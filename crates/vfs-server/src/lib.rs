@@ -6,4 +6,4 @@ pub mod handler;
 pub mod proto;
 pub mod server;
 
-// pub use server::Server;  // uncommented in Task 4
+pub use server::Server;
