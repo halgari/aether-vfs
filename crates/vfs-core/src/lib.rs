@@ -14,7 +14,7 @@ mod wildcard;
 //     BuildError, CacheKey, DirEntry, EntryKind, InputEntry, Layer, LayerId, NodeKind, Resolution,
 //     SourceId, Stat, VfsError,
 // };
-// pub use path::{normalize_vpath, PathError};
+pub use path::{normalize_vpath, PathError};
 // pub use tree::VfsTree;
 // pub use tree::build;
 // pub use wildcard::wildcard_match;
