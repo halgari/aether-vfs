@@ -31,6 +31,7 @@ pub use model::{
     BuildError, CacheKey, DirEntry, EntryKind, InputEntry, Layer, LayerId, NodeKind, Resolution,
     SourceId, Stat, VfsError,
 };
+pub use casefold::fold;
 pub use path::{normalize_vpath, PathError};
 pub use tree::VfsTree;
 pub use tree::build;

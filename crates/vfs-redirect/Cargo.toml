@@ -1,0 +1,12 @@
+[package]
+name = "vfs-redirect"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vfs-core = { path = "../vfs-core" }
+vfs-shared = { path = "../vfs-shared" }
+
+[dev-dependencies]
+# `bridge` (test-only) provides `flatten` for building snapshot fixtures.
+vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
