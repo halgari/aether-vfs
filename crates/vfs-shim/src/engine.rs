@@ -1,6 +1,6 @@
 //! The redirect engine: a `RootMap` plus the snapshot bytes it resolves against.
 
-use vfs_redirect::{Decision, RootMap};
+use vfs_redirect::{AttrDecision, Decision, RootMap};
 use vfs_shared::{LayoutError, SnapshotReader};
 
 /// Errors constructing an [`Engine`].
@@ -33,6 +33,14 @@ impl Engine {
         match SnapshotReader::open(&self.snapshot) {
             Ok(reader) => self.map.decide(nt_path, &reader),
             Err(_) => Decision::PassThrough,
+        }
+    }
+
+    /// Answer a path-based attribute query against the snapshot. Fail-safe.
+    pub fn query_attributes(&self, nt_path: &str) -> AttrDecision {
+        match SnapshotReader::open(&self.snapshot) {
+            Ok(reader) => self.map.query_attributes(nt_path, &reader),
+            Err(_) => AttrDecision::PassThrough,
         }
     }
 }
@@ -80,5 +88,15 @@ mod tests {
     fn decide_passes_through_outside_root() {
         let engine = Engine::new(r"\??\C:\Games\Skyrim", snapshot_bytes()).unwrap();
         assert_eq!(engine.decide(r"\??\C:\Windows\notepad.exe"), Decision::PassThrough);
+    }
+
+    #[test]
+    fn query_attributes_reports_virtual_file() {
+        use vfs_redirect::AttrDecision;
+        let engine = Engine::new(r"\??\C:\Games\Skyrim", snapshot_bytes()).unwrap();
+        assert_eq!(
+            engine.query_attributes(r"\??\C:\Games\Skyrim\Data\foo.esp"),
+            AttrDecision::Attributes { is_dir: false, size: 10, mtime: 1 }
+        );
     }
 }

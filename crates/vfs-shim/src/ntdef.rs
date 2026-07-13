@@ -47,3 +47,38 @@ pub type NtCreateFileFn = unsafe extern "system" fn(
     *const c_void, // EaBuffer
     u32,         // EaLength
 ) -> NTSTATUS;
+
+/// `STATUS_SUCCESS`.
+pub const STATUS_SUCCESS: NTSTATUS = 0;
+/// `FILE_ATTRIBUTE_DIRECTORY` / `FILE_ATTRIBUTE_NORMAL`.
+pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+
+/// Layout-compatible with `FILE_BASIC_INFORMATION` (40 bytes).
+#[repr(C)]
+pub struct FileBasicInformation {
+    pub creation_time: i64,
+    pub last_access_time: i64,
+    pub last_write_time: i64,
+    pub change_time: i64,
+    pub file_attributes: u32,
+    pub _reserved: u32,
+}
+
+/// Layout-compatible with `FILE_NETWORK_OPEN_INFORMATION` (56 bytes).
+#[repr(C)]
+pub struct FileNetworkOpenInformation {
+    pub creation_time: i64,
+    pub last_access_time: i64,
+    pub last_write_time: i64,
+    pub change_time: i64,
+    pub allocation_size: i64,
+    pub end_of_file: i64,
+    pub file_attributes: u32,
+    pub _reserved: u32,
+}
+
+pub type NtQueryAttributesFileFn =
+    unsafe extern "system" fn(*const ObjectAttributes, *mut FileBasicInformation) -> NTSTATUS;
+pub type NtQueryFullAttributesFileFn =
+    unsafe extern "system" fn(*const ObjectAttributes, *mut FileNetworkOpenInformation) -> NTSTATUS;
