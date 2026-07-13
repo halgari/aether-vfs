@@ -134,7 +134,7 @@ git commit -m "chore: scaffold vfs-core workspace and crate"
 - Consumes: nothing.
 - Produces:
   - `pub fn fold(s: &str) -> String` — lowercase simple case fold; the ONLY case-normalizer in the crate.
-  - `pub fn cmp_ci(a: &str, b: &str) -> std::cmp::Ordering` — case-insensitive total order, tie-broken by raw bytes for stability.
+  - `pub fn cmp_ci(a: &str, b: &str) -> std::cmp::Ordering` — case-insensitive comparison; fold-equal strings compare `Equal`. No raw tie-break (directory siblings are keyed by folded name, so case-only collisions can't occur among them; `readdir` relies on a stable sort).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -176,10 +176,11 @@ mod tests {
     }
 
     #[test]
-    fn cmp_tiebreaks_stably_by_raw() {
-        // Same fold, different case → deterministic, non-Equal order.
+    fn cmp_fold_equal_is_equal() {
+        // Names differing only by case fold-compare Equal. (They can never be
+        // directory siblings, since children are keyed by folded name.)
         assert_eq!(cmp_ci("abc", "abc"), Ordering::Equal);
-        assert_ne!(cmp_ci("ABC", "abc"), Ordering::Equal);
+        assert_eq!(cmp_ci("ABC", "abc"), Ordering::Equal);
     }
 }
 ```
@@ -200,10 +201,11 @@ pub fn fold(s: &str) -> String {
     s.chars().flat_map(char::to_lowercase).collect()
 }
 
-/// Case-insensitive total order. Ties on the folded form are broken by the raw
-/// string so the order is deterministic (stable sort friendly).
+/// Case-insensitive comparison. Fold-equal strings compare `Equal`; callers that
+/// need stable output rely on a stable sort. (Directory siblings are keyed by
+/// folded name, so a case-only collision can never occur among them.)
 pub fn cmp_ci(a: &str, b: &str) -> std::cmp::Ordering {
-    fold(a).cmp(&fold(b)).then_with(|| a.cmp(b))
+    fold(a).cmp(&fold(b))
 }
 ```
 
