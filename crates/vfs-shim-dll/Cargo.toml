@@ -1,0 +1,11 @@
+[package]
+name = "vfs-shim-dll"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vfs-shim = { path = "../vfs-shim" }
+windows-sys = { version = "0.59", features = ["Win32_Foundation"] }
