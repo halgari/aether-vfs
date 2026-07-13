@@ -138,10 +138,16 @@ Add to the `#[cfg(test)] mod tests` block in `bootstrap.rs`. These exercise only
 the ERROR paths (they must not install the global hook):
 
 ```rust
+    // Use `matches!` on the whole Result rather than `.unwrap_err()`: the latter
+    // needs the Ok type `HookGuard: Debug`, which it deliberately is not (it owns
+    // a RawDetour; a guard type carries no useful Debug). Same convention the rest
+    // of the workspace uses for resource/guard types.
     #[test]
     fn bootstrap_missing_file_is_io_error() {
-        let err = bootstrap_from_config_path(r"C:\nope\does-not-exist.cfg").unwrap_err();
-        assert!(matches!(err, BootstrapError::Io));
+        assert!(matches!(
+            bootstrap_from_config_path(r"C:\nope\does-not-exist.cfg"),
+            Err(BootstrapError::Io)
+        ));
     }
 
     #[test]
@@ -149,8 +155,10 @@ the ERROR paths (they must not install the global hook):
         let dir = std::env::temp_dir();
         let path = dir.join(format!("vfs-shim-badcfg-{}.bin", std::process::id()));
         std::fs::write(&path, [0u8, 1]).unwrap(); // too short for the header
-        let err = bootstrap_from_config_path(path.to_str().unwrap()).unwrap_err();
-        assert!(matches!(err, BootstrapError::BadConfig));
+        assert!(matches!(
+            bootstrap_from_config_path(path.to_str().unwrap()),
+            Err(BootstrapError::BadConfig)
+        ));
         let _ = std::fs::remove_file(&path);
     }
 ```
@@ -715,7 +723,7 @@ git commit -m "vfs-inject/vfs-shim-dll: update Cargo.lock"
 ## Self-Review Notes
 
 - **Spec coverage:** config codec (Task 1), `bootstrap_from_config_path` (Task 2), `vfs-shim-dll` DllMain (Task 3), injection primitive + orchestrator + probe + types (Tasks 4–5), end-to-end proof (Task 5 test), workspace wiring + deps + localized unsafe (Tasks + Global Constraints + Task 6 audit). Readiness coordination (wait for the ready file before resume) is in Task 5's `run_target_with_shim`.
-- **Derives:** `BootstrapError` and `InjectError` derive `Debug` (used via `.unwrap_err()`/`matches!`/`.expect()`). `EngineError`/`InstallError` already derive `Debug` (from `vfs-shim`), so `BootstrapError`'s derive holds.
+- **Derives:** `BootstrapError` and `InjectError` derive `Debug` (used via `matches!`/`.expect()`). Note the Task 2 tests use `matches!(Result, Err(..))` NOT `.unwrap_err()` — `.unwrap_err()` would require the Ok type `HookGuard: Debug`, which it deliberately is not (guard type owning a RawDetour). `EngineError`/`InstallError` already derive `Debug` (from `vfs-shim`).
 - **Type consistency:** `run_target_with_shim(RunConfig) -> Result<i32, InjectError>` matches the test's call; `encode_config(&str, &[u8]) -> Vec<u8>` matches `decode_config`'s inverse; the DLL reads `VFS_SHIM_CONFIG`/`VFS_SHIM_READY` exactly as the director sets them; `inject_dll` takes `HANDLE` (windows-sys) internally and is not part of the public API (no leaked type).
 - **No-panic:** library code and the DLL bootstrap thread use `Result`/`if let`/`match`; the only `expect` is in the `vfs-probe` binary (a test target, where a panic → nonzero exit is acceptable and detected by the exit-code assert).
 - **Artifact location:** the test checks the test-exe dir then its parent for `vfs_shim_dll.dll` — both cases verified empirically; the `vfs-shim-dll` dev-dependency forces the DLL to build.

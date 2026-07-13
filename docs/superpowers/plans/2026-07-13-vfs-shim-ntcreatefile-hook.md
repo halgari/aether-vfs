@@ -178,8 +178,13 @@ mod tests {
 
     #[test]
     fn new_rejects_a_bad_snapshot() {
-        let err = Engine::new(r"C:\Games\Skyrim", vec![0u8; 4]).unwrap_err();
-        assert!(matches!(err, EngineError::Snapshot(_)));
+        // Use `matches!` on the whole Result rather than `.unwrap_err()` — the
+        // latter needs `Engine: Debug`, but Engine holds a `Vec<u8>` snapshot we
+        // don't want dumped, so Engine intentionally does not derive Debug.
+        assert!(matches!(
+            Engine::new(r"C:\Games\Skyrim", vec![0u8; 4]),
+            Err(EngineError::Snapshot(_))
+        ));
     }
 
     #[test]
