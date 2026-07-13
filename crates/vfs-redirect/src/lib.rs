@@ -3,8 +3,10 @@
 //! The injected shim's pure redirect-decision core: map an incoming NT open path
 //! + a published snapshot to pass-through vs redirect-to-backing-file.
 
-use vfs_core::{fold, normalize_vpath, PathError};
-use vfs_shared::{SnapResolution, SnapshotReader};
+use std::collections::BTreeMap;
+
+use vfs_core::{fold, normalize_vpath, wildcard_match, PathError};
+use vfs_shared::{NodeKind, SnapResolution, SnapshotReader};
 
 /// The managed VFS install root (mount point), as normalized path components.
 pub struct RootMap {
@@ -61,25 +63,75 @@ impl RootMap {
         }
     }
 
-    /// Normalize + case-insensitively match the root + resolve the remainder.
-    fn locate(&self, nt_path: &str, snap: &SnapshotReader) -> Located {
-        let norm = match normalize_vpath(nt_path) {
-            Ok(n) => n,
-            Err(_) => return Located::Outside,
-        };
+    /// Folded remainder components if `nt_path` is under the managed root, else
+    /// `None` (out of root, malformed, or escaping).
+    fn under_root(&self, nt_path: &str) -> Option<Vec<String>> {
+        let norm = normalize_vpath(nt_path).ok()?;
         let comps: Vec<&str> =
             if norm.is_empty() { Vec::new() } else { norm.split('/').collect() };
         if comps.len() < self.root.len() {
-            return Located::Outside;
+            return None;
         }
         for (r, c) in self.root.iter().zip(comps.iter()) {
             if fold(r) != fold(c) {
-                return Located::Outside;
+                return None;
             }
         }
-        let folded: Vec<String> = comps[self.root.len()..].iter().map(|c| fold(c)).collect();
-        let folded_refs: Vec<&str> = folded.iter().map(String::as_str).collect();
-        Located::Resolved(snap.resolve(&folded_refs))
+        Some(comps[self.root.len()..].iter().map(|c| fold(c)).collect())
+    }
+
+    fn locate(&self, nt_path: &str, snap: &SnapshotReader) -> Located {
+        match self.under_root(nt_path) {
+            None => Located::Outside,
+            Some(folded) => {
+                let refs: Vec<&str> = folded.iter().map(String::as_str).collect();
+                Located::Resolved(snap.resolve(&refs))
+            }
+        }
+    }
+
+    /// Merge a directory's real on-disk `real` entries with the snapshot's
+    /// virtual children: overrides win, tombstones are hidden, `wildcard` filters
+    /// the display names, output is case-insensitively ordered by folded name.
+    pub fn merge_directory(
+        &self,
+        dir_nt_path: &str,
+        snap: &SnapshotReader,
+        real: &[DirItem],
+        wildcard: Option<&str>,
+    ) -> Vec<DirItem> {
+        let mut map: BTreeMap<String, DirItem> = BTreeMap::new();
+        for e in real {
+            map.insert(fold(&e.name), e.clone());
+        }
+        if let Some(folded) = self.under_root(dir_nt_path) {
+            let refs: Vec<&str> = folded.iter().map(String::as_str).collect();
+            if let Ok(virt) = snap.readdir(&refs) {
+                for v in virt {
+                    let key = fold(&v.name);
+                    match v.kind {
+                        NodeKind::Tombstone => {
+                            map.remove(&key);
+                        }
+                        NodeKind::Dir => {
+                            map.insert(key, DirItem { name: v.name, is_dir: true, size: 0, mtime: 0 });
+                        }
+                        NodeKind::File => {
+                            map.insert(
+                                key,
+                                DirItem { name: v.name, is_dir: false, size: v.size, mtime: v.mtime },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        map.into_values()
+            .filter(|e| match wildcard {
+                Some(p) => wildcard_match(p, &e.name),
+                None => true,
+            })
+            .collect()
     }
 }
 
@@ -112,6 +164,16 @@ pub fn utf16_to_string(units: &[u16]) -> String {
 /// Encode a `&str` as UTF-16 with NO trailing NUL (`UNICODE_STRING` is counted).
 pub fn string_to_utf16(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
+}
+
+/// One entry in a directory listing — used both for the caller's real on-disk
+/// entries and for the merged result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirItem {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub mtime: i64,
 }
 
 /// The outcome of inspecting one NT open path.
@@ -357,5 +419,100 @@ mod tests {
             root().query_attributes(r"\??\c:\games\SKYRIM\DATA\Foo.ESP", &snap),
             AttrDecision::Attributes { is_dir: false, size: 10, mtime: 1 }
         );
+    }
+
+    // data/ has: Mod.esp (add), Shared.esp (override, size 99), AddedDir (dir),
+    // Deleted.esp (tombstone).
+    fn merge_snapshot() -> Vec<u8> {
+        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
+        let mk = |vpath: &str, kind: EntryKind, size: u64| InputEntry {
+            vpath: vpath.into(),
+            kind,
+            source: r"D:\Mods\X\f".into(),
+            size,
+            mtime: 7,
+        };
+        let tree = build(vec![Layer {
+            id: LayerId(0),
+            entries: vec![
+                mk("data/Mod.esp", EntryKind::File, 5),
+                mk("data/Shared.esp", EntryKind::File, 99),
+                mk("data/AddedDir", EntryKind::Dir, 0),
+                mk("data/Deleted.esp", EntryKind::Tombstone, 0),
+            ],
+        }])
+        .unwrap();
+        vfs_shared::bridge::flatten(&tree)
+    }
+
+    fn item(name: &str, is_dir: bool, size: u64) -> DirItem {
+        DirItem { name: name.into(), is_dir, size, mtime: 0 }
+    }
+
+    fn names(v: &[DirItem]) -> Vec<String> {
+        v.iter().map(|e| e.name.clone()).collect()
+    }
+
+    const DATA_NT: &str = r"\??\C:\Games\Skyrim\Data";
+
+    #[test]
+    fn merge_overrides_adds_and_hides_tombstones() {
+        let bytes = merge_snapshot();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let real = vec![
+            item("Shared.esp", false, 1), // overridden by virtual (size 99)
+            item("Deleted.esp", false, 1), // tombstoned away
+            item("RealOnly.txt", false, 7), // survives
+        ];
+        let merged = root().merge_directory(DATA_NT, &snap, &real, None);
+        // Case-insensitive folded order: addeddir, mod.esp, realonly.txt, shared.esp
+        assert_eq!(names(&merged), vec!["AddedDir", "Mod.esp", "RealOnly.txt", "Shared.esp"]);
+        let shared = merged.iter().find(|e| e.name == "Shared.esp").unwrap();
+        assert_eq!(shared.size, 99); // mod wins
+        let added = merged.iter().find(|e| e.name == "AddedDir").unwrap();
+        assert!(added.is_dir);
+        assert!(!merged.iter().any(|e| e.name == "Deleted.esp"));
+    }
+
+    #[test]
+    fn merge_is_case_insensitive_override() {
+        let bytes = merge_snapshot();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let real = vec![item("SHARED.ESP", false, 1)];
+        let merged = root().merge_directory(DATA_NT, &snap, &real, None);
+        // One entry, display name from the virtual (mod) side.
+        let shared: Vec<&DirItem> = merged.iter().filter(|e| e.name.eq_ignore_ascii_case("shared.esp")).collect();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].name, "Shared.esp");
+        assert_eq!(shared[0].size, 99);
+    }
+
+    #[test]
+    fn merge_wildcard_filters_output() {
+        let bytes = merge_snapshot();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let real = vec![item("RealOnly.txt", false, 7)];
+        let merged = root().merge_directory(DATA_NT, &snap, &real, Some("*.esp"));
+        // AddedDir and RealOnly.txt filtered out; only *.esp remain.
+        assert_eq!(names(&merged), vec!["Mod.esp", "Shared.esp"]);
+    }
+
+    #[test]
+    fn merge_out_of_root_returns_filtered_real() {
+        let bytes = merge_snapshot();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let real = vec![item("a.dll", false, 1), item("b.exe", false, 2)];
+        let merged = root().merge_directory(r"\??\C:\Windows\System32", &snap, &real, Some("*.dll"));
+        assert_eq!(names(&merged), vec!["a.dll"]);
+    }
+
+    #[test]
+    fn merge_real_only_dir_not_in_snapshot() {
+        let bytes = merge_snapshot();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        // `data/sub` is under root but not in the snapshot -> no overlay.
+        let real = vec![item("z.txt", false, 1), item("a.txt", false, 2)];
+        let merged = root().merge_directory(r"\??\C:\Games\Skyrim\Data\sub", &snap, &real, None);
+        assert_eq!(names(&merged), vec!["a.txt", "z.txt"]); // ordered, no overlay
     }
 }
