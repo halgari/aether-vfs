@@ -14,4 +14,8 @@ pub mod bridge;
 
 pub use builder::SnapshotBuilder;
 
+pub use reader::{
+    LayoutError, NodeKind, ReadError, SnapDirEntry, SnapResolution, SnapStat, SnapshotReader,
+};
+
 // pub use lines are added by later tasks as items land.
