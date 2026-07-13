@@ -8,6 +8,10 @@ use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 /// (an invariant violation the hook must not panic on).
 pub const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as i32;
 
+/// `STATUS_OBJECT_NAME_NOT_FOUND` — returned for a tombstoned (mod-deleted) path
+/// so the real on-disk file appears absent.
+pub const STATUS_OBJECT_NAME_NOT_FOUND: NTSTATUS = 0xC000_0034u32 as i32;
+
 /// Layout-compatible with the NT `UNICODE_STRING`. `length`/`maximum_length`
 /// are in BYTES; the u16 count is `length / 2`.
 #[repr(C)]

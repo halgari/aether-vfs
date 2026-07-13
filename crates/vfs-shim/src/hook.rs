@@ -10,7 +10,10 @@ use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 
 use crate::engine::Engine;
-use crate::ntdef::{NtCreateFileFn, ObjectAttributes, UnicodeString, STATUS_UNSUCCESSFUL};
+use crate::ntdef::{
+    NtCreateFileFn, ObjectAttributes, UnicodeString, STATUS_OBJECT_NAME_NOT_FOUND,
+    STATUS_UNSUCCESSFUL,
+};
 
 /// Errors installing the hook.
 #[derive(Debug)]
@@ -56,6 +59,27 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
     }
 }
 
+/// Decode the ObjectName and ask the engine what to do. Returns `None` when the
+/// open is ineligible (no engine, null/relative OA, or empty ObjectName).
+unsafe fn decision_for(oa: *const ObjectAttributes) -> Option<Decision> {
+    let engine = ENGINE.get()?;
+    if oa.is_null() {
+        return None;
+    }
+    let oa_ref = &*oa;
+    // MVP: only fully-qualified opens (no RootDirectory-relative).
+    if !oa_ref.root_directory.is_null() || oa_ref.object_name.is_null() {
+        return None;
+    }
+    let us = &*oa_ref.object_name;
+    if us.buffer.is_null() {
+        return None;
+    }
+    let units = core::slice::from_raw_parts(us.buffer, us.length as usize / 2);
+    let path = String::from_utf16_lossy(units);
+    Some(engine.decide(&path))
+}
+
 /// The detour. Must never panic (a panic across `extern "system"` aborts) and
 /// must do no hookable I/O.
 unsafe extern "system" fn hook(
@@ -77,43 +101,34 @@ unsafe extern "system" fn hook(
         None => return STATUS_UNSUCCESSFUL,
     };
 
-    if let Some(engine) = ENGINE.get() {
-        if !oa.is_null() {
+    match decision_for(oa) {
+        Some(Decision::Redirect { target_nt }) => {
+            // Buffers live across the synchronous trampoline call.
+            let mut wbuf: Vec<u16> = target_nt.encode_utf16().collect();
+            let byte_len = (wbuf.len() * 2) as u16;
+            let new_us = UnicodeString {
+                length: byte_len,
+                maximum_length: byte_len,
+                buffer: wbuf.as_mut_ptr(),
+            };
             let oa_ref = &*oa;
-            // MVP: only fully-qualified opens (no RootDirectory-relative).
-            if oa_ref.root_directory.is_null() && !oa_ref.object_name.is_null() {
-                let us = &*oa_ref.object_name;
-                if !us.buffer.is_null() {
-                    let units = core::slice::from_raw_parts(us.buffer, us.length as usize / 2);
-                    let path = String::from_utf16_lossy(units);
-                    if let Decision::Redirect { target_nt } = engine.decide(&path) {
-                        // Buffers live across the synchronous trampoline call.
-                        let mut wbuf: Vec<u16> = target_nt.encode_utf16().collect();
-                        let byte_len = (wbuf.len() * 2) as u16;
-                        let new_us = UnicodeString {
-                            length: byte_len,
-                            maximum_length: byte_len,
-                            buffer: wbuf.as_mut_ptr(),
-                        };
-                        let new_oa = ObjectAttributes {
-                            length: oa_ref.length,
-                            root_directory: core::ptr::null_mut(),
-                            object_name: &new_us,
-                            attributes: oa_ref.attributes,
-                            security_descriptor: oa_ref.security_descriptor,
-                            security_qos: oa_ref.security_qos,
-                        };
-                        let status = tramp(
-                            file_handle, access, &new_oa, iosb, alloc, attrs, share, disp, opts,
-                            ea, ealen,
-                        );
-                        drop(wbuf);
-                        return status;
-                    }
-                }
-            }
+            let new_oa = ObjectAttributes {
+                length: oa_ref.length,
+                root_directory: core::ptr::null_mut(),
+                object_name: &new_us,
+                attributes: oa_ref.attributes,
+                security_descriptor: oa_ref.security_descriptor,
+                security_qos: oa_ref.security_qos,
+            };
+            let status = tramp(
+                file_handle, access, &new_oa, iosb, alloc, attrs, share, disp, opts, ea, ealen,
+            );
+            drop(wbuf);
+            status
+        }
+        Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
+        Some(Decision::PassThrough) | None => {
+            tramp(file_handle, access, oa, iosb, alloc, attrs, share, disp, opts, ea, ealen)
         }
     }
-
-    tramp(file_handle, access, oa, iosb, alloc, attrs, share, disp, opts, ea, ealen)
 }
