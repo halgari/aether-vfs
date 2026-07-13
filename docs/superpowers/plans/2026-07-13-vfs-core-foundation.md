@@ -769,16 +769,19 @@ use crate::casefold::fold;
 use crate::model::{BuildError, EntryKind, InputEntry, Layer, LayerId, Resolution, SourceId};
 use crate::path::normalize_vpath;
 
+#[derive(Debug)]
 struct Node {
     name: String,
     entry: NodeEntry,
 }
 
+#[derive(Debug)]
 enum NodeEntry {
     File(FileNode),
     Dir(DirNode),
 }
 
+#[derive(Debug)]
 struct FileNode {
     source: SourceId,
     size: u64,
@@ -786,10 +789,12 @@ struct FileNode {
     layer: LayerId,
 }
 
+#[derive(Debug)]
 struct DirNode {
     children: BTreeMap<String, u32>, // key = folded name → node index
 }
 
+#[derive(Debug)]
 pub struct VfsTree {
     nodes: Vec<Node>, // nodes[0] is the root dir
 }
@@ -1090,7 +1095,7 @@ impl VfsTree {
 }
 ```
 
-Note: `FileNode`/`Node` are constructed in tests via `resolve` only, so no `#[derive(Debug)]` is required on them, but `Resolution` derives `Debug` (Task 5) so `panic!("{other:?}")` in tests compiles.
+Note: `VfsTree` and the private node types derive `Debug` so `build(...).unwrap_err()` compiles (`Result::unwrap_err` requires the `Ok` type — `VfsTree` — to be `Debug`). `Resolution` also derives `Debug` (Task 5), so `panic!("{other:?}")` in tests compiles.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
