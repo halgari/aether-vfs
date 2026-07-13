@@ -13,7 +13,7 @@
 - MVP is 64-bit only.
 - Crate attribute: `#![deny(unsafe_code)]` with localized `#[allow(unsafe_code)]` only in the mapping FFI.
 - No panics on Win32 failure — return `std::io::Error::last_os_error()`.
-- `windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Memory"] }`.
+- `windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_Security"] }` (the `Win32_Security` feature is required because `CreateFileMappingW` takes a `*const SECURITY_ATTRIBUTES` and is feature-gated behind it).
 - Derive `Debug` on every public type; derive `PartialEq, Eq` on POD types used in `assert_eq!`.
 - Names passed to `*W` APIs must be NUL-terminated UTF-16.
 - Section names use the `Local\` namespace prefix supplied by the caller (the crate does not add it); tests use a `Local\`-prefixed unique name.
