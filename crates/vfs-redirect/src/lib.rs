@@ -31,6 +31,11 @@ impl RootMap {
         &self.root
     }
 
+    /// Whether `nt_path` lies under the managed root (well-formed, not escaping).
+    pub fn contains(&self, nt_path: &str) -> bool {
+        self.under_root(nt_path).is_some()
+    }
+
     /// Decide how to handle an incoming NT open path.
     ///
     /// Fail-safe: any path that is malformed, outside the root, or does not
@@ -197,6 +202,182 @@ pub enum AttrDecision {
     Attributes { is_dir: bool, size: u64, mtime: i64 },
     /// Tombstoned: return not-found rather than reveal a hidden real file.
     Deny,
+}
+
+/// The directory-info `FILE_INFORMATION_CLASS` values the shim marshals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirInfoClass {
+    Directory,       // 1  FILE_DIRECTORY_INFORMATION
+    FullDirectory,   // 2  FILE_FULL_DIR_INFORMATION
+    BothDirectory,   // 3  FILE_BOTH_DIR_INFORMATION
+    Names,           // 12 FILE_NAMES_INFORMATION
+    IdBothDirectory, // 37 FILE_ID_BOTH_DIR_INFORMATION
+    IdFullDirectory, // 38 FILE_ID_FULL_DIR_INFORMATION
+}
+
+impl DirInfoClass {
+    /// Map a raw `FILE_INFORMATION_CLASS`; `None` for classes we do not marshal.
+    pub fn from_u32(v: u32) -> Option<DirInfoClass> {
+        Some(match v {
+            1 => DirInfoClass::Directory,
+            2 => DirInfoClass::FullDirectory,
+            3 => DirInfoClass::BothDirectory,
+            12 => DirInfoClass::Names,
+            37 => DirInfoClass::IdBothDirectory,
+            38 => DirInfoClass::IdFullDirectory,
+            _ => return None,
+        })
+    }
+
+    /// Byte offset of the `FileName` field == the fixed header size.
+    fn name_offset(self) -> usize {
+        match self {
+            DirInfoClass::Names => 12,
+            DirInfoClass::Directory => 64,
+            DirInfoClass::FullDirectory => 68,
+            DirInfoClass::IdFullDirectory => 80,
+            DirInfoClass::BothDirectory => 94,
+            DirInfoClass::IdBothDirectory => 104,
+        }
+    }
+
+    /// Byte offset of the `FileNameLength` (u32) field.
+    fn name_len_offset(self) -> usize {
+        match self {
+            DirInfoClass::Names => 8,
+            _ => 60,
+        }
+    }
+
+    /// Whether this class carries `EndOfFile`/`AllocationSize`/`FileAttributes`.
+    fn has_metadata(self) -> bool {
+        !matches!(self, DirInfoClass::Names)
+    }
+}
+
+/// The NTSTATUS family a directory write resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirStatus {
+    Success,
+    NoMoreFiles,
+    BufferOverflow,
+}
+
+/// Result of marshalling directory entries into a caller buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirWriteResult {
+    /// Bytes actually used (end offset of the last record's data) —
+    /// the value to report as `IoStatusBlock.Information`.
+    pub bytes: usize,
+    /// Number of entries written.
+    pub count: usize,
+    pub status: DirStatus,
+}
+
+/// Marshal `items` into `buf` in the layout of `class`, chaining
+/// `NextEntryOffset`, 8-byte aligning each record, stopping at `single` (one
+/// entry) or when the next record would overflow `buf`. Pure: writes only into
+/// `buf`.
+pub fn write_dir_info(
+    class: DirInfoClass,
+    items: &[DirItem],
+    buf: &mut [u8],
+    single: bool,
+) -> DirWriteResult {
+    let name_off = class.name_offset();
+    let name_len_off = class.name_len_offset();
+    let cap = buf.len();
+    let mut off = 0usize;
+    let mut count = 0usize;
+    let mut prev: Option<usize> = None;
+    let mut last_end = 0usize;
+
+    for it in items {
+        let name16: Vec<u16> = it.name.encode_utf16().collect();
+        let namelen = name16.len() * 2;
+        let rec = name_off + namelen;
+        if off + rec > cap {
+            break;
+        }
+        // Zero the fixed header (EaSize/ShortName/FileId fields left zero).
+        for b in &mut buf[off..off + name_off] {
+            *b = 0;
+        }
+        if class.has_metadata() {
+            let eof = it.size as i64;
+            buf[off + 40..off + 48].copy_from_slice(&eof.to_le_bytes());
+            buf[off + 48..off + 56].copy_from_slice(&eof.to_le_bytes());
+            let attrs: u32 = if it.is_dir { 0x10 } else { 0x80 };
+            buf[off + 56..off + 60].copy_from_slice(&attrs.to_le_bytes());
+        }
+        buf[off + name_len_off..off + name_len_off + 4]
+            .copy_from_slice(&(namelen as u32).to_le_bytes());
+        let name_bytes: Vec<u8> = name16.iter().flat_map(|u| u.to_le_bytes()).collect();
+        buf[off + name_off..off + name_off + namelen].copy_from_slice(&name_bytes);
+
+        if let Some(p) = prev {
+            let delta = (off - p) as u32;
+            buf[p..p + 4].copy_from_slice(&delta.to_le_bytes());
+        }
+        prev = Some(off);
+        last_end = off + rec;
+        count += 1;
+        off += (rec + 7) & !7; // 8-byte align next record
+        if single {
+            break;
+        }
+    }
+
+    let status = if count == 0 {
+        if items.is_empty() {
+            DirStatus::NoMoreFiles
+        } else {
+            DirStatus::BufferOverflow
+        }
+    } else {
+        DirStatus::Success
+    };
+    DirWriteResult { bytes: last_end, count, status }
+}
+
+/// Parse a `FILE_FULL_DIR_INFORMATION` (class 2) chain into items, skipping `.`
+/// and `..`. Bounds-checked: a record that would read past `buf` ends the walk
+/// (fail-safe, never panics). The shim always *drains the OS in class 2*, so
+/// only this one class needs a parser.
+pub fn parse_full_dir_info(buf: &[u8]) -> Vec<DirItem> {
+    const HDR: usize = 68;
+    let mut out = Vec::new();
+    let mut o = 0usize;
+    loop {
+        if o + HDR > buf.len() {
+            break;
+        }
+        let next = u32::from_le_bytes(buf[o..o + 4].try_into().unwrap()) as usize;
+        let size = i64::from_le_bytes(buf[o + 40..o + 48].try_into().unwrap());
+        let attrs = u32::from_le_bytes(buf[o + 56..o + 60].try_into().unwrap());
+        let namelen = u32::from_le_bytes(buf[o + 60..o + 64].try_into().unwrap()) as usize;
+        if o + HDR + namelen > buf.len() {
+            break;
+        }
+        let units: Vec<u16> = buf[o + HDR..o + HDR + namelen]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let name = String::from_utf16_lossy(&units);
+        if !name.is_empty() && name != "." && name != ".." {
+            out.push(DirItem {
+                name,
+                is_dir: attrs & 0x10 != 0,
+                size: size.max(0) as u64,
+                mtime: 0,
+            });
+        }
+        if next == 0 {
+            break;
+        }
+        o += next;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -514,5 +695,131 @@ mod tests {
         let real = vec![item("z.txt", false, 1), item("a.txt", false, 2)];
         let merged = root().merge_directory(r"\??\C:\Games\Skyrim\Data\sub", &snap, &real, None);
         assert_eq!(names(&merged), vec!["a.txt", "z.txt"]); // ordered, no overlay
+    }
+
+    #[test]
+    fn contains_reports_under_root() {
+        let r = root(); // \??\C:\Games\Skyrim
+        assert!(r.contains(r"\??\C:\Games\Skyrim\Data\foo.esp"));
+        assert!(r.contains(r"\??\C:\Games\Skyrim")); // the root itself
+        assert!(!r.contains(r"\??\C:\Windows\System32"));
+        assert!(!r.contains(r"\??\C:\Games\Skyrim\..\..\..\..\evil")); // escaping
+    }
+
+    fn ditem(name: &str, is_dir: bool, size: u64) -> DirItem {
+        DirItem { name: name.into(), is_dir, size, mtime: 0 }
+    }
+
+    fn ru32(buf: &[u8], rec: usize, off: usize) -> u32 {
+        u32::from_le_bytes(buf[rec + off..rec + off + 4].try_into().unwrap())
+    }
+    fn ri64(buf: &[u8], rec: usize, off: usize) -> i64 {
+        i64::from_le_bytes(buf[rec + off..rec + off + 8].try_into().unwrap())
+    }
+    fn rname(buf: &[u8], rec: usize, name_off: usize, namelen: usize) -> String {
+        let units: Vec<u16> = buf[rec + name_off..rec + name_off + namelen]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    }
+
+    #[test]
+    fn write_full_dir_two_entries_chained() {
+        let items = [ditem("a.esp", false, 5), ditem("sub", true, 0)];
+        let mut buf = vec![0u8; 1024];
+        let r = write_dir_info(DirInfoClass::FullDirectory, &items, &mut buf, false);
+        assert_eq!(r.status, DirStatus::Success);
+        assert_eq!(r.count, 2);
+        assert_eq!(ru32(&buf, 0, 60), 10); // "a.esp" = 5 chars * 2 bytes
+        assert_eq!(ri64(&buf, 0, 40), 5); // EndOfFile
+        assert_eq!(ru32(&buf, 0, 56), 0x80); // FILE_ATTRIBUTE_NORMAL
+        assert_eq!(rname(&buf, 0, 68, 10), "a.esp");
+        let next = ru32(&buf, 0, 0) as usize;
+        assert_eq!(next, 80); // (68+10)=78 -> 8-align -> 80
+        assert_eq!(ru32(&buf, next, 56), 0x10); // second is a directory
+        assert_eq!(rname(&buf, next, 68, 6), "sub");
+        assert_eq!(ru32(&buf, next, 0), 0); // last record: NextEntryOffset 0
+        assert_eq!(r.bytes, 80 + 68 + 6);
+    }
+
+    #[test]
+    fn write_both_dir_uses_class3_header() {
+        let items = [ditem("x", false, 1)];
+        let mut buf = vec![0u8; 512];
+        let r = write_dir_info(DirInfoClass::BothDirectory, &items, &mut buf, false);
+        assert_eq!(r.status, DirStatus::Success);
+        assert_eq!(ru32(&buf, 0, 60), 2);
+        assert_eq!(ru32(&buf, 0, 56), 0x80);
+        assert_eq!(rname(&buf, 0, 94, 2), "x");
+    }
+
+    #[test]
+    fn write_names_class_is_name_only() {
+        let items = [ditem("only.txt", false, 999)];
+        let mut buf = vec![0u8; 256];
+        let r = write_dir_info(DirInfoClass::Names, &items, &mut buf, false);
+        assert_eq!(r.status, DirStatus::Success);
+        assert_eq!(ru32(&buf, 0, 8), 16); // "only.txt" = 8*2
+        assert_eq!(rname(&buf, 0, 12, 16), "only.txt");
+    }
+
+    #[test]
+    fn write_single_entry_stops_after_one() {
+        let items = [ditem("a", false, 1), ditem("b", false, 1)];
+        let mut buf = vec![0u8; 512];
+        let r = write_dir_info(DirInfoClass::FullDirectory, &items, &mut buf, true);
+        assert_eq!(r.count, 1);
+        assert_eq!(r.status, DirStatus::Success);
+        assert_eq!(ru32(&buf, 0, 0), 0); // single -> no chain
+    }
+
+    #[test]
+    fn write_empty_is_no_more_files() {
+        let mut buf = vec![0u8; 128];
+        let r = write_dir_info(DirInfoClass::FullDirectory, &[], &mut buf, false);
+        assert_eq!(r.count, 0);
+        assert_eq!(r.status, DirStatus::NoMoreFiles);
+        assert_eq!(r.bytes, 0);
+    }
+
+    #[test]
+    fn write_too_small_for_first_is_buffer_overflow() {
+        let items = [ditem("longname.esp", false, 1)];
+        let mut buf = vec![0u8; 8]; // smaller than one class-2 record
+        let r = write_dir_info(DirInfoClass::FullDirectory, &items, &mut buf, false);
+        assert_eq!(r.count, 0);
+        assert_eq!(r.status, DirStatus::BufferOverflow);
+    }
+
+    #[test]
+    fn dir_info_class_from_u32() {
+        assert_eq!(DirInfoClass::from_u32(2), Some(DirInfoClass::FullDirectory));
+        assert_eq!(DirInfoClass::from_u32(3), Some(DirInfoClass::BothDirectory));
+        assert_eq!(DirInfoClass::from_u32(12), Some(DirInfoClass::Names));
+        assert_eq!(DirInfoClass::from_u32(99), None);
+    }
+
+    #[test]
+    fn parse_full_dir_round_trips_and_skips_dots() {
+        let items = [
+            ditem(".", true, 0),
+            ditem("..", true, 0),
+            ditem("keep.esp", false, 42),
+            ditem("kids", true, 0),
+        ];
+        let mut buf = vec![0u8; 4096];
+        let w = write_dir_info(DirInfoClass::FullDirectory, &items, &mut buf, false);
+        assert_eq!(w.status, DirStatus::Success);
+        let parsed = parse_full_dir_info(&buf);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], DirItem { name: "keep.esp".into(), is_dir: false, size: 42, mtime: 0 });
+        assert_eq!(parsed[1], DirItem { name: "kids".into(), is_dir: true, size: 0, mtime: 0 });
+    }
+
+    #[test]
+    fn parse_full_dir_empty_buffer_is_empty() {
+        let buf = vec![0u8; 68];
+        let _ = parse_full_dir_info(&buf); // must not panic
     }
 }
