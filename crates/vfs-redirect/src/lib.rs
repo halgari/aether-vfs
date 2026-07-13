@@ -56,7 +56,11 @@ impl RootMap {
             SnapResolution::File { source, .. } => {
                 Decision::Redirect { target_nt: render_nt(&source) }
             }
-            SnapResolution::Dir | SnapResolution::NotFound => Decision::PassThrough,
+            // TODO(Slice B): a Tombstone must Deny (return STATUS_OBJECT_NAME_NOT_FOUND
+            // so a mod-deleted real file stays hidden). Interim: pass through.
+            SnapResolution::Dir | SnapResolution::NotFound | SnapResolution::Tombstone => {
+                Decision::PassThrough
+            }
         }
     }
 }
