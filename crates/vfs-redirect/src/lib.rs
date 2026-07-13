@@ -34,35 +34,45 @@ impl RootMap {
     /// Fail-safe: any path that is malformed, outside the root, or does not
     /// positively resolve to a virtualized file yields `PassThrough`.
     pub fn decide(&self, nt_path: &str, snap: &SnapshotReader) -> Decision {
+        match self.locate(nt_path, snap) {
+            Located::Resolved(SnapResolution::File { source, .. }) => {
+                Decision::Redirect { target_nt: render_nt(&source) }
+            }
+            Located::Resolved(SnapResolution::Tombstone) => Decision::Deny,
+            Located::Resolved(SnapResolution::Dir)
+            | Located::Resolved(SnapResolution::NotFound)
+            | Located::Outside => Decision::PassThrough,
+        }
+    }
+
+    /// Normalize + case-insensitively match the root + resolve the remainder.
+    fn locate(&self, nt_path: &str, snap: &SnapshotReader) -> Located {
         let norm = match normalize_vpath(nt_path) {
             Ok(n) => n,
-            Err(_) => return Decision::PassThrough,
+            Err(_) => return Located::Outside,
         };
         let comps: Vec<&str> =
             if norm.is_empty() { Vec::new() } else { norm.split('/').collect() };
         if comps.len() < self.root.len() {
-            return Decision::PassThrough;
+            return Located::Outside;
         }
-        // Component-wise, case-insensitive root prefix match.
         for (r, c) in self.root.iter().zip(comps.iter()) {
             if fold(r) != fold(c) {
-                return Decision::PassThrough;
+                return Located::Outside;
             }
         }
-        // Fold the remainder and resolve it against the snapshot.
         let folded: Vec<String> = comps[self.root.len()..].iter().map(|c| fold(c)).collect();
         let folded_refs: Vec<&str> = folded.iter().map(String::as_str).collect();
-        match snap.resolve(&folded_refs) {
-            SnapResolution::File { source, .. } => {
-                Decision::Redirect { target_nt: render_nt(&source) }
-            }
-            // TODO(Slice B): a Tombstone must Deny (return STATUS_OBJECT_NAME_NOT_FOUND
-            // so a mod-deleted real file stays hidden). Interim: pass through.
-            SnapResolution::Dir | SnapResolution::NotFound | SnapResolution::Tombstone => {
-                Decision::PassThrough
-            }
-        }
+        Located::Resolved(snap.resolve(&folded_refs))
     }
+}
+
+/// Where an NT path lands relative to the managed root.
+enum Located {
+    /// Not under the root, or malformed/escaping — never virtualized.
+    Outside,
+    /// Under the root; here is the snapshot's answer for the remainder.
+    Resolved(SnapResolution),
 }
 
 /// Render a backing `source` (a UTF-8 absolute Win32 path, per the director's
@@ -95,6 +105,9 @@ pub enum Decision {
     PassThrough,
     /// Reissue the open against this NT path (the mod backing file).
     Redirect { target_nt: String },
+    /// The path is tombstoned (mod-deleted); the hook must return
+    /// STATUS_OBJECT_NAME_NOT_FOUND rather than open or pass through.
+    Deny,
 }
 
 #[cfg(test)]
@@ -141,6 +154,13 @@ mod tests {
             entries: vec![
                 file("data/foo.esp", r"D:\Mods\Cool\foo.esp"),
                 file("data/sub/bar.dds", r"D:\Mods\Cool\bar.dds"),
+                InputEntry {
+                    vpath: "data/deleted.esp".into(),
+                    kind: EntryKind::Tombstone,
+                    source: "".into(),
+                    size: 0,
+                    mtime: 0,
+                },
             ],
         }])
         .unwrap();
@@ -239,6 +259,16 @@ mod tests {
         assert_eq!(
             d,
             Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() }
+        );
+    }
+
+    #[test]
+    fn decide_denies_a_tombstoned_path() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        assert_eq!(
+            root().decide(r"\??\C:\Games\Skyrim\Data\deleted.esp", &snap),
+            Decision::Deny
         );
     }
 }
