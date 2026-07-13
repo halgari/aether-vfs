@@ -5,6 +5,8 @@
 //! is a later slice).
 
 mod engine;
+mod hook;
 mod ntdef;
 
 pub use engine::{Engine, EngineError};
+pub use hook::{install, HookGuard, InstallError};
