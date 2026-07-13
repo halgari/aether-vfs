@@ -5,8 +5,8 @@ use std::io;
 use vfs_ipc::SharedSeg;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS,
-    MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
+    CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile,
+    FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
 };
 
 /// RAII owner of a Windows file-mapping section and its mapped read/write view.
@@ -48,6 +48,19 @@ impl SharedMapping {
                 wide.as_ptr(),
             )
         };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Self::map_view(handle, size)
+    }
+
+    /// Open an existing named section and map a read/write view.
+    pub fn open(name: &str, size: usize) -> io::Result<Self> {
+        let wide = to_wide(name);
+        // SAFETY: FFI. `wide` is a valid NUL-terminated UTF-16 pointer for the
+        // call; FALSE (0) => the mapped view handle is not inheritable.
+        #[allow(unsafe_code)]
+        let handle = unsafe { OpenFileMappingW(FILE_MAP_ALL_ACCESS, 0, wide.as_ptr()) };
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
@@ -142,5 +155,25 @@ mod tests {
         // requires an 8-aligned base for its atomics; success proves the section
         // is writable and correctly aligned.
         vfs_ipc::ring::init(m.seg(), 4, 256).unwrap();
+    }
+
+    #[test]
+    fn open_aliases_the_same_section() {
+        let name = section_name("alias");
+        let creator = SharedMapping::create(&name, 64 * 1024).unwrap();
+        // Creator writes the ring MAGIC + geometry into the shared pages.
+        let geom_created = vfs_ipc::ring::init(creator.seg(), 4, 256).unwrap();
+        // A second mapping of the SAME section sees those bytes: ring::open validates
+        // the MAGIC the creator wrote and recovers the identical geometry.
+        let opener = SharedMapping::open(&name, 64 * 1024).unwrap();
+        let geom_opened = vfs_ipc::ring::open(opener.seg()).unwrap();
+        assert_eq!(geom_created, geom_opened);
+    }
+
+    #[test]
+    fn open_missing_section_errors() {
+        let name = section_name("does-not-exist-xyz");
+        let err = SharedMapping::open(&name, 64 * 1024);
+        assert!(err.is_err());
     }
 }
