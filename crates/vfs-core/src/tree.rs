@@ -253,9 +253,6 @@ mod tests {
     fn file(vpath: &str, source: &str, size: u64, mtime: i64) -> InputEntry {
         InputEntry { vpath: vpath.into(), kind: EntryKind::File, source: source.into(), size, mtime }
     }
-    fn dir(vpath: &str) -> InputEntry {
-        InputEntry { vpath: vpath.into(), kind: EntryKind::Dir, source: "".into(), size: 0, mtime: 0 }
-    }
     fn tomb(vpath: &str) -> InputEntry {
         InputEntry { vpath: vpath.into(), kind: EntryKind::Tombstone, source: "".into(), size: 0, mtime: 0 }
     }
