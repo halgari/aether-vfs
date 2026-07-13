@@ -10,5 +10,6 @@ pub mod ring;
 pub mod seg;
 
 pub use seg::{OwnedSeg, SharedSeg};
+pub use ring::{Geom, IpcError};
 
 // pub use lines added by later tasks.
