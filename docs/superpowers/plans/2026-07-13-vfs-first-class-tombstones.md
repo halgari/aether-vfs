@@ -43,48 +43,48 @@ pub enum Resolution {
 }
 ```
 
-- [ ] **Step 2: Write the failing tree tests**
+- [ ] **Step 2a: Update the three pre-existing tests that encode the OLD (removal) semantics**
 
-Add to the `#[cfg(test)] mod tests` block in `crates/vfs-core/src/tree.rs` (there is
-already a `tomb(vpath)` helper at line ~327 building an `InputEntry` with
-`EntryKind::Tombstone`; reuse it, and the existing `file(...)` helper):
+This slice deliberately changes tombstone behavior from "remove the node → `NotFound`, absent from `readdir`" to "first-class `Tombstone` node → `Resolution::Tombstone`, listed in `readdir` as `NodeKind::Tombstone`". Three existing tests in `crates/vfs-core/src/tree.rs` assert the old behavior and MUST be updated (the old behavior was exactly the bug this fixes):
+
+- `tombstone_hides_lower_layer` (~line 369): change the assertion from
+  `Resolution::NotFound` to `Resolution::Tombstone`.
+- `directory_tombstone_hides_subtree` (~line 393): change the first assertion
+  `t.resolve("data/sub")` from `Resolution::NotFound` to `Resolution::Tombstone`;
+  KEEP the second assertion `t.resolve("data/sub/a.esp") == Resolution::NotFound`
+  (you still can't descend through a tombstone leaf).
+- `readdir_honors_tombstones` (~line 469): rename to `readdir_lists_tombstones`
+  and change the body's final assertions to:
+
+```rust
+        let entries = t.readdir("d", None).unwrap();
+        let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, vec!["a.esp", "b.esp"]);
+        let a = entries.iter().find(|e| e.name == "a.esp").unwrap();
+        assert_eq!(a.kind, crate::model::NodeKind::Tombstone);
+```
+
+`higher_layer_resurrects_tombstone` (~line 378) still passes unchanged (a re-added
+file over a tombstone resolves to `File`).
+
+- [ ] **Step 2b: Add the two genuinely-new tests**
+
+Add to the `#[cfg(test)] mod tests` block (reuse the existing `file`/`tomb`/`layer` helpers):
 
 ```rust
     #[test]
-    fn tombstone_hides_lower_layer_file() {
-        use crate::model::Resolution;
-        let tree = build(vec![
-            Layer { id: LayerId(0), entries: vec![file("data/x.esp", "s/x", 10, 1)] },
-            Layer { id: LayerId(1), entries: vec![tomb("data/x.esp")] },
-        ])
-        .unwrap();
-        assert_eq!(tree.resolve("data/x.esp"), Resolution::Tombstone);
-    }
-
-    #[test]
     fn tombstone_with_no_lower_entry_still_denies() {
         use crate::model::Resolution;
-        let tree = build(vec![Layer { id: LayerId(0), entries: vec![tomb("data/gone.esp")] }]).unwrap();
-        assert_eq!(tree.resolve("data/gone.esp"), Resolution::Tombstone);
-    }
-
-    #[test]
-    fn higher_layer_file_revives_a_tombstone() {
-        use crate::model::Resolution;
-        let tree = build(vec![
-            Layer { id: LayerId(0), entries: vec![tomb("data/x.esp")] },
-            Layer { id: LayerId(1), entries: vec![file("data/x.esp", "s/x", 10, 1)] },
-        ])
-        .unwrap();
-        assert!(matches!(tree.resolve("data/x.esp"), Resolution::File { .. }));
+        let t = build(vec![layer(0, vec![tomb("data/gone.esp")])]).unwrap();
+        assert_eq!(t.resolve("data/gone.esp"), Resolution::Tombstone);
     }
 
     #[test]
     fn tombstone_getattr_is_none_and_parent_lists_it() {
         use crate::model::NodeKind;
-        let tree = build(vec![Layer { id: LayerId(0), entries: vec![tomb("data/gone.esp")] }]).unwrap();
-        assert_eq!(tree.getattr("data/gone.esp"), None);
-        let entries = tree.readdir("data", None).unwrap();
+        let t = build(vec![layer(0, vec![tomb("data/gone.esp")])]).unwrap();
+        assert_eq!(t.getattr("data/gone.esp"), None);
+        let entries = t.readdir("data", None).unwrap();
         let e = entries.iter().find(|e| e.name == "gone.esp").unwrap();
         assert_eq!(e.kind, NodeKind::Tombstone);
     }
@@ -239,9 +239,10 @@ In `walk_from`, add an arm after the `File` arm:
 - [ ] **Step 5: Run to verify passing**
 
 Run: `cargo test -p vfs-core`
-Expected: PASS (all existing + 4 new tombstone tests). If a pre-existing test
-does a non-exhaustive match on `NodeKind`/`Resolution`/`WalkNodeKind`, add the
-`Tombstone` arm there too (compile-guided).
+Expected: PASS — including the 3 updated tests (Step 2a) and the 2 new tests
+(Step 2b). If a pre-existing test does a non-exhaustive match on
+`NodeKind`/`Resolution`/`WalkNodeKind`, add the `Tombstone` arm there too
+(compile-guided).
 
 - [ ] **Step 6: Commit**
 
