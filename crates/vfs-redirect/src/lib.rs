@@ -45,6 +45,22 @@ impl RootMap {
         }
     }
 
+    /// Answer a path-based attribute query against the snapshot.
+    pub fn query_attributes(&self, nt_path: &str, snap: &SnapshotReader) -> AttrDecision {
+        match self.locate(nt_path, snap) {
+            Located::Resolved(SnapResolution::File { size, mtime, .. }) => {
+                AttrDecision::Attributes { is_dir: false, size, mtime }
+            }
+            Located::Resolved(SnapResolution::Dir) => {
+                AttrDecision::Attributes { is_dir: true, size: 0, mtime: 0 }
+            }
+            Located::Resolved(SnapResolution::Tombstone) => AttrDecision::Deny,
+            Located::Resolved(SnapResolution::NotFound) | Located::Outside => {
+                AttrDecision::PassThrough
+            }
+        }
+    }
+
     /// Normalize + case-insensitively match the root + resolve the remainder.
     fn locate(&self, nt_path: &str, snap: &SnapshotReader) -> Located {
         let norm = match normalize_vpath(nt_path) {
@@ -107,6 +123,17 @@ pub enum Decision {
     Redirect { target_nt: String },
     /// The path is tombstoned (mod-deleted); the hook must return
     /// STATUS_OBJECT_NAME_NOT_FOUND rather than open or pass through.
+    Deny,
+}
+
+/// The outcome of a path-based attribute query (NtQueryAttributesFile).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttrDecision {
+    /// Let the original query proceed unchanged.
+    PassThrough,
+    /// Answer from the snapshot with these attributes.
+    Attributes { is_dir: bool, size: u64, mtime: i64 },
+    /// Tombstoned: return not-found rather than reveal a hidden real file.
     Deny,
 }
 
@@ -269,6 +296,66 @@ mod tests {
         assert_eq!(
             root().decide(r"\??\C:\Games\Skyrim\Data\deleted.esp", &snap),
             Decision::Deny
+        );
+    }
+
+    #[test]
+    fn attrs_of_a_virtual_file() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        assert_eq!(
+            root().query_attributes(r"\??\C:\Games\Skyrim\Data\foo.esp", &snap),
+            AttrDecision::Attributes { is_dir: false, size: 10, mtime: 1 }
+        );
+    }
+
+    #[test]
+    fn attrs_of_a_virtual_directory() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        assert_eq!(
+            root().query_attributes(r"\??\C:\Games\Skyrim\Data", &snap),
+            AttrDecision::Attributes { is_dir: true, size: 0, mtime: 0 }
+        );
+    }
+
+    #[test]
+    fn attrs_of_a_tombstone_deny() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        assert_eq!(
+            root().query_attributes(r"\??\C:\Games\Skyrim\Data\deleted.esp", &snap),
+            AttrDecision::Deny
+        );
+    }
+
+    #[test]
+    fn attrs_under_root_not_virtualized_passes_through() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        assert_eq!(
+            root().query_attributes(r"\??\C:\Games\Skyrim\Data\real.esp", &snap),
+            AttrDecision::PassThrough
+        );
+    }
+
+    #[test]
+    fn attrs_outside_root_passes_through() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        assert_eq!(
+            root().query_attributes(r"\??\C:\Windows\notepad.exe", &snap),
+            AttrDecision::PassThrough
+        );
+    }
+
+    #[test]
+    fn attrs_are_case_insensitive() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        assert_eq!(
+            root().query_attributes(r"\??\c:\games\SKYRIM\DATA\Foo.ESP", &snap),
+            AttrDecision::Attributes { is_dir: false, size: 10, mtime: 1 }
         );
     }
 }
