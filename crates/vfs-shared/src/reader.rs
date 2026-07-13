@@ -1,0 +1,1 @@
+//! SnapshotReader.
