@@ -439,6 +439,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vfs-inject"
+version = "0.1.0"
+dependencies = [
+ "vfs-core",
+ "vfs-shared",
+ "vfs-shim",
+ "vfs-shim-dll",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "vfs-ipc"
 version = "0.1.0"
 
@@ -474,6 +485,14 @@ dependencies = [
  "vfs-core",
  "vfs-redirect",
  "vfs-shared",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "vfs-shim-dll"
+version = "0.1.0"
+dependencies = [
+ "vfs-shim",
  "windows-sys 0.59.0",
 ]
 
