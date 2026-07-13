@@ -21,6 +21,7 @@ pub enum ReadError {
 pub enum NodeKind {
     Dir,
     File,
+    Tombstone,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,7 @@ pub enum SnapResolution {
         cache_key: [u8; 32],
     },
     Dir,
+    Tombstone,
     NotFound,
 }
 
@@ -123,6 +125,7 @@ impl<'a> SnapshotReader<'a> {
         match read_u8(self.bytes, base + N_KIND)? {
             KIND_DIR => Some(NodeKind::Dir),
             KIND_FILE => Some(NodeKind::File),
+            KIND_TOMBSTONE => Some(NodeKind::Tombstone),
             _ => None,
         }
     }
@@ -187,6 +190,7 @@ impl<'a> SnapshotReader<'a> {
                 size: read_u64(self.bytes, base + N_SIZE)?,
                 mtime: read_i64(self.bytes, base + N_MTIME)?,
             }),
+            NodeKind::Tombstone => None,
         }
     }
 
@@ -215,6 +219,7 @@ impl<'a> SnapshotReader<'a> {
         match self.node_kind(idx) {
             Some(NodeKind::Dir) => SnapResolution::Dir,
             Some(NodeKind::File) => self.file_resolution(base).unwrap_or(SnapResolution::NotFound),
+            Some(NodeKind::Tombstone) => SnapResolution::Tombstone,
             None => SnapResolution::NotFound,
         }
     }
@@ -243,6 +248,7 @@ impl<'a> SnapshotReader<'a> {
                     let nb = self.node_base(node).unwrap();
                     let (size, mtime) = match kind {
                         NodeKind::Dir => (0, 0),
+                        NodeKind::Tombstone => (0, 0),
                         NodeKind::File => (
                             read_u64(self.bytes, nb + N_SIZE).unwrap_or(0),
                             read_i64(self.bytes, nb + N_MTIME).unwrap_or(0),
@@ -326,6 +332,23 @@ mod tests {
         let r = SnapshotReader::open(&img).unwrap();
         assert_eq!(r.readdir(&["data", "a.esp"]), Err(ReadError::NotADirectory));
         assert_eq!(r.readdir(&["nope"]), Err(ReadError::NotFound));
+    }
+
+    #[test]
+    fn reader_surfaces_tombstones() {
+        let mut b = SnapshotBuilder::new();
+        let gone = b.add_tombstone("gone.esp");
+        let data = b.add_dir("data", &[("gone.esp".into(), gone)]);
+        let root = b.add_dir("", &[("data".into(), data)]);
+        b.set_root(root);
+        let img = b.finish();
+        let r = SnapshotReader::open(&img).unwrap();
+
+        assert_eq!(r.resolve(&["data", "gone.esp"]), SnapResolution::Tombstone);
+        assert_eq!(r.getattr(&["data", "gone.esp"]), None);
+        let entries = r.readdir(&["data"]).unwrap();
+        let e = entries.iter().find(|e| e.name == "gone.esp").unwrap();
+        assert_eq!(e.kind, NodeKind::Tombstone);
     }
 
     #[test]

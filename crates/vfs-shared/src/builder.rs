@@ -82,6 +82,25 @@ impl SnapshotBuilder {
         id
     }
 
+    pub fn add_tombstone(&mut self, display: &str) -> u32 {
+        let (name_off, name_len) = self.intern(display.as_bytes());
+        let id = self.nodes.len() as u32;
+        self.nodes.push(NodeRec {
+            kind: KIND_TOMBSTONE,
+            layer: 0,
+            name_off,
+            name_len,
+            child_first: 0,
+            child_count: 0,
+            source_off: 0,
+            source_len: 0,
+            size: 0,
+            mtime: 0,
+            cache_key: [0; 32],
+        });
+        id
+    }
+
     pub fn add_dir(&mut self, display: &str, children: &[(String, u32)]) -> u32 {
         let mut sorted = children.to_vec();
         sorted.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
@@ -186,6 +205,15 @@ mod tests {
         assert_eq!(read_u32(&img, H_TOTAL_LEN), Some(img.len() as u32));
         // nodes start right after the header
         assert_eq!(read_u32(&img, H_NODES_OFF), Some(HEADER_SIZE as u32));
+    }
+
+    #[test]
+    fn tombstone_node_kind_is_written() {
+        let mut bld = SnapshotBuilder::new();
+        let t = bld.add_tombstone("gone.esp");
+        bld.set_root(t);
+        let img = bld.finish();
+        assert_eq!(read_u8(&img, HEADER_SIZE + N_KIND), Some(KIND_TOMBSTONE));
     }
 
     #[test]

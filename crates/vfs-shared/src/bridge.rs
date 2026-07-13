@@ -29,6 +29,7 @@ pub fn flatten(tree: &vfs_core::VfsTree) -> Vec<u8> {
                     .collect();
                 builder.add_dir(n.display, &children)
             }
+            WalkNodeKind::Tombstone => builder.add_tombstone(n.display),
         };
         id_map.insert(n.id, snap_idx);
         if n.id == tree.root_id() {
@@ -62,5 +63,22 @@ mod tests {
             r.resolve(&["data", "a.esp"]),
             crate::reader::SnapResolution::File { .. }
         ));
+    }
+
+    #[test]
+    fn flatten_preserves_tombstones() {
+        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
+        let entry = |vpath: &str, kind: EntryKind| InputEntry {
+            vpath: vpath.into(), kind, source: "s".into(), size: 0, mtime: 0,
+        };
+        let tree = build(vec![Layer {
+            id: LayerId(0),
+            entries: vec![entry("data/keep.esp", EntryKind::File), entry("data/gone.esp", EntryKind::Tombstone)],
+        }])
+        .unwrap();
+        let img = flatten(&tree);
+        let r = crate::reader::SnapshotReader::open(&img).unwrap();
+        assert_eq!(r.resolve(&["data", "gone.esp"]), crate::reader::SnapResolution::Tombstone);
+        assert!(matches!(r.resolve(&["data", "keep.esp"]), crate::reader::SnapResolution::File { .. }));
     }
 }

@@ -49,17 +49,18 @@ fn snapshot_answers_match_vfs_core() {
         other => panic!("resolution mismatch: {other:?}"),
     }
 
-    // The tombstoned master is gone in both. (Reader keys are folded: "skyrim.esm".)
-    assert_eq!(tree.resolve("Data/Skyrim.esm"), Resolution::NotFound);
-    assert_eq!(r.resolve(&["data", "skyrim.esm"]), SnapResolution::NotFound);
+    // The tombstoned master is now a first-class Tombstone in both, not absent.
+    // (Reader keys are folded: "skyrim.esm".)
+    assert_eq!(tree.resolve("Data/Skyrim.esm"), Resolution::Tombstone);
+    assert_eq!(r.resolve(&["data", "skyrim.esm"]), SnapResolution::Tombstone);
 
-    // Merged Data listing matches (case-insensitive order, tombstone honored).
+    // Merged Data listing matches (case-insensitive order, tombstone surfaced).
     let core_names: Vec<String> =
         tree.readdir("Data", None).unwrap().into_iter().map(|e| e.name).collect();
     let snap_names: Vec<String> =
         r.readdir(&["data"]).unwrap().into_iter().map(|e| e.name).collect();
     assert_eq!(core_names, snap_names);
-    assert_eq!(snap_names, vec!["MyMod.esp", "textures"]);
+    assert_eq!(snap_names, vec!["MyMod.esp", "Skyrim.esm", "textures"]);
 
     // getattr kinds agree for a directory.
     assert_eq!(r.getattr(&["data", "textures"]).unwrap().kind, NodeKind::Dir);

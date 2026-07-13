@@ -6,6 +6,7 @@ pub const MAGIC: u32 = 0x5646_5353;
 pub const VERSION: u32 = 1;
 pub const KIND_DIR: u8 = 0;
 pub const KIND_FILE: u8 = 1;
+pub const KIND_TOMBSTONE: u8 = 2;
 
 #[repr(C)]
 pub struct Header {
