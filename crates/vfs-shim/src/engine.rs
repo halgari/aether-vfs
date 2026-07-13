@@ -1,6 +1,6 @@
 //! The redirect engine: a `RootMap` plus the snapshot bytes it resolves against.
 
-use vfs_redirect::{AttrDecision, Decision, RootMap};
+use vfs_redirect::{AttrDecision, Decision, DirItem, RootMap};
 use vfs_shared::{LayoutError, SnapshotReader};
 
 /// Errors constructing an [`Engine`].
@@ -41,6 +41,26 @@ impl Engine {
         match SnapshotReader::open(&self.snapshot) {
             Ok(reader) => self.map.query_attributes(nt_path, &reader),
             Err(_) => AttrDecision::PassThrough,
+        }
+    }
+
+    /// Whether `nt_path` lies under the managed root.
+    pub fn is_under_root(&self, nt_path: &str) -> bool {
+        self.map.contains(nt_path)
+    }
+
+    /// Merge a directory's real on-disk entries with the snapshot's virtual
+    /// children. Fail-safe: on snapshot re-open failure, returns `real`
+    /// unchanged (never hides real files on error).
+    pub fn merge_directory(
+        &self,
+        dir_nt_path: &str,
+        real: &[DirItem],
+        wildcard: Option<&str>,
+    ) -> Vec<DirItem> {
+        match SnapshotReader::open(&self.snapshot) {
+            Ok(reader) => self.map.merge_directory(dir_nt_path, &reader, real, wildcard),
+            Err(_) => real.to_vec(),
         }
     }
 }
@@ -88,6 +108,24 @@ mod tests {
     fn decide_passes_through_outside_root() {
         let engine = Engine::new(r"\??\C:\Games\Skyrim", snapshot_bytes()).unwrap();
         assert_eq!(engine.decide(r"\??\C:\Windows\notepad.exe"), Decision::PassThrough);
+    }
+
+    #[test]
+    fn is_under_root_predicate() {
+        let engine = Engine::new(r"\??\C:\Games\Skyrim", snapshot_bytes()).unwrap();
+        assert!(engine.is_under_root(r"\??\C:\Games\Skyrim\Data\foo.esp"));
+        assert!(!engine.is_under_root(r"\??\C:\Windows\notepad.exe"));
+    }
+
+    #[test]
+    fn merge_directory_adds_virtual_children() {
+        use vfs_redirect::DirItem;
+        let engine = Engine::new(r"\??\C:\Games\Skyrim", snapshot_bytes()).unwrap();
+        let real = vec![DirItem { name: "real.txt".into(), is_dir: false, size: 1, mtime: 0 }];
+        let merged = engine.merge_directory(r"\??\C:\Games\Skyrim\Data", &real, None);
+        let names: Vec<&str> = merged.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"real.txt"));
+        assert!(names.contains(&"foo.esp"));
     }
 
     #[test]

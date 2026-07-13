@@ -82,3 +82,42 @@ pub type NtQueryAttributesFileFn =
     unsafe extern "system" fn(*const ObjectAttributes, *mut FileBasicInformation) -> NTSTATUS;
 pub type NtQueryFullAttributesFileFn =
     unsafe extern "system" fn(*const ObjectAttributes, *mut FileNetworkOpenInformation) -> NTSTATUS;
+
+/// `ntdll!NtQueryDirectoryFileEx`. `FileName` is a `PUNICODE_STRING` (nullable);
+/// `IoStatusBlock` and `FileInformation` are left opaque and touched by the hook
+/// via raw offsets. `ApcRoutine`/`ApcContext`/`Event` are unused by our callers.
+pub type NtQueryDirectoryFileExFn = unsafe extern "system" fn(
+    HANDLE,               // FileHandle
+    HANDLE,               // Event
+    *const c_void,        // ApcRoutine
+    *const c_void,        // ApcContext
+    *mut c_void,          // IoStatusBlock
+    *mut c_void,          // FileInformation
+    u32,                  // Length
+    u32,                  // FileInformationClass
+    u32,                  // QueryFlags
+    *const UnicodeString, // FileName
+) -> NTSTATUS;
+
+/// `ntdll!NtOpenFile` — the open path many callers (incl. Rust `std`'s
+/// directory open) use instead of `NtCreateFile`.
+pub type NtOpenFileFn = unsafe extern "system" fn(
+    *mut HANDLE, // FileHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    *mut c_void, // IoStatusBlock
+    u32,         // ShareAccess
+    u32,         // OpenOptions
+) -> NTSTATUS;
+
+/// `ntdll!NtClose`.
+pub type NtCloseFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
+
+/// `NtQueryDirectoryFileEx` QueryFlags.
+pub const SL_RESTART_SCAN: u32 = 0x01;
+pub const SL_RETURN_SINGLE_ENTRY: u32 = 0x02;
+
+/// `STATUS_NO_MORE_FILES` — enumeration cursor exhausted.
+pub const STATUS_NO_MORE_FILES: NTSTATUS = 0x8000_0006u32 as i32;
+/// `STATUS_BUFFER_OVERFLOW` — the caller buffer cannot hold even one entry.
+pub const STATUS_BUFFER_OVERFLOW: NTSTATUS = 0x8000_0005u32 as i32;
