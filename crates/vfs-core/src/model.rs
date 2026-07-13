@@ -44,6 +44,7 @@ impl From<&str> for SourceId {
 pub enum NodeKind {
     File,
     Dir,
+    Tombstone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +75,7 @@ pub enum Resolution {
         cache_key: CacheKey,
     },
     Dir,
+    Tombstone,
     NotFound,
 }
 

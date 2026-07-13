@@ -17,6 +17,7 @@ struct Node {
 enum NodeEntry {
     File(FileNode),
     Dir(DirNode),
+    Tombstone,
 }
 
 #[derive(Debug)]
@@ -52,7 +53,7 @@ pub fn build(layers: Vec<Layer>) -> Result<VfsTree, BuildError> {
             }
             let comps: Vec<&str> = norm.split('/').collect();
             match entry.kind {
-                EntryKind::Tombstone => tree.remove_path(&comps),
+                EntryKind::Tombstone => tree.insert_tombstone(&comps),
                 EntryKind::Dir => {
                     tree.ensure_dir_path(&comps);
                 }
@@ -72,6 +73,7 @@ impl VfsTree {
         match self.find(&norm) {
             Some(id) => match &self.nodes[id as usize].entry {
                 NodeEntry::Dir(_) => Resolution::Dir,
+                NodeEntry::Tombstone => Resolution::Tombstone,
                 NodeEntry::File(f) => Resolution::File {
                     source: f.source.clone(),
                     size: f.size,
@@ -88,10 +90,11 @@ impl VfsTree {
         use crate::model::{NodeKind, Stat};
         let norm = normalize_vpath(vpath).ok()?;
         let id = self.find(&norm)?;
-        Some(match &self.nodes[id as usize].entry {
-            NodeEntry::Dir(_) => Stat { kind: NodeKind::Dir, size: 0, mtime: 0 },
-            NodeEntry::File(f) => Stat { kind: NodeKind::File, size: f.size, mtime: f.mtime },
-        })
+        match &self.nodes[id as usize].entry {
+            NodeEntry::Dir(_) => Some(Stat { kind: NodeKind::Dir, size: 0, mtime: 0 }),
+            NodeEntry::File(f) => Some(Stat { kind: NodeKind::File, size: f.size, mtime: f.mtime }),
+            NodeEntry::Tombstone => None,
+        }
     }
 
     pub fn readdir(
@@ -107,7 +110,7 @@ impl VfsTree {
         let id = self.find(&norm).ok_or(VfsError::NotFound)?;
         let dir = match &self.nodes[id as usize].entry {
             NodeEntry::Dir(d) => d,
-            NodeEntry::File(_) => return Err(VfsError::NotADirectory),
+            NodeEntry::File(_) | NodeEntry::Tombstone => return Err(VfsError::NotADirectory),
         };
 
         let mut out: Vec<DirEntry> = dir
@@ -127,6 +130,12 @@ impl VfsTree {
                         kind: NodeKind::File,
                         size: f.size,
                         mtime: f.mtime,
+                    },
+                    NodeEntry::Tombstone => DirEntry {
+                        name: node.name.clone(),
+                        kind: NodeKind::Tombstone,
+                        size: 0,
+                        mtime: 0,
                     },
                 }
             })
@@ -149,7 +158,7 @@ impl VfsTree {
             let key = fold(comp);
             match &self.nodes[cur as usize].entry {
                 NodeEntry::Dir(d) => cur = *d.children.get(&key)?,
-                NodeEntry::File(_) => return None,
+                NodeEntry::File(_) | NodeEntry::Tombstone => return None,
             }
         }
         Some(cur)
@@ -166,7 +175,7 @@ impl VfsTree {
     fn child(&self, parent: u32, key: &str) -> Option<u32> {
         match &self.nodes[parent as usize].entry {
             NodeEntry::Dir(d) => d.children.get(key).copied(),
-            NodeEntry::File(_) => None,
+            NodeEntry::File(_) | NodeEntry::Tombstone => None,
         }
     }
 
@@ -184,8 +193,9 @@ impl VfsTree {
             let key = fold(comp);
             match self.child(cur, &key) {
                 Some(id) => {
-                    if matches!(self.nodes[id as usize].entry, NodeEntry::File(_)) {
-                        // Replace file with an empty dir; name takes this layer's casing.
+                    if !matches!(self.nodes[id as usize].entry, NodeEntry::Dir(_)) {
+                        // Replace any non-dir (file or tombstone) with an empty dir;
+                        // name takes this layer's casing.
                         self.nodes[id as usize].name = comp.to_string();
                         self.nodes[id as usize].entry =
                             NodeEntry::Dir(DirNode { children: BTreeMap::new() });
@@ -225,23 +235,21 @@ impl VfsTree {
         }
     }
 
-    /// Remove the node at `comps` from its parent (tombstone / whiteout). Orphaned
-    /// subtree nodes remain in the arena but become unreachable — acceptable for MVP.
-    fn remove_path(&mut self, comps: &[&str]) {
-        let (leaf, parents) = match comps.split_last() {
-            Some(x) => x,
-            None => return,
-        };
-        // Walk parents without creating anything.
-        let mut cur = 0u32;
-        for comp in parents {
-            match self.child(cur, &fold(comp)) {
-                Some(id) if matches!(self.nodes[id as usize].entry, NodeEntry::Dir(_)) => cur = id,
-                _ => return, // path doesn't exist as a dir; nothing to remove
+    /// Insert a tombstone (whiteout) at `comps`, creating parent dirs; replaces
+    /// any existing node so the deletion shadows lower layers.
+    fn insert_tombstone(&mut self, comps: &[&str]) {
+        let (leaf, parents) = comps.split_last().expect("build guarantees non-empty");
+        let parent = self.ensure_dir_path(parents);
+        let key = fold(leaf);
+        match self.child(parent, &key) {
+            Some(id) => {
+                self.nodes[id as usize].name = leaf.to_string();
+                self.nodes[id as usize].entry = NodeEntry::Tombstone;
             }
-        }
-        if let NodeEntry::Dir(d) = &mut self.nodes[cur as usize].entry {
-            d.children.remove(&fold(leaf));
+            None => {
+                let id = self.push(leaf, NodeEntry::Tombstone);
+                self.set_child(parent, key, id);
+            }
         }
     }
 }
@@ -256,6 +264,7 @@ pub enum WalkNodeKind<'a> {
         layer: LayerId,
         cache_key: crate::model::CacheKey,
     },
+    Tombstone,
 }
 
 /// A node handed to the `walk_postorder` visitor.
@@ -309,6 +318,15 @@ impl VfsTree {
                         layer: f.layer,
                         cache_key: compute_cache_key(&f.source, f.size, f.mtime),
                     },
+                    children: Vec::new(),
+                });
+            }
+            NodeEntry::Tombstone => {
+                visit(WalkNode {
+                    id: idx,
+                    display: &node.name,
+                    folded: folded_name.to_string(),
+                    kind: WalkNodeKind::Tombstone,
                     children: Vec::new(),
                 });
             }
@@ -372,7 +390,7 @@ mod tests {
             layer(1, vec![tomb("data/a.esp")]),
         ])
         .unwrap();
-        assert_eq!(t.resolve("data/a.esp"), Resolution::NotFound);
+        assert_eq!(t.resolve("data/a.esp"), Resolution::Tombstone);
     }
 
     #[test]
@@ -396,7 +414,7 @@ mod tests {
             layer(1, vec![tomb("data/sub")]),
         ])
         .unwrap();
-        assert_eq!(t.resolve("data/sub"), Resolution::NotFound);
+        assert_eq!(t.resolve("data/sub"), Resolution::Tombstone);
         assert_eq!(t.resolve("data/sub/a.esp"), Resolution::NotFound);
     }
 
@@ -467,14 +485,17 @@ mod tests {
     }
 
     #[test]
-    fn readdir_honors_tombstones() {
+    fn readdir_lists_tombstones() {
         let t = build(vec![
             layer(0, vec![file("d/a.esp", "s", 1, 1), file("d/b.esp", "s", 1, 1)]),
             layer(1, vec![tomb("d/a.esp")]),
         ])
         .unwrap();
-        let names: Vec<String> = t.readdir("d", None).unwrap().into_iter().map(|e| e.name).collect();
-        assert_eq!(names, vec!["b.esp"]);
+        let entries = t.readdir("d", None).unwrap();
+        let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, vec!["a.esp", "b.esp"]);
+        let a = entries.iter().find(|e| e.name == "a.esp").unwrap();
+        assert_eq!(a.kind, crate::model::NodeKind::Tombstone);
     }
 
     #[test]
@@ -534,5 +555,22 @@ mod tests {
         // Folded child names are lowercased.
         assert!(seen_folded.iter().any(|f| f == "a.esp"));
         assert!(seen_folded.iter().any(|f| f == "sub"));
+    }
+
+    #[test]
+    fn tombstone_with_no_lower_entry_still_denies() {
+        use crate::model::Resolution;
+        let t = build(vec![layer(0, vec![tomb("data/gone.esp")])]).unwrap();
+        assert_eq!(t.resolve("data/gone.esp"), Resolution::Tombstone);
+    }
+
+    #[test]
+    fn tombstone_getattr_is_none_and_parent_lists_it() {
+        use crate::model::NodeKind;
+        let t = build(vec![layer(0, vec![tomb("data/gone.esp")])]).unwrap();
+        assert_eq!(t.getattr("data/gone.esp"), None);
+        let entries = t.readdir("data", None).unwrap();
+        let e = entries.iter().find(|e| e.name == "gone.esp").unwrap();
+        assert_eq!(e.kind, NodeKind::Tombstone);
     }
 }

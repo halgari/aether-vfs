@@ -42,13 +42,14 @@ fn end_to_end_modded_game_view() {
         other => panic!("expected mod1 file, got {other:?}"),
     }
 
-    // Mod2 tombstones the base master.
-    assert_eq!(tree.resolve("Data/Skyrim.esm"), Resolution::NotFound);
+    // Mod2 tombstones the base master (first-class deny, distinct from absent).
+    assert_eq!(tree.resolve("Data/Skyrim.esm"), Resolution::Tombstone);
 
-    // Merged Data listing is sorted case-insensitively and honors the tombstone.
+    // Merged Data listing is sorted case-insensitively and includes the tombstone
+    // entry (a later merge transform subtracts denied names).
     let names: Vec<String> =
         tree.readdir("Data", None).unwrap().into_iter().map(|e| e.name).collect();
-    assert_eq!(names, vec!["MyMod.esp", "textures"]);
+    assert_eq!(names, vec!["MyMod.esp", "Skyrim.esm", "textures"]);
 
     // The new mod file resolves.
     assert!(matches!(tree.resolve("Data/MyMod.esp"), Resolution::File { .. }));
