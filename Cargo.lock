@@ -352,6 +352,15 @@ name = "vfs-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "vfs-server"
+version = "0.1.0"
+dependencies = [
+ "vfs-core",
+ "vfs-ipc",
+ "vfs-shared",
+]
+
+[[package]]
 name = "vfs-shared"
 version = "0.1.0"
 dependencies = [
