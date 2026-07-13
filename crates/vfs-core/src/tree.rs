@@ -94,6 +94,52 @@ impl VfsTree {
         })
     }
 
+    pub fn readdir(
+        &self,
+        vpath: &str,
+        filter: Option<&str>,
+    ) -> Result<Vec<crate::model::DirEntry>, crate::model::VfsError> {
+        use crate::casefold::cmp_ci;
+        use crate::model::{DirEntry, NodeKind, VfsError};
+        use crate::wildcard::wildcard_match;
+
+        let norm = normalize_vpath(vpath).map_err(|_| VfsError::NotFound)?;
+        let id = self.find(&norm).ok_or(VfsError::NotFound)?;
+        let dir = match &self.nodes[id as usize].entry {
+            NodeEntry::Dir(d) => d,
+            NodeEntry::File(_) => return Err(VfsError::NotADirectory),
+        };
+
+        let mut out: Vec<DirEntry> = dir
+            .children
+            .values()
+            .map(|&cid| {
+                let node = &self.nodes[cid as usize];
+                match &node.entry {
+                    NodeEntry::Dir(_) => DirEntry {
+                        name: node.name.clone(),
+                        kind: NodeKind::Dir,
+                        size: 0,
+                        mtime: 0,
+                    },
+                    NodeEntry::File(f) => DirEntry {
+                        name: node.name.clone(),
+                        kind: NodeKind::File,
+                        size: f.size,
+                        mtime: f.mtime,
+                    },
+                }
+            })
+            .filter(|e| match filter {
+                Some(pat) => wildcard_match(pat, &e.name),
+                None => true,
+            })
+            .collect();
+
+        out.sort_by(|a, b| cmp_ci(&a.name, &b.name));
+        Ok(out)
+    }
+
     fn find(&self, norm: &str) -> Option<u32> {
         let mut cur = 0u32;
         if norm.is_empty() {
@@ -340,5 +386,53 @@ mod tests {
     fn getattr_missing_is_none() {
         let t = build(vec![layer(0, vec![file("data/a.esp", "s", 1, 1)])]).unwrap();
         assert_eq!(t.getattr("nope"), None);
+    }
+
+    #[test]
+    fn readdir_merges_and_sorts_case_insensitively() {
+        let t = build(vec![
+            layer(0, vec![file("d/Zebra.esp", "s", 1, 1), file("d/apple.esp", "s", 1, 1)]),
+            layer(1, vec![file("d/Mango.esp", "s", 1, 1)]),
+        ])
+        .unwrap();
+        let names: Vec<String> = t.readdir("d", None).unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["apple.esp", "Mango.esp", "Zebra.esp"]);
+    }
+
+    #[test]
+    fn readdir_honors_tombstones() {
+        let t = build(vec![
+            layer(0, vec![file("d/a.esp", "s", 1, 1), file("d/b.esp", "s", 1, 1)]),
+            layer(1, vec![tomb("d/a.esp")]),
+        ])
+        .unwrap();
+        let names: Vec<String> = t.readdir("d", None).unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["b.esp"]);
+    }
+
+    #[test]
+    fn readdir_applies_wildcard_filter() {
+        let t = build(vec![layer(
+            0,
+            vec![file("d/a.esp", "s", 1, 1), file("d/b.txt", "s", 1, 1), file("d/c.esp", "s", 1, 1)],
+        )])
+        .unwrap();
+        let names: Vec<String> =
+            t.readdir("d", Some("*.esp")).unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["a.esp", "c.esp"]);
+    }
+
+    #[test]
+    fn readdir_on_file_is_not_a_directory() {
+        use crate::model::VfsError;
+        let t = build(vec![layer(0, vec![file("d/a.esp", "s", 1, 1)])]).unwrap();
+        assert_eq!(t.readdir("d/a.esp", None).unwrap_err(), VfsError::NotADirectory);
+    }
+
+    #[test]
+    fn readdir_missing_is_not_found() {
+        use crate::model::VfsError;
+        let t = build(vec![layer(0, vec![file("d/a.esp", "s", 1, 1)])]).unwrap();
+        assert_eq!(t.readdir("nope", None).unwrap_err(), VfsError::NotFound);
     }
 }
