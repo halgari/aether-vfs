@@ -34,4 +34,5 @@ pub use model::{
 pub use path::{normalize_vpath, PathError};
 pub use tree::VfsTree;
 pub use tree::build;
+pub use tree::{WalkNode, WalkNodeKind};
 pub use wildcard::wildcard_match;

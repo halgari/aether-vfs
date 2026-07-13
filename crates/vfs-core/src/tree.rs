@@ -246,6 +246,76 @@ impl VfsTree {
     }
 }
 
+/// Kind + payload for a node visited by `walk_postorder`.
+pub enum WalkNodeKind<'a> {
+    Dir,
+    File {
+        source: &'a [u8],
+        size: u64,
+        mtime: i64,
+        layer: LayerId,
+        cache_key: crate::model::CacheKey,
+    },
+}
+
+/// A node handed to the `walk_postorder` visitor.
+pub struct WalkNode<'a> {
+    pub id: u32,
+    pub display: &'a str,
+    /// Folded name (empty for the root). Folded with vfs-core's canonical fold.
+    pub folded: String,
+    pub kind: WalkNodeKind<'a>,
+    /// (folded_child_name, child_id) pairs, in this dir's stored order.
+    pub children: Vec<(String, u32)>,
+}
+
+impl VfsTree {
+    pub fn root_id(&self) -> u32 {
+        0
+    }
+
+    /// Visit every node in post-order (children before parents). Read-only.
+    pub fn walk_postorder(&self, mut visit: impl FnMut(WalkNode)) {
+        self.walk_from(0, "", &mut visit);
+    }
+
+    fn walk_from(&self, idx: u32, folded_name: &str, visit: &mut impl FnMut(WalkNode)) {
+        let node = &self.nodes[idx as usize];
+        match &node.entry {
+            NodeEntry::Dir(d) => {
+                // Recurse into children first (post-order).
+                for (folded, &child) in &d.children {
+                    self.walk_from(child, folded, visit);
+                }
+                let children: Vec<(String, u32)> =
+                    d.children.iter().map(|(f, &c)| (f.clone(), c)).collect();
+                visit(WalkNode {
+                    id: idx,
+                    display: &node.name,
+                    folded: folded_name.to_string(),
+                    kind: WalkNodeKind::Dir,
+                    children,
+                });
+            }
+            NodeEntry::File(f) => {
+                visit(WalkNode {
+                    id: idx,
+                    display: &node.name,
+                    folded: folded_name.to_string(),
+                    kind: WalkNodeKind::File {
+                        source: &f.source.0,
+                        size: f.size,
+                        mtime: f.mtime,
+                        layer: f.layer,
+                        cache_key: compute_cache_key(&f.source, f.size, f.mtime),
+                    },
+                    children: Vec::new(),
+                });
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +501,38 @@ mod tests {
         use crate::model::VfsError;
         let t = build(vec![layer(0, vec![file("d/a.esp", "s", 1, 1)])]).unwrap();
         assert_eq!(t.readdir("nope", None).unwrap_err(), VfsError::NotFound);
+    }
+
+    #[test]
+    fn walk_postorder_visits_children_before_parents_with_folded_names() {
+        use crate::tree::WalkNodeKind;
+        let t = build(vec![layer(0, vec![
+            file("Data/A.esp", "src/a", 10, 1),
+            file("Data/sub/c.txt", "src/c", 30, 3),
+        ])])
+        .unwrap();
+
+        let mut order: Vec<String> = Vec::new();
+        let mut seen_folded: Vec<String> = Vec::new();
+        t.walk_postorder(|n| {
+            order.push(n.display.to_string());
+            for (folded, _child) in n.children {
+                seen_folded.push(folded.clone());
+            }
+            // A file must carry its source + metadata.
+            if let WalkNodeKind::File { source, size, .. } = &n.kind {
+                assert!(!source.is_empty());
+                assert!(*size > 0);
+            }
+        });
+
+        // Post-order: a leaf appears before its parent dir.
+        let pos = |name: &str| order.iter().position(|x| x == name).unwrap();
+        assert!(pos("A.esp") < pos("Data"));
+        assert!(pos("c.txt") < pos("sub"));
+        assert!(pos("sub") < pos("Data"));
+        // Folded child names are lowercased.
+        assert!(seen_folded.iter().any(|f| f == "a.esp"));
+        assert!(seen_folded.iter().any(|f| f == "sub"));
     }
 }
