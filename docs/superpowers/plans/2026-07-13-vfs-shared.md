@@ -914,7 +914,8 @@ mod tests {
     fn open_rejects_bad_magic() {
         let mut img = fixture();
         img[0] ^= 0xFF;
-        assert_eq!(SnapshotReader::open(&img).unwrap_err(), LayoutError::BadMagic);
+        // `matches!` (not unwrap_err) so SnapshotReader needn't derive Debug.
+        assert!(matches!(SnapshotReader::open(&img), Err(LayoutError::BadMagic)));
     }
 }
 ```
