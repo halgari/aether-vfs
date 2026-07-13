@@ -3,7 +3,8 @@
 //! The injected shim's pure redirect-decision core: map an incoming NT open path
 //! + a published snapshot to pass-through vs redirect-to-backing-file.
 
-use vfs_core::{normalize_vpath, PathError};
+use vfs_core::{fold, normalize_vpath, PathError};
+use vfs_shared::{SnapResolution, SnapshotReader};
 
 /// The managed VFS install root (mount point), as normalized path components.
 pub struct RootMap {
@@ -26,6 +27,49 @@ impl RootMap {
     /// The normalized root components (original case). For tests/diagnostics.
     pub fn root_components(&self) -> &[String] {
         &self.root
+    }
+
+    /// Decide how to handle an incoming NT open path.
+    ///
+    /// Fail-safe: any path that is malformed, outside the root, or does not
+    /// positively resolve to a virtualized file yields `PassThrough`.
+    pub fn decide(&self, nt_path: &str, snap: &SnapshotReader) -> Decision {
+        let norm = match normalize_vpath(nt_path) {
+            Ok(n) => n,
+            Err(_) => return Decision::PassThrough,
+        };
+        let comps: Vec<&str> =
+            if norm.is_empty() { Vec::new() } else { norm.split('/').collect() };
+        if comps.len() < self.root.len() {
+            return Decision::PassThrough;
+        }
+        // Component-wise, case-insensitive root prefix match.
+        for (r, c) in self.root.iter().zip(comps.iter()) {
+            if fold(r) != fold(c) {
+                return Decision::PassThrough;
+            }
+        }
+        // Fold the remainder and resolve it against the snapshot.
+        let folded: Vec<String> = comps[self.root.len()..].iter().map(|c| fold(c)).collect();
+        let folded_refs: Vec<&str> = folded.iter().map(String::as_str).collect();
+        match snap.resolve(&folded_refs) {
+            SnapResolution::File { source, .. } => {
+                Decision::Redirect { target_nt: render_nt(&source) }
+            }
+            SnapResolution::Dir | SnapResolution::NotFound => Decision::PassThrough,
+        }
+    }
+}
+
+/// Render a backing `source` (a UTF-8 absolute Win32 path, per the director's
+/// contract) as an NT DOS-device path. A `source` already carrying an NT/DOS
+/// long-path prefix is returned unchanged rather than double-prefixed.
+fn render_nt(source: &[u8]) -> String {
+    let s = String::from_utf8_lossy(source);
+    if s.starts_with(r"\??\") || s.starts_with(r"\\?\") {
+        s.into_owned()
+    } else {
+        format!(r"\??\{s}")
     }
 }
 
@@ -74,5 +118,123 @@ mod tests {
     fn utf16_lossy_does_not_panic_on_unpaired_surrogate() {
         let units: [u16; 2] = [0xD800, b'x' as u16]; // lone high surrogate
         let _ = utf16_to_string(&units); // must not panic
+    }
+
+    use vfs_shared::SnapshotReader;
+
+    // Build a snapshot with two virtual files under `data/`.
+    fn snapshot_bytes() -> Vec<u8> {
+        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
+        let file = |vpath: &str, source: &str| InputEntry {
+            vpath: vpath.into(),
+            kind: EntryKind::File,
+            source: source.into(),
+            size: 10,
+            mtime: 1,
+        };
+        let tree = build(vec![Layer {
+            id: LayerId(0),
+            entries: vec![
+                file("data/foo.esp", r"D:\Mods\Cool\foo.esp"),
+                file("data/sub/bar.dds", r"D:\Mods\Cool\bar.dds"),
+            ],
+        }])
+        .unwrap();
+        vfs_shared::bridge::flatten(&tree)
+    }
+
+    fn root() -> RootMap {
+        RootMap::new(r"\??\C:\Games\Skyrim").unwrap()
+    }
+
+    #[test]
+    fn redirects_a_virtual_file() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let d = root().decide(r"\??\C:\Games\Skyrim\Data\foo.esp", &snap);
+        assert_eq!(
+            d,
+            Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() }
+        );
+    }
+
+    #[test]
+    fn redirect_is_case_insensitive_on_root_and_remainder() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let d = root().decide(r"\??\c:\games\SKYRIM\DATA\Foo.ESP", &snap);
+        assert_eq!(
+            d,
+            Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() }
+        );
+    }
+
+    #[test]
+    fn passes_through_outside_root() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let d = root().decide(r"\??\C:\Windows\System32\kernel32.dll", &snap);
+        assert_eq!(d, Decision::PassThrough);
+    }
+
+    #[test]
+    fn passes_through_under_root_but_not_virtualized() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let d = root().decide(r"\??\C:\Games\Skyrim\Data\notmod.esp", &snap);
+        assert_eq!(d, Decision::PassThrough);
+    }
+
+    #[test]
+    fn passes_through_a_virtual_directory() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let d = root().decide(r"\??\C:\Games\Skyrim\Data", &snap);
+        assert_eq!(d, Decision::PassThrough);
+    }
+
+    #[test]
+    fn passes_through_escaping_path_without_panic() {
+        // Four `..` pop past the drive component, so normalize_vpath returns
+        // PathError::EscapesRoot; decide must fail safe to PassThrough, not panic.
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let d = root().decide(r"\??\C:\Games\Skyrim\..\..\..\..\evil", &snap);
+        assert_eq!(d, Decision::PassThrough);
+    }
+
+    #[test]
+    fn win32_form_root_matches_nt_form_open() {
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let win32_root = RootMap::new(r"C:\Games\Skyrim").unwrap();
+        let d = win32_root.decide(r"\??\C:\Games\Skyrim\Data\foo.esp", &snap);
+        assert_eq!(
+            d,
+            Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() }
+        );
+    }
+
+    #[test]
+    fn source_already_nt_prefixed_is_not_double_prefixed() {
+        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
+        let tree = build(vec![Layer {
+            id: LayerId(0),
+            entries: vec![InputEntry {
+                vpath: "data/foo.esp".into(),
+                kind: EntryKind::File,
+                source: r"\??\D:\Mods\Cool\foo.esp".into(),
+                size: 10,
+                mtime: 1,
+            }],
+        }])
+        .unwrap();
+        let bytes = vfs_shared::bridge::flatten(&tree);
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let d = root().decide(r"\??\C:\Games\Skyrim\Data\foo.esp", &snap);
+        assert_eq!(
+            d,
+            Decision::Redirect { target_nt: r"\??\D:\Mods\Cool\foo.esp".to_string() }
+        );
     }
 }
