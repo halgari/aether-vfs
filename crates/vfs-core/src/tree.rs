@@ -84,6 +84,16 @@ impl VfsTree {
         }
     }
 
+    pub fn getattr(&self, vpath: &str) -> Option<crate::model::Stat> {
+        use crate::model::{NodeKind, Stat};
+        let norm = normalize_vpath(vpath).ok()?;
+        let id = self.find(&norm)?;
+        Some(match &self.nodes[id as usize].entry {
+            NodeEntry::Dir(_) => Stat { kind: NodeKind::Dir, size: 0, mtime: 0 },
+            NodeEntry::File(f) => Stat { kind: NodeKind::File, size: f.size, mtime: f.mtime },
+        })
+    }
+
     fn find(&self, norm: &str) -> Option<u32> {
         let mut cur = 0u32;
         if norm.is_empty() {
@@ -304,5 +314,31 @@ mod tests {
             }
             other => panic!("expected file, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn getattr_file_reports_size_and_mtime() {
+        use crate::model::{NodeKind, Stat};
+        let t = build(vec![layer(0, vec![file("data/a.esp", "s", 123, 456)])]).unwrap();
+        assert_eq!(
+            t.getattr("data/a.esp"),
+            Some(Stat { kind: NodeKind::File, size: 123, mtime: 456 })
+        );
+    }
+
+    #[test]
+    fn getattr_dir_reports_dir_kind() {
+        use crate::model::{NodeKind, Stat};
+        let t = build(vec![layer(0, vec![file("data/a.esp", "s", 1, 1)])]).unwrap();
+        assert_eq!(
+            t.getattr("data"),
+            Some(Stat { kind: NodeKind::Dir, size: 0, mtime: 0 })
+        );
+    }
+
+    #[test]
+    fn getattr_missing_is_none() {
+        let t = build(vec![layer(0, vec![file("data/a.esp", "s", 1, 1)])]).unwrap();
+        assert_eq!(t.getattr("nope"), None);
     }
 }
