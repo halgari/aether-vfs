@@ -9,7 +9,7 @@ mod path;
 mod tree;
 mod wildcard;
 
-// pub use cachekey::compute_cache_key;
+pub use cachekey::compute_cache_key;
 pub use model::{
     BuildError, CacheKey, DirEntry, EntryKind, InputEntry, Layer, LayerId, NodeKind, Resolution,
     SourceId, Stat, VfsError,
