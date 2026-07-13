@@ -4,4 +4,7 @@
 //! virtualized paths to their mod backing files (in-process for now; injection
 //! is a later slice).
 
+mod engine;
 mod ntdef;
+
+pub use engine::{Engine, EngineError};
