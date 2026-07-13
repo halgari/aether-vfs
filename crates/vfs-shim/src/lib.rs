@@ -9,6 +9,6 @@ mod engine;
 mod hook;
 mod ntdef;
 
-pub use bootstrap::{decode_config, encode_config};
+pub use bootstrap::{bootstrap_from_config_path, decode_config, encode_config, BootstrapError};
 pub use engine::{Engine, EngineError};
 pub use hook::{install, HookGuard, InstallError};
