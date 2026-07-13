@@ -1,0 +1,1 @@
+//! RingClient / RingServer blocking endpoints.
