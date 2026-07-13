@@ -1273,6 +1273,7 @@ fn readers_never_see_a_torn_snapshot() {
     let writer = {
         let stop = stop.clone();
         thread::spawn(move || {
+            let ptr = ptr; // capture the whole Shared wrapper (Send), not ptr.0 alone
             #[allow(unsafe_code)]
             let shared = unsafe { std::slice::from_raw_parts_mut(ptr.0, ptr.1) };
             let mut toggle = false;
@@ -1290,6 +1291,7 @@ fn readers_never_see_a_torn_snapshot() {
     for _ in 0..4 {
         let stop = stop.clone();
         readers.push(thread::spawn(move || {
+            let ptr = ptr; // capture the whole Shared wrapper (Send), not ptr.0 alone
             #[allow(unsafe_code)]
             let shared = unsafe { std::slice::from_raw_parts(ptr.0 as *const u8, ptr.1) };
             for _ in 0..20_000 {
