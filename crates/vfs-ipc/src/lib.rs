@@ -9,4 +9,6 @@ pub mod notifier;
 pub mod ring;
 pub mod seg;
 
+pub use seg::{OwnedSeg, SharedSeg};
+
 // pub use lines added by later tasks.
