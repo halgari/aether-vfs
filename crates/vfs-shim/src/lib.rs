@@ -4,9 +4,11 @@
 //! virtualized paths to their mod backing files (in-process for now; injection
 //! is a later slice).
 
+mod bootstrap;
 mod engine;
 mod hook;
 mod ntdef;
 
+pub use bootstrap::{decode_config, encode_config};
 pub use engine::{Engine, EngineError};
 pub use hook::{install, HookGuard, InstallError};
