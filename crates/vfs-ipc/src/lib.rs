@@ -12,5 +12,6 @@ pub mod seg;
 pub use seg::{OwnedSeg, SharedSeg};
 pub use ring::{Geom, IpcError};
 pub use notifier::{Notifier, SpinNotifier};
+pub use endpoint::{Request, Response, RingClient, RingServer};
 
 // pub use lines added by later tasks.
