@@ -13,3 +13,4 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 [dev-dependencies]
 # `bridge` (test-only) provides `flatten` for building snapshot fixtures.
 vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
