@@ -12,4 +12,6 @@ pub mod seqlock;
 #[cfg(feature = "bridge")]
 pub mod bridge;
 
+pub use builder::SnapshotBuilder;
+
 // pub use lines are added by later tasks as items land.
