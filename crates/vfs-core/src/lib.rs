@@ -17,4 +17,4 @@ mod wildcard;
 pub use path::{normalize_vpath, PathError};
 // pub use tree::VfsTree;
 // pub use tree::build;
-// pub use wildcard::wildcard_match;
+pub use wildcard::wildcard_match;
