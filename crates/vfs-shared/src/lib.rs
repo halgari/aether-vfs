@@ -18,4 +18,6 @@ pub use reader::{
     LayoutError, NodeKind, ReadError, SnapDirEntry, SnapResolution, SnapStat, SnapshotReader,
 };
 
+pub use seqlock::{publish, read_stable, AlignedBuf, PublishError};
+
 // pub use lines are added by later tasks as items land.
