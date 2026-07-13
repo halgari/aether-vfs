@@ -43,15 +43,22 @@ slice that exercises it. The control ring / data arena / sync block are
    `VfsTree → snapshot` bridge lives behind an optional `bridge` feature that
    pulls `vfs-core`; the server and the round-trip test enable it, the **shim
    never does** (keeps provider logic out of the shim, G12 spirit).
-5. **No `bytemuck`, no `unsafe`.** (De)serialization is manual little-endian via
-   `offset_of!`-derived field offsets and `from_le_bytes`/`to_le_bytes`. Works on
-   any `&[u8]` regardless of alignment; zero dependencies in the default build.
+5. **No `bytemuck`; unsafe-free except one audited atomic view.**
+   (De)serialization is manual little-endian via `offset_of!`-derived field
+   offsets and `from_le_bytes`/`to_le_bytes` — works on any `&[u8]` regardless of
+   alignment, zero dependencies in the default build. Layout/builder/reader are
+   fully unsafe-free. The **only** exception is the seqlock's generation
+   accessor: forming an `&AtomicU64` over the generation slot in a shared `&[u8]`
+   has no safe std API, so `seqlock.rs` contains exactly one small, audited,
+   `#[allow(unsafe_code)]` helper. The crate is `#![deny(unsafe_code)]` (not
+   `forbid`) so that single localized allow is the whole unsafe surface.
 
 ---
 
 ## 2. Scope & crate boundary
 
-`crates/vfs-shared`, stable Rust, `#![forbid(unsafe_code)]`.
+`crates/vfs-shared`, stable Rust, `#![deny(unsafe_code)]` with exactly one
+localized `#[allow(unsafe_code)]` (the seqlock generation accessor, §5/§8).
 
 ### In scope (this slice)
 
@@ -238,9 +245,11 @@ generation as an `AtomicU64`, which requires the generation field (Header offset
 always holds in production. Tests that exercise the seqlock must use an
 8-aligned buffer; `vfs-shared` provides a small `aligned_buffer(len) -> AlignedVec`
 test/helper for that. `publish`/`read_stable` validate the buffer's alignment and
-return `PublishError::Misaligned` / treat it as a precondition (the plan pins the
-exact mechanism — e.g. `AtomicU64::from_mut` over the aligned generation slot, or
-a safe atomic-over-bytes helper; still no hand-written `unsafe` in the crate).
+return `PublishError::Misaligned` / treat it as a precondition. The atomic view
+is the crate's single audited `unsafe`: a `#[allow(unsafe_code)]` helper that
+casts the (validated in-bounds, 8-aligned) generation slot to `&AtomicU64` with a
+`// SAFETY:` note. The test/helper `AlignedBuf` (over-allocate + aligned subslice)
+provides 8-aligned buffers **without** unsafe.
 
 ---
 
@@ -329,7 +338,8 @@ no behavior change to existing APIs. The plan pins the exact signature.
 ## 8. Dependencies & toolchain
 
 - **Toolchain:** stable Rust.
-- **Default build:** no dependencies. `#![forbid(unsafe_code)]`.
+- **Default build:** no dependencies. `#![deny(unsafe_code)]` with one localized
+  `#[allow(unsafe_code)]` (seqlock generation accessor).
 - **Feature `bridge`:** adds `vfs-core` (path dependency).
 - **Dev-dependencies:** `vfs-core` (for the round-trip test under `bridge`).
 - **Workspace:** `crates/vfs-shared` added to the workspace `members`.
