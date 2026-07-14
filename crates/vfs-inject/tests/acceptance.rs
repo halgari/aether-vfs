@@ -20,20 +20,25 @@ fn injected_shim_passes_full_acceptance_suite() {
     let base = std::env::temp_dir().join(format!("vfs-accept-{pid}"));
     let root = base.join("gameroot");
     let mods = base.join("mods"); // backing files, OUTSIDE the root
+    let overlay = base.join("overlay"); // write overlay, OUTSIDE the root
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&mods).unwrap();
+    std::fs::create_dir_all(&overlay).unwrap();
 
     // Real on-disk contents under the root.
     std::fs::write(root.join("override.txt"), b"REAL-OVERRIDE").unwrap();
     std::fs::write(root.join("real_only.txt"), b"REAL-ONLY-BYTES").unwrap();
     std::fs::write(root.join("deleted.txt"), b"SHOULD-BE-HIDDEN").unwrap();
+    std::fs::write(root.join("del_target.txt"), b"DELETE-ME-RUNTIME").unwrap();
     std::fs::create_dir_all(root.join("real_dir")).unwrap();
 
-    // Backing files for the mod add + override.
+    // Backing files for the mod add + override + copy-on-write target.
     let added_backing = mods.join("added_backing.dat");
     std::fs::write(&added_backing, b"MOD-ADDED-BYTES").unwrap();
     let override_backing = mods.join("override_backing.dat");
     std::fs::write(&override_backing, b"MOD-OVERRIDE-BYTES").unwrap();
+    let cow_backing = mods.join("cow_backing.dat");
+    std::fs::write(&cow_backing, b"COW-ORIG").unwrap();
 
     // A real, loadable system DLL stands in for a mod plugin DLL.
     let plugin_backing = r"C:\Windows\System32\version.dll";
@@ -56,13 +61,18 @@ fn injected_shim_passes_full_acceptance_suite() {
                 e("deleted.txt", EntryKind::Tombstone, "", 0),
                 e("virtual_dir", EntryKind::Dir, "", 0),
                 e("plugin.dll", EntryKind::File, plugin_backing, plugin_size),
+                e("cow_target.esp", EntryKind::File, cow_backing.to_str().unwrap(), 8),
             ],
         }])
         .unwrap();
         vfs_shared::bridge::flatten(&tree)
     };
 
-    let config_bytes = vfs_shim::encode_config(root.to_str().unwrap(), &snapshot);
+    let config_bytes = vfs_shim::encode_config_with_overlay(
+        root.to_str().unwrap(),
+        overlay.to_str().unwrap(),
+        &snapshot,
+    );
     let config_path = base.join("shim.cfg");
     std::fs::write(&config_path, &config_bytes).unwrap();
 
@@ -92,5 +102,5 @@ fn injected_shim_passes_full_acceptance_suite() {
         assert!(line.ends_with("=PASS"), "check failed: {line}\nfull report:\n{report}");
     }
     // Guard against silently skipping checks.
-    assert_eq!(report.lines().count(), 11, "expected 11 checks:\n{report}");
+    assert_eq!(report.lines().count(), 14, "expected 14 checks:\n{report}");
 }

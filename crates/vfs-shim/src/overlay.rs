@@ -87,6 +87,14 @@ impl Overlay {
         let _ = std::fs::remove_file(self.whiteout_path(comps));
     }
 
+    /// Whiteout `comps`: drop any overlay copy and lay down a marker so the path
+    /// reads as deleted (hiding the snapshot backing / real file beneath).
+    pub fn whiteout(&self, comps: &[String]) {
+        self.ensure_parent(comps);
+        let _ = std::fs::remove_file(self.file_path(comps));
+        let _ = std::fs::write(self.whiteout_path(comps), b"");
+    }
+
     /// Whether an overlay file exists for `comps`.
     pub fn has_file(&self, comps: &[String]) -> bool {
         self.file_path(comps).exists()

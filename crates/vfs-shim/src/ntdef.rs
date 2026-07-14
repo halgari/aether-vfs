@@ -126,6 +126,22 @@ pub type NtQueryInformationFileFn = unsafe extern "system" fn(
 /// as the authoritative path (spoof this; NOT class 9, which would break it).
 pub const FILE_NORMALIZED_NAME_INFORMATION: u32 = 48;
 
+/// `ntdll!NtSetInformationFile` (same ABI as NtQueryInformationFile).
+pub type NtSetInformationFileFn = unsafe extern "system" fn(
+    HANDLE,      // FileHandle
+    *mut c_void, // IoStatusBlock
+    *mut c_void, // FileInformation
+    u32,         // Length
+    u32,         // FileInformationClass
+) -> NTSTATUS;
+
+/// `FileDispositionInformation` (class 13): 1-byte BOOLEAN `DeleteFile`.
+pub const FILE_DISPOSITION_INFORMATION: u32 = 13;
+/// `FileDispositionInformationEx` (class 64): ULONG `Flags`; bit 0 = DELETE.
+pub const FILE_DISPOSITION_INFORMATION_EX: u32 = 64;
+/// `FILE_DISPOSITION_DELETE` flag for the Ex form.
+pub const FILE_DISPOSITION_DELETE: u32 = 0x1;
+
 /// `NtQueryDirectoryFileEx` QueryFlags.
 pub const SL_RESTART_SCAN: u32 = 0x01;
 pub const SL_RETURN_SINGLE_ENTRY: u32 = 0x02;

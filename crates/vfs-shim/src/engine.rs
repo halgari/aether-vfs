@@ -142,6 +142,24 @@ impl Engine {
         self.map.contains(nt_path)
     }
 
+    /// The folded remainder components of `nt_path` under the root, or `None`.
+    pub fn remainder(&self, nt_path: &str) -> Option<Vec<String>> {
+        self.map.remainder(nt_path)
+    }
+
+    /// Whiteout `comps` in the overlay (mark as deleted). Returns whether an
+    /// overlay is configured to handle it; `false` means the caller should let
+    /// the real delete proceed (read-only VFS).
+    pub fn whiteout(&self, comps: &[String]) -> bool {
+        match &self.overlay {
+            Some(ov) => {
+                ov.whiteout(comps);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Merge a directory's real on-disk entries with the snapshot's virtual
     /// children, then apply the overlay (adds/overrides win, whiteouts remove).
     /// Fail-safe: on snapshot re-open failure, returns `real` unchanged.

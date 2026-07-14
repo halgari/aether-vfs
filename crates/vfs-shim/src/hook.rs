@@ -21,9 +21,10 @@ use crate::inject::{inject_dll, self_dll_path, wait_ready};
 use crate::ntdef::{
     FileBasicInformation, FileNetworkOpenInformation, NtCloseFn, NtCreateFileFn, NtOpenFileFn,
     NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryFullAttributesFileFn,
-    NtQueryInformationFileFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_NORMAL, FILE_NORMALIZED_NAME_INFORMATION, SL_RESTART_SCAN,
-    SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES,
+    NtQueryInformationFileFn, NtSetInformationFileFn, ObjectAttributes, UnicodeString,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_DELETE,
+    FILE_DISPOSITION_INFORMATION, FILE_DISPOSITION_INFORMATION_EX, FILE_NORMALIZED_NAME_INFORMATION,
+    SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 
@@ -45,6 +46,7 @@ static mut TRAMP_OPEN: Option<NtOpenFileFn> = None;
 static mut TRAMP_QDIREX: Option<NtQueryDirectoryFileExFn> = None;
 static mut TRAMP_CLOSE: Option<NtCloseFn> = None;
 static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
+static mut TRAMP_SETINFO: Option<NtSetInformationFileFn> = None;
 static mut TRAMP_CPIW: Option<CreateProcessInternalWFn> = None;
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
@@ -92,6 +94,10 @@ static DIR_TABLE: Mutex<BTreeMap<isize, DirTracked>> = Mutex::new(BTreeMap::new(
 
 /// Redirected-file handle -> virtual volume-relative path (identity spoof).
 static IDENTITY_TABLE: Mutex<BTreeMap<isize, String>> = Mutex::new(BTreeMap::new());
+
+/// Any under-root open's handle -> folded vpath components, so a later
+/// handle-based delete/rename (NtSetInformationFile) can act by vpath.
+static PATH_TABLE: Mutex<BTreeMap<isize, Vec<String>>> = Mutex::new(BTreeMap::new());
 
 /// Keeps the detours alive; dropping it disables the hooks.
 pub struct HookGuard {
@@ -151,6 +157,11 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
         TRAMP_QIF = Some(core::mem::transmute::<*const (), NtQueryInformationFileFn>(
             d_qif.trampoline() as *const (),
         ));
+        let d_setinfo =
+            make_detour(ntdll, b"NtSetInformationFile\0", setinfo_hook as *const ())?;
+        TRAMP_SETINFO = Some(core::mem::transmute::<*const (), NtSetInformationFileFn>(
+            d_setinfo.trampoline() as *const (),
+        ));
 
         d_create.enable().map_err(|_| InstallError::Detour)?;
         d_qattr.enable().map_err(|_| InstallError::Detour)?;
@@ -159,8 +170,10 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
         d_qdirex.enable().map_err(|_| InstallError::Detour)?;
         d_close.enable().map_err(|_| InstallError::Detour)?;
         d_qif.enable().map_err(|_| InstallError::Detour)?;
+        d_setinfo.enable().map_err(|_| InstallError::Detour)?;
 
-        let mut detours = vec![d_create, d_qattr, d_qfull, d_open, d_qdirex, d_close, d_qif];
+        let mut detours =
+            vec![d_create, d_qattr, d_qfull, d_open, d_qdirex, d_close, d_qif, d_setinfo];
 
         // Best-effort child-process propagation: hook CreateProcessInternalW so
         // spawned children get the shim too. Never fails install — if our own
@@ -263,6 +276,22 @@ unsafe fn record_identity(
     }
 }
 
+/// Record a successful under-root open's handle -> folded vpath components, so
+/// a later handle-based delete/rename can act by vpath. Shared by both open
+/// hooks across all decision branches.
+unsafe fn record_path(file_handle: *mut HANDLE, oa: *const ObjectAttributes, status: NTSTATUS) {
+    if status < 0 || file_handle.is_null() {
+        return;
+    }
+    if let (Some(engine), Some(path)) = (ENGINE.get(), path_of(oa)) {
+        if let Some(comps) = engine.remainder(&path) {
+            if let Ok(mut t) = PATH_TABLE.lock() {
+                t.insert(*file_handle as isize, comps);
+            }
+        }
+    }
+}
+
 unsafe extern "system" fn create_hook(
     file_handle: *mut HANDLE,
     access: u32,
@@ -303,6 +332,7 @@ unsafe extern "system" fn create_hook(
             );
             drop(wbuf);
             record_identity(file_handle, oa, status);
+            record_path(file_handle, oa, status);
             status
         }
         Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
@@ -310,6 +340,7 @@ unsafe extern "system" fn create_hook(
             let status =
                 tramp(file_handle, access, oa, iosb, alloc, attrs, share, disp, opts, ea, ealen);
             tag_under_root(file_handle, oa, status);
+            record_path(file_handle, oa, status);
             status
         }
     }
@@ -352,12 +383,14 @@ unsafe extern "system" fn open_hook(
             let status = tramp(file_handle, access, &new_oa, iosb, share, opts);
             drop(wbuf);
             record_identity(file_handle, oa, status);
+            record_path(file_handle, oa, status);
             status
         }
         Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
         Some(Decision::PassThrough) | None => {
             let status = tramp(file_handle, access, oa, iosb, share, opts);
             tag_under_root(file_handle, oa, status);
+            record_path(file_handle, oa, status);
             status
         }
     }
@@ -438,7 +471,55 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
     if let Ok(mut t) = IDENTITY_TABLE.lock() {
         t.remove(&(handle as isize));
     }
+    if let Ok(mut t) = PATH_TABLE.lock() {
+        t.remove(&(handle as isize));
+    }
     tramp(handle)
+}
+
+/// `NtSetInformationFile` hook. Converts a delete (FileDispositionInformation /
+/// ...Ex with the DELETE flag) of a tracked under-root handle into an overlay
+/// whiteout and suppresses the real delete, so the mod backing / real file is
+/// preserved but the path reads as gone. Everything else passes through
+/// (rename handling is a later phase).
+unsafe extern "system" fn setinfo_hook(
+    handle: HANDLE,
+    iosb: *mut c_void,
+    info: *mut c_void,
+    length: u32,
+    class: u32,
+) -> NTSTATUS {
+    let tramp = match TRAMP_SETINFO {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    let is_delete = !info.is_null()
+        && match class {
+            FILE_DISPOSITION_INFORMATION => length >= 1 && *(info as *const u8) != 0,
+            FILE_DISPOSITION_INFORMATION_EX => {
+                length >= 4
+                    && core::ptr::read_unaligned(info as *const u32) & FILE_DISPOSITION_DELETE != 0
+            }
+            _ => false,
+        };
+    if is_delete {
+        let comps = match PATH_TABLE.lock() {
+            Ok(t) => t.get(&(handle as isize)).cloned(),
+            Err(_) => None,
+        };
+        if let (Some(comps), Some(engine)) = (comps, ENGINE.get()) {
+            if engine.whiteout(&comps) {
+                // Suppress the real delete; report success to the caller.
+                if !iosb.is_null() {
+                    let p = iosb as *mut u8;
+                    core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
+                    core::ptr::write_unaligned(p.add(8) as *mut usize, 0);
+                }
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+    tramp(handle, iosb, info, length, class)
 }
 
 /// `NtQueryInformationFile` hook. Spoofs only `FileNormalizedNameInformation`

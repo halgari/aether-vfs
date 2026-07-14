@@ -14,6 +14,9 @@ fn writes_land_in_overlay_with_cow() {
     std::fs::create_dir_all(&overlay).unwrap();
     std::fs::create_dir_all(&mods).unwrap();
 
+    // A real, non-virtualized file under the root, to be deleted (whiteout).
+    std::fs::write(root.join("to_delete.txt"), b"DELETE-ME").unwrap();
+
     // A mod (virtual) file backed on disk, mapped by the snapshot.
     let backing = mods.join("mod_backing.esp");
     std::fs::write(&backing, b"ORIG").unwrap();
@@ -60,4 +63,16 @@ fn writes_land_in_overlay_with_cow() {
     assert_eq!(std::fs::read(overlay.join("mod.esp")).unwrap(), b"ORIGX", "overlay has COW copy");
     // ...and the shared mod backing is untouched.
     assert_eq!(std::fs::read(&backing).unwrap(), b"ORIG", "backing must not be mutated");
+
+    // --- Delete -> whiteout ---
+    assert_eq!(std::fs::read(root.join("to_delete.txt")).unwrap(), b"DELETE-ME", "visible pre-delete");
+    std::fs::remove_file(root.join("to_delete.txt")).expect("delete");
+    // The path now reads as gone through the VFS...
+    assert!(std::fs::read(root.join("to_delete.txt")).is_err(), "deleted file hidden");
+    // ...via a whiteout marker in the overlay...
+    assert!(overlay.join("to_delete.txt.__vfs_wh__").exists(), "whiteout marker written");
+    // ...and deleting a mod file leaves the backing intact.
+    std::fs::remove_file(root.join("mod.esp")).expect("delete mod");
+    assert!(std::fs::read(root.join("mod.esp")).is_err(), "deleted mod hidden");
+    assert_eq!(std::fs::read(&backing).unwrap(), b"ORIG", "backing survives mod delete");
 }

@@ -209,6 +209,42 @@ fn main() {
         expect_eq(&got, b"MOD-ADDED-BYTES")
     });
 
+    // 12. Write a new file -> lands in the overlay, readable through the VFS.
+    check("write_create", &mut out, &mut all_ok, || {
+        let p = root.join("created_by_test.txt");
+        std::fs::write(&p, b"CREATED-CONTENT").map_err(|e| format!("write: {e}"))?;
+        let got = std::fs::read(&p).map_err(|e| format!("read back: {e}"))?;
+        expect_eq(&got, b"CREATED-CONTENT")
+    });
+
+    // 13. Copy-on-write modify of a mod file -> content changes via the overlay.
+    check("write_modify_cow", &mut out, &mut all_ok, || {
+        let p = root.join("cow_target.esp");
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&p)
+                .map_err(|e| format!("open append: {e}"))?;
+            f.write_all(b"+MORE").map_err(|e| format!("append: {e}"))?;
+        }
+        let got = std::fs::read(&p).map_err(|e| format!("read back: {e}"))?;
+        expect_eq(&got, b"COW-ORIG+MORE")
+    });
+
+    // 14. Delete a file -> hidden afterwards (whiteout).
+    check("write_delete", &mut out, &mut all_ok, || {
+        let p = root.join("del_target.txt");
+        if std::fs::read(&p).is_err() {
+            return Err("del_target not visible before delete".into());
+        }
+        std::fs::remove_file(&p).map_err(|e| format!("remove: {e}"))?;
+        if std::fs::read(&p).is_ok() {
+            return Err("deleted file still readable".into());
+        }
+        Ok(())
+    });
+
     std::fs::write(report, out.as_bytes()).expect("write report");
     std::process::exit(if all_ok { 0 } else { 1 });
 }
