@@ -457,6 +457,7 @@ dependencies = [
  "vfs-shared",
  "vfs-shim",
  "vfs-shim-dll",
+ "vfs-zip",
  "windows-sys 0.59.0",
 ]
 
@@ -518,6 +519,13 @@ version = "0.1.0"
 dependencies = [
  "vfs-ipc",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "vfs-zip"
+version = "0.1.0"
+dependencies = [
+ "vfs-core",
 ]
 
 [[package]]
