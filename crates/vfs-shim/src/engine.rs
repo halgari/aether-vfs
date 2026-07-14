@@ -1,9 +1,16 @@
 //! The redirect engine: a `RootMap` plus the snapshot bytes it resolves against.
 
-use vfs_redirect::{to_nt, AttrDecision, Decision, DirItem, RootMap};
+use std::path::PathBuf;
+
+use vfs_redirect::{classify_open, to_nt, AttrDecision, Decision, DirItem, RootMap};
 use vfs_shared::{LayoutError, SnapshotReader};
 
 use crate::overlay::{Overlay, OverlayState};
+
+/// Strip a `\??\` / `\\?\` device prefix, leaving a Win32 path (drive intact).
+fn strip_nt(p: &str) -> String {
+    p.strip_prefix(r"\??\").or_else(|| p.strip_prefix(r"\\?\")).unwrap_or(p).to_string()
+}
 
 /// Errors constructing an [`Engine`].
 #[derive(Debug)]
@@ -85,6 +92,49 @@ impl Engine {
             Ok(reader) => self.map.query_attributes(nt_path, &reader),
             Err(_) => AttrDecision::PassThrough,
         }
+    }
+
+    /// Decide how to handle an open given its desired-access mask and create
+    /// disposition. Reads use the overlay-first read resolution; writes (with an
+    /// overlay configured) redirect to the overlay, copy-on-write materializing
+    /// existing content first. Without an overlay, writes pass through.
+    pub fn decide_open(&self, nt_path: &str, access: u32, disposition: u32) -> Decision {
+        let intent = classify_open(access, disposition);
+        if !intent.write {
+            return self.decide(nt_path);
+        }
+        let ov = match &self.overlay {
+            Some(o) => o,
+            None => return Decision::PassThrough,
+        };
+        let comps = match self.map.remainder(nt_path) {
+            Some(c) if !c.is_empty() => c,
+            _ => return Decision::PassThrough,
+        };
+        ov.ensure_parent(&comps);
+        // Recreating the path: drop any whiteout so it is visible again.
+        ov.clear_whiteout(&comps);
+        // Copy-on-write: preserve existing content into the overlay before the
+        // caller writes, unless it is truncating/replacing (no copy needed) or a
+        // copy already exists.
+        if intent.preserves && !ov.has_file(&comps) {
+            if let Some(src) = self.materialize_source(nt_path) {
+                let _ = std::fs::copy(&src, ov.file_path(&comps));
+            }
+        }
+        Decision::Redirect { target_nt: to_nt(&ov.file_path(&comps).to_string_lossy()) }
+    }
+
+    /// The current on-disk source of `nt_path`'s content to seed a COW copy:
+    /// the snapshot's mod backing if virtual, else the real file if it exists.
+    fn materialize_source(&self, nt_path: &str) -> Option<PathBuf> {
+        if let Ok(reader) = SnapshotReader::open(&self.snapshot) {
+            if let Decision::Redirect { target_nt } = self.map.decide(nt_path, &reader) {
+                return Some(PathBuf::from(strip_nt(&target_nt)));
+            }
+        }
+        let real = PathBuf::from(strip_nt(nt_path));
+        real.exists().then_some(real)
     }
 
     /// Whether `nt_path` lies under the managed root.

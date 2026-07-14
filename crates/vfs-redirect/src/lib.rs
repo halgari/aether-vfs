@@ -387,6 +387,35 @@ pub fn parse_full_dir_info(buf: &[u8]) -> Vec<DirItem> {
     out
 }
 
+/// NtCreateFile create dispositions.
+pub const FILE_SUPERSEDE: u32 = 0;
+pub const FILE_OPEN: u32 = 1;
+pub const FILE_CREATE: u32 = 2;
+pub const FILE_OPEN_IF: u32 = 3;
+pub const FILE_OVERWRITE: u32 = 4;
+pub const FILE_OVERWRITE_IF: u32 = 5;
+
+/// How an open intends to touch a file's content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteIntent {
+    /// The caller can modify content (has write/append/generic-write access).
+    pub write: bool,
+    /// The disposition keeps existing content (`OPEN`/`OPEN_IF`) rather than
+    /// truncating or replacing it — the signal that a copy-on-write materialize
+    /// must preserve the current bytes.
+    pub preserves: bool,
+}
+
+/// Classify an open from its desired-access mask and create disposition.
+pub fn classify_open(access: u32, disposition: u32) -> WriteIntent {
+    // FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL.
+    const WRITE_MASK: u32 = 0x2 | 0x4 | 0x4000_0000 | 0x1000_0000;
+    WriteIntent {
+        write: access & WRITE_MASK != 0,
+        preserves: matches!(disposition, FILE_OPEN | FILE_OPEN_IF),
+    }
+}
+
 /// The whiteout marker suffix appended to a deleted file's name in the overlay.
 pub const WHITEOUT_SUFFIX: &str = ".__vfs_wh__";
 
@@ -938,6 +967,30 @@ mod tests {
         assert_eq!(to_nt(r"C:\overlay\foo.esp"), r"\??\C:\overlay\foo.esp");
         assert_eq!(to_nt(r"\??\C:\x"), r"\??\C:\x");
         assert_eq!(to_nt(r"\\?\C:\x"), r"\\?\C:\x");
+    }
+
+    #[test]
+    fn classify_open_reads_writes_and_preserves() {
+        // Read: SYNCHRONIZE|READ_DATA, disp OPEN -> not a write.
+        assert_eq!(
+            classify_open(0x0010_0001, FILE_OPEN),
+            WriteIntent { write: false, preserves: true }
+        );
+        // GENERIC_WRITE + OPEN_IF -> write, preserves (COW-materialize).
+        assert_eq!(
+            classify_open(0x4010_0080, FILE_OPEN_IF),
+            WriteIntent { write: true, preserves: true }
+        );
+        // GENERIC_WRITE + OVERWRITE_IF -> write, does not preserve (truncate).
+        assert_eq!(
+            classify_open(0x4000_0000, FILE_OVERWRITE_IF),
+            WriteIntent { write: true, preserves: false }
+        );
+        // APPEND_DATA + CREATE -> write, create (no preserve).
+        assert_eq!(
+            classify_open(0x4, FILE_CREATE),
+            WriteIntent { write: true, preserves: false }
+        );
     }
 
     #[test]

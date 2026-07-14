@@ -75,6 +75,23 @@ impl Overlay {
         OverlayState::Absent
     }
 
+    /// Ensure the parent directory of the overlay file for `comps` exists.
+    pub fn ensure_parent(&self, comps: &[String]) {
+        if let Some(parent) = self.file_path(comps).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+
+    /// Remove any whiteout marker hiding `comps` (a path is being recreated).
+    pub fn clear_whiteout(&self, comps: &[String]) {
+        let _ = std::fs::remove_file(self.whiteout_path(comps));
+    }
+
+    /// Whether an overlay file exists for `comps`.
+    pub fn has_file(&self, comps: &[String]) -> bool {
+        self.file_path(comps).exists()
+    }
+
     /// Overlay a directory's overlay entries onto a snapshot+real `merged`
     /// listing: whiteout markers remove names, overlay files add/override
     /// (wildcard-filtered), result stays folded-ordered.

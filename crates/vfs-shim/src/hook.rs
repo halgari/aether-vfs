@@ -208,11 +208,12 @@ unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
     Some(String::from_utf16_lossy(units))
 }
 
-/// Decode + ask the engine what to do with an open.
-unsafe fn decision_for(oa: *const ObjectAttributes) -> Option<Decision> {
+/// Decode + ask the engine what to do with an open, given its access mask and
+/// create disposition (write-path aware).
+unsafe fn decision_for(oa: *const ObjectAttributes, access: u32, disposition: u32) -> Option<Decision> {
     let engine = ENGINE.get()?;
     let path = path_of(oa)?;
-    Some(engine.decide(&path))
+    Some(engine.decide_open(&path, access, disposition))
 }
 
 /// Record a freshly-opened handle as a candidate directory for enumeration
@@ -279,7 +280,7 @@ unsafe extern "system" fn create_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    match decision_for(oa) {
+    match decision_for(oa, access, disp) {
         Some(Decision::Redirect { target_nt }) => {
             let mut wbuf: Vec<u16> = target_nt.encode_utf16().collect();
             let byte_len = (wbuf.len() * 2) as u16;
@@ -329,7 +330,8 @@ unsafe extern "system" fn open_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    match decision_for(oa) {
+    // NtOpenFile has no disposition; it always opens existing (FILE_OPEN).
+    match decision_for(oa, access, vfs_redirect::FILE_OPEN) {
         Some(Decision::Redirect { target_nt }) => {
             let mut wbuf: Vec<u16> = target_nt.encode_utf16().collect();
             let byte_len = (wbuf.len() * 2) as u16;
