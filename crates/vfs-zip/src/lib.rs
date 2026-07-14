@@ -107,6 +107,10 @@ fn locate_central_directory(
     f: &mut std::fs::File,
     file_len: u64,
 ) -> Result<(u64, u64), ZipError> {
+    // A well-formed zip must be at least large enough to hold an EOCD record.
+    if file_len < 22 {
+        return Err(ZipError::NotAZip);
+    }
     // EOCD is within the last 22 + 65535 bytes. Scan backward for its signature.
     let scan = 22 + 0xFFFF;
     let start = file_len.saturating_sub(scan);
@@ -147,7 +151,10 @@ fn read_central_directory(
     count: u64,
 ) -> Result<Vec<CdEntry>, ZipError> {
     f.seek(SeekFrom::Start(cd_off))?;
-    let mut entries = Vec::with_capacity(count as usize);
+    // `count` is untrusted (read straight off disk); cap eager preallocation so a
+    // corrupt archive claiming a huge count can't abort via allocation failure.
+    // The read_exact calls below will still surface a real error once data runs out.
+    let mut entries = Vec::with_capacity((count as usize).min(4096));
     for _ in 0..count {
         let mut fixed = [0u8; 46];
         f.read_exact(&mut fixed)?;
@@ -389,5 +396,15 @@ mod tests {
         if let vfs_core::Source::ZipWindow { offset, .. } = win {
             assert!(offset > 0xFFFF_FFFF, "expected a 64-bit offset");
         }
+    }
+
+    #[test]
+    fn a_too_small_file_is_not_a_zip() {
+        let dir = std::env::temp_dir().join(format!("vfs-zip-tiny-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.bin");
+        std::fs::write(&path, b"PK").unwrap(); // 2 bytes, no EOCD
+        assert!(matches!(read_layer(&path, LayerId(0)), Err(ZipError::NotAZip)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
