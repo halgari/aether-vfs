@@ -11,6 +11,7 @@ mod inject;
 mod ntdef;
 mod overlay;
 mod payload_abi;
+mod zipserve;
 
 pub use bootstrap::{
     bootstrap_from_config_path, bootstrap_from_config_path_with_payload, decode_config,

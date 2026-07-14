@@ -156,3 +156,46 @@ pub const SL_RETURN_SINGLE_ENTRY: u32 = 0x02;
 pub const STATUS_NO_MORE_FILES: NTSTATUS = 0x8000_0006u32 as i32;
 /// `STATUS_BUFFER_OVERFLOW` — the caller buffer cannot hold even one entry.
 pub const STATUS_BUFFER_OVERFLOW: NTSTATUS = 0x8000_0005u32 as i32;
+
+/// `ntdll!NtReadFile`. `Event`/`ApcRoutine`/`ApcContext`/`Key` are unused by
+/// synchronous callers; `ByteOffset` is a `PLARGE_INTEGER` (nullable).
+pub type NtReadFileFn = unsafe extern "system" fn(
+    HANDLE,        // FileHandle
+    HANDLE,        // Event
+    *const c_void, // ApcRoutine
+    *const c_void, // ApcContext
+    *mut c_void,   // IoStatusBlock
+    *mut c_void,   // Buffer
+    u32,           // Length
+    *const i64,    // ByteOffset (LARGE_INTEGER)
+    *const u32,    // Key
+) -> NTSTATUS;
+
+/// `STATUS_END_OF_FILE`.
+pub const STATUS_END_OF_FILE: NTSTATUS = 0xC000_0011u32 as i32;
+/// `STATUS_NOT_IMPLEMENTED`.
+pub const STATUS_NOT_IMPLEMENTED: NTSTATUS = 0xC000_0002u32 as i32;
+/// `FILE_OPENED` disposition-information for a synthetic open's IoStatusBlock.
+pub const FILE_OPENED: usize = 1;
+
+/// `FileStandardInformation` (class 5).
+pub const FILE_STANDARD_INFORMATION: u32 = 5;
+/// `FilePositionInformation` (class 14).
+pub const FILE_POSITION_INFORMATION: u32 = 14;
+
+/// Layout-compatible with `FILE_STANDARD_INFORMATION` (24 bytes).
+#[repr(C)]
+pub struct FileStandardInformation {
+    pub allocation_size: i64,
+    pub end_of_file: i64,
+    pub number_of_links: u32,
+    pub delete_pending: u8,
+    pub directory: u8,
+    pub _pad: u16,
+}
+
+/// Layout-compatible with `FILE_POSITION_INFORMATION` (8 bytes).
+#[repr(C)]
+pub struct FilePositionInformation {
+    pub current_byte_offset: i64,
+}

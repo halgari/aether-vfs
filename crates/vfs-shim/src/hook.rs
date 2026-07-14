@@ -19,14 +19,16 @@ use windows_sys::Win32::System::Threading::{
 use crate::engine::Engine;
 use crate::inject::{inject_child, re_suspend, self_dll_path};
 use crate::ntdef::{
-    FileBasicInformation, FileNetworkOpenInformation, NtCloseFn, NtCreateFileFn, NtOpenFileFn,
-    NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryFullAttributesFileFn,
-    NtQueryInformationFileFn, NtSetInformationFileFn, ObjectAttributes, UnicodeString,
+    FileBasicInformation, FileNetworkOpenInformation, FilePositionInformation,
+    FileStandardInformation, NtCloseFn, NtCreateFileFn, NtOpenFileFn, NtQueryAttributesFileFn,
+    NtQueryDirectoryFileExFn, NtQueryFullAttributesFileFn, NtQueryInformationFileFn,
+    NtReadFileFn, NtSetInformationFileFn, ObjectAttributes, UnicodeString,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_DELETE,
     FILE_DISPOSITION_INFORMATION, FILE_DISPOSITION_INFORMATION_EX, FILE_NORMALIZED_NAME_INFORMATION,
-    FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX, SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY,
-    STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
-    STATUS_UNSUCCESSFUL,
+    FILE_POSITION_INFORMATION, FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX,
+    FILE_STANDARD_INFORMATION, SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW,
+    STATUS_END_OF_FILE, STATUS_NOT_IMPLEMENTED, STATUS_NO_MORE_FILES, STATUS_OBJECT_NAME_NOT_FOUND,
+    STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 
 /// Errors installing the hooks.
@@ -48,6 +50,7 @@ static mut TRAMP_QDIREX: Option<NtQueryDirectoryFileExFn> = None;
 static mut TRAMP_CLOSE: Option<NtCloseFn> = None;
 static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
 static mut TRAMP_SETINFO: Option<NtSetInformationFileFn> = None;
+static mut TRAMP_READ: Option<NtReadFileFn> = None;
 static mut TRAMP_CPIW: Option<CreateProcessInternalWFn> = None;
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
@@ -214,12 +217,17 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     TRAMP_SETINFO = Some(core::mem::transmute::<*const (), NtSetInformationFileFn>(
         d_setinfo.trampoline() as *const (),
     ));
+    let d_read = make_detour(ntdll, b"NtReadFile\0", read_hook as *const ())?;
+    TRAMP_READ = Some(core::mem::transmute::<*const (), NtReadFileFn>(
+        d_read.trampoline() as *const (),
+    ));
 
     d_qdirex.enable().map_err(|_| InstallError::Detour)?;
     d_close.enable().map_err(|_| InstallError::Detour)?;
     d_qif.enable().map_err(|_| InstallError::Detour)?;
     d_setinfo.enable().map_err(|_| InstallError::Detour)?;
-    detours.extend([d_qdirex, d_close, d_qif, d_setinfo]);
+    d_read.enable().map_err(|_| InstallError::Detour)?;
+    detours.extend([d_qdirex, d_close, d_qif, d_setinfo, d_read]);
 
     // Best-effort child-process propagation.
     if let Some(dll) = self_dll_path() {
@@ -396,6 +404,28 @@ unsafe extern "system" fn create_hook(
             record_path(file_handle, oa, status);
             status
         }
+        Some(Decision::Serve { container_nt, offset, length }) => {
+            match crate::zipserve::open_synth(&container_nt, offset, length) {
+                Some(h) => {
+                    if !file_handle.is_null() {
+                        *file_handle = h as HANDLE;
+                    }
+                    if !iosb.is_null() {
+                        let p = iosb as *mut u8;
+                        core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
+                        core::ptr::write_unaligned(
+                            p.add(8) as *mut usize,
+                            crate::ntdef::FILE_OPENED,
+                        );
+                    }
+                    STATUS_SUCCESS
+                }
+                // Mapping failed: fall back to the real open (likely NOT_FOUND).
+                None => tramp(
+                    file_handle, access, oa, iosb, alloc, attrs, share, disp, opts, ea, ealen,
+                ),
+            }
+        }
         Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
         Some(Decision::PassThrough) | None => {
             let status =
@@ -446,6 +476,25 @@ unsafe extern "system" fn open_hook(
             record_identity(file_handle, oa, status);
             record_path(file_handle, oa, status);
             status
+        }
+        Some(Decision::Serve { container_nt, offset, length }) => {
+            match crate::zipserve::open_synth(&container_nt, offset, length) {
+                Some(h) => {
+                    if !file_handle.is_null() {
+                        *file_handle = h as HANDLE;
+                    }
+                    if !iosb.is_null() {
+                        let p = iosb as *mut u8;
+                        core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
+                        core::ptr::write_unaligned(
+                            p.add(8) as *mut usize,
+                            crate::ntdef::FILE_OPENED,
+                        );
+                    }
+                    STATUS_SUCCESS
+                }
+                None => tramp(file_handle, access, oa, iosb, share, opts),
+            }
         }
         Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
         Some(Decision::PassThrough) | None => {
@@ -526,6 +575,10 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
+    if crate::zipserve::is_synth(handle as isize) {
+        crate::zipserve::close(handle as isize);
+        return STATUS_SUCCESS;
+    }
     if let Ok(mut table) = DIR_TABLE.lock() {
         table.remove(&(handle as isize));
     }
@@ -554,6 +607,19 @@ unsafe extern "system" fn setinfo_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
+    if crate::zipserve::is_synth(handle as isize) {
+        if class == FILE_POSITION_INFORMATION
+            && !info.is_null()
+            && length as usize >= core::mem::size_of::<FilePositionInformation>()
+        {
+            let pos = (*(info as *const FilePositionInformation)).current_byte_offset;
+            if pos >= 0 {
+                crate::zipserve::set_position(handle as isize, pos as u64);
+            }
+            return STATUS_SUCCESS;
+        }
+        return STATUS_SUCCESS; // ignore other classes on synthetic handles
+    }
     let is_delete = !info.is_null()
         && match class {
             FILE_DISPOSITION_INFORMATION => length >= 1 && *(info as *const u8) != 0,
@@ -609,6 +675,43 @@ unsafe extern "system" fn qif_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
+    if crate::zipserve::is_synth(handle as isize) {
+        match class {
+            FILE_STANDARD_INFORMATION => {
+                if let Some(len) = crate::zipserve::size(handle as isize) {
+                    if !info.is_null() && length as usize >= core::mem::size_of::<FileStandardInformation>() {
+                        let si = info as *mut FileStandardInformation;
+                        (*si).allocation_size = len as i64;
+                        (*si).end_of_file = len as i64;
+                        (*si).number_of_links = 1;
+                        (*si).delete_pending = 0;
+                        (*si).directory = 0;
+                        (*si)._pad = 0;
+                        if !iosb.is_null() {
+                            let p = iosb as *mut u8;
+                            core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
+                            core::ptr::write_unaligned(
+                                p.add(8) as *mut usize,
+                                core::mem::size_of::<FileStandardInformation>(),
+                            );
+                        }
+                        return STATUS_SUCCESS;
+                    }
+                }
+                return STATUS_NOT_IMPLEMENTED;
+            }
+            FILE_POSITION_INFORMATION => {
+                if let Some(pos) = crate::zipserve::position(handle as isize) {
+                    if !info.is_null() && length as usize >= core::mem::size_of::<FilePositionInformation>() {
+                        (*(info as *mut FilePositionInformation)).current_byte_offset = pos as i64;
+                        return STATUS_SUCCESS;
+                    }
+                }
+                return STATUS_NOT_IMPLEMENTED;
+            }
+            _ => return STATUS_NOT_IMPLEMENTED,
+        }
+    }
     if class == FILE_NORMALIZED_NAME_INFORMATION && !info.is_null() {
         let vpath = match IDENTITY_TABLE.lock() {
             Ok(t) => t.get(&(handle as isize)).cloned(),
@@ -630,6 +733,63 @@ unsafe extern "system" fn qif_hook(
         }
     }
     tramp(handle, iosb, info, length, class)
+}
+
+/// `NtReadFile` hook. For synthetic (zip-window) handles, copy bytes from the
+/// mapped window; real handles pass straight through. `ByteOffset` of NULL or
+/// the "use current position" sentinel (-1/-2) means "current position".
+#[allow(clippy::too_many_arguments)]
+unsafe extern "system" fn read_hook(
+    handle: HANDLE,
+    event: HANDLE,
+    apc: *const c_void,
+    apc_ctx: *const c_void,
+    iosb: *mut c_void,
+    buffer: *mut c_void,
+    length: u32,
+    byte_offset: *const i64,
+    key: *const u32,
+) -> NTSTATUS {
+    let tramp = match TRAMP_READ {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if crate::zipserve::is_synth(handle as isize) {
+        // Resolve an explicit offset only if it is a real, non-sentinel value.
+        let explicit = if byte_offset.is_null() {
+            None
+        } else {
+            let v = core::ptr::read_unaligned(byte_offset);
+            if v < 0 {
+                None // FILE_USE_FILE_POINTER_POSITION and friends
+            } else {
+                Some(v as u64)
+            }
+        };
+        match crate::zipserve::read(handle as isize, length as usize, explicit) {
+            Some((bytes, _new_pos, at_eof)) => {
+                if !buffer.is_null() && !bytes.is_empty() {
+                    core::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        buffer as *mut u8,
+                        bytes.len(),
+                    );
+                }
+                let status = if at_eof { STATUS_END_OF_FILE } else { STATUS_SUCCESS };
+                if !iosb.is_null() {
+                    let p = iosb as *mut u8;
+                    core::ptr::write_unaligned(p as *mut u32, status as u32);
+                    core::ptr::write_unaligned(p.add(8) as *mut usize, bytes.len());
+                }
+                if !event.is_null() {
+                    windows_sys::Win32::System::Threading::SetEvent(event);
+                }
+                return status;
+            }
+            None => return STATUS_UNSUCCESSFUL,
+        }
+    }
+    tramp(handle, event, apc, apc_ctx, iosb, buffer, length, byte_offset, key)
 }
 
 /// `CreateProcessInternalW` hook: force the child to start suspended, dual-layer
