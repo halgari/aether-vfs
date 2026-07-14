@@ -124,10 +124,34 @@ fn injected_shim_serves_a_file_from_inside_a_zip() {
     let got = std::fs::read(&output_path).expect("probe output");
     assert_eq!(got, expected, "served bytes must equal the zip entry content");
 
-    // Prove nothing was extracted: the only files under `base` are our inputs.
-    let extracted = std::fs::read_dir(&base)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .any(|e| e.file_name().to_string_lossy().contains("proof.dat"));
-    assert!(!extracted, "no entry should have been extracted to disk");
+    // Prove nothing was extracted: the virtual path itself must not exist on
+    // disk, and no file named `proof.dat` was materialized anywhere under
+    // `base` (recursively — catches an extracted copy at gameroot/Data/proof.dat
+    // or anywhere else a materialize-to-disk regression might write it).
+    assert!(
+        !virtual_path.exists(),
+        "virtual path must not exist on disk — bytes must come from the zip window, not a materialized copy"
+    );
+    assert!(
+        !contains_file_named(&base, "proof.dat"),
+        "no entry should have been extracted to disk anywhere under the test root"
+    );
+}
+
+fn contains_file_named(dir: &std::path::Path, needle: &str) -> bool {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if contains_file_named(&path, needle) {
+                return true;
+            }
+        } else if entry.file_name().to_string_lossy() == needle {
+            return true;
+        }
+    }
+    false
 }
