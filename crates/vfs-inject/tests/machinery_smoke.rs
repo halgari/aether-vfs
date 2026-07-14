@@ -48,6 +48,7 @@ fn dual_layer_writes_ready_marker_and_payload_cfg_file() {
     let (dll, payload) = common::locate_shim_and_payload();
     let exit = run_target_with_shim(RunConfig {
         target_exe: env!("CARGO_BIN_EXE_vfs-probe").to_string(),
+        current_dir: None,
         args: vec![
             virtual_path.to_str().unwrap().to_string(),
             out.to_str().unwrap().to_string(),
@@ -58,6 +59,7 @@ fn dual_layer_writes_ready_marker_and_payload_cfg_file() {
         ready_timeout: Duration::from_secs(15),
         payload_path: payload,
         preinit_redirects: vec![],
+        detach: false,
     })
     .expect("dual-layer probe");
 

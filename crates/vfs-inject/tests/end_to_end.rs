@@ -50,6 +50,7 @@ fn injected_shim_redirects_target_file_open() {
 
     let exit = run_target_with_shim(RunConfig {
         target_exe: probe,
+        current_dir: None,
         args: vec![
             virtual_path.to_str().unwrap().to_string(),
             output_path.to_str().unwrap().to_string(),
@@ -60,6 +61,7 @@ fn injected_shim_redirects_target_file_open() {
         ready_timeout: Duration::from_secs(10),
         payload_path: payload,
         preinit_redirects: vec![],
+        detach: false,
     })
     .expect("run_target_with_shim");
 

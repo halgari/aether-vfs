@@ -57,6 +57,7 @@ fn child_static_import_via_dual_layer_cpiw() {
     let spawner = env!("CARGO_BIN_EXE_vfs-spawn-child").to_string();
     let exit = run_target_with_shim(RunConfig {
         target_exe: spawner,
+        current_dir: None,
         args: vec![
             child_exe.to_str().unwrap().to_string(),
             app_dir.to_str().unwrap().to_string(),
@@ -68,6 +69,7 @@ fn child_static_import_via_dual_layer_cpiw() {
         ready_timeout: Duration::from_secs(20),
         payload_path: payload,
         preinit_redirects: vec![],
+        detach: false,
     })
     .expect("run dual-layer parent spawner");
 

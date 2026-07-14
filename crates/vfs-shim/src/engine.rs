@@ -118,23 +118,39 @@ impl Engine {
         // caller writes, unless it is truncating/replacing (no copy needed) or a
         // copy already exists.
         if intent.preserves && !ov.has_file(&comps) {
-            if let Some(src) = self.materialize_source(nt_path) {
-                let _ = std::fs::copy(&src, ov.file_path(&comps));
+            let dest = ov.file_path(&comps);
+            if !self.cow_seed(nt_path, &dest) {
+                // Best-effort; write still goes to the overlay path.
             }
         }
         Decision::Redirect { target_nt: to_nt(&ov.file_path(&comps).to_string_lossy()) }
     }
 
-    /// The current on-disk source of `nt_path`'s content to seed a COW copy:
-    /// the snapshot's mod backing if virtual, else the real file if it exists.
-    fn materialize_source(&self, nt_path: &str) -> Option<PathBuf> {
+    /// Seed an overlay path with existing content (disk redirect, zip window, or
+    /// real file). Returns true when bytes were written to `dest`.
+    fn cow_seed(&self, nt_path: &str, dest: &std::path::Path) -> bool {
         if let Ok(reader) = SnapshotReader::open(&self.snapshot) {
-            if let Decision::Redirect { target_nt } = self.map.decide(nt_path, &reader) {
-                return Some(PathBuf::from(strip_nt(&target_nt)));
+            match self.map.decide(nt_path, &reader) {
+                Decision::Redirect { target_nt } => {
+                    return std::fs::copy(strip_nt(&target_nt), dest).is_ok();
+                }
+                Decision::Serve {
+                    container_nt,
+                    offset,
+                    length,
+                } => {
+                    return crate::zipserve::copy_window_to_file(
+                        &container_nt,
+                        offset,
+                        length,
+                        dest,
+                    );
+                }
+                _ => {}
             }
         }
         let real = PathBuf::from(strip_nt(nt_path));
-        real.exists().then_some(real)
+        real.exists() && std::fs::copy(&real, dest).is_ok()
     }
 
     /// Whether `nt_path` lies under the managed root.
@@ -179,9 +195,8 @@ impl Engine {
         };
         ov.ensure_parent(&from);
         if !ov.has_file(&from) {
-            if let Some(src) = self.materialize_source(from_nt) {
-                let _ = std::fs::copy(&src, ov.file_path(&from));
-            }
+            let dest = ov.file_path(&from);
+            let _ = self.cow_seed(from_nt, &dest);
         }
         ov.rename(&from, &to);
         true

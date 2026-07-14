@@ -77,6 +77,7 @@ fn injected_shim_passes_full_acceptance_suite() {
 
     let exit = run_target_with_shim(RunConfig {
         target_exe: exerciser,
+        current_dir: None,
         args: vec![root.to_str().unwrap().to_string(), report_path.to_str().unwrap().to_string()],
         dll_path: dll,
         config_path: config_path.to_str().unwrap().to_string(),
@@ -84,6 +85,7 @@ fn injected_shim_passes_full_acceptance_suite() {
         ready_timeout: Duration::from_secs(15),
         payload_path: payload,
         preinit_redirects: vec![],
+        detach: false,
     })
     .expect("run_target_with_shim");
 

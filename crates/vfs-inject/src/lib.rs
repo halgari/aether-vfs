@@ -19,6 +19,8 @@ mod stub;
 pub struct RunConfig {
     pub target_exe: String,
     pub args: Vec<String>,
+    /// Working directory for the child (typically the managed game root).
+    pub current_dir: Option<String>,
     /// Full std shim DLL (`vfs_shim_dll.dll`).
     pub dll_path: String,
     pub config_path: String,
@@ -28,6 +30,8 @@ pub struct RunConfig {
     pub payload_path: String,
     /// Early redirect-table entries (static-import DLLs); may be empty.
     pub preinit_redirects: Vec<PreinitRedirect>,
+    /// When true, return as soon as the target is running (do not wait for exit).
+    pub detach: bool,
 }
 
 /// One early-payload redirect: object names ending with `suffix` (final path

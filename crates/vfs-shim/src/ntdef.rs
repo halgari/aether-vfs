@@ -175,13 +175,97 @@ pub type NtReadFileFn = unsafe extern "system" fn(
 pub const STATUS_END_OF_FILE: NTSTATUS = 0xC000_0011u32 as i32;
 /// `STATUS_NOT_IMPLEMENTED`.
 pub const STATUS_NOT_IMPLEMENTED: NTSTATUS = 0xC000_0002u32 as i32;
+/// `STATUS_INVALID_FILE_FOR_SECTION` — e.g. SEC_IMAGE on a zip-window handle.
+pub const STATUS_INVALID_FILE_FOR_SECTION: NTSTATUS = 0xC000_0124u32 as i32;
+/// `STATUS_INVALID_HANDLE`.
+pub const STATUS_INVALID_HANDLE: NTSTATUS = 0xC000_0008u32 as i32;
+/// `STATUS_SECTION_TOO_BIG`.
+pub const STATUS_SECTION_TOO_BIG: NTSTATUS = 0xC000_0040u32 as i32;
 /// `FILE_OPENED` disposition-information for a synthetic open's IoStatusBlock.
 pub const FILE_OPENED: usize = 1;
 
+/// `SEC_IMAGE` — PE image mapping (not supported for zip-window handles).
+pub const SEC_IMAGE: u32 = 0x0100_0000;
+
+/// `ntdll!NtCreateSection`.
+pub type NtCreateSectionFn = unsafe extern "system" fn(
+    *mut HANDLE, // SectionHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    *mut i64, // MaximumSize (PLARGE_INTEGER)
+    u32,      // SectionPageProtection
+    u32,      // AllocationAttributes
+    HANDLE,   // FileHandle
+) -> NTSTATUS;
+
+/// `ntdll!NtMapViewOfSection`.
+pub type NtMapViewOfSectionFn = unsafe extern "system" fn(
+    HANDLE,         // SectionHandle
+    HANDLE,         // ProcessHandle
+    *mut *mut c_void, // BaseAddress
+    usize,          // ZeroBits
+    usize,          // CommitSize
+    *mut i64,       // SectionOffset
+    *mut usize,     // ViewSize
+    u32,            // InheritDisposition
+    u32,            // AllocationType
+    u32,            // Win32Protect
+) -> NTSTATUS;
+
+/// `ntdll!NtUnmapViewOfSection`.
+pub type NtUnmapViewOfSectionFn = unsafe extern "system" fn(
+    HANDLE,      // ProcessHandle
+    *mut c_void, // BaseAddress
+) -> NTSTATUS;
+
+/// `FileBasicInformation` (class 4).
+pub const FILE_BASIC_INFORMATION: u32 = 4;
 /// `FileStandardInformation` (class 5).
 pub const FILE_STANDARD_INFORMATION: u32 = 5;
+/// `FileInternalInformation` (class 6).
+pub const FILE_INTERNAL_INFORMATION: u32 = 6;
 /// `FilePositionInformation` (class 14).
 pub const FILE_POSITION_INFORMATION: u32 = 14;
+/// `FileAllInformation` (class 18).
+pub const FILE_ALL_INFORMATION: u32 = 18;
+/// `FileNetworkOpenInformation` (class 34).
+pub const FILE_NETWORK_OPEN_INFORMATION: u32 = 34;
+/// `FileAttributeTagInformation` (class 35).
+pub const FILE_ATTRIBUTE_TAG_INFORMATION: u32 = 35;
+
+/// Layout-compatible with `FILE_INTERNAL_INFORMATION` (8 bytes).
+#[repr(C)]
+pub struct FileInternalInformation {
+    pub index_number: i64,
+}
+
+/// Layout-compatible with `FILE_ATTRIBUTE_TAG_INFORMATION` (8 bytes).
+#[repr(C)]
+pub struct FileAttributeTagInformation {
+    pub file_attributes: u32,
+    pub reparse_tag: u32,
+}
+
+/// `ntdll!NtQueryVolumeInformationFile`.
+pub type NtQueryVolumeInformationFileFn = unsafe extern "system" fn(
+    HANDLE,      // FileHandle
+    *mut c_void, // IoStatusBlock
+    *mut c_void, // FsInformation
+    u32,         // Length
+    u32,         // FsInformationClass
+) -> NTSTATUS;
+
+/// `FileFsDeviceInformation` (class 4).
+pub const FILE_FS_DEVICE_INFORMATION: u32 = 4;
+/// `FILE_DEVICE_DISK`.
+pub const FILE_DEVICE_DISK: u32 = 0x0000_0007;
+
+/// Layout-compatible with `FILE_FS_DEVICE_INFORMATION` (8 bytes).
+#[repr(C)]
+pub struct FileFsDeviceInformation {
+    pub device_type: u32,
+    pub characteristics: u32,
+}
 
 /// Layout-compatible with `FILE_STANDARD_INFORMATION` (24 bytes).
 #[repr(C)]

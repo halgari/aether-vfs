@@ -62,6 +62,7 @@ fn config_static_import_via_dual_layer() {
         ready_timeout: Duration::from_secs(15),
         payload_path: payload,
         preinit_redirects: vec![],
+        detach: false,
     })
     .expect("run_target_with_shim");
 

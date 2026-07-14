@@ -19,16 +19,20 @@ use windows_sys::Win32::System::Threading::{
 use crate::engine::Engine;
 use crate::inject::{inject_child, re_suspend, self_dll_path};
 use crate::ntdef::{
-    FileBasicInformation, FileNetworkOpenInformation, FilePositionInformation,
-    FileStandardInformation, NtCloseFn, NtCreateFileFn, NtOpenFileFn, NtQueryAttributesFileFn,
-    NtQueryDirectoryFileExFn, NtQueryFullAttributesFileFn, NtQueryInformationFileFn,
-    NtReadFileFn, NtSetInformationFileFn, ObjectAttributes, UnicodeString,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_DELETE,
-    FILE_DISPOSITION_INFORMATION, FILE_DISPOSITION_INFORMATION_EX, FILE_NORMALIZED_NAME_INFORMATION,
-    FILE_POSITION_INFORMATION, FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX,
-    FILE_STANDARD_INFORMATION, SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW,
-    STATUS_END_OF_FILE, STATUS_NOT_IMPLEMENTED, STATUS_NO_MORE_FILES, STATUS_OBJECT_NAME_NOT_FOUND,
-    STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    FileAttributeTagInformation, FileBasicInformation, FileFsDeviceInformation,
+    FileInternalInformation, FileNetworkOpenInformation, FilePositionInformation,
+    FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateSectionFn, NtMapViewOfSectionFn,
+    NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryFullAttributesFileFn,
+    NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
+    NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFORMATION, FILE_ALL_INFORMATION,
+    FILE_BASIC_INFORMATION, FILE_DEVICE_DISK, FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION,
+    FILE_DISPOSITION_INFORMATION_EX, FILE_FS_DEVICE_INFORMATION, FILE_INTERNAL_INFORMATION,
+    FILE_NETWORK_OPEN_INFORMATION, FILE_NORMALIZED_NAME_INFORMATION, FILE_POSITION_INFORMATION,
+    FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX, FILE_STANDARD_INFORMATION, SEC_IMAGE,
+    SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_END_OF_FILE,
+    STATUS_INVALID_FILE_FOR_SECTION, STATUS_INVALID_HANDLE, STATUS_NO_MORE_FILES,
+    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SECTION_TOO_BIG, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 
 /// Errors installing the hooks.
@@ -51,6 +55,10 @@ static mut TRAMP_CLOSE: Option<NtCloseFn> = None;
 static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
 static mut TRAMP_SETINFO: Option<NtSetInformationFileFn> = None;
 static mut TRAMP_READ: Option<NtReadFileFn> = None;
+static mut TRAMP_CREATE_SECTION: Option<NtCreateSectionFn> = None;
+static mut TRAMP_MAP_VIEW: Option<NtMapViewOfSectionFn> = None;
+static mut TRAMP_UNMAP_VIEW: Option<NtUnmapViewOfSectionFn> = None;
+static mut TRAMP_QVOL: Option<NtQueryVolumeInformationFileFn> = None;
 static mut TRAMP_CPIW: Option<CreateProcessInternalWFn> = None;
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
@@ -221,13 +229,36 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     TRAMP_READ = Some(core::mem::transmute::<*const (), NtReadFileFn>(
         d_read.trampoline() as *const (),
     ));
+    let d_csec = make_detour(ntdll, b"NtCreateSection\0", create_section_hook as *const ())?;
+    TRAMP_CREATE_SECTION = Some(core::mem::transmute::<*const (), NtCreateSectionFn>(
+        d_csec.trampoline() as *const (),
+    ));
+    let d_map = make_detour(ntdll, b"NtMapViewOfSection\0", map_view_hook as *const ())?;
+    TRAMP_MAP_VIEW = Some(core::mem::transmute::<*const (), NtMapViewOfSectionFn>(
+        d_map.trampoline() as *const (),
+    ));
+    let d_unmap = make_detour(ntdll, b"NtUnmapViewOfSection\0", unmap_view_hook as *const ())?;
+    TRAMP_UNMAP_VIEW = Some(core::mem::transmute::<*const (), NtUnmapViewOfSectionFn>(
+        d_unmap.trampoline() as *const (),
+    ));
+    let d_qvol =
+        make_detour(ntdll, b"NtQueryVolumeInformationFile\0", qvol_hook as *const ())?;
+    TRAMP_QVOL = Some(core::mem::transmute::<*const (), NtQueryVolumeInformationFileFn>(
+        d_qvol.trampoline() as *const (),
+    ));
 
     d_qdirex.enable().map_err(|_| InstallError::Detour)?;
     d_close.enable().map_err(|_| InstallError::Detour)?;
     d_qif.enable().map_err(|_| InstallError::Detour)?;
     d_setinfo.enable().map_err(|_| InstallError::Detour)?;
     d_read.enable().map_err(|_| InstallError::Detour)?;
-    detours.extend([d_qdirex, d_close, d_qif, d_setinfo, d_read]);
+    d_csec.enable().map_err(|_| InstallError::Detour)?;
+    d_map.enable().map_err(|_| InstallError::Detour)?;
+    d_unmap.enable().map_err(|_| InstallError::Detour)?;
+    d_qvol.enable().map_err(|_| InstallError::Detour)?;
+    detours.extend([
+        d_qdirex, d_close, d_qif, d_setinfo, d_read, d_csec, d_map, d_unmap, d_qvol,
+    ]);
 
     // Best-effort child-process propagation.
     if let Some(dll) = self_dll_path() {
@@ -579,6 +610,10 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
         crate::zipserve::close(handle as isize);
         return STATUS_SUCCESS;
     }
+    if crate::zipserve::is_synth_section(handle as isize) {
+        crate::zipserve::close_section(handle as isize);
+        return STATUS_SUCCESS;
+    }
     if let Ok(mut table) = DIR_TABLE.lock() {
         table.remove(&(handle as isize));
     }
@@ -659,6 +694,176 @@ unsafe extern "system" fn setinfo_hook(
     tramp(handle, iosb, info, length, class)
 }
 
+/// Fill IoStatusBlock for a successful synth query of `bytes` information.
+unsafe fn synth_iosb_ok(iosb: *mut c_void, bytes: usize) {
+    if !iosb.is_null() {
+        let p = iosb as *mut u8;
+        core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
+        core::ptr::write_unaligned(p.add(8) as *mut usize, bytes);
+    }
+}
+
+/// Answer handle-based information queries for zip-window synthetic files.
+/// Covers the classes `GetFileInformationByHandle` / Rust `metadata` use.
+unsafe fn synth_query_information(
+    handle: HANDLE,
+    iosb: *mut c_void,
+    info: *mut c_void,
+    length: u32,
+    class: u32,
+) -> NTSTATUS {
+    let Some(len) = crate::zipserve::size(handle as isize) else {
+        return STATUS_INVALID_HANDLE;
+    };
+    let pos = crate::zipserve::position(handle as isize).unwrap_or(0);
+    if info.is_null() {
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    match class {
+        FILE_BASIC_INFORMATION => {
+            if (length as usize) < core::mem::size_of::<FileBasicInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let bi = info as *mut FileBasicInformation;
+            (*bi).creation_time = 0;
+            (*bi).last_access_time = 0;
+            (*bi).last_write_time = 0;
+            (*bi).change_time = 0;
+            (*bi).file_attributes = FILE_ATTRIBUTE_NORMAL;
+            (*bi)._reserved = 0;
+            synth_iosb_ok(iosb, core::mem::size_of::<FileBasicInformation>());
+            STATUS_SUCCESS
+        }
+        FILE_STANDARD_INFORMATION => {
+            if (length as usize) < core::mem::size_of::<FileStandardInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let si = info as *mut FileStandardInformation;
+            (*si).allocation_size = len as i64;
+            (*si).end_of_file = len as i64;
+            (*si).number_of_links = 1;
+            (*si).delete_pending = 0;
+            (*si).directory = 0;
+            (*si)._pad = 0;
+            synth_iosb_ok(iosb, core::mem::size_of::<FileStandardInformation>());
+            STATUS_SUCCESS
+        }
+        FILE_INTERNAL_INFORMATION => {
+            if (length as usize) < core::mem::size_of::<FileInternalInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            // Stable fake index derived from the synthetic handle value.
+            (*(info as *mut FileInternalInformation)).index_number = handle as i64;
+            synth_iosb_ok(iosb, core::mem::size_of::<FileInternalInformation>());
+            STATUS_SUCCESS
+        }
+        FILE_POSITION_INFORMATION => {
+            if (length as usize) < core::mem::size_of::<FilePositionInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            (*(info as *mut FilePositionInformation)).current_byte_offset = pos as i64;
+            synth_iosb_ok(iosb, core::mem::size_of::<FilePositionInformation>());
+            STATUS_SUCCESS
+        }
+        FILE_NETWORK_OPEN_INFORMATION => {
+            if (length as usize) < core::mem::size_of::<FileNetworkOpenInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let ni = info as *mut FileNetworkOpenInformation;
+            (*ni).creation_time = 0;
+            (*ni).last_access_time = 0;
+            (*ni).last_write_time = 0;
+            (*ni).change_time = 0;
+            (*ni).allocation_size = len as i64;
+            (*ni).end_of_file = len as i64;
+            (*ni).file_attributes = FILE_ATTRIBUTE_NORMAL;
+            (*ni)._reserved = 0;
+            synth_iosb_ok(iosb, core::mem::size_of::<FileNetworkOpenInformation>());
+            STATUS_SUCCESS
+        }
+        FILE_ATTRIBUTE_TAG_INFORMATION => {
+            if (length as usize) < core::mem::size_of::<FileAttributeTagInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let at = info as *mut FileAttributeTagInformation;
+            (*at).file_attributes = FILE_ATTRIBUTE_NORMAL;
+            (*at).reparse_tag = 0;
+            synth_iosb_ok(iosb, core::mem::size_of::<FileAttributeTagInformation>());
+            STATUS_SUCCESS
+        }
+        FILE_ALL_INFORMATION => {
+            // FILE_ALL_INFORMATION starts with BASIC + STANDARD + INTERNAL + EA +
+            // ACCESS + POSITION + MODE + ALIGNMENT + NAME. We fill the fixed
+            // header fields callers typically read (size / attributes) and leave
+            // the trailing name empty. Minimum size for the fixed prefix:
+            // Basic(40)+Standard(24)+Internal(8)+Ea(4)+Access(4)+Position(8)+Mode(4)+Align(4)+Name(4) = 100.
+            const PREFIX: usize = 100;
+            if (length as usize) < PREFIX {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let p = info as *mut u8;
+            core::ptr::write_bytes(p, 0, PREFIX);
+            // Basic.FileAttributes @ offset 32
+            core::ptr::write_unaligned(p.add(32) as *mut u32, FILE_ATTRIBUTE_NORMAL);
+            // Standard.AllocationSize @ 40, EndOfFile @ 48
+            core::ptr::write_unaligned(p.add(40) as *mut i64, len as i64);
+            core::ptr::write_unaligned(p.add(48) as *mut i64, len as i64);
+            // Standard.NumberOfLinks @ 56 = 1
+            core::ptr::write_unaligned(p.add(56) as *mut u32, 1);
+            // Internal.IndexNumber @ 64
+            core::ptr::write_unaligned(p.add(64) as *mut i64, handle as i64);
+            // Position.CurrentByteOffset @ 80 (after Ea 4 + Access 4 = 8 from 72)
+            // Layout: Basic 40 | Std 24 | Int 8 | Ea 4 | Access 4 | Pos 8 | Mode 4 | Align 4 | Name…
+            // Pos at 40+24+8+4+4 = 80
+            core::ptr::write_unaligned(p.add(80) as *mut i64, pos as i64);
+            synth_iosb_ok(iosb, PREFIX);
+            STATUS_SUCCESS
+        }
+        // Unknown class on a synthetic handle: succeed as a soft no-op so
+        // unhooked callers do not treat us as a hard failure when the class is
+        // informational. Length-0 write keeps IoStatusBlock consistent.
+        _ => {
+            synth_iosb_ok(iosb, 0);
+            STATUS_SUCCESS
+        }
+    }
+}
+
+/// `NtQueryVolumeInformationFile` hook — `GetFileType` needs
+/// `FileFsDeviceInformation` on synthetic handles.
+unsafe extern "system" fn qvol_hook(
+    handle: HANDLE,
+    iosb: *mut c_void,
+    info: *mut c_void,
+    length: u32,
+    class: u32,
+) -> NTSTATUS {
+    let tramp = match TRAMP_QVOL {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if crate::zipserve::is_synth(handle as isize) {
+        if class == FILE_FS_DEVICE_INFORMATION {
+            if info.is_null() || (length as usize) < core::mem::size_of::<FileFsDeviceInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let di = info as *mut FileFsDeviceInformation;
+            (*di).device_type = FILE_DEVICE_DISK;
+            (*di).characteristics = 0;
+            synth_iosb_ok(iosb, core::mem::size_of::<FileFsDeviceInformation>());
+            return STATUS_SUCCESS;
+        }
+        // Soft-success for other volume classes (size/attr) with zeros.
+        if !info.is_null() && length > 0 {
+            core::ptr::write_bytes(info as *mut u8, 0, length as usize);
+        }
+        synth_iosb_ok(iosb, length as usize);
+        return STATUS_SUCCESS;
+    }
+    tramp(handle, iosb, info, length, class)
+}
+
 /// `NtQueryInformationFile` hook. Spoofs only `FileNormalizedNameInformation`
 /// (class 48) on a redirected handle -> the virtual path, so
 /// `GetFinalPathNameByHandleW` reports where the mod file appears to live.
@@ -676,49 +881,7 @@ unsafe extern "system" fn qif_hook(
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::zipserve::is_synth(handle as isize) {
-        match class {
-            FILE_STANDARD_INFORMATION => {
-                if let Some(len) = crate::zipserve::size(handle as isize) {
-                    if !info.is_null() && length as usize >= core::mem::size_of::<FileStandardInformation>() {
-                        let si = info as *mut FileStandardInformation;
-                        (*si).allocation_size = len as i64;
-                        (*si).end_of_file = len as i64;
-                        (*si).number_of_links = 1;
-                        (*si).delete_pending = 0;
-                        (*si).directory = 0;
-                        (*si)._pad = 0;
-                        if !iosb.is_null() {
-                            let p = iosb as *mut u8;
-                            core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-                            core::ptr::write_unaligned(
-                                p.add(8) as *mut usize,
-                                core::mem::size_of::<FileStandardInformation>(),
-                            );
-                        }
-                        return STATUS_SUCCESS;
-                    }
-                }
-                return STATUS_NOT_IMPLEMENTED;
-            }
-            FILE_POSITION_INFORMATION => {
-                if let Some(pos) = crate::zipserve::position(handle as isize) {
-                    if !info.is_null() && length as usize >= core::mem::size_of::<FilePositionInformation>() {
-                        (*(info as *mut FilePositionInformation)).current_byte_offset = pos as i64;
-                        if !iosb.is_null() {
-                            let p = iosb as *mut u8;
-                            core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-                            core::ptr::write_unaligned(
-                                p.add(8) as *mut usize,
-                                core::mem::size_of::<FilePositionInformation>(),
-                            );
-                        }
-                        return STATUS_SUCCESS;
-                    }
-                }
-                return STATUS_NOT_IMPLEMENTED;
-            }
-            _ => return STATUS_NOT_IMPLEMENTED,
-        }
+        return synth_query_information(handle, iosb, info, length, class);
     }
     if class == FILE_NORMALIZED_NAME_INFORMATION && !info.is_null() {
         let vpath = match IDENTITY_TABLE.lock() {
@@ -805,6 +968,145 @@ unsafe extern "system" fn read_hook(
         }
     }
     tramp(handle, event, apc, apc_ctx, iosb, buffer, length, byte_offset, key)
+}
+
+/// `NtCreateSection` hook: data sections over synthetic zip-window file handles
+/// become synthetic section handles. `SEC_IMAGE` is rejected (PE images must be
+/// real on-disk files). Real handles pass through.
+unsafe extern "system" fn create_section_hook(
+    section_handle: *mut HANDLE,
+    access: u32,
+    oa: *const ObjectAttributes,
+    max_size: *mut i64,
+    page_prot: u32,
+    alloc_attrs: u32,
+    file_handle: HANDLE,
+) -> NTSTATUS {
+    let tramp = match TRAMP_CREATE_SECTION {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if crate::zipserve::is_synth(file_handle as isize) {
+        if alloc_attrs & SEC_IMAGE != 0 {
+            return STATUS_INVALID_FILE_FOR_SECTION;
+        }
+        // Optional MaximumSize must not exceed the window length.
+        if let Some(len) = crate::zipserve::size(file_handle as isize) {
+            if !max_size.is_null() {
+                let want = core::ptr::read_unaligned(max_size);
+                if want > 0 && (want as u64) > len {
+                    return STATUS_SECTION_TOO_BIG;
+                }
+            }
+        }
+        match crate::zipserve::create_section(file_handle as isize) {
+            Some(h) => {
+                if !section_handle.is_null() {
+                    *section_handle = h as HANDLE;
+                }
+                STATUS_SUCCESS
+            }
+            None => STATUS_INVALID_HANDLE,
+        }
+    } else {
+        tramp(
+            section_handle,
+            access,
+            oa,
+            max_size,
+            page_prot,
+            alloc_attrs,
+            file_handle,
+        )
+    }
+}
+
+/// `NtMapViewOfSection` hook: synthetic sections return a pointer into the
+/// already-mapped zip window. Real sections pass through.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "system" fn map_view_hook(
+    section: HANDLE,
+    process: HANDLE,
+    base_address: *mut *mut c_void,
+    zero_bits: usize,
+    commit_size: usize,
+    section_offset: *mut i64,
+    view_size: *mut usize,
+    inherit: u32,
+    alloc_type: u32,
+    protect: u32,
+) -> NTSTATUS {
+    let tramp = match TRAMP_MAP_VIEW {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if crate::zipserve::is_synth_section(section as isize) {
+        // Only the current process: cross-process map of our private VA is N/A.
+        let off = if section_offset.is_null() {
+            0u64
+        } else {
+            let v = core::ptr::read_unaligned(section_offset);
+            if v < 0 {
+                return STATUS_UNSUCCESSFUL;
+            }
+            v as u64
+        };
+        let want = if view_size.is_null() {
+            0u64
+        } else {
+            *view_size as u64
+        };
+        match crate::zipserve::map_view(section as isize, off, want) {
+            Some((base, size)) => {
+                if !base_address.is_null() {
+                    let preferred = *base_address;
+                    if !preferred.is_null() && preferred as usize != base {
+                        // Caller demanded a specific VA we cannot satisfy.
+                        crate::zipserve::unmap_view(base);
+                        return STATUS_UNSUCCESSFUL;
+                    }
+                    *base_address = base as *mut c_void;
+                }
+                if !view_size.is_null() {
+                    *view_size = size as usize;
+                }
+                if !section_offset.is_null() {
+                    core::ptr::write_unaligned(section_offset, off as i64);
+                }
+                let _ = (process, zero_bits, commit_size, inherit, alloc_type, protect);
+                STATUS_SUCCESS
+            }
+            None => STATUS_UNSUCCESSFUL,
+        }
+    } else {
+        tramp(
+            section,
+            process,
+            base_address,
+            zero_bits,
+            commit_size,
+            section_offset,
+            view_size,
+            inherit,
+            alloc_type,
+            protect,
+        )
+    }
+}
+
+/// `NtUnmapViewOfSection` hook: synthetic views are bookkeeping-only (the zip
+/// map stays for the process lifetime).
+unsafe extern "system" fn unmap_view_hook(process: HANDLE, base: *mut c_void) -> NTSTATUS {
+    let tramp = match TRAMP_UNMAP_VIEW {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if !base.is_null() && crate::zipserve::is_synth_view(base as usize) {
+        crate::zipserve::unmap_view(base as usize);
+        let _ = process;
+        return STATUS_SUCCESS;
+    }
+    tramp(process, base)
 }
 
 /// `CreateProcessInternalW` hook: force the child to start suspended, dual-layer

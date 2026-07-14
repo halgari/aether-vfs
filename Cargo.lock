@@ -466,6 +466,17 @@ name = "vfs-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "vfs-launch"
+version = "0.1.0"
+dependencies = [
+ "vfs-core",
+ "vfs-inject",
+ "vfs-shared",
+ "vfs-shim",
+ "vfs-zip",
+]
+
+[[package]]
 name = "vfs-payload"
 version = "0.1.0"
 

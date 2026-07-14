@@ -332,6 +332,7 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
     }
     let app_w = wide(&cfg.target_exe);
     let mut cmd_w = wide(&cmdline);
+    let cwd_w = cfg.current_dir.as_ref().map(|s| wide(s));
 
     // SAFETY: CreateProcessW + dual-layer arm + resume; handles closed on every path.
     unsafe {
@@ -346,7 +347,10 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
             0,
             CREATE_SUSPENDED,
             core::ptr::null(),
-            core::ptr::null(),
+            cwd_w
+                .as_ref()
+                .map(|v| v.as_ptr())
+                .unwrap_or(core::ptr::null()),
             &si,
             &mut pi,
         );
@@ -428,6 +432,12 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
             return Err(InjectError::Write);
+        }
+
+        if cfg.detach {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return Ok(0);
         }
 
         if WaitForSingleObject(pi.hProcess, INFINITE) != 0 {

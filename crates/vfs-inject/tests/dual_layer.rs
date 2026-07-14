@@ -63,6 +63,7 @@ fn dual_layer_static_import_and_virtual_file() {
 
     let exit = run_target_with_shim(RunConfig {
         target_exe: tgt.to_str().unwrap().to_string(),
+        current_dir: None,
         args: vec![result_path.to_str().unwrap().to_string()],
         dll_path: dll.clone(),
         config_path: config_path.to_str().unwrap().to_string(),
@@ -70,6 +71,7 @@ fn dual_layer_static_import_and_virtual_file() {
         ready_timeout: Duration::from_secs(15),
         payload_path: payload.clone(),
         preinit_redirects: vec![],
+        detach: false,
     })
     .expect("dual-layer staticimp");
     assert_eq!(exit, 0, "staticimp under dual-layer");
@@ -85,6 +87,7 @@ fn dual_layer_static_import_and_virtual_file() {
 
     let exit = run_target_with_shim(RunConfig {
         target_exe: probe,
+        current_dir: None,
         args: vec![
             virtual_path.to_str().unwrap().to_string(),
             output_path.to_str().unwrap().to_string(),
@@ -95,6 +98,7 @@ fn dual_layer_static_import_and_virtual_file() {
         ready_timeout: Duration::from_secs(15),
         payload_path: payload,
         preinit_redirects: vec![],
+        detach: false,
     })
     .expect("dual-layer probe");
     assert_eq!(exit, 0, "probe under dual-layer");

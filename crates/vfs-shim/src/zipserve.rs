@@ -14,11 +14,13 @@ use windows_sys::Win32::System::Memory::{
     PAGE_READONLY,
 };
 
-/// High tag bit (2^46) marking a synthetic handle; real kernel handles never
-/// reach this magnitude. The sign bit (2^63) stays clear so the value is a
-/// positive handle, never confused with pseudo-handles (-1..-6) or
+/// High tag bit (2^46) marking a synthetic *file* handle; real kernel handles
+/// never reach this magnitude. The sign bit (2^63) stays clear so the value is
+/// a positive handle, never confused with pseudo-handles (-1..-6) or
 /// INVALID_HANDLE_VALUE.
 const SYNTH_TAG: usize = 0x0000_4000_0000_0000;
+/// Tag bit (2^45) for synthetic *section* handles (NtCreateSection results).
+const SYNTH_SECTION_TAG: usize = 0x0000_2000_0000_0000;
 
 /// A mapped container: base address of the whole-file view and the
 /// container's byte size (captured at mapping time, used to bound windows).
@@ -35,9 +37,18 @@ struct SynthFile {
     position: u64,
 }
 
+/// A synthetic section over a zip-window (data mapping only, not SEC_IMAGE).
+struct SynthSection {
+    window: usize,
+    length: u64,
+}
+
 // Raw addresses stored as usize -> Send/Sync-safe in the maps.
 static ZIP_MAPS: Mutex<BTreeMap<String, ZipMap>> = Mutex::new(BTreeMap::new());
 static SYNTH: Mutex<BTreeMap<usize, SynthFile>> = Mutex::new(BTreeMap::new());
+static SYNTH_SECTIONS: Mutex<BTreeMap<usize, SynthSection>> = Mutex::new(BTreeMap::new());
+/// Mapped synthetic views: base address → view length (for UnmapView no-op).
+static SYNTH_VIEWS: Mutex<BTreeMap<usize, u64>> = Mutex::new(BTreeMap::new());
 static NEXT_SLOT: Mutex<usize> = Mutex::new(0);
 
 /// Strip a `\??\` / `\\?\` device prefix to a Win32 path for `CreateFileW`.
@@ -200,6 +211,104 @@ pub fn close(handle: isize) -> bool {
         Ok(mut t) => t.remove(&(handle as usize)).is_some(),
         Err(_) => false,
     }
+}
+
+/// Whether `handle` is a synthetic section (from [`create_section`]).
+pub fn is_synth_section(handle: isize) -> bool {
+    (handle as usize) & SYNTH_SECTION_TAG != 0
+}
+
+/// Create a data section over a synthetic file handle's window.
+/// Returns `None` if `file_handle` is not a known synthetic file.
+pub fn create_section(file_handle: isize) -> Option<isize> {
+    let (window, length) = {
+        let t = SYNTH.lock().ok()?;
+        let f = t.get(&(file_handle as usize))?;
+        (f.window, f.length)
+    };
+    let mut slot = NEXT_SLOT.lock().ok()?;
+    let handle = SYNTH_SECTION_TAG | (*slot << 3);
+    *slot += 1;
+    drop(slot);
+    SYNTH_SECTIONS
+        .lock()
+        .ok()?
+        .insert(handle, SynthSection { window, length });
+    Some(handle as isize)
+}
+
+/// Close a synthetic section handle.
+pub fn close_section(handle: isize) -> bool {
+    match SYNTH_SECTIONS.lock() {
+        Ok(mut t) => t.remove(&(handle as usize)).is_some(),
+        Err(_) => false,
+    }
+}
+
+/// Map a view of a synthetic section into the current process.
+///
+/// Returns `(base, view_size)` on success. The base is a pointer into the
+/// already-mapped zip container (no extra mapping); [`unmap_view`] must be used
+/// so we do not `UnmapViewOfFile` the shared container.
+pub fn map_view(
+    section_handle: isize,
+    section_offset: u64,
+    view_size: u64,
+) -> Option<(usize, u64)> {
+    let t = SYNTH_SECTIONS.lock().ok()?;
+    let s = t.get(&(section_handle as usize))?;
+    if section_offset > s.length {
+        return None;
+    }
+    let max = s.length - section_offset;
+    let size = if view_size == 0 { max } else { view_size.min(max) };
+    if size == 0 && max == 0 {
+        // Empty file: still "succeed" with a non-null? Prefer fail.
+        return None;
+    }
+    let base = s.window.checked_add(section_offset as usize)?;
+    drop(t);
+    if let Ok(mut views) = SYNTH_VIEWS.lock() {
+        views.insert(base, size);
+    }
+    Some((base, size))
+}
+
+/// Whether `base` is a synthetic mapped view (should no-op on UnmapView).
+pub fn is_synth_view(base: usize) -> bool {
+    SYNTH_VIEWS
+        .lock()
+        .map(|v| v.contains_key(&base))
+        .unwrap_or(false)
+}
+
+/// Forget a synthetic mapped view (do not unmap the underlying zip).
+pub fn unmap_view(base: usize) -> bool {
+    match SYNTH_VIEWS.lock() {
+        Ok(mut v) => v.remove(&base).is_some(),
+        Err(_) => false,
+    }
+}
+
+/// Copy `[offset, offset+length)` of a container into `dest` (for COW overlay).
+/// Maps the container if needed. Returns false on any failure.
+pub fn copy_window_to_file(container_nt: &str, offset: u64, length: u64, dest: &std::path::Path) -> bool {
+    let (base, file_size) = match ensure_mapped(container_nt) {
+        Some(x) => x,
+        None => return false,
+    };
+    let end = match offset.checked_add(length) {
+        Some(e) if e <= file_size => e,
+        _ => return false,
+    };
+    let _ = end;
+    let src = (base + offset as usize) as *const u8;
+    // SAFETY: window lies inside the mapped container (bounds checked above).
+    let bytes = unsafe { core::slice::from_raw_parts(src, length as usize) };
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(dest, bytes).is_ok()
 }
 
 #[cfg(test)]

@@ -1,0 +1,20 @@
+[package]
+name = "vfs-launch"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "vfs-launch"
+path = "src/main.rs"
+
+[[bin]]
+name = "vfs-game-probe"
+path = "src/bin/vfs-game-probe.rs"
+
+[dependencies]
+vfs-core = { path = "../vfs-core" }
+vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
+vfs-zip = { path = "../vfs-zip" }
+vfs-shim = { path = "../vfs-shim" }
+vfs-inject = { path = "../vfs-inject" }
