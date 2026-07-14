@@ -63,6 +63,7 @@ fn config_static_import_via_dual_layer() {
         payload_path: payload,
         preinit_redirects: vec![],
         detach: false,
+        target_pe_bytes: None,
     })
     .expect("run_target_with_shim");
 

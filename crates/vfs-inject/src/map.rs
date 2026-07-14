@@ -104,6 +104,89 @@ pub fn apply_relocs(img: &mut [u8], e_lfanew: usize, image_base: u64, new_base: 
     }
 }
 
+/// Resolve the PE import table in-place using **this process's** module bases
+/// (system DLLs share session-wide bases, which is enough for typical loader
+/// EXEs like skse64_loader). Call after `build_image` / before writing into a
+/// hollowed target.
+pub fn resolve_imports(img: &mut [u8], e_lfanew: usize) -> Result<(), &'static str> {
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+
+    let opt = e_lfanew + 24;
+    // DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT = 1]
+    let imp_dir = opt + 112 + 8;
+    if imp_dir + 8 > img.len() {
+        return Ok(());
+    }
+    let mut desc = rd_u32(img, imp_dir) as usize;
+    let imp_size = rd_u32(img, imp_dir + 4) as usize;
+    if desc == 0 || imp_size == 0 {
+        return Ok(());
+    }
+    let desc_end = desc + imp_size;
+
+    while desc + 20 <= img.len() && desc < desc_end {
+        let oft = rd_u32(img, desc) as usize; // OriginalFirstThunk
+        let name_rva = rd_u32(img, desc + 12) as usize;
+        let ft = rd_u32(img, desc + 16) as usize; // FirstThunk (IAT)
+        if name_rva == 0 {
+            break;
+        }
+        // DLL name
+        if name_rva >= img.len() {
+            break;
+        }
+        let mut end = name_rva;
+        while end < img.len() && img[end] != 0 {
+            end += 1;
+        }
+        let mut dll_name = img[name_rva..end].to_vec();
+        dll_name.push(0);
+        // SAFETY: LoadLibraryA of a normal system/import DLL name from the PE.
+        let module = unsafe { LoadLibraryA(dll_name.as_ptr()) };
+        if module.is_null() {
+            return Err("LoadLibraryA for import failed");
+        }
+        let mut thunk_rva = if oft != 0 { oft } else { ft };
+        let mut iat_rva = ft;
+        loop {
+            if thunk_rva + 8 > img.len() || iat_rva + 8 > img.len() {
+                break;
+            }
+            let entry = rd_u64(img, thunk_rva);
+            if entry == 0 {
+                break;
+            }
+            let addr = if entry & (1u64 << 63) != 0 {
+                // Import by ordinal
+                let ord = (entry & 0xFFFF) as u16;
+                unsafe { GetProcAddress(module, ord as *const u8) }
+            } else {
+                // IMAGE_IMPORT_BY_NAME: Hint (2) + Name
+                let name_ptr = (entry as usize) + 2;
+                if name_ptr >= img.len() {
+                    break;
+                }
+                let mut ne = name_ptr;
+                while ne < img.len() && img[ne] != 0 {
+                    ne += 1;
+                }
+                let mut nm = img[name_ptr..ne].to_vec();
+                nm.push(0);
+                unsafe { GetProcAddress(module, nm.as_ptr()) }
+            };
+            let Some(func) = addr else {
+                return Err("GetProcAddress for import failed");
+            };
+            let fa = func as u64;
+            img[iat_rva..iat_rva + 8].copy_from_slice(&fa.to_le_bytes());
+            thunk_rva += 8;
+            iat_rva += 8;
+        }
+        desc += 20;
+    }
+    Ok(())
+}
+
 /// Find an export's RVA by name (RVAs index into the flat image).
 pub fn export_rva(img: &[u8], e_lfanew: usize, name: &[u8]) -> Result<u32, &'static str> {
     let opt = e_lfanew + 24;

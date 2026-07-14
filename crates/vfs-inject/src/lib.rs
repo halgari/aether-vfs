@@ -9,11 +9,16 @@
 use std::time::Duration;
 
 mod artifacts;
+mod ghostly;
 mod inject;
 mod map;
 mod payload_cfg;
 mod static_imports;
 mod stub;
+
+pub use ghostly::{
+    create_process_from_pe_bytes, image_section_from_pe_bytes, pe_looks_like_image,
+};
 
 /// Parameters for [`run_target_with_shim`].
 pub struct RunConfig {
@@ -32,6 +37,10 @@ pub struct RunConfig {
     pub preinit_redirects: Vec<PreinitRedirect>,
     /// When true, return as soon as the target is running (do not wait for exit).
     pub detach: bool,
+    /// When set, launch this PE image from memory (DELETE_ON_CLOSE ghost section)
+    /// instead of `CreateProcess(target_exe)`. `target_exe` is still used as the
+    /// virtual image path in the command line. **No durable copy of these bytes.**
+    pub target_pe_bytes: Option<Vec<u8>>,
 }
 
 /// One early-payload redirect: object names ending with `suffix` (final path

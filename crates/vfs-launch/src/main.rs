@@ -219,12 +219,10 @@ fn locate_artifacts() -> Result<(String, String), String> {
     Ok((dll.to_string_lossy().into_owned(), payload))
 }
 
-fn write_steam_appid(root: &Path) {
-    let p = root.join("steam_appid.txt");
-    if !p.exists() {
-        let _ = std::fs::write(&p, STEAM_APPID);
-        eprintln!("  wrote {}", p.display());
-    }
+fn set_steam_env() {
+    // Prefer env over steam_appid.txt so we don't add another file under the root.
+    std::env::set_var("SteamAppId", STEAM_APPID);
+    std::env::set_var("SteamGameId", STEAM_APPID);
 }
 
 /// Canonical early load-order for SSE masters (only those present are emitted).
@@ -435,7 +433,7 @@ fn main() {
     let snapshot = vfs_shared::bridge::flatten(&tree);
     eprintln!("  snapshot {} bytes", snapshot.len());
 
-    write_steam_appid(&args.root);
+    set_steam_env();
 
     let root_s = args.root.to_string_lossy().into_owned();
     let overlay_s = args.overlay.to_string_lossy().into_owned();
@@ -524,6 +522,7 @@ fn main() {
         payload_path: payload,
         preinit_redirects: vec![],
         detach,
+        target_pe_bytes: None,
     });
 
     match exit {

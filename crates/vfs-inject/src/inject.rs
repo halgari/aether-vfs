@@ -319,6 +319,17 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
     std::env::set_var("VFS_DUAL_LAYER", "1");
     // Advertise payload path for children that resolve via env.
     std::env::set_var("VFS_PAYLOAD_PATH", &payload_path);
+    // When launching from memory PE, the kernel maps a temp path; the game
+    // should still *see* the virtual image path (GetModuleFileName spoof).
+    // Clear first so a prior session's value is not inherited incorrectly.
+    std::env::remove_var("VFS_VIRTUAL_IMAGE");
+    std::env::remove_var("VFS_VIRTUAL_DIR");
+    if cfg.target_pe_bytes.is_some() {
+        std::env::set_var("VFS_VIRTUAL_IMAGE", &cfg.target_exe);
+        if let Some(ref d) = cfg.current_dir {
+            std::env::set_var("VFS_VIRTUAL_DIR", d);
+        }
+    }
     let cfg_file = format!("{}.payload_cfg", cfg.ready_path);
     std::env::set_var("VFS_PAYLOAD_CFG_FILE", &cfg_file);
     let _ = std::fs::remove_file(&cfg.ready_path);
@@ -326,36 +337,52 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
 
     let redirects = merge_preinit_redirects(&cfg.config_path, &cfg.preinit_redirects);
 
-    let mut cmdline = format!("\"{}\"", cfg.target_exe);
-    for a in &cfg.args {
-        cmdline.push_str(&format!(" \"{a}\""));
-    }
-    let app_w = wide(&cfg.target_exe);
-    let mut cmd_w = wide(&cmdline);
-    let cwd_w = cfg.current_dir.as_ref().map(|s| wide(s));
-
-    // SAFETY: CreateProcessW + dual-layer arm + resume; handles closed on every path.
+    // SAFETY: CreateProcessW (or ghostly PE launch) + dual-layer arm + resume.
     unsafe {
-        let mut si: STARTUPINFOW = zeroed();
-        si.cb = size_of::<STARTUPINFOW>() as u32;
         let mut pi: PROCESS_INFORMATION = zeroed();
-        let ok = CreateProcessW(
-            app_w.as_ptr(),
-            cmd_w.as_mut_ptr(),
-            core::ptr::null(),
-            core::ptr::null(),
-            0,
-            CREATE_SUSPENDED,
-            core::ptr::null(),
-            cwd_w
-                .as_ref()
-                .map(|v| v.as_ptr())
-                .unwrap_or(core::ptr::null()),
-            &si,
-            &mut pi,
-        );
-        if ok == 0 {
-            return Err(InjectError::CreateProcess);
+        if let Some(ref pe) = cfg.target_pe_bytes {
+            let (proc, thread, pid, tid) = crate::ghostly::create_process_from_pe_bytes(
+                pe,
+                &cfg.target_exe,
+                &cfg.args,
+                cfg.current_dir.as_deref(),
+            )
+            .map_err(|e| {
+                eprintln!("vfs-inject: memory PE launch failed: {e}");
+                InjectError::CreateProcess
+            })?;
+            pi.hProcess = proc;
+            pi.hThread = thread;
+            pi.dwProcessId = pid;
+            pi.dwThreadId = tid;
+        } else {
+            let mut cmdline = format!("\"{}\"", cfg.target_exe);
+            for a in &cfg.args {
+                cmdline.push_str(&format!(" \"{a}\""));
+            }
+            let app_w = wide(&cfg.target_exe);
+            let mut cmd_w = wide(&cmdline);
+            let cwd_w = cfg.current_dir.as_ref().map(|s| wide(s));
+            let mut si: STARTUPINFOW = zeroed();
+            si.cb = size_of::<STARTUPINFOW>() as u32;
+            let ok = CreateProcessW(
+                app_w.as_ptr(),
+                cmd_w.as_mut_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+                CREATE_SUSPENDED,
+                core::ptr::null(),
+                cwd_w
+                    .as_ref()
+                    .map(|v| v.as_ptr())
+                    .unwrap_or(core::ptr::null()),
+                &si,
+                &mut pi,
+            );
+            if ok == 0 {
+                return Err(InjectError::CreateProcess);
+            }
         }
 
         let arm = match arm_preinit_payload_ex(

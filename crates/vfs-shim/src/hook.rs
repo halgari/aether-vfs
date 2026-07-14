@@ -60,6 +60,14 @@ static mut TRAMP_MAP_VIEW: Option<NtMapViewOfSectionFn> = None;
 static mut TRAMP_UNMAP_VIEW: Option<NtUnmapViewOfSectionFn> = None;
 static mut TRAMP_QVOL: Option<NtQueryVolumeInformationFileFn> = None;
 static mut TRAMP_CPIW: Option<CreateProcessInternalWFn> = None;
+static mut TRAMP_GMFW: Option<GetModuleFileNameWFn> = None;
+static mut TRAMP_GMFA: Option<GetModuleFileNameAFn> = None;
+static mut TRAMP_QFPIW: Option<QueryFullProcessImageNameWFn> = None;
+
+type GetModuleFileNameWFn = unsafe extern "system" fn(HMODULE, *mut u16, u32) -> u32;
+type GetModuleFileNameAFn = unsafe extern "system" fn(HMODULE, *mut u8, u32) -> u32;
+type QueryFullProcessImageNameWFn =
+    unsafe extern "system" fn(HANDLE, u32, *mut u16, *mut u32) -> i32;
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
 /// 12 params; only `flags` and `pi` are inspected/modified by the hook.
@@ -260,7 +268,7 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
         d_qdirex, d_close, d_qif, d_setinfo, d_read, d_csec, d_map, d_unmap, d_qvol,
     ]);
 
-    // Best-effort child-process propagation.
+    // Best-effort child-process propagation + virtual image path spoof.
     if let Some(dll) = self_dll_path() {
         let _ = SELF_DLL.set(dll);
         let mut kb = GetModuleHandleA(b"kernelbase.dll\0".as_ptr());
@@ -277,10 +285,123 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
                     detours.push(d_cpiw);
                 }
             }
+            for mod_name in [b"kernel32.dll\0".as_slice(), b"kernelbase.dll\0".as_slice()] {
+                let hm = GetModuleHandleA(mod_name.as_ptr());
+                if hm.is_null() {
+                    continue;
+                }
+                // GetModuleFileName spoof disabled by default — only needed for
+                // ephemeral vfs-run PE launches. Session-root PE files already
+                // live at the correct path (no spoof). Re-enable via env if needed.
+                let _ = hm;
+            }
+            let _ = kb;
         }
     }
 
     Ok(HookGuard { _detours: detours })
+}
+
+/// Spoof main-module path **only** when the real image is a `vfs-run-*` ephemeral
+/// PE. If the process was launched from a real session path, return that path
+/// unchanged (do not force a stale VFS_VIRTUAL_IMAGE).
+unsafe extern "system" fn gmf_hook(module: HMODULE, buffer: *mut u16, size: u32) -> u32 {
+    let tramp = match TRAMP_GMFW {
+        Some(t) => t,
+        None => return 0,
+    };
+    let main = GetModuleHandleA(core::ptr::null());
+    let is_main = module.is_null() || (!main.is_null() && module == main);
+    if is_main {
+        // Probe real path first.
+        let real_n = tramp(module, buffer, size);
+        if real_n > 0 && !buffer.is_null() {
+            let real = String::from_utf16_lossy(core::slice::from_raw_parts(
+                buffer,
+                real_n as usize,
+            ));
+            let is_ephemeral = real.to_ascii_lowercase().contains("vfs-run-");
+            if is_ephemeral {
+                if let Ok(virt) = std::env::var("VFS_VIRTUAL_IMAGE") {
+                    let units: Vec<u16> = virt.encode_utf16().collect();
+                    if size as usize > units.len() {
+                        core::ptr::copy_nonoverlapping(units.as_ptr(), buffer, units.len());
+                        *buffer.add(units.len()) = 0;
+                        return units.len() as u32;
+                    }
+                }
+            }
+            return real_n;
+        }
+    }
+    tramp(module, buffer, size)
+}
+
+unsafe extern "system" fn gmfa_hook(module: HMODULE, buffer: *mut u8, size: u32) -> u32 {
+    let tramp = match TRAMP_GMFA {
+        Some(t) => t,
+        None => return 0,
+    };
+    let main = GetModuleHandleA(core::ptr::null());
+    let is_main = module.is_null() || (!main.is_null() && module == main);
+    if is_main {
+        let real_n = tramp(module, buffer, size);
+        if real_n > 0 && !buffer.is_null() {
+            let real = core::str::from_utf8(core::slice::from_raw_parts(buffer, real_n as usize))
+                .unwrap_or("");
+            let is_ephemeral = real.to_ascii_lowercase().contains("vfs-run-");
+            if is_ephemeral {
+                if let Ok(virt) = std::env::var("VFS_VIRTUAL_IMAGE") {
+                    let bytes = virt.as_bytes();
+                    if size as usize > bytes.len() {
+                        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len());
+                        *buffer.add(bytes.len()) = 0;
+                        return bytes.len() as u32;
+                    }
+                }
+            }
+            return real_n;
+        }
+    }
+    tramp(module, buffer, size)
+}
+
+/// Spoof `QueryFullProcessImageNameW` for the current process.
+unsafe extern "system" fn qfpi_hook(
+    process: HANDLE,
+    flags: u32,
+    buffer: *mut u16,
+    size: *mut u32,
+) -> i32 {
+    let tramp = match TRAMP_QFPIW {
+        Some(t) => t,
+        None => return 0,
+    };
+    // Current process: GetCurrentProcess() is (HANDLE)-1.
+    let is_self = process == (-1isize as HANDLE) || process == (usize::MAX as HANDLE);
+    if is_self {
+        if let Ok(virt) = std::env::var("VFS_VIRTUAL_IMAGE") {
+            if !buffer.is_null() && !size.is_null() {
+                let units: Vec<u16> = virt.encode_utf16().collect();
+                let need = units.len() as u32;
+                if *size > need {
+                    core::ptr::copy_nonoverlapping(units.as_ptr(), buffer, units.len());
+                    *buffer.add(units.len()) = 0;
+                    *size = need;
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(r"C:\GameLayers\vfs-state\gmf-spoof.log")
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(f, "qfpi spoof -> {virt}")
+                        });
+                    return 1; // TRUE
+                }
+            }
+        }
+    }
+    tramp(process, flags, buffer, size)
 }
 
 /// Decode a fully-qualified ObjectName. `None` when ineligible (null/relative OA
@@ -987,6 +1108,8 @@ unsafe extern "system" fn create_section_hook(
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::zipserve::is_synth(file_handle as isize) {
+        // SEC_IMAGE on zip-window handles is not supported without staging a
+        // real PE image (bootstrap PE files are materialised by vfs-launch).
         if alloc_attrs & SEC_IMAGE != 0 {
             return STATUS_INVALID_FILE_FOR_SECTION;
         }
@@ -1133,7 +1256,9 @@ unsafe extern "system" fn cpiw_hook(
         None => return 0, // STATUS/BOOL FALSE — invariant violation, should not occur
     };
     let caller_suspended = flags & CREATE_SUSPENDED != 0;
+
     let forced = flags | CREATE_SUSPENDED;
+    let _ = (app, cmd); // reserved for future virtual-PE CreateProcess intercept
     let r = tramp(
         token, app, cmd, proc_attr, thread_attr, inherit, forced, env, cur_dir, si, pi, ptok,
     );
@@ -1142,31 +1267,10 @@ unsafe extern "system" fn cpiw_hook(
         let hprocess = (*pi).hProcess;
         let hthread = (*pi).hThread;
         if let Some(dll) = SELF_DLL.get() {
-            // Dual-layer resumes the primary for the spin-gate, then releases it
-            // into RtlUserThreadStart. If the caller wanted a suspended child,
-            // re-suspend after inject.
             let _ = inject_child(hprocess, hthread, pid, dll, CHILD_READY_TIMEOUT_MS);
             if caller_suspended {
                 re_suspend(hthread);
             }
-            // If dual-layer already left the primary running (normal case), do
-            // not ResumeThread again. inject_child dual-layer resumes internally;
-            // classic fallback leaves the thread suspended — resume if needed.
-            // Classic inject_dll does not resume; dual-layer ends with primary
-            // past the stub (running or about to run entry). For !caller_suspended
-            // after classic fallback we still need ResumeThread.
-            //
-            // inject_child dual-layer: primary was resumed for spin, then released
-            // — it is running. Classic fallback: primary still suspended.
-            // Heuristic: if dual-layer path ran, primary is not at the original
-            // suspended start. Simplest correct behavior matching prior API:
-            // always ResumeThread when !caller_suspended (idempotent if already
-            // running — ResumeThread on a running thread is fine / increments
-            // suspend count carefully: if suspend count is 0, ResumeThread
-            // returns previous count 0 and does nothing harmful... actually
-            // ResumeThread when not suspended returns 0xFFFFFFFF? Docs: if
-            // suspend count is 0, returns previous suspend count of 0.
-            // Safe to call when already running.
             if !caller_suspended {
                 ResumeThread(hthread);
             }
@@ -1175,6 +1279,84 @@ unsafe extern "system" fn cpiw_hook(
         }
     }
     r
+}
+
+/// If CreateProcess targets a VFS zip-window PE, return (win32 path, pe bytes).
+unsafe fn resolve_virtual_pe(app: *const u16, cmd: *mut u16) -> Option<(String, Vec<u8>)> {
+    let engine = ENGINE.get()?;
+    let mut path = if !app.is_null() {
+        utf16_z(app)
+    } else if !cmd.is_null() {
+        // First token of the command line.
+        let full = utf16_z(cmd);
+        parse_first_arg(&full)?
+    } else {
+        return None;
+    };
+    // Normalize quotes.
+    path = path.trim_matches('"').to_string();
+    if path.is_empty() {
+        return None;
+    }
+    let nt = if path.starts_with(r"\??\") || path.starts_with(r"\\?\") {
+        path.clone()
+    } else {
+        format!(r"\??\{path}")
+    };
+    match engine.decide(&nt) {
+        Decision::Serve {
+            container_nt,
+            offset,
+            length,
+        } => {
+            if length == 0 || length > 256 * 1024 * 1024 {
+                return None;
+            }
+            let pe = read_container_window(&container_nt, offset, length)?;
+            if pe.len() < 2 || pe[0] != b'M' || pe[1] != b'Z' {
+                return None;
+            }
+            Some((path, pe))
+        }
+        _ => None,
+    }
+}
+
+fn parse_first_arg(cmd: &str) -> Option<String> {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return None;
+    }
+    if cmd.starts_with('"') {
+        let end = cmd[1..].find('"')?;
+        Some(cmd[1..1 + end].to_string())
+    } else {
+        Some(cmd.split_whitespace().next()?.to_string())
+    }
+}
+
+unsafe fn utf16_z(p: *const u16) -> String {
+    let mut len = 0usize;
+    while *p.add(len) != 0 {
+        len += 1;
+        if len > 32_768 {
+            break;
+        }
+    }
+    String::from_utf16_lossy(core::slice::from_raw_parts(p, len))
+}
+
+fn read_container_window(container_nt: &str, offset: u64, length: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = container_nt
+        .strip_prefix(r"\??\")
+        .or_else(|| container_nt.strip_prefix(r"\\?\"))
+        .unwrap_or(container_nt);
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf = vec![0u8; length as usize];
+    f.read_exact(&mut buf).ok()?;
+    Some(buf)
 }
 
 /// Extract a search wildcard from a `PUNICODE_STRING`. Null/empty/`*`/`*.*`

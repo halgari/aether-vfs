@@ -86,6 +86,7 @@ fn injected_shim_passes_full_acceptance_suite() {
         payload_path: payload,
         preinit_redirects: vec![],
         detach: false,
+        target_pe_bytes: None,
     })
     .expect("run_target_with_shim");
 
