@@ -49,8 +49,17 @@ impl RootMap {
     /// positively resolve to a virtualized file yields `PassThrough`.
     pub fn decide(&self, nt_path: &str, snap: &SnapshotReader) -> Decision {
         match self.locate(nt_path, snap) {
-            Located::Resolved(SnapResolution::File { source, .. }) => {
-                Decision::Redirect { target_nt: render_nt(&source) }
+            Located::Resolved(SnapResolution::File { source, size, .. }) => {
+                match vfs_core::decode(&source) {
+                    vfs_core::Source::ZipWindow { offset, container } => Decision::Serve {
+                        container_nt: render_nt(container),
+                        offset,
+                        length: size,
+                    },
+                    vfs_core::Source::Disk(bytes) => {
+                        Decision::Redirect { target_nt: render_nt(bytes) }
+                    }
+                }
             }
             Located::Resolved(SnapResolution::Tombstone) => Decision::Deny,
             Located::Resolved(SnapResolution::Dir)
@@ -198,6 +207,10 @@ pub enum Decision {
     /// The path is tombstoned (mod-deleted); the hook must return
     /// STATUS_OBJECT_NAME_NOT_FOUND rather than open or pass through.
     Deny,
+    /// Serve the file's bytes from a window inside a container (zip) file.
+    /// The shim opens `container_nt`, maps it, and returns a synthetic handle
+    /// covering `[offset, offset + length)`.
+    Serve { container_nt: String, offset: u64, length: u64 },
 }
 
 /// The outcome of a path-based attribute query (NtQueryAttributesFile).
@@ -1001,5 +1014,36 @@ mod tests {
             Some(vec!["data".to_string(), "foo.esp".to_string()])
         );
         assert_eq!(r.remainder(r"\??\C:\Windows"), None);
+    }
+
+    #[test]
+    fn decide_serves_a_zip_window_source() {
+        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId, SourceId};
+        let src = SourceId::new(vfs_core::encode_zip_window(
+            0x1_0000_0010,
+            r"C:\GameLayers\base.zip",
+        ));
+        let tree = build(vec![Layer {
+            id: LayerId(0),
+            entries: vec![InputEntry {
+                vpath: "data/big.bsa".into(),
+                kind: EntryKind::File,
+                source: src,
+                size: 4242,
+                mtime: 1,
+            }],
+        }])
+        .unwrap();
+        let snap = vfs_shared::bridge::flatten(&tree);
+        let reader = vfs_shared::SnapshotReader::open(&snap).unwrap();
+        let map = RootMap::new(r"\??\C:\Games\Skyrim").unwrap();
+        assert_eq!(
+            map.decide(r"\??\C:\Games\Skyrim\Data\big.bsa", &reader),
+            Decision::Serve {
+                container_nt: r"\??\C:\GameLayers\base.zip".to_string(),
+                offset: 0x1_0000_0010,
+                length: 4242,
+            }
+        );
     }
 }
