@@ -704,6 +704,14 @@ unsafe extern "system" fn qif_hook(
                 if let Some(pos) = crate::zipserve::position(handle as isize) {
                     if !info.is_null() && length as usize >= core::mem::size_of::<FilePositionInformation>() {
                         (*(info as *mut FilePositionInformation)).current_byte_offset = pos as i64;
+                        if !iosb.is_null() {
+                            let p = iosb as *mut u8;
+                            core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
+                            core::ptr::write_unaligned(
+                                p.add(8) as *mut usize,
+                                core::mem::size_of::<FilePositionInformation>(),
+                            );
+                        }
                         return STATUS_SUCCESS;
                     }
                 }

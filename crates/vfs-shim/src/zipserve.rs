@@ -7,10 +7,11 @@ use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_EXISTING,
+    CreateFileW, GetFileSizeEx, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, MapViewOfFile, FILE_MAP_READ, PAGE_READONLY,
+    CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS,
+    PAGE_READONLY,
 };
 
 /// High tag bit (2^46) marking a synthetic handle; real kernel handles never
@@ -19,9 +20,11 @@ use windows_sys::Win32::System::Memory::{
 /// INVALID_HANDLE_VALUE.
 const SYNTH_TAG: usize = 0x0000_4000_0000_0000;
 
-/// A mapped container: base address of the whole-file view.
+/// A mapped container: base address of the whole-file view and the
+/// container's byte size (captured at mapping time, used to bound windows).
 struct ZipMap {
     base: usize,
+    size: u64,
 }
 
 /// A synthetic open: absolute window start (map base + entry offset), length,
@@ -46,59 +49,93 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Map `container_nt` once (cached), returning its base address.
-fn ensure_mapped(container_nt: &str) -> Option<usize> {
-    let mut maps = ZIP_MAPS.lock().ok()?;
-    if let Some(m) = maps.get(container_nt) {
-        return Some(m.base);
+/// Open + whole-file-map `win` without holding any lock. Returns the mapped
+/// base address and the container's byte size, or `None` on any failure.
+///
+/// SAFETY: standard read-only open + whole-file mapping; handles closed on
+/// failure. The view outlives the process (never unmapped) once installed —
+/// callers that lose the insert race are responsible for unmapping their
+/// duplicate view via `UnmapViewOfFile`.
+unsafe fn map_container(win: &str) -> Option<(usize, u64)> {
+    let path = wide(win);
+    let file = CreateFileW(
+        path.as_ptr(),
+        0x8000_0000, // GENERIC_READ
+        FILE_SHARE_READ,
+        core::ptr::null(),
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        core::ptr::null_mut(),
+    );
+    if file == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let mut size: i64 = 0;
+    if GetFileSizeEx(file, &mut size) == 0 || size < 0 {
+        CloseHandle(file);
+        return None;
+    }
+    let mapping = CreateFileMappingW(
+        file,
+        core::ptr::null(),
+        PAGE_READONLY,
+        0,
+        0, // whole file
+        core::ptr::null(),
+    );
+    if mapping.is_null() {
+        CloseHandle(file);
+        return None;
+    }
+    let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    // The section keeps the pages alive while mapped; we can drop the file
+    // and mapping handles but keep them for clarity — closing the file is
+    // safe once the mapping exists. Keep the mapping handle open.
+    CloseHandle(file);
+    if view.Value.is_null() {
+        CloseHandle(mapping);
+        return None;
+    }
+    Some((view.Value as usize, size as u64))
+}
+
+/// Map `container_nt` once (cached), returning its base address and byte
+/// size. The `ZIP_MAPS` lock is never held across the mapping syscalls:
+/// `CreateFileW` funnels through the process's hooked `NtCreateFile`, so
+/// holding the lock across it would be a reentrant deadlock.
+fn ensure_mapped(container_nt: &str) -> Option<(usize, u64)> {
+    // Fast path: already mapped.
+    {
+        let maps = ZIP_MAPS.lock().ok()?;
+        if let Some(m) = maps.get(container_nt) {
+            return Some((m.base, m.size));
+        }
     }
     let win = to_win32(container_nt);
-    // SAFETY: standard read-only open + whole-file mapping; handles closed on
-    // failure. The view outlives the process (never unmapped).
-    unsafe {
-        let path = wide(&win);
-        let file = CreateFileW(
-            path.as_ptr(),
-            0x8000_0000, // GENERIC_READ
-            FILE_SHARE_READ,
-            core::ptr::null(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            core::ptr::null_mut(),
-        );
-        if file == INVALID_HANDLE_VALUE {
-            return None;
+    // SAFETY: no lock held here; see `map_container`.
+    let (base, size) = unsafe { map_container(&win) }?;
+    let mut maps = ZIP_MAPS.lock().ok()?;
+    if let Some(m) = maps.get(container_nt) {
+        // Another thread won the race and already inserted this container;
+        // release our duplicate view and use the existing one.
+        // SAFETY: `base` is a view we just mapped and haven't shared with
+        // anyone else, so unmapping it here is sound.
+        unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: base as *mut core::ffi::c_void });
         }
-        let mapping = CreateFileMappingW(
-            file,
-            core::ptr::null(),
-            PAGE_READONLY,
-            0,
-            0, // whole file
-            core::ptr::null(),
-        );
-        if mapping.is_null() {
-            CloseHandle(file);
-            return None;
-        }
-        let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
-        // The section keeps the pages alive while mapped; we can drop the file
-        // and mapping handles but keep them for clarity — closing the file is
-        // safe once the mapping exists. Keep the mapping handle open.
-        CloseHandle(file);
-        if view.Value.is_null() {
-            CloseHandle(mapping);
-            return None;
-        }
-        let base = view.Value as usize;
-        maps.insert(container_nt.to_string(), ZipMap { base });
-        Some(base)
+        return Some((m.base, m.size));
     }
+    maps.insert(container_nt.to_string(), ZipMap { base, size });
+    Some((base, size))
 }
 
 /// Register a synthetic open over `[offset, offset+length)` of `container_nt`.
 pub fn open_synth(container_nt: &str, offset: u64, length: u64) -> Option<isize> {
-    let base = ensure_mapped(container_nt)?;
+    let (base, file_size) = ensure_mapped(container_nt)?;
+    let end = offset.checked_add(length)?;
+    if end > file_size {
+        return None;
+    }
     let window = base.checked_add(offset as usize)?;
     let mut slot = NEXT_SLOT.lock().ok()?;
     let handle = SYNTH_TAG | (*slot << 3);
@@ -187,6 +224,22 @@ mod tests {
         assert_eq!(&bytes2, b"EF"); // clamped to the 5-byte window
         let (_, _, eof2) = read(h, 1, None).unwrap();
         assert!(eof2);
+        assert!(close(h));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_a_window_past_the_container_end() {
+        let dir = std::env::temp_dir().join(format!("vfs-zipserve-oob-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("small.bin");
+        std::fs::write(&path, b"0123456789").unwrap(); // 10 bytes
+        let nt = format!(r"\??\{}", path.to_string_lossy());
+        // A window that runs past EOF must be rejected, not served.
+        assert!(open_synth(&nt, 5, 100).is_none());
+        // A window fully inside the file still works.
+        let h = open_synth(&nt, 5, 5).expect("in-bounds window");
+        assert_eq!(size(h), Some(5));
         assert!(close(h));
         let _ = std::fs::remove_dir_all(&dir);
     }
