@@ -1,18 +1,9 @@
 //! Cross-process acceptance: build a managed VFS layout, launch the acceptance
 //! exerciser injected with the shim, and assert every feature check passes.
+mod common;
+
 use std::time::Duration;
 use vfs_inject::{run_target_with_shim, RunConfig};
-
-fn locate_dll() -> String {
-    let exe = std::env::current_exe().unwrap();
-    let dir = exe.parent().unwrap().to_path_buf();
-    for cand in [dir.join("vfs_shim_dll.dll"), dir.parent().unwrap().join("vfs_shim_dll.dll")] {
-        if cand.exists() {
-            return cand.to_str().unwrap().to_string();
-        }
-    }
-    panic!("vfs_shim_dll.dll not found near {dir:?}");
-}
 
 #[test]
 fn injected_shim_passes_full_acceptance_suite() {
@@ -82,7 +73,7 @@ fn injected_shim_passes_full_acceptance_suite() {
     let _ = std::fs::remove_file(&report_path);
 
     let exerciser = env!("CARGO_BIN_EXE_vfs-acceptance").to_string();
-    let dll = locate_dll();
+    let (dll, payload) = common::locate_shim_and_payload();
 
     let exit = run_target_with_shim(RunConfig {
         target_exe: exerciser,
@@ -91,6 +82,8 @@ fn injected_shim_passes_full_acceptance_suite() {
         config_path: config_path.to_str().unwrap().to_string(),
         ready_path: ready_path.to_str().unwrap().to_string(),
         ready_timeout: Duration::from_secs(15),
+        payload_path: payload,
+        preinit_redirects: vec![],
     })
     .expect("run_target_with_shim");
 

@@ -439,6 +439,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vfs-fixture-staticimp"
+version = "0.1.0"
+dependencies = [
+ "vfs-fixture-vproxy",
+]
+
+[[package]]
+name = "vfs-fixture-vproxy"
+version = "0.1.0"
+
+[[package]]
 name = "vfs-inject"
 version = "0.1.0"
 dependencies = [
@@ -451,6 +462,10 @@ dependencies = [
 
 [[package]]
 name = "vfs-ipc"
+version = "0.1.0"
+
+[[package]]
+name = "vfs-payload"
 version = "0.1.0"
 
 [[package]]
@@ -483,6 +498,7 @@ version = "0.1.0"
 dependencies = [
  "retour",
  "vfs-core",
+ "vfs-inject",
  "vfs-redirect",
  "vfs-shared",
  "windows-sys 0.59.0",

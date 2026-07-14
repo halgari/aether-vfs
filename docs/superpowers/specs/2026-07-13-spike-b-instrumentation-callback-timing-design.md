@@ -1,13 +1,18 @@
 # Spike B — Instrumentation-Callback Timing — Design Spec
 
-**Status:** Approved-to-proceed. **Type:** throwaway spike, scratchpad-only, not
-a workspace crate.
+**Status: SHELVED.** Instrumentation-callback (`NtSetInformationProcess` class
+40) is undocumented and not the production path. Pre-init injection uses
+**reflective-map + RIP-redirect** instead — see
+`docs/superpowers/specs/2026-07-14-preinit-injection-design.md`. Code under
+`scratchpad/spike-b/` is retained as evidence only; do not extend it.
+
+**Type:** throwaway spike, scratchpad-only, not a workspace crate.
 **Date:** 2026-07-13
 **Context:** [[vfs-nostd-payload-recipe]] left two candidate pre-init vehicles
 for running `shim_install` before the target's own static PE imports (the
 game EXE's d3d/dxgi imports) get snapped by the loader: Task A
 (reflective-map + RIP-redirect) and Task B (process instrumentation
-callback). This spike tests **Task B only**.
+callback). This spike tested **Task B only** and is now shelved.
 
 ---
 

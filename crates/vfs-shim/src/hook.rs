@@ -17,7 +17,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::engine::Engine;
-use crate::inject::{inject_dll, self_dll_path, wait_ready};
+use crate::inject::{inject_child, re_suspend, self_dll_path};
 use crate::ntdef::{
     FileBasicInformation, FileNetworkOpenInformation, NtCloseFn, NtCreateFileFn, NtOpenFileFn,
     NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryFullAttributesFileFn,
@@ -115,18 +115,65 @@ unsafe fn make_detour(
     RawDetour::new(proc as *const (), hookfn).map_err(|_| InstallError::Detour)
 }
 
-/// Install all read-path detours backed by `engine`. Idempotent-guarded.
+/// Install all detours backed by `engine` (in-process / no early payload).
+/// Idempotent-guarded. Patches the four path/attr stubs itself.
 pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
     ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
+    // SAFETY: ntdll lookup + detour install; each hook matches its ABI.
+    unsafe { install_all_detours(true) }
+}
 
-    // SAFETY: standard ntdll lookup + detour install; each hook matches its
-    // function's ABI; each trampoline is stored before any detour is enabled.
+/// Dual-layer install: early payload already owns open/create/qattr/qfull.
+/// Wire trampolines to the early Config's tramp buffers, publish secondary
+/// dispatch pointers into that Config, and detour only the remaining stubs.
+///
+/// `payload_cfg` is the reflectively-mapped early Config in this process.
+pub fn install_late(
+    engine: Engine,
+    payload_cfg: *mut crate::payload_abi::PayloadConfig,
+) -> Result<HookGuard, InstallError> {
+    if payload_cfg.is_null() {
+        return Err(InstallError::Detour);
+    }
+    ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
+
+    // SAFETY: cfg is the live early Config in this process; tramp addresses
+    // are RWX pages the injector allocated; secondary pointers are our hooks.
     unsafe {
-        let ntdll = GetModuleHandleA(b"ntdll.dll\0".as_ptr());
-        if ntdll.is_null() {
-            return Err(InstallError::NtdllMissing);
-        }
+        let cfg = &mut *payload_cfg;
+        // Call originals via the early payload's trampolines (real ntdll tails).
+        TRAMP_CREATE = Some(core::mem::transmute::<usize, NtCreateFileFn>(cfg.create_tramp));
+        TRAMP_OPEN = Some(core::mem::transmute::<usize, NtOpenFileFn>(cfg.open_tramp));
+        TRAMP_QATTR =
+            Some(core::mem::transmute::<usize, NtQueryAttributesFileFn>(cfg.qattr_tramp));
+        TRAMP_QFULL =
+            Some(core::mem::transmute::<usize, NtQueryFullAttributesFileFn>(cfg.qfull_tramp));
 
+        // Publish secondary last-ish: hooks become Engine-backed for non-table paths.
+        core::ptr::write_volatile(
+            &mut cfg.secondary_create,
+            create_hook as *const () as usize,
+        );
+        core::ptr::write_volatile(&mut cfg.secondary_open, open_hook as *const () as usize);
+        core::ptr::write_volatile(&mut cfg.secondary_qattr, qattr_hook as *const () as usize);
+        core::ptr::write_volatile(&mut cfg.secondary_qfull, qfull_hook as *const () as usize);
+
+        // Do NOT patch the four early-owned stubs.
+        install_all_detours(false)
+    }
+}
+
+/// `patch_early_owned`: when true, also detour the four path/attr stubs
+/// (standalone install). When false, only remainder detours (dual-layer).
+unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, InstallError> {
+    let ntdll = GetModuleHandleA(b"ntdll.dll\0".as_ptr());
+    if ntdll.is_null() {
+        return Err(InstallError::NtdllMissing);
+    }
+
+    let mut detours: Vec<RawDetour> = Vec::new();
+
+    if patch_early_owned {
         let d_create = make_detour(ntdll, b"NtCreateFile\0", create_hook as *const ())?;
         TRAMP_CREATE = Some(core::mem::transmute::<*const (), NtCreateFileFn>(
             d_create.trampoline() as *const (),
@@ -144,64 +191,57 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
         TRAMP_OPEN = Some(core::mem::transmute::<*const (), NtOpenFileFn>(
             d_open.trampoline() as *const (),
         ));
-        let d_qdirex =
-            make_detour(ntdll, b"NtQueryDirectoryFileEx\0", qdirex_hook as *const ())?;
-        TRAMP_QDIREX = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileExFn>(
-            d_qdirex.trampoline() as *const (),
-        ));
-        let d_close = make_detour(ntdll, b"NtClose\0", close_hook as *const ())?;
-        TRAMP_CLOSE = Some(core::mem::transmute::<*const (), NtCloseFn>(
-            d_close.trampoline() as *const (),
-        ));
-        let d_qif =
-            make_detour(ntdll, b"NtQueryInformationFile\0", qif_hook as *const ())?;
-        TRAMP_QIF = Some(core::mem::transmute::<*const (), NtQueryInformationFileFn>(
-            d_qif.trampoline() as *const (),
-        ));
-        let d_setinfo =
-            make_detour(ntdll, b"NtSetInformationFile\0", setinfo_hook as *const ())?;
-        TRAMP_SETINFO = Some(core::mem::transmute::<*const (), NtSetInformationFileFn>(
-            d_setinfo.trampoline() as *const (),
-        ));
-
         d_create.enable().map_err(|_| InstallError::Detour)?;
         d_qattr.enable().map_err(|_| InstallError::Detour)?;
         d_qfull.enable().map_err(|_| InstallError::Detour)?;
         d_open.enable().map_err(|_| InstallError::Detour)?;
-        d_qdirex.enable().map_err(|_| InstallError::Detour)?;
-        d_close.enable().map_err(|_| InstallError::Detour)?;
-        d_qif.enable().map_err(|_| InstallError::Detour)?;
-        d_setinfo.enable().map_err(|_| InstallError::Detour)?;
+        detours.extend([d_create, d_qattr, d_qfull, d_open]);
+    }
 
-        let mut detours =
-            vec![d_create, d_qattr, d_qfull, d_open, d_qdirex, d_close, d_qif, d_setinfo];
+    let d_qdirex = make_detour(ntdll, b"NtQueryDirectoryFileEx\0", qdirex_hook as *const ())?;
+    TRAMP_QDIREX = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileExFn>(
+        d_qdirex.trampoline() as *const (),
+    ));
+    let d_close = make_detour(ntdll, b"NtClose\0", close_hook as *const ())?;
+    TRAMP_CLOSE = Some(core::mem::transmute::<*const (), NtCloseFn>(
+        d_close.trampoline() as *const (),
+    ));
+    let d_qif = make_detour(ntdll, b"NtQueryInformationFile\0", qif_hook as *const ())?;
+    TRAMP_QIF = Some(core::mem::transmute::<*const (), NtQueryInformationFileFn>(
+        d_qif.trampoline() as *const (),
+    ));
+    let d_setinfo = make_detour(ntdll, b"NtSetInformationFile\0", setinfo_hook as *const ())?;
+    TRAMP_SETINFO = Some(core::mem::transmute::<*const (), NtSetInformationFileFn>(
+        d_setinfo.trampoline() as *const (),
+    ));
 
-        // Best-effort child-process propagation: hook CreateProcessInternalW so
-        // spawned children get the shim too. Never fails install — if our own
-        // DLL path or the kernelbase export can't be resolved (e.g. in-process
-        // tests where "self" is the test exe, not a DLL), skip it silently.
-        if let Some(dll) = self_dll_path() {
-            let _ = SELF_DLL.set(dll);
-            let mut kb = GetModuleHandleA(b"kernelbase.dll\0".as_ptr());
-            if kb.is_null() {
-                kb = GetModuleHandleA(b"kernel32.dll\0".as_ptr());
-            }
-            if !kb.is_null() {
-                if let Ok(d_cpiw) =
-                    make_detour(kb, b"CreateProcessInternalW\0", cpiw_hook as *const ())
-                {
-                    TRAMP_CPIW = Some(core::mem::transmute::<*const (), CreateProcessInternalWFn>(
-                        d_cpiw.trampoline() as *const (),
-                    ));
-                    if d_cpiw.enable().is_ok() {
-                        detours.push(d_cpiw);
-                    }
+    d_qdirex.enable().map_err(|_| InstallError::Detour)?;
+    d_close.enable().map_err(|_| InstallError::Detour)?;
+    d_qif.enable().map_err(|_| InstallError::Detour)?;
+    d_setinfo.enable().map_err(|_| InstallError::Detour)?;
+    detours.extend([d_qdirex, d_close, d_qif, d_setinfo]);
+
+    // Best-effort child-process propagation.
+    if let Some(dll) = self_dll_path() {
+        let _ = SELF_DLL.set(dll);
+        let mut kb = GetModuleHandleA(b"kernelbase.dll\0".as_ptr());
+        if kb.is_null() {
+            kb = GetModuleHandleA(b"kernel32.dll\0".as_ptr());
+        }
+        if !kb.is_null() {
+            if let Ok(d_cpiw) = make_detour(kb, b"CreateProcessInternalW\0", cpiw_hook as *const ())
+            {
+                TRAMP_CPIW = Some(core::mem::transmute::<*const (), CreateProcessInternalWFn>(
+                    d_cpiw.trampoline() as *const (),
+                ));
+                if d_cpiw.enable().is_ok() {
+                    detours.push(d_cpiw);
                 }
             }
         }
-
-        Ok(HookGuard { _detours: detours })
     }
+
+    Ok(HookGuard { _detours: detours })
 }
 
 /// Decode a fully-qualified ObjectName. `None` when ineligible (null/relative OA
@@ -592,10 +632,10 @@ unsafe extern "system" fn qif_hook(
     tramp(handle, iosb, info, length, class)
 }
 
-/// `CreateProcessInternalW` hook: force the child to start suspended, inject the
-/// shim, wait for its hooks to come up, then resume (unless the caller asked for
-/// a suspended child). Best-effort — a failed inject or timeout still resumes
-/// the child (unvirtualized rather than hung).
+/// `CreateProcessInternalW` hook: force the child to start suspended, dual-layer
+/// inject (early payload + full shim), wait for hooks, then resume (unless the
+/// caller asked for a suspended child). Best-effort — a failed inject or timeout
+/// still resumes the child (unvirtualized rather than hung).
 #[allow(clippy::too_many_arguments)]
 unsafe extern "system" fn cpiw_hook(
     token: HANDLE,
@@ -625,12 +665,35 @@ unsafe extern "system" fn cpiw_hook(
         let hprocess = (*pi).hProcess;
         let hthread = (*pi).hThread;
         if let Some(dll) = SELF_DLL.get() {
-            if inject_dll(hprocess, dll) {
-                // Give the child's shim a chance to install hooks before it runs.
-                wait_ready(pid, CHILD_READY_TIMEOUT_MS);
+            // Dual-layer resumes the primary for the spin-gate, then releases it
+            // into RtlUserThreadStart. If the caller wanted a suspended child,
+            // re-suspend after inject.
+            let _ = inject_child(hprocess, hthread, pid, dll, CHILD_READY_TIMEOUT_MS);
+            if caller_suspended {
+                re_suspend(hthread);
             }
-        }
-        if !caller_suspended {
+            // If dual-layer already left the primary running (normal case), do
+            // not ResumeThread again. inject_child dual-layer resumes internally;
+            // classic fallback leaves the thread suspended — resume if needed.
+            // Classic inject_dll does not resume; dual-layer ends with primary
+            // past the stub (running or about to run entry). For !caller_suspended
+            // after classic fallback we still need ResumeThread.
+            //
+            // inject_child dual-layer: primary was resumed for spin, then released
+            // — it is running. Classic fallback: primary still suspended.
+            // Heuristic: if dual-layer path ran, primary is not at the original
+            // suspended start. Simplest correct behavior matching prior API:
+            // always ResumeThread when !caller_suspended (idempotent if already
+            // running — ResumeThread on a running thread is fine / increments
+            // suspend count carefully: if suspend count is 0, ResumeThread
+            // returns previous count 0 and does nothing harmful... actually
+            // ResumeThread when not suspended returns 0xFFFFFFFF? Docs: if
+            // suspend count is 0, returns previous suspend count of 0.
+            // Safe to call when already running.
+            if !caller_suspended {
+                ResumeThread(hthread);
+            }
+        } else if !caller_suspended {
             ResumeThread(hthread);
         }
     }

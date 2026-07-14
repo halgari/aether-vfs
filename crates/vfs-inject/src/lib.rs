@@ -1,20 +1,51 @@
 #![deny(unsafe_code)]
 
-//! Launch a target process, inject the shim DLL, and run it with file-open
-//! redirection active.
+//! Launch a target process with VFS injection.
+//!
+//! - [`run_target_with_shim`] — dual-layer: pre-init early payload + full shim
+//!   (static imports + full Engine) via spin-gate handoff.
+//! - [`run_target_with_preinit`] — early payload only (static-import fixture).
 
 use std::time::Duration;
 
+mod artifacts;
 mod inject;
+mod map;
+mod payload_cfg;
+mod static_imports;
+mod stub;
 
 /// Parameters for [`run_target_with_shim`].
 pub struct RunConfig {
     pub target_exe: String,
     pub args: Vec<String>,
+    /// Full std shim DLL (`vfs_shim_dll.dll`).
     pub dll_path: String,
     pub config_path: String,
     pub ready_path: String,
     pub ready_timeout: Duration,
+    /// Zero-import early payload DLL (`vfs_payload.dll`).
+    pub payload_path: String,
+    /// Early redirect-table entries (static-import DLLs); may be empty.
+    pub preinit_redirects: Vec<PreinitRedirect>,
+}
+
+/// One early-payload redirect: object names ending with `suffix` (final path
+/// component) open the backing file at `backing_nt` (absolute NT path `\??\...`).
+pub struct PreinitRedirect {
+    pub suffix: String,
+    pub backing_nt: String,
+    pub backing_size: u64,
+}
+
+/// Parameters for [`run_target_with_preinit`].
+pub struct PreinitConfig {
+    pub target_exe: String,
+    pub args: Vec<String>,
+    /// Working directory for the child (app dir without the virtualized DLL).
+    pub current_dir: Option<String>,
+    pub payload_path: String,
+    pub redirects: Vec<PreinitRedirect>,
 }
 
 /// Failure points in launch + inject + run.
@@ -27,6 +58,16 @@ pub enum InjectError {
     Timeout,
     Wait,
     ExitCode,
+    Ntdll,
+    PayloadRead,
+    PeParse,
+    ThreadContext,
+    Config,
 }
 
-pub use inject::run_target_with_shim;
+pub use artifacts::{ensure_payload_beside_shim, find_near, resolve_payload_for_run};
+pub use inject::{
+    arm_preinit_payload, arm_preinit_payload_ex, inject_dll, load_static_imports_from_config,
+    merge_preinit_redirects, run_target_with_preinit, run_target_with_shim, PreinitArm,
+};
+pub use static_imports::StaticImport as ConfigStaticImport;

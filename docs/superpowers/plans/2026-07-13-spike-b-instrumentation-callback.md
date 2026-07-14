@@ -1,5 +1,11 @@
 # Spike B — Instrumentation-Callback Timing — Implementation Plan
 
+**Status: SHELVED.** Do not continue this plan. Production pre-init injection is
+reflective-map + RIP-redirect — see
+`docs/superpowers/plans/2026-07-14-preinit-injection.md` and the design
+`docs/superpowers/specs/2026-07-14-preinit-injection-design.md`.
+`scratchpad/spike-b/` is retained as evidence only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Answer one binary question — does a process instrumentation callback

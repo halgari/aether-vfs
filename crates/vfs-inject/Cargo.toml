@@ -11,6 +11,8 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Memory",
   "Win32_System_Diagnostics_Debug",
   "Win32_System_LibraryLoader",
+  "Win32_System_SystemServices",
+  "Win32_System_Kernel",
   "Win32_Storage_FileSystem",
 ] }
 
@@ -19,6 +21,8 @@ vfs-shim = { path = "../vfs-shim" }
 vfs-shim-dll = { path = "../vfs-shim-dll" }
 vfs-core = { path = "../vfs-core" }
 vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
+# PE fixtures (payload, vproxy, staticimp) are built by build.rs via a nested
+# `cargo build -p …` (cannot be normal deps: vfs-payload is no_std/panic=abort).
 
 [[bin]]
 name = "vfs-probe"
@@ -27,3 +31,7 @@ path = "src/bin/vfs-probe.rs"
 [[bin]]
 name = "vfs-acceptance"
 path = "src/bin/vfs-acceptance.rs"
+
+[[bin]]
+name = "vfs-spawn-child"
+path = "src/bin/vfs-spawn-child.rs"

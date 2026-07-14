@@ -1,0 +1,10 @@
+[package]
+name = "vfs-fixture-vproxy"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# cdylib = the PE image / import lib the staticimp fixture links; rlib keeps
+# cargo happy when other crates list this package as a path dependency.
+crate-type = ["cdylib", "rlib"]
+name = "vproxy"
