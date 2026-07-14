@@ -11,6 +11,7 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Memory",
   "Win32_System_Diagnostics_Debug",
   "Win32_System_LibraryLoader",
+  "Win32_Storage_FileSystem",
 ] }
 
 [dev-dependencies]
@@ -22,3 +23,7 @@ vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
 [[bin]]
 name = "vfs-probe"
 path = "src/bin/vfs-probe.rs"
+
+[[bin]]
+name = "vfs-acceptance"
+path = "src/bin/vfs-acceptance.rs"
