@@ -794,7 +794,14 @@ unsafe extern "system" fn read_hook(
                 }
                 return status;
             }
-            None => return STATUS_UNSUCCESSFUL,
+            None => {
+                if !iosb.is_null() {
+                    let p = iosb as *mut u8;
+                    core::ptr::write_unaligned(p as *mut u32, STATUS_UNSUCCESSFUL as u32);
+                    core::ptr::write_unaligned(p.add(8) as *mut usize, 0usize);
+                }
+                return STATUS_UNSUCCESSFUL;
+            }
         }
     }
     tramp(handle, event, apc, apc_ctx, iosb, buffer, length, byte_offset, key)

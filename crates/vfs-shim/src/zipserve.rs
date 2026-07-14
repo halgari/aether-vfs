@@ -89,13 +89,16 @@ unsafe fn map_container(win: &str) -> Option<(usize, u64)> {
     }
     let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
     // The section keeps the pages alive while mapped; we can drop the file
-    // and mapping handles but keep them for clarity — closing the file is
-    // safe once the mapping exists. Keep the mapping handle open.
+    // and mapping handles once the view exists — closing them is safe once
+    // the mapping/view exist.
     CloseHandle(file);
     if view.Value.is_null() {
         CloseHandle(mapping);
         return None;
     }
+    // The view now holds the section's pages alive; the mapping handle is no
+    // longer needed and would otherwise leak one handle per mapped container.
+    CloseHandle(mapping);
     Some((view.Value as usize, size as u64))
 }
 
