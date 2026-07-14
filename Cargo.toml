@@ -11,6 +11,7 @@ members = [
   "crates/vfs-shim",
   "crates/vfs-shim-dll",
   "crates/vfs-win",
+  "crates/vfs-zip",
   "crates/vfs-fixture-vproxy",
   "crates/vfs-fixture-staticimp",
 ]
