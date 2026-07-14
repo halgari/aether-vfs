@@ -35,6 +35,10 @@ fn injected_shim_passes_full_acceptance_suite() {
     let override_backing = mods.join("override_backing.dat");
     std::fs::write(&override_backing, b"MOD-OVERRIDE-BYTES").unwrap();
 
+    // A real, loadable system DLL stands in for a mod plugin DLL.
+    let plugin_backing = r"C:\Windows\System32\version.dll";
+    let plugin_size = std::fs::metadata(plugin_backing).unwrap().len();
+
     let snapshot = {
         use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
         let e = |vpath: &str, kind: EntryKind, source: &str, size: u64| InputEntry {
@@ -51,6 +55,7 @@ fn injected_shim_passes_full_acceptance_suite() {
                 e("override.txt", EntryKind::File, override_backing.to_str().unwrap(), 18),
                 e("deleted.txt", EntryKind::Tombstone, "", 0),
                 e("virtual_dir", EntryKind::Dir, "", 0),
+                e("plugin.dll", EntryKind::File, plugin_backing, plugin_size),
             ],
         }])
         .unwrap();
@@ -87,5 +92,5 @@ fn injected_shim_passes_full_acceptance_suite() {
         assert!(line.ends_with("=PASS"), "check failed: {line}\nfull report:\n{report}");
     }
     // Guard against silently skipping checks.
-    assert_eq!(report.lines().count(), 9, "expected 9 checks:\n{report}");
+    assert_eq!(report.lines().count(), 10, "expected 10 checks:\n{report}");
 }

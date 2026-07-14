@@ -18,6 +18,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetFileAttributesW, GetFinalPathNameByHandleW, FILE_ATTRIBUTE_DIRECTORY,
     INVALID_FILE_ATTRIBUTES,
 };
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -155,6 +156,25 @@ fn main() {
         let lp = p.to_lowercase();
         if !lp.contains("mod_added.txt") {
             return Err(format!("final path lost virtual name: {p}"));
+        }
+        Ok(())
+    });
+
+    // 10. Load a VIRTUAL DLL (mod plugin) -> maps from the backing image and its
+    // export resolves. Proves DLL/image loading is virtualized (open-redirect +
+    // attr hooks; the loader builds the section from the redirected handle).
+    check("dll_load", &mut out, &mut all_ok, || {
+        let dll = root.join("plugin.dll");
+        let wide: Vec<u16> =
+            dll.to_str().unwrap().encode_utf16().chain(std::iter::once(0)).collect();
+        let module = unsafe { LoadLibraryW(wide.as_ptr()) };
+        if module.is_null() {
+            return Err("LoadLibraryW(virtual plugin.dll) returned null".into());
+        }
+        // The backing is version.dll; this export must be present.
+        let export = b"GetFileVersionInfoSizeW\0";
+        if unsafe { GetProcAddress(module, export.as_ptr()) }.is_none() {
+            return Err("export GetFileVersionInfoSizeW not found in loaded module".into());
         }
         Ok(())
     });
