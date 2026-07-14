@@ -1,8 +1,18 @@
+mod datapage;
+mod stub;
+
+use core::ffi::c_void;
 use std::env;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
 
 use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    FlushInstructionCache, ReadProcessMemory, WriteProcessMemory,
+};
+use windows_sys::Win32::System::Memory::{
+    VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
+};
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, ResumeThread, WaitForSingleObject, CREATE_SUSPENDED,
     INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
@@ -45,6 +55,62 @@ fn main() {
         );
         assert!(ok != 0, "CreateProcessW failed: {}", std::io::Error::last_os_error());
         println!("target created suspended, pid={}", pi.dwProcessId);
+
+        // --- Task 3: write the stub + data page into the suspended target ---
+        let mut local_stub = stub::stub_bytes();
+        let stub_len = local_stub.len();
+        println!("extracted stub: {stub_len} bytes");
+
+        let data_remote = VirtualAllocEx(
+            pi.hProcess,
+            core::ptr::null(),
+            datapage::DATA_PAGE_SIZE,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        );
+        assert!(!data_remote.is_null(), "VirtualAllocEx(data page) failed");
+
+        stub::patch_data_page_address(&mut local_stub, data_remote as u64);
+
+        let stub_remote = VirtualAllocEx(
+            pi.hProcess,
+            core::ptr::null(),
+            stub_len,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE,
+        );
+        assert!(!stub_remote.is_null(), "VirtualAllocEx(stub page) failed");
+
+        let mut written = 0usize;
+        let ok = WriteProcessMemory(
+            pi.hProcess,
+            stub_remote,
+            local_stub.as_ptr() as *const c_void,
+            stub_len,
+            &mut written,
+        );
+        assert!(ok != 0 && written == stub_len, "WriteProcessMemory(stub) failed");
+
+        // Required after writing fresh code into an executable page: the CPU
+        // isn't guaranteed to see it without an explicit cache flush.
+        FlushInstructionCache(pi.hProcess, stub_remote, stub_len);
+
+        // Verify: read the stub back and diff against the local (patched) copy.
+        let mut readback = vec![0u8; stub_len];
+        let mut read_n = 0usize;
+        let ok = ReadProcessMemory(
+            pi.hProcess,
+            stub_remote,
+            readback.as_mut_ptr() as *mut c_void,
+            stub_len,
+            &mut read_n,
+        );
+        assert!(ok != 0 && read_n == stub_len, "ReadProcessMemory(stub verify) failed");
+        assert_eq!(readback, local_stub, "stub bytes in target do not match what was written");
+        println!(
+            "stub written and verified at remote addr {:#x}, data page at {:#x}",
+            stub_remote as usize, data_remote as usize
+        );
 
         let resumed = ResumeThread(pi.hThread);
         assert!(resumed != u32::MAX, "ResumeThread failed: {}", std::io::Error::last_os_error());
