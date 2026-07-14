@@ -7,7 +7,8 @@ use std::sync::{Mutex, OnceLock};
 
 use retour::RawDetour;
 use vfs_redirect::{
-    parse_full_dir_info, write_dir_info, AttrDecision, Decision, DirInfoClass, DirItem, DirStatus,
+    nt_to_volume_relative, parse_full_dir_info, write_dir_info, write_file_name_info, AttrDecision,
+    Decision, DirInfoClass, DirItem, DirStatus,
 };
 use windows_sys::Win32::Foundation::{HANDLE, HMODULE, NTSTATUS};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
@@ -16,8 +17,9 @@ use crate::engine::Engine;
 use crate::ntdef::{
     FileBasicInformation, FileNetworkOpenInformation, NtCloseFn, NtCreateFileFn, NtOpenFileFn,
     NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryFullAttributesFileFn,
-    ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-    SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES,
+    NtQueryInformationFileFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILE_NORMALIZED_NAME_INFORMATION, SL_RESTART_SCAN,
+    SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 
@@ -38,6 +40,7 @@ static mut TRAMP_QFULL: Option<NtQueryFullAttributesFileFn> = None;
 static mut TRAMP_OPEN: Option<NtOpenFileFn> = None;
 static mut TRAMP_QDIREX: Option<NtQueryDirectoryFileExFn> = None;
 static mut TRAMP_CLOSE: Option<NtCloseFn> = None;
+static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
 
 /// Per-handle enumeration cursor over a merged directory listing.
 struct EnumState {
@@ -56,6 +59,9 @@ struct DirTracked {
 /// needs no lazy init. Populated by the `NtCreateFile` hook, drained by
 /// `NtClose`.
 static DIR_TABLE: Mutex<BTreeMap<isize, DirTracked>> = Mutex::new(BTreeMap::new());
+
+/// Redirected-file handle -> virtual volume-relative path (identity spoof).
+static IDENTITY_TABLE: Mutex<BTreeMap<isize, String>> = Mutex::new(BTreeMap::new());
 
 /// Keeps the detours alive; dropping it disables the hooks.
 pub struct HookGuard {
@@ -110,6 +116,11 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
         TRAMP_CLOSE = Some(core::mem::transmute::<*const (), NtCloseFn>(
             d_close.trampoline() as *const (),
         ));
+        let d_qif =
+            make_detour(ntdll, b"NtQueryInformationFile\0", qif_hook as *const ())?;
+        TRAMP_QIF = Some(core::mem::transmute::<*const (), NtQueryInformationFileFn>(
+            d_qif.trampoline() as *const (),
+        ));
 
         d_create.enable().map_err(|_| InstallError::Detour)?;
         d_qattr.enable().map_err(|_| InstallError::Detour)?;
@@ -117,8 +128,11 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
         d_open.enable().map_err(|_| InstallError::Detour)?;
         d_qdirex.enable().map_err(|_| InstallError::Detour)?;
         d_close.enable().map_err(|_| InstallError::Detour)?;
+        d_qif.enable().map_err(|_| InstallError::Detour)?;
 
-        Ok(HookGuard { _detours: vec![d_create, d_qattr, d_qfull, d_open, d_qdirex, d_close] })
+        Ok(HookGuard {
+            _detours: vec![d_create, d_qattr, d_qfull, d_open, d_qdirex, d_close, d_qif],
+        })
     }
 }
 
@@ -175,6 +189,25 @@ unsafe fn tag_under_root(
     }
 }
 
+/// Record a redirected handle's virtual identity: after a successful redirected
+/// open, map the handle to the volume-relative form of the ORIGINAL virtual path
+/// (`oa` still holds it — only a local `new_oa` was rewritten). Reclaimed by
+/// `NtClose`. Enables the `NtQueryInformationFile` class-48 spoof.
+unsafe fn record_identity(
+    file_handle: *mut HANDLE,
+    oa: *const ObjectAttributes,
+    status: NTSTATUS,
+) {
+    if status < 0 || file_handle.is_null() {
+        return;
+    }
+    if let Some(path) = path_of(oa) {
+        if let Ok(mut t) = IDENTITY_TABLE.lock() {
+            t.insert(*file_handle as isize, nt_to_volume_relative(&path));
+        }
+    }
+}
+
 unsafe extern "system" fn create_hook(
     file_handle: *mut HANDLE,
     access: u32,
@@ -214,6 +247,7 @@ unsafe extern "system" fn create_hook(
                 file_handle, access, &new_oa, iosb, alloc, attrs, share, disp, opts, ea, ealen,
             );
             drop(wbuf);
+            record_identity(file_handle, oa, status);
             status
         }
         Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
@@ -261,6 +295,7 @@ unsafe extern "system" fn open_hook(
             };
             let status = tramp(file_handle, access, &new_oa, iosb, share, opts);
             drop(wbuf);
+            record_identity(file_handle, oa, status);
             status
         }
         Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
@@ -344,7 +379,49 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
     if let Ok(mut table) = DIR_TABLE.lock() {
         table.remove(&(handle as isize));
     }
+    if let Ok(mut t) = IDENTITY_TABLE.lock() {
+        t.remove(&(handle as isize));
+    }
     tramp(handle)
+}
+
+/// `NtQueryInformationFile` hook. Spoofs only `FileNormalizedNameInformation`
+/// (class 48) on a redirected handle -> the virtual path, so
+/// `GetFinalPathNameByHandleW` reports where the mod file appears to live.
+/// Class 9 and everything else pass through (spoofing class 9 breaks
+/// `GetFinalPathNameByHandleW`).
+unsafe extern "system" fn qif_hook(
+    handle: HANDLE,
+    iosb: *mut c_void,
+    info: *mut c_void,
+    length: u32,
+    class: u32,
+) -> NTSTATUS {
+    let tramp = match TRAMP_QIF {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if class == FILE_NORMALIZED_NAME_INFORMATION && !info.is_null() {
+        let vpath = match IDENTITY_TABLE.lock() {
+            Ok(t) => t.get(&(handle as isize)).cloned(),
+            Err(_) => None,
+        };
+        if let Some(vpath) = vpath {
+            let buf = core::slice::from_raw_parts_mut(info as *mut u8, length as usize);
+            let r = write_file_name_info(&vpath, buf);
+            let status = match r.status {
+                DirStatus::Success => STATUS_SUCCESS,
+                _ => STATUS_BUFFER_OVERFLOW,
+            };
+            if !iosb.is_null() {
+                let p = iosb as *mut u8;
+                core::ptr::write_unaligned(p as *mut u32, status as u32);
+                core::ptr::write_unaligned(p.add(8) as *mut usize, r.bytes);
+            }
+            return status;
+        }
+    }
+    tramp(handle, iosb, info, length, class)
 }
 
 /// Extract a search wildcard from a `PUNICODE_STRING`. Null/empty/`*`/`*.*`

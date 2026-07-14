@@ -113,6 +113,19 @@ pub type NtOpenFileFn = unsafe extern "system" fn(
 /// `ntdll!NtClose`.
 pub type NtCloseFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
 
+/// `ntdll!NtQueryInformationFile`.
+pub type NtQueryInformationFileFn = unsafe extern "system" fn(
+    HANDLE,      // FileHandle
+    *mut c_void, // IoStatusBlock
+    *mut c_void, // FileInformation
+    u32,         // Length
+    u32,         // FileInformationClass
+) -> NTSTATUS;
+
+/// `FileNormalizedNameInformation` — the class `GetFinalPathNameByHandleW` uses
+/// as the authoritative path (spoof this; NOT class 9, which would break it).
+pub const FILE_NORMALIZED_NAME_INFORMATION: u32 = 48;
+
 /// `NtQueryDirectoryFileEx` QueryFlags.
 pub const SL_RESTART_SCAN: u32 = 0x01;
 pub const SL_RETURN_SINGLE_ENTRY: u32 = 0x02;

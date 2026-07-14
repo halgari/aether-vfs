@@ -380,6 +380,47 @@ pub fn parse_full_dir_info(buf: &[u8]) -> Vec<DirItem> {
     out
 }
 
+/// Strip a `\??\` / `\\?\` prefix and a leading `X:` drive, yielding the
+/// volume-relative path (`\...`, no drive) that `FILE_NAME_INFORMATION` carries.
+/// Idempotent on already-relative input.
+pub fn nt_to_volume_relative(nt_path: &str) -> String {
+    let s = nt_path
+        .strip_prefix(r"\??\")
+        .or_else(|| nt_path.strip_prefix(r"\\?\"))
+        .unwrap_or(nt_path);
+    let b = s.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        s[2..].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Result of marshalling a `FILE_NAME_INFORMATION` record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NameWriteResult {
+    pub bytes: usize,
+    pub status: DirStatus,
+}
+
+/// Marshal a `FILE_NAME_INFORMATION` / `FILE_NORMALIZED_NAME_INFORMATION`:
+/// `FileNameLength` (u32 bytes) @0, UTF-16LE `FileName` (no NUL) @4. On overflow
+/// writes only `FileNameLength` (documented behavior).
+pub fn write_file_name_info(name: &str, buf: &mut [u8]) -> NameWriteResult {
+    let name16: Vec<u16> = name.encode_utf16().collect();
+    let namelen = name16.len() * 2;
+    if buf.len() < 4 {
+        return NameWriteResult { bytes: 0, status: DirStatus::BufferOverflow };
+    }
+    buf[0..4].copy_from_slice(&(namelen as u32).to_le_bytes());
+    if buf.len() < 4 + namelen {
+        return NameWriteResult { bytes: 4, status: DirStatus::BufferOverflow };
+    }
+    let nb: Vec<u8> = name16.iter().flat_map(|u| u.to_le_bytes()).collect();
+    buf[4..4 + namelen].copy_from_slice(&nb);
+    NameWriteResult { bytes: 4 + namelen, status: DirStatus::Success }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -821,5 +862,36 @@ mod tests {
     fn parse_full_dir_empty_buffer_is_empty() {
         let buf = vec![0u8; 68];
         let _ = parse_full_dir_info(&buf); // must not panic
+    }
+
+    #[test]
+    fn volume_relative_strips_prefix_and_drive() {
+        assert_eq!(
+            nt_to_volume_relative(r"\??\C:\Games\Skyrim\Data\foo.esp"),
+            r"\Games\Skyrim\Data\foo.esp"
+        );
+        assert_eq!(nt_to_volume_relative(r"\\?\D:\Mods\x.esp"), r"\Mods\x.esp");
+        assert_eq!(nt_to_volume_relative(r"\Games\already.esp"), r"\Games\already.esp");
+    }
+
+    #[test]
+    fn write_file_name_info_round_trips() {
+        let mut buf = vec![0u8; 128];
+        let r = write_file_name_info(r"\Games\Skyrim\Data\foo.esp", &mut buf);
+        assert_eq!(r.status, DirStatus::Success);
+        let namelen = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+        assert_eq!(namelen, r"\Games\Skyrim\Data\foo.esp".encode_utf16().count() * 2);
+        let units: Vec<u16> =
+            buf[4..4 + namelen].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        assert_eq!(String::from_utf16_lossy(&units), r"\Games\Skyrim\Data\foo.esp");
+        assert_eq!(r.bytes, 4 + namelen);
+    }
+
+    #[test]
+    fn write_file_name_info_overflow_writes_length_only() {
+        let mut buf = vec![0u8; 6]; // room for u32 len but not the name
+        let r = write_file_name_info("abcdef", &mut buf);
+        assert_eq!(r.status, DirStatus::BufferOverflow);
+        assert_eq!(u32::from_le_bytes(buf[0..4].try_into().unwrap()), 12);
     }
 }
