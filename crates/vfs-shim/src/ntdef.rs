@@ -142,6 +142,12 @@ pub const FILE_DISPOSITION_INFORMATION_EX: u32 = 64;
 /// `FILE_DISPOSITION_DELETE` flag for the Ex form.
 pub const FILE_DISPOSITION_DELETE: u32 = 0x1;
 
+/// `FileRenameInformation` (class 10) / `FileRenameInformationEx` (class 65).
+/// Layout (x64): `[0] ReplaceIfExists/Flags`, `[8] RootDirectory (HANDLE)`,
+/// `[16] FileNameLength (ULONG)`, `[20] FileName (WCHAR[])`.
+pub const FILE_RENAME_INFORMATION: u32 = 10;
+pub const FILE_RENAME_INFORMATION_EX: u32 = 65;
+
 /// `NtQueryDirectoryFileEx` QueryFlags.
 pub const SL_RESTART_SCAN: u32 = 0x01;
 pub const SL_RETURN_SINGLE_ENTRY: u32 = 0x02;

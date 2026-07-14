@@ -245,6 +245,19 @@ fn main() {
         Ok(())
     });
 
+    // 15. Rename within the root -> destination has the content, source hidden.
+    check("write_rename", &mut out, &mut all_ok, || {
+        let src = root.join("rename_from.txt");
+        let dst = root.join("rename_to.txt");
+        std::fs::write(&src, b"RENAME-CONTENT").map_err(|e| format!("write src: {e}"))?;
+        std::fs::rename(&src, &dst).map_err(|e| format!("rename: {e}"))?;
+        if std::fs::read(&src).is_ok() {
+            return Err("source visible after rename".into());
+        }
+        let got = std::fs::read(&dst).map_err(|e| format!("read dst: {e}"))?;
+        expect_eq(&got, b"RENAME-CONTENT")
+    });
+
     std::fs::write(report, out.as_bytes()).expect("write report");
     std::process::exit(if all_ok { 0 } else { 1 });
 }

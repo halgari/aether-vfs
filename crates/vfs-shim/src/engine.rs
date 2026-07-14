@@ -147,17 +147,44 @@ impl Engine {
         self.map.remainder(nt_path)
     }
 
-    /// Whiteout `comps` in the overlay (mark as deleted). Returns whether an
-    /// overlay is configured to handle it; `false` means the caller should let
-    /// the real delete proceed (read-only VFS).
-    pub fn whiteout(&self, comps: &[String]) -> bool {
-        match &self.overlay {
-            Some(ov) => {
-                ov.whiteout(comps);
+    /// Whiteout `nt_path` in the overlay (mark as deleted). Returns whether an
+    /// overlay handled it; `false` means the caller should let the real delete
+    /// proceed (read-only VFS or path outside the root).
+    pub fn whiteout(&self, nt_path: &str) -> bool {
+        match (&self.overlay, self.map.remainder(nt_path)) {
+            (Some(ov), Some(comps)) if !comps.is_empty() => {
+                ov.whiteout(&comps);
                 true
             }
-            None => false,
+            _ => false,
         }
+    }
+
+    /// Rename `from_nt` to `to_nt` within the overlay: materialize the source if
+    /// needed, move it, and whiteout the old location. Returns whether it was
+    /// handled; `false` (no overlay, or either side not cleanly under root) means
+    /// the caller should let the real rename proceed.
+    pub fn rename(&self, from_nt: &str, to_nt: &str) -> bool {
+        let ov = match &self.overlay {
+            Some(o) => o,
+            None => return false,
+        };
+        let from = match self.map.remainder(from_nt) {
+            Some(c) if !c.is_empty() => c,
+            _ => return false,
+        };
+        let to = match self.map.remainder(to_nt) {
+            Some(c) if !c.is_empty() => c,
+            _ => return false,
+        };
+        ov.ensure_parent(&from);
+        if !ov.has_file(&from) {
+            if let Some(src) = self.materialize_source(from_nt) {
+                let _ = std::fs::copy(&src, ov.file_path(&from));
+            }
+        }
+        ov.rename(&from, &to);
+        true
     }
 
     /// Merge a directory's real on-disk entries with the snapshot's virtual

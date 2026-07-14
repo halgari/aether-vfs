@@ -95,6 +95,15 @@ impl Overlay {
         let _ = std::fs::write(self.whiteout_path(comps), b"");
     }
 
+    /// Move `from` to `to` within the overlay and whiteout the source location.
+    /// The caller ensures `from` is materialized in the overlay first.
+    pub fn rename(&self, from: &[String], to: &[String]) {
+        self.ensure_parent(to);
+        let _ = std::fs::rename(self.file_path(from), self.file_path(to));
+        self.clear_whiteout(to);
+        let _ = std::fs::write(self.whiteout_path(from), b"");
+    }
+
     /// Whether an overlay file exists for `comps`.
     pub fn has_file(&self, comps: &[String]) -> bool {
         self.file_path(comps).exists()

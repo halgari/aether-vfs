@@ -24,8 +24,9 @@ use crate::ntdef::{
     NtQueryInformationFileFn, NtSetInformationFileFn, ObjectAttributes, UnicodeString,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_DELETE,
     FILE_DISPOSITION_INFORMATION, FILE_DISPOSITION_INFORMATION_EX, FILE_NORMALIZED_NAME_INFORMATION,
-    SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES,
-    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX, SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY,
+    STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
+    STATUS_UNSUCCESSFUL,
 };
 
 /// Errors installing the hooks.
@@ -95,9 +96,9 @@ static DIR_TABLE: Mutex<BTreeMap<isize, DirTracked>> = Mutex::new(BTreeMap::new(
 /// Redirected-file handle -> virtual volume-relative path (identity spoof).
 static IDENTITY_TABLE: Mutex<BTreeMap<isize, String>> = Mutex::new(BTreeMap::new());
 
-/// Any under-root open's handle -> folded vpath components, so a later
-/// handle-based delete/rename (NtSetInformationFile) can act by vpath.
-static PATH_TABLE: Mutex<BTreeMap<isize, Vec<String>>> = Mutex::new(BTreeMap::new());
+/// Any under-root open's handle -> the NT path it was opened as, so a later
+/// handle-based delete/rename (NtSetInformationFile) can act by path.
+static PATH_TABLE: Mutex<BTreeMap<isize, String>> = Mutex::new(BTreeMap::new());
 
 /// Keeps the detours alive; dropping it disables the hooks.
 pub struct HookGuard {
@@ -284,12 +285,32 @@ unsafe fn record_path(file_handle: *mut HANDLE, oa: *const ObjectAttributes, sta
         return;
     }
     if let (Some(engine), Some(path)) = (ENGINE.get(), path_of(oa)) {
-        if let Some(comps) = engine.remainder(&path) {
+        if engine.is_under_root(&path) {
             if let Ok(mut t) = PATH_TABLE.lock() {
-                t.insert(*file_handle as isize, comps);
+                t.insert(*file_handle as isize, path);
             }
         }
     }
+}
+
+/// Parse the target path from a `FILE_RENAME_INFORMATION`(`_EX`) buffer. Only
+/// absolute targets (RootDirectory == NULL) are handled; otherwise `None`.
+unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Option<String> {
+    let len = length as usize;
+    if info.is_null() || len < 20 {
+        return None;
+    }
+    let b = info as *const u8;
+    let root_dir = core::ptr::read_unaligned(b.add(8) as *const usize);
+    if root_dir != 0 {
+        return None;
+    }
+    let namelen = core::ptr::read_unaligned(b.add(16) as *const u32) as usize;
+    if 20 + namelen > len {
+        return None;
+    }
+    let units = core::slice::from_raw_parts(b.add(20) as *const u16, namelen / 2);
+    Some(String::from_utf16_lossy(units))
 }
 
 unsafe extern "system" fn create_hook(
@@ -502,14 +523,24 @@ unsafe extern "system" fn setinfo_hook(
             }
             _ => false,
         };
-    if is_delete {
-        let comps = match PATH_TABLE.lock() {
+    let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);
+
+    if is_delete || is_rename {
+        let nt = match PATH_TABLE.lock() {
             Ok(t) => t.get(&(handle as isize)).cloned(),
             Err(_) => None,
         };
-        if let (Some(comps), Some(engine)) = (comps, ENGINE.get()) {
-            if engine.whiteout(&comps) {
-                // Suppress the real delete; report success to the caller.
+        if let (Some(nt), Some(engine)) = (nt, ENGINE.get()) {
+            let handled = if is_delete {
+                engine.whiteout(&nt)
+            } else {
+                match parse_rename_target(info, length) {
+                    Some(target) => engine.rename(&nt, &target),
+                    None => false,
+                }
+            };
+            if handled {
+                // Suppress the real delete/rename; report success to the caller.
                 if !iosb.is_null() {
                     let p = iosb as *mut u8;
                     core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);

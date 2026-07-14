@@ -75,4 +75,10 @@ fn writes_land_in_overlay_with_cow() {
     std::fs::remove_file(root.join("mod.esp")).expect("delete mod");
     assert!(std::fs::read(root.join("mod.esp")).is_err(), "deleted mod hidden");
     assert_eq!(std::fs::read(&backing).unwrap(), b"ORIG", "backing survives mod delete");
+
+    // --- Rename within the root ---
+    std::fs::write(root.join("rename_src.txt"), b"RENAMEME").unwrap();
+    std::fs::rename(root.join("rename_src.txt"), root.join("rename_dst.txt")).expect("rename");
+    assert_eq!(std::fs::read(root.join("rename_dst.txt")).unwrap(), b"RENAMEME", "renamed to dst");
+    assert!(std::fs::read(root.join("rename_src.txt")).is_err(), "source hidden after rename");
 }
