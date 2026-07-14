@@ -23,6 +23,7 @@ mod casefold;
 mod cachekey;
 mod model;
 mod path;
+mod source;
 mod tree;
 mod wildcard;
 
@@ -33,6 +34,7 @@ pub use model::{
 };
 pub use casefold::fold;
 pub use path::{normalize_vpath, PathError};
+pub use source::{decode, encode_zip_window, Source};
 pub use tree::VfsTree;
 pub use tree::build;
 pub use tree::{WalkNode, WalkNodeKind};
