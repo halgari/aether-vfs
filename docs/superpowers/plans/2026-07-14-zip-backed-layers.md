@@ -33,7 +33,7 @@
   - `pub fn encode_zip_window(offset: u64, container: &str) -> Vec<u8>`
   - `pub enum Source<'a> { Disk(&'a [u8]), ZipWindow { offset: u64, container: &'a [u8] } }`
   - `pub fn decode(blob: &[u8]) -> Source<'_>`
-  - Re-exported from `vfs_core` as `vfs_core::source::{encode_zip_window, decode, Source}`.
+  - Re-exported from `vfs_core` as `vfs_core::{encode_zip_window, decode, Source}`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -134,7 +134,7 @@ git commit -m "feat(vfs-core): tagged source-blob codec for zip-window sources"
 - Modify: `Cargo.toml` (workspace `members` — add `"crates/vfs-zip"`)
 
 **Interfaces:**
-- Consumes: `vfs_core::{InputEntry, EntryKind, Layer, LayerId, SourceId}`, `vfs_core::source::encode_zip_window`.
+- Consumes: `vfs_core::{InputEntry, EntryKind, Layer, LayerId, SourceId}`, `vfs_core::encode_zip_window`.
 - Produces:
   - `pub fn read_layer(zip_path: &std::path::Path, id: vfs_core::LayerId) -> Result<vfs_core::Layer, ZipError>`
   - `pub enum ZipError { Io(std::io::Error), NotAZip, Unsupported(String), Malformed(String) }`
@@ -178,7 +178,7 @@ Create `crates/vfs-zip/src/lib.rs`:
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use vfs_core::source::encode_zip_window;
+use vfs_core::encode_zip_window;
 use vfs_core::{EntryKind, InputEntry, Layer, LayerId, SourceId};
 
 #[derive(Debug)]
@@ -505,9 +505,9 @@ mod tests {
         assert_eq!(entry.size, content.len() as u64);
 
         // The recorded data offset must point at the entry's bytes on disk.
-        let win = vfs_core::source::decode(&entry.source.0);
+        let win = vfs_core::decode(&entry.source.0);
         match win {
-            vfs_core::source::Source::ZipWindow { offset, .. } => {
+            vfs_core::Source::ZipWindow { offset, .. } => {
                 let mut f = std::fs::File::open(&zip).unwrap();
                 let mut got = vec![0u8; content.len()];
                 f.seek(SeekFrom::Start(offset)).unwrap();
@@ -569,8 +569,8 @@ Append this test to the `tests` module (validates parsing against a real, non-fi
         // An entry known to sit past the 4 GB mark exercises ZIP64 offsets.
         let tex = layer.entries.iter().find(|e| e.vpath == "Data/Skyrim - Textures1.bsa").unwrap();
         assert_eq!(tex.size, 1_511_492_648);
-        let win = vfs_core::source::decode(&tex.source.0);
-        if let vfs_core::source::Source::ZipWindow { offset, .. } = win {
+        let win = vfs_core::decode(&tex.source.0);
+        if let vfs_core::Source::ZipWindow { offset, .. } = win {
             assert!(offset > 0xFFFF_FFFF, "expected a 64-bit offset");
         }
     }
@@ -594,18 +594,18 @@ git commit -m "feat(vfs-zip): ZIP64 central-directory reader emitting zip-window
 - Modify: `crates/vfs-redirect/src/lib.rs` (the `Decision` enum ~line 193, and `decide` ~line 50-60)
 
 **Interfaces:**
-- Consumes: `vfs_core::source::{decode, Source}`, existing `render_nt`.
+- Consumes: `vfs_core::{decode, Source}`, existing `render_nt`.
 - Produces: new variant `Decision::Serve { container_nt: String, offset: u64, length: u64 }`.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to the `tests` module in `crates/vfs-redirect/src/lib.rs` (reuse the existing `file` fixture helper pattern; a zip-window source is built with `vfs_core::source::encode_zip_window`):
+Add to the `tests` module in `crates/vfs-redirect/src/lib.rs` (reuse the existing `file` fixture helper pattern; a zip-window source is built with `vfs_core::encode_zip_window`):
 
 ```rust
     #[test]
     fn decide_serves_a_zip_window_source() {
         use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId, SourceId};
-        let src = SourceId::new(vfs_core::source::encode_zip_window(
+        let src = SourceId::new(vfs_core::encode_zip_window(
             0x1_0000_0010,
             r"C:\GameLayers\base.zip",
         ));
@@ -656,13 +656,13 @@ Replace the `File` arm of `decide` (currently lines 52-54) with:
 
 ```rust
             Located::Resolved(SnapResolution::File { source, size, .. }) => {
-                match vfs_core::source::decode(&source) {
-                    vfs_core::source::Source::ZipWindow { offset, container } => Decision::Serve {
+                match vfs_core::decode(&source) {
+                    vfs_core::Source::ZipWindow { offset, container } => Decision::Serve {
                         container_nt: render_nt(container),
                         offset,
                         length: size,
                     },
-                    vfs_core::source::Source::Disk(bytes) => {
+                    vfs_core::Source::Disk(bytes) => {
                         Decision::Redirect { target_nt: render_nt(bytes) }
                     }
                 }
@@ -1207,7 +1207,7 @@ fn reads_a_zip_window_through_the_hook() {
 
     let snapshot = {
         use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId, SourceId};
-        let src = SourceId::new(vfs_core::source::encode_zip_window(
+        let src = SourceId::new(vfs_core::encode_zip_window(
             5,
             &container.to_string_lossy(),
         ));
