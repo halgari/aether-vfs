@@ -21,6 +21,7 @@ vfs-shim = { path = "../vfs-shim" }
 vfs-shim-dll = { path = "../vfs-shim-dll" }
 vfs-core = { path = "../vfs-core" }
 vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
+vfs-zip = { path = "../vfs-zip" }
 # PE fixtures (payload, vproxy, staticimp) are built by build.rs via a nested
 # `cargo build -p …` (cannot be normal deps: vfs-payload is no_std/panic=abort).
 
