@@ -17,42 +17,58 @@ pub enum BootstrapError {
     Install(InstallError),
 }
 
-/// Read a config file, build an `Engine`, and install the NtCreateFile hook.
-/// Returns the guard keeping the hook alive (the injected DLL leaks it).
+/// Read a config file, build an `Engine`, and install the hooks. Returns the
+/// guard keeping the hooks alive (the injected DLL leaks it). An empty
+/// `overlay_root` means read-only (no write overlay).
 pub fn bootstrap_from_config_path(path: &str) -> Result<HookGuard, BootstrapError> {
     let bytes = std::fs::read(path).map_err(|_| BootstrapError::Io)?;
-    let (root, snapshot) = decode_config(&bytes).ok_or(BootstrapError::BadConfig)?;
-    let engine = Engine::new(&root, snapshot).map_err(BootstrapError::Engine)?;
+    let (root, overlay, snapshot) = decode_config(&bytes).ok_or(BootstrapError::BadConfig)?;
+    let engine = if overlay.is_empty() {
+        Engine::new(&root, snapshot)
+    } else {
+        Engine::with_overlay(&root, &overlay, snapshot)
+    }
+    .map_err(BootstrapError::Engine)?;
     let guard = install(engine).map_err(BootstrapError::Install)?;
     // Tell any spawning parent (that force-suspended us) our hooks are live.
     crate::inject::signal_ready();
     Ok(guard)
 }
 
-/// Encode `[u32 LE root_len][root utf8][snapshot bytes]`.
+/// Encode with no write overlay. See [`encode_config_with_overlay`].
 pub fn encode_config(root: &str, snapshot: &[u8]) -> Vec<u8> {
+    encode_config_with_overlay(root, "", snapshot)
+}
+
+/// Encode `[u32 root_len][root][u32 overlay_len][overlay][snapshot]` (all UTF-8).
+/// An empty `overlay` disables the write path.
+pub fn encode_config_with_overlay(root: &str, overlay: &str, snapshot: &[u8]) -> Vec<u8> {
     let root = root.as_bytes();
-    let mut out = Vec::with_capacity(4 + root.len() + snapshot.len());
+    let overlay = overlay.as_bytes();
+    let mut out = Vec::with_capacity(8 + root.len() + overlay.len() + snapshot.len());
     out.extend_from_slice(&(root.len() as u32).to_le_bytes());
     out.extend_from_slice(root);
+    out.extend_from_slice(&(overlay.len() as u32).to_le_bytes());
+    out.extend_from_slice(overlay);
     out.extend_from_slice(snapshot);
     out
 }
 
-/// Decode a buffer produced by [`encode_config`]. Returns `None` on truncation or
-/// invalid UTF-8 in the root. Never panics.
-pub fn decode_config(bytes: &[u8]) -> Option<(String, Vec<u8>)> {
-    if bytes.len() < 4 {
-        return None;
-    }
-    let root_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-    let root_end = 4usize.checked_add(root_len)?;
-    if bytes.len() < root_end {
-        return None;
-    }
-    let root = std::str::from_utf8(&bytes[4..root_end]).ok()?.to_string();
-    let snapshot = bytes[root_end..].to_vec();
-    Some((root, snapshot))
+/// Decode a buffer produced by [`encode_config_with_overlay`]. Returns
+/// `(root, overlay, snapshot)`; `overlay` empty means none. `None` on truncation
+/// or invalid UTF-8. Never panics.
+pub fn decode_config(bytes: &[u8]) -> Option<(String, String, Vec<u8>)> {
+    let read_field = |b: &[u8], off: usize| -> Option<(String, usize)> {
+        let len = u32::from_le_bytes(b.get(off..off + 4)?.try_into().ok()?) as usize;
+        let start = off + 4;
+        let end = start.checked_add(len)?;
+        let s = std::str::from_utf8(b.get(start..end)?).ok()?.to_string();
+        Some((s, end))
+    };
+    let (root, after_root) = read_field(bytes, 0)?;
+    let (overlay, after_overlay) = read_field(bytes, after_root)?;
+    let snapshot = bytes.get(after_overlay..)?.to_vec();
+    Some((root, overlay, snapshot))
 }
 
 #[cfg(test)]
@@ -63,8 +79,19 @@ mod tests {
     fn config_round_trips() {
         let snapshot = vec![1u8, 2, 3, 4, 5];
         let bytes = encode_config(r"\??\C:\Games\Skyrim", &snapshot);
-        let (root, snap) = decode_config(&bytes).unwrap();
+        let (root, overlay, snap) = decode_config(&bytes).unwrap();
         assert_eq!(root, r"\??\C:\Games\Skyrim");
+        assert_eq!(overlay, ""); // encode_config -> no overlay
+        assert_eq!(snap, snapshot);
+    }
+
+    #[test]
+    fn config_with_overlay_round_trips() {
+        let snapshot = vec![9u8, 8, 7];
+        let bytes = encode_config_with_overlay(r"C:\Game", r"C:\Overlay", &snapshot);
+        let (root, overlay, snap) = decode_config(&bytes).unwrap();
+        assert_eq!(root, r"C:\Game");
+        assert_eq!(overlay, r"C:\Overlay");
         assert_eq!(snap, snapshot);
     }
 

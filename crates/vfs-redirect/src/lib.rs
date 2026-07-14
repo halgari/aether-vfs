@@ -36,6 +36,13 @@ impl RootMap {
         self.under_root(nt_path).is_some()
     }
 
+    /// The folded remainder components of `nt_path` under the managed root, or
+    /// `None` if it is outside/malformed. Exposed so the overlay layer can build
+    /// overlay paths from the same normalized components the snapshot uses.
+    pub fn remainder(&self, nt_path: &str) -> Option<Vec<String>> {
+        self.under_root(nt_path)
+    }
+
     /// Decide how to handle an incoming NT open path.
     ///
     /// Fail-safe: any path that is malformed, outside the root, or does not
@@ -378,6 +385,29 @@ pub fn parse_full_dir_info(buf: &[u8]) -> Vec<DirItem> {
         o += next;
     }
     out
+}
+
+/// The whiteout marker suffix appended to a deleted file's name in the overlay.
+pub const WHITEOUT_SUFFIX: &str = ".__vfs_wh__";
+
+/// The overlay marker filename that hides `name` (a deletion tombstone on disk).
+pub fn whiteout_marker(name: &str) -> String {
+    format!("{name}{WHITEOUT_SUFFIX}")
+}
+
+/// If `name` is a whiteout marker, the base name it hides; else `None`.
+pub fn is_whiteout(name: &str) -> Option<&str> {
+    name.strip_suffix(WHITEOUT_SUFFIX)
+}
+
+/// Wrap a Win32 absolute path as an NT DOS-device path (`\??\...`). A path that
+/// already carries an NT/DOS long prefix is returned unchanged.
+pub fn to_nt(path: &str) -> String {
+    if path.starts_with(r"\??\") || path.starts_with(r"\\?\") {
+        path.to_string()
+    } else {
+        format!(r"\??\{path}")
+    }
 }
 
 /// Strip a `\??\` / `\\?\` prefix and a leading `X:` drive, yielding the
@@ -893,5 +923,30 @@ mod tests {
         let r = write_file_name_info("abcdef", &mut buf);
         assert_eq!(r.status, DirStatus::BufferOverflow);
         assert_eq!(u32::from_le_bytes(buf[0..4].try_into().unwrap()), 12);
+    }
+
+    #[test]
+    fn whiteout_marker_round_trips() {
+        let m = whiteout_marker("foo.esp");
+        assert_eq!(m, "foo.esp.__vfs_wh__");
+        assert_eq!(is_whiteout(&m), Some("foo.esp"));
+        assert_eq!(is_whiteout("foo.esp"), None);
+    }
+
+    #[test]
+    fn to_nt_prefixes_and_preserves() {
+        assert_eq!(to_nt(r"C:\overlay\foo.esp"), r"\??\C:\overlay\foo.esp");
+        assert_eq!(to_nt(r"\??\C:\x"), r"\??\C:\x");
+        assert_eq!(to_nt(r"\\?\C:\x"), r"\\?\C:\x");
+    }
+
+    #[test]
+    fn remainder_returns_folded_components() {
+        let r = root(); // \??\C:\Games\Skyrim
+        assert_eq!(
+            r.remainder(r"\??\C:\Games\Skyrim\Data\Foo.ESP"),
+            Some(vec!["data".to_string(), "foo.esp".to_string()])
+        );
+        assert_eq!(r.remainder(r"\??\C:\Windows"), None);
     }
 }

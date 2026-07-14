@@ -9,7 +9,11 @@ mod engine;
 mod hook;
 mod inject;
 mod ntdef;
+mod overlay;
 
-pub use bootstrap::{bootstrap_from_config_path, decode_config, encode_config, BootstrapError};
+pub use bootstrap::{
+    bootstrap_from_config_path, decode_config, encode_config, encode_config_with_overlay,
+    BootstrapError,
+};
 pub use engine::{Engine, EngineError};
 pub use hook::{install, HookGuard, InstallError};
