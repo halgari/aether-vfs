@@ -92,5 +92,5 @@ fn injected_shim_passes_full_acceptance_suite() {
         assert!(line.ends_with("=PASS"), "check failed: {line}\nfull report:\n{report}");
     }
     // Guard against silently skipping checks.
-    assert_eq!(report.lines().count(), 10, "expected 10 checks:\n{report}");
+    assert_eq!(report.lines().count(), 11, "expected 11 checks:\n{report}");
 }

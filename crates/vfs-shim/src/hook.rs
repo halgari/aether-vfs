@@ -12,8 +12,12 @@ use vfs_redirect::{
 };
 use windows_sys::Win32::Foundation::{HANDLE, HMODULE, NTSTATUS};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+use windows_sys::Win32::System::Threading::{
+    ResumeThread, CREATE_SUSPENDED, PROCESS_INFORMATION, STARTUPINFOW,
+};
 
 use crate::engine::Engine;
+use crate::inject::{inject_dll, self_dll_path, wait_ready};
 use crate::ntdef::{
     FileBasicInformation, FileNetworkOpenInformation, NtCloseFn, NtCreateFileFn, NtOpenFileFn,
     NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryFullAttributesFileFn,
@@ -41,6 +45,32 @@ static mut TRAMP_OPEN: Option<NtOpenFileFn> = None;
 static mut TRAMP_QDIREX: Option<NtQueryDirectoryFileExFn> = None;
 static mut TRAMP_CLOSE: Option<NtCloseFn> = None;
 static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
+static mut TRAMP_CPIW: Option<CreateProcessInternalWFn> = None;
+
+/// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
+/// 12 params; only `flags` and `pi` are inspected/modified by the hook.
+type CreateProcessInternalWFn = unsafe extern "system" fn(
+    HANDLE,        // hToken
+    *const u16,    // lpApplicationName
+    *mut u16,      // lpCommandLine
+    *const c_void, // lpProcessAttributes
+    *const c_void, // lpThreadAttributes
+    i32,           // bInheritHandles
+    u32,           // dwCreationFlags
+    *const c_void, // lpEnvironment
+    *const u16,    // lpCurrentDirectory
+    *const STARTUPINFOW,
+    *mut PROCESS_INFORMATION,
+    *mut HANDLE, // phNewToken
+) -> i32;
+
+/// This shim's own DLL path on disk, resolved once at install so the
+/// process-creation hook can inject the same DLL into children.
+static SELF_DLL: OnceLock<String> = OnceLock::new();
+
+/// How long a spawning process waits for a child's shim to install its hooks
+/// before resuming the child anyway (unvirtualized rather than hung).
+const CHILD_READY_TIMEOUT_MS: u32 = 5_000;
 
 /// Per-handle enumeration cursor over a merged directory listing.
 struct EnumState {
@@ -130,9 +160,33 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
         d_close.enable().map_err(|_| InstallError::Detour)?;
         d_qif.enable().map_err(|_| InstallError::Detour)?;
 
-        Ok(HookGuard {
-            _detours: vec![d_create, d_qattr, d_qfull, d_open, d_qdirex, d_close, d_qif],
-        })
+        let mut detours = vec![d_create, d_qattr, d_qfull, d_open, d_qdirex, d_close, d_qif];
+
+        // Best-effort child-process propagation: hook CreateProcessInternalW so
+        // spawned children get the shim too. Never fails install — if our own
+        // DLL path or the kernelbase export can't be resolved (e.g. in-process
+        // tests where "self" is the test exe, not a DLL), skip it silently.
+        if let Some(dll) = self_dll_path() {
+            let _ = SELF_DLL.set(dll);
+            let mut kb = GetModuleHandleA(b"kernelbase.dll\0".as_ptr());
+            if kb.is_null() {
+                kb = GetModuleHandleA(b"kernel32.dll\0".as_ptr());
+            }
+            if !kb.is_null() {
+                if let Ok(d_cpiw) =
+                    make_detour(kb, b"CreateProcessInternalW\0", cpiw_hook as *const ())
+                {
+                    TRAMP_CPIW = Some(core::mem::transmute::<*const (), CreateProcessInternalWFn>(
+                        d_cpiw.trampoline() as *const (),
+                    ));
+                    if d_cpiw.enable().is_ok() {
+                        detours.push(d_cpiw);
+                    }
+                }
+            }
+        }
+
+        Ok(HookGuard { _detours: detours })
     }
 }
 
@@ -422,6 +476,51 @@ unsafe extern "system" fn qif_hook(
         }
     }
     tramp(handle, iosb, info, length, class)
+}
+
+/// `CreateProcessInternalW` hook: force the child to start suspended, inject the
+/// shim, wait for its hooks to come up, then resume (unless the caller asked for
+/// a suspended child). Best-effort — a failed inject or timeout still resumes
+/// the child (unvirtualized rather than hung).
+#[allow(clippy::too_many_arguments)]
+unsafe extern "system" fn cpiw_hook(
+    token: HANDLE,
+    app: *const u16,
+    cmd: *mut u16,
+    proc_attr: *const c_void,
+    thread_attr: *const c_void,
+    inherit: i32,
+    flags: u32,
+    env: *const c_void,
+    cur_dir: *const u16,
+    si: *const STARTUPINFOW,
+    pi: *mut PROCESS_INFORMATION,
+    ptok: *mut HANDLE,
+) -> i32 {
+    let tramp = match TRAMP_CPIW {
+        Some(t) => t,
+        None => return 0, // STATUS/BOOL FALSE — invariant violation, should not occur
+    };
+    let caller_suspended = flags & CREATE_SUSPENDED != 0;
+    let forced = flags | CREATE_SUSPENDED;
+    let r = tramp(
+        token, app, cmd, proc_attr, thread_attr, inherit, forced, env, cur_dir, si, pi, ptok,
+    );
+    if r != 0 && !pi.is_null() {
+        let pid = (*pi).dwProcessId;
+        let hprocess = (*pi).hProcess;
+        let hthread = (*pi).hThread;
+        if let Some(dll) = SELF_DLL.get() {
+            if inject_dll(hprocess, dll) {
+                // Give the child's shim a chance to install hooks before it runs.
+                wait_ready(pid, CHILD_READY_TIMEOUT_MS);
+            }
+        }
+        if !caller_suspended {
+            ResumeThread(hthread);
+        }
+    }
+    r
 }
 
 /// Extract a search wildcard from a `PUNICODE_STRING`. Null/empty/`*`/`*.*`

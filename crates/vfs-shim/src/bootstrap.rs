@@ -23,7 +23,10 @@ pub fn bootstrap_from_config_path(path: &str) -> Result<HookGuard, BootstrapErro
     let bytes = std::fs::read(path).map_err(|_| BootstrapError::Io)?;
     let (root, snapshot) = decode_config(&bytes).ok_or(BootstrapError::BadConfig)?;
     let engine = Engine::new(&root, snapshot).map_err(BootstrapError::Engine)?;
-    install(engine).map_err(BootstrapError::Install)
+    let guard = install(engine).map_err(BootstrapError::Install)?;
+    // Tell any spawning parent (that force-suspended us) our hooks are live.
+    crate::inject::signal_ready();
+    Ok(guard)
 }
 
 /// Encode `[u32 LE root_len][root utf8][snapshot bytes]`.

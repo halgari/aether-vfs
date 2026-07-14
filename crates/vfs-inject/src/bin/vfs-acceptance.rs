@@ -63,6 +63,19 @@ fn main() {
     if args.len() < 3 {
         std::process::exit(2);
     }
+
+    // Child mode: `--child <root> <output>`. Spawned by the acceptance run to
+    // prove the VFS propagated into this child process. Read a VIRTUAL file
+    // (only resolvable if this child's shim is active) and echo it to <output>.
+    if args[1] == "--child" {
+        if args.len() < 4 {
+            std::process::exit(2);
+        }
+        let content = std::fs::read(Path::new(&args[2]).join("mod_added.txt")).unwrap_or_default();
+        std::fs::write(&args[3], &content).expect("child write output");
+        std::process::exit(0);
+    }
+
     let root = Path::new(&args[1]);
     let report = &args[2];
 
@@ -177,6 +190,23 @@ fn main() {
             return Err("export GetFileVersionInfoSizeW not found in loaded module".into());
         }
         Ok(())
+    });
+
+    // 11. Child-process propagation -> a spawned child inherits the VFS and can
+    // read a virtual file (only possible if the shim injected itself into it).
+    check("child_process", &mut out, &mut all_ok, || {
+        let child_out = format!("{report}.child");
+        let _ = std::fs::remove_file(&child_out);
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let status = std::process::Command::new(exe)
+            .args(["--child", root.to_str().unwrap(), &child_out])
+            .status()
+            .map_err(|e| format!("spawn child: {e}"))?;
+        if !status.success() {
+            return Err(format!("child exit: {status:?}"));
+        }
+        let got = std::fs::read(&child_out).map_err(|e| format!("read child output: {e}"))?;
+        expect_eq(&got, b"MOD-ADDED-BYTES")
     });
 
     std::fs::write(report, out.as_bytes()).expect("write report");

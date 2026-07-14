@@ -7,6 +7,7 @@
 mod bootstrap;
 mod engine;
 mod hook;
+mod inject;
 mod ntdef;
 
 pub use bootstrap::{bootstrap_from_config_path, decode_config, encode_config, BootstrapError};
