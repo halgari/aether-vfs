@@ -6,6 +6,8 @@
 
 mod bootstrap;
 mod engine;
+mod fuse_client;
+mod fuse_synth;
 mod hook;
 mod inject;
 mod ntdef;

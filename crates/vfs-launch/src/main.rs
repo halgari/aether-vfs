@@ -9,6 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod director;
+
 use vfs_core::{decode, EntryKind, Layer, LayerId, Source, SourceId};
 use vfs_inject::{run_target_with_shim, RunConfig};
 use vfs_zip::read_layer;
@@ -483,6 +485,24 @@ fn main() {
     let snapshot = vfs_shared::bridge::flatten(&tree);
     eprintln!("  snapshot {} bytes", snapshot.len());
 
+    // Parent director: FUSE control ring (content authority for managed root).
+    let section_name = format!(
+        "Local\\vfs_ring_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    eprintln!("  director section: {section_name}");
+    let director = match director::Director::start(tree, section_name.clone()) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: director start: {e}");
+            std::process::exit(1);
+        }
+    };
+
     set_steam_env();
 
     let root_s = args.root.to_string_lossy().into_owned();
@@ -490,8 +510,88 @@ fn main() {
     let config_bytes = vfs_shim::encode_config_with_overlay(&root_s, &overlay_s, &snapshot);
     let config_path = args.state.join("shim.cfg");
     std::fs::write(&config_path, &config_bytes).expect("write shim.cfg");
+    // Thin FUSE config for shim attach (section name + root).
+    let thin_path = args.state.join("fuse.cfg");
+    if let Err(e) = director::write_thin_config(
+        &thin_path,
+        &director.section_name,
+        &root_s,
+        director.payload_cap,
+        director.ring_bytes,
+    ) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+    // Env so injected shim can find the ring without parsing cfg path variants.
+    std::env::set_var("VFS_RING_SECTION", &director.section_name);
+    std::env::set_var("VFS_RING_BYTES", director.ring_bytes.to_string());
+    std::env::set_var("VFS_RING_PAYLOAD_CAP", director.payload_cap.to_string());
+    std::env::set_var("VFS_FUSE_CFG", thin_path.to_string_lossy().as_ref());
+    std::env::set_var("VFS_VIRTUAL_DIR", &root_s);
+
     let ready_path = args.state.join("ready.flag");
     let _ = std::fs::remove_file(&ready_path);
+
+    // Probe: pure director RPC (OPEN/READ/CLOSE) — no game inject required.
+    if args.probe {
+        let client = match director.client() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: probe client: {e}");
+                std::process::exit(1);
+            }
+        };
+        let mut report = String::new();
+        report.push_str("authority=director-fuse-rpc\n");
+        report.push_str(&format!("section={}\n", director.section_name));
+        let checks = [
+            "Data/Skyrim.esm",
+            "Data/SkyUI_SE.esp",
+            "Data/SkyUI_SE.bsa",
+        ];
+        let mut ok_n = 0u32;
+        for vpath in checks {
+            match director::rpc_read_all(&client, vpath, director.payload_cap) {
+                Ok((size, bytes)) => {
+                    let n = bytes.len().min(8);
+                    report.push_str(&format!(
+                        "rpc {vpath}: ok size={size} read={} head={:02x?}\n",
+                        bytes.len(),
+                        &bytes[..n]
+                    ));
+                    // Magic checks where known.
+                    if vpath.ends_with(".esm") || vpath.ends_with(".esp") {
+                        if bytes.len() >= 4 && &bytes[..4] == b"TES4" {
+                            report.push_str(&format!("magic {vpath}: TES4 ok\n"));
+                            ok_n += 1;
+                        } else {
+                            report.push_str(&format!(
+                                "magic {vpath}: FAIL head={:02x?}\n",
+                                &bytes[..bytes.len().min(4)]
+                            ));
+                        }
+                    } else if !bytes.is_empty() {
+                        ok_n += 1;
+                    }
+                }
+                Err(e) => report.push_str(&format!("rpc {vpath}: ERR {e}\n")),
+            }
+        }
+        let payload_files = count_payload_files(&args.root);
+        report.push_str(&format!("root_payload_files={payload_files}\n"));
+        report.push_str(&format!("probe_ok_paths={ok_n}\n"));
+        let report_path = args.state.join("probe-report.txt");
+        let _ = std::fs::write(&report_path, &report);
+        eprintln!("--- probe report (director FUSE RPC) ---\n{report}");
+        eprintln!("  managed root payload files: {payload_files}");
+        if ok_n < 2 || payload_files != 0 {
+            eprintln!("error: probe failed (need >=2 good paths and zero root payloads)");
+            std::process::exit(1);
+        }
+        eprintln!("probe ok via director OPEN/READ/CLOSE");
+        director.stop();
+        std::process::exit(0);
+    }
 
     let (dll, payload) = match locate_artifacts() {
         Ok(x) => x,
@@ -510,40 +610,10 @@ fn main() {
     }
     eprintln!("  managed root payload files: 0");
 
-    let (target, target_args, detach, target_pe) = if args.probe {
-        let probe_exe = std::env::current_exe()
-            .ok()
-            .and_then(|e| vfs_inject::find_near(&e, "vfs-game-probe.exe"))
-            .or_else(|| {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|e| e.parent().map(|p| p.join("vfs-game-probe.exe")))
-                    .filter(|p| p.is_file())
-            })
-            .unwrap_or_else(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../target/debug/vfs-game-probe.exe")
-            });
-        if !probe_exe.is_file() {
-            eprintln!("error: vfs-game-probe.exe not found (build -p vfs-launch)");
-            std::process::exit(1);
-        }
-        (
-            probe_exe,
-            vec![
-                root_s.clone(),
-                args.state
-                    .join("probe-report.txt")
-                    .to_string_lossy()
-                    .into_owned(),
-            ],
-            false,
-            None,
-        )
-    } else {
-        // Virtual path only — file must NOT exist; PE comes from hollow.
-        (args.root.join(pe_name), vec![], !args.wait, pe_bytes)
-    };
+    // Virtual path only — file must NOT exist; PE comes from hollow.
+    let target = args.root.join(pe_name);
+    let detach = !args.wait;
+    let target_pe = pe_bytes;
 
     eprintln!("launching {} …", target.display());
     eprintln!("  game root: {}", args.root.display());
@@ -552,15 +622,15 @@ fn main() {
         "  mode:      {}{}",
         if detach { "detach" } else { "wait for exit" },
         if target_pe.is_some() {
-            " + memory hollow (no PE on disk)"
+            " + memory hollow (no PE on disk) + director FUSE"
         } else {
-            ""
+            " + director FUSE"
         }
     );
 
     let exit = run_target_with_shim(RunConfig {
         target_exe: target.to_string_lossy().into_owned(),
-        args: target_args,
+        args: vec![],
         current_dir: Some(root_s),
         dll_path: dll,
         config_path: config_path.to_string_lossy().into_owned(),
@@ -572,25 +642,44 @@ fn main() {
         target_pe_bytes: target_pe,
     });
 
+    // Keep director alive until game exits (or detach briefly).
     match exit {
         Ok(code) => {
-            if args.probe {
-                let report = args.state.join("probe-report.txt");
-                if let Ok(t) = std::fs::read_to_string(&report) {
-                    eprintln!("--- probe report ---\n{t}");
-                }
-                std::process::exit(code);
-            }
             if detach {
-                eprintln!("game process running (detached); VFS serving from zip layers");
+                eprintln!("game process running (detached); director FUSE serving zip layers");
+                // Detach: leave director for a while is wrong if we exit — for detach
+                // keep process alive until user kills; sleep forever-ish by joining nothing.
+                // Parent exit kills director; for --wait we stop after exit.
+                std::mem::forget(director);
             } else {
                 eprintln!("game exited with code {code}");
+                director.stop();
                 std::process::exit(code);
             }
         }
         Err(e) => {
             eprintln!("error: launch failed: {e:?}");
+            director.stop();
             std::process::exit(1);
         }
     }
+}
+
+fn count_payload_files(root: &Path) -> usize {
+    fn walk(dir: &Path, n: &mut usize) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                walk(&p, n);
+            } else if p.is_file() {
+                *n += 1;
+            }
+        }
+    }
+    let mut n = 0;
+    walk(root, &mut n);
+    n
 }

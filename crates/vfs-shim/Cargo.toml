@@ -7,6 +7,9 @@ edition = "2021"
 vfs-redirect = { path = "../vfs-redirect" }
 vfs-shared = { path = "../vfs-shared" }
 vfs-core = { path = "../vfs-core" }
+vfs-protocol = { path = "../vfs-protocol" }
+vfs-ipc = { path = "../vfs-ipc" }
+vfs-win = { path = "../vfs-win" }
 # Dual-layer vehicle (reflective map + RIP-redirect + spin gate) for children.
 vfs-inject = { path = "../vfs-inject" }
 retour = { version = "0.3", default-features = false }

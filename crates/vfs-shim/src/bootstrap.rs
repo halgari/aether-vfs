@@ -78,6 +78,8 @@ pub fn bootstrap_from_config_path_with_payload(
 ) -> Result<HookGuard, BootstrapError> {
     let bytes = std::fs::read(path).map_err(|_| BootstrapError::Io)?;
     let (root, overlay, snapshot) = decode_config(&bytes).ok_or(BootstrapError::BadConfig)?;
+    // Attach to parent director FUSE ring when env/config is present.
+    let _ = crate::fuse_client::try_init_from_env();
     let engine = if overlay.is_empty() {
         Engine::new(&root, snapshot)
     } else {

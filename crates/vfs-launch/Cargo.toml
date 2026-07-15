@@ -18,3 +18,7 @@ vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
 vfs-zip = { path = "../vfs-zip" }
 vfs-shim = { path = "../vfs-shim" }
 vfs-inject = { path = "../vfs-inject" }
+vfs-server = { path = "../vfs-server" }
+vfs-ipc = { path = "../vfs-ipc" }
+vfs-protocol = { path = "../vfs-protocol" }
+vfs-win = { path = "../vfs-win" }

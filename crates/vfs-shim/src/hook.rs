@@ -567,6 +567,43 @@ unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Option<String> 
     Some(String::from_utf16_lossy(units))
 }
 
+/// Try director FUSE OPEN for paths under the managed root. Returns Some(status)
+/// when the fuse client handled the call (success or hard failure under root).
+unsafe fn try_fuse_create(
+    file_handle: *mut HANDLE,
+    oa: *const ObjectAttributes,
+    iosb: *mut c_void,
+) -> Option<NTSTATUS> {
+    let client = crate::fuse_client::global()?;
+    let path = path_of(oa)?;
+    let vpath = client.vpath_under_root(&path)?;
+    // Directory open of root: empty vpath → "."
+    let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+    match client.open(vp) {
+        Ok(resp) => {
+            let h = crate::fuse_synth::open_fuse(resp.fh, resp.size, resp.is_dir)?;
+            if !file_handle.is_null() {
+                *file_handle = h as HANDLE;
+            }
+            if !iosb.is_null() {
+                let p = iosb as *mut u8;
+                core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
+                core::ptr::write_unaligned(p.add(8) as *mut usize, crate::ntdef::FILE_OPENED);
+            }
+            record_path(file_handle, oa, STATUS_SUCCESS);
+            if resp.is_dir {
+                tag_under_root(file_handle, oa, STATUS_SUCCESS);
+            }
+            Some(STATUS_SUCCESS)
+        }
+        Err(st) if st == vfs_protocol::ST_NOT_FOUND => Some(STATUS_OBJECT_NAME_NOT_FOUND),
+        Err(_) => {
+            // Director down / I/O — do not fall through to empty root.
+            Some(STATUS_UNSUCCESSFUL)
+        }
+    }
+}
+
 unsafe extern "system" fn create_hook(
     file_handle: *mut HANDLE,
     access: u32,
@@ -584,6 +621,10 @@ unsafe extern "system" fn create_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
+    // Prefer director FUSE for managed-root content (no in-shim zipserve).
+    if let Some(st) = try_fuse_create(file_handle, oa, iosb) {
+        return st;
+    }
     match decision_for(oa, access, disp) {
         Some(Decision::Redirect { target_nt }) => {
             let mut wbuf: Vec<u16> = target_nt.encode_utf16().collect();
@@ -611,6 +652,10 @@ unsafe extern "system" fn create_hook(
             status
         }
         Some(Decision::Serve { container_nt, offset, length }) => {
+            // Legacy Serve path: only if FUSE client is not active.
+            if crate::fuse_client::global().is_some() {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
             match crate::zipserve::open_synth(&container_nt, offset, length) {
                 Some(h) => {
                     if !file_handle.is_null() {
@@ -658,6 +703,9 @@ unsafe extern "system" fn open_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
+    if let Some(st) = try_fuse_create(file_handle, oa, iosb) {
+        return st;
+    }
     // NtOpenFile has no disposition; it always opens existing (FILE_OPEN).
     match decision_for(oa, access, vfs_redirect::FILE_OPEN) {
         Some(Decision::Redirect { target_nt }) => {
@@ -684,6 +732,9 @@ unsafe extern "system" fn open_hook(
             status
         }
         Some(Decision::Serve { container_nt, offset, length }) => {
+            if crate::fuse_client::global().is_some() {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
             match crate::zipserve::open_synth(&container_nt, offset, length) {
                 Some(h) => {
                     if !file_handle.is_null() {
@@ -781,6 +832,14 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
+    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        if let Some(fh) = crate::fuse_synth::close_fuse(handle as isize) {
+            if let Some(c) = crate::fuse_client::global() {
+                let _ = c.close(fh);
+            }
+        }
+        return STATUS_SUCCESS;
+    }
     if crate::zipserve::is_synth(handle as isize) {
         crate::zipserve::close(handle as isize);
         return STATUS_SUCCESS;
@@ -1100,6 +1159,69 @@ unsafe extern "system" fn read_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
+    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        let explicit = if byte_offset.is_null() {
+            None
+        } else {
+            let v = core::ptr::read_unaligned(byte_offset);
+            if v < 0 {
+                None
+            } else {
+                Some(v as u64)
+            }
+        };
+        if let Some((fh, size, _is_dir, pos)) = crate::fuse_synth::lookup(handle as isize) {
+            let off = explicit.unwrap_or(pos);
+            let want = length as usize;
+            if off >= size {
+                if !iosb.is_null() {
+                    let p = iosb as *mut u8;
+                    core::ptr::write_unaligned(p as *mut u32, STATUS_END_OF_FILE as u32);
+                    core::ptr::write_unaligned(p.add(8) as *mut usize, 0usize);
+                }
+                return STATUS_END_OF_FILE;
+            }
+            let mut tmp = vec![0u8; want.min((size - off) as usize)];
+            match crate::fuse_client::global()
+                .ok_or(vfs_protocol::ST_IO_ERROR)
+                .and_then(|c| c.read_fragmented(fh, off, &mut tmp))
+            {
+                Ok(n) => {
+                    let n = n.min(tmp.len());
+                    if !buffer.is_null() && n > 0 {
+                        core::ptr::copy_nonoverlapping(tmp.as_ptr(), buffer as *mut u8, n);
+                    }
+                    if explicit.is_none() {
+                        crate::fuse_synth::set_position(handle as isize, off + n as u64);
+                    }
+                    let at_eof = off + n as u64 >= size;
+                    let status = if at_eof && n == 0 {
+                        STATUS_END_OF_FILE
+                    } else {
+                        STATUS_SUCCESS
+                    };
+                    if !iosb.is_null() {
+                        let p = iosb as *mut u8;
+                        core::ptr::write_unaligned(p as *mut u32, status as u32);
+                        core::ptr::write_unaligned(p.add(8) as *mut usize, n);
+                    }
+                    if !event.is_null() {
+                        windows_sys::Win32::System::Threading::SetEvent(event);
+                    }
+                    return status;
+                }
+                Err(_) => {
+                    if !iosb.is_null() {
+                        let p = iosb as *mut u8;
+                        core::ptr::write_unaligned(p as *mut u32, STATUS_UNSUCCESSFUL as u32);
+                        core::ptr::write_unaligned(p.add(8) as *mut usize, 0usize);
+                    }
+                    return STATUS_UNSUCCESSFUL;
+                }
+            }
+        }
+        return STATUS_UNSUCCESSFUL;
+    }
     if crate::zipserve::is_synth(handle as isize) {
         // Resolve an explicit offset only if it is a real, non-sentinel value.
         let explicit = if byte_offset.is_null() {
