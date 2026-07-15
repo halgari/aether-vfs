@@ -189,12 +189,11 @@ impl FuseClient {
                         .ok_or(vfs_protocol::ST_BAD_REQUEST)?;
                     let n = (bn as usize).min(dest.len());
                     if n > 0 {
-                        let data = self
-                            .mapping
+                        // Arena → user buffer without intermediate Vec.
+                        self.mapping
                             .seg()
-                            .read_bytes(aoff as usize, n)
+                            .copy_to(aoff as usize, &mut dest[..n])
                             .ok_or(vfs_protocol::ST_IO_ERROR)?;
-                        dest[..n].copy_from_slice(&data);
                     }
                     n
                 } else {

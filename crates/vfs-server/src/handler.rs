@@ -3,7 +3,7 @@
 use vfs_core::{NodeKind, VfsError, VfsTree};
 use vfs_protocol::{
     decode_close_req, decode_open_req, decode_path_req, decode_read_req, encode_getattr_resp,
-    encode_open_resp, encode_path_req, encode_read_resp, encode_read_resp_bulk, encode_readdir_resp,
+    encode_open_resp, encode_read_resp, encode_read_resp_bulk, encode_readdir_resp,
     AttrResp, DirEntryWire, FLAG_READ_BULK, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ,
     OP_READDIR, ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
 };
@@ -95,18 +95,12 @@ pub fn dispatch_full(
                 let want_bulk = (flags & FLAG_READ_BULK) != 0 || req.len >= BULK_THRESHOLD;
                 if want_bulk {
                     if let Some((arena, slot)) = arena {
+                        // **C1:** disk/zip → arena bank directly (no intermediate Vec).
                         let max = arena.bank_size.min(req.len as usize);
-                        match table.read(req.fh, req.offset, max as u32, max) {
-                            Ok(data) => match arena.write_bank(slot, &data) {
-                                Ok(off) => (ST_OK, encode_read_resp_bulk(data.len() as u32, off)),
-                                Err(()) => {
-                                    let max_i = max_read_data(payload_cap);
-                                    match table.read(req.fh, req.offset, req.len, max_i) {
-                                        Ok(d) => (ST_OK, encode_read_resp(&d)),
-                                        Err(st) => (st, Vec::new()),
-                                    }
-                                }
-                            },
+                        match arena.fill_bank(slot, max, |buf| {
+                            table.read_into(req.fh, req.offset, max, buf)
+                        }) {
+                            Ok((off, n)) => (ST_OK, encode_read_resp_bulk(n as u32, off)),
                             Err(st) => (st, Vec::new()),
                         }
                     } else {

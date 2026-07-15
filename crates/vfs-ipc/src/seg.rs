@@ -69,16 +69,42 @@ impl SharedSeg {
         true
     }
 
+    /// Run `f` with a mutable view of `n` bytes at `off` (server bulk arena fill).
+    ///
+    /// The callback has exclusive access for the duration of the call under the
+    /// ring/arena bank ownership protocol (slot CLAIMED → COMPLETED).
     #[allow(unsafe_code)]
-    pub fn read_bytes(&self, off: usize, n: usize) -> Option<Vec<u8>> {
+    pub fn with_mut_bytes<R>(
+        &self,
+        off: usize,
+        n: usize,
+        f: impl FnOnce(&mut [u8]) -> R,
+    ) -> Option<R> {
         if !self.in_bounds(off, n) {
             return None;
         }
-        let mut v = vec![0u8; n];
+        // SAFETY: in-bounds; exclusive bank/slot ownership per protocol.
+        let slice = unsafe { core::slice::from_raw_parts_mut(self.ptr.add(off), n) };
+        Some(f(slice))
+    }
+
+    /// Copy `dest.len()` bytes from `off` into `dest` (no intermediate `Vec`).
+    #[allow(unsafe_code)]
+    pub fn copy_to(&self, off: usize, dest: &mut [u8]) -> Option<()> {
+        if !self.in_bounds(off, dest.len()) {
+            return None;
+        }
         // SAFETY: in-bounds; read of a settled region per the protocol.
         unsafe {
-            core::ptr::copy_nonoverlapping(self.ptr.add(off), v.as_mut_ptr(), n);
+            core::ptr::copy_nonoverlapping(self.ptr.add(off), dest.as_mut_ptr(), dest.len());
         }
+        Some(())
+    }
+
+    #[allow(unsafe_code)]
+    pub fn read_bytes(&self, off: usize, n: usize) -> Option<Vec<u8>> {
+        let mut v = vec![0u8; n];
+        self.copy_to(off, &mut v)?;
         Some(v)
     }
 
@@ -169,6 +195,23 @@ mod tests {
         assert!(!seg.write_bytes(30, b"toolong"));
         assert_eq!(seg.read_bytes(30, 8), None);
         assert_eq!(seg.read_u64(30), None);
+    }
+
+    #[test]
+    fn with_mut_bytes_and_copy_to() {
+        let owned = OwnedSeg::new(64);
+        let seg = owned.seg();
+        let n = seg
+            .with_mut_bytes(8, 16, |buf| {
+                buf[..5].copy_from_slice(b"world");
+                5
+            })
+            .unwrap();
+        assert_eq!(n, 5);
+        let mut dest = [0u8; 5];
+        assert!(seg.copy_to(8, &mut dest).is_some());
+        assert_eq!(&dest, b"world");
+        assert!(seg.copy_to(60, &mut [0u8; 8]).is_none());
     }
 
     #[test]

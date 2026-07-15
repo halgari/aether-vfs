@@ -2,7 +2,8 @@
 //!
 //! **A1:** OPEN keeps an OS `File` open.
 //! **A2:** READ clones `Arc` and drops map mutex before I/O.
-//! **B5:** Sequential readahead into a small per-fh buffer.
+//! **B5:** Sequential readahead into a small per-fh buffer (small READs only).
+//! **C1:** `read_into` writes disk/zip bytes straight into a caller buffer (bulk arena).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -162,14 +163,7 @@ impl OpenTable {
     }
 
     pub fn read(&self, fh: u64, offset: u64, len: u32, max_data: usize) -> Result<Vec<u8>, i32> {
-        let live = {
-            let g = self.map.lock().map_err(|_| ST_IO_ERROR)?;
-            let ent = g.get(&fh).ok_or(ST_BAD_FH)?;
-            match &ent.kind {
-                OpenKind::Dir { .. } => return Err(ST_IS_DIR),
-                OpenKind::File(live) => Arc::clone(live),
-            }
-        };
+        let live = self.live_file(fh)?;
         if offset >= live.size {
             return Ok(Vec::new());
         }
@@ -178,47 +172,89 @@ impl OpenTable {
         if want == 0 {
             return Ok(Vec::new());
         }
+        let mut buf = vec![0u8; want];
+        let n = self.read_live_into(&live, offset, &mut buf)?;
+        buf.truncate(n);
+        Ok(buf)
+    }
 
-        // **B5:** serve from readahead if it covers this range.
+    /// Read into a caller buffer (bulk arena path: disk/zip → out, no intermediate Vec).
+    pub fn read_into(
+        &self,
+        fh: u64,
+        offset: u64,
+        max_data: usize,
+        out: &mut [u8],
+    ) -> Result<usize, i32> {
+        let live = self.live_file(fh)?;
+        if offset >= live.size {
+            return Ok(0);
+        }
+        let remain = (live.size - offset) as usize;
+        let want = max_data.min(out.len()).min(remain);
+        if want == 0 {
+            return Ok(0);
+        }
+        self.read_live_into(&live, offset, &mut out[..want])
+    }
+
+    fn live_file(&self, fh: u64) -> Result<Arc<LiveFile>, i32> {
+        let g = self.map.lock().map_err(|_| ST_IO_ERROR)?;
+        let ent = g.get(&fh).ok_or(ST_BAD_FH)?;
+        match &ent.kind {
+            OpenKind::Dir { .. } => Err(ST_IS_DIR),
+            OpenKind::File(live) => Ok(Arc::clone(live)),
+        }
+    }
+
+    fn read_live_into(
+        &self,
+        live: &LiveFile,
+        offset: u64,
+        out: &mut [u8],
+    ) -> Result<usize, i32> {
+        let want = out.len();
+        if want == 0 {
+            return Ok(0);
+        }
+
+        // **B5:** serve from readahead if it fully covers this range.
         if let Ok(ra) = live.readahead.lock() {
             if let Some(ref r) = *ra {
                 if offset >= r.offset {
                     let skip = (offset - r.offset) as usize;
                     if skip < r.data.len() {
                         let n = want.min(r.data.len() - skip);
-                        let mut buf = r.data[skip..skip + n].to_vec();
-                        // Partial hit: still return what we have; caller may re-request rest.
                         if n == want {
+                            out.copy_from_slice(&r.data[skip..skip + n]);
                             if let Ok(mut le) = live.last_end.lock() {
                                 *le = offset + n as u64;
                             }
-                            return Ok(buf);
+                            return Ok(n);
                         }
-                        // Fall through to full read if readahead is only partial
-                        let _ = buf;
+                        // Partial only — fall through to full I/O for the whole range.
                     }
                 }
             }
         }
 
-        let mut buf = vec![0u8; want];
         let abs = live.base_offset.saturating_add(offset);
-        {
+        let n = {
             let mut f = live.file.lock().map_err(|_| ST_IO_ERROR)?;
             f.seek(SeekFrom::Start(abs)).map_err(|_| ST_IO_ERROR)?;
-            let n = f.read(&mut buf).map_err(|_| ST_IO_ERROR)?;
-            buf.truncate(n);
-        }
-        let n = buf.len();
+            f.read(out).map_err(|_| ST_IO_ERROR)?
+        };
         let end = offset + n as u64;
 
-        // **B5:** if sequential, prefetch next window under the file lock.
+        // **B5:** prefetch only for small sequential READs. Large bulk transfers
+        // already pull multi-hundred-KiB chunks; an extra 256 KiB readahead only
+        // steals disk bandwidth and is rarely fully consumed.
         let sequential = live
             .last_end
             .lock()
             .map(|le| *le == offset || *le == 0)
             .unwrap_or(false);
-        if sequential && end < live.size {
+        if sequential && n > 0 && n < READAHEAD_SIZE && end < live.size {
             let pref = READAHEAD_SIZE.min((live.size - end) as usize);
             if pref > 0 {
                 let mut pre = vec![0u8; pref];
@@ -237,24 +273,15 @@ impl OpenTable {
                     }
                 }
             }
+        } else if n >= READAHEAD_SIZE {
+            // Invalidate stale readahead after large reads.
+            if let Ok(mut ra) = live.readahead.lock() {
+                *ra = None;
+            }
         }
         if let Ok(mut le) = live.last_end.lock() {
             *le = end;
         }
-        Ok(buf)
-    }
-
-    /// Read into a caller buffer (for bulk arena path — one less alloc when possible).
-    pub fn read_into(
-        &self,
-        fh: u64,
-        offset: u64,
-        max_data: usize,
-        out: &mut [u8],
-    ) -> Result<usize, i32> {
-        let data = self.read(fh, offset, max_data as u32, max_data.min(out.len()))?;
-        let n = data.len().min(out.len());
-        out[..n].copy_from_slice(&data[..n]);
         Ok(n)
     }
 

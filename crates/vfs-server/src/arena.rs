@@ -1,5 +1,5 @@
 //! **B1:** Shared bulk data arena — banks sized per ring slot for concurrent READs.
-//! Uses `SharedSeg::write_bytes` (no extra unsafe in this crate).
+//! Uses `SharedSeg` helpers only (no extra unsafe in this crate).
 
 use vfs_ipc::SharedSeg;
 
@@ -44,6 +44,30 @@ impl<'a> DataArena<'a> {
         }
         Ok(off as u64)
     }
+
+    /// Fill the bank for `slot` by letting `f` write into a mutable bank slice.
+    ///
+    /// Returns `(mapping_offset, bytes_written)`. Used by bulk READ to avoid an
+    /// intermediate `Vec` (disk/zip → arena directly).
+    pub fn fill_bank(
+        &self,
+        slot: u32,
+        max_len: usize,
+        f: impl FnOnce(&mut [u8]) -> Result<usize, i32>,
+    ) -> Result<(u64, usize), i32> {
+        let max = max_len.min(self.bank_size);
+        if max == 0 {
+            return Ok((self.bank_mapping_offset(slot), 0));
+        }
+        let off = self.mapping_offset + self.bank_index(slot) * self.bank_size;
+        self.seg
+            .with_mut_bytes(off, max, |buf| {
+                let n = f(buf)?;
+                let n = n.min(buf.len());
+                Ok((off as u64, n))
+            })
+            .ok_or(vfs_protocol::ST_IO_ERROR)?
+    }
 }
 
 #[cfg(test)]
@@ -60,5 +84,21 @@ mod tests {
         assert_eq!(off, arena.bank_size as u64);
         let got = owned.seg().read_bytes(off as usize, data.len()).unwrap();
         assert_eq!(got, data);
+    }
+
+    #[test]
+    fn fill_bank_writes_without_extra_copy() {
+        let owned = OwnedSeg::new(256 * 1024);
+        let arena = DataArena::new(owned.seg(), 0, 128 * 1024, 4);
+        let (off, n) = arena
+            .fill_bank(2, 64, |buf| {
+                buf[..11].copy_from_slice(b"fill-direct");
+                Ok(11)
+            })
+            .unwrap();
+        assert_eq!(n, 11);
+        assert_eq!(off, arena.bank_mapping_offset(2));
+        let got = owned.seg().read_bytes(off as usize, 11).unwrap();
+        assert_eq!(got, b"fill-direct");
     }
 }

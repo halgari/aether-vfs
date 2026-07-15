@@ -16,8 +16,8 @@ use vfs_server::{DataArena, Server, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
 use vfs_win::{EventNotifier, SharedMapping};
 
 pub const DEFAULT_SLOT_COUNT: u32 = 32;
-/// **B1:** bytes of bulk arena after the control ring.
-pub const DEFAULT_ARENA_BYTES: usize = 16 * 1024 * 1024;
+/// **B1/C2:** bulk arena after the control ring (32 MiB → ~1 MiB banks @ 32 slots).
+pub const DEFAULT_ARENA_BYTES: usize = 32 * 1024 * 1024;
 
 struct DirectorInner {
     mapping: SharedMapping,
@@ -249,11 +249,11 @@ pub fn rpc_read_all(
                 break;
             }
             let s = seg.ok_or_else(|| "bulk without seg".to_string())?;
-            let chunk = s
-                .read_bytes(aoff as usize, n as usize)
-                .ok_or_else(|| "arena read_bytes".to_string())?;
+            let start = out.len();
+            out.resize(start + n as usize, 0);
+            s.copy_to(aoff as usize, &mut out[start..])
+                .ok_or_else(|| "arena copy_to".to_string())?;
             off += n as u64;
-            out.extend_from_slice(&chunk);
             // Continue until off >= size; bank may be smaller than `want`.
         } else {
             let chunk =

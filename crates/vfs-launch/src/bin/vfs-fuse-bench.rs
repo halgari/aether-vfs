@@ -17,11 +17,12 @@ use vfs_core::{encode_zip_window, EntryKind, InputEntry, Layer, LayerId, SourceI
 use vfs_ipc::ring::init;
 use vfs_ipc::{OwnedSeg, RingClient, RingServer, SpinNotifier};
 use vfs_protocol::{
-    decode_getattr_resp, decode_open_resp, decode_read_resp, decode_read_resp_into,
-    encode_close_req, encode_open_req, encode_path_req, encode_read_req, OpenResp, ReadReq,
-    OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ, OPEN_READ, ST_OK,
+    decode_getattr_resp, decode_open_resp, decode_read_bulk_resp, decode_read_resp,
+    decode_read_resp_into, encode_close_req, encode_open_req, encode_path_req, encode_read_req,
+    is_read_resp_bulk, OpenResp, ReadReq, FLAG_READ_BULK, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT,
+    OP_OPEN, OP_READ, OPEN_READ, ST_OK,
 };
-use vfs_server::{OpenTable, Server, DEFAULT_PAYLOAD_CAP};
+use vfs_server::{DataArena, OpenTable, Server, DEFAULT_PAYLOAD_CAP};
 
 struct Stats {
     name: String,
@@ -130,16 +131,20 @@ fn main() {
     } else {
         disk_layers(&disk_path, file_size as u64)
     };
-    let _ = label;
 
     let server = Arc::new(
         Server::from_layers_with_cap(layers, payload_cap).expect("server"),
     );
-    // Ring large enough for 256 KiB payloads × 8 slots.
+    // Ring + bulk arena (matches production director layout, fewer slots for bench).
+    const SLOT_COUNT: u32 = 8;
+    const ARENA_LEN: usize = 8 * 1024 * 1024; // 8 MiB → 1 MiB banks @ 8 slots
     let stride = ((32 + payload_cap as usize) + 7) & !7;
-    let ring_bytes = 40 + 8 * stride + 4096;
-    let owned = OwnedSeg::new(ring_bytes);
-    init(owned.seg(), 8, payload_cap).expect("ring init");
+    let ring_bytes = 40 + SLOT_COUNT as usize * stride;
+    let arena_offset = ring_bytes;
+    let map_len = ring_bytes + ARENA_LEN;
+    let owned = OwnedSeg::new(map_len);
+    init(owned.seg(), SLOT_COUNT, payload_cap).expect("ring init");
+    let bank_size = ARENA_LEN / SLOT_COUNT as usize;
     let stop = Arc::new(AtomicBool::new(false));
 
     // `thread::scope` keeps `owned` alive for both server and client.
@@ -149,8 +154,9 @@ fn main() {
         let seg = owned.seg();
         scope.spawn(move || {
             let ring = RingServer::new(seg, SpinNotifier).unwrap();
+            let arena = DataArena::new(seg, arena_offset, ARENA_LEN, SLOT_COUNT as usize);
             while !stop2.load(Ordering::Relaxed) {
-                match srv.serve_one(&ring) {
+                match srv.serve_one_arena(&ring, &arena) {
                     Ok(true) => {}
                     Ok(false) => std::hint::spin_loop(),
                     Err(_) => break,
@@ -160,6 +166,7 @@ fn main() {
 
         thread::sleep(Duration::from_millis(10));
         let client = RingClient::new(owned.seg(), SpinNotifier).unwrap();
+        let seg = owned.seg();
 
         let mut lines: Vec<String> = Vec::new();
         lines.push("# VFS Director FUSE RPC Benchmark".into());
@@ -178,6 +185,9 @@ fn main() {
             }
         ));
         lines.push(format!("- payload_cap: {payload_cap} bytes"));
+        lines.push(format!(
+            "- bulk arena: {ARENA_LEN} bytes ({bank_size} B banks × {SLOT_COUNT} slots)"
+        ));
         lines.push(
             "- Notifier: SpinNotifier (same-process client/server threads)".into(),
         );
@@ -251,11 +261,23 @@ fn main() {
         lines.push(String::new());
         lines.push("```".into());
 
-        for chunk in [64usize, 512, 4096, 16384, 65536, 262144 - 8] {
-            let len = chunk
-                .min((size as usize).max(1))
-                .min(payload_cap as usize - 8) as u32;
-            let mut st = Stats::new(format!("READ {len} B"));
+        // Cap single-RPC sizes at bank_size (bulk path) or payload_cap−8 (inline).
+        let single_max = bank_size.min(payload_cap as usize - 8).min((size as usize).max(1));
+        for chunk in [64usize, 512, 4096, 16384, 65536, 262144, 1_048_576] {
+            let len = chunk.min(single_max) as u32;
+            if len == 0 {
+                continue;
+            }
+            // Prefer bulk for ≥64 KiB (matches production handler threshold).
+            let flags = if len >= 64 * 1024 {
+                FLAG_READ_BULK
+            } else {
+                0
+            };
+            let mut st = Stats::new(format!(
+                "READ {len} B{}",
+                if flags != 0 { " bulk" } else { "" }
+            ));
             let req = encode_read_req(&ReadReq {
                 fh,
                 offset: 0,
@@ -263,11 +285,21 @@ fn main() {
             });
             for i in 0..(warmup + iters) {
                 let t0 = Instant::now();
-                let r = client.submit(OP_READ, 0, &req).unwrap();
+                let r = client.submit(OP_READ, flags, &req).unwrap();
                 let dt = t0.elapsed();
                 assert_eq!(r.status, ST_OK);
-                let data = decode_read_resp(&r.payload).unwrap();
-                assert_eq!(data.len(), len as usize);
+                let got = if is_read_resp_bulk(&r.payload) {
+                    let (bn, aoff) = decode_read_bulk_resp(&r.payload).unwrap();
+                    let n = bn as usize;
+                    let mut tmp = vec![0u8; n];
+                    if n > 0 {
+                        seg.copy_to(aoff as usize, &mut tmp).unwrap();
+                    }
+                    tmp
+                } else {
+                    decode_read_resp(&r.payload).unwrap()
+                };
+                assert_eq!(got.len(), len as usize);
                 if i >= warmup {
                     st.push(dt);
                 }
@@ -282,11 +314,11 @@ fn main() {
         }
         lines.push("```".into());
 
-        // --- Sequential throughput (A3 into scratch + A5 pipelined depth 4) ---
+        // --- Sequential throughput: bulk arena + pipeline (production data path) ---
         let read_bytes = (size as usize).min(32 * 1024 * 1024);
-        let max_chunk = (payload_cap as usize).saturating_sub(8);
+        let max_chunk = bank_size; // bulk bank size
         const PIPE_DEPTH: usize = 4;
-        let mut sink = vec![0u8; max_chunk]; // A3: decode_read_resp_into (no second heap alloc)
+        let mut sink = vec![0u8; max_chunk];
         let t0 = Instant::now();
         let mut off = 0u64;
         let mut total = 0usize;
@@ -303,7 +335,7 @@ fn main() {
                 }
                 reqs.push((
                     OP_READ,
-                    0,
+                    FLAG_READ_BULK,
                     encode_read_req(&ReadReq {
                         fh,
                         offset: plan_off,
@@ -320,7 +352,16 @@ fn main() {
             let responses = client.submit_many(&reqs).unwrap();
             for (r, want) in responses.iter().zip(wants.iter()) {
                 assert_eq!(r.status, ST_OK);
-                let n = decode_read_resp_into(&r.payload, &mut sink[..*want]).unwrap();
+                let n = if is_read_resp_bulk(&r.payload) {
+                    let (bn, aoff) = decode_read_bulk_resp(&r.payload).unwrap();
+                    let n = (bn as usize).min(*want).min(sink.len());
+                    if n > 0 {
+                        seg.copy_to(aoff as usize, &mut sink[..n]).unwrap();
+                    }
+                    n
+                } else {
+                    decode_read_resp_into(&r.payload, &mut sink[..*want]).unwrap()
+                };
                 if n == 0 {
                     break 'seq;
                 }
@@ -339,7 +380,7 @@ fn main() {
         let mib_s = mib / secs;
 
         lines.push(String::new());
-        lines.push("## Sequential throughput (fragmented READ RPCs)".into());
+        lines.push("## Sequential throughput (bulk arena READ RPCs)".into());
         lines.push(String::new());
         lines.push(format!(
             "- Bytes read: {total} ({mib:.2} MiB) in {rpc_count} RPC(s)"
@@ -353,6 +394,9 @@ fn main() {
             "- Avg time per RPC: {:.2} µs",
             elapsed.as_secs_f64() * 1e6 / rpc_count as f64
         ));
+        lines.push(format!(
+            "- Chunk size: {max_chunk} B (bulk bank), pipeline depth {PIPE_DEPTH}"
+        ));
 
         // --- Baseline: OpenTable direct ---
         let tree = server.tree();
@@ -361,18 +405,17 @@ fn main() {
         let t0 = Instant::now();
         let mut off = 0u64;
         let mut total_d = 0usize;
+        let mut direct_buf = vec![0u8; max_chunk];
         while total_d < read_bytes {
-            let want = ((read_bytes - total_d) as u64)
-                .min(max_chunk as u64)
-                .min(1_048_576) as u32;
-            let chunk = table
-                .read(open.fh, off, want, want as usize)
-                .expect("direct read");
-            if chunk.is_empty() {
+            let want = ((read_bytes - total_d) as u64).min(max_chunk as u64) as usize;
+            let n = table
+                .read_into(open.fh, off, want, &mut direct_buf[..want])
+                .expect("direct read_into");
+            if n == 0 {
                 break;
             }
-            total_d += chunk.len();
-            off += chunk.len() as u64;
+            total_d += n;
+            off += n as u64;
         }
         let elapsed_d = t0.elapsed();
         let _ = table.close(open.fh);
@@ -383,7 +426,7 @@ fn main() {
         let mut total_fs = 0usize;
         if let Ok(mut file) = std::fs::File::open(&disk_path) {
             use std::io::Read;
-            let mut buf = vec![0u8; max_chunk.min(1_048_576)];
+            let mut buf = vec![0u8; max_chunk];
             while total_fs < read_bytes.min(file_size) {
                 let n = file.read(&mut buf).unwrap_or(0);
                 if n == 0 {
@@ -403,7 +446,7 @@ fn main() {
         lines.push("## Baselines (same host, for context)".into());
         lines.push(String::new());
         lines.push(format!(
-            "- **OpenTable::read direct** (no IPC, same Server tree): **{mib_d:.1} MiB/s** over {total_d} bytes"
+            "- **OpenTable::read_into direct** (no IPC, same Server tree): **{mib_d:.1} MiB/s** over {total_d} bytes"
         ));
         if total_fs > 0 {
             lines.push(format!(
@@ -423,7 +466,7 @@ fn main() {
                 .into(),
         );
         lines.push(
-            "- Each READ response is capped at `payload_cap - 8` bytes; large files are fragmented into multiple RPCs."
+            "- Sequential throughput uses **FLAG_READ_BULK** with disk/zip → arena bank (no intermediate Vec) and client `copy_to` into a scratch buffer."
                 .into(),
         );
         lines.push(
