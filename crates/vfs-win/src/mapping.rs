@@ -111,6 +111,11 @@ impl SharedMapping {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// Raw start of the mapped view (for carving an arena after the ring).
+    pub fn as_mut_ptr(&self) -> *mut u8 {
+        self.view as *mut u8
+    }
 }
 
 impl Drop for SharedMapping {

@@ -5,4 +5,9 @@ edition = "2021"
 
 [dependencies]
 vfs-ipc = { path = "../vfs-ipc" }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Memory"] }
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Memory",
+  "Win32_System_Threading",
+] }

@@ -31,6 +31,11 @@ pub const OPEN_READ: u32 = 1;
 /// OPEN request wants write access (unsupported in MVP director → BAD_REQUEST).
 pub const OPEN_WRITE: u32 = 2;
 
+/// Ring/request flag: prefer bulk-arena READ (data in shared arena, not ring payload).
+pub const FLAG_READ_BULK: u32 = 0x1;
+/// High bit on READ response `bytes_read` means bulk: data lives at arena_offset.
+pub const READ_RESP_BULK_BIT: u32 = 0x8000_0000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttrResp {
     pub found: bool,
@@ -207,17 +212,49 @@ pub fn decode_read_resp(p: &[u8]) -> Option<Vec<u8>> {
 
 /// **A3:** copy READ response data into `out` without allocating a second Vec.
 /// Returns bytes copied (may be less than `out.len()` on short/EOF reads).
+/// Inline responses only (not bulk).
 pub fn decode_read_resp_into(p: &[u8], out: &mut [u8]) -> Option<usize> {
     if p.len() < 8 {
         return None;
     }
-    let n = u32::from_le_bytes(p[0..4].try_into().ok()?) as usize;
+    let raw = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    if raw & READ_RESP_BULK_BIT != 0 {
+        return None; // use decode_read_bulk_resp + arena
+    }
+    let n = raw as usize;
     if p.len() < 8 + n {
         return None;
     }
     let n = n.min(out.len());
     out[..n].copy_from_slice(&p[8..8 + n]);
     Some(n)
+}
+
+/// Bulk READ response: `bytes_read|BULK_BIT : u32 | pad:u32 | arena_offset:u64`
+pub fn encode_read_resp_bulk(bytes_read: u32, arena_offset: u64) -> Vec<u8> {
+    let mut b = Vec::with_capacity(16);
+    b.extend_from_slice(&(bytes_read | READ_RESP_BULK_BIT).to_le_bytes());
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b.extend_from_slice(&arena_offset.to_le_bytes());
+    b
+}
+
+/// Returns `(bytes_read, arena_offset)` for a bulk response, or `None` if inline/malformed.
+pub fn decode_read_bulk_resp(p: &[u8]) -> Option<(u32, u64)> {
+    if p.len() < 16 {
+        return None;
+    }
+    let raw = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    if raw & READ_RESP_BULK_BIT == 0 {
+        return None;
+    }
+    let n = raw & !READ_RESP_BULK_BIT;
+    let off = u64::from_le_bytes(p[8..16].try_into().ok()?);
+    Some((n, off))
+}
+
+pub fn is_read_resp_bulk(p: &[u8]) -> bool {
+    p.len() >= 4 && (u32::from_le_bytes(p[0..4].try_into().unwrap_or([0; 4])) & READ_RESP_BULK_BIT) != 0
 }
 
 pub fn encode_close_req(fh: u64) -> Vec<u8> {

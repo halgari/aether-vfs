@@ -57,7 +57,7 @@ impl SharedSeg {
     }
 
     #[allow(unsafe_code)]
-    pub(crate) fn write_bytes(&self, off: usize, data: &[u8]) -> bool {
+    pub fn write_bytes(&self, off: usize, data: &[u8]) -> bool {
         if !self.in_bounds(off, data.len()) {
             return false;
         }
@@ -70,7 +70,7 @@ impl SharedSeg {
     }
 
     #[allow(unsafe_code)]
-    pub(crate) fn read_bytes(&self, off: usize, n: usize) -> Option<Vec<u8>> {
+    pub fn read_bytes(&self, off: usize, n: usize) -> Option<Vec<u8>> {
         if !self.in_bounds(off, n) {
             return None;
         }

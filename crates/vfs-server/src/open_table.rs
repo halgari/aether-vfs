@@ -1,7 +1,8 @@
 //! Stateful director open-file table: OPEN/READ/CLOSE over zip windows and disk.
 //!
-//! **A1:** OPEN keeps an OS `File` open (no per-READ `File::open`).
-//! **A2:** READ clones an `Arc` live file and drops the map mutex before I/O.
+//! **A1:** OPEN keeps an OS `File` open.
+//! **A2:** READ clones `Arc` and drops map mutex before I/O.
+//! **B5:** Sequential readahead into a small per-fh buffer.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -15,12 +16,22 @@ use vfs_protocol::{
     OpenResp, OPEN_WRITE, ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_IS_DIR, ST_NOT_FOUND, ST_OK,
 };
 
-/// Live open file: seek base (0 disk, zip data_offset) + kept OS handle.
+/// Prefetch size for sequential access (**B5**).
+const READAHEAD_SIZE: usize = 256 * 1024;
+
+struct Readahead {
+    offset: u64,
+    data: Vec<u8>,
+}
+
+/// Live open file: seek base + kept OS handle + optional readahead.
 struct LiveFile {
     size: u64,
-    /// Byte offset in the OS file of virtual offset 0.
     base_offset: u64,
     file: Mutex<File>,
+    /// Last successful read end offset (for sequential detection).
+    last_end: Mutex<u64>,
+    readahead: Mutex<Option<Readahead>>,
 }
 
 enum OpenKind {
@@ -32,7 +43,6 @@ struct OpenEntry {
     kind: OpenKind,
 }
 
-/// Director-side open handles (opaque `fh` values never zero).
 pub struct OpenTable {
     next: AtomicU64,
     map: Mutex<HashMap<u64, OpenEntry>>,
@@ -52,7 +62,6 @@ impl OpenTable {
         }
     }
 
-    /// OPEN: resolve vpath in `tree` and allocate an fh (opens OS file once).
     pub fn open(&self, tree: &VfsTree, path: &str, flags: u32) -> Result<OpenResp, i32> {
         if flags & OPEN_WRITE != 0 {
             return Err(ST_BAD_REQUEST);
@@ -92,6 +101,8 @@ impl OpenTable {
                             size,
                             base_offset: offset,
                             file: Mutex::new(f),
+                            last_end: Mutex::new(0),
+                            readahead: Mutex::new(None),
                         })
                     }
                     Source::Disk(bytes) => {
@@ -102,6 +113,8 @@ impl OpenTable {
                             size,
                             base_offset: 0,
                             file: Mutex::new(f),
+                            last_end: Mutex::new(0),
+                            readahead: Mutex::new(None),
                         })
                     }
                 };
@@ -122,7 +135,6 @@ impl OpenTable {
         }
     }
 
-    /// Also allow OPEN via getattr fallback for dirs that resolve only as walk nodes.
     pub fn open_with_getattr(&self, tree: &VfsTree, path: &str, flags: u32) -> Result<OpenResp, i32> {
         match self.open(tree, path, flags) {
             Err(ST_NOT_FOUND) => {
@@ -149,8 +161,6 @@ impl OpenTable {
         }
     }
 
-    /// READ up to `len` bytes, capped by `max_data` (payload room).
-    /// **A2:** map lock is only held to clone `Arc<LiveFile>`; I/O is outside the lock.
     pub fn read(&self, fh: u64, offset: u64, len: u32, max_data: usize) -> Result<Vec<u8>, i32> {
         let live = {
             let g = self.map.lock().map_err(|_| ST_IO_ERROR)?;
@@ -160,7 +170,6 @@ impl OpenTable {
                 OpenKind::File(live) => Arc::clone(live),
             }
         };
-        // A2: I/O without holding the open-table map mutex.
         if offset >= live.size {
             return Ok(Vec::new());
         }
@@ -169,13 +178,84 @@ impl OpenTable {
         if want == 0 {
             return Ok(Vec::new());
         }
+
+        // **B5:** serve from readahead if it covers this range.
+        if let Ok(ra) = live.readahead.lock() {
+            if let Some(ref r) = *ra {
+                if offset >= r.offset {
+                    let skip = (offset - r.offset) as usize;
+                    if skip < r.data.len() {
+                        let n = want.min(r.data.len() - skip);
+                        let mut buf = r.data[skip..skip + n].to_vec();
+                        // Partial hit: still return what we have; caller may re-request rest.
+                        if n == want {
+                            if let Ok(mut le) = live.last_end.lock() {
+                                *le = offset + n as u64;
+                            }
+                            return Ok(buf);
+                        }
+                        // Fall through to full read if readahead is only partial
+                        let _ = buf;
+                    }
+                }
+            }
+        }
+
         let mut buf = vec![0u8; want];
         let abs = live.base_offset.saturating_add(offset);
-        let mut f = live.file.lock().map_err(|_| ST_IO_ERROR)?;
-        f.seek(SeekFrom::Start(abs)).map_err(|_| ST_IO_ERROR)?;
-        let n = f.read(&mut buf).map_err(|_| ST_IO_ERROR)?;
-        buf.truncate(n);
+        {
+            let mut f = live.file.lock().map_err(|_| ST_IO_ERROR)?;
+            f.seek(SeekFrom::Start(abs)).map_err(|_| ST_IO_ERROR)?;
+            let n = f.read(&mut buf).map_err(|_| ST_IO_ERROR)?;
+            buf.truncate(n);
+        }
+        let n = buf.len();
+        let end = offset + n as u64;
+
+        // **B5:** if sequential, prefetch next window under the file lock.
+        let sequential = live
+            .last_end
+            .lock()
+            .map(|le| *le == offset || *le == 0)
+            .unwrap_or(false);
+        if sequential && end < live.size {
+            let pref = READAHEAD_SIZE.min((live.size - end) as usize);
+            if pref > 0 {
+                let mut pre = vec![0u8; pref];
+                if let Ok(mut f) = live.file.lock() {
+                    let abs2 = live.base_offset.saturating_add(end);
+                    if f.seek(SeekFrom::Start(abs2)).is_ok() {
+                        if let Ok(pn) = f.read(&mut pre) {
+                            pre.truncate(pn);
+                            if let Ok(mut ra) = live.readahead.lock() {
+                                *ra = Some(Readahead {
+                                    offset: end,
+                                    data: pre,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(mut le) = live.last_end.lock() {
+            *le = end;
+        }
         Ok(buf)
+    }
+
+    /// Read into a caller buffer (for bulk arena path — one less alloc when possible).
+    pub fn read_into(
+        &self,
+        fh: u64,
+        offset: u64,
+        max_data: usize,
+        out: &mut [u8],
+    ) -> Result<usize, i32> {
+        let data = self.read(fh, offset, max_data as u32, max_data.min(out.len()))?;
+        let n = data.len().min(out.len());
+        out[..n].copy_from_slice(&data[..n]);
+        Ok(n)
     }
 
     pub fn close(&self, fh: u64) -> Result<(), i32> {
@@ -192,7 +272,6 @@ impl OpenTable {
     }
 }
 
-/// Max data bytes that fit in a READ response for the given ring payload_cap.
 pub fn max_read_data(payload_cap: u32) -> usize {
     payload_cap.saturating_sub(8) as usize
 }
@@ -262,7 +341,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Minimal Stored zip with one entry `hello.txt` = `hello-world`.
     fn write_tiny_stored_zip(path: &std::path::Path, name: &str, data: &[u8]) {
         use std::io::Write;
         let mut f = File::create(path).unwrap();
@@ -281,7 +359,6 @@ mod tests {
         local.extend_from_slice(&0u16.to_le_bytes());
         local.extend_from_slice(name_b);
         local.extend_from_slice(data);
-        let local_off = 0u32;
         f.write_all(&local).unwrap();
         let cd_off = local.len() as u32;
         let mut cd = Vec::new();
@@ -301,7 +378,7 @@ mod tests {
         cd.extend_from_slice(&0u16.to_le_bytes());
         cd.extend_from_slice(&0u16.to_le_bytes());
         cd.extend_from_slice(&0u32.to_le_bytes());
-        cd.extend_from_slice(&local_off.to_le_bytes());
+        cd.extend_from_slice(&0u32.to_le_bytes());
         cd.extend_from_slice(name_b);
         f.write_all(&cd).unwrap();
         let mut eocd = Vec::new();
@@ -314,7 +391,6 @@ mod tests {
         eocd.extend_from_slice(&cd_off.to_le_bytes());
         eocd.extend_from_slice(&0u16.to_le_bytes());
         f.write_all(&eocd).unwrap();
-        let _ = local;
     }
 
     #[test]
@@ -324,7 +400,6 @@ mod tests {
         let zip_path = dir.join("t.zip");
         let data = b"hello-world";
         write_tiny_stored_zip(&zip_path, "hello.txt", data);
-
         let data_off = 30u64 + 9;
         let src = encode_zip_window(data_off, &zip_path.to_string_lossy());
         let tree = build(vec![Layer {
@@ -338,7 +413,6 @@ mod tests {
             }],
         }])
         .unwrap();
-
         let table = OpenTable::new();
         let open = table.open(&tree, "hello.txt", 0).unwrap();
         let a = table.read(open.fh, 0, 5, 4096).unwrap();

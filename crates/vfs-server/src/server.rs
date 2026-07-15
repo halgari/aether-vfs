@@ -4,11 +4,14 @@ use vfs_core::{build, BuildError, Layer, VfsTree};
 use vfs_ipc::ring::IpcError;
 use vfs_ipc::{Notifier, RingServer};
 
-use crate::handler::{dispatch, dispatch_with_table};
+use crate::arena::DataArena;
+use crate::handler::{dispatch, dispatch_full, dispatch_with_table};
 use crate::open_table::OpenTable;
 
-/// Default ring payload capacity used when not specified.
-pub const DEFAULT_PAYLOAD_CAP: u32 = 262_144;
+/// **B2:** default ring payload capacity (1 MiB).
+pub const DEFAULT_PAYLOAD_CAP: u32 = 1_048_576;
+/// **B3:** default number of server worker threads.
+pub const DEFAULT_WORKER_COUNT: usize = 4;
 
 /// The authoritative server: owns the merged tree, open-file table, and answers
 /// ring requests (and can still publish a snapshot for debug).
@@ -62,7 +65,6 @@ impl Server {
         )
     }
 
-    /// Metadata-only dispatch (no open table) — used by older tests.
     pub fn handle_meta(&self, opcode: u32, payload: &[u8]) -> (i32, Vec<u8>) {
         dispatch(&self.tree, opcode, payload)
     }
@@ -72,7 +74,25 @@ impl Server {
         ring.serve_one(|req| self.handle(req.opcode, &req.payload))
     }
 
-    /// Publish the authoritative tree as a vfs-shared snapshot image.
+    /// **B1:** serve with bulk arena (slot-keyed banks).
+    pub fn serve_one_arena<N: Notifier>(
+        &self,
+        ring: &RingServer<'_, N>,
+        arena: &DataArena<'_>,
+    ) -> Result<bool, IpcError> {
+        ring.serve_one(|req| {
+            dispatch_full(
+                &self.tree,
+                &self.table,
+                req.opcode,
+                &req.payload,
+                req.flags,
+                self.payload_cap,
+                Some((arena, req.slot)),
+            )
+        })
+    }
+
     pub fn snapshot(&self) -> Vec<u8> {
         vfs_shared::bridge::flatten(&self.tree)
     }

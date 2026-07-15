@@ -3,10 +3,12 @@
 //! publishes the `vfs-shared` snapshot, and services `vfs-ipc` requests
 //! including stateful OPEN/READ/CLOSE for the director FUSE path.
 
+pub mod arena;
 pub mod handler;
 pub mod open_table;
 pub mod proto;
 pub mod server;
 
+pub use arena::DataArena;
 pub use open_table::OpenTable;
-pub use server::{Server, DEFAULT_PAYLOAD_CAP};
+pub use server::{Server, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};

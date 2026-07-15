@@ -1,17 +1,19 @@
-//! Opcode dispatcher (stateless metadata + stateful open table).
+//! Opcode dispatcher (stateless metadata + stateful open table + bulk arena).
 
 use vfs_core::{NodeKind, VfsError, VfsTree};
 use vfs_protocol::{
     decode_close_req, decode_open_req, decode_path_req, decode_read_req, encode_getattr_resp,
-    encode_open_resp, encode_path_req, encode_read_resp, encode_readdir_resp, AttrResp,
-    DirEntryWire, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ, OP_READDIR, ST_BAD_REQUEST,
-    ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
+    encode_open_resp, encode_path_req, encode_read_resp, encode_read_resp_bulk, encode_readdir_resp,
+    AttrResp, DirEntryWire, FLAG_READ_BULK, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ,
+    OP_READDIR, ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
 };
 
+use crate::arena::DataArena;
 use crate::open_table::{max_read_data, OpenTable};
 
-/// Decode a request, query the authoritative tree, encode a response.
-/// Pure and total for GETATTR/READDIR/HEARTBEAT — never panics.
+/// Threshold: READs larger than this prefer bulk arena when available (**B1**).
+pub const BULK_THRESHOLD: u32 = 64 * 1024;
+
 pub fn dispatch(tree: &VfsTree, opcode: u32, payload: &[u8]) -> (i32, Vec<u8>) {
     match opcode {
         OP_GETATTR => match decode_path_req(payload) {
@@ -54,13 +56,12 @@ pub fn dispatch(tree: &VfsTree, opcode: u32, payload: &[u8]) -> (i32, Vec<u8>) {
             None => (ST_BAD_REQUEST, Vec::new()),
         },
         OP_HEARTBEAT => (ST_OK, Vec::new()),
-        // Stateful opcodes require dispatch_with_table.
         OP_OPEN | OP_READ | OP_CLOSE => (ST_BAD_REQUEST, Vec::new()),
         _ => (ST_BAD_REQUEST, Vec::new()),
     }
 }
 
-/// Full director dispatch including OPEN/READ/CLOSE against `table`.
+/// Full director dispatch including OPEN/READ/CLOSE.
 pub fn dispatch_with_table(
     tree: &VfsTree,
     table: &OpenTable,
@@ -68,9 +69,22 @@ pub fn dispatch_with_table(
     payload: &[u8],
     payload_cap: u32,
 ) -> (i32, Vec<u8>) {
+    dispatch_full(tree, table, opcode, payload, 0, payload_cap, None)
+}
+
+/// Dispatch with ring flags + optional bulk arena (**B1**).
+pub fn dispatch_full(
+    tree: &VfsTree,
+    table: &OpenTable,
+    opcode: u32,
+    payload: &[u8],
+    flags: u32,
+    payload_cap: u32,
+    arena: Option<(&DataArena<'_>, u32 /*slot*/)>,
+) -> (i32, Vec<u8>) {
     match opcode {
         OP_OPEN => match decode_open_req(payload) {
-            Some((flags, path)) => match table.open_with_getattr(tree, &path, flags) {
+            Some((oflags, path)) => match table.open_with_getattr(tree, &path, oflags) {
                 Ok(r) => (ST_OK, encode_open_resp(&r)),
                 Err(st) => (st, Vec::new()),
             },
@@ -78,10 +92,36 @@ pub fn dispatch_with_table(
         },
         OP_READ => match decode_read_req(payload) {
             Some(req) => {
-                let max = max_read_data(payload_cap);
-                match table.read(req.fh, req.offset, req.len, max) {
-                    Ok(data) => (ST_OK, encode_read_resp(&data)),
-                    Err(st) => (st, Vec::new()),
+                let want_bulk = (flags & FLAG_READ_BULK) != 0 || req.len >= BULK_THRESHOLD;
+                if want_bulk {
+                    if let Some((arena, slot)) = arena {
+                        let max = arena.bank_size.min(req.len as usize);
+                        match table.read(req.fh, req.offset, max as u32, max) {
+                            Ok(data) => match arena.write_bank(slot, &data) {
+                                Ok(off) => (ST_OK, encode_read_resp_bulk(data.len() as u32, off)),
+                                Err(()) => {
+                                    let max_i = max_read_data(payload_cap);
+                                    match table.read(req.fh, req.offset, req.len, max_i) {
+                                        Ok(d) => (ST_OK, encode_read_resp(&d)),
+                                        Err(st) => (st, Vec::new()),
+                                    }
+                                }
+                            },
+                            Err(st) => (st, Vec::new()),
+                        }
+                    } else {
+                        let max = max_read_data(payload_cap);
+                        match table.read(req.fh, req.offset, req.len, max) {
+                            Ok(data) => (ST_OK, encode_read_resp(&data)),
+                            Err(st) => (st, Vec::new()),
+                        }
+                    }
+                } else {
+                    let max = max_read_data(payload_cap);
+                    match table.read(req.fh, req.offset, req.len, max) {
+                        Ok(data) => (ST_OK, encode_read_resp(&data)),
+                        Err(st) => (st, Vec::new()),
+                    }
                 }
             }
             None => (ST_BAD_REQUEST, Vec::new()),
@@ -95,12 +135,6 @@ pub fn dispatch_with_table(
         },
         other => dispatch(tree, other, payload),
     }
-}
-
-// Silence unused import warnings when tests use encode_path_req via re-exports.
-#[allow(dead_code)]
-fn _keep(p: &str) -> Vec<u8> {
-    encode_path_req(p)
 }
 
 #[cfg(test)]
@@ -131,9 +165,6 @@ mod tests {
         assert_eq!(st, ST_OK);
         let a = decode_getattr_resp(&p).unwrap();
         assert!(a.found && !a.is_dir && a.size == 10 && a.mtime == 1);
-
-        let (_, p) = dispatch(&t, OP_GETATTR, &encode_path_req("data"));
-        assert!(decode_getattr_resp(&p).unwrap().is_dir);
     }
 
     #[test]

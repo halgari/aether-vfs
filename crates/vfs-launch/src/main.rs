@@ -518,6 +518,10 @@ fn main() {
         &root_s,
         director.payload_cap,
         director.ring_bytes,
+        director.arena_offset,
+        director.arena_len,
+        &director.server_ev_name,
+        &director.client_ev_name,
     ) {
         eprintln!("error: {e}");
         std::process::exit(1);
@@ -526,6 +530,10 @@ fn main() {
     std::env::set_var("VFS_RING_SECTION", &director.section_name);
     std::env::set_var("VFS_RING_BYTES", director.ring_bytes.to_string());
     std::env::set_var("VFS_RING_PAYLOAD_CAP", director.payload_cap.to_string());
+    std::env::set_var("VFS_ARENA_OFFSET", director.arena_offset.to_string());
+    std::env::set_var("VFS_ARENA_LEN", director.arena_len.to_string());
+    std::env::set_var("VFS_SERVER_EV", &director.server_ev_name);
+    std::env::set_var("VFS_CLIENT_EV", &director.client_ev_name);
     std::env::set_var("VFS_FUSE_CFG", thin_path.to_string_lossy().as_ref());
     std::env::set_var("VFS_VIRTUAL_DIR", &root_s);
 
@@ -551,7 +559,12 @@ fn main() {
         ];
         let mut ok_n = 0u32;
         for vpath in checks {
-            match director::rpc_read_all(&client, vpath, director.payload_cap) {
+            match director::rpc_read_all(
+                &client,
+                vpath,
+                director.payload_cap,
+                Some(director.shared_seg()),
+            ) {
                 Ok((size, bytes)) => {
                     let n = bytes.len().min(8);
                     report.push_str(&format!(

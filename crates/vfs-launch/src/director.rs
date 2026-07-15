@@ -1,92 +1,159 @@
-//! Parent-process director: control ring server over a named shared section.
+//! Parent-process director: control ring + bulk arena + worker pool + events.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use vfs_core::VfsTree;
-use vfs_ipc::ring::init;
-use vfs_ipc::{RingClient, RingServer, SpinNotifier};
+use vfs_ipc::ring::{self, Geom};
+use vfs_ipc::{Notifier, RingClient, RingServer, SpinNotifier};
 use vfs_protocol::{
-    decode_open_resp, decode_read_resp, encode_close_req, encode_open_req, encode_read_req,
-    OpenResp, ReadReq, OP_CLOSE, OP_HEARTBEAT, OP_OPEN, OP_READ, OPEN_READ, ST_OK,
+    decode_open_resp, decode_read_bulk_resp, decode_read_resp, encode_close_req, encode_open_req,
+    encode_read_req, is_read_resp_bulk, OpenResp, ReadReq, FLAG_READ_BULK, OP_CLOSE, OP_HEARTBEAT,
+    OP_OPEN, OP_READ, OPEN_READ, ST_OK,
 };
-use vfs_server::Server;
-use vfs_win::SharedMapping;
+use vfs_server::{DataArena, Server, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
+use vfs_win::{EventNotifier, SharedMapping};
 
-pub const DEFAULT_PAYLOAD_CAP: u32 = 262_144;
 pub const DEFAULT_SLOT_COUNT: u32 = 32;
+/// **B1:** bytes of bulk arena after the control ring.
+pub const DEFAULT_ARENA_BYTES: usize = 16 * 1024 * 1024;
 
 struct DirectorInner {
     mapping: SharedMapping,
     server: Server,
     stop: AtomicBool,
+    geom: Geom,
+    arena_offset: usize,
+    arena_len: usize,
+    /// Keep named events alive for workers + shim (**B4**).
+    _events: EventNotifier,
+    server_ev_name: String,
+    client_ev_name: String,
 }
 
-/// Running director: keeps the mapping + server thread alive.
+/// Running director: keeps the mapping + workers alive.
 pub struct Director {
     pub section_name: String,
     pub payload_cap: u32,
     pub ring_bytes: usize,
+    pub arena_offset: usize,
+    pub arena_len: usize,
+    pub server_ev_name: String,
+    pub client_ev_name: String,
     inner: Arc<DirectorInner>,
-    join: Option<JoinHandle<()>>,
+    joins: Vec<JoinHandle<()>>,
 }
 
 impl Director {
-    /// Create a named section, init the ring, spawn the serve loop.
+    /// Create named section (ring + arena), event pair, and **B3** worker pool.
     pub fn start(tree: VfsTree, section_name: String) -> Result<Self, String> {
         let payload_cap = DEFAULT_PAYLOAD_CAP;
         let slot_count = DEFAULT_SLOT_COUNT;
         let stride = ((32 + payload_cap as usize) + 7) & !7;
         let ring_bytes = 40 + slot_count as usize * stride;
-        let map_size = ((ring_bytes + 0xFFFF) & !0xFFFF).max(1024 * 1024);
+        let arena_len = DEFAULT_ARENA_BYTES;
+        let map_size = ((ring_bytes + arena_len + 0xFFFF) & !0xFFFF).max(2 * 1024 * 1024);
 
         let mapping = SharedMapping::create(&section_name, map_size)
             .map_err(|e| format!("create section {section_name}: {e}"))?;
-        init(mapping.seg(), slot_count, payload_cap)
+        let geom = ring::init(mapping.seg(), slot_count, payload_cap)
             .map_err(|e| format!("ring init: {e:?}"))?;
 
+        let server_ev_name = format!("{section_name}_srv");
+        let client_ev_name = format!("{section_name}_cli");
+        let events = EventNotifier::create(&server_ev_name, &client_ev_name)
+            .map_err(|e| format!("create events: {e}"))?;
+
         let server = Server::with_payload_cap(tree, payload_cap);
+        let arena_offset = ring_bytes;
         let inner = Arc::new(DirectorInner {
             mapping,
             server,
             stop: AtomicBool::new(false),
+            geom,
+            arena_offset,
+            arena_len,
+            _events: events,
+            server_ev_name: server_ev_name.clone(),
+            client_ev_name: client_ev_name.clone(),
         });
-        let inner2 = inner.clone();
-        let join = thread::spawn(move || {
-            let ring = match RingServer::new(inner2.mapping.seg(), SpinNotifier) {
-                Ok(r) => r,
-                Err(_) => return,
-            };
-            while !inner2.stop.load(Ordering::Relaxed) {
-                match inner2.server.serve_one(&ring) {
-                    Ok(true) => {}
-                    Ok(false) => thread::sleep(Duration::from_millis(1)),
-                    Err(_) => break,
+
+        let workers = DEFAULT_WORKER_COUNT.max(1);
+        let mut joins = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let inner2 = inner.clone();
+            let sev = server_ev_name.clone();
+            let cev = client_ev_name.clone();
+            joins.push(thread::spawn(move || {
+                let notifier = EventNotifier::open(&sev, &cev)
+                    .or_else(|_| EventNotifier::create(&sev, &cev))
+                    .ok();
+                // Prefer events; fall back to spin if open fails.
+                if let Some(n) = notifier {
+                    worker_loop(&inner2, n);
+                } else {
+                    worker_loop(&inner2, SpinNotifier);
                 }
-            }
-        });
+            }));
+        }
 
         Ok(Director {
             section_name,
             payload_cap,
             ring_bytes: map_size,
+            arena_offset,
+            arena_len,
+            server_ev_name,
+            client_ev_name,
             inner,
-            join: Some(join),
+            joins,
         })
     }
 
-    /// In-process ring client against this director (same process probe).
     pub fn client(&self) -> Result<RingClient<'_, SpinNotifier>, String> {
-        RingClient::new(self.inner.mapping.seg(), SpinNotifier)
-            .map_err(|e| format!("RingClient: {e:?}"))
+        Ok(RingClient::with_geom(
+            self.inner.mapping.seg(),
+            self.inner.geom,
+            SpinNotifier,
+        ))
+    }
+
+    /// Shared segment for bulk arena copies (same process probe).
+    pub fn shared_seg(&self) -> &vfs_ipc::SharedSeg {
+        self.inner.mapping.seg()
     }
 
     pub fn stop(mut self) {
         self.inner.stop.store(true, Ordering::Relaxed);
-        if let Some(j) = self.join.take() {
+        // Nudge workers off WaitForSingleObject.
+        if let Ok(n) = EventNotifier::open(&self.server_ev_name, &self.client_ev_name) {
+            n.notify_server();
+            n.notify_client(0);
+            drop(n);
+        }
+        for j in self.joins.drain(..) {
             let _ = j.join();
+        }
+    }
+}
+
+fn worker_loop<N: vfs_ipc::Notifier>(inner: &DirectorInner, notifier: N) {
+    let ring = match RingServer::new(inner.mapping.seg(), notifier) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let arena = DataArena::new(
+        inner.mapping.seg(),
+        inner.arena_offset,
+        inner.arena_len,
+        inner.geom.slot_count as usize,
+    );
+    while !inner.stop.load(Ordering::Relaxed) {
+        match inner.server.serve_one_arena(&ring, &arena) {
+            Ok(true) => {}
+            Ok(false) => {}
+            Err(_) => break,
         }
     }
 }
@@ -94,31 +161,43 @@ impl Director {
 impl Drop for Director {
     fn drop(&mut self) {
         self.inner.stop.store(true, Ordering::Relaxed);
-        if let Some(j) = self.join.take() {
+        if let Ok(n) = EventNotifier::open(&self.inner.server_ev_name, &self.inner.client_ev_name)
+        {
+            n.notify_server();
+            n.notify_client(0);
+        }
+        for j in self.joins.drain(..) {
             let _ = j.join();
         }
     }
 }
 
-/// Thin shim config: KEY=value lines the child parses for ring attach.
+/// Thin shim config: KEY=value lines.
 pub fn write_thin_config(
     path: &std::path::Path,
     section: &str,
     root: &str,
     payload_cap: u32,
     ring_bytes: usize,
+    arena_offset: usize,
+    arena_len: usize,
+    server_ev: &str,
+    client_ev: &str,
 ) -> Result<(), String> {
     let body = format!(
-        "section={section}\nroot={root}\npayload_cap={payload_cap}\nring_bytes={ring_bytes}\n"
+        "section={section}\nroot={root}\npayload_cap={payload_cap}\nring_bytes={ring_bytes}\n\
+         arena_offset={arena_offset}\narena_len={arena_len}\n\
+         server_ev={server_ev}\nclient_ev={client_ev}\n"
     );
     std::fs::write(path, body).map_err(|e| format!("write thin config: {e}"))
 }
 
-/// OPEN+READ a virtual path fully via the ring client (fragmented).
+/// OPEN+READ a virtual path fully via the ring client (fragmented, bulk-aware).
 pub fn rpc_read_all(
     client: &RingClient<'_, SpinNotifier>,
     vpath: &str,
     payload_cap: u32,
+    seg: Option<&vfs_ipc::SharedSeg>,
 ) -> Result<(u64, Vec<u8>), String> {
     let hb = client
         .submit(OP_HEARTBEAT, 0, &[])
@@ -134,15 +213,24 @@ pub fn rpc_read_all(
     }
     let OpenResp { fh, size, .. } =
         decode_open_resp(&open.payload).ok_or_else(|| "OPEN decode".to_string())?;
-    let max_chunk = payload_cap.saturating_sub(8) as u64;
+    let max_chunk = if seg.is_some() {
+        1024 * 1024u32
+    } else {
+        payload_cap.saturating_sub(8)
+    };
     let mut out = Vec::with_capacity(size as usize);
     let mut off = 0u64;
     while off < size {
-        let want = ((size - off).min(max_chunk)) as u32;
+        let want = ((size - off) as u32).min(max_chunk);
+        let flags = if want >= 64 * 1024 && seg.is_some() {
+            FLAG_READ_BULK
+        } else {
+            0
+        };
         let resp = client
             .submit(
                 OP_READ,
-                0,
+                flags,
                 &encode_read_req(&ReadReq {
                     fh,
                     offset: off,
@@ -154,22 +242,36 @@ pub fn rpc_read_all(
             let _ = client.submit(OP_CLOSE, 0, &encode_close_req(fh));
             return Err(format!("READ {vpath} status {}", resp.status));
         }
-        let chunk =
-            decode_read_resp(&resp.payload).ok_or_else(|| "READ decode".to_string())?;
-        if chunk.is_empty() {
-            break;
-        }
-        off += chunk.len() as u64;
-        out.extend_from_slice(&chunk);
-        if chunk.len() < want as usize {
-            break;
+        if is_read_resp_bulk(&resp.payload) {
+            let (n, aoff) =
+                decode_read_bulk_resp(&resp.payload).ok_or_else(|| "bulk decode".to_string())?;
+            if n == 0 {
+                break;
+            }
+            let s = seg.ok_or_else(|| "bulk without seg".to_string())?;
+            let chunk = s
+                .read_bytes(aoff as usize, n as usize)
+                .ok_or_else(|| "arena read_bytes".to_string())?;
+            off += n as u64;
+            out.extend_from_slice(&chunk);
+            // Continue until off >= size; bank may be smaller than `want`.
+        } else {
+            let chunk =
+                decode_read_resp(&resp.payload).ok_or_else(|| "READ decode".to_string())?;
+            if chunk.is_empty() {
+                break;
+            }
+            off += chunk.len() as u64;
+            out.extend_from_slice(&chunk);
+            if (chunk.len() as u32) < want {
+                break;
+            }
         }
     }
     let _ = client.submit(OP_CLOSE, 0, &encode_close_req(fh));
     Ok((size, out))
 }
 
-/// Parse thin config from a file.
 pub fn parse_thin_config(text: &str) -> Option<(String, String, u32, usize)> {
     let mut section = None;
     let mut root = None;

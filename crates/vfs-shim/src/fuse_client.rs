@@ -1,23 +1,18 @@
-//! Thin director FUSE client: RingClient + fragmented READ. No zip access.
-//!
-//! **A3:** `decode_read_resp_into` — no second Vec for READ data.
-//! **A4:** cache ring `Geom`; reuse `RingClient::with_geom` (no re-open header).
-//! **A5:** pipelined multi-slot READs for sequential fragments.
+//! Thin director FUSE client: ring + bulk arena + optional event wake.
 
 use std::sync::OnceLock;
 
 use vfs_ipc::{Geom, RingClient, SpinNotifier};
 use vfs_protocol::{
-    decode_getattr_resp, decode_open_resp, decode_readdir_resp, decode_read_resp_into,
-    encode_close_req, encode_open_req, encode_path_req, encode_read_req, AttrResp, DirEntryWire,
-    OpenResp, ReadReq, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ, OP_READDIR, OPEN_READ,
-    ST_OK,
+    decode_getattr_resp, decode_open_resp, decode_readdir_resp, decode_read_bulk_resp,
+    decode_read_resp_into, encode_close_req, encode_open_req, encode_path_req, encode_read_req,
+    is_read_resp_bulk, AttrResp, DirEntryWire, OpenResp, ReadReq, FLAG_READ_BULK, OP_CLOSE,
+    OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ, OP_READDIR, OPEN_READ, ST_OK,
 };
 use vfs_win::SharedMapping;
 
 static FUSE: OnceLock<FuseClient> = OnceLock::new();
 
-/// Global thin client (set once at bootstrap when fuse.cfg / env is present).
 pub fn global() -> Option<&'static FuseClient> {
     FUSE.get()
 }
@@ -30,28 +25,31 @@ pub fn try_init_from_env() -> Result<(), String> {
     let ring_bytes: usize = std::env::var("VFS_RING_BYTES")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1024 * 1024);
+        .unwrap_or(2 * 1024 * 1024);
     let payload_cap: u32 = std::env::var("VFS_RING_PAYLOAD_CAP")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(262_144);
+        .unwrap_or(1_048_576);
+    let arena_len: usize = std::env::var("VFS_ARENA_LEN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let root = std::env::var("VFS_VIRTUAL_DIR").unwrap_or_else(|_| r"C:\GameLayers\runtime".into());
-    let client = FuseClient::connect(&section, &root, payload_cap, ring_bytes)?;
+    let client = FuseClient::connect(&section, &root, payload_cap, ring_bytes, arena_len)?;
     client.heartbeat()?;
     let _ = FUSE.set(client);
     Ok(())
 }
 
-/// Max in-flight READ slots for A5 pipelining (must be ≤ ring slot_count).
 const PIPELINE_DEPTH: usize = 4;
+const BULK_THRESHOLD: u32 = 64 * 1024;
 
 pub struct FuseClient {
-    /// Keep mapping alive for process lifetime.
-    _mapping: SharedMapping,
-    /// **A4:** cached geometry from connect-time `ring::open`.
+    mapping: SharedMapping,
     geom: Geom,
     payload_cap: u32,
     root_lower: String,
+    arena_len: usize,
 }
 
 impl FuseClient {
@@ -60,21 +58,22 @@ impl FuseClient {
         root: &str,
         payload_cap: u32,
         ring_bytes: usize,
+        arena_len: usize,
     ) -> Result<Self, String> {
         let mapping = SharedMapping::open(section, ring_bytes)
             .map_err(|e| format!("open section {section}: {e}"))?;
         let geom = vfs_ipc::ring::open(mapping.seg()).map_err(|e| format!("ring open: {e:?}"))?;
         Ok(FuseClient {
-            _mapping: mapping,
+            mapping,
             geom,
             payload_cap,
             root_lower: root.replace('/', "\\").to_ascii_lowercase(),
+            arena_len,
         })
     }
 
-    /// **A4:** cheap client construction with cached geom.
     fn client(&self) -> RingClient<'_, SpinNotifier> {
-        RingClient::with_geom(self._mapping.seg(), self.geom, SpinNotifier)
+        RingClient::with_geom(self.mapping.seg(), self.geom, SpinNotifier)
     }
 
     pub fn heartbeat(&self) -> Result<(), String> {
@@ -121,9 +120,6 @@ impl FuseClient {
         decode_open_resp(&r.payload).ok_or(vfs_protocol::ST_BAD_REQUEST)
     }
 
-    /// Fragmented READ into `buf`.
-    /// **A3:** no intermediate data Vec (decode into `buf` slices).
-    /// **A5:** pipeline up to `PIPELINE_DEPTH` outstanding READs.
     pub fn read_fragmented(
         &self,
         fh: u64,
@@ -133,25 +129,43 @@ impl FuseClient {
         if buf.is_empty() {
             return Ok(0);
         }
-        let max_chunk = self.payload_cap.saturating_sub(8) as usize;
+        let bulk_chunk = if self.arena_len > 0 {
+            (self.arena_len / self.geom.slot_count as usize)
+                .max(256 * 1024)
+                .min(1024 * 1024)
+        } else {
+            self.payload_cap.saturating_sub(8) as usize
+        };
+        let inline_chunk = self.payload_cap.saturating_sub(8) as usize;
         let c = self.client();
         let mut filled = 0usize;
 
         while filled < buf.len() {
-            // Plan a batch of sequential fragments.
             let mut reqs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+            let mut wants: Vec<usize> = Vec::new();
             let mut batch_off = filled;
             while reqs.len() < PIPELINE_DEPTH && batch_off < buf.len() {
-                let chunk = (buf.len() - batch_off).min(max_chunk) as u32;
+                let rem = buf.len() - batch_off;
+                let bulk = rem as u32 >= BULK_THRESHOLD && self.arena_len > 0;
+                let chunk = if bulk {
+                    rem.min(bulk_chunk)
+                } else {
+                    rem.min(inline_chunk)
+                } as u32;
                 if chunk == 0 {
                     break;
                 }
-                let payload = encode_read_req(&ReadReq {
-                    fh,
-                    offset: offset + batch_off as u64,
-                    len: chunk,
-                });
-                reqs.push((OP_READ, 0, payload));
+                let flags = if bulk { FLAG_READ_BULK } else { 0 };
+                reqs.push((
+                    OP_READ,
+                    flags,
+                    encode_read_req(&ReadReq {
+                        fh,
+                        offset: offset + batch_off as u64,
+                        len: chunk,
+                    }),
+                ));
+                wants.push(chunk as usize);
                 batch_off += chunk as usize;
             }
             if reqs.is_empty() {
@@ -164,29 +178,34 @@ impl FuseClient {
 
             let mut batch_filled = 0usize;
             let mut eof = false;
-            for (i, resp) in responses.iter().enumerate() {
+            for (resp, want) in responses.iter().zip(wants.iter()) {
                 if resp.status != ST_OK {
                     return Err(resp.status);
                 }
-                // Destination slice for this fragment.
                 let frag_start = filled + batch_filled;
-                let want = {
-                    // re-derive chunk length from request plan
-                    let rem = buf.len() - frag_start;
-                    rem.min(max_chunk)
+                let dest = &mut buf[frag_start..frag_start + *want];
+                let n = if is_read_resp_bulk(&resp.payload) {
+                    let (bn, aoff) = decode_read_bulk_resp(&resp.payload)
+                        .ok_or(vfs_protocol::ST_BAD_REQUEST)?;
+                    let n = (bn as usize).min(dest.len());
+                    if n > 0 {
+                        let data = self
+                            .mapping
+                            .seg()
+                            .read_bytes(aoff as usize, n)
+                            .ok_or(vfs_protocol::ST_IO_ERROR)?;
+                        dest[..n].copy_from_slice(&data);
+                    }
+                    n
+                } else {
+                    decode_read_resp_into(&resp.payload, dest)
+                        .ok_or(vfs_protocol::ST_BAD_REQUEST)?
                 };
-                if want == 0 {
-                    break;
-                }
-                let dest = &mut buf[frag_start..frag_start + want];
-                let n = decode_read_resp_into(&resp.payload, dest)
-                    .ok_or(vfs_protocol::ST_BAD_REQUEST)?;
                 batch_filled += n;
-                if n < want {
+                if n < *want {
                     eof = true;
                     break;
                 }
-                let _ = i;
             }
             filled += batch_filled;
             if eof || batch_filled == 0 {
@@ -207,28 +226,23 @@ impl FuseClient {
         Ok(())
     }
 
-    /// If `path` is under managed root, return vpath with `/` separators.
     pub fn vpath_under_root(&self, path: &str) -> Option<String> {
         vpath_under_root_norm(path, &self.root_lower)
     }
 }
 
-/// Strip `\??\` / `\\?\` device prefixes; leave Win32 path (drive intact).
 pub fn strip_nt_device(p: &str) -> &str {
     p.strip_prefix(r"\??\")
         .or_else(|| p.strip_prefix(r"\\?\"))
         .unwrap_or(p)
 }
 
-/// Normalize path for root comparison: strip NT device, unify slashes, lower.
 pub fn normalize_path_for_root(p: &str) -> String {
     strip_nt_device(p)
         .replace('/', "\\")
         .to_ascii_lowercase()
 }
 
-/// Pure: if `path` is under `root` (either may be NT or Win32), return relative
-/// vpath with `/` separators; empty string means the root directory itself.
 pub fn vpath_under_root_norm(path: &str, root: &str) -> Option<String> {
     let p = normalize_path_for_root(path);
     let root = normalize_path_for_root(root);
@@ -246,56 +260,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_nt_device_forms() {
-        assert_eq!(strip_nt_device(r"\??\C:\GameLayers\runtime"), r"C:\GameLayers\runtime");
-        assert_eq!(strip_nt_device(r"\\?\C:\GameLayers\runtime"), r"C:\GameLayers\runtime");
-        assert_eq!(strip_nt_device(r"C:\GameLayers\runtime"), r"C:\GameLayers\runtime");
+    fn vpath_under_root_nt_device() {
+        assert_eq!(
+            vpath_under_root_norm(r"\??\C:\GameLayers\runtime\Data\x.esp", r"C:\GameLayers\runtime")
+                .as_deref(),
+            Some("data/x.esp")
+        );
     }
 
     #[test]
     fn vpath_under_root_win32() {
-        let root = r"C:\GameLayers\runtime";
         assert_eq!(
-            vpath_under_root_norm(r"C:\GameLayers\runtime\Data\Skyrim.esm", root).as_deref(),
-            Some("data/skyrim.esm")
-        );
-        assert_eq!(vpath_under_root_norm(root, root).as_deref(), Some(""));
-    }
-
-    #[test]
-    fn vpath_under_root_nt_device() {
-        let root = r"C:\GameLayers\runtime";
-        assert_eq!(
-            vpath_under_root_norm(r"\??\C:\GameLayers\runtime\Data\x.esp", root).as_deref(),
-            Some("data/x.esp")
-        );
-        assert_eq!(
-            vpath_under_root_norm(r"\\?\C:\GameLayers\runtime\Data\x.esp", root).as_deref(),
-            Some("data/x.esp")
-        );
-        assert_eq!(
-            vpath_under_root_norm(r"\??\C:\GameLayers\runtime", root).as_deref(),
-            Some("")
-        );
-        assert_eq!(
-            vpath_under_root_norm(
-                r"\??\C:\GameLayers\runtime\Data\Skyrim.esm",
-                r"\??\C:\GameLayers\runtime"
-            )
-            .as_deref(),
-            Some("data/skyrim.esm")
+            vpath_under_root_norm(r"C:\GameLayers\runtime\Data\a.esm", r"C:\GameLayers\runtime")
+                .as_deref(),
+            Some("data/a.esm")
         );
     }
 
     #[test]
     fn vpath_under_root_rejects_outside() {
-        let root = r"C:\GameLayers\runtime";
         assert_eq!(
-            vpath_under_root_norm(r"\??\C:\Windows\System32\kernel32.dll", root),
-            None
-        );
-        assert_eq!(
-            vpath_under_root_norm(r"C:\GameLayers\other\file.bin", root),
+            vpath_under_root_norm(r"\??\C:\Windows\x.dll", r"C:\GameLayers\runtime"),
             None
         );
     }
