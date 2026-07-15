@@ -471,13 +471,21 @@ version = "0.1.0"
 dependencies = [
  "vfs-core",
  "vfs-inject",
+ "vfs-ipc",
+ "vfs-protocol",
+ "vfs-server",
  "vfs-shared",
  "vfs-shim",
+ "vfs-win",
  "vfs-zip",
 ]
 
 [[package]]
 name = "vfs-payload"
+version = "0.1.0"
+
+[[package]]
+name = "vfs-protocol"
 version = "0.1.0"
 
 [[package]]
@@ -494,6 +502,7 @@ version = "0.1.0"
 dependencies = [
  "vfs-core",
  "vfs-ipc",
+ "vfs-protocol",
  "vfs-shared",
 ]
 
@@ -511,8 +520,11 @@ dependencies = [
  "retour",
  "vfs-core",
  "vfs-inject",
+ "vfs-ipc",
+ "vfs-protocol",
  "vfs-redirect",
  "vfs-shared",
+ "vfs-win",
  "windows-sys 0.59.0",
 ]
 
