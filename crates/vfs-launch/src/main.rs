@@ -1,10 +1,10 @@
 //! Launch Skyrim (via SKSE) with game/mod content served straight from
-//! Stored ZIP archives under `C:\GameLayers` — no full extract.
+//! Stored ZIP archives under `C:\GameLayers`.
 //!
-//! Windows requires real PE images for CreateProcess / LoadLibrary (SEC_IMAGE),
-//! so `.exe` / `.dll` bytes are materialised into the runtime game root from
-//! their zip windows. Everything else (BSAs, ESMs, scripts, inis, …) stays
-//! inside the archives and is served by the injected VFS shim.
+//! **Zero archive extract:** no PE/BSA/ESP bytes are written to the managed
+//! root or TEMP. Primary EXE is process-hollowed from zip bytes into a
+//! pre-existing host image (WriteProcessMemory only). Data/ and PE DLLs are
+//! `Decision::Serve` zip windows (SEC_IMAGE via in-process manual map).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -120,11 +120,6 @@ fn discover_layers(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(found.into_iter().map(|(_, p)| p).collect())
 }
 
-fn is_pe_name(vpath: &str) -> bool {
-    let lower = vpath.to_ascii_lowercase();
-    lower.ends_with(".exe") || lower.ends_with(".dll")
-}
-
 /// Read bytes from a zip-window source blob (or plain disk path).
 fn read_source_bytes(source: &SourceId, size: u64) -> Result<Vec<u8>, String> {
     match decode(&source.0) {
@@ -147,15 +142,10 @@ fn read_source_bytes(source: &SourceId, size: u64) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Materialise PE files into `root` and rewrite their sources to disk paths so
-/// CreateProcess / LoadLibrary / SEC_IMAGE see real images. Non-PE entries keep
-/// their zip-window sources (served by the shim — never extracted).
-///
-/// Also creates an empty directory skeleton for every virtual path so opens of
-/// pure-virtual dirs like `Data/` succeed against a real handle that the dir-
-/// enum hook can then merge with snapshot children.
-fn prepare_layer(mut layer: Layer, root: &Path) -> Result<Layer, String> {
-    for entry in &mut layer.entries {
+/// Empty directory skeleton only — **never** writes archive file content.
+/// PE entries keep zip-window sources (hollow / SEC_IMAGE manual map at runtime).
+fn prepare_layer(layer: Layer, root: &Path) -> Result<Layer, String> {
+    for entry in &layer.entries {
         let dest = root.join(entry.vpath.replace('/', "\\"));
         match entry.kind {
             EntryKind::Dir => {
@@ -167,29 +157,58 @@ fn prepare_layer(mut layer: Layer, root: &Path) -> Result<Layer, String> {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
                 }
-                if !is_pe_name(&entry.vpath) {
-                    continue;
-                }
-                // Skip rewrite if already present with the right size (re-launch).
-                let need_write = match std::fs::metadata(&dest) {
-                    Ok(m) => m.len() != entry.size,
-                    Err(_) => true,
-                };
-                if need_write {
-                    let bytes = read_source_bytes(&entry.source, entry.size)?;
-                    std::fs::write(&dest, &bytes)
-                        .map_err(|e| format!("write {}: {e}", dest.display()))?;
-                    eprintln!("  bootstrap PE: {} ({} bytes)", entry.vpath, bytes.len());
-                } else {
-                    eprintln!("  bootstrap PE: {} (cached)", entry.vpath);
-                }
-                let dest_s = dest.to_string_lossy().into_owned();
-                entry.source = SourceId::new(dest_s.into_bytes());
+                // Intentionally no PE materialize — zip-window sources retained.
             }
             EntryKind::Tombstone => {}
         }
     }
     Ok(layer)
+}
+
+/// Remove any leftover archive payload files under `root` (prior PE bootstrap).
+fn wipe_payload_files(root: &Path) -> Result<usize, String> {
+    fn walk(dir: &Path, n: &mut usize) -> Result<(), String> {
+        let rd = match std::fs::read_dir(dir) {
+            Ok(r) => r,
+            Err(_) => return Ok(()),
+        };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                walk(&p, n)?;
+            } else if p.is_file() {
+                std::fs::remove_file(&p).map_err(|e| format!("remove {}: {e}", p.display()))?;
+                *n += 1;
+            }
+        }
+        Ok(())
+    }
+    let mut n = 0;
+    walk(root, &mut n)?;
+    Ok(n)
+}
+
+fn find_pe_bytes(layers: &[Layer], file_name: &str) -> Result<Vec<u8>, String> {
+    let want = file_name.to_ascii_lowercase();
+    let mut found: Option<&vfs_core::InputEntry> = None;
+    for layer in layers {
+        for e in &layer.entries {
+            if e.kind != EntryKind::File {
+                continue;
+            }
+            let base = e
+                .vpath
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&e.vpath)
+                .to_ascii_lowercase();
+            if base == want {
+                found = Some(e);
+            }
+        }
+    }
+    let e = found.ok_or_else(|| format!("PE {file_name} not in layer zips"))?;
+    read_source_bytes(&e.source, e.size)
 }
 
 fn locate_artifacts() -> Result<(String, String), String> {
@@ -396,8 +415,16 @@ fn main() {
     std::fs::create_dir_all(&args.root).expect("create game root");
     std::fs::create_dir_all(&args.overlay).expect("create overlay");
     std::fs::create_dir_all(&args.state).expect("create state dir");
+    match wipe_payload_files(&args.root) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("  wiped {n} leftover payload file(s) under {}", args.root.display()),
+        Err(e) => {
+            eprintln!("error: wipe root: {e}");
+            std::process::exit(1);
+        }
+    }
 
-    eprintln!("building VFS snapshot (zip-window sources; PE → disk bootstrap)…");
+    eprintln!("building VFS snapshot (all zip-window; zero archive→disk writes)…");
     let mut layers: Vec<Layer> = Vec::new();
     for (i, zip) in zips.iter().enumerate() {
         eprintln!("  parsing {} …", zip.file_name().unwrap_or_default().to_string_lossy());
@@ -408,7 +435,7 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        eprintln!("    {} entries", layer.entries.len());
+        eprintln!("    {} entries (zip-window retained)", layer.entries.len());
         let prepared = match prepare_layer(layer, &args.root) {
             Ok(l) => l,
             Err(e) => {
@@ -418,6 +445,29 @@ fn main() {
         };
         layers.push(prepared);
     }
+
+    let pe_name = if args.use_skse {
+        "skse64_loader.exe"
+    } else {
+        "SkyrimSE.exe"
+    };
+    let pe_bytes = if args.probe {
+        None
+    } else {
+        match find_pe_bytes(&layers, pe_name) {
+            Ok(b) => {
+                eprintln!(
+                    "  loaded {pe_name} from zip into RAM ({} bytes) — hollow, no disk write",
+                    b.len()
+                );
+                Some(b)
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
 
     if let Err(e) = ensure_plugins_enabled(&layers) {
         eprintln!("warning: plugins enablement failed: {e}");
@@ -454,61 +504,58 @@ fn main() {
     eprintln!("  shim:    {dll}");
     eprintln!("  payload: {payload}");
 
-    let (target, target_args, detach) = if args.probe {
+    let leftover = wipe_payload_files(&args.root).unwrap_or(0);
+    if leftover > 0 {
+        eprintln!("  re-wiped {leftover} files before launch");
+    }
+    eprintln!("  managed root payload files: 0");
+
+    let (target, target_args, detach, target_pe) = if args.probe {
         let probe_exe = std::env::current_exe()
             .ok()
             .and_then(|e| vfs_inject::find_near(&e, "vfs-game-probe.exe"))
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|e| e.parent().map(|p| p.join("vfs-game-probe.exe")))
+                    .filter(|p| p.is_file())
+            })
             .unwrap_or_else(|| {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("../../target/debug/vfs-game-probe.exe")
             });
         if !probe_exe.is_file() {
-            // Same dir as vfs-launch after cargo build.
-            let beside = std::env::current_exe()
-                .ok()
-                .and_then(|e| e.parent().map(|p| p.join("vfs-game-probe.exe")));
-            match beside {
-                Some(p) if p.is_file() => (p, vec![root_s.clone(), args.state.join("probe-report.txt").to_string_lossy().into_owned()], false),
-                _ => {
-                    eprintln!("error: vfs-game-probe.exe not found (build -p vfs-launch)");
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            (
-                probe_exe,
-                vec![
-                    root_s.clone(),
-                    args.state
-                        .join("probe-report.txt")
-                        .to_string_lossy()
-                        .into_owned(),
-                ],
-                false,
-            )
-        }
-    } else {
-        let target = if args.use_skse {
-            args.root.join("skse64_loader.exe")
-        } else {
-            args.root.join("SkyrimSE.exe")
-        };
-        if !target.is_file() {
-            eprintln!(
-                "error: {} not materialised — is the matching layer zip present?",
-                target.display()
-            );
+            eprintln!("error: vfs-game-probe.exe not found (build -p vfs-launch)");
             std::process::exit(1);
         }
-        (target, vec![], !args.wait)
+        (
+            probe_exe,
+            vec![
+                root_s.clone(),
+                args.state
+                    .join("probe-report.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+            false,
+            None,
+        )
+    } else {
+        // Virtual path only — file must NOT exist; PE comes from hollow.
+        (args.root.join(pe_name), vec![], !args.wait, pe_bytes)
     };
 
     eprintln!("launching {} …", target.display());
     eprintln!("  game root: {}", args.root.display());
     eprintln!("  overlay:   {}", args.overlay.display());
     eprintln!(
-        "  mode:      {}",
-        if detach { "detach" } else { "wait for exit" }
+        "  mode:      {}{}",
+        if detach { "detach" } else { "wait for exit" },
+        if target_pe.is_some() {
+            " + memory hollow (no PE on disk)"
+        } else {
+            ""
+        }
     );
 
     let exit = run_target_with_shim(RunConfig {
@@ -522,7 +569,7 @@ fn main() {
         payload_path: payload,
         preinit_redirects: vec![],
         detach,
-        target_pe_bytes: None,
+        target_pe_bytes: target_pe,
     });
 
     match exit {

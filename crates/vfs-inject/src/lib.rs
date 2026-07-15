@@ -17,7 +17,8 @@ mod static_imports;
 mod stub;
 
 pub use ghostly::{
-    create_process_from_pe_bytes, image_section_from_pe_bytes, pe_looks_like_image,
+    create_process_from_pe_bytes, create_process_from_pe_bytes_ex, hollow_host_exe,
+    hollow_host_exe_for, map_image_from_pe_bytes_local, pe_looks_like_image,
 };
 
 /// Parameters for [`run_target_with_shim`].

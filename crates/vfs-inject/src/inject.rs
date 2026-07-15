@@ -16,8 +16,9 @@ use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, CreateRemoteThread, GetExitCodeProcess, ResumeThread, WaitForSingleObject,
-    CREATE_SUSPENDED, INFINITE, LPTHREAD_START_ROUTINE, PROCESS_INFORMATION, STARTUPINFOW,
+    CreateProcessW, CreateRemoteThread, GetExitCodeProcess, QueueUserAPC, ResumeThread,
+    WaitForSingleObject, CREATE_SUSPENDED, INFINITE, LPTHREAD_START_ROUTINE, PROCESS_INFORMATION,
+    STARTUPINFOW,
 };
 
 use crate::artifacts::resolve_payload_for_run;
@@ -109,6 +110,90 @@ unsafe fn wpm(process: HANDLE, addr: u64, data: &[u8]) -> Result<(), InjectError
     Ok(())
 }
 
+/// Inject via `NtCreateThreadEx(LoadLibraryW)` — more reliable than
+/// `CreateRemoteThread` on hollowed targets (avoids ERROR_NOACCESS 998).
+pub fn inject_dll_apc(process: HANDLE, _thread: HANDLE, dll_path: &str) -> Result<(), InjectError> {
+    type NtCreateThreadExFn = unsafe extern "system" fn(
+        *mut HANDLE,
+        u32,
+        *const c_void,
+        HANDLE,
+        *const c_void,
+        *const c_void,
+        u32,
+        usize,
+        usize,
+        usize,
+        *const c_void,
+    ) -> i32;
+
+    unsafe {
+        let dll_w = wide(dll_path);
+        let bytes = dll_w.len() * 2;
+        let remote = VirtualAllocEx(
+            process,
+            core::ptr::null(),
+            bytes,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        );
+        if remote.is_null() {
+            return Err(InjectError::Alloc);
+        }
+        let mut written = 0usize;
+        let ok = WriteProcessMemory(
+            process,
+            remote,
+            dll_w.as_ptr() as *const c_void,
+            bytes,
+            &mut written,
+        );
+        if ok == 0 || written != bytes {
+            return Err(InjectError::Write);
+        }
+        let k32 = GetModuleHandleW(wide("kernel32.dll").as_ptr());
+        if k32.is_null() {
+            return Err(InjectError::RemoteThread);
+        }
+        let load_library = match GetProcAddress(k32, b"LoadLibraryW\0".as_ptr()) {
+            Some(p) => p as *const c_void,
+            None => return Err(InjectError::RemoteThread),
+        };
+        let ntdll = GetModuleHandleW(wide("ntdll.dll").as_ptr());
+        if ntdll.is_null() {
+            return Err(InjectError::Ntdll);
+        }
+        let nt_cte: NtCreateThreadExFn = match GetProcAddress(ntdll, b"NtCreateThreadEx\0".as_ptr())
+        {
+            Some(p) => core::mem::transmute(p),
+            None => return Err(InjectError::Ntdll),
+        };
+        let mut hthread: HANDLE = core::ptr::null_mut();
+        // THREAD_ALL_ACCESS = 0x1FFFFF
+        let st = nt_cte(
+            &mut hthread,
+            0x1F_FFFF,
+            core::ptr::null(),
+            process,
+            load_library,
+            remote,
+            0, // create flags (0 = run immediately)
+            0,
+            0,
+            0,
+            core::ptr::null(),
+        );
+        if st != 0 || hthread.is_null() {
+            eprintln!("vfs-inject: NtCreateThreadEx failed status={st:x}");
+            // Fall back to CreateRemoteThread.
+            return inject_dll(process, dll_path);
+        }
+        WaitForSingleObject(hthread, INFINITE);
+        CloseHandle(hthread);
+        Ok(())
+    }
+}
+
 /// Inject `dll_path` into a process via `LoadLibraryW` on a remote thread.
 /// Used for the post-init full shim (`vfs-shim-dll`). Wakes the loader — do not
 /// use this alone when the target's own static imports must be virtualized.
@@ -151,6 +236,8 @@ pub fn inject_dll(process: HANDLE, dll_path: &str) -> Result<(), InjectError> {
         let hthread =
             CreateRemoteThread(process, core::ptr::null(), 0, start, remote, 0, core::ptr::null_mut());
         if hthread.is_null() || hthread == INVALID_HANDLE_VALUE {
+            let err = windows_sys::Win32::Foundation::GetLastError();
+            eprintln!("vfs-inject: CreateRemoteThread failed last_error={err}");
             return Err(InjectError::RemoteThread);
         }
         WaitForSingleObject(hthread, INFINITE);
@@ -316,45 +403,121 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
 
     std::env::set_var("VFS_SHIM_CONFIG", &cfg.config_path);
     std::env::set_var("VFS_SHIM_READY", &cfg.ready_path);
-    std::env::set_var("VFS_DUAL_LAYER", "1");
     // Advertise payload path for children that resolve via env.
     std::env::set_var("VFS_PAYLOAD_PATH", &payload_path);
-    // When launching from memory PE, the kernel maps a temp path; the game
-    // should still *see* the virtual image path (GetModuleFileName spoof).
-    // Clear first so a prior session's value is not inherited incorrectly.
+    // Memory-PE hollow path uses classic LoadLibrary inject only (no dual-layer
+    // preinit / OEP redirect — that would clobber hollow RCX entry).
     std::env::remove_var("VFS_VIRTUAL_IMAGE");
     std::env::remove_var("VFS_VIRTUAL_DIR");
+    let cfg_file = format!("{}.payload_cfg", cfg.ready_path);
     if cfg.target_pe_bytes.is_some() {
         std::env::set_var("VFS_VIRTUAL_IMAGE", &cfg.target_exe);
         if let Some(ref d) = cfg.current_dir {
             std::env::set_var("VFS_VIRTUAL_DIR", d);
         }
+        // No dual-layer for hollow: full shim install from DllMain bootstrap.
+        std::env::remove_var("VFS_DUAL_LAYER");
+        std::env::remove_var("VFS_PAYLOAD_CFG_FILE");
+        let _ = std::fs::remove_file(&cfg_file);
+    } else {
+        std::env::set_var("VFS_DUAL_LAYER", "1");
+        std::env::set_var("VFS_PAYLOAD_CFG_FILE", &cfg_file);
+        let _ = std::fs::remove_file(&cfg_file);
     }
-    let cfg_file = format!("{}.payload_cfg", cfg.ready_path);
-    std::env::set_var("VFS_PAYLOAD_CFG_FILE", &cfg_file);
     let _ = std::fs::remove_file(&cfg.ready_path);
-    let _ = std::fs::remove_file(&cfg_file);
 
     let redirects = merge_preinit_redirects(&cfg.config_path, &cfg.preinit_redirects);
 
     // SAFETY: CreateProcessW (or ghostly PE launch) + dual-layer arm + resume.
     unsafe {
         let mut pi: PROCESS_INFORMATION = zeroed();
+        // Memory PE path: inject shim into a clean suspended *host* first
+        // (CreateRemoteThread works), wait for hooks, then hollow the main image
+        // from archive bytes (no PE file write). Dual-layer RIP redirect is not
+        // used — it would clobber the hollowed entry in RCX.
         if let Some(ref pe) = cfg.target_pe_bytes {
-            let (proc, thread, pid, tid) = crate::ghostly::create_process_from_pe_bytes(
+            // Real on-disk host only (Steam SkyrimSE when target is Skyrim).
+            let host = crate::ghostly::hollow_host_exe_for(Some(&cfg.target_exe))
+                .map_err(|_| InjectError::CreateProcess)?;
+            let mut cmdline = format!("\"{}\"", cfg.target_exe);
+            for a in &cfg.args {
+                cmdline.push_str(&format!(" \"{a}\""));
+            }
+            let host_w = wide(&host);
+            let mut cmd_w = wide(&cmdline);
+            let cwd_w = cfg.current_dir.as_ref().map(|s| wide(s));
+            let mut si: STARTUPINFOW = zeroed();
+            si.cb = size_of::<STARTUPINFOW>() as u32;
+            let ok = CreateProcessW(
+                host_w.as_ptr(),
+                cmd_w.as_mut_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+                CREATE_SUSPENDED,
+                core::ptr::null(),
+                cwd_w
+                    .as_ref()
+                    .map(|v| v.as_ptr())
+                    .unwrap_or(core::ptr::null()),
+                &si,
+                &mut pi,
+            );
+            if ok == 0 {
+                return Err(InjectError::CreateProcess);
+            }
+            // 1) Inject full shim first (hooks for zip Serve). Host image still
+            //    intact so CreateRemoteThread(LoadLibrary) is reliable.
+            if let Err(e) = inject_dll(pi.hProcess, &cfg.dll_path) {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                return Err(e);
+            }
+            let deadline = Instant::now() + cfg.ready_timeout;
+            while !std::path::Path::new(&cfg.ready_path).exists() {
+                if Instant::now() >= deadline {
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                    return Err(InjectError::Timeout);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            // 2) Hollow: preload imports + map archive PE + set primary RCX=entry.
+            //    Host stays mapped (no unmap) so further remote threads still work.
+            if let Err(e) = crate::ghostly::hollow_existing_process(
+                pi.hProcess,
+                pi.hThread,
                 pe,
                 &cfg.target_exe,
-                &cfg.args,
-                cfg.current_dir.as_deref(),
-            )
-            .map_err(|e| {
-                eprintln!("vfs-inject: memory PE launch failed: {e}");
-                InjectError::CreateProcess
-            })?;
-            pi.hProcess = proc;
-            pi.hThread = thread;
-            pi.dwProcessId = pid;
-            pi.dwThreadId = tid;
+            ) {
+                eprintln!("vfs-inject: hollow_existing_process failed: {e}");
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                return Err(InjectError::CreateProcess);
+            }
+            // 3) Resume primary: RtlUserThreadStart → hollowed EP (MSVC CRT).
+            let start_mode = std::env::var("VFS_HOLLOW_START").unwrap_or_else(|_| "rcx".into());
+            if start_mode != "thread" {
+                ResumeThread(pi.hThread);
+            }
+            if cfg.detach {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                return Ok(0);
+            }
+            if WaitForSingleObject(pi.hProcess, INFINITE) != 0 {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                return Err(InjectError::Wait);
+            }
+            let mut code: u32 = 0;
+            let got = GetExitCodeProcess(pi.hProcess, &mut code);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            if got == 0 {
+                return Err(InjectError::ExitCode);
+            }
+            return Ok(code as i32);
         } else {
             let mut cmdline = format!("\"{}\"", cfg.target_exe);
             for a in &cfg.args {

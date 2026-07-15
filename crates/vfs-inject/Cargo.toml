@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+vfs-core = { path = "../vfs-core" }
+vfs-zip = { path = "../vfs-zip" }
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Security",
@@ -15,6 +17,7 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Kernel",
   "Win32_Storage_FileSystem",
   "Win32_System_SystemInformation",
+  "Win32_System_ProcessStatus",
 ] }
 
 [dev-dependencies]
@@ -37,3 +40,32 @@ path = "src/bin/vfs-acceptance.rs"
 [[bin]]
 name = "vfs-spawn-child"
 path = "src/bin/vfs-spawn-child.rs"
+
+[[bin]]
+name = "hollow_diag"
+path = "src/bin/hollow_diag.rs"
+
+[[bin]]
+name = "hollow_hello"
+path = "src/bin/hollow_hello.rs"
+
+
+[[bin]]
+name = "compare_map"
+path = "src/bin/compare_map.rs"
+
+
+[[bin]]
+name = "local_run"
+path = "src/bin/local_run.rs"
+
+
+[[bin]]
+name = "hollow_crt"
+path = "src/bin/hollow_crt.rs"
+
+
+[[bin]]
+name = "list_mods"
+path = "src/bin/list_mods.rs"
+

@@ -237,6 +237,20 @@ pub fn create_section(file_handle: isize) -> Option<isize> {
     Some(handle as isize)
 }
 
+/// Register an already-mapped PE image (from `map_image_from_pe_bytes_local`)
+/// as a synthetic section so `MapViewOfSection` returns `base`.
+pub fn register_mapped_image(base: usize, size: u64) -> Option<isize> {
+    let mut slot = NEXT_SLOT.lock().ok()?;
+    let handle = SYNTH_SECTION_TAG | (*slot << 3);
+    *slot += 1;
+    drop(slot);
+    SYNTH_SECTIONS
+        .lock()
+        .ok()?
+        .insert(handle, SynthSection { window: base, length: size });
+    Some(handle as isize)
+}
+
 /// Close a synthetic section handle.
 pub fn close_section(handle: isize) -> bool {
     match SYNTH_SECTIONS.lock() {

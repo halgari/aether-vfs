@@ -285,15 +285,53 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
                     detours.push(d_cpiw);
                 }
             }
+            // Spoof GetModuleFileName / QueryFullProcessImageName when the
+            // process was hollowed from a zip PE (VFS_VIRTUAL_IMAGE). Without
+            // this, SKSE/game see cmd.exe and abort ("outside of loader control").
             for mod_name in [b"kernel32.dll\0".as_slice(), b"kernelbase.dll\0".as_slice()] {
                 let hm = GetModuleHandleA(mod_name.as_ptr());
                 if hm.is_null() {
                     continue;
                 }
-                // GetModuleFileName spoof disabled by default — only needed for
-                // ephemeral vfs-run PE launches. Session-root PE files already
-                // live at the correct path (no spoof). Re-enable via env if needed.
-                let _ = hm;
+                if TRAMP_GMFW.is_none() {
+                    if let Ok(d) =
+                        make_detour(hm, b"GetModuleFileNameW\0", gmf_hook as *const ())
+                    {
+                        TRAMP_GMFW = Some(core::mem::transmute::<*const (), GetModuleFileNameWFn>(
+                            d.trampoline() as *const (),
+                        ));
+                        if d.enable().is_ok() {
+                            detours.push(d);
+                        }
+                    }
+                }
+                if TRAMP_GMFA.is_none() {
+                    if let Ok(d) =
+                        make_detour(hm, b"GetModuleFileNameA\0", gmfa_hook as *const ())
+                    {
+                        TRAMP_GMFA = Some(core::mem::transmute::<*const (), GetModuleFileNameAFn>(
+                            d.trampoline() as *const (),
+                        ));
+                        if d.enable().is_ok() {
+                            detours.push(d);
+                        }
+                    }
+                }
+                if TRAMP_QFPIW.is_none() {
+                    if let Ok(d) = make_detour(
+                        hm,
+                        b"QueryFullProcessImageNameW\0",
+                        qfpi_hook as *const (),
+                    ) {
+                        TRAMP_QFPIW =
+                            Some(core::mem::transmute::<*const (), QueryFullProcessImageNameWFn>(
+                                d.trampoline() as *const (),
+                            ));
+                        if d.enable().is_ok() {
+                            detours.push(d);
+                        }
+                    }
+                }
             }
             let _ = kb;
         }
@@ -302,9 +340,28 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     Ok(HookGuard { _detours: detours })
 }
 
-/// Spoof main-module path **only** when the real image is a `vfs-run-*` ephemeral
-/// PE. If the process was launched from a real session path, return that path
-/// unchanged (do not force a stale VFS_VIRTUAL_IMAGE).
+/// Spoof main-module path when hollowed from a zip PE (`VFS_VIRTUAL_IMAGE`) or
+/// when the real path is an ephemeral `vfs-run-*` staging file.
+fn should_spoof_image_path(real: &str) -> bool {
+    if std::env::var_os("VFS_VIRTUAL_IMAGE").is_none() {
+        return false;
+    }
+    let r = real.to_ascii_lowercase();
+    // Always spoof sacrificial hosts. When host is Steam SkyrimSE, still spoof
+    // to the VFS virtual path so Data/ resolves under GameLayers (zip serve),
+    // while kernel ProcessImageFileName stays the Steam path for DRM.
+    r.contains("vfs-run-")
+        || r.contains("vfs-sse-")
+        || r.contains("vfs-sec-")
+        || r.ends_with("\\cmd.exe")
+        || r.ends_with("\\runtimebroker.exe")
+        || r.ends_with("\\notepad.exe")
+        || r.ends_with("\\conhost.exe")
+        || r.contains("\\system32\\cmd.exe")
+        || r.contains("skyrimse.exe")
+        || r.contains("skyrim special edition")
+}
+
 unsafe extern "system" fn gmf_hook(module: HMODULE, buffer: *mut u16, size: u32) -> u32 {
     let tramp = match TRAMP_GMFW {
         Some(t) => t,
@@ -313,15 +370,13 @@ unsafe extern "system" fn gmf_hook(module: HMODULE, buffer: *mut u16, size: u32)
     let main = GetModuleHandleA(core::ptr::null());
     let is_main = module.is_null() || (!main.is_null() && module == main);
     if is_main {
-        // Probe real path first.
         let real_n = tramp(module, buffer, size);
         if real_n > 0 && !buffer.is_null() {
             let real = String::from_utf16_lossy(core::slice::from_raw_parts(
                 buffer,
                 real_n as usize,
             ));
-            let is_ephemeral = real.to_ascii_lowercase().contains("vfs-run-");
-            if is_ephemeral {
+            if should_spoof_image_path(&real) {
                 if let Ok(virt) = std::env::var("VFS_VIRTUAL_IMAGE") {
                     let units: Vec<u16> = virt.encode_utf16().collect();
                     if size as usize > units.len() {
@@ -349,8 +404,7 @@ unsafe extern "system" fn gmfa_hook(module: HMODULE, buffer: *mut u8, size: u32)
         if real_n > 0 && !buffer.is_null() {
             let real = core::str::from_utf8(core::slice::from_raw_parts(buffer, real_n as usize))
                 .unwrap_or("");
-            let is_ephemeral = real.to_ascii_lowercase().contains("vfs-run-");
-            if is_ephemeral {
+            if should_spoof_image_path(real) {
                 if let Ok(virt) = std::env::var("VFS_VIRTUAL_IMAGE") {
                     let bytes = virt.as_bytes();
                     if size as usize > bytes.len() {
@@ -1108,10 +1162,37 @@ unsafe extern "system" fn create_section_hook(
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::zipserve::is_synth(file_handle as isize) {
-        // SEC_IMAGE on zip-window handles is not supported without staging a
-        // real PE image (bootstrap PE files are materialised by vfs-launch).
+        // SEC_IMAGE: map PE from zip window into this process (no disk staging).
         if alloc_attrs & SEC_IMAGE != 0 {
-            return STATUS_INVALID_FILE_FOR_SECTION;
+            let Some(len) = crate::zipserve::size(file_handle as isize) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            if len == 0 || len > 256 * 1024 * 1024 {
+                return STATUS_INVALID_FILE_FOR_SECTION;
+            }
+            let Some((bytes, _, _)) =
+                crate::zipserve::read(file_handle as isize, len as usize, Some(0))
+            else {
+                return STATUS_INVALID_HANDLE;
+            };
+            if !vfs_inject::pe_looks_like_image(&bytes) {
+                return STATUS_INVALID_FILE_FOR_SECTION;
+            }
+            match vfs_inject::map_image_from_pe_bytes_local(&bytes) {
+                Ok((base, size)) => {
+                    // Register as a synthetic section whose MapView returns `base`.
+                    match crate::zipserve::register_mapped_image(base as usize, size as u64) {
+                        Some(h) => {
+                            if !section_handle.is_null() {
+                                *section_handle = h as HANDLE;
+                            }
+                            return STATUS_SUCCESS;
+                        }
+                        None => return STATUS_INVALID_FILE_FOR_SECTION,
+                    }
+                }
+                Err(_) => return STATUS_INVALID_FILE_FOR_SECTION,
+            }
         }
         // Optional MaximumSize must not exceed the window length.
         if let Some(len) = crate::zipserve::size(file_handle as isize) {
@@ -1257,8 +1338,75 @@ unsafe extern "system" fn cpiw_hook(
     };
     let caller_suspended = flags & CREATE_SUSPENDED != 0;
 
+    // CreateProcess maps the image in-kernel from a real path. Zip-window PEs
+    // have no path — hollow from archive bytes (no filesystem write of PE).
+    // Thread-local re-entry guard: create_process_from_pe_bytes itself calls
+    // CreateProcessW(host) which must not re-enter hollow.
+    thread_local! {
+        static IN_HOLLOW_CREATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    let in_hollow_host = IN_HOLLOW_CREATE.with(|c| c.get());
+    // Nested CreateProcess from create_process_from_pe_bytes (host EXE): pass
+    // through with no inject/hollow — just create a clean suspended host.
+    if in_hollow_host {
+        return tramp(
+            token, app, cmd, proc_attr, thread_attr, inherit, flags, env, cur_dir, si, pi, ptok,
+        );
+    }
+
+    if let Some((virt_path, pe)) = resolve_virtual_pe(app, cmd) {
+        let cwd = if cur_dir.is_null() {
+            None
+        } else {
+            Some(utf16_z(cur_dir))
+        };
+        std::env::set_var("VFS_VIRTUAL_IMAGE", &virt_path);
+        if let Some(parent) = std::path::Path::new(&virt_path).parent() {
+            std::env::set_var("VFS_VIRTUAL_DIR", parent.to_string_lossy().as_ref());
+        }
+        // Inject shim *before* hollow so remote LoadLibrary of game-local
+        // imports (steam_api64, bink, …) hits VFS Serve hooks.
+        let dll = SELF_DLL.get().map(|s| s.as_str());
+        IN_HOLLOW_CREATE.with(|c| c.set(true));
+        let hollow_result = vfs_inject::create_process_from_pe_bytes_ex(
+            &pe,
+            &virt_path,
+            &[],
+            cwd.as_deref(),
+            dll,
+        );
+        IN_HOLLOW_CREATE.with(|c| c.set(false));
+        match hollow_result {
+            Ok((hprocess, hthread, pid, tid)) => {
+                eprintln!(
+                    "vfs-shim: hollowed virtual PE {virt_path} -> pid={pid} ({} bytes)",
+                    pe.len()
+                );
+                if !pi.is_null() {
+                    (*pi).hProcess = hprocess;
+                    (*pi).hThread = hthread;
+                    (*pi).dwProcessId = pid;
+                    (*pi).dwThreadId = tid;
+                }
+                // Do not LoadLibrary SKSE here — skse64_loader injects it into the
+                // suspended child (CreateRemoteThread works while host stays mapped).
+                // Shim already injected inside create_process_from_pe_bytes_ex.
+                if caller_suspended {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                } else {
+                    ResumeThread(hthread);
+                }
+                let _ = (token, proc_attr, thread_attr, inherit, env, si, ptok);
+                return 1;
+            }
+            Err(e) => {
+                eprintln!("vfs-shim: hollow CreateProcess failed: {e}");
+                /* fall through */
+            }
+        }
+    }
+
     let forced = flags | CREATE_SUSPENDED;
-    let _ = (app, cmd); // reserved for future virtual-PE CreateProcess intercept
     let r = tramp(
         token, app, cmd, proc_attr, thread_attr, inherit, forced, env, cur_dir, si, pi, ptok,
     );
