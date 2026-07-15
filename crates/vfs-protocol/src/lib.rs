@@ -205,6 +205,21 @@ pub fn decode_read_resp(p: &[u8]) -> Option<Vec<u8>> {
     Some(p[8..8 + n].to_vec())
 }
 
+/// **A3:** copy READ response data into `out` without allocating a second Vec.
+/// Returns bytes copied (may be less than `out.len()` on short/EOF reads).
+pub fn decode_read_resp_into(p: &[u8], out: &mut [u8]) -> Option<usize> {
+    if p.len() < 8 {
+        return None;
+    }
+    let n = u32::from_le_bytes(p[0..4].try_into().ok()?) as usize;
+    if p.len() < 8 + n {
+        return None;
+    }
+    let n = n.min(out.len());
+    out[..n].copy_from_slice(&p[8..8 + n]);
+    Some(n)
+}
+
 pub fn encode_close_req(fh: u64) -> Vec<u8> {
     fh.to_le_bytes().to_vec()
 }
@@ -269,6 +284,9 @@ mod tests {
             decode_read_resp(&encode_read_resp(data)).as_deref(),
             Some(&data[..])
         );
+        let mut out = [0u8; 8];
+        assert_eq!(decode_read_resp_into(&encode_read_resp(data), &mut out), Some(4));
+        assert_eq!(&out[..4], b"abcd");
     }
 
     #[test]

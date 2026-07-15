@@ -17,9 +17,9 @@ use vfs_core::{encode_zip_window, EntryKind, InputEntry, Layer, LayerId, SourceI
 use vfs_ipc::ring::init;
 use vfs_ipc::{OwnedSeg, RingClient, RingServer, SpinNotifier};
 use vfs_protocol::{
-    decode_getattr_resp, decode_open_resp, decode_read_resp, encode_close_req, encode_open_req,
-    encode_path_req, encode_read_req, OpenResp, ReadReq, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT,
-    OP_OPEN, OP_READ, OPEN_READ, ST_OK,
+    decode_getattr_resp, decode_open_resp, decode_read_resp, decode_read_resp_into,
+    encode_close_req, encode_open_req, encode_path_req, encode_read_req, OpenResp, ReadReq,
+    OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ, OPEN_READ, ST_OK,
 };
 use vfs_server::{OpenTable, Server, DEFAULT_PAYLOAD_CAP};
 
@@ -282,32 +282,54 @@ fn main() {
         }
         lines.push("```".into());
 
-        // --- Sequential throughput ---
+        // --- Sequential throughput (A3 into scratch + A5 pipelined depth 4) ---
         let read_bytes = (size as usize).min(32 * 1024 * 1024);
         let max_chunk = (payload_cap as usize).saturating_sub(8);
+        const PIPE_DEPTH: usize = 4;
+        let mut sink = vec![0u8; max_chunk]; // A3: decode_read_resp_into (no second heap alloc)
         let t0 = Instant::now();
         let mut off = 0u64;
         let mut total = 0usize;
-        while total < read_bytes {
-            let want = ((read_bytes - total) as u64).min(max_chunk as u64) as u32;
-            let r = client
-                .submit(
+        let mut rpc_count = 0usize;
+        'seq: while total < read_bytes {
+            let mut reqs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+            let mut plan_off = off;
+            let mut wants: Vec<usize> = Vec::new();
+            while reqs.len() < PIPE_DEPTH && total + wants.iter().sum::<usize>() < read_bytes {
+                let already = wants.iter().sum::<usize>();
+                let want = ((read_bytes - total - already) as u64).min(max_chunk as u64) as u32;
+                if want == 0 {
+                    break;
+                }
+                reqs.push((
                     OP_READ,
                     0,
-                    &encode_read_req(&ReadReq {
+                    encode_read_req(&ReadReq {
                         fh,
-                        offset: off,
+                        offset: plan_off,
                         len: want,
                     }),
-                )
-                .unwrap();
-            assert_eq!(r.status, ST_OK);
-            let data = decode_read_resp(&r.payload).unwrap();
-            if data.is_empty() {
+                ));
+                plan_off += want as u64;
+                wants.push(want as usize);
+            }
+            if reqs.is_empty() {
                 break;
             }
-            total += data.len();
-            off += data.len() as u64;
+            rpc_count += reqs.len();
+            let responses = client.submit_many(&reqs).unwrap();
+            for (r, want) in responses.iter().zip(wants.iter()) {
+                assert_eq!(r.status, ST_OK);
+                let n = decode_read_resp_into(&r.payload, &mut sink[..*want]).unwrap();
+                if n == 0 {
+                    break 'seq;
+                }
+                total += n;
+                off += n as u64;
+                if n < *want {
+                    break 'seq;
+                }
+            }
         }
         let elapsed = t0.elapsed();
         let _ = client.submit(OP_CLOSE, 0, &encode_close_req(fh));
@@ -315,7 +337,6 @@ fn main() {
         let secs = elapsed.as_secs_f64().max(1e-9);
         let mib = total as f64 / (1024.0 * 1024.0);
         let mib_s = mib / secs;
-        let rpc_count = (total + max_chunk - 1) / max_chunk;
 
         lines.push(String::new());
         lines.push("## Sequential throughput (fragmented READ RPCs)".into());

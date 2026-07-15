@@ -1,36 +1,31 @@
 //! Stateful director open-file table: OPEN/READ/CLOSE over zip windows and disk.
+//!
+//! **A1:** OPEN keeps an OS `File` open (no per-READ `File::open`).
+//! **A2:** READ clones an `Arc` live file and drops the map mutex before I/O.
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use vfs_core::{decode, NodeKind, Resolution, Source, VfsTree};
 use vfs_protocol::{
     OpenResp, OPEN_WRITE, ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_IS_DIR, ST_NOT_FOUND, ST_OK,
 };
 
-enum OpenKind {
-    File {
-        size: u64,
-        source: FileSource,
-    },
-    Dir {
-        size: u64,
-    },
+/// Live open file: seek base (0 disk, zip data_offset) + kept OS handle.
+struct LiveFile {
+    size: u64,
+    /// Byte offset in the OS file of virtual offset 0.
+    base_offset: u64,
+    file: Mutex<File>,
 }
 
-enum FileSource {
-    ZipWindow {
-        container: PathBuf,
-        data_offset: u64,
-        length: u64,
-    },
-    Disk {
-        path: PathBuf,
-    },
+enum OpenKind {
+    File(Arc<LiveFile>),
+    Dir { size: u64 },
 }
 
 struct OpenEntry {
@@ -57,7 +52,7 @@ impl OpenTable {
         }
     }
 
-    /// OPEN: resolve vpath in `tree` and allocate an fh.
+    /// OPEN: resolve vpath in `tree` and allocate an fh (opens OS file once).
     pub fn open(&self, tree: &VfsTree, path: &str, flags: u32) -> Result<OpenResp, i32> {
         if flags & OPEN_WRITE != 0 {
             return Err(ST_BAD_REQUEST);
@@ -88,20 +83,26 @@ impl OpenTable {
                 layer: _,
                 cache_key: _,
             } => {
-                let file_source = match decode(&source.0) {
+                let live = match decode(&source.0) {
                     Source::ZipWindow { offset, container } => {
                         let c = String::from_utf8_lossy(container).into_owned();
-                        FileSource::ZipWindow {
-                            container: PathBuf::from(c),
-                            data_offset: offset,
-                            length: size,
-                        }
+                        let path = PathBuf::from(c);
+                        let f = File::open(&path).map_err(|_| ST_IO_ERROR)?;
+                        Arc::new(LiveFile {
+                            size,
+                            base_offset: offset,
+                            file: Mutex::new(f),
+                        })
                     }
                     Source::Disk(bytes) => {
                         let p = String::from_utf8_lossy(bytes).into_owned();
-                        FileSource::Disk {
-                            path: PathBuf::from(p),
-                        }
+                        let path = PathBuf::from(p);
+                        let f = File::open(&path).map_err(|_| ST_IO_ERROR)?;
+                        Arc::new(LiveFile {
+                            size,
+                            base_offset: 0,
+                            file: Mutex::new(f),
+                        })
                     }
                 };
                 let fh = self.alloc_fh();
@@ -109,10 +110,7 @@ impl OpenTable {
                 g.insert(
                     fh,
                     OpenEntry {
-                        kind: OpenKind::File {
-                            size,
-                            source: file_source,
-                        },
+                        kind: OpenKind::File(live),
                     },
                 );
                 Ok(OpenResp {
@@ -128,7 +126,6 @@ impl OpenTable {
     pub fn open_with_getattr(&self, tree: &VfsTree, path: &str, flags: u32) -> Result<OpenResp, i32> {
         match self.open(tree, path, flags) {
             Err(ST_NOT_FOUND) => {
-                // getattr may still see a directory
                 if let Some(s) = tree.getattr(path.trim_start_matches(['/', '\\'])) {
                     if s.kind == NodeKind::Dir {
                         let fh = self.alloc_fh();
@@ -153,47 +150,32 @@ impl OpenTable {
     }
 
     /// READ up to `len` bytes, capped by `max_data` (payload room).
+    /// **A2:** map lock is only held to clone `Arc<LiveFile>`; I/O is outside the lock.
     pub fn read(&self, fh: u64, offset: u64, len: u32, max_data: usize) -> Result<Vec<u8>, i32> {
-        let g = self.map.lock().map_err(|_| ST_IO_ERROR)?;
-        let ent = g.get(&fh).ok_or(ST_BAD_FH)?;
-        match &ent.kind {
-            OpenKind::Dir { .. } => Err(ST_IS_DIR),
-            OpenKind::File { size, source } => {
-                if offset >= *size {
-                    return Ok(Vec::new());
-                }
-                let remain = (*size - offset) as usize;
-                let want = (len as usize).min(max_data).min(remain);
-                if want == 0 {
-                    return Ok(Vec::new());
-                }
-                let mut buf = vec![0u8; want];
-                match source {
-                    FileSource::Disk { path } => {
-                        let mut f = File::open(path).map_err(|_| ST_IO_ERROR)?;
-                        f.seek(SeekFrom::Start(offset)).map_err(|_| ST_IO_ERROR)?;
-                        let n = f.read(&mut buf).map_err(|_| ST_IO_ERROR)?;
-                        buf.truncate(n);
-                        Ok(buf)
-                    }
-                    FileSource::ZipWindow {
-                        container,
-                        data_offset,
-                        length,
-                    } => {
-                        if offset >= *length {
-                            return Ok(Vec::new());
-                        }
-                        let mut f = File::open(container).map_err(|_| ST_IO_ERROR)?;
-                        let abs = data_offset.saturating_add(offset);
-                        f.seek(SeekFrom::Start(abs)).map_err(|_| ST_IO_ERROR)?;
-                        let n = f.read(&mut buf).map_err(|_| ST_IO_ERROR)?;
-                        buf.truncate(n);
-                        Ok(buf)
-                    }
-                }
+        let live = {
+            let g = self.map.lock().map_err(|_| ST_IO_ERROR)?;
+            let ent = g.get(&fh).ok_or(ST_BAD_FH)?;
+            match &ent.kind {
+                OpenKind::Dir { .. } => return Err(ST_IS_DIR),
+                OpenKind::File(live) => Arc::clone(live),
             }
+        };
+        // A2: I/O without holding the open-table map mutex.
+        if offset >= live.size {
+            return Ok(Vec::new());
         }
+        let remain = (live.size - offset) as usize;
+        let want = (len as usize).min(max_data).min(remain);
+        if want == 0 {
+            return Ok(Vec::new());
+        }
+        let mut buf = vec![0u8; want];
+        let abs = live.base_offset.saturating_add(offset);
+        let mut f = live.file.lock().map_err(|_| ST_IO_ERROR)?;
+        f.seek(SeekFrom::Start(abs)).map_err(|_| ST_IO_ERROR)?;
+        let n = f.read(&mut buf).map_err(|_| ST_IO_ERROR)?;
+        buf.truncate(n);
+        Ok(buf)
     }
 
     pub fn close(&self, fh: u64) -> Result<(), i32> {
@@ -285,25 +267,23 @@ mod tests {
         use std::io::Write;
         let mut f = File::create(path).unwrap();
         let name_b = name.as_bytes();
-        // Local file header
         let mut local = Vec::new();
-        local.extend_from_slice(&0x04034b50u32.to_le_bytes()); // sig
-        local.extend_from_slice(&20u16.to_le_bytes()); // version
-        local.extend_from_slice(&0u16.to_le_bytes()); // flags
-        local.extend_from_slice(&0u16.to_le_bytes()); // method Stored
-        local.extend_from_slice(&0u16.to_le_bytes()); // time
-        local.extend_from_slice(&0u16.to_le_bytes()); // date
-        local.extend_from_slice(&0u32.to_le_bytes()); // crc (0 ok for our reader if not checked)
+        local.extend_from_slice(&0x04034b50u32.to_le_bytes());
+        local.extend_from_slice(&20u16.to_le_bytes());
+        local.extend_from_slice(&0u16.to_le_bytes());
+        local.extend_from_slice(&0u16.to_le_bytes());
+        local.extend_from_slice(&0u16.to_le_bytes());
+        local.extend_from_slice(&0u16.to_le_bytes());
+        local.extend_from_slice(&0u32.to_le_bytes());
         local.extend_from_slice(&(data.len() as u32).to_le_bytes());
         local.extend_from_slice(&(data.len() as u32).to_le_bytes());
         local.extend_from_slice(&(name_b.len() as u16).to_le_bytes());
-        local.extend_from_slice(&0u16.to_le_bytes()); // extra
+        local.extend_from_slice(&0u16.to_le_bytes());
         local.extend_from_slice(name_b);
         local.extend_from_slice(data);
         let local_off = 0u32;
         f.write_all(&local).unwrap();
         let cd_off = local.len() as u32;
-        // Central directory
         let mut cd = Vec::new();
         cd.extend_from_slice(&0x02014b50u32.to_le_bytes());
         cd.extend_from_slice(&20u16.to_le_bytes());
@@ -324,7 +304,6 @@ mod tests {
         cd.extend_from_slice(&local_off.to_le_bytes());
         cd.extend_from_slice(name_b);
         f.write_all(&cd).unwrap();
-        // EOCD
         let mut eocd = Vec::new();
         eocd.extend_from_slice(&0x06054b50u32.to_le_bytes());
         eocd.extend_from_slice(&0u16.to_le_bytes());
@@ -346,7 +325,6 @@ mod tests {
         let data = b"hello-world";
         write_tiny_stored_zip(&zip_path, "hello.txt", data);
 
-        // data offset = 30 + name_len + extra = 30 + 9 = 39
         let data_off = 30u64 + 9;
         let src = encode_zip_window(data_off, &zip_path.to_string_lossy());
         let tree = build(vec![Layer {
