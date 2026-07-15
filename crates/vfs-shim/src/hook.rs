@@ -763,6 +763,18 @@ unsafe extern "system" fn open_hook(
     }
 }
 
+/// Path-based getattr via director OP_GETATTR when FUSE client is live.
+unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), i32>> {
+    let client = crate::fuse_client::global()?;
+    let vpath = client.vpath_under_root(path)?;
+    let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+    Some(match client.getattr(vp) {
+        Ok(a) if a.found => Ok((a.is_dir, a.size, a.mtime)),
+        Ok(_) => Err(vfs_protocol::ST_NOT_FOUND),
+        Err(st) => Err(st),
+    })
+}
+
 unsafe extern "system" fn qattr_hook(
     oa: *const ObjectAttributes,
     info: *mut FileBasicInformation,
@@ -771,8 +783,26 @@ unsafe extern "system" fn qattr_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if let Some(engine) = ENGINE.get() {
-        if let Some(path) = path_of(oa) {
+    if let Some(path) = path_of(oa) {
+        // Prefer director FUSE getattr (no in-shim snapshot authority).
+        if let Some(res) = fuse_path_attr(&path) {
+            return match res {
+                Ok((is_dir, _size, _mtime)) => {
+                    if !info.is_null() {
+                        (*info).creation_time = 0;
+                        (*info).last_access_time = 0;
+                        (*info).last_write_time = 0;
+                        (*info).change_time = 0;
+                        (*info).file_attributes =
+                            if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+                    }
+                    STATUS_SUCCESS
+                }
+                Err(st) if st == vfs_protocol::ST_NOT_FOUND => STATUS_OBJECT_NAME_NOT_FOUND,
+                Err(_) => STATUS_UNSUCCESSFUL,
+            };
+        }
+        if let Some(engine) = ENGINE.get() {
             match engine.query_attributes(&path) {
                 AttrDecision::Attributes { is_dir, .. } => {
                     if !info.is_null() {
@@ -801,8 +831,27 @@ unsafe extern "system" fn qfull_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if let Some(engine) = ENGINE.get() {
-        if let Some(path) = path_of(oa) {
+    if let Some(path) = path_of(oa) {
+        if let Some(res) = fuse_path_attr(&path) {
+            return match res {
+                Ok((is_dir, size, _mtime)) => {
+                    if !info.is_null() {
+                        (*info).creation_time = 0;
+                        (*info).last_access_time = 0;
+                        (*info).last_write_time = 0;
+                        (*info).change_time = 0;
+                        (*info).allocation_size = size as i64;
+                        (*info).end_of_file = size as i64;
+                        (*info).file_attributes =
+                            if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+                    }
+                    STATUS_SUCCESS
+                }
+                Err(st) if st == vfs_protocol::ST_NOT_FOUND => STATUS_OBJECT_NAME_NOT_FOUND,
+                Err(_) => STATUS_UNSUCCESSFUL,
+            };
+        }
+        if let Some(engine) = ENGINE.get() {
             match engine.query_attributes(&path) {
                 AttrDecision::Attributes { is_dir, size, .. } => {
                     if !info.is_null() {
@@ -876,6 +925,19 @@ unsafe extern "system" fn setinfo_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
+    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        if class == FILE_POSITION_INFORMATION
+            && !info.is_null()
+            && length as usize >= core::mem::size_of::<FilePositionInformation>()
+        {
+            let pos = (*(info as *const FilePositionInformation)).current_byte_offset;
+            if pos >= 0 {
+                crate::fuse_synth::set_position(handle as isize, pos as u64);
+            }
+            return STATUS_SUCCESS;
+        }
+        return STATUS_SUCCESS;
+    }
     if crate::zipserve::is_synth(handle as isize) {
         if class == FILE_POSITION_INFORMATION
             && !info.is_null()
@@ -934,6 +996,90 @@ unsafe fn synth_iosb_ok(iosb: *mut c_void, bytes: usize) {
         let p = iosb as *mut u8;
         core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
         core::ptr::write_unaligned(p.add(8) as *mut usize, bytes);
+    }
+}
+
+/// Answer handle-based information queries for director FUSE synth handles.
+unsafe fn fuse_query_information(
+    handle: HANDLE,
+    iosb: *mut c_void,
+    info: *mut c_void,
+    length: u32,
+    class: u32,
+) -> NTSTATUS {
+    let Some((fh, size, is_dir, pos)) = crate::fuse_synth::lookup(handle as isize) else {
+        return STATUS_INVALID_HANDLE;
+    };
+    let _ = fh;
+    if info.is_null() {
+        return STATUS_UNSUCCESSFUL;
+    }
+    match class {
+        FILE_BASIC_INFORMATION => {
+            if (length as usize) < core::mem::size_of::<FileBasicInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let bi = info as *mut FileBasicInformation;
+            (*bi).creation_time = 0;
+            (*bi).last_access_time = 0;
+            (*bi).last_write_time = 0;
+            (*bi).change_time = 0;
+            (*bi).file_attributes =
+                if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+            (*bi)._reserved = 0;
+            synth_iosb_ok(iosb, core::mem::size_of::<FileBasicInformation>());
+            STATUS_SUCCESS
+        }
+        FILE_STANDARD_INFORMATION => {
+            if (length as usize) < core::mem::size_of::<FileStandardInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let si = info as *mut FileStandardInformation;
+            (*si).allocation_size = size as i64;
+            (*si).end_of_file = size as i64;
+            (*si).number_of_links = 1;
+            (*si).delete_pending = 0;
+            (*si).directory = if is_dir { 1 } else { 0 };
+            (*si)._pad = 0;
+            synth_iosb_ok(iosb, core::mem::size_of::<FileStandardInformation>());
+            STATUS_SUCCESS
+        }
+        FILE_INTERNAL_INFORMATION => {
+            if (length as usize) < core::mem::size_of::<FileInternalInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            (*(info as *mut FileInternalInformation)).index_number = handle as i64;
+            synth_iosb_ok(iosb, core::mem::size_of::<FileInternalInformation>());
+            STATUS_SUCCESS
+        }
+        FILE_POSITION_INFORMATION => {
+            if (length as usize) < core::mem::size_of::<FilePositionInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            (*(info as *mut FilePositionInformation)).current_byte_offset = pos as i64;
+            synth_iosb_ok(iosb, core::mem::size_of::<FilePositionInformation>());
+            STATUS_SUCCESS
+        }
+        FILE_NETWORK_OPEN_INFORMATION => {
+            if (length as usize) < core::mem::size_of::<FileNetworkOpenInformation>() {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let ni = info as *mut FileNetworkOpenInformation;
+            (*ni).creation_time = 0;
+            (*ni).last_access_time = 0;
+            (*ni).last_write_time = 0;
+            (*ni).change_time = 0;
+            (*ni).allocation_size = size as i64;
+            (*ni).end_of_file = size as i64;
+            (*ni).file_attributes =
+                if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+            synth_iosb_ok(iosb, core::mem::size_of::<FileNetworkOpenInformation>());
+            STATUS_SUCCESS
+        }
+        _ => {
+            synth_iosb_ok(iosb, 0);
+            STATUS_SUCCESS
+        }
     }
 }
 
@@ -1077,7 +1223,9 @@ unsafe extern "system" fn qvol_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if crate::zipserve::is_synth(handle as isize) {
+    if crate::fuse_synth::is_fuse_synth(handle as isize)
+        || crate::zipserve::is_synth(handle as isize)
+    {
         if class == FILE_FS_DEVICE_INFORMATION {
             if info.is_null() || (length as usize) < core::mem::size_of::<FileFsDeviceInformation>() {
                 return STATUS_BUFFER_OVERFLOW;
@@ -1114,6 +1262,9 @@ unsafe extern "system" fn qif_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
+    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        return fuse_query_information(handle, iosb, info, length, class);
+    }
     if crate::zipserve::is_synth(handle as isize) {
         return synth_query_information(handle, iosb, info, length, class);
     }
@@ -1722,15 +1873,49 @@ unsafe extern "system" fn qdirex_hook(
         }
     };
 
-    // Phase 2 (unlocked): drain the real dir + merge. `drain_real` calls the
-    // syscall, so the lock must NOT be held here (NtClose also takes it).
+    // Phase 2 (unlocked): build listing. Prefer director OP_READDIR when FUSE
+    // is live (no in-shim snapshot merge). `drain_real` may call the syscall,
+    // so the lock must NOT be held here (NtClose also takes it).
     let rebuilt = if need_build {
         let wildcard = wildcard_of(file_name);
-        let real = drain_real(handle, tramp);
-        Some(match ENGINE.get() {
-            Some(engine) => engine.merge_directory(&dir_path, &real, wildcard.as_deref()),
-            None => real,
-        })
+        if let Some(client) = crate::fuse_client::global() {
+            if let Some(vpath) = client.vpath_under_root(&dir_path) {
+                let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+                match client.readdir(vp) {
+                    Ok(entries) => {
+                        let mut items: Vec<DirItem> = entries
+                            .into_iter()
+                            .map(|e| DirItem {
+                                name: e.name,
+                                is_dir: e.is_dir,
+                                size: e.size,
+                                mtime: e.mtime,
+                            })
+                            .collect();
+                        if let Some(ref w) = wildcard {
+                            items.retain(|i| {
+                                vfs_core::wildcard_match(w, &i.name)
+                                    || i.name.eq_ignore_ascii_case(w)
+                            });
+                        }
+                        Some(items)
+                    }
+                    Err(_) => Some(Vec::new()),
+                }
+            } else {
+                let real = drain_real(handle, tramp);
+                Some(match ENGINE.get() {
+                    Some(engine) => engine.merge_directory(&dir_path, &real, wildcard.as_deref()),
+                    None => real,
+                })
+            }
+        } else {
+            let real = drain_real(handle, tramp);
+            Some(match ENGINE.get() {
+                Some(engine) => engine.merge_directory(&dir_path, &real, wildcard.as_deref()),
+                None => real,
+            })
+        }
     } else {
         None
     };
