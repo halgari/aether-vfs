@@ -1,13 +1,14 @@
-//! Thin director FUSE client: ring + bulk arena + optional event wake.
+//! Thin director FUSE client: ring + bulk arena + optional remote READ + event wake.
 
 use std::sync::OnceLock;
 
 use vfs_ipc::{Geom, RingClient, SpinNotifier};
 use vfs_protocol::{
-    decode_getattr_resp, decode_open_resp, decode_readdir_resp, decode_read_bulk_resp,
-    decode_read_resp_into, encode_close_req, encode_open_req, encode_path_req, encode_read_req,
-    is_read_resp_bulk, AttrResp, DirEntryWire, OpenResp, ReadReq, FLAG_READ_BULK, OP_CLOSE,
-    OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ, OP_READDIR, OPEN_READ, ST_OK,
+    decode_getattr_resp, decode_open_resp, decode_read_bulk_resp, decode_read_remote_resp,
+    decode_readdir_resp, decode_read_resp_into, encode_close_req, encode_open_req, encode_path_req,
+    encode_read_req, encode_register_process_req, is_read_resp_bulk, is_read_resp_remote, AttrResp,
+    DirEntryWire, OpenResp, ReadReq, FLAG_READ_BULK, FLAG_READ_REMOTE, OP_CLOSE, OP_GETATTR,
+    OP_HEARTBEAT, OP_OPEN, OP_READ, OP_READDIR, OP_REGISTER_PROCESS, OPEN_READ, ST_OK,
 };
 use vfs_win::SharedMapping;
 
@@ -35,14 +36,35 @@ pub fn try_init_from_env() -> Result<(), String> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let root = std::env::var("VFS_VIRTUAL_DIR").unwrap_or_else(|_| r"C:\GameLayers\runtime".into());
-    let client = FuseClient::connect(&section, &root, payload_cap, ring_bytes, arena_len)?;
+    // Phase 2 remote READ: register for WPM. Default: bulk preferred when arena exists
+    // (bench: bulk ~3× faster than WPM). Set VFS_PREFER_REMOTE=1 to force remote for large READs.
+    let remote_enabled = std::env::var("VFS_REMOTE_READ")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
+    let prefer_remote = std::env::var("VFS_PREFER_REMOTE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let client = FuseClient::connect(
+        &section,
+        &root,
+        payload_cap,
+        ring_bytes,
+        arena_len,
+        remote_enabled,
+        prefer_remote,
+    )?;
     client.heartbeat()?;
+    if remote_enabled {
+        let _ = client.register_process();
+    }
     let _ = FUSE.set(client);
     Ok(())
 }
 
 const PIPELINE_DEPTH: usize = 4;
 const BULK_THRESHOLD: u32 = 64 * 1024;
+/// Director WPM threshold when remote is selected (**phase 2**).
+const REMOTE_THRESHOLD: u32 = 256 * 1024;
 
 pub struct FuseClient {
     mapping: SharedMapping,
@@ -50,6 +72,10 @@ pub struct FuseClient {
     payload_cap: u32,
     root_lower: String,
     arena_len: usize,
+    /// Director accepted REGISTER_PROCESS (or we still try and fall back).
+    remote_ok: std::sync::atomic::AtomicBool,
+    /// When true, prefer WPM over bulk arena for large fragments.
+    prefer_remote: bool,
 }
 
 impl FuseClient {
@@ -59,6 +85,8 @@ impl FuseClient {
         payload_cap: u32,
         ring_bytes: usize,
         arena_len: usize,
+        remote_enabled: bool,
+        prefer_remote: bool,
     ) -> Result<Self, String> {
         let mapping = SharedMapping::open(section, ring_bytes)
             .map_err(|e| format!("open section {section}: {e}"))?;
@@ -69,6 +97,8 @@ impl FuseClient {
             payload_cap,
             root_lower: root.replace('/', "\\").to_ascii_lowercase(),
             arena_len,
+            remote_ok: std::sync::atomic::AtomicBool::new(remote_enabled),
+            prefer_remote,
         })
     }
 
@@ -84,6 +114,27 @@ impl FuseClient {
         if r.status != ST_OK {
             return Err(format!("HEARTBEAT status {}", r.status));
         }
+        Ok(())
+    }
+
+    /// Register this process so the director can WPM into our buffers.
+    pub fn register_process(&self) -> Result<(), String> {
+        let pid = std::process::id();
+        let c = self.client();
+        let r = c
+            .submit(
+                OP_REGISTER_PROCESS,
+                0,
+                &encode_register_process_req(pid),
+            )
+            .map_err(|e| format!("REGISTER_PROCESS: {e:?}"))?;
+        if r.status != ST_OK {
+            self.remote_ok
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            return Err(format!("REGISTER_PROCESS status {}", r.status));
+        }
+        self.remote_ok
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -120,6 +171,10 @@ impl FuseClient {
         decode_open_resp(&r.payload).ok_or(vfs_protocol::ST_BAD_REQUEST)
     }
 
+    /// Read into `buf` (typically the game's NtReadFile buffer — **phase 1**).
+    ///
+    /// Large fragments use **phase 2** remote WPM when registered; otherwise bulk arena
+    /// + `copy_to` into `buf`, or inline ring payload.
     pub fn read_fragmented(
         &self,
         fh: u64,
@@ -136,18 +191,28 @@ impl FuseClient {
         } else {
             self.payload_cap.saturating_sub(8) as usize
         };
+        let remote_chunk = bulk_chunk.min(1024 * 1024);
         let inline_chunk = self.payload_cap.saturating_sub(8) as usize;
+        let remote_ok = self.remote_ok.load(std::sync::atomic::Ordering::Relaxed);
         let c = self.client();
         let mut filled = 0usize;
 
         while filled < buf.len() {
             let mut reqs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
             let mut wants: Vec<usize> = Vec::new();
+            let mut modes: Vec<ReadMode> = Vec::new();
             let mut batch_off = filled;
             while reqs.len() < PIPELINE_DEPTH && batch_off < buf.len() {
                 let rem = buf.len() - batch_off;
-                let bulk = rem as u32 >= BULK_THRESHOLD && self.arena_len > 0;
-                let chunk = if bulk {
+                // Prefer bulk arena when available (faster than WPM on measured hosts).
+                // Remote when: no arena, or VFS_PREFER_REMOTE, and size ≥ threshold.
+                let use_remote = remote_ok
+                    && rem as u32 >= REMOTE_THRESHOLD
+                    && (self.arena_len == 0 || self.prefer_remote);
+                let bulk = !use_remote && rem as u32 >= BULK_THRESHOLD && self.arena_len > 0;
+                let chunk = if use_remote {
+                    rem.min(remote_chunk)
+                } else if bulk {
                     rem.min(bulk_chunk)
                 } else {
                     rem.min(inline_chunk)
@@ -155,7 +220,18 @@ impl FuseClient {
                 if chunk == 0 {
                     break;
                 }
-                let flags = if bulk { FLAG_READ_BULK } else { 0 };
+                let dest_va = buf.as_mut_ptr() as u64 + batch_off as u64;
+                let (flags, target_va, mode) = if use_remote {
+                    (
+                        FLAG_READ_REMOTE,
+                        Some(dest_va),
+                        ReadMode::Remote,
+                    )
+                } else if bulk {
+                    (FLAG_READ_BULK, None, ReadMode::Bulk)
+                } else {
+                    (0, None, ReadMode::Inline)
+                };
                 reqs.push((
                     OP_READ,
                     flags,
@@ -163,9 +239,11 @@ impl FuseClient {
                         fh,
                         offset: offset + batch_off as u64,
                         len: chunk,
+                        target_va,
                     }),
                 ));
                 wants.push(chunk as usize);
+                modes.push(mode);
                 batch_off += chunk as usize;
             }
             if reqs.is_empty() {
@@ -178,18 +256,33 @@ impl FuseClient {
 
             let mut batch_filled = 0usize;
             let mut eof = false;
-            for (resp, want) in responses.iter().zip(wants.iter()) {
+            for ((resp, want), mode) in responses
+                .iter()
+                .zip(wants.iter())
+                .zip(modes.iter())
+            {
                 if resp.status != ST_OK {
+                    // Remote failed (e.g. no registered process): disable and surface error
+                    // so the caller can retry or fail; for mid-batch, fail the read.
+                    if *mode == ReadMode::Remote {
+                        self.remote_ok
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
                     return Err(resp.status);
                 }
                 let frag_start = filled + batch_filled;
                 let dest = &mut buf[frag_start..frag_start + *want];
-                let n = if is_read_resp_bulk(&resp.payload) {
+                let n = if is_read_resp_remote(&resp.payload) {
+                    // Phase 2: director already wrote into dest VA.
+                    let bn = decode_read_remote_resp(&resp.payload)
+                        .ok_or(vfs_protocol::ST_BAD_REQUEST)?;
+                    (bn as usize).min(dest.len())
+                } else if is_read_resp_bulk(&resp.payload) {
                     let (bn, aoff) = decode_read_bulk_resp(&resp.payload)
                         .ok_or(vfs_protocol::ST_BAD_REQUEST)?;
                     let n = (bn as usize).min(dest.len());
                     if n > 0 {
-                        // Arena → user buffer without intermediate Vec.
+                        // Phase 1: arena → game buffer (no intermediate Vec).
                         self.mapping
                             .seg()
                             .copy_to(aoff as usize, &mut dest[..n])
@@ -228,6 +321,13 @@ impl FuseClient {
     pub fn vpath_under_root(&self, path: &str) -> Option<String> {
         vpath_under_root_norm(path, &self.root_lower)
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadMode {
+    Inline,
+    Bulk,
+    Remote,
 }
 
 pub fn strip_nt_device(p: &str) -> &str {

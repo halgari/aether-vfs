@@ -8,12 +8,32 @@ use vfs_core::{EntryKind, InputEntry, Layer, LayerId};
 use vfs_ipc::ring::init;
 use vfs_ipc::{OwnedSeg, RingClient, RingServer, SpinNotifier};
 use vfs_protocol::{
-    decode_getattr_resp, decode_open_resp, decode_read_bulk_resp, decode_readdir_resp,
-    decode_read_resp, encode_close_req, encode_open_req, encode_path_req, encode_read_req,
-    is_read_resp_bulk, OpenResp, ReadReq, FLAG_READ_BULK, OP_CLOSE, OP_GETATTR, OP_OPEN, OP_READ,
-    OP_READDIR, OPEN_READ, ST_OK,
+    decode_getattr_resp, decode_open_resp, decode_read_bulk_resp, decode_read_remote_resp,
+    decode_readdir_resp, decode_read_resp, encode_close_req, encode_open_req, encode_path_req,
+    encode_read_req, is_read_resp_bulk, is_read_resp_remote, OpenResp, ReadReq, FLAG_READ_BULK,
+    FLAG_READ_REMOTE, OP_CLOSE, OP_GETATTR, OP_OPEN, OP_READ, OP_READDIR, OPEN_READ, ST_IO_ERROR,
+    ST_OK,
 };
-use vfs_server::{DataArena, Server};
+use vfs_server::{DataArena, RemoteMemWriter, Server};
+
+/// Same-process remote writer for tests (no Win32; treats VA as local pointer).
+struct LocalVaWriter;
+
+impl RemoteMemWriter for LocalVaWriter {
+    fn write_at(&self, va: u64, data: &[u8]) -> Result<(), i32> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        if va == 0 {
+            return Err(ST_IO_ERROR);
+        }
+        // SAFETY: test buffer remains live for the duration of the RPC.
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), va as *mut u8, data.len());
+        }
+        Ok(())
+    }
+}
 
 #[test]
 fn client_open_read_close_over_ring() {
@@ -77,6 +97,7 @@ fn client_open_read_close_over_ring() {
                     fh,
                     offset: 0,
                     len: size as u32,
+                    target_va: None,
                 }),
             )
             .unwrap();
@@ -229,6 +250,7 @@ fn client_bulk_read_into_arena() {
                         fh,
                         offset: off,
                         len: want,
+                        target_va: None,
                     }),
                 )
                 .unwrap();
@@ -247,6 +269,97 @@ fn client_bulk_read_into_arena() {
 
         let c = client.submit(OP_CLOSE, 0, &encode_close_req(fh)).unwrap();
         assert_eq!(c.status, ST_OK);
+        stop.store(true, Ordering::Relaxed);
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Phase 2 path: server writes into client buffer VA (local pointer adapter).
+#[test]
+fn client_remote_write_into_buffer() {
+    let dir = std::env::temp_dir().join(format!("vfs-fuse-remote-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join("r.bin");
+    let content: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&file, &content).unwrap();
+    let src = file.to_string_lossy().into_owned();
+    let server = Server::from_layers_with_cap(
+        vec![Layer {
+            id: LayerId(0),
+            entries: vec![InputEntry {
+                vpath: "data/r.bin".into(),
+                kind: EntryKind::File,
+                source: src.as_str().into(),
+                size: content.len() as u64,
+                mtime: 1,
+            }],
+        }],
+        65_536,
+    )
+    .unwrap();
+
+    const SLOTS: u32 = 4;
+    const ARENA: usize = 512 * 1024;
+    let stride = ((32 + 65_536) + 7) & !7;
+    let ring_bytes = 40 + SLOTS as usize * stride;
+    let owned = OwnedSeg::new(ring_bytes + ARENA);
+    init(owned.seg(), SLOTS, 65_536).unwrap();
+    let seg = owned.seg();
+    let stop = AtomicBool::new(false);
+    let writer = LocalVaWriter;
+
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let ring = RingServer::new(seg, SpinNotifier).unwrap();
+            let arena = DataArena::new(seg, ring_bytes, ARENA, SLOTS as usize);
+            let w: &dyn RemoteMemWriter = &writer;
+            loop {
+                match server.serve_one_arena_remote(&ring, &arena, Some(w)) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let client = RingClient::new(seg, SpinNotifier).unwrap();
+        let open = client
+            .submit(OP_OPEN, 0, &encode_open_req(OPEN_READ, "data/r.bin"))
+            .unwrap();
+        assert_eq!(open.status, ST_OK);
+        let OpenResp { fh, size, .. } = decode_open_resp(&open.payload).unwrap();
+
+        let mut out = vec![0u8; size as usize];
+        let mut off = 0u64;
+        while off < size {
+            let want = ((size - off) as u32).min(128 * 1024);
+            let va = out.as_mut_ptr() as u64 + off;
+            let r = client
+                .submit(
+                    OP_READ,
+                    FLAG_READ_REMOTE,
+                    &encode_read_req(&ReadReq {
+                        fh,
+                        offset: off,
+                        len: want,
+                        target_va: Some(va),
+                    }),
+                )
+                .unwrap();
+            assert_eq!(r.status, ST_OK);
+            assert!(is_read_resp_remote(&r.payload));
+            let n = decode_read_remote_resp(&r.payload).unwrap() as u64;
+            if n == 0 {
+                break;
+            }
+            off += n;
+        }
+        assert_eq!(out, content);
+        let _ = client.submit(OP_CLOSE, 0, &encode_close_req(fh));
         stop.store(true, Ordering::Relaxed);
     });
     let _ = std::fs::remove_dir_all(&dir);

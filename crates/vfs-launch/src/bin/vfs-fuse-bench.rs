@@ -17,12 +17,22 @@ use vfs_core::{encode_zip_window, EntryKind, InputEntry, Layer, LayerId, SourceI
 use vfs_ipc::ring::init;
 use vfs_ipc::{OwnedSeg, RingClient, RingServer, SpinNotifier};
 use vfs_protocol::{
-    decode_getattr_resp, decode_open_resp, decode_read_bulk_resp, decode_read_resp,
-    decode_read_resp_into, encode_close_req, encode_open_req, encode_path_req, encode_read_req,
-    is_read_resp_bulk, OpenResp, ReadReq, FLAG_READ_BULK, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT,
-    OP_OPEN, OP_READ, OPEN_READ, ST_OK,
+    decode_getattr_resp, decode_open_resp, decode_read_bulk_resp, decode_read_remote_resp,
+    decode_read_resp, decode_read_resp_into, encode_close_req, encode_open_req, encode_path_req,
+    encode_read_req, is_read_resp_bulk, is_read_resp_remote, OpenResp, ReadReq, FLAG_READ_BULK,
+    FLAG_READ_REMOTE, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ, OPEN_READ, ST_IO_ERROR,
+    ST_OK,
 };
-use vfs_server::{DataArena, OpenTable, Server, DEFAULT_PAYLOAD_CAP};
+use vfs_server::{DataArena, OpenTable, RemoteMemWriter, Server, DEFAULT_PAYLOAD_CAP};
+use vfs_win::ProcessVm;
+
+struct WpmWriter(ProcessVm);
+
+impl RemoteMemWriter for WpmWriter {
+    fn write_at(&self, va: u64, data: &[u8]) -> Result<(), i32> {
+        self.0.write_at(va, data).map_err(|_| ST_IO_ERROR)
+    }
+}
 
 struct Stats {
     name: String,
@@ -146,17 +156,23 @@ fn main() {
     init(owned.seg(), SLOT_COUNT, payload_cap).expect("ring init");
     let bank_size = ARENA_LEN / SLOT_COUNT as usize;
     let stop = Arc::new(AtomicBool::new(false));
+    // Phase 2: same-process WPM into client buffers (OpenProcess on self).
+    let remote = Arc::new(WpmWriter(
+        ProcessVm::open(std::process::id()).expect("open self for WPM"),
+    ));
 
     // `thread::scope` keeps `owned` alive for both server and client.
     let doc = thread::scope(|scope| {
         let stop2 = stop.clone();
         let srv = server.clone();
         let seg = owned.seg();
+        let remote_srv = remote.clone();
         scope.spawn(move || {
             let ring = RingServer::new(seg, SpinNotifier).unwrap();
             let arena = DataArena::new(seg, arena_offset, ARENA_LEN, SLOT_COUNT as usize);
             while !stop2.load(Ordering::Relaxed) {
-                match srv.serve_one_arena(&ring, &arena) {
+                let w: &dyn RemoteMemWriter = remote_srv.as_ref();
+                match srv.serve_one_arena_remote(&ring, &arena, Some(w)) {
                     Ok(true) => {}
                     Ok(false) => std::hint::spin_loop(),
                     Err(_) => break,
@@ -282,6 +298,7 @@ fn main() {
                 fh,
                 offset: 0,
                 len,
+                target_va: None,
             });
             for i in 0..(warmup + iters) {
                 let t0 = Instant::now();
@@ -340,6 +357,7 @@ fn main() {
                         fh,
                         offset: plan_off,
                         len: want,
+                        target_va: None,
                     }),
                 ));
                 plan_off += want as u64;
@@ -373,7 +391,6 @@ fn main() {
             }
         }
         let elapsed = t0.elapsed();
-        let _ = client.submit(OP_CLOSE, 0, &encode_close_req(fh));
 
         let secs = elapsed.as_secs_f64().max(1e-9);
         let mib = total as f64 / (1024.0 * 1024.0);
@@ -397,6 +414,82 @@ fn main() {
         lines.push(format!(
             "- Chunk size: {max_chunk} B (bulk bank), pipeline depth {PIPE_DEPTH}"
         ));
+
+        // --- Sequential throughput: remote WPM into client buffer (phase 2) ---
+        let mut big = vec![0u8; read_bytes];
+        let t0 = Instant::now();
+        let mut off = 0u64;
+        let mut total_r = 0usize;
+        let mut rpc_r = 0usize;
+        'seq_r: while total_r < read_bytes {
+            let mut reqs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+            let mut plan_off = off;
+            let mut wants: Vec<usize> = Vec::new();
+            let mut vas: Vec<u64> = Vec::new();
+            while reqs.len() < PIPE_DEPTH && total_r + wants.iter().sum::<usize>() < read_bytes {
+                let already = wants.iter().sum::<usize>();
+                let want = ((read_bytes - total_r - already) as u64).min(max_chunk as u64) as u32;
+                if want == 0 {
+                    break;
+                }
+                let va = big.as_mut_ptr() as u64 + (total_r + already) as u64;
+                reqs.push((
+                    OP_READ,
+                    FLAG_READ_REMOTE,
+                    encode_read_req(&ReadReq {
+                        fh,
+                        offset: plan_off,
+                        len: want,
+                        target_va: Some(va),
+                    }),
+                ));
+                plan_off += want as u64;
+                wants.push(want as usize);
+                vas.push(va);
+            }
+            if reqs.is_empty() {
+                break;
+            }
+            rpc_r += reqs.len();
+            let responses = client.submit_many(&reqs).unwrap();
+            for (r, want) in responses.iter().zip(wants.iter()) {
+                assert_eq!(r.status, ST_OK, "remote READ failed");
+                assert!(is_read_resp_remote(&r.payload));
+                let n = decode_read_remote_resp(&r.payload).unwrap() as usize;
+                if n == 0 {
+                    break 'seq_r;
+                }
+                total_r += n;
+                off += n as u64;
+                if n < *want {
+                    break 'seq_r;
+                }
+            }
+            let _ = vas;
+        }
+        let elapsed_r = t0.elapsed();
+        let _ = client.submit(OP_CLOSE, 0, &encode_close_req(fh));
+        let mib_r = total_r as f64 / (1024.0 * 1024.0) / elapsed_r.as_secs_f64().max(1e-9);
+
+        lines.push(String::new());
+        lines.push("## Sequential throughput (remote WPM READ RPCs)".into());
+        lines.push(String::new());
+        lines.push(format!(
+            "- Bytes read: {total_r} ({:.2} MiB) in {rpc_r} RPC(s)",
+            total_r as f64 / (1024.0 * 1024.0)
+        ));
+        lines.push(format!(
+            "- Wall time: {elapsed_r:?} ({:.2} ms)",
+            elapsed_r.as_secs_f64() * 1000.0
+        ));
+        lines.push(format!("- Throughput: **{mib_r:.1} MiB/s**"));
+        lines.push(format!(
+            "- Avg time per RPC: {:.2} µs",
+            elapsed_r.as_secs_f64() * 1e6 / rpc_r.max(1) as f64
+        ));
+        lines.push(
+            "- Path: disk/zip → director staging → WriteProcessMemory into client buffer".into(),
+        );
 
         // --- Baseline: OpenTable direct ---
         let tree = server.tree();
@@ -454,8 +547,12 @@ fn main() {
             ));
         }
         lines.push(format!(
-            "- **IPC overhead factor**: {:.1}× slower than OpenTable direct (throughput ratio)",
+            "- **IPC overhead factor (bulk)**: {:.1}× slower than OpenTable direct",
             mib_d / mib_s.max(0.001)
+        ));
+        lines.push(format!(
+            "- **IPC overhead factor (remote WPM)**: {:.1}× slower than OpenTable direct",
+            mib_d / mib_r.max(0.001)
         ));
 
         lines.push(String::new());
@@ -466,7 +563,11 @@ fn main() {
                 .into(),
         );
         lines.push(
-            "- Sequential throughput uses **FLAG_READ_BULK** with disk/zip → arena bank (no intermediate Vec) and client `copy_to` into a scratch buffer."
+            "- Bulk sequential: **FLAG_READ_BULK** disk/zip → arena → client `copy_to` (phase 1 into user buffer)."
+                .into(),
+        );
+        lines.push(
+            "- Remote sequential: **FLAG_READ_REMOTE** disk/zip → staging → `WriteProcessMemory` into client buffer (phase 2)."
                 .into(),
         );
         lines.push(
@@ -495,7 +596,10 @@ fn main() {
             percentile_us(&close_s.samples, 50)
         ));
         lines.push(format!(
-            "| Sequential RPC throughput | **{mib_s:.1} MiB/s** |"
+            "| Sequential bulk throughput | **{mib_s:.1} MiB/s** |"
+        ));
+        lines.push(format!(
+            "| Sequential remote WPM throughput | **{mib_r:.1} MiB/s** |"
         ));
         lines.push(format!(
             "| OpenTable direct throughput | **{mib_d:.1} MiB/s** |"

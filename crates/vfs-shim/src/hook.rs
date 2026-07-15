@@ -1332,43 +1332,48 @@ unsafe extern "system" fn read_hook(
                 }
                 return STATUS_END_OF_FILE;
             }
-            let mut tmp = vec![0u8; want.min((size - off) as usize)];
-            match crate::fuse_client::global()
-                .ok_or(vfs_protocol::ST_IO_ERROR)
-                .and_then(|c| c.read_fragmented(fh, off, &mut tmp))
+            // Phase 1: fill the game's NtReadFile buffer in place (no intermediate tmp).
+            let max = want.min((size - off) as usize);
+            let n = if max == 0 || buffer.is_null() {
+                0usize
+            } else {
+                // SAFETY: NtReadFile contract — buffer is writable for `length` bytes.
+                let slice =
+                    unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, max) };
+                match crate::fuse_client::global()
+                    .ok_or(vfs_protocol::ST_IO_ERROR)
+                    .and_then(|c| c.read_fragmented(fh, off, slice))
+                {
+                    Ok(n) => n,
+                    Err(_) => {
+                        if !iosb.is_null() {
+                            let p = iosb as *mut u8;
+                            core::ptr::write_unaligned(p as *mut u32, STATUS_UNSUCCESSFUL as u32);
+                            core::ptr::write_unaligned(p.add(8) as *mut usize, 0usize);
+                        }
+                        return STATUS_UNSUCCESSFUL;
+                    }
+                }
+            };
             {
-                Ok(n) => {
-                    let n = n.min(tmp.len());
-                    if !buffer.is_null() && n > 0 {
-                        core::ptr::copy_nonoverlapping(tmp.as_ptr(), buffer as *mut u8, n);
-                    }
-                    if explicit.is_none() {
-                        crate::fuse_synth::set_position(handle as isize, off + n as u64);
-                    }
-                    let at_eof = off + n as u64 >= size;
-                    let status = if at_eof && n == 0 {
-                        STATUS_END_OF_FILE
-                    } else {
-                        STATUS_SUCCESS
-                    };
-                    if !iosb.is_null() {
-                        let p = iosb as *mut u8;
-                        core::ptr::write_unaligned(p as *mut u32, status as u32);
-                        core::ptr::write_unaligned(p.add(8) as *mut usize, n);
-                    }
-                    if !event.is_null() {
-                        windows_sys::Win32::System::Threading::SetEvent(event);
-                    }
-                    return status;
+                if explicit.is_none() {
+                    crate::fuse_synth::set_position(handle as isize, off + n as u64);
                 }
-                Err(_) => {
-                    if !iosb.is_null() {
-                        let p = iosb as *mut u8;
-                        core::ptr::write_unaligned(p as *mut u32, STATUS_UNSUCCESSFUL as u32);
-                        core::ptr::write_unaligned(p.add(8) as *mut usize, 0usize);
-                    }
-                    return STATUS_UNSUCCESSFUL;
+                let at_eof = off + n as u64 >= size;
+                let status = if at_eof && n == 0 {
+                    STATUS_END_OF_FILE
+                } else {
+                    STATUS_SUCCESS
+                };
+                if !iosb.is_null() {
+                    let p = iosb as *mut u8;
+                    core::ptr::write_unaligned(p as *mut u32, status as u32);
+                    core::ptr::write_unaligned(p.add(8) as *mut usize, n);
                 }
+                if !event.is_null() {
+                    windows_sys::Win32::System::Threading::SetEvent(event);
+                }
+                return status;
             }
         }
         return STATUS_UNSUCCESSFUL;

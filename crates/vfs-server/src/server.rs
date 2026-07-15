@@ -7,6 +7,7 @@ use vfs_ipc::{Notifier, RingServer};
 use crate::arena::DataArena;
 use crate::handler::{dispatch, dispatch_full, dispatch_with_table};
 use crate::open_table::OpenTable;
+use crate::remote::RemoteMemWriter;
 
 /// **B2:** default ring payload capacity (1 MiB).
 pub const DEFAULT_PAYLOAD_CAP: u32 = 1_048_576;
@@ -80,6 +81,16 @@ impl Server {
         ring: &RingServer<'_, N>,
         arena: &DataArena<'_>,
     ) -> Result<bool, IpcError> {
+        self.serve_one_arena_remote(ring, arena, None)
+    }
+
+    /// **B1 + phase 2:** bulk arena + optional remote (WPM) writer.
+    pub fn serve_one_arena_remote<N: Notifier>(
+        &self,
+        ring: &RingServer<'_, N>,
+        arena: &DataArena<'_>,
+        remote: Option<&dyn RemoteMemWriter>,
+    ) -> Result<bool, IpcError> {
         ring.serve_one(|req| {
             dispatch_full(
                 &self.tree,
@@ -89,6 +100,7 @@ impl Server {
                 req.flags,
                 self.payload_cap,
                 Some((arena, req.slot)),
+                remote,
             )
         })
     }
