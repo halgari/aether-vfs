@@ -12,6 +12,10 @@ path = "src/main.rs"
 name = "vfs-game-probe"
 path = "src/bin/vfs-game-probe.rs"
 
+[[bin]]
+name = "vfs-fuse-bench"
+path = "src/bin/vfs-fuse-bench.rs"
+
 [dependencies]
 vfs-core = { path = "../vfs-core" }
 vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
