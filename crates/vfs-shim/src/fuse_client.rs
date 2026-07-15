@@ -172,15 +172,101 @@ impl FuseClient {
         })
     }
 
-    /// If `win32_path` is under managed root, return vpath with `/` separators.
-    pub fn vpath_under_root(&self, win32_path: &str) -> Option<String> {
-        let p = win32_path.replace('/', "\\").to_ascii_lowercase();
-        let root = self.root_lower.trim_end_matches('\\');
-        if p == root {
-            return Some(String::new());
-        }
-        let prefix = format!("{root}\\");
-        let rest = p.strip_prefix(&prefix)?;
-        Some(rest.replace('\\', "/"))
+    /// If `path` is under managed root, return vpath with `/` separators.
+    /// Accepts Win32 (`C:\…`) or NT (`\??\C:\…` / `\\?\C:\…`) forms from
+    /// `path_of` / DIR_TABLE; root is compared after the same strip.
+    pub fn vpath_under_root(&self, path: &str) -> Option<String> {
+        vpath_under_root_norm(path, &self.root_lower)
+    }
+}
+
+/// Strip `\??\` / `\\?\` device prefixes; leave Win32 path (drive intact).
+pub fn strip_nt_device(p: &str) -> &str {
+    p.strip_prefix(r"\??\")
+        .or_else(|| p.strip_prefix(r"\\?\"))
+        .unwrap_or(p)
+}
+
+/// Normalize path for root comparison: strip NT device, unify slashes, lower.
+pub fn normalize_path_for_root(p: &str) -> String {
+    strip_nt_device(p)
+        .replace('/', "\\")
+        .to_ascii_lowercase()
+}
+
+/// Pure: if `path` is under `root` (either may be NT or Win32), return relative
+/// vpath with `/` separators; empty string means the root directory itself.
+pub fn vpath_under_root_norm(path: &str, root: &str) -> Option<String> {
+    let p = normalize_path_for_root(path);
+    let root = normalize_path_for_root(root);
+    let root = root.trim_end_matches('\\');
+    if p == root {
+        return Some(String::new());
+    }
+    let prefix = format!("{root}\\");
+    let rest = p.strip_prefix(&prefix)?;
+    Some(rest.replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_nt_device_forms() {
+        assert_eq!(strip_nt_device(r"\??\C:\GameLayers\runtime"), r"C:\GameLayers\runtime");
+        assert_eq!(strip_nt_device(r"\\?\C:\GameLayers\runtime"), r"C:\GameLayers\runtime");
+        assert_eq!(strip_nt_device(r"C:\GameLayers\runtime"), r"C:\GameLayers\runtime");
+    }
+
+    #[test]
+    fn vpath_under_root_win32() {
+        let root = r"C:\GameLayers\runtime";
+        assert_eq!(
+            vpath_under_root_norm(r"C:\GameLayers\runtime\Data\Skyrim.esm", root).as_deref(),
+            Some("data/skyrim.esm")
+        );
+        assert_eq!(vpath_under_root_norm(root, root).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn vpath_under_root_nt_device() {
+        let root = r"C:\GameLayers\runtime";
+        // path_of() / DIR_TABLE store NT paths while root is Win32.
+        assert_eq!(
+            vpath_under_root_norm(r"\??\C:\GameLayers\runtime\Data\x.esp", root).as_deref(),
+            Some("data/x.esp")
+        );
+        assert_eq!(
+            vpath_under_root_norm(r"\\?\C:\GameLayers\runtime\Data\x.esp", root).as_deref(),
+            Some("data/x.esp")
+        );
+        // root itself as NT
+        assert_eq!(
+            vpath_under_root_norm(r"\??\C:\GameLayers\runtime", root).as_deref(),
+            Some("")
+        );
+        // NT root + NT path
+        assert_eq!(
+            vpath_under_root_norm(
+                r"\??\C:\GameLayers\runtime\Data\Skyrim.esm",
+                r"\??\C:\GameLayers\runtime"
+            )
+            .as_deref(),
+            Some("data/skyrim.esm")
+        );
+    }
+
+    #[test]
+    fn vpath_under_root_rejects_outside() {
+        let root = r"C:\GameLayers\runtime";
+        assert_eq!(
+            vpath_under_root_norm(r"\??\C:\Windows\System32\kernel32.dll", root),
+            None
+        );
+        assert_eq!(
+            vpath_under_root_norm(r"C:\GameLayers\other\file.bin", root),
+            None
+        );
     }
 }
