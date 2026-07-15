@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/vfs-core",
   "crates/vfs-shared",
+  "crates/vfs-protocol",
   "crates/vfs-ipc",
   "crates/vfs-inject",
   "crates/vfs-payload",

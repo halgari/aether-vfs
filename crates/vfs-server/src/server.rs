@@ -4,29 +4,66 @@ use vfs_core::{build, BuildError, Layer, VfsTree};
 use vfs_ipc::ring::IpcError;
 use vfs_ipc::{Notifier, RingServer};
 
-use crate::handler::dispatch;
+use crate::handler::{dispatch, dispatch_with_table};
+use crate::open_table::OpenTable;
 
-/// The authoritative server: owns the merged tree, answers ring requests, and
-/// publishes the shared-memory snapshot.
+/// Default ring payload capacity used when not specified.
+pub const DEFAULT_PAYLOAD_CAP: u32 = 262_144;
+
+/// The authoritative server: owns the merged tree, open-file table, and answers
+/// ring requests (and can still publish a snapshot for debug).
 pub struct Server {
     tree: VfsTree,
+    table: OpenTable,
+    payload_cap: u32,
 }
 
 impl Server {
     pub fn new(tree: VfsTree) -> Self {
-        Server { tree }
+        Self::with_payload_cap(tree, DEFAULT_PAYLOAD_CAP)
+    }
+
+    pub fn with_payload_cap(tree: VfsTree, payload_cap: u32) -> Self {
+        Server {
+            tree,
+            table: OpenTable::new(),
+            payload_cap,
+        }
     }
 
     pub fn from_layers(layers: Vec<Layer>) -> Result<Self, BuildError> {
-        Ok(Server { tree: build(layers)? })
+        Ok(Server::new(build(layers)?))
+    }
+
+    pub fn from_layers_with_cap(layers: Vec<Layer>, payload_cap: u32) -> Result<Self, BuildError> {
+        Ok(Server::with_payload_cap(build(layers)?, payload_cap))
     }
 
     pub fn tree(&self) -> &VfsTree {
         &self.tree
     }
 
-    /// Decode + answer one (opcode, payload).
+    pub fn payload_cap(&self) -> u32 {
+        self.payload_cap
+    }
+
+    pub fn table(&self) -> &OpenTable {
+        &self.table
+    }
+
+    /// Decode + answer one (opcode, payload) — includes OPEN/READ/CLOSE.
     pub fn handle(&self, opcode: u32, payload: &[u8]) -> (i32, Vec<u8>) {
+        dispatch_with_table(
+            &self.tree,
+            &self.table,
+            opcode,
+            payload,
+            self.payload_cap,
+        )
+    }
+
+    /// Metadata-only dispatch (no open table) — used by older tests.
+    pub fn handle_meta(&self, opcode: u32, payload: &[u8]) -> (i32, Vec<u8>) {
         dispatch(&self.tree, opcode, payload)
     }
 
@@ -77,8 +114,10 @@ mod tests {
         let s = server();
         let img = s.snapshot();
         let r = SnapshotReader::open(&img).unwrap();
-        // Folded keys: "data" / "a.esp".
-        assert!(matches!(r.resolve(&["data", "a.esp"]), SnapResolution::File { .. }));
+        assert!(matches!(
+            r.resolve(&["data", "a.esp"]),
+            SnapResolution::File { .. }
+        ));
         assert_eq!(r.getattr(&["data", "a.esp"]).unwrap().size, 10);
     }
 }
