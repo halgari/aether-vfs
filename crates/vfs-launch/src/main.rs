@@ -7,13 +7,14 @@
 //! `Decision::Serve` zip windows (SEC_IMAGE via in-process manual map).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 mod director;
 
 use vfs_core::{decode, EntryKind, Layer, LayerId, Source, SourceId};
 use vfs_inject::{run_target_with_shim, RunConfig};
-use vfs_zip::read_layer;
+use vfs_zip::{read_layer, ZipBackend};
 
 const DEFAULT_LAYERS: &str = r"C:\GameLayers";
 const STEAM_APPID: &str = "489830"; // Skyrim Special Edition
@@ -495,7 +496,24 @@ fn main() {
             .unwrap_or(0)
     );
     eprintln!("  director section: {section_name}");
-    let director = match director::Director::start(tree, section_name.clone()) {
+    // Userspace FUSE kernel: each zip is a backend (no zip types in the director).
+    let kernel = Arc::new(vfs_director::Director::new());
+    for zip in &zips {
+        match ZipBackend::open(zip) {
+            Ok(be) => {
+                if let Err(e) = kernel.mount("", Arc::new(be)) {
+                    eprintln!("error: mount {}: status {e}", zip.display());
+                    std::process::exit(1);
+                }
+                eprintln!("  mounted backend {}", zip.display());
+            }
+            Err(e) => {
+                eprintln!("error: ZipBackend {}: {e:?}", zip.display());
+                std::process::exit(1);
+            }
+        }
+    }
+    let director = match director::Director::start(kernel, section_name.clone()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("error: director start: {e}");

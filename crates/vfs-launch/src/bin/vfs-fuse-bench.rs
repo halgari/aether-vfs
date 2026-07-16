@@ -399,7 +399,7 @@ fn main() {
         ));
 
         // --- Baseline: OpenTable direct ---
-        let tree = server.tree();
+        let tree = server.tree().expect("tree authority for direct baseline");
         let table = OpenTable::new();
         let open = table.open(tree, &vpath, OPEN_READ).expect("direct open");
         let t0 = Instant::now();

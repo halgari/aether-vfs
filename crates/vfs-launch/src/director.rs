@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use vfs_core::VfsTree;
 use vfs_ipc::ring::{self, Geom};
 use vfs_ipc::{Notifier, RingClient, RingServer, SpinNotifier};
 use vfs_protocol::{
@@ -47,7 +46,13 @@ pub struct Director {
 
 impl Director {
     /// Create named section (ring + arena), event pair, and worker pool.
-    pub fn start(tree: VfsTree, section_name: String) -> Result<Self, String> {
+    ///
+    /// `kernel` is the userspace FUSE director with backends already mounted
+    /// (zip/disk/C callbacks). Ring content authority goes through that kernel.
+    pub fn start(
+        kernel: Arc<vfs_director::Director>,
+        section_name: String,
+    ) -> Result<Self, String> {
         let payload_cap = DEFAULT_PAYLOAD_CAP;
         let slot_count = DEFAULT_SLOT_COUNT;
         let stride = ((32 + payload_cap as usize) + 7) & !7;
@@ -65,7 +70,7 @@ impl Director {
         let events = EventNotifier::create(&server_ev_name, &client_ev_name)
             .map_err(|e| format!("create events: {e}"))?;
 
-        let server = Server::with_payload_cap(tree, payload_cap);
+        let server = Server::from_director(kernel, payload_cap);
         let arena_offset = ring_bytes;
         let inner = Arc::new(DirectorInner {
             mapping,

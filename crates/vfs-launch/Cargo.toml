@@ -20,6 +20,7 @@ path = "src/bin/vfs-fuse-bench.rs"
 vfs-core = { path = "../vfs-core" }
 vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
 vfs-zip = { path = "../vfs-zip" }
+vfs-director = { path = "../vfs-director" }
 vfs-shim = { path = "../vfs-shim" }
 vfs-inject = { path = "../vfs-inject" }
 vfs-server = { path = "../vfs-server" }

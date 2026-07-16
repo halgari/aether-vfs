@@ -1,6 +1,9 @@
-//! Read a ZIP archive's central directory (ZIP64-aware) and emit a `vfs-core`
-//! layer whose file entries are zip-window sources. Only `Stored` entries are
-//! supported — nothing is decompressed or extracted.
+//! ZIP central directory (ZIP64-aware).
+//!
+//! - **Preferred:** [`backend::ZipBackend`] implements `vfs_director::Backend`
+//!   (userspace FUSE; no vfs-core types).
+//! - **Legacy:** [`read_layer`] still builds a `vfs-core` Layer with zip-window
+//!   sources for transitional PE/snapshot paths.
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Seek, SeekFrom};
@@ -8,6 +11,9 @@ use std::path::Path;
 
 use vfs_core::encode_zip_window;
 use vfs_core::{EntryKind, InputEntry, Layer, LayerId, SourceId};
+
+pub mod backend;
+pub use backend::ZipBackend;
 
 #[derive(Debug)]
 pub enum ZipError {
@@ -103,7 +109,7 @@ pub fn read_layer(zip_path: &Path, id: LayerId) -> Result<Layer, ZipError> {
 }
 
 /// Find the central directory offset + entry count, honoring ZIP64.
-fn locate_central_directory(
+pub(crate) fn locate_central_directory(
     f: &mut std::fs::File,
     file_len: u64,
 ) -> Result<(u64, u64), ZipError> {
@@ -145,7 +151,7 @@ fn locate_central_directory(
 }
 
 /// Read `count` central-directory headers starting at `cd_off`.
-fn read_central_directory(
+pub(crate) fn read_central_directory(
     f: &mut std::fs::File,
     cd_off: u64,
     count: u64,
@@ -240,7 +246,7 @@ fn apply_zip64_extra(
 }
 
 /// Read a local file header to compute the true data offset.
-fn data_offset(f: &mut std::fs::File, local_header_off: u64) -> Result<u64, ZipError> {
+pub(crate) fn data_offset(f: &mut std::fs::File, local_header_off: u64) -> Result<u64, ZipError> {
     let mut lfh = [0u8; 30];
     f.seek(SeekFrom::Start(local_header_off))?;
     f.read_exact(&mut lfh)?;
@@ -325,6 +331,27 @@ mod tests {
             }
         }
         !crc
+    }
+
+    #[test]
+    fn zip_backend_open_read_via_director() {
+        use std::sync::Arc;
+        use vfs_director::{Director, OPEN_READ};
+
+        let dir = std::env::temp_dir().join(format!("vfs-zip-be-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let content = b"HELLO FROM INSIDE THE ZIP";
+        let zip = write_plain_zip(&dir, "Data/hello.txt", content);
+        let be = ZipBackend::open(&zip).unwrap();
+        let d = Director::new();
+        d.mount("", Arc::new(be)).unwrap();
+        let (fh, size, is_dir) = d.open("Data/hello.txt", OPEN_READ).unwrap();
+        assert!(!is_dir && size == content.len() as u64);
+        let mut buf = vec![0u8; content.len()];
+        let n = d.read(fh, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], content);
+        d.close(fh).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

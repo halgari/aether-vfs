@@ -1,0 +1,15 @@
+[package]
+name = "vfs-director"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Userspace FUSE kernel: mount backends, overlay resolve, open table, C ABI"
+
+[lib]
+name = "vfs_director"
+crate-type = ["rlib", "cdylib", "staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# Status codes shared with the ring protocol (no OS).
+vfs-protocol = { path = "../vfs-protocol" }

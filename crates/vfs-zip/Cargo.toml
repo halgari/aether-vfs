@@ -6,3 +6,5 @@ publish = false
 
 [dependencies]
 vfs-core = { path = "../vfs-core" }
+vfs-director = { path = "../vfs-director" }
+vfs-protocol = { path = "../vfs-protocol" }

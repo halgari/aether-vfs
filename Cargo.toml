@@ -9,6 +9,7 @@ members = [
   "crates/vfs-payload",
   "crates/vfs-redirect",
   "crates/vfs-server",
+  "crates/vfs-director",
   "crates/vfs-shim",
   "crates/vfs-shim-dll",
   "crates/vfs-win",

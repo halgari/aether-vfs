@@ -8,3 +8,4 @@ vfs-core = { path = "../vfs-core" }
 vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
 vfs-ipc = { path = "../vfs-ipc" }
 vfs-protocol = { path = "../vfs-protocol" }
+vfs-director = { path = "../vfs-director" }
