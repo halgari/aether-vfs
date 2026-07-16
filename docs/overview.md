@@ -43,7 +43,7 @@ CLI: `cargo run -p vfs-launch --release` (GameLayers layout under `C:\GameLayers
 │  Dual-layer inject: no_std payload (pre-init) + full shim (post-loader hooks)   │
 │  NtCreateFile/ReadFile/… under root → FuseClient RPC → director backends        │
 │  EXEs: hollow real Steam host image with zip PE (WriteProcessMemory only)       │
-└───────────────────────────────────────────────────────────────����������������─────────┘
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Isolation:** the shim does **not** open layer zips. Only the director (and PE/inject helpers) touch archive containers.
