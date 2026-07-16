@@ -485,13 +485,10 @@ version = "0.1.0"
 dependencies = [
  "vfs-core",
  "vfs-director",
- "vfs-inject",
  "vfs-ipc",
+ "vfs-ops",
  "vfs-protocol",
  "vfs-server",
- "vfs-shared",
- "vfs-shim",
- "vfs-win",
  "vfs-zip",
 ]
 

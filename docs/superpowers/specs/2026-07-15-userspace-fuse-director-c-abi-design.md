@@ -91,7 +91,8 @@ No zip encoding, no `SourceId` in the director.
 - [x] C header + cdylib/staticlib export (`crates/vfs-director/include/vfs.h`, `ffi`)  
 - [x] In-process open/read of a disk backend and a zip backend  
 - [x] Unit tests without the game inject path  
-- [x] Launch mounts GameLayers zips via `ZipBackend` + ring `Server::from_director`  
+- [x] Launch mounts GameLayers zips via `Session::mount_zip` + **`IpcServe`** ring workers  
+  (not legacy `vfs-server::Server::from_director`)
 
 ## 9. Out of scope follow-ups
 

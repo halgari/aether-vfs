@@ -4,7 +4,7 @@
  *
  *   1. vfs_director_create()
  *   2. vfs_director_set_root / set_overlay / set_state_dir
- *   3. Mount content backends (vfs_director_mount, or vfs_zip_mount from vfs-zip)
+ *   3. Mount content backends (vfs_director_mount / vfs_director_mount_zip)
  *   4. vfs_director_serve()     — start IPC so the child can remap I/O
  *   5. vfs_launch(...)          — CreateProcess + inject; child NT I/O under
  *                                  the virtual root is served by this director

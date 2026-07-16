@@ -29,10 +29,16 @@ struct Inner {
 }
 
 /// Running IPC server bound to a director kernel (keeps workers alive).
+///
+/// This is the **production ring host** for remapped child I/O (not the legacy
+/// `vfs_server::Server` tree path).
 pub struct IpcServe {
     pub section_name: String,
     pub payload_cap: u32,
-    pub ring_bytes: usize,
+    /// Full shared mapping size (ring + arena). Used as `VFS_RING_BYTES` so the
+    /// shim's `SharedMapping::open` maps the entire section.
+    pub map_bytes: usize,
+    /// Byte offset of the bulk arena (= control-ring length).
     pub arena_offset: usize,
     pub arena_len: usize,
     pub server_ev_name: String,
@@ -95,7 +101,7 @@ impl IpcServe {
         Ok(IpcServe {
             section_name,
             payload_cap,
-            ring_bytes: map_size,
+            map_bytes: map_size,
             arena_offset,
             arena_len,
             server_ev_name,
@@ -130,13 +136,14 @@ impl IpcServe {
     }
 
     pub fn write_thin_config(&self, path: &std::path::Path, root: &str) -> Result<(), String> {
+        // `ring_bytes` key = full map size (historical name; shim maps this many bytes).
         let body = format!(
             "section={}\nroot={root}\npayload_cap={}\nring_bytes={}\n\
              arena_offset={}\narena_len={}\n\
              server_ev={}\nclient_ev={}\n",
             self.section_name,
             self.payload_cap,
-            self.ring_bytes,
+            self.map_bytes,
             self.arena_offset,
             self.arena_len,
             self.server_ev_name,
@@ -146,8 +153,9 @@ impl IpcServe {
     }
 
     pub fn apply_env(&self, virtual_root: &str, thin_cfg: &std::path::Path) {
+        // Process-global env is for the injected child (and single-session hosts).
         std::env::set_var("VFS_RING_SECTION", &self.section_name);
-        std::env::set_var("VFS_RING_BYTES", self.ring_bytes.to_string());
+        std::env::set_var("VFS_RING_BYTES", self.map_bytes.to_string());
         std::env::set_var("VFS_RING_PAYLOAD_CAP", self.payload_cap.to_string());
         std::env::set_var("VFS_ARENA_OFFSET", self.arena_offset.to_string());
         std::env::set_var("VFS_ARENA_LEN", self.arena_len.to_string());

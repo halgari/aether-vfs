@@ -1,6 +1,7 @@
 //! Zip as a userspace FUSE **backend** — no vfs-core Layer/Source types.
 //!
-//! Implements `vfs_director::Backend` for Stored entries only.
+//! Implements [`vfs_ops::Backend`] for Stored entries only. Path lookups are
+//! **case-insensitive** (Windows game paths).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -12,7 +13,7 @@ use std::sync::Mutex;
 use vfs_ops::{
     Backend, BackendHandle, DirEntry, Stat, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
-use vfs_protocol::{ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_IS_DIR, ST_NOT_FOUND};
+use vfs_protocol::{ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_NOT_A_DIRECTORY, ST_NOT_FOUND};
 
 use crate::{data_offset, locate_central_directory, read_central_directory, ZipError};
 
@@ -34,8 +35,10 @@ struct Live {
 /// Zip archive mounted as a backend (path index + open handles).
 pub struct ZipBackend {
     container: PathBuf,
-    /// Normalized path (no leading slash) → node. Dirs have is_dir=true.
+    /// Canonical path (as in the zip CD) → node.
     nodes: HashMap<String, Node>,
+    /// ASCII-lowercase path → canonical key (Windows-style).
+    by_fold: HashMap<String, String>,
     next: AtomicU64,
     opens: Mutex<HashMap<u64, Live>>,
 }
@@ -83,9 +86,15 @@ impl ZipBackend {
             );
         }
 
+        let mut by_fold = HashMap::with_capacity(nodes.len());
+        for key in nodes.keys() {
+            by_fold.insert(key.to_ascii_lowercase(), key.clone());
+        }
+
         Ok(ZipBackend {
             container: zip_path.to_path_buf(),
             nodes,
+            by_fold,
             next: AtomicU64::new(1),
             opens: Mutex::new(HashMap::new()),
         })
@@ -93,7 +102,11 @@ impl ZipBackend {
 
     fn get(&self, path: &str) -> Option<&Node> {
         let p = path.trim_start_matches('/');
-        self.nodes.get(p)
+        if let Some(n) = self.nodes.get(p) {
+            return Some(n);
+        }
+        let canon = self.by_fold.get(&p.to_ascii_lowercase())?;
+        self.nodes.get(canon)
     }
 }
 
@@ -139,17 +152,23 @@ impl Backend for ZipBackend {
 
     fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, i32> {
         let p = path.trim_start_matches('/');
-        if !p.is_empty() {
-            match self.get(p) {
-                Some(n) if n.is_dir => {}
-                Some(_) => return Err(vfs_protocol::ST_NOT_A_DIRECTORY),
-                None => return Err(ST_NOT_FOUND),
-            }
-        }
-        let prefix = if p.is_empty() {
+        let canon = if p.is_empty() {
             String::new()
         } else {
-            format!("{p}/")
+            match self.get(p) {
+                Some(n) if n.is_dir => self
+                    .by_fold
+                    .get(&p.to_ascii_lowercase())
+                    .cloned()
+                    .unwrap_or_else(|| p.to_string()),
+                Some(_) => return Err(ST_NOT_A_DIRECTORY),
+                None => return Err(ST_NOT_FOUND),
+            }
+        };
+        let prefix = if canon.is_empty() {
+            String::new()
+        } else {
+            format!("{canon}/")
         };
         let mut kids: HashMap<String, DirEntry> = HashMap::new();
         for (name, node) in &self.nodes {
@@ -243,6 +262,3 @@ impl Backend for ZipBackend {
         Ok(())
     }
 }
-
-// silence unused
-const _: i32 = ST_IS_DIR;

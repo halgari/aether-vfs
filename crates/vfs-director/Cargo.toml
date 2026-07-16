@@ -10,6 +10,11 @@ name = "vfs_director"
 crate-type = ["rlib", "cdylib", "staticlib"]
 path = "src/lib.rs"
 
+[features]
+default = ["zip"]
+## Convenience `Session::mount_zip` / `vfs_director_mount_zip` (pulls vfs-zip).
+zip = ["dep:vfs-zip"]
+
 [dependencies]
 vfs-protocol = { path = "../vfs-protocol" }
 vfs-ops = { path = "../vfs-ops" }
@@ -18,4 +23,4 @@ vfs-server = { path = "../vfs-server" }
 vfs-win = { path = "../vfs-win" }
 vfs-inject = { path = "../vfs-inject" }
 vfs-shim = { path = "../vfs-shim" }
-vfs-zip = { path = "../vfs-zip" }
+vfs-zip = { path = "../vfs-zip", optional = true }

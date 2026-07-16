@@ -1,15 +1,11 @@
-//! Launch Skyrim (via SKSE) with game/mod content served straight from
-//! Stored ZIP archives under `C:\GameLayers`.
+//! Launch Skyrim (via SKSE) with game/mod content served from Stored ZIP layers.
 //!
-//! **Zero archive extract:** no PE/BSA/ESP bytes are written to the managed
-//! root or TEMP. Primary EXE is process-hollowed from zip bytes into a
-//! pre-existing host image (WriteProcessMemory only). Data/ and PE DLLs are
-//! `Decision::Serve` zip windows (SEC_IMAGE via in-process manual map).
+//! Host workflow: discover zips → `Session` mount → serve IPC → launch (I/O remapped).
+//! No full-layer parse for PE preload; PE is hollowed from the VFS at launch.
 
 use std::path::{Path, PathBuf};
 
-use vfs_core::{decode, EntryKind, Layer, LayerId, Source, SourceId};
-use vfs_zip::read_layer;
+use vfs_director::{Director, KIND_FILE, Session};
 
 const DEFAULT_LAYERS: &str = r"C:\GameLayers";
 const STEAM_APPID: &str = "489830"; // Skyrim Special Edition
@@ -27,7 +23,7 @@ fn usage() -> ! {
            --state <dir>    Config/ready flags (default: <layers>/vfs-state)\n\
            --se             Launch SkyrimSE.exe instead of skse64_loader.exe\n\
            --wait           Wait for the game process to exit (default: detach)\n\
-           --probe          Run vfs-game-probe against the VFS (no game)\n\
+           --probe          Probe VFS paths via Session (no game)\n\
            --help           Show this help\n"
     );
     std::process::exit(2);
@@ -101,7 +97,6 @@ fn discover_layers(dir: &Path) -> Result<Vec<PathBuf>, String> {
             continue;
         }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        // "1. Skyrim Special Edition.zip" → 1
         let num: u32 = name
             .split(|c: char| !c.is_ascii_digit())
             .next()
@@ -116,51 +111,6 @@ fn discover_layers(dir: &Path) -> Result<Vec<PathBuf>, String> {
         return Err(format!("no numbered layer zips in {}", dir.display()));
     }
     Ok(found.into_iter().map(|(_, p)| p).collect())
-}
-
-/// Read bytes from a zip-window source blob (or plain disk path).
-fn read_source_bytes(source: &SourceId, size: u64) -> Result<Vec<u8>, String> {
-    match decode(&source.0) {
-        Source::ZipWindow { offset, container } => {
-            let path = String::from_utf8_lossy(container);
-            let mut f = std::fs::File::open(path.as_ref())
-                .map_err(|e| format!("open container {path}: {e}"))?;
-            use std::io::{Read, Seek, SeekFrom};
-            f.seek(SeekFrom::Start(offset))
-                .map_err(|e| format!("seek {path} @{offset}: {e}"))?;
-            let mut buf = vec![0u8; size as usize];
-            f.read_exact(&mut buf)
-                .map_err(|e| format!("read {path} @{offset} len={size}: {e}"))?;
-            Ok(buf)
-        }
-        Source::Disk(bytes) => {
-            let path = String::from_utf8_lossy(bytes);
-            std::fs::read(path.as_ref()).map_err(|e| format!("read {path}: {e}"))
-        }
-    }
-}
-
-/// Empty directory skeleton only — **never** writes archive file content.
-/// PE entries keep zip-window sources (hollow / SEC_IMAGE manual map at runtime).
-fn prepare_layer(layer: Layer, root: &Path) -> Result<Layer, String> {
-    for entry in &layer.entries {
-        let dest = root.join(entry.vpath.replace('/', "\\"));
-        match entry.kind {
-            EntryKind::Dir => {
-                std::fs::create_dir_all(&dest)
-                    .map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
-            }
-            EntryKind::File => {
-                if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-                }
-                // Intentionally no PE materialize — zip-window sources retained.
-            }
-            EntryKind::Tombstone => {}
-        }
-    }
-    Ok(layer)
 }
 
 /// Remove any leftover archive payload files under `root` (prior PE bootstrap).
@@ -186,36 +136,11 @@ fn wipe_payload_files(root: &Path) -> Result<usize, String> {
     Ok(n)
 }
 
-fn find_pe_bytes(layers: &[Layer], file_name: &str) -> Result<Vec<u8>, String> {
-    let want = file_name.to_ascii_lowercase();
-    let mut found: Option<&vfs_core::InputEntry> = None;
-    for layer in layers {
-        for e in &layer.entries {
-            if e.kind != EntryKind::File {
-                continue;
-            }
-            let base = e
-                .vpath
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(&e.vpath)
-                .to_ascii_lowercase();
-            if base == want {
-                found = Some(e);
-            }
-        }
-    }
-    let e = found.ok_or_else(|| format!("PE {file_name} not in layer zips"))?;
-    read_source_bytes(&e.source, e.size)
-}
-
 fn set_steam_env() {
-    // Prefer env over steam_appid.txt so we don't add another file under the root.
     std::env::set_var("SteamAppId", STEAM_APPID);
     std::env::set_var("SteamGameId", STEAM_APPID);
 }
 
-/// Canonical early load-order for SSE masters (only those present are emitted).
 const MASTER_ORDER: &[&str] = &[
     "Skyrim.esm",
     "Update.esm",
@@ -224,55 +149,50 @@ const MASTER_ORDER: &[&str] = &[
     "Dragonborn.esm",
 ];
 
-/// Collect plugin basenames (`*.esm` / `*.esp` / `*.esl`) from layer entries under `Data/`.
-fn collect_plugins(layers: &[Layer]) -> Vec<String> {
-    let mut seen = std::collections::BTreeMap::<String, String>::new(); // fold -> display
-    for layer in layers {
-        for e in &layer.entries {
-            if e.kind != EntryKind::File {
-                continue;
-            }
-            let v = e.vpath.replace('\\', "/");
-            let Some(name) = v.strip_prefix("Data/").or_else(|| v.strip_prefix("data/")) else {
-                continue;
-            };
-            if name.contains('/') {
-                continue; // only top-level Data plugins
-            }
-            let lower = name.to_ascii_lowercase();
-            if !(lower.ends_with(".esm") || lower.ends_with(".esp") || lower.ends_with(".esl")) {
-                continue;
-            }
-            seen.insert(lower, name.to_string());
-        }
-    }
-    // Order: fixed masters first, then remaining esm/esl alphabetically, then esp alphabetically.
+/// Order plugin basenames: fixed masters, other esm/esl, then esp.
+fn order_plugins(mut seen: std::collections::BTreeMap<String, String>) -> Vec<String> {
     let mut out = Vec::new();
-    let mut rest = seen;
     for m in MASTER_ORDER {
         let key = m.to_ascii_lowercase();
-        if let Some(name) = rest.remove(&key) {
+        if let Some(name) = seen.remove(&key) {
             out.push(name);
         }
     }
-    let mut esm_esl: Vec<String> = rest
+    let mut esm_esl: Vec<String> = seen
         .iter()
         .filter(|(k, _)| k.ends_with(".esm") || k.ends_with(".esl"))
         .map(|(_, v)| v.clone())
         .collect();
     esm_esl.sort_by_key(|s| s.to_ascii_lowercase());
     for name in esm_esl {
-        rest.remove(&name.to_ascii_lowercase());
+        seen.remove(&name.to_ascii_lowercase());
         out.push(name);
     }
-    let mut esp: Vec<String> = rest.into_values().collect();
+    let mut esp: Vec<String> = seen.into_values().collect();
     esp.sort_by_key(|s| s.to_ascii_lowercase());
     out.extend(esp);
     out
 }
 
-/// SSE `Plugins.txt` / `loadorder.txt` bodies for the given plugin basenames.
-/// `Plugins.txt` uses a leading `*` to mark enabled plugins.
+/// Collect top-level `Data/*.{esm,esp,esl}` from the mounted director kernel.
+fn collect_plugins_from_kernel(kernel: &Director) -> Vec<String> {
+    let mut seen = std::collections::BTreeMap::<String, String>::new();
+    let Ok(entries) = kernel.readdir("Data") else {
+        return Vec::new();
+    };
+    for e in entries {
+        if e.stat.kind != KIND_FILE {
+            continue;
+        }
+        let lower = e.name.to_ascii_lowercase();
+        if !(lower.ends_with(".esm") || lower.ends_with(".esp") || lower.ends_with(".esl")) {
+            continue;
+        }
+        seen.insert(lower, e.name);
+    }
+    order_plugins(seen)
+}
+
 pub fn format_plugins_txt(plugins: &[String]) -> String {
     let mut s = String::from(
         "# This file is used by Skyrim to keep track of your downloaded content.\n\
@@ -295,10 +215,7 @@ pub fn format_loadorder_txt(plugins: &[String]) -> String {
     s
 }
 
-/// Write Plugins.txt + loadorder.txt under `%LOCALAPPDATA%\Skyrim Special Edition`
-/// so layer mods (e.g. SkyUI) are enabled. Config only — not archive extraction.
-fn ensure_plugins_enabled(layers: &[Layer]) -> Result<(), String> {
-    let plugins = collect_plugins(layers);
+fn ensure_plugins_enabled(plugins: &[String]) -> Result<(), String> {
     if plugins.is_empty() {
         return Ok(());
     }
@@ -307,58 +224,83 @@ fn ensure_plugins_enabled(layers: &[Layer]) -> Result<(), String> {
         .ok_or_else(|| "LOCALAPPDATA not set".to_string())?
         .join("Skyrim Special Edition");
     std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
-    let plugins_body = format_plugins_txt(&plugins);
-    let loadorder_body = format_loadorder_txt(&plugins);
-    // UTF-8 is what this install accepts; game rewrites Plugins.txt after read.
-    std::fs::write(base.join("Plugins.txt"), plugins_body.as_bytes())
+    std::fs::write(base.join("Plugins.txt"), format_plugins_txt(plugins).as_bytes())
         .map_err(|e| format!("write Plugins.txt: {e}"))?;
-    std::fs::write(base.join("loadorder.txt"), loadorder_body.as_bytes())
+    std::fs::write(base.join("loadorder.txt"), format_loadorder_txt(plugins).as_bytes())
         .map_err(|e| format!("write loadorder.txt: {e}"))?;
     eprintln!(
         "  enabled {} plugins in {} (incl. SkyUI if present)",
         plugins.len(),
         base.display()
     );
-    for p in &plugins {
+    for p in plugins {
         eprintln!("    *{p}");
     }
     Ok(())
 }
 
+/// Find PE by basename under the VFS (any directory), case-insensitive.
+fn find_pe_vpath(kernel: &Director, file_name: &str) -> Option<String> {
+    let want = file_name.to_ascii_lowercase();
+    // Common game roots first.
+    for dir in ["", "Data"] {
+        let Ok(entries) = kernel.readdir(dir) else {
+            continue;
+        };
+        for e in entries {
+            if e.stat.kind == KIND_FILE && e.name.to_ascii_lowercase() == want {
+                return Some(if dir.is_empty() {
+                    e.name
+                } else {
+                    format!("{dir}/{}", e.name)
+                });
+            }
+        }
+    }
+    // Fallback: open by bare name (casefold backends).
+    if kernel.getattr(file_name).ok().flatten().is_some() {
+        return Some(file_name.to_string());
+    }
+    None
+}
+
+fn count_payload_files(root: &Path) -> usize {
+    fn walk(dir: &Path, n: &mut usize) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                walk(&p, n);
+            } else if p.is_file() {
+                *n += 1;
+            }
+        }
+    }
+    let mut n = 0;
+    walk(root, &mut n);
+    n
+}
+
 #[cfg(test)]
 mod plugin_order_tests {
     use super::*;
-    use vfs_core::{EntryKind, InputEntry, Layer, LayerId, SourceId};
-
-    fn file(vpath: &str) -> InputEntry {
-        InputEntry {
-            vpath: vpath.into(),
-            kind: EntryKind::File,
-            source: SourceId::new(b"x".as_slice()),
-            size: 1,
-            mtime: 0,
-        }
-    }
 
     #[test]
-    fn collect_orders_masters_then_cc_then_skyui() {
-        let layers = vec![
-            Layer {
-                id: LayerId(0),
-                entries: vec![
-                    file("Data/Skyrim.esm"),
-                    file("Data/Update.esm"),
-                    file("Data/Dawnguard.esm"),
-                    file("Data/ccBGSSSE001-Fish.esm"),
-                    file("Data/_ResourcePack.esl"),
-                ],
-            },
-            Layer {
-                id: LayerId(2),
-                entries: vec![file("Data/SkyUI_SE.esp")],
-            },
-        ];
-        let p = collect_plugins(&layers);
+    fn order_masters_then_cc_then_skyui() {
+        let mut seen = std::collections::BTreeMap::new();
+        for n in [
+            "Skyrim.esm",
+            "Update.esm",
+            "Dawnguard.esm",
+            "ccBGSSSE001-Fish.esm",
+            "_ResourcePack.esl",
+            "SkyUI_SE.esp",
+        ] {
+            seen.insert(n.to_ascii_lowercase(), n.to_string());
+        }
+        let p = order_plugins(seen);
         assert_eq!(p.first().map(String::as_str), Some("Skyrim.esm"));
         assert!(p.iter().any(|x| x == "SkyUI_SE.esp"));
         assert_eq!(p.last().map(String::as_str), Some("SkyUI_SE.esp"));
@@ -395,57 +337,8 @@ fn main() {
         }
     }
 
-    eprintln!("building VFS snapshot (all zip-window; zero archive→disk writes)…");
-    let mut layers: Vec<Layer> = Vec::new();
-    for (i, zip) in zips.iter().enumerate() {
-        eprintln!("  parsing {} …", zip.file_name().unwrap_or_default().to_string_lossy());
-        let layer = match read_layer(zip, LayerId(i as u32)) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("error: read_layer {}: {e:?}", zip.display());
-                std::process::exit(1);
-            }
-        };
-        eprintln!("    {} entries (zip-window retained)", layer.entries.len());
-        let prepared = match prepare_layer(layer, &args.root) {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("error: prepare_layer: {e}");
-                std::process::exit(1);
-            }
-        };
-        layers.push(prepared);
-    }
-
-    let pe_name = if args.use_skse {
-        "skse64_loader.exe"
-    } else {
-        "SkyrimSE.exe"
-    };
-    let pe_bytes = if args.probe {
-        None
-    } else {
-        match find_pe_bytes(&layers, pe_name) {
-            Ok(b) => {
-                eprintln!(
-                    "  loaded {pe_name} from zip into RAM ({} bytes) — hollow, no disk write",
-                    b.len()
-                );
-                Some(b)
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            }
-        }
-    };
-
-    if let Err(e) = ensure_plugins_enabled(&layers) {
-        eprintln!("warning: plugins enablement failed: {e}");
-    }
-
-    // Host session: configure → mount zip backends → serve → launch (I/O remapped).
-    let mut session = vfs_director::Session::new();
+    // Configure → mount (single CD parse per zip via ZipBackend) → serve → launch.
+    let mut session = Session::new();
     session.set_root(&args.root);
     session.set_overlay(&args.overlay);
     session.set_state_dir(&args.state);
@@ -456,6 +349,33 @@ fn main() {
         }
         eprintln!("  mounted backend {}", zip.display());
     }
+
+    let pe_name = if args.use_skse {
+        "skse64_loader.exe"
+    } else {
+        "SkyrimSE.exe"
+    };
+    let pe_vpath = find_pe_vpath(session.kernel(), pe_name).unwrap_or_else(|| pe_name.to_string());
+    if !args.probe {
+        match session.kernel().getattr(&pe_vpath) {
+            Ok(Some(st)) if st.kind == KIND_FILE && st.size > 512 => {
+                eprintln!(
+                    "  PE {pe_vpath} present in VFS ({} bytes) — hollow at launch",
+                    st.size
+                );
+            }
+            _ => {
+                eprintln!("error: PE {pe_name} not found in mounted layers");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    let plugins = collect_plugins_from_kernel(session.kernel());
+    if let Err(e) = ensure_plugins_enabled(&plugins) {
+        eprintln!("warning: plugins enablement failed: {e}");
+    }
+
     if let Err(e) = session.serve() {
         eprintln!("error: serve: {e}");
         std::process::exit(1);
@@ -464,7 +384,6 @@ fn main() {
 
     set_steam_env();
 
-    // Probe: host-side read through the director kernel (no inject).
     if args.probe {
         let mut report = String::new();
         report.push_str("authority=director-session\n");
@@ -503,8 +422,7 @@ fn main() {
         let payload_files = count_payload_files(&args.root);
         report.push_str(&format!("root_payload_files={payload_files}\n"));
         report.push_str(&format!("probe_ok_paths={ok_n}\n"));
-        let report_path = args.state.join("probe-report.txt");
-        let _ = std::fs::write(&report_path, &report);
+        let _ = std::fs::write(args.state.join("probe-report.txt"), &report);
         eprintln!("--- probe report ---\n{report}");
         if ok_n < 2 || payload_files != 0 {
             eprintln!("error: probe failed (need >=2 good paths and zero root payloads)");
@@ -521,12 +439,14 @@ fn main() {
     }
 
     let detach = !args.wait;
-    eprintln!("launching {pe_name} under {} …", args.root.display());
-    eprintln!("  mode: {} + hollow from VFS + remapped I/O", if detach { "detach" } else { "wait" });
+    eprintln!("launching {pe_vpath} under {} …", args.root.display());
+    eprintln!(
+        "  mode: {} + hollow from VFS + remapped I/O",
+        if detach { "detach" } else { "wait" }
+    );
 
-    let _ = pe_bytes; // validated above; launch reloads PE from VFS for hollow
     let exit = session.launch(&vfs_director::LaunchOpts {
-        image: pe_name.to_string(),
+        image: pe_vpath,
         args: vec![],
         wait: args.wait,
         hollow_pe: true,
@@ -537,6 +457,8 @@ fn main() {
     match exit {
         Ok(code) => {
             if detach {
+                // Session (and IPC workers) must outlive the child; forget keeps them alive
+                // until this host process exits.
                 eprintln!("game process running (detached); keep host process alive for IPC");
                 std::mem::forget(session);
             } else {
@@ -551,23 +473,4 @@ fn main() {
             std::process::exit(1);
         }
     }
-}
-
-fn count_payload_files(root: &Path) -> usize {
-    fn walk(dir: &Path, n: &mut usize) {
-        let Ok(rd) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for ent in rd.flatten() {
-            let p = ent.path();
-            if p.is_dir() {
-                walk(&p, n);
-            } else if p.is_file() {
-                *n += 1;
-            }
-        }
-    }
-    let mut n = 0;
-    walk(root, &mut n);
-    n
 }

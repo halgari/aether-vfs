@@ -65,7 +65,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vfs-sess-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("a.bin"), b"xyz").unwrap();
-        let mut s = Session::new();
+        let s = Session::new();
         s.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
         let got = s.read_file("a.bin").unwrap();
         assert_eq!(got, b"xyz");

@@ -2,19 +2,25 @@
 //!
 //! Shared by `vfs-director` (kernel) and backends (`vfs-zip`, disk, host C callbacks)
 //! without creating dependency cycles.
+//!
+//! # Kind constants
+//! [`KIND_FILE`] / [`KIND_DIR`] / [`KIND_TOMBSTONE`] are **ops-layer** kinds used in
+//! [`Stat`]. They are **not** the same encoding as `vfs-shared` snapshot node kinds.
 
 #![forbid(unsafe_code)]
 
-use vfs_protocol::{
-    ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_IS_DIR, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
+// Single source of truth for open flags and status codes.
+pub use vfs_protocol::{
+    OPEN_READ, OPEN_WRITE, ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_IS_DIR, ST_NOT_A_DIRECTORY,
+    ST_NOT_FOUND, ST_OK,
 };
 
+/// Ops-layer file kind (not `vfs-shared` snapshot kind).
 pub const KIND_FILE: u8 = 1;
+/// Ops-layer directory kind.
 pub const KIND_DIR: u8 = 2;
+/// Ops-layer tombstone kind (reserved for overlay delete).
 pub const KIND_TOMBSTONE: u8 = 3;
-
-pub const OPEN_READ: u32 = 1;
-pub const OPEN_WRITE: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stat {

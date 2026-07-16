@@ -1,9 +1,9 @@
 //! ZIP central directory (ZIP64-aware).
 //!
-//! - **Preferred:** [`backend::ZipBackend`] implements `vfs_director::Backend`
+//! - **Preferred:** [`backend::ZipBackend`] implements [`vfs_ops::Backend`]
 //!   (userspace FUSE; no vfs-core types).
 //! - **Legacy:** [`read_layer`] still builds a `vfs-core` Layer with zip-window
-//!   sources for transitional PE/snapshot paths.
+//!   sources for transitional inject/PE helpers.
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Seek, SeekFrom};
@@ -349,7 +349,8 @@ mod tests {
         let be = ZipBackend::open(&zip).unwrap();
         let st = be.getattr("Data/hello.txt").unwrap().unwrap();
         assert_eq!(st.size, content.len() as u64);
-        let (bh, size, is_dir) = be.open("Data/hello.txt", OPEN_READ).unwrap();
+        // Case-insensitive open (Windows game paths).
+        let (bh, size, is_dir) = be.open("data/HELLO.TXT", OPEN_READ).unwrap();
         assert!(!is_dir && size == content.len() as u64);
         let mut buf = vec![0u8; content.len()];
         let n = be.read(bh, 0, &mut buf).unwrap();

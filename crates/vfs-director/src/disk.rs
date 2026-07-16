@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -132,10 +132,4 @@ impl Backend for DiskBackend {
     }
 }
 
-/// Convenience: root must exist.
-pub fn open_root(path: &Path) -> Result<DiskBackend, i32> {
-    if !path.is_dir() {
-        return Err(not_found());
-    }
-    Ok(DiskBackend::new(path))
-}
+

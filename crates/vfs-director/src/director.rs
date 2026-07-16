@@ -171,13 +171,4 @@ impl Director {
         };
         rec.backend.release(rec.bh)
     }
-
-    /// Helper matching ring AttrResp-style checks.
-    pub fn is_file(&self, path: &str) -> Result<bool, i32> {
-        match self.getattr(path)? {
-            Some(s) if s.kind == KIND_FILE => Ok(true),
-            Some(s) if s.kind == KIND_DIR => Ok(false),
-            _ => Ok(false),
-        }
-    }
 }

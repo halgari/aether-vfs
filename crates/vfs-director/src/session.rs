@@ -89,6 +89,9 @@ impl Session {
     }
 
     /// Mount a Stored zip archive as a content backend (later mounts win on conflicts).
+    ///
+    /// Requires the `zip` feature (on by default).
+    #[cfg(feature = "zip")]
     pub fn mount_zip(&self, zip_path: impl AsRef<Path>) -> Result<(), String> {
         let path = zip_path.as_ref();
         let be = vfs_zip::ZipBackend::open(path)

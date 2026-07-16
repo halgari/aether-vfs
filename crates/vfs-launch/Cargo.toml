@@ -17,13 +17,12 @@ name = "vfs-fuse-bench"
 path = "src/bin/vfs-fuse-bench.rs"
 
 [dependencies]
-vfs-core = { path = "../vfs-core" }
-vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
-vfs-zip = { path = "../vfs-zip" }
+# Main binary: Session host. Transitive: inject/shim/ipc via vfs-director.
 vfs-director = { path = "../vfs-director" }
-vfs-shim = { path = "../vfs-shim" }
-vfs-inject = { path = "../vfs-inject" }
+vfs-ops = { path = "../vfs-ops" }
+# Fuse-bench still uses legacy tree Server + protocol codecs.
+vfs-core = { path = "../vfs-core" }
+vfs-zip = { path = "../vfs-zip" }
 vfs-server = { path = "../vfs-server" }
 vfs-ipc = { path = "../vfs-ipc" }
 vfs-protocol = { path = "../vfs-protocol" }
-vfs-win = { path = "../vfs-win" }

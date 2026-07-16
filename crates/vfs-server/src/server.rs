@@ -1,4 +1,8 @@
-//! The authoritative Server (legacy tree + open table).
+//! Legacy tree + open-table ring server.
+//!
+//! **Production content path** uses `vfs_director::IpcServe` + `Director` backends.
+//! This `Server` remains for fuse-bench baselines and older e2e tests that build
+//! a `vfs-core` tree with zip-window sources.
 
 use vfs_core::{build, BuildError, Layer, VfsTree};
 use vfs_ipc::ring::IpcError;

@@ -1,4 +1,14 @@
 //! C ABI — configure session, serve IPC, **vfs_launch** (primary); open/read optional.
+//!
+//! # Threading
+//! The C API is **single-threaded per session**: do not call `vfs_*` on the same
+//! `vfs_director*` from multiple threads. Ring workers call backend ops; C
+//! backends must ensure `userdata` is safe for concurrent worker access
+//! (`Send + Sync` equivalent).
+//!
+//! # Errors
+//! Failures return `vfs-protocol` status codes (`VFS_ERR_*` in the header).
+//! Detailed messages are not exported yet (use host logging around Rust wrappers).
 
 #![allow(unsafe_code)]
 
@@ -293,6 +303,8 @@ pub extern "C" fn vfs_director_mount(
 }
 
 /// Mount a Stored zip as a backend (`prefix` is always root for zip layers).
+/// Requires the crate `zip` feature (default).
+#[cfg(feature = "zip")]
 #[no_mangle]
 pub extern "C" fn vfs_director_mount_zip(d: *mut Session, zip_path: *const c_char) -> c_int {
     let s = match session(d) {
@@ -523,10 +535,4 @@ pub extern "C" fn vfs_close(d: *mut Session, fh: u64) -> c_int {
     }
 }
 
-/// Used by vfs-zip C helper: borrow kernel for mount.
-pub fn session_kernel(d: *mut Session) -> Option<Arc<crate::director::Director>> {
-    if d.is_null() {
-        return None;
-    }
-    Some(Arc::clone(unsafe { &*d }.kernel()))
-}
+
