@@ -439,6 +439,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vfs-director"
+version = "0.1.0"
+dependencies = [
+ "vfs-protocol",
+]
+
+[[package]]
 name = "vfs-fixture-staticimp"
 version = "0.1.0"
 dependencies = [
@@ -470,6 +477,7 @@ name = "vfs-launch"
 version = "0.1.0"
 dependencies = [
  "vfs-core",
+ "vfs-director",
  "vfs-inject",
  "vfs-ipc",
  "vfs-protocol",
@@ -501,6 +509,7 @@ name = "vfs-server"
 version = "0.1.0"
 dependencies = [
  "vfs-core",
+ "vfs-director",
  "vfs-ipc",
  "vfs-protocol",
  "vfs-shared",
@@ -549,6 +558,8 @@ name = "vfs-zip"
 version = "0.1.0"
 dependencies = [
  "vfs-core",
+ "vfs-director",
+ "vfs-protocol",
 ]
 
 [[package]]
