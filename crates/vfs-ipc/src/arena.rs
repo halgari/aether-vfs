@@ -1,7 +1,14 @@
-//! **B1:** Shared bulk data arena — banks sized per ring slot for concurrent READs.
-//! Uses `SharedSeg` helpers only (no extra unsafe in this crate).
+//! Shared bulk data arena — banks sized per ring slot for concurrent READs.
+//! Uses `SharedSeg` helpers only (no extra unsafe beyond `seg`).
 
-use vfs_ipc::SharedSeg;
+use crate::seg::SharedSeg;
+
+/// Default ring payload capacity (1 MiB) for director / server setups.
+pub const DEFAULT_PAYLOAD_CAP: u32 = 1_048_576;
+/// Default bulk arena size after the control ring (32 MiB).
+pub const DEFAULT_ARENA_BYTES: usize = 32 * 1024 * 1024;
+/// Default number of ring server worker threads (host IPC).
+pub const DEFAULT_WORKER_COUNT: usize = 4;
 
 /// View over arena memory inside an existing shared segment.
 pub struct DataArena<'a> {
@@ -73,7 +80,7 @@ impl<'a> DataArena<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vfs_ipc::OwnedSeg;
+    use crate::OwnedSeg;
 
     #[test]
     fn write_bank_roundtrip() {

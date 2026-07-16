@@ -6,7 +6,7 @@ use vfs_protocol::{
     DirEntryWire, OpenResp, FLAG_READ_BULK, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ,
     OP_READDIR, ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
 };
-use vfs_server::DataArena;
+use vfs_ipc::DataArena;
 
 use crate::director::Director;
 use crate::ops::{KIND_DIR, OPEN_READ, OPEN_WRITE};

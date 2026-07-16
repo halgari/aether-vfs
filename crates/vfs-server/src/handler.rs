@@ -8,7 +8,8 @@ use vfs_protocol::{
     ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
 };
 
-use crate::arena::DataArena;
+use vfs_ipc::DataArena;
+
 use crate::open_table::{max_read_data, OpenTable};
 
 /// Threshold: READs larger than this prefer bulk arena when available (**B1**).

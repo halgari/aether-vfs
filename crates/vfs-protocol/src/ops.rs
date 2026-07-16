@@ -1,18 +1,14 @@
 //! Backend operations for the userspace FUSE director.
 //!
-//! Shared by `vfs-director` (kernel) and backends (`vfs-zip`, disk, host C callbacks)
-//! without creating dependency cycles.
+//! Shared by `vfs-director` (kernel) and backends (`vfs-zip`, disk, host C callbacks).
+//! No OS I/O here — pure contract types + status helpers.
 //!
 //! # Kind constants
 //! [`KIND_FILE`] / [`KIND_DIR`] / [`KIND_TOMBSTONE`] are **ops-layer** kinds used in
 //! [`Stat`]. They are **not** the same encoding as `vfs-shared` snapshot node kinds.
 
-#![forbid(unsafe_code)]
-
-// Single source of truth for open flags and status codes.
-pub use vfs_protocol::{
-    OPEN_READ, OPEN_WRITE, ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_IS_DIR, ST_NOT_A_DIRECTORY,
-    ST_NOT_FOUND, ST_OK,
+use crate::{
+    ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_IS_DIR, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
 };
 
 /// Ops-layer file kind (not `vfs-shared` snapshot kind).

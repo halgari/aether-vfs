@@ -17,9 +17,7 @@ zip = ["dep:vfs-zip"]
 
 [dependencies]
 vfs-protocol = { path = "../vfs-protocol" }
-vfs-ops = { path = "../vfs-ops" }
 vfs-ipc = { path = "../vfs-ipc" }
-vfs-server = { path = "../vfs-server" }
 vfs-win = { path = "../vfs-win" }
 vfs-inject = { path = "../vfs-inject" }
 vfs-shim = { path = "../vfs-shim" }

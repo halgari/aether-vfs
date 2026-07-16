@@ -1,8 +1,16 @@
-//! Pure little-endian FUSE-like wire codecs for the director control ring.
-//! No OS I/O and no `vfs-core` — only encode/decode + status/opcode constants.
+//! Pure FUSE contracts for the VFS stack: wire codecs, status/opcodes, and
+//! backend ops (`Backend` trait). No OS I/O and no `vfs-core`.
 #![forbid(unsafe_code)]
 
+pub mod ops;
+
+pub use ops::{
+    bad_fh, bad_request, is_dir, map_io_err, not_a_dir, not_found, ok, Backend, BackendHandle,
+    DirEntry, Stat, KIND_DIR, KIND_FILE, KIND_TOMBSTONE,
+};
+
 // Opcode catalog — must match `vfs_ipc::layout` values (do not renumber).
+
 pub const OP_GETATTR: u32 = 1;
 pub const OP_READDIR: u32 = 2;
 pub const OP_OPEN: u32 = 3;

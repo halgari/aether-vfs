@@ -1,14 +1,14 @@
 #![forbid(unsafe_code)]
-//! `vfs-server`: authoritative side of the out-of-process VFS. Runs `vfs-core`,
-//! publishes the `vfs-shared` snapshot, and services `vfs-ipc` requests
-//! including stateful OPEN/READ/CLOSE for the director FUSE path.
+//! Legacy tree + open-table ring server (`vfs-core` + zip-window sources).
+//! Production hosts use `vfs-director` (`IpcServe` + backends).
+//!
+//! `DataArena` lives in `vfs-ipc` (re-exported here for older call sites).
 
-pub mod arena;
 pub mod handler;
 pub mod open_table;
 pub mod proto;
 pub mod server;
 
-pub use arena::DataArena;
 pub use open_table::OpenTable;
-pub use server::{Server, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
+pub use server::Server;
+pub use vfs_ipc::{DataArena, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};

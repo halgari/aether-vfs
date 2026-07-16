@@ -1,6 +1,6 @@
 //! Zip as a userspace FUSE **backend** — no vfs-core Layer/Source types.
 //!
-//! Implements [`vfs_ops::Backend`] for Stored entries only. Path lookups are
+//! Implements [`vfs_protocol::Backend`] for Stored entries only. Path lookups are
 //! **case-insensitive** (Windows game paths).
 
 use std::collections::HashMap;
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use vfs_ops::{
+use vfs_protocol::{
     Backend, BackendHandle, DirEntry, Stat, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
 use vfs_protocol::{ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_NOT_A_DIRECTORY, ST_NOT_FOUND};

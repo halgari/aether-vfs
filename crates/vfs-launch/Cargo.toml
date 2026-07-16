@@ -19,7 +19,6 @@ path = "src/bin/vfs-fuse-bench.rs"
 [dependencies]
 # Main binary: Session host. Transitive: inject/shim/ipc via vfs-director.
 vfs-director = { path = "../vfs-director" }
-vfs-ops = { path = "../vfs-ops" }
 # Fuse-bench still uses legacy tree Server + protocol codecs.
 vfs-core = { path = "../vfs-core" }
 vfs-zip = { path = "../vfs-zip" }

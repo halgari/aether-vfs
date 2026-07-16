@@ -1,6 +1,6 @@
 //! ZIP central directory (ZIP64-aware).
 //!
-//! - **Preferred:** [`backend::ZipBackend`] implements [`vfs_ops::Backend`]
+//! - **Preferred:** [`backend::ZipBackend`] implements [`vfs_protocol::Backend`]
 //!   (userspace FUSE; no vfs-core types).
 //! - **Legacy:** [`read_layer`] still builds a `vfs-core` Layer with zip-window
 //!   sources for transitional inject/PE helpers.
@@ -15,7 +15,7 @@ use vfs_core::{EntryKind, InputEntry, Layer, LayerId, SourceId};
 pub mod backend;
 pub use backend::ZipBackend;
 
-/// Open a zip as a [`vfs_ops::Backend`] (mount with `Director::mount` / `Session::mount`).
+/// Open a zip as a [`vfs_protocol::Backend`] (mount with `Director::mount` / `Session::mount`).
 pub fn open_backend(zip_path: &Path) -> Result<ZipBackend, ZipError> {
     ZipBackend::open(zip_path)
 }
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn zip_backend_getattr_open_read() {
-        use vfs_ops::{Backend, OPEN_READ};
+        use vfs_protocol::{Backend, OPEN_READ};
 
         let dir = std::env::temp_dir().join(format!("vfs-zip-be-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

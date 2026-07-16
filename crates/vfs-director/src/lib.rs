@@ -11,7 +11,7 @@
 //!
 //! C ABI: see `include/vfs.h` (`vfs_director_*`, `vfs_launch`).
 //!
-//! Backend trait lives in [`vfs_ops`] so zip/inject do not form a crate cycle.
+//! Backend trait lives in [`vfs_protocol`] (ops module) so zip stays free of host deps.
 
 #![deny(unsafe_code)]
 

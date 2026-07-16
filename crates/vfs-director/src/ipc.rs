@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 
 use vfs_ipc::ring::{self, Geom};
 use vfs_ipc::{Notifier, RingClient, RingServer, SpinNotifier};
-use vfs_server::{DataArena, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
+use vfs_ipc::{DataArena, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
 use vfs_win::{EventNotifier, SharedMapping};
 
 use crate::director::Director;

@@ -8,14 +8,10 @@ use vfs_core::{build, BuildError, Layer, VfsTree};
 use vfs_ipc::ring::IpcError;
 use vfs_ipc::{Notifier, RingServer};
 
-use crate::arena::DataArena;
+use vfs_ipc::{DataArena, DEFAULT_PAYLOAD_CAP};
+
 use crate::handler::{dispatch, dispatch_full, dispatch_with_table};
 use crate::open_table::OpenTable;
-
-/// Default ring payload capacity (1 MiB).
-pub const DEFAULT_PAYLOAD_CAP: u32 = 1_048_576;
-/// Default number of server worker threads.
-pub const DEFAULT_WORKER_COUNT: usize = 4;
 
 /// Legacy server: vfs-core tree + open-file table.
 /// Prefer [`vfs_director::Session`] for new hosts (director kernel + launch).
