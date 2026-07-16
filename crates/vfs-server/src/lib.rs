@@ -4,7 +4,6 @@
 //! including stateful OPEN/READ/CLOSE for the director FUSE path.
 
 pub mod arena;
-pub mod director_dispatch;
 pub mod handler;
 pub mod open_table;
 pub mod proto;

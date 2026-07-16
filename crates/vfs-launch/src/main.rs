@@ -8,12 +8,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
-
-mod director;
 
 use vfs_core::{decode, EntryKind, Layer, LayerId, Source, SourceId};
-use vfs_inject::{run_target_with_shim, RunConfig};
 use vfs_zip::{read_layer, ZipBackend};
 
 const DEFAULT_LAYERS: &str = r"C:\GameLayers";
@@ -476,32 +472,15 @@ fn main() {
         eprintln!("warning: plugins enablement failed: {e}");
     }
 
-    let tree = match vfs_core::build(layers) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: build tree: {e:?}");
-            std::process::exit(1);
-        }
-    };
-    let snapshot = vfs_shared::bridge::flatten(&tree);
-    eprintln!("  snapshot {} bytes", snapshot.len());
-
-    // Parent director: FUSE control ring (content authority for managed root).
-    let section_name = format!(
-        "Local\\vfs_ring_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
-    eprintln!("  director section: {section_name}");
-    // Userspace FUSE kernel: each zip is a backend (no zip types in the director).
-    let kernel = Arc::new(vfs_director::Director::new());
+    // Host session: configure → mount zip backends → serve → launch (I/O remapped).
+    let mut session = vfs_director::Session::new();
+    session.set_root(&args.root);
+    session.set_overlay(&args.overlay);
+    session.set_state_dir(&args.state);
     for zip in &zips {
         match ZipBackend::open(zip) {
             Ok(be) => {
-                if let Err(e) = kernel.mount("", Arc::new(be)) {
+                if let Err(e) = session.mount("", Arc::new(be)) {
                     eprintln!("error: mount {}: status {e}", zip.display());
                     std::process::exit(1);
                 }
@@ -513,63 +492,18 @@ fn main() {
             }
         }
     }
-    let director = match director::Director::start(kernel, section_name.clone()) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: director start: {e}");
-            std::process::exit(1);
-        }
-    };
+    if let Err(e) = session.serve() {
+        eprintln!("error: serve: {e}");
+        std::process::exit(1);
+    }
+    eprintln!("  director serving IPC for remapped I/O");
 
     set_steam_env();
 
-    let root_s = args.root.to_string_lossy().into_owned();
-    let overlay_s = args.overlay.to_string_lossy().into_owned();
-    let config_bytes = vfs_shim::encode_config_with_overlay(&root_s, &overlay_s, &snapshot);
-    let config_path = args.state.join("shim.cfg");
-    std::fs::write(&config_path, &config_bytes).expect("write shim.cfg");
-    // Thin FUSE config for shim attach (section name + root).
-    let thin_path = args.state.join("fuse.cfg");
-    if let Err(e) = director::write_thin_config(
-        &thin_path,
-        &director.section_name,
-        &root_s,
-        director.payload_cap,
-        director.ring_bytes,
-        director.arena_offset,
-        director.arena_len,
-        &director.server_ev_name,
-        &director.client_ev_name,
-    ) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    }
-    // Env so injected shim can find the ring without parsing cfg path variants.
-    std::env::set_var("VFS_RING_SECTION", &director.section_name);
-    std::env::set_var("VFS_RING_BYTES", director.ring_bytes.to_string());
-    std::env::set_var("VFS_RING_PAYLOAD_CAP", director.payload_cap.to_string());
-    std::env::set_var("VFS_ARENA_OFFSET", director.arena_offset.to_string());
-    std::env::set_var("VFS_ARENA_LEN", director.arena_len.to_string());
-    std::env::set_var("VFS_SERVER_EV", &director.server_ev_name);
-    std::env::set_var("VFS_CLIENT_EV", &director.client_ev_name);
-    std::env::set_var("VFS_FUSE_CFG", thin_path.to_string_lossy().as_ref());
-    std::env::set_var("VFS_VIRTUAL_DIR", &root_s);
-
-    let ready_path = args.state.join("ready.flag");
-    let _ = std::fs::remove_file(&ready_path);
-
-    // Probe: pure director RPC (OPEN/READ/CLOSE) — no game inject required.
+    // Probe: host-side read through the director kernel (no inject).
     if args.probe {
-        let client = match director.client() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("error: probe client: {e}");
-                std::process::exit(1);
-            }
-        };
         let mut report = String::new();
-        report.push_str("authority=director-fuse-rpc\n");
-        report.push_str(&format!("section={}\n", director.section_name));
+        report.push_str("authority=director-session\n");
         let checks = [
             "Data/Skyrim.esm",
             "Data/SkyUI_SE.esp",
@@ -577,20 +511,14 @@ fn main() {
         ];
         let mut ok_n = 0u32;
         for vpath in checks {
-            match director::rpc_read_all(
-                &client,
-                vpath,
-                director.payload_cap,
-                Some(director.shared_seg()),
-            ) {
-                Ok((size, bytes)) => {
+            match session.read_file(vpath) {
+                Ok(bytes) => {
                     let n = bytes.len().min(8);
                     report.push_str(&format!(
-                        "rpc {vpath}: ok size={size} read={} head={:02x?}\n",
+                        "read {vpath}: ok len={} head={:02x?}\n",
                         bytes.len(),
                         &bytes[..n]
                     ));
-                    // Magic checks where known.
                     if vpath.ends_with(".esm") || vpath.ends_with(".esp") {
                         if bytes.len() >= 4 && &bytes[..4] == b"TES4" {
                             report.push_str(&format!("magic {vpath}: TES4 ok\n"));
@@ -605,7 +533,7 @@ fn main() {
                         ok_n += 1;
                     }
                 }
-                Err(e) => report.push_str(&format!("rpc {vpath}: ERR {e}\n")),
+                Err(e) => report.push_str(&format!("read {vpath}: ERR status {e}\n")),
             }
         }
         let payload_files = count_payload_files(&args.root);
@@ -613,84 +541,49 @@ fn main() {
         report.push_str(&format!("probe_ok_paths={ok_n}\n"));
         let report_path = args.state.join("probe-report.txt");
         let _ = std::fs::write(&report_path, &report);
-        eprintln!("--- probe report (director FUSE RPC) ---\n{report}");
-        eprintln!("  managed root payload files: {payload_files}");
+        eprintln!("--- probe report ---\n{report}");
         if ok_n < 2 || payload_files != 0 {
             eprintln!("error: probe failed (need >=2 good paths and zero root payloads)");
             std::process::exit(1);
         }
-        eprintln!("probe ok via director OPEN/READ/CLOSE");
-        director.stop();
+        eprintln!("probe ok");
+        session.stop_serve();
         std::process::exit(0);
     }
-
-    let (dll, payload) = match locate_artifacts() {
-        Ok(x) => x,
-        Err(e) => {
-            eprintln!("error: {e}");
-            eprintln!("hint: cargo build -p vfs-shim-dll -p vfs-payload -p vfs-launch");
-            std::process::exit(1);
-        }
-    };
-    eprintln!("  shim:    {dll}");
-    eprintln!("  payload: {payload}");
 
     let leftover = wipe_payload_files(&args.root).unwrap_or(0);
     if leftover > 0 {
         eprintln!("  re-wiped {leftover} files before launch");
     }
-    eprintln!("  managed root payload files: 0");
 
-    // Virtual path only — file must NOT exist; PE comes from hollow.
-    let target = args.root.join(pe_name);
     let detach = !args.wait;
-    let target_pe = pe_bytes;
+    eprintln!("launching {pe_name} under {} …", args.root.display());
+    eprintln!("  mode: {} + hollow from VFS + remapped I/O", if detach { "detach" } else { "wait" });
 
-    eprintln!("launching {} …", target.display());
-    eprintln!("  game root: {}", args.root.display());
-    eprintln!("  overlay:   {}", args.overlay.display());
-    eprintln!(
-        "  mode:      {}{}",
-        if detach { "detach" } else { "wait for exit" },
-        if target_pe.is_some() {
-            " + memory hollow (no PE on disk) + director FUSE"
-        } else {
-            " + director FUSE"
-        }
-    );
-
-    let exit = run_target_with_shim(RunConfig {
-        target_exe: target.to_string_lossy().into_owned(),
+    let _ = pe_bytes; // validated above; launch reloads PE from VFS for hollow
+    let exit = session.launch(&vfs_director::LaunchOpts {
+        image: pe_name.to_string(),
         args: vec![],
-        current_dir: Some(root_s),
-        dll_path: dll,
-        config_path: config_path.to_string_lossy().into_owned(),
-        ready_path: ready_path.to_string_lossy().into_owned(),
-        ready_timeout: Duration::from_secs(120),
-        payload_path: payload,
-        preinit_redirects: vec![],
-        detach,
-        target_pe_bytes: target_pe,
+        wait: args.wait,
+        hollow_pe: true,
+        shim_dll: None,
+        payload_dll: None,
     });
 
-    // Keep director alive until game exits (or detach briefly).
     match exit {
         Ok(code) => {
             if detach {
-                eprintln!("game process running (detached); director FUSE serving zip layers");
-                // Detach: leave director for a while is wrong if we exit — for detach
-                // keep process alive until user kills; sleep forever-ish by joining nothing.
-                // Parent exit kills director; for --wait we stop after exit.
-                std::mem::forget(director);
+                eprintln!("game process running (detached); keep host process alive for IPC");
+                std::mem::forget(session);
             } else {
                 eprintln!("game exited with code {code}");
-                director.stop();
+                session.stop_serve();
                 std::process::exit(code);
             }
         }
         Err(e) => {
-            eprintln!("error: launch failed: {e:?}");
-            director.stop();
+            eprintln!("error: launch failed: {e}");
+            session.stop_serve();
             std::process::exit(1);
         }
     }

@@ -15,6 +15,11 @@ use vfs_core::{EntryKind, InputEntry, Layer, LayerId, SourceId};
 pub mod backend;
 pub use backend::ZipBackend;
 
+/// Open a zip as a [`vfs_ops::Backend`] (mount with `Director::mount` / `Session::mount`).
+pub fn open_backend(zip_path: &Path) -> Result<ZipBackend, ZipError> {
+    ZipBackend::open(zip_path)
+}
+
 #[derive(Debug)]
 pub enum ZipError {
     Io(std::io::Error),
@@ -334,23 +339,22 @@ mod tests {
     }
 
     #[test]
-    fn zip_backend_open_read_via_director() {
-        use std::sync::Arc;
-        use vfs_director::{Director, OPEN_READ};
+    fn zip_backend_getattr_open_read() {
+        use vfs_ops::{Backend, OPEN_READ};
 
         let dir = std::env::temp_dir().join(format!("vfs-zip-be-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let content = b"HELLO FROM INSIDE THE ZIP";
         let zip = write_plain_zip(&dir, "Data/hello.txt", content);
         let be = ZipBackend::open(&zip).unwrap();
-        let d = Director::new();
-        d.mount("", Arc::new(be)).unwrap();
-        let (fh, size, is_dir) = d.open("Data/hello.txt", OPEN_READ).unwrap();
+        let st = be.getattr("Data/hello.txt").unwrap().unwrap();
+        assert_eq!(st.size, content.len() as u64);
+        let (bh, size, is_dir) = be.open("Data/hello.txt", OPEN_READ).unwrap();
         assert!(!is_dir && size == content.len() as u64);
         let mut buf = vec![0u8; content.len()];
-        let n = d.read(fh, 0, &mut buf).unwrap();
+        let n = be.read(bh, 0, &mut buf).unwrap();
         assert_eq!(&buf[..n], content);
-        d.close(fh).unwrap();
+        be.release(bh).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

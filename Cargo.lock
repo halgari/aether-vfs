@@ -442,7 +442,13 @@ dependencies = [
 name = "vfs-director"
 version = "0.1.0"
 dependencies = [
+ "vfs-inject",
+ "vfs-ipc",
+ "vfs-ops",
  "vfs-protocol",
+ "vfs-server",
+ "vfs-shim",
+ "vfs-win",
 ]
 
 [[package]]
@@ -489,6 +495,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vfs-ops"
+version = "0.1.0"
+dependencies = [
+ "vfs-protocol",
+]
+
+[[package]]
 name = "vfs-payload"
 version = "0.1.0"
 
@@ -509,7 +522,6 @@ name = "vfs-server"
 version = "0.1.0"
 dependencies = [
  "vfs-core",
- "vfs-director",
  "vfs-ipc",
  "vfs-protocol",
  "vfs-shared",
@@ -558,7 +570,7 @@ name = "vfs-zip"
 version = "0.1.0"
 dependencies = [
  "vfs-core",
- "vfs-director",
+ "vfs-ops",
  "vfs-protocol",
 ]
 

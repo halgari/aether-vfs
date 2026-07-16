@@ -1,15 +1,27 @@
-//! Userspace FUSE kernel: mount backends, overlay resolve, open table, C ABI.
+//! Userspace FUSE **host session**: mount backends, serve IPC, **launch** a
+//! process with remapped I/O.
 //!
-//! Zip and other stores implement [`Backend`]; they are **not** part of this crate.
-//! Hosts create a [`Director`], mount backends (Rust or C ops), and call
-//! getattr/readdir/open/read/close — or use the C exports in `ffi`.
+//! Primary API for hosts:
+//! 1. [`Session::new`] + path setters  
+//! 2. [`Session::mount`] backends (zip/disk/C)  
+//! 3. [`Session::serve`] — ring for the child shim  
+//! 4. [`Session::launch`] — inject + remap  
+//!
+//! Host `open`/`read` exist for occasional inspection only.
+//!
+//! C ABI: see `include/vfs.h` (`vfs_director_*`, `vfs_launch`).
+//!
+//! Backend trait lives in [`vfs_ops`] so zip/inject do not form a crate cycle.
 
 #![deny(unsafe_code)]
 
 pub mod director;
 pub mod disk;
+pub mod ipc;
 pub mod ops;
 pub mod path;
+pub mod ring_dispatch;
+pub mod session;
 
 #[allow(unsafe_code)]
 pub mod ffi;
@@ -17,6 +29,7 @@ pub mod ffi;
 pub use director::Director;
 pub use disk::DiskBackend;
 pub use ops::{Backend, BackendHandle, DirEntry, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
+pub use session::{LaunchOpts, Session};
 
 #[cfg(test)]
 mod tests {
@@ -48,22 +61,14 @@ mod tests {
     }
 
     #[test]
-    fn overlay_later_mount_wins() {
-        let a = std::env::temp_dir().join(format!("vfs-dir-a-{}", std::process::id()));
-        let b = std::env::temp_dir().join(format!("vfs-dir-b-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&a);
-        let _ = std::fs::create_dir_all(&b);
-        std::fs::write(a.join("x.bin"), b"from-a").unwrap();
-        std::fs::write(b.join("x.bin"), b"from-b").unwrap();
-        let d = Director::new();
-        d.mount("", Arc::new(DiskBackend::new(&a))).unwrap();
-        d.mount("", Arc::new(DiskBackend::new(&b))).unwrap();
-        let (fh, _, _) = d.open("x.bin", OPEN_READ).unwrap();
-        let mut buf = [0u8; 8];
-        let n = d.read(fh, 0, &mut buf).unwrap();
-        assert_eq!(&buf[..n], b"from-b");
-        d.close(fh).unwrap();
-        let _ = std::fs::remove_dir_all(&a);
-        let _ = std::fs::remove_dir_all(&b);
+    fn session_read_file_helper() {
+        let dir = std::env::temp_dir().join(format!("vfs-sess-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("a.bin"), b"xyz").unwrap();
+        let mut s = Session::new();
+        s.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
+        let got = s.read_file("a.bin").unwrap();
+        assert_eq!(got, b"xyz");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

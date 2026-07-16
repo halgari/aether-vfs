@@ -6,11 +6,11 @@
 
 ## 1. Goal
 
-Provide a **full userspace FUSE** implementation whose **entrypoint is the director crate**. Hosts (Rust, C, C#, …) pull in the director and register **backends via C-compatible ops callbacks**. **Zip is not part of core or director** — it is a backend that implements those ops.
+Provide a **full userspace FUSE** implementation whose **entrypoint is the director session**. Hosts **configure mounts**, **serve IPC**, and **`vfs_launch` a process** so all NT I/O under the virtual root is remapped. Hosts rarely call open/read themselves.
 
 Mental model:
 
-> Director = FUSE kernel in userland. Backends = fuse_operations. Clients = in-process C/Rust API and (later) the game ring.
+> Session = configure + serve + launch. Kernel = FUSE in userland. Backends = fuse_operations (zip/disk/C). Child process = primary client via inject + ring.
 
 ## 2. Non-goals (this slice)
 

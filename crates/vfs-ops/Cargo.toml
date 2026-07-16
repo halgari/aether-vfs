@@ -1,10 +1,9 @@
 [package]
-name = "vfs-zip"
+name = "vfs-ops"
 version = "0.1.0"
 edition = "2021"
 publish = false
+description = "Backend ops trait for userspace FUSE (no OS, no zip)"
 
 [dependencies]
-vfs-core = { path = "../vfs-core" }
-vfs-ops = { path = "../vfs-ops" }
 vfs-protocol = { path = "../vfs-protocol" }

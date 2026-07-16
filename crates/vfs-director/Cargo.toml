@@ -3,7 +3,7 @@ name = "vfs-director"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Userspace FUSE kernel: mount backends, overlay resolve, open table, C ABI"
+description = "Userspace FUSE host: mount backends, serve IPC, launch process with remapped I/O"
 
 [lib]
 name = "vfs_director"
@@ -11,5 +11,10 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 path = "src/lib.rs"
 
 [dependencies]
-# Status codes shared with the ring protocol (no OS).
 vfs-protocol = { path = "../vfs-protocol" }
+vfs-ops = { path = "../vfs-ops" }
+vfs-ipc = { path = "../vfs-ipc" }
+vfs-server = { path = "../vfs-server" }
+vfs-win = { path = "../vfs-win" }
+vfs-inject = { path = "../vfs-inject" }
+vfs-shim = { path = "../vfs-shim" }

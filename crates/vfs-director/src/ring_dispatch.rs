@@ -1,18 +1,21 @@
-//! Ring opcode dispatch against the userspace FUSE [`vfs_director::Director`].
+//! Ring opcode dispatch against the userspace FUSE director kernel.
 
-use std::sync::Arc;
-
-use vfs_director::{Director, KIND_DIR, OPEN_READ, OPEN_WRITE};
 use vfs_protocol::{
     decode_close_req, decode_open_req, decode_path_req, decode_read_req, encode_getattr_resp,
     encode_open_resp, encode_read_resp, encode_read_resp_bulk, encode_readdir_resp, AttrResp,
     DirEntryWire, OpenResp, FLAG_READ_BULK, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ,
     OP_READDIR, ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
 };
+use vfs_server::DataArena;
 
-use crate::arena::DataArena;
-use crate::handler::BULK_THRESHOLD;
-use crate::open_table::max_read_data;
+use crate::director::Director;
+use crate::ops::{KIND_DIR, OPEN_READ, OPEN_WRITE};
+
+const BULK_THRESHOLD: u32 = 64 * 1024;
+
+fn max_read_data(payload_cap: u32) -> usize {
+    payload_cap.saturating_sub(8) as usize
+}
 
 /// Full OPEN/READ/CLOSE + meta against a director kernel.
 pub fn dispatch_director(
@@ -73,10 +76,9 @@ pub fn dispatch_director(
                 }
                 let flags = if oflags == 0 { OPEN_READ } else { oflags };
                 match director.open(&path, flags) {
-                    Ok((fh, size, is_dir)) => (
-                        ST_OK,
-                        encode_open_resp(&OpenResp { fh, size, is_dir }),
-                    ),
+                    Ok((fh, size, is_dir)) => {
+                        (ST_OK, encode_open_resp(&OpenResp { fh, size, is_dir }))
+                    }
                     Err(st) => (st, Vec::new()),
                 }
             }
@@ -128,15 +130,4 @@ pub fn dispatch_director(
         },
         _ => (ST_BAD_REQUEST, Vec::new()),
     }
-}
-
-pub fn dispatch_director_arc(
-    director: &Arc<Director>,
-    opcode: u32,
-    payload: &[u8],
-    flags: u32,
-    payload_cap: u32,
-    arena: Option<(&DataArena<'_>, u32)>,
-) -> (i32, Vec<u8>) {
-    dispatch_director(director, opcode, payload, flags, payload_cap, arena)
 }

@@ -1,12 +1,12 @@
-//! C ABI for the userspace FUSE director. All `unsafe` for this crate lives here.
+//! C ABI — configure session, serve IPC, **vfs_launch** (primary); open/read optional.
 
 #![allow(unsafe_code)]
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::Arc;
 
-use crate::director::Director;
-use crate::ops::{Backend, BackendHandle, DirEntry, Stat, KIND_DIR, KIND_FILE};
+use crate::ops::{Backend, BackendHandle, DirEntry, Stat};
+use crate::session::{LaunchOpts, Session};
 
 #[repr(C)]
 pub struct VfsStat {
@@ -17,9 +17,7 @@ pub struct VfsStat {
 
 #[repr(C)]
 pub struct VfsBackendOps {
-    pub getattr: Option<
-        unsafe extern "C" fn(*mut c_void, *const c_char, *mut VfsStat) -> c_int,
-    >,
+    pub getattr: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *mut VfsStat) -> c_int>,
     pub readdir: Option<
         unsafe extern "C" fn(
             *mut c_void,
@@ -38,10 +36,20 @@ pub struct VfsBackendOps {
             *mut u8,
         ) -> c_int,
     >,
-    pub read: Option<
-        unsafe extern "C" fn(*mut c_void, u64, u64, *mut u8, u32, *mut u32) -> c_int,
-    >,
+    pub read:
+        Option<unsafe extern "C" fn(*mut c_void, u64, u64, *mut u8, u32, *mut u32) -> c_int>,
     pub release: Option<unsafe extern "C" fn(*mut c_void, u64) -> c_int>,
+}
+
+#[repr(C)]
+pub struct VfsLaunchOpts {
+    pub image: *const c_char,
+    pub argv: *const *const c_char,
+    pub argc: c_int,
+    pub wait: c_int,
+    pub hollow_pe: c_int,
+    pub shim_dll: *const c_char,
+    pub payload_dll: *const c_char,
 }
 
 struct CBackend {
@@ -49,7 +57,6 @@ struct CBackend {
     userdata: *mut c_void,
 }
 
-// SAFETY: host guarantees userdata is valid for the mount lifetime and ops are thread-safe.
 unsafe impl Send for CBackend {}
 unsafe impl Sync for CBackend {}
 
@@ -185,37 +192,90 @@ fn cstr<'a>(p: *const c_char) -> Result<&'a str, i32> {
         .map_err(|_| vfs_protocol::ST_BAD_REQUEST)
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_director_create() -> *mut Director {
-    Box::into_raw(Box::new(Director::new()))
+fn session<'a>(d: *mut Session) -> Result<&'a mut Session, i32> {
+    if d.is_null() {
+        return Err(vfs_protocol::ST_BAD_REQUEST);
+    }
+    Ok(unsafe { &mut *d })
 }
 
 #[no_mangle]
-pub extern "C" fn vfs_director_destroy(d: *mut Director) {
+pub extern "C" fn vfs_director_create() -> *mut Session {
+    Box::into_raw(Box::new(Session::new()))
+}
+
+#[no_mangle]
+pub extern "C" fn vfs_director_destroy(d: *mut Session) {
     if d.is_null() {
         return;
     }
     unsafe {
-        drop(Box::from_raw(d));
+        let mut s = Box::from_raw(d);
+        s.stop_serve();
+        drop(s);
     }
 }
 
 #[no_mangle]
+pub extern "C" fn vfs_director_set_root(d: *mut Session, path: *const c_char) -> c_int {
+    let s = match session(d) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let path = match cstr(path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    s.set_root(path);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn vfs_director_set_overlay(d: *mut Session, path: *const c_char) -> c_int {
+    let s = match session(d) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let path = match cstr(path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    s.set_overlay(path);
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn vfs_director_set_state_dir(d: *mut Session, path: *const c_char) -> c_int {
+    let s = match session(d) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let path = match cstr(path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    s.set_state_dir(path);
+    0
+}
+
+#[no_mangle]
 pub extern "C" fn vfs_director_mount(
-    d: *mut Director,
+    d: *mut Session,
     prefix: *const c_char,
     ops: *const VfsBackendOps,
     userdata: *mut c_void,
 ) -> c_int {
-    if d.is_null() || ops.is_null() {
-        return vfs_protocol::ST_BAD_REQUEST;
-    }
-    let director = unsafe { &*d };
-    let prefix = match cstr(prefix) {
+    let s = match session(d) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    // Copy function pointers (struct is not Copy if we add non-Copy fields later).
+    if ops.is_null() {
+        return vfs_protocol::ST_BAD_REQUEST;
+    }
+    let prefix = match cstr(prefix) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     let ops = unsafe {
         VfsBackendOps {
             getattr: (*ops).getattr,
@@ -226,29 +286,104 @@ pub extern "C" fn vfs_director_mount(
         }
     };
     let backend = Arc::new(CBackend { ops, userdata });
-    match director.mount(prefix, backend) {
+    match s.mount(prefix, backend) {
         Ok(()) => 0,
         Err(e) => e,
     }
 }
 
 #[no_mangle]
-pub extern "C" fn vfs_getattr(d: *mut Director, path: *const c_char, out: *mut VfsStat) -> c_int {
-    if d.is_null() || out.is_null() {
-        return vfs_protocol::ST_BAD_REQUEST;
-    }
-    let director = unsafe { &*d };
-    let path = match cstr(path) {
+pub extern "C" fn vfs_director_serve(d: *mut Session) -> c_int {
+    let s = match session(d) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    match director.getattr(path) {
-        Ok(Some(s)) => {
+    match s.serve() {
+        Ok(()) => 0,
+        Err(_) => vfs_protocol::ST_IO_ERROR,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vfs_launch(
+    d: *mut Session,
+    opts: *const VfsLaunchOpts,
+    exit_code: *mut i32,
+) -> c_int {
+    let s = match session(d) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if opts.is_null() {
+        return vfs_protocol::ST_BAD_REQUEST;
+    }
+    let o = unsafe { &*opts };
+    let image = match cstr(o.image) {
+        Ok(p) => p.to_string(),
+        Err(e) => return e,
+    };
+    let mut args = Vec::new();
+    if !o.argv.is_null() && o.argc > 0 {
+        for i in 0..o.argc as isize {
+            let p = unsafe { *o.argv.offset(i) };
+            if let Ok(a) = cstr(p) {
+                args.push(a.to_string());
+            }
+        }
+    }
+    let shim = if o.shim_dll.is_null() {
+        None
+    } else {
+        cstr(o.shim_dll).ok().map(|s| s.to_string())
+    };
+    let payload = if o.payload_dll.is_null() {
+        None
+    } else {
+        cstr(o.payload_dll).ok().map(|s| s.to_string())
+    };
+    let launch = LaunchOpts {
+        image,
+        args,
+        wait: o.wait != 0,
+        hollow_pe: o.hollow_pe != 0,
+        shim_dll: shim,
+        payload_dll: payload,
+    };
+    match s.launch(&launch) {
+        Ok(code) => {
+            if !exit_code.is_null() {
+                unsafe {
+                    *exit_code = code;
+                }
+            }
+            0
+        }
+        Err(_) => vfs_protocol::ST_IO_ERROR,
+    }
+}
+
+/* ---- Optional host inspection (uses kernel only) ---- */
+
+#[no_mangle]
+pub extern "C" fn vfs_getattr(d: *mut Session, path: *const c_char, out: *mut VfsStat) -> c_int {
+    let s = match session(d) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if out.is_null() {
+        return vfs_protocol::ST_BAD_REQUEST;
+    }
+    let path = match cstr(path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    match s.kernel().getattr(path) {
+        Ok(Some(st)) => {
             unsafe {
                 *out = VfsStat {
-                    kind: s.kind,
-                    size: s.size,
-                    mtime: s.mtime,
+                    kind: st.kind,
+                    size: st.size,
+                    mtime: st.mtime,
                 };
             }
             0
@@ -258,27 +393,22 @@ pub extern "C" fn vfs_getattr(d: *mut Director, path: *const c_char, out: *mut V
     }
 }
 
-struct FillState {
-    fill: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const VfsStat) -> c_int>,
-    ctx: *mut c_void,
-}
-
 #[no_mangle]
 pub extern "C" fn vfs_readdir(
-    d: *mut Director,
+    d: *mut Session,
     path: *const c_char,
     fill_ctx: *mut c_void,
     fill: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const VfsStat) -> c_int>,
 ) -> c_int {
-    if d.is_null() {
-        return vfs_protocol::ST_BAD_REQUEST;
-    }
-    let director = unsafe { &*d };
-    let path = match cstr(path) {
+    let s = match session(d) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    let entries = match director.readdir(path) {
+    let path = match cstr(path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let entries = match s.kernel().readdir(path) {
         Ok(e) => e,
         Err(e) => return e,
     };
@@ -300,28 +430,30 @@ pub extern "C" fn vfs_readdir(
             break;
         }
     }
-    let _ = FillState { fill: Some(fill), ctx: fill_ctx };
     0
 }
 
 #[no_mangle]
 pub extern "C" fn vfs_open(
-    d: *mut Director,
+    d: *mut Session,
     path: *const c_char,
     flags: u32,
     fh_out: *mut u64,
     size_out: *mut u64,
     is_dir_out: *mut u8,
 ) -> c_int {
-    if d.is_null() || fh_out.is_null() || size_out.is_null() || is_dir_out.is_null() {
-        return vfs_protocol::ST_BAD_REQUEST;
-    }
-    let director = unsafe { &*d };
-    let path = match cstr(path) {
+    let s = match session(d) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    match director.open(path, flags) {
+    if fh_out.is_null() || size_out.is_null() || is_dir_out.is_null() {
+        return vfs_protocol::ST_BAD_REQUEST;
+    }
+    let path = match cstr(path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    match s.kernel().open(path, flags) {
         Ok((fh, size, is_dir)) => {
             unsafe {
                 *fh_out = fh;
@@ -336,19 +468,22 @@ pub extern "C" fn vfs_open(
 
 #[no_mangle]
 pub extern "C" fn vfs_read(
-    d: *mut Director,
+    d: *mut Session,
     fh: u64,
     offset: u64,
     buf: *mut u8,
     len: u32,
     nread: *mut u32,
 ) -> c_int {
-    if d.is_null() || buf.is_null() || nread.is_null() {
+    let s = match session(d) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if buf.is_null() || nread.is_null() {
         return vfs_protocol::ST_BAD_REQUEST;
     }
-    let director = unsafe { &*d };
     let slice = unsafe { std::slice::from_raw_parts_mut(buf, len as usize) };
-    match director.read(fh, offset, slice) {
+    match s.kernel().read(fh, offset, slice) {
         Ok(n) => {
             unsafe {
                 *nread = n as u32;
@@ -360,16 +495,21 @@ pub extern "C" fn vfs_read(
 }
 
 #[no_mangle]
-pub extern "C" fn vfs_close(d: *mut Director, fh: u64) -> c_int {
-    if d.is_null() {
-        return vfs_protocol::ST_BAD_REQUEST;
-    }
-    let director = unsafe { &*d };
-    match director.close(fh) {
+pub extern "C" fn vfs_close(d: *mut Session, fh: u64) -> c_int {
+    let s = match session(d) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    match s.kernel().close(fh) {
         Ok(()) => 0,
         Err(e) => e,
     }
 }
 
-// Silence unused import warnings for kind constants used by C consumers only.
-const _: (u8, u8) = (KIND_FILE, KIND_DIR);
+/// Used by vfs-zip C helper: borrow kernel for mount.
+pub fn session_kernel(d: *mut Session) -> Option<Arc<crate::director::Director>> {
+    if d.is_null() {
+        return None;
+    }
+    Some(Arc::clone(unsafe { &*d }.kernel()))
+}

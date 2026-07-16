@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use vfs_director::{
+use vfs_ops::{
     Backend, BackendHandle, DirEntry, Stat, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
 use vfs_protocol::{ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_IS_DIR, ST_NOT_FOUND};
