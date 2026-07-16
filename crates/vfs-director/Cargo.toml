@@ -18,3 +18,4 @@ vfs-server = { path = "../vfs-server" }
 vfs-win = { path = "../vfs-win" }
 vfs-inject = { path = "../vfs-inject" }
 vfs-shim = { path = "../vfs-shim" }
+vfs-zip = { path = "../vfs-zip" }

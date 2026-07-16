@@ -71,4 +71,53 @@ mod tests {
         assert_eq!(got, b"xyz");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn session_serve_and_ring_read() {
+        use vfs_protocol::{
+            decode_open_resp, decode_read_resp, encode_open_req, encode_read_req, OpenResp, ReadReq,
+            OP_OPEN, OP_READ, OPEN_READ, ST_OK,
+        };
+
+        let dir = std::env::temp_dir().join(format!("vfs-sess-ring-{}", std::process::id()));
+        let state = std::env::temp_dir().join(format!("vfs-sess-st-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("payload.bin"), b"ring-bytes").unwrap();
+
+        let mut s = Session::new();
+        s.set_root(&dir);
+        s.set_state_dir(&state);
+        s.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
+        s.serve().expect("serve");
+        assert!(s.is_serving());
+
+        {
+            let ipc = s.ipc().expect("ipc");
+            let client = ipc.client().expect("client");
+            let open = client
+                .submit(OP_OPEN, 0, &encode_open_req(OPEN_READ, "payload.bin"))
+                .unwrap();
+            assert_eq!(open.status, ST_OK);
+            let OpenResp { fh, size, .. } = decode_open_resp(&open.payload).unwrap();
+            assert_eq!(size, 10);
+            let r = client
+                .submit(
+                    OP_READ,
+                    0,
+                    &encode_read_req(&ReadReq {
+                        fh,
+                        offset: 0,
+                        len: 10,
+                    }),
+                )
+                .unwrap();
+            assert_eq!(r.status, ST_OK);
+            assert_eq!(decode_read_resp(&r.payload).unwrap(), b"ring-bytes");
+        }
+
+        s.stop_serve();
+        assert!(!s.is_serving());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&state);
+    }
 }

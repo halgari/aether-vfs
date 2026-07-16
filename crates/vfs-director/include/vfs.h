@@ -74,6 +74,9 @@ int vfs_director_set_state_dir(vfs_director *d, const char *path);
 int vfs_director_mount(vfs_director *d, const char *prefix,
                        const vfs_backend_ops *ops, void *userdata);
 
+/* Convenience: mount a Stored ZIP as a content backend (absolute or relative path). */
+int vfs_director_mount_zip(vfs_director *d, const char *zip_path);
+
 /* Start control-ring workers. Must succeed before vfs_launch. */
 int vfs_director_serve(vfs_director *d);
 

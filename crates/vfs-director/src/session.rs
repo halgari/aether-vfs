@@ -88,6 +88,26 @@ impl Session {
         self.kernel.mount(prefix, backend)
     }
 
+    /// Mount a Stored zip archive as a content backend (later mounts win on conflicts).
+    pub fn mount_zip(&self, zip_path: impl AsRef<Path>) -> Result<(), String> {
+        let path = zip_path.as_ref();
+        let be = vfs_zip::ZipBackend::open(path)
+            .map_err(|e| format!("ZipBackend {}: {e:?}", path.display()))?;
+        self.kernel
+            .mount("", Arc::new(be))
+            .map_err(|st| format!("mount zip status {st}"))
+    }
+
+    /// Whether IPC workers are running (required before [`launch`]).
+    pub fn is_serving(&self) -> bool {
+        self.ipc.is_some()
+    }
+
+    /// Access the live IPC server (after [`serve`]) for probes / diagnostics.
+    pub fn ipc(&self) -> Option<&IpcServe> {
+        self.ipc.as_ref()
+    }
+
     /// Occasional host-side full-file read (not the primary API).
     pub fn read_file(&self, vpath: &str) -> Result<Vec<u8>, i32> {
         let (fh, size, is_dir) = self.kernel.open(vpath, OPEN_READ)?;

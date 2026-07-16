@@ -7,10 +7,9 @@
 //! `Decision::Serve` zip windows (SEC_IMAGE via in-process manual map).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use vfs_core::{decode, EntryKind, Layer, LayerId, Source, SourceId};
-use vfs_zip::{read_layer, ZipBackend};
+use vfs_zip::read_layer;
 
 const DEFAULT_LAYERS: &str = r"C:\GameLayers";
 const STEAM_APPID: &str = "489830"; // Skyrim Special Edition
@@ -208,33 +207,6 @@ fn find_pe_bytes(layers: &[Layer], file_name: &str) -> Result<Vec<u8>, String> {
     }
     let e = found.ok_or_else(|| format!("PE {file_name} not in layer zips"))?;
     read_source_bytes(&e.source, e.size)
-}
-
-fn locate_artifacts() -> Result<(String, String), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dll = vfs_inject::find_near(&exe, "vfs_shim_dll.dll")
-        .or_else(|| {
-            // Workspace target/debug layout when running `cargo run -p vfs-launch`.
-            let mut d = exe.clone();
-            for _ in 0..5 {
-                if let Some(p) = d.parent() {
-                    d = p.to_path_buf();
-                    let c = d.join("vfs_shim_dll.dll");
-                    if c.is_file() {
-                        return Some(c);
-                    }
-                    let c = d.join("debug").join("vfs_shim_dll.dll");
-                    if c.is_file() {
-                        return Some(c);
-                    }
-                }
-            }
-            None
-        })
-        .ok_or_else(|| "vfs_shim_dll.dll not found near vfs-launch".to_string())?;
-    let payload = vfs_inject::ensure_payload_beside_shim(dll.to_str().unwrap(), None)
-        .ok_or_else(|| "vfs_payload.dll not found".to_string())?;
-    Ok((dll.to_string_lossy().into_owned(), payload))
 }
 
 fn set_steam_env() {
@@ -478,19 +450,11 @@ fn main() {
     session.set_overlay(&args.overlay);
     session.set_state_dir(&args.state);
     for zip in &zips {
-        match ZipBackend::open(zip) {
-            Ok(be) => {
-                if let Err(e) = session.mount("", Arc::new(be)) {
-                    eprintln!("error: mount {}: status {e}", zip.display());
-                    std::process::exit(1);
-                }
-                eprintln!("  mounted backend {}", zip.display());
-            }
-            Err(e) => {
-                eprintln!("error: ZipBackend {}: {e:?}", zip.display());
-                std::process::exit(1);
-            }
+        if let Err(e) = session.mount_zip(zip) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
         }
+        eprintln!("  mounted backend {}", zip.display());
     }
     if let Err(e) = session.serve() {
         eprintln!("error: serve: {e}");

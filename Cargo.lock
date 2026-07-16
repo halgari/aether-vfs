@@ -449,6 +449,7 @@ dependencies = [
  "vfs-server",
  "vfs-shim",
  "vfs-win",
+ "vfs-zip",
 ]
 
 [[package]]

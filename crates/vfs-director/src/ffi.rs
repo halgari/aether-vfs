@@ -292,6 +292,23 @@ pub extern "C" fn vfs_director_mount(
     }
 }
 
+/// Mount a Stored zip as a backend (`prefix` is always root for zip layers).
+#[no_mangle]
+pub extern "C" fn vfs_director_mount_zip(d: *mut Session, zip_path: *const c_char) -> c_int {
+    let s = match session(d) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let path = match cstr(zip_path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    match s.mount_zip(path) {
+        Ok(()) => 0,
+        Err(_) => vfs_protocol::ST_IO_ERROR,
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn vfs_director_serve(d: *mut Session) -> c_int {
     let s = match session(d) {
