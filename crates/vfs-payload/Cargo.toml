@@ -6,5 +6,9 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 name = "vfs_payload"
+# no_std + custom #[panic_handler] conflicts with the test harness (std).
+test = false
+doctest = false
+bench = false
 
 [dependencies]

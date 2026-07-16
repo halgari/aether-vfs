@@ -55,6 +55,7 @@ fn config_static_import_via_dual_layer() {
     let (dll, payload) = common::locate_shim_and_payload();
     let exit = run_target_with_shim(RunConfig {
         target_exe: tgt.to_str().unwrap().to_string(),
+        current_dir: None,
         args: vec![result_path.to_str().unwrap().to_string()],
         dll_path: dll,
         config_path: config_path.to_str().unwrap().to_string(),
