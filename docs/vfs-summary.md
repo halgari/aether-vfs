@@ -1,540 +1,532 @@
-# VFS: Deep Technical Summary
+# VFS: Technical Summary for Architecture & Whitepaper Use
 
-A full write-up of the `C:\oss\vfs` workspace: architecture, how zip-backed layers work, how Skyrim + SKSE + SkyUI launch without extracting archives, and the hard lessons from getting PE/DLL loading correct under Windows and Steam DRM.
+**Document type:** Deep technical summary (whitepaper source material)  
+**Codebase:** `C:\oss\vfs` / private `halgari/vfs`  
+**Last updated:** 2026-07-16  
+**Audience:** Engineers writing papers, design reviews, or onboarding to the stack  
 
----
+This document describes **what** the system is, **why** it exists, **how** it works end-to-end, and **what was learned** building a usermode virtual filesystem that launches a modern DRM-bound Windows game with mods served from multi-gigabyte ZIP archives without extraction.
 
-## 1. What this system is
-
-**VFS** is a usermode, MO2/USVFS-lineage virtual filesystem for game modding. Its practical mission for the current milestone is:
-
-> Launch **Skyrim Special Edition** with **SKSE** and **SkyUI**, serving base game + mods **straight from Stored ZIP archives under `C:\GameLayers`**, with **zero archive→disk extract** of PE/BSA/ESP content (no durable materialize under the managed root, no TEMP staging of archive PE).
-
-The three layer archives (bottom → top):
-
-| Order | Archive | Role |
-|------|---------|------|
-| 1 | `1. Skyrim Special Edition.zip` (~16 GB, ZIP64) | Base game: `SkyrimSE.exe`, `Data/*.bsa`, masters, … |
-| 2 | `2. SKSE 2.2.6.zip` | `skse64_loader.exe`, SKSE DLLs, script PEXes |
-| 3 | `3. SkyUI 6.11.zip` | `Data/SkyUI_SE.esp`, `Data/SkyUI_SE.bsa`, translations |
-
-**Decisive physical fact:** every entry in all three archives is **Stored** (method 0, no compression). A “file” in a layer is just a **byte window** `[offset, offset+size)` inside a real zip file on disk. Deflated entries are rejected, not decompressed.
-
-The managed install root is typically:
-
-```
-C:\GameLayers\runtime\     # empty skeleton dirs only (Data/, Scripts/, …)
-C:\GameLayers\overlay\     # optional write overlay (creates/deletes)
-C:\GameLayers\vfs-state\   # shim config, ready flags, GMF spoof logs
-C:\GameLayers\1…3 *.zip    # the only archive-backed content on disk
-```
-
-AppData `Plugins.txt` (plugin enablement) is allowed as non-archive config.
+A short product overview lives in [overview.md](./overview.md). Design history lives under [superpowers/specs/](./superpowers/specs/).
 
 ---
 
-## 2. Design principles
+# Part I — Problem, goals, and constraints
 
-1. **Director builds; shim serves.** Zip parsing and tree merge happen **out of process** (or at least outside the game’s hot path) when building a **snapshot**. The injected shim never walks zip central directories; it only sees resolved **windows** or **redirect targets**.
-2. **Pure core.** `vfs-core` is `#![forbid(unsafe_code)]`, does no I/O, and only merges layered trees.
-3. **Fail-safe hooks.** Unknown paths, bad snapshots, or undecidable opens → **pass through** to the real kernel (or soft success on synth queries), not crash the game.
-4. **Zero extract for content.** No PE/BSA/ESP bytes from archives written under managed root or TEMP. Empty directory skeletons are fine.
-5. **Windows still needs a real host image for CreateProcess.** Pure VFS paths cannot be the kernel’s `ProcessImageFileName` for Steam DRM. Solution: **hollow** a real on-disk host (Steam’s `SkyrimSE.exe`) and **WriteProcessMemory** zip PE bytes into it.
-6. **Dual-layer inject.** Static imports of the primary EXE must be virtualizable **before** `LdrpInitializeProcess` finishes; full Engine (dir enum, overlay, CPIW, …) installs after loader lock is released.
+## 1. The problem space
 
----
+### 1.1 Modding and virtual filesystems
 
-## 3. Crate map
+PC game modding often requires **overlaying** many packages of files onto a single “install tree.” Tools such as Mod Organizer 2 (USVFS lineage) solve this by interposing Windows file APIs so the game believes a merged tree exists, while files still live in separate mod folders or archives.
 
-Workspace root: `C:\oss\vfs` (Cargo workspace, `panic = "abort"` for `no_std` payload).
+That approach has hard constraints:
 
-| Crate | Role |
-|-------|------|
-| **vfs-core** | Pure VFS tree: layers, tombstones, resolve, casefold, path normalize, **source encoding** (disk vs zip-window). |
-| **vfs-zip** | ZIP64 central-directory reader → `Layer` of zip-window sources. Stored only. |
-| **vfs-shared** | Flattened **snapshot** bytes (seqlock-friendly layout) + builder/reader. Published for shim/server. |
-| **vfs-redirect** | Pure **decision core**: NT path + snapshot → `PassThrough` / `Redirect` / `Serve` / `Deny`; dir merge; whiteouts. |
-| **vfs-shim** | In-process **engine** + **ntdll/kernel32 hooks** + **zipserve** synthetic handles + CPIW hollow. |
-| **vfs-shim-dll** | Injectable DLL entry (`DllMain` / sync bootstrap for dual-layer). |
-| **vfs-payload** | `no_std` early payload: patches 4 ntdll stubs **pre-init**; redirect table for static-import DLLs. |
-| **vfs-inject** | CreateProcess suspended, inject, pre-init arm, dual-layer handoff, **ghostly** PE hollow/map, game-local DLL pipeline. |
-| **vfs-launch** | End-user director: discover zips, build snapshot, skeleton root, hollow-launch SKSE/Skyrim. |
-| **vfs-win** | Shared-memory section helpers for IPC rings. |
-| **vfs-ipc** | Recursion-free control ring over caller-owned segments. |
-| **vfs-server** | Optional out-of-process authoritative VFS (snapshot + IPC). |
-| **vfs-fixture-*** | Test fixtures (static-import EXE, vproxy). |
+- The game is a **third-party binary** you cannot recompile.
+- Windows I/O is **NT-native** (`NtCreateFile`, `NtReadFile`, …), not only Win32 `CreateFile`.
+- **CreateProcess** and the loader demand a real PE image on disk for the initial process.
+- **Steam DRM** inspects process image identity (paths, signatures, authenticity checks)—naive hollowing of `cmd.exe` fails.
+- Large base games are shipped as **16+ GB ZIP64** archives; extracting them to disk is slow, duplicates storage, and defeats “run from zip” goals.
 
-Rough dependency flow:
+### 1.2 The concrete mission
 
-```
-                    vfs-launch (director)
-                         │
-         ┌───────────────┼────────────────┐
-         ▼               ▼                ▼
-      vfs-zip        vfs-core         vfs-inject
-         │               │                │
-         └──────► vfs-shared ◄──── vfs-redirect
-                         │                │
-                         ▼                ▼
-                    vfs-shim ◄──── vfs-payload
-                         │
-                    vfs-shim-dll (in game process)
-```
+The milestone that drives design and validation:
+
+> Launch **Skyrim Special Edition** with **SKSE** and **SkyUI**, serving base game + mods **straight from Stored ZIP archives** under `C:\GameLayers`, with **zero durable extract** of PE/BSA/ESP content under the managed root (no TEMP staging of archive PE as the content store).
+
+Three layers (bottom → top):
+
+| Order | Archive | Typical content |
+|------|---------|-----------------|
+| 1 | `1. Skyrim Special Edition.zip` (~16 GB, ZIP64) | `SkyrimSE.exe`, `Data/*.bsa`, masters |
+| 2 | `2. SKSE 2.2.6.zip` | `skse64_loader.exe`, SKSE DLLs, scripts |
+| 3 | `3. SkyUI 6.11.zip` | `Data/SkyUI_SE.esp`, BSA, translations |
+
+**Decisive physical fact:** entries used on the content path are **Stored** (ZIP method 0). A virtual file is a **byte window** `[offset, offset+size)` inside a real container file. Deflated entries are rejected rather than inflated on the hot path.
+
+### 1.3 What “zero extract” means (and does not)
+
+| Allowed | Forbidden (for archive content) |
+|---------|----------------------------------|
+| Empty directory skeleton under managed root | Writing PE/BSA/ESP payload from zip to root or TEMP as the source of truth |
+| AppData `Plugins.txt` / loadorder config | Materializing full archives for play |
+| Real **Steam** `SkyrimSE.exe` as CreateProcess host | Using a non-Steam host for DRM’d Skyrim and expecting DRM to accept it |
+| RAM buffers and process image writes (hollow) | Leaving extracted PE beside the game for LoadLibrary |
 
 ---
 
-## 4. Layer model and snapshot
+## 2. Design goals and non-goals
 
-### 4.1 Inputs
+### 2.1 Goals
 
-Each layer is a list of `InputEntry`:
+1. **Correctness under a real game stack** — SKSE + Steam + large BSAs, not only unit tests.  
+2. **Isolation of content authority** — zip containers opened by a **director** process (or host), not by the injected game shim on the pure FUSE path.  
+3. **Composable layers** — later mounts override earlier; plugins and PE discovery work across overlays.  
+4. **Multi-language hostability** — C ABI: configure mounts, serve IPC, launch; optional host read for tools.  
+5. **Performance** — bulk sequential reads in the hundreds of MiB/s class over IPC; small-metadata RTT in microseconds on spin notifiers.  
+6. **Fail-safe hooks** — undecidable opens pass through to the real kernel; avoid crashing the game.
 
-- `vpath` — virtual path under the managed root (`Data/Skyrim.esm`, …)
-- `kind` — `File` | `Dir` | `Tombstone`
-- `source` — opaque blob (disk path **or** zip-window encoding)
-- `size`, `mtime`
+### 2.2 Non-goals (current)
 
-Later layers win on conflict. Tombstones hide lower-layer names (first-class deletes).
+- Kernel FUSE / WinFsp / filter drivers  
+- Deflated zip as first-class content  
+- Multi-tenant long-lived daemon for many games  
+- Full write-path productization (overlay exists; not the focus)  
+- Replacing Steam or SKSE  
 
-### 4.2 Source encoding (`vfs-core::source`)
+### 2.3 Why usermode FUSE (not a driver)
 
-Disk paths never start with NUL. Zip windows use a tag:
+| Approach | Pros | Cons for this project |
+|----------|------|------------------------|
+| WinFsp / Dokan | Familiar mount letter | Driver install, signing, different failure modes |
+| Filter driver | Deep integration | Complexity, stability, distribution |
+| **Usermode NT hooks + parent director** | No driver, full control, process-scoped | Must handle CreateProcess, SEC_IMAGE, Steam carefully |
 
-```
-Disk:       <UTF-8 path bytes>
-ZipWindow:  0x00 | u64 LE offset | <UTF-8 container path>
-```
-
-Size lives on the tree node, not in the blob. Decode is fail-safe: truncated zip blobs fall back to “disk” interpretation rather than panic.
-
-### 4.3 Zip reader (`vfs-zip`)
-
-- Opens the zip; finds EOCD / ZIP64 EOCD.
-- Walks central directory; requires compression method **Stored**.
-- Reads **local file header** for true data offset:
-  `data_offset = local_header_off + 30 + local_name_len + local_extra_len`
-  (local name/extra can differ from central directory).
-- Emits `encode_zip_window(data_offset, zip_path)` per file.
-
-No full-file extract; the 16 GB base zip is never copied. Only directory structures and window metadata are materialized in the snapshot.
-
-### 4.4 Tree + snapshot
-
-`vfs-core::build` merges layers into a `VfsTree` (casefolded lookup, dir walks, cache keys).
-
-`vfs-shared` flattens that into a compact **snapshot** buffer the shim can mmap or receive as config. The shim’s `SnapshotReader` validates layout and answers resolve queries without re-parsing zips.
+The bet: **the game process is the only place that must see the virtual world**, and a **parent director** can own archives and answer RPC. That is “FUSE completely in userland”: the director is the kernel; the shim is the client.
 
 ---
 
-## 5. Redirect decision core (`vfs-redirect`)
+# Part II — Architecture
 
-Given an NT path (e.g. `\??\C:\GameLayers\runtime\Data\Skyrim.esm`) and the snapshot:
+## 3. Two eras of content authority
 
-1. Is the path under the **managed root**?
-2. Overlay first (if configured): present → redirect to overlay file; whiteout → deny.
-3. Else snapshot resolve:
-   - Disk source → `Decision::Redirect { target_nt }`
-   - Zip-window → `Decision::Serve { container_nt, offset, length }`
-   - Missing → pass-through or deny depending on policy
-4. Directory opens merge real OS children + virtual children + whiteouts.
+The codebase contains **two generations** of content serving. Both matter for understanding history and residual code.
 
-Also pure helpers for:
-
-- Attribute queries (`NtQueryAttributesFile` family)
-- Directory info marshaling (`FILE_FULL_DIR_INFORMATION`, …)
-- Write classification (create disposition + access → copy-on-write to overlay)
-
-The shim’s `Engine` wraps `RootMap` + snapshot + optional `Overlay`.
-
----
-
-## 6. Shim: hooks and zip serve
-
-### 6.1 What gets hooked
-
-| API | Purpose |
-|-----|---------|
-| `NtCreateFile` / `NtOpenFile` | Path virtualization: redirect / serve / deny |
-| `NtQueryAttributesFile` / `NtQueryFullAttributesFile` | Fake size/mtime for zip files |
-| `NtQueryDirectoryFile(Ex)` | Merged directory listings under root |
-| `NtReadFile` | Synth zip windows → memcpy from mapped container |
-| `NtQueryInformationFile` / `NtSetInformationFile` | Synth size/position; rename/delete → overlay |
-| `NtClose` | Drop synth handles |
-| `NtCreateSection` / `NtMapViewOfSection` / `NtUnmapViewOfSection` | Data sections over synth files; **SEC_IMAGE** special-case for zip PE |
-| `CreateProcessInternalW` | Child process: inject + hollow virtual PE |
-| `GetModuleFileName(W/A)`, related | Spoof paths toward GameLayers (GMF) |
-
-Early path/attr stubs can be owned by **vfs-payload** (pre-init inline patches); full shim attaches remaining detours post-loader via `retour`.
-
-### 6.2 Decision path in hooks
-
-On create/open:
-
-```
-decision_for(OA, access, disposition)
-  → PassThrough  → real ntdll trampoline
-  → Redirect     → rewrite ObjectAttributes path, trampoline
-  → Serve        → zipserve::open_synth(container, offset, length) → synthetic handle
-  → Deny         → STATUS_OBJECT_NAME_NOT_FOUND
-```
-
-### 6.3 Synthetic handles (`zipserve`)
-
-- **Container map cache:** first Serve for a zip opens it read-only, `CreateFileMapping` + `MapViewOfFile` whole file (pages fault in lazily). Cached by container NT/Win32 path.
-- **Synth file handle:** tagged high bit (`2^46`) so real kernel handles never collide. Stores window base, length, file position.
-- **NtReadFile:** if synth → copy `[position, position+len)` from mapped window; advance position.
-- **Query info:** fake `FileStandardInformation`, `FileBasicInformation`, stable fake index, etc.
-- **Synth sections:** data sections over zip windows; MapView returns pointer into the already-mapped zip (unmap is bookkeeping-only).
-
-### 6.4 SEC_IMAGE on zip windows
-
-Windows will not create a true image section on a non-file or fake handle. The shim intercepts `NtCreateSection(…, SEC_IMAGE)` on a synth file:
-
-1. Read the zip-window PE bytes into a buffer.
-2. `map_image_from_pe_bytes_local` (manual map in the **current** process).
-3. Register a synthetic section whose `MapView` returns that base.
-
-This is how LoadLibrary-like paths through VFS **can** get PE images without staging a PE file—**when** the open goes through synth handles. Static imports of a Steam-hosted EXE still use the real Steam disk files unless rewritten later (see §9).
-
----
-
-## 7. Dual-layer inject and pre-init
-
-### 7.1 The problem
-
-| Approach | Static EXE imports | Full Engine |
-|----------|--------------------|-------------|
-| LoadLibrary shim after resume | Too late | Yes |
-| Pre-init payload only | Yes (redirect table) | No |
-| Naïve both | Race + **double-patch** of same ntdll stubs | Broken |
-
-### 7.2 Ownership model
-
-- **Early (`vfs-payload`):** permanently owns 4 stubs via 14-byte absolute jumps:
-  - `NtOpenFile`, `NtCreateFile`, `NtQueryAttributesFile`, `NtQueryFullAttributesFile`
-- Early body: suffix redirect table **or** secondary dispatch into full Engine once the full shim is live.
-- **Full (`vfs-shim`):** never rewrites those 4 prologues; installs dir enum, close, QIF, setinfo, CPIW via `retour` after kernel32 is present.
-
-### 7.3 Handoff sequence (`run_target_with_shim`)
-
-1. `CreateProcess` target (often suspended or gated).
-2. Arm **pre-init payload** (config file / shared page with redirect entries for known static-import DLLs).
-3. Inject full shim DLL.
-4. Wait for ready event (`Local\vfs_shim_ready_{pid}` or path-based ready file).
-5. Dual-layer: OEP late-entry stub may call `vfs_shim_sync_bootstrap` so hooks are live before EXE main.
-6. Optional: **hollow** primary PE from zip RAM into the process.
-7. Resume / wait as configured.
-
-`VFS_DUAL_LAYER` changes `DllMain` behavior (no async bootstrap race; sync install from late-entry).
-
----
-
-## 8. Process hollowing (“ghostly”) for EXEs
-
-### 8.1 Why hollow
-
-- Managed root has **no** `skse64_loader.exe` / `SkyrimSE.exe` files on disk (by design).
-- Windows `CreateProcess` requires a real file for the initial image.
-- Steam DRM checks **ProcessImageFileName** / authenticity of the host binary: hollowed `cmd.exe` → Steam error `3:0000065558`.
-- **Fix:** CreateProcess the **real Steam** `SkyrimSE.exe` (or a real system host for non-DRM tools), then **overwrite** the process image with zip PE bytes via `WriteProcessMemory` only—no archive extract.
-
-### 8.2 Hollow algorithm (simplified)
-
-1. Pick host via `hollow_host_exe_for(image_path)`:
-   - Prefer Steam `…\Skyrim Special Edition\SkyrimSE.exe` when target looks like Skyrim.
-   - Never use a path under `GameLayers\runtime` (may be VFS-spoofed / empty).
-2. `CreateProcessW(host, cmdline_with_virtual_path, CREATE_SUSPENDED)`.
-3. Optionally inject shim **before** hollow so VFS hooks exist during import preload.
-4. Query PEB ImageBase; compare host `SizeOfImage` to zip PE.
-5. **Preload remote imports** (system DLLs via remote `LoadLibraryA`; game-locals via Stage A—see §9).
-6. Prefer **in-place** overwrite when `SizeOfImage` matches (SkyrimSE Steam host matches zip SE)—preserves one main module base for SKSE.
-   - Else `VirtualAllocEx` + unmap optional + write new base; fix PEB ImageBase; apply relocs.
-7. `resolve_imports_ex_with_bases` against remote process + forced game-local bases.
-8. Write full flat PE image; set thread context entry (RCX/RIP as needed); TLS/cookie/unwind helpers for MSVC CRT where required.
-9. **Finalize game-local modules** (Stages B–D).
-10. Spoof PEB/LDR/GMF paths toward `C:\GameLayers\runtime\…`.
-
-Primary EXE provenance is always logged as:
+### 3.1 Generation A — Snapshot + in-process Serve (legacy / transitional)
 
 ```text
-vfs-inject: wrote N zip PE bytes to 0x… (source=archive RAM)
+Director/build time:  zips → vfs-zip → vfs-core Layer → merge → vfs-shared snapshot
+Game process:         shim Engine + snapshot → Decision::Serve
+                      zipserve maps container, synthetic handles, NtReadFile memcpy
 ```
 
-### 8.3 Child processes (CPIW)
+Principles:
 
-When the game or SKSE calls `CreateProcess` for a virtual path under the root:
+- Zip CD parse **outside** the game’s hot path when building the snapshot.  
+- Shim never walks central directories; it only sees **resolved windows**.  
+- Pure `vfs-core` / `vfs-redirect` for merge and decisions.
 
-1. Shim’s CPIW hook sees the virtual ApplicationName.
-2. May CreateProcess a real host + inject + hollow zip PE for that child.
-3. Result: SKSE loader can “launch” `SkyrimSE.exe` at a GameLayers path while the kernel host remains DRM-safe Steam image hollowed with zip content.
+This path still appears in inject PE helpers, some shim paths, and fuse-bench baselines.
 
----
-
-## 9. Game-local DLLs: the four-stage pipeline
-
-Game-local imports of the main EXE (`steam_api64.dll`, `bink2w64.dll`, …) are the hardest part of “everything from zips.”
-
-### 9.1 Why not “just LoadLibrary GameLayers\steam_api64.dll”
-
-- Root has **no** file on disk → LoadLibrary fails unless VFS SEC_IMAGE path works end-to-end.
-- Steam host’s static imports already map **Steam-disk SEC_IMAGE** modules with **DllMain already run**.
-- FreeLibrary / NtUnmap of those modules is unreliable (static pin, ghost LDR).
-- Manual-map to a **new** base and point IAT there → titled Skyrim window dies (DllMain globals, DRM session tied to original HMODULE).
-- Full WPM of zip layout **including writable sections** after DllMain → destroys initialized data → window dies.
-- “Privatize” (unmap Steam SEC_IMAGE, re-alloc same base, **copy live pages**) preserves DllMain but **does not** put zip PE provenance on code pages—skeptics correctly rejected it as re-labeling Steam content.
-
-### 9.2 Working pipeline
-
-**Stage A — Bootstrap HMODULE (preload, before main-image IAT resolve)**
-
-- Never bare-`LoadLibrary("steam_api64.dll")` as the content strategy.
-- If already mapped (Steam host): record base; log Stage A + zip source path for later WPM.
-- Else: try LoadLibrary full GameLayers path (VFS), else **manual-map zip PE** + optional DllMain.
-- Push `(name, base)` into `forced_bases` for main-image import resolve.
-
-**Stage B — Zip materialize (`overwrite_remote_module_zip_preserve_iat`)**
-
-After main EXE zip PE is written:
-
-1. `pe_layout(zip)` → flat image; apply relocs to host base.
-2. Copy **remote IAT** (and FirstThunk chains) into the image (loader-resolved addresses stay valid).
-3. For each **writable** section: copy **from remote** into image (preserve DllMain-dirtied data).
-4. Re-copy IAT after writable restore.
-5. `VirtualProtectEx` + **WPM entire image** → non-writable sections are now **exactly zip pe_layout**.
-6. Log: `wrote N zip PE bytes to 0x… for steam_api64.dll (IAT+writable preserved, non-writable from zip)`.
-
-**Stage C — Identity proof (`remote_image_matches_zip_layout`)**
-
-- Rebuild expected layout + reloc + IAT mask from remote.
-- Compare **headers** (ImageBase field masked) and **every non-writable section** byte-for-byte.
-- Require ≥ 0x1000 bytes compared.
-- **Must fail** if a single byte at section VA `+0x1000` is flipped (unit-tested).
-- Log: `zip PE identity OK … nonwritable_fnv=… source=zip-window:…zip!steam_api64.dll`.
-
-**Stage D — LDR path spoof**
-
-- Rewrite PEB LDR `FullDllName` / `BaseDllName` to `C:\GameLayers\runtime\<dll>`.
-- `EnumProcessModules` / `GetModuleFileNameEx` report GameLayers, not `steamapps`.
-
-### 9.3 Unit test that gates the path
-
-`game_local_zip_overwrite_preserves_iat_and_identity`:
-
-1. Suspended Steam SkyrimSE host.
-2. Remote LoadLibrary Steam `steam_api64.dll` (Stage A).
-3. Stage B zip overwrite from layer zip window.
-4. Stage C identity must pass; IAT first slot unchanged.
-5. Flip one byte at `base+0x1000` → Stage C must fail.
-
-This fails on privatize-only / header-only “proof” paths.
-
----
-
-## 10. End-to-end launch path (`vfs-launch`)
+### 3.2 Generation B — Director userspace FUSE + thin shim (product path)
 
 ```text
-vfs-launch [--layers C:\GameLayers] [--wait] [--probe]
+Host Session:   mount ZipBackend layers → serve IpcServe (ring + bulk arena)
+Game process:   thin FuseClient → OPEN/READ/CLOSE over ring → director backends
+Launch:         inject dual-layer + optional PE hollow from Session::read_file
 ```
 
-1. Discover numbered zips `1.…`, `2.…`, …
-2. `read_layer` each → `prepare_layer` creates **dirs only** under `runtime\`.
-3. Wipe any leftover payload files under root.
-4. Build merged tree + snapshot; write shim config under `vfs-state`.
-5. Enable plugins in AppData `Plugins.txt` (masters + SkyUI if present).
-6. Set `SteamAppId` / `SteamGameId` = `489830`.
-7. Locate `vfs_shim_dll.dll` + `vfs_payload.dll` near the launcher.
-8. Read zip PE bytes for `skse64_loader.exe` (or `SkyrimSE.exe` with `--se`).
-9. `run_target_with_shim` with `target_pe_bytes` = zip loader PE, virtual image path under `runtime\`.
-10. SKSE (hollowed) CPIW-launches virtual SkyrimSE → Steam host + hollow zip SE + Stages A–D for game-locals.
-11. Game runs: `Data/` opens are **Serve** from zip windows; no BSA/ESP on disk under root.
+Principles:
 
-Probe mode (`--probe` / `vfs-game-probe`) validates sizes/magic for key paths without GPU game loop.
+- **No zip types in the director kernel** — zip is a **backend** implementing `Backend`.  
+- Shim under managed root uses **RPC**, not local zip maps, when FUSE is live.  
+- Hosts configure and **launch**; they rarely stream game data themselves.
+
+**Current launch path (`vfs-launch`)** uses Generation B for content: `Session::mount_zip` + `serve` + `launch`.
 
 ---
 
-## 11. What content is where at runtime
+## 4. End-to-end runtime topology
 
-| Artifact | Origin | On disk under runtime? |
-|----------|--------|-------------------------|
-| `skse64_loader.exe` image | Zip RAM hollow into host | No |
-| `SkyrimSE.exe` image | Zip RAM hollow into **Steam host** | No (host file is Steam install) |
-| `steam_api64.dll` code/const | Zip WPM Stage B after Steam DllMain | No |
-| `bink2w64.dll` code/const | Same | No |
-| SKSE runtime DLL | Loaded via SKSE/VFS paths (GameLayers LDR) | No payload file required |
-| `Data/*.bsa`, `*.esm`, SkyUI | Zip-window Serve / NtReadFile | No |
-| Empty `Data/`, `Scripts/`, … | mkdir skeleton | Dirs only |
-| Overlay writes | `C:\GameLayers\overlay` | Yes (user writes) |
-| Layer zips | `C:\GameLayers\*.zip` | Yes (containers only) |
-
----
-
-## 12. Hard lessons (empirical)
-
-### 12.1 Steam DRM is host-path sensitive
-
-Hollow into `cmd.exe` / random system EXEs → Steam fails early. Prefer real Steam `SkyrimSE.exe` as CreateProcess ApplicationName while cmdline and PEB still advertise GameLayers virtual paths.
-
-### 12.2 CreateRemoteThread exit codes are 32-bit
-
-Remote `LoadLibrary` return via thread exit code truncates 64-bit HMODULEs (`0x7ff8…` → low 32 bits). Always re-resolve bases with `EnumProcessModulesEx`.
-
-### 12.3 IAT is sacred after loader bind
-
-Any zip PE write over a live module must **preserve the remote IAT** (directory + FirstThunks). Zeroing IAT from a fresh `pe_layout` kills imports immediately.
-
-### 12.4 DllMain state lives in writable sections
-
-Code can come from zip; **`.data` / writable** may be dirtied after `DLL_PROCESS_ATTACH`. Overwriting writable with pristine zip zeros breaks Steam API session / bink state. Preserve writable; prove identity on **non-writable** sections.
-
-### 12.5 Same HMODULE, different content strategy
-
-Clone-to-new-base + IAT retarget breaks the titled window. Same-base overwrite (Stage B) keeps HMODULE stable for DRM and for anything that stashed the module handle.
-
-### 12.6 Path spoof ≠ provenance
-
-LDR / GMF strings saying `C:\GameLayers\…` prove **enumeration**, not **byte origin**. Identity must RPM-compare remote pages to `pe_layout(zip)`. Header-only MZ/PE checks are dishonest.
-
-### 12.7 “Privatize” is not enough for “from zips”
-
-Unmap SEC_IMAGE + private re-map of **live** pages drops the Steam file object but content is still “whatever was live,” not necessarily a deliberate zip materialize. Stage B WPM from zip is the content path.
-
-### 12.8 CREATE_SUSPENDED does not guarantee static imports mapped
-
-On some hosts/builds, Steam SkyrimSE suspended has no `steam_api` yet. Stage A must LoadLibrary when missing.
-
-### 12.9 Preload order vs hollow
-
-Inject shim **before** hollow when possible so remote LoadLibrary of game-locals can hit VFS. Finalize zip-overwrite **after** main-image IAT is bound to Stage A bases.
-
-### 12.10 SKSE wants one coherent main module
-
-In-place hollow (matching SizeOfImage) keeps SKSE’s image expectations happier than dual bases / unmap host. Logs “outside of loader control” appear when image identity/handshake is wrong—not only when inject fails.
-
----
-
-## 13. Verification bar (what “done” meant for the goal)
-
-Acceptance-style checks that were used repeatedly:
-
-1. **Dual consecutive launches:** titled window `Skyrim Special Edition` ≥ ~30s; SKSE log `init complete`; SkyUI referenced in SKSE log.
-2. **Zero extract:** managed root recursive file count for archive payloads = 0; no new `vfs-run-*` / `vfs-sse-*` / `vfs-sec-*` TEMP staging.
-3. **Module paths:** `EnumProcessModules` shows `steam_api64`, `bink2w64`, `skse*`, `SkyrimSE` under `C:\GameLayers\runtime\…`, not `steamapps`.
-4. **Zip provenance logs:** `wrote N zip PE bytes` for main EXEs and game-local DLLs; `zip PE identity OK … source=zip-window:…`.
-5. **In-repo tests:** `cargo test -p vfs-inject --lib` including Stage B/C identity test; zip-serve / hollow no-stage tests.
-
-Scratch evidence typically under:
-
-`%LOCALAPPDATA%\Temp\grok-goal-…\implementer\`  
-(`dual-launch-transcript.txt`, `launch-1.log`, `module-paths.txt`, `no-temp-extract.txt`, `cargo-zip.txt`, `skse-runtime.log`).
-
----
-
-## 14. IPC / server path (architecture beyond the game launch)
-
-Though the Skyrim path is largely **in-process snapshot + shim**, the workspace also has:
-
-- **vfs-win:** section-backed shared memory.
-- **vfs-ipc:** lock-free control ring (no OS file APIs inside the ring code—G11 constraint for recursion safety).
-- **vfs-server:** authoritative process builds/publishes snapshot and answers IPC.
-
-These support multi-process directors and future tools without baking zip parsers into every client.
-
----
-
-## 15. Security / threat framing (explicit non-goals)
-
-This stack is **modding infrastructure** (USVFS/MO2 successor thinking), not a red-team kit:
-
-- Process hollowing and PEB spoofing exist to satisfy **Windows loader + Steam DRM + empty install root**, not to hide malware.
-- No kernel drivers.
-- No claim of anti-cheat bypass as a product goal.
-- Stored-zip-only; no general archive unpacker for arbitrary malware samples.
-
----
-
-## 16. Open edges and future work
-
-| Topic | Notes |
-|-------|--------|
-| Deflated zip entries | Out of scope; would need decompress cache (conflicts with zero-extract purity). |
-| True VFS LoadLibrary for game-locals from cold start | Would need early Ldr hooks before Steam static imports; Steam DRM still wants a real host EXE. |
-| Writable-section provenance | Intentionally left as DllMain live pages; only non-writable proven vs zip. |
-| Full `SEC_IMAGE` kernel semantics | Synth SEC_IMAGE is manual-map, not a real section object; some APIs may still distinguish. |
-| Child dual-layer | Same handoff as parent; document/complete parity. |
-| Performance | Whole-file map of 16 GB zip relies on OS demand paging; fine for reads, watch working set. |
-| Extract `game_local_dll.rs` | Strategist recommendation: keep Stage A–D in one module for maintainability. |
-
----
-
-## 17. Mental model (one page)
-
-```
-                    ┌─────────────────────────────┐
-                    │  C:\GameLayers\*.zip (Stored)│
-                    └──────────────┬──────────────┘
-                                   │ vfs-zip → layers
-                                   ▼
-                    ┌─────────────────────────────┐
-                    │  vfs-core tree + vfs-shared  │
-                    │  snapshot (no PE on root)    │
-                    └──────────────┬──────────────┘
-                                   │ config to shim
-         CreateProcess(Steam host) │
-                    ┌──────────────▼──────────────┐
-                    │  Game process               │
-                    │  ┌─ early payload (4 stubs) │
-                    │  ├─ full shim + Engine      │
-                    │  ├─ hollow: zip PE → main   │
-                    │  ├─ Stage A–D game-locals   │
-                    │  └─ Data/ reads → zipserve  │
-                    └─────────────────────────────┘
-                                   │
-                    User sees GameLayers paths;
-                    kernel may still have Steam host file
-                    for DRM; live code/const from zip WPM;
-                    assets from zip windows.
+```text
+┌──────────────────────────── Host process ─────────────────────────────┐
+│  vfs-launch / custom host / C language binding                          │
+│                                                                         │
+│  Session                                                                │
+│   ├─ virtual_root, overlay, state_dir                                   │
+│   ├─ Director kernel (mount table, fh table, overlay resolve)         │
+│   ├─ ZipBackend / DiskBackend / C vfs_backend_ops                     │
+│   └─ IpcServe: N workers, named section, events                         │
+│                                                                         │
+│  launch(): locate shim+payload, hollow PE from VFS, run_target_with_shim│
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │  Named shared section
+                                │  [ control ring | bulk data arena ]
+                                │  Named events (wake, not file pipes)
+┌───────────────────────────────▼─────────────────────────────────────────┐
+│  Game process (Steam host image + hollowed zip PE + injected DLLs)      │
+│                                                                         │
+│  vfs-payload (early): NtCreate/Open/QueryAttributes* pre-init stubs     │
+│  vfs-shim (full):     remaining NT/kernel32 hooks after loader lock     │
+│  FuseClient:          OPEN/READ/CLOSE → ring → arena copy_to user buf   │
+│  Synth handles:       map fh ↔ NT handle for game code                  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**One sentence:**  
-VFS is a pure layered FS core plus an injected Windows shim that **serves Stored zip windows as files** and **materializes executables in memory** (hollow + zip-overwrite DLLs), so a full SKSE Skyrim stack runs from three GameLayers archives with an empty managed root.
+### 4.1 Isolation invariant
+
+| Component | Opens layer zips? | Sees game user buffers? |
+|-----------|-------------------|-------------------------|
+| Director / ZipBackend | **Yes** | Only if remote WPM were used (removed); bulk uses shared arena |
+| Thin FuseClient / hooks | **No** (FUSE path) | Yes — NtReadFile buffer |
+| Payload / early redirects | Redirect table only | N/A |
+
+This is the security/architecture story for a whitepaper: **the game process is not trusted with archive layout**; it only speaks a FUSE-like protocol over shared memory the parent created.
 
 ---
 
-## 18. Key file index
+## 5. Userspace FUSE kernel (`vfs-director`)
 
-| Path | Why it matters |
-|------|----------------|
-| `crates/vfs-launch/src/main.rs` | Director / launch entry |
-| `crates/vfs-zip/src/lib.rs` | ZIP64 Stored → windows |
-| `crates/vfs-core/src/source.rs` | Disk vs zip-window encoding |
-| `crates/vfs-redirect/src/lib.rs` | Decisions, dir merge, whiteouts |
-| `crates/vfs-shim/src/engine.rs` | Overlay + snapshot engine |
-| `crates/vfs-shim/src/hook.rs` | All NT hooks, CPIW hollow |
-| `crates/vfs-shim/src/zipserve.rs` | Synth handles + maps |
-| `crates/vfs-inject/src/ghostly.rs` | Hollow, preload, Stage B–D |
-| `crates/vfs-inject/src/map.rs` | pe_layout, relocs, imports |
-| `crates/vfs-inject/src/inject.rs` | Dual-layer / pre-init arm |
-| `crates/vfs-payload/src/lib.rs` | Early 4-stub patches |
-| `docs/superpowers/specs/*` | Design history (zip layers, dual-layer, hooks, …) |
+### 5.1 Roles
+
+| Type | Role |
+|------|------|
+| **`Director`** | Mount table, path normalize, overlay resolve, global file handles |
+| **`Backend`** | `getattr` / `readdir` / `open` / `read` / `release` |
+| **`Session`** | Paths + kernel + `IpcServe` + **`launch`** (host entrypoint) |
+| **`IpcServe`** | Shared section, ring init, worker pool, env for child |
+
+### 5.2 Mount and resolve semantics
+
+1. Paths normalized to `/` separators; `..` escaping rejected.  
+2. **Later mounts win** on `getattr` / `open` (walk mounts high → low).  
+3. **`readdir`** merges children from all mounts that have the directory; same name → later wins (case-folded merge keys).  
+4. **Zip backends** perform **case-insensitive** path lookup (Windows game paths).  
+5. OPEN allocates a **global `fh`** mapping to `(backend, backend_handle, size, is_dir)`.  
+6. READ/CLOSE dispatch only to that backend.
+
+### 5.3 Host API (launch-centric)
+
+Rust:
+
+```rust
+let mut s = Session::new();
+s.set_root(r"C:\GameLayers\runtime");
+s.set_overlay(r"C:\GameLayers\overlay");
+s.set_state_dir(r"C:\GameLayers\vfs-state");
+s.mount_zip(r"C:\GameLayers\1. Skyrim Special Edition.zip")?;
+// … SKSE, SkyUI …
+s.serve()?;
+s.launch(&LaunchOpts {
+    image: "skse64_loader.exe".into(),
+    wait: true,
+    hollow_pe: true,
+    ..Default::default()
+})?;
+```
+
+C: `crates/vfs-director/include/vfs.h` — `vfs_director_create`, `set_*`, `mount` / `mount_zip`, `serve`, **`vfs_launch`**. Host open/read are optional inspection tools.
+
+### 5.4 Why backends are separate from the kernel
+
+Zip knowledge (CD, ZIP64, local headers, Stored windows) is confined to **`vfs-zip::ZipBackend`**. The director only sees `Backend`. That enables:
+
+- Custom language backends via C function pointers  
+- Disk backends for tests  
+- Future pack formats without rewriting the kernel  
+
+The ops contract lives in **`vfs-protocol`** (`Backend`, `Stat`, KIND_*, status codes) so zip does not depend on the heavy host stack.
 
 ---
 
-## 19. Glossary
+## 6. Zip backend and Stored windows
+
+### 6.1 ZIP64 central directory
+
+`ZipBackend::open`:
+
+1. Open container; locate EOCD / ZIP64 EOCD.  
+2. Read central directory entries.  
+3. For each Stored file, compute **true data offset** from the **local file header** (local name/extra lengths can differ from the central directory).  
+4. Build path → `{ data_off, size, mtime, is_dir }` plus a **casefold index**.  
+5. OPEN keeps an OS `File` per open handle; READ seeks to `base + offset`.
+
+No full-archive extract. The 16 GB base zip is **never** copied as a whole; the OS page cache faults container pages as windows are read.
+
+### 6.2 Why Stored-only is a feature, not a limitation (for this product)
+
+For distribution of already-built game/mod packages as Stored archives:
+
+- Random access is seek + read.  
+- No CPU inflate on every BSA page.  
+- IPC throughput can approach local disk for warm cache.  
+
+Deflated packages would require a different design (inflate-to-cache, seekable compression, or extract).
+
+### 6.3 Legacy `read_layer`
+
+`vfs-zip::read_layer` still builds a `vfs-core::Layer` of zip-window **source blobs** for transitional inject/snapshot code. The **launch content path** no longer double-parses every zip solely to discard PE bytes: mounts use `ZipBackend` once; PE hollow reads through the Session/VFS.
+
+---
+
+## 7. IPC: control ring and bulk arena
+
+### 7.1 Control ring (`vfs-ipc`)
+
+- Caller-owned shared segment; no OS in the pure ring crate.  
+- Slots: FREE → CLAIMED → REQUESTED → PROCESSING → COMPLETED → free.  
+- Fixed payload capacity (default **1 MiB**).  
+- Spin notifiers for tests; **Windows events** in production (`vfs-win::EventNotifier`) so idle rings do not burn a core forever.  
+
+**Recursion rule:** IPC must not use hooked `NtCreateFile`/`NtReadFile` (no pipes/sockets through the game’s own hooks). Shared memory + events.
+
+### 7.2 Bulk arena
+
+Large READs set `FLAG_READ_BULK`:
+
+1. Director fills a **per-slot bank** in the shared section (disk/zip → bank via `fill_bank` / `read_into`, no intermediate `Vec` on the happy path).  
+2. Ring response is tiny: status + bytes_read + arena offset (BULK bit).  
+3. Client `SharedSeg::copy_to` into the game buffer (NtReadFile buffer on the phase-1 path).
+
+Default arena ~**32 MiB** → ~1 MiB banks at 32 slots.
+
+**Copies (bulk):** typically two — container → arena, arena → user buffer.
+
+### 7.3 Performance (order of magnitude)
+
+Release spin-bench numbers (host-dependent; see `docs/benchmarks/`):
+
+| Metric | Ballpark |
+|--------|----------|
+| HEARTBEAT p50 | ~1 µs |
+| Small READ p50 | ~5–10 µs |
+| Sequential bulk (disk-like) | ~1–2 GiB/s class in-process spin |
+| Sequential bulk (zip ESM) | ~0.8 GiB/s class after bulk optimizations |
+| vs OpenTable direct | ~1.4–3× overhead depending on cache |
+
+Optimizations that mattered: open-file reuse, unlock during I/O, bulk arena, 1 MiB payload, worker pool, skip readahead on large bulk, decode-into / copy_to.
+
+Remote `WriteProcessMemory` into game buffers was prototyped and **removed**: bulk arena + local copy was simpler and faster for the measured disk path.
+
+---
+
+## 8. Thin shim and FUSE client
+
+### 8.1 Hooks (full shim)
+
+| API | Role under FUSE |
+|-----|-----------------|
+| `NtCreateFile` / `NtOpenFile` | Path under root → OPEN; synth handle |
+| `NtReadFile` | `read_fragmented` into **user buffer** (no intermediate tmp) |
+| `NtQuery*Attributes*` / directory enum | GETATTR / READDIR |
+| `NtClose` | CLOSE |
+| CPIW / GMF | Child inject, path spoofing |
+
+When FUSE is not live, legacy Engine/snapshot/zipserve paths may still apply (transitional).
+
+### 8.2 FuseClient
+
+- Connects via env: section name, map size (`VFS_RING_BYTES` = **full mapping**), arena length, events.  
+- Large fragments: bulk + pipeline (`submit_many`).  
+- Small fragments: inline ring payload.  
+
+### 8.3 Dual-layer inject (why two DLLs)
+
+| Layer | When | Owns |
+|-------|------|------|
+| **vfs-payload** (`no_std`) | Pre-`LdrpInitializeProcess` complete | Permanent 14-byte jumps on 4 ntdll stubs: Create/Open/QueryAttributes* |
+| **vfs-shim** | After loader lock; kernel32 available | Full Engine + remaining detours via `retour`; **does not** re-patch the four early stubs |
+
+**Handoff:** early body uses a redirect table for static-import DLLs, then secondary dispatch into full Engine once live. Double-patching the same stubs is a classic failure mode this design avoids.
+
+Sequence sketch:
+
+1. CreateProcess host (Steam Skyrim) suspended / gated.  
+2. Arm payload + inject full shim.  
+3. Ready event / ready file.  
+4. Optional OEP late-entry sync bootstrap.  
+5. Hollow primary PE from zip RAM.  
+6. Resume.
+
+---
+
+## 9. Process hollowing and Steam DRM
+
+### 9.1 Why hollow
+
+- Managed root has **no** durable `skse64_loader.exe` / `SkyrimSE.exe` payload files.  
+- CreateProcess needs a real image file.  
+- Steam checks process image authenticity; hollowed arbitrary system EXEs fail.
+
+**Approach:** CreateProcess **real Steam** `SkyrimSE.exe`, then **WriteProcessMemory** zip PE image into the process (and fix PEB/relocs as needed). Archive PE never becomes a durable file under GameLayers.
+
+### 9.2 Game-local DLLs and SEC_IMAGE
+
+Zip-backed PE loaded as **SEC_IMAGE** is not a normal file mapping. The stack has evolved through:
+
+- Synthetic sections + local manual map  
+- Remote LoadLibrary of Steam/system modules  
+- Stage pipelines to retarget LDR entries and prove zip PE identity in remote process memory  
+
+These details are highly Windows-version and Steam-sensitive; the whitepaper-relevant claim is:
+
+> **File content** for data files can be pure windows; **process images** still require a real host file for CreateProcess and careful remote PE management for DRM and the loader.
+
+### 9.3 Plugins enablement
+
+SSE enablement files under `%LOCALAPPDATA%\Skyrim Special Edition\` (`Plugins.txt`, `loadorder.txt`) are **config**, not archive extract. Launch enumerates top-level `Data/*.{esm,esp,esl}` via director readdir and writes enable lists so SkyUI and masters load.
+
+---
+
+## 10. Crate architecture (after consolidation)
+
+Workspace root uses `panic = "abort"` for the no_std payload.
+
+### 10.1 Product path
+
+| Crate | Responsibility |
+|-------|----------------|
+| **vfs-protocol** | Opcodes, status, wire codecs, **`Backend` ops** |
+| **vfs-ipc** | Control ring, **DataArena**, default caps |
+| **vfs-win** | Named sections, event notifiers |
+| **vfs-zip** | ZipBackend + legacy `read_layer` |
+| **vfs-director** | Director, Session, IpcServe, C ABI, launch |
+| **vfs-inject** | CreateProcess, inject, hollow, PE tools |
+| **vfs-payload** | Early no_std stubs |
+| **vfs-shim** / **vfs-shim-dll** | Hooks + injectable DLL |
+| **vfs-launch** | Skyrim CLI host |
+
+### 10.2 Legacy / transitional
+
+| Crate | Responsibility |
+|-------|----------------|
+| **vfs-core** | Pure merge tree, Source disk/zip-window |
+| **vfs-shared** | Flattened snapshot |
+| **vfs-redirect** | Decision core for snapshot Engine |
+| **vfs-server** | Legacy tree Server + OpenTable (benches/e2e) |
+
+### 10.3 Dependency rationale (why not one crate)
+
+- **payload** isolation (`no_std`)  
+- **protocol** leaf for zip without host/inject  
+- **ipc** free of Win32 except through vfs-win  
+- **inject** vs **shim** (parent vs child)  
+- **director** is the multi-language host surface  
+
+Recently merged: `vfs-ops` → `vfs-protocol`; `DataArena` → `vfs-ipc` (director no longer depends on legacy server for the arena).
+
+---
+
+## 11. Launch workflow (concrete)
+
+Expected layout:
+
+```text
+C:\GameLayers\
+  1. Skyrim Special Edition.zip
+  2. SKSE 2.2.6.zip
+  3. SkyUI 6.11.zip
+  runtime\          # virtual root (payload wiped before launch)
+  overlay\
+  vfs-state\        # fuse.cfg, shim.cfg, ready.flag
+```
+
+`vfs-launch` steps:
+
+1. Discover numbered `*.zip`.  
+2. Wipe residual payload files under runtime.  
+3. `Session::mount_zip` each layer (single CD parse per zip).  
+4. Verify PE exists via getattr; enable plugins from readdir.  
+5. `serve()` — section, workers, env for child.  
+6. `launch(skse64_loader.exe | SkyrimSE.exe)` with hollow.  
+7. Detach: `mem::forget(session)` so IPC outlives the call (host process must stay alive).
+
+`--probe` validates TES4 heads and zero root payload files without starting the game.
+
+---
+
+## 12. Security, isolation, and trust model
+
+| Trust boundary | Claim |
+|----------------|--------|
+| Game process | Untrusted with archive layout; may only use FUSE protocol |
+| Shared section | Parent-created; child maps by name/env |
+| C backends | Host must provide Sync-safe userdata; session C API is single-threaded |
+| PE hollow | Uses elevated parent rights on the child; expected for inject tools |
+
+Threat model is **modding convenience and anti-extract**, not multi-tenant sandboxing of hostile games. Still, keeping zip I/O out of the game reduces the surface of “what the game can accidentally touch.”
+
+---
+
+## 13. Performance story (whitepaper-ready claims)
+
+### 13.1 Cost centers
+
+1. Disk/zip sequential bandwidth  
+2. Memory copies (container → arena → user)  
+3. Per-RPC fixed costs (slot claim, atomics, wake)  
+4. Open/seek vs pooled handles  
+
+### 13.2 What moved the needle
+
+- Keep OS handles on OPEN  
+- Do not hold global maps across I/O  
+- Bulk arena + 1 MiB-class chunks  
+- Multiple server workers  
+- Avoid intermediate Vec on bulk fill  
+- Skip useless readahead on large sequential bulk  
+- Measure with release builds and real zip windows  
+
+### 13.3 What did not win
+
+- Director WPM into game buffers for large sequential (worse/noisier than bulk arena on disk)  
+- Pipelining alone with a single overloaded server thread  
+
+Evidence lives under `docs/benchmarks/` and `docs/performance-rpc-analysis.md`.
+
+---
+
+## 14. Lessons learned (engineering narrative)
+
+1. **CreateProcess is not a VFS problem alone** — DRM and image path force a real host PE.  
+2. **Static imports race the loader** — pre-init ownership of a few NT stubs is mandatory.  
+3. **Do not double-patch ntdll** — dual-layer ownership model.  
+4. **Snapshot Serve vs FUSE RPC** — local zip maps in the game fight the isolation story; director RPC is cleaner and multi-language friendly.  
+5. **Stored zip windows scale** — ZIP64 + local header fixup is enough for 16 GB bases.  
+6. **Measure copies** — “zero copy” marketing fails if you still Vec through the ring.  
+7. **Migration debt is real** — dual stacks (tree Server vs IpcServe) must be documented and retired deliberately.  
+8. **Casefold on Windows is not optional** for game paths.  
+
+---
+
+## 15. Future directions
+
+| Direction | Notes |
+|-----------|--------|
+| Retire legacy tree Server content path | Point all benches at IpcServe |
+| Drop remaining `read_layer` from inject | PE only via backends |
+| Feature-split director (kernel vs launch) | Smaller pure-kernel cdylib |
+| Readahead in backends | Recover OpenTable B5 benefits |
+| Overlay write productization | Spec exists historically |
+| Deflated zip / other packs | New Backend implementations |
+| Multi-session env | Avoid process-global set_var |
+
+---
+
+## 16. Related documents
+
+| Path | Content |
+|------|---------|
+| [overview.md](./overview.md) | Short overview |
+| [superpowers/specs/2026-07-15-director-fuse-thin-shim-design.md](./superpowers/specs/2026-07-15-director-fuse-thin-shim-design.md) | Thin shim + director FUSE |
+| [superpowers/specs/2026-07-15-userspace-fuse-director-c-abi-design.md](./superpowers/specs/2026-07-15-userspace-fuse-director-c-abi-design.md) | Session + C ABI |
+| [superpowers/specs/2026-07-14-zip-backed-layers-design.md](./superpowers/specs/2026-07-14-zip-backed-layers-design.md) | Zip windows |
+| [superpowers/specs/2026-07-14-dual-layer-inject-handoff-design.md](./superpowers/specs/2026-07-14-dual-layer-inject-handoff-design.md) | Dual-layer inject |
+| [superpowers/specs/2026-07-13-vfs-ipc-control-ring-design.md](./superpowers/specs/2026-07-13-vfs-ipc-control-ring-design.md) | Control ring |
+| [benchmarks/](./benchmarks/) | Latency/throughput |
+| [performance-rpc-analysis.md](./performance-rpc-analysis.md) | Perf analysis |
+
+---
+
+## 17. Glossary
 
 | Term | Meaning |
 |------|---------|
-| **Stored** | Zip compression method 0; raw bytes contiguous in archive |
-| **Zip window** | `(container_path, offset, length)` into a zip file |
-| **Serve** | Decision: open returns synthetic handle over a window |
-| **Redirect** | Decision: rewrite path to another real file (disk/overlay) |
-| **Snapshot** | Flattened published VFS image for the shim |
-| **Hollow** | CreateProcess real host; WPM different PE into process |
-| **Stage A–D** | Game-local DLL bootstrap → zip WPM → identity → LDR spoof |
-| **Forced bases** | Remote HMODULEs for game-locals used when resolving main IAT |
-| **GMF** | GetModuleFileName spoof toward virtual root |
-| **CPIW** | CreateProcessInternalW hook for child hollow |
-| **Whiteout** | Overlay tombstone hiding a lower-layer name |
+| **Director** | Parent/host userspace FUSE kernel |
+| **Session** | Host entrypoint: mounts + serve + launch |
+| **Backend** | Zip/disk/C provider of getattr/open/read |
+| **Stored window** | Uncompressed zip payload region |
+| **Bulk arena** | Shared banks for large READ payloads |
+| **Synth handle** | Fake NT handle for virtual files |
+| **Hollow** | Replace suspended process image with zip PE |
+| **Dual-layer inject** | Pre-init payload + full shim without double-patch |
+| **Snapshot** | Flattened vfs-core tree for legacy Serve path |
 
 ---
 
-*Document generated from the `C:\oss\vfs` codebase, design specs under `docs/superpowers/`, and the Skyrim zip-launch iteration work (hollow, dual-layer inject, game-local Stage B/C identity). Reflects the shipping approach as of the zip-overwrite + dual-launch green path.*
+## 18. Closing thesis (for a whitepaper abstract)
+
+> Modern Windows games can be virtualized for modding **without kernel drivers** and **without extracting multi-gigabyte archives**, by combining (1) **Stored ZIP byte windows**, (2) a **parent-process FUSE authority** over shared memory, (3) a **thin NT-API client** in the game, and (4) **careful PE process creation** that satisfies CreateProcess and platform DRM. The decisive architectural split is that **content I/O belongs to the director**, while the game process only remaps paths and consumes a FUSE-like protocol—yielding isolation, multi-language hosts, and competitive sequential throughput once bulk transfer is engineered as carefully as the hooks.
+
+---
+
+*End of summary. For implementation plans and historical task breakdowns, see `docs/superpowers/plans/`.*

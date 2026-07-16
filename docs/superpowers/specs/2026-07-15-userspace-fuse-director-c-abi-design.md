@@ -1,7 +1,7 @@
 # Userspace FUSE Director + C ABI — Design Spec
 
-**Status:** Approved (dialogue 2026-07-15); implementation in progress  
-**Date:** 2026-07-15  
+**Status:** Implemented (Session + C ABI + launch; see `docs/vfs-summary.md`)  
+**Date:** 2026-07-15 (status updated 2026-07-16)  
 **Type:** Architecture  
 
 ## 1. Goal
