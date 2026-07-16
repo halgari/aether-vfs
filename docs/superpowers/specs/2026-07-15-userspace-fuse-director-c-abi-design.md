@@ -53,15 +53,22 @@ Status codes align with `vfs-protocol` (`0` OK, negative errors).
 
 Rust equivalent: `trait Backend: Send + Sync` with the same methods.
 
-## 5. Host / driver API (C)
+## 5. Host / driver API (C) — launch-centric
 
-- `vfs_director *vfs_director_create(void);`
-- `void vfs_director_destroy(vfs_director *);`
-- `int vfs_director_mount(vfs_director *, const char *prefix, const vfs_backend_ops *, void *userdata);`
-- `int vfs_getattr / vfs_readdir / vfs_open / vfs_read / vfs_close` — in-process client of the kernel  
-- Later: ring serve helpers on the same director instance  
+Primary workflow:
+
+1. `vfs_director_create`
+2. `vfs_director_set_root` / `set_overlay` / `set_state_dir`
+3. `vfs_director_mount` (backends: zip via `ZipBackend`, disk, or C ops)
+4. `vfs_director_serve` — start ring so the child can remap I/O
+5. `vfs_launch` — CreateProcess + inject; child I/O under root goes through this session
+6. `vfs_director_destroy`
+
+Optional host inspection: `vfs_getattr` / `vfs_open` / `vfs_read` / `vfs_close` (not the hot path).
 
 Mount order: **later mounts override earlier** for the same path (overlay).
+
+Rust: [`Session`](crates/vfs-director/src/session.rs) (`serve` + `launch`).
 
 ## 6. Kernel behavior
 
