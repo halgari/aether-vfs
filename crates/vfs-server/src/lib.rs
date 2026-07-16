@@ -7,10 +7,8 @@ pub mod arena;
 pub mod handler;
 pub mod open_table;
 pub mod proto;
-pub mod remote;
 pub mod server;
 
 pub use arena::DataArena;
 pub use open_table::OpenTable;
-pub use remote::RemoteMemWriter;
 pub use server::{Server, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};

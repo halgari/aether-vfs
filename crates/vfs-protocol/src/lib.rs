@@ -33,12 +33,8 @@ pub const OPEN_WRITE: u32 = 2;
 
 /// Ring/request flag: prefer bulk-arena READ (data in shared arena, not ring payload).
 pub const FLAG_READ_BULK: u32 = 0x1;
-/// Ring/request flag: director writes data into `target_va` in the registered process (WPM).
-pub const FLAG_READ_REMOTE: u32 = 0x2;
 /// High bit on READ response `bytes_read` means bulk: data lives at arena_offset.
 pub const READ_RESP_BULK_BIT: u32 = 0x8000_0000;
-/// Bit on READ response `bytes_read`: remote write completed; no payload body.
-pub const READ_RESP_REMOTE_BIT: u32 = 0x4000_0000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttrResp {
@@ -68,8 +64,6 @@ pub struct ReadReq {
     pub fh: u64,
     pub offset: u64,
     pub len: u32,
-    /// When set (with `FLAG_READ_REMOTE`), director writes bytes to this VA in the game.
-    pub target_va: Option<u64>,
 }
 
 pub fn encode_path_req(vpath: &str) -> Vec<u8> {
@@ -176,18 +170,13 @@ pub fn decode_open_resp(p: &[u8]) -> Option<OpenResp> {
     Some(OpenResp { fh, size, is_dir })
 }
 
-/// READ req: `fh:u64 | offset:u64 | len:u32 | pad:u32 [| target_va:u64]`
-///
-/// When `target_va` is present the wire size is 32 bytes (remote READ).
+/// READ req: `fh:u64 | offset:u64 | len:u32 | pad:u32`
 pub fn encode_read_req(r: &ReadReq) -> Vec<u8> {
-    let mut b = Vec::with_capacity(if r.target_va.is_some() { 32 } else { 24 });
+    let mut b = Vec::with_capacity(24);
     b.extend_from_slice(&r.fh.to_le_bytes());
     b.extend_from_slice(&r.offset.to_le_bytes());
     b.extend_from_slice(&r.len.to_le_bytes());
     b.extend_from_slice(&0u32.to_le_bytes());
-    if let Some(va) = r.target_va {
-        b.extend_from_slice(&va.to_le_bytes());
-    }
     b
 }
 
@@ -198,17 +187,7 @@ pub fn decode_read_req(p: &[u8]) -> Option<ReadReq> {
     let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
     let offset = u64::from_le_bytes(p[8..16].try_into().ok()?);
     let len = u32::from_le_bytes(p[16..20].try_into().ok()?);
-    let target_va = if p.len() >= 32 {
-        Some(u64::from_le_bytes(p[24..32].try_into().ok()?))
-    } else {
-        None
-    };
-    Some(ReadReq {
-        fh,
-        offset,
-        len,
-        target_va,
-    })
+    Some(ReadReq { fh, offset, len })
 }
 
 /// READ resp: `bytes_read:u32 | pad:u32 | data[bytes_read]`
@@ -233,14 +212,14 @@ pub fn decode_read_resp(p: &[u8]) -> Option<Vec<u8>> {
 
 /// **A3:** copy READ response data into `out` without allocating a second Vec.
 /// Returns bytes copied (may be less than `out.len()` on short/EOF reads).
-/// Inline responses only (not bulk/remote).
+/// Inline responses only (not bulk).
 pub fn decode_read_resp_into(p: &[u8], out: &mut [u8]) -> Option<usize> {
     if p.len() < 8 {
         return None;
     }
     let raw = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    if raw & (READ_RESP_BULK_BIT | READ_RESP_REMOTE_BIT) != 0 {
-        return None; // bulk or remote
+    if raw & READ_RESP_BULK_BIT != 0 {
+        return None; // use decode_read_bulk_resp + arena
     }
     let n = raw as usize;
     if p.len() < 8 + n {
@@ -249,42 +228,6 @@ pub fn decode_read_resp_into(p: &[u8], out: &mut [u8]) -> Option<usize> {
     let n = n.min(out.len());
     out[..n].copy_from_slice(&p[8..8 + n]);
     Some(n)
-}
-
-/// Remote READ response: data already written to `target_va`; header only.
-pub fn encode_read_resp_remote(bytes_read: u32) -> Vec<u8> {
-    let mut b = Vec::with_capacity(8);
-    b.extend_from_slice(&(bytes_read | READ_RESP_REMOTE_BIT).to_le_bytes());
-    b.extend_from_slice(&0u32.to_le_bytes());
-    b
-}
-
-pub fn is_read_resp_remote(p: &[u8]) -> bool {
-    p.len() >= 4
-        && (u32::from_le_bytes(p[0..4].try_into().unwrap_or([0; 4])) & READ_RESP_REMOTE_BIT) != 0
-}
-
-pub fn decode_read_remote_resp(p: &[u8]) -> Option<u32> {
-    if p.len() < 8 {
-        return None;
-    }
-    let raw = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    if raw & READ_RESP_REMOTE_BIT == 0 {
-        return None;
-    }
-    Some(raw & !READ_RESP_REMOTE_BIT & !READ_RESP_BULK_BIT)
-}
-
-/// REGISTER_PROCESS req: `pid:u32`
-pub fn encode_register_process_req(pid: u32) -> Vec<u8> {
-    pid.to_le_bytes().to_vec()
-}
-
-pub fn decode_register_process_req(p: &[u8]) -> Option<u32> {
-    if p.len() < 4 {
-        return None;
-    }
-    Some(u32::from_le_bytes(p[0..4].try_into().ok()?))
 }
 
 /// Bulk READ response: `bytes_read|BULK_BIT : u32 | pad:u32 | arena_offset:u64`
@@ -371,16 +314,8 @@ mod tests {
             fh: 7,
             offset: 10,
             len: 4,
-            target_va: None,
         };
         assert_eq!(decode_read_req(&encode_read_req(&req)), Some(req));
-        let remote = ReadReq {
-            fh: 2,
-            offset: 100,
-            len: 4096,
-            target_va: Some(0x7ff0_0000),
-        };
-        assert_eq!(decode_read_req(&encode_read_req(&remote)), Some(remote));
         let data = b"abcd";
         assert_eq!(
             decode_read_resp(&encode_read_resp(data)).as_deref(),
@@ -389,10 +324,6 @@ mod tests {
         let mut out = [0u8; 8];
         assert_eq!(decode_read_resp_into(&encode_read_resp(data), &mut out), Some(4));
         assert_eq!(&out[..4], b"abcd");
-        let er = encode_read_resp_remote(42);
-        assert!(is_read_resp_remote(&er));
-        assert_eq!(decode_read_remote_resp(&er), Some(42));
-        assert_eq!(decode_register_process_req(&encode_register_process_req(1234)), Some(1234));
     }
 
     #[test]

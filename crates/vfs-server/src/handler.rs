@@ -1,22 +1,18 @@
-//! Opcode dispatcher (stateless metadata + stateful open table + bulk arena + remote).
+//! Opcode dispatcher (stateless metadata + stateful open table + bulk arena).
 
 use vfs_core::{NodeKind, VfsError, VfsTree};
 use vfs_protocol::{
     decode_close_req, decode_open_req, decode_path_req, decode_read_req, encode_getattr_resp,
-    encode_open_resp, encode_read_resp, encode_read_resp_bulk, encode_read_resp_remote,
-    encode_readdir_resp, AttrResp, DirEntryWire, FLAG_READ_BULK, FLAG_READ_REMOTE, OP_CLOSE,
-    OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ, OP_READDIR, ST_BAD_REQUEST, ST_IO_ERROR,
-    ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
+    encode_open_resp, encode_read_resp, encode_read_resp_bulk, encode_readdir_resp, AttrResp,
+    DirEntryWire, FLAG_READ_BULK, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ, OP_READDIR,
+    ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
 };
 
 use crate::arena::DataArena;
 use crate::open_table::{max_read_data, OpenTable};
-use crate::remote::RemoteMemWriter;
 
 /// Threshold: READs larger than this prefer bulk arena when available (**B1**).
 pub const BULK_THRESHOLD: u32 = 64 * 1024;
-/// Cap a single remote (WPM) READ fragment.
-pub const MAX_REMOTE_READ: usize = 1024 * 1024;
 
 pub fn dispatch(tree: &VfsTree, opcode: u32, payload: &[u8]) -> (i32, Vec<u8>) {
     match opcode {
@@ -73,10 +69,10 @@ pub fn dispatch_with_table(
     payload: &[u8],
     payload_cap: u32,
 ) -> (i32, Vec<u8>) {
-    dispatch_full(tree, table, opcode, payload, 0, payload_cap, None, None)
+    dispatch_full(tree, table, opcode, payload, 0, payload_cap, None)
 }
 
-/// Dispatch with ring flags + optional bulk arena (**B1**) + remote writer (**phase 2**).
+/// Dispatch with ring flags + optional bulk arena (**B1**).
 pub fn dispatch_full(
     tree: &VfsTree,
     table: &OpenTable,
@@ -85,7 +81,6 @@ pub fn dispatch_full(
     flags: u32,
     payload_cap: u32,
     arena: Option<(&DataArena<'_>, u32 /*slot*/)>,
-    remote: Option<&dyn RemoteMemWriter>,
 ) -> (i32, Vec<u8>) {
     match opcode {
         OP_OPEN => match decode_open_req(payload) {
@@ -97,47 +92,16 @@ pub fn dispatch_full(
         },
         OP_READ => match decode_read_req(payload) {
             Some(req) => {
-                // **Phase 2:** director writes into game VA (no data in ring/arena).
-                if (flags & FLAG_READ_REMOTE) != 0 {
-                    let va = match req.target_va {
-                        Some(v) if v != 0 => v,
-                        _ => return (ST_BAD_REQUEST, Vec::new()),
-                    };
-                    let Some(writer) = remote else {
-                        return (ST_IO_ERROR, Vec::new());
-                    };
-                    let max = (req.len as usize)
-                        .min(MAX_REMOTE_READ)
-                        .min(arena.map(|(a, _)| a.bank_size).unwrap_or(MAX_REMOTE_READ));
-                    let mut staging = vec![0u8; max];
-                    match table.read_into(req.fh, req.offset, max, &mut staging) {
-                        Ok(n) => {
-                            staging.truncate(n);
-                            match writer.write_at(va, &staging) {
-                                Ok(()) => (ST_OK, encode_read_resp_remote(n as u32)),
-                                Err(st) => (st, Vec::new()),
-                            }
-                        }
-                        Err(st) => (st, Vec::new()),
-                    }
-                } else {
-                    let want_bulk = (flags & FLAG_READ_BULK) != 0 || req.len >= BULK_THRESHOLD;
-                    if want_bulk {
-                        if let Some((arena, slot)) = arena {
-                            // **C1:** disk/zip → arena bank directly (no intermediate Vec).
-                            let max = arena.bank_size.min(req.len as usize);
-                            match arena.fill_bank(slot, max, |buf| {
-                                table.read_into(req.fh, req.offset, max, buf)
-                            }) {
-                                Ok((off, n)) => (ST_OK, encode_read_resp_bulk(n as u32, off)),
-                                Err(st) => (st, Vec::new()),
-                            }
-                        } else {
-                            let max = max_read_data(payload_cap);
-                            match table.read(req.fh, req.offset, req.len, max) {
-                                Ok(data) => (ST_OK, encode_read_resp(&data)),
-                                Err(st) => (st, Vec::new()),
-                            }
+                let want_bulk = (flags & FLAG_READ_BULK) != 0 || req.len >= BULK_THRESHOLD;
+                if want_bulk {
+                    if let Some((arena, slot)) = arena {
+                        // Disk/zip → arena bank directly (no intermediate Vec).
+                        let max = arena.bank_size.min(req.len as usize);
+                        match arena.fill_bank(slot, max, |buf| {
+                            table.read_into(req.fh, req.offset, max, buf)
+                        }) {
+                            Ok((off, n)) => (ST_OK, encode_read_resp_bulk(n as u32, off)),
+                            Err(st) => (st, Vec::new()),
                         }
                     } else {
                         let max = max_read_data(payload_cap);
@@ -145,6 +109,12 @@ pub fn dispatch_full(
                             Ok(data) => (ST_OK, encode_read_resp(&data)),
                             Err(st) => (st, Vec::new()),
                         }
+                    }
+                } else {
+                    let max = max_read_data(payload_cap);
+                    match table.read(req.fh, req.offset, req.len, max) {
+                        Ok(data) => (ST_OK, encode_read_resp(&data)),
+                        Err(st) => (st, Vec::new()),
                     }
                 }
             }

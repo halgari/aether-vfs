@@ -1,32 +1,23 @@
 //! Parent-process director: control ring + bulk arena + worker pool + events.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use vfs_core::VfsTree;
 use vfs_ipc::ring::{self, Geom};
 use vfs_ipc::{Notifier, RingClient, RingServer, SpinNotifier};
 use vfs_protocol::{
-    decode_open_resp, decode_read_bulk_resp, decode_read_resp, decode_register_process_req,
-    encode_close_req, encode_open_req, encode_read_req, is_read_resp_bulk, OpenResp, ReadReq,
-    FLAG_READ_BULK, OP_CLOSE, OP_HEARTBEAT, OP_OPEN, OP_READ, OP_REGISTER_PROCESS, OPEN_READ, ST_OK,
-    ST_BAD_REQUEST, ST_IO_ERROR,
+    decode_open_resp, decode_read_bulk_resp, decode_read_resp, encode_close_req, encode_open_req,
+    encode_read_req, is_read_resp_bulk, OpenResp, ReadReq, FLAG_READ_BULK, OP_CLOSE, OP_HEARTBEAT,
+    OP_OPEN, OP_READ, OPEN_READ, ST_OK,
 };
-use vfs_server::{DataArena, RemoteMemWriter, Server, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
-use vfs_win::{EventNotifier, ProcessVm, SharedMapping};
+use vfs_server::{DataArena, Server, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
+use vfs_win::{EventNotifier, SharedMapping};
 
 pub const DEFAULT_SLOT_COUNT: u32 = 32;
-/// **B1/C2:** bulk arena after the control ring (32 MiB → ~1 MiB banks @ 32 slots).
+/// Bulk arena after the control ring (32 MiB → ~1 MiB banks @ 32 slots).
 pub const DEFAULT_ARENA_BYTES: usize = 32 * 1024 * 1024;
-
-struct ProcessVmWriter(ProcessVm);
-
-impl RemoteMemWriter for ProcessVmWriter {
-    fn write_at(&self, va: u64, data: &[u8]) -> Result<(), i32> {
-        self.0.write_at(va, data).map_err(|_| ST_IO_ERROR)
-    }
-}
 
 struct DirectorInner {
     mapping: SharedMapping,
@@ -39,8 +30,6 @@ struct DirectorInner {
     _events: EventNotifier,
     server_ev_name: String,
     client_ev_name: String,
-    /// Game process for phase-2 remote READ (WPM).
-    target: Mutex<Option<Arc<ProcessVmWriter>>>,
 }
 
 /// Running director: keeps the mapping + workers alive.
@@ -57,7 +46,7 @@ pub struct Director {
 }
 
 impl Director {
-    /// Create named section (ring + arena), event pair, and **B3** worker pool.
+    /// Create named section (ring + arena), event pair, and worker pool.
     pub fn start(tree: VfsTree, section_name: String) -> Result<Self, String> {
         let payload_cap = DEFAULT_PAYLOAD_CAP;
         let slot_count = DEFAULT_SLOT_COUNT;
@@ -88,7 +77,6 @@ impl Director {
             _events: events,
             server_ev_name: server_ev_name.clone(),
             client_ev_name: client_ev_name.clone(),
-            target: Mutex::new(None),
         });
 
         let workers = DEFAULT_WORKER_COUNT.max(1);
@@ -101,7 +89,6 @@ impl Director {
                 let notifier = EventNotifier::open(&sev, &cev)
                     .or_else(|_| EventNotifier::create(&sev, &cev))
                     .ok();
-                // Prefer events; fall back to spin if open fails.
                 if let Some(n) = notifier {
                     worker_loop(&inner2, n);
                 } else {
@@ -138,7 +125,6 @@ impl Director {
 
     pub fn stop(mut self) {
         self.inner.stop.store(true, Ordering::Relaxed);
-        // Nudge workers off WaitForSingleObject.
         if let Ok(n) = EventNotifier::open(&self.server_ev_name, &self.client_ev_name) {
             n.notify_server();
             n.notify_client(0);
@@ -162,41 +148,7 @@ fn worker_loop<N: vfs_ipc::Notifier>(inner: &DirectorInner, notifier: N) {
         inner.geom.slot_count as usize,
     );
     while !inner.stop.load(Ordering::Relaxed) {
-        let target = inner
-            .target
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(Arc::clone));
-        let remote: Option<&dyn RemoteMemWriter> =
-            target.as_ref().map(|t| t.as_ref() as &dyn RemoteMemWriter);
-
-        let handled = ring.serve_one(|req| {
-            if req.opcode == OP_REGISTER_PROCESS {
-                return match decode_register_process_req(&req.payload) {
-                    Some(pid) => match ProcessVm::open(pid) {
-                        Ok(vm) => {
-                            if let Ok(mut g) = inner.target.lock() {
-                                *g = Some(Arc::new(ProcessVmWriter(vm)));
-                            }
-                            (ST_OK, Vec::new())
-                        }
-                        Err(_) => (ST_IO_ERROR, Vec::new()),
-                    },
-                    None => (ST_BAD_REQUEST, Vec::new()),
-                };
-            }
-            vfs_server::handler::dispatch_full(
-                inner.server.tree(),
-                inner.server.table(),
-                req.opcode,
-                &req.payload,
-                req.flags,
-                inner.server.payload_cap(),
-                Some((&arena, req.slot)),
-                remote,
-            )
-        });
-        match handled {
+        match inner.server.serve_one_arena(&ring, &arena) {
             Ok(true) => {}
             Ok(false) => {}
             Err(_) => break,
@@ -281,7 +233,6 @@ pub fn rpc_read_all(
                     fh,
                     offset: off,
                     len: want,
-                    target_va: None,
                 }),
             )
             .map_err(|e| format!("READ {vpath}: {e:?}"))?;
@@ -301,7 +252,6 @@ pub fn rpc_read_all(
             s.copy_to(aoff as usize, &mut out[start..])
                 .ok_or_else(|| "arena copy_to".to_string())?;
             off += n as u64;
-            // Continue until off >= size; bank may be smaller than `want`.
         } else {
             let chunk =
                 decode_read_resp(&resp.payload).ok_or_else(|| "READ decode".to_string())?;
