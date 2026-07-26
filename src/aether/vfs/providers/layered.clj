@@ -7,7 +7,6 @@
   write-handling OverlayProvider, so writes are never exercised, but they
   route to the owning layer for completeness."
   (:require [aether.vfs.error :as error]
-            [aether.vfs.error :as vfs-error]
             [aether.vfs.provider :as p]))
 
 (defn- routed [top bottom layer]
@@ -16,7 +15,7 @@
 (defrecord LayeredProvider [top bottom open next-h]
   p/Provider
   (lookup [_ path]
-    (vfs-error/on-not-found (p/lookup top path) (p/lookup bottom path)))
+    (error/on-not-found (p/lookup top path) (p/lookup bottom path)))
 
   (readdir [_ path]
     (let [t (try
@@ -30,7 +29,7 @@
           (into (vec t) (remove #(contains? seen (:name %))) (or b []))))))
 
   (open-file [_ path flags]
-    (let [[layer inner] (vfs-error/on-not-found
+    (let [[layer inner] (error/on-not-found
                          [:top (p/open-file top path flags)]
                          [:bottom (p/open-file bottom path flags)])
           handle (swap! next-h inc)]

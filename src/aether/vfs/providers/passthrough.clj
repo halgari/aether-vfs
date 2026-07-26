@@ -7,7 +7,6 @@
   files a guest held open for its whole session."
   (:require [clojure.java.io :as io]
             [aether.vfs.error :as error]
-            [aether.vfs.error :as vfs-error]
             [aether.vfs.provider :as p]
             [aether.vfs.providers.fsutil :as fsutil]
             [aether.vfs.types :as types])
@@ -35,7 +34,7 @@
                            (if (types/writable? flags)
                              [StandardOpenOption/READ StandardOpenOption/WRITE]
                              [StandardOpenOption/READ]))
-          chan (vfs-error/with-io (FileChannel/open (.toPath real) opts))
+          chan (error/with-io (FileChannel/open (.toPath real) opts))
           handle (swap! next-h inc)]
       (trace-line! trace (str "OPEN " real))
       (swap! open assoc handle {:chan chan :real (str real)})

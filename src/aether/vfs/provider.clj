@@ -3,8 +3,7 @@
 
   Read-only providers implement Provider; writable ones also implement
   Writable. The create/unlink/rename/mkdir/rmdir/truncate wrappers default to
-  :read-only when the provider is not Writable (the Rust trait's default
-  methods)."
+  :read-only when the provider is not Writable."
   (:refer-clojure :exclude [read])
   (:require [aether.vfs.error :as error]))
 

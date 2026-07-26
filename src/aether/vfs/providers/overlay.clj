@@ -5,7 +5,6 @@
   directory. The base is never mutated."
   (:require [clojure.java.io :as io]
             [aether.vfs.error :as error]
-            [aether.vfs.error :as vfs-error]
             [aether.vfs.provider :as p]
             [aether.vfs.providers.fsutil :as fsutil]
             [aether.vfs.types :as types])
@@ -54,7 +53,7 @@
 (defn- write-whiteout! [ov path]
   (let [^java.io.File w (or (whiteout-path ov path) (error/raise :invalid-argument "whiteout of root"))]
     (io/make-parents w)
-    (vfs-error/with-io (.createNewFile w))
+    (error/with-io (.createNewFile w))
     nil))
 
 (defn- store-handle! [ov h cache]
@@ -71,7 +70,7 @@
       (io/make-parents up)
       (let [o (p/open-file (:base ov) path types/o-rdonly)]
         (try
-          (vfs-error/with-io
+          (error/with-io
             (with-open [out (io/output-stream up)]
               (loop [off 0]
                 (let [chunk ^bytes (p/read-at (:base ov) (:handle o) off copy-chunk)]
@@ -85,7 +84,7 @@
 (defn- copy-up-dir!
   "Recursively materialize a directory subtree (merged view) into upper."
   [ov path]
-  (vfs-error/with-io (Files/createDirectories (.toPath (upper-path ov path)) (make-array java.nio.file.attribute.FileAttribute 0)))
+  (error/with-io (Files/createDirectories (.toPath (upper-path ov path)) (make-array java.nio.file.attribute.FileAttribute 0)))
   (doseq [{:keys [name kind]} (merged-readdir ov path)]
     (let [child (types/child path name)]
       (case kind
@@ -128,7 +127,7 @@
   (lookup [ov path]
     (when (whiteout? ov path)
       (error/raise :not-found (str path " is whited out")))
-    (vfs-error/on-not-found
+    (error/on-not-found
      (fsutil/stat-meta (upper-path ov path))
      (p/lookup (:base ov) path)))
 
@@ -144,7 +143,7 @@
         (do (when-not (.exists up)
               (copy-up! ov path))
             (store-handle! ov {:layer :upper
-                               :chan (vfs-error/with-io
+                               :chan (error/with-io
                                        (FileChannel/open (.toPath up)
                                                          (into-array StandardOpenOption
                                                                      [StandardOpenOption/READ StandardOpenOption/WRITE])))}
@@ -152,7 +151,7 @@
 
         (.exists up)
         (store-handle! ov {:layer :upper
-                           :chan (vfs-error/with-io
+                           :chan (error/with-io
                                    (FileChannel/open (.toPath up)
                                                      (into-array StandardOpenOption
                                                                  [StandardOpenOption/READ])))}
@@ -188,7 +187,7 @@
   (create-file [ov path _flags mode]
     (let [up (upper-path ov path)]
       (io/make-parents up)
-      (let [chan (vfs-error/with-io
+      (let [chan (error/with-io
                    (FileChannel/open (.toPath up)
                                      (into-array StandardOpenOption
                                                  [StandardOpenOption/CREATE
@@ -205,7 +204,7 @@
     (let [up (upper-path ov path)]
       (when-not (.exists up)
         (copy-up! ov path))
-      (vfs-error/with-io
+      (error/with-io
         (with-open [raf (RandomAccessFile. up "rw")]
           (.setLength raf size)))
       nil))
@@ -217,7 +216,7 @@
       (when-not (or in-upper in-base)
         (error/raise :not-found path))
       (when in-upper
-        (vfs-error/with-io (Files/delete (.toPath up))))
+        (error/with-io (Files/delete (.toPath up))))
       (when in-base
         (write-whiteout! ov path))
       nil))
@@ -230,12 +229,12 @@
         (error/raise :already-exists path))
       (io/make-parents up)
       (clear-whiteout! ov path)
-      (vfs-error/with-io (Files/createDirectory (.toPath up) (make-array java.nio.file.attribute.FileAttribute 0)))
+      (error/with-io (Files/createDirectory (.toPath up) (make-array java.nio.file.attribute.FileAttribute 0)))
       (fsutil/set-perms-best-effort! up mode)
       (when was-whiteout
         ;; recreating a deleted base dir: keep it opaque so base contents
         ;; don't merge
-        (vfs-error/with-io (.createNewFile (io/file up opaque))))
+        (error/with-io (.createNewFile (io/file up opaque))))
       nil))
 
   (rmdir! [ov path]
@@ -246,7 +245,7 @@
       (when (.isDirectory up)
         ;; merged view is empty, so any upper entries are only markers — clear
         ;; them
-        (vfs-error/with-io
+        (error/with-io
           (doseq [^File f (.listFiles up)]
             (Files/delete (.toPath f)))
           (Files/delete (.toPath up))))
@@ -277,7 +276,7 @@
         (cond
           (.isDirectory to-up) (doseq [^File f (reverse (file-seq to-up))] (.delete f))
           (.exists to-up) (.delete to-up))
-        (vfs-error/with-io
+        (error/with-io
           (Files/move (.toPath from-up) (.toPath to-up)
                       (make-array StandardCopyOption 0)))
         (when (some? (base-lookup (:base ov) from))
@@ -285,7 +284,7 @@
         ;; If base has a directory at to, mark upper/to opaque so the base
         ;; directory's stale children don't merge back through the renamed dir.
         (when (and (.isDirectory to-up) (base-dir? (:base ov) to))
-          (vfs-error/with-io (.createNewFile (io/file to-up opaque))))
+          (error/with-io (.createNewFile (io/file to-up opaque))))
         nil))))
 
 (defn overlay-provider [base upper-dir]

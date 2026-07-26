@@ -26,7 +26,7 @@
         root (compose/build-data-root base overrides)
         ;; (a) base file reads through the overlay
         h (p/open-file root "/Data/Skyrim.esm" types/o-rdonly)]
-    (is (pos? (alength ^bytes (p/read-at root (:handle h) 0 16))))
+    (is (= "ESM-BYTES" (String. ^bytes (p/read-at root (:handle h) 0 16))))
     (p/release-handle root (:handle h))
     ;; (b) creating a new file lands in the overrides dir and reads back
     (let [c (p/create root "/new.txt" types/o-wronly 0644)]
