@@ -15,8 +15,11 @@ planned as a separate project.
 ## Mount example
 
 ```clojure
-(require '[aether.vfs.fuse :as fuse]
+(require '[clojure.java.io :as io]
+         '[aether.vfs.fuse :as fuse]
          '[aether.vfs.providers.inline :as inline])
+
+(.mkdirs (io/file "/tmp/my-mount")) ;; the mountpoint dir must already exist
 
 (let [root  (inline/inline-provider [["/hello.txt" (.getBytes "hi") 0644]])
       guard (fuse/mount root "/tmp/my-mount")]
@@ -54,7 +57,11 @@ and inline-over-overrides) so callers don't hand-stack layered/overlay themselve
 ## Proton example
 
 ```clojure
-(require '[aether.vfs.proton :as proton])
+(require '[clojure.java.io :as io]
+         '[aether.vfs.proton :as proton])
+
+(def logdir "/tmp/throwaway-compat/logs")
+(.mkdirs (io/file logdir)) ;; launch-proton! redirects run.log here — must exist
 
 (let [params {:proton      "/path/to/GE-Proton10-34/proton"
               :mountpoint  "/tmp/my-mount"
@@ -63,7 +70,7 @@ and inline-over-overrides) so callers don't hand-stack layered/overlay themselve
               :app-id      489830
               :compat      "/tmp/throwaway-compat"}
       cmd  (proton/proton-command params)
-      proc (proton/launch-proton! cmd {:logdir "/tmp/throwaway-compat/logs"})]
+      proc (proton/launch-proton! cmd {:logdir logdir})]
   (.waitFor proc)
   (proton/teardown! params))
 ```
