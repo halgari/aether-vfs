@@ -1,6 +1,6 @@
 (ns aether.vfs.proton-test
   (:require [clojure.test :refer [deftest is]]
-            [aether.vfs.proton :as proton]))
+            [aether.vfs.os.linux.proton :as proton]))
 
 (deftest proton-command-builds-the-invocation
   (let [cmd (proton/proton-command {:proton "/opt/proton"

@@ -3,7 +3,7 @@
 A provider-based virtual filesystem for the JVM. A `Provider` answers
 `lookup`/`readdir`/`open-file`/`read-at`/`write-at`/`release-handle` for a
 tree of virtual paths; a `router` maps glob patterns to providers; and
-`aether.vfs.fuse` mounts the whole thing as a real Linux FUSE filesystem
+`aether.vfs.os.linux.fuse` mounts the whole thing as a real Linux FUSE filesystem
 in-process via [jnr-fuse](https://github.com/SerCeMan/jnr-fuse), with an FFM
 zero-copy read path (`java.lang.foreign`) that lets a provider write straight
 into the kernel's own read buffer instead of bouncing through the Java heap.
@@ -16,7 +16,7 @@ planned as a separate project.
 
 ```clojure
 (require '[clojure.java.io :as io]
-         '[aether.vfs.fuse :as fuse]
+         '[aether.vfs.os.linux.fuse :as fuse]
          '[aether.vfs.providers.inline :as inline])
 
 (.mkdirs (io/file "/tmp/my-mount")) ;; the mountpoint dir must already exist
@@ -34,7 +34,7 @@ returns a `java.io.Closeable` guard; closing it unmounts. `inline/inline-provide
 takes `[[virtual-path bytes perm] …]` and serves it read-only from RAM — no
 store, no cache, no disk — which makes it the simplest root to mount for a
 smoke test or a generated overlay (e.g. a load order's `Plugins.txt`). Reads
-run through libfuse's multithreaded loop; `aether.vfs.fuse` bounds concurrent
+run through libfuse's multithreaded loop; `aether.vfs.os.linux.fuse` bounds concurrent
 in-flight reads (see env vars below) and isolates a bad request to an errno
 instead of tearing down the mount. To route more than one provider under a
 single mountpoint, build a `aether.vfs.router/router` and mount it with
@@ -58,7 +58,7 @@ and inline-over-overrides) so callers don't hand-stack layered/overlay themselve
 
 ```clojure
 (require '[clojure.java.io :as io]
-         '[aether.vfs.proton :as proton])
+         '[aether.vfs.os.linux.proton :as proton])
 
 (def logdir "/tmp/throwaway-compat/logs")
 (.mkdirs (io/file logdir)) ;; launch-proton! redirects run.log here — must exist

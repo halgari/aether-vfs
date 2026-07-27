@@ -1,4 +1,4 @@
-(ns aether.vfs.fuse
+(ns aether.vfs.os.linux.fuse
   "Translates FUSE ops into Provider calls via jnr-fuse and mounts in-process.
 
   jnr-fuse's high-level API is path-based (libfuse resolves inodes for us), so

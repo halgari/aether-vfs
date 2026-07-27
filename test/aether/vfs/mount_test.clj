@@ -4,7 +4,7 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is]]
             [aether.vfs.test-util :refer [tmp-dir]]
-            [aether.vfs.fuse :as fuse]
+            [aether.vfs.os.linux.fuse :as fuse]
             [aether.vfs.providers.inline :as inline]))
 
 (deftest read-through-fuse-mount

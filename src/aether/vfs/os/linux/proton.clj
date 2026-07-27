@@ -1,4 +1,4 @@
-(ns aether.vfs.proton
+(ns aether.vfs.os.linux.proton
   "Run a Windows exe under Proton from a directory (typically an aether-vfs
   mount): build the invocation, spawn it tracked with logs captured, grep the
   logs, tear it down."
