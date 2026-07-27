@@ -13,7 +13,8 @@
 (def ^:private FLAG-READ-BULK 0x1)
 (def ^:private BULK-THRESHOLD (* 64 1024))
 (def ^:private ST-OK 0) (def ^:private ST-NOT-FOUND -1) (def ^:private ST-BAD-FH -6)
-(def ^:private ST-BAD-REQUEST -3)
+(def ^:private ST-NOT-A-DIRECTORY -2)
+(def ^:private ST-BAD-REQUEST -3) (def ^:private ST-IO-ERROR -4)
 
 (defn make-state [arena] (atom {:arena arena :next-fh 1 :open {}}))
 
@@ -29,10 +30,18 @@
     (resp ST-OK (wire/encode-getattr-resp {:found false :is-dir false :size 0 :mtime 0}))))
 
 (defn- do-readdir [_ provider vpath]
-  (let [entries (p/readdir provider vpath)]
-    (resp ST-OK (wire/encode-readdir-resp
-                  (map (fn [e] {:name (:name e) :is-dir (= :dir (:kind e))
-                                :size (or (:size e) 0) :mtime (or (:mtime-secs e) 0)}) entries)))))
+  ;; Guard with lookup: the inline provider's readdir returns [] for any prefix
+  ;; and never raises, so mirror Rust READDIR (ST_NOT_FOUND / ST_NOT_A_DIRECTORY)
+  ;; by resolving the path first. lookup raises :not-found for a missing path.
+  (error/on-not-found
+    (let [m (p/lookup provider vpath)]
+      (if (= :dir (:kind m))
+        (let [entries (p/readdir provider vpath)]
+          (resp ST-OK (wire/encode-readdir-resp
+                        (map (fn [e] {:name (:name e) :is-dir (= :dir (:kind e))
+                                      :size (or (:size e) 0) :mtime (or (:mtime-secs e) 0)}) entries))))
+        (resp ST-NOT-A-DIRECTORY (byte-array 0))))
+    (resp ST-NOT-FOUND (byte-array 0))))
 
 (defn- do-open [state provider flags vpath]
   ;; A missing path yields ST_NOT_FOUND (mirrors Rust dispatch_director OPEN).
@@ -70,13 +79,19 @@
     (resp ST-BAD-FH (byte-array 0))))
 
 (defn dispatch [state provider {:keys [opcode flags payload]}]
-  (condp = (long opcode)
-    OP-GETATTR (do-getattr state provider (wire/decode-path-req payload))
-    OP-READDIR (do-readdir state provider (wire/decode-path-req payload))
-    OP-OPEN    (let [{:keys [flags path]} (wire/decode-open-req payload)] (do-open state provider flags path))
-    OP-READ    (do-read state provider flags (wire/decode-read-req payload))
-    OP-CLOSE   (do-close state provider (wire/decode-close-req payload))
-    (resp ST-BAD-REQUEST (byte-array 0))))
+  ;; Total: every request MUST yield a status so the serve loop always reaches
+  ;; ring/server-complete for the slot it CAS'd to PROCESSING. Any otherwise-
+  ;; unhandled throw becomes ST_IO_ERROR rather than wedging the ring.
+  (try
+    (condp = (long opcode)
+      OP-GETATTR (do-getattr state provider (wire/decode-path-req payload))
+      OP-READDIR (do-readdir state provider (wire/decode-path-req payload))
+      OP-OPEN    (let [{:keys [flags path]} (wire/decode-open-req payload)] (do-open state provider flags path))
+      OP-READ    (do-read state provider flags (wire/decode-read-req payload))
+      OP-CLOSE   (do-close state provider (wire/decode-close-req payload))
+      (resp ST-BAD-REQUEST (byte-array 0)))
+    (catch Throwable _
+      (resp ST-IO-ERROR (byte-array 0)))))
 
 (defn serve
   "Spin serve loop: take a submitted slot, dispatch, complete. Stops when @stop? is true."

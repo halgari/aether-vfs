@@ -3,6 +3,7 @@
             [aether.vfs.os.windows.server :as server]
             [aether.vfs.os.windows.arena :as arena]
             [aether.vfs.wire :as wire]
+            [aether.vfs.provider :as provider]
             [aether.vfs.providers.inline :as inline])
   (:import [java.lang.foreign Arena MemorySegment ValueLayout]))
 
@@ -83,3 +84,32 @@
         p (provider)
         op (server/dispatch st p {:opcode 3 :flags 1 :payload (wire/encode-open-req 1 "/nope.txt")})]
     (is (= -1 (:status op)))))
+
+(deftest readdir-missing-path-not-found
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        p (provider)
+        rd (server/dispatch st p {:opcode 2 :flags 0 :payload (.getBytes "/nope" "UTF-8")})]
+    (is (= -1 (:status rd)))))
+
+;; A provider whose every method throws a plain RuntimeException — nothing the
+;; per-op handling catches (not an :aether.vfs/error). dispatch must still
+;; return a status (ST_IO_ERROR -4), never propagate the throw into serve.
+(def ^:private throwing-provider
+  (reify provider/Provider
+    (lookup [_ _] (throw (RuntimeException. "boom")))
+    (readdir [_ _] (throw (RuntimeException. "boom")))
+    (open-file [_ _ _] (throw (RuntimeException. "boom")))
+    (read-at [_ _ _ _] (throw (RuntimeException. "boom")))
+    (write-at [_ _ _ _] (throw (RuntimeException. "boom")))
+    (release-handle [_ _] (throw (RuntimeException. "boom")))))
+
+(deftest dispatch-is-total-on-unhandled-throw
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        ga (server/dispatch st throwing-provider
+                            {:opcode 1 :flags 0 :payload (.getBytes "/whatever" "UTF-8")})]
+    (is (= -4 (:status ga)))
+    (is (bytes? (:payload ga)))))
