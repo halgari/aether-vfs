@@ -6,7 +6,7 @@
 
 (defn make [^MemorySegment seg mapping-offset arena-len banks]
   (let [banks (max 1 (long banks))
-        bank-size (max 1 (quot (long arena-len) banks))]
+        bank-size (max 4096 (quot (long arena-len) banks))]
     {:seg seg :mapping-offset (long mapping-offset) :bank-size bank-size :banks banks}))
 
 (defn bank-mapping-offset ^long [arena ^long slot]
