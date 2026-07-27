@@ -1,0 +1,35 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  rust-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust tests (full engine — includes Windows-only crates)
+        run: cargo test
+        working-directory: rust
+  clojure-and-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Portable Rust crates (compile+test on Linux)
+        run: cargo test -p vfs-ipc -p vfs-protocol -p xtask-descriptor
+        working-directory: rust
+      - name: Regenerate protocol artifacts
+        run: bin/regen-protocol
+      - name: Fail on protocol drift
+        run: git diff --exit-code resources/
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '26'
+      - name: Install Clojure CLI
+        uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          cli: latest
+      - name: Clojure tests (full Linux suite)
+        run: clojure -M:test

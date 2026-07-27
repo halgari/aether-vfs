@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Regenerate the protocol descriptor + golden vectors from the Rust source of
+# truth. Run this after ANY change to vfs-ipc/vfs-protocol, then commit the
+# updated resources/ files together with the Rust change.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+( cd rust && cargo run --quiet -p xtask-descriptor -- ../resources )
+echo "regenerated resources/protocol-descriptor.edn and resources/protocol-golden.edn"
