@@ -9,6 +9,7 @@
 use std::time::Duration;
 
 mod artifacts;
+mod cli;
 mod ghostly;
 mod inject;
 mod map;
@@ -80,6 +81,7 @@ pub enum InjectError {
 }
 
 pub use artifacts::{ensure_payload_beside_shim, find_near, resolve_payload_for_run};
+pub use cli::parse_injector_args;
 pub use inject::{
     arm_preinit_payload, arm_preinit_payload_ex, inject_dll, load_static_imports_from_config,
     merge_preinit_redirects, run_target_with_preinit, run_target_with_shim, PreinitArm,
