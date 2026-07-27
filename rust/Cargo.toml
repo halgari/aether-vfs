@@ -17,6 +17,7 @@ members = [
   "crates/vfs-launch",
   "crates/vfs-fixture-vproxy",
   "crates/vfs-fixture-staticimp",
+  "crates/xtask-descriptor",
 ]
 
 # Required by crates/vfs-payload (#![no_std] + custom panic_handler; cannot

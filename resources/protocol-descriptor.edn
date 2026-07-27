@@ -1,0 +1,10 @@
+{:magic 0x56464950
+ :version 1
+ :content-hash 0xB0521729
+ :opcodes {:getattr 1 :readdir 2 :open 3 :materialize 4 :read 5 :write 6 :setattr 7 :rename 8 :delete 9 :mkdir 10 :close 11 :register-process 12 :heartbeat 13 }
+ :statuses {:ok 0 :not-found -1 :not-a-directory -2 :bad-request -3 :io-error -4 :is-dir -5 :bad-fh -6 :no-space -7 }
+ :flags {:open-read 1 :open-write 2 :read-bulk 1 :read-resp-bulk-bit 0x80000000}
+ :slot-states {:free 0 :claimed 1 :submitted 2 :processing 3 :completed 4}
+ :ring-header {:size 40 :align 8 :fields {:magic 0 :version 4 :slot-count 8 :slot-stride 12 :payload-cap 16 :req-seq 24 :submit-seq 32}}
+ :slot-header {:size 32 :align 8 :fields {:state 0 :opcode 4 :flags 8 :payload-len 12 :status 16 :req-id 24}}
+}

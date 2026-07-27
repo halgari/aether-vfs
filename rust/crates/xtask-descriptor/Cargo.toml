@@ -1,0 +1,12 @@
+[package]
+name = "xtask-descriptor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vfs-ipc = { path = "../vfs-ipc" }
+vfs-protocol = { path = "../vfs-protocol" }
+
+[[bin]]
+name = "xtask-descriptor"
+path = "src/main.rs"
