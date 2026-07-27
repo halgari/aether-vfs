@@ -81,9 +81,34 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Inline construction of the `vfs-shim::encode_config` wire format, kept
+/// dependency-free here so `xtask-descriptor` stays portable (no `vfs-shim`,
+/// which is Windows-only via `retour`/`windows-sys` and would break the
+/// ubuntu `cargo test -p xtask-descriptor` CI job). Format (documented in
+/// `vfs-shim::bootstrap::encode_config_full`, and pinned there against this
+/// exact byte shape by a same-crate unit test):
+/// `[u32 root_len][root utf8][u32 overlay_len][overlay utf8]"VFS1"[u32 n_static]
+///  n times: [u32 name_len][name utf8][u32 backing_len][backing utf8][snapshot bytes]`.
+/// `encode_config(root, snapshot)` is `encode_config_full(root, "", &[], snapshot)`.
+fn shim_config_bytes(root: &str, overlay: &str, snapshot: &[u8]) -> Vec<u8> {
+    let root_b = root.as_bytes();
+    let overlay_b = overlay.as_bytes();
+    let mut out = Vec::with_capacity(16 + root_b.len() + overlay_b.len() + snapshot.len());
+    out.extend_from_slice(&(root_b.len() as u32).to_le_bytes());
+    out.extend_from_slice(root_b);
+    out.extend_from_slice(&(overlay_b.len() as u32).to_le_bytes());
+    out.extend_from_slice(overlay_b);
+    out.extend_from_slice(b"VFS1");
+    out.extend_from_slice(&0u32.to_le_bytes()); // n_static = 0
+    out.extend_from_slice(snapshot);
+    out
+}
+
 /// Canonical (name, encoded-bytes) vectors. Fixed inputs → exact wire bytes.
 pub fn golden_vectors() -> Vec<(&'static str, Vec<u8>)> {
     vec![
+        ("shim-config-root-runtime-empty-snapshot",
+         shim_config_bytes(r"C:\GameLayers\runtime", "", &[])),
         ("open-req-read-skyrim", P::encode_open_req(P::OPEN_READ, "Data/Skyrim.esm")),
         ("getattr-resp-file-123",
          P::encode_getattr_resp(&AttrResp { found: true, is_dir: false, size: 123, mtime: -7 })),

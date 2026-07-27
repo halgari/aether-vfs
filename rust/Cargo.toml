@@ -15,6 +15,7 @@ members = [
   "crates/vfs-win",
   "crates/vfs-zip",
   "crates/vfs-launch",
+  "crates/vfs-fixture-read",
   "crates/vfs-fixture-vproxy",
   "crates/vfs-fixture-staticimp",
   "crates/vfs-ring-harness",

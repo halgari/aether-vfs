@@ -1,4 +1,5 @@
 {:vectors [
+  {:name :shim-config-root-runtime-empty-snapshot :bytes "15000000433a5c47616d654c61796572735c72756e74696d65000000005646533100000000"}
   {:name :open-req-read-skyrim :bytes "01000000446174612f536b7972696d2e65736d"}
   {:name :getattr-resp-file-123 :bytes "01007b00000000000000f9ffffffffffffff"}
   {:name :read-req-fh7-off10-len4 :bytes "07000000000000000a000000000000000400000000000000"}

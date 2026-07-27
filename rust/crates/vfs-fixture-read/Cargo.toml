@@ -1,0 +1,8 @@
+[package]
+name = "vfs-fixture-read"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "vfs-fixture-read"
+path = "src/main.rs"

@@ -304,6 +304,29 @@ pub fn static_imports_to_preinit(
 mod tests {
     use super::*;
 
+    // Pins `encode_config` byte-for-byte to the inline golden bytes built in
+    // `xtask-descriptor::golden_vectors()` (vector
+    // "shim-config-root-runtime-empty-snapshot") and, transitively, to the
+    // Clojure `aether.vfs.os.windows.shim-config/encode` mirror. Kept in this
+    // (Windows-only) crate — not in `xtask-descriptor` — so the portable
+    // ubuntu CI job never needs a `vfs-shim` dependency; this test runs in
+    // the full Windows `cargo test` job instead.
+    #[test]
+    fn encode_config_matches_xtask_descriptor_golden_inline_bytes() {
+        let root = r"C:\GameLayers\runtime";
+        let expected = {
+            let root_b = root.as_bytes();
+            let mut out = Vec::new();
+            out.extend_from_slice(&(root_b.len() as u32).to_le_bytes());
+            out.extend_from_slice(root_b);
+            out.extend_from_slice(&0u32.to_le_bytes()); // overlay_len = 0
+            out.extend_from_slice(b"VFS1");
+            out.extend_from_slice(&0u32.to_le_bytes()); // n_static = 0
+            out
+        };
+        assert_eq!(encode_config(root, &[]), expected);
+    }
+
     #[test]
     fn config_round_trips() {
         let snapshot = vec![1u8, 2, 3, 4, 5];
