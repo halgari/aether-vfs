@@ -726,20 +726,34 @@ git checkout resources/protocol-descriptor.edn
 
 - [ ] **Step 4: Write the CI workflow**
 
-Create `.github/workflows/ci.yml`:
+Create `.github/workflows/ci.yml`. **Two OS-split jobs** — the full Rust engine
+has Windows-only crates (`vfs-win`, `vfs-inject`, `vfs-payload` hooks) that do
+not compile on Linux, so the whole-workspace `cargo test` runs on
+`windows-latest`; the Linux job builds only the portable protocol crates, runs
+the drift gate (regen uses only those portable crates), and runs the full
+Clojure suite (green on Linux):
 ```yaml
 name: ci
 on:
   push:
   pull_request:
 jobs:
-  build-and-verify:
+  rust-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust tests (full engine — includes Windows-only crates)
+        run: cargo test
+        working-directory: rust
+  clojure-and-drift:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Rust tests
-        run: cd rust && cargo test
+      - name: Portable Rust crates (compile+test on Linux)
+        run: cargo test -p vfs-ipc -p vfs-protocol -p xtask-descriptor
+        working-directory: rust
       - name: Regenerate protocol artifacts
         run: bin/regen-protocol
       - name: Fail on protocol drift
@@ -747,15 +761,17 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '26'
       - name: Install Clojure CLI
         uses: DeLaGuardo/setup-clojure@13.0
         with:
           cli: latest
-      - name: Clojure tests
+      - name: Clojure tests (full Linux suite)
         run: clojure -M:test
 ```
-(The `mount-test` self-skips without `/dev/fuse`, which the GitHub runner lacks — that is a pass.)
+(The `mount-test` self-skips without `/dev/fuse` if the Linux runner lacks it —
+that is a pass. The ~18 failures seen on Windows are POSIX-attr/Proton tests
+that pass on Linux, so the ubuntu Clojure job is expected green.)
 
 - [ ] **Step 5: Commit**
 
