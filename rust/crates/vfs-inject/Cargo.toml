@@ -1,0 +1,71 @@
+[package]
+name = "vfs-inject"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vfs-core = { path = "../vfs-core" }
+vfs-zip = { path = "../vfs-zip" }
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Threading",
+  "Win32_System_Memory",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_LibraryLoader",
+  "Win32_System_SystemServices",
+  "Win32_System_Kernel",
+  "Win32_Storage_FileSystem",
+  "Win32_System_SystemInformation",
+  "Win32_System_ProcessStatus",
+] }
+
+[dev-dependencies]
+vfs-shim = { path = "../vfs-shim" }
+vfs-shim-dll = { path = "../vfs-shim-dll" }
+vfs-core = { path = "../vfs-core" }
+vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
+vfs-zip = { path = "../vfs-zip" }
+# PE fixtures (payload, vproxy, staticimp) are built by build.rs via a nested
+# `cargo build -p …` (cannot be normal deps: vfs-payload is no_std/panic=abort).
+
+[[bin]]
+name = "vfs-probe"
+path = "src/bin/vfs-probe.rs"
+
+[[bin]]
+name = "vfs-acceptance"
+path = "src/bin/vfs-acceptance.rs"
+
+[[bin]]
+name = "vfs-spawn-child"
+path = "src/bin/vfs-spawn-child.rs"
+
+[[bin]]
+name = "hollow_diag"
+path = "src/bin/hollow_diag.rs"
+
+[[bin]]
+name = "hollow_hello"
+path = "src/bin/hollow_hello.rs"
+
+
+[[bin]]
+name = "compare_map"
+path = "src/bin/compare_map.rs"
+
+
+[[bin]]
+name = "local_run"
+path = "src/bin/local_run.rs"
+
+
+[[bin]]
+name = "hollow_crt"
+path = "src/bin/hollow_crt.rs"
+
+
+[[bin]]
+name = "list_mods"
+path = "src/bin/list_mods.rs"
+

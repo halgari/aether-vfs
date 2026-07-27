@@ -1,0 +1,29 @@
+[package]
+name = "vfs-shim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vfs-redirect = { path = "../vfs-redirect" }
+vfs-shared = { path = "../vfs-shared" }
+vfs-core = { path = "../vfs-core" }
+vfs-protocol = { path = "../vfs-protocol" }
+vfs-ipc = { path = "../vfs-ipc" }
+vfs-win = { path = "../vfs-win" }
+# Dual-layer vehicle (reflective map + RIP-redirect + spin gate) for children.
+vfs-inject = { path = "../vfs-inject" }
+retour = { version = "0.3", default-features = false }
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_System_Memory",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_Storage_FileSystem",
+] }
+
+[dev-dependencies]
+# `bridge` (test-only) provides `flatten` for building snapshot fixtures.
+vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

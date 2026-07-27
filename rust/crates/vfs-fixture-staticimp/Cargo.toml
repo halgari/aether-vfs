@@ -1,0 +1,14 @@
+[package]
+name = "vfs-fixture-staticimp"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "vfs-staticimp"
+path = "src/main.rs"
+
+# Ensures vproxy is built first (cdylib + import lib). We still link the import
+# lib via build.rs / #[link] so the PE import table names vproxy.dll.
+[dependencies]
+vfs-fixture-vproxy = { path = "../vfs-fixture-vproxy" }

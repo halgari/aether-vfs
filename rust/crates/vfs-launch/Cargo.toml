@@ -1,0 +1,27 @@
+[package]
+name = "vfs-launch"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "vfs-launch"
+path = "src/main.rs"
+
+[[bin]]
+name = "vfs-game-probe"
+path = "src/bin/vfs-game-probe.rs"
+
+[[bin]]
+name = "vfs-fuse-bench"
+path = "src/bin/vfs-fuse-bench.rs"
+
+[dependencies]
+# Main binary: Session host. Transitive: inject/shim/ipc via vfs-director.
+vfs-director = { path = "../vfs-director" }
+# Fuse-bench still uses legacy tree Server + protocol codecs.
+vfs-core = { path = "../vfs-core" }
+vfs-zip = { path = "../vfs-zip" }
+vfs-server = { path = "../vfs-server" }
+vfs-ipc = { path = "../vfs-ipc" }
+vfs-protocol = { path = "../vfs-protocol" }

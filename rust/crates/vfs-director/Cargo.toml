@@ -1,0 +1,24 @@
+[package]
+name = "vfs-director"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Userspace FUSE host: mount backends, serve IPC, launch process with remapped I/O"
+
+[lib]
+name = "vfs_director"
+crate-type = ["rlib", "cdylib", "staticlib"]
+path = "src/lib.rs"
+
+[features]
+default = ["zip"]
+## Convenience `Session::mount_zip` / `vfs_director_mount_zip` (pulls vfs-zip).
+zip = ["dep:vfs-zip"]
+
+[dependencies]
+vfs-protocol = { path = "../vfs-protocol" }
+vfs-ipc = { path = "../vfs-ipc" }
+vfs-win = { path = "../vfs-win" }
+vfs-inject = { path = "../vfs-inject" }
+vfs-shim = { path = "../vfs-shim" }
+vfs-zip = { path = "../vfs-zip", optional = true }

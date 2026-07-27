@@ -1,0 +1,13 @@
+[package]
+name = "vfs-shared"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+bridge = ["dep:vfs-core"]
+
+[dependencies]
+vfs-core = { path = "../vfs-core", optional = true }
+
+[dev-dependencies]
+vfs-core = { path = "../vfs-core" }
