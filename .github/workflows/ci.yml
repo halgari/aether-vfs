@@ -40,8 +40,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build ring harness
-        run: cargo build -p vfs-ring-harness
+      - name: Build ring harness + injection artifacts
+        run: cargo build -p vfs-ring-harness -p vfs-inject --bin vfs-injector -p vfs-shim-dll -p vfs-payload -p vfs-fixture-read
         working-directory: rust
       - uses: actions/setup-java@v4
         with:
@@ -60,7 +60,7 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\clj-cli"
       - name: Windows Clojure tests (FFM section + cross-process ring proof)
         shell: pwsh
-        run: clojure -M:test -n aether.vfs.os.windows.section-test -n aether.vfs.os.windows.integration-test
+        run: clojure -M:test -n aether.vfs.os.windows.section-test -n aether.vfs.os.windows.integration-test -n aether.vfs.os.windows.launch-test
         env:
           # The harness exe path in the test is relative to the repo root.
           JDK_JAVA_OPTIONS: "--enable-native-access=ALL-UNNAMED"
