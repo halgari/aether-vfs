@@ -1,0 +1,10 @@
+# Generated protocol artifacts are emitted with LF by xtask-descriptor. The Rust
+# golden test `include_str!`s resources/protocol-golden.edn and compares it
+# byte-for-byte against the emitter output, so these files MUST stay LF on every
+# platform — otherwise a Windows checkout converts them to CRLF and the test
+# (and local `bin/regen-protocol` drift checks) break. LF also keeps the CI
+# drift gate deterministic across OSes.
+resources/*.edn text eol=lf
+
+# Shell scripts must remain LF to execute on the Linux CI runner.
+bin/* text eol=lf

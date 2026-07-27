@@ -31,5 +31,7 @@ jobs:
         uses: DeLaGuardo/setup-clojure@13.0
         with:
           cli: latest
+      - name: Install libfuse (jnr-fuse native dependency)
+        run: sudo apt-get update && sudo apt-get install -y libfuse2
       - name: Clojure tests (full Linux suite)
         run: clojure -M:test
