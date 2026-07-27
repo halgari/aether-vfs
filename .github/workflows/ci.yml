@@ -35,3 +35,24 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libfuse2
       - name: Clojure tests (full Linux suite)
         run: clojure -M:test
+  windows-clojure:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build ring harness
+        run: cargo build -p vfs-ring-harness
+        working-directory: rust
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '26'
+      - name: Install Clojure CLI
+        uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          cli: latest
+      - name: Windows Clojure tests (FFM section + cross-process ring proof)
+        run: clojure -M:test -n aether.vfs.os.windows.section-test -n aether.vfs.os.windows.integration-test
+        env:
+          # The harness exe path in the test is relative to the repo root.
+          JDK_JAVA_OPTIONS: "--enable-native-access=ALL-UNNAMED"
