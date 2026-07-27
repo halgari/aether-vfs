@@ -8,6 +8,7 @@ fn main() {
     std::fs::create_dir_all(&out_dir).expect("create out dir");
     std::fs::write(out_dir.join("protocol-descriptor.edn"), xtask_descriptor::descriptor_edn())
         .expect("write descriptor");
-    // golden vectors added in Task 3
+    std::fs::write(out_dir.join("protocol-golden.edn"), xtask_descriptor::golden_edn())
+        .expect("write golden");
     println!("wrote descriptor to {}", out_dir.display());
 }

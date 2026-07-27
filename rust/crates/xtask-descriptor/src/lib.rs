@@ -3,6 +3,7 @@
 use std::fmt::Write as _;
 use vfs_ipc::layout as L;
 use vfs_protocol as P;
+use vfs_protocol::{AttrResp, DirEntryWire, ReadReq};
 
 /// FNV-1a over the descriptor text; low 32 bits used as the handshake hash (M3).
 pub fn content_hash(s: &str) -> u32 {
@@ -72,6 +73,52 @@ fn descriptor_body() -> String {
         L::SLOT_HEADER_SIZE, L::SH_STATE, L::SH_OPCODE, L::SH_FLAGS, L::SH_PAYLOAD_LEN, L::SH_STATUS, L::SH_REQ_ID
     );
     s
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes { let _ = write!(s, "{b:02x}"); }
+    s
+}
+
+/// Canonical (name, encoded-bytes) vectors. Fixed inputs → exact wire bytes.
+pub fn golden_vectors() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("open-req-read-skyrim", P::encode_open_req(P::OPEN_READ, "Data/Skyrim.esm")),
+        ("getattr-resp-file-123",
+         P::encode_getattr_resp(&AttrResp { found: true, is_dir: false, size: 123, mtime: -7 })),
+        ("read-req-fh7-off10-len4",
+         P::encode_read_req(&ReadReq { fh: 7, offset: 10, len: 4 })),
+        ("read-resp-abcd", P::encode_read_resp(b"abcd")),
+        ("readdir-resp-two",
+         P::encode_readdir_resp(&[
+             DirEntryWire { name: "a.esp".into(), is_dir: false, size: 10, mtime: 1 },
+             DirEntryWire { name: "sub".into(),   is_dir: true,  size: 0,  mtime: 0 },
+         ])),
+        ("close-req-99", P::encode_close_req(99)),
+    ]
+}
+
+pub fn golden_edn() -> String {
+    let mut s = String::from("{:vectors [\n");
+    for (name, bytes) in golden_vectors() {
+        let _ = write!(s, "  {{:name :{name} :bytes \"{}\"}}\n", hex(&bytes));
+    }
+    s.push_str("]}\n");
+    s
+}
+
+#[cfg(test)]
+mod golden_tests {
+    use super::*;
+
+    #[test]
+    fn encoders_match_committed_golden() {
+        // The committed file is the contract; regenerating must not change it silently.
+        let committed = include_str!("../../../../resources/protocol-golden.edn");
+        assert_eq!(golden_edn(), committed,
+            "golden vectors drifted — regenerate with bin/regen-protocol and review");
+    }
 }
 
 #[cfg(test)]
