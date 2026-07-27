@@ -89,6 +89,10 @@
     (dotimes [_ 7] (.write b 0))
     (.toByteArray b)))
 
+(defn decode-open-resp [^bytes p]
+  (let [bb (buf p)]
+    {:fh (.getLong bb) :size (.getLong bb) :is-dir (not (zero? (.get bb)))}))
+
 (defn decode-read-req [^bytes p]
   (let [bb (buf p)]
     {:fh (.getLong bb) :offset (.getLong bb) :len (bit-and (long (.getInt bb)) 0xffffffff)}))
@@ -100,5 +104,11 @@
     (put-u32! b 0)
     (put-u64! b arena-offset)
     (.toByteArray b)))
+
+(defn decode-read-resp-bulk [^bytes p]
+  (let [bb (buf p)
+        raw (bit-and (long (.getInt bb)) 0xffffffff)]
+    (.getInt bb) ; pad
+    [(bit-and raw 0x7fffffff) (.getLong bb)]))
 
 (defn decode-close-req [^bytes p] (.getLong (buf p)))
