@@ -131,6 +131,11 @@ pub fn golden_vectors() -> Vec<(&'static str, Vec<u8>)> {
             vfs_ipc::ring::init(owned.seg(), 4, 256).unwrap();
             owned.seg().read_bytes(0, 40).unwrap()
         }),
+        ("empty-tree-snapshot", {
+            use vfs_core::{build, Layer, LayerId};
+            let tree = build(vec![Layer { id: LayerId(0), entries: vec![] }]).unwrap();
+            vfs_shared::bridge::flatten(&tree)
+        }),
     ]
 }
 

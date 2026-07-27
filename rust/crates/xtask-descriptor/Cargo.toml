@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 vfs-ipc = { path = "../vfs-ipc" }
 vfs-protocol = { path = "../vfs-protocol" }
+vfs-core = { path = "../vfs-core" }
+vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
 
 [[bin]]
 name = "xtask-descriptor"

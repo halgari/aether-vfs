@@ -13,3 +13,7 @@
 (deftest encodes-shim-config-like-rust
   (is (= (:shim-config-root-runtime-empty-snapshot (golden))
          (hex (cfg/encode "C:\\GameLayers\\runtime" (byte-array 0))))))
+
+(deftest empty-tree-snapshot-matches-golden
+  (is (= (:empty-tree-snapshot (golden))
+         (hex (cfg/empty-tree-snapshot)))))
