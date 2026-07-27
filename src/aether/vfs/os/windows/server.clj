@@ -21,6 +21,16 @@
 
 (defn- resp [status ^bytes payload] {:status status :payload payload})
 
+(defn- norm-vpath
+  "The injected shim classifies opens by root prefix and sends the path relative
+  to the virtual root WITHOUT a leading slash (e.g. \"data/x.esp\", \"\" for the
+  root); aether Providers expect a '/'-rooted vpath. Normalize so they agree
+  (mirrors the Rust director's normalize)."
+  ^String [^String s]
+  (cond (or (nil? s) (= s "")) "/"
+        (.startsWith s "/") s
+        :else (str "/" s)))
+
 (defn- do-getattr [_ provider vpath]
   ;; GETATTR always answers ST_OK; a missing path yields found:false (mirrors
   ;; Rust dispatch_director GETATTR — it never uses ST_NOT_FOUND).
@@ -85,9 +95,9 @@
   ;; unhandled throw becomes ST_IO_ERROR rather than wedging the ring.
   (try
     (condp = (long opcode)
-      OP-GETATTR (do-getattr state provider (wire/decode-path-req payload))
-      OP-READDIR (do-readdir state provider (wire/decode-path-req payload))
-      OP-OPEN    (let [{:keys [flags path]} (wire/decode-open-req payload)] (do-open state provider flags path))
+      OP-GETATTR (do-getattr state provider (norm-vpath (wire/decode-path-req payload)))
+      OP-READDIR (do-readdir state provider (norm-vpath (wire/decode-path-req payload)))
+      OP-OPEN    (let [{:keys [flags path]} (wire/decode-open-req payload)] (do-open state provider flags (norm-vpath path)))
       OP-READ    (do-read state provider flags (wire/decode-read-req payload))
       OP-CLOSE   (do-close state provider (wire/decode-close-req payload))
       OP-HEARTBEAT (resp ST-OK (byte-array 0))
