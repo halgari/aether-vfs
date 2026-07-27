@@ -47,11 +47,19 @@ jobs:
         with:
           distribution: temurin
           java-version: '26'
-      - name: Install Clojure CLI
-        uses: DeLaGuardo/setup-clojure@13.0
-        with:
-          cli: latest
+      - name: Install Clojure CLI (deps.clj — deterministic on Windows PATH)
+        shell: pwsh
+        run: |
+          # DeLaGuardo/setup-clojure is flaky exposing `clojure` on the windows
+          # runner PATH under pwsh; deps.clj is a single exe we add to GITHUB_PATH.
+          $ver = "1.12.5.1654"
+          $url = "https://github.com/borkdude/deps.clj/releases/download/v$ver/deps.clj-$ver-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\deps.zip"
+          Expand-Archive "$env:RUNNER_TEMP\deps.zip" -DestinationPath "$env:RUNNER_TEMP\clj-cli" -Force
+          Copy-Item "$env:RUNNER_TEMP\clj-cli\deps.exe" "$env:RUNNER_TEMP\clj-cli\clojure.exe"
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\clj-cli"
       - name: Windows Clojure tests (FFM section + cross-process ring proof)
+        shell: pwsh
         run: clojure -M:test -n aether.vfs.os.windows.section-test -n aether.vfs.os.windows.integration-test
         env:
           # The harness exe path in the test is relative to the repo root.
