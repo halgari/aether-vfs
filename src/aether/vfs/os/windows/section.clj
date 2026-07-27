@@ -14,10 +14,14 @@
 
 (def ^:private ^Linker linker (Linker/nativeLinker))
 (def ^:private ^Arena libs (Arena/ofShared))
-(def ^:private ^SymbolLookup k32 (SymbolLookup/libraryLookup "kernel32.dll" libs))
+;; Lazily resolve kernel32 so merely LOADING this namespace succeeds on
+;; non-Windows (e.g. the Linux CI job running the full suite, where the
+;; Windows-only tests self-skip). The lookup is forced only when create/open is
+;; actually called — which is Windows-only.
+(def ^:private k32 (delay (SymbolLookup/libraryLookup "kernel32.dll" libs)))
 
 (defn- handle ^MethodHandle [sym ^FunctionDescriptor fd]
-  (.downcallHandle linker (.orElseThrow (.find k32 sym)) fd (make-array Linker$Option 0)))
+  (.downcallHandle linker (.orElseThrow (.find ^SymbolLookup @k32 sym)) fd (make-array Linker$Option 0)))
 
 (def ^:private A ValueLayout/ADDRESS)
 (def ^:private I ValueLayout/JAVA_INT)
@@ -30,11 +34,12 @@
   ^FunctionDescriptor [res & args]
   (FunctionDescriptor/of res (into-array MemoryLayout args)))
 
-(def ^:private ^MethodHandle mh-create (handle "CreateFileMappingW" (fd A A A I I I A)))
-(def ^:private ^MethodHandle mh-open   (handle "OpenFileMappingW"   (fd A I I A)))
-(def ^:private ^MethodHandle mh-map    (handle "MapViewOfFile"      (fd A A I I I L)))
-(def ^:private ^MethodHandle mh-unmap  (handle "UnmapViewOfFile"    (fd I A)))
-(def ^:private ^MethodHandle mh-close  (handle "CloseHandle"        (fd I A)))
+;; Delays (each forces @k32 on first use) so namespace load stays native-free.
+(def ^:private mh-create (delay (handle "CreateFileMappingW" (fd A A A I I I A))))
+(def ^:private mh-open   (delay (handle "OpenFileMappingW"   (fd A I I A))))
+(def ^:private mh-map    (delay (handle "MapViewOfFile"      (fd A A I I I L))))
+(def ^:private mh-unmap  (delay (handle "UnmapViewOfFile"    (fd I A))))
+(def ^:private mh-close  (delay (handle "CloseHandle"        (fd I A))))
 
 (def ^:private PAGE-READWRITE 0x04)
 (def ^:private FILE-MAP-ALL 0xF001F)
@@ -52,17 +57,17 @@
     seg))
 
 (defn- map-view [^MemorySegment h size name]
-  (let [view ^MemorySegment (.invokeWithArguments mh-map
+  (let [view ^MemorySegment (.invokeWithArguments ^MethodHandle @mh-map
                               (object-array [h (int FILE-MAP-ALL) (int 0) (int 0) (long size)]))]
     (when (null? view)
-      (.invokeWithArguments mh-close (object-array [h]))
+      (.invokeWithArguments ^MethodHandle @mh-close (object-array [h]))
       (throw (ex-info "MapViewOfFile failed" {:name name})))
     {:handle h :segment (.reinterpret view (long size)) :size size :name name}))
 
 (defn create [name size]
   (let [a (Arena/ofConfined)]
     (try
-      (let [h ^MemorySegment (.invokeWithArguments mh-create
+      (let [h ^MemorySegment (.invokeWithArguments ^MethodHandle @mh-create
                               (object-array [INVALID-HANDLE MemorySegment/NULL
                                              (int PAGE-READWRITE)
                                              (int (unsigned-bit-shift-right (long size) 32))
@@ -75,7 +80,7 @@
 (defn open [name size]
   (let [a (Arena/ofConfined)]
     (try
-      (let [h ^MemorySegment (.invokeWithArguments mh-open
+      (let [h ^MemorySegment (.invokeWithArguments ^MethodHandle @mh-open
                               (object-array [(int FILE-MAP-ALL) (int 0) (wide a name)]))]
         (when (null? h) (throw (ex-info "OpenFileMappingW failed" {:name name})))
         (map-view h size name))
@@ -84,5 +89,5 @@
 (defn close! [{:keys [handle segment size]}]
   ;; The reinterpreted view shares the raw base address MapViewOfFile returned,
   ;; so unmapping it targets the real mapped base.
-  (.invokeWithArguments mh-unmap (object-array [(.asSlice ^MemorySegment segment (long 0) (long size))]))
-  (.invokeWithArguments mh-close (object-array [^MemorySegment handle])))
+  (.invokeWithArguments ^MethodHandle @mh-unmap (object-array [(.asSlice ^MemorySegment segment (long 0) (long size))]))
+  (.invokeWithArguments ^MethodHandle @mh-close (object-array [^MemorySegment handle])))
