@@ -509,6 +509,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vfs-ring-harness"
+version = "0.1.0"
+dependencies = [
+ "vfs-ipc",
+ "vfs-protocol",
+ "vfs-win",
+]
+
+[[package]]
 name = "vfs-server"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,13 @@
+[package]
+name = "vfs-ring-harness"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vfs-ipc = { path = "../vfs-ipc" }
+vfs-win = { path = "../vfs-win" }
+vfs-protocol = { path = "../vfs-protocol" }
+
+[[bin]]
+name = "vfs-ring-harness"
+path = "src/main.rs"
