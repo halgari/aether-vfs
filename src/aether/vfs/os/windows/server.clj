@@ -10,6 +10,7 @@
 
 (def ^:private OP-GETATTR 1) (def ^:private OP-READDIR 2) (def ^:private OP-OPEN 3)
 (def ^:private OP-READ 5)    (def ^:private OP-CLOSE 11)
+(def ^:private OP-HEARTBEAT 13)
 (def ^:private FLAG-READ-BULK 0x1)
 (def ^:private BULK-THRESHOLD (* 64 1024))
 (def ^:private ST-OK 0) (def ^:private ST-NOT-FOUND -1) (def ^:private ST-BAD-FH -6)
@@ -89,6 +90,7 @@
       OP-OPEN    (let [{:keys [flags path]} (wire/decode-open-req payload)] (do-open state provider flags path))
       OP-READ    (do-read state provider flags (wire/decode-read-req payload))
       OP-CLOSE   (do-close state provider (wire/decode-close-req payload))
+      OP-HEARTBEAT (resp ST-OK (byte-array 0))
       (resp ST-BAD-REQUEST (byte-array 0)))
     (catch Throwable _
       (resp ST-IO-ERROR (byte-array 0)))))

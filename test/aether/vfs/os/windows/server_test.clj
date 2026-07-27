@@ -105,6 +105,14 @@
     (write-at [_ _ _ _] (throw (RuntimeException. "boom")))
     (release-handle [_ _] (throw (RuntimeException. "boom")))))
 
+(deftest heartbeat-returns-ok
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        p (provider)
+        hb (server/dispatch st p {:opcode 13 :flags 0 :payload (byte-array 0)})]
+    (is (= 0 (:status hb)))))
+
 (deftest dispatch-is-total-on-unhandled-throw
   (let [s (seg (* 1 1024 1024))
         a (arena/make s 0 4096 2)
