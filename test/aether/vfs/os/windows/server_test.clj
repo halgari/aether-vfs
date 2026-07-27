@@ -10,9 +10,11 @@
 
 (def small (.getBytes "hello" "UTF-8"))
 (def big (byte-array 70000 (byte 88))) ; 'X' * 70000 > 64KiB -> bulk
+(def exact (byte-array 65536 (byte 89))) ; 'Y' * 65536 == BULK_THRESHOLD -> bulk
 
 (defn- provider [] (inline/inline-provider [["/hello.txt" small 0644]
-                                            ["/big.bin" big 0644]]))
+                                            ["/big.bin" big 0644]
+                                            ["/exact.bin" exact 0644]]))
 
 (deftest getattr-and-inline-read
   (let [s (seg (* 1 1024 1024))
@@ -41,3 +43,43 @@
     (is (= 70000 n))
     (is (= 88 (.get s ValueLayout/JAVA_BYTE off)))          ; first arena byte is 'X'
     (is (= 88 (.get s ValueLayout/JAVA_BYTE (+ off 69999)))))) ; last byte too
+
+(deftest bulk-threshold-boundary
+  ;; len == BULK_THRESHOLD (65536) must go bulk even without FLAG_READ_BULK.
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s (* 512 1024) (* 256 1024) 2)
+        st (server/make-state a)
+        p (provider)
+        op (server/dispatch st p {:opcode 3 :flags 1 :payload (wire/encode-open-req 1 "/exact.bin")})
+        {:keys [fh]} (wire/decode-open-resp (:payload op))
+        rd (server/dispatch st p {:opcode 5 :flags 0 ; NO FLAG_READ_BULK
+                                  :payload (wire/encode-read-req {:fh fh :offset 0 :len 65536})})
+        [n off] (wire/decode-read-resp-bulk (:payload rd))]
+    (is (= 65536 n))
+    (is (= 89 (.get s ValueLayout/JAVA_BYTE off)))))
+
+(deftest close-unknown-fh-is-bad-fh
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        p (provider)
+        cl (server/dispatch st p {:opcode 11 :flags 0 :payload (wire/encode-close-req 999)})]
+    (is (= -6 (:status cl)))))
+
+(deftest getattr-missing-path-found-false
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        p (provider)
+        ga (server/dispatch st p {:opcode 1 :flags 0 :payload (.getBytes "/nope.txt" "UTF-8")})
+        attr (wire/decode-getattr-resp (:payload ga))]
+    (is (= 0 (:status ga)))
+    (is (= false (:found attr)))))
+
+(deftest open-missing-path-not-found
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        p (provider)
+        op (server/dispatch st p {:opcode 3 :flags 1 :payload (wire/encode-open-req 1 "/nope.txt")})]
+    (is (= -1 (:status op)))))

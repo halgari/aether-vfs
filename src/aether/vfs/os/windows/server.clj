@@ -4,6 +4,7 @@
   (:require [aether.vfs.os.windows.ring :as ring]
             [aether.vfs.os.windows.arena :as arena]
             [aether.vfs.wire :as wire]
+            [aether.vfs.error :as error]
             [aether.vfs.provider :as p])
   (:import [java.lang.foreign MemorySegment ValueLayout]))
 
@@ -19,10 +20,13 @@
 (defn- resp [status ^bytes payload] {:status status :payload payload})
 
 (defn- do-getattr [_ provider vpath]
-  (if-let [m (p/lookup provider vpath)]
-    (resp ST-OK (wire/encode-getattr-resp {:found true :is-dir (= :dir (:kind m))
-                                           :size (:size m) :mtime (or (:mtime-secs m) 0)}))
-    (resp ST-NOT-FOUND (wire/encode-getattr-resp {:found false :is-dir false :size 0 :mtime 0}))))
+  ;; GETATTR always answers ST_OK; a missing path yields found:false (mirrors
+  ;; Rust dispatch_director GETATTR — it never uses ST_NOT_FOUND).
+  (error/on-not-found
+    (let [m (p/lookup provider vpath)]
+      (resp ST-OK (wire/encode-getattr-resp {:found true :is-dir (= :dir (:kind m))
+                                             :size (:size m) :mtime (or (:mtime-secs m) 0)})))
+    (resp ST-OK (wire/encode-getattr-resp {:found false :is-dir false :size 0 :mtime 0}))))
 
 (defn- do-readdir [_ provider vpath]
   (let [entries (p/readdir provider vpath)]
@@ -31,18 +35,21 @@
                                 :size (or (:size e) 0) :mtime (or (:mtime-secs e) 0)}) entries)))))
 
 (defn- do-open [state provider flags vpath]
-  (let [opened (p/open-file provider vpath flags)
-        m (p/lookup provider vpath)
-        fh (:next-fh @state)]
-    (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened)
-                                              :size (:size m)})
-                        (assoc :next-fh (inc fh))))
-    (resp ST-OK (wire/encode-open-resp {:fh fh :size (:size m) :is-dir (= :dir (:kind m))}))))
+  ;; A missing path yields ST_NOT_FOUND (mirrors Rust dispatch_director OPEN).
+  (error/on-not-found
+    (let [opened (p/open-file provider vpath flags)
+          m (p/lookup provider vpath)
+          fh (:next-fh @state)]
+      (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened)
+                                                :size (:size m)})
+                          (assoc :next-fh (inc fh))))
+      (resp ST-OK (wire/encode-open-resp {:fh fh :size (:size m) :is-dir (= :dir (:kind m))})))
+    (resp ST-NOT-FOUND (byte-array 0))))
 
 (defn- do-read [state _ flags {:keys [fh offset len]}]
   (if-let [rec (get-in @state [:open fh])]
     (let [want (long len)
-          bulk? (or (not= 0 (bit-and (long flags) FLAG-READ-BULK)) (> want BULK-THRESHOLD))]
+          bulk? (or (not= 0 (bit-and (long flags) FLAG-READ-BULK)) (>= want BULK-THRESHOLD))]
       (if bulk?
         (let [arena (:arena @state)
               {:keys [offset len]} (arena/fill-bank arena fh want
@@ -56,10 +63,11 @@
     (resp ST-BAD-FH (byte-array 0))))
 
 (defn- do-close [state _ fh]
-  (when-let [rec (get-in @state [:open fh])]
-    (p/release-handle (:provider rec) (:handle rec)))
-  (swap! state update :open dissoc fh)
-  (resp ST-OK (byte-array 0)))
+  (if-let [rec (get-in @state [:open fh])]
+    (do (p/release-handle (:provider rec) (:handle rec))
+        (swap! state update :open dissoc fh)
+        (resp ST-OK (byte-array 0)))
+    (resp ST-BAD-FH (byte-array 0))))
 
 (defn dispatch [state provider {:keys [opcode flags payload]}]
   (condp = (long opcode)
