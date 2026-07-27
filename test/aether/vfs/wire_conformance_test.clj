@@ -27,3 +27,18 @@
   (is (= "abcd" (String. ^bytes (wire/decode-read-resp (wire/encode-read-resp (.getBytes "abcd"))))))
   (is (= [{:name "a.esp" :is-dir false :size 10 :mtime 1}]
          (wire/decode-readdir-resp (wire/encode-readdir-resp [{:name "a.esp" :is-dir false :size 10 :mtime 1}])))))
+
+(deftest server-side-codecs-match-golden
+  (let [g (golden)]
+    (is (= (:open-resp-fh42-size1000 g)
+           (hex (wire/encode-open-resp {:fh 42 :size 1000 :is-dir false}))))
+    (is (= (:read-resp-bulk-len5-off65536 g)
+           (hex (wire/encode-read-resp-bulk 5 65536))))))
+
+(deftest server-side-decoders-roundtrip
+  (is (= {:flags 1 :path "Data/Skyrim.esm"}
+         (wire/decode-open-req (wire/encode-open-req 1 "Data/Skyrim.esm"))))
+  (is (= {:fh 7 :offset 10 :len 4}
+         (wire/decode-read-req (wire/encode-read-req {:fh 7 :offset 10 :len 4}))))
+  (is (= "Data/x" (wire/decode-path-req (.getBytes "Data/x" "UTF-8"))))
+  (is (= 99 (wire/decode-close-req (wire/encode-close-req 99)))))

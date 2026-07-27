@@ -96,6 +96,16 @@ pub fn golden_vectors() -> Vec<(&'static str, Vec<u8>)> {
              DirEntryWire { name: "sub".into(),   is_dir: true,  size: 0,  mtime: 0 },
          ])),
         ("close-req-99", P::encode_close_req(99)),
+        ("open-resp-fh42-size1000",
+         P::encode_open_resp(&vfs_protocol::OpenResp { fh: 42, size: 1000, is_dir: false })),
+        ("read-resp-bulk-len5-off65536",
+         P::encode_read_resp_bulk(5, 65536)),
+        ("ring-header-slots4-cap256", {
+            use vfs_ipc::seg::OwnedSeg;
+            let owned = OwnedSeg::new(4096);
+            vfs_ipc::ring::init(owned.seg(), 4, 256).unwrap();
+            owned.seg().read_bytes(0, 40).unwrap()
+        }),
     ]
 }
 

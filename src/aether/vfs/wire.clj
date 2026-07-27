@@ -71,3 +71,34 @@
               :is-dir (not (zero? (.get bb)))
               :size (.getLong bb)
               :mtime (.getLong bb)})))))
+
+;; --- server-side codecs (mirrors vfs-protocol; M2) ---
+
+(defn decode-path-req ^String [^bytes p] (String. p "UTF-8"))
+
+(defn decode-open-req [^bytes p]
+  (let [bb (buf p)
+        flags (bit-and (long (.getInt bb)) 0xffffffff)
+        rest (byte-array (.remaining bb))]
+    (.get bb rest)
+    {:flags flags :path (String. rest "UTF-8")}))
+
+(defn encode-open-resp ^bytes [{:keys [fh size is-dir]}]
+  (let [b (baos)]
+    (put-u64! b fh) (put-u64! b size) (.write b (int (if is-dir 1 0)))
+    (dotimes [_ 7] (.write b 0))
+    (.toByteArray b)))
+
+(defn decode-read-req [^bytes p]
+  (let [bb (buf p)]
+    {:fh (.getLong bb) :offset (.getLong bb) :len (bit-and (long (.getInt bb)) 0xffffffff)}))
+
+(def ^:private READ-RESP-BULK-BIT 0x80000000)
+(defn encode-read-resp-bulk ^bytes [bytes-read arena-offset]
+  (let [b (baos)]
+    (put-u32! b (bit-or (long bytes-read) READ-RESP-BULK-BIT))
+    (put-u32! b 0)
+    (put-u64! b arena-offset)
+    (.toByteArray b)))
+
+(defn decode-close-req [^bytes p] (.getLong (buf p)))
