@@ -41,7 +41,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build ring harness + injection artifacts
-        run: cargo build -p vfs-ring-harness -p vfs-inject --bin vfs-injector -p vfs-shim-dll -p vfs-payload -p vfs-fixture-read
+        # NB: no `--bin` — a target selector would restrict cargo to that ONE
+        # target and skip the other packages' default artifacts (the shim/payload
+        # DLLs, fixtures, harness), making the Windows proofs self-skip. Building
+        # each package (default targets) produces all bins incl. vfs-injector.
+        run: cargo build -p vfs-ring-harness -p vfs-inject -p vfs-shim-dll -p vfs-payload -p vfs-fixture-read
         working-directory: rust
       - uses: actions/setup-java@v4
         with:
