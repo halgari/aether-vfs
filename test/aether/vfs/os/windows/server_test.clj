@@ -129,7 +129,11 @@
   (let [s (seg (* 1 1024 1024))
         a (arena/make s 0 4096 2)
         st (server/make-state a)
-        overrides (str (System/getProperty "java.io.tmpdir") "vfs-m4-" (System/nanoTime))
+        ;; join via File so it works cross-platform — java.io.tmpdir has a
+        ;; trailing separator on Windows but NOT on Linux (/tmp), so (str …)
+        ;; produced "/tmpvfs-m4-…" (a path under /) that mkdirs couldn't create.
+        overrides (.getPath (java.io.File. (System/getProperty "java.io.tmpdir")
+                                           (str "vfs-m4-" (System/nanoTime))))
         _ (.mkdirs (java.io.File. overrides))
         p (overlay/overlay-provider (inline/inline-provider []) overrides)  ; Writable
         op (server/dispatch st p {:opcode 3 :flags 2 :payload (wire/encode-open-req 2 "/new.txt")})]
