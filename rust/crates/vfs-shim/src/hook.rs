@@ -24,7 +24,7 @@ use crate::ntdef::{
     FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateSectionFn, NtMapViewOfSectionFn,
     NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryFullAttributesFileFn,
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
-    NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
+    NtWriteFileFn, NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFORMATION, FILE_ALL_INFORMATION,
     FILE_BASIC_INFORMATION, FILE_DEVICE_DISK, FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION,
     FILE_DISPOSITION_INFORMATION_EX, FILE_FS_DEVICE_INFORMATION, FILE_INTERNAL_INFORMATION,
@@ -55,6 +55,7 @@ static mut TRAMP_CLOSE: Option<NtCloseFn> = None;
 static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
 static mut TRAMP_SETINFO: Option<NtSetInformationFileFn> = None;
 static mut TRAMP_READ: Option<NtReadFileFn> = None;
+static mut TRAMP_WRITE: Option<NtWriteFileFn> = None;
 static mut TRAMP_CREATE_SECTION: Option<NtCreateSectionFn> = None;
 static mut TRAMP_MAP_VIEW: Option<NtMapViewOfSectionFn> = None;
 static mut TRAMP_UNMAP_VIEW: Option<NtUnmapViewOfSectionFn> = None;
@@ -237,6 +238,10 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     TRAMP_READ = Some(core::mem::transmute::<*const (), NtReadFileFn>(
         d_read.trampoline() as *const (),
     ));
+    let d_write = make_detour(ntdll, b"NtWriteFile\0", write_hook as *const ())?;
+    TRAMP_WRITE = Some(core::mem::transmute::<*const (), NtWriteFileFn>(
+        d_write.trampoline() as *const (),
+    ));
     let d_csec = make_detour(ntdll, b"NtCreateSection\0", create_section_hook as *const ())?;
     TRAMP_CREATE_SECTION = Some(core::mem::transmute::<*const (), NtCreateSectionFn>(
         d_csec.trampoline() as *const (),
@@ -260,12 +265,13 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     d_qif.enable().map_err(|_| InstallError::Detour)?;
     d_setinfo.enable().map_err(|_| InstallError::Detour)?;
     d_read.enable().map_err(|_| InstallError::Detour)?;
+    d_write.enable().map_err(|_| InstallError::Detour)?;
     d_csec.enable().map_err(|_| InstallError::Detour)?;
     d_map.enable().map_err(|_| InstallError::Detour)?;
     d_unmap.enable().map_err(|_| InstallError::Detour)?;
     d_qvol.enable().map_err(|_| InstallError::Detour)?;
     detours.extend([
-        d_qdirex, d_close, d_qif, d_setinfo, d_read, d_csec, d_map, d_unmap, d_qvol,
+        d_qdirex, d_close, d_qif, d_setinfo, d_read, d_write, d_csec, d_map, d_unmap, d_qvol,
     ]);
 
     // Best-effort child-process propagation + virtual image path spoof.
@@ -569,17 +575,26 @@ unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Option<String> 
 
 /// Try director FUSE OPEN for paths under the managed root. Returns Some(status)
 /// when the fuse client handled the call (success or hard failure under root).
+/// An under-root open needs the ring WRITE path when write access or a
+/// create/overwrite disposition is present (SUPERSEDE/CREATE/OVERWRITE[_IF]).
+fn is_write_open(access: u32, disposition: u32) -> bool {
+    const WRITE_ACCESS: u32 = 0x4000_0000 | 0x0002 | 0x0004; // GENERIC_WRITE|FILE_WRITE_DATA|FILE_APPEND_DATA
+    (access & WRITE_ACCESS) != 0 || matches!(disposition, 0 | 2 | 4 | 5)
+}
+
 unsafe fn try_fuse_create(
     file_handle: *mut HANDLE,
     oa: *const ObjectAttributes,
     iosb: *mut c_void,
+    write: bool,
 ) -> Option<NTSTATUS> {
     let client = crate::fuse_client::global()?;
     let path = path_of(oa)?;
     let vpath = client.vpath_under_root(&path)?;
     // Directory open of root: empty vpath → "."
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
-    match client.open(vp) {
+    let opened = if write { client.open_write(vp) } else { client.open(vp) };
+    match opened {
         Ok(resp) => {
             let h = crate::fuse_synth::open_fuse(resp.fh, resp.size, resp.is_dir)?;
             if !file_handle.is_null() {
@@ -622,7 +637,7 @@ unsafe extern "system" fn create_hook(
         None => return STATUS_UNSUCCESSFUL,
     };
     // Prefer director FUSE for managed-root content (no in-shim zipserve).
-    if let Some(st) = try_fuse_create(file_handle, oa, iosb) {
+    if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, disp)) {
         return st;
     }
     match decision_for(oa, access, disp) {
@@ -703,7 +718,7 @@ unsafe extern "system" fn open_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if let Some(st) = try_fuse_create(file_handle, oa, iosb) {
+    if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, 0)) {
         return st;
     }
     // NtOpenFile has no disposition; it always opens existing (FILE_OPEN).
@@ -1294,6 +1309,79 @@ unsafe extern "system" fn qif_hook(
 /// `NtReadFile` hook. For synthetic (zip-window) handles, copy bytes from the
 /// mapped window; real handles pass straight through. `ByteOffset` of NULL or
 /// the "use current position" sentinel (-1/-2) means "current position".
+/// `NtWriteFile` hook. For synthetic (fuse) write handles, forward the game's
+/// buffer to the JVM overlay over the ring and complete the IRP; real handles
+/// pass straight through. `ByteOffset` NULL / negative sentinel = current pos.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "system" fn write_hook(
+    handle: HANDLE,
+    event: HANDLE,
+    apc: *const c_void,
+    apc_ctx: *const c_void,
+    iosb: *mut c_void,
+    buffer: *mut c_void,
+    length: u32,
+    byte_offset: *const i64,
+    key: *const u32,
+) -> NTSTATUS {
+    let tramp = match TRAMP_WRITE {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        let explicit = if byte_offset.is_null() {
+            None
+        } else {
+            let v = core::ptr::read_unaligned(byte_offset);
+            if v < 0 {
+                None
+            } else {
+                Some(v as u64)
+            }
+        };
+        if let Some((fh, _size, _is_dir, pos)) = crate::fuse_synth::lookup(handle as isize) {
+            let off = explicit.unwrap_or(pos);
+            let want = length as usize;
+            let n = if want == 0 || buffer.is_null() {
+                0usize
+            } else {
+                // SAFETY: NtWriteFile contract — buffer is readable for `length` bytes.
+                let slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, want) };
+                match crate::fuse_client::global()
+                    .ok_or(vfs_protocol::ST_IO_ERROR)
+                    .and_then(|c| c.write(fh, off, slice))
+                {
+                    Ok(n) => n,
+                    Err(_) => {
+                        if !iosb.is_null() {
+                            let p = iosb as *mut u8;
+                            core::ptr::write_unaligned(p as *mut u32, STATUS_UNSUCCESSFUL as u32);
+                            core::ptr::write_unaligned(p.add(8) as *mut usize, 0usize);
+                        }
+                        return STATUS_UNSUCCESSFUL;
+                    }
+                }
+            };
+            if explicit.is_none() {
+                crate::fuse_synth::set_position(handle as isize, off + n as u64);
+            }
+            if !iosb.is_null() {
+                let p = iosb as *mut u8;
+                core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
+                core::ptr::write_unaligned(p.add(8) as *mut usize, n);
+            }
+            if !event.is_null() {
+                windows_sys::Win32::System::Threading::SetEvent(event);
+            }
+            let _ = (apc, apc_ctx, key);
+            return STATUS_SUCCESS;
+        }
+    }
+    tramp(
+        handle, event, apc, apc_ctx, iosb, buffer, length, byte_offset, key,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe extern "system" fn read_hook(
     handle: HANDLE,

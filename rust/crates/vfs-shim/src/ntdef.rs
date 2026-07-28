@@ -171,6 +171,19 @@ pub type NtReadFileFn = unsafe extern "system" fn(
     *const u32,    // Key
 ) -> NTSTATUS;
 
+/// `NtWriteFile` — identical signature to `NtReadFile` (Buffer is the source).
+pub type NtWriteFileFn = unsafe extern "system" fn(
+    HANDLE,        // FileHandle
+    HANDLE,        // Event
+    *const c_void, // ApcRoutine
+    *const c_void, // ApcContext
+    *mut c_void,   // IoStatusBlock
+    *mut c_void,   // Buffer (source bytes to write)
+    u32,           // Length
+    *const i64,    // ByteOffset
+    *const u32,    // Key
+) -> NTSTATUS;
+
 /// `STATUS_END_OF_FILE`.
 pub const STATUS_END_OF_FILE: NTSTATUS = 0xC000_0011u32 as i32;
 /// `STATUS_NOT_IMPLEMENTED`.

@@ -5,9 +5,10 @@ use std::sync::OnceLock;
 use vfs_ipc::{Geom, RingClient, SpinNotifier};
 use vfs_protocol::{
     decode_getattr_resp, decode_open_resp, decode_readdir_resp, decode_read_bulk_resp,
-    decode_read_resp_into, encode_close_req, encode_open_req, encode_path_req, encode_read_req,
-    is_read_resp_bulk, AttrResp, DirEntryWire, OpenResp, ReadReq, FLAG_READ_BULK, OP_CLOSE,
-    OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ, OP_READDIR, OPEN_READ, ST_OK,
+    decode_read_resp_into, decode_write_resp, encode_close_req, encode_open_req, encode_path_req,
+    encode_read_req, encode_write_req, is_read_resp_bulk, AttrResp, DirEntryWire, OpenResp,
+    ReadReq, WriteReq, FLAG_READ_BULK, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ,
+    OP_READDIR, OP_WRITE, OPEN_READ, OPEN_WRITE, ST_OK,
 };
 use vfs_win::SharedMapping;
 
@@ -118,6 +119,56 @@ impl FuseClient {
             return Err(r.status);
         }
         decode_open_resp(&r.payload).ok_or(vfs_protocol::ST_BAD_REQUEST)
+    }
+
+    /// Open a virtual path for WRITE (the JVM overlay creates/opens it writable).
+    pub fn open_write(&self, vpath: &str) -> Result<OpenResp, i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_OPEN, 0, &encode_open_req(OPEN_WRITE, vpath))
+            .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        decode_open_resp(&r.payload).ok_or(vfs_protocol::ST_BAD_REQUEST)
+    }
+
+    /// Write `data` at `offset` to a virtual write handle. Chunks to fit the ring
+    /// payload (inline; bulk-arena writes are a later step).
+    pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<usize, i32> {
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let chunk = (self.payload_cap as usize).saturating_sub(24).max(1);
+        let c = self.client();
+        let mut written = 0usize;
+        while written < data.len() {
+            let end = (written + chunk).min(data.len());
+            let piece = &data[written..end];
+            let r = c
+                .submit(
+                    OP_WRITE,
+                    0,
+                    &encode_write_req(
+                        &WriteReq {
+                            fh,
+                            offset: offset + written as u64,
+                            len: piece.len() as u32,
+                        },
+                        piece,
+                    ),
+                )
+                .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
+            if r.status != ST_OK {
+                return Err(r.status);
+            }
+            let n = decode_write_resp(&r.payload).ok_or(vfs_protocol::ST_BAD_REQUEST)? as usize;
+            written += n;
+            if n < piece.len() {
+                break;
+            }
+        }
+        Ok(written)
     }
 
     /// Read into `buf` (typically the game's NtReadFile buffer).
