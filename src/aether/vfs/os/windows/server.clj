@@ -9,12 +9,18 @@
   (:import [java.lang.foreign MemorySegment ValueLayout]))
 
 (def ^:private OP-GETATTR 1) (def ^:private OP-READDIR 2) (def ^:private OP-OPEN 3)
-(def ^:private OP-READ 5)    (def ^:private OP-CLOSE 11)
+(def ^:private OP-READ 5)    (def ^:private OP-WRITE 6)   (def ^:private OP-CLOSE 11)
 (def ^:private OP-HEARTBEAT 13)
 (def ^:private FLAG-READ-BULK 0x1)
+(def ^:private OPEN-WRITE 2)
+(def ^:private DEFAULT-CREATE-MODE 420) ; 0644
 (def ^:private BULK-THRESHOLD (* 64 1024))
 (def ^:private ST-OK 0) (def ^:private ST-NOT-FOUND -1) (def ^:private ST-BAD-FH -6)
 (def ^:private ST-NOT-A-DIRECTORY -2)
+;; No dedicated ST_READ_ONLY exists in vfs-protocol (only ST_OK..ST_NO_SPACE,
+;; -1..-7); a :read-only raise from a Writable wrapper maps onto ST_BAD_REQUEST,
+;; matching the Rust director's existing "OPEN_WRITE unsupported -> BAD_REQUEST"
+;; convention rather than inventing a colliding status code here.
 (def ^:private ST-BAD-REQUEST -3) (def ^:private ST-IO-ERROR -4)
 
 (defn make-state [arena] (atom {:arena arena :next-fh 1 :open {}}))
@@ -56,15 +62,27 @@
 
 (defn- do-open [state provider flags vpath]
   ;; A missing path yields ST_NOT_FOUND (mirrors Rust dispatch_director OPEN).
-  (error/on-not-found
-    (let [opened (p/open-file provider vpath flags)
-          m (p/lookup provider vpath)
-          fh (:next-fh @state)]
-      (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened)
-                                                :size (:size m)})
-                          (assoc :next-fh (inc fh))))
-      (resp ST-OK (wire/encode-open-resp {:fh fh :size (:size m) :is-dir (= :dir (:kind m))})))
-    (resp ST-NOT-FOUND (byte-array 0))))
+  ;; OPEN_WRITE (bit 2) routes through the provider's Writable wrapper
+  ;; (create-file) to open/create a writable handle; a :read-only raise (base
+  ;; provider without a Writable overlay) maps to ST_BAD_REQUEST rather than
+  ;; propagating to the total try/catch's generic ST_IO_ERROR.
+  (try
+    (error/on-not-found
+      (let [write? (not= 0 (bit-and (long flags) OPEN-WRITE))
+            opened (if write?
+                     (p/create provider vpath flags DEFAULT-CREATE-MODE)
+                     (p/open-file provider vpath flags))
+            m (p/lookup provider vpath)
+            fh (:next-fh @state)]
+        (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened)
+                                                  :size (:size m)})
+                            (assoc :next-fh (inc fh))))
+        (resp ST-OK (wire/encode-open-resp {:fh fh :size (:size m) :is-dir (= :dir (:kind m))})))
+      (resp ST-NOT-FOUND (byte-array 0)))
+    (catch clojure.lang.ExceptionInfo e
+      (if (= :read-only (error/category e))
+        (resp ST-BAD-REQUEST (byte-array 0))
+        (throw e)))))
 
 (defn- do-read [state _ flags {:keys [fh offset len]}]
   (if-let [rec (get-in @state [:open fh])]
@@ -80,6 +98,12 @@
           (resp ST-OK (wire/encode-read-resp-bulk len offset)))
         (let [bytes (p/read-at (:provider rec) (:handle rec) offset want)]
           (resp ST-OK (wire/encode-read-resp bytes)))))
+    (resp ST-BAD-FH (byte-array 0))))
+
+(defn- do-write [state _ {:keys [fh offset data]}]
+  (if-let [rec (get-in @state [:open fh])]
+    (let [n (p/write-at (:provider rec) (:handle rec) offset data)]
+      (resp ST-OK (wire/encode-write-resp (int n))))
     (resp ST-BAD-FH (byte-array 0))))
 
 (defn- do-close [state _ fh]
@@ -99,6 +123,7 @@
       OP-READDIR (do-readdir state provider (norm-vpath (wire/decode-path-req payload)))
       OP-OPEN    (let [{:keys [flags path]} (wire/decode-open-req payload)] (do-open state provider flags (norm-vpath path)))
       OP-READ    (do-read state provider flags (wire/decode-read-req payload))
+      OP-WRITE   (do-write state provider (wire/decode-write-req payload))
       OP-CLOSE   (do-close state provider (wire/decode-close-req payload))
       OP-HEARTBEAT (resp ST-OK (byte-array 0))
       (resp ST-BAD-REQUEST (byte-array 0)))

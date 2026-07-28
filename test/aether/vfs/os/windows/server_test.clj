@@ -4,7 +4,8 @@
             [aether.vfs.os.windows.arena :as arena]
             [aether.vfs.wire :as wire]
             [aether.vfs.provider :as provider]
-            [aether.vfs.providers.inline :as inline])
+            [aether.vfs.providers.inline :as inline]
+            [aether.vfs.providers.overlay :as overlay])
   (:import [java.lang.foreign Arena MemorySegment ValueLayout]))
 
 (defn- seg ^MemorySegment [n] (.allocate (Arena/ofAuto) (long n) 8))
@@ -121,3 +122,24 @@
                             {:opcode 1 :flags 0 :payload (.getBytes "/whatever" "UTF-8")})]
     (is (= -4 (:status ga)))
     (is (bytes? (:payload ga)))))
+
+(deftest write-open-write-and-read-back
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        overrides (str (System/getProperty "java.io.tmpdir") "vfs-m4-" (System/nanoTime))
+        _ (.mkdirs (java.io.File. overrides))
+        base (inline/inline-provider [])                    ; empty base
+        p (overlay/overlay-provider base overrides)          ; Writable
+        ;; open /new.txt for write (OPEN_WRITE=2), create
+        op (server/dispatch st p {:opcode 3 :flags 2 :payload (wire/encode-open-req 2 "/new.txt")})
+        {:keys [fh]} (wire/decode-open-resp (:payload op))
+        w  (server/dispatch st p {:opcode 6 :flags 0 :payload (wire/encode-write-req {:fh fh :offset 0} (.getBytes "hi!" "UTF-8"))})
+        n  (wire/decode-write-resp (:payload w))]
+    (is (= 0 (:status op)))
+    (is (= 3 n))
+    ;; read it back through a fresh open/read
+    (let [op2 (server/dispatch st p {:opcode 3 :flags 1 :payload (wire/encode-open-req 1 "/new.txt")})
+          {:keys [fh]} (wire/decode-open-resp (:payload op2))
+          rd (server/dispatch st p {:opcode 5 :flags 0 :payload (wire/encode-read-req {:fh fh :offset 0 :len 3})})]
+      (is (= "hi!" (String. ^bytes (wire/decode-read-resp (:payload rd)) "UTF-8"))))))

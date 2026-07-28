@@ -7,7 +7,7 @@
            (java.nio ByteBuffer)
            (java.nio.channels FileChannel)
            (java.nio.file Files LinkOption Path)
-           (java.nio.file.attribute FileTime PosixFilePermission PosixFileAttributes)))
+           (java.nio.file.attribute BasicFileAttributes FileTime PosixFilePermission PosixFileAttributes)))
 
 (def ^:private ^"[Ljava.nio.file.LinkOption;" no-follow
   (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
@@ -39,15 +39,28 @@
     (if (= "" rel) (io/file backing) (io/file backing rel))))
 
 (defn stat-meta
-  "Meta for a real file (symlink metadata: links are not followed)."
+  "Meta for a real file (symlink metadata: links are not followed). POSIX
+  permissions are used when the host filesystem supports them; on
+  filesystems without a POSIX attribute view (e.g. Windows/NTFS, which
+  throws UnsupportedOperationException for PosixFileAttributes), fall back
+  to BasicFileAttributes with a conservative default perm."
   [^File f]
   (vfs-error/with-io
-    (let [attrs ^PosixFileAttributes (Files/readAttributes (.toPath f) PosixFileAttributes no-follow)]
-      {:size (.size attrs)
-       :kind (if (.isDirectory attrs) :dir :file)
-       :perm (perms->int (.permissions attrs))
-       :mtime-secs (quot (.toMillis ^FileTime (.lastModifiedTime attrs)) 1000)
-       :cache :cached})))
+    (let [path (.toPath f)]
+      (try
+        (let [attrs ^PosixFileAttributes (Files/readAttributes path PosixFileAttributes no-follow)]
+          {:size (.size attrs)
+           :kind (if (.isDirectory attrs) :dir :file)
+           :perm (perms->int (.permissions attrs))
+           :mtime-secs (quot (.toMillis ^FileTime (.lastModifiedTime attrs)) 1000)
+           :cache :cached})
+        (catch UnsupportedOperationException _
+          (let [attrs ^BasicFileAttributes (Files/readAttributes path BasicFileAttributes no-follow)]
+            {:size (.size attrs)
+             :kind (if (.isDirectory attrs) :dir :file)
+             :perm (if (.isDirectory attrs) 0755 0644)
+             :mtime-secs (quot (.toMillis ^FileTime (.lastModifiedTime attrs)) 1000)
+             :cache :cached}))))))
 
 (defn list-dir
   "DirEntries for a real directory."
