@@ -124,25 +124,25 @@
     (is (bytes? (:payload ga)))))
 
 (deftest write-open-write-and-read-back
+  ;; Status-checked so a dispatch error surfaces as a clear assertion (with the
+  ;; status), never a blind decode of an empty error payload (which underflows).
   (let [s (seg (* 1 1024 1024))
         a (arena/make s 0 4096 2)
         st (server/make-state a)
         overrides (str (System/getProperty "java.io.tmpdir") "vfs-m4-" (System/nanoTime))
         _ (.mkdirs (java.io.File. overrides))
-        base (inline/inline-provider [])                    ; empty base
-        p (overlay/overlay-provider base overrides)          ; Writable
-        ;; open /new.txt for write (OPEN_WRITE=2), create
-        op (server/dispatch st p {:opcode 3 :flags 2 :payload (wire/encode-open-req 2 "/new.txt")})
-        {:keys [fh]} (wire/decode-open-resp (:payload op))
-        w  (server/dispatch st p {:opcode 6 :flags 0 :payload (wire/encode-write-req {:fh fh :offset 0} (.getBytes "hi!" "UTF-8"))})
-        n  (wire/decode-write-resp (:payload w))]
-    (is (= 0 (:status op)))
-    (is (= 3 n))
-    ;; close the write handle so the overlay flushes to disk before reopening
-    ;; (a fresh read handle won't see an unflushed write channel — this bit on Linux)
-    (server/dispatch st p {:opcode 11 :flags 0 :payload (wire/encode-close-req fh)})
-    ;; The OP_WRITE dispatch persisted the bytes into the overlay overrides dir.
-    ;; (Read-your-writes over the ring is proven end-to-end by the injection
-    ;; launch-test; an in-process re-open/read here was platform-dependent on the
-    ;; overlay's channel-flush timing, so assert the copied-up file directly.)
-    (is (= "hi!" (slurp (java.io.File. overrides "new.txt"))))))
+        p (overlay/overlay-provider (inline/inline-provider []) overrides)  ; Writable
+        op (server/dispatch st p {:opcode 3 :flags 2 :payload (wire/encode-open-req 2 "/new.txt")})]
+    (is (= 0 (:status op)) (str "write-open status=" (:status op)))
+    (when (= 0 (:status op))
+      (let [{:keys [fh]} (wire/decode-open-resp (:payload op))
+            w (server/dispatch st p {:opcode 6 :flags 0
+                                     :payload (wire/encode-write-req {:fh fh :offset 0} (.getBytes "hi!" "UTF-8"))})]
+        (is (= 0 (:status w)) (str "write status=" (:status w)))
+        (when (= 0 (:status w))
+          (is (= 3 (wire/decode-write-resp (:payload w))))
+          ;; close flushes the overlay write channel to disk
+          (server/dispatch st p {:opcode 11 :flags 0 :payload (wire/encode-close-req fh)})
+          ;; the OP_WRITE dispatch persisted the bytes into the overlay overrides
+          ;; dir (read-your-writes over the ring is proven by the injection launch-test)
+          (is (= "hi!" (slurp (java.io.File. overrides "new.txt")))))))))
