@@ -81,13 +81,22 @@
                             (assoc :next-fh (inc fh))))
         (resp ST-OK (wire/encode-open-resp {:fh fh :size 0 :is-dir false})))
       (error/on-not-found
-        (let [opened (p/open-file provider vpath flags)
-              m (p/lookup provider vpath)
+        ;; Lookup first: a directory open must NOT go through open-file, which
+        ;; opens a byte-stream FileChannel and throws on a directory. Directory
+        ;; handles carry no channel (enumeration/attr queries are path- or
+        ;; getattr-based); reads/closes on a nil handle are harmless no-ops.
+        (let [m (p/lookup provider vpath)
               fh (:next-fh @state)]
-          (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened)
-                                                    :size (:size m) :vpath vpath})
-                              (assoc :next-fh (inc fh))))
-          (resp ST-OK (wire/encode-open-resp {:fh fh :size (:size m) :is-dir (= :dir (:kind m))})))
+          (if (= :dir (:kind m))
+            (do (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle nil
+                                                          :size 0 :vpath vpath :dir true})
+                                    (assoc :next-fh (inc fh))))
+                (resp ST-OK (wire/encode-open-resp {:fh fh :size 0 :is-dir true})))
+            (let [opened (p/open-file provider vpath flags)]
+              (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened)
+                                                        :size (:size m) :vpath vpath})
+                                  (assoc :next-fh (inc fh))))
+              (resp ST-OK (wire/encode-open-resp {:fh fh :size (:size m) :is-dir false})))))
         (resp ST-NOT-FOUND (byte-array 0))))
     (catch clojure.lang.ExceptionInfo e
       (if (= :read-only (error/category e))

@@ -239,3 +239,21 @@
         p (overlay/overlay-provider (inline/inline-provider []) overrides)
         sa (server/dispatch st p {:opcode 7 :flags 0 :payload (wire/encode-setattr-req {:fh 999 :size 0})})]
     (is (= -6 (:status sa)))))
+
+(deftest open-directory-returns-dir-handle
+  ;; A directory open must NOT go through open-file (which opens a byte-stream
+  ;; FileChannel and throws on a directory). do-open looks up first and returns
+  ;; a channel-less dir handle with is-dir=true. `/sub` is a directory in the
+  ;; inline tree (parent of /sub/x.txt).
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        p (inline/inline-provider [["/sub/x.txt" small 0644]])
+        op (server/dispatch st p {:opcode 3 :flags 0 :payload (wire/encode-open-req 1 "/sub")})]
+    (is (= 0 (:status op)) (str "dir-open status=" (:status op)))
+    (let [{:keys [fh is-dir size]} (wire/decode-open-resp (:payload op))]
+      (is (true? is-dir) "directory reports is-dir")
+      (is (= 0 size))
+      ;; the handle closes cleanly (nil channel → no-op release)
+      (is (= 0 (:status (server/dispatch st p {:opcode 11 :flags 0
+                                               :payload (wire/encode-close-req fh)})))))))

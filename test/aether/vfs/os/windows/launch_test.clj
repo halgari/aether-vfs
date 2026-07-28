@@ -57,3 +57,32 @@
                                  "VFS_FIXTURE_DATA" "written-through-real-hooks"}})]
         (is (= 0 exit) "injected process created + wrote + read-back a virtual file via the overlay Provider")
         (is (.exists (java.io.File. overrides "new.txt")) "the write copied-up into the overlay overrides dir")))))
+
+(deftest injected-writeset-mkdir-truncate-delete-rename
+  (let [writeset-artifacts (conj artifacts "vfs-fixture-writeset.exe")]
+    (cond
+      (not windows?) (println "skip: launch-test is Windows-only")
+      (not (every? #(.exists (artifact %)) writeset-artifacts))
+      (println "skip: build rust artifacts first (incl. vfs-fixture-writeset)")
+      :else
+      ;; File-joined temp overrides dir (java.io.tmpdir has a trailing separator
+      ;; on Windows but not on Linux; launch-test is Windows-only but keep the
+      ;; safe idiom). Base is empty — every op lands purely in the upper.
+      (let [overrides (.getPath (java.io.File. (System/getProperty "java.io.tmpdir")
+                                               (str "vfs-m4p2-writeset-" (System/nanoTime))))
+            _ (.mkdirs (java.io.File. overrides))
+            provider (overlay/overlay-provider (inline/inline-provider []) overrides)
+            exit (launch/launch provider
+                   {:target-exe (.getPath (artifact "vfs-fixture-writeset.exe"))
+                    :injector   (.getPath (artifact "vfs-injector.exe"))
+                    :shim-dll   (.getPath (artifact "vfs_shim_dll.dll"))
+                    :payload    (.getPath (artifact "vfs_payload.dll"))
+                    :child-env  {"VFS_FIXTURE_DIR" "C:\\GameLayers\\runtime"}})]
+        (is (= 0 exit)
+            "injected process ran mkdir/truncate/delete/rename through the overlay Provider")
+        ;; Authoritative proof: the overlay overrides dir on disk reflects each op.
+        (is (.isDirectory (java.io.File. overrides "madedir")) "mkdir created a real dir in overrides")
+        (is (= 2 (.length (java.io.File. overrides "trunc.bin"))) "truncate shrank the overrides file to 2 bytes")
+        (is (not (.exists (java.io.File. overrides "del.txt"))) "delete removed the file from overrides")
+        (is (.exists (java.io.File. overrides "ren_b.txt")) "rename produced the target in overrides")
+        (is (not (.exists (java.io.File. overrides "ren_a.txt"))) "rename removed the source from overrides")))))

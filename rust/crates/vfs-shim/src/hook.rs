@@ -1219,6 +1219,34 @@ unsafe fn fuse_query_information(
             synth_iosb_ok(iosb, core::mem::size_of::<FileNetworkOpenInformation>());
             STATUS_SUCCESS
         }
+        FILE_ALL_INFORMATION => {
+            // GetFileInformationByHandle (Rust `metadata`) issues this. Fill the
+            // fixed prefix callers read — attributes (incl. DIRECTORY), size, the
+            // Standard.Directory flag — and leave the trailing name empty. Prefix
+            // layout: Basic 40 | Standard 24 | Internal 8 | Ea 4 | Access 4 |
+            // Position 8 | Mode 4 | Alignment 4 | Name 4 = 100.
+            const PREFIX: usize = 100;
+            if (length as usize) < PREFIX {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let p = info as *mut u8;
+            core::ptr::write_bytes(p, 0, PREFIX);
+            let attrs = if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+            // Basic.FileAttributes @ 32
+            core::ptr::write_unaligned(p.add(32) as *mut u32, attrs);
+            // Standard.AllocationSize @ 40, EndOfFile @ 48, NumberOfLinks @ 56
+            core::ptr::write_unaligned(p.add(40) as *mut i64, size as i64);
+            core::ptr::write_unaligned(p.add(48) as *mut i64, size as i64);
+            core::ptr::write_unaligned(p.add(56) as *mut u32, 1);
+            // Standard.Directory (BOOLEAN) @ 61
+            *p.add(61) = if is_dir { 1 } else { 0 };
+            // Internal.IndexNumber @ 64
+            core::ptr::write_unaligned(p.add(64) as *mut i64, handle as i64);
+            // Position.CurrentByteOffset @ 80
+            core::ptr::write_unaligned(p.add(80) as *mut i64, pos as i64);
+            synth_iosb_ok(iosb, PREFIX);
+            STATUS_SUCCESS
+        }
         _ => {
             synth_iosb_ok(iosb, 0);
             STATUS_SUCCESS
