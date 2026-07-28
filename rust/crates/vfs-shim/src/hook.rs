@@ -718,7 +718,10 @@ unsafe extern "system" fn open_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, 0)) {
+    // NtOpenFile has no disposition — it always opens existing (FILE_OPEN). Pass
+    // FILE_OPEN (1), NOT 0: 0 is FILE_SUPERSEDE, which is in is_write_open's
+    // create/overwrite set and would misclassify every open as a write.
+    if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, vfs_redirect::FILE_OPEN)) {
         return st;
     }
     // NtOpenFile has no disposition; it always opens existing (FILE_OPEN).
@@ -1376,6 +1379,9 @@ unsafe extern "system" fn write_hook(
             let _ = (apc, apc_ctx, key);
             return STATUS_SUCCESS;
         }
+        // Tagged synth handle with no table entry — never hand it to the real
+        // NtWriteFile (mirrors read_hook).
+        return STATUS_UNSUCCESSFUL;
     }
     tramp(
         handle, event, apc, apc_ctx, iosb, buffer, length, byte_offset, key,
