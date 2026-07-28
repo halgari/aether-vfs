@@ -265,6 +265,59 @@ pub fn is_read_resp_bulk(p: &[u8]) -> bool {
     p.len() >= 4 && (u32::from_le_bytes(p[0..4].try_into().unwrap_or([0; 4])) & READ_RESP_BULK_BIT) != 0
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteReq {
+    pub fh: u64,
+    pub offset: u64,
+    pub len: u32,
+}
+
+/// WRITE req: `fh:u64 | offset:u64 | len:u32 | pad:u32 | data[len]`
+pub fn encode_write_req(r: &WriteReq, data: &[u8]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(24 + data.len());
+    b.extend_from_slice(&r.fh.to_le_bytes());
+    b.extend_from_slice(&r.offset.to_le_bytes());
+    b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b.extend_from_slice(data);
+    b
+}
+
+pub fn decode_write_req(p: &[u8]) -> Option<(WriteReq, Vec<u8>)> {
+    if p.len() < 24 {
+        return None;
+    }
+    let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
+    let offset = u64::from_le_bytes(p[8..16].try_into().ok()?);
+    let len = u32::from_le_bytes(p[16..20].try_into().ok()?) as usize;
+    if p.len() < 24 + len {
+        return None;
+    }
+    Some((
+        WriteReq {
+            fh,
+            offset,
+            len: len as u32,
+        },
+        p[24..24 + len].to_vec(),
+    ))
+}
+
+/// WRITE resp: `bytes_written:u32 | pad:u32`
+pub fn encode_write_resp(n: u32) -> Vec<u8> {
+    let mut b = Vec::with_capacity(8);
+    b.extend_from_slice(&n.to_le_bytes());
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b
+}
+
+pub fn decode_write_resp(p: &[u8]) -> Option<u32> {
+    if p.len() < 4 {
+        return None;
+    }
+    Some(u32::from_le_bytes(p[0..4].try_into().ok()?))
+}
+
 pub fn encode_close_req(fh: u64) -> Vec<u8> {
     fh.to_le_bytes().to_vec()
 }
@@ -332,6 +385,21 @@ mod tests {
         let mut out = [0u8; 8];
         assert_eq!(decode_read_resp_into(&encode_read_resp(data), &mut out), Some(4));
         assert_eq!(&out[..4], b"abcd");
+    }
+
+    #[test]
+    fn write_req_resp_roundtrip() {
+        let req = WriteReq {
+            fh: 7,
+            offset: 10,
+            len: 3,
+        };
+        let data = b"abc";
+        let encoded = encode_write_req(&req, data);
+        let (decoded_req, decoded_data) = decode_write_req(&encoded).unwrap();
+        assert_eq!(decoded_req, req);
+        assert_eq!(decoded_data, data);
+        assert_eq!(decode_write_resp(&encode_write_resp(3)), Some(3));
     }
 
     #[test]

@@ -42,3 +42,14 @@
          (wire/decode-read-req (wire/encode-read-req {:fh 7 :offset 10 :len 4}))))
   (is (= "Data/x" (wire/decode-path-req (.getBytes "Data/x" "UTF-8"))))
   (is (= 99 (wire/decode-close-req (wire/encode-close-req 99)))))
+
+(deftest write-codecs-match-golden
+  (let [g (golden)]
+    (is (= (:write-req-fh7-off10-abc g) (hex (wire/encode-write-req {:fh 7 :offset 10} (.getBytes "abc" "UTF-8")))))
+    (is (= (:write-resp-3 g) (hex (wire/encode-write-resp 3))))))
+
+(deftest write-decoders-roundtrip
+  (is (= {:fh 7 :offset 10 :data "abc"}
+         (let [{:keys [fh offset data]} (wire/decode-write-req (wire/encode-write-req {:fh 7 :offset 10} (.getBytes "abc" "UTF-8")))]
+           {:fh fh :offset offset :data (String. ^bytes data "UTF-8")})))
+  (is (= 3 (wire/decode-write-resp (wire/encode-write-resp 3)))))

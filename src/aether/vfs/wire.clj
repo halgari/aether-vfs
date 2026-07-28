@@ -112,3 +112,19 @@
     [(bit-and raw 0x7fffffff) (.getLong bb)]))
 
 (defn decode-close-req [^bytes p] (.getLong (buf p)))
+
+(defn encode-write-req ^bytes [{:keys [fh offset]} ^bytes data]
+  (let [b (baos)] (put-u64! b fh) (put-u64! b offset)
+    (put-u32! b (alength data)) (put-u32! b 0)
+    (.write b data 0 (alength data)) (.toByteArray b)))
+
+(defn decode-write-req [^bytes p]
+  (let [bb (buf p) fh (.getLong bb) offset (.getLong bb)
+        len (bit-and (long (.getInt bb)) 0xffffffff)]
+    (.getInt bb) ; pad
+    (let [d (byte-array len)] (.get bb d) {:fh fh :offset offset :data d})))
+
+(defn encode-write-resp ^bytes [n]
+  (let [b (baos)] (put-u32! b n) (put-u32! b 0) (.toByteArray b)))
+
+(defn decode-write-resp [^bytes p] (bit-and (long (.getInt (buf p))) 0xffffffff))
