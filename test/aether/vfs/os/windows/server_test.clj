@@ -150,3 +150,94 @@
           ;; the OP_WRITE dispatch persisted the bytes into the overlay overrides
           ;; dir (read-your-writes over the ring is proven by the injection launch-test)
           (is (= "hi!" (slurp (java.io.File. overrides "new.txt")))))))))
+
+(defn- temp-overrides
+  "A fresh, File-joined temp dir for an overlay's upper layer. java.io.tmpdir
+  has a trailing separator on Windows but NOT on Linux (/tmp), so plain (str
+  …) concatenation builds an uncreatable path under \"/\" there — always join
+  with java.io.File."
+  ^String []
+  (let [dir (.getPath (java.io.File. (System/getProperty "java.io.tmpdir")
+                                     (str "vfs-m4p2-" (System/nanoTime))))]
+    (.mkdirs (java.io.File. dir))
+    dir))
+
+(deftest delete-writes-whiteout-over-base-file
+  ;; Per overlay.clj unlink!, a whiteout is only recorded when the path exists
+  ;; in the (immutable) base — a path created purely in upper is just deleted
+  ;; outright with no whiteout marker. So the base provider must already have
+  ;; the file for this assertion to hold.
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        overrides (temp-overrides)
+        base (inline/inline-provider [["/x.txt" small 0644]])
+        p (overlay/overlay-provider base overrides)
+        del (server/dispatch st p {:opcode 9 :flags 0 :payload (.getBytes "/x.txt" "UTF-8")})]
+    (is (= 0 (:status del)) (str "delete status=" (:status del)))
+    (is (.exists (java.io.File. overrides ".wh.x.txt")))))
+
+(deftest delete-missing-path-not-found
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        overrides (temp-overrides)
+        p (overlay/overlay-provider (inline/inline-provider []) overrides)
+        del (server/dispatch st p {:opcode 9 :flags 0 :payload (.getBytes "/nope.txt" "UTF-8")})]
+    (is (= -1 (:status del)))))
+
+(deftest mkdir-creates-directory-in-overrides
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        overrides (temp-overrides)
+        p (overlay/overlay-provider (inline/inline-provider []) overrides)
+        md (server/dispatch st p {:opcode 10 :flags 0 :payload (wire/encode-mkdir-req 493 "/d")})]
+    (is (= 0 (:status md)) (str "mkdir status=" (:status md)))
+    (is (.isDirectory (java.io.File. overrides "d")))))
+
+(deftest rename-moves-file-in-overrides
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        overrides (temp-overrides)
+        p (overlay/overlay-provider (inline/inline-provider []) overrides)
+        op (server/dispatch st p {:opcode 3 :flags 2 :payload (wire/encode-open-req 2 "/a.txt")})
+        {:keys [fh]} (wire/decode-open-resp (:payload op))]
+    (is (= 0 (:status op)) (str "open status=" (:status op)))
+    (server/dispatch st p {:opcode 11 :flags 0 :payload (wire/encode-close-req fh)})
+    (let [rn (server/dispatch st p {:opcode 8 :flags 0 :payload (wire/encode-rename-req "/a.txt" "/b.txt")})]
+      (is (= 0 (:status rn)) (str "rename status=" (:status rn)))
+      (is (.exists (java.io.File. overrides "b.txt")))
+      (is (not (.exists (java.io.File. overrides "a.txt")))))))
+
+(deftest truncate-shrinks-file-in-overrides
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        overrides (temp-overrides)
+        p (overlay/overlay-provider (inline/inline-provider []) overrides)
+        op (server/dispatch st p {:opcode 3 :flags 2 :payload (wire/encode-open-req 2 "/t.txt")})
+        {:keys [fh]} (wire/decode-open-resp (:payload op))]
+    (is (= 0 (:status op)) (str "open status=" (:status op)))
+    (let [w (server/dispatch st p {:opcode 6 :flags 0
+                                   :payload (wire/encode-write-req {:fh fh :offset 0} (.getBytes "hello" "UTF-8"))})]
+      (is (= 0 (:status w)) (str "write status=" (:status w))))
+    (server/dispatch st p {:opcode 11 :flags 0 :payload (wire/encode-close-req fh)})
+    ;; reopen write to get a fresh fh (with :vpath) for OP_SETATTR
+    (let [op2 (server/dispatch st p {:opcode 3 :flags 2 :payload (wire/encode-open-req 2 "/t.txt")})
+          {fh2 :fh} (wire/decode-open-resp (:payload op2))]
+      (is (= 0 (:status op2)) (str "reopen status=" (:status op2)))
+      (let [sa (server/dispatch st p {:opcode 7 :flags 0 :payload (wire/encode-setattr-req {:fh fh2 :size 2})})]
+        (is (= 0 (:status sa)) (str "setattr status=" (:status sa)))
+        (server/dispatch st p {:opcode 11 :flags 0 :payload (wire/encode-close-req fh2)})
+        (is (= 2 (.length (java.io.File. overrides "t.txt"))))))))
+
+(deftest setattr-unknown-fh-is-bad-fh
+  (let [s (seg (* 1 1024 1024))
+        a (arena/make s 0 4096 2)
+        st (server/make-state a)
+        overrides (temp-overrides)
+        p (overlay/overlay-provider (inline/inline-provider []) overrides)
+        sa (server/dispatch st p {:opcode 7 :flags 0 :payload (wire/encode-setattr-req {:fh 999 :size 0})})]
+    (is (= -6 (:status sa)))))

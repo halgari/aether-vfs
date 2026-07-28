@@ -11,6 +11,8 @@
 (def ^:private OP-GETATTR 1) (def ^:private OP-READDIR 2) (def ^:private OP-OPEN 3)
 (def ^:private OP-READ 5)    (def ^:private OP-WRITE 6)   (def ^:private OP-CLOSE 11)
 (def ^:private OP-HEARTBEAT 13)
+(def ^:private OP-SETATTR 7) (def ^:private OP-RENAME 8)  (def ^:private OP-DELETE 9)
+(def ^:private OP-MKDIR 10)
 (def ^:private FLAG-READ-BULK 0x1)
 (def ^:private OPEN-WRITE 2)
 (def ^:private DEFAULT-CREATE-MODE 420) ; 0644
@@ -75,7 +77,7 @@
       ;; ST_BAD_REQUEST via the catch below.
       (let [opened (p/create provider vpath flags DEFAULT-CREATE-MODE)
             fh (:next-fh @state)]
-        (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened) :size 0})
+        (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened) :size 0 :vpath vpath})
                             (assoc :next-fh (inc fh))))
         (resp ST-OK (wire/encode-open-resp {:fh fh :size 0 :is-dir false})))
       (error/on-not-found
@@ -83,7 +85,7 @@
               m (p/lookup provider vpath)
               fh (:next-fh @state)]
           (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened)
-                                                    :size (:size m)})
+                                                    :size (:size m) :vpath vpath})
                               (assoc :next-fh (inc fh))))
           (resp ST-OK (wire/encode-open-resp {:fh fh :size (:size m) :is-dir (= :dir (:kind m))})))
         (resp ST-NOT-FOUND (byte-array 0))))
@@ -121,6 +123,36 @@
         (resp ST-OK (byte-array 0)))
     (resp ST-BAD-FH (byte-array 0))))
 
+(defmacro ^:private try-write
+  "Run a Writable-overlay mutation, replying ST_OK on success. A :not-found
+  raise (e.g. unlink/truncate/rename of a missing path) maps to ST_NOT_FOUND;
+  a :read-only raise (provider without a Writable overlay) maps to
+  ST_BAD_REQUEST, mirroring do-open's OPEN_WRITE handling. Any other
+  ExceptionInfo propagates to dispatch's total try/catch -> ST_IO_ERROR."
+  [& body]
+  `(try
+     ~@body
+     (resp ST-OK (byte-array 0))
+     (catch clojure.lang.ExceptionInfo e#
+       (case (error/category e#)
+         :not-found (resp ST-NOT-FOUND (byte-array 0))
+         :read-only (resp ST-BAD-REQUEST (byte-array 0))
+         (throw e#)))))
+
+(defn- do-delete [_ provider vpath]
+  (try-write (p/unlink provider vpath)))
+
+(defn- do-rename [_ provider from to]
+  (try-write (p/rename provider from to)))
+
+(defn- do-mkdir [_ provider vpath mode]
+  (try-write (p/mkdir provider vpath mode)))
+
+(defn- do-truncate [state provider {:keys [fh size]}]
+  (if-let [rec (get-in @state [:open fh])]
+    (try-write (p/truncate provider (:vpath rec) size))
+    (resp ST-BAD-FH (byte-array 0))))
+
 (defn dispatch [state provider {:keys [opcode flags payload]}]
   ;; Total: every request MUST yield a status so the serve loop always reaches
   ;; ring/server-complete for the slot it CAS'd to PROCESSING. Any otherwise-
@@ -133,6 +165,12 @@
       OP-READ    (do-read state provider flags (wire/decode-read-req payload))
       OP-WRITE   (do-write state provider (wire/decode-write-req payload))
       OP-CLOSE   (do-close state provider (wire/decode-close-req payload))
+      OP-DELETE  (do-delete state provider (norm-vpath (wire/decode-path-req payload)))
+      OP-RENAME  (let [{:keys [from to]} (wire/decode-rename-req payload)]
+                   (do-rename state provider (norm-vpath from) (norm-vpath to)))
+      OP-MKDIR   (let [{:keys [mode path]} (wire/decode-mkdir-req payload)]
+                   (do-mkdir state provider (norm-vpath path) mode))
+      OP-SETATTR (do-truncate state provider (wire/decode-setattr-req payload))
       OP-HEARTBEAT (resp ST-OK (byte-array 0))
       (resp ST-BAD-REQUEST (byte-array 0)))
     (catch Throwable _
