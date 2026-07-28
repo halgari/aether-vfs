@@ -67,18 +67,26 @@
   ;; provider without a Writable overlay) maps to ST_BAD_REQUEST rather than
   ;; propagating to the total try/catch's generic ST_IO_ERROR.
   (try
-    (error/on-not-found
-      (let [write? (not= 0 (bit-and (long flags) OPEN-WRITE))
-            opened (if write?
-                     (p/create provider vpath flags DEFAULT-CREATE-MODE)
-                     (p/open-file provider vpath flags))
-            m (p/lookup provider vpath)
+    (if (not= 0 (bit-and (long flags) OPEN-WRITE))
+      ;; Write-create: a freshly created/truncated file is 0 bytes, so DON'T
+      ;; lookup after create — a lookup-after-create tripped a create-vs-lookup
+      ;; path quirk in the overlay on Linux (stat of the just-created upper file
+      ;; raised :not-found → ST_NOT_FOUND). A :read-only raise still maps to
+      ;; ST_BAD_REQUEST via the catch below.
+      (let [opened (p/create provider vpath flags DEFAULT-CREATE-MODE)
             fh (:next-fh @state)]
-        (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened)
-                                                  :size (:size m)})
+        (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened) :size 0})
                             (assoc :next-fh (inc fh))))
-        (resp ST-OK (wire/encode-open-resp {:fh fh :size (:size m) :is-dir (= :dir (:kind m))})))
-      (resp ST-NOT-FOUND (byte-array 0)))
+        (resp ST-OK (wire/encode-open-resp {:fh fh :size 0 :is-dir false})))
+      (error/on-not-found
+        (let [opened (p/open-file provider vpath flags)
+              m (p/lookup provider vpath)
+              fh (:next-fh @state)]
+          (swap! state #(-> % (assoc-in [:open fh] {:provider provider :handle (:handle opened)
+                                                    :size (:size m)})
+                              (assoc :next-fh (inc fh))))
+          (resp ST-OK (wire/encode-open-resp {:fh fh :size (:size m) :is-dir (= :dir (:kind m))})))
+        (resp ST-NOT-FOUND (byte-array 0))))
     (catch clojure.lang.ExceptionInfo e
       (if (= :read-only (error/category e))
         (resp ST-BAD-REQUEST (byte-array 0))
