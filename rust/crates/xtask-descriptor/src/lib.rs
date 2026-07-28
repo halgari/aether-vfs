@@ -128,6 +128,10 @@ pub fn golden_vectors() -> Vec<(&'static str, Vec<u8>)> {
         ("write-req-fh7-off10-abc",
          P::encode_write_req(&vfs_protocol::WriteReq { fh: 7, offset: 10, len: 3 }, b"abc")),
         ("write-resp-3", P::encode_write_resp(3)),
+        ("mkdir-req-mode493-dir", P::encode_mkdir_req(493, "sub/dir")),
+        ("rename-req-a-b", P::encode_rename_req("old.txt", "new.txt")),
+        ("setattr-req-fh5-size100",
+         P::encode_setattr_req(&vfs_protocol::SetattrReq { fh: 5, size: 100 })),
         ("ring-header-slots4-cap256", {
             use vfs_ipc::seg::OwnedSeg;
             let owned = OwnedSeg::new(4096);

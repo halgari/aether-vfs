@@ -128,3 +128,40 @@
   (let [b (baos)] (put-u32! b n) (put-u32! b 0) (.toByteArray b)))
 
 (defn decode-write-resp [^bytes p] (bit-and (long (.getInt (buf p))) 0xffffffff))
+
+;; --- mkdir / rename / setattr (M4 Part 2: write set) ---
+
+(defn encode-mkdir-req ^bytes [mode ^String path]
+  (let [b (baos)] (put-u32! b mode) (.write b (.getBytes path "UTF-8")) (.toByteArray b)))
+
+(defn decode-mkdir-req [^bytes p]
+  (let [bb (buf p)
+        mode (bit-and (long (.getInt bb)) 0xffffffff)
+        rest (byte-array (.remaining bb))]
+    (.get bb rest)
+    {:mode mode :path (String. rest "UTF-8")}))
+
+(defn encode-rename-req ^bytes [^String from ^String to]
+  (let [b (baos)
+        fb (.getBytes from "UTF-8")
+        tb (.getBytes to "UTF-8")]
+    (put-u32! b (alength fb))
+    (.write b fb 0 (alength fb))
+    (.write b tb 0 (alength tb))
+    (.toByteArray b)))
+
+(defn decode-rename-req [^bytes p]
+  (let [bb (buf p)
+        from-len (bit-and (long (.getInt bb)) 0xffffffff)
+        from-b (byte-array from-len)
+        _ (.get bb from-b)
+        to-b (byte-array (.remaining bb))
+        _ (.get bb to-b)]
+    {:from (String. from-b "UTF-8") :to (String. to-b "UTF-8")}))
+
+(defn encode-setattr-req ^bytes [{:keys [fh size]}]
+  (let [b (baos)] (put-u64! b fh) (put-u64! b size) (.toByteArray b)))
+
+(defn decode-setattr-req [^bytes p]
+  (let [bb (buf p)]
+    {:fh (.getLong bb) :size (.getLong bb)}))

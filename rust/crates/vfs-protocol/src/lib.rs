@@ -318,6 +318,66 @@ pub fn decode_write_resp(p: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes(p[0..4].try_into().ok()?))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetattrReq {
+    pub fh: u64,
+    pub size: u64,
+}
+
+/// MKDIR req: `mode:u32 | path_utf8…`
+pub fn encode_mkdir_req(mode: u32, path: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(4 + path.len());
+    b.extend_from_slice(&mode.to_le_bytes());
+    b.extend_from_slice(path.as_bytes());
+    b
+}
+
+pub fn decode_mkdir_req(p: &[u8]) -> Option<(u32, String)> {
+    if p.len() < 4 {
+        return None;
+    }
+    let mode = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    let path = core::str::from_utf8(&p[4..]).ok()?.to_string();
+    Some((mode, path))
+}
+
+/// RENAME req: `from_len:u32 | from_utf8 | to_utf8`
+pub fn encode_rename_req(from: &str, to: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(4 + from.len() + to.len());
+    b.extend_from_slice(&(from.len() as u32).to_le_bytes());
+    b.extend_from_slice(from.as_bytes());
+    b.extend_from_slice(to.as_bytes());
+    b
+}
+
+pub fn decode_rename_req(p: &[u8]) -> Option<(String, String)> {
+    if p.len() < 4 {
+        return None;
+    }
+    let from_len = u32::from_le_bytes(p[0..4].try_into().ok()?) as usize;
+    let end = 4usize.checked_add(from_len)?;
+    let from = core::str::from_utf8(p.get(4..end)?).ok()?.to_string();
+    let to = core::str::from_utf8(p.get(end..)?).ok()?.to_string();
+    Some((from, to))
+}
+
+/// SETATTR req: `fh:u64 | size:u64`
+pub fn encode_setattr_req(r: &SetattrReq) -> Vec<u8> {
+    let mut b = Vec::with_capacity(16);
+    b.extend_from_slice(&r.fh.to_le_bytes());
+    b.extend_from_slice(&r.size.to_le_bytes());
+    b
+}
+
+pub fn decode_setattr_req(p: &[u8]) -> Option<SetattrReq> {
+    if p.len() < 16 {
+        return None;
+    }
+    let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
+    let size = u64::from_le_bytes(p[8..16].try_into().ok()?);
+    Some(SetattrReq { fh, size })
+}
+
 pub fn encode_close_req(fh: u64) -> Vec<u8> {
     fh.to_le_bytes().to_vec()
 }
@@ -405,6 +465,27 @@ mod tests {
     #[test]
     fn close_req_roundtrip() {
         assert_eq!(decode_close_req(&encode_close_req(99)), Some(99));
+    }
+
+    #[test]
+    fn mkdir_req_roundtrip() {
+        let p = encode_mkdir_req(493, "sub/dir");
+        assert_eq!(decode_mkdir_req(&p), Some((493, "sub/dir".to_string())));
+    }
+
+    #[test]
+    fn rename_req_roundtrip() {
+        let p = encode_rename_req("old.txt", "new.txt");
+        assert_eq!(
+            decode_rename_req(&p),
+            Some(("old.txt".to_string(), "new.txt".to_string()))
+        );
+    }
+
+    #[test]
+    fn setattr_req_roundtrip() {
+        let req = SetattrReq { fh: 5, size: 100 };
+        assert_eq!(decode_setattr_req(&encode_setattr_req(&req)), Some(req));
     }
 
     #[test]

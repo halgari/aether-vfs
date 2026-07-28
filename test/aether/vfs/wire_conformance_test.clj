@@ -53,3 +53,17 @@
          (let [{:keys [fh offset data]} (wire/decode-write-req (wire/encode-write-req {:fh 7 :offset 10} (.getBytes "abc" "UTF-8")))]
            {:fh fh :offset offset :data (String. ^bytes data "UTF-8")})))
   (is (= 3 (wire/decode-write-resp (wire/encode-write-resp 3)))))
+
+(deftest mkdir-rename-setattr-codecs-match-golden
+  (let [g (golden)]
+    (is (= (:mkdir-req-mode493-dir g) (hex (wire/encode-mkdir-req 493 "sub/dir"))))
+    (is (= (:rename-req-a-b g)        (hex (wire/encode-rename-req "old.txt" "new.txt"))))
+    (is (= (:setattr-req-fh5-size100 g) (hex (wire/encode-setattr-req {:fh 5 :size 100}))))))
+
+(deftest mkdir-rename-setattr-decoders-roundtrip
+  (is (= {:mode 493 :path "sub/dir"}
+         (wire/decode-mkdir-req (wire/encode-mkdir-req 493 "sub/dir"))))
+  (is (= {:from "old.txt" :to "new.txt"}
+         (wire/decode-rename-req (wire/encode-rename-req "old.txt" "new.txt"))))
+  (is (= {:fh 5 :size 100}
+         (wire/decode-setattr-req (wire/encode-setattr-req {:fh 5 :size 100})))))
