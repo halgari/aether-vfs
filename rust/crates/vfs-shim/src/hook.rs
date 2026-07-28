@@ -20,14 +20,17 @@ use crate::engine::Engine;
 use crate::inject::{inject_child, re_suspend, self_dll_path};
 use crate::ntdef::{
     FileAttributeTagInformation, FileBasicInformation, FileFsDeviceInformation,
-    FileInternalInformation, FileNetworkOpenInformation, FilePositionInformation,
+    FileEndOfFileInformation, FileInternalInformation, FileNetworkOpenInformation,
+    FilePositionInformation,
     FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateSectionFn, NtMapViewOfSectionFn,
     NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryFullAttributesFileFn,
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
     NtWriteFileFn, NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFORMATION, FILE_ALL_INFORMATION,
-    FILE_BASIC_INFORMATION, FILE_DEVICE_DISK, FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION,
-    FILE_DISPOSITION_INFORMATION_EX, FILE_FS_DEVICE_INFORMATION, FILE_INTERNAL_INFORMATION,
+    FILE_BASIC_INFORMATION, FILE_CREATED, FILE_DEVICE_DISK, FILE_DIRECTORY_FILE,
+    FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION,
+    FILE_DISPOSITION_INFORMATION_EX, FILE_END_OF_FILE_INFORMATION, FILE_FS_DEVICE_INFORMATION,
+    FILE_INTERNAL_INFORMATION,
     FILE_NETWORK_OPEN_INFORMATION, FILE_NORMALIZED_NAME_INFORMATION, FILE_POSITION_INFORMATION,
     FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX, FILE_STANDARD_INFORMATION, SEC_IMAGE,
     SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_END_OF_FILE,
@@ -619,6 +622,58 @@ unsafe fn try_fuse_create(
     }
 }
 
+/// Create a virtual directory under the managed root via the ring (`OP_MKDIR`),
+/// then hand back a virtual directory handle. Only acts on directory opens
+/// (`FILE_DIRECTORY_FILE`) with a creating disposition (CREATE / OPEN_IF /
+/// OVERWRITE_IF); a plain FILE_OPEN of an existing dir is left to
+/// `try_fuse_create`. Returns `None` when it doesn't apply (not under root, not
+/// a dir create, or no FUSE client) so the caller falls through.
+unsafe fn try_fuse_mkdir(
+    file_handle: *mut HANDLE,
+    oa: *const ObjectAttributes,
+    iosb: *mut c_void,
+    opts: u32,
+    disp: u32,
+) -> Option<NTSTATUS> {
+    if opts & FILE_DIRECTORY_FILE == 0 {
+        return None;
+    }
+    // FILE_CREATE(2), FILE_OPEN_IF(3), FILE_OVERWRITE_IF(5) create if absent.
+    if !matches!(disp, 2 | 3 | 5) {
+        return None;
+    }
+    let client = crate::fuse_client::global()?;
+    let path = path_of(oa)?;
+    let vpath = client.vpath_under_root(&path)?;
+    let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+    match client.mkdir(vp, 0o755) {
+        Ok(()) => {
+            // Synthesize a virtual directory handle directly — do NOT OP_OPEN the
+            // new dir: the overlay opens paths as FileChannels, and a directory
+            // open throws. fh=0 is never a real JVM handle, so the NtClose-time
+            // close(0) is a harmless no-op. The caller (CreateDirectoryW) only
+            // needs a handle to receive and immediately close; later metadata
+            // reads are path-based (qattr/getattr), not through this handle.
+            let h = crate::fuse_synth::open_fuse(0, 0, true)?;
+            if !file_handle.is_null() {
+                *file_handle = h as HANDLE;
+            }
+            if !iosb.is_null() {
+                let p = iosb as *mut u8;
+                core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
+                core::ptr::write_unaligned(p.add(8) as *mut usize, FILE_CREATED);
+            }
+            record_path(file_handle, oa, STATUS_SUCCESS);
+            tag_under_root(file_handle, oa, STATUS_SUCCESS);
+            Some(STATUS_SUCCESS)
+        }
+        // Parent missing → name-not-found; director down / other → hard fail
+        // (do not fall through to a real on-disk mkdir under the root).
+        Err(st) if st == vfs_protocol::ST_NOT_FOUND => Some(STATUS_OBJECT_NAME_NOT_FOUND),
+        Err(_) => Some(STATUS_UNSUCCESSFUL),
+    }
+}
+
 unsafe extern "system" fn create_hook(
     file_handle: *mut HANDLE,
     access: u32,
@@ -636,6 +691,12 @@ unsafe extern "system" fn create_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
+    // Directory create under the managed root → ring OP_MKDIR (must precede the
+    // generic file open below, which would otherwise create a FILE named as the
+    // directory via the write-create path).
+    if let Some(st) = try_fuse_mkdir(file_handle, oa, iosb, opts, disp) {
+        return st;
+    }
     // Prefer director FUSE for managed-root content (no in-shim zipserve).
     if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, disp)) {
         return st;
@@ -927,11 +988,36 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
     tramp(handle)
 }
 
-/// `NtSetInformationFile` hook. Converts a delete (FileDispositionInformation /
-/// ...Ex with the DELETE flag) of a tracked under-root handle into an overlay
-/// whiteout and suppresses the real delete, so the mod backing / real file is
-/// preserved but the path reads as gone. Everything else passes through
-/// (rename handling is a later phase).
+/// True when this `NtSetInformationFile` call requests a delete (either
+/// disposition class with the delete flag/boolean set).
+unsafe fn is_delete_request(info: *mut c_void, length: u32, class: u32) -> bool {
+    !info.is_null()
+        && match class {
+            FILE_DISPOSITION_INFORMATION => length >= 1 && *(info as *const u8) != 0,
+            FILE_DISPOSITION_INFORMATION_EX => {
+                length >= 4
+                    && core::ptr::read_unaligned(info as *const u32) & FILE_DISPOSITION_DELETE != 0
+            }
+            _ => false,
+        }
+}
+
+/// Write a successful (Information = 0) IoStatusBlock for a set-info we handled
+/// and suppressed from the real filesystem.
+unsafe fn setinfo_ok_iosb(iosb: *mut c_void) {
+    if !iosb.is_null() {
+        let p = iosb as *mut u8;
+        core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
+        core::ptr::write_unaligned(p.add(8) as *mut usize, 0);
+    }
+}
+
+/// `NtSetInformationFile` hook. For director FUSE (pure-ring) virtual handles it
+/// routes truncate (`FileEndOfFileInformation`), delete, and rename to the JVM
+/// overlay over the ring. For legacy local-overlay handles it converts a delete
+/// or rename of a tracked under-root handle into an overlay whiteout/rename and
+/// suppresses the real operation, so the mod backing / real file is preserved
+/// but the path reads as gone/moved. Everything else passes through.
 unsafe extern "system" fn setinfo_hook(
     handle: HANDLE,
     iosb: *mut c_void,
@@ -954,6 +1040,57 @@ unsafe extern "system" fn setinfo_hook(
             }
             return STATUS_SUCCESS;
         }
+        // Truncate (`File::set_len`) → ring OP_SETATTR on the virtual write handle.
+        if class == FILE_END_OF_FILE_INFORMATION
+            && !info.is_null()
+            && length as usize >= core::mem::size_of::<FileEndOfFileInformation>()
+        {
+            let eof = (*(info as *const FileEndOfFileInformation)).end_of_file;
+            if let (Some((fh, _, _, _)), Some(c)) = (
+                crate::fuse_synth::lookup(handle as isize),
+                crate::fuse_client::global(),
+            ) {
+                if eof >= 0 && c.truncate(fh, eof as u64).is_ok() {
+                    crate::fuse_synth::set_size(handle as isize, eof as u64);
+                    setinfo_ok_iosb(iosb);
+                    return STATUS_SUCCESS;
+                }
+            }
+            return STATUS_UNSUCCESSFUL;
+        }
+        // Delete / rename of a virtual handle → ring OP_DELETE / OP_RENAME, keyed
+        // by the NT path recorded (record_path) when the handle was opened.
+        let is_delete = is_delete_request(info, length, class);
+        let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);
+        if is_delete || is_rename {
+            let nt = match PATH_TABLE.lock() {
+                Ok(t) => t.get(&(handle as isize)).cloned(),
+                Err(_) => None,
+            };
+            if let (Some(nt), Some(c)) = (nt, crate::fuse_client::global()) {
+                if let Some(vpath) = c.vpath_under_root(&nt) {
+                    let src = if vpath.is_empty() { ".".to_string() } else { vpath };
+                    let ok = if is_delete {
+                        c.delete(&src).is_ok()
+                    } else {
+                        match parse_rename_target(info, length)
+                            .and_then(|t| c.vpath_under_root(&t))
+                        {
+                            Some(dstv) => {
+                                let dst = if dstv.is_empty() { ".".to_string() } else { dstv };
+                                c.rename(&src, &dst).is_ok()
+                            }
+                            None => false,
+                        }
+                    };
+                    if ok {
+                        setinfo_ok_iosb(iosb);
+                        return STATUS_SUCCESS;
+                    }
+                    return STATUS_UNSUCCESSFUL;
+                }
+            }
+        }
         return STATUS_SUCCESS;
     }
     if crate::zipserve::is_synth(handle as isize) {
@@ -969,15 +1106,7 @@ unsafe extern "system" fn setinfo_hook(
         }
         return STATUS_SUCCESS; // ignore other classes on synthetic handles
     }
-    let is_delete = !info.is_null()
-        && match class {
-            FILE_DISPOSITION_INFORMATION => length >= 1 && *(info as *const u8) != 0,
-            FILE_DISPOSITION_INFORMATION_EX => {
-                length >= 4
-                    && core::ptr::read_unaligned(info as *const u32) & FILE_DISPOSITION_DELETE != 0
-            }
-            _ => false,
-        };
+    let is_delete = is_delete_request(info, length, class);
     let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);
 
     if is_delete || is_rename {
@@ -996,11 +1125,7 @@ unsafe extern "system" fn setinfo_hook(
             };
             if handled {
                 // Suppress the real delete/rename; report success to the caller.
-                if !iosb.is_null() {
-                    let p = iosb as *mut u8;
-                    core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-                    core::ptr::write_unaligned(p.add(8) as *mut usize, 0);
-                }
+                setinfo_ok_iosb(iosb);
                 return STATUS_SUCCESS;
             }
         }

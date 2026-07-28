@@ -5,10 +5,11 @@ use std::sync::OnceLock;
 use vfs_ipc::{Geom, RingClient, SpinNotifier};
 use vfs_protocol::{
     decode_getattr_resp, decode_open_resp, decode_readdir_resp, decode_read_bulk_resp,
-    decode_read_resp_into, decode_write_resp, encode_close_req, encode_open_req, encode_path_req,
-    encode_read_req, encode_write_req, is_read_resp_bulk, AttrResp, DirEntryWire, OpenResp,
-    ReadReq, WriteReq, FLAG_READ_BULK, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ,
-    OP_READDIR, OP_WRITE, OPEN_READ, OPEN_WRITE, ST_OK,
+    decode_read_resp_into, decode_write_resp, encode_close_req, encode_mkdir_req, encode_open_req,
+    encode_path_req, encode_read_req, encode_rename_req, encode_setattr_req, encode_write_req,
+    is_read_resp_bulk, AttrResp, DirEntryWire, OpenResp, ReadReq, SetattrReq, WriteReq,
+    FLAG_READ_BULK, OP_CLOSE, OP_DELETE, OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN, OP_READ,
+    OP_READDIR, OP_RENAME, OP_SETATTR, OP_WRITE, OPEN_READ, OPEN_WRITE, ST_OK,
 };
 use vfs_win::SharedMapping;
 
@@ -266,6 +267,54 @@ impl FuseClient {
             }
         }
         Ok(filled)
+    }
+
+    /// Delete (whiteout) a virtual path via the JVM overlay (`OP_DELETE`).
+    pub fn delete(&self, vpath: &str) -> Result<(), i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_DELETE, 0, &encode_path_req(vpath))
+            .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(())
+    }
+
+    /// Rename a virtual path to another virtual path (`OP_RENAME`).
+    pub fn rename(&self, from: &str, to: &str) -> Result<(), i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_RENAME, 0, &encode_rename_req(from, to))
+            .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(())
+    }
+
+    /// Create a virtual directory via the JVM overlay (`OP_MKDIR`).
+    pub fn mkdir(&self, vpath: &str, mode: u32) -> Result<(), i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_MKDIR, 0, &encode_mkdir_req(mode, vpath))
+            .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(())
+    }
+
+    /// Truncate/extend a virtual write handle to `size` bytes (`OP_SETATTR`).
+    pub fn truncate(&self, fh: u64, size: u64) -> Result<(), i32> {
+        let c = self.client();
+        let r = c
+            .submit(OP_SETATTR, 0, &encode_setattr_req(&SetattrReq { fh, size }))
+            .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(())
     }
 
     pub fn close(&self, fh: u64) -> Result<(), i32> {

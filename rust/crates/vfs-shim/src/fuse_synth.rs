@@ -53,6 +53,19 @@ pub fn set_position(handle: isize, pos: u64) {
     }
 }
 
+/// Update the cached size after a successful truncate so later reads on this
+/// handle see the new EOF.
+pub fn set_size(handle: isize, size: u64) {
+    if let Ok(mut g) = TABLE.lock() {
+        if let Some(e) = g.get_mut(&(handle as usize)) {
+            e.size = size;
+            if e.position > size {
+                e.position = size;
+            }
+        }
+    }
+}
+
 pub fn close_fuse(handle: isize) -> Option<u64> {
     let mut g = TABLE.lock().ok()?;
     g.remove(&(handle as usize)).map(|e| e.fh)

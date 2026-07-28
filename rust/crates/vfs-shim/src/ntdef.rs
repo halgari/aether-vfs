@@ -148,6 +148,13 @@ pub const FILE_DISPOSITION_DELETE: u32 = 0x1;
 pub const FILE_RENAME_INFORMATION: u32 = 10;
 pub const FILE_RENAME_INFORMATION_EX: u32 = 65;
 
+/// `FileEndOfFileInformation` (class 20): a single `LARGE_INTEGER EndOfFile`.
+/// Set via `NtSetInformationFile` — this is how `File::set_len` truncates.
+pub const FILE_END_OF_FILE_INFORMATION: u32 = 20;
+
+/// `FILE_DIRECTORY_FILE` `CreateOptions` flag — the open targets a directory.
+pub const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
+
 /// `NtQueryDirectoryFileEx` QueryFlags.
 pub const SL_RESTART_SCAN: u32 = 0x01;
 pub const SL_RETURN_SINGLE_ENTRY: u32 = 0x02;
@@ -196,6 +203,8 @@ pub const STATUS_INVALID_HANDLE: NTSTATUS = 0xC000_0008u32 as i32;
 pub const STATUS_SECTION_TOO_BIG: NTSTATUS = 0xC000_0040u32 as i32;
 /// `FILE_OPENED` disposition-information for a synthetic open's IoStatusBlock.
 pub const FILE_OPENED: usize = 1;
+/// `FILE_CREATED` disposition-information (a fresh object was created).
+pub const FILE_CREATED: usize = 2;
 
 /// `SEC_IMAGE` — PE image mapping (not supported for zip-window handles).
 pub const SEC_IMAGE: u32 = 0x0100_0000;
@@ -295,4 +304,10 @@ pub struct FileStandardInformation {
 #[repr(C)]
 pub struct FilePositionInformation {
     pub current_byte_offset: i64,
+}
+
+/// Layout-compatible with `FILE_END_OF_FILE_INFORMATION` (8 bytes).
+#[repr(C)]
+pub struct FileEndOfFileInformation {
+    pub end_of_file: i64,
 }
