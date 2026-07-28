@@ -223,15 +223,13 @@
     (let [w (server/dispatch st p {:opcode 6 :flags 0
                                    :payload (wire/encode-write-req {:fh fh :offset 0} (.getBytes "hello" "UTF-8"))})]
       (is (= 0 (:status w)) (str "write status=" (:status w))))
-    (server/dispatch st p {:opcode 11 :flags 0 :payload (wire/encode-close-req fh)})
-    ;; reopen write to get a fresh fh (with :vpath) for OP_SETATTR
-    (let [op2 (server/dispatch st p {:opcode 3 :flags 2 :payload (wire/encode-open-req 2 "/t.txt")})
-          {fh2 :fh} (wire/decode-open-resp (:payload op2))]
-      (is (= 0 (:status op2)) (str "reopen status=" (:status op2)))
-      (let [sa (server/dispatch st p {:opcode 7 :flags 0 :payload (wire/encode-setattr-req {:fh fh2 :size 2})})]
-        (is (= 0 (:status sa)) (str "setattr status=" (:status sa)))
-        (server/dispatch st p {:opcode 11 :flags 0 :payload (wire/encode-close-req fh2)})
-        (is (= 2 (.length (java.io.File. overrides "t.txt"))))))))
+    (is (= 5 (.length (java.io.File. overrides "t.txt"))) "file is 5 bytes before shrink")
+    ;; setattr on the SAME still-open write fh: a genuine 5 -> 2 shrink, not a
+    ;; reopen-driven zero-extension.
+    (let [sa (server/dispatch st p {:opcode 7 :flags 0 :payload (wire/encode-setattr-req {:fh fh :size 2})})]
+      (is (= 0 (:status sa)) (str "setattr status=" (:status sa)))
+      (server/dispatch st p {:opcode 11 :flags 0 :payload (wire/encode-close-req fh)})
+      (is (= 2 (.length (java.io.File. overrides "t.txt")))))))
 
 (deftest setattr-unknown-fh-is-bad-fh
   (let [s (seg (* 1 1024 1024))

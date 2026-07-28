@@ -148,9 +148,9 @@
 (defn- do-mkdir [_ provider vpath mode]
   (try-write (p/mkdir provider vpath mode)))
 
-(defn- do-truncate [state provider {:keys [fh size]}]
+(defn- do-truncate [state _ {:keys [fh size]}]
   (if-let [rec (get-in @state [:open fh])]
-    (try-write (p/truncate provider (:vpath rec) size))
+    (try-write (p/truncate (:provider rec) (:vpath rec) size))
     (resp ST-BAD-FH (byte-array 0))))
 
 (defn dispatch [state provider {:keys [opcode flags payload]}]
