@@ -138,6 +138,9 @@
         n  (wire/decode-write-resp (:payload w))]
     (is (= 0 (:status op)))
     (is (= 3 n))
+    ;; close the write handle so the overlay flushes to disk before reopening
+    ;; (a fresh read handle won't see an unflushed write channel — this bit on Linux)
+    (server/dispatch st p {:opcode 11 :flags 0 :payload (wire/encode-close-req fh)})
     ;; read it back through a fresh open/read
     (let [op2 (server/dispatch st p {:opcode 3 :flags 1 :payload (wire/encode-open-req 1 "/new.txt")})
           {:keys [fh]} (wire/decode-open-resp (:payload op2))
