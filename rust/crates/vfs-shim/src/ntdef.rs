@@ -199,6 +199,10 @@ pub const STATUS_NOT_IMPLEMENTED: NTSTATUS = 0xC000_0002u32 as i32;
 pub const STATUS_INVALID_FILE_FOR_SECTION: NTSTATUS = 0xC000_0124u32 as i32;
 /// `STATUS_INVALID_HANDLE`.
 pub const STATUS_INVALID_HANDLE: NTSTATUS = 0xC000_0008u32 as i32;
+/// `STATUS_OBJECT_NAME_COLLISION` — maps to `ERROR_ALREADY_EXISTS`; what a
+/// `FILE_CREATE` of an existing name must report so the standard
+/// create-and-ignore-ALREADY_EXISTS idiom works.
+pub const STATUS_OBJECT_NAME_COLLISION: NTSTATUS = 0xC000_0035u32 as i32;
 /// `STATUS_SECTION_TOO_BIG`.
 pub const STATUS_SECTION_TOO_BIG: NTSTATUS = 0xC000_0040u32 as i32;
 /// `FILE_OPENED` disposition-information for a synthetic open's IoStatusBlock.

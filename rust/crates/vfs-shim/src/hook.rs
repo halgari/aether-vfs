@@ -35,7 +35,8 @@ use crate::ntdef::{
     FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX, FILE_STANDARD_INFORMATION, SEC_IMAGE,
     SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_END_OF_FILE,
     STATUS_INVALID_FILE_FOR_SECTION, STATUS_INVALID_HANDLE, STATUS_NO_MORE_FILES,
-    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SECTION_TOO_BIG, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SECTION_TOO_BIG,
+    STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 
 /// Errors installing the hooks.
@@ -667,10 +668,36 @@ unsafe fn try_fuse_mkdir(
             tag_under_root(file_handle, oa, STATUS_SUCCESS);
             Some(STATUS_SUCCESS)
         }
-        // Parent missing → name-not-found; director down / other → hard fail
-        // (do not fall through to a real on-disk mkdir under the root).
+        // Parent missing → name-not-found (do not fall through to a real on-disk
+        // mkdir under the root).
         Err(st) if st == vfs_protocol::ST_NOT_FOUND => Some(STATUS_OBJECT_NAME_NOT_FOUND),
-        Err(_) => Some(STATUS_UNSUCCESSFUL),
+        // mkdir failed — most often the directory already exists (the overlay
+        // raises :already-exists, which the JVM has no dedicated status for and
+        // reports as a generic error). Probe: if a directory is really there,
+        // honor the disposition — FILE_CREATE(2) must report a name collision
+        // (ERROR_ALREADY_EXISTS, so the create-and-ignore idiom works), while
+        // FILE_OPEN_IF(3)/FILE_OVERWRITE_IF(5) open the existing directory.
+        Err(_) => match client.getattr(vp) {
+            Ok(a) if a.found && a.is_dir => {
+                if disp == 2 {
+                    Some(STATUS_OBJECT_NAME_COLLISION)
+                } else {
+                    let h = crate::fuse_synth::open_fuse(0, 0, true)?;
+                    if !file_handle.is_null() {
+                        *file_handle = h as HANDLE;
+                    }
+                    if !iosb.is_null() {
+                        let p = iosb as *mut u8;
+                        core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
+                        core::ptr::write_unaligned(p.add(8) as *mut usize, crate::ntdef::FILE_OPENED);
+                    }
+                    record_path(file_handle, oa, STATUS_SUCCESS);
+                    tag_under_root(file_handle, oa, STATUS_SUCCESS);
+                    Some(STATUS_SUCCESS)
+                }
+            }
+            _ => Some(STATUS_UNSUCCESSFUL),
+        },
     }
 }
 

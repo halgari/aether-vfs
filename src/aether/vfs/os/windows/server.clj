@@ -84,7 +84,9 @@
         ;; Lookup first: a directory open must NOT go through open-file, which
         ;; opens a byte-stream FileChannel and throws on a directory. Directory
         ;; handles carry no channel (enumeration/attr queries are path- or
-        ;; getattr-based); reads/closes on a nil handle are harmless no-ops.
+        ;; getattr-based); a close on the nil handle is a no-op, and a stray
+        ;; byte-read would surface as ST_IO_ERROR (never a wedge) — callers do
+        ;; not NtReadFile a directory handle.
         (let [m (p/lookup provider vpath)
               fh (:next-fh @state)]
           (if (= :dir (:kind m))

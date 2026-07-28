@@ -31,6 +31,15 @@ fn main() {
         Ok(_) => fail(10, format!("{} exists but is not a directory", made.display())),
         Err(e) => fail(10, format!("metadata {} after mkdir: {e}", made.display())),
     }
+    // Idempotency: creating an existing dir must report AlreadyExists (the
+    // standard create-and-ignore idiom), NOT a generic failure.
+    match fs::create_dir(&made) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            println!("mkdir-existing OK: reported AlreadyExists");
+        }
+        Err(e) => fail(10, format!("re-create {} gave {:?}, want AlreadyExists", made.display(), e.kind())),
+        Ok(()) => fail(10, format!("re-create {} unexpectedly succeeded", made.display())),
+    }
 
     // 2. truncate → write 5 bytes, set_len(2) on the SAME open write handle,
     //    close, reopen for read: it must be exactly 2 bytes.
