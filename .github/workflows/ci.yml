@@ -64,7 +64,7 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\clj-cli"
       - name: Windows Clojure tests (FFM section + cross-process ring proof)
         shell: pwsh
-        run: clojure -M:test -n aether.vfs.os.windows.section-test -n aether.vfs.os.windows.integration-test -n aether.vfs.os.windows.launch-test
+        run: clojure -M:test -n aether.vfs.os.windows.section-test -n aether.vfs.os.windows.integration-test -n aether.vfs.os.windows.launch-test -n aether.vfs.os.windows.artifacts-test -n aether.vfs-test -n aether.vfs.run-e2e-test
         env:
           # The harness exe path in the test is relative to the repo root.
           JDK_JAVA_OPTIONS: "--enable-native-access=ALL-UNNAMED"

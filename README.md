@@ -7,10 +7,62 @@ tree of virtual paths; a `router` maps glob patterns to providers; and
 in-process via [jnr-fuse](https://github.com/SerCeMan/jnr-fuse), with an FFM
 zero-copy read path (`java.lang.foreign`) that lets a provider write straight
 into the kernel's own read buffer instead of bouncing through the Java heap.
-A `proton` namespace launches Windows executables against a mount under
-Proton. It was extracted from the mauvi mod manager's storage layer. Linux
-only today — a Rust-based Windows counterpart exposing the same interfaces is
-planned as a separate project.
+The same `Provider` interface is now delivered on **both** OSes through one
+entry point, `aether.vfs/run` (see below): a FUSE mount on Linux, and an
+injected user-mode shim on Windows (the merged Rust engine under `rust/`, driven
+by a JVM ring server). A `proton` namespace additionally launches Windows
+executables against a Linux mount under Proton. Extracted from the mauvi mod
+manager's storage layer.
+
+## Running a program inside the VFS — `aether.vfs/run`
+
+The unified entry point runs a target program inside a Provider-backed virtual
+filesystem, scoped to that program's lifetime, and returns its exit code. It
+dispatches on the host OS — **no admin/root required** on either:
+
+- **Linux** — mounts the provider at a temp mountpoint (user-space FUSE), runs
+  the target from that mountpoint (`cwd` = mountpoint, `$AETHER_VFS_MOUNT` set),
+  waits, then unmounts and cleans up.
+- **Windows** — injects the shim into the target so its file access under the
+  virtual root (`C:\GameLayers\runtime`) is served by the provider over a
+  shared-memory ring; the VFS lives only inside that process tree.
+
+```clojure
+(require '[aether.vfs :as vfs]
+         '[aether.vfs.providers.inline :as inline])
+
+(def provider (inline/inline-provider [["/hello.txt" (.getBytes "hi") 0644]]))
+
+;; Linux: the target reads the virtual file through the mount
+(vfs/run provider {:exec ["sh" "-c" "cat \"$AETHER_VFS_MOUNT/hello.txt\""]})
+;=> 0  (prints "hi")
+
+;; Windows: the injected target reads C:\GameLayers\runtime\hello.txt
+(vfs/run provider {:exec ["my-game.exe" "--flag"]})
+;=> the target's exit code
+```
+
+Opts: `:exec` `[cmd & args]` (required); `:mountpoint` (Linux mount dir; Windows
+virtual root — passthrough for now); `:env` `{k v}` extra target environment;
+`:native-dir` (Windows only, see below); `:windows`/`:linux` maps for
+OS-specific passthrough.
+
+### Windows native artifacts
+
+The Windows path needs three native artifacts (`vfs-injector.exe`,
+`vfs_shim_dll.dll`, `vfs_payload.dll`). `run` resolves them in order:
+
+1. `:native-dir` opt — a directory holding all three.
+2. `AETHER_VFS_NATIVE_DIR` env — same.
+3. **Bundled** — extracted from the jar's `native/windows/` resources to a cache
+   dir. This is what makes the published jar "just work" with no setup.
+
+### Building the jar
+
+`clojure -T:build jar` builds the Windows Rust artifacts (`--release`), stages
+them into `resources/native/windows/`, and writes
+`target/aether-vfs-<version>.jar` bundling the Clojure source and the natives.
+(The staged binaries are gitignored — the build and CI populate them.)
 
 ## Mount example
 

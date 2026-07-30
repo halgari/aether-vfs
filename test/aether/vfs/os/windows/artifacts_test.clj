@@ -16,11 +16,14 @@
       (is (.exists (io/file payload))))))
 
 (deftest native-dir-incomplete-falls-through-to-error
-  ;; a dir missing one artifact is not a valid override tier; with no env and no
-  ;; bundled native/windows resources (absent on the test classpath) → ex-info.
+  ;; a dir missing one artifact is not a valid override tier → ex-info. Neutralize
+  ;; the bundled tier hermetically: resources/native/windows may be populated on
+  ;; this machine (the jar build / run-e2e stage it), so stub io/resource → nil
+  ;; rather than assuming an empty classpath.
   (let [dir (temp-dir)]
     (spit (io/file dir (:injector art/artifact-names)) "x") ; only 1 of 3
-    (is (thrown? clojure.lang.ExceptionInfo (art/resolve! {:native-dir (.getPath dir)})))))
+    (with-redefs [clojure.java.io/resource (constantly nil)]
+      (is (thrown? clojure.lang.ExceptionInfo (art/resolve! {:native-dir (.getPath dir)}))))))
 
 (deftest extract-bundled-copies-resource-and-size-skips
   (let [cache (temp-dir)
