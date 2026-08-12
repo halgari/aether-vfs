@@ -420,7 +420,16 @@ unsafe fn fill_chunk_at(addr: usize) -> bool {
     };
 
     if readable > 0 {
+        // Bracket the fill: a started-without-completed pair is the signature of
+        // a wedged faulting thread, which is invisible everywhere else.
+        crate::hookstats::note_fill_start();
+        let t0 = std::time::Instant::now();
         let n_read = fill_bytes(fh, file_off, page as usize, readable);
+        crate::hookstats::note_fill_end(
+            n_read.unwrap_or(0),
+            t0.elapsed().as_nanos() as u64,
+            n_read.is_some(),
+        );
         let dest = core::slice::from_raw_parts_mut(page as *mut u8, readable);
         match n_read {
             Some(n) if n < readable => dest[n..].fill(0),

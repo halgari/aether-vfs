@@ -12,7 +12,7 @@
 //! intercepted call is itself measurable, so it must not be on by default.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 /// Hooks worth attributing separately. Anything not listed lands in `Other`.
@@ -170,6 +170,180 @@ pub fn render() -> String {
     )
 }
 
+/// Asynchronous-I/O usage against our synthetic handles.
+///
+/// We complete every read synchronously and signal `event` when one is given.
+/// We do **not** run the caller's APC, and we cannot post to an I/O completion
+/// port — a synthetic handle is not a kernel file object, so no packet is ever
+/// queued. A caller that waits on either never wakes, which looks exactly like
+/// the observed hang: handles already open (no new opens), reads barely moving,
+/// every thread idle, and nothing of ours on any stack.
+///
+/// `FileCompletionInformation` is how a handle gets bound to a port, so seeing
+/// it on a synthetic handle is the smoking gun.
+static ASYNC_OPENS: AtomicU64 = AtomicU64::new(0);
+static SYNC_OPENS: AtomicU64 = AtomicU64::new(0);
+static APC_READS: AtomicU64 = AtomicU64::new(0);
+static EVENT_READS: AtomicU64 = AtomicU64::new(0);
+static BARE_READS: AtomicU64 = AtomicU64::new(0);
+static IOCP_BINDS: AtomicU64 = AtomicU64::new(0);
+
+/// A synthetic handle was opened; `synchronous` reflects the CreateOptions.
+pub fn note_open_sync(synchronous: bool) {
+    if !enabled() {
+        return;
+    }
+    if synchronous {
+        SYNC_OPENS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        ASYNC_OPENS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A read on a synthetic handle, classified by how the caller expects
+/// completion: APC routine, event, or neither (fully synchronous).
+pub fn note_read_completion(has_apc: bool, has_event: bool) {
+    if !enabled() {
+        return;
+    }
+    if has_apc {
+        APC_READS.fetch_add(1, Ordering::Relaxed);
+    } else if has_event {
+        EVENT_READS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        BARE_READS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Demand-paged section fills — the one I/O path no other counter can see.
+///
+/// A read from a mapped view is a page fault, not `NtReadFile`, and
+/// `lazy_section` calls `read_fragmented` directly rather than going through the
+/// read hook. So section traffic appears in neither the hook table nor the
+/// director's request log from the game's point of view.
+///
+/// `started` vs `completed` is the important pair: a persistent gap means a fill
+/// is in flight and never returned, i.e. the faulting thread is wedged. That is
+/// indistinguishable from "the game went idle" at every other vantage point.
+static FILLS_STARTED: AtomicU64 = AtomicU64::new(0);
+static FILLS_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static FILLS_FAILED: AtomicU64 = AtomicU64::new(0);
+static FILL_BYTES: AtomicU64 = AtomicU64::new(0);
+static FILL_NANOS: AtomicU64 = AtomicU64::new(0);
+static FILL_MAX_NANOS: AtomicU64 = AtomicU64::new(0);
+
+pub fn note_fill_start() {
+    if enabled() {
+        FILLS_STARTED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn note_fill_end(bytes: usize, nanos: u64, ok: bool) {
+    if !enabled() {
+        return;
+    }
+    FILLS_COMPLETED.fetch_add(1, Ordering::Relaxed);
+    if !ok {
+        FILLS_FAILED.fetch_add(1, Ordering::Relaxed);
+    }
+    FILL_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    FILL_NANOS.fetch_add(nanos, Ordering::Relaxed);
+    FILL_MAX_NANOS.fetch_max(nanos, Ordering::Relaxed);
+}
+
+fn render_fills() -> String {
+    let started = FILLS_STARTED.load(Ordering::Relaxed);
+    let done = FILLS_COMPLETED.load(Ordering::Relaxed);
+    if started == 0 {
+        return String::new();
+    }
+    let ns = FILL_NANOS.load(Ordering::Relaxed);
+    let inflight = started.saturating_sub(done);
+    format!(
+        "\ndemand-paged section fills:\n  \
+         started {started} / completed {done} / failed {} / IN FLIGHT {inflight}\n  \
+         {:.1} MiB, {:.3}s total, max {:.1}ms{}\n",
+        FILLS_FAILED.load(Ordering::Relaxed),
+        FILL_BYTES.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0),
+        ns as f64 / 1e9,
+        FILL_MAX_NANOS.load(Ordering::Relaxed) as f64 / 1e6,
+        if inflight > 0 {
+            "   <-- a fill never returned; the faulting thread is wedged"
+        } else {
+            ""
+        }
+    )
+}
+
+/// A synthetic handle was bound to an I/O completion port.
+pub fn note_iocp_bind() {
+    if !enabled() {
+        return;
+    }
+    IOCP_BINDS.fetch_add(1, Ordering::Relaxed);
+}
+
+fn render_async() -> String {
+    let (a, s) = (
+        ASYNC_OPENS.load(Ordering::Relaxed),
+        SYNC_OPENS.load(Ordering::Relaxed),
+    );
+    let (apc, ev, bare) = (
+        APC_READS.load(Ordering::Relaxed),
+        EVENT_READS.load(Ordering::Relaxed),
+        BARE_READS.load(Ordering::Relaxed),
+    );
+    let iocp = IOCP_BINDS.load(Ordering::Relaxed);
+    if a + s + apc + ev + bare + iocp == 0 {
+        return String::new();
+    }
+    format!(
+        "\nasync I/O on synthetic handles:\n  \
+         opens: {a} async / {s} synchronous\n  \
+         reads: {apc} with APC / {ev} with event / {bare} bare\n  \
+         IOCP binds (FileCompletionInformation): {iocp}\n  \
+         NOTE: APC reads and IOCP binds are completions we never deliver.\n"
+    )
+}
+
+/// Distinct paths that were *not* served by the VFS, capped so a storm cannot
+/// grow this without bound.
+///
+/// A hook count alone cannot say what a stalled game is hunting for: a world
+/// load issued 25k `NtCreateFile` with only 210 resolving under the root, and
+/// the useful question is which paths the other 24.9k were.
+static PASSTHRU: Mutex<Vec<String>> = Mutex::new(Vec::new());
+const PASSTHRU_MAX: usize = 400;
+
+/// Record a path that fell through to disk. Cheap no-op when disabled.
+pub fn note_passthrough(path: &str) {
+    if !enabled() {
+        return;
+    }
+    let Ok(mut v) = PASSTHRU.lock() else { return };
+    if v.len() >= PASSTHRU_MAX {
+        return;
+    }
+    let lower = path.to_ascii_lowercase();
+    if !v.iter().any(|p| *p == lower) {
+        v.push(lower);
+    }
+}
+
+fn render_passthrough() -> String {
+    let Ok(v) = PASSTHRU.lock() else {
+        return String::new();
+    };
+    if v.is_empty() {
+        return String::new();
+    }
+    let mut s = format!("\npassthrough paths (first {} distinct):\n", v.len());
+    for p in v.iter() {
+        s.push_str(&format!("  {p}\n"));
+    }
+    s
+}
+
 /// Start a thread that rewrites the report periodically.
 ///
 /// A snapshot rather than an exit dump: a game that is killed, or one still
@@ -185,7 +359,7 @@ pub fn start_reporter() {
         .name("vfs-shim-stats".into())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(250));
-            let body = render();
+            let body = format!("{}{}{}{}", render(), render_async(), render_fills(), render_passthrough());
             // Write via a temp + rename so a reader never sees a half file.
             let tmp = std::path::PathBuf::from(&path).with_extension("tmp");
             if std::fs::write(&tmp, body.as_bytes()).is_ok() {

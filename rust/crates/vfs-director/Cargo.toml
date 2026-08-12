@@ -29,3 +29,9 @@ windows-sys = { version = "0.59", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_System_Diagnostics_ToolHelp",
 ] }
+
+[dev-dependencies]
+# Integrity tests compare the composed VFS against a native extract.
+vfs-zip = { path = "../vfs-zip" }
+vfs-compose = { path = "../vfs-compose" }
+vfs-shim = { path = "../vfs-shim" }

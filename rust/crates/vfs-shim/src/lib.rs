@@ -6,7 +6,7 @@
 
 mod bootstrap;
 mod engine;
-mod fuse_client;
+pub mod fuse_client;
 mod fuse_synth;
 mod hook;
 mod hookstats;

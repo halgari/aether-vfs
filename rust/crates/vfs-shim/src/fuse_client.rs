@@ -127,6 +127,9 @@ pub struct FuseClient {
     /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened —
     /// the ring still works, just with the old timer-tick latency.
     server_ev: HANDLE,
+    /// Staged-launch directory, treated as an alias for the virtual root so
+    /// executable-relative lookups resolve. See `vpath_under_root`.
+    stage_root_lower: Option<String>,
     /// Serializes ring claim/submit — not safe for concurrent clients on one ring.
     ring_lock: Mutex<()>,
 }
@@ -164,6 +167,7 @@ impl FuseClient {
             root_lower: root.replace('/', "\\").to_ascii_lowercase(),
             arena_len,
             server_ev,
+            stage_root_lower: stage_root_from_env(),
             ring_lock: Mutex::new(()),
         })
     }
@@ -480,9 +484,41 @@ impl FuseClient {
         Ok(())
     }
 
+    /// Map an absolute path into the virtual namespace.
+    ///
+    /// Two prefixes resolve, not one. The game is launched from a staged
+    /// directory holding only its PE closure, and it resolves `Data\` relative
+    /// to **its own executable**, not the working directory — measured
+    /// 2026-08-12, a new game asked for
+    /// `…\vfs-stage-21728\data\ccasvsse001-almsivi.esm` and friends. With only
+    /// the virtual root mapped those fell through to a directory containing six
+    /// files, so the plugin set came back empty and world load never completed
+    /// while the main menu, which resolves through the root, worked fine.
+    ///
+    /// Treating the staging directory as an alias for the root puts both
+    /// spellings in the same namespace. It also fixes tools that resolve beside
+    /// the executable — SKSE looks for `Data\SKSE\Plugins\` there.
     pub fn vpath_under_root(&self, path: &str) -> Option<String> {
-        vpath_under_root_norm(path, &self.root_lower)
+        if let Some(v) = vpath_under_root_norm(path, &self.root_lower) {
+            return Some(v);
+        }
+        let alias = self.stage_root_lower.as_deref()?;
+        vpath_under_root_norm(path, alias)
     }
+}
+
+/// Directory holding the staged launch image, derived from `VFS_HOLLOW_HOST`.
+///
+/// The staged EXE and its imports live there physically; everything else the
+/// game asks for beside it must come from the VFS.
+fn stage_root_from_env() -> Option<String> {
+    let host = std::env::var("VFS_HOLLOW_HOST").ok()?;
+    let dir = std::path::Path::new(&host).parent()?;
+    let s = dir.to_string_lossy();
+    if s.is_empty() {
+        return None;
+    }
+    Some(normalize_path_for_root(&s))
 }
 
 pub fn strip_nt_device(p: &str) -> &str {
@@ -528,6 +564,40 @@ mod tests {
             vpath_under_root_norm(r"C:\GameLayers\runtime\Data\a.esm", r"C:\GameLayers\runtime")
                 .as_deref(),
             Some("data/a.esm")
+        );
+    }
+
+    /// The staged launch directory must map into the same namespace as the root.
+    ///
+    /// Measured 2026-08-12: a new game asked for
+    /// `<stage>\data\ccasvsse001-almsivi.esm` because Skyrim resolves `Data`
+    /// relative to its executable, not the working directory. With only the
+    /// root mapped, those fell through to bare disk, the plugin set came back
+    /// empty, and world load hung while the main menu worked.
+    #[test]
+    fn stage_dir_aliases_the_virtual_root() {
+        let stage = r"C:\tmp\skyrim-data\stage\vfs-stage-21728";
+        assert_eq!(
+            vpath_under_root_norm(
+                r"\??\c:\tmp\skyrim-data\stage\vfs-stage-21728\data\ccasvsse001-almsivi.esm",
+                stage
+            )
+            .as_deref(),
+            Some("data/ccasvsse001-almsivi.esm")
+        );
+        // The game probes the bare-root spelling as well as Data\.
+        assert_eq!(
+            vpath_under_root_norm(
+                r"\??\c:\tmp\skyrim-data\stage\vfs-stage-21728\ccasvsse001-almsivi.esm",
+                stage
+            )
+            .as_deref(),
+            Some("ccasvsse001-almsivi.esm")
+        );
+        // A sibling staging directory must not match.
+        assert_eq!(
+            vpath_under_root_norm(r"\??\c:\tmp\skyrim-data\stage\other\data\x.esl", stage),
+            None
         );
     }
 

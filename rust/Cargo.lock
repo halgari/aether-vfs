@@ -1562,6 +1562,7 @@ dependencies = [
 name = "vfs-director"
 version = "0.1.0"
 dependencies = [
+ "vfs-compose",
  "vfs-inject",
  "vfs-ipc",
  "vfs-protocol",

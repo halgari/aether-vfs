@@ -1124,8 +1124,15 @@ unsafe extern "system" fn create_hook(
         return st;
     }
     // Prefer director FUSE for managed-root content (no in-shim zipserve).
+    if let Some(p) = path_of(oa) {
+        crate::hookstats::note_passthrough(&p);
+    }
     if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, disp)) {
         _hs.mark_rooted();
+        // FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT. Absent means
+        // the caller intends asynchronous completion, which a synthetic handle
+        // cannot deliver by APC or completion port.
+        crate::hookstats::note_open_sync(opts & 0x0000_0030 != 0);
         return st;
     }
     match decision_for(oa, access, disp) {
@@ -1595,6 +1602,9 @@ unsafe fn setinfo_ok_iosb(iosb: *mut c_void) {
 /// or rename of a tracked under-root handle into an overlay whiteout/rename and
 /// suppresses the real operation, so the mod backing / real file is preserved
 /// but the path reads as gone/moved. Everything else passes through.
+/// `FileCompletionInformation` — binds a handle to an I/O completion port.
+const FILE_COMPLETION_INFORMATION: u32 = 30;
+
 unsafe extern "system" fn setinfo_hook(
     handle: HANDLE,
     iosb: *mut c_void,
@@ -1607,6 +1617,12 @@ unsafe extern "system" fn setinfo_hook(
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        if class == FILE_COMPLETION_INFORMATION {
+            // Binding a synthetic handle to a completion port: the kernel will
+            // never post a packet for it, so any caller waiting on that port
+            // for this handle waits forever.
+            crate::hookstats::note_iocp_bind();
+        }
         if class == FILE_POSITION_INFORMATION
             && !info.is_null()
             && length as usize >= core::mem::size_of::<FilePositionInformation>()
@@ -2064,6 +2080,7 @@ unsafe extern "system" fn write_hook(
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        crate::hookstats::note_read_completion(!apc.is_null(), !event.is_null());
         let explicit = if byte_offset.is_null() {
             None
         } else {
@@ -2307,6 +2324,19 @@ unsafe fn fuse_create_section(
             return STATUS_SECTION_TOO_BIG;
         }
     }
+    // Diagnostic: `VFS_REJECT_FUSE_DATA_SECTION=1` refuses *data* sections only,
+    // so the game falls back to ReadFile for content while SEC_IMAGE (DLL
+    // loading) keeps working. Rejecting every section — the older
+    // VFS_REJECT_FUSE_SECTION — breaks the launch outright.
+    //
+    // This is the one I/O path nothing else can observe: reads from a mapped
+    // view are page faults served by the lazy-section VEH, so they appear in
+    // neither NtReadFile nor the hook counters. Bypassing it makes that traffic
+    // visible as ordinary reads.
+    if std::env::var_os("VFS_REJECT_FUSE_DATA_SECTION").is_some() {
+        return STATUS_INVALID_FILE_FOR_SECTION;
+    }
+
     const EAGER_MAX: u64 = 256 * 1024 * 1024;
     if size > crate::lazy_section::MAX_LAZY {
         return STATUS_SECTION_TOO_BIG;
