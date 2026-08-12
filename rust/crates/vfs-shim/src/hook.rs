@@ -1829,8 +1829,9 @@ unsafe extern "system" fn read_hook(
 /// Map a FUSE synthetic file into a synthetic section by streaming its contents
 /// from the director (zip/composed sources) into a private mapping.
 ///
-/// Skyrim BSAs exceed 1 GiB — we stream into `VirtualAlloc` (no intermediate
-/// Vec) so CreateSection never opens the Steam library tree.
+/// Bytes move **zip → shared bulk arena → VirtualAlloc** via pipelined
+/// `FLAG_READ_BULK` READs (ring only carries length+arena offset). Skyrim BSAs
+/// exceed 1 GiB — never load them as ring payload blobs or from the Steam tree.
 unsafe fn fuse_create_section(
     section_handle: *mut HANDLE,
     max_size: *mut i64,

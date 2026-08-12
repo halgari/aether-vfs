@@ -13,7 +13,8 @@ use crate::director::Director;
 use crate::ring_dispatch::dispatch_director;
 
 pub const DEFAULT_SLOT_COUNT: u32 = 32;
-pub const DEFAULT_ARENA_BYTES: usize = 32 * 1024 * 1024;
+/// Re-export for callers; keep in sync with [`vfs_ipc::DEFAULT_ARENA_BYTES`].
+pub const DEFAULT_ARENA_BYTES: usize = vfs_ipc::DEFAULT_ARENA_BYTES;
 
 struct Inner {
     mapping: SharedMapping,

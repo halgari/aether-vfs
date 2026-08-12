@@ -43,8 +43,12 @@ pub fn try_init_from_env() -> Result<(), String> {
     Ok(())
 }
 
-const PIPELINE_DEPTH: usize = 4;
-const BULK_THRESHOLD: u32 = 64 * 1024;
+/// Concurrent bulk READs in flight (each uses its own arena bank via slot id).
+const PIPELINE_DEPTH: usize = 8;
+/// Prefer shared-section bulk over inline ring payload above this size.
+const BULK_THRESHOLD: u32 = 32 * 1024;
+/// Deep pipeline for multi‑MiB sequential streams (CreateSection fill).
+const PIPELINE_DEPTH_STREAM: usize = 16;
 
 pub struct FuseClient {
     mapping: SharedMapping,
@@ -172,9 +176,21 @@ impl FuseClient {
         Ok(written)
     }
 
-    /// Read into `buf` (typically the game's NtReadFile buffer).
+    /// Bytes per bulk READ = one arena bank (shared section, not ring payload).
+    fn bulk_bank_bytes(&self) -> usize {
+        if self.arena_len == 0 {
+            return self.payload_cap.saturating_sub(8) as usize;
+        }
+        let slots = self.geom.slot_count.max(1) as usize;
+        // Full bank size — do not cap at 1 MiB (that undid a 128 MiB arena).
+        (self.arena_len / slots).max(256 * 1024)
+    }
+
+    /// Read into `buf` (game NtReadFile buffer or CreateSection destination).
     ///
-    /// Large fragments use bulk arena + `copy_to` into `buf`; small use inline ring payload.
+    /// Large fragments use the **shared bulk arena** (control ring only carries
+    /// length+offset); small use inline ring payload. Data never rides as a
+    /// multi‑MiB ring blob.
     pub fn read_fragmented(
         &self,
         fh: u64,
@@ -184,14 +200,14 @@ impl FuseClient {
         if buf.is_empty() {
             return Ok(0);
         }
-        let bulk_chunk = if self.arena_len > 0 {
-            (self.arena_len / self.geom.slot_count as usize)
-                .max(256 * 1024)
-                .min(1024 * 1024)
-        } else {
-            self.payload_cap.saturating_sub(8) as usize
-        };
+        let bulk_chunk = self.bulk_bank_bytes();
         let inline_chunk = self.payload_cap.saturating_sub(8) as usize;
+        // Deep pipeline for multi‑MiB sequential streams (section fill / BSA).
+        let pipeline = if buf.len() >= 4 * 1024 * 1024 {
+            PIPELINE_DEPTH_STREAM.min(self.geom.slot_count as usize).max(1)
+        } else {
+            PIPELINE_DEPTH.min(self.geom.slot_count as usize).max(1)
+        };
         let c = self.client();
         let mut filled = 0usize;
 
@@ -199,7 +215,7 @@ impl FuseClient {
             let mut reqs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
             let mut wants: Vec<usize> = Vec::new();
             let mut batch_off = filled;
-            while reqs.len() < PIPELINE_DEPTH && batch_off < buf.len() {
+            while reqs.len() < pipeline && batch_off < buf.len() {
                 let rem = buf.len() - batch_off;
                 let bulk = rem as u32 >= BULK_THRESHOLD && self.arena_len > 0;
                 let chunk = if bulk {
@@ -244,7 +260,7 @@ impl FuseClient {
                         .ok_or(vfs_protocol::ST_BAD_REQUEST)?;
                     let n = (bn as usize).min(dest.len());
                     if n > 0 {
-                        // Arena → user/game buffer (no intermediate Vec).
+                        // Shared arena → destination (one memcpy; not via ring).
                         self.mapping
                             .seg()
                             .copy_to(aoff as usize, &mut dest[..n])

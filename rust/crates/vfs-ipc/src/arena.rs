@@ -5,10 +5,14 @@ use crate::seg::SharedSeg;
 
 /// Default ring payload capacity (1 MiB) for director / server setups.
 pub const DEFAULT_PAYLOAD_CAP: u32 = 1_048_576;
-/// Default bulk arena size after the control ring (32 MiB).
-pub const DEFAULT_ARENA_BYTES: usize = 32 * 1024 * 1024;
+/// Default bulk arena size after the control ring (128 MiB).
+///
+/// Large BSA/ESM CreateSection streams through this shared section — not the
+/// control-ring payload. Bigger arena → larger per-slot banks → fewer RTTs.
+pub const DEFAULT_ARENA_BYTES: usize = 128 * 1024 * 1024;
 /// Default number of ring server worker threads (host IPC).
-pub const DEFAULT_WORKER_COUNT: usize = 4;
+/// Sized for pipelined bulk READs filling independent arena banks.
+pub const DEFAULT_WORKER_COUNT: usize = 8;
 
 /// View over arena memory inside an existing shared segment.
 pub struct DataArena<'a> {
