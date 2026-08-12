@@ -63,6 +63,63 @@ fn keep_host_steam_api() -> bool {
     })
 }
 
+/// Scope `VFS_VIRTUAL_IMAGE` across a child `CreateProcess`, restoring ours.
+///
+/// That variable answers "which image is this process?" — the shim spoofs
+/// `GetModuleFileName` / `QueryFullProcessImageName` from it so a hollowed
+/// process does not report its host (see the spoof install below). It is
+/// therefore *per-process*, but it lives in the environment, and children
+/// inherit it.
+///
+/// Measured 2026-08-12: SKSE's loader is hollowed, so it carries
+/// `VFS_VIRTUAL_IMAGE=...\skse64_loader.exe`; the `SkyrimSE.exe` it spawns
+/// inherited that and reported itself as the *loader*. Steam checks executable
+/// identity and refused to start the game — "Application load error
+/// 3:0000065432", a modal dialog, so the child hung instead of exiting.
+///
+/// Env is process-global, so this is not safe against another thread spawning
+/// concurrently; it matches the save/restore `Session::launch` already uses.
+struct VirtualImageScope(Option<String>);
+
+impl VirtualImageScope {
+    /// `image` = the child's own virtual image, or `None` for a child that is
+    /// not hollowed and so needs no identity spoof at all.
+    fn enter(image: Option<&str>) -> Self {
+        let prev = std::env::var("VFS_VIRTUAL_IMAGE").ok();
+        match image {
+            Some(p) => std::env::set_var("VFS_VIRTUAL_IMAGE", p),
+            None => std::env::remove_var("VFS_VIRTUAL_IMAGE"),
+        }
+        Self(prev)
+    }
+}
+
+impl Drop for VirtualImageScope {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(p) => std::env::set_var("VFS_VIRTUAL_IMAGE", p),
+            None => std::env::remove_var("VFS_VIRTUAL_IMAGE"),
+        }
+    }
+}
+
+/// Whether a child process we inject starts with its working directory set to
+/// the virtual root. Default **on**; `VFS_CHILD_CWD_ROOT=0` disables.
+///
+/// A launcher sets the child's cwd to its own directory — SKSE points it at the
+/// staged launch dir. Two things then break: `SteamAPI_Init` reads
+/// `steam_appid.txt` from the *cwd* and fails DRM with "Application load error
+/// 3:0000065432" (a modal dialog, so the child hangs rather than exits), and the
+/// game resolves `Data/` from there and finds no content. The virtual root is
+/// where both actually live.
+fn child_cwd_root() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| match std::env::var("VFS_CHILD_CWD_ROOT") {
+        Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("no")),
+        Err(_) => true,
+    })
+}
+
 /// Experiment switch: when `VFS_FUSE_SKYRIM_EXE=1`, serve `SkyrimSE.exe`
 /// through the director instead of excepting it to the host install.
 ///
@@ -2540,13 +2597,31 @@ unsafe extern "system" fn cpiw_hook(
         );
     }
 
+    // Start managed children in the virtual root, not the launcher's directory
+    // (see `child_cwd_root`). Kept alive for the whole call: `cur_dir_eff` may
+    // point into it.
+    let root_cwd_w: Option<Vec<u16>> = if child_cwd_root() {
+        std::env::var("VFS_VIRTUAL_DIR")
+            .ok()
+            .filter(|d| !d.is_empty())
+            .map(|d| d.encode_utf16().chain(core::iter::once(0)).collect())
+    } else {
+        None
+    };
+    let cur_dir_eff: *const u16 = match &root_cwd_w {
+        Some(v) => v.as_ptr(),
+        None => cur_dir,
+    };
+
     if let Some((virt_path, pe)) = resolve_virtual_pe(app, cmd) {
-        let cwd = if cur_dir.is_null() {
+        let cwd = if cur_dir_eff.is_null() {
             None
         } else {
-            Some(utf16_z(cur_dir))
+            Some(utf16_z(cur_dir_eff))
         };
-        std::env::set_var("VFS_VIRTUAL_IMAGE", &virt_path);
+        // Scoped, not global: this identifies the *child*, and leaking it to
+        // any process spawned later breaks their identity (see VirtualImageScope).
+        let _img_scope = VirtualImageScope::enter(Some(&virt_path));
         if let Some(parent) = std::path::Path::new(&virt_path).parent() {
             std::env::set_var("VFS_VIRTUAL_DIR", parent.to_string_lossy().as_ref());
         }
@@ -2593,8 +2668,12 @@ unsafe extern "system" fn cpiw_hook(
     }
 
     let forced = flags | CREATE_SUSPENDED;
+    // This child runs a real on-disk image, so it needs no identity spoof —
+    // and must not inherit ours. A hollowed launcher (SKSE) would otherwise
+    // hand the game its own image path and Steam would reject the mismatch.
+    let _img_scope = VirtualImageScope::enter(None);
     let r = tramp(
-        token, app, cmd, proc_attr, thread_attr, inherit, forced, env, cur_dir, si, pi, ptok,
+        token, app, cmd, proc_attr, thread_attr, inherit, forced, env, cur_dir_eff, si, pi, ptok,
     );
     if r != 0 && !pi.is_null() {
         let pid = (*pi).dwProcessId;
