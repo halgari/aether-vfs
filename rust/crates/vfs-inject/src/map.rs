@@ -427,7 +427,18 @@ fn remote_export_dir(
     base: u64,
 ) -> Result<(u64, u32), &'static str> {
     // e_lfanew at +0x3C
-    let e_lfanew = rpm_u32(process, base + 0x3C)? as u64;
+    let e_lfanew = match rpm_u32(process, base + 0x3C) {
+        Ok(v) => v as u64,
+        Err(e) => {
+            // Generic "RPM u32 failed" here is unactionable: it means some
+            // module base we recorded is not readable in the child. Name it.
+            eprintln!(
+                "vfs-inject: export dir unreadable at base=0x{base:x} (+0x3C): {e} — \
+                 module base is bogus or its pages are not committed"
+            );
+            return Err(e);
+        }
+    };
     let opt = base + e_lfanew + 24;
     // Export dir = DataDirectory[0]
     let exp_rva = rpm_u32(process, opt + 112)?;

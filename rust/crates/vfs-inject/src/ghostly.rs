@@ -270,8 +270,15 @@ pub fn hollow_existing_process(
             }
             ok_soi as usize
         };
+        // In-place needs the host's image reservation to *hold* the zip image,
+        // not to match it byte for byte. Requiring equality only ever admitted
+        // the game's own EXE as host; a purpose-built neutral host (see
+        // crates/vfs-host) reserves deliberately more, and was rejected here —
+        // falling back to "allocating zip image", which relocates off the
+        // preferred base and then dies in `RPM u32 failed`. Surplus reservation
+        // is simply unused VA the loader already committed for the image.
         let use_inplace = remote_base != 0
-            && host_soi == size_of_image
+            && host_soi >= size_of_image
             && image_path.to_ascii_lowercase().contains("skyrimse");
 
         // Preload imports in remote before any image overwrite.
@@ -2164,9 +2171,25 @@ unsafe fn remote_load_library_path(
                 "vfs-inject: remote LoadLibrary({full_path}) thread crashed exit=0x{code:x}"
             );
         }
-        None
-    } else {
-        Some(code as u64)
+        return None;
+    }
+    // The exit code is a DWORD but HMODULE is 64-bit, so `code` is a *truncated*
+    // base and must never be used as one: a module at 0x7ffc3b400000 comes back
+    // as 0x3b400000, which then reads as unmapped ("export dir unreadable").
+    // Treat it purely as a success flag and get the real base from the loader.
+    let base_name = std::path::Path::new(full_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(full_path);
+    match find_remote_module_base_opt(process, base_name) {
+        Some(b) => Some(b),
+        None => {
+            eprintln!(
+                "vfs-inject: remote LoadLibrary({full_path}) returned exit=0x{code:x} but the \
+                 module is not enumerable; refusing to use a truncated base"
+            );
+            None
+        }
     }
 }
 
