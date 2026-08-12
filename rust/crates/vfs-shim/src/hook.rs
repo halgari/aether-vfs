@@ -286,6 +286,7 @@ unsafe fn make_detour(
 /// Idempotent-guarded. Patches the four path/attr stubs itself.
 pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
     install_panic_hook();
+    crate::hookstats::start_reporter();
     ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
     // SAFETY: ntdll lookup + detour install; each hook matches its ABI.
     unsafe { install_all_detours(true) }
@@ -362,6 +363,7 @@ pub fn install_late(
         return Err(InstallError::Detour);
     }
     install_panic_hook();
+    crate::hookstats::start_reporter();
     ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
 
     // SAFETY: cfg is the live early Config in this process; tramp addresses
@@ -1104,6 +1106,7 @@ unsafe extern "system" fn create_hook(
     ea: *const c_void,
     ealen: u32,
 ) -> NTSTATUS {
+    let mut _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Create);
     let tramp = match TRAMP_CREATE {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -1122,6 +1125,7 @@ unsafe extern "system" fn create_hook(
     }
     // Prefer director FUSE for managed-root content (no in-shim zipserve).
     if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, disp)) {
+        _hs.mark_rooted();
         return st;
     }
     match decision_for(oa, access, disp) {
@@ -1309,6 +1313,7 @@ unsafe extern "system" fn open_hook(
     share: u32,
     opts: u32,
 ) -> NTSTATUS {
+    let mut _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Open);
     let tramp = match TRAMP_OPEN {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -1320,6 +1325,7 @@ unsafe extern "system" fn open_hook(
     // FILE_OPEN (1), NOT 0: 0 is FILE_SUPERSEDE, which is in is_write_open's
     // create/overwrite set and would misclassify every open as a write.
     if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, vfs_redirect::FILE_OPEN)) {
+        _hs.mark_rooted();
         return st;
     }
     // NtOpenFile has no disposition; it always opens existing (FILE_OPEN).
@@ -1407,6 +1413,7 @@ unsafe extern "system" fn qattr_hook(
     oa: *const ObjectAttributes,
     info: *mut FileBasicInformation,
 ) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QAttr);
     let tramp = match TRAMP_QATTR {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -1464,6 +1471,7 @@ unsafe extern "system" fn qfull_hook(
     oa: *const ObjectAttributes,
     info: *mut FileNetworkOpenInformation,
 ) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QFull);
     let tramp = match TRAMP_QFULL {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -1521,6 +1529,7 @@ unsafe extern "system" fn qfull_hook(
 /// Reclaim any tracking for a closing handle before the OS (possibly) reuses
 /// its value.
 unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Close);
     let tramp = match TRAMP_CLOSE {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -1997,6 +2006,7 @@ unsafe extern "system" fn qif_hook(
     length: u32,
     class: u32,
 ) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QueryInfo);
     let tramp = match TRAMP_QIF {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -2048,6 +2058,7 @@ unsafe extern "system" fn write_hook(
     byte_offset: *const i64,
     key: *const u32,
 ) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Write);
     let tramp = match TRAMP_WRITE {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -2121,6 +2132,7 @@ unsafe extern "system" fn read_hook(
     byte_offset: *const i64,
     key: *const u32,
 ) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Read);
     let tramp = match TRAMP_READ {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -2380,6 +2392,7 @@ unsafe extern "system" fn create_section_hook(
     alloc_attrs: u32,
     file_handle: HANDLE,
 ) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::CreateSection);
     let tramp = match TRAMP_CREATE_SECTION {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -2478,6 +2491,7 @@ unsafe extern "system" fn map_view_hook(
     alloc_type: u32,
     protect: u32,
 ) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::MapView);
     let tramp = match TRAMP_MAP_VIEW {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -2837,6 +2851,7 @@ unsafe extern "system" fn qdirex_hook(
     flags: u32,
     file_name: *const UnicodeString,
 ) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QDirEx);
     let tramp = match TRAMP_QDIREX {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,

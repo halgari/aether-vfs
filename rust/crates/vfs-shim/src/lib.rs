@@ -9,6 +9,7 @@ mod engine;
 mod fuse_client;
 mod fuse_synth;
 mod hook;
+mod hookstats;
 mod inject;
 mod lazy_section;
 mod ntdef;

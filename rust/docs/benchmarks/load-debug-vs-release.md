@@ -113,3 +113,61 @@ Start-Process "$root\skse64_loader.exe" -WorkingDirectory $root
 
 Then poll for a visible `SkyrimSE.exe` window with a non-zero client rect, the
 same end condition `vfs_director::bench` uses.
+
+## Hook-level attribution
+
+`VFS_SHIM_STATS_LOG=<file>` turns on `vfs_shim::hookstats`: per-hook call counts
+and time inside the detour, snapshotted every 250 ms from the game process.
+Release build, SKSE launch, read at the window mark (9.78 s):
+
+```
+  NtCreateFile                       370 calls     1.953s   5279.6 us/call  rooted 168 (45.4%)
+  NtOpenFile                        3789 calls     0.105s     27.8 us/call
+  NtQueryAttributesFile               41 calls     0.110s   2675.6 us/call
+  NtQueryFullAttributesFile          229 calls     2.147s   9375.5 us/call
+  NtReadFile                        2482 calls     3.899s   1570.9 us/call
+  NtWriteFile                        217 calls     0.004s     19.7 us/call
+  NtClose                           5815 calls     0.143s     24.7 us/call
+  NtQueryDirectoryFileEx               8 calls     0.018s   2213.5 us/call
+  NtQueryInformationFile            2081 calls     0.003s      1.4 us/call
+  NtCreateSection                     31 calls     0.001s     31.5 us/call
+  NtMapViewOfSection                 105 calls     0.001s      8.3 us/call
+  TOTAL                            15168 calls     8.385s    552.8 us/call
+```
+
+**8.385 s of a 9.78 s launch is spent inside the detours — ~86% of wall clock**,
+which accounts for essentially all of the 9.3 s gap against native.
+
+It is not call volume. Hooks that only pass through cost **1–28 µs**
+(`NtQueryInformationFile` 1.4 µs across 2081 calls; `NtClose` 25 µs across
+5815). The hooks that issue a ring RPC cost **1.6–9.4 ms** — two orders of
+magnitude more than `vfs-fuse-bench` measures for the same RPCs (20–209 µs).
+
+## Root cause: the notifier, not the ring
+
+`vfs-fuse-bench` runs `SpinNotifier`. The director runs `EventNotifier`, whose
+waits are (`vfs-win/src/event_notifier.rs`):
+
+```rust
+WaitForSingleObject(self.server_ev, 1); // 1ms slice then re-check atomics
+```
+
+A 1 ms timeout does not wake in 1 ms. Windows' default timer resolution is
+**15.6 ms**, so the wait rounds up to the next tick and any RPC that misses an
+immediate signal pays a scheduler quantum. That is precisely the observed
+1.6–9.4 ms per call, and the totals reconcile:
+
+```
+2482 × 1.57ms + 229 × 9.4ms + 370 × 5.3ms ≈ 8.0 s
+```
+
+**The published ring numbers are measured on a notifier the product does not
+use.** Fixes, in order of expected effect:
+
+1. **Spin-then-wait.** Spin for a few tens of µs — the real work is 20–209 µs —
+   before falling back to the event. This is what makes `SpinNotifier` ~100×
+   faster and should remove most of the 8 s.
+2. **`timeBeginPeriod(1)`** in the director/shim: a cheap mitigation that turns
+   15.6 ms granularity into ~1 ms, but still sleeps.
+3. Only then read-path work (read-ahead, larger blocks). At 2482 reads it is
+   worth having, but it is second-order next to per-call wake latency.
