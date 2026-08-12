@@ -508,14 +508,13 @@ unsafe extern "system" fn qfpi_hook(
     tramp(process, flags, buffer, size)
 }
 
-/// Decode a fully-qualified ObjectName. `None` when ineligible (null/relative OA
-/// or empty name).
-unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
+/// Decode ObjectName as UTF-16 (no root resolution).
+unsafe fn object_name_str(oa: *const ObjectAttributes) -> Option<String> {
     if oa.is_null() {
         return None;
     }
     let oa_ref = &*oa;
-    if !oa_ref.root_directory.is_null() || oa_ref.object_name.is_null() {
+    if oa_ref.object_name.is_null() {
         return None;
     }
     let us = &*oa_ref.object_name;
@@ -524,6 +523,42 @@ unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
     }
     let units = core::slice::from_raw_parts(us.buffer, us.length as usize / 2);
     Some(String::from_utf16_lossy(units))
+}
+
+/// Fully-qualified NT/Win32 path for an open.
+///
+/// Absolute names work as before. **Relative** opens (`RootDirectory` set) only
+/// resolve when the root is a FUSE synthetic directory handle whose absolute
+/// path was recorded in `PATH_TABLE`. Real kernel roots return `None` so the
+/// caller can tramp. Without this, steam_api / CRT opens like
+/// `RootDirectory=<game dir FUSE handle>, Name=steam_appid.txt` hit the kernel
+/// with a fake handle → fail → **Steam Error**.
+unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
+    if oa.is_null() {
+        return None;
+    }
+    let oa_ref = &*oa;
+    let name = object_name_str(oa)?;
+    if oa_ref.root_directory.is_null() {
+        return if name.is_empty() { None } else { Some(name) };
+    }
+    let root = oa_ref.root_directory as isize;
+    if !crate::fuse_synth::is_fuse_synth(root) {
+        return None;
+    }
+    // Prefer PATH_TABLE (recorded on open); fall back to fuse_synth abs_path.
+    let parent = PATH_TABLE
+        .lock()
+        .ok()
+        .and_then(|t| t.get(&root).cloned())
+        .or_else(|| crate::fuse_synth::abs_path(root))?;
+    let parent = parent.trim_end_matches(['\\', '/']);
+    let rel = name.trim_start_matches(['\\', '/']);
+    if rel.is_empty() {
+        Some(parent.to_string())
+    } else {
+        Some(format!("{parent}\\{rel}"))
+    }
 }
 
 /// Decode + ask the engine what to do with an open, given its access mask and
@@ -638,13 +673,40 @@ unsafe fn try_fuse_create(
     // Directory open of root: empty vpath → "."
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
 
-    // All under-root *reads* go through the director (zip / composed sources).
-    // Never open the Steam library tree for game content — that violates the
-    // VFS goal. Writes may fall through for shim-local overlay redirect.
+    // DRM / identity exceptions (host Steam tree only — not Data/* content):
+    // - steam_api*: SEC_IMAGE + client IPC
+    // - steam_appid.txt: SteamAPI_Init / RestartAppIfNecessary
+    // - SkyrimSE.exe: Steam hashes the on-disk PE against the running process;
+    //   serving the zip image via FUSE here produced "Steam Error" while
+    //   hollow still injects zip PE from the director at launch.
+    {
+        let base = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if base.eq_ignore_ascii_case("steam_api64.dll")
+            || base.eq_ignore_ascii_case("steam_api.dll")
+            || base.eq_ignore_ascii_case("steam_appid.txt")
+            || base.eq_ignore_ascii_case("SkyrimSE.exe")
+            || base.eq_ignore_ascii_case("SkyrimSELauncher.exe")
+        {
+            return None; // tramp → host install next to the hollow image
+        }
+    }
+
+    // All other under-root *reads* go through the director (zip / composed).
+    // Writes may fall through for shim-local overlay redirect.
     let opened = if write { client.open_write(vp) } else { client.open(vp) };
     match opened {
         Ok(resp) => {
-            let h = crate::fuse_synth::open_fuse(resp.fh, resp.size, resp.is_dir)?;
+            // Record absolute path on the handle so later relative opens
+            // (RootDirectory=this handle) resolve through the director.
+            let h = crate::fuse_synth::open_fuse_at(
+                resp.fh,
+                resp.size,
+                resp.is_dir,
+                Some(path.clone()),
+            )?;
             if !file_handle.is_null() {
                 *file_handle = h as HANDLE;
             }
@@ -652,6 +714,10 @@ unsafe fn try_fuse_create(
                 let p = iosb as *mut u8;
                 core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
                 core::ptr::write_unaligned(p.add(8) as *mut usize, crate::ntdef::FILE_OPENED);
+            }
+            // Direct PATH_TABLE insert with absolute path (path_of may be relative OA).
+            if let Ok(mut t) = PATH_TABLE.lock() {
+                t.insert(h, path.clone());
             }
             record_path(file_handle, oa, STATUS_SUCCESS);
             if resp.is_dir {
@@ -890,6 +956,10 @@ unsafe extern "system" fn create_hook(
         }
         Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
         Some(Decision::PassThrough) | None => {
+            // Never pass a FUSE RootDirectory to the kernel (invalid handle).
+            if fuse_root_directory(oa) {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
             let status =
                 tramp(file_handle, access, oa, iosb, alloc, attrs, share, disp, opts, ea, ealen);
             tag_under_root(file_handle, oa, status);
@@ -897,6 +967,15 @@ unsafe extern "system" fn create_hook(
             status
         }
     }
+}
+
+/// True when OA.RootDirectory is a FUSE synthetic handle.
+unsafe fn fuse_root_directory(oa: *const ObjectAttributes) -> bool {
+    if oa.is_null() {
+        return false;
+    }
+    let root = (*oa).root_directory;
+    !root.is_null() && crate::fuse_synth::is_fuse_synth(root as isize)
 }
 
 /// `NtOpenFile` hook. Mirrors `create_hook` (redirect / deny / pass-through +
@@ -972,6 +1051,9 @@ unsafe extern "system" fn open_hook(
         }
         Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
         Some(Decision::PassThrough) | None => {
+            if fuse_root_directory(oa) {
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
             let status = tramp(file_handle, access, oa, iosb, share, opts);
             tag_under_root(file_handle, oa, status);
             record_path(file_handle, oa, status);
@@ -1839,15 +1921,42 @@ unsafe fn fuse_create_section(
     alloc_attrs: u32,
     file_handle: HANDLE,
 ) -> NTSTATUS {
-    // SEC_IMAGE not supported for FUSE data files (PEs use hollow/inject path).
-    if alloc_attrs & SEC_IMAGE != 0 {
-        return STATUS_INVALID_FILE_FOR_SECTION;
-    }
     let Some((fh, size, is_dir, _)) = crate::fuse_synth::lookup(file_handle as isize) else {
         return STATUS_INVALID_HANDLE;
     };
     if is_dir || size == 0 {
         return STATUS_INVALID_FILE_FOR_SECTION;
+    }
+    // SEC_IMAGE: map PE image from director bytes (same approach as zipserve).
+    if alloc_attrs & SEC_IMAGE != 0 {
+        if size > 256 * 1024 * 1024 {
+            return STATUS_INVALID_FILE_FOR_SECTION;
+        }
+        let Some(client) = crate::fuse_client::global() else {
+            return STATUS_UNSUCCESSFUL;
+        };
+        let mut pe = vec![0u8; size as usize];
+        match client.read_fragmented(fh, 0, &mut pe) {
+            Ok(n) if n == pe.len() => {}
+            Ok(n) if n > 0 => pe.truncate(n),
+            _ => return STATUS_INVALID_FILE_FOR_SECTION,
+        }
+        if !vfs_inject::pe_looks_like_image(&pe) {
+            return STATUS_INVALID_FILE_FOR_SECTION;
+        }
+        return match vfs_inject::map_image_from_pe_bytes_local(&pe) {
+            Ok((base, img_size)) => match crate::zipserve::register_mapped_image(base as usize, img_size as u64)
+            {
+                Some(h) => {
+                    if !section_handle.is_null() {
+                        *section_handle = h as HANDLE;
+                    }
+                    STATUS_SUCCESS
+                }
+                None => STATUS_INVALID_FILE_FOR_SECTION,
+            },
+            Err(_) => STATUS_INVALID_FILE_FOR_SECTION,
+        };
     }
     // Cap: largest SE BSAs are ~1.7 GiB; leave headroom under 4 GiB usize maps.
     const MAX_MAP: u64 = 3 * 1024 * 1024 * 1024;
