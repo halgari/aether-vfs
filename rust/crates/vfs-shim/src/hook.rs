@@ -1317,7 +1317,10 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
         return STATUS_SUCCESS;
     }
     if crate::zipserve::is_synth_section(handle as isize) {
-        crate::zipserve::close_section(handle as isize);
+        // Releasing shim-owned VA waits for the last view (NT semantics).
+        if let Some(window) = crate::zipserve::close_section(handle as isize) {
+            crate::lazy_section::on_section_closed(window);
+        }
         return STATUS_SUCCESS;
     }
     if let Ok(mut table) = DIR_TABLE.lock() {
@@ -2072,8 +2075,7 @@ unsafe fn fuse_create_section(
         }
     }
     const EAGER_MAX: u64 = 256 * 1024 * 1024;
-    const MAX_MAP: u64 = 3 * 1024 * 1024 * 1024;
-    if size > MAX_MAP {
+    if size > crate::lazy_section::MAX_LAZY {
         return STATUS_SECTION_TOO_BIG;
     }
     if size > EAGER_MAX {
@@ -2114,18 +2116,21 @@ unsafe fn fuse_create_section(
         }
         _ => false,
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(r"C:\tmp\skyrim-data\perf\section-fill.log")
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "eager fh={fh} size={size} ok={fill_ok}");
+    // Opt-in trace only: this runs inside NtCreateSection, so the file I/O
+    // re-enters our own hooks on every section the game creates.
+    if let Some(path) = std::env::var_os("VFS_SECTION_FILL_LOG") {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            use std::io::Write;
+            let _ = writeln!(f, "eager fh={fh} size={size} ok={fill_ok}");
+        }
     }
     if !fill_ok {
         VirtualFree(base, 0, MEM_RELEASE);
         return STATUS_UNSUCCESSFUL;
     }
+    // Track the allocation so NtClose frees it — otherwise every eager section
+    // leaks up to EAGER_MAX for the life of the process.
+    crate::lazy_section::track_eager_section(base as usize, size);
     match crate::zipserve::register_mapped_image(base as usize, size) {
         Some(h) => {
             if !section_handle.is_null() {
@@ -2134,7 +2139,9 @@ unsafe fn fuse_create_section(
             STATUS_SUCCESS
         }
         None => {
-            VirtualFree(base, 0, MEM_RELEASE);
+            // Reaps the tracked region (no view, no open section) — which frees
+            // `base`, so do not VirtualFree it again here.
+            crate::lazy_section::on_section_closed(base as usize);
             STATUS_INVALID_FILE_FOR_SECTION
         }
     }
@@ -2317,11 +2324,11 @@ unsafe extern "system" fn unmap_view_hook(process: HANDLE, base: *mut c_void) ->
     };
     if !base.is_null() && crate::zipserve::is_synth_view(base as usize) {
         let b = base as usize;
+        // Retire one reference; the backing VA outlives it unless the section
+        // handle is already closed and this was the last view — a BSA reader
+        // slides views over one open section and must keep the others.
         crate::zipserve::unmap_view(b);
-        // Free lazy reserved region if this was a demand-paged FUSE section.
-        unsafe {
-            let _ = crate::lazy_section::release_if_lazy(b);
-        }
+        crate::lazy_section::on_view_unmapped(b);
         let _ = process;
         return STATUS_SUCCESS;
     }

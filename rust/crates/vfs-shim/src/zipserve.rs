@@ -47,8 +47,16 @@ struct SynthSection {
 static ZIP_MAPS: Mutex<BTreeMap<String, ZipMap>> = Mutex::new(BTreeMap::new());
 static SYNTH: Mutex<BTreeMap<usize, SynthFile>> = Mutex::new(BTreeMap::new());
 static SYNTH_SECTIONS: Mutex<BTreeMap<usize, SynthSection>> = Mutex::new(BTreeMap::new());
-/// Mapped synthetic views: base address → view length (for UnmapView no-op).
-static SYNTH_VIEWS: Mutex<BTreeMap<usize, u64>> = Mutex::new(BTreeMap::new());
+/// One outstanding synthetic view. Callers may map the same base twice (two
+/// views at the same section offset), so keep a refcount rather than letting
+/// the first unmap forget a base the process is still using.
+struct SynthView {
+    length: u64,
+    refs: u32,
+}
+
+/// Mapped synthetic views: base address → view (for UnmapView no-op).
+static SYNTH_VIEWS: Mutex<BTreeMap<usize, SynthView>> = Mutex::new(BTreeMap::new());
 static NEXT_SLOT: Mutex<usize> = Mutex::new(0);
 
 /// Strip a `\??\` / `\\?\` device prefix to a Win32 path for `CreateFileW`.
@@ -251,12 +259,17 @@ pub fn register_mapped_image(base: usize, size: u64) -> Option<isize> {
     Some(handle as isize)
 }
 
-/// Close a synthetic section handle.
-pub fn close_section(handle: isize) -> bool {
-    match SYNTH_SECTIONS.lock() {
-        Ok(mut t) => t.remove(&(handle as usize)).is_some(),
-        Err(_) => false,
-    }
+/// Close a synthetic section handle, returning the window base it covered.
+///
+/// The base lets the caller release shim-owned address space (see
+/// [`crate::lazy_section::on_section_closed`]). Views may still be outstanding;
+/// the owner frees only once the last one is unmapped.
+pub fn close_section(handle: isize) -> Option<usize> {
+    SYNTH_SECTIONS
+        .lock()
+        .ok()?
+        .remove(&(handle as usize))
+        .map(|s| s.window)
 }
 
 /// Map a view of a synthetic section into the current process.
@@ -283,9 +296,27 @@ pub fn map_view(
     let base = s.window.checked_add(section_offset as usize)?;
     drop(t);
     if let Ok(mut views) = SYNTH_VIEWS.lock() {
-        views.insert(base, size);
+        views
+            .entry(base)
+            .and_modify(|v| {
+                v.refs += 1;
+                v.length = v.length.max(size);
+            })
+            .or_insert(SynthView { length: size, refs: 1 });
     }
     Some((base, size))
+}
+
+/// Whether any synthetic view still falls inside `[base, base+len)`.
+///
+/// Owners of shim-allocated section memory use this to decide when a region is
+/// unreferenced. On a poisoned lock this reports "still in use": leaking a
+/// reservation is recoverable, freeing one out from under a live view is not.
+pub fn has_view_in(base: usize, len: usize) -> bool {
+    match SYNTH_VIEWS.lock() {
+        Ok(v) => v.range(base..base.saturating_add(len)).next().is_some(),
+        Err(_) => true,
+    }
 }
 
 /// Whether `base` is a synthetic mapped view (should no-op on UnmapView).
@@ -296,11 +327,22 @@ pub fn is_synth_view(base: usize) -> bool {
         .unwrap_or(false)
 }
 
-/// Forget a synthetic mapped view (do not unmap the underlying zip).
+/// Forget one reference to a synthetic mapped view (do not unmap the underlying
+/// zip). Returns true when this was the *last* reference to `base`.
 pub fn unmap_view(base: usize) -> bool {
-    match SYNTH_VIEWS.lock() {
-        Ok(mut v) => v.remove(&base).is_some(),
-        Err(_) => false,
+    let Ok(mut views) = SYNTH_VIEWS.lock() else {
+        return false;
+    };
+    match views.get_mut(&base) {
+        Some(v) if v.refs > 1 => {
+            v.refs -= 1;
+            false
+        }
+        Some(_) => {
+            views.remove(&base);
+            true
+        }
+        None => false,
     }
 }
 
