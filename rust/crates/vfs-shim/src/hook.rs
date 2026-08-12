@@ -34,31 +34,16 @@ fn in_hook_reenter() -> bool {
     HOOK_REENTER.with(|c| c.get() > 0)
 }
 
-/// When set (`VFS_DISK_ONLY_ROOT=1`), under-root *read* opens/getattr skip the
-/// FUSE ring entirely and fall through to the host (disk). Massive win for a
-/// complete Steam install where the zip is only a backup: avoids hundreds of
-/// ring RTT getattr/open probes for missing CC plugins / lodsettings.
-fn disk_only_root() -> bool {
+/// Opt-in only: when `VFS_ALLOW_DISK_FALLTHROUGH=1`, under-root FUSE NOT_FOUND
+/// may open the host path (legacy / debug). Default **off** — game content must
+/// come from the director (zip/overrides), never the Steam library tree.
+fn allow_disk_fallthrough() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        match std::env::var("VFS_DISK_ONLY_ROOT") {
-            Ok(v) => {
-                let t = v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes");
-                t
-            }
-            Err(_) => false,
-        }
+    *FLAG.get_or_init(|| match std::env::var("VFS_ALLOW_DISK_FALLTHROUGH") {
+        Ok(v) => v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"),
+        Err(_) => false,
     })
 }
-
-/// Bounded positive/negative cache for host path existence (avoids repeated
-/// GetFileAttributesW on the same masters/BSAs and missing-plugin probes).
-fn phys_exists_cache() -> &'static Mutex<std::collections::HashMap<String, bool>> {
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, bool>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::with_capacity(512)))
-}
-
-const PHYS_CACHE_CAP: usize = 4096;
 
 use retour::RawDetour;
 use vfs_redirect::{
@@ -653,22 +638,9 @@ unsafe fn try_fuse_create(
     // Directory open of root: empty vpath → "."
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
 
-    // Prefer a real on-disk host file/dir when present (complete Steam install).
-    // FUSE synthetic handles do not support NtCreateSection/MapView, which
-    // Skyrim uses for ESMs/BSAs — that blocked master load and forced tiny
-    // ReadFile drips. Also prefer real dirs so Data/Textures/ etc. enumerate
-    // without FUSE empty-tree gaps (which can thrash/stack-overflow probes).
-    // Zip-only content still goes through FUSE below.
-    if !write && physical_under_root_exists(&path) {
-        disk_prefer_trace(&path);
-        return None;
-    }
-    // Complete install fast path: skip ring open for missing host paths (CC
-    // probes, lodsettings, etc.). Kernel returns NOT_FOUND without a director RTT.
-    if !write && disk_only_root() {
-        return None;
-    }
-
+    // All under-root *reads* go through the director (zip / composed sources).
+    // Never open the Steam library tree for game content — that violates the
+    // VFS goal. Writes may fall through for shim-local overlay redirect.
     let opened = if write { client.open_write(vp) } else { client.open(vp) };
     match opened {
         Ok(resp) => {
@@ -685,73 +657,33 @@ unsafe fn try_fuse_create(
             if resp.is_dir {
                 tag_under_root(file_handle, oa, STATUS_SUCCESS);
             }
+            director_open_trace(&path, resp.size);
             Some(STATUS_SUCCESS)
         }
-        // Not in the zip/director: fall through to local overlay + real disk.
-        // Critical for steam_appid.txt (and other host-side DRM files) which live
-        // next to the exe / in the write overlay but are not in the archive —
-        // hard NOT_FOUND here made RestartAppIfNecessary fire steam://run.
-        Err(st) if st == vfs_protocol::ST_NOT_FOUND => None,
+        // Not in director: seal under-root *reads* (no Steam-disk fallthrough).
+        // Writes fall through so overlay redirect / create still works.
+        // steam_appid.txt must live in the overrides mount (skyrim-live writes it).
+        Err(st) if st == vfs_protocol::ST_NOT_FOUND => {
+            if write || allow_disk_fallthrough() {
+                None
+            } else {
+                Some(STATUS_OBJECT_NAME_NOT_FOUND)
+            }
+        }
         // Director rejects OPEN_WRITE (overlay is shim-local). Fall through so
-        // write/create under the root hits the real overlay / disk path.
+        // write/create under the root hits the overlay redirect path.
         Err(_) if write => None,
         Err(_) => {
-            // Director down / I/O — do not fall through to empty root.
+            // Director down / I/O — do not fall through to the Steam tree.
             Some(STATUS_UNSUCCESSFUL)
         }
     }
 }
 
-/// True when `nt_or_win_path` resolves to an existing file **or directory** on
-/// the host (so CreateFile/CreateSection/dir enum use a real kernel handle).
-///
-/// Uses `GetFileAttributesW` under the reentrancy guard (cheaper / shallower
-/// stack than `Path::is_file` + `is_dir`, which still matter on a 1 MiB stack).
-/// Results are cached (positive + negative) to cut repeated probes during the
-/// master/BSA open burst.
-fn physical_under_root_exists(nt_or_win_path: &str) -> bool {
-    let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim());
-    if p.is_empty() {
-        return false;
-    }
-    let win = p.replace('/', "\\");
-    // Strip trailing separators for dir probes like `Data\Textures\`.
-    let win = win.trim_end_matches(['\\', '/']);
-    if win.is_empty() {
-        return false;
-    }
-    // Cache key: lowercase for NT case-insensitivity.
-    let key = win.to_ascii_lowercase();
-    if let Ok(cache) = phys_exists_cache().lock() {
-        if let Some(&hit) = cache.get(&key) {
-            return hit;
-        }
-    }
-    if !hook_reenter_begin() {
-        return false;
-    }
-    let mut w: Vec<u16> = win.encode_utf16().collect();
-    w.push(0);
-    // INVALID_FILE_ATTRIBUTES = 0xFFFF_FFFF
-    let attrs = unsafe {
-        windows_sys::Win32::Storage::FileSystem::GetFileAttributesW(w.as_ptr())
-    };
-    hook_reenter_end();
-    let ok = attrs != 0xFFFF_FFFF;
-    if let Ok(mut cache) = phys_exists_cache().lock() {
-        if cache.len() >= PHYS_CACHE_CAP {
-            cache.clear();
-        }
-        cache.insert(key, ok);
-    }
-    ok
-}
-
-/// Append a line proving disk-prefer path (masters/BSAs) — **only** when
-/// `VFS_DISK_PREFER_LOG` is set. Default-off: sync append on every open was a
-/// measured hot-path tax (~0.3 ms/line) during the BSA burst.
-fn disk_prefer_trace(nt_or_win_path: &str) {
-    let Some(path) = std::env::var_os("VFS_DISK_PREFER_LOG").map(std::path::PathBuf::from) else {
+/// Optional proof that opens went through the director (not host disk).
+/// Set `VFS_DIRECTOR_OPEN_LOG` to a file path.
+fn director_open_trace(nt_or_win_path: &str, size: u64) {
+    let Some(path) = std::env::var_os("VFS_DIRECTOR_OPEN_LOG").map(std::path::PathBuf::from) else {
         return;
     };
     let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
@@ -761,16 +693,19 @@ fn disk_prefer_trace(nt_or_win_path: &str) {
         || lower.ends_with(".esl")
         || lower.ends_with(".esp")
         || lower.ends_with(".bsa")
+        || lower.ends_with(".exe")
+        || lower.ends_with(".dll")
         || lower.ends_with("steam_appid.txt"))
     {
         return;
     }
     let line = format!(
-        "{}\tdisk-prefer\t{}\n",
+        "{}\tdirector-open\tsize={}\t{}\n",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
+        size,
         p
     );
     if !hook_reenter_begin() {
@@ -1046,11 +981,9 @@ unsafe extern "system" fn open_hook(
 }
 
 /// Path-based getattr via director OP_GETATTR when FUSE client is live.
+/// `Some(...)` means the path is under the managed root — caller must not tramp
+/// to the Steam tree on NOT_FOUND (seal under-root).
 unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), i32>> {
-    // Disk-only root: never pay a ring getattr RTT for under-root probes.
-    if disk_only_root() {
-        return None;
-    }
     let client = crate::fuse_client::global()?;
     let vpath = client.vpath_under_root(path)?;
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
@@ -1073,12 +1006,7 @@ unsafe extern "system" fn qattr_hook(
         return tramp(oa, info);
     }
     if let Some(path) = path_of(oa) {
-        // Prefer real disk metadata when the host path exists (complete install).
-        if physical_under_root_exists(&path) {
-            return tramp(oa, info);
-        }
-        // Prefer director FUSE getattr (no in-shim snapshot authority).
-        // On NOT_FOUND, fall through to local overlay / real disk (steam_appid.txt).
+        // Under-root: director only (zip/overrides). Never host Steam metadata.
         if let Some(res) = fuse_path_attr(&path) {
             match res {
                 Ok((is_dir, _size, _mtime)) => {
@@ -1092,7 +1020,13 @@ unsafe extern "system" fn qattr_hook(
                     }
                     return STATUS_SUCCESS;
                 }
-                Err(st) if st == vfs_protocol::ST_NOT_FOUND => {}
+                Err(st) if st == vfs_protocol::ST_NOT_FOUND => {
+                    if allow_disk_fallthrough() {
+                        // fall through to engine / tramp
+                    } else {
+                        return STATUS_OBJECT_NAME_NOT_FOUND;
+                    }
+                }
                 Err(_) => return STATUS_UNSUCCESSFUL,
             }
         }
@@ -1129,9 +1063,6 @@ unsafe extern "system" fn qfull_hook(
         return tramp(oa, info);
     }
     if let Some(path) = path_of(oa) {
-        if physical_under_root_exists(&path) {
-            return tramp(oa, info);
-        }
         if let Some(res) = fuse_path_attr(&path) {
             match res {
                 Ok((is_dir, size, _mtime)) => {
@@ -1147,7 +1078,11 @@ unsafe extern "system" fn qfull_hook(
                     }
                     return STATUS_SUCCESS;
                 }
-                Err(st) if st == vfs_protocol::ST_NOT_FOUND => {}
+                Err(st) if st == vfs_protocol::ST_NOT_FOUND => {
+                    if !allow_disk_fallthrough() {
+                        return STATUS_OBJECT_NAME_NOT_FOUND;
+                    }
+                }
                 Err(_) => return STATUS_UNSUCCESSFUL,
             }
         }
@@ -1891,9 +1826,11 @@ unsafe extern "system" fn read_hook(
     tramp(handle, event, apc, apc_ctx, iosb, buffer, length, byte_offset, key)
 }
 
-/// Map a FUSE synthetic file into a synthetic section by bulk-reading its
-/// contents (masters ≤ ~400MB). Larger files should open as real disk handles
-/// via [`physical_under_root_exists`] fallthrough.
+/// Map a FUSE synthetic file into a synthetic section by streaming its contents
+/// from the director (zip/composed sources) into a private mapping.
+///
+/// Skyrim BSAs exceed 1 GiB — we stream into `VirtualAlloc` (no intermediate
+/// Vec) so CreateSection never opens the Steam library tree.
 unsafe fn fuse_create_section(
     section_handle: *mut HANDLE,
     max_size: *mut i64,
@@ -1901,7 +1838,7 @@ unsafe fn fuse_create_section(
     alloc_attrs: u32,
     file_handle: HANDLE,
 ) -> NTSTATUS {
-    // SEC_IMAGE not supported for FUSE data files.
+    // SEC_IMAGE not supported for FUSE data files (PEs use hollow/inject path).
     if alloc_attrs & SEC_IMAGE != 0 {
         return STATUS_INVALID_FILE_FOR_SECTION;
     }
@@ -1911,7 +1848,8 @@ unsafe fn fuse_create_section(
     if is_dir || size == 0 {
         return STATUS_INVALID_FILE_FOR_SECTION;
     }
-    const MAX_MAP: u64 = 400 * 1024 * 1024;
+    // Cap: largest SE BSAs are ~1.7 GiB; leave headroom under 4 GiB usize maps.
+    const MAX_MAP: u64 = 3 * 1024 * 1024 * 1024;
     if size > MAX_MAP {
         return STATUS_SECTION_TOO_BIG;
     }
@@ -1924,39 +1862,65 @@ unsafe fn fuse_create_section(
     let Some(client) = crate::fuse_client::global() else {
         return STATUS_UNSUCCESSFUL;
     };
-    let mut buf = vec![0u8; size as usize];
-    match client.read_fragmented(fh, 0, &mut buf) {
-        Ok(n) if n == buf.len() => {}
-        Ok(n) => {
-            // Partial read — still map what we got if non-empty.
-            if n == 0 {
-                return STATUS_INVALID_FILE_FOR_SECTION;
-            }
-            buf.truncate(n);
-        }
-        Err(_) => return STATUS_UNSUCCESSFUL,
-    }
     use windows_sys::Win32::System::Memory::{
-        VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
+        VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
     };
+    let map_len = size as usize;
     let base = VirtualAlloc(
         core::ptr::null(),
-        buf.len(),
+        map_len,
         MEM_COMMIT | MEM_RESERVE,
         PAGE_READWRITE,
     );
     if base.is_null() {
         return STATUS_UNSUCCESSFUL;
     }
-    core::ptr::copy_nonoverlapping(buf.as_ptr(), base as *mut u8, buf.len());
-    match crate::zipserve::register_mapped_image(base as usize, buf.len() as u64) {
+    let dest = core::slice::from_raw_parts_mut(base as *mut u8, map_len);
+    match client.read_fragmented(fh, 0, dest) {
+        Ok(n) if n == map_len => {}
+        Ok(n) if n > 0 => {
+            // Partial — still register mapped region of length n.
+            let base2 = VirtualAlloc(
+                core::ptr::null(),
+                n,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            );
+            if base2.is_null() {
+                VirtualFree(base, 0, MEM_RELEASE);
+                return STATUS_UNSUCCESSFUL;
+            }
+            core::ptr::copy_nonoverlapping(base as *const u8, base2 as *mut u8, n);
+            VirtualFree(base, 0, MEM_RELEASE);
+            return match crate::zipserve::register_mapped_image(base2 as usize, n as u64) {
+                Some(h) => {
+                    if !section_handle.is_null() {
+                        *section_handle = h as HANDLE;
+                    }
+                    STATUS_SUCCESS
+                }
+                None => {
+                    VirtualFree(base2, 0, MEM_RELEASE);
+                    STATUS_INVALID_FILE_FOR_SECTION
+                }
+            };
+        }
+        _ => {
+            VirtualFree(base, 0, MEM_RELEASE);
+            return STATUS_UNSUCCESSFUL;
+        }
+    }
+    match crate::zipserve::register_mapped_image(base as usize, size) {
         Some(h) => {
             if !section_handle.is_null() {
                 *section_handle = h as HANDLE;
             }
             STATUS_SUCCESS
         }
-        None => STATUS_INVALID_FILE_FOR_SECTION,
+        None => {
+            VirtualFree(base, 0, MEM_RELEASE);
+            STATUS_INVALID_FILE_FOR_SECTION
+        }
     }
 }
 

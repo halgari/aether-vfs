@@ -110,31 +110,13 @@ fn run() -> Result<(), String> {
     ensure_steam_running()?;
     ensure_steam_logged_on()?;
     eprintln!("  steam: AppId env cleared; steam_appid.txt=489830; client must stay running");
-    // Keep Steam-library steam_api64 — do not zip-overwrite or LDR-spoof it away.
+    // Keep host steam_api64 for DRM IPC only. All other game content must come
+    // from the zip via the director — never open the Steam library tree.
     std::env::set_var("VFS_KEEP_HOST_STEAM_API", "1");
-    // Complete on-disk install: skip FUSE ring for under-root *reads* (shim still
-    // maps real handles for ESM/BSA). Zip remains mounted for tools that opt out
-    // of disk-only; default on when Data/Skyrim.esm exists next to the hollow host.
-    let esm_on_disk = root.join("Data").join("Skyrim.esm").is_file()
-        || root.join("DATA").join("Skyrim.esm").is_file();
-    if esm_on_disk {
-        std::env::set_var("VFS_DISK_ONLY_ROOT", "1");
-        eprintln!(
-            "  perf: VFS_DISK_ONLY_ROOT=1 (Skyrim.esm on disk — skip FUSE RTT for under-root reads)"
-        );
-    } else {
-        eprintln!("  perf: VFS_DISK_ONLY_ROOT off (no on-disk Skyrim.esm — FUSE/zip serves content)");
-    }
-    // Optional open proof log (off unless VFS_DISK_PREFER_LOG already set — hot path).
-    if std::env::var_os("VFS_DISK_PREFER_LOG").is_none() {
-        // Leave unset by default for load speed; set in harness when proving masters.
-    } else {
-        eprintln!(
-            "  disk-prefer log: {}",
-            std::env::var_os("VFS_DISK_PREFER_LOG")
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        );
+    std::env::remove_var("VFS_ALLOW_DISK_FALLTHROUGH");
+    std::env::remove_var("VFS_DISK_ONLY_ROOT");
+    if let Some(p) = std::env::var_os("VFS_DIRECTOR_OPEN_LOG") {
+        eprintln!("  director-open log: {}", p.to_string_lossy());
     }
 
     // ── open zip, strip "Skyrim Special Edition/" prefix ────────────────────
@@ -157,19 +139,19 @@ fn run() -> Result<(), String> {
     session.set_root(&root);
     session.set_overlay(&overrides);
     session.set_state_dir(&state);
-    // Disk fallthrough first, zip on top (later mount wins). Ensures
-    // steam_appid.txt / host steam_api64 are visible via FUSE when not in the zip.
-    // Without this, RestartAppIfNecessary cannot see steam_appid.txt and fires
-    // steam://run (Steam UI reopen / Remote Play).
-    session
-        .mount("", Arc::new(DiskBackend::new(&root)))
-        .map_err(|st| format!("mount disk fallthrough status {st}"))?;
-    session
-        .mount("", Arc::new(DiskBackend::new(&overrides)))
-        .map_err(|st| format!("mount overrides status {st}"))?;
+    // Composition: zip (game content) under overrides (steam_appid, writes).
+    // Do **not** mount the Steam library DiskBackend — that let the game load
+    // masters/BSAs/DLLs from the host install and violated the VFS contract.
+    // steam_appid.txt is written into `overrides` before launch.
     session
         .mount("", backend)
         .map_err(|st| format!("mount zip status {st}"))?;
+    session
+        .mount("", Arc::new(DiskBackend::new(&overrides)))
+        .map_err(|st| format!("mount overrides status {st}"))?;
+    eprintln!(
+        "  composition: zip + overrides only (no Steam-disk mount; under-root sealed to director)"
+    );
 
     // Prove steam_appid is visible through the director (what the shim FUSE sees).
     match session.kernel().getattr("steam_appid.txt") {
