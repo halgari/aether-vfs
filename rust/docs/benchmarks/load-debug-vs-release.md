@@ -41,24 +41,53 @@ Three runs each, time-to-window in seconds:
 **Release is ~14% (1.7 s) faster.** Byte and op counts are identical between
 builds, as expected — only CPU cost differs, not the work done.
 
-## What this says about where the time goes
+## Where the time goes — the control run
 
 Everything before the game starts is **0.74 s total** (zip index, staging,
-serve, inject, hollow). The remaining **~9 s is the game's own startup** —
-D3D device creation, master/BSA header parsing, engine init.
+serve, inject, hollow). The obvious reading is that the remaining ~9 s is the
+game's own startup. **That reading is wrong**, and the only way to know was to
+measure a launch with no VFS at all.
 
-The VFS moves **69.5 MiB in 433 reads (164 KiB/read)** before the window
-appears, plus ~370 getattr/open ops. Against the ring's measured throughput
-(`c-throughput-delta.md`: ~1937 MiB/s sequential bulk, 20–209 µs per RPC by
-size) that is well under a second of the ~10.
+The zip was extracted to disk and the same SKSE launch timed natively — no
+shim, no director, same INIs (My Games is junctioned, so the 720p settings
+carry), same window detection:
 
-**So the VFS is not the bottleneck for time-to-window.** Optimising the read
-path will not move this number much.
+| configuration | time to window |
+|---------------|---------------:|
+| **Native** (no shim, no VFS) | **1.0 s** (0.92 / 1.03 / 0.92) |
+| VFS, zip backend | 10.34 s |
+| VFS, disk backend | 10.38 s |
+
+**The VFS adds ~9.3 s — roughly a 10× slowdown**, and it is *not* the game
+being slow.
+
+Swapping the content source changes nothing (10.34 vs 10.38 s), so the cost is
+**not** in `ZipBackend`: it is in the layer common to both, the shim hooks and
+the IPC round trip.
+
+## Why the op counters do not explain it
+
+At the window mark the director has served 433 reads / 69.5 MiB plus ~370
+getattr/open — about **800 operations**. Spreading 9.3 s over those would need
+**~11 ms per op**, which is implausible for a shared-memory ring measured at
+20–209 µs per RPC (`c-throughput-delta.md`).
+
+So the cost is in work the director never sees. The shim detours *every* file
+operation the process makes, including the thousands that pass straight through
+to disk (System32 DLLs, probes, directory queries) and never become a ring
+request. `io_stats` counts only what reaches the director, so that traffic is
+invisible here.
+
+**Next measurement:** count and time hook invocations in the shim — total calls,
+under-root vs passthrough, and time spent inside the detour. That is the only
+number that can attribute the 9.3 s. Optimising the read path (read-ahead,
+larger blocks) targets ~800 ops and cannot recover it.
 
 ## Where read amplification actually lives
 
-The small-read problem is real but sits **after** this measurement point. A full
-session to the main menu shows:
+The small-read problem is real but sits **after** this measurement point, and
+given the control run above it is **not** where the 9.3 s lives. A full session
+to the main menu shows:
 
 | path | ops | MiB | avg |
 |------|----:|----:|----:|
@@ -69,5 +98,18 @@ session to the main menu shows:
 Two archives account for ~97% of all read RPCs. At the window mark only 433
 reads have happened, so that traffic is menu/content load, not startup. A
 client-side read-ahead cache (the shim has none; the server already has one —
-see B5/C2) targets *that* phase, and should be measured with an end condition
-past the window.
+see B5/C2) targets *that* phase and should be measured with an end condition
+past the window — but it is a second-order win next to the per-call hook cost.
+
+## Reproducing the native control
+
+```powershell
+& 'C:\Program Files\7-Zip\7z.exe' x 'C:\tmp\skyrimse.zip' -o'C:\tmp\skyrim-native' -y
+$root = 'C:\tmp\skyrim-native\Skyrim Special Edition'
+# Beside the exe: steam_appid.txt (DRM reads it from the cwd), the DX redist
+# DLLs, and SKSE - so the native run matches the VFS run file for file.
+Start-Process "$root\skse64_loader.exe" -WorkingDirectory $root
+```
+
+Then poll for a visible `SkyrimSE.exe` window with a non-zero client rect, the
+same end condition `vfs_director::bench` uses.
