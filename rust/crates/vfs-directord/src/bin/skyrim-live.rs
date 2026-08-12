@@ -85,8 +85,18 @@ fn run() -> Result<(), String> {
     };
     let stage_root = data.join("stage");
 
+    // Optional mod overlay (e.g. an unpacked SKSE) composed over the zip, and
+    // the executable to launch — `skse64_loader.exe` to go through SKSE.
+    let mods_dir = std::env::var_os("VFS_SKYRIM_MODS").map(PathBuf::from);
+    let launch_exe =
+        std::env::var("VFS_SKYRIM_LAUNCH").unwrap_or_else(|_| "SkyrimSE.exe".to_string());
+
     eprintln!("skyrim-live");
     eprintln!("  zip:       {}", zip_path.display());
+    if let Some(m) = &mods_dir {
+        eprintln!("  mods:      {}  (overlay above zip)", m.display());
+    }
+    eprintln!("  launch:    {launch_exe}");
     match &preset_host {
         Some(h) => eprintln!("  hollow:    {h}  (VFS_HOLLOW_HOST override)"),
         None => eprintln!("  hollow:    staged from zip into {}", stage_root.display()),
@@ -175,11 +185,23 @@ fn run() -> Result<(), String> {
     session
         .mount("", backend)
         .map_err(|st| format!("mount zip status {st}"))?;
+    // Mods sit above the base game and below the write overlay, so an unpacked
+    // SKSE contributes skse64_loader.exe / skse64_*.dll at the root and merges
+    // its Data/Scripts into the game's Data.
+    if let Some(m) = &mods_dir {
+        if !m.is_dir() {
+            return Err(format!("VFS_SKYRIM_MODS not a directory: {}", m.display()));
+        }
+        session
+            .mount("", Arc::new(DiskBackend::new(m)))
+            .map_err(|st| format!("mount mods status {st}"))?;
+    }
     session
         .mount("", Arc::new(DiskBackend::new(&overrides)))
         .map_err(|st| format!("mount overrides status {st}"))?;
     eprintln!(
-        "  composition: zip + overrides only (no Steam-disk mount; under-root sealed to director)"
+        "  composition: zip{} + overrides (no Steam-disk mount; under-root sealed to director)",
+        if mods_dir.is_some() { " + mods" } else { "" }
     );
 
     // Prove steam_appid is visible through the director (what the shim FUSE sees).
@@ -233,9 +255,29 @@ fn run() -> Result<(), String> {
             if swept > 0 {
                 eprintln!("  reclaimed {swept} stale staging dir(s)");
             }
-            let staged = vfs_director::stage::stage_launch(
+            // Launching via a loader (SKSE) stages the game beside it: the
+            // loader spawns SkyrimSE.exe itself, and that CreateProcess needs a
+            // real image just as ours did. SKSE also resolves its runtime DLL
+            // relative to the loader, and that DLL is *not* a static import —
+            // it is injected at runtime — so the closure walk cannot find it.
+            let mut also_owned: Vec<String> = Vec::new();
+            if !launch_exe.eq_ignore_ascii_case("SkyrimSE.exe") {
+                also_owned.push("SkyrimSE.exe".to_string());
+                if let Some(m) = &mods_dir {
+                    for ent in std::fs::read_dir(m).into_iter().flatten().flatten() {
+                        let n = ent.file_name().to_string_lossy().into_owned();
+                        let l = n.to_ascii_lowercase();
+                        if l.starts_with("skse64_") && l.ends_with(".dll") {
+                            also_owned.push(n);
+                        }
+                    }
+                }
+            }
+            let also: Vec<&str> = also_owned.iter().map(|s| s.as_str()).collect();
+            let staged = vfs_director::stage::stage_launch_with(
                 &KernelSource(&session),
-                "SkyrimSE.exe",
+                &launch_exe,
+                &also,
                 &stage_root,
                 &std::process::id().to_string(),
                 // DirectX redistributables are static imports but ship with the

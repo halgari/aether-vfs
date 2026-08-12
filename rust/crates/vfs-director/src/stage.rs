@@ -134,6 +134,29 @@ pub trait ImageSource {
 /// Imports found in neither are skipped rather than failing: system DLLs
 /// resolve from `System32`, and a missing optional import is the loader's
 /// problem to report, not ours to guess at.
+/// Additional images to stage alongside the primary, each with its own import
+/// closure.
+///
+/// A launcher that spawns the real game (SKSE's `skse64_loader.exe` starts
+/// `SkyrimSE.exe`) needs its target beside it on disk: `CreateProcess` in the
+/// child needs a real image just as much as the first one did. Staging both
+/// into one directory satisfies that without the launcher's spawn having to be
+/// intercepted and staged in turn.
+pub fn stage_launch_with(
+    source: &dyn ImageSource,
+    exe_vpath: &str,
+    also: &[&str],
+    root: &Path,
+    tag: &str,
+    fallback_dirs: &[PathBuf],
+) -> Result<StagedDir, String> {
+    let mut staged_dir = stage_launch(source, exe_vpath, root, tag, fallback_dirs)?;
+    for extra in also {
+        stage_into(source, extra, &mut staged_dir, fallback_dirs)?;
+    }
+    Ok(staged_dir)
+}
+
 pub fn stage_launch(
     source: &dyn ImageSource,
     exe_vpath: &str,
@@ -147,6 +170,34 @@ pub fn stage_launch(
         .ok_or_else(|| format!("no file name in {exe_vpath}"))?
         .to_string();
 
+    let dir = root.join(format!("{STAGE_PREFIX}{tag}"));
+    // A leftover from a previous run with the same tag would shadow us.
+    let _ = remove_staged_dir(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+
+    let mut staged_dir = StagedDir {
+        dir: dir.clone(),
+        exe: dir.join(&exe_name),
+        staged: Vec::new(),
+    };
+    stage_into(source, exe_vpath, &mut staged_dir, fallback_dirs)?;
+    Ok(staged_dir)
+}
+
+/// Add `exe_vpath` and its import closure to an existing staged directory.
+fn stage_into(
+    source: &dyn ImageSource,
+    exe_vpath: &str,
+    staged_dir: &mut StagedDir,
+    fallback_dirs: &[PathBuf],
+) -> Result<(), String> {
+    let dir = staged_dir.dir.clone();
+    let exe_name = Path::new(exe_vpath)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("no file name in {exe_vpath}"))?
+        .to_string();
+
     let exe_bytes = source
         .read(exe_vpath)
         .ok_or_else(|| format!("VFS has no {exe_vpath}"))?;
@@ -154,18 +205,16 @@ pub fn stage_launch(
         return Err(format!("{exe_vpath} is not a PE image"));
     }
 
-    let dir = root.join(format!("{STAGE_PREFIX}{tag}"));
-    // A leftover from a previous run with the same tag would shadow us.
-    let _ = remove_staged_dir(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-
     let exe_path = dir.join(&exe_name);
     std::fs::write(&exe_path, &exe_bytes)
         .map_err(|e| format!("write {}: {e}", exe_path.display()))?;
 
-    let mut staged = vec![exe_name.clone()];
+    let staged = &mut staged_dir.staged;
+    staged.push(exe_name.clone());
     let mut pending: Vec<Vec<u8>> = vec![exe_bytes];
-    let mut seen: Vec<String> = vec![exe_name.to_ascii_lowercase()];
+    // Already-staged names carry across calls, so a second image does not
+    // restage shared dependencies.
+    let mut seen: Vec<String> = staged.iter().map(|s| s.to_ascii_lowercase()).collect();
 
     // Breadth-first over the import graph: a staged DLL can itself import
     // another game-local DLL, and the loader needs the whole closure present.
@@ -229,11 +278,7 @@ pub fn stage_launch(
         }
     }
 
-    Ok(StagedDir {
-        dir,
-        exe: exe_path,
-        staged,
-    })
+    Ok(())
 }
 
 #[cfg(test)]
@@ -287,6 +332,32 @@ mod tests {
             assert!(dir_path.file_name().unwrap().to_string_lossy().starts_with(STAGE_PREFIX));
         }
         assert!(!dir_path.exists(), "staging dir must be removed on drop");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A launcher and the game it spawns must land in one directory, so the
+    /// child's CreateProcess finds a real image beside the launcher.
+    #[test]
+    fn stages_a_launcher_alongside_its_target() {
+        let root = tmp_root("launcher");
+        let mut m = HashMap::new();
+        m.insert("skse64_loader.exe".to_string(), bare_pe());
+        m.insert("SkyrimSE.exe".to_string(), bare_pe());
+        let src = Fake(m);
+
+        let staged = stage_launch_with(
+            &src,
+            "skse64_loader.exe",
+            &["SkyrimSE.exe"],
+            &root,
+            "1",
+            &[],
+        )
+        .expect("stage");
+
+        assert_eq!(staged.exe().file_name().unwrap(), "skse64_loader.exe");
+        assert!(staged.dir().join("SkyrimSE.exe").is_file(), "target must be staged too");
+        assert!(staged.staged().iter().any(|s| s == "SkyrimSE.exe"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
