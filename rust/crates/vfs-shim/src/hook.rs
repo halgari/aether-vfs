@@ -34,6 +34,32 @@ fn in_hook_reenter() -> bool {
     HOOK_REENTER.with(|c| c.get() > 0)
 }
 
+/// When set (`VFS_DISK_ONLY_ROOT=1`), under-root *read* opens/getattr skip the
+/// FUSE ring entirely and fall through to the host (disk). Massive win for a
+/// complete Steam install where the zip is only a backup: avoids hundreds of
+/// ring RTT getattr/open probes for missing CC plugins / lodsettings.
+fn disk_only_root() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        match std::env::var("VFS_DISK_ONLY_ROOT") {
+            Ok(v) => {
+                let t = v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes");
+                t
+            }
+            Err(_) => false,
+        }
+    })
+}
+
+/// Bounded positive/negative cache for host path existence (avoids repeated
+/// GetFileAttributesW on the same masters/BSAs and missing-plugin probes).
+fn phys_exists_cache() -> &'static Mutex<std::collections::HashMap<String, bool>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, bool>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::with_capacity(512)))
+}
+
+const PHYS_CACHE_CAP: usize = 4096;
+
 use retour::RawDetour;
 use vfs_redirect::{
     nt_to_volume_relative, parse_full_dir_info, write_dir_info, write_file_name_info, AttrDecision,
@@ -637,6 +663,11 @@ unsafe fn try_fuse_create(
         disk_prefer_trace(&path);
         return None;
     }
+    // Complete install fast path: skip ring open for missing host paths (CC
+    // probes, lodsettings, etc.). Kernel returns NOT_FOUND without a director RTT.
+    if !write && disk_only_root() {
+        return None;
+    }
 
     let opened = if write { client.open_write(vp) } else { client.open(vp) };
     match opened {
@@ -676,6 +707,8 @@ unsafe fn try_fuse_create(
 ///
 /// Uses `GetFileAttributesW` under the reentrancy guard (cheaper / shallower
 /// stack than `Path::is_file` + `is_dir`, which still matter on a 1 MiB stack).
+/// Results are cached (positive + negative) to cut repeated probes during the
+/// master/BSA open burst.
 fn physical_under_root_exists(nt_or_win_path: &str) -> bool {
     let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim());
     if p.is_empty() {
@@ -687,6 +720,13 @@ fn physical_under_root_exists(nt_or_win_path: &str) -> bool {
     if win.is_empty() {
         return false;
     }
+    // Cache key: lowercase for NT case-insensitivity.
+    let key = win.to_ascii_lowercase();
+    if let Ok(cache) = phys_exists_cache().lock() {
+        if let Some(&hit) = cache.get(&key) {
+            return hit;
+        }
+    }
     if !hook_reenter_begin() {
         return false;
     }
@@ -697,12 +737,23 @@ fn physical_under_root_exists(nt_or_win_path: &str) -> bool {
         windows_sys::Win32::Storage::FileSystem::GetFileAttributesW(w.as_ptr())
     };
     hook_reenter_end();
-    attrs != 0xFFFF_FFFF
+    let ok = attrs != 0xFFFF_FFFF;
+    if let Ok(mut cache) = phys_exists_cache().lock() {
+        if cache.len() >= PHYS_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(key, ok);
+    }
+    ok
 }
 
-/// Append a line proving disk-prefer path (masters/BSAs) — LastAccessTime is
-/// often disabled on modern Windows so we log opens explicitly.
+/// Append a line proving disk-prefer path (masters/BSAs) — **only** when
+/// `VFS_DISK_PREFER_LOG` is set. Default-off: sync append on every open was a
+/// measured hot-path tax (~0.3 ms/line) during the BSA burst.
 fn disk_prefer_trace(nt_or_win_path: &str) {
+    let Some(path) = std::env::var_os("VFS_DISK_PREFER_LOG").map(std::path::PathBuf::from) else {
+        return;
+    };
     let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
     let lower = p.to_ascii_lowercase();
     if !(lower.contains("\\data\\")
@@ -722,10 +773,6 @@ fn disk_prefer_trace(nt_or_win_path: &str) {
             .unwrap_or(0),
         p
     );
-    let path = std::env::var_os("VFS_DISK_PREFER_LOG").map(std::path::PathBuf::from);
-    let path = path.unwrap_or_else(|| {
-        std::path::PathBuf::from(r"C:\tmp\skyrim-data\vfs-state\disk-prefer.log")
-    });
     if !hook_reenter_begin() {
         return;
     }
@@ -1000,6 +1047,10 @@ unsafe extern "system" fn open_hook(
 
 /// Path-based getattr via director OP_GETATTR when FUSE client is live.
 unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), i32>> {
+    // Disk-only root: never pay a ring getattr RTT for under-root probes.
+    if disk_only_root() {
+        return None;
+    }
     let client = crate::fuse_client::global()?;
     let vpath = client.vpath_under_root(path)?;
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };

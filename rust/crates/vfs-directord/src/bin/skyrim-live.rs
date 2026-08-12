@@ -112,11 +112,30 @@ fn run() -> Result<(), String> {
     eprintln!("  steam: AppId env cleared; steam_appid.txt=489830; client must stay running");
     // Keep Steam-library steam_api64 — do not zip-overwrite or LDR-spoof it away.
     std::env::set_var("VFS_KEEP_HOST_STEAM_API", "1");
-    // Child shim logs disk-prefer opens (masters/BSAs) for post-launch proof.
-    let prefer_log = state.join("disk-prefer.log");
-    let _ = std::fs::remove_file(&prefer_log);
-    std::env::set_var("VFS_DISK_PREFER_LOG", &prefer_log);
-    eprintln!("  disk-prefer log: {}", prefer_log.display());
+    // Complete on-disk install: skip FUSE ring for under-root *reads* (shim still
+    // maps real handles for ESM/BSA). Zip remains mounted for tools that opt out
+    // of disk-only; default on when Data/Skyrim.esm exists next to the hollow host.
+    let esm_on_disk = root.join("Data").join("Skyrim.esm").is_file()
+        || root.join("DATA").join("Skyrim.esm").is_file();
+    if esm_on_disk {
+        std::env::set_var("VFS_DISK_ONLY_ROOT", "1");
+        eprintln!(
+            "  perf: VFS_DISK_ONLY_ROOT=1 (Skyrim.esm on disk — skip FUSE RTT for under-root reads)"
+        );
+    } else {
+        eprintln!("  perf: VFS_DISK_ONLY_ROOT off (no on-disk Skyrim.esm — FUSE/zip serves content)");
+    }
+    // Optional open proof log (off unless VFS_DISK_PREFER_LOG already set — hot path).
+    if std::env::var_os("VFS_DISK_PREFER_LOG").is_none() {
+        // Leave unset by default for load speed; set in harness when proving masters.
+    } else {
+        eprintln!(
+            "  disk-prefer log: {}",
+            std::env::var_os("VFS_DISK_PREFER_LOG")
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        );
+    }
 
     // ── open zip, strip "Skyrim Special Edition/" prefix ────────────────────
     // Open the zip ONCE. (A second open re-scans the 16GB CD and looks frozen.)
