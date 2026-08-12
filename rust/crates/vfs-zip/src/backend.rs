@@ -243,21 +243,20 @@ impl Backend for ZipBackend {
     }
 
     fn read(&self, bh: BackendHandle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-        // Clone the File under the lock, then seek/read outside — concurrent bulk
-        // arena fills must not serialize on one mutex for multi‑MiB I/O.
-        let (mut file, base, size) = {
-            let g = self.opens.lock().map_err(|_| ST_IO_ERROR)?;
-            let live = g.get(&bh).ok_or(ST_BAD_FH)?;
-            if offset >= live.size {
-                return Ok(0);
-            }
-            let file = live.file.try_clone().map_err(|_| ST_IO_ERROR)?;
-            (file, live.base, live.size)
-        };
-        let max = ((size - offset) as usize).min(buf.len());
-        let abs = base + offset;
-        file.seek(SeekFrom::Start(abs)).map_err(|_| ST_IO_ERROR)?;
-        file.read(&mut buf[..max]).map_err(|_| ST_IO_ERROR)
+        // Serialize seek+read on the live File. Concurrent try_clone + seek from
+        // multiple director workers was part of the post-seal 0xC0000409 regression
+        // (corrupted / racy BSA streams). Revisit with per-handle File handles later.
+        let mut g = self.opens.lock().map_err(|_| ST_IO_ERROR)?;
+        let live = g.get_mut(&bh).ok_or(ST_BAD_FH)?;
+        if offset >= live.size {
+            return Ok(0);
+        }
+        let max = ((live.size - offset) as usize).min(buf.len());
+        let abs = live.base + offset;
+        live.file
+            .seek(SeekFrom::Start(abs))
+            .map_err(|_| ST_IO_ERROR)?;
+        live.file.read(&mut buf[..max]).map_err(|_| ST_IO_ERROR)
     }
 
     fn release(&self, bh: BackendHandle) -> Result<(), i32> {

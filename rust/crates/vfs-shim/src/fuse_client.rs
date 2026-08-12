@@ -19,6 +19,25 @@ pub fn global() -> Option<&'static FuseClient> {
     FUSE.get()
 }
 
+/// Run FUSE ring I/O on a **large stack** worker.
+///
+/// SkyrimSE's primary thread ships with a 1 MiB PE stack. Pipelined ring
+/// submit + bulk arena copies there regularly hit `0xC0000409` / stack overflow.
+/// Callers on game threads must use this for open/read/getattr paths.
+pub fn on_large_stack<T, F>(f: F) -> Result<T, ()>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("vfs-fuse-io".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(f)
+        .map_err(|_| ())?
+        .join()
+        .map_err(|_| ())
+}
+
 pub fn try_init_from_env() -> Result<(), String> {
     if FUSE.get().is_some() {
         return Ok(());
@@ -44,11 +63,13 @@ pub fn try_init_from_env() -> Result<(), String> {
 }
 
 /// Concurrent bulk READs in flight (each uses its own arena bank via slot id).
-const PIPELINE_DEPTH: usize = 8;
+/// Keep modest: deep pipelines + large banks correlated with early 0xC0000409
+/// under the sealed director path (working director-only used depth 4 / 1 MiB).
+const PIPELINE_DEPTH: usize = 4;
 /// Prefer shared-section bulk over inline ring payload above this size.
-const BULK_THRESHOLD: u32 = 32 * 1024;
+const BULK_THRESHOLD: u32 = 64 * 1024;
 /// Deep pipeline for multi‑MiB sequential streams (CreateSection fill).
-const PIPELINE_DEPTH_STREAM: usize = 16;
+const PIPELINE_DEPTH_STREAM: usize = 8;
 
 pub struct FuseClient {
     mapping: SharedMapping,
@@ -191,8 +212,12 @@ impl FuseClient {
             return self.payload_cap.saturating_sub(8) as usize;
         }
         let slots = self.geom.slot_count.max(1) as usize;
-        // Full bank size — do not cap at 1 MiB (that undid a 128 MiB arena).
-        (self.arena_len / slots).max(256 * 1024)
+        // Cap at 1 MiB per RTT — full bank (4–16 MiB) was used during the
+        // 0xC0000409 regression window; large copies + deep pipelines on the
+        // game thread (or long join windows) are not worth the risk yet.
+        (self.arena_len / slots)
+            .max(256 * 1024)
+            .min(1024 * 1024)
     }
 
     /// Read into `buf` (game NtReadFile buffer or CreateSection destination).
@@ -253,39 +278,63 @@ impl FuseClient {
                 break;
             }
 
-            let responses = c
-                .submit_many(&reqs)
+            // Hold slots until bulk arena banks are copied — free-before-copy
+            // races with bank reuse and can corrupt BSA streams (game then dies
+            // with 0xC0000409 / bad archive parse after ~full Animations.bsa).
+            let (responses, held) = c
+                .submit_many_held(&reqs)
                 .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
 
             let mut batch_filled = 0usize;
             let mut eof = false;
+            let mut copy_err: Option<i32> = None;
             for (resp, want) in responses.iter().zip(wants.iter()) {
                 if resp.status != ST_OK {
-                    return Err(resp.status);
+                    copy_err = Some(resp.status);
+                    break;
                 }
                 let frag_start = filled + batch_filled;
                 let dest = &mut buf[frag_start..frag_start + *want];
                 let n = if is_read_resp_bulk(&resp.payload) {
-                    let (bn, aoff) = decode_read_bulk_resp(&resp.payload)
-                        .ok_or(vfs_protocol::ST_BAD_REQUEST)?;
+                    let (bn, aoff) = match decode_read_bulk_resp(&resp.payload) {
+                        Some(x) => x,
+                        None => {
+                            copy_err = Some(vfs_protocol::ST_BAD_REQUEST);
+                            break;
+                        }
+                    };
                     let n = (bn as usize).min(dest.len());
                     if n > 0 {
                         // Shared arena → destination (one memcpy; not via ring).
-                        self.mapping
+                        if self
+                            .mapping
                             .seg()
                             .copy_to(aoff as usize, &mut dest[..n])
-                            .ok_or(vfs_protocol::ST_IO_ERROR)?;
+                            .is_none()
+                        {
+                            copy_err = Some(vfs_protocol::ST_IO_ERROR);
+                            break;
+                        }
                     }
                     n
                 } else {
-                    decode_read_resp_into(&resp.payload, dest)
-                        .ok_or(vfs_protocol::ST_BAD_REQUEST)?
+                    match decode_read_resp_into(&resp.payload, dest) {
+                        Some(n) => n,
+                        None => {
+                            copy_err = Some(vfs_protocol::ST_BAD_REQUEST);
+                            break;
+                        }
+                    }
                 };
                 batch_filled += n;
                 if n < *want {
                     eof = true;
                     break;
                 }
+            }
+            c.release_slots(&held);
+            if let Some(st) = copy_err {
+                return Err(st);
             }
             filled += batch_filled;
             if eof || batch_filled == 0 {

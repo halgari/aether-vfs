@@ -82,12 +82,31 @@ impl<'a, N: Notifier> RingClient<'a, N> {
 
     /// **A5:** publish several requests (each on its own slot), wait for all, free slots.
     /// Returns responses in the same order as `reqs`.
+    ///
+    /// Bulk READ responses only carry `(len, arena_offset)` — the payload lives in
+    /// the shared arena bank for that slot. We **must not free slots until the
+    /// caller has finished reading those banks** (see [`Self::submit_many_held`]).
+    /// Freeing early lets a concurrent claim reuse the bank and corrupt bulk data.
     pub fn submit_many(
         &self,
         reqs: &[(u32, u32, Vec<u8>)],
     ) -> Result<Vec<Response>, IpcError> {
+        let (out, slots) = self.submit_many_held(reqs)?;
+        for &slot in &slots {
+            let _ = ring::free_slot(self.seg, &self.geom, slot);
+            self.notifier.notify_slot_free();
+        }
+        Ok(out)
+    }
+
+    /// Like [`Self::submit_many`], but leaves slots **held** so bulk arena banks
+    /// stay stable until the caller frees them via [`Self::release_slots`].
+    pub fn submit_many_held(
+        &self,
+        reqs: &[(u32, u32, Vec<u8>)],
+    ) -> Result<(Vec<Response>, Vec<u32>), IpcError> {
         if reqs.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         for (_, _, p) in reqs {
             if p.len() > self.geom.payload_cap as usize {
@@ -109,11 +128,17 @@ impl<'a, N: Notifier> RingClient<'a, N> {
                 }
                 self.notifier.wait_client(slot);
             };
-            ring::free_slot(self.seg, &self.geom, slot)?;
-            self.notifier.notify_slot_free();
             out.push(Response { status, payload });
         }
-        Ok(out)
+        Ok((out, slots))
+    }
+
+    /// Free slots previously returned by [`Self::submit_many_held`].
+    pub fn release_slots(&self, slots: &[u32]) {
+        for &slot in slots {
+            let _ = ring::free_slot(self.seg, &self.geom, slot);
+            self.notifier.notify_slot_free();
+        }
     }
 }
 

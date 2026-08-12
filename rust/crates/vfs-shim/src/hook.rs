@@ -696,6 +696,7 @@ unsafe fn try_fuse_create(
 
     // All other under-root *reads* go through the director (zip / composed).
     // Writes may fall through for shim-local overlay redirect.
+    // (Primary stack is expanded to 16 MiB by vfs-inject; open is a shallow ring op.)
     let opened = if write { client.open_write(vp) } else { client.open(vp) };
     match opened {
         Ok(resp) => {
@@ -957,7 +958,17 @@ unsafe extern "system" fn create_hook(
         Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
         Some(Decision::PassThrough) | None => {
             // Never pass a FUSE RootDirectory to the kernel (invalid handle).
+            // DRM host exceptions resolve via path_of → absolute tramp instead.
             if fuse_root_directory(oa) {
+                if let Some(path) = path_of(oa) {
+                    let status = tramp_create_abs(
+                        tramp, file_handle, access, oa, iosb, alloc, attrs, share, disp, opts,
+                        ea, ealen, &path,
+                    );
+                    tag_under_root(file_handle, oa, status);
+                    record_path(file_handle, oa, status);
+                    return status;
+                }
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
             let status =
@@ -976,6 +987,94 @@ unsafe fn fuse_root_directory(oa: *const ObjectAttributes) -> bool {
     }
     let root = (*oa).root_directory;
     !root.is_null() && crate::fuse_synth::is_fuse_synth(root as isize)
+}
+
+/// Absolute `\??\` NT path for a Win32 or NT path string.
+fn to_nt_path(path: &str) -> String {
+    let p = crate::fuse_client::strip_nt_device(path.trim());
+    if p.starts_with(r"\??\") {
+        p.to_string()
+    } else {
+        format!(r"\??\{p}")
+    }
+}
+
+/// Open via trampoline with an absolute NT path and **null** RootDirectory.
+///
+/// Required when the original OA had a FUSE synthetic RootDirectory (invalid
+/// to the kernel) but we intentionally fall through to the host install —
+/// DRM exceptions (`steam_api*`, `steam_appid.txt`, `SkyrimSE.exe`).
+unsafe fn tramp_create_abs(
+    tramp: NtCreateFileFn,
+    file_handle: *mut HANDLE,
+    access: u32,
+    oa: *const ObjectAttributes,
+    iosb: *mut c_void,
+    alloc: *const i64,
+    attrs: u32,
+    share: u32,
+    disp: u32,
+    opts: u32,
+    ea: *const c_void,
+    ealen: u32,
+    abs_path: &str,
+) -> NTSTATUS {
+    let nt = to_nt_path(abs_path);
+    let mut wbuf: Vec<u16> = nt.encode_utf16().collect();
+    wbuf.push(0);
+    let byte_len = ((wbuf.len() - 1) * 2) as u16;
+    let new_us = UnicodeString {
+        length: byte_len,
+        maximum_length: byte_len + 2,
+        buffer: wbuf.as_mut_ptr(),
+    };
+    let oa_ref = &*oa;
+    let new_oa = ObjectAttributes {
+        length: oa_ref.length,
+        root_directory: core::ptr::null_mut(),
+        object_name: &new_us,
+        attributes: oa_ref.attributes,
+        security_descriptor: oa_ref.security_descriptor,
+        security_qos: oa_ref.security_qos,
+    };
+    let status = tramp(
+        file_handle, access, &new_oa, iosb, alloc, attrs, share, disp, opts, ea, ealen,
+    );
+    drop(wbuf);
+    status
+}
+
+unsafe fn tramp_open_abs(
+    tramp: NtOpenFileFn,
+    file_handle: *mut HANDLE,
+    access: u32,
+    oa: *const ObjectAttributes,
+    iosb: *mut c_void,
+    share: u32,
+    opts: u32,
+    abs_path: &str,
+) -> NTSTATUS {
+    let nt = to_nt_path(abs_path);
+    let mut wbuf: Vec<u16> = nt.encode_utf16().collect();
+    wbuf.push(0);
+    let byte_len = ((wbuf.len() - 1) * 2) as u16;
+    let new_us = UnicodeString {
+        length: byte_len,
+        maximum_length: byte_len + 2,
+        buffer: wbuf.as_mut_ptr(),
+    };
+    let oa_ref = &*oa;
+    let new_oa = ObjectAttributes {
+        length: oa_ref.length,
+        root_directory: core::ptr::null_mut(),
+        object_name: &new_us,
+        attributes: oa_ref.attributes,
+        security_descriptor: oa_ref.security_descriptor,
+        security_qos: oa_ref.security_qos,
+    };
+    let status = tramp(file_handle, access, &new_oa, iosb, share, opts);
+    drop(wbuf);
+    status
 }
 
 /// `NtOpenFile` hook. Mirrors `create_hook` (redirect / deny / pass-through +
@@ -1052,6 +1151,13 @@ unsafe extern "system" fn open_hook(
         Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
         Some(Decision::PassThrough) | None => {
             if fuse_root_directory(oa) {
+                if let Some(path) = path_of(oa) {
+                    let status =
+                        tramp_open_abs(tramp, file_handle, access, oa, iosb, share, opts, &path);
+                    tag_under_root(file_handle, oa, status);
+                    record_path(file_handle, oa, status);
+                    return status;
+                }
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
             let status = tramp(file_handle, access, oa, iosb, share, opts);
@@ -1910,10 +2016,11 @@ unsafe extern "system" fn read_hook(
 
 /// Map a FUSE synthetic file into a synthetic section.
 ///
-/// - **SEC_IMAGE**: still eager (PE layout) — small, rare for archives.
-/// - **Data (BSAs/ESMs)**: **lazy** — reserve VA only; first touch streams a
-///   256 KiB chunk from the director via the shared bulk arena (no multi‑GiB
-///   preload). Matches OS mmap laziness while keeping content on the VFS.
+/// - **SEC_IMAGE**: map PE from director bytes (rare; PEs usually host-tramped).
+/// - **Data ≤256 MiB**: eager stream into a private mapping (primary stack is
+///   expanded to 16 MiB by vfs-inject — matches the known-good director-only path).
+/// - **Data >256 MiB**: lazy demand-page (reserve + warm + VEH) so multi‑GiB BSAs
+///   never full-preload.
 unsafe fn fuse_create_section(
     section_handle: *mut HANDLE,
     max_size: *mut i64,
@@ -1927,7 +2034,7 @@ unsafe fn fuse_create_section(
     if is_dir || size == 0 {
         return STATUS_INVALID_FILE_FOR_SECTION;
     }
-    // SEC_IMAGE: map PE image from director bytes (eager; PE needs full image).
+    // SEC_IMAGE: map PE image from director bytes.
     if alloc_attrs & SEC_IMAGE != 0 {
         if size > 256 * 1024 * 1024 {
             return STATUS_INVALID_FILE_FOR_SECTION;
@@ -1964,36 +2071,27 @@ unsafe fn fuse_create_section(
             return STATUS_SECTION_TOO_BIG;
         }
     }
-    // Small archives: eager stream (cheap, avoids VEH for header-sized BSAs).
-    // Large archives: lazy demand-page (no multi‑GiB preload).
-    const EAGER_MAX: u64 = 128 * 1024 * 1024;
-    if size <= EAGER_MAX {
-        return fuse_create_section_eager(section_handle, fh, size);
+    const EAGER_MAX: u64 = 256 * 1024 * 1024;
+    const MAX_MAP: u64 = 3 * 1024 * 1024 * 1024;
+    if size > MAX_MAP {
+        return STATUS_SECTION_TOO_BIG;
     }
-    match crate::lazy_section::create_lazy_data_section(fh, size) {
-        Some(h) => {
-            if !section_handle.is_null() {
-                *section_handle = h as HANDLE;
+    if size > EAGER_MAX {
+        return match crate::lazy_section::create_lazy_data_section(fh, size) {
+            Some(h) => {
+                if !section_handle.is_null() {
+                    *section_handle = h as HANDLE;
+                }
+                STATUS_SUCCESS
             }
-            STATUS_SUCCESS
-        }
-        None => STATUS_SECTION_TOO_BIG,
+            None => STATUS_SECTION_TOO_BIG,
+        };
     }
-}
-
-/// Eager map for modest files (≤128 MiB): one bulk stream into committed memory.
-///
-/// The director read runs on a **worker thread with a large stack** — SkyrimSE's
-/// primary thread only has 1 MiB PE stack; pipelined FUSE reads there hit
-/// `0xC0000409` (stack buffer overrun / GS).
-unsafe fn fuse_create_section_eager(
-    section_handle: *mut HANDLE,
-    fh: u64,
-    size: u64,
-) -> NTSTATUS {
-    if crate::fuse_client::global().is_none() {
+    // Eager path (≤256 MiB): stream on this thread into VirtualAlloc.
+    // Known-good with expand_primary_stack — avoid CreateThread from NtCreateSection.
+    let Some(client) = crate::fuse_client::global() else {
         return STATUS_UNSUCCESSFUL;
-    }
+    };
     use windows_sys::Win32::System::Memory::{
         VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
     };
@@ -2007,29 +2105,14 @@ unsafe fn fuse_create_section_eager(
     if base.is_null() {
         return STATUS_UNSUCCESSFUL;
     }
-    let base_u = base as usize;
-    let fill = std::thread::Builder::new()
-        .name("vfs-sec-fill".into())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            let client = crate::fuse_client::global().ok_or(-1i32)?;
-            let dest = unsafe { core::slice::from_raw_parts_mut(base_u as *mut u8, map_len) };
-            client.read_fragmented(fh, 0, dest)
-        });
-    let (fill_ok, fill_note) = match fill {
-        Ok(j) => match j.join() {
-            Ok(Ok(n)) if n > 0 => {
-                if n < map_len {
-                    let dest = core::slice::from_raw_parts_mut(base as *mut u8, map_len);
-                    dest[n..].fill(0);
-                }
-                (true, format!("ok n={n}"))
-            }
-            Ok(Ok(n)) => (false, format!("short n={n}")),
-            Ok(Err(e)) => (false, format!("read_err {e}")),
-            Err(_) => (false, "panic".into()),
-        },
-        Err(e) => (false, format!("spawn {e}")),
+    let dest = core::slice::from_raw_parts_mut(base as *mut u8, map_len);
+    let fill_ok = match client.read_fragmented(fh, 0, dest) {
+        Ok(n) if n == map_len => true,
+        Ok(n) if n > 0 => {
+            dest[n..].fill(0);
+            true
+        }
+        _ => false,
     };
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
@@ -2037,13 +2120,13 @@ unsafe fn fuse_create_section_eager(
         .open(r"C:\tmp\skyrim-data\perf\section-fill.log")
     {
         use std::io::Write;
-        let _ = writeln!(f, "eager fh={fh} size={size} ok={fill_ok} {fill_note}");
+        let _ = writeln!(f, "eager fh={fh} size={size} ok={fill_ok}");
     }
     if !fill_ok {
         VirtualFree(base, 0, MEM_RELEASE);
         return STATUS_UNSUCCESSFUL;
     }
-    match crate::zipserve::register_mapped_image(base_u, size) {
+    match crate::zipserve::register_mapped_image(base as usize, size) {
         Some(h) => {
             if !section_handle.is_null() {
                 *section_handle = h as HANDLE;
