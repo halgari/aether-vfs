@@ -10,6 +10,7 @@ mod fuse_client;
 mod fuse_synth;
 mod hook;
 mod inject;
+mod lazy_section;
 mod ntdef;
 mod overlay;
 mod payload_abi;

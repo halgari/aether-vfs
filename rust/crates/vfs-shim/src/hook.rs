@@ -1908,12 +1908,12 @@ unsafe extern "system" fn read_hook(
     tramp(handle, event, apc, apc_ctx, iosb, buffer, length, byte_offset, key)
 }
 
-/// Map a FUSE synthetic file into a synthetic section by streaming its contents
-/// from the director (zip/composed sources) into a private mapping.
+/// Map a FUSE synthetic file into a synthetic section.
 ///
-/// Bytes move **zip → shared bulk arena → VirtualAlloc** via pipelined
-/// `FLAG_READ_BULK` READs (ring only carries length+arena offset). Skyrim BSAs
-/// exceed 1 GiB — never load them as ring payload blobs or from the Steam tree.
+/// - **SEC_IMAGE**: still eager (PE layout) — small, rare for archives.
+/// - **Data (BSAs/ESMs)**: **lazy** — reserve VA only; first touch streams a
+///   256 KiB chunk from the director via the shared bulk arena (no multi‑GiB
+///   preload). Matches OS mmap laziness while keeping content on the VFS.
 unsafe fn fuse_create_section(
     section_handle: *mut HANDLE,
     max_size: *mut i64,
@@ -1927,7 +1927,7 @@ unsafe fn fuse_create_section(
     if is_dir || size == 0 {
         return STATUS_INVALID_FILE_FOR_SECTION;
     }
-    // SEC_IMAGE: map PE image from director bytes (same approach as zipserve).
+    // SEC_IMAGE: map PE image from director bytes (eager; PE needs full image).
     if alloc_attrs & SEC_IMAGE != 0 {
         if size > 256 * 1024 * 1024 {
             return STATUS_INVALID_FILE_FOR_SECTION;
@@ -1958,79 +1958,21 @@ unsafe fn fuse_create_section(
             Err(_) => STATUS_INVALID_FILE_FOR_SECTION,
         };
     }
-    // Cap: largest SE BSAs are ~1.7 GiB; leave headroom under 4 GiB usize maps.
-    const MAX_MAP: u64 = 3 * 1024 * 1024 * 1024;
-    if size > MAX_MAP {
-        return STATUS_SECTION_TOO_BIG;
-    }
     if !max_size.is_null() {
         let want = core::ptr::read_unaligned(max_size);
         if want > 0 && (want as u64) > size {
             return STATUS_SECTION_TOO_BIG;
         }
     }
-    let Some(client) = crate::fuse_client::global() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    use windows_sys::Win32::System::Memory::{
-        VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
-    };
-    let map_len = size as usize;
-    let base = VirtualAlloc(
-        core::ptr::null(),
-        map_len,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_READWRITE,
-    );
-    if base.is_null() {
-        return STATUS_UNSUCCESSFUL;
-    }
-    let dest = core::slice::from_raw_parts_mut(base as *mut u8, map_len);
-    match client.read_fragmented(fh, 0, dest) {
-        Ok(n) if n == map_len => {}
-        Ok(n) if n > 0 => {
-            // Partial — still register mapped region of length n.
-            let base2 = VirtualAlloc(
-                core::ptr::null(),
-                n,
-                MEM_COMMIT | MEM_RESERVE,
-                PAGE_READWRITE,
-            );
-            if base2.is_null() {
-                VirtualFree(base, 0, MEM_RELEASE);
-                return STATUS_UNSUCCESSFUL;
-            }
-            core::ptr::copy_nonoverlapping(base as *const u8, base2 as *mut u8, n);
-            VirtualFree(base, 0, MEM_RELEASE);
-            return match crate::zipserve::register_mapped_image(base2 as usize, n as u64) {
-                Some(h) => {
-                    if !section_handle.is_null() {
-                        *section_handle = h as HANDLE;
-                    }
-                    STATUS_SUCCESS
-                }
-                None => {
-                    VirtualFree(base2, 0, MEM_RELEASE);
-                    STATUS_INVALID_FILE_FOR_SECTION
-                }
-            };
-        }
-        _ => {
-            VirtualFree(base, 0, MEM_RELEASE);
-            return STATUS_UNSUCCESSFUL;
-        }
-    }
-    match crate::zipserve::register_mapped_image(base as usize, size) {
+    // Lazy data section: reserve only; MapView + first-touch stream from VFS.
+    match crate::lazy_section::create_lazy_data_section(fh, size) {
         Some(h) => {
             if !section_handle.is_null() {
                 *section_handle = h as HANDLE;
             }
             STATUS_SUCCESS
         }
-        None => {
-            VirtualFree(base, 0, MEM_RELEASE);
-            STATUS_INVALID_FILE_FOR_SECTION
-        }
+        None => STATUS_SECTION_TOO_BIG,
     }
 }
 
@@ -2050,9 +1992,8 @@ unsafe extern "system" fn create_section_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    // FUSE synthetic file handles: map by bulk-reading content (masters/BSAs).
-    // Without this, NtCreateSection falls through to the kernel with a fake
-    // handle and fails — Skyrim then never memory-maps ESMs.
+    // FUSE synthetic file handles: lazy data section or eager SEC_IMAGE.
+    // Without this, NtCreateSection fails on fake handles (game mmap of BSAs).
     if crate::fuse_synth::is_fuse_synth(file_handle as isize) {
         return fuse_create_section(
             section_handle,
@@ -2207,7 +2148,12 @@ unsafe extern "system" fn unmap_view_hook(process: HANDLE, base: *mut c_void) ->
         None => return STATUS_UNSUCCESSFUL,
     };
     if !base.is_null() && crate::zipserve::is_synth_view(base as usize) {
-        crate::zipserve::unmap_view(base as usize);
+        let b = base as usize;
+        crate::zipserve::unmap_view(b);
+        // Free lazy reserved region if this was a demand-paged FUSE section.
+        unsafe {
+            let _ = crate::lazy_section::release_if_lazy(b);
+        }
         let _ = process;
         return STATUS_SUCCESS;
     }
