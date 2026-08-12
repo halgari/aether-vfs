@@ -1,8 +1,8 @@
 //! Lazy FUSE data sections: emulate mmap without preloading multi‑GiB BSAs.
 //!
-//! CreateSection reserves address space only. MapView returns that base.
-//! First touch faults (ACCESS_VIOLATION); a vectored exception handler commits
-//! a chunk and streams it from the director via the shared bulk arena.
+//! CreateSection reserves address space (and optionally warms the first window).
+//! MapView returns that base. Further first-touch faults commit 256 KiB chunks
+//! and stream them from the director via the shared bulk arena.
 #![allow(unsafe_code)]
 
 use core::cell::Cell;
@@ -15,37 +15,30 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, EXCEPTION_POINTERS,
 };
 use windows_sys::Win32::System::Memory::{
-    VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS,
-    PAGE_READWRITE,
+    VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE,
 };
 
-/// Page size (x64 Windows).
 const PAGE: usize = 4096;
-/// Commit/fill this many bytes per fault (reduces fault rate vs page-at-a-time).
+/// Commit/fill this many bytes per fault.
 const CHUNK: usize = 256 * 1024;
-/// Hard cap for reserved region (largest SE BSAs ~1.7 GiB).
+/// Warm this many bytes at CreateSection so header/index peeks don't depend on VEH.
+const WARM_BYTES: usize = 2 * 1024 * 1024;
 const MAX_LAZY: u64 = 3 * 1024 * 1024 * 1024;
 
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
-/// STATUS_ACCESS_VIOLATION as NTSTATUS (i32).
 const STATUS_ACCESS_VIOLATION: i32 = 0xC0000005u32 as i32;
 
 struct LazyRegion {
     base: usize,
-    /// Page-aligned reserved length.
     reserved: usize,
-    /// Exact file size (reads past this are zero-filled).
     file_size: u64,
-    /// Director FUSE file handle.
     fh: u64,
-    /// Chunk indices already committed (chunk = CHUNK bytes).
     committed: HashSet<usize>,
 }
 
 static REGIONS: Mutex<BTreeMap<usize, LazyRegion>> = Mutex::new(BTreeMap::new());
 static VEH_INSTALLED: AtomicBool = AtomicBool::new(false);
-/// Global lock while filling a fault (director read + commit).
 static FILL_LOCK: Mutex<()> = Mutex::new(());
 
 thread_local! {
@@ -60,16 +53,15 @@ fn ensure_veh() {
     if VEH_INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
-    // First handler so we run before language runtimes.
     let h = unsafe { AddVectoredExceptionHandler(1, Some(veh_handler)) };
     if h.is_null() {
         VEH_INSTALLED.store(false, Ordering::SeqCst);
     }
 }
 
-/// Reserve VA for a director-backed data section (no bulk read).
+/// Reserve VA for a director-backed data section; warm first [`WARM_BYTES`].
 ///
-/// Returns synthetic section handle suitable for [`crate::zipserve::map_view`].
+/// Returns synthetic section handle for [`crate::zipserve::map_view`].
 pub unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option<isize> {
     if file_size == 0 || file_size > MAX_LAZY {
         return None;
@@ -78,13 +70,11 @@ pub unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option<isize>
     if reserved == 0 {
         return None;
     }
-    ensure_veh();
-    let base = VirtualAlloc(
-        core::ptr::null(),
-        reserved,
-        MEM_RESERVE,
-        PAGE_NOACCESS,
-    );
+    // Install VEH only if not disabled (VFS_LAZY_NO_VEH=1 for debug).
+    if std::env::var_os("VFS_LAZY_NO_VEH").is_none() {
+        ensure_veh();
+    }
+    let base = VirtualAlloc(core::ptr::null(), reserved, MEM_RESERVE, PAGE_NOACCESS);
     if base.is_null() {
         return None;
     }
@@ -102,10 +92,31 @@ pub unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option<isize>
             },
         );
     }
+    // Warm header/index window so first peeks work even if VEH is slow/racy.
+    let warm = (file_size as usize).min(WARM_BYTES);
+    if warm > 0 {
+        let _ = ensure_range(base_u, 0, warm);
+    }
     crate::zipserve::register_mapped_image(base_u, file_size)
 }
 
-/// Free a lazy region containing `addr` (MapView base may be section_offset into the region).
+/// Ensure `[offset, offset+len)` within the lazy region is committed and filled.
+pub unsafe fn ensure_range(base: usize, offset: usize, len: usize) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let end = offset.saturating_add(len);
+    let mut off = offset / CHUNK * CHUNK;
+    while off < end {
+        if !fill_chunk_at(base + off) {
+            return false;
+        }
+        off += CHUNK;
+    }
+    true
+}
+
+/// Free a lazy region containing `addr`.
 pub unsafe fn release_if_lazy(addr: usize) -> bool {
     let region = {
         let mut g = match REGIONS.lock() {
@@ -142,7 +153,6 @@ unsafe extern "system" fn veh_handler(info: *mut EXCEPTION_POINTERS) -> i32 {
     if info.is_null() {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    // Avoid re-entering while we are filling (director I/O / alloc).
     if IN_VEH.with(|c| c.get()) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -150,16 +160,19 @@ unsafe extern "system" fn veh_handler(info: *mut EXCEPTION_POINTERS) -> i32 {
     if rec.is_null() {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    let code = (*rec).ExceptionCode;
-    if code != STATUS_ACCESS_VIOLATION {
+    if (*rec).ExceptionCode != STATUS_ACCESS_VIOLATION {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     if (*rec).NumberParameters < 2 {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     let fault_addr = (*rec).ExceptionInformation[1];
+    // Quick reject before taking locks.
+    if !is_lazy_base(fault_addr) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
     IN_VEH.with(|c| c.set(true));
-    let ok = fill_fault(fault_addr);
+    let ok = fill_chunk_at(fault_addr);
     IN_VEH.with(|c| c.set(false));
     if ok {
         EXCEPTION_CONTINUE_EXECUTION
@@ -168,37 +181,34 @@ unsafe extern "system" fn veh_handler(info: *mut EXCEPTION_POINTERS) -> i32 {
     }
 }
 
-/// Commit + stream one CHUNK covering `fault_addr` from the director.
-unsafe fn fill_fault(fault_addr: usize) -> bool {
+/// Commit + stream the CHUNK covering `addr` (addr may be anywhere in the chunk).
+unsafe fn fill_chunk_at(addr: usize) -> bool {
     let _guard = match FILL_LOCK.lock() {
         Ok(g) => g,
         Err(_) => return false,
     };
 
-    // Re-check under lock (another thread may have filled).
-    let (base, reserved, file_size, fh, chunk_idx, commit_off, commit_len) = {
+    let (base, file_size, fh, chunk_idx, commit_off, commit_len) = {
         let mut g = match REGIONS.lock() {
             Ok(g) => g,
             Err(_) => return false,
         };
-        let Some((&_k, region)) = g
-            .range(..=fault_addr)
+        let Some((_, region)) = g
+            .range(..=addr)
             .next_back()
-            .filter(|(_, r)| fault_addr < r.base + r.reserved)
+            .filter(|(_, r)| addr < r.base + r.reserved)
         else {
             return false;
         };
-        let off = fault_addr - region.base;
+        let off = addr - region.base;
         let chunk_idx = off / CHUNK;
         if region.committed.contains(&chunk_idx) {
-            // Peer already filled this chunk — continue execution.
             return true;
         }
         let commit_off = chunk_idx * CHUNK;
         let commit_len = CHUNK.min(region.reserved - commit_off);
         (
             region.base,
-            region.reserved,
             region.file_size,
             region.fh,
             chunk_idx,
@@ -206,15 +216,24 @@ unsafe fn fill_fault(fault_addr: usize) -> bool {
             commit_len,
         )
     };
-    let _ = reserved;
 
     let page = (base + commit_off) as *mut c_void;
+    // Align commit length to pages (required).
+    let commit_len = align_up(commit_len, PAGE);
     let committed = VirtualAlloc(page, commit_len, MEM_COMMIT, PAGE_READWRITE);
     if committed.is_null() {
+        // Might already be committed by a racing fill that dropped lock early.
+        if REGIONS
+            .lock()
+            .ok()
+            .and_then(|g| g.get(&base).map(|r| r.committed.contains(&chunk_idx)))
+            .unwrap_or(false)
+        {
+            return true;
+        }
         return false;
     }
 
-    // Stream only the file-backed portion; zero the rest of the last page/chunk.
     let file_off = commit_off as u64;
     let readable = if file_off >= file_size {
         0usize
@@ -223,29 +242,31 @@ unsafe fn fill_fault(fault_addr: usize) -> bool {
     };
 
     if readable > 0 {
-        let Some(client) = crate::fuse_client::global() else {
-            VirtualFree(page, commit_len, MEM_DECOMMIT);
-            return false;
-        };
+        // Fill on a worker with a large stack — never deep FUSE I/O on the
+        // game's 1 MiB primary stack (or inside a tight VEH frame).
+        let page_u = page as usize;
+        let n_read = std::thread::Builder::new()
+            .name("vfs-lazy-fill".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let client = crate::fuse_client::global()?;
+                let dest =
+                    unsafe { core::slice::from_raw_parts_mut(page_u as *mut u8, readable) };
+                client.read_fragmented(fh, file_off, dest).ok()
+            })
+            .ok()
+            .and_then(|j| j.join().ok())
+            .flatten();
         let dest = core::slice::from_raw_parts_mut(page as *mut u8, readable);
-        match client.read_fragmented(fh, file_off, dest) {
-            Ok(n) => {
-                if n < readable {
-                    dest[n..].fill(0);
-                }
-            }
-            Err(_) => {
-                // Zeros so we don't spin-fault forever on a hard I/O error.
-                dest.fill(0);
-            }
+        match n_read {
+            Some(n) if n < readable => dest[n..].fill(0),
+            Some(_) => {}
+            None => dest.fill(0),
         }
     }
     if readable < commit_len {
-        let tail = core::slice::from_raw_parts_mut(
-            (page as *mut u8).add(readable),
-            commit_len - readable,
-        );
-        tail.fill(0);
+        core::slice::from_raw_parts_mut((page as *mut u8).add(readable), commit_len - readable)
+            .fill(0);
     }
 
     if let Ok(mut g) = REGIONS.lock() {

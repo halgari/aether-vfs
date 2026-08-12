@@ -1,6 +1,6 @@
 //! Thin director FUSE client: ring + bulk arena + optional event wake.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use vfs_ipc::{Geom, RingClient, SpinNotifier};
 use vfs_protocol::{
@@ -56,6 +56,8 @@ pub struct FuseClient {
     payload_cap: u32,
     root_lower: String,
     arena_len: usize,
+    /// Serializes ring claim/submit — not safe for concurrent clients on one ring.
+    ring_lock: Mutex<()>,
 }
 
 impl FuseClient {
@@ -75,6 +77,7 @@ impl FuseClient {
             payload_cap,
             root_lower: root.replace('/', "\\").to_ascii_lowercase(),
             arena_len,
+            ring_lock: Mutex::new(()),
         })
     }
 
@@ -83,6 +86,7 @@ impl FuseClient {
     }
 
     pub fn heartbeat(&self) -> Result<(), String> {
+        let _g = self.ring_lock.lock().map_err(|_| "ring lock poisoned".to_string())?;
         let c = self.client();
         let r = c
             .submit(OP_HEARTBEAT, 0, &[])
@@ -94,6 +98,7 @@ impl FuseClient {
     }
 
     pub fn getattr(&self, vpath: &str) -> Result<AttrResp, i32> {
+        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_GETATTR, 0, &encode_path_req(vpath))
@@ -105,6 +110,7 @@ impl FuseClient {
     }
 
     pub fn readdir(&self, vpath: &str) -> Result<Vec<DirEntryWire>, i32> {
+        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_READDIR, 0, &encode_path_req(vpath))
@@ -116,6 +122,7 @@ impl FuseClient {
     }
 
     pub fn open(&self, vpath: &str) -> Result<OpenResp, i32> {
+        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_OPEN, 0, &encode_open_req(OPEN_READ, vpath))
@@ -128,6 +135,7 @@ impl FuseClient {
 
     /// Open a virtual path for WRITE (the JVM overlay creates/opens it writable).
     pub fn open_write(&self, vpath: &str) -> Result<OpenResp, i32> {
+        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_OPEN, 0, &encode_open_req(OPEN_WRITE, vpath))
@@ -144,6 +152,7 @@ impl FuseClient {
         if data.is_empty() {
             return Ok(0);
         }
+        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let chunk = (self.payload_cap as usize).saturating_sub(24).max(1);
         let c = self.client();
         let mut written = 0usize;
@@ -200,6 +209,7 @@ impl FuseClient {
         if buf.is_empty() {
             return Ok(0);
         }
+        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let bulk_chunk = self.bulk_bank_bytes();
         let inline_chunk = self.payload_cap.saturating_sub(8) as usize;
         // Deep pipeline for multi‑MiB sequential streams (section fill / BSA).
@@ -287,6 +297,7 @@ impl FuseClient {
 
     /// Delete (whiteout) a virtual path via the JVM overlay (`OP_DELETE`).
     pub fn delete(&self, vpath: &str) -> Result<(), i32> {
+        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_DELETE, 0, &encode_path_req(vpath))
@@ -299,6 +310,7 @@ impl FuseClient {
 
     /// Rename a virtual path to another virtual path (`OP_RENAME`).
     pub fn rename(&self, from: &str, to: &str) -> Result<(), i32> {
+        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_RENAME, 0, &encode_rename_req(from, to))
@@ -311,6 +323,7 @@ impl FuseClient {
 
     /// Create a virtual directory via the JVM overlay (`OP_MKDIR`).
     pub fn mkdir(&self, vpath: &str, mode: u32) -> Result<(), i32> {
+        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_MKDIR, 0, &encode_mkdir_req(mode, vpath))
@@ -323,6 +336,7 @@ impl FuseClient {
 
     /// Truncate/extend a virtual write handle to `size` bytes (`OP_SETATTR`).
     pub fn truncate(&self, fh: u64, size: u64) -> Result<(), i32> {
+        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_SETATTR, 0, &encode_setattr_req(&SetattrReq { fh, size }))
@@ -334,6 +348,7 @@ impl FuseClient {
     }
 
     pub fn close(&self, fh: u64) -> Result<(), i32> {
+        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_CLOSE, 0, &encode_close_req(fh))

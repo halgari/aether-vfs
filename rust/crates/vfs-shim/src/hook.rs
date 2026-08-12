@@ -1964,7 +1964,12 @@ unsafe fn fuse_create_section(
             return STATUS_SECTION_TOO_BIG;
         }
     }
-    // Lazy data section: reserve only; MapView + first-touch stream from VFS.
+    // Small archives: eager stream (cheap, avoids VEH for header-sized BSAs).
+    // Large archives: lazy demand-page (no multi‑GiB preload).
+    const EAGER_MAX: u64 = 128 * 1024 * 1024;
+    if size <= EAGER_MAX {
+        return fuse_create_section_eager(section_handle, fh, size);
+    }
     match crate::lazy_section::create_lazy_data_section(fh, size) {
         Some(h) => {
             if !section_handle.is_null() {
@@ -1973,6 +1978,82 @@ unsafe fn fuse_create_section(
             STATUS_SUCCESS
         }
         None => STATUS_SECTION_TOO_BIG,
+    }
+}
+
+/// Eager map for modest files (≤128 MiB): one bulk stream into committed memory.
+///
+/// The director read runs on a **worker thread with a large stack** — SkyrimSE's
+/// primary thread only has 1 MiB PE stack; pipelined FUSE reads there hit
+/// `0xC0000409` (stack buffer overrun / GS).
+unsafe fn fuse_create_section_eager(
+    section_handle: *mut HANDLE,
+    fh: u64,
+    size: u64,
+) -> NTSTATUS {
+    if crate::fuse_client::global().is_none() {
+        return STATUS_UNSUCCESSFUL;
+    }
+    use windows_sys::Win32::System::Memory::{
+        VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+    };
+    let map_len = size as usize;
+    let base = VirtualAlloc(
+        core::ptr::null(),
+        map_len,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE,
+    );
+    if base.is_null() {
+        return STATUS_UNSUCCESSFUL;
+    }
+    let base_u = base as usize;
+    let fill = std::thread::Builder::new()
+        .name("vfs-sec-fill".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let client = crate::fuse_client::global().ok_or(-1i32)?;
+            let dest = unsafe { core::slice::from_raw_parts_mut(base_u as *mut u8, map_len) };
+            client.read_fragmented(fh, 0, dest)
+        });
+    let (fill_ok, fill_note) = match fill {
+        Ok(j) => match j.join() {
+            Ok(Ok(n)) if n > 0 => {
+                if n < map_len {
+                    let dest = core::slice::from_raw_parts_mut(base as *mut u8, map_len);
+                    dest[n..].fill(0);
+                }
+                (true, format!("ok n={n}"))
+            }
+            Ok(Ok(n)) => (false, format!("short n={n}")),
+            Ok(Err(e)) => (false, format!("read_err {e}")),
+            Err(_) => (false, "panic".into()),
+        },
+        Err(e) => (false, format!("spawn {e}")),
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(r"C:\tmp\skyrim-data\perf\section-fill.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "eager fh={fh} size={size} ok={fill_ok} {fill_note}");
+    }
+    if !fill_ok {
+        VirtualFree(base, 0, MEM_RELEASE);
+        return STATUS_UNSUCCESSFUL;
+    }
+    match crate::zipserve::register_mapped_image(base_u, size) {
+        Some(h) => {
+            if !section_handle.is_null() {
+                *section_handle = h as HANDLE;
+            }
+            STATUS_SUCCESS
+        }
+        None => {
+            VirtualFree(base, 0, MEM_RELEASE);
+            STATUS_INVALID_FILE_FOR_SECTION
+        }
     }
 }
 
@@ -1995,6 +2076,10 @@ unsafe extern "system" fn create_section_hook(
     // FUSE synthetic file handles: lazy data section or eager SEC_IMAGE.
     // Without this, NtCreateSection fails on fake handles (game mmap of BSAs).
     if crate::fuse_synth::is_fuse_synth(file_handle as isize) {
+        // Debug: VFS_REJECT_FUSE_SECTION=1 forces ReadFile path (no section map).
+        if std::env::var_os("VFS_REJECT_FUSE_SECTION").is_some() {
+            return STATUS_INVALID_FILE_FOR_SECTION;
+        }
         return fuse_create_section(
             section_handle,
             max_size,
