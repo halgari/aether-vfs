@@ -228,9 +228,68 @@ unsafe fn make_detour(
 /// Install all detours backed by `engine` (in-process / no early payload).
 /// Idempotent-guarded. Patches the four path/attr stubs itself.
 pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
+    install_panic_hook();
     ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
     // SAFETY: ntdll lookup + detour install; each hook matches its ABI.
     unsafe { install_all_detours(true) }
+}
+
+/// Record shim panics before they take the game down.
+///
+/// The workspace builds with `panic = "abort"`, and Rust's abort on MSVC is
+/// `__fastfail(FAST_FAIL_FATAL_APP_EXIT)` — which surfaces as process exit code
+/// **0xC0000409**. Without this hook every shim panic is an unattributable
+/// `STATUS_STACK_BUFFER_OVERRUN`, indistinguishable from a genuine stack-cookie
+/// or CFG failure in the game, and the only way to localise one is to bisect
+/// (see the 0xC0000409 hunt behind commit 5f8f2eb).
+///
+/// `set_hook` still runs under `panic = "abort"`, so the message survives.
+/// Writes to `VFS_SHIM_PANIC_LOG`, else `<state dir>/shim-panic.log`, else a
+/// fixed fallback — a panic here must never be silent for want of a path.
+fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let default = std::env::var("VFS_STATE_DIR")
+            .ok()
+            .map(|d| format!("{d}\\shim-panic.log"));
+        let path = std::env::var("VFS_SHIM_PANIC_LOG")
+            .ok()
+            .or(default)
+            .unwrap_or_else(|| r"C:\tmp\skyrim-data\vfs-state\shim-panic.log".to_string());
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let loc = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown location>".into());
+            let msg = info.payload().downcast_ref::<&str>().map(|s| (*s).to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string payload>".into());
+            let line = format!(
+                "pid={} tid={:?} at {loc}\n  {msg}\n",
+                std::process::id(),
+                std::thread::current().id()
+            );
+            // Guard the write: this file I/O re-enters our own NtCreateFile
+            // hooks, and a panic raised *inside* a hook would otherwise recurse.
+            if hook_reenter_begin() {
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                use std::io::Write;
+                if let Ok(mut f) =
+                    std::fs::OpenOptions::new().create(true).append(true).open(&path)
+                {
+                    let _ = f.write_all(line.as_bytes());
+                    let _ = f.flush();
+                }
+                hook_reenter_end();
+            }
+            // Best-effort stderr too; harmless when the child has no console.
+            eprintln!("vfs-shim PANIC {line}");
+            prev(info);
+        }));
+    });
 }
 
 /// Dual-layer install: early payload already owns open/create/qattr/qfull.
@@ -245,6 +304,7 @@ pub fn install_late(
     if payload_cfg.is_null() {
         return Err(InstallError::Detour);
     }
+    install_panic_hook();
     ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
 
     // SAFETY: cfg is the live early Config in this process; tramp addresses

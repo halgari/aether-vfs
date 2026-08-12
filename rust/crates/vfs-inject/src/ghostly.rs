@@ -280,6 +280,12 @@ pub fn hollow_existing_process(
         let use_inplace = remote_base != 0
             && host_soi >= size_of_image
             && image_path.to_ascii_lowercase().contains("skyrimse");
+        // Whether the host image *is* the image we are writing. When it is, the
+        // loader already built this exact PE's TLS template, `_tls_index` and
+        // .pdata, and we inherit all of it for free. A neutral host reserves
+        // enough room to write in place but carries its **own** loader
+        // metadata, so that setup still has to be done by hand.
+        let host_is_target = remote_base != 0 && host_soi == size_of_image;
 
         // Preload imports in remote before any image overwrite.
         // Game-local DLLs are manual-mapped from zip/VFS PE bytes (not Steam disk).
@@ -416,7 +422,15 @@ pub fn hollow_existing_process(
             entry_rva,
         )?;
         // Kernel already ran TLS for in-place host; only set up TLS for new allocs.
-        if !use_inplace {
+        // Needed whenever the loader's TLS setup does not already describe the
+        // image we just wrote — i.e. for a fresh allocation, or for an in-place
+        // write over a host that is not the target image itself. Skipping it
+        // there leaves Skyrim's CRT reading vfs-host's TLS template and
+        // `_tls_index`, which fastfails (0xC0000409) inside CRT startup.
+        if !use_inplace || !host_is_target {
+            eprintln!(
+                "vfs-inject: setup_remote_tls (inplace={use_inplace} host_is_target={host_is_target})"
+            );
             setup_remote_tls(process, thread, new_base_u, &img, e_lfanew, preferred_base)?;
         }
         let real_entry = new_base_u + entry_rva as u64;
