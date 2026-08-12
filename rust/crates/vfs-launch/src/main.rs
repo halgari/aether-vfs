@@ -452,6 +452,7 @@ fn main() {
         hollow_pe: true,
         shim_dll: None,
         payload_dll: None,
+        env: Default::default(),
     });
 
     match exit {

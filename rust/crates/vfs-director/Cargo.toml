@@ -7,12 +7,11 @@ description = "Userspace FUSE host: mount backends, serve IPC, launch process wi
 
 [lib]
 name = "vfs_director"
-crate-type = ["rlib", "cdylib", "staticlib"]
 path = "src/lib.rs"
 
 [features]
 default = ["zip"]
-## Convenience `Session::mount_zip` / `vfs_director_mount_zip` (pulls vfs-zip).
+## Convenience `Session::mount_zip` (pulls vfs-zip).
 zip = ["dep:vfs-zip"]
 
 [dependencies]

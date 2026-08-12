@@ -11,6 +11,8 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     FlushInstructionCache, GetThreadContext, SetThreadContext, WriteProcessMemory, CONTEXT,
 };
+
+const CONTEXT_FULL: u32 = 0x0010_000B;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
@@ -110,22 +112,199 @@ unsafe fn wpm(process: HANDLE, addr: u64, data: &[u8]) -> Result<(), InjectError
     Ok(())
 }
 
+type NtCreateThreadExFn = unsafe extern "system" fn(
+    *mut HANDLE,
+    u32,
+    *const c_void,
+    HANDLE,
+    *const c_void,
+    *const c_void,
+    u32,
+    usize,
+    usize,
+    usize,
+    *const c_void,
+) -> i32;
+
+/// Grow the *primary* suspended thread's stack to `stack_reserve` bytes.
+///
+/// Keeps CreateProcess image = Steam library path (DRM) while avoiding the
+/// stock 1 MiB SkyrimSE stack that overflows under VFS hooks (`0xC00000FD`).
+///
+/// Unlike a bare RSP pivot onto an empty region (which broke Steam DRM /
+/// RtlUserThreadStart), this:
+/// 1. reads the live TEB StackBase + current RSP,
+/// 2. copies `[RSP, StackBase)` onto the high end of a new reservation,
+/// 3. adjusts RSP by the same delta, then updates TEB stack fields.
+unsafe fn expand_primary_stack(
+    process: HANDLE,
+    primary: HANDLE,
+    stack_reserve: usize,
+) -> Result<(), InjectError> {
+    type NtQueryInformationThreadFn = unsafe extern "system" fn(
+        HANDLE,
+        u32,
+        *mut c_void,
+        u32,
+        *mut u32,
+    ) -> i32;
+
+    let ntdll = GetModuleHandleW(wide("ntdll.dll").as_ptr());
+    if ntdll.is_null() {
+        return Err(InjectError::Ntdll);
+    }
+    let nt_qit: NtQueryInformationThreadFn =
+        match GetProcAddress(ntdll, b"NtQueryInformationThread\0".as_ptr()) {
+            Some(p) => core::mem::transmute(p),
+            None => return Err(InjectError::Ntdll),
+        };
+
+    // THREADINFOCLASS ThreadBasicInformation = 0
+    // struct { ExitStatus, TebBaseAddress, ClientId, Affinity, Priority, BasePriority }
+    #[repr(C)]
+    struct ThreadBasicInformation {
+        exit_status: i32,
+        teb_base: u64,
+        client_id: [u64; 2],
+        affinity: u64,
+        priority: i32,
+        base_priority: i32,
+    }
+    let mut tbi: ThreadBasicInformation = zeroed();
+    let mut ret_len = 0u32;
+    let st = nt_qit(
+        primary,
+        0,
+        &mut tbi as *mut _ as *mut c_void,
+        size_of::<ThreadBasicInformation>() as u32,
+        &mut ret_len,
+    );
+    if st != 0 || tbi.teb_base == 0 {
+        eprintln!("vfs-inject: NtQueryInformationThread TEB failed status={st:x}");
+        return Err(InjectError::CreateProcess);
+    }
+
+    let teb = tbi.teb_base as *mut c_void;
+    // TEB x64: StackBase=0x08, StackLimit=0x10, DeallocationStack=0x1478
+    let mut old_base = 0u64;
+    let mut old_limit = 0u64;
+    let mut old_dealloc = 0u64;
+    let mut read_n = 0usize;
+    for (off, dst) in [
+        (0x08u64, &mut old_base),
+        (0x10u64, &mut old_limit),
+        (0x1478u64, &mut old_dealloc),
+    ] {
+        let ok = windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory(
+            process,
+            (teb as u64 + off) as *const c_void,
+            dst as *mut u64 as *mut c_void,
+            8,
+            &mut read_n,
+        );
+        if ok == 0 || read_n != 8 || *dst == 0 {
+            eprintln!("vfs-inject: TEB stack field read failed off={off:#x}");
+            return Err(InjectError::CreateProcess);
+        }
+    }
+
+    let mut ctx_buf = vec![0u8; size_of::<CONTEXT>() + 16];
+    let ctx_addr = (ctx_buf.as_mut_ptr() as usize + 15) & !15;
+    let ctx = ctx_addr as *mut CONTEXT;
+    core::ptr::write_bytes(ctx as *mut u8, 0, size_of::<CONTEXT>());
+    (*ctx).ContextFlags = CONTEXT_FULL;
+    if GetThreadContext(primary, ctx) == 0 {
+        return Err(InjectError::CreateProcess);
+    }
+    let old_rsp = (*ctx).Rsp;
+    if old_rsp == 0 || old_rsp >= old_base || old_rsp < old_limit {
+        eprintln!(
+            "vfs-inject: primary RSP={old_rsp:#x} outside stack [{old_limit:#x},{old_base:#x})"
+        );
+        return Err(InjectError::CreateProcess);
+    }
+    let used = (old_base - old_rsp) as usize;
+    // Leave headroom: used frames + 256 KiB slack must fit in the new reserve.
+    if used + 256 * 1024 > stack_reserve {
+        eprintln!("vfs-inject: live stack used={used:#x} exceeds expand target");
+        return Err(InjectError::Alloc);
+    }
+
+    let stack = VirtualAllocEx(
+        process,
+        core::ptr::null(),
+        stack_reserve,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_READWRITE,
+    );
+    if stack.is_null() {
+        return Err(InjectError::Alloc);
+    }
+    let new_base = stack as u64 + stack_reserve as u64; // high address (grows down)
+    // Guard-ish low page as StackLimit (committed but not used for frames).
+    let new_limit = stack as u64 + 0x1000;
+    let new_rsp = new_base - used as u64;
+
+    // Copy live frames [old_rsp, old_base) → [new_rsp, new_base).
+    let mut live = vec![0u8; used];
+    let ok = windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory(
+        process,
+        old_rsp as *const c_void,
+        live.as_mut_ptr() as *mut c_void,
+        used,
+        &mut read_n,
+    );
+    if ok == 0 || read_n != used {
+        eprintln!("vfs-inject: read live stack frames failed used={used:#x}");
+        return Err(InjectError::CreateProcess);
+    }
+    let mut written = 0usize;
+    let ok = WriteProcessMemory(
+        process,
+        new_rsp as *mut c_void,
+        live.as_ptr() as *const c_void,
+        used,
+        &mut written,
+    );
+    if ok == 0 || written != used {
+        eprintln!("vfs-inject: write live stack frames failed");
+        return Err(InjectError::Write);
+    }
+
+    for (off, val) in [
+        (0x08u64, new_base),
+        (0x10u64, new_limit),
+        (0x1478u64, stack as u64),
+    ] {
+        let ok = WriteProcessMemory(
+            process,
+            (teb as u64 + off) as *mut c_void,
+            &val as *const u64 as *const c_void,
+            8,
+            &mut written,
+        );
+        if ok == 0 || written != 8 {
+            eprintln!("vfs-inject: TEB stack field write failed off={off:#x}");
+            return Err(InjectError::Write);
+        }
+    }
+
+    (*ctx).Rsp = new_rsp;
+    if SetThreadContext(primary, ctx) == 0 {
+        return Err(InjectError::CreateProcess);
+    }
+    eprintln!(
+        "vfs-inject: expanded primary stack to {stack_reserve:#x} \
+         (TEB={:#x} RSP {old_rsp:#x}→{new_rsp:#x} used={used:#x}; \
+         old dealloc={old_dealloc:#x})",
+        tbi.teb_base
+    );
+    Ok(())
+}
+
 /// Inject via `NtCreateThreadEx(LoadLibraryW)` — more reliable than
 /// `CreateRemoteThread` on hollowed targets (avoids ERROR_NOACCESS 998).
 pub fn inject_dll_apc(process: HANDLE, _thread: HANDLE, dll_path: &str) -> Result<(), InjectError> {
-    type NtCreateThreadExFn = unsafe extern "system" fn(
-        *mut HANDLE,
-        u32,
-        *const c_void,
-        HANDLE,
-        *const c_void,
-        *const c_void,
-        u32,
-        usize,
-        usize,
-        usize,
-        *const c_void,
-    ) -> i32;
 
     unsafe {
         let dll_w = wide(dll_path);
@@ -237,11 +416,22 @@ pub fn inject_dll(process: HANDLE, dll_path: &str) -> Result<(), InjectError> {
             CreateRemoteThread(process, core::ptr::null(), 0, start, remote, 0, core::ptr::null_mut());
         if hthread.is_null() || hthread == INVALID_HANDLE_VALUE {
             let err = windows_sys::Win32::Foundation::GetLastError();
-            eprintln!("vfs-inject: CreateRemoteThread failed last_error={err}");
+            eprintln!("vfs-inject: CreateRemoteThread(LoadLibrary) failed last_error={err}");
             return Err(InjectError::RemoteThread);
         }
         WaitForSingleObject(hthread, INFINITE);
+        let mut exit: u32 = 0;
+        let got = windows_sys::Win32::System::Threading::GetExitCodeThread(hthread, &mut exit);
         CloseHandle(hthread);
+        // LoadLibraryW returns HMODULE. On x64 the thread exit code is only the
+        // low 32 bits — a successful load above 4GB can look like 0. Treat 0 as
+        // soft-warn only; hollow/bootstrap timeouts catch true failures.
+        if got == 0 || exit == 0 {
+            eprintln!(
+                "vfs-inject: remote LoadLibraryW exit={exit:#x} for {dll_path} \
+                 (may still be OK on x64 if HMODULE high bits set)"
+            );
+        }
         Ok(())
     }
 }
@@ -407,8 +597,12 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
     std::env::set_var("VFS_PAYLOAD_PATH", &payload_path);
     // Memory-PE hollow path uses classic LoadLibrary inject only (no dual-layer
     // preinit / OEP redirect — that would clobber hollow RCX entry).
+    //
+    // Clear hollow-only image marker first; virtual dir is re-applied below from
+    // `current_dir` (dual-layer + director FUSE need it so the child fuse client
+    // matches the session root — defaulting to C:\GameLayers\runtime breaks
+    // daemon sessions under temp roots).
     std::env::remove_var("VFS_VIRTUAL_IMAGE");
-    std::env::remove_var("VFS_VIRTUAL_DIR");
     let cfg_file = format!("{}.payload_cfg", cfg.ready_path);
     if cfg.target_pe_bytes.is_some() {
         std::env::set_var("VFS_VIRTUAL_IMAGE", &cfg.target_exe);
@@ -423,6 +617,10 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
         std::env::set_var("VFS_DUAL_LAYER", "1");
         std::env::set_var("VFS_PAYLOAD_CFG_FILE", &cfg_file);
         let _ = std::fs::remove_file(&cfg_file);
+        // Preserve / re-assert the managed root for director-FUSE sessions.
+        if let Some(ref d) = cfg.current_dir {
+            std::env::set_var("VFS_VIRTUAL_DIR", d);
+        }
     }
     let _ = std::fs::remove_file(&cfg.ready_path);
 
@@ -437,6 +635,7 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
         // used — it would clobber the hollowed entry in RCX.
         if let Some(ref pe) = cfg.target_pe_bytes {
             // Real on-disk host only (Steam SkyrimSE when target is Skyrim).
+            // Do not patch library PE (Steam Error). Large stack via NtCreateThreadEx.
             let host = crate::ghostly::hollow_host_exe_for(Some(&cfg.target_exe))
                 .map_err(|_| InjectError::CreateProcess)?;
             let mut cmdline = format!("\"{}\"", cfg.target_exe);
@@ -473,15 +672,41 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
                 CloseHandle(pi.hProcess);
                 return Err(e);
             }
+            eprintln!(
+                "vfs-inject: hollow path injected shim; waiting for ready at {} (pid={})",
+                cfg.ready_path, pi.dwProcessId
+            );
             let deadline = Instant::now() + cfg.ready_timeout;
             while !std::path::Path::new(&cfg.ready_path).exists() {
+                // Detect host dying mid-bootstrap (Steam DRM / AV / crash).
+                let mut code: u32 = 0;
+                if GetExitCodeProcess(pi.hProcess, &mut code) != 0 && code != 259 {
+                    // 259 = STILL_ACTIVE
+                    eprintln!(
+                        "vfs-inject: hollow host exited during shim bootstrap \
+                         (pid={} exit={code:#x}) dll={} config={}",
+                        pi.dwProcessId, cfg.dll_path, cfg.config_path
+                    );
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                    return Err(InjectError::Timeout);
+                }
                 if Instant::now() >= deadline {
+                    eprintln!(
+                        "vfs-inject: timeout waiting for ready flag {}\n\
+                         dll={} config={} host pid={}",
+                        cfg.ready_path,
+                        cfg.dll_path,
+                        cfg.config_path,
+                        pi.dwProcessId
+                    );
                     CloseHandle(pi.hThread);
                     CloseHandle(pi.hProcess);
                     return Err(InjectError::Timeout);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
+            eprintln!("vfs-inject: ready flag seen; hollowing image…");
             // 2) Hollow: preload imports + map archive PE + set primary RCX=entry.
             //    Host stays mapped (no unmap) so further remote threads still work.
             if let Err(e) = crate::ghostly::hollow_existing_process(
@@ -495,12 +720,49 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
                 CloseHandle(pi.hProcess);
                 return Err(InjectError::CreateProcess);
             }
-            // 3) Resume primary: RtlUserThreadStart → hollowed EP (MSVC CRT).
+            // 3) Resume primary (MSVC CRT needs RtlUserThreadStart → EP).
+            // Default: grow TEB stack to 16 MiB with live-frame copy (SkyrimSE
+            // ships 1 MiB; VFS hooks overflow after master/BSA open → 0xC00000FD).
+            // Opt out with VFS_EXPAND_STACK=0. Library PE is never patched.
             let start_mode = std::env::var("VFS_HOLLOW_START").unwrap_or_else(|_| "rcx".into());
             if start_mode != "thread" {
+                let expand = match std::env::var("VFS_EXPAND_STACK") {
+                    Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("off") => {
+                        false
+                    }
+                    _ => true, // default on (including unset)
+                };
+                if expand {
+                    if let Err(e) = expand_primary_stack(pi.hProcess, pi.hThread, 16 * 1024 * 1024)
+                    {
+                        eprintln!("vfs-inject: expand_primary_stack failed ({e:?}) — resuming with stock 1MiB stack");
+                    }
+                }
                 ResumeThread(pi.hThread);
             }
             if cfg.detach {
+                // Brief grace window: Steam DRM / RestartAppIfNecessary often
+                // kills the process in <1s. Capture exit code for diagnosis
+                // before we drop the handle.
+                let early = WaitForSingleObject(pi.hProcess, 3000);
+                if early == 0 {
+                    // WAIT_OBJECT_0 — process exited
+                    let mut code: u32 = 0;
+                    let got = GetExitCodeProcess(pi.hProcess, &mut code);
+                    eprintln!(
+                        "vfs-inject: hollowed process exited within 3s \
+                         pid={} exit={} (0x{:x}) got={got}",
+                        pi.dwProcessId, code, code
+                    );
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                    // Still Ok(0) for detach API, but surface the death in logs.
+                    return Ok(code as i32);
+                }
+                eprintln!(
+                    "vfs-inject: detach ok pid={} still alive after 3s",
+                    pi.dwProcessId
+                );
                 CloseHandle(pi.hThread);
                 CloseHandle(pi.hProcess);
                 return Ok(0);

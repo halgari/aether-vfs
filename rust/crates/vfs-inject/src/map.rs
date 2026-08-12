@@ -225,11 +225,29 @@ pub fn resolve_imports_ex_with_bases(
             // Prefer parent LoadLibrary (system DLLs / already loaded).
             let parent_mod = unsafe { LoadLibraryA(dll_z.as_ptr()) };
             if parent_mod.is_null() && !process.is_null() {
-                (
-                    true,
-                    find_remote_module_base(process, &dll_name_str)?,
-                    0 as HANDLE,
-                )
+                match find_remote_module_base(process, &dll_name_str) {
+                    Ok(base) => (true, base, 0 as HANDLE),
+                    Err(_) => {
+                        // Optional multimedia imports may be missing on thin hosts.
+                        let optional = {
+                            let b = want_base.as_str();
+                            b.contains("x3daudio")
+                                || b.contains("xactengine")
+                                || b.contains("xapofx")
+                                || b.contains("d3dx")
+                                || b.contains("xinput")
+                                || b.contains("xaudio")
+                        };
+                        if optional {
+                            eprintln!(
+                                "vfs-inject: skip IAT for optional missing import {dll_name_str}"
+                            );
+                            desc += 20;
+                            continue;
+                        }
+                        return Err("remote module not found");
+                    }
+                }
             } else if parent_mod.is_null() {
                 return Err("LoadLibraryA for import failed");
             } else {

@@ -1,167 +1,98 @@
 # aether-vfs
 
-A provider-based virtual filesystem for the JVM. A `Provider` answers
-`lookup`/`readdir`/`open-file`/`read-at`/`write-at`/`release-handle` for a
-tree of virtual paths; a `router` maps glob patterns to providers; and
-`aether.vfs.os.linux.fuse` mounts the whole thing as a real Linux FUSE filesystem
-in-process via [jnr-fuse](https://github.com/SerCeMan/jnr-fuse), with an FFM
-zero-copy read path (`java.lang.foreign`) that lets a provider write straight
-into the kernel's own read buffer instead of bouncing through the Java heap.
-The same `Provider` interface is now delivered on **both** OSes through one
-entry point, `aether.vfs/run` (see below): a FUSE mount on Linux, and an
-injected user-mode shim on Windows (the merged Rust engine under `rust/`, driven
-by a JVM ring server). A `proton` namespace additionally launches Windows
-executables against a Linux mount under Proton. Extracted from the mauvi mod
-manager's storage layer.
+Userspace virtual filesystem for **Windows game modding**: compose base game +
+mods from pluggable sources (disk, zip, remote gRPC plugins), inject a thin
+NT-API shim into the game, and serve remapped I/O from a long-lived **Rust
+director daemon**.
 
-## Running a program inside the VFS — `aether.vfs/run`
+The control plane is **gRPC** (any language). The data plane is the existing
+shared-memory ring + inject/payload/shim stack.
 
-The unified entry point runs a target program inside a Provider-backed virtual
-filesystem, scoped to that program's lifetime, and returns its exit code. It
-dispatches on the host OS — **no admin/root required** on either:
+> Pure Rust. The former Clojure/JVM layer has been removed (M4).
 
-- **Linux** — mounts the provider at a temp mountpoint (user-space FUSE), runs
-  the target from that mountpoint (`cwd` = mountpoint, `$AETHER_VFS_MOUNT` set),
-  waits, then unmounts and cleans up.
-- **Windows** — injects the shim into the target so its file access under the
-  virtual root (`C:\GameLayers\runtime`) is served by the provider over a
-  shared-memory ring; the VFS lives only inside that process tree.
+## Quick start
 
-```clojure
-(require '[aether.vfs :as vfs]
-         '[aether.vfs.providers.inline :as inline])
-
-(def provider (inline/inline-provider [["/hello.txt" (.getBytes "hi") 0644]]))
-
-;; Linux: the target reads the virtual file through the mount
-(vfs/run provider {:exec ["sh" "-c" "cat \"$AETHER_VFS_MOUNT/hello.txt\""]})
-;=> 0  (prints "hi")
-
-;; Windows: the injected target reads C:\GameLayers\runtime\hello.txt
-(vfs/run provider {:exec ["my-game.exe" "--flag"]})
-;=> the target's exit code
+```powershell
+cd rust
+cargo build -p vfs-directord -p vfs-shim-dll -p vfs-payload -p vfs-fixture-read
 ```
 
-Opts: `:exec` `[cmd & args]` (required); `:mountpoint` (Linux mount dir; Windows
-virtual root — passthrough for now); `:env` `{k v}` extra target environment;
-`:native-dir` (Windows only, see below); `:windows`/`:linux` maps for
-OS-specific passthrough.
+### Daemon + CLI (`vfs`)
 
-### Windows native artifacts
+```powershell
+# Foreground daemon (clients also auto-spawn when needed)
+.\target\debug\vfs.exe daemon
 
-The Windows path needs three native artifacts (`vfs-injector.exe`,
-`vfs_shim_dll.dll`, `vfs_payload.dll`). `run` resolves them in order:
+# Health / stats
+.\target\debug\vfs.exe health
+.\target\debug\vfs.exe stats
 
-1. `:native-dir` opt — a directory holding all three.
-2. `AETHER_VFS_NATIVE_DIR` env — same.
-3. **Bundled** — extracted from the jar's `native/windows/` resources to a cache
-   dir. This is what makes the published jar "just work" with no setup.
+# Config-driven session
+.\target\debug\vfs.exe up --config scenario.toml
 
-### Building the jar
-
-`clojure -T:build jar` builds the Windows Rust artifacts (`--release`), stages
-them into `resources/native/windows/`, and writes
-`target/aether-vfs-<version>.jar` bundling the Clojure source and the natives.
-(The staged binaries are gitignored — the build and CI populate them.)
-
-## Mount example
-
-```clojure
-(require '[clojure.java.io :as io]
-         '[aether.vfs.os.linux.fuse :as fuse]
-         '[aether.vfs.providers.inline :as inline])
-
-(.mkdirs (io/file "/tmp/my-mount")) ;; the mountpoint dir must already exist
-
-(let [root  (inline/inline-provider [["/hello.txt" (.getBytes "hi") 0644]])
-      guard (fuse/mount root "/tmp/my-mount")]
-  (try
-    (slurp "/tmp/my-mount/hello.txt") ;=> "hi"
-    (finally
-      (.close guard))))
+# Flag-driven
+.\target\debug\vfs.exe launch `
+  --source disk:C:\content@/#0 `
+  --source zip:C:\GameLayers\base.zip@/#10 `
+  --exec C:\path\to\tool.exe --env KEY=VAL
 ```
 
-`fuse/mount` proxies FUSE callbacks straight onto the `Provider` protocol and
-returns a `java.io.Closeable` guard; closing it unmounts. `inline/inline-provider`
-takes `[[virtual-path bytes perm] …]` and serves it read-only from RAM — no
-store, no cache, no disk — which makes it the simplest root to mount for a
-smoke test or a generated overlay (e.g. a load order's `Plugins.txt`). Reads
-run through libfuse's multithreaded loop; `aether.vfs.os.linux.fuse` bounds concurrent
-in-flight reads (see env vars below) and isolates a bad request to an errno
-instead of tearing down the mount. To route more than one provider under a
-single mountpoint, build a `aether.vfs.router/router` and mount it with
-`fuse/mount-router` instead of `fuse/mount`.
+Example `scenario.toml`:
 
-## Composition
+```toml
+[session]
+name = "demo"
 
-`aether.vfs.compose` wires the providers together into the shapes a game
-mount actually needs: `aether.vfs.router` dispatches virtual paths to
-providers by glob pattern (first match wins, else a default); `providers.layered`
-stacks two read-only providers with top-wins precedence, so a mod's files
-shadow same-path base-game files while everything else falls through; and
-`providers.overlay` sits on top as copy-on-write — it serves reads merged
-upper-over-base, records deletes as `.wh.*` whiteout markers, copies a file
-up to the writable directory the first time it's modified, and never mutates
-the base. `compose/build-data-root`, `build-data-root-over`, and
-`build-inline-root` assemble the common combinations (snapshot, snapshot-over-base,
-and inline-over-overrides) so callers don't hand-stack layered/overlay themselves.
+[[source]]
+type  = "disk"
+path  = "C:/content"
+mount = "/"
+layer = 0
 
-## Proton example
-
-```clojure
-(require '[clojure.java.io :as io]
-         '[aether.vfs.os.linux.proton :as proton])
-
-(def logdir "/tmp/throwaway-compat/logs")
-(.mkdirs (io/file logdir)) ;; launch-proton! redirects run.log here — must exist
-
-(let [params {:proton      "/path/to/GE-Proton10-34/proton"
-              :mountpoint  "/tmp/my-mount"
-              :exe         "Game.exe"
-              :steam-root  (proton/default-steam-root)
-              :app-id      489830
-              :compat      "/tmp/throwaway-compat"}
-      cmd  (proton/proton-command params)
-      proc (proton/launch-proton! cmd {:logdir logdir})]
-  (.waitFor proc)
-  (proton/teardown! params))
+[launch]
+exec      = "C:/tools/my-probe.exe"
+wait      = true
+hollow_pe = false
 ```
 
-`proton-command` builds the `proton run <mountpoint>/<exe>` invocation —
-`:compat` must be a throwaway `STEAM_COMPAT_DATA_PATH`, never the caller's
-real Steam prefix. `launch-proton!` spawns it as a tracked `Process` with
-`PROTON_LOG` on and stdout/stderr captured to `<logdir>/run.log` (Wine's own
-trace logging is silenced so the log doesn't grow to gigabytes in seconds).
-`proton/drm-failures` and `proton/reached-markers` grep that log directory
-for known failure/success signatures. `teardown!` kills only the exe running
-at this mount and this run's `wineserver` — never another game's — since the
-Wine process tree outlives the `proton` wrapper and keeps hammering the mount
-if left running.
+### Out-of-process source plugin
 
-## Env vars
-
-- `AETHER_VFS_NO_READ_INTO` — when set, forces the heap `read-at` path even
-  if FFM zero-copy reads are available, skipping the `MemorySegment`-backed
-  `read-into!` fast path entirely. Useful for isolating whether a bug is in
-  the zero-copy path.
-- `AETHER_VFS_MAX_FUSE_READS` — caps the number of concurrent kernel read
-  requests in flight (default `32`). libfuse's multithreaded loop spawns a
-  worker per in-flight request; a slow provider lets them pile up faster than
-  they drain, and the accumulated heap-heavy state can exhaust the JVM heap.
-  Lower this if reads are large or the backing provider is slow.
-- `AETHER_VFS_PROTON_PATH` — overrides the default Proton binary path
-  (`<steam-root>/compatibilitytools.d/GE-Proton10-34/proton`) used by
-  `proton/default-proton-path`.
-
-## Tests
-
-```
-clojure -M:test
+```powershell
+cargo run -p vfs-source --bin vfs-source-plugin -- --root C:\data --bind 127.0.0.1:0
+# prints endpoint=127.0.0.1:PORT — pass as remote source
 ```
 
-The FFM zero-copy read path uses restricted methods, so the `:test` alias
-runs with `--enable-native-access=ALL-UNNAMED`. `aether.vfs.mount-test`
-mounts a real FUSE filesystem in-process and reads a file back through the
-kernel — it needs `/dev/fuse` and prints `skip: /dev/fuse not available` and
-short-circuits if the device isn't present (e.g. no `fuse` kernel module, or
-inside a container without `--device /dev/fuse`).
+Any language can implement `vfs-source/proto/source.proto` (`Source` service).
+
+## Architecture (short)
+
+| Piece | Crate |
+|-------|--------|
+| Control gRPC + config schema | `vfs-control` |
+| Daemon + `vfs` CLI | `vfs-directord` |
+| Source builders, SourceService, conformance | `vfs-source` |
+| Layered / router / overlay (read) | `vfs-compose` |
+| Block cache (RAM + disk) | `vfs-cache` |
+| FUSE kernel + Session launch | `vfs-director` |
+| Inject / shim / payload | `vfs-inject`, `vfs-shim`, `vfs-payload` |
+
+Docs: [rust/docs/](rust/docs/), design
+[docs/superpowers/specs/2026-08-11-director-daemon-rework-design.md](docs/superpowers/specs/2026-08-11-director-daemon-rework-design.md).
+
+## Packaging
+
+Release build of the daemon and natives:
+
+```powershell
+cd rust
+cargo build --release -p vfs-directord -p vfs-shim-dll -p vfs-payload -p vfs-source
+# Artifacts under target/release/:
+#   vfs.exe, vfs_shim_dll.dll, vfs_payload.dll, vfs-source-plugin.exe
+```
+
+Ship those four next to each other (the daemon locates the DLLs beside the
+`vfs` binary when launching children).
+
+## License
+
+Private / unlicensed for external use unless otherwise stated.

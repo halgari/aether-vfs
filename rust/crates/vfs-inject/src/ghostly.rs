@@ -585,6 +585,57 @@ unsafe fn copy_remote_iat_into_image(
     Ok(())
 }
 
+/// Return a CreateProcess host path whose PE has at least `min_reserve` stack.
+///
+/// **Never mutates the Steam-library host** (Steam validates on-disk SkyrimSE.exe
+/// → "Steam Error" if we patch it in place). When the original reserve is too
+/// small, write a temp copy with a larger stack and use that as the
+/// CreateProcess image; cmdline / GMFW still present the real Steam path.
+///
+/// SkyrimSE ships with 1 MiB reserve; under VFS Nt hooks the main thread hits
+/// `0xC00000FD` after masters/BSAs mmap without this bump.
+pub fn ensure_host_stack_reserve(host: &str, min_reserve: u64) -> Result<String, &'static str> {
+    let mut pe = std::fs::read(host).map_err(|_| "read host pe for stack patch")?;
+    if pe.len() < 0x40 || pe[0] != b'M' || pe[1] != b'Z' {
+        return Err("host pe not MZ");
+    }
+    let e_lfanew = u32::from_le_bytes(pe[0x3c..0x40].try_into().unwrap()) as usize;
+    if e_lfanew + 0x18 + 0x58 > pe.len() {
+        return Err("host pe truncated");
+    }
+    if &pe[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
+        return Err("host pe bad PE sig");
+    }
+    let opt = e_lfanew + 0x18;
+    let magic = u16::from_le_bytes(pe[opt..opt + 2].try_into().unwrap());
+    // PE32+ optional header: SizeOfStackReserve @ +0x48, SizeOfStackCommit @ +0x50
+    if magic != 0x20b {
+        return Ok(host.to_string());
+    }
+    let res_off = opt + 0x48;
+    let cur = u64::from_le_bytes(pe[res_off..res_off + 8].try_into().unwrap());
+    if cur >= min_reserve {
+        return Ok(host.to_string());
+    }
+    pe[res_off..res_off + 8].copy_from_slice(&min_reserve.to_le_bytes());
+    let com_off = opt + 0x50;
+    let com = u64::from_le_bytes(pe[com_off..com_off + 8].try_into().unwrap());
+    if com < 64 * 1024 {
+        pe[com_off..com_off + 8].copy_from_slice(&(256 * 1024u64).to_le_bytes());
+    }
+    let base = std::path::Path::new(host)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("host");
+    let tmp = std::env::temp_dir().join(format!("vfs-host-stack-{base}-{min_reserve:x}.exe"));
+    std::fs::write(&tmp, &pe).map_err(|_| "write temp host pe stack patch")?;
+    let out = tmp.to_string_lossy().into_owned();
+    eprintln!(
+        "vfs-inject: temp host stack reserve {cur:#x} → {min_reserve:#x} (CreateProcess image={out}; library host untouched)"
+    );
+    Ok(out)
+}
+
 /// Pick a real on-disk EXE to CreateProcess as the hollow host.
 /// Never uses the current module path (may be VFS-spoofed).
 ///
@@ -609,11 +660,15 @@ pub fn hollow_host_exe_for(image_path: Option<&str>) -> Result<String, &'static 
     let img = image_path.unwrap_or("").to_ascii_lowercase();
     let want_skyrim = img.contains("skyrimse") || img.contains("skyrim");
     if want_skyrim {
+        // Prefer canonical installdir (matches appmanifest). Underscore rename is
+        // last-resort only — launching from `_Skyrim...` breaks Steam path
+        // association and triggers steam://run / Remote Play.
         for c in [
             r"C:\Program Files (x86)\Steam\steamapps\common\Skyrim Special Edition\SkyrimSE.exe",
             r"C:\Program Files\Steam\steamapps\common\Skyrim Special Edition\SkyrimSE.exe",
             r"D:\SteamLibrary\steamapps\common\Skyrim Special Edition\SkyrimSE.exe",
             r"E:\SteamLibrary\steamapps\common\Skyrim Special Edition\SkyrimSE.exe",
+            r"C:\Program Files (x86)\Steam\steamapps\common\_Skyrim Special Edition\SkyrimSE.exe",
         ] {
             if std::path::Path::new(c).is_file() {
                 eprintln!("vfs-inject: using Steam SkyrimSE as hollow host (DRM-safe)");
@@ -869,6 +924,48 @@ pub unsafe fn preload_remote_import_dlls(
     }
 
     for name in &names {
+        // steam_api must stay the Steam-install copy. Overwriting it from the zip
+        // and spoofing LDR to C:\tmp\... makes steam_api re-launch Steam
+        // (RestartAppIfNecessary / wrong install path) in a loop.
+        let base_name = std::path::Path::new(name)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name);
+        if std::env::var_os("VFS_KEEP_HOST_STEAM_API").is_some()
+            && (base_name.eq_ignore_ascii_case("steam_api64.dll")
+                || base_name.eq_ignore_ascii_case("steam_api.dll"))
+        {
+            if let Some(b) = find_remote_module_base_opt(process, name) {
+                eprintln!(
+                    "vfs-inject: keeping host {name} @ 0x{b:x} (VFS_KEEP_HOST_STEAM_API)"
+                );
+                continue;
+            }
+            // Not loaded yet — load from hollow host directory if present.
+            if let Ok(host) = std::env::var("VFS_HOLLOW_HOST") {
+                if let Some(dir) = std::path::Path::new(&host).parent() {
+                    let full = dir.join(base_name);
+                    if full.is_file() {
+                        if let Some(b) =
+                            remote_load_library_path(process, load_start, &full.to_string_lossy())
+                        {
+                            eprintln!(
+                                "vfs-inject: LoadLibrary host {name} from {} -> 0x{b:x}",
+                                full.display()
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Do not fall through to zip overwrite — that rewrites LDR to a temp
+            // path and Steam starts Remote Play / relaunch loops.
+            eprintln!(
+                "vfs-inject: ERROR: could not keep host {name}; skipping zip overwrite"
+            );
+            continue;
+        }
+
         let system = is_system_import_dll(name);
         if system {
             let mut raw = name.as_bytes().to_vec();
@@ -915,6 +1012,39 @@ pub unsafe fn preload_remote_import_dlls(
             let _ = windows_sys::Win32::System::Threading::GetExitCodeThread(ht, &mut code);
             CloseHandle(ht);
             if code == 0 {
+                // Prefer absolute path under managed roots (staged DirectX redist).
+                let mut loaded = false;
+                for dir in &search_dirs {
+                    let full = format!("{dir}\\{name}");
+                    if std::path::Path::new(&full).is_file() {
+                        if let Some(b) = remote_load_library_path(process, load_start, &full) {
+                            eprintln!(
+                                "vfs-inject: remote LoadLibraryW({full}) -> 0x{b:x} (staged)"
+                            );
+                            loaded = true;
+                            break;
+                        }
+                    }
+                }
+                if loaded {
+                    continue;
+                }
+                // Optional DirectX/audio runtimes — soft-skip if still missing.
+                let optional = {
+                    let b = name.to_ascii_lowercase();
+                    b.contains("x3daudio")
+                        || b.contains("xactengine")
+                        || b.contains("xapofx")
+                        || b.contains("d3dx")
+                        || b.contains("xinput")
+                        || b.contains("xaudio")
+                };
+                if optional {
+                    eprintln!(
+                        "vfs-inject: optional system DLL {name} not found; continuing hollow"
+                    );
+                    continue;
+                }
                 eprintln!("vfs-inject: remote LoadLibraryA({name}) returned NULL");
                 return Err("remote LoadLibraryA returned NULL");
             }
@@ -969,6 +1099,38 @@ pub unsafe fn preload_remote_import_dlls(
                 let _ = windows_sys::Win32::System::Threading::GetExitCodeThread(ht, &mut code);
                 CloseHandle(ht);
                 if code == 0 {
+                    // Try absolute paths under managed roots (staged DirectX redist).
+                    let mut loaded = false;
+                    for dir in &search_dirs {
+                        let full = format!("{dir}\\{name}");
+                        if std::path::Path::new(&full).is_file() {
+                            if let Some(b) = remote_load_library_path(process, load_start, &full) {
+                                eprintln!(
+                                    "vfs-inject: remote LoadLibraryW({full}) -> 0x{b:x} (staged redist; {e})"
+                                );
+                                loaded = true;
+                                break;
+                            }
+                        }
+                    }
+                    if loaded {
+                        continue;
+                    }
+                    let optional = {
+                        let b = name.to_ascii_lowercase();
+                        b.contains("x3daudio")
+                            || b.contains("xactengine")
+                            || b.contains("xapofx")
+                            || b.contains("d3dx")
+                            || b.contains("xinput")
+                            || b.contains("xaudio")
+                    };
+                    if optional {
+                        eprintln!(
+                            "vfs-inject: optional DLL {name} not found ({e}); continuing hollow"
+                        );
+                        continue;
+                    }
                     eprintln!(
                         "vfs-inject: remote LoadLibraryA({name}) NULL (not in zip; {e})"
                     );

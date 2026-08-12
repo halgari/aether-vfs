@@ -33,12 +33,32 @@ pub extern "system" fn vfs_shim_sync_bootstrap(payload_cfg: *mut c_void) -> u32 
 fn bootstrap() {
     let config = match std::env::var("VFS_SHIM_CONFIG") {
         Ok(c) => c,
-        Err(_) => return,
+        Err(_) => {
+            log_boot("VFS_SHIM_CONFIG unset");
+            return;
+        }
     };
-    if let Ok(guard) = vfs_shim::bootstrap_from_config_path(&config) {
-        core::mem::forget(guard);
-        if let Ok(ready) = std::env::var("VFS_SHIM_READY") {
-            let _ = std::fs::write(&ready, b"ready");
+    match vfs_shim::bootstrap_from_config_path(&config) {
+        Ok(guard) => {
+            core::mem::forget(guard);
+            if let Ok(ready) = std::env::var("VFS_SHIM_READY") {
+                let _ = std::fs::write(&ready, b"ready");
+            }
+        }
+        Err(e) => {
+            log_boot(&format!("bootstrap_from_config_path({config}) failed: {e:?}"));
         }
     }
+}
+
+fn log_boot(msg: &str) {
+    if let Ok(ready) = std::env::var("VFS_SHIM_READY") {
+        let path = format!("{ready}.boot.log");
+        let _ = std::fs::write(&path, msg.as_bytes());
+    }
+    // Also try a fixed temp path so we always have a breadcrumb.
+    let _ = std::fs::write(
+        std::env::temp_dir().join("vfs_shim_boot.log"),
+        msg.as_bytes(),
+    );
 }

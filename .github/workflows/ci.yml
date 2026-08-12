@@ -8,63 +8,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Build daemon + inject artifacts
+        # Ensure shim/payload/fixture sit next to the test profile so the
+        # daemon e2e can inject vfs-fixture-read without a nested cargo build.
+        run: cargo build -p vfs-directord -p vfs-source -p vfs-inject -p vfs-shim-dll -p vfs-payload -p vfs-fixture-read -p vfs-fixture-write -p vfs-fixture-writeset -p vfs-ring-harness
+        working-directory: rust
       - name: Rust tests (full engine — includes Windows-only crates)
         run: cargo test
         working-directory: rust
-  clojure-and-drift:
+
+  rust-linux-portable:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test -p vfs-ipc -p vfs-protocol -p xtask-descriptor
+        run: cargo test -p vfs-ipc -p vfs-protocol -p vfs-compose -p vfs-cache -p xtask-descriptor
         working-directory: rust
       - name: Regenerate protocol artifacts
         run: bin/regen-protocol
       - name: Fail on protocol drift
         run: git diff --exit-code resources/
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '26'
-      - name: Install Clojure CLI
-        uses: DeLaGuardo/setup-clojure@13.0
-        with:
-          cli: latest
-      - name: Install libfuse (jnr-fuse native dependency)
-        run: sudo apt-get update && sudo apt-get install -y libfuse2
-      - name: Clojure tests (full Linux suite)
-        run: clojure -M:test
-  windows-clojure:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build ring harness + injection artifacts
-        # NB: no `--bin` — a target selector would restrict cargo to that ONE
-        # target and skip the other packages' default artifacts (the shim/payload
-        # DLLs, fixtures, harness), making the Windows proofs self-skip. Building
-        # each package (default targets) produces all bins incl. vfs-injector.
-        run: cargo build -p vfs-ring-harness -p vfs-inject -p vfs-shim-dll -p vfs-payload -p vfs-fixture-read -p vfs-fixture-write -p vfs-fixture-writeset
-        working-directory: rust
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '26'
-      - name: Install Clojure CLI (deps.clj — deterministic on Windows PATH)
-        shell: pwsh
-        run: |
-          # DeLaGuardo/setup-clojure is flaky exposing `clojure` on the windows
-          # runner PATH under pwsh; deps.clj is a single exe we add to GITHUB_PATH.
-          $ver = "1.12.5.1654"
-          $url = "https://github.com/borkdude/deps.clj/releases/download/v$ver/deps.clj-$ver-windows-amd64.zip"
-          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\deps.zip"
-          Expand-Archive "$env:RUNNER_TEMP\deps.zip" -DestinationPath "$env:RUNNER_TEMP\clj-cli" -Force
-          Copy-Item "$env:RUNNER_TEMP\clj-cli\deps.exe" "$env:RUNNER_TEMP\clj-cli\clojure.exe"
-          Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\clj-cli"
-      - name: Windows Clojure tests (FFM section + cross-process ring proof)
-        shell: pwsh
-        run: clojure -M:test -n aether.vfs.os.windows.section-test -n aether.vfs.os.windows.integration-test -n aether.vfs.os.windows.launch-test -n aether.vfs.os.windows.artifacts-test -n aether.vfs-test -n aether.vfs.run-e2e-test
-        env:
-          # The harness exe path in the test is relative to the repo root.
-          JDK_JAVA_OPTIONS: "--enable-native-access=ALL-UNNAMED"

@@ -9,6 +9,7 @@ use vfs_protocol::{
 use vfs_ipc::DataArena;
 
 use crate::director::Director;
+use crate::io_stats;
 use crate::ops::{KIND_DIR, OPEN_READ, OPEN_WRITE};
 
 const BULK_THRESHOLD: u32 = 64 * 1024;
@@ -30,19 +31,28 @@ pub fn dispatch_director(
         OP_GETATTR => match decode_path_req(payload) {
             Some(vp) => {
                 let resp = match director.getattr(&vp) {
-                    Ok(Some(s)) => AttrResp {
-                        found: true,
-                        is_dir: s.kind == KIND_DIR,
-                        size: s.size,
-                        mtime: s.mtime,
-                    },
-                    Ok(None) => AttrResp {
-                        found: false,
-                        is_dir: false,
-                        size: 0,
-                        mtime: 0,
-                    },
-                    Err(st) => return (st, Vec::new()),
+                    Ok(Some(s)) => {
+                        io_stats::record_getattr(&vp, true, false);
+                        AttrResp {
+                            found: true,
+                            is_dir: s.kind == KIND_DIR,
+                            size: s.size,
+                            mtime: s.mtime,
+                        }
+                    }
+                    Ok(None) => {
+                        io_stats::record_getattr(&vp, false, false);
+                        AttrResp {
+                            found: false,
+                            is_dir: false,
+                            size: 0,
+                            mtime: 0,
+                        }
+                    }
+                    Err(st) => {
+                        io_stats::record_getattr(&vp, false, true);
+                        return (st, Vec::new());
+                    }
                 };
                 (ST_OK, encode_getattr_resp(&resp))
             }
@@ -51,6 +61,7 @@ pub fn dispatch_director(
         OP_READDIR => match decode_path_req(payload) {
             Some(vp) => match director.readdir(&vp) {
                 Ok(entries) => {
+                    io_stats::record_readdir(&vp, true);
                     let wire: Vec<DirEntryWire> = entries
                         .into_iter()
                         .map(|e| DirEntryWire {
@@ -62,9 +73,18 @@ pub fn dispatch_director(
                         .collect();
                     (ST_OK, encode_readdir_resp(&wire))
                 }
-                Err(st) if st == ST_NOT_A_DIRECTORY => (ST_NOT_A_DIRECTORY, Vec::new()),
-                Err(st) if st == ST_NOT_FOUND => (ST_NOT_FOUND, Vec::new()),
-                Err(st) => (st, Vec::new()),
+                Err(st) if st == ST_NOT_A_DIRECTORY => {
+                    io_stats::record_readdir(&vp, false);
+                    (ST_NOT_A_DIRECTORY, Vec::new())
+                }
+                Err(st) if st == ST_NOT_FOUND => {
+                    io_stats::record_readdir(&vp, false);
+                    (ST_NOT_FOUND, Vec::new())
+                }
+                Err(st) => {
+                    io_stats::record_readdir(&vp, false);
+                    (st, Vec::new())
+                }
             },
             None => (ST_BAD_REQUEST, Vec::new()),
         },
@@ -77,9 +97,13 @@ pub fn dispatch_director(
                 let flags = if oflags == 0 { OPEN_READ } else { oflags };
                 match director.open(&path, flags) {
                     Ok((fh, size, is_dir)) => {
+                        io_stats::record_open(&path, Some(fh), size, false);
                         (ST_OK, encode_open_resp(&OpenResp { fh, size, is_dir }))
                     }
-                    Err(st) => (st, Vec::new()),
+                    Err(st) => {
+                        io_stats::record_open(&path, None, 0, true);
+                        (st, Vec::new())
+                    }
                 }
             }
             None => (ST_BAD_REQUEST, Vec::new()),
@@ -93,18 +117,28 @@ pub fn dispatch_director(
                         match arena.fill_bank(slot, max, |buf| {
                             director.read(req.fh, req.offset, buf)
                         }) {
-                            Ok((off, n)) => (ST_OK, encode_read_resp_bulk(n as u32, off)),
-                            Err(st) => (st, Vec::new()),
+                            Ok((off, n)) => {
+                                io_stats::record_read(req.fh, n, false);
+                                (ST_OK, encode_read_resp_bulk(n as u32, off))
+                            }
+                            Err(st) => {
+                                io_stats::record_read(req.fh, 0, true);
+                                (st, Vec::new())
+                            }
                         }
                     } else {
                         let max = max_read_data(payload_cap);
                         let mut buf = vec![0u8; (req.len as usize).min(max)];
                         match director.read(req.fh, req.offset, &mut buf) {
                             Ok(n) => {
+                                io_stats::record_read(req.fh, n, false);
                                 buf.truncate(n);
                                 (ST_OK, encode_read_resp(&buf))
                             }
-                            Err(st) => (st, Vec::new()),
+                            Err(st) => {
+                                io_stats::record_read(req.fh, 0, true);
+                                (st, Vec::new())
+                            }
                         }
                     }
                 } else {
@@ -112,10 +146,14 @@ pub fn dispatch_director(
                     let mut buf = vec![0u8; (req.len as usize).min(max)];
                     match director.read(req.fh, req.offset, &mut buf) {
                         Ok(n) => {
+                            io_stats::record_read(req.fh, n, false);
                             buf.truncate(n);
                             (ST_OK, encode_read_resp(&buf))
                         }
-                        Err(st) => (st, Vec::new()),
+                        Err(st) => {
+                            io_stats::record_read(req.fh, 0, true);
+                            (st, Vec::new())
+                        }
                     }
                 }
             }
@@ -123,7 +161,10 @@ pub fn dispatch_director(
         },
         OP_CLOSE => match decode_close_req(payload) {
             Some(fh) => match director.close(fh) {
-                Ok(()) => (ST_OK, Vec::new()),
+                Ok(()) => {
+                    io_stats::record_close(fh);
+                    (ST_OK, Vec::new())
+                }
                 Err(st) => (st, Vec::new()),
             },
             None => (ST_BAD_REQUEST, Vec::new()),

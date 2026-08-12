@@ -54,6 +54,15 @@ impl Director {
         Ok(())
     }
 
+    /// Drop all mounts (used when a session rebuilds composition).
+    pub fn clear_mounts(&self) -> Result<(), i32> {
+        self.mounts
+            .lock()
+            .map_err(|_| map_io_err())?
+            .clear();
+        Ok(())
+    }
+
     pub fn getattr(&self, path: &str) -> Result<Option<Stat>, i32> {
         let path = normalize(path).map_err(|_| bad_request())?;
         let mounts = self.mounts.lock().map_err(|_| map_io_err())?;

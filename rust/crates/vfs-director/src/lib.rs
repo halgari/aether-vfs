@@ -9,25 +9,22 @@
 //!
 //! Host `open`/`read` exist for occasional inspection only.
 //!
-//! C ABI: see `include/vfs.h` (`vfs_director_*`, `vfs_launch`).
-//!
 //! Backend trait lives in [`vfs_protocol`] (ops module) so zip stays free of host deps.
 
 #![deny(unsafe_code)]
 
 pub mod director;
 pub mod disk;
+pub mod io_stats;
 pub mod ipc;
 pub mod ops;
 pub mod path;
 pub mod ring_dispatch;
 pub mod session;
 
-#[allow(unsafe_code)]
-pub mod ffi;
-
 pub use director::Director;
 pub use disk::DiskBackend;
+pub use io_stats::{mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report};
 pub use ops::{Backend, BackendHandle, DirEntry, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
 pub use session::{LaunchOpts, Session};
 
@@ -69,6 +66,19 @@ mod tests {
         s.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
         let got = s.read_file("a.bin").unwrap();
         assert_eq!(got, b"xyz");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_mounts_drops_visibility() {
+        let dir = std::env::temp_dir().join(format!("vfs-clear-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("x.txt"), b"x").unwrap();
+        let d = Director::new();
+        d.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
+        assert!(d.getattr("x.txt").unwrap().is_some());
+        d.clear_mounts().unwrap();
+        assert!(d.getattr("x.txt").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

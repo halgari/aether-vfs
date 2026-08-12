@@ -1,18 +1,27 @@
 //! Host session: configure mounts + paths, serve IPC, **launch a process** with
 //! all NT I/O under the virtual root remapped through this director.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::director::Director;
 use crate::ipc::IpcServe;
 use crate::ops::{Backend, OPEN_READ};
 
+/// Serializes process-global env mutation around [`Session::launch`].
+///
+/// `CreateProcessW` inherits the parent's environment (null env block), and
+/// `IpcServe::apply_env` / `run_target_with_shim` both set process-wide `VFS_*`
+/// vars. A multi-session daemon must not interleave two launches.
+static LAUNCH_ENV_LOCK: Mutex<()> = Mutex::new(());
+
 /// Options for [`Session::launch`].
 #[derive(Clone, Debug)]
 pub struct LaunchOpts {
-    /// Virtual image path under the managed root (e.g. `SkyrimSE.exe` or `skse64_loader.exe`).
+    /// Virtual image path under the managed root (e.g. `SkyrimSE.exe`), or an
+    /// absolute host path when [`Self::hollow_pe`] is false (fixtures / tools).
     pub image: String,
     pub args: Vec<String>,
     /// Wait for process exit (false = detach; session must stay alive).
@@ -22,6 +31,10 @@ pub struct LaunchOpts {
     /// Optional override paths for shim/payload DLLs (else search near this exe).
     pub shim_dll: Option<String>,
     pub payload_dll: Option<String>,
+    /// Extra environment variables for the child only. Applied under a process
+    /// lock around launch and restored afterward so they do not leak into the
+    /// host / other sessions.
+    pub env: BTreeMap<String, String>,
 }
 
 impl Default for LaunchOpts {
@@ -33,6 +46,7 @@ impl Default for LaunchOpts {
             hollow_pe: true,
             shim_dll: None,
             payload_dll: None,
+            env: BTreeMap::new(),
         }
     }
 }
@@ -86,6 +100,11 @@ impl Session {
 
     pub fn mount(&self, prefix: &str, backend: Arc<dyn Backend>) -> Result<(), i32> {
         self.kernel.mount(prefix, backend)
+    }
+
+    /// Drop all mounts before rebuilding composition.
+    pub fn clear_mounts(&self) -> Result<(), i32> {
+        self.kernel.clear_mounts()
     }
 
     /// Mount a Stored zip archive as a content backend (later mounts win on conflicts).
@@ -157,9 +176,11 @@ impl Session {
         ipc.write_thin_config(&thin, &root_s)?;
         ipc.apply_env(&root_s, &thin);
 
-        // Minimal shim.cfg (FUSE path is env-driven; snapshot optional).
+        // Minimal shim.cfg (FUSE path is env-driven). The snapshot must still be a
+        // valid empty tree: Engine::build rejects zero-length snapshot bytes, which
+        // would abort dual-layer bootstrap before hooks install.
         let overlay_s = self.overlay.to_string_lossy().into_owned();
-        let snap: Vec<u8> = Vec::new();
+        let snap = empty_tree_snapshot();
         let config_bytes =
             vfs_shim::encode_config_with_overlay(&root_s, &overlay_s, &snap);
         let _ = std::fs::write(self.state_dir.join("shim.cfg"), config_bytes);
@@ -172,6 +193,10 @@ impl Session {
     /// Child sees remapped I/O for paths under `virtual_root`.
     ///
     /// Requires [`serve`] first. On `wait: false`, keep this `Session` alive.
+    ///
+    /// When `hollow_pe` is false and `image` is an absolute path, the host file
+    /// is launched directly (fixtures / tools). Relative images resolve under
+    /// the virtual root.
     pub fn launch(&self, opts: &LaunchOpts) -> Result<i32, String> {
         let ipc = self
             .ipc
@@ -179,41 +204,121 @@ impl Session {
             .ok_or_else(|| "serve() before launch()".to_string())?;
 
         let root_s = self.virtual_root.to_string_lossy().into_owned();
-        let target = self.virtual_root.join(&opts.image);
+        let image_path = Path::new(&opts.image);
+        // Hollow DRM path: prefer absolute host image (Steam library exe) so
+        // CreateProcess cmdline / ProcessImageFileName stay in-library.
+        // Non-hollow absolute paths (fixtures) launch that host file directly.
+        let target = if image_path.is_absolute() {
+            image_path.to_path_buf()
+        } else if opts.hollow_pe {
+            if let Ok(host) = std::env::var("VFS_HOLLOW_HOST") {
+                let hp = PathBuf::from(&host);
+                if hp.is_file() {
+                    hp
+                } else {
+                    self.virtual_root.join(&opts.image)
+                }
+            } else {
+                self.virtual_root.join(&opts.image)
+            }
+        } else {
+            self.virtual_root.join(&opts.image)
+        };
         let config_path = self.state_dir.join("shim.cfg");
         let ready_path = self.state_dir.join("ready.flag");
         let _ = std::fs::remove_file(&ready_path);
 
         let (dll, payload) = locate_shim_payload(opts)?;
+        // Remote LoadLibrary resolves relative to the *child* cwd (managed root,
+        // which is intentionally empty). Always use absolute DLL paths.
+        // Strip the `\\?\` verbatim prefix — some LoadLibrary paths reject it.
+        let strip_verbatim = |s: String| {
+            s.strip_prefix(r"\\?\")
+                .map(|t| t.to_string())
+                .unwrap_or(s)
+        };
+        let dll = strip_verbatim(
+            std::fs::canonicalize(&dll)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(dll),
+        );
+        let payload = strip_verbatim(
+            std::fs::canonicalize(&payload)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(payload),
+        );
+        let config_path_s = strip_verbatim(
+            std::fs::canonicalize(&config_path)
+                .unwrap_or(config_path.clone())
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let ready_path_s = ready_path.to_string_lossy().into_owned();
+
         let pe_bytes = if opts.hollow_pe {
+            // Image may be an absolute Steam-library path for DRM; PE is still
+            // read from the VFS by basename (zip content), not from that path.
+            let vpath = Path::new(&opts.image)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(opts.image.as_str())
+                .replace('\\', "/");
+            let vpath = vpath.trim_start_matches('/');
+            eprintln!("vfs-director: reading PE {vpath} from VFS for hollow…");
             Some(
-                self.read_file(&opts.image.replace('\\', "/"))
-                    .map_err(|e| format!("read PE from VFS {}: status {e}", opts.image))?,
+                self.read_file(vpath)
+                    .map_err(|e| format!("read PE from VFS {vpath}: status {e}"))?,
             )
         } else {
             None
         };
+        if let Some(ref pe) = pe_bytes {
+            eprintln!("vfs-director: PE {} bytes; shim={dll}", pe.len());
+        }
 
-        // Ensure env still points at this IPC (in case host changed process env).
+        // Serialize env mutation: ring env + per-child fixture vars inherit via
+        // CreateProcessW(null environment).
+        let _guard = LAUNCH_ENV_LOCK
+            .lock()
+            .map_err(|_| "launch env lock poisoned".to_string())?;
+
         let thin = self.state_dir.join("fuse.cfg");
         ipc.apply_env(&root_s, &thin);
+
+        let mut saved: Vec<(String, Option<String>)> = Vec::with_capacity(opts.env.len());
+        for (k, v) in &opts.env {
+            saved.push((k.clone(), std::env::var(k).ok()));
+            std::env::set_var(k, v);
+        }
+
+        let ready_timeout = std::env::var("VFS_READY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(180));
 
         let exit = vfs_inject::run_target_with_shim(vfs_inject::RunConfig {
             target_exe: target.to_string_lossy().into_owned(),
             args: opts.args.clone(),
             current_dir: Some(root_s),
             dll_path: dll,
-            config_path: config_path.to_string_lossy().into_owned(),
-            ready_path: ready_path.to_string_lossy().into_owned(),
-            ready_timeout: Duration::from_secs(120),
+            config_path: config_path_s,
+            ready_path: ready_path_s.clone(),
+            ready_timeout,
             payload_path: payload,
             preinit_redirects: vec![],
             detach: !opts.wait,
             target_pe_bytes: pe_bytes,
-        })
-        .map_err(|e| format!("launch: {e:?}"))?;
+        });
 
-        Ok(exit)
+        for (k, old) in saved {
+            match old {
+                Some(v) => std::env::set_var(&k, v),
+                None => std::env::remove_var(&k),
+            }
+        }
+
+        exit.map_err(|e| format!("launch: {e:?}"))
     }
 
     pub fn stop_serve(&mut self) {
@@ -226,6 +331,55 @@ impl Session {
 impl Default for Session {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Protocol golden `empty-tree-snapshot`: a single empty root directory.
+/// Kept inline so `vfs-director` does not need the vfs-core bridge just for this.
+const EMPTY_TREE_SNAPSHOT_HEX: &str = "\
+535346560100000000000000000000008000000000000000010000003000000000000000\
+800000000000000080000000000000000000000080000000000000000000000000000000\
+800000000000000000000000000000000000000000000000000000000000000000000000\
+0000000000000000000000000000000000000000";
+
+fn empty_tree_snapshot() -> Vec<u8> {
+    let hex = EMPTY_TREE_SNAPSHOT_HEX.as_bytes();
+    debug_assert_eq!(
+        hex.len(),
+        256,
+        "empty-tree golden must be 128 bytes (256 hex chars)"
+    );
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let mut i = 0;
+    while i + 1 < hex.len() {
+        let hi = from_hex(hex[i]);
+        let lo = from_hex(hex[i + 1]);
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    out
+}
+
+fn from_hex(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn empty_tree_snapshot_is_valid_header() {
+        let snap = empty_tree_snapshot();
+        assert_eq!(snap.len(), 128);
+        // MAGIC "SSFV" little-endian = 0x5646_5353
+        assert_eq!(&snap[0..4], &[0x53, 0x53, 0x46, 0x56]);
+        assert_eq!(u32::from_le_bytes(snap[4..8].try_into().unwrap()), 1);
     }
 }
 

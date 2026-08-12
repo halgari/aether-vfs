@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package vfs.source;
+
+// Out-of-process source plugin contract (mirrors Backend ops).
+service Source {
+  rpc GetAttr(GetAttrReq) returns (GetAttrResp);
+  rpc ReadDir(ReadDirReq) returns (ReadDirResp);
+  rpc Open(OpenReq) returns (OpenResp);
+  rpc Read(ReadReq) returns (ReadResp);
+  rpc Release(ReleaseReq) returns (Empty);
+}
+
+message Empty {}
+
+message GetAttrReq { string path = 1; }
+message GetAttrResp {
+  bool found = 1;
+  bool is_dir = 2;
+  uint64 size = 3;
+  int64 mtime = 4;
+  int32 status = 5; // 0 = ok, negative = protocol ST_*
+}
+
+message ReadDirReq { string path = 1; }
+message DirEnt {
+  string name = 1;
+  bool is_dir = 2;
+  uint64 size = 3;
+  int64 mtime = 4;
+}
+message ReadDirResp {
+  repeated DirEnt entries = 1;
+  int32 status = 2;
+}
+
+message OpenReq {
+  string path = 1;
+  uint32 flags = 2;
+}
+message OpenResp {
+  uint64 handle = 1;
+  uint64 size = 2;
+  bool is_dir = 3;
+  uint64 file_id = 4;
+  int32 status = 5;
+}
+
+message ReadReq {
+  uint64 handle = 1;
+  uint64 offset = 2;
+  uint32 len = 3;
+}
+message ReadResp {
+  bytes data = 1;
+  int32 status = 2;
+}
+
+message ReleaseReq { uint64 handle = 1; }

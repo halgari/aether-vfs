@@ -1,0 +1,29 @@
+[package]
+name = "vfs-source"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Source facade: Backend builders, gRPC SourceService, conformance suite"
+
+[lib]
+name = "vfs_source"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vfs-source-plugin"
+path = "src/bin/vfs-source-plugin.rs"
+
+[dependencies]
+vfs-protocol = { path = "../vfs-protocol" }
+vfs-director = { path = "../vfs-director" }
+vfs-zip = { path = "../vfs-zip" }
+vfs-control = { path = "../vfs-control" }
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+clap = { version = "4", features = ["derive"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+protoc-bin-vendored = "3"

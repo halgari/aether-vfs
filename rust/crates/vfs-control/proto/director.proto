@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package vfs.director;
+
+// ── Control-plane service ────────────────────────────────────────────────────
+// A per-user daemon holds many sessions. A client creates a session, adds source
+// mappings, then launches an executable tied to that session. Read-only phase.
+service Director {
+  rpc Health(HealthReq) returns (HealthResp);
+  rpc CreateSession(CreateSessionReq) returns (Session);
+  rpc AddSource(AddSourceReq) returns (SourceRef);
+  rpc Launch(LaunchReq) returns (stream LaunchEvent);
+  rpc TeardownSession(TeardownReq) returns (Empty);
+  rpc ListSessions(Empty) returns (SessionList);
+  rpc Stats(Empty) returns (StatsResp);
+}
+
+message Empty {}
+
+message HealthReq {}
+message HealthResp {
+  string version = 1;
+  uint32 sessions = 2;
+}
+
+message CreateSessionReq {
+  string name = 1; // optional label
+}
+message Session {
+  string id = 1;
+  string name = 2;
+  string root = 3; // daemon-chosen virtual root; address files as <root>/<path>
+}
+message SessionList {
+  repeated Session sessions = 1;
+}
+
+// A declarative source. Read-only phase wires disk + zip; http/remote reserved.
+message SourceSpec {
+  oneof kind {
+    DiskSource disk = 1;
+    ZipSource zip = 2;
+    HttpSource http = 3;
+    RemoteSource remote = 4;
+  }
+}
+message DiskSource { string path = 1; }
+message ZipSource { string path = 1; }
+message HttpSource { string url = 1; }
+message RemoteSource { string endpoint = 1; }
+
+message AddSourceReq {
+  string session_id = 1;
+  SourceSpec source = 2;
+  string mount = 3; // virtual prefix, e.g. "/"
+  int32 layer = 4;  // precedence; higher wins on same path
+}
+message SourceRef {
+  uint64 id = 1;
+}
+
+message LaunchReq {
+  string session_id = 1;
+  string exec = 2;            // image path under the virtual root
+  repeated string args = 3;
+  bool wait = 4;
+  bool hollow_pe = 5;
+  map<string, string> env = 6; // per-child environment (must not leak to the daemon)
+}
+message LaunchEvent {
+  oneof event {
+    Started started = 1;
+    Exited exited = 2;
+    LogLine log = 3;
+  }
+}
+message Started { uint32 pid = 1; }
+message Exited { int32 code = 1; }
+message LogLine { string line = 1; }
+
+message TeardownReq {
+  string session_id = 1;
+}
+
+// Block-cache metrics (M2).
+message StatsResp {
+  uint64 cache_hits = 1;
+  uint64 cache_misses = 2;
+  uint64 cache_evicts = 3;
+  uint64 cache_disk_hits = 4;
+  uint64 cache_bytes_from_cache = 5;
+  uint64 cache_bytes_from_source = 6;
+  uint64 cache_ram_bytes = 7;
+  uint32 sessions = 8;
+}

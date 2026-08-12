@@ -52,13 +52,26 @@ s.launch(&LaunchOpts {
 })?;
 ```
 
-C headers: `crates/vfs-director/include/vfs.h` (`vfs_director_*`, `vfs_launch`).
+Control plane is gRPC-only (the in-process C ABI was removed). Prefer the
+`vfs` CLI / `vfs-directord` daemon:
+
+```powershell
+cargo run -p vfs-directord -- daemon
+cargo run -p vfs-directord -- up --config scenario.toml
+```
 
 ## Workspace
 
 Rust 2021 Cargo workspace. `panic = "abort"` is workspace-wide for the `no_std` early payload.
 
-Private development: `github.com/halgari/vfs`.
+| Crate | Role |
+|-------|------|
+| `vfs-directord` | Daemon + `vfs` CLI |
+| `vfs-control` | gRPC control proto + scenario config |
+| `vfs-source` | Source builders + out-of-proc SourceService |
+| `vfs-compose` | Layered / router / overlay composition |
+| `vfs-cache` | Block cache |
+| `vfs-director` | Kernel + Session + inject launch |
 
 ## License
 
