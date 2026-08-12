@@ -718,7 +718,7 @@ fn pe_layout(raw: &[u8]) -> Result<(Vec<u8>, u64, u32, usize), &'static str> {
     Ok((img, base, entry_rva, size_of_image))
 }
 
-fn is_system_import_dll(name: &str) -> bool {
+pub fn is_system_import_dll(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     let base = std::path::Path::new(&n)
         .file_name()

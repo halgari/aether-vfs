@@ -21,6 +21,7 @@ pub mod ops;
 pub mod path;
 pub mod ring_dispatch;
 pub mod session;
+pub mod stage;
 
 pub use director::Director;
 pub use disk::DiskBackend;

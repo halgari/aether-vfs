@@ -32,6 +32,31 @@ fn main() {
     }
 }
 
+/// Reads whole files out of the composed VFS for [`vfs_director::stage`].
+struct KernelSource<'a>(&'a Session);
+
+impl vfs_director::stage::ImageSource for KernelSource<'_> {
+    fn read(&self, vpath: &str) -> Option<Vec<u8>> {
+        let k = self.0.kernel();
+        let (fh, size, _) = k.open(vpath, vfs_protocol::OPEN_READ).ok()?;
+        let mut buf = vec![0u8; size as usize];
+        let mut off = 0usize;
+        while off < buf.len() {
+            match k.read(fh, off as u64, &mut buf[off..]) {
+                Ok(0) => break,
+                Ok(n) => off += n,
+                Err(_) => {
+                    let _ = k.close(fh);
+                    return None;
+                }
+            }
+        }
+        let _ = k.close(fh);
+        buf.truncate(off);
+        Some(buf)
+    }
+}
+
 fn run() -> Result<(), String> {
     let zip_path = env_path("VFS_SKYRIM_ZIP", r"C:\tmp\skyrimse.zip");
     let data = env_path("VFS_SKYRIM_DATA", r"C:\tmp\skyrim-data");
@@ -44,31 +69,29 @@ fn run() -> Result<(), String> {
         return Err(format!("zip not found: {}", zip_path.display()));
     }
 
-    // Hollow host: Steam library SkyrimSE.exe under the *canonical* installdir
-    // that appmanifest_489830.acf records ("Skyrim Special Edition"). Running
-    // from a renamed `_Skyrim...` path makes Steam fail path association and
-    // hand off to steam://run (UI reopen / Remote Play). Ensure a junction if
-    // only the underscore folder exists.
-    let host = resolve_hollow_host()?;
-    let host_dir = Path::new(&host)
-        .parent()
-        .ok_or_else(|| "VFS_HOLLOW_HOST has no parent dir".to_string())?
-        .to_path_buf();
-    std::env::set_var("VFS_HOLLOW_HOST", &host);
+    // The hollow host is staged from the zip just before launch (see
+    // `stage_launch` below), so no Steam install is required or consulted.
+    // Measured 2026-08-12: with the Steam library deleted entirely, the game
+    // runs and DRM passes from a host under C:\tmp — Steam associates the
+    // process via steam_appid.txt and the running client, not the image path.
+    // `VFS_HOLLOW_HOST` still overrides, for bisecting against a real install.
+    let preset_host = std::env::var("VFS_HOLLOW_HOST").ok().filter(|h| Path::new(h).is_file());
 
-    // Virtual root MUST be the Steam install directory (not C:\tmp\skyrim-runtime).
-    // The game resolves Data/ relative to the real exe image path. Serving the zip
-    // under that path keeps steam_api in-library and stops Remote Play / relaunch.
+    // Managed root: never the Steam tree. Content is served here from the zip.
     let root = if let Some(r) = std::env::var_os("VFS_SKYRIM_ROOT") {
         PathBuf::from(r)
     } else {
-        host_dir.clone()
+        PathBuf::from(r"C:\tmp\skyrim-runtime")
     };
+    let stage_root = data.join("stage");
 
     eprintln!("skyrim-live");
     eprintln!("  zip:       {}", zip_path.display());
-    eprintln!("  hollow:    {host}");
-    eprintln!("  root:      {}  (Steam install / VFS root)", root.display());
+    match &preset_host {
+        Some(h) => eprintln!("  hollow:    {h}  (VFS_HOLLOW_HOST override)"),
+        None => eprintln!("  hollow:    staged from zip into {}", stage_root.display()),
+    }
+    eprintln!("  root:      {}  (managed VFS root)", root.display());
     eprintln!("  overrides: {}", overrides.display());
     eprintln!("  saves:     {}", saves.display());
     eprintln!("  profiles:  {}", profiles.display());
@@ -194,17 +217,54 @@ fn run() -> Result<(), String> {
     }
 
     session.serve().map_err(|e| format!("serve: {e}"))?;
-    eprintln!("  IPC serving; launching via Steam host (zip PE hollow)…");
+
+    // ── stage the launch directory ─────────────────────────────────────────
+    // CreateProcess needs a real on-disk image, and the loader resolves the
+    // EXE's static imports before our shim exists. Export just that closure;
+    // everything else stays virtual. `_staged` must outlive the child — its
+    // Drop removes the directory, and the EXE is mapped while the game runs.
+    let _staged;
+    let host = match preset_host {
+        Some(h) => h,
+        None => {
+            std::fs::create_dir_all(&stage_root)
+                .map_err(|e| format!("mkdir {}: {e}", stage_root.display()))?;
+            let swept = vfs_director::stage::sweep_stale(&stage_root);
+            if swept > 0 {
+                eprintln!("  reclaimed {swept} stale staging dir(s)");
+            }
+            let staged = vfs_director::stage::stage_launch(
+                &KernelSource(&session),
+                "SkyrimSE.exe",
+                &stage_root,
+                &std::process::id().to_string(),
+                // DirectX redistributables are static imports but ship with the
+                // DX runtime, not in the game archive.
+                &[data.join("dx-redist")],
+            )?;
+            eprintln!(
+                "  staged {} file(s) → {}: {}",
+                staged.staged().len(),
+                staged.dir().display(),
+                staged.staged().join(", ")
+            );
+            let exe = staged.exe().to_string_lossy().into_owned();
+            std::env::set_var("VFS_HOLLOW_HOST", &exe);
+            _staged = staged;
+            exe
+        }
+    };
+
+    eprintln!("  IPC serving; launching staged host (zip PE hollow)…");
     eprintln!("  writes under the game root land in {}", overrides.display());
     eprintln!("  saves → {}", saves.display());
     eprintln!("  profiles/inis → {}", profiles.display());
-    eprintln!("  (reading PE for hollow — ~37MB from zip; may take a few seconds)");
 
     // Preflight host open/read is not ring I/O — reset so post-launch stats are clean.
     vfs_director::io_stats_reset();
 
-    // Launch image = real Steam path so cmdline/ProcessImageFileName stay in-library.
-    // PE bytes still come from the zip VFS (hollow_pe).
+    // The staged EXE *is* the zip's image, so the hollow host matches the target
+    // byte for byte and inherits the loader's TLS / .pdata / LDR metadata.
     let wait = std::env::var("VFS_WAIT").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
     let code = session.launch(&LaunchOpts {
         image: host.clone(),
