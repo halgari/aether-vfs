@@ -1182,27 +1182,50 @@ pub unsafe fn preload_remote_import_dlls(
             }
             b
         } else {
+            // Prefer letting the *loader* map it: LoadLibrary of a path the
+            // shim serves means ntdll builds a real LDR_DATA_TABLE_ENTRY, so
+            // the module can locate itself (GetModuleHandle/GetModuleFileName)
+            // and spoof_remote_ldr_module_path has an entry to rewrite. The
+            // manual-map fallback below produces no LDR entry at all.
             let mut bound = None;
             for dir in &search_dirs {
                 let full = format!("{dir}\\{name}");
-                if let Some(b) = remote_load_library_path(process, load_start, &full) {
-                    if let Ok(path) = remote_module_path(process, name) {
-                        if path.to_ascii_lowercase().contains("gamelayers") {
-                            eprintln!(
-                                "vfs-inject: zip-path LoadLibrary {name} -> 0x{b:x} path={path} (source={src})"
-                            );
-                            bound = Some(b);
-                            break;
-                        }
+                let Some(b) = remote_load_library_path(process, load_start, &full) else {
+                    continue;
+                };
+                // Accept when the loader resolved it inside the root we asked
+                // for. This used to require the path to contain "gamelayers",
+                // so a managed root such as C:\tmp\skyrim-runtime fell through
+                // to the manual map even though LoadLibrary had succeeded —
+                // which is why zip-served steam_api64 got no LDR entry and
+                // SteamAPI_Init hung at startup.
+                match remote_module_path(process, name) {
+                    Ok(path)
+                        if path
+                            .to_ascii_lowercase()
+                            .starts_with(&dir.to_ascii_lowercase()) =>
+                    {
+                        eprintln!(
+                            "vfs-inject: zip-path LoadLibrary {name} -> 0x{b:x} path={path} (source={src})"
+                        );
+                        bound = Some(b);
+                        break;
                     }
+                    Ok(path) => eprintln!(
+                        "vfs-inject: LoadLibrary {name} resolved outside {dir} (path={path}); not binding"
+                    ),
+                    Err(_) => {}
                 }
             }
             match bound {
                 Some(b) => b,
                 None => {
                     let b = map_remote_dll_from_pe_ex(process, &pe, name, true)?;
+                    // No LDR entry: fine for a DLL the game only calls through
+                    // the IAT, fatal for one that looks itself up.
                     eprintln!(
-                        "vfs-inject: manual-mapped zip PE {name} -> 0x{b:x} ({} bytes, source={src})",
+                        "vfs-inject: manual-mapped zip PE {name} -> 0x{b:x} ({} bytes, source={src}); \
+                         WARNING no LDR entry — self-locating DLLs will fail",
                         pe.len()
                     );
                     b
