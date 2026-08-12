@@ -767,11 +767,40 @@ fn game_local_search_dirs() -> Vec<String> {
     d
 }
 
+/// Whether `steam_api*.dll` must stay the host-install copy rather than being
+/// served from the zip.
+///
+/// Value-aware on purpose: this used to be a bare `var_os(..).is_some()`, so
+/// `VFS_KEEP_HOST_STEAM_API=0` still read as *on* and there was no way to turn
+/// it off. Setting it to `0`/`false`/`no` lets a neutral hollow host get past
+/// the IAT failure (`map.rs` "remote module not found") when there is no host
+/// copy beside the image.
+///
+/// **Turning it off does not currently yield a playable game.** Measured
+/// 2026-08-12 with a neutral host: the zip `steam_api64.dll` is *manual-mapped*,
+/// so it gets no LDR entry ("LDR path spoof failed: LDR entry not found"),
+/// `GetModuleHandle`/`GetModuleFileName` cannot see it, and the process hangs at
+/// startup — 0s CPU, one director open, no BSA ever read. Contrast
+/// `bink2w64.dll`, which is real-`LoadLibrary`'d through the shim and *does* get
+/// its LDR path spoofed. Serving steam_api from the zip needs that same
+/// LoadLibrary-then-overwrite route, not a manual map.
+pub fn keep_host_steam_api() -> bool {
+    match std::env::var("VFS_KEEP_HOST_STEAM_API") {
+        Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("no")),
+        Err(_) => false,
+    }
+}
+
 /// Read game-local PE bytes without extracting archive content to disk.
 ///
 /// Prefer direct Stored-zip window reads from layer zips (no parent-hook
-/// dependency; avoids parent AV when VFS Serve is mid-bootstrap). Optionally
-/// falls back to parent `std::fs::read` of managed-root paths.
+/// dependency; avoids parent AV when VFS Serve is mid-bootstrap).
+///
+/// Falls back to a plain `std::fs::read` of `search_dirs`. That is a **real
+/// filesystem read**, not a VFS one — if `search_dirs` points at the game
+/// install, the PE comes off host disk and the zip is bypassed entirely. The
+/// returned source is labelled `disk:` so that shows up in the log instead of
+/// hiding behind a `vfs:` prefix.
 ///
 /// Returns `(bytes, source_description)`.
 fn read_game_local_pe(name: &str, search_dirs: &[String]) -> Result<(Vec<u8>, String), &'static str> {
@@ -784,8 +813,8 @@ fn read_game_local_pe(name: &str, search_dirs: &[String]) -> Result<(Vec<u8>, St
         let p = format!("{dir}\\{name}");
         match std::fs::read(&p) {
             Ok(b) if pe_looks_like_image(&b) && b.len() > 512 => {
-                eprintln!("vfs-inject: game-local {name} from vfs:{p} ({} bytes)", b.len());
-                return Ok((b, format!("vfs:{p}")));
+                eprintln!("vfs-inject: game-local {name} from disk:{p} ({} bytes)", b.len());
+                return Ok((b, format!("disk:{p}")));
             }
             _ => {}
         }
@@ -931,7 +960,7 @@ pub unsafe fn preload_remote_import_dlls(
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(name);
-        if std::env::var_os("VFS_KEEP_HOST_STEAM_API").is_some()
+        if keep_host_steam_api()
             && (base_name.eq_ignore_ascii_case("steam_api64.dll")
                 || base_name.eq_ignore_ascii_case("steam_api.dll"))
         {
@@ -3530,14 +3559,52 @@ mod tests {
         assert!(pe_looks_like_image(&bytes), "must be MZ PE");
         assert!(bytes.len() > 10_000);
         assert!(
-            src.contains("zip-window:") || src.starts_with("vfs:"),
-            "source must be zip/vfs, got {src}"
+            src.contains("zip-window:") || src.starts_with("disk:"),
+            "source must be a zip window or a labelled disk read, got {src}"
         );
-        assert!(!src.to_ascii_lowercase().contains("steamapps"));
+        // The disk fallback must never resolve into the Steam install: that
+        // silently bypasses the zip (see the `disk:` note on read_game_local_pe).
+        assert!(!src.to_ascii_lowercase().contains("steamapps"), "source={src}");
         // bink too
         let (bink, bsrc) = read_game_local_pe("bink2w64.dll", &[]).expect("bink zip PE");
         assert!(pe_looks_like_image(&bink));
-        assert!(bsrc.contains("zip-window:") || bsrc.starts_with("vfs:"));
+        assert!(bsrc.contains("zip-window:") || bsrc.starts_with("disk:"));
+        assert!(!bsrc.to_ascii_lowercase().contains("steamapps"), "source={bsrc}");
+    }
+
+    /// The `search_dirs` fallback is a real `std::fs::read`, so it must be
+    /// labelled `disk:` — a `vfs:` prefix there hid host-disk PE loads in the
+    /// log and made a zip bypass look like a VFS hit.
+    #[test]
+    fn game_local_pe_disk_fallback_is_labelled_disk_not_vfs() {
+        let dir = std::env::temp_dir().join(format!(
+            "vfs-pe-label-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Minimal thing read_game_local_pe accepts: MZ and >512 bytes.
+        let mut pe = vec![0u8; 1024];
+        pe[0] = b'M';
+        pe[1] = b'Z';
+        let name = "vfs-label-probe.dll";
+        std::fs::write(dir.join(name), &pe).unwrap();
+
+        let (bytes, src) =
+            read_game_local_pe(name, &[dir.to_string_lossy().into_owned()]).expect("disk PE");
+
+        assert_eq!(bytes.len(), 1024);
+        assert!(
+            src.starts_with("disk:"),
+            "disk fallback must be labelled disk:, got {src}"
+        );
+        assert!(
+            !src.starts_with("vfs:"),
+            "disk read must not claim to be a VFS read, got {src}"
+        );
+        assert!(src.contains(name), "source should name the file, got {src}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

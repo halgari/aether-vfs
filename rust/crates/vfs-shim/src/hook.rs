@@ -45,6 +45,52 @@ fn allow_disk_fallthrough() -> bool {
     })
 }
 
+/// Whether `steam_api*.dll` stays the host-install copy (excepted from the
+/// director) rather than being served from the zip.
+///
+/// Must agree with `vfs_inject::keep_host_steam_api` — if the shim tramps the
+/// open to disk while vfs-inject expects a zip-served module (or vice versa),
+/// the IAT cannot be resolved and hollow fails with "remote module not found".
+///
+/// Unset defaults to **true** here (unlike vfs-inject, which defaults false):
+/// this exception used to be unconditional, so anything launching the shim
+/// without setting the variable must keep seeing the host copy.
+fn keep_host_steam_api() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| match std::env::var("VFS_KEEP_HOST_STEAM_API") {
+        Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("no")),
+        Err(_) => true,
+    })
+}
+
+/// Experiment switch: when `VFS_FUSE_SKYRIM_EXE=1`, serve `SkyrimSE.exe`
+/// through the director instead of excepting it to the host install.
+///
+/// **Measured 2026-08-12** (launch → main menu, `VFS_DRM_EXE_LOG` set): the
+/// game process never opens `SkyrimSE.exe` through `try_fuse_create` at all —
+/// the trace file was not created in either mode, and both runs reached the
+/// menu with DRM satisfied and no "Steam Error". So this exception is inert on
+/// the startup path and is *not* what fixes the historical symptom.
+///
+/// What actually needs the on-disk exe is outside this hook: `CreateProcess`
+/// of the host image, and Steam's own path association (the client is a
+/// separate, un-injected process, so our hooks cannot affect what it reads).
+/// That association is what `ensure_canonical_skyrim_installdirs` addresses.
+///
+/// Kept default-**off** rather than deleted: the trace only covers startup, and
+/// the recorded explanation for the original failure was wrong ("Steam hashes
+/// the on-disk PE" — it does not; hollow rewrites the whole loaded image and
+/// DRM still passes), so the real trigger may lie on a path not yet exercised.
+/// Only `SkyrimSE.exe` is affected; steam_api*, steam_appid.txt and the
+/// launcher stay excepted.
+fn fuse_skyrim_exe() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| match std::env::var("VFS_FUSE_SKYRIM_EXE") {
+        Ok(v) => v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"),
+        Err(_) => false,
+    })
+}
+
 use retour::RawDetour;
 use vfs_redirect::{
     nt_to_volume_relative, parse_full_dir_info, write_dir_info, write_file_name_info, AttrDecision,
@@ -676,21 +722,45 @@ unsafe fn try_fuse_create(
     // DRM / identity exceptions (host Steam tree only — not Data/* content):
     // - steam_api*: SEC_IMAGE + client IPC
     // - steam_appid.txt: SteamAPI_Init / RestartAppIfNecessary
-    // - SkyrimSE.exe: Steam hashes the on-disk PE against the running process;
-    //   serving the zip image via FUSE here produced "Steam Error" while
-    //   hollow still injects zip PE from the director at launch.
+    // - SkyrimSE.exe / SkyrimSELauncher.exe: identity. Steam associates a
+    //   process with an app by its *image path* vs the appmanifest installdir,
+    //   and re-opens that path for version info / icon. Serving it through FUSE
+    //   was observed to produce "Steam Error"; the cause is an open that fails
+    //   to resolve (see tramp_create_abs and STATUS_OBJECT_NAME_NOT_FOUND on
+    //   FUSE-relative OA), not an integrity check.
+    //
+    //   Steam does NOT compare the in-memory image against the on-disk PE:
+    //   hollow overwrites the whole loaded image with zip PE bytes at a
+    //   relocated base and DRM still verifies fine. Do not "fix" anything here
+    //   on the theory that the mapped image must match disk.
     {
         let base = std::path::Path::new(&path)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("");
-        if base.eq_ignore_ascii_case("steam_api64.dll")
-            || base.eq_ignore_ascii_case("steam_api.dll")
-            || base.eq_ignore_ascii_case("steam_appid.txt")
-            || base.eq_ignore_ascii_case("SkyrimSE.exe")
+        if base.eq_ignore_ascii_case("steam_appid.txt")
             || base.eq_ignore_ascii_case("SkyrimSELauncher.exe")
         {
             return None; // tramp → host install next to the hollow image
+        }
+        // steam_api* follows the same policy vfs-inject uses. With a neutral
+        // hollow host there is no host copy beside the image, so trampling to
+        // disk here would just fail: serve it from the director instead.
+        if (base.eq_ignore_ascii_case("steam_api64.dll")
+            || base.eq_ignore_ascii_case("steam_api.dll"))
+            && keep_host_steam_api()
+        {
+            return None;
+        }
+        // SkyrimSE.exe is excepted the same way by default, but is the one we
+        // are still trying to explain — trace every open so the log shows who
+        // asks for it and how (FUSE-relative OA vs absolute).
+        if base.eq_ignore_ascii_case("SkyrimSE.exe") {
+            let via_director = fuse_skyrim_exe();
+            drm_exe_trace(&path, fuse_root_directory(oa), write, via_director);
+            if !via_director {
+                return None;
+            }
         }
     }
 
@@ -745,6 +815,40 @@ unsafe fn try_fuse_create(
             Some(STATUS_UNSUCCESSFUL)
         }
     }
+}
+
+/// Trace every `SkyrimSE.exe` open so the DRM exception can be explained rather
+/// than assumed. Set `VFS_DRM_EXE_LOG` to a file path.
+///
+/// `rel` marks a FUSE-relative OA (RootDirectory is a synthetic handle), which
+/// is the shape that previously failed with `STATUS_OBJECT_NAME_NOT_FOUND`.
+fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool, via_director: bool) {
+    let Some(path) = std::env::var_os("VFS_DRM_EXE_LOG").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
+    let line = format!(
+        "{}\tskyrimse-exe\troute={}\toa={}\taccess={}\t{}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        if via_director { "director" } else { "host" },
+        if rel { "fuse-relative" } else { "absolute" },
+        if write { "write" } else { "read" },
+        p
+    );
+    if !hook_reenter_begin() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+    hook_reenter_end();
 }
 
 /// Optional proof that opens went through the director (not host disk).

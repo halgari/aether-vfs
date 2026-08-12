@@ -112,7 +112,13 @@ fn run() -> Result<(), String> {
     eprintln!("  steam: AppId env cleared; steam_appid.txt=489830; client must stay running");
     // Keep host steam_api64 for DRM IPC only. All other game content must come
     // from the zip via the director — never open the Steam library tree.
-    std::env::set_var("VFS_KEEP_HOST_STEAM_API", "1");
+    //
+    // Default on, but honour an explicit setting. `VFS_KEEP_HOST_STEAM_API=0`
+    // serves steam_api* from the zip instead, which is what a neutral hollow
+    // host needs — there is no host copy beside the image to keep.
+    if std::env::var_os("VFS_KEEP_HOST_STEAM_API").is_none() {
+        std::env::set_var("VFS_KEEP_HOST_STEAM_API", "1");
+    }
     std::env::remove_var("VFS_ALLOW_DISK_FALLTHROUGH");
     std::env::remove_var("VFS_DISK_ONLY_ROOT");
     if let Some(p) = std::env::var_os("VFS_DIRECTOR_OPEN_LOG") {
