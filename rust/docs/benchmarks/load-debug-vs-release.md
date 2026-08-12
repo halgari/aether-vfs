@@ -220,3 +220,59 @@ Of the remaining ~1.7 s over native, ~0.72 s is pre-game work native never does
 is still the worst per call at 857.6 µs across 231 calls — the next thing to
 look at, worth ~0.2 s. Read-ahead remains second-order: 2484 reads now cost
 60.5 µs each.
+
+## NtQueryFullAttributesFile: not slow, just asleep
+
+After the server-side spin it was the worst hook at 819 µs/call. A mean hides
+which of two very different problems that is, so `hookstats` gained max and a
+`>1ms` stall count:
+
+```
+NtQueryFullAttributesFile   231 calls  0.189s  819.4 us/call  max 15.2ms  >1ms 16
+```
+
+`fuse_path_attr` issues exactly **one** `getattr` RPC — no more work than a
+read, which cost 60.3 µs. And 215 of 231 calls *were* that fast. Sixteen were
+not, with a 15.2 ms worst case, and those owned roughly **93% of the hook's
+total time**. 15.2 ms is the Windows timer quantum: the 819 µs "average"
+describes no call that ever happened.
+
+So the hook was never doing too much work — it was waiting on a sleeping
+director. The server-side spin covers a *burst*; once the ring goes quiet the
+director sleeps, and nothing woke it because the shim's client was
+`SpinNotifier`, whose `notify_server` is a no-op.
+
+### Fix: the client wakes the server
+
+`WakeServerSpinClient` (`vfs-shim/src/fuse_client.rs`) signals `VFS_SERVER_EV`
+on submit and still spins for the response — the response arrives in 20–209 µs,
+well below the cost of sleeping for it. Opening the event is best-effort; if it
+fails the ring falls back to the old timed wait.
+
+| hook | server-spin only | + client wakes server |
+|------|-----------------:|----------------------:|
+| `NtQueryFullAttributesFile` | 819.4 µs (max 15.2 ms, 16 stalls) | **28.5 µs** (max 0.1 ms, **0**) |
+| `NtQueryAttributesFile` | 363.0 µs (max 15.0 ms) | **23.0 µs** (max 0.1 ms) |
+| `NtCreateFile` | 108.2 µs (max 15.2 ms) | **26.2 µs** (max 0.4 ms) |
+| `NtReadFile` | 60.3 µs | **23.8 µs** |
+| **total in hooks** | 0.536 s | **0.180 s** |
+
+Every quantum stall outside `NtReadFile` is gone (3 remain there, max 19.6 ms —
+likely genuine disk on a large read, worth a look but small).
+
+### Cumulative
+
+| configuration | runs | mean |
+|---------------|------|-----:|
+| release, original | 9.79 / 10.61 / 10.61 | 10.34 s |
+| + server spin-then-wait | 2.72 / 2.75 / 2.76 | 2.74 s |
+| **+ client wakes server** | 2.29 / 1.51 / 2.30 / 2.28 / 2.42 / 1.63 | **2.07 s** |
+| native (no VFS) | 0.92 / 1.03 / 0.92 | 1.00 s |
+
+**10.34 s → 2.07 s, 5× overall.** Overhead against native is ~1.1 s, of which
+~0.72 s is pre-game work native never does (staging, inject, hollow) and 0.18 s
+is hook time — leaving very little on the table.
+
+Run-to-run spread widened (1.51–2.42 s vs 2.72–2.76 s before). Six runs are
+reported rather than three for that reason; the spread is worth understanding
+before chasing the remaining ~0.2 s.

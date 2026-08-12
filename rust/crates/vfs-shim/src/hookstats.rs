@@ -53,7 +53,16 @@ const NAMES: [&str; N] = [
 static CALLS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
 static NANOS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
 /// Calls that resolved to VFS content (rather than passing through to disk).
+/// Only meaningful for hooks that call `mark_rooted` — currently create/open.
 static ROOTED: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
+/// Slowest single call, and how many exceeded [`SLOW_NS`]. A mean cannot tell
+/// "every call is slow" from "a few calls stall on a cold wake", and those want
+/// opposite fixes — the first is per-call work, the second is wake latency.
+static MAX_NANOS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
+static SLOW: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
+/// Time above which a call is counted as stalled rather than served: well past
+/// any ring RPC (20–209 µs measured) and into scheduler-quantum territory.
+const SLOW_NS: u64 = 1_000_000;
 static REPORTER: AtomicBool = AtomicBool::new(false);
 
 /// Whether instrumentation is on, resolved once.
@@ -91,8 +100,13 @@ impl Drop for Timed {
     fn drop(&mut self) {
         let Some(start) = self.start else { return };
         let i = self.hook as usize;
+        let ns = start.elapsed().as_nanos() as u64;
         CALLS[i].fetch_add(1, Ordering::Relaxed);
-        NANOS[i].fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        NANOS[i].fetch_add(ns, Ordering::Relaxed);
+        if ns > SLOW_NS {
+            SLOW[i].fetch_add(1, Ordering::Relaxed);
+        }
+        MAX_NANOS[i].fetch_max(ns, Ordering::Relaxed);
         if self.rooted {
             ROOTED[i].fetch_add(1, Ordering::Relaxed);
         }
@@ -115,14 +129,24 @@ pub fn render() -> String {
         total_calls += c;
         total_nanos += ns;
         total_rooted += r;
+        let slow = SLOW[i].load(Ordering::Relaxed);
+        let max = MAX_NANOS[i].load(Ordering::Relaxed);
+        // Share of total time owned by the calls that stalled: if this is most
+        // of it, the mean is a wake-latency artefact, not per-call work.
+        let stall_share = if ns == 0 {
+            0.0
+        } else {
+            100.0 * (slow as f64 * SLOW_NS as f64) / ns as f64
+        };
         rows.push_str(&format!(
-            "  {:<28} {:>9} calls  {:>8.3}s  {:>7.1} us/call  rooted {:>7} ({:>4.1}%)\n",
+            "  {:<28} {:>7} calls {:>8.3}s {:>8.1} us/call  max {:>8.1}ms  >1ms {:>5} ({:>4.1}% min-share)\n",
             NAMES[i],
             c,
             ns as f64 / 1e9,
             (ns as f64 / c as f64) / 1000.0,
-            r,
-            100.0 * r as f64 / c as f64
+            max as f64 / 1e6,
+            slow,
+            stall_share
         ));
     }
     format!(

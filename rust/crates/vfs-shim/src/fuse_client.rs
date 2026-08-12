@@ -1,8 +1,12 @@
 //! Thin director FUSE client: ring + bulk arena + optional event wake.
 
+// Waking the director is a Win32 SetEvent on a handle we opened; the rest of
+// the crate stays unsafe-free.
+#![allow(unsafe_code)]
+
 use std::sync::{Mutex, OnceLock};
 
-use vfs_ipc::{Geom, RingClient, SpinNotifier};
+use vfs_ipc::{Geom, RingClient};
 use vfs_protocol::{
     decode_getattr_resp, decode_open_resp, decode_readdir_resp, decode_read_bulk_resp,
     decode_read_resp_into, decode_write_resp, encode_close_req, encode_mkdir_req, encode_open_req,
@@ -12,6 +16,11 @@ use vfs_protocol::{
     OP_READDIR, OP_RENAME, OP_SETATTR, OP_WRITE, OPEN_READ, OPEN_WRITE, ST_OK,
 };
 use vfs_win::SharedMapping;
+use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent};
+
+/// `EVENT_MODIFY_STATE` — all we need is `SetEvent`.
+const EVENT_MODIFY_STATE: u32 = 0x0002;
 
 static FUSE: OnceLock<FuseClient> = OnceLock::new();
 
@@ -71,15 +80,60 @@ const BULK_THRESHOLD: u32 = 64 * 1024;
 /// Deep pipeline for multi‑MiB sequential streams (CreateSection fill).
 const PIPELINE_DEPTH_STREAM: usize = 8;
 
+/// Wakes the director on submit, then spins for the response.
+///
+/// The client used to be a plain `SpinNotifier`, whose `notify_server` is a
+/// no-op — so `server_ev` was never signalled and a director that had gone to
+/// sleep only noticed the request when its timed wait expired at the 15.6 ms
+/// timer tick. Measured 2026-08-12: 16 of 231 `NtQueryFullAttributesFile` calls
+/// stalled that way and owned ~93% of that hook's total time, with a 15.2 ms
+/// worst case.
+///
+/// Spinning for the *response* stays right: it arrives in 20–209 µs, far below
+/// the cost of sleeping for it.
+struct WakeServerSpinClient {
+    server_ev: HANDLE,
+}
+
+impl vfs_ipc::Notifier for WakeServerSpinClient {
+    fn notify_server(&self) {
+        if !self.server_ev.is_null() {
+            // SAFETY: handle owned by FuseClient for its lifetime; SetEvent is
+            // safe on an auto-reset event from any thread.
+            unsafe {
+                let _ = SetEvent(self.server_ev);
+            }
+        }
+    }
+    fn wait_client(&self, _slot: u32) {
+        core::hint::spin_loop();
+    }
+    fn notify_slot_free(&self) {
+        // A full ring can leave the director blocked; wake it on release too.
+        if !self.server_ev.is_null() {
+            unsafe {
+                let _ = SetEvent(self.server_ev);
+            }
+        }
+    }
+}
+
 pub struct FuseClient {
     mapping: SharedMapping,
     geom: Geom,
     payload_cap: u32,
     root_lower: String,
     arena_len: usize,
+    /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened —
+    /// the ring still works, just with the old timer-tick latency.
+    server_ev: HANDLE,
     /// Serializes ring claim/submit — not safe for concurrent clients on one ring.
     ring_lock: Mutex<()>,
 }
+
+// SAFETY: `server_ev` is only ever passed to SetEvent, which is thread-safe.
+unsafe impl Send for FuseClient {}
+unsafe impl Sync for FuseClient {}
 
 impl FuseClient {
     pub fn connect(
@@ -92,18 +146,36 @@ impl FuseClient {
         let mapping = SharedMapping::open(section, ring_bytes)
             .map_err(|e| format!("open section {section}: {e}"))?;
         let geom = vfs_ipc::ring::open(mapping.seg()).map_err(|e| format!("ring open: {e:?}"))?;
+        // Opening the director's wake event is best-effort: without it the ring
+        // still works, it just falls back to the director's timed wait.
+        let server_ev = std::env::var("VFS_SERVER_EV")
+            .ok()
+            .map(|n| {
+                let w: Vec<u16> = n.encode_utf16().chain(core::iter::once(0)).collect();
+                // SAFETY: name is NUL-terminated; a failed open returns null.
+                unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, w.as_ptr()) }
+            })
+            .unwrap_or(core::ptr::null_mut());
+
         Ok(FuseClient {
             mapping,
             geom,
             payload_cap,
             root_lower: root.replace('/', "\\").to_ascii_lowercase(),
             arena_len,
+            server_ev,
             ring_lock: Mutex::new(()),
         })
     }
 
-    fn client(&self) -> RingClient<'_, SpinNotifier> {
-        RingClient::with_geom(self.mapping.seg(), self.geom, SpinNotifier)
+    fn client(&self) -> RingClient<'_, WakeServerSpinClient> {
+        RingClient::with_geom(
+            self.mapping.seg(),
+            self.geom,
+            WakeServerSpinClient {
+                server_ev: self.server_ev,
+            },
+        )
     }
 
     pub fn heartbeat(&self) -> Result<(), String> {
