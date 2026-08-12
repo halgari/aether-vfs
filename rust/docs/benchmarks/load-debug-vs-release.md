@@ -171,3 +171,52 @@ use.** Fixes, in order of expected effect:
    15.6 ms granularity into ~1 ms, but still sleeps.
 3. Only then read-path work (read-ahead, larger blocks). At 2482 reads it is
    worth having, but it is second-order next to per-call wake latency.
+
+## Fix: spin-then-wait on the server side
+
+The two halves of the ring were running **mismatched notifiers**. The shim's
+client is `SpinNotifier` (`vfs-shim/src/fuse_client.rs`), whose `notify_server`
+is a no-op — so `server_ev` was never signalled. The director meanwhile waited
+on `WaitForSingleObject(server_ev, 1)` for a signal that never came, and that
+1 ms timeout rounds up to the 15.6 ms system tick. The director was discovering
+requests at ~15 ms intervals; nothing was actually slow, it was asleep.
+
+`wait_server` now spins while the ring is hot (`notify_client` timestamps each
+completed request) and falls back to the timed wait once it goes quiet, so a
+burst costs a little CPU and idle costs none. Budget: `VFS_RING_SPIN_US`,
+default 400 µs — above the 20–209 µs service time; `0` restores the old
+behaviour.
+
+### Time to window
+
+| build | runs | mean |
+|-------|------|-----:|
+| debug | 12.23 / 12.41 / 11.51 | 12.05 s |
+| release | 9.79 / 10.61 / 10.61 | 10.34 s |
+| **release + spin-then-wait** | **2.72 / 2.75 / 2.76** | **2.74 s** |
+| native (no VFS) | 0.92 / 1.03 / 0.92 | 1.0 s |
+
+**10.34 s → 2.74 s, a 3.8× speedup.** VFS overhead against native drops from
+~9.3 s to ~1.7 s. (One instrumented run measured 1.94 s; the three clean repeats
+above are tighter and are the honest figure.)
+
+### Time inside the hooks
+
+| hook | before | after |
+|------|-------:|------:|
+| `NtCreateFile` | 5279.6 µs | 67.1 µs |
+| `NtReadFile` | 1570.9 µs | 60.5 µs |
+| `NtQueryFullAttributesFile` | 9375.5 µs | 857.6 µs |
+| `NtClose` | 24.7 µs | 2.9 µs |
+| **total** | **8.385 s** | **0.578 s** |
+
+Call counts are unchanged (~15–17 k); only the per-call wait disappeared, which
+confirms wake latency rather than work was the cost.
+
+### What is left
+
+Of the remaining ~1.7 s over native, ~0.72 s is pre-game work native never does
+(staging, inject, hollow) and ~0.58 s is hook time. `NtQueryFullAttributesFile`
+is still the worst per call at 857.6 µs across 231 calls — the next thing to
+look at, worth ~0.2 s. Read-ahead remains second-order: 2484 reads now cost
+60.5 µs each.
