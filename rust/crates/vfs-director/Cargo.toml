@@ -21,3 +21,11 @@ vfs-win = { path = "../vfs-win" }
 vfs-inject = { path = "../vfs-inject" }
 vfs-shim = { path = "../vfs-shim" }
 vfs-zip = { path = "../vfs-zip", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+# Window + process enumeration for the load benchmark (crates/vfs-director/src/bench.rs).
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Diagnostics_ToolHelp",
+] }

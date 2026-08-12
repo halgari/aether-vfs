@@ -58,6 +58,11 @@ impl vfs_director::stage::ImageSource for KernelSource<'_> {
 }
 
 fn run() -> Result<(), String> {
+    // Load benchmark: record phase timings and, when VFS_BENCH=1, stop at the
+    // first rendered frame instead of running the game indefinitely.
+    let mut timeline = vfs_director::bench::Timeline::new();
+    let bench = std::env::var("VFS_BENCH").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+
     let zip_path = env_path("VFS_SKYRIM_ZIP", r"C:\tmp\skyrimse.zip");
     let data = env_path("VFS_SKYRIM_DATA", r"C:\tmp\skyrim-data");
     let state = data.join("vfs-state");
@@ -164,6 +169,7 @@ fn run() -> Result<(), String> {
     let t0 = std::time::Instant::now();
     let zip = ZipBackend::open(&zip_path).map_err(|e| format!("ZipBackend: {e:?}"))?;
     eprintln!("  zip index ready in {:.1}s", t0.elapsed().as_secs_f32());
+    timeline.mark("zip index");
 
     // Detect single top-level folder from the already-open backend (no re-open).
     let prefix = detect_zip_root_prefix(&zip)?;
@@ -239,6 +245,7 @@ fn run() -> Result<(), String> {
     }
 
     session.serve().map_err(|e| format!("serve: {e}"))?;
+    timeline.mark("serving");
 
     // ── stage the launch directory ─────────────────────────────────────────
     // CreateProcess needs a real on-disk image, and the loader resolves the
@@ -297,6 +304,7 @@ fn run() -> Result<(), String> {
         }
     };
 
+    timeline.mark("staged");
     eprintln!("  IPC serving; launching staged host (zip PE hollow)…");
     eprintln!("  writes under the game root land in {}", overrides.display());
     eprintln!("  saves → {}", saves.display());
@@ -318,10 +326,40 @@ fn run() -> Result<(), String> {
         env: Default::default(),
     })?;
 
+    timeline.mark("launched");
     vfs_director::io_mark_launch();
     eprintln!("  vfs-io: launch mark — counting child FUSE traffic from here");
 
-    if wait {
+    if bench {
+        // Stop at the first rendered frame: that is the number a player feels,
+        // and it bounds every cost on the path (staging, inject, streaming).
+        use vfs_director::bench;
+        let timeout = std::time::Duration::from_secs(300);
+        let pid = bench::wait_for_pid("SkyrimSE.exe", timeout)
+            .ok_or_else(|| "benchmark: SkyrimSE.exe never appeared".to_string())?;
+        timeline.mark("game process");
+        let size = bench::wait_for_window(pid, timeout);
+        timeline.mark("window visible");
+
+        let totals = vfs_director::io_stats::totals();
+        let label = std::env::var("VFS_BENCH_LABEL").unwrap_or_else(|_| "run".to_string());
+        eprint!("{}", bench::report(&timeline, &totals, &label));
+        match size {
+            Some((w, h)) => eprintln!("  window: {w}x{h} (pid {pid})"),
+            None => eprintln!("  window: NONE within {}s — timing is a timeout, not a load", timeout.as_secs()),
+        }
+        eprintln!("\n{}", bench::markdown_header());
+        eprintln!("{}", bench::markdown_row(&timeline, &totals, &label));
+
+        // The staged dir is dropped when this returns, so stop the game first.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", "SkyrimSE.exe"])
+            .output();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", "skse64_loader.exe"])
+            .output();
+        session.stop_serve();
+    } else if wait {
         eprintln!("game exited with code {code}");
         eprint!("{}", vfs_director::io_stats_report(40));
         session.stop_serve();

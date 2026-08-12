@@ -63,6 +63,60 @@ fn state() -> &'static Mutex<State> {
     STATE.get_or_init(|| Mutex::new(State::default()))
 }
 
+/// Aggregate counters, for benchmarking rather than the human report.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Totals {
+    pub getattrs: u64,
+    pub readdirs: u64,
+    pub opens: u64,
+    pub reads: u64,
+    pub closes: u64,
+    pub errors: u64,
+    pub bytes: u64,
+    /// Distinct paths touched (opened, statted or listed).
+    pub paths: u64,
+}
+
+impl Totals {
+    /// Mean bytes per read. The headline number for read amplification: a game
+    /// that streams 4 KiB records turns every one into a ring round-trip.
+    pub fn bytes_per_read(&self) -> f64 {
+        if self.reads == 0 {
+            0.0
+        } else {
+            self.bytes as f64 / self.reads as f64
+        }
+    }
+
+    /// Read RPCs per MiB delivered — scale-free, so runs of different length
+    /// stay comparable.
+    pub fn reads_per_mib(&self) -> f64 {
+        let mib = self.bytes as f64 / (1024.0 * 1024.0);
+        if mib <= 0.0 {
+            0.0
+        } else {
+            self.reads as f64 / mib
+        }
+    }
+}
+
+/// Snapshot of the aggregate counters.
+pub fn totals() -> Totals {
+    let Ok(s) = state().lock() else {
+        return Totals::default();
+    };
+    Totals {
+        getattrs: s.ops_getattr,
+        readdirs: s.ops_readdir,
+        opens: s.ops_open,
+        reads: s.ops_read,
+        closes: s.ops_close,
+        errors: s.ops_err,
+        bytes: s.total_bytes,
+        paths: s.by_path.len() as u64,
+    }
+}
+
 pub fn mark_launch() {
     let ms = start().elapsed().as_millis() as u64;
     LAUNCH_MARK_MS.store(ms, Ordering::Relaxed);

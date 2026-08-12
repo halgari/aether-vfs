@@ -10,6 +10,7 @@ Numbers for the director FUSE control ring (shared-memory RPC) and related delta
 | [b-optimizations-delta.md](./b-optimizations-delta.md) | B1–B5 (bulk arena, payload cap, workers, events, readahead) |
 | [c-throughput-delta.md](./c-throughput-delta.md) | C-set (read_into bank, larger arena, bench bulk path) |
 | [phase12-game-buffer-delta.md](./phase12-game-buffer-delta.md) | Into-game-buffer path notes (bulk preferred) |
+| [load-debug-vs-release.md](./load-debug-vs-release.md) | Real game load: time-to-window, debug vs release |
 
 Architecture context: [../overview.md](../overview.md), [../vfs-summary.md](../vfs-summary.md) §13.
 
