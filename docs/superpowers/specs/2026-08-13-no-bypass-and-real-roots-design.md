@@ -27,7 +27,8 @@ bypass work, for the reason in §7.
 | Real files under a root that no provider serves | **Invisible.** The root is fully virtual; mount a `disk` provider to expose a real tree. |
 | Published snapshot | **Deleted as a shim input.** All metadata routes. The shim keeps one local predicate: is this path under a managed root? |
 | DRM/identity exceptions | **Closed completely.** No allow-list, no fallback. |
-| Ordering | **No-bypass (2a) before real roots (2b).** |
+| Writes | **Inside the invariant.** 2a absorbs the write path from what was Stage 3, because the fall-through cannot be closed without a replacement. |
+| Ordering | **No-bypass (2a) before real roots (2b)**, and within 2a, the write path before closing the bypass. |
 
 ### The cost question, answered before it is asked
 
@@ -47,25 +48,38 @@ the disk provider anyway: `Decision::Redirect` carries a real NT path, which a
 > For any path P and any process in the session, if P resolves under a managed
 > root, every NT operation on P is answered by the director.
 
-### What 2a achieves, and the one hole it leaves
+### The invariant covers writes, which forces a dependency
 
-2a achieves this for **opens, reads, metadata queries, and directory
-enumeration**. It does **not** close writes, and that must be stated plainly
-rather than discovered later.
+Writes are inside the invariant, not outside it. That creates a hard
+dependency: the director cannot serve a write today. `Director::open` rejects
+`OPEN_WRITE`, `ring_dispatch` implements no write opcodes, and no provider
+implements `write_at`. The shim's fall-through at `hook.rs:797` — "Writes may
+fall through for shim-local overlay redirect" — is load-bearing until something
+else can serve them.
 
-The reason is a hard dependency: the director cannot serve a write today.
-`Director::open` rejects `OPEN_WRITE` and `ring_dispatch` implements no write
-opcodes, so an under-root write open has nowhere to go. The shim's comment at
-`hook.rs:797` — "Writes may fall through for shim-local overlay redirect" — is
-load-bearing until Stage 3 routes writes through the provider stack. Closing it
-in 2a without Stage 3 would mean the game cannot write its INIs, logs, or
-saves.
+So **2a absorbs the write path** from what was Stage 3. Closing the
+fall-through without a replacement would mean the game cannot write its INIs,
+logs, or saves.
 
-So during 2a the write path is a **declared, counted, reported** exception:
-every write that falls through is recorded by `(root, path)` and surfaced in
-`vfs stats`, exactly like the rejected-write diagnostics Stage 3 specifies.
-The no-bypass property is **incomplete until Stage 3**, and this spec does not
-claim otherwise.
+### 2a runs in two phases
+
+The two risky areas — the write path, and closing the DRM exceptions and
+escapes — are independent, and failure in either is much cheaper to diagnose
+when they land separately.
+
+- **Phase 2a-i — the write path.** `Director::open` accepts `OPEN_WRITE`;
+  `ring_dispatch` gains `OP_WRITE`, `OP_SETATTR`, `OP_RENAME`, `OP_DELETE`,
+  `OP_MKDIR`; `DiskProvider` implements the write half of the contract;
+  `OverlayProvider` gains copy-up and is promoted to `ReadWrite`; the director
+  owns append cursors. The shim's fall-through still exists but routed writes
+  no longer use it.
+  *Gate:* writes work end-to-end through the director; the game still launches.
+
+- **Phase 2a-ii — close the bypass.** Delete the legacy decision paths and the
+  write fall-through, make the root fully virtual, canonicalise paths and close
+  the escapes, remove the DRM exceptions, and build the canary suite and the
+  open-count reconciliation.
+  *Gate:* the full acceptance criteria in §8.
 
 ### Fail-closed replaces fail-open
 
@@ -237,10 +251,11 @@ and the stage is not declared done with a game that does not launch.
 
 ### Stage 2a — No bypass
 
-Single root throughout. FUSE routing becomes mandatory; the legacy decision
-paths are deleted; the root becomes fully virtual; paths are canonicalised and
-escapes closed; DRM exceptions removed; the canary suite and the open-count
-reconciliation are built.
+Single root throughout, in the two phases described in §3: first the write path
+(so there is somewhere for writes to go), then closing the bypass — FUSE
+routing mandatory, legacy decision paths deleted, root fully virtual, paths
+canonicalised and escapes closed, DRM exceptions removed, canary suite and
+open-count reconciliation built.
 
 ### Stage 2b — Real roots
 
@@ -259,17 +274,21 @@ and it would triple the surface the canary suite must cover.
 
 ## 8. Stage 2a acceptance criteria
 
-1. Canary matrix green for **read, metadata, and enumeration** access: 14
-   spellings × 2 canaries. Unbuildable vectors reported as unbuildable, never
-   silently skipped. Write access to the negative canary is expected to fall
-   through in 2a and is asserted as *counted*, not as *blocked* — see §3.
+1. Canary matrix green for **read, write, metadata, and enumeration** access:
+   14 spellings × 2 canaries. Unbuildable vectors reported as unbuildable,
+   never silently skipped. A write to the negative canary must be **blocked**,
+   and must not create a file on the real filesystem under the root.
 2. Zero undecodable paths across a full game load.
-3. Under-root non-write open count at the shim equals open count at the
-   director. Write opens are counted separately and reported, not zero.
-4. FUSE init failure aborts the launch, with a test asserting it.
-5. Skyrim launches under `tools/gamectl.ps1` and shows the expected load order.
-6. No regression against the figures in `rust/docs/benchmarks/`.
-7. Zero clippy warnings; full suite green.
+3. Under-root open count at the shim equals open count at the director, for
+   reads and writes alike. Any nonzero fall-through count fails the gate.
+4. A write through the director is visible to a subsequent read through the
+   director, and lands where the provider graph says — not on the real
+   filesystem under the root.
+5. FUSE init failure aborts the launch, with a test asserting it.
+6. Skyrim launches under `tools/gamectl.ps1`, shows the expected load order,
+   and writes its INI and save through the director.
+7. No regression against the figures in `rust/docs/benchmarks/`.
+8. Zero clippy warnings; full suite green.
 
 ## 9. Stage 2b acceptance criteria
 
@@ -285,9 +304,10 @@ and it would triple the surface the canary suite must cover.
 
 - Retiring `vfs-server` and the `vfs-shared` snapshot machinery, which needs the
   benchmark rebased onto the director first.
-- Write routing through the provider stack — Stage 3. This is the one hole 2a
-  leaves open, for the dependency reason in §3. Until Stage 3 lands, the
-  no-bypass property covers reads, metadata, and enumeration only. The
-  open-count reconciliation keeps the remaining write bypass visible and
-  measured rather than forgotten.
+- **What remains of the old Stage 3.** 2a absorbs the parts the invariant
+  needs: write opcodes, `DiskProvider` writes, `overlay` copy-up, append
+  cursors, `ST_READ_ONLY`. What is *not* absorbed and stays deferred:
+  `dry_run_writes` and the rejected-write discovery workflow, `FLAG_WRITE_BULK`
+  (performance, not correctness), the read-write `memory` provider, and the
+  write half of the gRPC `remote` provider. Stage 3 shrinks to those.
 - Hook-boundary `catch_unwind`, still unimplemented (see the Stage 1 spec).
