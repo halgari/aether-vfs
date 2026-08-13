@@ -102,8 +102,13 @@ fn main() {
     }
 
     let (vpath, layers, label) = if use_zip {
-        // Prefer real GameLayers Skyrim.esm zip window if present.
-        let zip = std::path::Path::new(r"C:\GameLayers\1. Skyrim Special Edition.zip");
+        // Prefer a real Skyrim.esm zip window when the corpus is present. Named
+        // by `VFS_SKYRIM_ZIP` rather than hardcoded: the absolute path this used
+        // referred to a layout that no longer exists, so the branch had silently
+        // stopped being taken.
+        let zip_path = std::env::var("VFS_SKYRIM_ZIP")
+            .unwrap_or_else(|_| r"C:\tmp\skyrimse.zip".to_string());
+        let zip = std::path::Path::new(&zip_path);
         if zip.is_file() {
             match find_zip_entry_window(zip, "Data/Skyrim.esm") {
                 Some((off, size)) => {

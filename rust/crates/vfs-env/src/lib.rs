@@ -66,8 +66,10 @@ pub const RING_SPIN_US: &str = "VFS_RING_SPIN_US";
 
 /// The managed virtual root. Everything under it resolves through the director.
 ///
-/// There is no good default — it names *which tree is being virtualised* — but
-/// one exists for historical reasons; see the audit's §2.6.
+/// **Required.** There is no good default — it names *which tree is being
+/// virtualised* — and the one that used to exist pointed at a layout that no
+/// longer exists, so an unset root connected the client to a path nothing
+/// matched and the failure surfaced later as missing content.
 pub const VIRTUAL_DIR: &str = "VFS_VIRTUAL_DIR";
 /// Directory for session state (ready flag, configs, logs).
 pub const STATE_DIR: &str = "VFS_STATE_DIR";
@@ -235,7 +237,7 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_EXPECT, kind: Kind::Fixture, default: "none" },
     Var { name: FIXTURE_FILL, kind: Kind::Fixture, default: "none" },
     Var { name: FIXTURE_DATA, kind: Kind::Fixture, default: "\"written-bytes\"" },
-    Var { name: FIXTURE_DIR, kind: Kind::Fixture, default: "fixture-specific" },
+    Var { name: FIXTURE_DIR, kind: Kind::Fixture, default: "required" },
 ];
 
 /// Is `name` a known switch?

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use vfs_director::{Director, KIND_FILE, Session};
 
-const DEFAULT_LAYERS: &str = r"C:\GameLayers";
+const DEFAULT_LAYERS: &str = r"C:	mp";
 const STEAM_APPID: &str = "489830"; // Skyrim Special Edition
 
 fn usage() -> ! {

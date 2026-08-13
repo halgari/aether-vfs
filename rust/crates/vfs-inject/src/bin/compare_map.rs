@@ -39,8 +39,8 @@ fn main() {
         let ok = CreateProcessW(app.as_ptr(), cmd.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 0, CREATE_SUSPENDED, std::ptr::null(), std::ptr::null(), &si, &mut pi);
         assert!(ok != 0, "CreateProcess failed");
         type NtQip = unsafe extern "system" fn(HANDLE, u32, *mut u8, u32, *mut u32) -> i32;
-        let ntdll = windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(b"ntdll.dll\0".as_ptr());
-        let ntqip: NtQip = std::mem::transmute(windows_sys::Win32::System::LibraryLoader::GetProcAddress(ntdll, b"NtQueryInformationProcess\0".as_ptr()).unwrap());
+        let ntdll = windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+        let ntqip: NtQip = std::mem::transmute(windows_sys::Win32::System::LibraryLoader::GetProcAddress(ntdll, c"NtQueryInformationProcess".as_ptr().cast()).unwrap());
         let mut pbi = [0u8; 48];
         let mut rl = 0u32;
         let st = ntqip(pi.hProcess, 0, pbi.as_mut_ptr(), 48, &mut rl);

@@ -2,6 +2,7 @@
 name = "vfs-server"
 version = "0.1.0"
 edition = "2021"
+description = "Benchmark-only ring server over vfs-core. Not the product path; see vfs-director."
 
 [dependencies]
 vfs-core = { path = "../vfs-core" }

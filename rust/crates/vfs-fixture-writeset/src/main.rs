@@ -5,7 +5,7 @@
 //! step succeeds; a distinct non-zero code names the failing step.
 //!
 //! Env: `VFS_FIXTURE_DIR` — the virtual directory the ops run under
-//! (default `C:\GameLayers\runtime`).
+//! (required).
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -17,8 +17,10 @@ fn fail(code: i32, msg: String) -> ! {
 }
 
 fn main() {
-    let dir = std::env::var("VFS_FIXTURE_DIR")
-        .unwrap_or_else(|_| r"C:\GameLayers\runtime".into());
+    let Ok(dir) = std::env::var("VFS_FIXTURE_DIR") else {
+        eprintln!("VFS_FIXTURE_DIR unset");
+        exit(2);
+    };
     let dir = Path::new(&dir);
 
     // 1. mkdir → a fresh virtual directory that reads back as a directory.

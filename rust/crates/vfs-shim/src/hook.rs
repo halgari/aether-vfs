@@ -220,10 +220,10 @@ pub struct HookGuard {
 /// Resolve `name` in ntdll and build (not yet enabled) a detour to `hookfn`.
 unsafe fn make_detour(
     ntdll: HMODULE,
-    name: &[u8],
+    name: &core::ffi::CStr,
     hookfn: *const (),
 ) -> Result<RawDetour, InstallError> {
-    let proc = GetProcAddress(ntdll, name.as_ptr()).ok_or(InstallError::ProcMissing)?;
+    let proc = GetProcAddress(ntdll, name.as_ptr().cast()).ok_or(InstallError::ProcMissing)?;
     RawDetour::new(proc as *const (), hookfn).map_err(|_| InstallError::Detour)
 }
 
@@ -342,7 +342,7 @@ pub unsafe fn install_late(
 /// `patch_early_owned`: when true, also detour the four path/attr stubs
 /// (standalone install). When false, only remainder detours (dual-layer).
 unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, InstallError> {
-    let ntdll = GetModuleHandleA(b"ntdll.dll\0".as_ptr());
+    let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
     if ntdll.is_null() {
         return Err(InstallError::NtdllMissing);
     }
@@ -350,20 +350,20 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     let mut detours: Vec<RawDetour> = Vec::new();
 
     if patch_early_owned {
-        let d_create = make_detour(ntdll, b"NtCreateFile\0", create_hook as *const ())?;
+        let d_create = make_detour(ntdll, c"NtCreateFile", create_hook as *const ())?;
         TRAMP_CREATE = Some(core::mem::transmute::<*const (), NtCreateFileFn>(
             d_create.trampoline() as *const (),
         ));
-        let d_qattr = make_detour(ntdll, b"NtQueryAttributesFile\0", qattr_hook as *const ())?;
+        let d_qattr = make_detour(ntdll, c"NtQueryAttributesFile", qattr_hook as *const ())?;
         TRAMP_QATTR = Some(core::mem::transmute::<*const (), NtQueryAttributesFileFn>(
             d_qattr.trampoline() as *const (),
         ));
         let d_qfull =
-            make_detour(ntdll, b"NtQueryFullAttributesFile\0", qfull_hook as *const ())?;
+            make_detour(ntdll, c"NtQueryFullAttributesFile", qfull_hook as *const ())?;
         TRAMP_QFULL = Some(core::mem::transmute::<*const (), NtQueryFullAttributesFileFn>(
             d_qfull.trampoline() as *const (),
         ));
-        let d_open = make_detour(ntdll, b"NtOpenFile\0", open_hook as *const ())?;
+        let d_open = make_detour(ntdll, c"NtOpenFile", open_hook as *const ())?;
         TRAMP_OPEN = Some(core::mem::transmute::<*const (), NtOpenFileFn>(
             d_open.trampoline() as *const (),
         ));
@@ -374,57 +374,57 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
         detours.extend([d_create, d_qattr, d_qfull, d_open]);
     }
 
-    let d_qdirex = make_detour(ntdll, b"NtQueryDirectoryFileEx\0", qdirex_hook as *const ())?;
+    let d_qdirex = make_detour(ntdll, c"NtQueryDirectoryFileEx", qdirex_hook as *const ())?;
     TRAMP_QDIREX = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileExFn>(
         d_qdirex.trampoline() as *const (),
     ));
     // Both enumeration exports must be covered: whichever one the caller picks
     // decides whether it sees the composed tree or the real, near-empty folder
     // behind it, and a caller on the unhooked one leaves no trace anywhere.
-    let d_qdir = make_detour(ntdll, b"NtQueryDirectoryFile\0", qdir_hook as *const ())?;
+    let d_qdir = make_detour(ntdll, c"NtQueryDirectoryFile", qdir_hook as *const ())?;
     TRAMP_QDIR = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileFn>(
         d_qdir.trampoline() as *const (),
     ));
-    let d_close = make_detour(ntdll, b"NtClose\0", close_hook as *const ())?;
+    let d_close = make_detour(ntdll, c"NtClose", close_hook as *const ())?;
     TRAMP_CLOSE = Some(core::mem::transmute::<*const (), NtCloseFn>(
         d_close.trampoline() as *const (),
     ));
-    let d_qif = make_detour(ntdll, b"NtQueryInformationFile\0", qif_hook as *const ())?;
+    let d_qif = make_detour(ntdll, c"NtQueryInformationFile", qif_hook as *const ())?;
     TRAMP_QIF = Some(core::mem::transmute::<*const (), NtQueryInformationFileFn>(
         d_qif.trampoline() as *const (),
     ));
-    let d_setinfo = make_detour(ntdll, b"NtSetInformationFile\0", setinfo_hook as *const ())?;
+    let d_setinfo = make_detour(ntdll, c"NtSetInformationFile", setinfo_hook as *const ())?;
     TRAMP_SETINFO = Some(core::mem::transmute::<*const (), NtSetInformationFileFn>(
         d_setinfo.trampoline() as *const (),
     ));
-    let d_read = make_detour(ntdll, b"NtReadFile\0", read_hook as *const ())?;
+    let d_read = make_detour(ntdll, c"NtReadFile", read_hook as *const ())?;
     TRAMP_READ = Some(core::mem::transmute::<*const (), NtReadFileFn>(
         d_read.trampoline() as *const (),
     ));
-    let d_write = make_detour(ntdll, b"NtWriteFile\0", write_hook as *const ())?;
+    let d_write = make_detour(ntdll, c"NtWriteFile", write_hook as *const ())?;
     TRAMP_WRITE = Some(core::mem::transmute::<*const (), NtWriteFileFn>(
         d_write.trampoline() as *const (),
     ));
-    let d_csec = make_detour(ntdll, b"NtCreateSection\0", create_section_hook as *const ())?;
+    let d_csec = make_detour(ntdll, c"NtCreateSection", create_section_hook as *const ())?;
     TRAMP_CREATE_SECTION = Some(core::mem::transmute::<*const (), NtCreateSectionFn>(
         d_csec.trampoline() as *const (),
     ));
-    let d_map = make_detour(ntdll, b"NtMapViewOfSection\0", map_view_hook as *const ())?;
+    let d_map = make_detour(ntdll, c"NtMapViewOfSection", map_view_hook as *const ())?;
     TRAMP_MAP_VIEW = Some(core::mem::transmute::<*const (), NtMapViewOfSectionFn>(
         d_map.trampoline() as *const (),
     ));
-    let d_unmap = make_detour(ntdll, b"NtUnmapViewOfSection\0", unmap_view_hook as *const ())?;
+    let d_unmap = make_detour(ntdll, c"NtUnmapViewOfSection", unmap_view_hook as *const ())?;
     TRAMP_UNMAP_VIEW = Some(core::mem::transmute::<*const (), NtUnmapViewOfSectionFn>(
         d_unmap.trampoline() as *const (),
     ));
     let d_qvol =
-        make_detour(ntdll, b"NtQueryVolumeInformationFile\0", qvol_hook as *const ())?;
+        make_detour(ntdll, c"NtQueryVolumeInformationFile", qvol_hook as *const ())?;
     TRAMP_QVOL = Some(core::mem::transmute::<*const (), NtQueryVolumeInformationFileFn>(
         d_qvol.trampoline() as *const (),
     ));
 
     // Present since Win10 1709. Optional so an older host still installs.
-    if let Ok(d_qibn) = make_detour(ntdll, b"NtQueryInformationByName\0", qibn_hook as *const ()) {
+    if let Ok(d_qibn) = make_detour(ntdll, c"NtQueryInformationByName", qibn_hook as *const ()) {
         TRAMP_QIBN = Some(core::mem::transmute::<*const (), NtQueryInformationByNameFn>(
             d_qibn.trampoline() as *const (),
         ));
@@ -456,12 +456,12 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     // Best-effort child-process propagation + virtual image path spoof.
     if let Some(dll) = self_dll_path() {
         let _ = SELF_DLL.set(dll);
-        let mut kb = GetModuleHandleA(b"kernelbase.dll\0".as_ptr());
+        let mut kb = GetModuleHandleA(c"kernelbase.dll".as_ptr().cast());
         if kb.is_null() {
-            kb = GetModuleHandleA(b"kernel32.dll\0".as_ptr());
+            kb = GetModuleHandleA(c"kernel32.dll".as_ptr().cast());
         }
         if !kb.is_null() {
-            if let Ok(d_cpiw) = make_detour(kb, b"CreateProcessInternalW\0", cpiw_hook as *const ())
+            if let Ok(d_cpiw) = make_detour(kb, c"CreateProcessInternalW", cpiw_hook as *const ())
             {
                 TRAMP_CPIW = Some(core::mem::transmute::<*const (), CreateProcessInternalWFn>(
                     d_cpiw.trampoline() as *const (),

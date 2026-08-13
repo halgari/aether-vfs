@@ -35,11 +35,11 @@ fn payload_cfg_usable(p: *mut PayloadConfig) -> bool {
         if mbi.State != MEM_COMMIT {
             return false;
         }
-        let ntdll = GetModuleHandleA(b"ntdll.dll\0".as_ptr());
+        let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
         if ntdll.is_null() {
             return false;
         }
-        let expected = match GetProcAddress(ntdll, b"NtProtectVirtualMemory\0".as_ptr()) {
+        let expected = match GetProcAddress(ntdll, c"NtProtectVirtualMemory".as_ptr().cast()) {
             Some(f) => f as usize,
             None => return false,
         };

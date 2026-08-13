@@ -61,8 +61,12 @@ pub fn try_init_from_env() -> Result<(), String> {
     let arena_len: usize = vfs_env::text(vfs_env::ARENA_LEN)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    // Required, not defaulted: this names *which tree is being virtualised*, and
+    // there is no sensible guess. The default it used to carry pointed at a
+    // layout that no longer exists, so an unset root connected the client to a
+    // path nothing matched — surfacing much later as content simply missing.
     let root = vfs_env::text(vfs_env::VIRTUAL_DIR)
-        .unwrap_or_else(|| r"C:\GameLayers\runtime".into());
+        .ok_or("VFS_VIRTUAL_DIR unset: the managed root has no default")?;
     let client = FuseClient::connect(&section, &root, payload_cap, ring_bytes, arena_len)?;
     client.heartbeat()?;
     let _ = FUSE.set(client);

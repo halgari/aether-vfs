@@ -10,15 +10,15 @@
 
 use core::ffi::c_void;
 
-fn ntdll_proc(name: &[u8]) -> Option<*const ()> {
+fn ntdll_proc(name: &core::ffi::CStr) -> Option<*const ()> {
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
     // SAFETY: ntdll is always mapped; both calls take NUL-terminated names.
     unsafe {
-        let h = GetModuleHandleA(b"ntdll.dll\0".as_ptr());
+        let h = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
         if h.is_null() {
             return None;
         }
-        GetProcAddress(h, name.as_ptr()).map(|p| p as *const ())
+        GetProcAddress(h, name.as_ptr().cast()).map(|p| p as *const ())
     }
 }
 
@@ -131,7 +131,7 @@ pub fn map_image_from_pe_bytes_local(pe: &[u8]) -> Result<(*mut c_void, usize), 
         core::ptr::copy_nonoverlapping(img.as_ptr(), base as *mut u8, img.len().min(size_of_image));
 
         // Register unwind info for local manual maps (DLL path).
-        if let Some(rtl) = ntdll_proc(b"RtlAddFunctionTable\0") {
+        if let Some(rtl) = ntdll_proc(c"RtlAddFunctionTable") {
             let opt = e_lfanew + 24;
             let ex_dir = opt + 112 + 3 * 8;
             if ex_dir + 8 <= img.len() {

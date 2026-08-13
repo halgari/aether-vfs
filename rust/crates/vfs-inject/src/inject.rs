@@ -62,7 +62,7 @@ fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
-fn ntdll_proc(name: &[u8]) -> Result<usize, InjectError> {
+fn ntdll_proc(name: &core::ffi::CStr) -> Result<usize, InjectError> {
     // SAFETY: ntdll is always mapped in the injector; addresses are valid in the
     // target too (session-shared base).
     unsafe {
@@ -70,7 +70,7 @@ fn ntdll_proc(name: &[u8]) -> Result<usize, InjectError> {
         if h.is_null() {
             return Err(InjectError::Ntdll);
         }
-        match GetProcAddress(h, name.as_ptr()) {
+        match GetProcAddress(h, name.as_ptr().cast()) {
             Some(p) => Ok(p as usize),
             None => Err(InjectError::Ntdll),
         }
@@ -139,7 +139,7 @@ unsafe fn expand_primary_stack(
         return Err(InjectError::Ntdll);
     }
     let nt_qit: NtQueryInformationThreadFn =
-        match GetProcAddress(ntdll, b"NtQueryInformationThread\0".as_ptr()) {
+        match GetProcAddress(ntdll, c"NtQueryInformationThread".as_ptr().cast()) {
             Some(p) => core::mem::transmute(p),
             None => return Err(InjectError::Ntdll),
         };
@@ -326,7 +326,7 @@ pub unsafe fn inject_dll(process: HANDLE, dll_path: &str) -> Result<(), InjectEr
         if k32.is_null() {
             return Err(InjectError::RemoteThread);
         }
-        let load_library = match GetProcAddress(k32, b"LoadLibraryW\0".as_ptr()) {
+        let load_library = match GetProcAddress(k32, c"LoadLibraryW".as_ptr().cast()) {
             Some(p) => p,
             None => return Err(InjectError::RemoteThread),
         };
@@ -434,14 +434,14 @@ pub unsafe fn arm_preinit_payload_ex(
         }
 
         let cfg = PayloadConfig {
-            nt_protect: ntdll_proc(b"NtProtectVirtualMemory\0")?,
-            open_target: ntdll_proc(b"NtOpenFile\0")?,
+            nt_protect: ntdll_proc(c"NtProtectVirtualMemory")?,
+            open_target: ntdll_proc(c"NtOpenFile")?,
             open_tramp: tramp_base as usize,
-            qattr_target: ntdll_proc(b"NtQueryAttributesFile\0")?,
+            qattr_target: ntdll_proc(c"NtQueryAttributesFile")?,
             qattr_tramp: (tramp_base + 0x40) as usize,
-            qfull_target: ntdll_proc(b"NtQueryFullAttributesFile\0")?,
+            qfull_target: ntdll_proc(c"NtQueryFullAttributesFile")?,
             qfull_tramp: (tramp_base + 0x80) as usize,
-            create_target: ntdll_proc(b"NtCreateFile\0")?,
+            create_target: ntdll_proc(c"NtCreateFile")?,
             create_tramp: (tramp_base + 0xC0) as usize,
             install_mask: 0xF,
             redirect_count: redirects.len() as u32,

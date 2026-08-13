@@ -81,7 +81,7 @@ pub fn inject_dll(process: HANDLE, dll_path: &str) -> bool {
         if k32.is_null() {
             return false;
         }
-        let load = match GetProcAddress(k32, b"LoadLibraryW\0".as_ptr()) {
+        let load = match GetProcAddress(k32, c"LoadLibraryW".as_ptr().cast()) {
             Some(p) => p,
             None => return false,
         };
