@@ -42,7 +42,7 @@ rather than a mutation, and confines failure to one process.
 │                                                                           │
 │  Session          mounts, paths, launch                                   │
 │  Director         userspace FUSE kernel: resolve, overlay, handle table   │
-│  Backends         zip · disk · cache · compose · gRPC plugin              │
+│  Providers        zip · disk · cache · compose · gRPC plugin              │
 │                                                                           │
 └───────────────────────────────┬───────────────────────────────────────────┘
                                 │  shared memory:
@@ -87,22 +87,62 @@ snapshot of that tree, with a seqlock so a reader never observes a torn update.
 Keeping this layer pure is what makes the merge semantics testable without a
 game, a driver, or even a filesystem.
 
-### 3.2 Sources and composition — `vfs-source`, `vfs-zip`, `vfs-compose`, `vfs-cache`
+### 3.2 Providers and composition — `vfs-provider`, `vfs-source`, `vfs-zip`, `vfs-compose`, `vfs-cache`
 
-Everything that can supply bytes implements one `Backend` trait
-(`vfs-protocol`): `getattr`, `readdir`, `open`, `read`, `write`, `rename`,
-`delete`, `mkdir`, `close`.
+Everything that can supply bytes implements the `Provider` trait
+(`vfs-provider`), addressed by `(RootId, relative path)` via `VPath` rather
+than a bare string — the root id is what lets one provider instance serve
+several virtualized locations at once and still tell `[1, "a"]` from
+`[0, "a"]` apart. A provider declares its `Capabilities` once, at
+construction; a read-only provider implements a five-method floor
+(`capabilities`, `getattr`, `readdir`, `open`, `close`, plus `read_at` or
+`read_next`), and everything past that defaults to `ST_NOT_SUPPORTED`. One
+conformance suite, `vfs_provider::assert_conformance`, runs the case subset
+implied by a provider's declared capabilities against every implementation —
+Rust today, host-language bindings later — so none can drift from the
+others. Full detail: [`vfs-provider/README.md`](../crates/vfs-provider/README.md)
+and the design spec's [§5](../../docs/superpowers/specs/2026-08-13-pluggable-providers-design.md#5-the-provider-contract).
 
-- **`vfs-zip`** parses the ZIP64 central directory and serves **Stored**
-  (uncompressed) entries as byte windows into the container. Stored-only is a
-  deliberate constraint: a Stored entry is a contiguous range, so a read at an
-  arbitrary offset is a seek, not a decompress-from-the-start. That is what
-  makes random access into a 15 GB archive viable.
-- **`vfs-compose`** stacks backends bottom-to-top with overlay semantics.
-- **`vfs-cache`** is a block cache (RAM LRU, optional disk tier) keyed by
-  `(source, file, block)`.
-- **`vfs-source`** turns a declarative spec into a live backend, including
-  out-of-process gRPC plugins — so a source can be written in any language.
+#### Why `immutable` and `slow` are separate flags
+
+`immutable` and `slow` look like they should be one flag; they are not, and
+conflating them is the easiest way to get this model wrong. `immutable` says
+caching a block is **safe** — the content never changes, so a cached copy is
+good forever, even across process restarts. `slow` says caching is
+**warranted** — reads are expensive enough that paying for a cache is worth
+it. A local disk file is fast and mutable: no cache needed. A remote provider
+serving content that can change underneath it might be slow but not
+immutable: worth a RAM cache with invalidation, never a disk cache, because a
+persisted block could go stale. A Stored zip entry is immutable but fast to
+seek into: safe to cache, not obviously worth it on its own. Only a provider
+that is both — a large, static, slow-to-fetch download — earns a cache that
+survives across sessions. Getting the two backwards produces either a
+correctness bug (stale bytes served from a disk cache for content that turns
+out to be mutable) or a silent performance bug (content that never changes,
+never cached).
+
+- **`vfs-zip`**'s `ZipProvider` parses the ZIP64 central directory and serves
+  **Stored** (uncompressed) entries as byte windows into the container.
+  Stored-only is a deliberate constraint: a Stored entry is a contiguous
+  range, so a read at an arbitrary offset is a seek, not a
+  decompress-from-the-start. That is what makes random access into a 15 GB
+  archive viable.
+- **`vfs-compose`** provides read-only combinators over other providers:
+  `layered` (top-wins; `readdir` unions), `router` (glob-pattern dispatch —
+  `getattr`/`open` take the first matching route; `readdir` is currently
+  single-dispatch rather than the cross-route union the design calls for),
+  `overlay` (an upper directory wins over a base provider, with `.wh.*`
+  whiteouts hiding base entries — read-only for now: it always declares
+  `Access::Read` and rejects `OPEN_WRITE`; copy-up writes are a later stage),
+  `subdir` (rewrite addressing to expose a subtree as a root), and `inline`
+  (an in-memory provider used by tests).
+- **`vfs-cache`**'s `CachingProvider` wraps any provider with a block cache
+  (RAM LRU, optional disk tier); its capabilities are derived from the inner
+  provider via `Capabilities::cached()` — access passes through, `slow` is
+  cleared.
+- **`vfs-source`** turns a declarative spec into a live provider, including
+  `RemoteProvider`, which forwards every op to an out-of-process gRPC plugin
+  — so a provider can be written in any language.
 
 ### 3.3 The director — `vfs-director`
 
@@ -412,7 +452,7 @@ regressed since its 2.74 s was recorded; removing it restored the profile
 (69.5 MiB read at the window, 164 KiB/read — an exact match for the historical
 table) rather than beating it.
 
-Content source is not a factor: zip and disk backends measure the same
+Content source is not a factor: zip and disk providers measure the same
 (10.34 vs 10.38 s pre-fix), which is what identified wake latency as the cost.
 
 ---
@@ -491,13 +531,14 @@ observer before concluding the process is idle.
 |---|---|
 | `vfs-core` | pure merged-tree resolver: layers, tombstones, case folding, wildcards |
 | `vfs-shared` | bitness-neutral shared snapshot layout + seqlock |
-| `vfs-protocol` | wire codecs, opcodes, the `Backend` trait |
+| `vfs-provider` | provider contract: `Capabilities`, `VPath`, `Provider`, conformance suite |
+| `vfs-protocol` | ring wire codecs and opcodes (re-exports the provider contract for existing importers) |
 | `vfs-ipc` | control ring + bulk arena, OS-free |
 | `vfs-win` | Windows shared memory and events |
-| `vfs-zip` | ZIP64 central directory, Stored windows |
-| `vfs-compose` | layered/overlay backends |
-| `vfs-cache` | block cache, RAM LRU + optional disk tier |
-| `vfs-source` | declarative spec → backend, incl. gRPC plugins |
+| `vfs-zip` | ZIP64 central directory, Stored windows, `ZipProvider` |
+| `vfs-compose` | read-only provider combinators: layered, overlay, router, subdir, inline |
+| `vfs-cache` | block cache, RAM LRU + optional disk tier, as a `Provider` wrapper |
+| `vfs-source` | declarative spec → provider, incl. `RemoteProvider` gRPC plugins |
 | `vfs-director` | FUSE kernel, session, staging, launch |
 | `vfs-directord` | daemon + CLI; `skyrim-live` harness |
 | `vfs-control` | gRPC contract + config schema |
@@ -510,7 +551,7 @@ observer before concluding the process is idle.
 | `vfs-fixture-*`, `vfs-ring-harness` | test fixtures |
 
 Dependency direction is enforced by the split: pure crates never learn about the
-OS, and the zip backend never learns about the host.
+OS, and the zip provider never learns about the host.
 
 ---
 

@@ -80,7 +80,8 @@ Any language can implement `vfs-source/proto/source.proto` (`Source` service).
 |-------|--------|
 | Control gRPC + config schema | `vfs-control` |
 | Daemon + `vfs` CLI | `vfs-directord` |
-| Source builders, SourceService, conformance | `vfs-source` |
+| Provider contract, capabilities, conformance suite | `vfs-provider` |
+| Provider builders, gRPC SourceService | `vfs-source` |
 | Layered / router / overlay (read) | `vfs-compose` |
 | Block cache (RAM + disk) | `vfs-cache` |
 | FUSE kernel + Session launch | `vfs-director` |
