@@ -248,13 +248,23 @@ fn assert_writable(p: &Arc<dyn Provider>) {
         .expect("set_attr mtime");
     p.remove(keep).expect("cleanup");
 
-    // The reference tree survived: write cases must not disturb it.
+    // The reference tree survived: write cases must not disturb it. Compare
+    // bytes, not just size — a same-length scribble is the corruption this
+    // check exists to catch, and a size comparison cannot see it.
     for (rel, body) in FIXTURE_FILES {
+        let vp = VPath::at_default(rel);
         let st = p
-            .getattr(VPath::at_default(rel))
+            .getattr(vp)
             .unwrap_or_else(|e| panic!("getattr({rel}) after writes failed with {e}"))
             .unwrap_or_else(|| panic!("write cases destroyed {rel}"));
-        assert_eq!(st.size, body.len() as u64, "write cases altered {rel}");
+        assert_eq!(st.size, body.len() as u64, "write cases altered {rel}'s size");
+
+        let (h, _, _) = p
+            .open(vp, crate::OPEN_READ)
+            .unwrap_or_else(|e| panic!("reopen({rel}) after writes failed with {e}"));
+        let got = read_all(p, h, st.size);
+        p.close(h).expect("close");
+        assert_eq!(got, *body, "write cases altered {rel}'s content");
     }
 }
 ```
