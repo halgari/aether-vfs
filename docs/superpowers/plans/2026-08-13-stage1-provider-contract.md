@@ -1667,7 +1667,11 @@ pub use disk::DiskProvider as DiskBackend;
 
 - [ ] **Step 7: Port the integration test**
 
-`crates/vfs-director/tests/zip_serve_integrity.rs` has 16 `Backend` references. Update the imports to `vfs_provider::{Provider, VPath}`, change `ZipBackend` → `ZipProvider`, wrap bare path arguments in `VPath::at_default(...)`, and rename `.read(` → `.read_at(` and `.release(` → `.close(`. **Do not change any assertion.**
+`crates/vfs-director/tests/zip_serve_integrity.rs` has 16 references to old type names. **Type renames only** — `DiskBackend` → `DiskProvider`, `ZipBackend` → `ZipProvider`, `StripPrefixBackend` → `SubdirProvider`.
+
+Do **not** wrap path arguments in `VPath::at_default(...)` and do not rename `.read(`/`.release(` here. That test drives `Director` and `Session`, whose own public methods keep taking `&str` and `u64` — they are this crate's API to the IPC layer, not `Provider` implementations. The port changes how `Director` *calls* its mounted providers, not `Director`'s own signatures. Wrapping the arguments would be a type error.
+
+**Do not change any assertion.**
 
 - [ ] **Step 8: Run to verify it passes**
 
