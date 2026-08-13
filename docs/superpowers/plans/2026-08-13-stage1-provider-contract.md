@@ -60,18 +60,55 @@
 
 - [ ] **Step 1: Write the failing test**
 
+**A runtime `catch_unwind` check cannot work here.** Cargo always builds `--test` harnesses with `panic = "unwind"` regardless of the profile setting, so a `catch_unwind` test passes under both profiles and proves nothing. Assert the manifests instead — that is what actually catches the regression (someone setting `panic = "abort"` on the main workspace again).
+
 Create `crates/vfs-protocol/tests/unwind.rs`:
 
 ```rust
-//! The workspace must unwind on panic: `catch_unwind` is a no-op under
-//! `panic = "abort"`, and the PyO3 binding needs panics to become exceptions.
+//! The main workspace must unwind so the PyO3 binding can turn a Rust panic
+//! into a Python exception instead of aborting the host process.
+//!
+//! This asserts the manifest rather than calling `catch_unwind`: Cargo always
+//! builds `--test` harnesses with `panic = "unwind"` regardless of the profile
+//! setting, so a runtime check passes under both and proves nothing.
 
 #[test]
-fn workspace_panics_unwind_rather_than_abort() {
-    let caught = std::panic::catch_unwind(|| {
-        panic!("intentional");
-    });
-    assert!(caught.is_err(), "panic did not unwind — check profile.panic in the root Cargo.toml");
+fn main_workspace_profiles_unwind() {
+    let manifest =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
+            .expect("read the workspace manifest");
+
+    let panic_lines: Vec<&str> = manifest
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("panic"))
+        .collect();
+
+    assert!(!panic_lines.is_empty(), "no panic setting found in the workspace manifest");
+    for line in panic_lines {
+        assert!(line.contains("unwind"), "main workspace must unwind, found: {line}");
+    }
+}
+
+#[test]
+fn vfs_payload_is_excluded_and_still_aborts() {
+    let root = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
+        .expect("read the workspace manifest");
+    assert!(
+        root.contains(r#"exclude = ["crates/vfs-payload"]"#),
+        "vfs-payload must stay excluded — it is #![no_std] and cannot unwind"
+    );
+
+    let payload = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../vfs-payload/Cargo.toml"
+    ))
+    .expect("read the vfs-payload manifest");
+    assert!(
+        payload.lines().map(str::trim).any(|l| l == r#"panic = "abort""#),
+        "vfs-payload must keep panic = \"abort\""
+    );
+    assert!(payload.contains("[workspace]"), "vfs-payload must be its own workspace root");
 }
 ```
 
@@ -79,7 +116,7 @@ fn workspace_panics_unwind_rather_than_abort() {
 
 Run: `cargo test -p vfs-protocol --test unwind`
 
-Expected: the test process **aborts** (exit code 101 with an abort message, or "error: test failed, to rerun pass `--test unwind`" after a STATUS_ABORT). It does not report a normal assertion failure — under `panic = "abort"` the process dies before the assert runs. That abort is the failure signal.
+Expected: FAIL — `main workspace must unwind, found: panic = "abort"`, and the exclude assertion fails too. After Steps 3-4, confirm the test has teeth by flipping the root manifest back to `panic = "abort"`, re-running (must FAIL), and restoring it (must PASS).
 
 - [ ] **Step 3: Give `vfs-payload` its own workspace**
 
@@ -194,10 +231,18 @@ In `crates/vfs-directord/tests/e2e.rs`, the args array around line 71 lists `"vf
           CARGO_TARGET_DIR: target
 ```
 
-`README.md` lines 27 and 97 — remove `-p vfs-payload` from both build commands and add below each:
+`README.md` lines 27 and 97 — remove `-p vfs-payload` from both build commands and add below each. Note the two differ: line 27 is the debug quick-start, line 97 is the release packaging section, whose surrounding text promises artifacts under `target/release/`.
+
+Below line 27:
 
 ```powershell
 cargo build --manifest-path crates/vfs-payload/Cargo.toml   # separate workspace
+```
+
+Below line 97:
+
+```powershell
+cargo build --release --manifest-path crates/vfs-payload/Cargo.toml   # separate workspace
 ```
 
 - [ ] **Step 9: Verify the whole tree still builds and tests**
