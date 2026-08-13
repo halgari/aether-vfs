@@ -81,3 +81,45 @@ impl PayloadConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The injector writes this struct into another process, and the payload
+    /// reads it back by offset. The two definitions live in different crates
+    /// and cannot share a type: `vfs-payload` is `no_std`/`panic=abort` and
+    /// depends on nothing. So the layout is pinned on both sides — the mirror
+    /// of this test is `vfs_payload::tests::config_layout_is_pinned`.
+    ///
+    /// Drift here does not fail a build or raise an error. The payload reads
+    /// addresses out of the wrong fields and the process dies during
+    /// pre-init, before anything can log why.
+    #[test]
+    fn payload_config_layout_matches_the_payload_crate() {
+        use core::mem::{align_of, offset_of, size_of};
+
+        assert_eq!(MAX_REDIRECTS, 4);
+        assert_eq!(size_of::<RedirectEntry>(), 40);
+        assert_eq!(offset_of!(RedirectEntry, suffix_ptr), 0);
+        assert_eq!(offset_of!(RedirectEntry, suffix_wlen), 8);
+        assert_eq!(offset_of!(RedirectEntry, backing_ptr), 16);
+        assert_eq!(offset_of!(RedirectEntry, backing_wlen), 24);
+        assert_eq!(offset_of!(RedirectEntry, backing_size), 32);
+
+        assert_eq!(align_of::<PayloadConfig>(), 8);
+        assert_eq!(offset_of!(PayloadConfig, nt_protect), 0);
+        assert_eq!(offset_of!(PayloadConfig, open_target), 8);
+        assert_eq!(offset_of!(PayloadConfig, open_tramp), 16);
+        assert_eq!(offset_of!(PayloadConfig, qattr_target), 24);
+        assert_eq!(offset_of!(PayloadConfig, qattr_tramp), 32);
+        assert_eq!(offset_of!(PayloadConfig, qfull_target), 40);
+        assert_eq!(offset_of!(PayloadConfig, qfull_tramp), 48);
+        assert_eq!(offset_of!(PayloadConfig, create_target), 56);
+        assert_eq!(offset_of!(PayloadConfig, create_tramp), 64);
+        assert_eq!(offset_of!(PayloadConfig, install_mask), 72);
+        assert_eq!(offset_of!(PayloadConfig, redirect_count), 76);
+        assert_eq!(offset_of!(PayloadConfig, redirects), 80);
+        assert_eq!(offset_of!(PayloadConfig, counters), 80 + 40 * MAX_REDIRECTS);
+    }
+}

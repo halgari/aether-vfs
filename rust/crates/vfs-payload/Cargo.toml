@@ -6,8 +6,8 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 name = "vfs_payload"
-# no_std + custom #[panic_handler] conflicts with the test harness (std).
-test = false
+# `no_std` and the custom #[panic_handler] are cfg(not(test)) in lib.rs, so a
+# normal harness links against std and can run.
 doctest = false
 bench = false
 
