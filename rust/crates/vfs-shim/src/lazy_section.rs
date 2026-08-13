@@ -457,6 +457,15 @@ mod tests {
         VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_FREE,
     };
 
+    /// Serialises the tests that reserve and release virtual address space.
+    ///
+    /// Each asserts that a specific base became `MEM_FREE`, and a freed base is
+    /// immediately available to anyone — including a sibling test reserving on
+    /// another thread. When that happens the region reads back as `MEM_RESERVE`
+    /// and the test blames the release it was checking. Nothing about the
+    /// product is racy here; only the observation is.
+    static VA_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Region state for `addr`: `MEM_FREE` once the VA has been released.
     fn va_state(addr: usize) -> u32 {
         let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
@@ -494,6 +503,7 @@ mod tests {
 
     #[test]
     fn unmapping_a_view_leaves_the_open_section_usable() {
+        let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let h = unsafe { create_lazy_data_section(0, SIZE) }.expect("create section");
         let base = hook_map(h, 0, 0);
 
@@ -517,6 +527,7 @@ mod tests {
 
     #[test]
     fn unmapping_an_offset_view_keeps_sibling_views_alive() {
+        let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let h = unsafe { create_lazy_data_section(0, SIZE) }.expect("create section");
         let head = hook_map(h, 0, 64 * 1024);
         let off = 4 * 1024 * 1024u64;
@@ -539,6 +550,7 @@ mod tests {
 
     #[test]
     fn closing_the_section_releases_the_reservation() {
+        let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let h = unsafe { create_lazy_data_section(0, SIZE) }.expect("create section");
         let base = hook_map(h, 0, 0);
 
@@ -554,6 +566,7 @@ mod tests {
 
     #[test]
     fn a_closed_section_with_a_live_view_keeps_its_pages() {
+        let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let h = unsafe { create_lazy_data_section(0, SIZE) }.expect("create section");
         let base = hook_map(h, 0, 0);
 
@@ -571,6 +584,7 @@ mod tests {
 
     #[test]
     fn two_views_at_one_base_are_refcounted() {
+        let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let h = unsafe { create_lazy_data_section(0, SIZE) }.expect("create section");
         let a = hook_map(h, 0, 0);
         let b = hook_map(h, 0, 0);
@@ -590,6 +604,7 @@ mod tests {
 
     #[test]
     fn eager_sections_are_freed_on_close() {
+        let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let size = 1024 * 1024u64;
         let base = unsafe {
             VirtualAlloc(
@@ -617,6 +632,7 @@ mod tests {
 
     #[test]
     fn oversized_files_are_still_mappable() {
+        let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Well past the old 3 GiB ceiling; reservation only, so this is cheap.
         assert!(MAX_LAZY > 8 * 1024 * 1024 * 1024);
     }

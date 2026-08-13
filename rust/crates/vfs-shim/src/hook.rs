@@ -756,6 +756,37 @@ unsafe fn cwd_from_peb() -> Option<(isize, String)> {
     Some((handle, String::from_utf16_lossy(core::slice::from_raw_parts(buf, units))))
 }
 
+/// The directory that a relative name is expressed against.
+///
+/// Three kinds of parent reach us, and missing any one makes the child
+/// undecodable — which is silent rather than an error: the call simply bypasses
+/// every decision we would have made and lands on whatever is really on disk.
+/// Shared by every hook that has to decode a name, so they cannot drift apart.
+unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<String> {
+    let root = root_handle as isize;
+    // 1. Our own synthetic directory handles.
+    if crate::fuse_synth::is_fuse_synth(root) {
+        // Prefer PATH_TABLE (recorded on open); fall back to fuse_synth abs_path.
+        return PATH_TABLE
+            .lock()
+            .ok()
+            .and_then(|t| t.get(&root).cloned())
+            .or_else(|| crate::fuse_synth::abs_path(root));
+    }
+    // 2. A real directory the process opened; we remember every one.
+    if let Some(p) = path_of_handle(root_handle) {
+        return Some(p);
+    }
+    // 3. The current-directory handle. The OS creates it, so it is in no table
+    //    of ours, yet it is the parent for every relative open a CRT makes:
+    //    `CreateFileW("Data\X")` becomes (CWD handle + "Data\X").
+    let (cwd_handle, dos) = cwd_from_peb()?;
+    if cwd_handle != root {
+        return None;
+    }
+    Some(format!(r"\??\{}", dos.trim_end_matches(['\\', '/'])))
+}
+
 unsafe fn oa_name_only(oa: *const ObjectAttributes) -> Option<String> {
     if oa.is_null() {
         return None;
@@ -772,34 +803,7 @@ unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
     if oa_ref.root_directory.is_null() {
         return if name.is_empty() { None } else { Some(name) };
     }
-    let root = oa_ref.root_directory as isize;
-    // A relative open names its parent by handle. Resolving only *our* synthetic
-    // parents was too narrow: a caller that opens the game directory for real
-    // and then opens files against that handle produced no path at all, so the
-    // open bypassed every decision and landed on the real folder behind the
-    // mount. HANDLE_PATHS remembers real parents for exactly this case.
-    let parent = if crate::fuse_synth::is_fuse_synth(root) {
-        // Prefer PATH_TABLE (recorded on open); fall back to fuse_synth abs_path.
-        PATH_TABLE
-            .lock()
-            .ok()
-            .and_then(|t| t.get(&root).cloned())
-            .or_else(|| crate::fuse_synth::abs_path(root))?
-    } else if let Some(p) = path_of_handle(oa_ref.root_directory) {
-        p
-    } else {
-        // The current-directory handle. The OS creates it, so it appears in no
-        // table of ours, yet it is the parent for every relative open the CRT
-        // makes: `CreateFileW("Data\X")` becomes (CWD handle + "Data\X").
-        // Without this, those opens cannot be matched against the root and land
-        // on the real folder behind the mount — silently, since an undecodable
-        // open is absent from every path-keyed report.
-        let (cwd_handle, dos) = cwd_from_peb()?;
-        if cwd_handle != root {
-            return None;
-        }
-        format!(r"\??\{}", dos.trim_end_matches(['\\', '/']))
-    };
+    let parent = parent_dir_of_handle(oa_ref.root_directory)?;
     let parent = parent.trim_end_matches(['\\', '/']);
     let rel = name.trim_start_matches(['\\', '/']);
     if rel.is_empty() {
@@ -843,16 +847,7 @@ unsafe fn tag_under_root(
             t.insert(key, path.clone());
         }
     }
-    // Two different notions of "ours" have to agree here. `is_under_root` knows
-    // only the managed root, but the client also serves the staging directory
-    // as an alias for it — and the game's working directory *is* the staging
-    // directory, so it enumerates `<stage>\Data`. Registering only by the
-    // narrower test left that handle untracked, the enumeration fell through to
-    // the real staging folder, and it returned nothing: an empty Data listing
-    // is an empty load order, which is a game with no world.
-    let under_root = ENGINE.get().is_some_and(|e| e.is_under_root(&path))
-        || crate::fuse_client::global().is_some_and(|c| c.vpath_under_root(&path).is_some());
-    if under_root {
+    if path_is_ours(&path) {
         if let Ok(mut table) = DIR_TABLE.lock() {
             table.insert(key, DirTracked { dir_nt_path: path, state: None });
         }
@@ -895,13 +890,33 @@ unsafe fn record_path(file_handle: *mut HANDLE, oa: *const ObjectAttributes, sta
     if status < 0 || file_handle.is_null() {
         return;
     }
-    if let (Some(engine), Some(path)) = (ENGINE.get(), path_of(oa)) {
-        if engine.is_under_root(&path) {
+    if let Some(path) = path_of(oa) {
+        if path_is_ours(&path) {
             if let Ok(mut t) = PATH_TABLE.lock() {
                 t.insert(*file_handle as isize, path);
             }
         }
     }
+}
+
+/// Is this path one we are responsible for?
+///
+/// There are two notions of "ours" and they are not the same. The engine knows
+/// the managed root; the client *also* serves the staging directory as an alias
+/// for it — and a staged game's working directory is that staging directory, so
+/// it reaches our content by that name. Anything that asks the narrower question
+/// silently disowns the aliased half.
+///
+/// Every caller must ask through here. When `tag_under_root` asked the narrow
+/// question, the enumeration of `<stage>\Data` went untracked and fell through
+/// to the real staging folder, which returned nothing — and an empty `Data`
+/// listing is an empty load order. The alias itself was unit-tested and correct;
+/// what drifted was which callers consulted it.
+fn path_is_ours(path: &str) -> bool {
+    if ENGINE.get().is_some_and(|e| e.is_under_root(path)) {
+        return true;
+    }
+    crate::fuse_client::global().is_some_and(|c| c.vpath_under_root(path).is_some())
 }
 
 /// Parse the target path from a `FILE_RENAME_INFORMATION`(`_EX`) buffer. Only
@@ -913,15 +928,26 @@ unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Option<String> 
     }
     let b = info as *const u8;
     let root_dir = core::ptr::read_unaligned(b.add(8) as *const usize);
-    if root_dir != 0 {
-        return None;
-    }
     let namelen = core::ptr::read_unaligned(b.add(16) as *const u32) as usize;
     if 20 + namelen > len {
         return None;
     }
     let units = core::slice::from_raw_parts(b.add(20) as *const u16, namelen / 2);
-    Some(String::from_utf16_lossy(units))
+    let name = String::from_utf16_lossy(units);
+    if root_dir == 0 {
+        return Some(name);
+    }
+    // A target named against a directory handle. Callers feed this straight to
+    // `vpath_under_root`, which needs a full path, so join it here — and
+    // decline when the parent is unknown rather than passing a bare leaf name
+    // off as if it were absolute.
+    let parent = parent_dir_of_handle(root_dir as HANDLE)?;
+    let parent = parent.trim_end_matches(['\\', '/']);
+    let rel = name.trim_start_matches(['\\', '/']);
+    if rel.is_empty() {
+        return Some(parent.to_string());
+    }
+    Some(format!("{parent}\\{rel}"))
 }
 
 /// Try director FUSE OPEN for paths under the managed root. Returns Some(status)
@@ -1647,6 +1673,26 @@ unsafe extern "system" fn qibn_hook(
                     }
                 }
                 Err(_) => return STATUS_UNSUCCESSFUL,
+            }
+        }
+        // The snapshot engine answers when no director is attached. Every other
+        // metadata hook consults both sources; consulting only one here would
+        // make this API disagree with `NtQueryAttributesFile` about whether the
+        // very same file exists.
+        if let Some(engine) = ENGINE.get() {
+            match engine.query_attributes(&path) {
+                AttrDecision::Attributes { is_dir, size, .. } => {
+                    if let Some(n) = fill_by_name(class_raw, info, length, is_dir, size) {
+                        if !iosb.is_null() {
+                            let q = iosb as *mut u8;
+                            core::ptr::write_unaligned(q as *mut u32, STATUS_SUCCESS as u32);
+                            core::ptr::write_unaligned(q.add(8) as *mut usize, n);
+                        }
+                        return STATUS_SUCCESS;
+                    }
+                }
+                AttrDecision::Deny => return STATUS_OBJECT_NAME_NOT_FOUND,
+                AttrDecision::PassThrough => {}
             }
         }
     }
@@ -3374,4 +3420,191 @@ unsafe fn serve_dir_query(
         core::ptr::write_unaligned(p.add(8) as *mut usize, result.bytes);
     }
     status
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Offsets and sizes of the metadata classes we answer by path.
+    ///
+    /// These are ABI, not our choice: the caller allocated the buffer and reads
+    /// the fields at fixed offsets. Writing `EndOfFile` at the wrong offset does
+    /// not fail — it reports a file of the wrong size, or a size of zero, which
+    /// a caller is free to treat as "not worth opening". That is silent, so it
+    /// gets pinned down here.
+    const CLASS_BASIC: u32 = 4;
+    const CLASS_STANDARD: u32 = 5;
+    const CLASS_NETWORK_OPEN: u32 = 34;
+    const CLASS_STAT: u32 = 68;
+    const CLASS_STAT_BASIC: u32 = 77;
+
+    fn fill(class: u32, buf: &mut [u8], is_dir: bool, size: u64) -> Option<usize> {
+        unsafe {
+            fill_by_name(
+                class,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as u32,
+                is_dir,
+                size,
+            )
+        }
+    }
+
+    fn u32_at(buf: &[u8], off: usize) -> u32 {
+        u32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
+    }
+
+    fn i64_at(buf: &[u8], off: usize) -> i64 {
+        i64::from_le_bytes(buf[off..off + 8].try_into().unwrap())
+    }
+
+    #[test]
+    fn every_supported_class_reports_its_documented_length() {
+        for (class, want) in [
+            (CLASS_BASIC, 40usize),
+            (CLASS_STANDARD, 24),
+            (CLASS_NETWORK_OPEN, 56),
+            (CLASS_STAT, 72),
+            (CLASS_STAT_BASIC, 104),
+        ] {
+            let mut buf = vec![0u8; want];
+            assert_eq!(fill(class, &mut buf, false, 1), Some(want), "class {class}");
+        }
+    }
+
+    /// A short buffer must be declined, not partially written: the caller sized
+    /// it for a different class and every byte past its end belongs to someone.
+    #[test]
+    fn a_buffer_one_byte_short_is_refused() {
+        for (class, need) in [
+            (CLASS_BASIC, 40usize),
+            (CLASS_STANDARD, 24),
+            (CLASS_NETWORK_OPEN, 56),
+            (CLASS_STAT, 72),
+            (CLASS_STAT_BASIC, 104),
+        ] {
+            let mut buf = vec![0xAAu8; need - 1];
+            assert_eq!(fill(class, &mut buf, false, 1), None, "class {class}");
+            assert!(buf.iter().all(|b| *b == 0xAA), "class {class} wrote into a short buffer");
+        }
+    }
+
+    #[test]
+    fn an_unknown_class_is_declined_so_the_caller_falls_through() {
+        let mut buf = vec![0u8; 512];
+        assert_eq!(fill(9999, &mut buf, false, 1), None);
+    }
+
+    /// The size a stat reports is the whole reason these classes are answered:
+    /// a caller that sees zero bytes may skip the file without ever opening it.
+    #[test]
+    fn size_lands_at_the_offset_each_class_defines() {
+        const SIZE: u64 = 249_753_412; // Skyrim.esm, i.e. well past 32 bits.
+        let mut buf = vec![0u8; 104];
+
+        fill(CLASS_STANDARD, &mut buf, false, SIZE).unwrap();
+        assert_eq!(i64_at(&buf, 0), SIZE as i64, "standard AllocationSize");
+        assert_eq!(i64_at(&buf, 8), SIZE as i64, "standard EndOfFile");
+
+        buf.iter_mut().for_each(|b| *b = 0);
+        fill(CLASS_NETWORK_OPEN, &mut buf, false, SIZE).unwrap();
+        assert_eq!(i64_at(&buf, 40), SIZE as i64, "network-open EndOfFile");
+
+        for class in [CLASS_STAT, CLASS_STAT_BASIC] {
+            buf.iter_mut().for_each(|b| *b = 0);
+            fill(class, &mut buf, false, SIZE).unwrap();
+            assert_eq!(i64_at(&buf, 40), SIZE as i64, "class {class} AllocationSize");
+            assert_eq!(i64_at(&buf, 48), SIZE as i64, "class {class} EndOfFile");
+        }
+    }
+
+    #[test]
+    fn directories_are_distinguishable_from_files_in_every_class() {
+        let mut buf = vec![0u8; 104];
+
+        for (class, attr_off) in [
+            (CLASS_BASIC, 32usize),
+            (CLASS_NETWORK_OPEN, 48),
+            (CLASS_STAT, 56),
+            (CLASS_STAT_BASIC, 56),
+        ] {
+            buf.iter_mut().for_each(|b| *b = 0);
+            fill(class, &mut buf, true, 0).unwrap();
+            assert_eq!(
+                u32_at(&buf, attr_off) & FILE_ATTRIBUTE_DIRECTORY,
+                FILE_ATTRIBUTE_DIRECTORY,
+                "class {class} did not mark a directory"
+            );
+
+            buf.iter_mut().for_each(|b| *b = 0);
+            fill(class, &mut buf, false, 1).unwrap();
+            assert_eq!(
+                u32_at(&buf, attr_off) & FILE_ATTRIBUTE_DIRECTORY,
+                0,
+                "class {class} marked a file as a directory"
+            );
+        }
+
+        // FileStandardInformation carries a boolean rather than an attribute.
+        buf.iter_mut().for_each(|b| *b = 0);
+        fill(CLASS_STANDARD, &mut buf, true, 0).unwrap();
+        assert_eq!(buf[21], 1, "standard Directory flag");
+        buf.iter_mut().for_each(|b| *b = 0);
+        fill(CLASS_STANDARD, &mut buf, false, 1).unwrap();
+        assert_eq!(buf[21], 0, "standard Directory flag set for a file");
+    }
+
+    /// FILE_RENAME_INFORMATION: ReplaceIfExists(1)+pad, RootDirectory@8,
+    /// FileNameLength@16, FileName@20.
+    fn rename_info(root_dir: usize, name: &str) -> Vec<u8> {
+        let units: Vec<u16> = name.encode_utf16().collect();
+        let namelen = units.len() * 2;
+        let mut buf = vec![0u8; 20 + namelen];
+        buf[8..16].copy_from_slice(&root_dir.to_le_bytes());
+        buf[16..20].copy_from_slice(&(namelen as u32).to_le_bytes());
+        for (i, u) in units.iter().enumerate() {
+            buf[20 + i * 2..22 + i * 2].copy_from_slice(&u.to_le_bytes());
+        }
+        buf
+    }
+
+    fn parse_rename(buf: &mut [u8]) -> Option<String> {
+        unsafe { parse_rename_target(buf.as_mut_ptr() as *mut c_void, buf.len() as u32) }
+    }
+
+    #[test]
+    fn an_absolute_rename_target_is_returned_as_is() {
+        let mut buf = rename_info(0, r"\??\C:\root\new.esp");
+        assert_eq!(parse_rename(&mut buf).as_deref(), Some(r"\??\C:\root\new.esp"));
+    }
+
+    /// A rename target may be named against a directory handle. Refusing to
+    /// decode those is the same defect that made relative *opens* invisible —
+    /// the rename would fall through unvirtualised and hit the real directory.
+    #[test]
+    fn a_rename_target_relative_to_a_known_handle_becomes_a_full_path() {
+        let handle = 0x4321usize;
+        HANDLE_PATHS
+            .lock()
+            .unwrap()
+            .insert(handle as isize, r"\??\C:\root\Data".to_string());
+
+        let mut buf = rename_info(handle, "new.esp");
+        assert_eq!(
+            parse_rename(&mut buf).as_deref(),
+            Some(r"\??\C:\root\Data\new.esp"),
+            "a handle-relative target must be joined to its parent"
+        );
+
+        HANDLE_PATHS.lock().unwrap().remove(&(handle as isize));
+    }
+
+    /// An unknown parent must yield nothing. Returning the bare leaf would be
+    /// worse than declining: callers treat the result as a full path.
+    #[test]
+    fn a_rename_target_with_an_unknown_parent_is_declined() {
+        let mut buf = rename_info(0xDEAD_BEEF, "new.esp");
+        assert_eq!(parse_rename(&mut buf), None);
+    }
 }
