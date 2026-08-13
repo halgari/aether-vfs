@@ -5,8 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vfs_provider::{
-    bad_fh, bad_request, is_dir, map_io_err, Capabilities, DirEntry, Handle, Provider, Stat,
-    VPath, OPEN_WRITE,
+    bad_fh, is_dir, map_io_err, Capabilities, DirEntry, Handle, Provider, SetAttr, Stat, VPath,
 };
 
 use crate::store::{BlockCache, BlockKey};
@@ -65,9 +64,11 @@ impl Provider for CachingProvider {
     }
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
-        if flags & OPEN_WRITE != 0 {
-            return Err(bad_request());
-        }
+        // The cache is a read accelerator, not a gate: it has no business
+        // refusing a write the inner provider accepts. `capabilities()`
+        // already forwards the inner's access level via `.cached()`, so
+        // rejecting writes here made that declaration a lie the moment a
+        // caller acted on it — exactly the bug class this method now avoids.
         let path = p.rel;
         let st = self.inner.getattr(p)?;
         let (inner, size, is_dir) = self.inner.open(p, flags)?;
@@ -167,6 +168,75 @@ impl Provider for CachingProvider {
             .ok_or_else(bad_fh)?;
         self.inner.close(rec.inner)
     }
+
+    fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
+        let (inner_h, file_id) = {
+            let g = self.opens.lock().map_err(|_| map_io_err())?;
+            let r = g.get(&h).ok_or_else(bad_fh)?;
+            (r.inner, r.file_id)
+        };
+        let n = self.inner.write_at(inner_h, offset, buf)?;
+        // Drop every block cached under this handle's file identity: serving
+        // a stale block after a write is the same bug class as refusing the
+        // write outright, just quieter. `BlockCache` only invalidates whole
+        // files today (no partial-range primitive), so this is coarser than
+        // strictly necessary, but it is correct and it is what exists.
+        self.cache.invalidate_file(self.source_id, file_id);
+        if n > 0 {
+            if let Ok(mut g) = self.opens.lock() {
+                if let Some(r) = g.get_mut(&h) {
+                    let end = offset + n as u64;
+                    if end > r.size {
+                        r.size = end;
+                    }
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    fn set_len(&self, h: Handle, len: u64) -> Result<(), i32> {
+        let (inner_h, file_id) = {
+            let g = self.opens.lock().map_err(|_| map_io_err())?;
+            let r = g.get(&h).ok_or_else(bad_fh)?;
+            (r.inner, r.file_id)
+        };
+        self.inner.set_len(inner_h, len)?;
+        // Blocks at and beyond the new length are stale (truncated), and a
+        // grow zero-fills range that was never cached — drop the whole file
+        // rather than reason about which blocks survive a shrink-then-grow.
+        self.cache.invalidate_file(self.source_id, file_id);
+        if let Ok(mut g) = self.opens.lock() {
+            if let Some(r) = g.get_mut(&h) {
+                r.size = len;
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&self, h: Handle) -> Result<(), i32> {
+        let inner_h = {
+            let g = self.opens.lock().map_err(|_| map_io_err())?;
+            g.get(&h).ok_or_else(bad_fh)?.inner
+        };
+        self.inner.flush(inner_h)
+    }
+
+    fn mkdir(&self, p: VPath) -> Result<(), i32> {
+        self.inner.mkdir(p)
+    }
+
+    fn remove(&self, p: VPath) -> Result<(), i32> {
+        self.inner.remove(p)
+    }
+
+    fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
+        self.inner.rename(from, to)
+    }
+
+    fn set_attr(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
+        self.inner.set_attr(p, attr)
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +249,21 @@ mod tests {
     fn caching_provider_over_the_fixture_tree_passes_conformance() {
         use vfs_provider::conformance::MemFixture;
         let inner: Arc<dyn Provider> = Arc::new(MemFixture::new());
+        let cache = Arc::new(BlockCache::new(CacheConfig::default()));
+        let p: Arc<dyn Provider> = Arc::new(CachingProvider::new(inner, cache, 1));
+        vfs_provider::assert_conformance(p);
+    }
+
+    /// The systematic guard for the write-rejection bug this module used to
+    /// have: `RwMemFixture` is `Access::ReadWrite`, so this exercises
+    /// `assert_writable`'s cases (including a same-handle write-then-read,
+    /// which is exactly the shape a stale cached block would corrupt) through
+    /// `CachingProvider`. Stage 1 added a cached-provider conformance test,
+    /// but its inner provider (`MemFixture`, above) is read-only, so the
+    /// write cases never ran and this gap sat open.
+    #[test]
+    fn caching_provider_over_a_writable_fixture_passes_conformance() {
+        let inner: Arc<dyn Provider> = Arc::new(vfs_provider::RwMemFixture::new());
         let cache = Arc::new(BlockCache::new(CacheConfig::default()));
         let p: Arc<dyn Provider> = Arc::new(CachingProvider::new(inner, cache, 1));
         vfs_provider::assert_conformance(p);
