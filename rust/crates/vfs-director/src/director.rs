@@ -27,12 +27,14 @@ struct OpenRec {
     /// caller-supplied offset in favor of the cursor, advancing it by the
     /// number of bytes written.
     ///
-    /// Known limitation: two handles appending to the same file
-    /// concurrently can interleave incorrectly, since each tracks its own
-    /// cursor rather than sharing one per path. Games write logs from a
-    /// single handle, so this has not mattered; a per-path cursor (keyed by
-    /// resolved mount + relative path rather than by `fh`) is the fix if it
-    /// ever does.
+    /// Known limitation: `Director::write` reads the cursor and writes it
+    /// back under two separate lock acquisitions with the provider call
+    /// unlocked in between, so two writes racing on *the same* `fh` — not
+    /// just two distinct handles appending to the same file — can interleave
+    /// incorrectly. Games write logs from a single handle used
+    /// single-threaded, so this has not mattered; a per-path cursor (keyed
+    /// by resolved mount + relative path rather than by `fh`), or holding
+    /// the lock across the provider call, is the fix if it ever does.
     cursor: Option<u64>,
 }
 
@@ -204,7 +206,8 @@ impl Director {
     /// Positional write, except on an append handle: there, the
     /// caller-supplied `offset` is ignored and the handle's own cursor is
     /// used instead, then advanced by the bytes actually written. See
-    /// `OpenRec::cursor` for the concurrent-appenders caveat.
+    /// `OpenRec::cursor` for the caveat about two writes racing on the same
+    /// handle.
     pub fn write(&self, fh: u64, offset: u64, buf: &[u8]) -> Result<usize, i32> {
         let (backend, bh, effective_offset) = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
@@ -228,6 +231,10 @@ impl Director {
         result
     }
 
+    /// Truncating or extending an append handle clamps its cursor to the new
+    /// length rather than resetting it: a cursor already at or below `len`
+    /// is still correct and must not jump forward, but one left past a
+    /// shorter `len` would otherwise leave a hole on the next append.
     pub fn set_len(&self, fh: u64, len: u64) -> Result<(), i32> {
         let (backend, bh) = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
@@ -239,6 +246,9 @@ impl Director {
             if let Ok(mut g) = self.opens.lock() {
                 if let Some(rec) = g.get_mut(&fh) {
                     rec.size = len;
+                    if let Some(c) = rec.cursor.as_mut() {
+                        *c = (*c).min(len);
+                    }
                 }
             }
         }
@@ -374,6 +384,53 @@ mod tests {
         d.write(fh, 0, b"two").unwrap();
         d.close(fh).unwrap();
         assert_eq!(std::fs::read(dir.join("log.txt")).unwrap(), b"onetwo");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_len_clamps_the_append_cursor_so_a_later_append_lands_at_the_new_end() {
+        let dir = std::env::temp_dir().join(format!("vfs-dirsetlen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("log.txt"), b"0123456789").unwrap();
+        let d = Director::new();
+        d.mount("/", Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+
+        let (fh, _, _) = d.open("log.txt", OPEN_WRITE | vfs_provider::OPEN_APPEND).unwrap();
+        // Cursor starts at 10 (the size at open). Truncating to 4 must clamp
+        // it down too, or the next append would write at the stale offset
+        // 10, leaving a hole between byte 4 and byte 10 instead of
+        // continuing right after the new end.
+        d.set_len(fh, 4).unwrap();
+        assert_eq!(d.write(fh, 0, b"AB").unwrap(), 2);
+        d.close(fh).unwrap();
+        assert_eq!(
+            std::fs::read(dir.join("log.txt")).unwrap(),
+            b"0123AB",
+            "append after a truncate must land at the new end with no hole"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_open_does_not_fall_through_a_read_only_top_mount_to_a_writable_one_beneath_it() {
+        // Two mounts share the "/" prefix: a writable DiskProvider mounted
+        // first (so it resolves *underneath*), and a read-only
+        // InlineProvider mounted second, making it the topmost resolved
+        // mount per "later mounts override earlier for the same path".
+        // A write open must fail with ST_READ_ONLY at the top mount rather
+        // than silently falling through and landing in the layer beneath —
+        // falling through risks a write silently landing in an unintended
+        // (possibly immutable) layer.
+        let dir = std::env::temp_dir().join(format!("vfs-dirshadow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = Director::new();
+        d.mount("/", Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount("/", Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])))
+            .unwrap();
+
+        assert_eq!(d.open("f", OPEN_WRITE), Err(vfs_provider::ST_READ_ONLY));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
