@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::ops::{
-    bad_request, map_io_err, not_a_dir, not_found, Access, Capabilities, DirEntry, Handle,
-    Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC,
-    OPEN_WRITE,
+    bad_request, exists, map_io_err, not_a_dir, not_found, Access, Capabilities, DirEntry,
+    Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_EXCL,
+    OPEN_TRUNC, OPEN_WRITE,
 };
 
 pub struct DiskProvider {
@@ -157,12 +157,17 @@ impl Provider for DiskProvider {
             .create_new(flags & OPEN_EXCL != 0)
             .truncate(flags & OPEN_TRUNC != 0)
             .open(&p)
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    not_found()
-                } else {
-                    map_io_err()
-                }
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => not_found(),
+                // `OPEN_EXCL` (create_new) against an existing path. Without
+                // this arm it fell into the generic `map_io_err()` below,
+                // indistinguishable from a real I/O failure — and the shim
+                // then treated *any* write-open error as "director refused,
+                // fall through to the overlay", so an exclusive create
+                // against an existing file silently created it in the
+                // overlay and reported success instead of failing.
+                std::io::ErrorKind::AlreadyExists => exists(),
+                _ => map_io_err(),
             })?;
         let size = f.metadata().map_err(|_| map_io_err())?.len();
         let bh = self.next.fetch_add(1, Ordering::Relaxed);
