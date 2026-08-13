@@ -4,12 +4,14 @@
 //! Rust or host-language — to the same standard.
 
 mod caps;
+pub mod conformance;
 mod model;
 mod path;
 mod provider;
 mod status;
 
 pub use caps::{Access, Capabilities};
+pub use conformance::{assert_conformance, write_fixture_tree, FIXTURE_FILES};
 pub use model::{DirEntry, Handle, SetAttr, Stat, KIND_DIR, KIND_FILE, KIND_TOMBSTONE};
 pub use path::{RootId, VPath};
 pub use provider::Provider;
