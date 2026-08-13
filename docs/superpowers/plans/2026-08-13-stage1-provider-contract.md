@@ -233,17 +233,21 @@ In `crates/vfs-directord/tests/e2e.rs`, the args array around line 71 lists `"vf
 
 `README.md` lines 27 and 97 — remove `-p vfs-payload` from both build commands and add below each. Note the two differ: line 27 is the debug quick-start, line 97 is the release packaging section, whose surrounding text promises artifacts under `target/release/`.
 
+Both need `--target-dir target`. Without it the DLL builds into `crates/vfs-payload/target/` and every artifact-location path — `vfs-inject/src/artifacts.rs`, `Session::launch` — fails to find it at runtime.
+
 Below line 27:
 
 ```powershell
-cargo build --manifest-path crates/vfs-payload/Cargo.toml   # separate workspace
+cargo build --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
 ```
 
 Below line 97:
 
 ```powershell
-cargo build --release --manifest-path crates/vfs-payload/Cargo.toml   # separate workspace
+cargo build --release --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
 ```
+
+Verify by running the packaging line from `rust/` and confirming `target/release/vfs_payload.dll` exists.
 
 - [ ] **Step 9: Verify the whole tree still builds and tests**
 
