@@ -28,18 +28,33 @@ impl DiskProvider {
         }
     }
 
-    fn resolve(&self, path: &str) -> PathBuf {
+    /// Map a `VPath::rel` onto a real path under `root`.
+    ///
+    /// `rel` is documented as arriving normalized (no `..`), but that is a
+    /// contract on the caller, not a guarantee this provider can see
+    /// enforced elsewhere — `vfs-source`'s gRPC boundary rejects a `..`
+    /// component from a network client, but this is a different crate, and
+    /// `open`'s new `OPEN_CREATE` handling escalates a containment slip from
+    /// unauthorized read to unauthorized directory creation. Reject a bare
+    /// `..` component here too, so containment does not depend solely on a
+    /// caller in another crate getting it right. A filename that merely
+    /// starts with `..` (e.g. `..foo`) is a normal path segment and passes
+    /// through untouched.
+    fn resolve(&self, path: &str) -> Result<PathBuf, i32> {
         if path.is_empty() {
-            self.root.clone()
-        } else {
-            let mut p = self.root.clone();
-            for part in path.split('/') {
-                if !part.is_empty() {
-                    p.push(part);
-                }
-            }
-            p
+            return Ok(self.root.clone());
         }
+        let mut p = self.root.clone();
+        for part in path.split('/') {
+            if part.is_empty() {
+                continue;
+            }
+            if part == ".." {
+                return Err(bad_request());
+            }
+            p.push(part);
+        }
+        Ok(p)
     }
 }
 
@@ -55,7 +70,7 @@ impl Provider for DiskProvider {
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
         let path = p.rel;
-        let p = self.resolve(path);
+        let p = self.resolve(path)?;
         let meta = match std::fs::metadata(&p) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -80,7 +95,7 @@ impl Provider for DiskProvider {
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
         let path = p.rel;
-        let p = self.resolve(path);
+        let p = self.resolve(path)?;
         let rd = std::fs::read_dir(&p).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 not_found()
@@ -114,7 +129,7 @@ impl Provider for DiskProvider {
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         let path = p.rel;
-        let p = self.resolve(path);
+        let p = self.resolve(path)?;
 
         if flags & OPEN_WRITE == 0 {
             let meta = std::fs::metadata(&p).map_err(|_| not_found())?;
@@ -182,22 +197,34 @@ impl Provider for DiskProvider {
     }
 
     fn mkdir(&self, p: VPath) -> Result<(), i32> {
-        let path = self.resolve(p.rel);
+        let path = self.resolve(p.rel)?;
         std::fs::create_dir_all(&path).map_err(|_| map_io_err())
     }
 
     fn remove(&self, p: VPath) -> Result<(), i32> {
-        let path = self.resolve(p.rel);
+        let path = self.resolve(p.rel)?;
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(not_found()),
-            Err(_) => std::fs::remove_dir(&path).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    not_found()
-                } else {
-                    map_io_err()
+            Err(_) => {
+                // Windows reports "remove_file'd a directory" as plain
+                // PermissionDenied — indistinguishable by ErrorKind from a
+                // genuinely locked or permission-denied file. Consult
+                // metadata to confirm this is actually a directory before
+                // falling back, so a real file-removal failure is reported
+                // as its own status instead of being replaced by whatever
+                // remove_dir happens to return for a path that isn't one.
+                if !std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) {
+                    return Err(map_io_err());
                 }
-            }),
+                std::fs::remove_dir(&path).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        not_found()
+                    } else {
+                        map_io_err()
+                    }
+                })
+            }
         }
     }
 
@@ -205,19 +232,21 @@ impl Provider for DiskProvider {
         if from.root != to.root {
             return Err(bad_request());
         }
-        let from_path = self.resolve(from.rel);
-        let to_path = self.resolve(to.rel);
+        let from_path = self.resolve(from.rel)?;
+        let to_path = self.resolve(to.rel)?;
         std::fs::rename(&from_path, &to_path).map_err(|_| map_io_err())
     }
 
     fn set_attr(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
-        let path = self.resolve(p.rel);
+        if attr.size.is_none() && attr.mtime.is_none() {
+            return Ok(());
+        }
+        let path = self.resolve(p.rel)?;
+        let f = File::options().write(true).open(&path).map_err(|_| map_io_err())?;
         if let Some(size) = attr.size {
-            let f = File::options().write(true).open(&path).map_err(|_| map_io_err())?;
             f.set_len(size).map_err(|_| map_io_err())?;
         }
         if let Some(mtime) = attr.mtime {
-            let f = File::options().write(true).open(&path).map_err(|_| map_io_err())?;
             let time = std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(mtime.max(0) as u64);
             let times = std::fs::FileTimes::new().set_modified(time);
@@ -258,5 +287,65 @@ mod tests {
         let p: std::sync::Arc<dyn vfs_provider::Provider> = std::sync::Arc::new(DiskProvider::new(&dir));
         vfs_provider::assert_conformance(p);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_rejects_a_dotdot_component() {
+        let dir = std::env::temp_dir().join(format!("vfs-diskdotdot-{}", std::process::id()));
+        vfs_provider::write_fixture_tree(&dir);
+
+        assert_eq!(
+            DiskProvider::new(&dir).resolve("../escape.txt"),
+            Err(bad_request()),
+            "a leading .. component must be refused, not walked"
+        );
+        assert_eq!(
+            DiskProvider::new(&dir).resolve("sub/../../escape.txt"),
+            Err(bad_request()),
+            "a .. component buried mid-path must be refused too"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_accepts_a_filename_that_merely_starts_with_dotdot() {
+        let dir = std::env::temp_dir().join(format!("vfs-diskdotdotfoo-{}", std::process::id()));
+        vfs_provider::write_fixture_tree(&dir);
+
+        let resolved = DiskProvider::new(&dir)
+            .resolve("..foo")
+            .expect("..foo is a legitimate filename, not a .. component");
+        assert_eq!(resolved, dir.join("..foo"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dotdot_escaping_open_is_refused_and_creates_nothing() {
+        // Guards the OPEN_CREATE escalation directly: before this fix, an
+        // OPEN_CREATE with a .. component would create_dir_all a directory
+        // outside root. Confirm the parent of `dir` gains nothing.
+        let parent = std::env::temp_dir();
+        let dir = parent.join(format!("vfs-diskdotdotopen-{}", std::process::id()));
+        vfs_provider::write_fixture_tree(&dir);
+        let sibling = parent.join(format!("vfs-diskdotdotopen-{}-escaped", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sibling);
+
+        use vfs_provider::{Provider, OPEN_CREATE, OPEN_WRITE};
+        let p = DiskProvider::new(&dir);
+        let escaping = format!(
+            "../{}/pwned.txt",
+            sibling.file_name().unwrap().to_string_lossy()
+        );
+        let result = p.open(VPath::at_default(&escaping), OPEN_WRITE | OPEN_CREATE);
+        assert_eq!(result, Err(bad_request()));
+        assert!(
+            !sibling.exists(),
+            "a .. escaping OPEN_CREATE must not create anything outside root"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&sibling);
     }
 }

@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
-use vfs_provider::{Access, Provider, RootId, VPath, KIND_DIR, ST_BAD_REQUEST, ST_OK};
+use vfs_provider::{
+    Access, Provider, RootId, VPath, KIND_DIR, OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC, OPEN_WRITE,
+    ST_BAD_REQUEST, ST_OK, ST_READ_ONLY,
+};
 
 use crate::pb::source_server::Source;
 use crate::pb::{
@@ -27,8 +30,10 @@ impl ProviderSourceService {
 /// forward-slash, no leading slash — but nothing on the gRPC boundary
 /// enforced that until now. A client is free to send anything in the `path`
 /// field, and `vfs-source-plugin` binds a TCP port, so a `..`-escaping path
-/// must be refused here rather than handed to `DiskProvider::resolve`, which
-/// pushes segments verbatim.
+/// must be refused here rather than trusted to reach a well-behaved provider.
+/// `DiskProvider::resolve` now also rejects a bare `..` component itself
+/// (defense in depth for anything reaching it directly, in-process), but the
+/// gRPC boundary is the first line of defense for a network client.
 ///
 /// Rejects (returns `false` for): a `..` path component (matched
 /// component-wise, so a file legitimately named `..foo` is unaffected), a
@@ -149,6 +154,23 @@ impl Source for ProviderSourceService {
                 is_dir: false,
                 file_id: 0,
                 status: ST_BAD_REQUEST,
+            }));
+        }
+        // The Stage-1 wire contract carries no write RPCs (no Write/SetLen/
+        // Flush/Mkdir/Remove/Rename/SetAttr messages), so a write open can
+        // never be honoured end-to-end even when the wrapped provider is
+        // itself ReadWrite (get_capabilities already clamps what is
+        // advertised, but that's just a promise — this is the enforcement).
+        // Refuse before the provider ever sees the request, rather than
+        // creating/truncating a file server-side and only then reporting a
+        // capability that doesn't match what just happened.
+        if r.flags & (OPEN_WRITE | OPEN_CREATE | OPEN_EXCL | OPEN_TRUNC) != 0 {
+            return Ok(Response::new(OpenResp {
+                handle: 0,
+                size: 0,
+                is_dir: false,
+                file_id: 0,
+                status: ST_READ_ONLY,
             }));
         }
         let provider = Arc::clone(&self.provider);
@@ -308,5 +330,38 @@ mod tests {
             !resp.found,
             "..foo isn't actually in the fixture, but it must reach the provider to find that out"
         );
+    }
+
+    #[tokio::test]
+    async fn a_write_open_is_refused_even_against_a_writable_provider() {
+        // The wrapped provider really is ReadWrite (a real DiskProvider, not
+        // the read-only MemFixture the other tests use) — this proves the
+        // refusal is enforced at the RPC boundary, not just a side effect of
+        // the backing provider being read-only.
+        let dir = std::env::temp_dir().join(format!("vfs-source-write-refuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let svc = ProviderSourceService::new(Arc::new(vfs_director::DiskProvider::new(&dir)));
+
+        let resp = svc
+            .open(Request::new(OpenReq {
+                path: "new_file.txt".into(),
+                flags: vfs_provider::OPEN_WRITE | vfs_provider::OPEN_CREATE,
+                root: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            resp.status, ST_READ_ONLY,
+            "a write open must be refused with ST_READ_ONLY, not dispatched"
+        );
+        assert!(
+            !dir.join("new_file.txt").exists(),
+            "the refusal must happen before the file is created on disk, not after"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
