@@ -9,6 +9,17 @@
 //! whole-file copy-up beats a lazy, block-tracked one on both simplicity and
 //! correctness. Removing a base-visible path — file or directory — writes a
 //! `.wh.<name>` marker into upper instead of touching base.
+//!
+//! Copy-up stages into a `.cu.<n>.<name>` temp file in the same directory and
+//! renames it over the destination on success, so the destination never
+//! exists in a partially-copied state: a reader either sees the whole file or
+//! none of it, and a failed copy leaves nothing behind for a later check to
+//! mistake for "already copied".
+//!
+//! Both prefixes are reserved names within upper: a real file genuinely named
+//! `.wh.foo` or `.cu.1.foo` is shadowed (treated as a marker, not served as
+//! content). This is the standard overlayfs tradeoff, made explicit here
+//! rather than left to be discovered.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,17 +111,28 @@ impl OverlayProvider {
         }
     }
 
+    /// `.cu.<n>.<name>` sibling of `path`, in the same directory as the
+    /// eventual destination — so the final rename stays within one parent
+    /// (and, for a disk-backed upper, one volume) and is atomic.
+    fn temp_copy_path(&self, path: &str, n: u64) -> String {
+        match path.rsplit_once('/') {
+            Some((parent, name)) => format!("{parent}/.cu.{n}.{name}"),
+            None => format!(".cu.{n}.{path}"),
+        }
+    }
+
     fn is_whiteout(&self, p: VPath) -> Result<bool, i32> {
         let wh = self.whiteout_path(p.rel);
         Ok(self.upper.getattr(VPath::new(p.root, &wh))?.is_some())
     }
 
-    /// True if `p` itself, or any ancestor directory, has been whited out —
-    /// a whiteout on a base directory hides its whole subtree.
-    fn hidden_by_whiteout(&self, p: VPath) -> Result<bool, i32> {
-        if self.is_whiteout(p)? {
-            return Ok(true);
-        }
+    /// True if any ancestor directory of `p` (not `p` itself) has been
+    /// whited out. Deliberately kept separate from [`Self::is_whiteout`]:
+    /// `open_for_write`'s `OPEN_CREATE` handling must tell "this exact path
+    /// was removed" (safe to un-hide by creating it again) from "an ancestor
+    /// directory was opaquely removed" (not safe to paper over — see the
+    /// comment there).
+    fn ancestor_whited_out(&self, p: VPath) -> Result<bool, i32> {
         let mut cur = p.rel;
         while let Some((parent, _)) = cur.rsplit_once('/') {
             if self.is_whiteout(VPath::new(p.root, parent))? {
@@ -119,6 +141,12 @@ impl OverlayProvider {
             cur = parent;
         }
         Ok(false)
+    }
+
+    /// True if `p` itself, or any ancestor directory, has been whited out —
+    /// a whiteout on a base directory hides its whole subtree.
+    fn hidden_by_whiteout(&self, p: VPath) -> Result<bool, i32> {
+        Ok(self.is_whiteout(p)? || self.ancestor_whited_out(p)?)
     }
 
     fn clear_whiteout(&self, p: VPath) -> Result<(), i32> {
@@ -178,20 +206,39 @@ impl OverlayProvider {
         self.copy_file_up(p)
     }
 
+    /// Copies base's `p` into a `.cu.` temp file in upper and renames it over
+    /// `p` only on complete success. The destination is never opened,
+    /// touched, or truncated directly: if the read, a write, flush, close,
+    /// or the final rename fails, the temp file is removed and the original
+    /// error is propagated (not the cleanup's) — so a partial copy can never
+    /// be mistaken for a complete one by a later `getattr`/copy-up check,
+    /// and a concurrent reader can never observe a half-written destination.
     fn copy_file_up(&self, p: VPath) -> Result<(), i32> {
+        let n = self.next.fetch_add(1, Ordering::Relaxed);
+        let tmp_rel = self.temp_copy_path(p.rel, n);
+        let tmp = VPath::new(p.root, &tmp_rel);
+
         let (bh, size, _) = self.base.open(p, OPEN_READ)?;
-        let copied = self.copy_bytes(bh, size, p);
+        let copied = self.copy_bytes(bh, size, tmp);
         let _ = self.base.close(bh);
-        copied
+
+        let result = copied.and_then(|_| self.upper.rename(tmp, p));
+        if result.is_err() {
+            let _ = self.upper.remove(tmp);
+        }
+        result
     }
 
     fn copy_bytes(&self, bh: Handle, size: u64, dest: VPath) -> Result<(), i32> {
         let (uh, _, _) = self
             .upper
             .open(dest, OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC)?;
-        let result = self.copy_loop(bh, uh, size);
-        let _ = self.upper.close(uh);
-        result
+        let copied = self.copy_loop(bh, uh, size).and_then(|_| self.upper.flush(uh));
+        let closed = self.upper.close(uh);
+        // Prefer the copy/flush error over the close error: it happened
+        // first and is almost always the more useful one to report, but
+        // either way *an* error here must never be swallowed.
+        copied.and(closed)
     }
 
     fn copy_loop(&self, bh: Handle, uh: Handle, size: u64) -> Result<(), i32> {
@@ -210,12 +257,27 @@ impl OverlayProvider {
 
     fn open_for_write(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         if self.upper.getattr(p)?.is_none() {
-            if self.hidden_by_whiteout(p)? {
+            // An ancestor directory being opaquely removed is deliberately
+            // NOT something OPEN_CREATE can paper over. Clearing the
+            // ancestor's whiteout here would silently resurrect every other
+            // base entry under it that the caller never asked to restore;
+            // creating the file anyway while leaving the ancestor whiteout
+            // in place would leave it permanently invisible to
+            // `hidden_by_whiteout`'s ancestor walk while still showing up
+            // through `readdir`'s upper merge — an inconsistent state with
+            // no good reading. Refusing is the only option with no
+            // surprising side effect; the way back is explicit: `mkdir` the
+            // ancestor, which clears exactly its own whiteout.
+            if self.ancestor_whited_out(p)? {
+                return Err(not_found());
+            }
+            if self.is_whiteout(p)? {
                 if flags & OPEN_CREATE == 0 {
                     return Err(not_found());
                 }
-                // OPEN_CREATE explicitly asks to (re)create over a whiteout;
-                // clear it so the new file is genuinely visible afterward.
+                // OPEN_CREATE explicitly asks to (re)create over a whiteout
+                // on this exact path; clear it so the new file is genuinely
+                // visible afterward.
                 self.clear_whiteout(p)?;
             } else {
                 self.copy_up_if_needed(p)?;
@@ -281,6 +343,11 @@ impl Provider for OverlayProvider {
                 for e in entries {
                     if let Some(target) = e.name.strip_prefix(".wh.") {
                         map.remove(&target.to_ascii_lowercase());
+                        continue;
+                    }
+                    // A crashed copy-up's temp file must never surface as a
+                    // visible entry.
+                    if e.name.starts_with(".cu.") {
                         continue;
                     }
                     map.insert(e.name.to_ascii_lowercase(), e);
@@ -363,6 +430,11 @@ impl Provider for OverlayProvider {
     }
 
     fn mkdir(&self, p: VPath) -> Result<(), i32> {
+        // Same reasoning as `open_for_write`: an ancestor's opaque removal
+        // is not something a create under it can silently paper over.
+        if self.ancestor_whited_out(p)? {
+            return Err(not_found());
+        }
         self.clear_whiteout(p)?;
         self.upper.mkdir(p)
     }
@@ -669,6 +741,111 @@ mod tests {
         }
     }
 
+    /// Wraps a `Provider` and counts calls to `open`, so a test can assert a
+    /// piece of code touched the wrapped provider exactly N times. A
+    /// final-size or final-content check on a copy-up race can't distinguish
+    /// "one thread copied" from "eight threads copied the same bytes" — this
+    /// can.
+    struct CountingOpens<P> {
+        inner: P,
+        opens: AtomicU64,
+    }
+
+    impl<P> CountingOpens<P> {
+        fn new(inner: P) -> Self {
+            CountingOpens {
+                inner,
+                opens: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl<P: Provider> Provider for CountingOpens<P> {
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            self.inner.getattr(p)
+        }
+        fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+            self.inner.readdir(p)
+        }
+        fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+            self.opens.fetch_add(1, Ordering::Relaxed);
+            self.inner.open(p, flags)
+        }
+        fn close(&self, h: Handle) -> Result<(), i32> {
+            self.inner.close(h)
+        }
+        fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+            self.inner.read_at(h, offset, buf)
+        }
+    }
+
+    /// A base whose `read_at` succeeds for the first chunk of a file and then
+    /// fails every call after — used to prove that a copy-up which dies
+    /// partway through a multi-chunk file leaves no trace in upper, rather
+    /// than a truncated destination that a later check would mistake for a
+    /// complete copy.
+    struct FlakyReadBase {
+        body: Vec<u8>,
+    }
+
+    impl Provider for FlakyReadBase {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::read_only()
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            if p.rel.is_empty() {
+                return Ok(Some(Stat {
+                    kind: KIND_DIR,
+                    size: 0,
+                    mtime: 0,
+                }));
+            }
+            if p.rel == "big.bin" {
+                return Ok(Some(Stat {
+                    kind: KIND_FILE,
+                    size: self.body.len() as u64,
+                    mtime: 0,
+                }));
+            }
+            Ok(None)
+        }
+        fn readdir(&self, _p: VPath) -> Result<Vec<DirEntry>, i32> {
+            Ok(vec![DirEntry {
+                name: "big.bin".to_string(),
+                stat: Stat {
+                    kind: KIND_FILE,
+                    size: self.body.len() as u64,
+                    mtime: 0,
+                },
+            }])
+        }
+        fn open(&self, p: VPath, _flags: u32) -> Result<(Handle, u64, bool), i32> {
+            if p.rel == "big.bin" {
+                Ok((1, self.body.len() as u64, false))
+            } else {
+                Err(not_found())
+            }
+        }
+        fn close(&self, _h: Handle) -> Result<(), i32> {
+            Ok(())
+        }
+        fn read_at(&self, _h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+            // First chunk (copy_loop's buffer is 64 KiB) succeeds; anything
+            // after that fails, simulating a read that dies partway through
+            // a multi-chunk file.
+            if offset >= 65536 {
+                return Err(map_io_err());
+            }
+            let start = offset as usize;
+            let n = (self.body.len() - start).min(buf.len());
+            buf[..n].copy_from_slice(&self.body[start..start + n]);
+            Ok(n)
+        }
+    }
+
     #[test]
     fn overlay_reports_read_write_and_is_never_immutable() {
         let ov = OverlayProvider::new(Arc::new(SlowSeqBase), MemUpper::default()).unwrap();
@@ -796,7 +973,11 @@ mod tests {
     fn concurrent_opens_copy_up_exactly_once() {
         use std::sync::Arc as StdArc;
         use vfs_provider::{Provider, VPath, OPEN_WRITE};
-        let base = Arc::new(InlineProvider::from_files([("a.txt", b"BASE".as_slice())]));
+        let counted = Arc::new(CountingOpens::new(InlineProvider::from_files([(
+            "a.txt",
+            b"BASE".as_slice(),
+        )])));
+        let base: Arc<dyn Provider> = counted.clone();
         let ov: StdArc<OverlayProvider> =
             StdArc::new(OverlayProvider::new(base, MemUpper::default()).unwrap());
 
@@ -815,6 +996,16 @@ mod tests {
         let (h, size, _) = ov.open(VPath::at_default("a.txt"), vfs_provider::OPEN_READ).unwrap();
         assert_eq!(size, 4, "concurrent copy-up corrupted the file");
         ov.close(h).unwrap();
+
+        // The assertion that actually proves exclusivity: every racing
+        // thread reads/writes identical bytes, so the size check above would
+        // pass just the same if all eight threads had copied concurrently.
+        // Counting how many times the base was opened does not.
+        assert_eq!(
+            counted.opens.load(Ordering::Relaxed),
+            1,
+            "copy-up opened the base more than once — the in-flight lock did not serialize the race"
+        );
     }
 
     #[test]
@@ -825,5 +1016,80 @@ mod tests {
         let ov: Arc<dyn vfs_provider::Provider> =
             Arc::new(OverlayProvider::new(base, MemUpper::default()).unwrap());
         vfs_provider::assert_conformance(ov);
+    }
+
+    #[test]
+    fn a_failed_copy_up_leaves_the_destination_absent_not_truncated() {
+        use vfs_provider::{Provider, VPath, OPEN_CREATE, OPEN_WRITE};
+        let base = Arc::new(FlakyReadBase {
+            body: vec![7u8; 200_000],
+        });
+        let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
+        let f = VPath::at_default("big.bin");
+
+        let err = ov
+            .open(f, OPEN_WRITE)
+            .expect_err("copy-up must fail when the base read dies partway through");
+        assert_eq!(err, map_io_err());
+
+        // The assertion that actually catches the bug: a truncated
+        // destination is worse than an error, because every future
+        // getattr/copy-up check would see "already present" and treat a
+        // half-copied file as fully copied forever after. Checking only the
+        // error status above would pass even with that bug intact.
+        assert!(
+            ov.upper.getattr(f).unwrap().is_none(),
+            "a failed copy-up left a truncated file at the destination instead of nothing"
+        );
+        // And no orphaned `.cu.` temp file should linger either.
+        assert!(
+            ov.upper
+                .readdir(VPath::at_default(""))
+                .unwrap()
+                .is_empty(),
+            "a failed copy-up left a stray temp file behind in upper"
+        );
+
+        // Retrying after the transient failure is cleared works normally —
+        // the failed attempt left the path genuinely untouched, not stuck.
+        let ov2 = OverlayProvider::new(
+            Arc::new(InlineProvider::from_files([("big.bin", b"ok".as_slice())])),
+            MemUpper::default(),
+        )
+        .unwrap();
+        let (h, _, _) = ov2.open(f, OPEN_WRITE | OPEN_CREATE).expect("unrelated retry works");
+        ov2.close(h).unwrap();
+    }
+
+    #[test]
+    fn creating_under_a_removed_ancestor_directory_is_refused_until_mkdir_recreates_it() {
+        use vfs_provider::{Provider, VPath, OPEN_CREATE, OPEN_WRITE};
+        let base = Arc::new(InlineProvider::from_files([("dir/a.txt", b"BASE".as_slice())]));
+        let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
+
+        // Opaquely remove the whole base directory.
+        ov.remove(VPath::at_default("dir")).expect("whiteout the base directory");
+        assert!(ov.getattr(VPath::at_default("dir/a.txt")).unwrap().is_none());
+
+        // Creating a brand-new file underneath the removed directory is
+        // refused outright, even with OPEN_CREATE. Clearing the ancestor's
+        // whiteout here would silently resurrect every other base entry
+        // under "dir" that nobody asked to restore; creating the file while
+        // leaving the ancestor whiteout in place would leave it permanently
+        // invisible to getattr while still surfacing through readdir's
+        // upper merge. Refusing is the only option with no inconsistent
+        // state; the way back is explicit.
+        let err = ov
+            .open(VPath::at_default("dir/new.txt"), OPEN_WRITE | OPEN_CREATE)
+            .expect_err("create under a whited-out ancestor must be refused");
+        assert_eq!(err, vfs_provider::not_found());
+
+        // The explicit way back: mkdir clears exactly "dir"'s own whiteout.
+        ov.mkdir(VPath::at_default("dir")).expect("mkdir recreates the directory");
+        let (h, _, _) = ov
+            .open(VPath::at_default("dir/new.txt"), OPEN_WRITE | OPEN_CREATE)
+            .expect("create succeeds once the ancestor is explicitly recreated");
+        ov.close(h).unwrap();
+        assert!(ov.getattr(VPath::at_default("dir/new.txt")).unwrap().is_some());
     }
 }
