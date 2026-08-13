@@ -329,20 +329,6 @@ fn from_hex(b: u8) -> u8 {
     }
 }
 
-#[cfg(test)]
-mod snapshot_tests {
-    use super::*;
-
-    #[test]
-    fn empty_tree_snapshot_is_valid_header() {
-        let snap = empty_tree_snapshot();
-        assert_eq!(snap.len(), 128);
-        // MAGIC "SSFV" little-endian = 0x5646_5353
-        assert_eq!(&snap[0..4], &[0x53, 0x53, 0x46, 0x56]);
-        assert_eq!(u32::from_le_bytes(snap[4..8].try_into().unwrap()), 1);
-    }
-}
-
 fn locate_shim_payload(opts: &LaunchOpts) -> Result<(String, String), String> {
     if let (Some(d), Some(p)) = (&opts.shim_dll, &opts.payload_dll) {
         return Ok((d.clone(), p.clone()));
@@ -362,4 +348,18 @@ fn locate_shim_payload(opts: &LaunchOpts) -> Result<(String, String), String> {
         .or_else(|| vfs_inject::ensure_payload_beside_shim(&dll, None))
         .ok_or_else(|| "vfs_payload.dll not found".to_string())?;
     Ok((dll, payload))
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn empty_tree_snapshot_is_valid_header() {
+        let snap = empty_tree_snapshot();
+        assert_eq!(snap.len(), 128);
+        // MAGIC "SSFV" little-endian = 0x5646_5353
+        assert_eq!(&snap[0..4], &[0x53, 0x53, 0x46, 0x56]);
+        assert_eq!(u32::from_le_bytes(snap[4..8].try_into().unwrap()), 1);
+    }
 }

@@ -24,13 +24,13 @@ fn main() {
         let r = EnumProcessModules(pi.hProcess, mods.as_mut_ptr() as *mut HMODULE, (mods.len()*8) as u32, &mut needed);
         eprintln!("EnumProcessModules r={r} needed={needed}");
         let count = (needed as usize)/8;
-        for i in 0..count.min(64) {
+        for m in mods.iter().take(count.min(64)) {
             let mut name = [0u8; 256];
-            GetModuleBaseNameA(pi.hProcess, mods[i] as HMODULE, name.as_mut_ptr(), 256);
+            GetModuleBaseNameA(pi.hProcess, *m as HMODULE, name.as_mut_ptr(), 256);
             let end = name.iter().position(|&c| c==0).unwrap_or(255);
             let nm = String::from_utf8_lossy(&name[..end]);
             let mut mi: MODULEINFO = zeroed();
-            GetModuleInformation(pi.hProcess, mods[i] as HMODULE, &mut mi, size_of::<MODULEINFO>() as u32);
+            GetModuleInformation(pi.hProcess, *m as HMODULE, &mut mi, size_of::<MODULEINFO>() as u32);
             eprintln!("  {nm} base={:p} size=0x{:x}", mi.lpBaseOfDll, mi.SizeOfImage);
         }
         TerminateProcess(pi.hProcess, 0);

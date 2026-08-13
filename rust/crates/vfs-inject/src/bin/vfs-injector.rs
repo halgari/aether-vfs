@@ -11,13 +11,21 @@ use vfs_inject::{parse_injector_args, run_target_with_shim, RunConfig};
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
-    let (target, dll, payload, config, ready, args) = match parse_injector_args(&a) {
+    let parsed = match parse_injector_args(&a) {
         Ok(parsed) => parsed,
         Err(usage) => {
             eprintln!("{usage}");
             std::process::exit(2);
         }
     };
+    let vfs_inject::InjectorArgs {
+        target,
+        shim_dll: dll,
+        payload_dll: payload,
+        config,
+        ready,
+        target_args: args,
+    } = parsed;
 
     eprintln!("[vfs-injector] target={target} shim={dll} payload={payload}");
     let exit = run_target_with_shim(RunConfig {

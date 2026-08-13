@@ -8,14 +8,15 @@
 #![allow(unsafe_code)]
 
 use core::ffi::c_void;
-use windows_sys::Win32::Foundation::{BOOL, HINSTANCE, TRUE};
+use windows_sys::Win32::Foundation::{HINSTANCE, TRUE};
 
 const DLL_PROCESS_ATTACH: u32 = 1;
 
 /// Standard DLL entry point. Always spawns bootstrap off the loader lock.
 /// Dual-layer uses `VFS_PAYLOAD_CFG_FILE` so bootstrap can `install_late`.
+/// (windows-sys 0.61 dropped the `BOOL` alias; the ABI return is a plain `i32`.)
 #[no_mangle]
-pub extern "system" fn DllMain(_dll: HINSTANCE, reason: u32, _reserved: *mut c_void) -> BOOL {
+pub extern "system" fn DllMain(_dll: HINSTANCE, reason: u32, _reserved: *mut c_void) -> i32 {
     if reason == DLL_PROCESS_ATTACH {
         std::thread::spawn(bootstrap);
     }

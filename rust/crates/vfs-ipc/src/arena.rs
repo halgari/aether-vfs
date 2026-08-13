@@ -13,6 +13,15 @@ pub const DEFAULT_ARENA_BYTES: usize = 32 * 1024 * 1024;
 /// Default number of ring server worker threads (host IPC).
 pub const DEFAULT_WORKER_COUNT: usize = 4;
 
+/// Why a bank write was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArenaError {
+    /// The payload exceeds this slot's bank.
+    TooLarge,
+    /// The computed offset fell outside the mapping.
+    OutOfBounds,
+}
+
 /// View over arena memory inside an existing shared segment.
 pub struct DataArena<'a> {
     seg: &'a SharedSeg,
@@ -44,13 +53,13 @@ impl<'a> DataArena<'a> {
     }
 
     /// Write `data` into the bank for `slot`. Returns mapping-relative offset of data.
-    pub fn write_bank(&self, slot: u32, data: &[u8]) -> Result<u64, ()> {
+    pub fn write_bank(&self, slot: u32, data: &[u8]) -> Result<u64, ArenaError> {
         if data.len() > self.bank_size {
-            return Err(());
+            return Err(ArenaError::TooLarge);
         }
         let off = self.mapping_offset + self.bank_index(slot) * self.bank_size;
         if !self.seg.write_bytes(off, data) {
-            return Err(());
+            return Err(ArenaError::OutOfBounds);
         }
         Ok(off as u64)
     }

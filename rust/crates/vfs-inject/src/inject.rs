@@ -140,7 +140,10 @@ unsafe fn expand_primary_stack(
     }
     let nt_qit: NtQueryInformationThreadFn =
         match GetProcAddress(ntdll, c"NtQueryInformationThread".as_ptr().cast()) {
-            Some(p) => core::mem::transmute(p),
+            Some(p) => core::mem::transmute::<
+                unsafe extern "system" fn() -> isize,
+                NtQueryInformationThreadFn,
+            >(p),
             None => return Err(InjectError::Ntdll),
         };
 
@@ -330,7 +333,10 @@ pub unsafe fn inject_dll(process: HANDLE, dll_path: &str) -> Result<(), InjectEr
             Some(p) => p,
             None => return Err(InjectError::RemoteThread),
         };
-        let start: LPTHREAD_START_ROUTINE = Some(core::mem::transmute(load_library));
+        let start: LPTHREAD_START_ROUTINE = Some(core::mem::transmute::<
+            unsafe extern "system" fn() -> isize,
+            unsafe extern "system" fn(*mut c_void) -> u32,
+        >(load_library));
         let hthread =
             CreateRemoteThread(process, core::ptr::null(), 0, start, remote, 0, core::ptr::null_mut());
         if hthread.is_null() || hthread == INVALID_HANDLE_VALUE {

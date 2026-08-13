@@ -47,7 +47,7 @@ pub fn build_backend(spec: &SourceSpec) -> Result<Arc<dyn Backend>, BuildError> 
         SourceSpec::Http { .. } => Err(BuildError::Unsupported("http source (later milestone)")),
         SourceSpec::Remote { endpoint } => {
             let be = RemoteBackend::connect_blocking(endpoint)
-                .map_err(|e| BuildError::Open(e))?;
+                .map_err(BuildError::Open)?;
             Ok(Arc::new(be))
         }
     }

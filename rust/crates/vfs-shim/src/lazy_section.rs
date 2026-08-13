@@ -464,6 +464,17 @@ mod tests {
     /// another thread. When that happens the region reads back as `MEM_RESERVE`
     /// and the test blames the release it was checking. Nothing about the
     /// product is racy here; only the observation is.
+    ///
+    /// Convention: cargo runs the `#[test]`s in one binary across many threads.
+    /// Any test in this crate that *asserts on process-global state* — the VA
+    /// reservation map here, the hook tables, the fuse-synth handle table, the
+    /// stats counters — must take a lock like this one rather than assume test
+    /// order, or it must live in its own test binary (as the `hook_*.rs`
+    /// integration tests do, one `#[test]` each) so the OS process boundary
+    /// provides the isolation. Take the guard as the first line of the test:
+    /// `let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());`
+    /// (`unwrap_or_else(into_inner)` so one panicking test does not poison the
+    /// lock and cascade into spurious failures in its siblings).
     static VA_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Region state for `addr`: `MEM_FREE` once the VA has been released.
@@ -634,6 +645,8 @@ mod tests {
     fn oversized_files_are_still_mappable() {
         let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Well past the old 3 GiB ceiling; reservation only, so this is cheap.
-        assert!(MAX_LAZY > 8 * 1024 * 1024 * 1024);
+        // A const assertion — the value is known at compile time, so a runtime
+        // `assert!` would never have been able to fail.
+        const _: () = assert!(MAX_LAZY > 8 * 1024 * 1024 * 1024);
     }
 }

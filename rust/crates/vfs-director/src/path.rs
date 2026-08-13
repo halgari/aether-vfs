@@ -1,7 +1,11 @@
 //! Path normalization for the userspace FUSE kernel.
 
+/// A path that could not be normalized: it escaped the root via `..`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathError;
+
 /// Normalize to `/`-separated, no leading slash, no `.` / `..` segments.
-pub fn normalize(raw: &str) -> Result<String, ()> {
+pub fn normalize(raw: &str) -> Result<String, PathError> {
     let s = raw.replace('\\', "/");
     let s = s.trim_matches('/');
     if s.is_empty() {
@@ -14,7 +18,7 @@ pub fn normalize(raw: &str) -> Result<String, ()> {
         }
         if part == ".." {
             if out.pop().is_none() {
-                return Err(());
+                return Err(PathError);
             }
             continue;
         }

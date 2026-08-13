@@ -127,6 +127,7 @@ fn find_near(reference: &Path, name: &str) -> Option<PathBuf> {
 }
 
 /// Shim + payload paths, with payload co-located beside the shim when possible.
+#[allow(dead_code)] // used by some test binaries, not all
 pub fn locate_shim_and_payload() -> (String, String) {
     ensure_fixtures();
     let dll = locate_artifact("vfs_shim_dll.dll");

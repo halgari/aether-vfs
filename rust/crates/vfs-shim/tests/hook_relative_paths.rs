@@ -147,6 +147,6 @@ fn open_dir(path: &std::path::Path) -> *mut c_void {
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS,
             core::ptr::null_mut(),
-        ) as *mut c_void
+        )
     }
 }

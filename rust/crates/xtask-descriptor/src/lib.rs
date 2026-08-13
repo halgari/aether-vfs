@@ -56,20 +56,20 @@ fn descriptor_body() -> String {
         "}}\n :flags {{:open-read {} :open-write {} :read-bulk {} :read-resp-bulk-bit 0x{:08X}}}\n",
         P::OPEN_READ, P::OPEN_WRITE, P::FLAG_READ_BULK, P::READ_RESP_BULK_BIT
     );
-    let _ = write!(
+    let _ = writeln!(
         s,
-        " :slot-states {{:free {} :claimed {} :submitted {} :processing {} :completed {}}}\n",
+        " :slot-states {{:free {} :claimed {} :submitted {} :processing {} :completed {}}}",
         L::ST_FREE, L::ST_CLAIMED, L::ST_SUBMITTED, L::ST_PROCESSING, L::ST_COMPLETED
     );
-    let _ = write!(
+    let _ = writeln!(
         s,
-        " :ring-header {{:size {} :align 8 :fields {{:magic {} :version {} :slot-count {} :slot-stride {} :payload-cap {} :req-seq {} :submit-seq {}}}}}\n",
+        " :ring-header {{:size {} :align 8 :fields {{:magic {} :version {} :slot-count {} :slot-stride {} :payload-cap {} :req-seq {} :submit-seq {}}}}}",
         L::RING_HEADER_SIZE, L::RH_MAGIC, L::RH_VERSION, L::RH_SLOT_COUNT, L::RH_SLOT_STRIDE,
         L::RH_PAYLOAD_CAP, L::RH_REQ_SEQ, L::RH_SUBMIT_SEQ
     );
-    let _ = write!(
+    let _ = writeln!(
         s,
-        " :slot-header {{:size {} :align 8 :fields {{:state {} :opcode {} :flags {} :payload-len {} :status {} :req-id {}}}}}\n",
+        " :slot-header {{:size {} :align 8 :fields {{:state {} :opcode {} :flags {} :payload-len {} :status {} :req-id {}}}}}",
         L::SLOT_HEADER_SIZE, L::SH_STATE, L::SH_OPCODE, L::SH_FLAGS, L::SH_PAYLOAD_LEN, L::SH_STATUS, L::SH_REQ_ID
     );
     s
@@ -149,7 +149,7 @@ pub fn golden_vectors() -> Vec<(&'static str, Vec<u8>)> {
 pub fn golden_edn() -> String {
     let mut s = String::from("{:vectors [\n");
     for (name, bytes) in golden_vectors() {
-        let _ = write!(s, "  {{:name :{name} :bytes \"{}\"}}\n", hex(&bytes));
+        let _ = writeln!(s, "  {{:name :{name} :bytes \"{}\"}}", hex(&bytes));
     }
     s.push_str("]}\n");
     s

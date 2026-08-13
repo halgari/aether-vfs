@@ -108,8 +108,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 discovery.clone(),
                 exe,
             )
-            .await
-            .map_err(|e| e)?;
+            .await?;
 
             match other {
                 Command::Daemon { .. } => unreachable!(),

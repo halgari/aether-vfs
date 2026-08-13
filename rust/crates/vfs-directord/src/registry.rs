@@ -59,6 +59,11 @@ impl SessionRegistry {
         &self.cache
     }
 
+    /// Number of live sessions.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().map(|g| g.len()).unwrap_or(0)
     }
@@ -123,7 +128,7 @@ impl SessionRegistry {
             if is_root {
                 live.layers.push((layer, cached));
                 // Stable order for equal layers: preserve insertion order.
-                live.layers.sort_by(|a, b| a.0.cmp(&b.0));
+                live.layers.sort_by_key(|a| a.0);
             } else {
                 live.prefix_mounts.push((mount.to_string(), cached));
             }

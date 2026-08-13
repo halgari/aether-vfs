@@ -28,8 +28,8 @@ vfs-zip = { path = "../vfs-zip" }
 vfs-protocol = { path = "../vfs-protocol" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-tonic = "0.12"
-prost = "0.13"
+tonic = "0.14"
+prost = "0.14"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,6 +38,6 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 tempfile = "3"
 toml = "0.8"
-tonic = "0.12"
+tonic = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }
 vfs-control = { path = "../vfs-control" }

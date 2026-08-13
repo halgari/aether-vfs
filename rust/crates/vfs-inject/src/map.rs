@@ -301,7 +301,10 @@ pub fn resolve_imports_ex_with_bases(
                 let Some(func) = addr else {
                     return Err("GetProcAddress for import failed");
                 };
-                func as u64
+                // The IAT slot holds the resolved address; a function pointer
+                // is exactly what we want to write there.
+                #[allow(clippy::fn_to_numeric_cast_any)]
+                { func as usize as u64 }
             };
             img[iat_rva..iat_rva + 8].copy_from_slice(&fa.to_le_bytes());
             thunk_rva += 8;
@@ -485,38 +488,6 @@ fn remote_proc_by_ordinal(
     Ok(base + func_rva)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn import_dll_names_reads_kernel32_from_self() {
-        let pe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
-        // build_image flattens; import_dll_names indexes by RVA into the flat image.
-        let (img, _, el) = build_image(&pe).expect("build_image");
-        let names = import_dll_names(&img, el);
-        assert!(
-            names.iter().any(|n| n.eq_ignore_ascii_case("KERNEL32.dll")
-                || n.to_ascii_lowercase().contains("kernel32")),
-            "expected kernel32 in imports: {names:?}"
-        );
-    }
-
-    #[test]
-    fn resolve_imports_fills_iat_for_self() {
-        let pe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
-        let (mut img, _, el) = build_image(&pe).expect("build_image");
-        resolve_imports(&mut img, el).expect("resolve_imports");
-        // IAT should contain at least one non-zero absolute address in high VA range.
-        let opt = el + 24;
-        let iat_rva = rd_u32(&img, opt + 112 + 12 * 8) as usize;
-        if iat_rva != 0 && iat_rva + 8 <= img.len() {
-            let v = rd_u64(&img, iat_rva);
-            assert_ne!(v, 0, "first IAT slot should be resolved");
-        }
-    }
-}
-
 /// Find an export's RVA by name (RVAs index into the flat image).
 pub fn export_rva(img: &[u8], e_lfanew: usize, name: &[u8]) -> Result<u32, &'static str> {
     let opt = e_lfanew + 24;
@@ -547,4 +518,36 @@ pub fn export_rva(img: &[u8], e_lfanew: usize, name: &[u8]) -> Result<u32, &'sta
         }
     }
     Err("export not found")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_dll_names_reads_kernel32_from_self() {
+        let pe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        // build_image flattens; import_dll_names indexes by RVA into the flat image.
+        let (img, _, el) = build_image(&pe).expect("build_image");
+        let names = import_dll_names(&img, el);
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("KERNEL32.dll")
+                || n.to_ascii_lowercase().contains("kernel32")),
+            "expected kernel32 in imports: {names:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_imports_fills_iat_for_self() {
+        let pe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let (mut img, _, el) = build_image(&pe).expect("build_image");
+        resolve_imports(&mut img, el).expect("resolve_imports");
+        // IAT should contain at least one non-zero absolute address in high VA range.
+        let opt = el + 24;
+        let iat_rva = rd_u32(&img, opt + 112 + 12 * 8) as usize;
+        if iat_rva != 0 && iat_rva + 8 <= img.len() {
+            let v = rd_u64(&img, iat_rva);
+            assert_ne!(v, 0, "first IAT slot should be resolved");
+        }
+    }
 }

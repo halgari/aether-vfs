@@ -253,8 +253,8 @@ mod tests {
         let mut buf = [0u8; 20];
         // Starts mid-block (offset 10) and spans into the next.
         assert_eq!(be.read(h, 10, &mut buf).unwrap(), 20);
-        for i in 0..20 {
-            assert_eq!(buf[i], (10 + i) as u8, "byte at {i}");
+        for (i, b) in buf.iter().enumerate().take(20) {
+            assert_eq!(*b, (10 + i) as u8, "byte at {i}");
         }
         be.release(h).unwrap();
     }

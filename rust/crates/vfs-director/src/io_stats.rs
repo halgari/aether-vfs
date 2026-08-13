@@ -26,6 +26,7 @@ struct PathStats {
     errors: u64,
 }
 
+#[derive(Default)]
 struct State {
     by_path: HashMap<String, PathStats>,
     fh_path: HashMap<u64, String>,
@@ -38,21 +39,6 @@ struct State {
     total_bytes: u64,
 }
 
-impl Default for State {
-    fn default() -> Self {
-        State {
-            by_path: HashMap::new(),
-            fh_path: HashMap::new(),
-            ops_getattr: 0,
-            ops_readdir: 0,
-            ops_open: 0,
-            ops_read: 0,
-            ops_close: 0,
-            ops_err: 0,
-            total_bytes: 0,
-        }
-    }
-}
 
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 

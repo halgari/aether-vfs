@@ -37,7 +37,7 @@ impl AlignedBuf {
 }
 
 fn is_aligned(b: &[u8]) -> bool {
-    (b.as_ptr() as usize) % 8 == 0
+    (b.as_ptr() as usize).is_multiple_of(8)
 }
 
 /// SAFETY-bearing helper: view the generation slot as an `&AtomicU64`.

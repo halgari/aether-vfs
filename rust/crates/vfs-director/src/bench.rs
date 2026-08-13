@@ -164,7 +164,7 @@ pub fn wait_for_window(_pid: u32, _timeout: Duration) -> Option<(u32, u32)> {
 #[cfg(windows)]
 fn find_window(pid: u32) -> Option<(u32, u32)> {
     use std::cell::RefCell;
-    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClientRect, GetWindowThreadProcessId, IsWindowVisible,
     };
@@ -174,7 +174,7 @@ fn find_window(pid: u32) -> Option<(u32, u32)> {
         static WANT_PID: RefCell<u32> = const { RefCell::new(0) };
     }
 
-    unsafe extern "system" fn cb(hwnd: HWND, _l: LPARAM) -> BOOL {
+    unsafe extern "system" fn cb(hwnd: HWND, _l: LPARAM) -> i32 {
         let mut wp: u32 = 0;
         GetWindowThreadProcessId(hwnd, &mut wp);
         let want = WANT_PID.with(|w| *w.borrow());

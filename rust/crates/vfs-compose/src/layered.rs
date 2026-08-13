@@ -55,10 +55,7 @@ impl Backend for LayeredBackend {
             }
             Err(e) => return Err(e),
         };
-        let bottom_entries = match self.bottom.readdir(path) {
-            Ok(e) => e,
-            Err(_) => Vec::new(),
-        };
+        let bottom_entries = self.bottom.readdir(path).unwrap_or_default();
         let mut seen: HashMap<String, DirEntry> = HashMap::new();
         // Bottom first, top overwrites.
         for e in bottom_entries {
@@ -68,7 +65,7 @@ impl Backend for LayeredBackend {
             seen.insert(e.name.to_ascii_lowercase(), e);
         }
         let mut out: Vec<DirEntry> = seen.into_values().collect();
-        out.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+        out.sort_by_key(|a| a.name.to_ascii_lowercase());
         Ok(out)
     }
 

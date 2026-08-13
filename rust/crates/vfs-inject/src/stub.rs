@@ -46,7 +46,7 @@ pub fn build_stub(
         // je spin_loop (rel8)
         let je = s.len();
         s.extend_from_slice(&[0x74, 0x00]);
-        s[je + 1] = (spin as i8 - (je as i8 + 2)) as u8 as u8;
+        s[je + 1] = (spin as i8 - (je as i8 + 2)) as u8;
         // pause (optional energy) — skip for simplicity
     }
 

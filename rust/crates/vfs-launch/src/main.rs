@@ -283,33 +283,6 @@ fn count_payload_files(root: &Path) -> usize {
     n
 }
 
-#[cfg(test)]
-mod plugin_order_tests {
-    use super::*;
-
-    #[test]
-    fn order_masters_then_cc_then_skyui() {
-        let mut seen = std::collections::BTreeMap::new();
-        for n in [
-            "Skyrim.esm",
-            "Update.esm",
-            "Dawnguard.esm",
-            "ccBGSSSE001-Fish.esm",
-            "_ResourcePack.esl",
-            "SkyUI_SE.esp",
-        ] {
-            seen.insert(n.to_ascii_lowercase(), n.to_string());
-        }
-        let p = order_plugins(seen);
-        assert_eq!(p.first().map(String::as_str), Some("Skyrim.esm"));
-        assert!(p.iter().any(|x| x == "SkyUI_SE.esp"));
-        assert_eq!(p.last().map(String::as_str), Some("SkyUI_SE.esp"));
-        let body = format_plugins_txt(&p);
-        assert!(body.contains("*SkyUI_SE.esp"));
-        assert!(body.contains("*Skyrim.esm"));
-    }
-}
-
 fn main() {
     let args = parse_args();
 
@@ -472,5 +445,32 @@ fn main() {
             session.stop_serve();
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod plugin_order_tests {
+    use super::*;
+
+    #[test]
+    fn order_masters_then_cc_then_skyui() {
+        let mut seen = std::collections::BTreeMap::new();
+        for n in [
+            "Skyrim.esm",
+            "Update.esm",
+            "Dawnguard.esm",
+            "ccBGSSSE001-Fish.esm",
+            "_ResourcePack.esl",
+            "SkyUI_SE.esp",
+        ] {
+            seen.insert(n.to_ascii_lowercase(), n.to_string());
+        }
+        let p = order_plugins(seen);
+        assert_eq!(p.first().map(String::as_str), Some("Skyrim.esm"));
+        assert!(p.iter().any(|x| x == "SkyUI_SE.esp"));
+        assert_eq!(p.last().map(String::as_str), Some("SkyUI_SE.esp"));
+        let body = format_plugins_txt(&p);
+        assert!(body.contains("*SkyUI_SE.esp"));
+        assert!(body.contains("*Skyrim.esm"));
     }
 }

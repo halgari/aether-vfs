@@ -1155,6 +1155,8 @@ fn to_nt_path(path: &str) -> String {
 /// Required when the original OA had a FUSE synthetic RootDirectory (invalid
 /// to the kernel) but we intentionally fall through to the host install —
 /// DRM exceptions (`steam_api*`, `steam_appid.txt`, `SkyrimSE.exe`).
+/// Arity mirrors `NtCreateFile` exactly; it is not ours to reduce.
+#[allow(clippy::too_many_arguments)]
 unsafe fn tramp_create_abs(
     tramp: NtCreateFileFn,
     file_handle: *mut HANDLE,
@@ -1195,6 +1197,8 @@ unsafe fn tramp_create_abs(
     status
 }
 
+/// Arity mirrors `NtOpenFile` exactly; it is not ours to reduce.
+#[allow(clippy::too_many_arguments)]
 unsafe fn tramp_open_abs(
     tramp: NtOpenFileFn,
     file_handle: *mut HANDLE,
@@ -1388,7 +1392,7 @@ unsafe fn fill_by_name(
             core::ptr::write_unaligned(p as *mut i64, size as i64); // AllocationSize
             core::ptr::write_unaligned(p.add(8) as *mut i64, size as i64); // EndOfFile
             core::ptr::write_unaligned(p.add(16) as *mut u32, 1); // NumberOfLinks
-            core::ptr::write_unaligned(p.add(21) as *mut u8, u8::from(is_dir)); // Directory
+            core::ptr::write_unaligned(p.add(21), u8::from(is_dir)); // Directory
         }
         34 => {
             core::ptr::write_unaligned(p.add(32) as *mut i64, size as i64); // AllocationSize

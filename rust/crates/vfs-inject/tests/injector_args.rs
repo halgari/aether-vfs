@@ -6,7 +6,9 @@ fn parses_positional_and_double_dash_args() {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let (t, s, p, c, r, args) = parse_injector_args(&a).unwrap();
+    let got = parse_injector_args(&a).unwrap();
+    let (t, s, p, c, r, args) =
+        (got.target, got.shim_dll, got.payload_dll, got.config, got.ready, got.target_args);
     assert_eq!(
         (t.as_str(), s.as_str(), p.as_str(), c.as_str(), r.as_str()),
         ("t.exe", "s.dll", "p.dll", "c.cfg", "r.flag")

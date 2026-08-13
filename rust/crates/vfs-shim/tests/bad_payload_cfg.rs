@@ -41,7 +41,7 @@ fn bad_payload_cfg_file_falls_back_to_full_install() {
 
     // Do not Debug-format Result: HookGuard does not implement Debug.
     assert!(
-        matches!(result, Ok(_)),
+        result.is_ok(),
         "bootstrap must succeed via full install fallback (bad cfg pointer rejected)"
     );
     // Keep guard alive for the rest of the process (test binary exits after).

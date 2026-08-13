@@ -34,12 +34,12 @@ impl SharedSeg {
     }
 
     fn in_bounds(&self, off: usize, n: usize) -> bool {
-        off.checked_add(n).map_or(false, |end| end <= self.len)
+        off.checked_add(n).is_some_and(|end| end <= self.len)
     }
 
     #[allow(unsafe_code)]
     pub(crate) fn atomic_u32(&self, off: usize) -> Option<&AtomicU32> {
-        if !self.in_bounds(off, 4) || (self.ptr as usize + off) % 4 != 0 {
+        if !self.in_bounds(off, 4) || !(self.ptr as usize + off).is_multiple_of(4) {
             return None;
         }
         // SAFETY: in-bounds and 4-aligned; AtomicU32 has the same layout as u32;
@@ -49,7 +49,7 @@ impl SharedSeg {
 
     #[allow(unsafe_code)]
     pub(crate) fn atomic_u64(&self, off: usize) -> Option<&AtomicU64> {
-        if !self.in_bounds(off, 8) || (self.ptr as usize + off) % 8 != 0 {
+        if !self.in_bounds(off, 8) || !(self.ptr as usize + off).is_multiple_of(8) {
             return None;
         }
         // SAFETY: in-bounds and 8-aligned; AtomicU64 has the same layout as u64.

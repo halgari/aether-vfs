@@ -19,11 +19,15 @@ enum Layer {
 }
 
 /// Upper-over-base with `.wh.*` whiteouts (read path).
+/// One open handle: which layer answered, the handle it gave back, and the
+/// upper-layer file when the open was for writing.
+type OpenEntry = (Layer, BackendHandle, Option<std::fs::File>);
+
 pub struct OverlayBackend {
     base: Arc<dyn Backend>,
     upper: PathBuf,
     next: AtomicU64,
-    opens: Mutex<HashMap<u64, (Layer, BackendHandle, Option<std::fs::File>)>>,
+    opens: Mutex<HashMap<u64, OpenEntry>>,
 }
 
 impl OverlayBackend {
@@ -132,7 +136,7 @@ impl Backend for OverlayBackend {
             return Err(not_found());
         }
         let mut out: Vec<DirEntry> = map.into_values().collect();
-        out.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+        out.sort_by_key(|a| a.name.to_ascii_lowercase());
         Ok(out)
     }
 

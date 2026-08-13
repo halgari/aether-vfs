@@ -46,7 +46,7 @@ impl Director for DirectorService {
         let summary = self
             .registry
             .create(name)
-            .map_err(|e| Status::internal(e))?;
+            .map_err(Status::internal)?;
         Ok(Response::new(Session {
             id: summary.id,
             name: summary.name,
@@ -57,7 +57,7 @@ impl Director for DirectorService {
     async fn add_source(&self, req: Request<AddSourceReq>) -> Result<Response<SourceRef>, Status> {
         let r = req.into_inner();
         let spec = pb_to_source_spec(r.source.as_ref())
-            .map_err(|e| Status::invalid_argument(e))?;
+            .map_err(Status::invalid_argument)?;
         // build_backend may block (remote connect); run off the async executor.
         let backend = tokio::task::spawn_blocking(move || build_backend(&spec))
             .await
@@ -73,7 +73,7 @@ impl Director for DirectorService {
         let id = self
             .registry
             .add_source(&r.session_id, &mount, r.layer, backend)
-            .map_err(|e| Status::not_found(e))?;
+            .map_err(Status::not_found)?;
 
         Ok(Response::new(SourceRef { id }))
     }
@@ -133,7 +133,7 @@ impl Director for DirectorService {
         let id = req.into_inner().session_id;
         self.registry
             .teardown(&id)
-            .map_err(|e| Status::not_found(e))?;
+            .map_err(Status::not_found)?;
         Ok(Response::new(Empty {}))
     }
 
@@ -141,7 +141,7 @@ impl Director for DirectorService {
         let sessions = self
             .registry
             .list()
-            .map_err(|e| Status::internal(e))?
+            .map_err(Status::internal)?
             .into_iter()
             .map(|s| Session {
                 id: s.id,

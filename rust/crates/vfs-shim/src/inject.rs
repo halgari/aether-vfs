@@ -85,7 +85,10 @@ pub fn inject_dll(process: HANDLE, dll_path: &str) -> bool {
             Some(p) => p,
             None => return false,
         };
-        let start: LPTHREAD_START_ROUTINE = Some(core::mem::transmute(load));
+        let start: LPTHREAD_START_ROUTINE = Some(core::mem::transmute::<
+            unsafe extern "system" fn() -> isize,
+            unsafe extern "system" fn(*mut c_void) -> u32,
+        >(load));
         let th =
             CreateRemoteThread(process, core::ptr::null(), 0, start, remote, 0, core::ptr::null_mut());
         if th.is_null() || th == INVALID_HANDLE_VALUE {

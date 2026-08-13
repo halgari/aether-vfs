@@ -76,6 +76,7 @@ fn process_alive(pid: u32) -> bool {
         // Prefer OpenProcess over shelling out to tasklist (slow, locale-dependent).
         // SAFETY: OpenProcess is well-defined for any pid; we only check nullity.
         unsafe {
+            #[allow(clippy::upper_case_acronyms)] // mirrors the Win32 name
             type HANDLE = *mut core::ffi::c_void;
             extern "system" {
                 fn OpenProcess(access: u32, inherit: i32, pid: u32) -> HANDLE;

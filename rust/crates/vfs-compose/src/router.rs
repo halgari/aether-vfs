@@ -17,11 +17,14 @@ pub struct Route {
 }
 
 /// First matching route wins; otherwise `default`.
+/// One open handle: the backend that answered, and the handle it returned.
+type OpenEntry = (Arc<dyn Backend>, BackendHandle);
+
 pub struct RouterBackend {
     default: Arc<dyn Backend>,
     routes: Vec<Route>,
     next: AtomicU64,
-    opens: Mutex<HashMap<u64, (Arc<dyn Backend>, BackendHandle)>>,
+    opens: Mutex<HashMap<u64, OpenEntry>>,
 }
 
 impl RouterBackend {

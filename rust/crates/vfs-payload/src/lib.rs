@@ -18,6 +18,12 @@
 //! logic under test is identical either way; only the runtime scaffolding
 //! differs.
 #![cfg_attr(not(test), no_std)]
+// `/ENTRY:DllMain` (build.rs) names the same symbol the cdylib exports, so the
+// linker emits LNK4216 ("exported entry point"). It is benign here: the
+// injector reaches this payload through the PE AddressOfEntryPoint, never by
+// name, so the export slot is unused. Any `#[no_mangle]` fn in a Windows cdylib
+// is exported, so the collision is structural and not worth contorting around.
+#![allow(linker_messages)]
 #![allow(clippy::missing_safety_doc)]
 
 use core::ffi::c_void;

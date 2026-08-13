@@ -100,7 +100,7 @@ pub fn read_i64(b: &[u8], off: usize) -> Option<i64> {
 }
 pub fn read_key(b: &[u8], off: usize) -> Option<[u8; 32]> {
     let s = b.get(off..off.checked_add(32)?)?;
-    Some(s.try_into().ok()?)
+    s.try_into().ok()
 }
 pub fn read_slice(b: &[u8], off: usize, len: usize) -> Option<&[u8]> {
     b.get(off..off.checked_add(len)?)

@@ -106,7 +106,7 @@ pub struct RelName {
 pub fn rel_name(dir: *mut c_void, rel: &str) -> RelName {
     let mut wide: Vec<u16> = rel.encode_utf16().collect();
     let bytes = (wide.len() * 2) as u16;
-    let mut us = Box::new(UnicodeString {
+    let us = Box::new(UnicodeString {
         length: bytes,
         maximum_length: bytes,
         buffer: wide.as_mut_ptr(),

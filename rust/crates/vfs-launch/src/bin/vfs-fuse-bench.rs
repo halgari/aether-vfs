@@ -562,10 +562,7 @@ fn find_zip_entry_window(zip: &std::path::Path, want_vpath: &str) -> Option<(u64
         }
         let vp = e.vpath.replace('\\', "/").to_ascii_lowercase();
         if vp == want || vp.ends_with(&want) {
-            match vfs_core::decode(&e.source.0) {
-                vfs_core::Source::ZipWindow { offset, .. } => return Some((offset, e.size)),
-                _ => {}
-            }
+            if let vfs_core::Source::ZipWindow { offset, .. } = vfs_core::decode(&e.source.0) { return Some((offset, e.size)) }
         }
     }
     None
@@ -584,14 +581,11 @@ fn chrono_like_now() -> String {
         // fallback string
         let _ = now;
     }
-    format!(
-        "{}",
-        std::process::Command::new("powershell")
+    std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", "Get-Date -Format o"])
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| format!("unix-{now}"))
-    )
+            .unwrap_or_else(|| format!("unix-{now}")).to_string()
 }

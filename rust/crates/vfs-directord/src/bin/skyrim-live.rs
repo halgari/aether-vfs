@@ -391,10 +391,10 @@ fn run() -> Result<(), String> {
                 last_steam_ok = steam_ok;
             }
             // Every 10s: full top-path I/O report.
-            if ticks % 2 == 0 {
+            if ticks.is_multiple_of(2) {
                 eprint!("{}", vfs_director::io_stats_report(25));
             }
-            if ticks % 6 == 0 {
+            if ticks.is_multiple_of(6) {
                 eprintln!(
                     "  ipc heartbeat t={}s game_alive={alive} steam_alive={steam_ok}",
                     ticks * 5
@@ -642,7 +642,7 @@ fn ensure_steam_logged_on() -> Result<(), String> {
     {
         let log = Path::new(r"C:\Program Files (x86)\Steam\logs\connection_log.txt");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-        let mut last_state = String::from("unknown");
+        let mut last_state;
         loop {
             if steam_offline_mode_active() {
                 eprintln!(
@@ -760,96 +760,6 @@ fn steam_cm_state(log: &Path) -> Result<String, String> {
     }
     last.map(|s| s.to_string())
         .ok_or_else(|| "no CM state tokens in connection_log tail".into())
-}
-
-#[cfg(test)]
-mod steam_gate_tests {
-    use super::*;
-
-    #[test]
-    fn refuses_when_steam_absent() {
-        let e = steam_gate_decision(&SteamInfo {
-            steam: false,
-            webhelper: false,
-            age_secs: 0,
-        })
-        .unwrap_err();
-        assert!(e.contains("HARD REQUIREMENT"), "{e}");
-        assert!(e.contains("never start Steam"), "{e}");
-    }
-
-    #[test]
-    fn refuses_when_webhelper_missing() {
-        let e = steam_gate_decision(&SteamInfo {
-            steam: true,
-            webhelper: false,
-            age_secs: 60,
-        })
-        .unwrap_err();
-        assert!(e.contains("webhelper"), "{e}");
-    }
-
-    #[test]
-    fn refuses_when_too_young() {
-        let e = steam_gate_decision(&SteamInfo {
-            steam: true,
-            webhelper: true,
-            age_secs: 5,
-        })
-        .unwrap_err();
-        assert!(e.contains("5s"), "{e}");
-    }
-
-    #[test]
-    fn accepts_settled_client() {
-        steam_gate_decision(&SteamInfo {
-            steam: true,
-            webhelper: true,
-            age_secs: 60,
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn inject_overlay_off_inserts_and_is_idempotent() {
-        let dir = std::env::temp_dir().join(format!(
-            "vfs-overlay-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("localconfig.vdf");
-        let body = r#""UserLocalConfigStore"
-{
-	"Software"
-	{
-		"Valve"
-		{
-			"Steam"
-			{
-				"apps"
-				{
-					"489830"
-					{
-						"LastPlayed"		"1"
-						"Playtime"		"2"
-					}
-				}
-			}
-		}
-	}
-}
-"#;
-        std::fs::write(&path, body).unwrap();
-        assert!(inject_enable_game_overlay_off(&path, "489830").unwrap());
-        let once = std::fs::read_to_string(&path).unwrap();
-        assert!(once.contains("EnableGameOverlay"), "{once}");
-        assert!(once.contains("\"0\""), "{once}");
-        assert!(!inject_enable_game_overlay_off(&path, "489830").unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }
 
 struct SteamInfo {
@@ -1192,4 +1102,94 @@ fn ensure_junction(link: &Path, target: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod steam_gate_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_when_steam_absent() {
+        let e = steam_gate_decision(&SteamInfo {
+            steam: false,
+            webhelper: false,
+            age_secs: 0,
+        })
+        .unwrap_err();
+        assert!(e.contains("HARD REQUIREMENT"), "{e}");
+        assert!(e.contains("never start Steam"), "{e}");
+    }
+
+    #[test]
+    fn refuses_when_webhelper_missing() {
+        let e = steam_gate_decision(&SteamInfo {
+            steam: true,
+            webhelper: false,
+            age_secs: 60,
+        })
+        .unwrap_err();
+        assert!(e.contains("webhelper"), "{e}");
+    }
+
+    #[test]
+    fn refuses_when_too_young() {
+        let e = steam_gate_decision(&SteamInfo {
+            steam: true,
+            webhelper: true,
+            age_secs: 5,
+        })
+        .unwrap_err();
+        assert!(e.contains("5s"), "{e}");
+    }
+
+    #[test]
+    fn accepts_settled_client() {
+        steam_gate_decision(&SteamInfo {
+            steam: true,
+            webhelper: true,
+            age_secs: 60,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn inject_overlay_off_inserts_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!(
+            "vfs-overlay-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("localconfig.vdf");
+        let body = r#""UserLocalConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"apps"
+				{
+					"489830"
+					{
+						"LastPlayed"		"1"
+						"Playtime"		"2"
+					}
+				}
+			}
+		}
+	}
+}
+"#;
+        std::fs::write(&path, body).unwrap();
+        assert!(inject_enable_game_overlay_off(&path, "489830").unwrap());
+        let once = std::fs::read_to_string(&path).unwrap();
+        assert!(once.contains("EnableGameOverlay"), "{once}");
+        assert!(once.contains("\"0\""), "{once}");
+        assert!(!inject_enable_game_overlay_off(&path, "489830").unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

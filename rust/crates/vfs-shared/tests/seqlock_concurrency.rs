@@ -58,12 +58,10 @@ fn readers_never_see_a_torn_snapshot() {
             #[allow(unsafe_code)]
             let shared = unsafe { std::slice::from_raw_parts(ptr.0 as *const u8, ptr.1) };
             for _ in 0..20_000 {
-                if let Some(sz) = read_stable(shared, |r| {
-                    r.getattr(&["a.esp"]).map(|s| s.size)
-                }) {
-                    if let Some(sz) = sz {
-                        assert!(sz == 10 || sz == 9999, "torn read: size={sz}");
-                    }
+                if let Some(Some(sz)) =
+                    read_stable(shared, |r| r.getattr(&["a.esp"]).map(|s| s.size))
+                {
+                    assert!(sz == 10 || sz == 9999, "torn read: size={sz}");
                 }
                 if stop.load(Ordering::Relaxed) {
                     break;

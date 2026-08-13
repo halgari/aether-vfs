@@ -136,7 +136,7 @@ pub fn map_image_from_pe_bytes_local(pe: &[u8]) -> Result<(*mut c_void, usize), 
             let ex_dir = opt + 112 + 3 * 8;
             if ex_dir + 8 <= img.len() {
                 let ex_rva = rd_u32(&img, ex_dir) as usize;
-                let ex_size = rd_u32(&img, ex_dir + 4) as u32;
+                let ex_size = rd_u32(&img, ex_dir + 4);
                 if ex_rva != 0 && ex_size >= 12 {
                     type RtlAddFunctionTableFn =
                         unsafe extern "system" fn(*const c_void, u32, u64) -> u8;
