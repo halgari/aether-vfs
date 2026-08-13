@@ -856,6 +856,7 @@ so a read-only provider implements five methods."
   - `assert_conformance(p: Arc<dyn Provider>)` — runs the case subset implied by `p.capabilities()`.
   - `write_fixture_tree(dir: &Path)` — writes the reference tree the suite expects. Moved from `vfs-source::conformance` so there is one definition.
   - `MemFixture` — a minimal in-crate `Access::Read` provider over a fixed tree, used to test the suite itself.
+  - `SeqFixture` — an `Access::SeqRead` provider over the same tree, with a per-handle cursor and **no** `read_at` (it inherits the `ST_NOT_SUPPORTED` default). It exists because no crate in Tasks 5-9 ports a sequential-only backend, so without it `assert_sequential` would ship with zero coverage — dead code inside the oracle six ports depend on. Stage 2's `seekable(p)` combinator also needs it as the thing to wrap. It delegates `getattr` and `readdir` to an internal `MemFixture` rather than duplicating the tree walk.
 
 **The reference tree** every provider under test must expose:
 
@@ -1298,6 +1299,20 @@ fn assert_positional(p: &Arc<dyn Provider>) {
 
 fn assert_sequential(p: &Arc<dyn Provider>) {
     for (rel, body) in FIXTURE_FILES {
+        // A sequential provider must refuse positional reads rather than
+        // silently returning something plausible.
+        let (probe, _, _) = p.open(VPath::at_default(rel), crate::OPEN_READ).expect("open");
+        match p.read_at(probe, 0, &mut [0u8; 4]) {
+            Err(e) if e == crate::not_supported() => {}
+            Err(e) => panic!(
+                "read_at on a SeqRead provider returned status {e}, expected ST_NOT_SUPPORTED"
+            ),
+            Ok(n) => panic!(
+                "read_at on a SeqRead provider succeeded with {n} bytes; it must be refused"
+            ),
+        }
+        p.close(probe).expect("close");
+
         let (h, _, _) = p.open(VPath::at_default(rel), crate::OPEN_READ).expect("open");
         let mut out = Vec::new();
         let mut buf = [0u8; 3];
