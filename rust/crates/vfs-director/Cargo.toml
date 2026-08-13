@@ -17,6 +17,7 @@ zip = ["dep:vfs-zip"]
 [dependencies]
 vfs-env = { path = "../vfs-env" }
 vfs-protocol = { path = "../vfs-protocol" }
+vfs-provider = { path = "../vfs-provider" }
 vfs-ipc = { path = "../vfs-ipc" }
 vfs-win = { path = "../vfs-win" }
 vfs-inject = { path = "../vfs-inject" }

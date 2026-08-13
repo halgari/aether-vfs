@@ -9,7 +9,8 @@
 //!
 //! Host `open`/`read` exist for occasional inspection only.
 //!
-//! Backend trait lives in [`vfs_protocol`] (ops module) so zip stays free of host deps.
+//! `Provider` trait lives in [`vfs_protocol`] (ops module, re-exported from
+//! `vfs-provider`) so zip stays free of host deps.
 
 #![deny(unsafe_code)]
 
@@ -25,9 +26,11 @@ pub mod bench;
 pub mod stage;
 
 pub use director::Director;
-pub use disk::DiskBackend;
+pub use disk::DiskProvider;
+/// Deprecated: renamed to [`DiskProvider`]. Removed at the end of Stage 1.
+pub use disk::DiskProvider as DiskBackend;
 pub use io_stats::{mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report};
-pub use ops::{Backend, BackendHandle, DirEntry, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
+pub use ops::{Provider, Handle, DirEntry, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
 pub use session::{LaunchOpts, Session};
 
 #[cfg(test)]

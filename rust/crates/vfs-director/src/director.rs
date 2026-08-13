@@ -5,19 +5,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::ops::{
-    bad_fh, bad_request, is_dir, map_io_err, not_a_dir, not_found, Backend, BackendHandle, DirEntry,
-    Stat, KIND_DIR, OPEN_WRITE,
+    bad_fh, bad_request, is_dir, map_io_err, not_a_dir, not_found, DirEntry, Handle, Provider,
+    Stat, VPath, KIND_DIR, OPEN_WRITE,
 };
 use crate::path::{normalize, strip_prefix};
 
 struct Mount {
     prefix: String,
-    backend: Arc<dyn Backend>,
+    backend: Arc<dyn Provider>,
 }
 
 struct OpenRec {
-    backend: Arc<dyn Backend>,
-    bh: BackendHandle,
+    backend: Arc<dyn Provider>,
+    bh: Handle,
     size: u64,
     is_dir: bool,
 }
@@ -45,7 +45,7 @@ impl Director {
     }
 
     /// Later mounts override earlier for the same path.
-    pub fn mount(&self, prefix: &str, backend: Arc<dyn Backend>) -> Result<(), i32> {
+    pub fn mount(&self, prefix: &str, backend: Arc<dyn Provider>) -> Result<(), i32> {
         let prefix = normalize(prefix).map_err(|_| bad_request())?;
         self.mounts
             .lock()
@@ -70,7 +70,7 @@ impl Director {
             let Some(rel) = strip_prefix(&path, &m.prefix) else {
                 continue;
             };
-            match m.backend.getattr(&rel)? {
+            match m.backend.getattr(VPath::at_default(&rel))? {
                 Some(s) => return Ok(Some(s)),
                 None => continue,
             }
@@ -96,7 +96,7 @@ impl Director {
             let Some(rel) = strip_prefix(&path, &m.prefix) else {
                 continue;
             };
-            match m.backend.readdir(&rel) {
+            match m.backend.readdir(VPath::at_default(&rel)) {
                 Ok(entries) => {
                     saw_dir = true;
                     for e in entries {
@@ -134,7 +134,7 @@ impl Director {
             let Some(rel) = strip_prefix(&path, &m.prefix) else {
                 continue;
             };
-            match m.backend.open(&rel, flags) {
+            match m.backend.open(VPath::at_default(&rel), flags) {
                 Ok((bh, size, is_dir_flag)) => {
                     let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
                     self.opens.lock().map_err(|_| map_io_err())?.insert(
@@ -170,7 +170,7 @@ impl Director {
             )
         };
         let _ = (size, is_dir_flag);
-        backend.read(bh, offset, buf)
+        backend.read_at(bh, offset, buf)
     }
 
     pub fn close(&self, fh: u64) -> Result<(), i32> {
@@ -178,6 +178,6 @@ impl Director {
             let mut g = self.opens.lock().map_err(|_| map_io_err())?;
             g.remove(&fh).ok_or_else(bad_fh)?
         };
-        rec.backend.release(rec.bh)
+        rec.backend.close(rec.bh)
     }
 }

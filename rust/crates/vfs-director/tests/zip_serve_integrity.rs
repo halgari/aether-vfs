@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use vfs_director::{DiskBackend, Session};
+use vfs_director::{DiskProvider, Session};
 
 /// Deterministic, position-dependent bytes: a fragmented or mis-ordered read
 /// shows up as a mismatch at a known offset rather than plausible-looking data.
@@ -38,7 +38,7 @@ fn reads_match_at_every_offset_and_size() {
     std::fs::write(dir.join("blob.bin"), &data).unwrap();
 
     let s = Session::new();
-    s.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
+    s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
     let k = s.kernel();
 
     let (fh, size, _) = k.open("blob.bin", vfs_protocol::OPEN_READ).unwrap();
@@ -72,7 +72,7 @@ fn sequential_whole_file_read_is_byte_exact() {
     std::fs::write(dir.join("master.esm"), &data).unwrap();
 
     let s = Session::new();
-    s.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
+    s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
     let k = s.kernel();
     let (fh, size, _) = k.open("master.esm", vfs_protocol::OPEN_READ).unwrap();
 
@@ -108,8 +108,8 @@ fn overlay_shadows_base_without_mixing() {
     std::fs::write(over.join("shared.bin"), &over_data).unwrap();
 
     let s = Session::new();
-    s.mount("", Arc::new(DiskBackend::new(&base))).unwrap();
-    s.mount("", Arc::new(DiskBackend::new(&over))).unwrap();
+    s.mount("", Arc::new(DiskProvider::new(&base))).unwrap();
+    s.mount("", Arc::new(DiskProvider::new(&over))).unwrap();
     let k = s.kernel();
 
     let (fh, size, _) = k.open("shared.bin", vfs_protocol::OPEN_READ).unwrap();
@@ -143,14 +143,14 @@ fn real_archive_matches_native_extract() {
         return;
     }
 
-    let backend = match vfs_zip::ZipBackend::open(zip) {
+    let backend = match vfs_zip::ZipProvider::open(zip) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("skip: ZipBackend: {e:?}");
+            eprintln!("skip: ZipProvider: {e:?}");
             return;
         }
     };
-    let stripped = vfs_compose::StripPrefixBackend::new(
+    let stripped = vfs_compose::SubdirProvider::new(
         Arc::new(backend),
         "Skyrim Special Edition".to_string(),
     );
@@ -207,7 +207,7 @@ fn ring_client_reads_are_byte_exact() {
     let mut s = Session::new();
     s.set_root(&dir);
     s.set_state_dir(&state);
-    s.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
+    s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
     s.serve().expect("serve");
 
     // `serve` publishes VFS_RING_* / VFS_VIRTUAL_DIR into this process env,
@@ -278,7 +278,7 @@ fn absent_files_report_not_found_not_error() {
     std::fs::write(dir.join("present.bin"), b"here").unwrap();
 
     let s = Session::new();
-    s.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
+    s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
     let k = s.kernel();
 
     // getattr: absent must be Ok(None), i.e. "looked, not there".
@@ -323,17 +323,17 @@ fn implicit_zip_directories_resolve_like_a_real_install() {
         eprintln!("skip: real corpus not present");
         return;
     }
-    let backend = match vfs_zip::ZipBackend::open(zip) {
+    let backend = match vfs_zip::ZipProvider::open(zip) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("skip: ZipBackend: {e:?}");
+            eprintln!("skip: ZipProvider: {e:?}");
             return;
         }
     };
     let s = Session::new();
     s.mount(
         "",
-        Arc::new(vfs_compose::StripPrefixBackend::new(
+        Arc::new(vfs_compose::SubdirProvider::new(
             Arc::new(backend),
             "Skyrim Special Edition".to_string(),
         )),
@@ -404,14 +404,14 @@ fn data_listing_includes_the_master_plugins() {
         eprintln!("skip: real corpus not present");
         return;
     }
-    let backend = match vfs_zip::ZipBackend::open(zip) {
+    let backend = match vfs_zip::ZipProvider::open(zip) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("skip: ZipBackend: {e:?}");
+            eprintln!("skip: ZipProvider: {e:?}");
             return;
         }
     };
-    let stripped = vfs_compose::StripPrefixBackend::new(
+    let stripped = vfs_compose::SubdirProvider::new(
         Arc::new(backend),
         "Skyrim Special Edition".to_string(),
     );

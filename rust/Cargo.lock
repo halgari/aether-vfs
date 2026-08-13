@@ -1521,6 +1521,7 @@ dependencies = [
  "vfs-inject",
  "vfs-ipc",
  "vfs-protocol",
+ "vfs-provider",
  "vfs-shim",
  "vfs-win",
  "vfs-zip",
