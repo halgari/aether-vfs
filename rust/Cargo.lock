@@ -1479,14 +1479,14 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vfs-cache"
 version = "0.1.0"
 dependencies = [
- "vfs-protocol",
+ "vfs-provider",
 ]
 
 [[package]]
 name = "vfs-compose"
 version = "0.1.0"
 dependencies = [
- "vfs-protocol",
+ "vfs-provider",
 ]
 
 [[package]]
@@ -1521,6 +1521,7 @@ dependencies = [
  "vfs-inject",
  "vfs-ipc",
  "vfs-protocol",
+ "vfs-provider",
  "vfs-shim",
  "vfs-win",
  "vfs-zip",
@@ -1606,11 +1607,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "vfs-payload"
+name = "vfs-protocol"
 version = "0.1.0"
+dependencies = [
+ "vfs-provider",
+]
 
 [[package]]
-name = "vfs-protocol"
+name = "vfs-provider"
 version = "0.1.0"
 
 [[package]]
@@ -1686,7 +1690,7 @@ dependencies = [
  "tonic-prost-build",
  "vfs-control",
  "vfs-director",
- "vfs-protocol",
+ "vfs-provider",
  "vfs-zip",
 ]
 
@@ -1705,6 +1709,7 @@ version = "0.1.0"
 dependencies = [
  "vfs-core",
  "vfs-protocol",
+ "vfs-provider",
 ]
 
 [[package]]

@@ -3,7 +3,7 @@ name = "vfs-source"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Source facade: Backend builders, gRPC SourceService, conformance suite"
+description = "Source facade: Provider builders, gRPC SourceService"
 
 [lib]
 name = "vfs_source"
@@ -14,7 +14,7 @@ name = "vfs-source-plugin"
 path = "src/bin/vfs-source-plugin.rs"
 
 [dependencies]
-vfs-protocol = { path = "../vfs-protocol" }
+vfs-provider = { path = "../vfs-provider" }
 vfs-director = { path = "../vfs-director" }
 vfs-zip = { path = "../vfs-zip" }
 vfs-control = { path = "../vfs-control" }

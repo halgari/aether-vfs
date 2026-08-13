@@ -11,8 +11,13 @@ jobs:
       - name: Build daemon + inject artifacts
         # Ensure shim/payload/fixture sit next to the test profile so the
         # daemon e2e can inject vfs-fixture-read without a nested cargo build.
-        run: cargo build -p vfs-directord -p vfs-source -p vfs-inject -p vfs-shim-dll -p vfs-payload -p vfs-fixture-read -p vfs-fixture-write -p vfs-fixture-writeset -p vfs-ring-harness
+        run: cargo build -p vfs-directord -p vfs-source -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-write -p vfs-fixture-writeset -p vfs-ring-harness
         working-directory: rust
+      - name: Build vfs-payload (separate workspace)
+        working-directory: rust
+        run: cargo build --manifest-path crates/vfs-payload/Cargo.toml
+        env:
+          CARGO_TARGET_DIR: target
       - name: Rust tests (full engine — includes Windows-only crates)
         run: cargo test
         working-directory: rust
@@ -23,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test -p vfs-ipc -p vfs-protocol -p vfs-compose -p vfs-cache -p xtask-descriptor
+        run: cargo test -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p xtask-descriptor
         working-directory: rust
       - name: Regenerate protocol artifacts
         run: bin/regen-protocol

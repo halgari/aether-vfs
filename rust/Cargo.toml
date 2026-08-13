@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/vfs-core",
+  "crates/vfs-provider",
   "crates/vfs-env",
   "crates/vfs-shared",
   "crates/vfs-protocol",
@@ -12,7 +13,6 @@ members = [
   "crates/vfs-directord",
   "crates/vfs-ipc",
   "crates/vfs-inject",
-  "crates/vfs-payload",
   "crates/vfs-redirect",
   "crates/vfs-server",
   "crates/vfs-director",
@@ -29,13 +29,13 @@ members = [
   "crates/vfs-ring-harness",
   "crates/xtask-descriptor",
 ]
+exclude = ["crates/vfs-payload"]
 
-# Required by crates/vfs-payload (#![no_std] + custom panic_handler; cannot
-# unwind). Cargo does not allow per-package `panic` in workspace package
-# profiles, so this applies workspace-wide. That is intentional and safe for
-# the rest of the tree (no catch_unwind-based tests rely on unwind).
+# `vfs-payload` is excluded from this workspace (it is #![no_std] with a custom
+# panic_handler and must abort). Everything here unwinds so the library can
+# catch panics at FFI boundaries instead of killing its host process.
 [profile.dev]
-panic = "abort"
+panic = "unwind"
 
 [profile.release]
-panic = "abort"
+panic = "unwind"

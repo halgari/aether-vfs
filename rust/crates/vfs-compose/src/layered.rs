@@ -1,11 +1,12 @@
-//! Top-wins layering of two backends (Clojure `layered-provider`).
+//! Top-wins layering of two providers (Clojure `layered-provider`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use vfs_protocol::{
-    bad_fh, map_io_err, not_found, Backend, BackendHandle, DirEntry, Stat, OPEN_WRITE,
+use vfs_provider::{
+    bad_fh, bad_request, map_io_err, not_found, Capabilities, DirEntry, Handle, Provider, Stat,
+    VPath, OPEN_WRITE,
 };
 
 enum Layer {
@@ -14,15 +15,15 @@ enum Layer {
 }
 
 /// `top` shadows `bottom` on the same path; readdir unions with top-wins names.
-pub struct LayeredBackend {
-    top: Arc<dyn Backend>,
-    bottom: Arc<dyn Backend>,
+pub struct LayeredProvider {
+    top: Arc<dyn Provider>,
+    bottom: Arc<dyn Provider>,
     next: AtomicU64,
-    opens: Mutex<HashMap<u64, (Layer, BackendHandle)>>,
+    opens: Mutex<HashMap<u64, (Layer, Handle)>>,
 }
 
-impl LayeredBackend {
-    pub fn new(top: Arc<dyn Backend>, bottom: Arc<dyn Backend>) -> Self {
+impl LayeredProvider {
+    pub fn new(top: Arc<dyn Provider>, bottom: Arc<dyn Provider>) -> Self {
         Self {
             top,
             bottom,
@@ -31,7 +32,7 @@ impl LayeredBackend {
         }
     }
 
-    fn routed(&self, layer: &Layer) -> &Arc<dyn Backend> {
+    fn routed(&self, layer: &Layer) -> &Arc<dyn Provider> {
         match layer {
             Layer::Top => &self.top,
             Layer::Bottom => &self.bottom,
@@ -39,23 +40,27 @@ impl LayeredBackend {
     }
 }
 
-impl Backend for LayeredBackend {
-    fn getattr(&self, path: &str) -> Result<Option<Stat>, i32> {
-        match self.top.getattr(path)? {
+impl Provider for LayeredProvider {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::weakest([self.top.capabilities(), self.bottom.capabilities()])
+    }
+
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        match self.top.getattr(p)? {
             Some(s) => Ok(Some(s)),
-            None => self.bottom.getattr(path),
+            None => self.bottom.getattr(p),
         }
     }
 
-    fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, i32> {
-        let top_entries = match self.top.readdir(path) {
+    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+        let top_entries = match self.top.readdir(p) {
             Ok(e) => e,
             Err(e) if e == not_found() => {
-                return self.bottom.readdir(path);
+                return self.bottom.readdir(p);
             }
             Err(e) => return Err(e),
         };
-        let bottom_entries = self.bottom.readdir(path).unwrap_or_default();
+        let bottom_entries = self.bottom.readdir(p).unwrap_or_default();
         let mut seen: HashMap<String, DirEntry> = HashMap::new();
         // Bottom first, top overwrites.
         for e in bottom_entries {
@@ -69,15 +74,15 @@ impl Backend for LayeredBackend {
         Ok(out)
     }
 
-    fn open(&self, path: &str, flags: u32) -> Result<(BackendHandle, u64, bool), i32> {
+    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         if flags & OPEN_WRITE != 0 {
             // Read-only composition phase.
-            return Err(vfs_protocol::bad_request());
+            return Err(bad_request());
         }
-        let (layer, inner) = match self.top.open(path, flags) {
+        let (layer, inner) = match self.top.open(p, flags) {
             Ok(r) => (Layer::Top, r),
             Err(e) if e == not_found() => {
-                let r = self.bottom.open(path, flags)?;
+                let r = self.bottom.open(p, flags)?;
                 (Layer::Bottom, r)
             }
             Err(e) => return Err(e),
@@ -91,75 +96,89 @@ impl Backend for LayeredBackend {
         Ok((h, size, is_dir))
     }
 
-    fn read(&self, bh: BackendHandle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let (layer, inner) = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let (l, i) = g.get(&bh).ok_or_else(bad_fh)?;
-            (match l {
-                Layer::Top => Layer::Top,
-                Layer::Bottom => Layer::Bottom,
-            }, *i)
+            let (l, i) = g.get(&h).ok_or_else(bad_fh)?;
+            (
+                match l {
+                    Layer::Top => Layer::Top,
+                    Layer::Bottom => Layer::Bottom,
+                },
+                *i,
+            )
         };
-        self.routed(&layer).read(inner, offset, buf)
+        self.routed(&layer).read_at(inner, offset, buf)
     }
 
-    fn release(&self, bh: BackendHandle) -> Result<(), i32> {
+    fn close(&self, h: Handle) -> Result<(), i32> {
         let (layer, inner) = {
             let mut g = self.opens.lock().map_err(|_| map_io_err())?;
-            g.remove(&bh).ok_or_else(bad_fh)?
+            g.remove(&h).ok_or_else(bad_fh)?
         };
-        self.routed(&layer).release(inner)
+        self.routed(&layer).close(inner)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InlineBackend;
-    use vfs_protocol::{OPEN_READ, KIND_FILE};
+    use crate::InlineProvider;
+    use vfs_provider::{KIND_FILE, OPEN_READ};
 
     #[test]
     fn top_wins_shared_path() {
-        let bottom = Arc::new(InlineBackend::from_files([
+        let bottom = Arc::new(InlineProvider::from_files([
             ("shared.txt", b"FROM-BASE".as_slice()),
             ("meshes/base.nif", b"BASE".as_slice()),
         ]));
-        let top = Arc::new(InlineBackend::from_files([
+        let top = Arc::new(InlineProvider::from_files([
             ("shared.txt", b"MOD-WIN".as_slice()),
             ("textures/mod.dds", &[1u8; 10]),
         ]));
-        let layered = LayeredBackend::new(top, bottom);
+        let layered = LayeredProvider::new(top, bottom);
 
-        let st = layered.getattr("shared.txt").unwrap().unwrap();
+        let st = layered
+            .getattr(VPath::at_default("shared.txt"))
+            .unwrap()
+            .unwrap();
         assert_eq!(st.size, 7);
         assert_eq!(st.kind, KIND_FILE);
 
-        let st = layered.getattr("meshes/base.nif").unwrap().unwrap();
+        let st = layered
+            .getattr(VPath::at_default("meshes/base.nif"))
+            .unwrap()
+            .unwrap();
         assert_eq!(st.size, 4);
 
-        let st = layered.getattr("textures/mod.dds").unwrap().unwrap();
+        let st = layered
+            .getattr(VPath::at_default("textures/mod.dds"))
+            .unwrap()
+            .unwrap();
         assert_eq!(st.size, 10);
 
-        let (h, size, _) = layered.open("shared.txt", OPEN_READ).unwrap();
+        let (h, size, _) = layered
+            .open(VPath::at_default("shared.txt"), OPEN_READ)
+            .unwrap();
         assert_eq!(size, 7);
         let mut buf = [0u8; 16];
-        let n = layered.read(h, 0, &mut buf).unwrap();
+        let n = layered.read_at(h, 0, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"MOD-WIN");
-        layered.release(h).unwrap();
+        layered.close(h).unwrap();
     }
 
     #[test]
     fn readdir_unions_with_top_winning_names() {
-        let bottom = Arc::new(InlineBackend::from_files([
+        let bottom = Arc::new(InlineProvider::from_files([
             ("a.txt", b"A".as_slice()),
             ("shared.txt", b"BASE".as_slice()),
         ]));
-        let top = Arc::new(InlineBackend::from_files([
+        let top = Arc::new(InlineProvider::from_files([
             ("b.txt", b"B".as_slice()),
             ("shared.txt", b"TOP".as_slice()),
         ]));
-        let layered = LayeredBackend::new(top, bottom);
-        let entries = layered.readdir("").unwrap();
+        let layered = LayeredProvider::new(top, bottom);
+        let entries = layered.readdir(VPath::at_default("")).unwrap();
         let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("a.txt")));
         assert!(names.iter().any(|n| n.eq_ignore_ascii_case("b.txt")));
@@ -172,13 +191,21 @@ mod tests {
 
     #[test]
     fn open_missing_on_top_falls_through() {
-        let bottom = Arc::new(InlineBackend::from_files([("only-base.txt", b"BB".as_slice())]));
-        let top = Arc::new(InlineBackend::from_files([("only-top.txt", b"TT".as_slice())]));
-        let layered = LayeredBackend::new(top, bottom);
-        let (h, size, _) = layered.open("only-base.txt", OPEN_READ).unwrap();
+        let bottom = Arc::new(InlineProvider::from_files([(
+            "only-base.txt",
+            b"BB".as_slice(),
+        )]));
+        let top = Arc::new(InlineProvider::from_files([(
+            "only-top.txt",
+            b"TT".as_slice(),
+        )]));
+        let layered = LayeredProvider::new(top, bottom);
+        let (h, size, _) = layered
+            .open(VPath::at_default("only-base.txt"), OPEN_READ)
+            .unwrap();
         assert_eq!(size, 2);
         let mut buf = [0u8; 4];
-        assert_eq!(layered.read(h, 0, &mut buf).unwrap(), 2);
-        layered.release(h).unwrap();
+        assert_eq!(layered.read_at(h, 0, &mut buf).unwrap(), 2);
+        layered.close(h).unwrap();
     }
 }

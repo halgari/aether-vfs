@@ -15,7 +15,7 @@ use vfs_control::pb::{
 };
 use vfs_control::SourceSpec;
 use vfs_director::LaunchOpts;
-use vfs_source::build_backend;
+use vfs_source::build_provider;
 
 use crate::registry::SessionRegistry;
 
@@ -58,8 +58,8 @@ impl Director for DirectorService {
         let r = req.into_inner();
         let spec = pb_to_source_spec(r.source.as_ref())
             .map_err(Status::invalid_argument)?;
-        // build_backend may block (remote connect); run off the async executor.
-        let backend = tokio::task::spawn_blocking(move || build_backend(&spec))
+        // build_provider may block (remote connect); run off the async executor.
+        let backend = tokio::task::spawn_blocking(move || build_provider(&spec))
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .map_err(|e| Status::invalid_argument(e.to_string()))?;

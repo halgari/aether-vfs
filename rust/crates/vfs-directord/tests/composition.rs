@@ -10,7 +10,7 @@ use vfs_control::pb::director_server::DirectorServer;
 use vfs_control::pb::{source_spec, AddSourceReq, CreateSessionReq, DiskSource, Empty, ZipSource};
 use vfs_control::SourceSpec;
 use vfs_directord::{connect, DirectorService, SessionRegistry};
-use vfs_source::build_backend;
+use vfs_source::build_provider;
 
 fn write_stored_zip(dir: &Path, entry: &str, content: &[u8]) -> std::path::PathBuf {
     let path = dir.join("layer.zip");
@@ -79,11 +79,11 @@ fn registry_layered_disk_sources_top_wins() {
 
     let reg = SessionRegistry::new();
     let summary = reg.create("layered".into()).unwrap();
-    let base_be = build_backend(&SourceSpec::Disk {
+    let base_be = build_provider(&SourceSpec::Disk {
         path: base.path().to_string_lossy().into_owned(),
     })
     .unwrap();
-    let mod_be = build_backend(&SourceSpec::Disk {
+    let mod_be = build_provider(&SourceSpec::Disk {
         path: mod_dir.path().to_string_lossy().into_owned(),
     })
     .unwrap();
@@ -108,7 +108,7 @@ fn registry_zip_source_reads_entry() {
     let zip = write_stored_zip(dir.path(), "Data/proof.dat", b"ZIP-BYTES");
     let reg = SessionRegistry::new();
     let summary = reg.create("zip".into()).unwrap();
-    let be = build_backend(&SourceSpec::Zip {
+    let be = build_provider(&SourceSpec::Zip {
         path: zip.to_string_lossy().into_owned(),
     })
     .unwrap();
@@ -135,7 +135,7 @@ fn registry_cache_hits_on_second_read() {
     let summary = reg.create("cache".into()).unwrap();
     let payload = vec![7u8; 40];
     std::fs::write(dir.path().join("blob.bin"), &payload).unwrap();
-    let be = build_backend(&SourceSpec::Disk {
+    let be = build_provider(&SourceSpec::Disk {
         path: dir.path().to_string_lossy().into_owned(),
     })
     .unwrap();

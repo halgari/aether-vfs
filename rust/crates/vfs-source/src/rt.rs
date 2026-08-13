@@ -1,4 +1,4 @@
-//! Small helper to run async gRPC from sync Backend methods.
+//! Small helper to run async gRPC from sync Provider methods.
 
 use std::future::Future;
 

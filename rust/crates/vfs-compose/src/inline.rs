@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use vfs_protocol::{
-    bad_fh, map_io_err, not_a_dir, not_found, Backend, BackendHandle, DirEntry, Stat, KIND_DIR,
-    KIND_FILE, OPEN_WRITE,
+use vfs_provider::{
+    bad_fh, bad_request, map_io_err, not_a_dir, not_found, Capabilities, DirEntry, Handle,
+    Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
 
 struct FileData {
@@ -14,13 +14,13 @@ struct FileData {
 }
 
 /// Flat map of virtual paths → file bytes. Parent dirs are synthesized.
-pub struct InlineBackend {
+pub struct InlineProvider {
     files: HashMap<String, FileData>,
     next: AtomicU64,
     opens: Mutex<HashMap<u64, (String, Vec<u8>)>>,
 }
 
-impl InlineBackend {
+impl InlineProvider {
     pub fn from_files<I, P, B>(entries: I) -> Self
     where
         I: IntoIterator<Item = (P, B)>,
@@ -43,17 +43,9 @@ impl InlineBackend {
             opens: Mutex::new(HashMap::new()),
         }
     }
-}
 
-fn normalize(path: &str) -> String {
-    path.replace('\\', "/")
-        .trim_matches('/')
-        .to_string()
-}
-
-impl Backend for InlineBackend {
-    fn getattr(&self, path: &str) -> Result<Option<Stat>, i32> {
-        let path = normalize(path);
+    /// Shared getattr logic, addressed by an already-normalized plain path.
+    fn stat(&self, path: &str) -> Result<Option<Stat>, i32> {
         if path.is_empty() {
             return Ok(Some(Stat {
                 kind: KIND_DIR,
@@ -61,7 +53,7 @@ impl Backend for InlineBackend {
                 mtime: 0,
             }));
         }
-        if let Some(f) = self.files.get(&path) {
+        if let Some(f) = self.files.get(path) {
             return Ok(Some(Stat {
                 kind: KIND_FILE,
                 size: f.bytes.len() as u64,
@@ -70,7 +62,11 @@ impl Backend for InlineBackend {
         }
         // Directory if any file has this prefix.
         let prefix = format!("{path}/");
-        if self.files.keys().any(|k| k.starts_with(&prefix) || k == &path) {
+        if self
+            .files
+            .keys()
+            .any(|k| k.starts_with(&prefix) || k == path)
+        {
             return Ok(Some(Stat {
                 kind: KIND_DIR,
                 size: 0,
@@ -79,10 +75,30 @@ impl Backend for InlineBackend {
         }
         Ok(None)
     }
+}
 
-    fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, i32> {
+fn normalize(path: &str) -> String {
+    path.replace('\\', "/").trim_matches('/').to_string()
+}
+
+impl Provider for InlineProvider {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            immutable: true,
+            ..Capabilities::read_only()
+        }
+    }
+
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        let path = p.rel;
         let path = normalize(path);
-        if self.getattr(&path)?.map(|s| s.kind) != Some(KIND_DIR) {
+        self.stat(&path)
+    }
+
+    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+        let path = p.rel;
+        let path = normalize(path);
+        if self.stat(&path)?.map(|s| s.kind) != Some(KIND_DIR) {
             if self.files.contains_key(&path) {
                 return Err(not_a_dir());
             }
@@ -123,9 +139,10 @@ impl Backend for InlineBackend {
             .collect())
     }
 
-    fn open(&self, path: &str, flags: u32) -> Result<(BackendHandle, u64, bool), i32> {
+    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+        let path = p.rel;
         if flags & OPEN_WRITE != 0 {
-            return Err(vfs_protocol::bad_request());
+            return Err(bad_request());
         }
         let path = normalize(path);
         let f = self.files.get(&path).ok_or_else(not_found)?;
@@ -138,9 +155,9 @@ impl Backend for InlineBackend {
         Ok((h, size, false))
     }
 
-    fn read(&self, bh: BackendHandle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let g = self.opens.lock().map_err(|_| map_io_err())?;
-        let (_, bytes) = g.get(&bh).ok_or_else(bad_fh)?;
+        let (_, bytes) = g.get(&h).ok_or_else(bad_fh)?;
         if offset as usize >= bytes.len() {
             return Ok(0);
         }
@@ -150,11 +167,11 @@ impl Backend for InlineBackend {
         Ok(n)
     }
 
-    fn release(&self, bh: BackendHandle) -> Result<(), i32> {
+    fn close(&self, h: Handle) -> Result<(), i32> {
         self.opens
             .lock()
             .map_err(|_| map_io_err())?
-            .remove(&bh)
+            .remove(&h)
             .ok_or_else(bad_fh)?;
         Ok(())
     }

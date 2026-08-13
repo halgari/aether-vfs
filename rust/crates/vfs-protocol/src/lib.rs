@@ -1,12 +1,18 @@
 //! Pure FUSE contracts for the VFS stack: wire codecs, status/opcodes, and
-//! backend ops (`Backend` trait). No OS I/O and no `vfs-core`.
+//! the provider contract (re-exported from `vfs-provider`). No OS I/O and no `vfs-core`.
 #![forbid(unsafe_code)]
 
 pub mod ops;
 
 pub use ops::{
-    bad_fh, bad_request, is_dir, map_io_err, not_a_dir, not_found, ok, Backend, BackendHandle,
-    DirEntry, Stat, KIND_DIR, KIND_FILE, KIND_TOMBSTONE,
+    bad_fh, bad_request, is_dir, map_io_err, not_a_dir, not_found, not_supported, ok, read_only,
+    Access, Capabilities, DirEntry, Handle, Provider, RootId, SetAttr, Stat, VPath, KIND_DIR,
+    KIND_FILE, KIND_TOMBSTONE,
+};
+pub use vfs_provider::{
+    OPEN_APPEND, OPEN_CREATE, OPEN_EXCL, OPEN_READ, OPEN_TRUNC, OPEN_WRITE, ST_BAD_FH,
+    ST_BAD_REQUEST, ST_IO_ERROR, ST_IS_DIR, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_NOT_SUPPORTED,
+    ST_NO_SPACE, ST_OK, ST_READ_ONLY,
 };
 
 // Opcode catalog — must match `vfs_ipc::layout` values (do not renumber).
@@ -24,20 +30,6 @@ pub const OP_MKDIR: u32 = 10;
 pub const OP_CLOSE: u32 = 11;
 pub const OP_REGISTER_PROCESS: u32 = 12;
 pub const OP_HEARTBEAT: u32 = 13;
-
-pub const ST_OK: i32 = 0;
-pub const ST_NOT_FOUND: i32 = -1;
-pub const ST_NOT_A_DIRECTORY: i32 = -2;
-pub const ST_BAD_REQUEST: i32 = -3;
-pub const ST_IO_ERROR: i32 = -4;
-pub const ST_IS_DIR: i32 = -5;
-pub const ST_BAD_FH: i32 = -6;
-pub const ST_NO_SPACE: i32 = -7;
-
-/// OPEN request wants read access.
-pub const OPEN_READ: u32 = 1;
-/// OPEN request wants write access (unsupported in MVP director → BAD_REQUEST).
-pub const OPEN_WRITE: u32 = 2;
 
 /// Ring/request flag: prefer bulk-arena READ (data in shared arena, not ring payload).
 pub const FLAG_READ_BULK: u32 = 0x1;

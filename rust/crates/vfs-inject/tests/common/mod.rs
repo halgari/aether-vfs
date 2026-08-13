@@ -19,11 +19,12 @@ pub fn ensure_fixtures() {
             .join("..")
             .canonicalize()
             .expect("workspace root");
+        let target_dir = workspace.join("target");
+
+        // Main-workspace fixtures.
         let mut cmd = Command::new(&cargo);
         cmd.current_dir(&workspace).args([
             "build",
-            "-p",
-            "vfs-payload",
             "-p",
             "vfs-shim-dll",
             "-p",
@@ -32,18 +33,28 @@ pub fn ensure_fixtures() {
             "vfs-fixture-staticimp",
             "--quiet",
         ]);
-        // Match the profile of the test binary when possible.
-        if cfg!(debug_assertions) {
-            // default dev/debug
-        } else {
+        if !cfg!(debug_assertions) {
             cmd.arg("--release");
         }
         let status = cmd.status().expect("spawn cargo to build fixtures");
-        assert!(
-            status.success(),
-            "fixture cargo build failed: {status}\n\
-             packages: vfs-payload vfs-shim-dll vfs-fixture-vproxy vfs-fixture-staticimp"
-        );
+        assert!(status.success(), "fixture cargo build failed: {status}");
+
+        // vfs-payload lives in its own workspace (panic = "abort"). Build it
+        // into the same target dir so `locate_artifact` finds it unchanged.
+        let mut pay = Command::new(&cargo);
+        pay.current_dir(&workspace)
+            .env("CARGO_TARGET_DIR", &target_dir)
+            .args([
+                "build",
+                "--manifest-path",
+                "crates/vfs-payload/Cargo.toml",
+                "--quiet",
+            ]);
+        if !cfg!(debug_assertions) {
+            pay.arg("--release");
+        }
+        let status = pay.status().expect("spawn cargo to build vfs-payload");
+        assert!(status.success(), "vfs-payload cargo build failed: {status}");
         // Co-locate under profile dir for child inject + locate.
         colocate_profile_artifacts();
     });

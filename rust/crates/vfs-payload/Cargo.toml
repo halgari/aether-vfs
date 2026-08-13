@@ -3,6 +3,16 @@ name = "vfs-payload"
 version = "0.1.0"
 edition = "2021"
 
+# Own workspace root: this crate is `#![no_std]` with a custom #[panic_handler]
+# and cannot unwind, while the main workspace must unwind for the PyO3 binding.
+[workspace]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
 [lib]
 crate-type = ["cdylib"]
 name = "vfs_payload"

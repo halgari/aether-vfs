@@ -1,33 +1,34 @@
-//! [`CachingBackend`]: wraps any [`Backend`] with block-aligned caching.
+//! [`CachingProvider`]: wraps any [`Provider`] with block-aligned caching.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use vfs_protocol::{
-    bad_fh, map_io_err, Backend, BackendHandle, DirEntry, Stat, OPEN_WRITE,
+use vfs_provider::{
+    bad_fh, bad_request, is_dir, map_io_err, Capabilities, DirEntry, Handle, Provider, Stat,
+    VPath, OPEN_WRITE,
 };
 
 use crate::store::{BlockCache, BlockKey};
 
 struct OpenRec {
-    inner: BackendHandle,
+    inner: Handle,
     size: u64,
     file_id: u64,
     is_dir: bool,
 }
 
-/// Caching facade over an inner backend. `source_id` namespaces cache keys.
-pub struct CachingBackend {
-    inner: Arc<dyn Backend>,
+/// Caching facade over an inner provider. `source_id` namespaces cache keys.
+pub struct CachingProvider {
+    inner: Arc<dyn Provider>,
     cache: Arc<BlockCache>,
     source_id: u64,
     next: AtomicU64,
     opens: Mutex<HashMap<u64, OpenRec>>,
 }
 
-impl CachingBackend {
-    pub fn new(inner: Arc<dyn Backend>, cache: Arc<BlockCache>, source_id: u64) -> Self {
+impl CachingProvider {
+    pub fn new(inner: Arc<dyn Provider>, cache: Arc<BlockCache>, source_id: u64) -> Self {
         Self {
             inner,
             cache,
@@ -50,21 +51,31 @@ impl CachingBackend {
     }
 }
 
-impl Backend for CachingBackend {
-    fn getattr(&self, path: &str) -> Result<Option<Stat>, i32> {
-        self.inner.getattr(path)
+impl Provider for CachingProvider {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities().cached()
     }
 
-    fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, i32> {
-        self.inner.readdir(path)
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        self.inner.getattr(p)
     }
 
-    fn open(&self, path: &str, flags: u32) -> Result<(BackendHandle, u64, bool), i32> {
+    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+        self.inner.readdir(p)
+    }
+
+    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         if flags & OPEN_WRITE != 0 {
-            return Err(vfs_protocol::bad_request());
+            return Err(bad_request());
         }
-        let st = self.inner.getattr(path)?;
-        let (inner, size, is_dir) = self.inner.open(path, flags)?;
+        let path = p.rel;
+        let st = self.inner.getattr(p)?;
+        let (inner, size, is_dir) = self.inner.open(p, flags)?;
+        // DEFERRED (Stage 2): file_id_for keys on `path` alone, not `p.root`.
+        // Two different roots serving the same relative path with the same
+        // size and mtime would collide on the same cache entry. Inert today
+        // because every call site addresses VPath under RootId(0) — Stage 2
+        // makes roots real and must fold `p.root` into this key.
         let (file_id, size) = if let Some(s) = st {
             (Self::file_id_for(path, s.size, s.mtime), size)
         } else {
@@ -86,10 +97,10 @@ impl Backend for CachingBackend {
         Ok((h, size, is_dir))
     }
 
-    fn read(&self, bh: BackendHandle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let rec = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let r = g.get(&bh).ok_or_else(bad_fh)?;
+            let r = g.get(&h).ok_or_else(bad_fh)?;
             OpenRec {
                 inner: r.inner,
                 size: r.size,
@@ -98,7 +109,7 @@ impl Backend for CachingBackend {
             }
         };
         if rec.is_dir {
-            return Err(vfs_protocol::is_dir());
+            return Err(is_dir());
         }
         if offset >= rec.size || buf.is_empty() {
             return Ok(0);
@@ -125,7 +136,7 @@ impl Backend for CachingBackend {
                 while filled < want {
                     let n = self
                         .inner
-                        .read(rec.inner, block_start + filled as u64, &mut raw[filled..])?;
+                        .read_at(rec.inner, block_start + filled as u64, &mut raw[filled..])?;
                     if n == 0 {
                         break;
                     }
@@ -147,14 +158,14 @@ impl Backend for CachingBackend {
         Ok(written)
     }
 
-    fn release(&self, bh: BackendHandle) -> Result<(), i32> {
+    fn close(&self, h: Handle) -> Result<(), i32> {
         let rec = self
             .opens
             .lock()
             .map_err(|_| map_io_err())?
-            .remove(&bh)
+            .remove(&h)
             .ok_or_else(bad_fh)?;
-        self.inner.release(rec.inner)
+        self.inner.close(rec.inner)
     }
 }
 
@@ -162,18 +173,30 @@ impl Backend for CachingBackend {
 mod tests {
     use super::*;
     use crate::store::CacheConfig;
-    use vfs_protocol::OPEN_READ;
+    use vfs_provider::{KIND_FILE, OPEN_READ};
 
-    struct CountingBackend {
+    #[test]
+    fn caching_provider_over_the_fixture_tree_passes_conformance() {
+        use vfs_provider::conformance::MemFixture;
+        let inner: Arc<dyn Provider> = Arc::new(MemFixture::new());
+        let cache = Arc::new(BlockCache::new(CacheConfig::default()));
+        let p: Arc<dyn Provider> = Arc::new(CachingProvider::new(inner, cache, 1));
+        vfs_provider::assert_conformance(p);
+    }
+
+    struct CountingProvider {
         data: Vec<u8>,
         reads: AtomicU64,
     }
 
-    impl Backend for CountingBackend {
-        fn getattr(&self, path: &str) -> Result<Option<Stat>, i32> {
-            if path == "f" {
+    impl Provider for CountingProvider {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::read_only()
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            if p.rel == "f" {
                 Ok(Some(Stat {
-                    kind: vfs_protocol::KIND_FILE,
+                    kind: KIND_FILE,
                     size: self.data.len() as u64,
                     mtime: 1,
                 }))
@@ -181,16 +204,16 @@ mod tests {
                 Ok(None)
             }
         }
-        fn readdir(&self, _: &str) -> Result<Vec<DirEntry>, i32> {
+        fn readdir(&self, _: VPath) -> Result<Vec<DirEntry>, i32> {
             Ok(vec![])
         }
-        fn open(&self, path: &str, _: u32) -> Result<(BackendHandle, u64, bool), i32> {
-            if path != "f" {
-                return Err(vfs_protocol::not_found());
+        fn open(&self, p: VPath, _: u32) -> Result<(Handle, u64, bool), i32> {
+            if p.rel != "f" {
+                return Err(vfs_provider::not_found());
             }
             Ok((1, self.data.len() as u64, false))
         }
-        fn read(&self, _: BackendHandle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        fn read_at(&self, _: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
             self.reads.fetch_add(1, Ordering::Relaxed);
             let start = offset as usize;
             if start >= self.data.len() {
@@ -200,14 +223,14 @@ mod tests {
             buf[..n].copy_from_slice(&self.data[start..start + n]);
             Ok(n)
         }
-        fn release(&self, _: BackendHandle) -> Result<(), i32> {
+        fn close(&self, _: Handle) -> Result<(), i32> {
             Ok(())
         }
     }
 
     #[test]
     fn second_read_is_cache_hit() {
-        let raw = Arc::new(CountingBackend {
+        let raw = Arc::new(CountingProvider {
             data: vec![9u8; 100],
             reads: AtomicU64::new(0),
         });
@@ -216,20 +239,20 @@ mod tests {
             ram_budget: 1024,
             disk_dir: None,
         }));
-        let be = CachingBackend::new(raw.clone(), cache.clone(), 1);
-        let (h, _, _) = be.open("f", OPEN_READ).unwrap();
+        let be = CachingProvider::new(raw.clone(), cache.clone(), 1);
+        let (h, _, _) = be.open(VPath::at_default("f"), OPEN_READ).unwrap();
         let mut buf = [0u8; 50];
-        assert_eq!(be.read(h, 0, &mut buf).unwrap(), 50);
+        assert_eq!(be.read_at(h, 0, &mut buf).unwrap(), 50);
         let reads_after_first = raw.reads.load(Ordering::Relaxed);
         assert!(reads_after_first >= 1);
-        assert_eq!(be.read(h, 0, &mut buf).unwrap(), 50);
+        assert_eq!(be.read_at(h, 0, &mut buf).unwrap(), 50);
         assert_eq!(
             raw.reads.load(Ordering::Relaxed),
             reads_after_first,
             "second read should not touch source"
         );
         assert!(cache.stats().hits >= 1);
-        be.release(h).unwrap();
+        be.close(h).unwrap();
     }
 
     #[test]
@@ -239,7 +262,7 @@ mod tests {
         for (i, b) in data.iter_mut().enumerate() {
             *b = i as u8;
         }
-        let raw = Arc::new(CountingBackend {
+        let raw = Arc::new(CountingProvider {
             data,
             reads: AtomicU64::new(0),
         });
@@ -248,14 +271,41 @@ mod tests {
             ram_budget: 4096,
             disk_dir: None,
         }));
-        let be = CachingBackend::new(raw, cache, 7);
-        let (h, _, _) = be.open("f", OPEN_READ).unwrap();
+        let be = CachingProvider::new(raw, cache, 7);
+        let (h, _, _) = be.open(VPath::at_default("f"), OPEN_READ).unwrap();
         let mut buf = [0u8; 20];
         // Starts mid-block (offset 10) and spans into the next.
-        assert_eq!(be.read(h, 10, &mut buf).unwrap(), 20);
+        assert_eq!(be.read_at(h, 10, &mut buf).unwrap(), 20);
         for (i, b) in buf.iter().enumerate().take(20) {
             assert_eq!(*b, (10 + i) as u8, "byte at {i}");
         }
-        be.release(h).unwrap();
+        be.close(h).unwrap();
+    }
+
+    #[test]
+    fn caching_answers_the_slow_marker() {
+        use std::sync::Arc;
+        use vfs_provider::{Access, Capabilities, DirEntry, Handle, Provider, Stat, VPath};
+
+        struct SlowInner;
+        impl Provider for SlowInner {
+            fn capabilities(&self) -> Capabilities {
+                Capabilities { slow: true, preferred_block: Some(1 << 20), ..Capabilities::read_only() }
+            }
+            fn getattr(&self, _p: VPath) -> Result<Option<Stat>, i32> { Ok(None) }
+            fn readdir(&self, _p: VPath) -> Result<Vec<DirEntry>, i32> { Ok(Vec::new()) }
+            fn open(&self, _p: VPath, _f: u32) -> Result<(Handle, u64, bool), i32> {
+                Err(vfs_provider::not_found())
+            }
+            fn close(&self, _h: Handle) -> Result<(), i32> { Ok(()) }
+            fn read_at(&self, _h: Handle, _o: u64, _b: &mut [u8]) -> Result<usize, i32> { Ok(0) }
+        }
+
+        let cache = Arc::new(crate::BlockCache::new(crate::CacheConfig::default()));
+        let p = CachingProvider::new(Arc::new(SlowInner), cache, 1);
+        let caps = p.capabilities();
+        assert!(!caps.slow, "a cached provider is no longer slow");
+        assert_eq!(caps.access, Access::Read, "access passes through");
+        assert_eq!(caps.preferred_block, Some(1 << 20), "the block hint survives");
     }
 }

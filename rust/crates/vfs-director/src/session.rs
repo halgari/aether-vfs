@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::director::Director;
 use crate::ipc::IpcServe;
-use crate::ops::{Backend, OPEN_READ};
+use crate::ops::{Provider, OPEN_READ};
 
 /// Serializes process-global env mutation around [`Session::launch`].
 ///
@@ -95,7 +95,7 @@ impl Session {
         &self.virtual_root
     }
 
-    pub fn mount(&self, prefix: &str, backend: Arc<dyn Backend>) -> Result<(), i32> {
+    pub fn mount(&self, prefix: &str, backend: Arc<dyn Provider>) -> Result<(), i32> {
         self.kernel.mount(prefix, backend)
     }
 
@@ -110,8 +110,8 @@ impl Session {
     #[cfg(feature = "zip")]
     pub fn mount_zip(&self, zip_path: impl AsRef<Path>) -> Result<(), String> {
         let path = zip_path.as_ref();
-        let be = vfs_zip::ZipBackend::open(path)
-            .map_err(|e| format!("ZipBackend {}: {e:?}", path.display()))?;
+        let be = vfs_zip::ZipProvider::open(path)
+            .map_err(|e| format!("ZipProvider {}: {e:?}", path.display()))?;
         self.kernel
             .mount("", Arc::new(be))
             .map_err(|st| format!("mount zip status {st}"))

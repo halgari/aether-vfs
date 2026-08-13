@@ -1,4 +1,4 @@
-//! Disk directory backend — maps a host folder under a mount.
+//! Disk directory provider — maps a host folder under a mount.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -8,19 +8,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::ops::{
-    bad_request, map_io_err, not_a_dir, not_found, Backend, BackendHandle, DirEntry, Stat,
-    KIND_DIR, KIND_FILE, OPEN_WRITE,
+    bad_request, map_io_err, not_a_dir, not_found, Access, Capabilities, DirEntry, Handle,
+    Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
 
-pub struct DiskBackend {
+pub struct DiskProvider {
     root: PathBuf,
     next: AtomicU64,
     opens: Mutex<HashMap<u64, File>>,
 }
 
-impl DiskBackend {
+impl DiskProvider {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        DiskBackend {
+        DiskProvider {
             root: root.into(),
             next: AtomicU64::new(1),
             opens: Mutex::new(HashMap::new()),
@@ -42,8 +42,18 @@ impl DiskBackend {
     }
 }
 
-impl Backend for DiskBackend {
-    fn getattr(&self, path: &str) -> Result<Option<Stat>, i32> {
+impl Provider for DiskProvider {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            access: Access::Read, // writes arrive in Stage 3
+            immutable: false,     // a real directory can change underneath us
+            slow: false,
+            preferred_block: None,
+        }
+    }
+
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        let path = p.rel;
         let p = self.resolve(path);
         let meta = match std::fs::metadata(&p) {
             Ok(m) => m,
@@ -67,7 +77,8 @@ impl Backend for DiskBackend {
         }
     }
 
-    fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, i32> {
+    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+        let path = p.rel;
         let p = self.resolve(path);
         let rd = std::fs::read_dir(&p).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -100,7 +111,8 @@ impl Backend for DiskBackend {
         Ok(out)
     }
 
-    fn open(&self, path: &str, flags: u32) -> Result<(BackendHandle, u64, bool), i32> {
+    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+        let path = p.rel;
         if flags & OPEN_WRITE != 0 {
             return Err(bad_request());
         }
@@ -117,19 +129,48 @@ impl Backend for DiskBackend {
         Ok((bh, size, false))
     }
 
-    fn read(&self, bh: BackendHandle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let mut g = self.opens.lock().map_err(|_| map_io_err())?;
-        let f = g.get_mut(&bh).ok_or_else(crate::ops::bad_fh)?;
+        let f = g.get_mut(&h).ok_or_else(crate::ops::bad_fh)?;
         f.seek(SeekFrom::Start(offset)).map_err(|_| map_io_err())?;
         f.read(buf).map_err(|_| map_io_err())
     }
 
-    fn release(&self, bh: BackendHandle) -> Result<(), i32> {
+    fn close(&self, h: Handle) -> Result<(), i32> {
         let mut g = self.opens.lock().map_err(|_| map_io_err())?;
         // Dir opens may not be in the map.
-        let _ = g.remove(&bh);
+        let _ = g.remove(&h);
         Ok(())
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    #[test]
+    fn disk_provider_declares_mutable_read_access() {
+        use vfs_provider::{Access, Provider};
+        let dir = std::env::temp_dir().join(format!("vfs-diskcaps-{}", std::process::id()));
+        vfs_provider::write_fixture_tree(&dir);
+
+        let p = DiskProvider::new(&dir);
+        let caps = p.capabilities();
+        assert_eq!(caps.access, Access::Read, "writes arrive in Stage 3");
+        assert!(!caps.immutable, "a real directory can change underneath us");
+        caps.validate().expect("declaration must be self-consistent");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disk_provider_passes_conformance() {
+        let dir = std::env::temp_dir().join(format!("vfs-diskconf-{}", std::process::id()));
+        vfs_provider::write_fixture_tree(&dir);
+
+        let p: std::sync::Arc<dyn vfs_provider::Provider> = std::sync::Arc::new(DiskProvider::new(&dir));
+        vfs_provider::assert_conformance(p);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -14,10 +14,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use vfs_compose::StripPrefixBackend;
-use vfs_director::{Backend, DiskBackend, LaunchOpts, Session};
-use vfs_protocol::KIND_DIR;
-use vfs_zip::ZipBackend;
+use vfs_compose::SubdirProvider;
+use vfs_director::{DiskProvider, LaunchOpts, Provider, Session};
+use vfs_protocol::{VPath, KIND_DIR};
+use vfs_zip::ZipProvider;
 
 fn env_path(key: &str, default: &str) -> PathBuf {
     std::env::var_os(key)
@@ -168,18 +168,18 @@ fn run() -> Result<(), String> {
     // sealed root and the launch path identical while changing only where bytes
     // come from, so a behaviour that survives the swap is not the archive's.
     let disk_src = vfs_env::path(vfs_env::SKYRIM_DISK);
-    let backend: Arc<dyn Backend> = if let Some(d) = &disk_src {
+    let backend: Arc<dyn Provider> = if let Some(d) = &disk_src {
         if !d.is_dir() {
             return Err(format!("VFS_SKYRIM_DISK not a directory: {}", d.display()));
         }
         eprintln!("  base:      {}  (disk tree, zip bypassed)", d.display());
         timeline.mark("zip index");
-        Arc::new(DiskBackend::new(d))
+        Arc::new(DiskProvider::new(d))
     } else {
         // Open the zip ONCE. (A second open re-scans the 16GB CD and looks frozen.)
         eprintln!("  opening zip index (one-time CD parse; may take ~30–90s on a 16GB archive)…");
         let t0 = std::time::Instant::now();
-        let zip = ZipBackend::open(&zip_path).map_err(|e| format!("ZipBackend: {e:?}"))?;
+        let zip = ZipProvider::open(&zip_path).map_err(|e| format!("ZipProvider: {e:?}"))?;
         eprintln!("  zip index ready in {:.1}s", t0.elapsed().as_secs_f32());
         timeline.mark("zip index");
 
@@ -187,7 +187,7 @@ fn run() -> Result<(), String> {
         let prefix = detect_zip_root_prefix(&zip)?;
         eprintln!("  zip root prefix: {prefix:?}");
         if let Some(pfx) = prefix {
-            Arc::new(StripPrefixBackend::new(Arc::new(zip), pfx))
+            Arc::new(SubdirProvider::new(Arc::new(zip), pfx))
         } else {
             Arc::new(zip)
         }
@@ -198,7 +198,7 @@ fn run() -> Result<(), String> {
     session.set_overlay(&overrides);
     session.set_state_dir(&state);
     // Composition: zip (game content) under overrides (steam_appid, writes).
-    // Do **not** mount the Steam library DiskBackend — that let the game load
+    // Do **not** mount the Steam library DiskProvider — that let the game load
     // masters/BSAs/DLLs from the host install and violated the VFS contract.
     // steam_appid.txt is written into `overrides` before launch.
     session
@@ -212,11 +212,11 @@ fn run() -> Result<(), String> {
             return Err(format!("VFS_SKYRIM_MODS not a directory: {}", m.display()));
         }
         session
-            .mount("", Arc::new(DiskBackend::new(m)))
+            .mount("", Arc::new(DiskProvider::new(m)))
             .map_err(|st| format!("mount mods status {st}"))?;
     }
     session
-        .mount("", Arc::new(DiskBackend::new(&overrides)))
+        .mount("", Arc::new(DiskProvider::new(&overrides)))
         .map_err(|st| format!("mount overrides status {st}"))?;
     eprintln!(
         "  composition: zip{} + overrides (no Steam-disk mount; under-root sealed to director)",
@@ -412,8 +412,10 @@ fn run() -> Result<(), String> {
 }
 
 /// If the zip has a single top-level directory, return its name.
-fn detect_zip_root_prefix(be: &dyn Backend) -> Result<Option<String>, String> {
-    let entries = be.readdir("").map_err(|e| format!("readdir root: {e}"))?;
+fn detect_zip_root_prefix(be: &dyn Provider) -> Result<Option<String>, String> {
+    let entries = be
+        .readdir(VPath::at_default(""))
+        .map_err(|e| format!("readdir root: {e}"))?;
     let dirs: Vec<_> = entries
         .iter()
         .filter(|e| e.stat.kind == KIND_DIR)

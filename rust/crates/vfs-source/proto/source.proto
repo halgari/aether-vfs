@@ -2,8 +2,9 @@ syntax = "proto3";
 
 package vfs.source;
 
-// Out-of-process source plugin contract (mirrors Backend ops).
+// Out-of-process source plugin contract (mirrors the vfs-provider Provider trait).
 service Source {
+  rpc GetCapabilities(Empty) returns (CapsResp);
   rpc GetAttr(GetAttrReq) returns (GetAttrResp);
   rpc ReadDir(ReadDirReq) returns (ReadDirResp);
   rpc Open(OpenReq) returns (OpenResp);
@@ -13,7 +14,16 @@ service Source {
 
 message Empty {}
 
-message GetAttrReq { string path = 1; }
+// 1 = Stage 1 read-only contract. Bumped when the wire shape changes.
+message CapsResp {
+  uint32 contract_version = 1;
+  uint32 access = 2;          // 0 = SeqRead, 1 = Read, 2 = ReadWrite
+  bool   immutable = 3;
+  bool   slow = 4;
+  uint32 preferred_block = 5; // 0 = unset
+}
+
+message GetAttrReq { string path = 1; uint32 root = 2; }
 message GetAttrResp {
   bool found = 1;
   bool is_dir = 2;
@@ -22,7 +32,7 @@ message GetAttrResp {
   int32 status = 5; // 0 = ok, negative = protocol ST_*
 }
 
-message ReadDirReq { string path = 1; }
+message ReadDirReq { string path = 1; uint32 root = 2; }
 message DirEnt {
   string name = 1;
   bool is_dir = 2;
@@ -37,6 +47,7 @@ message ReadDirResp {
 message OpenReq {
   string path = 1;
   uint32 flags = 2;
+  uint32 root = 3;
 }
 message OpenResp {
   uint64 handle = 1;

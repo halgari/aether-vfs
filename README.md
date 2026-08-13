@@ -24,7 +24,8 @@ shared-memory ring + inject/payload/shim stack.
 
 ```powershell
 cd rust
-cargo build -p vfs-directord -p vfs-shim-dll -p vfs-payload -p vfs-fixture-read
+cargo build -p vfs-directord -p vfs-shim-dll -p vfs-fixture-read
+cargo build --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
 ```
 
 ### Daemon + CLI (`vfs`)
@@ -79,7 +80,8 @@ Any language can implement `vfs-source/proto/source.proto` (`Source` service).
 |-------|--------|
 | Control gRPC + config schema | `vfs-control` |
 | Daemon + `vfs` CLI | `vfs-directord` |
-| Source builders, SourceService, conformance | `vfs-source` |
+| Provider contract, capabilities, conformance suite | `vfs-provider` |
+| Provider builders, gRPC SourceService | `vfs-source` |
 | Layered / router / overlay (read) | `vfs-compose` |
 | Block cache (RAM + disk) | `vfs-cache` |
 | FUSE kernel + Session launch | `vfs-director` |
@@ -94,7 +96,8 @@ Release build of the daemon and natives:
 
 ```powershell
 cd rust
-cargo build --release -p vfs-directord -p vfs-shim-dll -p vfs-payload -p vfs-source
+cargo build --release -p vfs-directord -p vfs-shim-dll -p vfs-source
+cargo build --release --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
 # Artifacts under target/release/:
 #   vfs.exe, vfs_shim_dll.dll, vfs_payload.dll, vfs-source-plugin.exe
 ```

@@ -44,7 +44,7 @@ fn locate_artifact(name: &str) -> PathBuf {
         }
     }
     panic!(
-        "{name} not found near {:?}; build -p vfs-fixture-read -p vfs-shim-dll -p vfs-payload first",
+        "{name} not found near {:?}; build -p vfs-fixture-read -p vfs-shim-dll and vfs-payload (--manifest-path crates/vfs-payload/Cargo.toml) first",
         profile_dir()
     );
 }
@@ -61,14 +61,12 @@ fn ensure_inject_artifacts() {
         let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..");
-        let status = std::process::Command::new(cargo)
+        let status = std::process::Command::new(&cargo)
             .current_dir(&workspace)
             .args([
                 "build",
                 "-p",
                 "vfs-shim-dll",
-                "-p",
-                "vfs-payload",
                 "-p",
                 "vfs-fixture-read",
                 "--quiet",
@@ -76,6 +74,22 @@ fn ensure_inject_artifacts() {
             .status()
             .expect("spawn cargo");
         assert!(status.success(), "fixture/artifact build failed: {status}");
+
+        // vfs-payload lives in its own workspace (panic = "abort"). Build it
+        // into the same target dir so the co-location below finds it unchanged.
+        let target_dir = workspace.join("target");
+        let status = std::process::Command::new(&cargo)
+            .current_dir(&workspace)
+            .env("CARGO_TARGET_DIR", &target_dir)
+            .args([
+                "build",
+                "--manifest-path",
+                "crates/vfs-payload/Cargo.toml",
+                "--quiet",
+            ])
+            .status()
+            .expect("spawn cargo to build vfs-payload");
+        assert!(status.success(), "vfs-payload cargo build failed: {status}");
     }
     // Copy into profile root so Session::launch's find_near works from the test exe.
     for name in needed {

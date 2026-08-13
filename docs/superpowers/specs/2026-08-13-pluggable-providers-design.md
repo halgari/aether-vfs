@@ -587,11 +587,27 @@ second copy of the suite that can drift.
 
 | Declared | Cases |
 |---|---|
-| All | Root scoping (`[0,"a"]` ≠ `[1,"a"]`), `readdir("")`, not-found, short reads, handle isolation, capabilities constant across calls |
+| All | `readdir("")`, not-found by `getattr` and by `open`, entry metadata (kind and size) agreeing between `readdir` and `getattr`, short reads, handle isolation, capabilities constant across calls, a non-default root handled coherently |
 | `Read` | Positional reads, offset past EOF, zero-length, unaligned |
 | `SeqRead` | Cursor advances, reopen resets, positional read refused |
 | `ReadWrite` | create/excl/trunc/append, write-then-read-back, `set_len` grow and shrink, rename, remove, mkdir, cross-root rename rejected, flush/close durability |
 | `ReadWrite + immutable` | Rejected at construction |
+
+**Root awareness is deliberately not a universal case.** A provider over one
+backing store — a zip, a directory — correctly ignores the root id and serves
+the same tree everywhere, which is exactly what §5 permits. A multi-root
+provider may just as correctly report not-found for a root it does not serve.
+Asserting that a given relative path resolves under an arbitrary root would
+forbid the second and be passed trivially by the first, so the universal case
+only requires that a non-default root produce `Ok` or `ST_NOT_FOUND` rather
+than a crash or an unrelated status. That `VPath` actually delivers the root id
+to the provider is verified separately, by a fixture built to serve different
+content per root.
+
+**Case-insensitive matching is also not a universal case.** Providers are
+expected to match case-insensitively on Windows, but the suite compares names
+exactly; a case-sensitive provider gains correctness from the `casefold`
+combinator rather than from every provider reimplementing folding.
 
 ### Combinators run the same suite
 
@@ -680,3 +696,13 @@ Named so they are decisions rather than omissions:
   is a later project.
 - Per-path append cursors.
 - Linux hosting.
+- Hook-boundary `catch_unwind`. §9 predicted that `panic = "unwind"` would let
+  the shim's hook entry points wrap their bodies in `catch_unwind` and convert
+  a panic into an error status instead of taking down the host process. That
+  wrapping was never implemented. The practical effect of `panic = "unwind"`
+  today is the opposite of a safety net: a panic inside a hooked NT syscall
+  now unwinds through live Rust stack frames — running `Drop` impls — in a
+  real game process before it reaches the `extern "system"` boundary and
+  aborts there, whereas under the old `panic = "abort"` it aborted immediately
+  at the panic site. Until hook entry points actually call `catch_unwind`, a
+  hook panic unwinds further than it used to.

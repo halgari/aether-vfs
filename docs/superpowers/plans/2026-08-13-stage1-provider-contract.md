@@ -60,18 +60,55 @@
 
 - [ ] **Step 1: Write the failing test**
 
+**A runtime `catch_unwind` check cannot work here.** Cargo always builds `--test` harnesses with `panic = "unwind"` regardless of the profile setting, so a `catch_unwind` test passes under both profiles and proves nothing. Assert the manifests instead — that is what actually catches the regression (someone setting `panic = "abort"` on the main workspace again).
+
 Create `crates/vfs-protocol/tests/unwind.rs`:
 
 ```rust
-//! The workspace must unwind on panic: `catch_unwind` is a no-op under
-//! `panic = "abort"`, and the PyO3 binding needs panics to become exceptions.
+//! The main workspace must unwind so the PyO3 binding can turn a Rust panic
+//! into a Python exception instead of aborting the host process.
+//!
+//! This asserts the manifest rather than calling `catch_unwind`: Cargo always
+//! builds `--test` harnesses with `panic = "unwind"` regardless of the profile
+//! setting, so a runtime check passes under both and proves nothing.
 
 #[test]
-fn workspace_panics_unwind_rather_than_abort() {
-    let caught = std::panic::catch_unwind(|| {
-        panic!("intentional");
-    });
-    assert!(caught.is_err(), "panic did not unwind — check profile.panic in the root Cargo.toml");
+fn main_workspace_profiles_unwind() {
+    let manifest =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
+            .expect("read the workspace manifest");
+
+    let panic_lines: Vec<&str> = manifest
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("panic"))
+        .collect();
+
+    assert!(!panic_lines.is_empty(), "no panic setting found in the workspace manifest");
+    for line in panic_lines {
+        assert!(line.contains("unwind"), "main workspace must unwind, found: {line}");
+    }
+}
+
+#[test]
+fn vfs_payload_is_excluded_and_still_aborts() {
+    let root = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
+        .expect("read the workspace manifest");
+    assert!(
+        root.contains(r#"exclude = ["crates/vfs-payload"]"#),
+        "vfs-payload must stay excluded — it is #![no_std] and cannot unwind"
+    );
+
+    let payload = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../vfs-payload/Cargo.toml"
+    ))
+    .expect("read the vfs-payload manifest");
+    assert!(
+        payload.lines().map(str::trim).any(|l| l == r#"panic = "abort""#),
+        "vfs-payload must keep panic = \"abort\""
+    );
+    assert!(payload.contains("[workspace]"), "vfs-payload must be its own workspace root");
 }
 ```
 
@@ -79,7 +116,7 @@ fn workspace_panics_unwind_rather_than_abort() {
 
 Run: `cargo test -p vfs-protocol --test unwind`
 
-Expected: the test process **aborts** (exit code 101 with an abort message, or "error: test failed, to rerun pass `--test unwind`" after a STATUS_ABORT). It does not report a normal assertion failure — under `panic = "abort"` the process dies before the assert runs. That abort is the failure signal.
+Expected: FAIL — `main workspace must unwind, found: panic = "abort"`, and the exclude assertion fails too. After Steps 3-4, confirm the test has teeth by flipping the root manifest back to `panic = "abort"`, re-running (must FAIL), and restoring it (must PASS).
 
 - [ ] **Step 3: Give `vfs-payload` its own workspace**
 
@@ -194,11 +231,23 @@ In `crates/vfs-directord/tests/e2e.rs`, the args array around line 71 lists `"vf
           CARGO_TARGET_DIR: target
 ```
 
-`README.md` lines 27 and 97 — remove `-p vfs-payload` from both build commands and add below each:
+`README.md` lines 27 and 97 — remove `-p vfs-payload` from both build commands and add below each. Note the two differ: line 27 is the debug quick-start, line 97 is the release packaging section, whose surrounding text promises artifacts under `target/release/`.
+
+Both need `--target-dir target`. Without it the DLL builds into `crates/vfs-payload/target/` and every artifact-location path — `vfs-inject/src/artifacts.rs`, `Session::launch` — fails to find it at runtime.
+
+Below line 27:
 
 ```powershell
-cargo build --manifest-path crates/vfs-payload/Cargo.toml   # separate workspace
+cargo build --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
 ```
+
+Below line 97:
+
+```powershell
+cargo build --release --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
+```
+
+Verify by running the packaging line from `rust/` and confirming `target/release/vfs_payload.dll` exists.
 
 - [ ] **Step 9: Verify the whole tree still builds and tests**
 
@@ -807,19 +856,22 @@ so a read-only provider implements five methods."
   - `assert_conformance(p: Arc<dyn Provider>)` — runs the case subset implied by `p.capabilities()`.
   - `write_fixture_tree(dir: &Path)` — writes the reference tree the suite expects. Moved from `vfs-source::conformance` so there is one definition.
   - `MemFixture` — a minimal in-crate `Access::Read` provider over a fixed tree, used to test the suite itself.
+  - `SeqFixture` — an `Access::SeqRead` provider over the same tree, with a per-handle cursor and **no** `read_at` (it inherits the `ST_NOT_SUPPORTED` default). It exists because no crate in Tasks 5-9 ports a sequential-only backend, so without it `assert_sequential` would ship with zero coverage — dead code inside the oracle six ports depend on. Stage 2's `seekable(p)` combinator also needs it as the thing to wrap. It delegates `getattr` and `readdir` to an internal `MemFixture` rather than duplicating the tree walk.
 
-**The reference tree** every provider under test must expose (identical to today's `vfs-source/src/conformance.rs` tree, so existing providers pass unchanged):
+**The reference tree** every provider under test must expose:
 
 ```text
 a.txt          "hello"
 sub/b.txt      "world!"
 ```
 
+This is **not** the superseded suite's tree (`hello.txt`, `sub/a.bin` = `"abc"`), so each port in Tasks 5-9 must write this tree rather than reusing an old fixture. The superseded suite also compared names with `eq_ignore_ascii_case`; this one compares exactly. Both changes are deliberate: case-insensitive matching is not a universal provider obligation in this design — the `casefold` combinator handles case-sensitive providers — so the suite must not silently accept a provider that returns the wrong case.
+
 **Write cases are deliberately absent.** They arrive in Stage 3 with the write path. This task builds the dispatch structure so adding them later is additive.
 
 - [ ] **Step 1: Read the existing suite before replacing it**
 
-Read `crates/vfs-source/src/conformance.rs` in full. The new suite must assert at least everything it does, or providers could regress silently.
+Read `crates/vfs-source/src/conformance.rs` in full. The new suite must assert at least everything it does, or providers could regress silently. Produce a comparison table in your report: every assertion the old suite makes, and where the new suite makes it. Any gap is a finding, not a footnote — six ports are validated by this suite.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -841,13 +893,41 @@ mod tests {
         assert_conformance(std::sync::Arc::new(MemFixture::missing("a.txt")));
     }
 
+    /// Serves different content per root, proving `VPath` carries the root id
+    /// through. This is not an obligation on real providers — a zip serves one
+    /// archive under every root — it verifies the plumbing, not the contract.
+    struct PerRootFixture;
+
+    impl Provider for PerRootFixture {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::read_only()
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            Ok(Some(Stat { kind: KIND_FILE, size: u64::from(p.root.0), mtime: 0 }))
+        }
+        fn readdir(&self, _p: VPath) -> Result<Vec<DirEntry>, i32> {
+            Ok(Vec::new())
+        }
+        fn open(&self, _p: VPath, _f: u32) -> Result<(Handle, u64, bool), i32> {
+            Err(not_found())
+        }
+        fn close(&self, _h: Handle) -> Result<(), i32> {
+            Ok(())
+        }
+    }
+
     #[test]
-    #[should_panic(expected = "root scoping")]
-    fn a_provider_that_ignores_the_root_id_fails_the_suite() {
-        assert_conformance(std::sync::Arc::new(MemFixture::root_blind()));
+    fn vpath_carries_the_root_id_to_the_provider() {
+        let p = PerRootFixture;
+        let at0 = p.getattr(VPath::new(RootId(0), "same")).unwrap().unwrap();
+        let at3 = p.getattr(VPath::new(RootId(3), "same")).unwrap().unwrap();
+        assert_eq!(at0.size, 0);
+        assert_eq!(at3.size, 3, "the provider did not receive the root id");
     }
 }
 ```
+
+**Why there is no "provider ignores the root id" negative fixture:** ignoring the root id is *legal*. A provider over one zip or one directory serves the same tree under every root, exactly as spec §5 permits. Asserting that a relative path resolves under an arbitrary root is passed trivially by such a provider and would wrongly fail a correct multi-root provider that reports not-found for a root it does not serve. `MemFixture` therefore has no `root_aware` flag; `PerRootFixture` above verifies the plumbing instead.
 
 - [ ] **Step 3: Run to verify it fails**
 
@@ -880,8 +960,13 @@ use crate::{
 pub const FIXTURE_FILES: &[(&str, &[u8])] = &[("a.txt", b"hello"), ("sub/b.txt", b"world!")];
 
 /// Write the reference tree to a real directory, for disk-like providers.
+///
+/// Clears `dir` first. The removal is not swallowed: a caller that passes the
+/// wrong path should hear about it rather than silently lose that tree.
 pub fn write_fixture_tree(dir: &Path) {
-    let _ = std::fs::remove_dir_all(dir);
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).expect("clear the fixture tree");
+    }
     std::fs::create_dir_all(dir.join("sub")).expect("create fixture tree");
     for (rel, body) in FIXTURE_FILES {
         let p = dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -1034,6 +1119,13 @@ fn read_all(p: &Arc<dyn Provider>, h: Handle, size: u64) -> Vec<u8> {
         }
         out.extend_from_slice(&buf[..n]);
         off += n as u64;
+        // Bound the loop: a provider that ignores `offset` and keeps returning
+        // the same block would otherwise hang here instead of failing.
+        assert!(
+            out.len() <= size as usize,
+            "read_at returned more than the file's {size} bytes — the provider is \
+             probably ignoring the offset and re-serving the same block"
+        );
     }
     out
 }
@@ -1089,20 +1181,63 @@ fn assert_common(p: &Arc<dyn Provider>) {
     names.sort_unstable();
     assert_eq!(names, ["a.txt", "sub"], "readdir of the root listed {names:?}");
 
+    // Entry metadata must be right, not just the names: a provider that lists
+    // a.txt as a directory, or with size 0, passes a names-only check.
+    for (rel, body) in FIXTURE_FILES {
+        let Some(name) = rel.split('/').next_back() else { continue };
+        if rel.contains('/') {
+            continue; // only root-level entries are in this listing
+        }
+        let e = entries
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name} missing from the root listing"));
+        assert_eq!(e.stat.kind, KIND_FILE, "readdir reported {name} as kind {}", e.stat.kind);
+        assert_eq!(e.stat.size, body.len() as u64, "readdir reported {name} size {}", e.stat.size);
+    }
+    let sub_entry = entries.iter().find(|e| e.name == "sub").expect("sub in the root listing");
+    assert_eq!(sub_entry.stat.kind, KIND_DIR, "readdir reported sub as a file");
+
+    // getattr must agree with readdir about directory-ness.
+    let sub_stat = p
+        .getattr(VPath::at_default("sub"))
+        .expect("getattr(sub)")
+        .expect("sub must exist");
+    assert_eq!(sub_stat.kind, KIND_DIR, "getattr reported sub as kind {}", sub_stat.kind);
+
     // readdir of a subdirectory.
     let sub = p.readdir(VPath::at_default("sub")).expect("readdir: sub");
     assert_eq!(sub.len(), 1, "readdir(sub) should list exactly one entry");
     assert_eq!(sub[0].name, "b.txt");
 
-    // Root scoping: the same relative path must resolve under a non-default root.
-    let alt = p
-        .getattr(VPath::new(RootId(7), "a.txt"))
-        .expect("root scoping: getattr under RootId(7) failed");
-    assert!(
-        alt.is_some(),
-        "root scoping: a.txt resolved under root 0 but not under root 7 — \
-         the provider is ignoring the root id"
-    );
+    // A non-default root must be handled coherently. Both answers are legal:
+    // a provider over one backing store (a zip, a directory) correctly ignores
+    // the root id and returns the same tree, while a multi-root provider may
+    // report not-found for a root it does not serve. What is not legal is
+    // panicking or returning an unrelated status.
+    //
+    // Root *distinguishing* is deliberately NOT asserted here — see the note
+    // below the test module. It would be passed trivially by a root-ignoring
+    // provider and would wrongly fail a correct multi-root one.
+    match p.getattr(VPath::new(RootId(7), "a.txt")) {
+        Ok(_) => {}
+        Err(e) if e == crate::not_found() => {}
+        Err(e) => panic!(
+            "getattr under a non-default root returned status {e}; expected Ok or ST_NOT_FOUND"
+        ),
+    }
+
+    // Opening an absent path fails with NOT_FOUND, not some other error and
+    // not success. The old vfs-source suite asserted this; six ports depend
+    // on it staying true.
+    match p.open(VPath::at_default("nope.txt"), crate::OPEN_READ) {
+        Err(e) if e == crate::not_found() => {}
+        Err(e) => panic!("open of an absent path returned status {e}, expected ST_NOT_FOUND"),
+        Ok((h, _, _)) => {
+            let _ = p.close(h);
+            panic!("open of an absent path succeeded; it must fail with ST_NOT_FOUND");
+        }
+    }
 
     // Handles are provider-scoped: two opens are independent.
     let (h1, _, _) = p.open(VPath::at_default("a.txt"), crate::OPEN_READ).expect("open #1");
@@ -1140,10 +1275,13 @@ fn assert_positional(p: &Arc<dyn Provider>) {
             0
         );
 
-        // An unaligned mid-file read returns the right bytes.
+        // An unaligned mid-file read returns the right bytes. Assert n > 0
+        // first — otherwise a provider returning 0 passes by comparing two
+        // empty slices.
         if body.len() >= 3 {
             let mut buf = [0u8; 2];
             let n = p.read_at(h, 1, &mut buf).expect("unaligned read_at");
+            assert!(n > 0, "unaligned read_at({rel}) returned 0 bytes mid-file");
             assert_eq!(&buf[..n], &body[1..1 + n], "unaligned read_at({rel}) content mismatch");
         }
 
@@ -1161,6 +1299,20 @@ fn assert_positional(p: &Arc<dyn Provider>) {
 
 fn assert_sequential(p: &Arc<dyn Provider>) {
     for (rel, body) in FIXTURE_FILES {
+        // A sequential provider must refuse positional reads rather than
+        // silently returning something plausible.
+        let (probe, _, _) = p.open(VPath::at_default(rel), crate::OPEN_READ).expect("open");
+        match p.read_at(probe, 0, &mut [0u8; 4]) {
+            Err(e) if e == crate::not_supported() => {}
+            Err(e) => panic!(
+                "read_at on a SeqRead provider returned status {e}, expected ST_NOT_SUPPORTED"
+            ),
+            Ok(n) => panic!(
+                "read_at on a SeqRead provider succeeded with {n} bytes; it must be refused"
+            ),
+        }
+        p.close(probe).expect("close");
+
         let (h, _, _) = p.open(VPath::at_default(rel), crate::OPEN_READ).expect("open");
         let mut out = Vec::new();
         let mut buf = [0u8; 3];
@@ -1170,15 +1322,26 @@ fn assert_sequential(p: &Arc<dyn Provider>) {
                 break;
             }
             out.extend_from_slice(&buf[..n]);
+            // Bound the loop: a provider whose cursor does not advance would
+            // otherwise hang here instead of failing. Same mechanism as
+            // `read_all` — a test oracle that hangs looks like a slow machine.
+            assert!(
+                out.len() <= body.len(),
+                "read_next returned more than {rel}'s {} bytes — the cursor is not advancing",
+                body.len()
+            );
         }
         assert_eq!(out, *body, "read_next({rel}) content mismatch");
         p.close(h).expect("close");
 
-        // Reopening resets the cursor.
+        // Reopening resets the cursor. Assert the byte count, not just the
+        // slice: a shared cursor parked at EOF returns n=0, and comparing two
+        // empty slices would pass.
         let (h2, _, _) = p.open(VPath::at_default(rel), crate::OPEN_READ).expect("reopen");
         let mut first = [0u8; 1];
         let n = p.read_next(h2, &mut first).expect("read_next after reopen");
-        assert_eq!(&first[..n], &body[..n], "reopen did not reset the cursor");
+        assert_eq!(n, 1, "reopen did not reset the cursor — read_next returned {n} bytes");
+        assert_eq!(&first[..1], &body[..1], "reopen returned the wrong first byte");
         p.close(h2).expect("close");
     }
 }
@@ -1394,9 +1557,13 @@ conformance."
 
 **Note for the next task:** the workspace does not build as a whole between Tasks 5 and 9 — each unported implementor is a compile error. Run per-crate `cargo test -p <crate>` until Task 9 restores a whole-workspace build. This is the one place in Stage 1 where a task does not leave the tree fully green, and it is why Tasks 5-9 should land in one sitting.
 
+**Execution order is 5 → 7 → 8 → 6 → 9, not 5 → 6 → 7 → 8 → 9.** `vfs-director` lists `vfs-compose` in `[dev-dependencies]` (`vfs-director/Cargo.toml`), so `cargo test -p vfs-director` compiles `vfs-compose` regardless of what `vfs-director`'s own source says — making Task 6's gate unsatisfiable until Task 7 lands. `vfs-compose` and `vfs-cache` depend only on `vfs-protocol`, so they port cleanly first. Task numbering below is left as originally written; only the order they are executed in changes.
+
 ---
 
 ### Task 6: Port `vfs-director` (disk provider and kernel)
+
+> **Execute this AFTER Tasks 7 and 8.** `vfs-director` lists `vfs-compose` in `[dev-dependencies]`, so `cargo test -p vfs-director` compiles `vfs-compose` no matter what this crate's own source says. Until Task 7 lands, this task's gate cannot go green.
 
 **Files:**
 - Modify: `crates/vfs-director/Cargo.toml`, `crates/vfs-director/src/ops.rs`, `crates/vfs-director/src/disk.rs`, `crates/vfs-director/src/director.rs`, `crates/vfs-director/src/session.rs`, `crates/vfs-director/src/lib.rs`, `crates/vfs-director/tests/zip_serve_integrity.rs`
@@ -1500,7 +1667,11 @@ pub use disk::DiskProvider as DiskBackend;
 
 - [ ] **Step 7: Port the integration test**
 
-`crates/vfs-director/tests/zip_serve_integrity.rs` has 16 `Backend` references. Update the imports to `vfs_provider::{Provider, VPath}`, change `ZipBackend` → `ZipProvider`, wrap bare path arguments in `VPath::at_default(...)`, and rename `.read(` → `.read_at(` and `.release(` → `.close(`. **Do not change any assertion.**
+`crates/vfs-director/tests/zip_serve_integrity.rs` has 16 references to old type names. **Type renames only** — `DiskBackend` → `DiskProvider`, `ZipBackend` → `ZipProvider`, `StripPrefixBackend` → `SubdirProvider`.
+
+Do **not** wrap path arguments in `VPath::at_default(...)` and do not rename `.read(`/`.release(` here. That test drives `Director` and `Session`, whose own public methods keep taking `&str` and `u64` — they are this crate's API to the IPC layer, not `Provider` implementations. The port changes how `Director` *calls* its mounted providers, not `Director`'s own signatures. Wrapping the arguments would be a type error.
+
+**Do not change any assertion.**
 
 - [ ] **Step 8: Run to verify it passes**
 
