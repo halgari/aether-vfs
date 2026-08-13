@@ -123,7 +123,9 @@ pub fn bootstrap_from_config_path_with_payload(
     let guard = if cfg_ptr.is_null() {
         install(engine).map_err(BootstrapError::Install)?
     } else {
-        install_late(engine, cfg_ptr).map_err(BootstrapError::Install)?
+        // SAFETY: `cfg_ptr` was parsed from the address the injector published
+        // for this process, and is non-null on this branch.
+        unsafe { install_late(engine, cfg_ptr).map_err(BootstrapError::Install)? }
     };
     // Tell any spawning parent (that force-suspended us) our hooks are live.
     crate::inject::signal_ready();

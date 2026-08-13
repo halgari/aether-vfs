@@ -290,7 +290,12 @@ unsafe fn expand_primary_stack(
 /// Inject `dll_path` into a process via `LoadLibraryW` on a remote thread.
 /// Used for the post-init full shim (`vfs-shim-dll`). Wakes the loader — do not
 /// use this alone when the target's own static imports must be virtualized.
-pub fn inject_dll(process: HANDLE, dll_path: &str) -> Result<(), InjectError> {
+///
+/// # Safety
+/// `process` must be a live process handle with `PROCESS_CREATE_THREAD`,
+/// `PROCESS_VM_OPERATION` and `PROCESS_VM_WRITE`. This writes into and runs
+/// code in another process; no part of that is checkable by the type system.
+pub unsafe fn inject_dll(process: HANDLE, dll_path: &str) -> Result<(), InjectError> {
     // SAFETY: standard remote LoadLibrary injection; `process` is a live process
     // handle with the needed rights (from CreateProcessW).
     unsafe {
@@ -360,17 +365,26 @@ pub fn inject_dll(process: HANDLE, dll_path: &str) -> Result<(), InjectError> {
 /// `shim_install` until the injector writes a non-zero u32 at `release_flag`
 /// (used so LoadLibrary of the full shim can run before the primary continues
 /// into `RtlUserThreadStart` / loader init).
-pub fn arm_preinit_payload(
+///
+/// # Safety
+/// See [`arm_preinit_payload_ex`].
+pub unsafe fn arm_preinit_payload(
     process: HANDLE,
     thread: HANDLE,
     payload_dll_path: &str,
     redirects: &[PreinitRedirect],
 ) -> Result<PreinitArm, InjectError> {
-    arm_preinit_payload_ex(process, thread, payload_dll_path, redirects, false)
+    // SAFETY: forwarding the caller's own safety obligation.
+    unsafe { arm_preinit_payload_ex(process, thread, payload_dll_path, redirects, false) }
 }
 
 /// Like [`arm_preinit_payload`], with optional post-install spin gate.
-pub fn arm_preinit_payload_ex(
+///
+/// # Safety
+/// `process` and `thread` must be a live, suspended process and its primary
+/// thread, with rights to read/write memory and set thread context. This maps
+/// a payload into that process and rewrites the thread's RIP.
+pub unsafe fn arm_preinit_payload_ex(
     process: HANDLE,
     thread: HANDLE,
     payload_dll_path: &str,

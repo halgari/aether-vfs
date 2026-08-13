@@ -312,7 +312,11 @@ fn install_panic_hook() {
 /// dispatch pointers into that Config, and detour only the remaining stubs.
 ///
 /// `payload_cfg` is the reflectively-mapped early Config in this process.
-pub fn install_late(
+///
+/// # Safety
+/// `payload_cfg` must point at a live [`PayloadConfig`](crate::payload_abi::PayloadConfig)
+/// written by the injector into this process, and stay valid for the call.
+pub unsafe fn install_late(
     engine: Engine,
     payload_cfg: *mut crate::payload_abi::PayloadConfig,
 ) -> Result<HookGuard, InstallError> {

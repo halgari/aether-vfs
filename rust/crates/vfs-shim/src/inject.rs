@@ -116,7 +116,10 @@ pub fn inject_child_dual_layer(
         None => return false,
     };
     let redirects = child_preinit_redirects();
-    let arm = match arm_preinit_payload_ex(process, thread, &payload, &redirects, true) {
+    // SAFETY: `process`/`thread` come from our own `CreateProcessInternalW`
+    // hook, which forced CREATE_SUSPENDED, so the child is live and suspended
+    // and we hold the rights the call needs.
+    let arm = match unsafe { arm_preinit_payload_ex(process, thread, &payload, &redirects, true) } {
         Ok(a) => a,
         Err(_) => return false,
     };
