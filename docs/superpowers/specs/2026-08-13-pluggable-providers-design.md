@@ -541,15 +541,33 @@ does nothing under `panic = "abort"`**. As written, a panic anywhere in the
 library would abort the host Python process instead of raising. A library that
 can kill its embedder on a bad path is not productized.
 
-**Fix:** split `vfs-payload` and `vfs-shim-dll` into their own workspace so the
-main workspace can use `panic = "unwind"`.
+**Fix:** exclude `vfs-payload` from the workspace and give it its own
+`[workspace]` table, so the main workspace can use `panic = "unwind"`.
 
-Knock-on effects, all of which are work items rather than surprises:
+`vfs-payload` is the only crate that needs `panic = "abort"`. It is the only
+`#![no_std]` crate with a `#[panic_handler]`, it has **zero dependencies**, and
+it is already not a normal dependency of anything — `vfs-inject` builds it with
+a nested `cargo build -p` precisely because of this constraint
+(`vfs-inject/Cargo.toml:36`). `vfs-shim-dll` is a plain std cdylib and stays
+where it is.
 
-- Two workspaces means two target directories and two build invocations.
-- The `xtask-descriptor` step needs revisiting.
-- `README.md` build instructions and any CI change accordingly.
+The crate directory does not move. Adding `exclude = ["crates/vfs-payload"]` to
+the root manifest and an empty `[workspace]` table to the payload manifest is
+sufficient, and building it with `CARGO_TARGET_DIR` pointed at the main target
+directory keeps every existing artifact-location path working unchanged.
+
+Knock-on work items:
+
+- Nested `cargo build -p vfs-payload` invocations must become
+  `--manifest-path crates/vfs-payload/Cargo.toml`:
+  `vfs-inject/tests/common/mod.rs:22-34`, `vfs-directord/tests/e2e.rs:71`.
+- `.github/workflows/ci.yml:14` and `README.md:27,97` build lines.
 - The wheel build must drive both workspaces.
+
+**A side benefit, not just a cost:** with unwinding available, the shim's hook
+entry points can wrap their bodies in `catch_unwind` and convert a panic into
+an error status. Today a panic inside a hook aborts the game process
+unconditionally.
 
 This is a prerequisite for the Python binding, not a cleanup.
 
@@ -632,7 +650,8 @@ Deliberate, and all pre-1.0:
   field. Existing out-of-process plugins break, but they break loudly at
   handshake.
 - `Director`'s layer-ordered mount merge is deleted.
-- The workspace splits (§9).
+- `vfs-payload` leaves the workspace (§9), so `cargo build -p vfs-payload` from
+  the workspace root stops working and becomes a `--manifest-path` invocation.
 - `RootMap::new(root)` (`vfs-redirect/src/lib.rs:19`) becomes multi-root and
   yields `(root_id, rel)`.
 
