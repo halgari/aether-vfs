@@ -24,7 +24,8 @@ shared-memory ring + inject/payload/shim stack.
 
 ```powershell
 cd rust
-cargo build -p vfs-directord -p vfs-shim-dll -p vfs-payload -p vfs-fixture-read
+cargo build -p vfs-directord -p vfs-shim-dll -p vfs-fixture-read
+cargo build --manifest-path crates/vfs-payload/Cargo.toml   # separate workspace
 ```
 
 ### Daemon + CLI (`vfs`)
@@ -94,7 +95,8 @@ Release build of the daemon and natives:
 
 ```powershell
 cd rust
-cargo build --release -p vfs-directord -p vfs-shim-dll -p vfs-payload -p vfs-source
+cargo build --release -p vfs-directord -p vfs-shim-dll -p vfs-source
+cargo build --manifest-path crates/vfs-payload/Cargo.toml   # separate workspace
 # Artifacts under target/release/:
 #   vfs.exe, vfs_shim_dll.dll, vfs_payload.dll, vfs-source-plugin.exe
 ```

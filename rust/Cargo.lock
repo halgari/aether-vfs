@@ -1606,10 +1606,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vfs-payload"
-version = "0.1.0"
-
-[[package]]
 name = "vfs-protocol"
 version = "0.1.0"
 
