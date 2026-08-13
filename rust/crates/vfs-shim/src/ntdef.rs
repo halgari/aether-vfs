@@ -120,6 +120,17 @@ pub type NtQueryDirectoryFileFn = unsafe extern "system" fn(
     u8,                   // RestartScan (BOOLEAN)
 ) -> NTSTATUS;
 
+/// `ntdll!NtQueryInformationByName` (Win10 1709+). Stats a path *without*
+/// opening it, so a caller using it never appears in any open-side counter and
+/// never consults a handle we could have virtualised.
+pub type NtQueryInformationByNameFn = unsafe extern "system" fn(
+    *const ObjectAttributes,
+    *mut c_void, // IoStatusBlock
+    *mut c_void, // FileInformation
+    u32,         // Length
+    u32,         // FileInformationClass
+) -> NTSTATUS;
+
 /// `ntdll!NtOpenFile` — the open path many callers (incl. Rust `std`'s
 /// directory open) use instead of `NtCreateFile`.
 pub type NtOpenFileFn = unsafe extern "system" fn(

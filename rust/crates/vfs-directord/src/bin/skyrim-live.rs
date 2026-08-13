@@ -163,21 +163,35 @@ fn run() -> Result<(), String> {
         eprintln!("  director-open log: {}", p.to_string_lossy());
     }
 
-    // ── open zip, strip "Skyrim Special Edition/" prefix ────────────────────
-    // Open the zip ONCE. (A second open re-scans the 16GB CD and looks frozen.)
-    eprintln!("  opening zip index (one-time CD parse; may take ~30–90s on a 16GB archive)…");
-    let t0 = std::time::Instant::now();
-    let zip = ZipBackend::open(&zip_path).map_err(|e| format!("ZipBackend: {e:?}"))?;
-    eprintln!("  zip index ready in {:.1}s", t0.elapsed().as_secs_f32());
-    timeline.mark("zip index");
-
-    // Detect single top-level folder from the already-open backend (no re-open).
-    let prefix = detect_zip_root_prefix(&zip)?;
-    eprintln!("  zip root prefix: {prefix:?}");
-    let backend: Arc<dyn Backend> = if let Some(pfx) = prefix {
-        Arc::new(StripPrefixBackend::new(Arc::new(zip), pfx))
+    // ── base content: a directory tree, or the zip ──────────────────────────
+    // `VFS_SKYRIM_DISK` swaps the archive for an already-extracted install. The
+    // point is differential diagnosis: it keeps the shim, the staging, the
+    // sealed root and the launch path identical while changing only where bytes
+    // come from, so a behaviour that survives the swap is not the archive's.
+    let disk_src = std::env::var_os("VFS_SKYRIM_DISK").map(PathBuf::from);
+    let backend: Arc<dyn Backend> = if let Some(d) = &disk_src {
+        if !d.is_dir() {
+            return Err(format!("VFS_SKYRIM_DISK not a directory: {}", d.display()));
+        }
+        eprintln!("  base:      {}  (disk tree, zip bypassed)", d.display());
+        timeline.mark("zip index");
+        Arc::new(DiskBackend::new(d))
     } else {
-        Arc::new(zip)
+        // Open the zip ONCE. (A second open re-scans the 16GB CD and looks frozen.)
+        eprintln!("  opening zip index (one-time CD parse; may take ~30–90s on a 16GB archive)…");
+        let t0 = std::time::Instant::now();
+        let zip = ZipBackend::open(&zip_path).map_err(|e| format!("ZipBackend: {e:?}"))?;
+        eprintln!("  zip index ready in {:.1}s", t0.elapsed().as_secs_f32());
+        timeline.mark("zip index");
+
+        // Detect single top-level folder from the already-open backend (no re-open).
+        let prefix = detect_zip_root_prefix(&zip)?;
+        eprintln!("  zip root prefix: {prefix:?}");
+        if let Some(pfx) = prefix {
+            Arc::new(StripPrefixBackend::new(Arc::new(zip), pfx))
+        } else {
+            Arc::new(zip)
+        }
     };
 
     let mut session = Session::new();

@@ -32,10 +32,11 @@ pub enum Hook {
     CreateSection = 9,
     MapView = 10,
     QDir = 11,
-    Other = 12,
+    QByName = 12,
+    Other = 13,
 }
 
-const N: usize = 13;
+const N: usize = 14;
 
 const NAMES: [&str; N] = [
     "NtCreateFile",
@@ -50,6 +51,7 @@ const NAMES: [&str; N] = [
     "NtCreateSection",
     "NtMapViewOfSection",
     "NtQueryDirectoryFile",
+    "NtQueryInformationByName",
     "other",
 ];
 
@@ -365,6 +367,83 @@ fn format_paths(mut pairs: Vec<(String, u64)>) -> String {
     s
 }
 
+/// Opens whose path could not be decoded, keyed by the bare object name.
+///
+/// A relative open names its parent only by handle; if that handle is unknown
+/// the call cannot be matched against the root, cannot be served, and appears
+/// in no path-keyed report. Counting them says whether anything is hiding.
+static UNDECODABLE: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+
+pub fn note_undecodable(name: Option<&str>) {
+    if !enabled() {
+        return;
+    }
+    let Ok(mut g) = UNDECODABLE.lock() else { return };
+    let map = g.get_or_insert_with(HashMap::new);
+    let key = name.unwrap_or("<no name>").to_ascii_lowercase();
+    *map.entry(key).or_insert(0) += 1;
+}
+
+fn render_undecodable() -> String {
+    let Ok(g) = UNDECODABLE.lock() else { return String::new() };
+    let Some(map) = g.as_ref() else { return String::new() };
+    if map.is_empty() {
+        return String::new();
+    }
+    let mut rows: Vec<(&String, &u64)> = map.iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let total: u64 = rows.iter().map(|(_, c)| **c).sum();
+    let mut s = format!("
+undecodable opens ({} distinct, {total} calls):
+", rows.len());
+    for (k, c) in rows.iter().take(60) {
+        s.push_str(&format!("  {c:>6}x  {k}
+"));
+    }
+    s
+}
+
+/// Ordered log of operations against the managed root.
+///
+/// Counts say *what* was touched; only order says *where a sequence stopped*.
+/// A load that gives up part way looks identical in a frequency table to one
+/// that never started, because both simply lack the entries that would have
+/// followed.
+static TRACE: Mutex<Option<Vec<String>>> = Mutex::new(None);
+const TRACE_MAX: usize = 4000;
+
+pub fn note_trace(op: &str, path: &str, result: &str) {
+    if !enabled() {
+        return;
+    }
+    let Ok(mut g) = TRACE.lock() else { return };
+    let v = g.get_or_insert_with(Vec::new);
+    if v.len() >= TRACE_MAX {
+        return;
+    }
+    v.push(format!("{:<10} {:<12} {}", op, result, path.to_ascii_lowercase()));
+}
+
+fn render_trace() -> String {
+    let Ok(g) = TRACE.lock() else {
+        return String::new();
+    };
+    let Some(v) = g.as_ref() else {
+        return String::new();
+    };
+    if v.is_empty() {
+        return String::new();
+    }
+    let mut s = format!("
+ordered trace of under-root operations ({}):
+", v.len());
+    for (i, line) in v.iter().enumerate() {
+        s.push_str(&format!("  {i:>5}  {line}
+"));
+    }
+    s
+}
+
 /// Attribute queries against the managed root, with their outcome.
 ///
 /// A stat is how a caller asks "does this exist" without opening it, so a stat
@@ -383,6 +462,7 @@ pub fn note_stat(path: &str, outcome: &str) {
     }
     let Ok(mut g) = STATS.lock() else { return };
     let map = g.get_or_insert_with(HashMap::new);
+    note_trace("stat", path, outcome);
     let key = format!("{:<12} {}", outcome, path.to_ascii_lowercase());
     if let Some(c) = map.get_mut(&key) {
         *c += 1;
@@ -485,11 +565,13 @@ pub fn start_reporter() {
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(250));
             let body = format!(
-                "{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}",
                 render(),
                 render_async(),
                 render_fills(),
                 render_stats(),
+                render_trace(),
+                render_undecodable(),
                 render_readdirs(),
                 render_passthrough()
             );

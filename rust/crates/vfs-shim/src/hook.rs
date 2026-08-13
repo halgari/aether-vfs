@@ -167,6 +167,7 @@ use crate::ntdef::{
     FilePositionInformation,
     FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateSectionFn, NtMapViewOfSectionFn,
     NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryDirectoryFileFn,
+    NtQueryInformationByNameFn,
     NtQueryFullAttributesFileFn,
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
     NtWriteFileFn, NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
@@ -200,6 +201,7 @@ static mut TRAMP_QFULL: Option<NtQueryFullAttributesFileFn> = None;
 static mut TRAMP_OPEN: Option<NtOpenFileFn> = None;
 static mut TRAMP_QDIREX: Option<NtQueryDirectoryFileExFn> = None;
 static mut TRAMP_QDIR: Option<NtQueryDirectoryFileFn> = None;
+static mut TRAMP_QIBN: Option<NtQueryInformationByNameFn> = None;
 static mut TRAMP_CLOSE: Option<NtCloseFn> = None;
 static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
 static mut TRAMP_SETINFO: Option<NtSetInformationFileFn> = None;
@@ -478,7 +480,20 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
         d_qvol.trampoline() as *const (),
     ));
 
+    // Present since Win10 1709. Optional so an older host still installs.
+    if let Ok(d_qibn) = make_detour(ntdll, b"NtQueryInformationByName ", qibn_hook as *const ()) {
+        TRAMP_QIBN = Some(core::mem::transmute::<*const (), NtQueryInformationByNameFn>(
+            d_qibn.trampoline() as *const (),
+        ));
+        if d_qibn.enable().is_ok() {
+            detours.push(d_qibn);
+        } else {
+            TRAMP_QIBN = None;
+        }
+    }
+
     d_qdirex.enable().map_err(|_| InstallError::Detour)?;
+    d_qdir.enable().map_err(|_| InstallError::Detour)?;
     d_close.enable().map_err(|_| InstallError::Detour)?;
     d_qif.enable().map_err(|_| InstallError::Detour)?;
     d_setinfo.enable().map_err(|_| InstallError::Detour)?;
@@ -488,8 +503,11 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     d_map.enable().map_err(|_| InstallError::Detour)?;
     d_unmap.enable().map_err(|_| InstallError::Detour)?;
     d_qvol.enable().map_err(|_| InstallError::Detour)?;
+    // Every enabled detour must be kept alive here: dropping one silently
+    // un-patches it, which reads exactly like "the process never calls this".
     detours.extend([
-        d_qdirex, d_close, d_qif, d_setinfo, d_read, d_write, d_csec, d_map, d_unmap, d_qvol,
+        d_qdirex, d_qdir, d_close, d_qif, d_setinfo, d_read, d_write, d_csec, d_map, d_unmap,
+        d_qvol,
     ]);
 
     // Best-effort child-process propagation + virtual image path spoof.
@@ -707,6 +725,44 @@ unsafe fn object_name_str(oa: *const ObjectAttributes) -> Option<String> {
 /// caller can tramp. Without this, steam_api / CRT opens like
 /// `RootDirectory=<game dir FUSE handle>, Name=steam_appid.txt` hit the kernel
 /// with a fake handle â†’ fail â†’ **Steam Error**.
+/// The `ObjectAttributes` name field alone, ignoring `RootDirectory`. Used only
+/// to describe an open we could not resolve to a full path.
+/// The process's current-directory handle and its DOS path, read from the PEB.
+///
+/// `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory` is the only place the handle
+/// is published; there is no API that hands it back.
+unsafe fn cwd_from_peb() -> Option<(isize, String)> {
+    // x64: TEB.ProcessEnvironmentBlock @ 0x60, PEB.ProcessParameters @ 0x20,
+    // params.CurrentDirectory @ 0x38 = { UNICODE_STRING DosPath; HANDLE Handle }.
+    let teb: usize;
+    core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, preserves_flags));
+    if teb == 0 {
+        return None;
+    }
+    let peb = *((teb + 0x60) as *const usize);
+    if peb == 0 {
+        return None;
+    }
+    let params = *((peb + 0x20) as *const usize);
+    if params == 0 {
+        return None;
+    }
+    let units = *((params + 0x38) as *const u16) as usize / 2;
+    let buf = *((params + 0x40) as *const *const u16);
+    let handle = *((params + 0x48) as *const isize);
+    if buf.is_null() || units == 0 || handle == 0 {
+        return None;
+    }
+    Some((handle, String::from_utf16_lossy(core::slice::from_raw_parts(buf, units))))
+}
+
+unsafe fn oa_name_only(oa: *const ObjectAttributes) -> Option<String> {
+    if oa.is_null() {
+        return None;
+    }
+    object_name_str(oa)
+}
+
 unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
     if oa.is_null() {
         return None;
@@ -717,15 +773,33 @@ unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
         return if name.is_empty() { None } else { Some(name) };
     }
     let root = oa_ref.root_directory as isize;
-    if !crate::fuse_synth::is_fuse_synth(root) {
-        return None;
-    }
-    // Prefer PATH_TABLE (recorded on open); fall back to fuse_synth abs_path.
-    let parent = PATH_TABLE
-        .lock()
-        .ok()
-        .and_then(|t| t.get(&root).cloned())
-        .or_else(|| crate::fuse_synth::abs_path(root))?;
+    // A relative open names its parent by handle. Resolving only *our* synthetic
+    // parents was too narrow: a caller that opens the game directory for real
+    // and then opens files against that handle produced no path at all, so the
+    // open bypassed every decision and landed on the real folder behind the
+    // mount. HANDLE_PATHS remembers real parents for exactly this case.
+    let parent = if crate::fuse_synth::is_fuse_synth(root) {
+        // Prefer PATH_TABLE (recorded on open); fall back to fuse_synth abs_path.
+        PATH_TABLE
+            .lock()
+            .ok()
+            .and_then(|t| t.get(&root).cloned())
+            .or_else(|| crate::fuse_synth::abs_path(root))?
+    } else if let Some(p) = path_of_handle(oa_ref.root_directory) {
+        p
+    } else {
+        // The current-directory handle. The OS creates it, so it appears in no
+        // table of ours, yet it is the parent for every relative open the CRT
+        // makes: `CreateFileW("Data\X")` becomes (CWD handle + "Data\X").
+        // Without this, those opens cannot be matched against the root and land
+        // on the real folder behind the mount — silently, since an undecodable
+        // open is absent from every path-keyed report.
+        let (cwd_handle, dos) = cwd_from_peb()?;
+        if cwd_handle != root {
+            return None;
+        }
+        format!(r"\??\{}", dos.trim_end_matches(['\\', '/']))
+    };
     let parent = parent.trim_end_matches(['\\', '/']);
     let rel = name.trim_start_matches(['\\', '/']);
     if rel.is_empty() {
@@ -757,39 +831,42 @@ unsafe fn tag_under_root(
     if status < 0 || file_handle.is_null() {
         return;
     }
-    if let Some(engine) = ENGINE.get() {
-        if let Some(path) = path_of(oa) {
-            if engine.is_under_root(&path) {
-                if let Ok(mut table) = DIR_TABLE.lock() {
-                    table.insert(
-                        *file_handle as isize,
-                        DirTracked { dir_nt_path: path, state: None },
-                    );
-                }
-                return;
-            }
-            // Outside the root we serve nothing, but an enumeration there is
-            // exactly what a wrong-Data-directory bug looks like, and the
-            // enumeration call itself carries no path â€” only a handle.
-            if crate::hookstats::enabled() {
-                if let Ok(mut t) = OUTSIDE_PATHS.lock() {
-                    if t.len() < OUTSIDE_PATHS_MAX {
-                        t.insert(*file_handle as isize, path);
-                    }
-                }
-            }
+    let Some(path) = path_of(oa) else { return };
+    let key = *file_handle as isize;
+    // Remember every handle's path, not just the ones under the root. NT lets a
+    // caller open a file as (directory handle + leaf name), and without the
+    // parent's path such an open cannot be decoded at all -- it is invisible to
+    // every decision we make and reaches the real directory behind the mount.
+    // The parent is often outside the root while the child is under it.
+    if let Ok(mut t) = HANDLE_PATHS.lock() {
+        if t.len() < HANDLE_PATHS_MAX {
+            t.insert(key, path.clone());
+        }
+    }
+    // Two different notions of "ours" have to agree here. `is_under_root` knows
+    // only the managed root, but the client also serves the staging directory
+    // as an alias for it — and the game's working directory *is* the staging
+    // directory, so it enumerates `<stage>\Data`. Registering only by the
+    // narrower test left that handle untracked, the enumeration fell through to
+    // the real staging folder, and it returned nothing: an empty Data listing
+    // is an empty load order, which is a game with no world.
+    let under_root = ENGINE.get().is_some_and(|e| e.is_under_root(&path))
+        || crate::fuse_client::global().is_some_and(|c| c.vpath_under_root(&path).is_some());
+    if under_root {
+        if let Ok(mut table) = DIR_TABLE.lock() {
+            table.insert(key, DirTracked { dir_nt_path: path, state: None });
         }
     }
 }
 
-/// Diagnostic-only handle -> path for opens *outside* the managed root, so an
-/// enumeration we did not serve can still be attributed to a directory. Bounded
-/// because it is fed by every open, and only populated when stats are on.
-static OUTSIDE_PATHS: Mutex<BTreeMap<isize, String>> = Mutex::new(BTreeMap::new());
-const OUTSIDE_PATHS_MAX: usize = 4096;
+/// Handle -> the NT path it was opened as, for *every* successful open.
+///
+/// Reclaimed by `NtClose`; bounded so a handle leak cannot grow it without end.
+static HANDLE_PATHS: Mutex<BTreeMap<isize, String>> = Mutex::new(BTreeMap::new());
+const HANDLE_PATHS_MAX: usize = 65_536;
 
 fn path_of_handle(handle: HANDLE) -> Option<String> {
-    OUTSIDE_PATHS.lock().ok()?.get(&(handle as isize)).cloned()
+    HANDLE_PATHS.lock().ok()?.get(&(handle as isize)).cloned()
 }
 
 /// Record a redirected handle's virtual identity: after a successful redirected
@@ -1154,10 +1231,18 @@ unsafe extern "system" fn create_hook(
         return st;
     }
     // Prefer director FUSE for managed-root content (no in-shim zipserve).
-    if let Some(p) = path_of(oa) {
-        crate::hookstats::note_passthrough(&p);
+    match path_of(oa) {
+        Some(p) => crate::hookstats::note_passthrough(&p),
+        // An open we cannot decode is an open we cannot serve. If the masters
+        // are hiding anywhere, it is here.
+        None => crate::hookstats::note_undecodable(oa_name_only(oa).as_deref()),
     }
     if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, disp)) {
+        if crate::hookstats::enabled() {
+            if let Some(p) = path_of(oa) {
+                crate::hookstats::note_trace("open", &p, if st >= 0 { "ok" } else { "FAIL" });
+            }
+        }
         _hs.mark_rooted();
         // FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT. Absent means
         // the caller intends asynchronous completion, which a synthetic handle
@@ -1358,13 +1443,19 @@ unsafe extern "system" fn open_hook(
     if in_hook_reenter() {
         return tramp(file_handle, access, oa, iosb, share, opts);
     }
-    if let Some(p) = path_of(oa) {
-        crate::hookstats::note_passthrough(&p);
+    match path_of(oa) {
+        Some(p) => crate::hookstats::note_passthrough(&p),
+        None => crate::hookstats::note_undecodable(oa_name_only(oa).as_deref()),
     }
     // NtOpenFile has no disposition â€” it always opens existing (FILE_OPEN). Pass
     // FILE_OPEN (1), NOT 0: 0 is FILE_SUPERSEDE, which is in is_write_open's
     // create/overwrite set and would misclassify every open as a write.
     if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, vfs_redirect::FILE_OPEN)) {
+        if crate::hookstats::enabled() {
+            if let Some(p) = path_of(oa) {
+                crate::hookstats::note_trace("open", &p, if st >= 0 { "ok" } else { "FAIL" });
+            }
+        }
         _hs.mark_rooted();
         return st;
     }
@@ -1447,6 +1538,119 @@ unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), i32>> {
         Ok(_) => Err(vfs_protocol::ST_NOT_FOUND),
         Err(st) => Err(st),
     })
+}
+
+/// Stat-by-path, with no handle anywhere in the call.
+///
+/// Windows 11 routes existence checks here (class 77,
+/// `FileStatBasicInformation`) instead of `NtQueryFullAttributesFile`, so an
+/// unhooked build answers them from the real directory behind the mount. That
+/// is silent by construction: the caller never opens anything, so nothing
+/// appears in any open-side counter, and a game that tolerates a missing file
+/// simply skips it. Skyrim's intro video and its master plugins both vanished
+/// this way.
+///
+/// Only the classes that are pure metadata are filled. Anything else under the
+/// root falls through, which is no worse than before this hook existed.
+unsafe fn fill_by_name(
+    class_raw: u32,
+    info: *mut c_void,
+    length: u32,
+    is_dir: bool,
+    size: u64,
+) -> Option<usize> {
+    let attrs = if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+    // Byte layouts per FILE_INFORMATION_CLASS. Written field-by-field with
+    // unaligned writes because the caller's buffer has no alignment guarantee.
+    let need: usize = match class_raw {
+        4 => 40,   // FileBasicInformation
+        5 => 24,   // FileStandardInformation
+        34 => 56,  // FileNetworkOpenInformation
+        68 => 72,  // FileStatInformation
+        77 => 104, // FileStatBasicInformation (Win11)
+        _ => return None,
+    };
+    if info.is_null() || (length as usize) < need {
+        return None;
+    }
+    let p = info as *mut u8;
+    core::ptr::write_bytes(p, 0, need);
+    match class_raw {
+        4 => {
+            // 4x LARGE_INTEGER times, then FileAttributes.
+            core::ptr::write_unaligned(p.add(32) as *mut u32, attrs);
+        }
+        5 => {
+            core::ptr::write_unaligned(p as *mut i64, size as i64); // AllocationSize
+            core::ptr::write_unaligned(p.add(8) as *mut i64, size as i64); // EndOfFile
+            core::ptr::write_unaligned(p.add(16) as *mut u32, 1); // NumberOfLinks
+            core::ptr::write_unaligned(p.add(21) as *mut u8, u8::from(is_dir)); // Directory
+        }
+        34 => {
+            core::ptr::write_unaligned(p.add(32) as *mut i64, size as i64); // AllocationSize
+            core::ptr::write_unaligned(p.add(40) as *mut i64, size as i64); // EndOfFile
+            core::ptr::write_unaligned(p.add(48) as *mut u32, attrs);
+        }
+        68 | 77 => {
+            // Both begin FileId, 4x time, AllocationSize, EndOfFile,
+            // FileAttributes, ReparseTag, NumberOfLinks.
+            core::ptr::write_unaligned(p.add(40) as *mut i64, size as i64); // AllocationSize
+            core::ptr::write_unaligned(p.add(48) as *mut i64, size as i64); // EndOfFile
+            core::ptr::write_unaligned(p.add(56) as *mut u32, attrs);
+            core::ptr::write_unaligned(p.add(64) as *mut u32, 1); // NumberOfLinks
+        }
+        _ => return None,
+    }
+    Some(need)
+}
+
+unsafe extern "system" fn qibn_hook(
+    oa: *const ObjectAttributes,
+    iosb: *mut c_void,
+    info: *mut c_void,
+    length: u32,
+    class_raw: u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QByName);
+    let tramp = match TRAMP_QIBN {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if in_hook_reenter() {
+        return tramp(oa, iosb, info, length, class_raw);
+    }
+    if let Some(path) = path_of(oa) {
+        let fuse = fuse_path_attr(&path);
+        if fuse.is_none() {
+            // Logged too: a stat that lands outside the root is exactly how a
+            // wrong Data directory would present, and it is otherwise silent.
+            crate::hookstats::note_stat(&path, &format!("byname{class_raw}-outside"));
+        }
+        if let Some(res) = fuse {
+            match res {
+                Ok((is_dir, size, _mtime)) => {
+                    if let Some(n) = fill_by_name(class_raw, info, length, is_dir, size) {
+                        crate::hookstats::note_stat(&path, &format!("byname{class_raw}-ok"));
+                        if !iosb.is_null() {
+                            let q = iosb as *mut u8;
+                            core::ptr::write_unaligned(q as *mut u32, STATUS_SUCCESS as u32);
+                            core::ptr::write_unaligned(q.add(8) as *mut usize, n);
+                        }
+                        return STATUS_SUCCESS;
+                    }
+                    crate::hookstats::note_stat(&path, &format!("byname{class_raw}-UNSUP"));
+                }
+                Err(st) if st == vfs_protocol::ST_NOT_FOUND => {
+                    crate::hookstats::note_stat(&path, &format!("byname{class_raw}-missing"));
+                    if !allow_disk_fallthrough() {
+                        return STATUS_OBJECT_NAME_NOT_FOUND;
+                    }
+                }
+                Err(_) => return STATUS_UNSUCCESSFUL,
+            }
+        }
+    }
+    tramp(oa, iosb, info, length, class_raw)
 }
 
 unsafe extern "system" fn qattr_hook(
@@ -1620,10 +1824,8 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
     if let Ok(mut table) = DIR_TABLE.lock() {
         table.remove(&(handle as isize));
     }
-    if crate::hookstats::enabled() {
-        if let Ok(mut t) = OUTSIDE_PATHS.lock() {
-            t.remove(&(handle as isize));
-        }
+    if let Ok(mut t) = HANDLE_PATHS.lock() {
+        t.remove(&(handle as isize));
     }
     if let Ok(mut t) = IDENTITY_TABLE.lock() {
         t.remove(&(handle as isize));
