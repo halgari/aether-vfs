@@ -730,10 +730,19 @@ unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Option<String> 
 /// Try director FUSE OPEN for paths under the managed root. Returns Some(status)
 /// when the fuse client handled the call (success or hard failure under root).
 /// An under-root open needs the ring WRITE path when write access or a
-/// create/overwrite disposition is present (SUPERSEDE/CREATE/OVERWRITE[_IF]).
+/// create/overwrite disposition is present (SUPERSEDE/CREATE/OPEN_IF/
+/// OVERWRITE[_IF]).
+///
+/// `FILE_OPEN_IF` (3) belongs in the disposition set alongside the other
+/// creating dispositions: it may create the path (no different from
+/// `FILE_CREATE`/`FILE_SUPERSEDE` in that respect), so a caller that asks
+/// for it with only read access must still route through the write path —
+/// otherwise a create-if-absent read open is treated as a plain read, which
+/// reports `ST_NOT_FOUND`/falls through to the overlay bypass instead of
+/// creating the file, on an absent path.
 fn is_write_open(access: u32, disposition: u32) -> bool {
     const WRITE_ACCESS: u32 = 0x4000_0000 | 0x0002 | 0x0004; // GENERIC_WRITE|FILE_WRITE_DATA|FILE_APPEND_DATA
-    (access & WRITE_ACCESS) != 0 || matches!(disposition, 0 | 2 | 4 | 5)
+    (access & WRITE_ACCESS) != 0 || matches!(disposition, 0 | 2 | 3 | 4 | 5)
 }
 
 /// True for NT's append-only access grant: `FILE_APPEND_DATA` without
@@ -749,10 +758,19 @@ fn is_write_open(access: u32, disposition: u32) -> bool {
 /// gap surfaced: an append reopen's first write landed at position 0 (the
 /// hardcoded initial value) and silently overwrote the file's existing bytes
 /// instead of extending it.
+///
+/// `GENERIC_WRITE` must count as full write access here too, same as
+/// `is_write_open`'s `WRITE_ACCESS`: a caller requesting
+/// `GENERIC_WRITE | FILE_APPEND_DATA` wants ordinary positional writes plus
+/// append, not append-only — checking only the literal `FILE_WRITE_DATA` bit
+/// missed that, because `GENERIC_WRITE` is a generic right that implies
+/// `FILE_WRITE_DATA` without necessarily carrying its specific bit set in the
+/// raw mask this hook observes.
 fn is_append_only(access: u32) -> bool {
+    const GENERIC_WRITE: u32 = 0x4000_0000;
     const FILE_WRITE_DATA: u32 = 0x0002;
     const FILE_APPEND_DATA: u32 = 0x0004;
-    access & FILE_APPEND_DATA != 0 && access & FILE_WRITE_DATA == 0
+    access & FILE_APPEND_DATA != 0 && access & (FILE_WRITE_DATA | GENERIC_WRITE) == 0
 }
 
 /// Map an NT create-disposition to the ring's `OPEN_CREATE`/`OPEN_EXCL`/
@@ -796,11 +814,70 @@ fn open_create_flags(disposition: u32) -> u32 {
     }
 }
 
+/// True for the three dispositions whose successful `IoStatusBlock`
+/// `Information` depends on whether the path already existed
+/// (`FILE_SUPERSEDE`/`FILE_OPEN_IF`/`FILE_OVERWRITE_IF`) — see
+/// `disposition_information`. The other three have one fixed outcome and
+/// need no probe.
+fn disposition_needs_existence_probe(disposition: u32) -> bool {
+    matches!(disposition, 0 | 3 | 5)
+}
+
+/// The correct `IoStatusBlock.Information` for a *successful* create/open,
+/// given the NT create-disposition and (for the three dispositions where it
+/// matters) whether the path existed before the call.
+///
+/// `create_hook` used to hardcode `FILE_OPENED` here unconditionally, which
+/// was invisible while every write fell through to a real file (whose kernel
+/// FCB reports this correctly on its own) — only reachable now that writes
+/// succeed through the director. Kernel32's `ERROR_ALREADY_EXISTS` signalling
+/// for `CREATE_ALWAYS` (`FILE_SUPERSEDE`) / `OPEN_ALWAYS` (`FILE_OPEN_IF`)
+/// reads exactly this field, so getting it wrong is not cosmetic.
+///
+/// NT's own table:
+/// - `FILE_OPEN` (1): always `FILE_OPENED` — must already exist.
+/// - `FILE_CREATE` (2): always `FILE_CREATED` — must not have existed
+///   (`OPEN_EXCL` already enforces this; success implies "created").
+/// - `FILE_OVERWRITE` (4): always `FILE_OVERWRITTEN` — must already exist.
+/// - `FILE_SUPERSEDE` (0), `FILE_OPEN_IF` (3), `FILE_OVERWRITE_IF` (5):
+///   outcome depends on whether the path existed — this is exactly why
+///   `disposition_needs_existence_probe` singles these three out.
+fn disposition_information(disposition: u32, existed_before: bool) -> usize {
+    use crate::ntdef::{FILE_CREATED, FILE_OPENED, FILE_OVERWRITTEN, FILE_SUPERSEDED};
+    match disposition {
+        0 => {
+            if existed_before {
+                FILE_SUPERSEDED
+            } else {
+                FILE_CREATED
+            }
+        }
+        2 => FILE_CREATED,
+        3 => {
+            if existed_before {
+                FILE_OPENED
+            } else {
+                FILE_CREATED
+            }
+        }
+        4 => FILE_OVERWRITTEN,
+        5 => {
+            if existed_before {
+                FILE_OVERWRITTEN
+            } else {
+                FILE_CREATED
+            }
+        }
+        _ => FILE_OPENED, // FILE_OPEN (1), and anything unrecognized.
+    }
+}
+
 unsafe fn try_fuse_create(
     file_handle: *mut HANDLE,
     oa: *const ObjectAttributes,
     iosb: *mut c_void,
     write: bool,
+    disposition: u32,
     create_flags: u32,
     append_only: bool,
 ) -> Option<NTSTATUS> {
@@ -859,6 +936,19 @@ unsafe fn try_fuse_create(
     // All other under-root *reads* go through the director (zip / composed).
     // Writes may fall through for shim-local overlay redirect.
     // (Primary stack is expanded to 16 MiB by vfs-inject; open is a shallow ring op.)
+    // Only the three "conditional" dispositions need to know whether the
+    // path pre-existed to report the right `IoStatusBlock.Information` (see
+    // `disposition_information`); the other three have one fixed outcome.
+    // This is a separate ring round-trip ahead of the open, so it is skipped
+    // whenever the answer is not needed. There is an inherent TOCTOU window
+    // between this probe and the open below — another writer could create or
+    // delete the path in between — but the race can only skew the reported
+    // Information (kernel32's ERROR_ALREADY_EXISTS hint), never the actual
+    // create/open outcome, which the director still decides atomically.
+    let existed_before = write
+        && disposition_needs_existence_probe(disposition)
+        && matches!(client.getattr(vp), Ok(a) if a.found);
+
     let opened = if write {
         client.open_write(vp, create_flags)
     } else {
@@ -881,7 +971,12 @@ unsafe fn try_fuse_create(
             if !iosb.is_null() {
                 let p = iosb as *mut u8;
                 core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-                core::ptr::write_unaligned(p.add(8) as *mut usize, crate::ntdef::FILE_OPENED);
+                let info = if write {
+                    disposition_information(disposition, existed_before)
+                } else {
+                    crate::ntdef::FILE_OPENED
+                };
+                core::ptr::write_unaligned(p.add(8) as *mut usize, info);
             }
             // Direct PATH_TABLE insert with absolute path (path_of may be relative OA).
             if let Ok(mut t) = PATH_TABLE.lock() {
@@ -904,6 +999,13 @@ unsafe fn try_fuse_create(
                 Some(STATUS_OBJECT_NAME_NOT_FOUND)
             }
         }
+        // `OPEN_EXCL` (CREATE_NEW / FILE_CREATE) against a path that already
+        // exists. Without this arm it fell into the generic `Err(_) if write`
+        // guard below and fell through to the shim-local overlay, which
+        // *created the file there and reported success* — an exclusive
+        // create silently "succeeding" against an existing file. Report the
+        // real collision instead of falling through.
+        Err(st) if st == vfs_protocol::ST_EXISTS => Some(STATUS_OBJECT_NAME_COLLISION),
         // Director rejects OPEN_WRITE (overlay is shim-local). Fall through so
         // write/create under the root hits the overlay redirect path.
         Err(_) if write => None,
@@ -1113,6 +1215,7 @@ unsafe extern "system" fn create_hook(
         oa,
         iosb,
         is_write_open(access, disp),
+        disp,
         open_create_flags(disp),
         is_append_only(access),
     ) {
@@ -1339,6 +1442,7 @@ unsafe extern "system" fn open_hook(
         oa,
         iosb,
         is_write_open(access, vfs_redirect::FILE_OPEN),
+        vfs_redirect::FILE_OPEN,
         0,
         is_append_only(access),
     ) {
@@ -2277,7 +2381,7 @@ unsafe extern "system" fn write_hook(
                 Some(v as u64)
             }
         };
-        if let Some((fh, _size, _is_dir, pos, append_only)) =
+        if let Some((fh, size, _is_dir, pos, append_only)) =
             crate::fuse_synth::lookup(handle as isize)
         {
             // Append-only access (FILE_APPEND_DATA without FILE_WRITE_DATA)
@@ -2311,6 +2415,17 @@ unsafe extern "system" fn write_hook(
             // an implicit-offset write consumes the file pointer.
             if append_only || explicit.is_none() {
                 crate::fuse_synth::set_position(handle as isize, off + n as u64);
+            }
+            // The synthetic size was set once at open and never touched
+            // since — a write that extends the file must bump it too, or
+            // `read_hook`'s EOF check and `fuse_query_information`'s
+            // `metadata().len()` keep reporting the pre-write length forever.
+            // Only reachable now that writes actually reach the director
+            // instead of falling through to a real file (whose kernel FCB
+            // would have tracked this for free).
+            let end = off + n as u64;
+            if end > size {
+                crate::fuse_synth::set_size(handle as isize, end);
             }
             if !iosb.is_null() {
                 let p = iosb as *mut u8;
@@ -3341,5 +3456,110 @@ mod tests {
     fn a_rename_target_with_an_unknown_parent_is_declined() {
         let mut buf = rename_info(0xDEAD_BEEF, "new.esp");
         assert_eq!(parse_rename(&mut buf), None);
+    }
+
+    // --- Fix 8: two disposition-classification bugs.
+
+    /// `GENERIC_WRITE | FILE_APPEND_DATA` is ordinary write-plus-append
+    /// access, not append-only: `GENERIC_WRITE` already grants full
+    /// positional write. Before the fix, `is_append_only` checked only the
+    /// literal `FILE_WRITE_DATA` bit (0x0002), which `GENERIC_WRITE`
+    /// (0x4000_0000) does not itself set in the raw mask this hook observes
+    /// — so this combination was misclassified as append-only, which would
+    /// have pinned every write to EOF regardless of the caller's offset.
+    #[test]
+    fn generic_write_with_append_data_is_not_append_only() {
+        const GENERIC_WRITE: u32 = 0x4000_0000;
+        const FILE_APPEND_DATA: u32 = 0x0004;
+        assert!(!is_append_only(GENERIC_WRITE | FILE_APPEND_DATA));
+    }
+
+    /// The genuine append-only shape — `FILE_APPEND_DATA` with neither
+    /// `FILE_WRITE_DATA` nor `GENERIC_WRITE` — must still be classified as
+    /// append-only. `Rust`'s `OpenOptions::append(true)` (without
+    /// `.write(true)`) requests exactly this.
+    #[test]
+    fn append_data_alone_is_append_only() {
+        const FILE_APPEND_DATA: u32 = 0x0004;
+        assert!(is_append_only(FILE_APPEND_DATA));
+    }
+
+    /// `FILE_WRITE_DATA` set explicitly alongside `FILE_APPEND_DATA` is full
+    /// write access, not append-only — unchanged by the fix, kept here so a
+    /// future edit cannot silently invert it.
+    #[test]
+    fn explicit_write_data_with_append_data_is_not_append_only() {
+        const FILE_WRITE_DATA: u32 = 0x0002;
+        const FILE_APPEND_DATA: u32 = 0x0004;
+        assert!(!is_append_only(FILE_WRITE_DATA | FILE_APPEND_DATA));
+    }
+
+    /// `FILE_OPEN_IF` (3) may create the path, exactly like `FILE_CREATE`/
+    /// `FILE_SUPERSEDE`/`FILE_OVERWRITE_IF` — so it must count as a write
+    /// open even with only read access requested. Before the fix, disposition
+    /// 3 was missing from `is_write_open`'s disposition set, so a
+    /// create-if-absent read open (read access + `FILE_OPEN_IF`) was treated
+    /// as a plain read and never reached the director's create path on an
+    /// absent file.
+    #[test]
+    fn file_open_if_with_read_only_access_is_a_write_open() {
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const FILE_OPEN_IF: u32 = 3;
+        assert!(is_write_open(GENERIC_READ, FILE_OPEN_IF));
+    }
+
+    /// Every disposition NT itself can create through must be a write open
+    /// regardless of the access mask; `FILE_OPEN` (1) is the sole disposition
+    /// that depends on the access mask alone.
+    #[test]
+    fn every_creating_disposition_is_a_write_open_even_with_read_only_access() {
+        const GENERIC_READ: u32 = 0x8000_0000;
+        for disposition in [0u32, 2, 3, 4, 5] {
+            assert!(
+                is_write_open(GENERIC_READ, disposition),
+                "disposition {disposition} must be a write open"
+            );
+        }
+        const FILE_OPEN: u32 = 1;
+        assert!(
+            !is_write_open(GENERIC_READ, FILE_OPEN),
+            "FILE_OPEN with only read access must not be a write open"
+        );
+    }
+
+    // --- Fix 7: per-disposition IoStatusBlock.Information.
+
+    #[test]
+    fn disposition_information_matches_nt_semantics() {
+        use crate::ntdef::{FILE_CREATED, FILE_OPENED, FILE_OVERWRITTEN, FILE_SUPERSEDED};
+
+        // FILE_SUPERSEDE (0): existed -> SUPERSEDED, absent -> CREATED.
+        assert_eq!(disposition_information(0, true), FILE_SUPERSEDED);
+        assert_eq!(disposition_information(0, false), FILE_CREATED);
+        // FILE_OPEN (1): always OPENED.
+        assert_eq!(disposition_information(1, true), FILE_OPENED);
+        assert_eq!(disposition_information(1, false), FILE_OPENED);
+        // FILE_CREATE (2): always CREATED.
+        assert_eq!(disposition_information(2, true), FILE_CREATED);
+        assert_eq!(disposition_information(2, false), FILE_CREATED);
+        // FILE_OPEN_IF (3): existed -> OPENED, absent -> CREATED.
+        assert_eq!(disposition_information(3, true), FILE_OPENED);
+        assert_eq!(disposition_information(3, false), FILE_CREATED);
+        // FILE_OVERWRITE (4): always OVERWRITTEN.
+        assert_eq!(disposition_information(4, true), FILE_OVERWRITTEN);
+        assert_eq!(disposition_information(4, false), FILE_OVERWRITTEN);
+        // FILE_OVERWRITE_IF (5): existed -> OVERWRITTEN, absent -> CREATED.
+        assert_eq!(disposition_information(5, true), FILE_OVERWRITTEN);
+        assert_eq!(disposition_information(5, false), FILE_CREATED);
+    }
+
+    #[test]
+    fn only_the_three_conditional_dispositions_need_an_existence_probe() {
+        for d in [0u32, 3, 5] {
+            assert!(disposition_needs_existence_probe(d), "disposition {d}");
+        }
+        for d in [1u32, 2, 4] {
+            assert!(!disposition_needs_existence_probe(d), "disposition {d}");
+        }
     }
 }
