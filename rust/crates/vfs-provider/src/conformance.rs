@@ -20,7 +20,9 @@ pub const FIXTURE_FILES: &[(&str, &[u8])] = &[("a.txt", b"hello"), ("sub/b.txt",
 
 /// Write the reference tree to a real directory, for disk-like providers.
 pub fn write_fixture_tree(dir: &Path) {
-    let _ = std::fs::remove_dir_all(dir);
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).expect("clear the fixture tree");
+    }
     std::fs::create_dir_all(dir.join("sub")).expect("create fixture tree");
     for (rel, body) in FIXTURE_FILES {
         let p = dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -28,34 +30,28 @@ pub fn write_fixture_tree(dir: &Path) {
     }
 }
 
-/// In-memory reference provider, used to test the suite itself. Serves the
-/// fixture tree under every root unless built with [`MemFixture::root_blind`].
+/// In-memory reference provider, used to test the suite itself. Root-blind by
+/// design — it serves the same tree under every root id, which is one of the
+/// two legal behaviors the suite accepts (see `assert_common`'s non-default-
+/// root case). `PerRootFixture` in the test module below covers the other
+/// legal behavior and verifies the root id actually reaches the provider.
 pub struct MemFixture {
     files: HashMap<String, Vec<u8>>,
-    /// When false, only `RootId(0)` resolves — the correct behavior here is
-    /// "same tree under every root", so this models a root-blind bug.
-    root_aware: bool,
     next: AtomicU64,
     opens: Mutex<HashMap<Handle, Vec<u8>>>,
 }
 
 impl MemFixture {
     pub fn new() -> Self {
-        Self::build(None, true)
+        Self::build(None)
     }
 
     /// A fixture missing one path, to prove the suite detects a gap.
     pub fn missing(path: &str) -> Self {
-        Self::build(Some(path.to_string()), true)
+        Self::build(Some(path.to_string()))
     }
 
-    /// A fixture that serves content only under `RootId(0)`, to prove the
-    /// suite detects a provider that ignores the root id.
-    pub fn root_blind() -> Self {
-        Self::build(None, false)
-    }
-
-    fn build(omit: Option<String>, root_aware: bool) -> Self {
+    fn build(omit: Option<String>) -> Self {
         let mut files = HashMap::new();
         for (rel, body) in FIXTURE_FILES {
             if omit.as_deref() == Some(*rel) {
@@ -63,11 +59,7 @@ impl MemFixture {
             }
             files.insert((*rel).to_string(), body.to_vec());
         }
-        MemFixture { files, root_aware, next: AtomicU64::new(1), opens: Mutex::new(HashMap::new()) }
-    }
-
-    fn visible(&self, p: VPath) -> bool {
-        self.root_aware || p.root == RootId::DEFAULT
+        MemFixture { files, next: AtomicU64::new(1), opens: Mutex::new(HashMap::new()) }
     }
 }
 
@@ -83,9 +75,6 @@ impl Provider for MemFixture {
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
-        if !self.visible(p) {
-            return Ok(None);
-        }
         if p.rel.is_empty() || p.rel == "sub" {
             return Ok(Some(Stat { kind: KIND_DIR, size: 0, mtime: 0 }));
         }
@@ -96,9 +85,6 @@ impl Provider for MemFixture {
     }
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
-        if !self.visible(p) {
-            return Err(not_found());
-        }
         let prefix = if p.rel.is_empty() { String::new() } else { format!("{}/", p.rel) };
         let mut seen: HashMap<String, DirEntry> = HashMap::new();
         for (rel, body) in &self.files {
@@ -130,9 +116,6 @@ impl Provider for MemFixture {
     }
 
     fn open(&self, p: VPath, _flags: u32) -> Result<(Handle, u64, bool), i32> {
-        if !self.visible(p) {
-            return Err(not_found());
-        }
         let body = self.files.get(p.rel).ok_or_else(not_found)?.clone();
         let size = body.len() as u64;
         let h = self.next.fetch_add(1, Ordering::Relaxed);
@@ -167,6 +150,11 @@ fn read_all(p: &Arc<dyn Provider>, h: Handle, size: u64) -> Vec<u8> {
         }
         out.extend_from_slice(&buf[..n]);
         off += n as u64;
+        assert!(
+            out.len() <= size as usize,
+            "read_at returned more than the file's {size} bytes — the provider is \
+             probably ignoring the offset and re-serving the same block"
+        );
     }
     out
 }
@@ -228,26 +216,60 @@ fn assert_common(p: &Arc<dyn Provider>) {
         }
     }
 
-    // readdir of the root lists both entries.
+    // readdir of the root lists both entries, with correct stat info.
     let entries = p.readdir(VPath::at_default("")).expect("readdir: provider root");
     let mut names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     names.sort_unstable();
     assert_eq!(names, ["a.txt", "sub"], "readdir of the root listed {names:?}");
+
+    for entry in &entries {
+        if entry.name == "sub" {
+            assert_eq!(
+                entry.stat.kind, KIND_DIR,
+                "readdir(root) listed 'sub' with kind {:?}, expected KIND_DIR",
+                entry.stat.kind
+            );
+            continue;
+        }
+        if let Some((_, body)) = FIXTURE_FILES.iter().find(|(rel, _)| *rel == entry.name) {
+            assert_eq!(
+                entry.stat.kind, KIND_FILE,
+                "readdir(root) listed {:?} with kind {:?}, expected KIND_FILE",
+                entry.name, entry.stat.kind
+            );
+            assert_eq!(
+                entry.stat.size,
+                body.len() as u64,
+                "readdir(root) listed {:?} with the wrong size",
+                entry.name
+            );
+        }
+    }
+
+    // getattr on the subdirectory agrees it is a directory.
+    let sub_attr = p
+        .getattr(VPath::at_default("sub"))
+        .expect("getattr: sub")
+        .expect("getattr: sub must exist");
+    assert_eq!(sub_attr.kind, KIND_DIR, "getattr(sub) should report a directory");
 
     // readdir of a subdirectory.
     let sub = p.readdir(VPath::at_default("sub")).expect("readdir: sub");
     assert_eq!(sub.len(), 1, "readdir(sub) should list exactly one entry");
     assert_eq!(sub[0].name, "b.txt");
 
-    // Root scoping: the same relative path must resolve under a non-default root.
-    let alt = p
-        .getattr(VPath::new(RootId(7), "a.txt"))
-        .expect("root scoping: getattr under RootId(7) failed");
-    assert!(
-        alt.is_some(),
-        "root scoping: a.txt resolved under root 0 but not under root 7 — \
-         the provider is ignoring the root id"
-    );
+    // A non-default root must be handled coherently. Both answers are legal:
+    // a provider over one backing store (a zip, a directory) correctly ignores
+    // the root id and returns the same tree, while a multi-root provider may
+    // report not-found for a root it does not serve. What is not legal is
+    // panicking or returning an unrelated status.
+    match p.getattr(VPath::new(RootId(7), "a.txt")) {
+        Ok(_) => {}
+        Err(e) if e == crate::not_found() => {}
+        Err(e) => panic!(
+            "getattr under a non-default root returned status {e}; expected Ok or ST_NOT_FOUND"
+        ),
+    }
 
     // Handles are provider-scoped: two opens are independent.
     let (h1, _, _) = p.open(VPath::at_default("a.txt"), crate::OPEN_READ).expect("open #1");
@@ -289,6 +311,7 @@ fn assert_positional(p: &Arc<dyn Provider>) {
         if body.len() >= 3 {
             let mut buf = [0u8; 2];
             let n = p.read_at(h, 1, &mut buf).expect("unaligned read_at");
+            assert!(n > 0, "unaligned read_at({rel}) returned 0 bytes for a mid-file offset");
             assert_eq!(&buf[..n], &body[1..1 + n], "unaligned read_at({rel}) content mismatch");
         }
 
@@ -323,7 +346,8 @@ fn assert_sequential(p: &Arc<dyn Provider>) {
         let (h2, _, _) = p.open(VPath::at_default(rel), crate::OPEN_READ).expect("reopen");
         let mut first = [0u8; 1];
         let n = p.read_next(h2, &mut first).expect("read_next after reopen");
-        assert_eq!(&first[..n], &body[..n], "reopen did not reset the cursor");
+        assert_eq!(n, 1, "reopen did not reset the cursor — read_next returned {n} bytes");
+        assert_eq!(&first[..1], &body[..1], "reopen returned the wrong first byte");
         p.close(h2).expect("close");
     }
 }
@@ -343,9 +367,35 @@ mod tests {
         assert_conformance(std::sync::Arc::new(MemFixture::missing("a.txt")));
     }
 
+    /// Serves different content per root, proving `VPath` carries the root id
+    /// through. This is not an obligation on real providers — a zip serves one
+    /// archive under every root — it verifies the plumbing, not the contract.
+    struct PerRootFixture;
+
+    impl Provider for PerRootFixture {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::read_only()
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            Ok(Some(Stat { kind: KIND_FILE, size: u64::from(p.root.0), mtime: 0 }))
+        }
+        fn readdir(&self, _p: VPath) -> Result<Vec<DirEntry>, i32> {
+            Ok(Vec::new())
+        }
+        fn open(&self, _p: VPath, _f: u32) -> Result<(Handle, u64, bool), i32> {
+            Err(not_found())
+        }
+        fn close(&self, _h: Handle) -> Result<(), i32> {
+            Ok(())
+        }
+    }
+
     #[test]
-    #[should_panic(expected = "root scoping")]
-    fn a_provider_that_ignores_the_root_id_fails_the_suite() {
-        assert_conformance(std::sync::Arc::new(MemFixture::root_blind()));
+    fn vpath_carries_the_root_id_to_the_provider() {
+        let p = PerRootFixture;
+        let at0 = p.getattr(VPath::new(RootId(0), "same")).unwrap().unwrap();
+        let at3 = p.getattr(VPath::new(RootId(3), "same")).unwrap().unwrap();
+        assert_eq!(at0.size, 0);
+        assert_eq!(at3.size, 3, "the provider did not receive the root id");
     }
 }
