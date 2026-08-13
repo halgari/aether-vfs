@@ -20,14 +20,12 @@ static LAUNCH_ENV_LOCK: Mutex<()> = Mutex::new(());
 /// Options for [`Session::launch`].
 #[derive(Clone, Debug)]
 pub struct LaunchOpts {
-    /// Virtual image path under the managed root (e.g. `SkyrimSE.exe`), or an
-    /// absolute host path when [`Self::hollow_pe`] is false (fixtures / tools).
+    /// Absolute path to the image to launch — normally the staged EXE. A
+    /// relative name resolves under the managed root (fixtures / tools).
     pub image: String,
     pub args: Vec<String>,
     /// Wait for process exit (false = detach; session must stay alive).
     pub wait: bool,
-    /// Load PE bytes from the VFS and process-hollow a host image (no PE on disk).
-    pub hollow_pe: bool,
     /// Optional override paths for shim/payload DLLs (else search near this exe).
     pub shim_dll: Option<String>,
     pub payload_dll: Option<String>,
@@ -43,7 +41,6 @@ impl Default for LaunchOpts {
             image: "SkyrimSE.exe".into(),
             args: Vec::new(),
             wait: true,
-            hollow_pe: true,
             shim_dll: None,
             payload_dll: None,
             env: BTreeMap::new(),
@@ -194,8 +191,7 @@ impl Session {
     ///
     /// Requires [`serve`] first. On `wait: false`, keep this `Session` alive.
     ///
-    /// When `hollow_pe` is false and `image` is an absolute path, the host file
-    /// is launched directly (fixtures / tools). Relative images resolve under
+    /// An absolute `image` is launched directly; a relative one resolves under
     /// the virtual root.
     pub fn launch(&self, opts: &LaunchOpts) -> Result<i32, String> {
         let ipc = self
@@ -205,22 +201,8 @@ impl Session {
 
         let root_s = self.virtual_root.to_string_lossy().into_owned();
         let image_path = Path::new(&opts.image);
-        // Hollow DRM path: prefer absolute host image (Steam library exe) so
-        // CreateProcess cmdline / ProcessImageFileName stay in-library.
-        // Non-hollow absolute paths (fixtures) launch that host file directly.
         let target = if image_path.is_absolute() {
             image_path.to_path_buf()
-        } else if opts.hollow_pe {
-            if let Ok(host) = std::env::var("VFS_HOLLOW_HOST") {
-                let hp = PathBuf::from(&host);
-                if hp.is_file() {
-                    hp
-                } else {
-                    self.virtual_root.join(&opts.image)
-                }
-            } else {
-                self.virtual_root.join(&opts.image)
-            }
         } else {
             self.virtual_root.join(&opts.image)
         };
@@ -255,27 +237,6 @@ impl Session {
         );
         let ready_path_s = ready_path.to_string_lossy().into_owned();
 
-        let pe_bytes = if opts.hollow_pe {
-            // Image may be an absolute Steam-library path for DRM; PE is still
-            // read from the VFS by basename (zip content), not from that path.
-            let vpath = Path::new(&opts.image)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(opts.image.as_str())
-                .replace('\\', "/");
-            let vpath = vpath.trim_start_matches('/');
-            eprintln!("vfs-director: reading PE {vpath} from VFS for hollow…");
-            Some(
-                self.read_file(vpath)
-                    .map_err(|e| format!("read PE from VFS {vpath}: status {e}"))?,
-            )
-        } else {
-            None
-        };
-        if let Some(ref pe) = pe_bytes {
-            eprintln!("vfs-director: PE {} bytes; shim={dll}", pe.len());
-        }
-
         // Serialize env mutation: ring env + per-child fixture vars inherit via
         // CreateProcessW(null environment).
         let _guard = LAUNCH_ENV_LOCK
@@ -308,7 +269,6 @@ impl Session {
             payload_path: payload,
             preinit_redirects: vec![],
             detach: !opts.wait,
-            target_pe_bytes: pe_bytes,
         });
 
         for (k, old) in saved {

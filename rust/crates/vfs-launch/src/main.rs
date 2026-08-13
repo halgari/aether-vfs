@@ -449,7 +449,6 @@ fn main() {
         image: pe_vpath,
         args: vec![],
         wait: args.wait,
-        hollow_pe: true,
         shim_dll: None,
         payload_dll: None,
         env: Default::default(),

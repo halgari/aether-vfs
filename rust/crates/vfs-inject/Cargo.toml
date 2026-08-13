@@ -42,27 +42,8 @@ name = "vfs-spawn-child"
 path = "src/bin/vfs-spawn-child.rs"
 
 [[bin]]
-name = "hollow_diag"
-path = "src/bin/hollow_diag.rs"
-
-[[bin]]
-name = "hollow_hello"
-path = "src/bin/hollow_hello.rs"
-
-
-[[bin]]
 name = "compare_map"
 path = "src/bin/compare_map.rs"
-
-
-[[bin]]
-name = "local_run"
-path = "src/bin/local_run.rs"
-
-
-[[bin]]
-name = "hollow_crt"
-path = "src/bin/hollow_crt.rs"
 
 
 [[bin]]

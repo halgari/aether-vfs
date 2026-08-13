@@ -9,7 +9,7 @@
 //! - `VFS_SKYRIM_ZIP`     = `C:\tmp\skyrimse.zip`
 //! - `VFS_SKYRIM_DATA`    = `C:\tmp\skyrim-data`  (saves/, profiles/, overrides/)
 //! - `VFS_SKYRIM_ROOT`    = `C:\tmp\skyrim-runtime` (empty managed virtual root)
-//! - `VFS_HOLLOW_HOST`    = Steam SkyrimSE.exe if present (set automatically when found)
+//! - `VFS_SKYRIM_LAUNCH`  = `SkyrimSE.exe`, or `skse64_loader.exe` to go via SKSE
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -74,13 +74,13 @@ fn run() -> Result<(), String> {
         return Err(format!("zip not found: {}", zip_path.display()));
     }
 
-    // The hollow host is staged from the zip just before launch (see
-    // `stage_launch` below), so no Steam install is required or consulted.
-    // Measured 2026-08-12: with the Steam library deleted entirely, the game
-    // runs and DRM passes from a host under C:\tmp — Steam associates the
-    // process via steam_appid.txt and the running client, not the image path.
-    // `VFS_HOLLOW_HOST` still overrides, for bisecting against a real install.
-    let preset_host = std::env::var("VFS_HOLLOW_HOST").ok().filter(|h| Path::new(h).is_file());
+    // The image is staged from the zip just before launch (see `stage_launch`
+    // below), so no Steam install is required or consulted. Measured 2026-08-12:
+    // with the Steam library deleted entirely, the game runs and DRM passes from
+    // an image under C:\tmp — Steam associates the process via steam_appid.txt
+    // and the running client, not the image path. `VFS_LAUNCH_IMAGE` overrides,
+    // for bisecting against a real install.
+    let preset_host = std::env::var("VFS_LAUNCH_IMAGE").ok().filter(|h| Path::new(h).is_file());
 
     // Managed root: never the Steam tree. Content is served here from the zip.
     let root = if let Some(r) = std::env::var_os("VFS_SKYRIM_ROOT") {
@@ -103,8 +103,8 @@ fn run() -> Result<(), String> {
     }
     eprintln!("  launch:    {launch_exe}");
     match &preset_host {
-        Some(h) => eprintln!("  hollow:    {h}  (VFS_HOLLOW_HOST override)"),
-        None => eprintln!("  hollow:    staged from zip into {}", stage_root.display()),
+        Some(h) => eprintln!("  image:     {h}  (VFS_LAUNCH_IMAGE override)"),
+        None => eprintln!("  image:     staged from zip into {}", stage_root.display()),
     }
     eprintln!("  root:      {}  (managed VFS root)", root.display());
     eprintln!("  overrides: {}", overrides.display());
@@ -141,8 +141,8 @@ fn run() -> Result<(), String> {
     std::env::remove_var("SteamTenfoot");
     std::env::remove_var("SteamAppUser");
     write_steam_appid(&root, &overrides)?;
-    // Overlay inject into a hollowed image has been observed to trip Steam CM
-    // asserts (`Expected connection state 0/1 but got 2`) and clean Shutdown.
+    // Overlay inject has been observed to trip Steam CM asserts (`Expected
+    // connection state 0/1 but got 2`) and clean Shutdown.
     // Best-effort: per-app EnableGameOverlay=0 in localconfig + registry.
     disable_skyrim_game_overlay()?;
     ensure_steam_running()?;
@@ -152,8 +152,7 @@ fn run() -> Result<(), String> {
     // from the zip via the director — never open the Steam library tree.
     //
     // Default on, but honour an explicit setting. `VFS_KEEP_HOST_STEAM_API=0`
-    // serves steam_api* from the zip instead, which is what a neutral hollow
-    // host needs — there is no host copy beside the image to keep.
+    // serves steam_api* from the zip instead.
     if std::env::var_os("VFS_KEEP_HOST_STEAM_API").is_none() {
         std::env::set_var("VFS_KEEP_HOST_STEAM_API", "1");
     }
@@ -312,14 +311,14 @@ fn run() -> Result<(), String> {
                 staged.staged().join(", ")
             );
             let exe = staged.exe().to_string_lossy().into_owned();
-            std::env::set_var("VFS_HOLLOW_HOST", &exe);
+            std::env::set_var("VFS_LAUNCH_IMAGE", &exe);
             _staged = staged;
             exe
         }
     };
 
     timeline.mark("staged");
-    eprintln!("  IPC serving; launching staged host (zip PE hollow)…");
+    eprintln!("  IPC serving; launching the staged image…");
     eprintln!("  writes under the game root land in {}", overrides.display());
     eprintln!("  saves → {}", saves.display());
     eprintln!("  profiles/inis → {}", profiles.display());
@@ -327,14 +326,11 @@ fn run() -> Result<(), String> {
     // Preflight host open/read is not ring I/O — reset so post-launch stats are clean.
     vfs_director::io_stats_reset();
 
-    // The staged EXE *is* the zip's image, so the hollow host matches the target
-    // byte for byte and inherits the loader's TLS / .pdata / LDR metadata.
     let wait = std::env::var("VFS_WAIT").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
     let code = session.launch(&LaunchOpts {
         image: host.clone(),
         args: vec![],
         wait,
-        hollow_pe: true,
         shim_dll: None,
         payload_dll: None,
         env: Default::default(),
@@ -437,121 +433,6 @@ fn detect_zip_root_prefix(be: &dyn Backend) -> Result<Option<String>, String> {
 /// Skyrim SE Steam AppID (appmanifest_489830.acf).
 const SKYRIM_SE_APP_ID: &str = "489830";
 
-/// Prefer a real Steam-library SkyrimSE.exe under the *canonical* installdir
-/// name Steam records (`Skyrim Special Edition`). Never default to notepad —
-/// that triggers Steam Error / Remote Play nonsense.
-fn resolve_hollow_host() -> Result<String, String> {
-    if let Ok(h) = std::env::var("VFS_HOLLOW_HOST") {
-        if Path::new(&h).is_file() {
-            // If the user pointed at an underscore rename, promote to canonical
-            // path (create junction) so ProcessImageFileName matches appmanifest.
-            if let Some(canon) = promote_to_canonical_host(&h) {
-                return Ok(canon);
-            }
-            return Ok(h);
-        }
-        return Err(format!("VFS_HOLLOW_HOST not a file: {h}"));
-    }
-
-    // Ensure library folder has the canonical installdir Steam expects.
-    ensure_canonical_skyrim_installdirs();
-
-    for c in [
-        r"C:\Program Files (x86)\Steam\steamapps\common\Skyrim Special Edition\SkyrimSE.exe",
-        r"C:\Program Files\Steam\steamapps\common\Skyrim Special Edition\SkyrimSE.exe",
-        r"D:\SteamLibrary\steamapps\common\Skyrim Special Edition\SkyrimSE.exe",
-        r"E:\SteamLibrary\steamapps\common\Skyrim Special Edition\SkyrimSE.exe",
-        // Last resort: underscore rename without junction (DRM path may fail).
-        r"C:\Program Files (x86)\Steam\steamapps\common\_Skyrim Special Edition\SkyrimSE.exe",
-    ] {
-        if Path::new(c).is_file() {
-            return Ok(c.to_string());
-        }
-    }
-    Err(
-        "no Steam SkyrimSE.exe host found — install/repair SSE under Steam, or set VFS_HOLLOW_HOST"
-            .into(),
-    )
-}
-
-/// For each Steam library `common` dir: if only `_Skyrim Special Edition` exists,
-/// create a directory junction at the canonical installdir name so ProcessImage
-/// + steam_api path association match appmanifest `installdir`.
-fn ensure_canonical_skyrim_installdirs() {
-    let commons = [
-        r"C:\Program Files (x86)\Steam\steamapps\common",
-        r"C:\Program Files\Steam\steamapps\common",
-        r"D:\SteamLibrary\steamapps\common",
-        r"E:\SteamLibrary\steamapps\common",
-    ];
-    for common in commons {
-        let canon = Path::new(common).join("Skyrim Special Edition");
-        let under = Path::new(common).join("_Skyrim Special Edition");
-        let under_exe = under.join("SkyrimSE.exe");
-        if canon.join("SkyrimSE.exe").is_file() {
-            continue;
-        }
-        if !under_exe.is_file() {
-            continue;
-        }
-        if canon.exists() || is_reparse_point(&canon) {
-            continue;
-        }
-        match std::process::Command::new("cmd")
-            .args([
-                "/C",
-                "mklink",
-                "/J",
-                &canon.to_string_lossy(),
-                &under.to_string_lossy(),
-            ])
-            .status()
-        {
-            Ok(st) if st.success() => {
-                eprintln!(
-                    "  steam installdir junction: {}  ⇒  {}",
-                    canon.display(),
-                    under.display()
-                );
-            }
-            Ok(st) => {
-                eprintln!(
-                    "  warning: mklink /J {} failed ({st}) — DRM path may reopen Steam",
-                    canon.display()
-                );
-            }
-            Err(e) => {
-                eprintln!("  warning: mklink: {e}");
-            }
-        }
-    }
-}
-
-/// If `host` is under `_Skyrim Special Edition`, return the canonical path
-/// (creating the installdir junction if needed).
-fn promote_to_canonical_host(host: &str) -> Option<String> {
-    let p = Path::new(host);
-    let parent = p.parent()?;
-    let name = parent.file_name()?.to_string_lossy();
-    if !name.eq_ignore_ascii_case("_Skyrim Special Edition") {
-        return None;
-    }
-    let common = parent.parent()?;
-    let canon_dir = common.join("Skyrim Special Edition");
-    let canon_exe = canon_dir.join(p.file_name()?);
-    if !canon_exe.is_file() {
-        ensure_canonical_skyrim_installdirs();
-    }
-    if canon_exe.is_file() {
-        eprintln!(
-            "  promoted hollow host to canonical installdir: {}",
-            canon_exe.display()
-        );
-        Some(canon_exe.to_string_lossy().into_owned())
-    } else {
-        None
-    }
-}
 
 /// Valve steam_appid.txt: lets SteamAPI_Init talk to the running client without
 /// RestartAppIfNecessary → steam://run (Remote Play / UI relaunch).
@@ -572,7 +453,7 @@ fn write_steam_appid(root: &Path, overrides: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Minimum Steam process age (seconds) before we allow hollow launch.
+/// Minimum Steam process age (seconds) before we allow launch.
 /// CM connect often finishes well after webhelper appears; 20s was too short.
 const STEAM_MIN_AGE_SECS: u64 = 45;
 
@@ -622,7 +503,7 @@ fn ensure_steam_running() -> Result<(), String> {
 const SKYRIM_SE_APPID: &str = "489830";
 
 /// Best-effort: turn off in-game overlay for Skyrim SE so Steam does not inject
-/// `gameoverlayui64` into the hollowed process (observed CM assert + Shutdown).
+/// `gameoverlayui64` into the game process (observed CM assert + Shutdown).
 ///
 /// Writes `userdata/*/config/localconfig.vdf` and HKCU Apps\\489830. If Steam
 /// was already running when the VDF changed, a client restart (by the user) may
@@ -753,7 +634,7 @@ fn inject_enable_game_overlay_off(path: &Path, appid: &str) -> Result<bool, Stri
 
 /// Wait until Steam is usable for DRM IPC: CM **Connected**, or **offline mode**.
 ///
-/// Online hollow while CM is mid-connect correlates with
+/// Launching while CM is mid-connect correlates with
 /// `LogonFailure No Connection` + client Shutdown. Offline is preferred when
 /// multi-session kicks (`Logged In Elsewhere`) kill the desktop client on game adopt.
 fn ensure_steam_logged_on() -> Result<(), String> {
@@ -771,7 +652,7 @@ fn ensure_steam_logged_on() -> Result<(), String> {
             }
             match steam_cm_state(log) {
                 Ok(state) if state.eq_ignore_ascii_case("Connected") => {
-                    eprintln!("  steam CM state: Connected (logged on) — safe to hollow");
+                    eprintln!("  steam CM state: Connected (logged on) — safe to launch");
                     return Ok(());
                 }
                 Ok(state) => {

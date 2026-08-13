@@ -62,8 +62,6 @@ pub struct LaunchConfig {
     pub args: Vec<String>,
     #[serde(default = "default_true")]
     pub wait: bool,
-    #[serde(default = "default_true")]
-    pub hollow_pe: bool,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
 }
@@ -153,7 +151,7 @@ args = ["--foo"]
         assert_eq!(cfg.sources[1].layer, 20);
         let launch = cfg.launch.unwrap();
         assert_eq!(launch.exec, "SkyrimSE.exe");
-        assert!(launch.wait && launch.hollow_pe); // defaulted true
+        assert!(launch.wait); // defaulted true
     }
 
     #[test]

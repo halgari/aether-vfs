@@ -10,16 +10,15 @@ use std::time::Duration;
 
 mod artifacts;
 mod cli;
-mod ghostly;
+mod pe;
 mod inject;
 mod map;
 mod payload_cfg;
 mod static_imports;
 mod stub;
 
-pub use ghostly::{
-    create_process_from_pe_bytes, create_process_from_pe_bytes_ex, hollow_host_exe,
-    hollow_host_exe_for, is_system_import_dll, map_image_from_pe_bytes_local, pe_looks_like_image,
+pub use pe::{
+    is_system_import_dll, keep_host_steam_api, map_image_from_pe_bytes_local, pe_looks_like_image,
 };
 
 /// Static-import DLL names declared by a raw PE file image.
@@ -49,10 +48,6 @@ pub struct RunConfig {
     pub preinit_redirects: Vec<PreinitRedirect>,
     /// When true, return as soon as the target is running (do not wait for exit).
     pub detach: bool,
-    /// When set, launch this PE image from memory (DELETE_ON_CLOSE ghost section)
-    /// instead of `CreateProcess(target_exe)`. `target_exe` is still used as the
-    /// virtual image path in the command line. **No durable copy of these bytes.**
-    pub target_pe_bytes: Option<Vec<u8>>,
 }
 
 /// One early-payload redirect: object names ending with `suffix` (final path

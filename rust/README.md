@@ -1,6 +1,6 @@
 # VFS
 
-Userspace virtual filesystem for Windows game modding: serve base game + mods **from Stored ZIP archives** without extracting PE/BSA/ESP content, inject a thin NT-API shim into the game, and hollow a real Steam host image so CreateProcess and DRM still work.
+Userspace virtual filesystem for Windows game modding: serve base game + mods **from Stored ZIP archives** without extracting PE/BSA/ESP content, stage the launch PE closure, and inject a thin NT-API shim into the game.
 
 ## Docs
 
@@ -47,7 +47,6 @@ s.serve()?;
 s.launch(&LaunchOpts {
     image: "skse64_loader.exe".into(),
     wait: true,
-    hollow_pe: true,
     ..Default::default()
 })?;
 ```

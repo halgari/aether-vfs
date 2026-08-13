@@ -64,7 +64,8 @@ message LaunchReq {
   string exec = 2;            // image path under the virtual root
   repeated string args = 3;
   bool wait = 4;
-  bool hollow_pe = 5;
+  reserved 5;                 // was hollow_pe; the staged launch has no hollow
+  reserved "hollow_pe";
   map<string, string> env = 6; // per-child environment (must not leak to the daemon)
 }
 message LaunchEvent {

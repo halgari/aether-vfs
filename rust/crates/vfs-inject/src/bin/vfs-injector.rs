@@ -31,7 +31,6 @@ fn main() {
         payload_path: payload,
         preinit_redirects: vec![],
         detach: false,
-        target_pe_bytes: None,
     })
     .unwrap_or_else(|e| {
         eprintln!("[vfs-injector] inject error: {e:?}");

@@ -179,28 +179,82 @@ config struct by the injector.
 
 ### 4.2 `CreateProcess` needs a real file on disk
 
-Windows will not create a process from a buffer. But writing game content to
-disk is precisely what the product exists to avoid.
+Windows will not create a process from a buffer, and for a long time the answer
+here was **process hollowing**: create the process from some unrelated on-disk
+host image, then overwrite that image in memory with the PE we actually wanted.
+It preserved a strict "no game PE ever touches disk" invariant.
 
-The system hollows a process: create it from a real on-disk host image, then
-overwrite the image in memory with the PE we actually want via
-`WriteProcessMemory`. No archive bytes touch any filesystem path.
+Making a hollowed MSVC CRT executable actually *run* cost a great deal —
+security cookie initialisation, remote TLS plus the TEB slot,
+`RtlAddFunctionTable` for x64 unwind data, LDR `SizeOfImage`/`EntryPoint`
+fixups, an entry trampoline so exception registration ran on the primary
+thread — and every one of those was a hand-written re-implementation of
+something the Windows loader already does correctly.
 
-Making a hollowed MSVC CRT executable actually *run* needs more than mapping and
-setting RCX:
+**That invariant no longer holds, so the mechanism is gone.** Staging writes the
+real EXE and its import closure to a scratch directory, which means there *is* a
+real file to `CreateProcess`, and the loader maps, relocates and binds it
+properly. The launch path is now simply: stage → `CreateProcess` suspended →
+inject → resume.
 
-- security cookie initialisation from the load config,
-- remote TLS data plus the TEB slot,
-- `RtlAddFunctionTable` so x64 unwind data (`.pdata`) is registered,
-- LDR `SizeOfImage` / `EntryPoint` fixups so the loader's own bookkeeping agrees,
-- an entry trampoline so exception registration runs on the primary thread.
+The measurements that settled it (three runs each, 2026-08-13) are worth keeping,
+because the redundancy was not free:
 
-Because staging already puts the *real* image on disk, the host is byte-identical
-to the image being hollowed, so the loader's TLS, `.pdata` and LDR metadata
-already describe it. A substitute host would require hand-replicating all of
-that — which was the earlier, more fragile design.
+| | time to window | VFS bytes read |
+|---|---:|---:|
+| with hollow | 5.07 / 5.13 / 5.12 s | 532 MiB |
+| without | **2.82 / 2.81 / 2.81 s** | **69.5 MiB** |
 
-### 4.3 Multi-gigabyte memory-mapped archives
+The hollow had become a no-op that still did all the work: `VFS_HOLLOW_HOST`
+pointed at the staged EXE, so the code re-read that PE from the VFS, re-applied
+the same relocations, and wrote it back over the loader's own correct mapping at
+the same base. `host_is_target` was true, which already caused the TLS setup to
+be skipped — an explicit admission that the loader had done it right.
+
+Removing it deleted ~3,800 lines (`ghostly.rs`), the purpose-built neutral host
+crate, three diagnostic binaries, a `hollow_pe` flag threaded through the gRPC
+contract and every launch API, and a hardcoded `contains("skyrimse")` special
+case. One consequence had to be carried across deliberately rather than deleted:
+the hollow path also grew the primary thread's stack to 16 MiB, because the
+shim's extra frames overflow the stock 1 MiB stack (`0xC00000FD`). That is not
+hollow-specific and now happens on the single launch path.
+
+**The one capability genuinely lost** is launching a child EXE that exists *only*
+inside an archive, with no path to `CreateProcess` from. Staging the whole launch
+closure — including a child that a loader will spawn — covers the real cases (see
+§4.3), and keeping a second launch mechanism alive for a hypothetical one was
+judged not worth its weight.
+
+### 4.3 Following the game across process creation
+
+A mod loader does not *become* the game; it launches it. `skse64_loader.exe`
+starts, does its work, spawns `SkyrimSE.exe`, and exits. The virtualised view has
+to survive that handover, or the process that actually plays the game sees the
+real, nearly-empty directory. This is a known hard part of the problem for any
+VFS in this space.
+
+Two halves solve it:
+
+**Stage the whole launch closure, not just the entry point.** When the launch
+executable is a loader, staging also places the game EXE beside it, because the
+loader will `CreateProcess` it and that needs a real image for exactly the same
+reason the top-level launch did. It also stages `skse64_<runtime>.dll`
+explicitly: SKSE injects that at runtime rather than importing it, so a PE import
+walk cannot discover it. For an SKSE launch the staged set is six files.
+
+**Follow the shim across `CreateProcess`.** The shim detours
+`kernelbase!CreateProcessInternalW` — the single funnel beneath every
+`CreateProcess*` variant — forces the child to start suspended, dual-layer
+injects it, waits for its hooks to report ready, then resumes. A failed inject or
+a timeout still resumes the child, so the failure mode is an unvirtualised game
+rather than a hung one. The child's image identity is scoped so the parent's does
+not leak into it.
+
+Verified 2026-08-13: launched via SKSE, the hook-stats file is written by the
+*child* pid, `getskseversion` reports `2.2.6` in-game, and `coc riverwood` loads
+the world — with no hollow anywhere in the path.
+
+### 4.4 Multi-gigabyte memory-mapped archives
 
 Bethesda archives are opened with `CreateFileMapping` and read through slid
 views. A naive implementation would have to materialise a whole BSA to back the
@@ -218,7 +272,7 @@ leave every other window — and any later remap of the still-open section —
 valid. The VA is released only once the section handle is closed **and** the last
 view is gone. Getting this wrong produced crashes far away from the cause.
 
-### 4.4 A file has more than one name
+### 4.5 A file has more than one name
 
 This is the defect class that cost the most, and it is worth stating plainly:
 **NT lets a caller name a file as (directory handle + relative name)**, not only
@@ -244,7 +298,7 @@ decodes a name, covering three kinds of parent:
 The same defect appeared independently in three hooks. It is now structurally
 impossible for one to know about a parent the others cannot.
 
-### 4.5 The same question has several APIs
+### 4.6 The same question has several APIs
 
 Windows offers multiple ways to ask "does this file exist, and how big is it",
 and callers choose between them for reasons of their own — the same program uses
@@ -264,7 +318,7 @@ Every one of these entry points is hooked, they share one implementation body
 where the shapes allow, and cross-API agreement is a test rather than a
 convention (§6).
 
-### 4.6 Performance was never where it looked
+### 4.7 Performance was never where it looked
 
 Early measurement showed the VFS adding ~9.3 s to a game launch, roughly a 10×
 slowdown. The natural assumption — too many reads, or reads that are too small —
@@ -288,7 +342,7 @@ Two fixes, both about who is awake:
 The lesson encoded in the tooling: report max and stall counts, never a bare
 mean, because the two shapes of "slow" want opposite fixes.
 
-### 4.7 Merged directory listings
+### 4.8 Merged directory listings
 
 An enumeration must show the union of real and virtual entries, hide
 tombstones, apply the caller's wildcard, honour case-insensitivity, and remain
@@ -296,14 +350,14 @@ stable across the restart-scan and single-entry-at-a-time protocols NT allows.
 It is also stateful: a directory handle carries a cursor, so the merged listing
 is built once per scan and served in slices.
 
-### 4.8 Isolation
+### 4.9 Isolation
 
 The managed root is **sealed**: under-root paths resolve through the director
 only, never falling through to whatever happens to be on disk there. This is
 what makes "the game cannot read anything we did not give it" a property rather
 than a hope, and it is why the runtime directory is nearly empty at rest.
 
-### 4.9 Handle identity
+### 4.10 Handle identity
 
 Once a file is served from a synthetic handle, everything asked *about* that
 handle must answer consistently — name, size, position, volume information —
@@ -325,7 +379,7 @@ Time-to-window for Skyrim SE, three clean runs each
 | **VFS, after wake fixes** | **2.74 s** |
 
 Of the remaining ~1.7 s over native, ~0.72 s is work native never does at all
-(staging, injection, hollowing) and ~0.58 s was hook time — since reduced to
+(staging and injection) and ~0.58 s was hook time — since reduced to
 0.180 s by the client-wake change, which has not been re-measured end to end.
 
 Content source is not a factor: zip and disk backends measure the same
@@ -411,7 +465,7 @@ observer before concluding the process is idle.
 | `vfs-redirect` | pure redirect-decision core |
 | `vfs-shim` / `vfs-shim-dll` | NT detours, FUSE client, synthetic handles, sections |
 | `vfs-payload` | `no_std` pre-init hook payload |
-| `vfs-inject` | injection, PE hollowing, process creation |
+| `vfs-inject` | injection, PE parsing, process creation |
 | `vfs-launch` | end-user launcher |
 | `vfs-fixture-*`, `vfs-ring-harness` | test fixtures |
 

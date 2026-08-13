@@ -60,7 +60,6 @@ fn dual_layer_writes_ready_marker_and_payload_cfg_file() {
         payload_path: payload,
         preinit_redirects: vec![],
         detach: false,
-        target_pe_bytes: None,
     })
     .expect("dual-layer probe");
 

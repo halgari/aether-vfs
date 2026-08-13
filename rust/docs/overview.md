@@ -1,5 +1,8 @@
 # VFS — Project Overview
 
+> **Partly out of date (2026-08-13).** PE hollowing has been removed in favour of
+> the staged launch. See [architecture.md](./architecture.md) for the current design.
+
 **Status:** Active development (2026-07)  
 **Repo:** private `halgari/vfs`  
 **Primary mission:** Run a Windows game (Skyrim SE + SKSE + SkyUI) with base game and mods served **directly from Stored ZIP archives**, with **no durable extract** of archive content onto the managed install root.

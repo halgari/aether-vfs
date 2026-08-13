@@ -1618,10 +1618,6 @@ name = "vfs-fixture-writeset"
 version = "0.1.0"
 
 [[package]]
-name = "vfs-host"
-version = "0.1.0"
-
-[[package]]
 name = "vfs-inject"
 version = "0.1.0"
 dependencies = [

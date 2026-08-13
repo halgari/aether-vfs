@@ -61,7 +61,6 @@ layer = 0
 [launch]
 exec      = "C:/tools/my-probe.exe"
 wait      = true
-hollow_pe = false
 ```
 
 ### Out-of-process source plugin

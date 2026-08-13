@@ -70,7 +70,6 @@ fn child_static_import_via_dual_layer_cpiw() {
         payload_path: payload,
         preinit_redirects: vec![],
         detach: false,
-        target_pe_bytes: None,
     })
     .expect("run dual-layer parent spawner");
 

@@ -72,7 +72,6 @@ fn dual_layer_static_import_and_virtual_file() {
         payload_path: payload.clone(),
         preinit_redirects: vec![],
         detach: false,
-        target_pe_bytes: None,
     })
     .expect("dual-layer staticimp");
     assert_eq!(exit, 0, "staticimp under dual-layer");
@@ -100,7 +99,6 @@ fn dual_layer_static_import_and_virtual_file() {
         payload_path: payload,
         preinit_redirects: vec![],
         detach: false,
-        target_pe_bytes: None,
     })
     .expect("dual-layer probe");
     assert_eq!(exit, 0, "probe under dual-layer");

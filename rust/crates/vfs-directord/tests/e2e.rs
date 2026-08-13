@@ -202,7 +202,6 @@ hollow_pe = false
             exec: launch.exec,
             args: launch.args,
             wait: launch.wait,
-            hollow_pe: launch.hollow_pe,
             env: launch.env.into_iter().collect(),
         })
         .await

@@ -277,7 +277,6 @@ pub async fn apply_session_config(
                 exec: launch.exec.clone(),
                 args: launch.args.clone(),
                 wait: launch.wait,
-                hollow_pe: launch.hollow_pe,
                 env: launch.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             })
             .await

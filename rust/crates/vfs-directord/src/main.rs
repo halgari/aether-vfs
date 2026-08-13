@@ -62,8 +62,6 @@ enum Command {
         args: Vec<String>,
         #[arg(long, default_value_t = true)]
         wait: bool,
-        #[arg(long, default_value_t = false)]
-        hollow_pe: bool,
         /// `KEY=VALUE` child environment entries, repeatable.
         #[arg(long = "env")]
         env: Vec<String>,
@@ -151,7 +149,6 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     exec,
                     args,
                     wait,
-                    hollow_pe,
                     env,
                 } => {
                     let mut entries = Vec::new();
@@ -172,7 +169,6 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                             exec,
                             args,
                             wait,
-                            hollow_pe,
                             env: env_map,
                         }),
                         cache: None,

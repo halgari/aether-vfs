@@ -1,5 +1,9 @@
 # VFS: Technical Summary for Architecture & Whitepaper Use
 
+> **Superseded in part (2026-08-13).** Sections on process hollowing describe a
+> mechanism that has since been removed — the staged launch replaced it. See
+> [architecture.md](./architecture.md) §4.2 for what the launch path does now.
+
 **Document type:** Deep technical summary (whitepaper source material)  
 **Codebase:** `C:\oss\vfs` / private `halgari/vfs`  
 **Last updated:** 2026-07-16  

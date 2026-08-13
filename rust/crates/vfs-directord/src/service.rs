@@ -93,7 +93,6 @@ impl Director for DirectorService {
             image: r.exec,
             args: r.args,
             wait: r.wait,
-            hollow_pe: r.hollow_pe,
             shim_dll: None,
             payload_dll: None,
             env: r.env.into_iter().collect::<BTreeMap<_, _>>(),
