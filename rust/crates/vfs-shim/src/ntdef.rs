@@ -99,6 +99,27 @@ pub type NtQueryDirectoryFileExFn = unsafe extern "system" fn(
     *const UnicodeString, // FileName
 ) -> NTSTATUS;
 
+/// `ntdll!NtQueryDirectoryFile` — the classic enumeration entry point, still a
+/// distinct export from the `Ex` form above and still what plenty of callers
+/// reach. It carries `ReturnSingleEntry` and `RestartScan` as separate
+/// `BOOLEAN`s where `Ex` folds both into `QueryFlags`.
+///
+/// Hooking only `Ex` leaves this one running against the real directory, which
+/// is invisible in every counter: the composed view is simply never consulted.
+pub type NtQueryDirectoryFileFn = unsafe extern "system" fn(
+    HANDLE,               // FileHandle
+    HANDLE,               // Event
+    *const c_void,        // ApcRoutine
+    *const c_void,        // ApcContext
+    *mut c_void,          // IoStatusBlock
+    *mut c_void,          // FileInformation
+    u32,                  // Length
+    u32,                  // FileInformationClass
+    u8,                   // ReturnSingleEntry (BOOLEAN)
+    *const UnicodeString, // FileName
+    u8,                   // RestartScan (BOOLEAN)
+) -> NTSTATUS;
+
 /// `ntdll!NtOpenFile` — the open path many callers (incl. Rust `std`'s
 /// directory open) use instead of `NtCreateFile`.
 pub type NtOpenFileFn = unsafe extern "system" fn(

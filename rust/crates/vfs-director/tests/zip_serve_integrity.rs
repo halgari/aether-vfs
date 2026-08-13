@@ -385,3 +385,53 @@ fn implicit_zip_directories_resolve_like_a_real_install() {
 
     assert!(bad.is_empty(), "directory semantics differ from a real install:\n  {}", bad.join("\n  "));
 }
+
+/// Does enumerating `Data` list the master plugins?
+///
+/// Skyrim discovers its load order by listing `Data`, not by opening the
+/// masters by name: the BSAs it loads are named explicitly in `Skyrim.ini` and
+/// the Creation Club plugins come from `Skyrim.ccc`, so both survive a broken
+/// listing. The masters do not. A launch where `Data` lists no `.esm` reaches
+/// the main menu looking healthy — the UI lives in `Skyrim - Interface.bsa` —
+/// and then has no world to load, which is indistinguishable from a hang.
+///
+/// Observed 2026-08-12: the game opened every BSA and every Creation Club
+/// plugin, never once opened `Skyrim.esm`, and rewrote `plugins.txt` empty.
+#[test]
+fn data_listing_includes_the_master_plugins() {
+    let zip = std::path::Path::new(r"C:\tmp\skyrimse.zip");
+    if !zip.is_file() {
+        eprintln!("skip: real corpus not present");
+        return;
+    }
+    let backend = match vfs_zip::ZipBackend::open(zip) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("skip: ZipBackend: {e:?}");
+            return;
+        }
+    };
+    let stripped = vfs_compose::StripPrefixBackend::new(
+        Arc::new(backend),
+        "Skyrim Special Edition".to_string(),
+    );
+    let s = Session::new();
+    s.mount("", Arc::new(stripped)).unwrap();
+
+    let entries = s.kernel().readdir("Data").expect("readdir Data");
+    let names: Vec<String> = entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
+
+    for master in [
+        "skyrim.esm",
+        "update.esm",
+        "dawnguard.esm",
+        "hearthfires.esm",
+        "dragonborn.esm",
+    ] {
+        assert!(
+            names.iter().any(|n| n == master),
+            "Data listing is missing {master}; got {} entries: {names:?}",
+            names.len()
+        );
+    }
+}

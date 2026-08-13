@@ -31,10 +31,11 @@ pub enum Hook {
     QueryInfo = 8,
     CreateSection = 9,
     MapView = 10,
-    Other = 11,
+    QDir = 11,
+    Other = 12,
 }
 
-const N: usize = 12;
+const N: usize = 13;
 
 const NAMES: [&str; N] = [
     "NtCreateFile",
@@ -48,6 +49,7 @@ const NAMES: [&str; N] = [
     "NtQueryInformationFile",
     "NtCreateSection",
     "NtMapViewOfSection",
+    "NtQueryDirectoryFile",
     "other",
 ];
 
@@ -318,8 +320,10 @@ fn render_async() -> String {
 /// this counts repeats and reports the busiest first.
 static PATHS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 const PATHS_MAX: usize = 4000;
-/// How many of the busiest paths to print.
-const PATHS_SHOWN: usize = 40;
+/// How many of the busiest paths to print. Generous: the question this answers
+/// is usually "did the process ever touch X", and a path asked for once is
+/// exactly the interesting case when X is a file that should have loaded.
+const PATHS_SHOWN: usize = 1000;
 
 /// Record a path an open was attempted on. Cheap no-op when disabled.
 pub fn note_passthrough(path: &str) {
@@ -361,6 +365,100 @@ fn format_paths(mut pairs: Vec<(String, u64)>) -> String {
     s
 }
 
+/// Attribute queries against the managed root, with their outcome.
+///
+/// A stat is how a caller asks "does this exist" without opening it, so a stat
+/// that wrongly says no is invisible in every open-side counter: the file is
+/// simply never requested. Skyrim validates its load order this way and drops
+/// any plugin whose stat fails, so "never opened Skyrim.esm" and "stat said
+/// Skyrim.esm is missing" look identical from the open path.
+/// Keyed by outcome + path and counted, so recording *every* stat — including
+/// the thousands of Windows DLL probes — stays bounded by distinct paths.
+static STATS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+const STATS_MAX: usize = 4000;
+
+pub fn note_stat(path: &str, outcome: &str) {
+    if !enabled() {
+        return;
+    }
+    let Ok(mut g) = STATS.lock() else { return };
+    let map = g.get_or_insert_with(HashMap::new);
+    let key = format!("{:<12} {}", outcome, path.to_ascii_lowercase());
+    if let Some(c) = map.get_mut(&key) {
+        *c += 1;
+        return;
+    }
+    if map.len() < STATS_MAX {
+        map.insert(key, 1);
+    }
+}
+
+fn render_stats() -> String {
+    let Ok(g) = STATS.lock() else {
+        return String::new();
+    };
+    let Some(map) = g.as_ref() else {
+        return String::new();
+    };
+    if map.is_empty() {
+        return String::new();
+    }
+    // Sorted by key so the outcome groups together and two reports diff cleanly.
+    let mut rows: Vec<(&String, &u64)> = map.iter().collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+    let mut s = format!("\nattribute queries ({} distinct):\n", rows.len());
+    for (k, c) in rows {
+        s.push_str(&format!("  {c:>6}x  {k}\n"));
+    }
+    s
+}
+
+/// Every directory enumeration, with what it was asked for and what it got.
+///
+/// A game that finds no plugins looks identical to a game with no plugins, and
+/// only the enumeration can tell those apart: Skyrim builds its load order by
+/// listing `Data`, so "listed `Data`, got 0 entries" and "never listed `Data`"
+/// are different bugs with the same symptom. Volume is tiny (60 calls across a
+/// whole launch), so every one is recorded rather than counted.
+static READDIRS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+const READDIRS_MAX: usize = 300;
+
+/// `served` distinguishes a listing we produced from one we handed to the OS.
+pub fn note_readdir(dir: &str, wildcard: Option<&str>, count: usize, served: bool) {
+    if !enabled() {
+        return;
+    }
+    let Ok(mut g) = READDIRS.lock() else { return };
+    let v = g.get_or_insert_with(Vec::new);
+    if v.len() >= READDIRS_MAX {
+        return;
+    }
+    v.push(format!(
+        "{:<8} {:>4} entries  filter={:<16} {}",
+        if served { "served" } else { "OS" },
+        count,
+        wildcard.unwrap_or("*"),
+        dir.to_ascii_lowercase()
+    ));
+}
+
+fn render_readdirs() -> String {
+    let Ok(g) = READDIRS.lock() else {
+        return String::new();
+    };
+    let Some(v) = g.as_ref() else {
+        return String::new();
+    };
+    if v.is_empty() {
+        return String::new();
+    }
+    let mut s = format!("\ndirectory enumerations ({}):\n", v.len());
+    for line in v {
+        s.push_str(&format!("  {line}\n"));
+    }
+    s
+}
+
 fn render_passthrough() -> String {
     let Ok(g) = PATHS.lock() else {
         return String::new();
@@ -386,7 +484,15 @@ pub fn start_reporter() {
         .name("vfs-shim-stats".into())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(250));
-            let body = format!("{}{}{}{}", render(), render_async(), render_fills(), render_passthrough());
+            let body = format!(
+                "{}{}{}{}{}{}",
+                render(),
+                render_async(),
+                render_fills(),
+                render_stats(),
+                render_readdirs(),
+                render_passthrough()
+            );
             // Write via a temp + rename so a reader never sees a half file.
             let tmp = std::path::PathBuf::from(&path).with_extension("tmp");
             if std::fs::write(&tmp, body.as_bytes()).is_ok() {

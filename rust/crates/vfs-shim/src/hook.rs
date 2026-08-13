@@ -1,4 +1,4 @@
-//! The ntdll detours. ALL `unsafe` in the crate lives here.
+﻿//! The ntdll detours. ALL `unsafe` in the crate lives here.
 #![allow(unsafe_code)]
 
 use core::cell::Cell;
@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
 /// Host-side metadata probes from inside hooks must not re-enter detours
-/// (`Path::is_file` → NtCreateFile → try_fuse_create → … → stack overflow).
+/// (`Path::is_file` â†’ NtCreateFile â†’ try_fuse_create â†’ â€¦ â†’ stack overflow).
 thread_local! {
     static HOOK_REENTER: Cell<u32> = const { Cell::new(0) };
 }
@@ -35,7 +35,7 @@ fn in_hook_reenter() -> bool {
 }
 
 /// Opt-in only: when `VFS_ALLOW_DISK_FALLTHROUGH=1`, under-root FUSE NOT_FOUND
-/// may open the host path (legacy / debug). Default **off** — game content must
+/// may open the host path (legacy / debug). Default **off** â€” game content must
 /// come from the director (zip/overrides), never the Steam library tree.
 fn allow_disk_fallthrough() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
@@ -48,7 +48,7 @@ fn allow_disk_fallthrough() -> bool {
 /// Whether `steam_api*.dll` stays the host-install copy (excepted from the
 /// director) rather than being served from the zip.
 ///
-/// Must agree with `vfs_inject::keep_host_steam_api` — if the shim tramps the
+/// Must agree with `vfs_inject::keep_host_steam_api` â€” if the shim tramps the
 /// open to disk while vfs-inject expects a zip-served module (or vice versa),
 /// the IAT cannot be resolved and hollow fails with "remote module not found".
 ///
@@ -65,7 +65,7 @@ fn keep_host_steam_api() -> bool {
 
 /// Scope `VFS_VIRTUAL_IMAGE` across a child `CreateProcess`, restoring ours.
 ///
-/// That variable answers "which image is this process?" — the shim spoofs
+/// That variable answers "which image is this process?" â€” the shim spoofs
 /// `GetModuleFileName` / `QueryFullProcessImageName` from it so a hollowed
 /// process does not report its host (see the spoof install below). It is
 /// therefore *per-process*, but it lives in the environment, and children
@@ -74,7 +74,7 @@ fn keep_host_steam_api() -> bool {
 /// Measured 2026-08-12: SKSE's loader is hollowed, so it carries
 /// `VFS_VIRTUAL_IMAGE=...\skse64_loader.exe`; the `SkyrimSE.exe` it spawns
 /// inherited that and reported itself as the *loader*. Steam checks executable
-/// identity and refused to start the game — "Application load error
+/// identity and refused to start the game â€” "Application load error
 /// 3:0000065432", a modal dialog, so the child hung instead of exiting.
 ///
 /// Env is process-global, so this is not safe against another thread spawning
@@ -106,7 +106,7 @@ impl Drop for VirtualImageScope {
 /// Whether a child process we inject starts with its working directory set to
 /// the virtual root. Default **on**; `VFS_CHILD_CWD_ROOT=0` disables.
 ///
-/// A launcher sets the child's cwd to its own directory — SKSE points it at the
+/// A launcher sets the child's cwd to its own directory â€” SKSE points it at the
 /// staged launch dir. Two things then break: `SteamAPI_Init` reads
 /// `steam_appid.txt` from the *cwd* and fails DRM with "Application load error
 /// 3:0000065432" (a modal dialog, so the child hangs rather than exits), and the
@@ -123,8 +123,8 @@ fn child_cwd_root() -> bool {
 /// Experiment switch: when `VFS_FUSE_SKYRIM_EXE=1`, serve `SkyrimSE.exe`
 /// through the director instead of excepting it to the host install.
 ///
-/// **Measured 2026-08-12** (launch → main menu, `VFS_DRM_EXE_LOG` set): the
-/// game process never opens `SkyrimSE.exe` through `try_fuse_create` at all —
+/// **Measured 2026-08-12** (launch â†’ main menu, `VFS_DRM_EXE_LOG` set): the
+/// game process never opens `SkyrimSE.exe` through `try_fuse_create` at all â€”
 /// the trace file was not created in either mode, and both runs reached the
 /// menu with DRM satisfied and no "Steam Error". So this exception is inert on
 /// the startup path and is *not* what fixes the historical symptom.
@@ -136,7 +136,7 @@ fn child_cwd_root() -> bool {
 ///
 /// Kept default-**off** rather than deleted: the trace only covers startup, and
 /// the recorded explanation for the original failure was wrong ("Steam hashes
-/// the on-disk PE" — it does not; hollow rewrites the whole loaded image and
+/// the on-disk PE" â€” it does not; hollow rewrites the whole loaded image and
 /// DRM still passes), so the real trigger may lie on a path not yet exercised.
 /// Only `SkyrimSE.exe` is affected; steam_api*, steam_appid.txt and the
 /// launcher stay excepted.
@@ -166,7 +166,8 @@ use crate::ntdef::{
     FileEndOfFileInformation, FileInternalInformation, FileNetworkOpenInformation,
     FilePositionInformation,
     FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateSectionFn, NtMapViewOfSectionFn,
-    NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryFullAttributesFileFn,
+    NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryDirectoryFileFn,
+    NtQueryFullAttributesFileFn,
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
     NtWriteFileFn, NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFORMATION, FILE_ALL_INFORMATION,
@@ -198,6 +199,7 @@ static mut TRAMP_QATTR: Option<NtQueryAttributesFileFn> = None;
 static mut TRAMP_QFULL: Option<NtQueryFullAttributesFileFn> = None;
 static mut TRAMP_OPEN: Option<NtOpenFileFn> = None;
 static mut TRAMP_QDIREX: Option<NtQueryDirectoryFileExFn> = None;
+static mut TRAMP_QDIR: Option<NtQueryDirectoryFileFn> = None;
 static mut TRAMP_CLOSE: Option<NtCloseFn> = None;
 static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
 static mut TRAMP_SETINFO: Option<NtSetInformationFileFn> = None;
@@ -217,7 +219,7 @@ type GetModuleFileNameAFn = unsafe extern "system" fn(HMODULE, *mut u8, u32) -> 
 type QueryFullProcessImageNameWFn =
     unsafe extern "system" fn(HANDLE, u32, *mut u16, *mut u32) -> i32;
 
-/// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
+/// `kernelbase!CreateProcessInternalW` â€” the funnel under all CreateProcess*.
 /// 12 params; only `flags` and `pi` are inspected/modified by the hook.
 type CreateProcessInternalWFn = unsafe extern "system" fn(
     HANDLE,        // hToken
@@ -295,7 +297,7 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
 /// Record shim panics before they take the game down.
 ///
 /// The workspace builds with `panic = "abort"`, and Rust's abort on MSVC is
-/// `__fastfail(FAST_FAIL_FATAL_APP_EXIT)` — which surfaces as process exit code
+/// `__fastfail(FAST_FAIL_FATAL_APP_EXIT)` â€” which surfaces as process exit code
 /// **0xC0000409**. Without this hook every shim panic is an unattributable
 /// `STATUS_STACK_BUFFER_OVERRUN`, indistinguishable from a genuine stack-cookie
 /// or CFG failure in the game, and the only way to localise one is to bisect
@@ -303,7 +305,7 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
 ///
 /// `set_hook` still runs under `panic = "abort"`, so the message survives.
 /// Writes to `VFS_SHIM_PANIC_LOG`, else `<state dir>/shim-panic.log`, else a
-/// fixed fallback — a panic here must never be silent for want of a path.
+/// fixed fallback â€” a panic here must never be silent for want of a path.
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -430,6 +432,13 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     let d_qdirex = make_detour(ntdll, b"NtQueryDirectoryFileEx\0", qdirex_hook as *const ())?;
     TRAMP_QDIREX = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileExFn>(
         d_qdirex.trampoline() as *const (),
+    ));
+    // Both enumeration exports must be covered: whichever one the caller picks
+    // decides whether it sees the composed tree or the real, near-empty folder
+    // behind it, and a caller on the unhooked one leaves no trace anywhere.
+    let d_qdir = make_detour(ntdll, b"NtQueryDirectoryFile\0", qdir_hook as *const ())?;
+    TRAMP_QDIR = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileFn>(
+        d_qdir.trampoline() as *const (),
     ));
     let d_close = make_detour(ntdll, b"NtClose\0", close_hook as *const ())?;
     TRAMP_CLOSE = Some(core::mem::transmute::<*const (), NtCloseFn>(
@@ -697,7 +706,7 @@ unsafe fn object_name_str(oa: *const ObjectAttributes) -> Option<String> {
 /// path was recorded in `PATH_TABLE`. Real kernel roots return `None` so the
 /// caller can tramp. Without this, steam_api / CRT opens like
 /// `RootDirectory=<game dir FUSE handle>, Name=steam_appid.txt` hit the kernel
-/// with a fake handle → fail → **Steam Error**.
+/// with a fake handle â†’ fail â†’ **Steam Error**.
 unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
     if oa.is_null() {
         return None;
@@ -757,14 +766,35 @@ unsafe fn tag_under_root(
                         DirTracked { dir_nt_path: path, state: None },
                     );
                 }
+                return;
+            }
+            // Outside the root we serve nothing, but an enumeration there is
+            // exactly what a wrong-Data-directory bug looks like, and the
+            // enumeration call itself carries no path â€” only a handle.
+            if crate::hookstats::enabled() {
+                if let Ok(mut t) = OUTSIDE_PATHS.lock() {
+                    if t.len() < OUTSIDE_PATHS_MAX {
+                        t.insert(*file_handle as isize, path);
+                    }
+                }
             }
         }
     }
 }
 
+/// Diagnostic-only handle -> path for opens *outside* the managed root, so an
+/// enumeration we did not serve can still be attributed to a directory. Bounded
+/// because it is fed by every open, and only populated when stats are on.
+static OUTSIDE_PATHS: Mutex<BTreeMap<isize, String>> = Mutex::new(BTreeMap::new());
+const OUTSIDE_PATHS_MAX: usize = 4096;
+
+fn path_of_handle(handle: HANDLE) -> Option<String> {
+    OUTSIDE_PATHS.lock().ok()?.get(&(handle as isize)).cloned()
+}
+
 /// Record a redirected handle's virtual identity: after a successful redirected
 /// open, map the handle to the volume-relative form of the ORIGINAL virtual path
-/// (`oa` still holds it — only a local `new_oa` was rewritten). Reclaimed by
+/// (`oa` still holds it â€” only a local `new_oa` was rewritten). Reclaimed by
 /// `NtClose`. Enables the `NtQueryInformationFile` class-48 spoof.
 unsafe fn record_identity(
     file_handle: *mut HANDLE,
@@ -835,10 +865,10 @@ unsafe fn try_fuse_create(
     let client = crate::fuse_client::global()?;
     let path = path_of(oa)?;
     let vpath = client.vpath_under_root(&path)?;
-    // Directory open of root: empty vpath → "."
+    // Directory open of root: empty vpath â†’ "."
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
 
-    // DRM / identity exceptions (host Steam tree only — not Data/* content):
+    // DRM / identity exceptions (host Steam tree only â€” not Data/* content):
     // - steam_api*: SEC_IMAGE + client IPC
     // - steam_appid.txt: SteamAPI_Init / RestartAppIfNecessary
     // - SkyrimSE.exe / SkyrimSELauncher.exe: identity. Steam associates a
@@ -860,7 +890,7 @@ unsafe fn try_fuse_create(
         if base.eq_ignore_ascii_case("steam_appid.txt")
             || base.eq_ignore_ascii_case("SkyrimSELauncher.exe")
         {
-            return None; // tramp → host install next to the hollow image
+            return None; // tramp â†’ host install next to the hollow image
         }
         // steam_api* follows the same policy vfs-inject uses. With a neutral
         // hollow host there is no host copy beside the image, so trampling to
@@ -872,7 +902,7 @@ unsafe fn try_fuse_create(
             return None;
         }
         // SkyrimSE.exe is excepted the same way by default, but is the one we
-        // are still trying to explain — trace every open so the log shows who
+        // are still trying to explain â€” trace every open so the log shows who
         // asks for it and how (FUSE-relative OA vs absolute).
         if base.eq_ignore_ascii_case("SkyrimSE.exe") {
             let via_director = fuse_skyrim_exe();
@@ -885,7 +915,7 @@ unsafe fn try_fuse_create(
 
     // All other under-root *reads* go through the director (zip / composed).
     // Writes may fall through for shim-local overlay redirect.
-    // (Primary stack is expanded to 16 MiB by vfs-inject; open is a shallow ring op.)
+    // (Primary stack is expanded to 16â€¯MiB by vfs-inject; open is a shallow ring op.)
     let opened = if write { client.open_write(vp) } else { client.open(vp) };
     match opened {
         Ok(resp) => {
@@ -930,7 +960,7 @@ unsafe fn try_fuse_create(
         // write/create under the root hits the overlay redirect path.
         Err(_) if write => None,
         Err(_) => {
-            // Director down / I/O — do not fall through to the Steam tree.
+            // Director down / I/O â€” do not fall through to the Steam tree.
             Some(STATUS_UNSUCCESSFUL)
         }
     }
@@ -1041,7 +1071,7 @@ unsafe fn try_fuse_mkdir(
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
     match client.mkdir(vp, 0o755) {
         Ok(()) => {
-            // Synthesize a virtual directory handle directly — do NOT OP_OPEN the
+            // Synthesize a virtual directory handle directly â€” do NOT OP_OPEN the
             // new dir: the overlay opens paths as FileChannels, and a directory
             // open throws. fh=0 is never a real JVM handle, so the NtClose-time
             // close(0) is a harmless no-op. The caller (CreateDirectoryW) only
@@ -1060,13 +1090,13 @@ unsafe fn try_fuse_mkdir(
             tag_under_root(file_handle, oa, STATUS_SUCCESS);
             Some(STATUS_SUCCESS)
         }
-        // Parent missing → name-not-found (do not fall through to a real on-disk
+        // Parent missing â†’ name-not-found (do not fall through to a real on-disk
         // mkdir under the root).
         Err(st) if st == vfs_protocol::ST_NOT_FOUND => Some(STATUS_OBJECT_NAME_NOT_FOUND),
-        // mkdir failed — most often the directory already exists (the overlay
+        // mkdir failed â€” most often the directory already exists (the overlay
         // raises :already-exists, which the JVM has no dedicated status for and
         // reports as a generic error). Probe: if a directory is really there,
-        // honor the disposition — FILE_CREATE(2) must report a name collision
+        // honor the disposition â€” FILE_CREATE(2) must report a name collision
         // (ERROR_ALREADY_EXISTS, so the create-and-ignore idiom works), while
         // FILE_OPEN_IF(3)/FILE_OVERWRITE_IF(5) open the existing directory.
         Err(_) => match client.getattr(vp) {
@@ -1117,7 +1147,7 @@ unsafe extern "system" fn create_hook(
             file_handle, access, oa, iosb, alloc, attrs, share, disp, opts, ea, ealen,
         );
     }
-    // Directory create under the managed root → ring OP_MKDIR (must precede the
+    // Directory create under the managed root â†’ ring OP_MKDIR (must precede the
     // generic file open below, which would otherwise create a FILE named as the
     // directory via the write-create path).
     if let Some(st) = try_fuse_mkdir(file_handle, oa, iosb, opts, disp) {
@@ -1190,7 +1220,7 @@ unsafe extern "system" fn create_hook(
         Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
         Some(Decision::PassThrough) | None => {
             // Never pass a FUSE RootDirectory to the kernel (invalid handle).
-            // DRM host exceptions resolve via path_of → absolute tramp instead.
+            // DRM host exceptions resolve via path_of â†’ absolute tramp instead.
             if fuse_root_directory(oa) {
                 if let Some(path) = path_of(oa) {
                     let status = tramp_create_abs(
@@ -1234,7 +1264,7 @@ fn to_nt_path(path: &str) -> String {
 /// Open via trampoline with an absolute NT path and **null** RootDirectory.
 ///
 /// Required when the original OA had a FUSE synthetic RootDirectory (invalid
-/// to the kernel) but we intentionally fall through to the host install —
+/// to the kernel) but we intentionally fall through to the host install â€”
 /// DRM exceptions (`steam_api*`, `steam_appid.txt`, `SkyrimSE.exe`).
 unsafe fn tramp_create_abs(
     tramp: NtCreateFileFn,
@@ -1331,7 +1361,7 @@ unsafe extern "system" fn open_hook(
     if let Some(p) = path_of(oa) {
         crate::hookstats::note_passthrough(&p);
     }
-    // NtOpenFile has no disposition — it always opens existing (FILE_OPEN). Pass
+    // NtOpenFile has no disposition â€” it always opens existing (FILE_OPEN). Pass
     // FILE_OPEN (1), NOT 0: 0 is FILE_SUPERSEDE, which is in is_write_open's
     // create/overwrite set and would misclassify every open as a write.
     if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, vfs_redirect::FILE_OPEN)) {
@@ -1406,7 +1436,7 @@ unsafe extern "system" fn open_hook(
 }
 
 /// Path-based getattr via director OP_GETATTR when FUSE client is live.
-/// `Some(...)` means the path is under the managed root — caller must not tramp
+/// `Some(...)` means the path is under the managed root â€” caller must not tramp
 /// to the Steam tree on NOT_FOUND (seal under-root).
 unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), i32>> {
     let client = crate::fuse_client::global()?;
@@ -1433,7 +1463,19 @@ unsafe extern "system" fn qattr_hook(
     }
     if let Some(path) = path_of(oa) {
         // Under-root: director only (zip/overrides). Never host Steam metadata.
-        if let Some(res) = fuse_path_attr(&path) {
+        let fuse = fuse_path_attr(&path);
+        if fuse.is_none() {
+            crate::hookstats::note_stat(&path, "outside-root");
+        }
+        if let Some(res) = fuse {
+            crate::hookstats::note_stat(
+                &path,
+                match &res {
+                    Ok(_) => "found",
+                    Err(st) if *st == vfs_protocol::ST_NOT_FOUND => "NOT-FOUND",
+                    Err(_) => "ERROR",
+                },
+            );
             match res {
                 Ok((is_dir, _size, _mtime)) => {
                     if !info.is_null() {
@@ -1490,7 +1532,19 @@ unsafe extern "system" fn qfull_hook(
         return tramp(oa, info);
     }
     if let Some(path) = path_of(oa) {
-        if let Some(res) = fuse_path_attr(&path) {
+        let fuse = fuse_path_attr(&path);
+        if fuse.is_none() {
+            crate::hookstats::note_stat(&path, "outside-root");
+        }
+        if let Some(res) = fuse {
+            crate::hookstats::note_stat(
+                &path,
+                match &res {
+                    Ok(_) => "found",
+                    Err(st) if *st == vfs_protocol::ST_NOT_FOUND => "NOT-FOUND",
+                    Err(_) => "ERROR",
+                },
+            );
             match res {
                 Ok((is_dir, size, _mtime)) => {
                     if !info.is_null() {
@@ -1566,6 +1620,11 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
     if let Ok(mut table) = DIR_TABLE.lock() {
         table.remove(&(handle as isize));
     }
+    if crate::hookstats::enabled() {
+        if let Ok(mut t) = OUTSIDE_PATHS.lock() {
+            t.remove(&(handle as isize));
+        }
+    }
     if let Ok(mut t) = IDENTITY_TABLE.lock() {
         t.remove(&(handle as isize));
     }
@@ -1605,7 +1664,7 @@ unsafe fn setinfo_ok_iosb(iosb: *mut c_void) {
 /// or rename of a tracked under-root handle into an overlay whiteout/rename and
 /// suppresses the real operation, so the mod backing / real file is preserved
 /// but the path reads as gone/moved. Everything else passes through.
-/// `FileCompletionInformation` — binds a handle to an I/O completion port.
+/// `FileCompletionInformation` â€” binds a handle to an I/O completion port.
 const FILE_COMPLETION_INFORMATION: u32 = 30;
 
 unsafe extern "system" fn setinfo_hook(
@@ -1636,7 +1695,7 @@ unsafe extern "system" fn setinfo_hook(
             }
             return STATUS_SUCCESS;
         }
-        // Truncate (`File::set_len`) → ring OP_SETATTR on the virtual write handle.
+        // Truncate (`File::set_len`) â†’ ring OP_SETATTR on the virtual write handle.
         if class == FILE_END_OF_FILE_INFORMATION
             && !info.is_null()
             && length as usize >= core::mem::size_of::<FileEndOfFileInformation>()
@@ -1654,7 +1713,7 @@ unsafe extern "system" fn setinfo_hook(
             }
             return STATUS_UNSUCCESSFUL;
         }
-        // Delete / rename of a virtual handle → ring OP_DELETE / OP_RENAME, keyed
+        // Delete / rename of a virtual handle â†’ ring OP_DELETE / OP_RENAME, keyed
         // by the NT path recorded (record_path) when the handle was opened.
         let is_delete = is_delete_request(info, length, class);
         let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);
@@ -1817,8 +1876,8 @@ unsafe fn fuse_query_information(
         }
         FILE_ALL_INFORMATION => {
             // GetFileInformationByHandle (Rust `metadata`) issues this. Fill the
-            // fixed prefix callers read — attributes (incl. DIRECTORY), size, the
-            // Standard.Directory flag — and leave the trailing name empty. Prefix
+            // fixed prefix callers read â€” attributes (incl. DIRECTORY), size, the
+            // Standard.Directory flag â€” and leave the trailing name empty. Prefix
             // layout: Basic 40 | Standard 24 | Internal 8 | Ea 4 | Access 4 |
             // Position 8 | Mode 4 | Alignment 4 | Name 4 = 100.
             const PREFIX: usize = 100;
@@ -1961,7 +2020,7 @@ unsafe fn synth_query_information(
             // Internal.IndexNumber @ 64
             core::ptr::write_unaligned(p.add(64) as *mut i64, handle as i64);
             // Position.CurrentByteOffset @ 80 (after Ea 4 + Access 4 = 8 from 72)
-            // Layout: Basic 40 | Std 24 | Int 8 | Ea 4 | Access 4 | Pos 8 | Mode 4 | Align 4 | Name…
+            // Layout: Basic 40 | Std 24 | Int 8 | Ea 4 | Access 4 | Pos 8 | Mode 4 | Align 4 | Nameâ€¦
             // Pos at 40+24+8+4+4 = 80
             core::ptr::write_unaligned(p.add(80) as *mut i64, pos as i64);
             synth_iosb_ok(iosb, PREFIX);
@@ -1977,7 +2036,7 @@ unsafe fn synth_query_information(
     }
 }
 
-/// `NtQueryVolumeInformationFile` hook — `GetFileType` needs
+/// `NtQueryVolumeInformationFile` hook â€” `GetFileType` needs
 /// `FileFsDeviceInformation` on synthetic handles.
 unsafe extern "system" fn qvol_hook(
     handle: HANDLE,
@@ -2100,7 +2159,7 @@ unsafe extern "system" fn write_hook(
             let n = if want == 0 || buffer.is_null() {
                 0usize
             } else {
-                // SAFETY: NtWriteFile contract — buffer is readable for `length` bytes.
+                // SAFETY: NtWriteFile contract â€” buffer is readable for `length` bytes.
                 let slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, want) };
                 match crate::fuse_client::global()
                     .ok_or(vfs_protocol::ST_IO_ERROR)
@@ -2131,7 +2190,7 @@ unsafe extern "system" fn write_hook(
             let _ = (apc, apc_ctx, key);
             return STATUS_SUCCESS;
         }
-        // Tagged synth handle with no table entry — never hand it to the real
+        // Tagged synth handle with no table entry â€” never hand it to the real
         // NtWriteFile (mirrors read_hook).
         return STATUS_UNSUCCESSFUL;
     }
@@ -2184,7 +2243,7 @@ unsafe extern "system" fn read_hook(
             let n = if max == 0 || buffer.is_null() {
                 0usize
             } else {
-                // SAFETY: NtReadFile contract — buffer is writable for `length` bytes.
+                // SAFETY: NtReadFile contract â€” buffer is writable for `length` bytes.
                 let slice =
                     unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, max) };
                 match crate::fuse_client::global()
@@ -2273,9 +2332,9 @@ unsafe extern "system" fn read_hook(
 /// Map a FUSE synthetic file into a synthetic section.
 ///
 /// - **SEC_IMAGE**: map PE from director bytes (rare; PEs usually host-tramped).
-/// - **Data ≤256 MiB**: eager stream into a private mapping (primary stack is
-///   expanded to 16 MiB by vfs-inject — matches the known-good director-only path).
-/// - **Data >256 MiB**: lazy demand-page (reserve + warm + VEH) so multi‑GiB BSAs
+/// - **Data â‰¤256â€¯MiB**: eager stream into a private mapping (primary stack is
+///   expanded to 16â€¯MiB by vfs-inject â€” matches the known-good director-only path).
+/// - **Data >256â€¯MiB**: lazy demand-page (reserve + warm + VEH) so multiâ€‘GiB BSAs
 ///   never full-preload.
 unsafe fn fuse_create_section(
     section_handle: *mut HANDLE,
@@ -2329,8 +2388,8 @@ unsafe fn fuse_create_section(
     }
     // Diagnostic: `VFS_REJECT_FUSE_DATA_SECTION=1` refuses *data* sections only,
     // so the game falls back to ReadFile for content while SEC_IMAGE (DLL
-    // loading) keeps working. Rejecting every section — the older
-    // VFS_REJECT_FUSE_SECTION — breaks the launch outright.
+    // loading) keeps working. Rejecting every section â€” the older
+    // VFS_REJECT_FUSE_SECTION â€” breaks the launch outright.
     //
     // This is the one I/O path nothing else can observe: reads from a mapped
     // view are page faults served by the lazy-section VEH, so they appear in
@@ -2355,8 +2414,8 @@ unsafe fn fuse_create_section(
             None => STATUS_SECTION_TOO_BIG,
         };
     }
-    // Eager path (≤256 MiB): stream on this thread into VirtualAlloc.
-    // Known-good with expand_primary_stack — avoid CreateThread from NtCreateSection.
+    // Eager path (â‰¤256â€¯MiB): stream on this thread into VirtualAlloc.
+    // Known-good with expand_primary_stack â€” avoid CreateThread from NtCreateSection.
     let Some(client) = crate::fuse_client::global() else {
         return STATUS_UNSUCCESSFUL;
     };
@@ -2394,7 +2453,7 @@ unsafe fn fuse_create_section(
         VirtualFree(base, 0, MEM_RELEASE);
         return STATUS_UNSUCCESSFUL;
     }
-    // Track the allocation so NtClose frees it — otherwise every eager section
+    // Track the allocation so NtClose frees it â€” otherwise every eager section
     // leaks up to EAGER_MAX for the life of the process.
     crate::lazy_section::track_eager_section(base as usize, size);
     match crate::zipserve::register_mapped_image(base as usize, size) {
@@ -2405,7 +2464,7 @@ unsafe fn fuse_create_section(
             STATUS_SUCCESS
         }
         None => {
-            // Reaps the tracked region (no view, no open section) — which frees
+            // Reaps the tracked region (no view, no open section) â€” which frees
             // `base`, so do not VirtualFree it again here.
             crate::lazy_section::on_section_closed(base as usize);
             STATUS_INVALID_FILE_FOR_SECTION
@@ -2593,7 +2652,7 @@ unsafe extern "system" fn unmap_view_hook(process: HANDLE, base: *mut c_void) ->
     if !base.is_null() && crate::zipserve::is_synth_view(base as usize) {
         let b = base as usize;
         // Retire one reference; the backing VA outlives it unless the section
-        // handle is already closed and this was the last view — a BSA reader
+        // handle is already closed and this was the last view â€” a BSA reader
         // slides views over one open section and must keep the others.
         crate::zipserve::unmap_view(b);
         crate::lazy_section::on_view_unmapped(b);
@@ -2605,7 +2664,7 @@ unsafe extern "system" fn unmap_view_hook(process: HANDLE, base: *mut c_void) ->
 
 /// `CreateProcessInternalW` hook: force the child to start suspended, dual-layer
 /// inject (early payload + full shim), wait for hooks, then resume (unless the
-/// caller asked for a suspended child). Best-effort — a failed inject or timeout
+/// caller asked for a suspended child). Best-effort â€” a failed inject or timeout
 /// still resumes the child (unvirtualized rather than hung).
 #[allow(clippy::too_many_arguments)]
 unsafe extern "system" fn cpiw_hook(
@@ -2624,12 +2683,12 @@ unsafe extern "system" fn cpiw_hook(
 ) -> i32 {
     let tramp = match TRAMP_CPIW {
         Some(t) => t,
-        None => return 0, // STATUS/BOOL FALSE — invariant violation, should not occur
+        None => return 0, // STATUS/BOOL FALSE â€” invariant violation, should not occur
     };
     let caller_suspended = flags & CREATE_SUSPENDED != 0;
 
     // CreateProcess maps the image in-kernel from a real path. Zip-window PEs
-    // have no path — hollow from archive bytes (no filesystem write of PE).
+    // have no path â€” hollow from archive bytes (no filesystem write of PE).
     // Thread-local re-entry guard: create_process_from_pe_bytes itself calls
     // CreateProcessW(host) which must not re-enter hollow.
     thread_local! {
@@ -2637,7 +2696,7 @@ unsafe extern "system" fn cpiw_hook(
     }
     let in_hollow_host = IN_HOLLOW_CREATE.with(|c| c.get());
     // Nested CreateProcess from create_process_from_pe_bytes (host EXE): pass
-    // through with no inject/hollow — just create a clean suspended host.
+    // through with no inject/hollow â€” just create a clean suspended host.
     if in_hollow_host {
         return tramp(
             token, app, cmd, proc_attr, thread_attr, inherit, flags, env, cur_dir, si, pi, ptok,
@@ -2673,7 +2732,7 @@ unsafe extern "system" fn cpiw_hook(
             std::env::set_var("VFS_VIRTUAL_DIR", parent.to_string_lossy().as_ref());
         }
         // Inject shim *before* hollow so remote LoadLibrary of game-local
-        // imports (steam_api64, bink, …) hits VFS Serve hooks.
+        // imports (steam_api64, bink, â€¦) hits VFS Serve hooks.
         let dll = SELF_DLL.get().map(|s| s.as_str());
         IN_HOLLOW_CREATE.with(|c| c.set(true));
         let hollow_result = vfs_inject::create_process_from_pe_bytes_ex(
@@ -2696,7 +2755,7 @@ unsafe extern "system" fn cpiw_hook(
                     (*pi).dwProcessId = pid;
                     (*pi).dwThreadId = tid;
                 }
-                // Do not LoadLibrary SKSE here — skse64_loader injects it into the
+                // Do not LoadLibrary SKSE here â€” skse64_loader injects it into the
                 // suspended child (CreateRemoteThread works while host stays mapped).
                 // Shim already injected inside create_process_from_pe_bytes_ex.
                 if caller_suspended {
@@ -2715,7 +2774,7 @@ unsafe extern "system" fn cpiw_hook(
     }
 
     let forced = flags | CREATE_SUSPENDED;
-    // This child runs a real on-disk image, so it needs no identity spoof —
+    // This child runs a real on-disk image, so it needs no identity spoof â€”
     // and must not inherit ours. A hollowed launcher (SKSE) would otherwise
     // hand the game its own image path and Steam would reject the mismatch.
     let _img_scope = VirtualImageScope::enter(None);
@@ -2889,17 +2948,116 @@ unsafe extern "system" fn qdirex_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    let passthrough =
-        || tramp(handle, event, apc, apc_ctx, iosb, info, length, class_raw, flags, file_name);
+    serve_dir_query(
+        handle,
+        iosb,
+        info,
+        length,
+        class_raw,
+        flags & SL_RESTART_SCAN != 0,
+        flags & SL_RETURN_SINGLE_ENTRY != 0,
+        file_name,
+        &|| tramp(handle, event, apc, apc_ctx, iosb, info, length, class_raw, flags, file_name),
+        &|h| drain_real(h, tramp),
+    )
+}
 
+/// The classic entry point. Same body, different argument shape.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "system" fn qdir_hook(
+    handle: HANDLE,
+    event: HANDLE,
+    apc: *const c_void,
+    apc_ctx: *const c_void,
+    iosb: *mut c_void,
+    info: *mut c_void,
+    length: u32,
+    class_raw: u32,
+    single: u8,
+    file_name: *const UnicodeString,
+    restart: u8,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QDir);
+    let tramp = match TRAMP_QDIR {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    // Draining still goes through the Ex trampoline: it is the same directory
+    // and the Ex form is what `drain_real` speaks. Fall back to the classic
+    // trampoline if Ex was never resolved.
+    serve_dir_query(
+        handle,
+        iosb,
+        info,
+        length,
+        class_raw,
+        restart != 0,
+        single != 0,
+        file_name,
+        &|| {
+            tramp(
+                handle, event, apc, apc_ctx, iosb, info, length, class_raw, single, file_name,
+                restart,
+            )
+        },
+        &|h| match TRAMP_QDIREX {
+            Some(ex) => drain_real(h, ex),
+            None => drain_real_classic(h, tramp),
+        },
+    )
+}
+
+/// `drain_real` for the classic trampoline, used only when `Ex` is unavailable.
+unsafe fn drain_real_classic(handle: HANDLE, tramp: NtQueryDirectoryFileFn) -> Vec<DirItem> {
+    const CLASS_FULL_DIR: u32 = 2;
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut first = true;
+    loop {
+        let mut local_iosb = [0u8; 16];
+        let restart = if first { 1u8 } else { 0u8 };
+        first = false;
+        let st = tramp(
+            handle,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            core::ptr::null(),
+            local_iosb.as_mut_ptr() as *mut c_void,
+            buf.as_mut_ptr() as *mut c_void,
+            buf.len() as u32,
+            CLASS_FULL_DIR,
+            0,
+            core::ptr::null(),
+            restart,
+        );
+        if st < 0 {
+            break;
+        }
+        out.extend(parse_full_dir_info(&buf));
+    }
+    out
+}
+
+/// Shared body for both enumeration entry points.
+#[allow(clippy::too_many_arguments)]
+unsafe fn serve_dir_query(
+    handle: HANDLE,
+    iosb: *mut c_void,
+    info: *mut c_void,
+    length: u32,
+    class_raw: u32,
+    restart: bool,
+    single: bool,
+    file_name: *const UnicodeString,
+    passthrough: &dyn Fn() -> NTSTATUS,
+    drain: &dyn Fn(HANDLE) -> Vec<DirItem>,
+) -> NTSTATUS {
     // Unknown info class -> let the OS handle it verbatim.
     let class = match DirInfoClass::from_u32(class_raw) {
         Some(c) => c,
         None => return passthrough(),
     };
     let key = handle as isize;
-    let restart = flags & SL_RESTART_SCAN != 0;
-    let single = flags & SL_RETURN_SINGLE_ENTRY != 0;
 
     // Phase 1 (locked): is this a tracked handle, and must we (re)build?
     let (need_build, dir_path) = {
@@ -2908,7 +3066,22 @@ unsafe extern "system" fn qdirex_hook(
             Err(_) => return passthrough(),
         };
         match table.get(&key) {
-            None => return passthrough(),
+            None => {
+                drop(table);
+                // Untracked: a directory outside the managed root, so the OS
+                // answers. Worth recording anyway â€” "the game listed a Data
+                // that isn't ours" is the diagnosis for an empty load order.
+                if crate::hookstats::enabled() {
+                    let dir = path_of_handle(handle).unwrap_or_else(|| "<unknown>".to_string());
+                    crate::hookstats::note_readdir(
+                        &dir,
+                        wildcard_of(file_name).as_deref(),
+                        0,
+                        false,
+                    );
+                }
+                return passthrough();
+            }
             Some(t) => (restart || t.state.is_none(), t.dir_nt_path.clone()),
         }
     };
@@ -2943,14 +3116,14 @@ unsafe extern "system" fn qdirex_hook(
                     Err(_) => Some(Vec::new()),
                 }
             } else {
-                let real = drain_real(handle, tramp);
+                let real = drain(handle);
                 Some(match ENGINE.get() {
                     Some(engine) => engine.merge_directory(&dir_path, &real, wildcard.as_deref()),
                     None => real,
                 })
             }
         } else {
-            let real = drain_real(handle, tramp);
+            let real = drain(handle);
             Some(match ENGINE.get() {
                 Some(engine) => engine.merge_directory(&dir_path, &real, wildcard.as_deref()),
                 None => real,
@@ -2970,6 +3143,12 @@ unsafe extern "system" fn qdirex_hook(
         None => return passthrough(),
     };
     if let Some(merged) = rebuilt {
+        crate::hookstats::note_readdir(
+            &dir_path,
+            wildcard_of(file_name).as_deref(),
+            merged.len(),
+            true,
+        );
         tracked.state = Some(EnumState { merged, cursor: 0 });
     }
     let st = match tracked.state.as_mut() {
