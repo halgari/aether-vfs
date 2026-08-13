@@ -696,3 +696,13 @@ Named so they are decisions rather than omissions:
   is a later project.
 - Per-path append cursors.
 - Linux hosting.
+- Hook-boundary `catch_unwind`. §9 predicted that `panic = "unwind"` would let
+  the shim's hook entry points wrap their bodies in `catch_unwind` and convert
+  a panic into an error status instead of taking down the host process. That
+  wrapping was never implemented. The practical effect of `panic = "unwind"`
+  today is the opposite of a safety net: a panic inside a hooked NT syscall
+  now unwinds through live Rust stack frames — running `Drop` impls — in a
+  real game process before it reaches the `extern "system"` boundary and
+  aborts there, whereas under the old `panic = "abort"` it aborted immediately
+  at the panic site. Until hook entry points actually call `catch_unwind`, a
+  hook panic unwinds further than it used to.
