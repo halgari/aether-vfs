@@ -15,9 +15,6 @@ pub use vfs_provider::{
     ST_NO_SPACE, ST_OK, ST_READ_ONLY,
 };
 
-/// Deprecated: use [`Handle`]. Removed at the end of Stage 1.
-pub type BackendHandle = Handle;
-
 // Opcode catalog — must match `vfs_ipc::layout` values (do not renumber).
 
 pub const OP_GETATTR: u32 = 1;

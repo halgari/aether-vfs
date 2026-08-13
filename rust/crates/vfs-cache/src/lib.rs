@@ -8,8 +8,6 @@ mod provider;
 mod store;
 
 pub use provider::CachingProvider;
-/// Deprecated: renamed to [`CachingProvider`]. Removed at the end of Stage 1.
-pub use provider::CachingProvider as CachingBackend;
 pub use store::{BlockCache, BlockKey, CacheConfig, CacheStats};
 
 /// Default block size: 1 MiB.

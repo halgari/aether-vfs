@@ -110,8 +110,8 @@ impl Session {
     #[cfg(feature = "zip")]
     pub fn mount_zip(&self, zip_path: impl AsRef<Path>) -> Result<(), String> {
         let path = zip_path.as_ref();
-        let be = vfs_zip::ZipBackend::open(path)
-            .map_err(|e| format!("ZipBackend {}: {e:?}", path.display()))?;
+        let be = vfs_zip::ZipProvider::open(path)
+            .map_err(|e| format!("ZipProvider {}: {e:?}", path.display()))?;
         self.kernel
             .mount("", Arc::new(be))
             .map_err(|st| format!("mount zip status {st}"))

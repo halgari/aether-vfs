@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use vfs_cache::{BlockCache, CacheConfig, CachingBackend};
+use vfs_cache::{BlockCache, CacheConfig, CachingProvider};
 use vfs_compose::stack_layers;
-use vfs_director::{Backend, LaunchOpts, Session};
+use vfs_director::{LaunchOpts, Provider, Session};
 
 /// One live host session plus metadata returned on ListSessions.
 pub struct LiveSession {
@@ -17,9 +17,9 @@ pub struct LiveSession {
     pub session: Session,
     next_source_id: AtomicU64,
     /// Mounted backends bottom→top for rebuild (same mount "/" composition).
-    layers: Vec<(i32, Arc<dyn Backend>)>,
+    layers: Vec<(i32, Arc<dyn Provider>)>,
     /// Sources with non-root mount prefixes (director path mounts).
-    prefix_mounts: Vec<(String, Arc<dyn Backend>)>,
+    prefix_mounts: Vec<(String, Arc<dyn Provider>)>,
 }
 
 impl LiveSession {
@@ -109,7 +109,7 @@ impl SessionRegistry {
         session_id: &str,
         mount: &str,
         layer: i32,
-        backend: Arc<dyn Backend>,
+        backend: Arc<dyn Provider>,
     ) -> Result<u64, String> {
         let source_id = {
             let mut guard = self
@@ -121,8 +121,8 @@ impl SessionRegistry {
                 .ok_or_else(|| format!("unknown session {session_id}"))?;
             let id = live.next_source_id();
             // Wrap with process-wide block cache.
-            let cached: Arc<dyn Backend> =
-                Arc::new(CachingBackend::new(backend, Arc::clone(&self.cache), id));
+            let cached: Arc<dyn Provider> =
+                Arc::new(CachingProvider::new(backend, Arc::clone(&self.cache), id));
             let mount_norm = mount.trim();
             let is_root = mount_norm.is_empty() || mount_norm == "/" || mount_norm == "\\";
             if is_root {
@@ -136,7 +136,7 @@ impl SessionRegistry {
             live.session
                 .clear_mounts()
                 .map_err(|st| format!("clear_mounts status {st}"))?;
-            let stack: Vec<Arc<dyn Backend>> =
+            let stack: Vec<Arc<dyn Provider>> =
                 live.layers.iter().map(|(_, b)| Arc::clone(b)).collect();
             if !stack.is_empty() {
                 let composed = stack_layers(stack).map_err(|e| e.to_string())?;

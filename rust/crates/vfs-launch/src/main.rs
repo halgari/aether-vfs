@@ -310,7 +310,7 @@ fn main() {
         }
     }
 
-    // Configure → mount (single CD parse per zip via ZipBackend) → serve → launch.
+    // Configure → mount (single CD parse per zip via ZipProvider) → serve → launch.
     let mut session = Session::new();
     session.set_root(&args.root);
     session.set_overlay(&args.overlay);

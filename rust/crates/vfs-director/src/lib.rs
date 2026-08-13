@@ -27,8 +27,6 @@ pub mod stage;
 
 pub use director::Director;
 pub use disk::DiskProvider;
-/// Deprecated: renamed to [`DiskProvider`]. Removed at the end of Stage 1.
-pub use disk::DiskProvider as DiskBackend;
 pub use io_stats::{mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report};
 pub use ops::{Provider, Handle, DirEntry, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
 pub use session::{LaunchOpts, Session};
@@ -40,7 +38,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn disk_backend_open_read() {
+    fn disk_provider_open_read() {
         let dir = std::env::temp_dir().join(format!("vfs-dir-disk-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("hello.txt");
@@ -49,7 +47,7 @@ mod tests {
             f.write_all(b"hello-director").unwrap();
         }
         let d = Director::new();
-        d.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
+        d.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
         let st = d.getattr("hello.txt").unwrap().unwrap();
         assert_eq!(st.kind, KIND_FILE);
         assert_eq!(st.size, 14);
@@ -68,7 +66,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("a.bin"), b"xyz").unwrap();
         let s = Session::new();
-        s.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
+        s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
         let got = s.read_file("a.bin").unwrap();
         assert_eq!(got, b"xyz");
         let _ = std::fs::remove_dir_all(&dir);
@@ -80,7 +78,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("x.txt"), b"x").unwrap();
         let d = Director::new();
-        d.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
+        d.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
         assert!(d.getattr("x.txt").unwrap().is_some());
         d.clear_mounts().unwrap();
         assert!(d.getattr("x.txt").unwrap().is_none());
@@ -102,7 +100,7 @@ mod tests {
         let mut s = Session::new();
         s.set_root(&dir);
         s.set_state_dir(&state);
-        s.mount("", Arc::new(DiskBackend::new(&dir))).unwrap();
+        s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
         s.serve().expect("serve");
         assert!(s.is_serving());
 

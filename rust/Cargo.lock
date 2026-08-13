@@ -1690,7 +1690,7 @@ dependencies = [
  "tonic-prost-build",
  "vfs-control",
  "vfs-director",
- "vfs-protocol",
+ "vfs-provider",
  "vfs-zip",
 ]
 

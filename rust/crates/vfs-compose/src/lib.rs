@@ -11,20 +11,10 @@ mod router;
 mod subdir;
 
 pub use inline::InlineProvider;
-/// Deprecated: renamed to [`InlineProvider`]. Removed at the end of Stage 1.
-pub use inline::InlineProvider as InlineBackend;
 pub use layered::LayeredProvider;
-/// Deprecated: renamed to [`LayeredProvider`]. Removed at the end of Stage 1.
-pub use layered::LayeredProvider as LayeredBackend;
 pub use overlay::OverlayProvider;
-/// Deprecated: renamed to [`OverlayProvider`]. Removed at the end of Stage 1.
-pub use overlay::OverlayProvider as OverlayBackend;
-/// Deprecated: renamed to [`RouterProvider`]. Removed at the end of Stage 1.
-pub use router::RouterProvider as RouterBackend;
 pub use router::{Route, RouterProvider};
 pub use subdir::SubdirProvider;
-/// Deprecated: renamed to [`SubdirProvider`]. Removed at the end of Stage 1.
-pub use subdir::SubdirProvider as StripPrefixBackend;
 
 use std::sync::Arc;
 use vfs_provider::Provider;

@@ -1,8 +1,7 @@
-//! Sources ("filesystem shards"). Every source implements the [`Backend`] op
-//! contract; [`build_backend`] turns a declarative [`SourceSpec`] into a live
-//! backend. Out-of-process plugins speak gRPC [`SourceService`](pb).
+//! Sources ("filesystem shards"). Every source implements the [`Provider`] op
+//! contract; [`build_provider`] turns a declarative [`SourceSpec`] into a live
+//! provider. Out-of-process plugins speak gRPC [`SourceService`](pb).
 
-mod conformance;
 mod remote;
 mod rt;
 mod serve;
@@ -11,11 +10,11 @@ pub mod pb {
     tonic::include_proto!("vfs.source");
 }
 
-pub use conformance::{assert_conformance, write_fixture_tree};
-pub use remote::RemoteBackend;
-pub use serve::BackendSourceService;
+pub use remote::RemoteProvider;
+pub use serve::ProviderSourceService;
 pub use vfs_control::SourceSpec;
-pub use vfs_protocol::{Backend, BackendHandle, DirEntry, Stat, KIND_DIR, KIND_FILE, OPEN_READ};
+pub use vfs_provider::{assert_conformance, write_fixture_tree};
+pub use vfs_provider::{DirEntry, Provider, Stat, KIND_DIR, KIND_FILE, OPEN_READ};
 
 use std::sync::Arc;
 
@@ -35,20 +34,20 @@ impl std::fmt::Display for BuildError {
 }
 impl std::error::Error for BuildError {}
 
-/// Build a live backend from a declarative spec.
-pub fn build_backend(spec: &SourceSpec) -> Result<Arc<dyn Backend>, BuildError> {
+/// Build a live provider from a declarative spec.
+pub fn build_provider(spec: &SourceSpec) -> Result<Arc<dyn Provider>, BuildError> {
     match spec {
-        SourceSpec::Disk { path } => Ok(Arc::new(vfs_director::DiskBackend::new(path))),
+        SourceSpec::Disk { path } => Ok(Arc::new(vfs_director::DiskProvider::new(path))),
         SourceSpec::Zip { path } => {
-            let be = vfs_zip::ZipBackend::open(std::path::Path::new(path))
+            let p = vfs_zip::ZipProvider::open(std::path::Path::new(path))
                 .map_err(|e| BuildError::Open(format!("{path}: {e:?}")))?;
-            Ok(Arc::new(be))
+            Ok(Arc::new(p))
         }
         SourceSpec::Http { .. } => Err(BuildError::Unsupported("http source (later milestone)")),
         SourceSpec::Remote { endpoint } => {
-            let be = RemoteBackend::connect_blocking(endpoint)
+            let p = RemoteProvider::connect_blocking(endpoint)
                 .map_err(BuildError::Open)?;
-            Ok(Arc::new(be))
+            Ok(Arc::new(p))
         }
     }
 }
@@ -58,18 +57,21 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
     use tonic::transport::Server;
-    use vfs_director::DiskBackend;
+    use vfs_director::DiskProvider;
 
     #[test]
-    fn builds_disk_backend() {
+    fn builds_disk_provider() {
         let dir = std::env::temp_dir().join(format!("vfs-src-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f.txt"), b"hi").unwrap();
-        let be = build_backend(&SourceSpec::Disk {
+        let p = build_provider(&SourceSpec::Disk {
             path: dir.to_string_lossy().into_owned(),
         })
         .unwrap();
-        let st = be.getattr("f.txt").unwrap().unwrap();
+        let st = p
+            .getattr(vfs_provider::VPath::at_default("f.txt"))
+            .unwrap()
+            .unwrap();
         assert_eq!(st.size, 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -77,18 +79,18 @@ mod tests {
     #[test]
     fn disk_conformance() {
         let dir = std::env::temp_dir().join(format!("vfs-conf-{}", std::process::id()));
-        write_fixture_tree(&dir);
-        let be: Arc<dyn Backend> = Arc::new(DiskBackend::new(&dir));
-        assert_conformance(be);
+        vfs_provider::write_fixture_tree(&dir);
+        let p: Arc<dyn Provider> = Arc::new(DiskProvider::new(&dir));
+        vfs_provider::assert_conformance(p);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn remote_backend_conformance() {
+    async fn remote_provider_conformance_and_capabilities() {
         let dir = std::env::temp_dir().join(format!("vfs-rconf-{}", std::process::id()));
-        write_fixture_tree(&dir);
-        let be: Arc<dyn Backend> = Arc::new(DiskBackend::new(&dir));
-        let svc = BackendSourceService::new(be);
+        vfs_provider::write_fixture_tree(&dir);
+        let p: Arc<dyn Provider> = Arc::new(DiskProvider::new(&dir));
+        let svc = ProviderSourceService::new(p);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
@@ -100,11 +102,15 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let remote = RemoteBackend::connect(&format!("{addr}")).await.unwrap();
-        let remote: Arc<dyn Backend> = Arc::new(remote);
-        // Conformance is sync and uses block_on internally.
+        let remote = RemoteProvider::connect(&format!("{addr}")).await.unwrap();
+        let remote: Arc<dyn Provider> = Arc::new(remote);
+
+        // Capabilities must survive the round trip, not be defaulted locally.
+        assert_eq!(remote.capabilities().access, vfs_provider::Access::Read);
+        assert!(!remote.capabilities().immutable, "disk is mutable, and the wire must say so");
+
         tokio::task::spawn_blocking(move || {
-            assert_conformance(remote);
+            vfs_provider::assert_conformance(remote);
         })
         .await
         .unwrap();
@@ -116,13 +122,13 @@ mod tests {
     #[test]
     fn http_still_unsupported() {
         assert!(matches!(
-            build_backend(&SourceSpec::Http { url: "http://x".into() }),
+            build_provider(&SourceSpec::Http { url: "http://x".into() }),
             Err(BuildError::Unsupported(_))
         ));
     }
 
     #[test]
-    fn builds_zip_backend() {
+    fn builds_zip_provider() {
         use std::io::Write;
         let dir = std::env::temp_dir().join(format!("vfs-zip-src-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
@@ -178,11 +184,14 @@ mod tests {
         let zip_path = dir.join("t.zip");
         std::fs::File::create(&zip_path).unwrap().write_all(&buf).unwrap();
 
-        let be = build_backend(&SourceSpec::Zip {
+        let p = build_provider(&SourceSpec::Zip {
             path: zip_path.to_string_lossy().into_owned(),
         })
         .unwrap();
-        let st = be.getattr("f.txt").unwrap().unwrap();
+        let st = p
+            .getattr(vfs_provider::VPath::at_default("f.txt"))
+            .unwrap()
+            .unwrap();
         assert_eq!(st.size, 2);
         let _ = std::fs::remove_dir_all(&dir);
     }

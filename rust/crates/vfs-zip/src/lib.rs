@@ -14,8 +14,6 @@ use vfs_core::{EntryKind, InputEntry, Layer, LayerId, SourceId};
 
 pub mod backend;
 pub use backend::ZipProvider;
-/// Deprecated: renamed to [`ZipProvider`]. Removed at the end of Stage 1.
-pub use backend::ZipProvider as ZipBackend;
 
 /// Open a zip as a [`vfs_provider::Provider`] (mount with `Director::mount` / `Session::mount`).
 pub fn open_backend(zip_path: &Path) -> Result<ZipProvider, ZipError> {

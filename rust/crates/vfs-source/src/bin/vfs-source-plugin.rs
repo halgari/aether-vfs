@@ -12,9 +12,9 @@ use std::sync::Arc;
 use clap::Parser;
 use tokio::net::TcpListener;
 use tonic::transport::Server;
-use vfs_director::DiskBackend;
+use vfs_director::DiskProvider;
 use vfs_source::pb::source_server::SourceServer;
-use vfs_source::BackendSourceService;
+use vfs_source::ProviderSourceService;
 
 #[derive(Parser, Debug)]
 #[command(name = "vfs-source-plugin")]
@@ -31,8 +31,8 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let addr: SocketAddr = args.bind.parse()?;
-    let backend = Arc::new(DiskBackend::new(&args.root));
-    let svc = BackendSourceService::new(backend);
+    let provider = Arc::new(DiskProvider::new(&args.root));
+    let svc = ProviderSourceService::new(provider);
     let listener = TcpListener::bind(addr).await?;
     let local = listener.local_addr()?;
     println!("endpoint={}:{}", local.ip(), local.port());
