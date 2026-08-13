@@ -1,0 +1,8 @@
+[package]
+name = "vfs-fixture-writepath"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "vfs-fixture-writepath"
+path = "src/main.rs"

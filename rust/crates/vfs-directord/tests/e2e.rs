@@ -54,7 +54,12 @@ fn ensure_inject_artifacts() {
     // binary). Co-locate them into the profile dir if cargo left them only in
     // deps/ or they were never built for this package.
     let profile = profile_dir();
-    let needed = ["vfs_shim_dll.dll", "vfs_payload.dll", "vfs-fixture-read.exe"];
+    let needed = [
+        "vfs_shim_dll.dll",
+        "vfs_payload.dll",
+        "vfs-fixture-read.exe",
+        "vfs-fixture-writepath.exe",
+    ];
     let missing = needed.iter().any(|n| !profile.join(n).is_file());
     if missing {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
@@ -69,6 +74,8 @@ fn ensure_inject_artifacts() {
                 "vfs-shim-dll",
                 "-p",
                 "vfs-fixture-read",
+                "-p",
+                "vfs-fixture-writepath",
                 "--quiet",
             ])
             .status()
@@ -246,6 +253,19 @@ wait      = true
 
     server.abort();
 }
+
+// NOTE: the `vfs-fixture-writepath` executable and its build wiring above
+// (`ensure_inject_artifacts`) are intentionally in place and unused by any
+// test yet. The end-to-end assertion that a launched process's writes land in
+// the `DiskProvider`'s backing directory is deliberately held back: it
+// currently fails not because of this fixture or this harness, but because
+// `vfs-shim`'s create-open routing (`try_fuse_create` in `hook.rs` /
+// `open_write` in `fuse_client.rs`) never forwards the NT create-disposition
+// into the ring's `OP_OPEN` request, so a brand-new file always falls through
+// to the shim-local overlay redirect before the director ever sees it. That
+// fix is Task 7's, which also touches `hook.rs`/`fuse_client.rs` for
+// delete/rename — the assertion test belongs in the same commit as the fix
+// that makes it pass. See the stage-2a-i Task 6 report for the full trace.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn apply_session_config_health_and_list() {
