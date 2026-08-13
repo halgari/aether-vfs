@@ -1,5 +1,5 @@
 ﻿use std::mem::{size_of, zeroed};
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HMODULE};
+use windows_sys::Win32::Foundation::{CloseHandle, HMODULE};
 use windows_sys::Win32::System::ProcessStatus::{EnumProcessModules, GetModuleBaseNameA, GetModuleInformation, MODULEINFO};
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, TerminateProcess, CREATE_SUSPENDED, PROCESS_INFORMATION, STARTUPINFOW,

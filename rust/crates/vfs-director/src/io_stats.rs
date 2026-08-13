@@ -1,7 +1,7 @@
 //! Process-wide VFS I/O telemetry for post-launch diagnosis.
 //!
 //! Tracks getattr / readdir / open / read / close / errors so hosts can see
-//! whether the game is actually pulling BSAs/ESMs after hollow resume.
+//! whether the game is actually pulling BSAs/ESMs once it is running.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

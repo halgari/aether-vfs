@@ -339,7 +339,7 @@ pub fn inject_dll(process: HANDLE, dll_path: &str) -> Result<(), InjectError> {
         CloseHandle(hthread);
         // LoadLibraryW returns HMODULE. On x64 the thread exit code is only the
         // low 32 bits — a successful load above 4GB can look like 0. Treat 0 as
-        // soft-warn only; hollow/bootstrap timeouts catch true failures.
+        // soft-warn only; bootstrap timeouts catch true failures.
         if got == 0 || exit == 0 {
             eprintln!(
                 "vfs-inject: remote LoadLibraryW exit={exit:#x} for {dll_path} \
@@ -509,11 +509,6 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
     std::env::set_var("VFS_SHIM_READY", &cfg.ready_path);
     // Advertise payload path for children that resolve via env.
     std::env::set_var("VFS_PAYLOAD_PATH", &payload_path);
-    // `VFS_VIRTUAL_IMAGE` marked a hollowed image so the shim could spoof
-    // `GetModuleFileName`. With the staged launch the process really *is* the
-    // image it reports, so nothing sets it — cleared here in case an ancestor
-    // left one behind.
-    std::env::remove_var("VFS_VIRTUAL_IMAGE");
     let cfg_file = format!("{}.payload_cfg", cfg.ready_path);
     std::env::set_var("VFS_DUAL_LAYER", "1");
     std::env::set_var("VFS_PAYLOAD_CFG_FILE", &cfg_file);
@@ -532,7 +527,7 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
         // One launch path: `CreateProcess` the staged image and dual-layer
         // inject. Staging puts the EXE and its import closure on disk, so the
         // loader resolves everything itself and there is nothing left for a
-        // hollow to do — see `vfs-director::stage`.
+        // for a second mapping pass to do — see `vfs-director::stage`.
         let mut cmdline = format!("\"{}\"", cfg.target_exe);
         for a in &cfg.args {
             cmdline.push_str(&format!(" \"{a}\""));
@@ -563,9 +558,9 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
 
         // The shim adds frames to every intercepted call, and the stock 1 MiB
         // primary stack overflows under that (`0xC00000FD`). This used to be
-        // done on the hollow path only; it is not hollow-specific, so it moved
-        // here when that path went away. Best-effort — a failure resumes with
-        // the stock stack rather than refusing to launch.
+        // done on the old hollow path only, but it is not specific to that, so
+        // it moved here when the path went away. Best-effort — a failure resumes
+        // with the stock stack rather than refusing to launch.
         if let Err(e) = expand_primary_stack(pi.hProcess, pi.hThread, 16 * 1024 * 1024) {
             eprintln!(
                 "vfs-inject: expand_primary_stack failed ({e:?}) — resuming with stock 1MiB stack"

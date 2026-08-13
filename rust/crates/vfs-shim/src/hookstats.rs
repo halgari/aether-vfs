@@ -33,10 +33,9 @@ pub enum Hook {
     MapView = 10,
     QDir = 11,
     QByName = 12,
-    Other = 13,
 }
 
-const N: usize = 14;
+const N: usize = 13;
 
 const NAMES: [&str; N] = [
     "NtCreateFile",
@@ -52,7 +51,6 @@ const NAMES: [&str; N] = [
     "NtMapViewOfSection",
     "NtQueryDirectoryFile",
     "NtQueryInformationByName",
-    "other",
 ];
 
 static CALLS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
@@ -636,7 +634,9 @@ mod tests {
     #[test]
     fn hook_names_cover_every_variant() {
         assert_eq!(NAMES.len(), N);
-        assert_eq!(Hook::Other as usize, N - 1);
+        // The last variant must index the last name, or a hook silently
+        // reports under a neighbour's label.
+        assert_eq!(Hook::QByName as usize, N - 1);
         assert!(NAMES.iter().all(|n| !n.is_empty()));
     }
 }

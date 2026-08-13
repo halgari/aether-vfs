@@ -16,10 +16,11 @@
 //! transitively — and nothing else. For Skyrim SE that is the 37 MiB EXE plus a
 //! couple of DLLs, against ~15 GiB of archive that stays virtual.
 //!
-//! Staging the *real* image also keeps the launch on the proven path: the host
-//! is then byte-identical to the image being hollowed, so the loader's TLS,
-//! `.pdata` and LDR metadata already describe it (see `host_is_target` in
-//! `vfs-inject`). A substitute host has to hand-replicate all of that.
+//! Staging the *real* image is also what lets the Windows loader do its own
+//! job: it maps, relocates and binds the PE, and builds the TLS template,
+//! `.pdata` registration and LDR metadata that describe it. An earlier design
+//! hand-replicated all of that over a substitute host image; staging removed
+//! the need (see `architecture.md` §4.2).
 //!
 //! # Lifetime
 //!

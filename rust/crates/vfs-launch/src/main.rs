@@ -1,7 +1,7 @@
 //! Launch Skyrim (via SKSE) with game/mod content served from Stored ZIP layers.
 //!
 //! Host workflow: discover zips → `Session` mount → serve IPC → launch (I/O remapped).
-//! No full-layer parse for PE preload; PE is hollowed from the VFS at launch.
+//! No full-layer parse for PE preload; the launch image is staged from the VFS.
 
 use std::path::{Path, PathBuf};
 
@@ -360,7 +360,7 @@ fn main() {
         match session.kernel().getattr(&pe_vpath) {
             Ok(Some(st)) if st.kind == KIND_FILE && st.size > 512 => {
                 eprintln!(
-                    "  PE {pe_vpath} present in VFS ({} bytes) — hollow at launch",
+                    "  PE {pe_vpath} present in VFS ({} bytes) — staged at launch",
                     st.size
                 );
             }
@@ -441,7 +441,7 @@ fn main() {
     let detach = !args.wait;
     eprintln!("launching {pe_vpath} under {} …", args.root.display());
     eprintln!(
-        "  mode: {} + hollow from VFS + remapped I/O",
+        "  mode: {} + staged from VFS + remapped I/O",
         if detach { "detach" } else { "wait" }
     );
 

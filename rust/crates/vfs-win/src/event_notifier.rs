@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use vfs_ipc::Notifier;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, OpenEventW, ResetEvent, SetEvent, WaitForSingleObject, INFINITE,
+    CreateEventW, OpenEventW, ResetEvent, SetEvent, WaitForSingleObject,
 };
 
 const EVENT_ALL_ACCESS: u32 = 0x1F_0003;

@@ -576,7 +576,6 @@ fn chrono_like_now() -> String {
     // Prefer ISO-like via local time API if available.
     #[cfg(windows)]
     {
-        use std::mem::zeroed;
         // fallback string
         let _ = now;
     }

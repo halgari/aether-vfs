@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::ops::{
     bad_fh, bad_request, is_dir, map_io_err, not_a_dir, not_found, Backend, BackendHandle, DirEntry,
-    Stat, KIND_DIR, KIND_FILE, OPEN_WRITE,
+    Stat, KIND_DIR, OPEN_WRITE,
 };
 use crate::path::{normalize, strip_prefix};
 

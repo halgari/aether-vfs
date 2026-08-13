@@ -142,7 +142,6 @@ layer = 0
 [launch]
 exec      = {}
 wait      = true
-hollow_pe = false
 "#,
         toml_string(&content_dir.path().to_string_lossy()),
         toml_string(&fixture.to_string_lossy()),

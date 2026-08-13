@@ -37,7 +37,7 @@ struct LiveFile {
 
 enum OpenKind {
     File(Arc<LiveFile>),
-    Dir { size: u64 },
+    Dir,
 }
 
 struct OpenEntry {
@@ -77,7 +77,7 @@ impl OpenTable {
                 g.insert(
                     fh,
                     OpenEntry {
-                        kind: OpenKind::Dir { size: 0 },
+                        kind: OpenKind::Dir,
                     },
                 );
                 Ok(OpenResp {
@@ -146,7 +146,7 @@ impl OpenTable {
                         g.insert(
                             fh,
                             OpenEntry {
-                                kind: OpenKind::Dir { size: 0 },
+                                kind: OpenKind::Dir,
                             },
                         );
                         return Ok(OpenResp {
@@ -202,7 +202,7 @@ impl OpenTable {
         let g = self.map.lock().map_err(|_| ST_IO_ERROR)?;
         let ent = g.get(&fh).ok_or(ST_BAD_FH)?;
         match &ent.kind {
-            OpenKind::Dir { .. } => Err(ST_IS_DIR),
+            OpenKind::Dir => Err(ST_IS_DIR),
             OpenKind::File(live) => Ok(Arc::clone(live)),
         }
     }

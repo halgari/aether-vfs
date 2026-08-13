@@ -225,8 +225,6 @@ pub type NtWriteFileFn = unsafe extern "system" fn(
 
 /// `STATUS_END_OF_FILE`.
 pub const STATUS_END_OF_FILE: NTSTATUS = 0xC000_0011u32 as i32;
-/// `STATUS_NOT_IMPLEMENTED`.
-pub const STATUS_NOT_IMPLEMENTED: NTSTATUS = 0xC000_0002u32 as i32;
 /// `STATUS_INVALID_FILE_FOR_SECTION` — e.g. SEC_IMAGE on a zip-window handle.
 pub const STATUS_INVALID_FILE_FOR_SECTION: NTSTATUS = 0xC000_0124u32 as i32;
 /// `STATUS_INVALID_HANDLE`.

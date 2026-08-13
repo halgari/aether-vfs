@@ -3,7 +3,7 @@
 #![allow(unsafe_code)]
 
 use core::ffi::c_void;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};

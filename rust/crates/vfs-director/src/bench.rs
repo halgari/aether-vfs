@@ -6,7 +6,7 @@
 //!
 //! The end condition is **window visible with a non-zero client rect**. It is
 //! objective, cheap to detect, and captures every cost on the path (staging,
-//! injection, hollow, content streaming) rather than one layer of it.
+//! injection, content streaming) rather than one layer of it.
 //!
 //! Emits a markdown row so runs land in `docs/benchmarks/` and stay comparable
 //! across builds — the immediate use being debug vs release.
