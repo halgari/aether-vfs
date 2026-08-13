@@ -10,6 +10,15 @@ shared-memory ring + inject/payload/shim stack.
 
 > Pure Rust. The former Clojure/JVM layer has been removed (M4).
 
+## Documentation
+
+| Document | For |
+|---|---|
+| [Architectural overview](rust/docs/architecture.md) | Engineers: how the system fits together, and how the hard parts are solved |
+| [Product overview](docs/product-overview.md) | Non-technical: what it does and why it matters |
+| [Benchmarks](rust/docs/benchmarks/) | Measurements and the analysis behind them |
+| [vfs-summary.md](rust/docs/vfs-summary.md) | Earlier long-form technical narrative |
+
 ## Quick start
 
 ```powershell
