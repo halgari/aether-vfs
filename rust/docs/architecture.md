@@ -451,6 +451,15 @@ can.
 fail with the classic detour disabled, which is the exact defect that once
 shipped.
 
+Beyond the suite, behavioural changes are verified against the running game. The
+window is driven headlessly with [`tools/gamectl.ps1`](../../tools/gamectl.ps1),
+which screenshots it and injects scancode-level input via
+`SendInput`/`KEYEVENTF_SCANCODE` (the game ignores `SendKeys` and posted
+messages): `key GRAVE` opens the console, `type "coc riverwood"` spells a command
+out key by key, `shot out.png` captures a frame, and runs end with `qqq` so the
+game exits on its own path. See
+[`benchmarks/hollow-removal.md`](benchmarks/hollow-removal.md) for the procedure.
+
 ---
 
 ## 7. Diagnostics

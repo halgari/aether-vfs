@@ -69,6 +69,12 @@ the child across `CreateProcess`. See
 
 ## Method notes
 
+- The game window is driven with [`tools/gamectl.ps1`](../../../tools/gamectl.ps1):
+  it screenshots the window and sends scancode-level input via
+  `SendInput`/`KEYEVENTF_SCANCODE` (the game ignores `SendKeys` and posted
+  `WM_KEYDOWN`). `gamectl.ps1 key GRAVE` (alias for `TILDE`) opens the console,
+  `gamectl.ps1 type "coc riverwood"` spells a command out key by key, and
+  `gamectl.ps1 shot out.png` captures the frame.
 - `coc` is issued **from the main menu**, not after starting a new game: a new
   game begins with the scripted Helgen sequence and `coc` during it does not
   reliably take.
