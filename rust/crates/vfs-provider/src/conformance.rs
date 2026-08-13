@@ -138,6 +138,70 @@ impl Provider for MemFixture {
     }
 }
 
+/// Sequential reference provider, used to give `assert_sequential` standing
+/// coverage. Composed from [`MemFixture`] rather than duplicating its tree
+/// walking: `getattr` and `readdir` delegate straight through, and `open`/
+/// `read_next` are implemented on top of `MemFixture`'s own `open`/`read_at`,
+/// tracking only the forward cursor `read_next` needs. Deliberately does not
+/// implement `read_at`, so it inherits the trait's `ST_NOT_SUPPORTED`
+/// default — correct for a provider that can only read forward, and the
+/// suite (`assert_sequential`'s positional-read-refused case) checks it.
+pub struct SeqFixture {
+    inner: MemFixture,
+    next: AtomicU64,
+    /// Our handle -> (inner `MemFixture` handle, forward cursor).
+    opens: Mutex<HashMap<Handle, (Handle, u64)>>,
+}
+
+impl SeqFixture {
+    pub fn new() -> Self {
+        SeqFixture { inner: MemFixture::new(), next: AtomicU64::new(1), opens: Mutex::new(HashMap::new()) }
+    }
+}
+
+impl Default for SeqFixture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Provider for SeqFixture {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities { access: Access::SeqRead, immutable: true, ..Capabilities::read_only() }
+    }
+
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        self.inner.getattr(p)
+    }
+
+    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+        self.inner.readdir(p)
+    }
+
+    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+        let (inner_h, size, is_dir) = self.inner.open(p, flags)?;
+        let h = self.next.fetch_add(1, Ordering::Relaxed);
+        self.opens.lock().map_err(|_| map_io_err())?.insert(h, (inner_h, 0));
+        Ok((h, size, is_dir))
+    }
+
+    fn close(&self, h: Handle) -> Result<(), i32> {
+        let inner_h = self.opens.lock().map_err(|_| map_io_err())?.remove(&h).map(|(ih, _)| ih);
+        match inner_h {
+            Some(ih) => self.inner.close(ih),
+            None => Ok(()),
+        }
+    }
+
+    fn read_next(&self, h: Handle, buf: &mut [u8]) -> Result<usize, i32> {
+        let mut g = self.opens.lock().map_err(|_| map_io_err())?;
+        let (inner_h, cursor) = g.get_mut(&h).ok_or_else(crate::bad_fh)?;
+        let n = self.inner.read_at(*inner_h, *cursor, buf)?;
+        *cursor += n as u64;
+        Ok(n)
+    }
+}
+
 /// Read every byte of an open handle, looping over short reads.
 fn read_all(p: &Arc<dyn Provider>, h: Handle, size: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(size as usize);
@@ -329,6 +393,16 @@ fn assert_positional(p: &Arc<dyn Provider>) {
 
 fn assert_sequential(p: &Arc<dyn Provider>) {
     for (rel, body) in FIXTURE_FILES {
+        // A sequential provider must refuse positional reads rather than
+        // silently returning something plausible.
+        let (probe, _, _) = p.open(VPath::at_default(rel), crate::OPEN_READ).expect("open");
+        match p.read_at(probe, 0, &mut [0u8; 4]) {
+            Err(e) if e == crate::not_supported() => {}
+            Err(e) => panic!("read_at on a SeqRead provider returned status {e}, expected ST_NOT_SUPPORTED"),
+            Ok(n) => panic!("read_at on a SeqRead provider succeeded with {n} bytes; it must be refused"),
+        }
+        p.close(probe).expect("close");
+
         let (h, _, _) = p.open(VPath::at_default(rel), crate::OPEN_READ).expect("open");
         let mut out = Vec::new();
         let mut buf = [0u8; 3];
@@ -359,6 +433,11 @@ mod tests {
     #[test]
     fn the_reference_fixture_passes_its_own_suite() {
         assert_conformance(std::sync::Arc::new(MemFixture::new()));
+    }
+
+    #[test]
+    fn the_sequential_fixture_passes_its_own_suite() {
+        assert_conformance(std::sync::Arc::new(SeqFixture::new()));
     }
 
     #[test]
