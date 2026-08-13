@@ -1557,9 +1557,13 @@ conformance."
 
 **Note for the next task:** the workspace does not build as a whole between Tasks 5 and 9 — each unported implementor is a compile error. Run per-crate `cargo test -p <crate>` until Task 9 restores a whole-workspace build. This is the one place in Stage 1 where a task does not leave the tree fully green, and it is why Tasks 5-9 should land in one sitting.
 
+**Execution order is 5 → 7 → 8 → 6 → 9, not 5 → 6 → 7 → 8 → 9.** `vfs-director` lists `vfs-compose` in `[dev-dependencies]` (`vfs-director/Cargo.toml`), so `cargo test -p vfs-director` compiles `vfs-compose` regardless of what `vfs-director`'s own source says — making Task 6's gate unsatisfiable until Task 7 lands. `vfs-compose` and `vfs-cache` depend only on `vfs-protocol`, so they port cleanly first. Task numbering below is left as originally written; only the order they are executed in changes.
+
 ---
 
 ### Task 6: Port `vfs-director` (disk provider and kernel)
+
+> **Execute this AFTER Tasks 7 and 8.** `vfs-director` lists `vfs-compose` in `[dev-dependencies]`, so `cargo test -p vfs-director` compiles `vfs-compose` no matter what this crate's own source says. Until Task 7 lands, this task's gate cannot go green.
 
 **Files:**
 - Modify: `crates/vfs-director/Cargo.toml`, `crates/vfs-director/src/ops.rs`, `crates/vfs-director/src/disk.rs`, `crates/vfs-director/src/director.rs`, `crates/vfs-director/src/session.rs`, `crates/vfs-director/src/lib.rs`, `crates/vfs-director/tests/zip_serve_integrity.rs`
