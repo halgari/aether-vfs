@@ -1328,6 +1328,9 @@ unsafe extern "system" fn open_hook(
     if in_hook_reenter() {
         return tramp(file_handle, access, oa, iosb, share, opts);
     }
+    if let Some(p) = path_of(oa) {
+        crate::hookstats::note_passthrough(&p);
+    }
     // NtOpenFile has no disposition — it always opens existing (FILE_OPEN). Pass
     // FILE_OPEN (1), NOT 0: 0 is FILE_SUPERSEDE, which is in is_write_open's
     // create/overwrite set and would misclassify every open as a write.

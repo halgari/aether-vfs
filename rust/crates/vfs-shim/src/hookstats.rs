@@ -11,6 +11,7 @@
 //! Off unless `VFS_SHIM_STATS_LOG` names a file: reading a clock on every
 //! intercepted call is itself measurable, so it must not be on by default.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -306,42 +307,68 @@ fn render_async() -> String {
     )
 }
 
-/// Distinct paths that were *not* served by the VFS, capped so a storm cannot
-/// grow this without bound.
+/// How often each path was opened, capped so a storm cannot grow this without
+/// bound.
 ///
 /// A hook count alone cannot say what a stalled game is hunting for: a world
 /// load issued 25k `NtCreateFile` with only 210 resolving under the root, and
-/// the useful question is which paths the other 24.9k were.
-static PASSTHRU: Mutex<Vec<String>> = Mutex::new(Vec::new());
-const PASSTHRU_MAX: usize = 400;
+/// the useful question is which paths the other 24.9k were. A *distinct* list
+/// could not answer that either — a process wedged in a retry loop reopens one
+/// path thousands of times, and dedup hides exactly the path that matters. So
+/// this counts repeats and reports the busiest first.
+static PATHS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+const PATHS_MAX: usize = 4000;
+/// How many of the busiest paths to print.
+const PATHS_SHOWN: usize = 40;
 
-/// Record a path that fell through to disk. Cheap no-op when disabled.
+/// Record a path an open was attempted on. Cheap no-op when disabled.
 pub fn note_passthrough(path: &str) {
     if !enabled() {
         return;
     }
-    let Ok(mut v) = PASSTHRU.lock() else { return };
-    if v.len() >= PASSTHRU_MAX {
+    let Ok(mut g) = PATHS.lock() else { return };
+    let map = g.get_or_insert_with(HashMap::new);
+    let lower = path.to_ascii_lowercase();
+    if let Some(c) = map.get_mut(&lower) {
+        *c += 1;
         return;
     }
-    let lower = path.to_ascii_lowercase();
-    if !v.iter().any(|p| *p == lower) {
-        v.push(lower);
+    // Past the cap we stop learning new paths but keep counting known ones,
+    // so a loop that started early still shows its true rate.
+    if map.len() < PATHS_MAX {
+        map.insert(lower, 1);
     }
 }
 
-fn render_passthrough() -> String {
-    let Ok(v) = PASSTHRU.lock() else {
-        return String::new();
-    };
-    if v.is_empty() {
+/// Busiest-first rendering, split out so the ordering is testable without
+/// touching the process-wide map (which is inert unless instrumentation is on).
+fn format_paths(mut pairs: Vec<(String, u64)>) -> String {
+    if pairs.is_empty() {
         return String::new();
     }
-    let mut s = format!("\npassthrough paths (first {} distinct):\n", v.len());
-    for p in v.iter() {
-        s.push_str(&format!("  {p}\n"));
+    let distinct = pairs.len();
+    let total: u64 = pairs.iter().map(|(_, c)| *c).sum();
+    // Count descending, then path so equal counts do not reorder between
+    // snapshots — a diff of two reports is how a loop's rate gets measured.
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let shown = pairs.len().min(PATHS_SHOWN);
+    let mut s = format!(
+        "\nopen paths by frequency (top {shown} of {distinct} distinct, {total} opens):\n"
+    );
+    for (p, c) in pairs.into_iter().take(shown) {
+        s.push_str(&format!("  {c:>8}x  {p}\n"));
     }
     s
+}
+
+fn render_passthrough() -> String {
+    let Ok(g) = PATHS.lock() else {
+        return String::new();
+    };
+    let Some(map) = g.as_ref() else {
+        return String::new();
+    };
+    format_paths(map.iter().map(|(p, c)| (p.clone(), *c)).collect())
 }
 
 /// Start a thread that rewrites the report periodically.
@@ -391,6 +418,31 @@ mod tests {
         assert!(s.contains("TOTAL"), "{s}");
         // Never divide by zero on an idle process.
         assert!(!s.contains("NaN"), "{s}");
+    }
+
+    #[test]
+    fn busiest_path_is_reported_first() {
+        // The point of counting repeats: a retry loop's path must outrank the
+        // hundreds of one-shot opens a launch makes, whatever order they hashed
+        // into the map.
+        let s = format_paths(vec![
+            ("\\??\\c:\\a.esm".into(), 3),
+            ("\\??\\c:\\loop.bsa".into(), 9001),
+            ("\\??\\c:\\b.esm".into(), 3),
+        ]);
+        let lines: Vec<&str> = s.lines().filter(|l| l.starts_with("  ")).collect();
+        assert!(lines[0].contains("loop.bsa"), "{s}");
+        assert!(lines[0].contains("9001"), "{s}");
+        // Equal counts must tie-break by path, so two snapshots stay diffable.
+        assert!(lines[1].contains("a.esm"), "{s}");
+        assert!(lines[2].contains("b.esm"), "{s}");
+        assert!(s.contains("3 distinct"), "{s}");
+        assert!(s.contains("9007 opens"), "{s}");
+    }
+
+    #[test]
+    fn no_paths_renders_nothing() {
+        assert_eq!(format_paths(Vec::new()), "");
     }
 
     #[test]
