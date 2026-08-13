@@ -12,7 +12,7 @@ PE staging, injection, hollow, and content streaming.
 
 ```powershell
 cargo build --release -p vfs-shim-dll
-cargo build --release -p vfs-payload
+cargo build --release --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
 cargo build --release -p vfs-directord --bin skyrim-live
 
 $env:VFS_BENCH=1; $env:VFS_BENCH_LABEL='release'
