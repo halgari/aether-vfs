@@ -34,6 +34,13 @@ impl RemoteProvider {
             .await
             .map_err(|e| format!("remote source get_capabilities: {e}"))?
             .into_inner();
+        if caps_resp.contract_version != crate::SOURCE_CONTRACT_VERSION {
+            return Err(format!(
+                "remote source: contract version mismatch (expected v{}, got v{})",
+                crate::SOURCE_CONTRACT_VERSION,
+                caps_resp.contract_version
+            ));
+        }
         let access = match caps_resp.access {
             0 => Access::SeqRead,
             1 => Access::Read,
@@ -157,5 +164,79 @@ impl Provider for RemoteProvider {
             .into_inner();
         let _ = resp;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+    use tonic::{Request, Response, Status};
+
+    use crate::pb::source_server::{Source, SourceServer};
+    use crate::pb::{
+        CapsResp, Empty, GetAttrReq, GetAttrResp, OpenReq, OpenResp, ReadDirReq, ReadDirResp,
+        ReadReq, ReadResp, ReleaseReq,
+    };
+
+    /// Announces a contract version other than [`crate::SOURCE_CONTRACT_VERSION`].
+    /// Every other RPC panics: `connect` must reject the version before
+    /// issuing any of them.
+    struct WrongVersionService;
+
+    #[tonic::async_trait]
+    impl Source for WrongVersionService {
+        async fn get_capabilities(&self, _req: Request<Empty>) -> Result<Response<CapsResp>, Status> {
+            Ok(Response::new(CapsResp {
+                contract_version: crate::SOURCE_CONTRACT_VERSION + 1,
+                access: 1,
+                immutable: false,
+                slow: false,
+                preferred_block: 0,
+            }))
+        }
+        async fn get_attr(&self, _req: Request<GetAttrReq>) -> Result<Response<GetAttrResp>, Status> {
+            unreachable!("connect must reject the version before any other RPC")
+        }
+        async fn read_dir(&self, _req: Request<ReadDirReq>) -> Result<Response<ReadDirResp>, Status> {
+            unreachable!("connect must reject the version before any other RPC")
+        }
+        async fn open(&self, _req: Request<OpenReq>) -> Result<Response<OpenResp>, Status> {
+            unreachable!("connect must reject the version before any other RPC")
+        }
+        async fn read(&self, _req: Request<ReadReq>) -> Result<Response<ReadResp>, Status> {
+            unreachable!("connect must reject the version before any other RPC")
+        }
+        async fn release(&self, _req: Request<ReleaseReq>) -> Result<Response<Empty>, Status> {
+            unreachable!("connect must reject the version before any other RPC")
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_rejects_a_mismatched_contract_version() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(SourceServer::new(WrongVersionService))
+                .serve_with_incoming(incoming)
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let err = match RemoteProvider::connect(&format!("{addr}")).await {
+            Err(e) => e,
+            Ok(_) => panic!("a server announcing the wrong contract version must not connect"),
+        };
+
+        let expected = crate::SOURCE_CONTRACT_VERSION;
+        let received = crate::SOURCE_CONTRACT_VERSION + 1;
+        assert!(
+            err.contains(&format!("v{expected}")) && err.contains(&format!("v{received}")),
+            "error should name both the expected and received version, got: {err}"
+        );
+
+        server.abort();
     }
 }

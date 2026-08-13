@@ -18,6 +18,13 @@ pub use vfs_provider::{DirEntry, Provider, Stat, KIND_DIR, KIND_FILE, OPEN_READ}
 
 use std::sync::Arc;
 
+/// Wire contract version for the out-of-process `Source` gRPC service.
+/// `RemoteProvider::connect` rejects any server that reports a different
+/// value, and `ProviderSourceService` reports exactly this value — the two
+/// sides must agree on the wire shape (`source.proto`) before any op is
+/// exchanged. Bump when that shape changes.
+pub const SOURCE_CONTRACT_VERSION: u32 = 1;
+
 #[derive(Debug)]
 pub enum BuildError {
     Unsupported(&'static str),
