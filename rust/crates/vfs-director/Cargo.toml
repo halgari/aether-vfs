@@ -15,6 +15,7 @@ default = ["zip"]
 zip = ["dep:vfs-zip"]
 
 [dependencies]
+vfs-env = { path = "../vfs-env" }
 vfs-protocol = { path = "../vfs-protocol" }
 vfs-ipc = { path = "../vfs-ipc" }
 vfs-win = { path = "../vfs-win" }

@@ -519,17 +519,17 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
     let payload_path = resolve_payload_for_run(&cfg.payload_path, &cfg.dll_path)
         .ok_or(InjectError::PayloadRead)?;
 
-    std::env::set_var("VFS_SHIM_CONFIG", &cfg.config_path);
-    std::env::set_var("VFS_SHIM_READY", &cfg.ready_path);
+    std::env::set_var(vfs_env::SHIM_CONFIG, &cfg.config_path);
+    std::env::set_var(vfs_env::SHIM_READY, &cfg.ready_path);
     // Advertise payload path for children that resolve via env.
-    std::env::set_var("VFS_PAYLOAD_PATH", &payload_path);
+    std::env::set_var(vfs_env::PAYLOAD_PATH, &payload_path);
     let cfg_file = format!("{}.payload_cfg", cfg.ready_path);
-    std::env::set_var("VFS_DUAL_LAYER", "1");
-    std::env::set_var("VFS_PAYLOAD_CFG_FILE", &cfg_file);
+    std::env::set_var(vfs_env::DUAL_LAYER, "1");
+    std::env::set_var(vfs_env::PAYLOAD_CFG_FILE, &cfg_file);
     let _ = std::fs::remove_file(&cfg_file);
     // The managed root, so the child's fuse client matches the session root.
     if let Some(ref d) = cfg.current_dir {
-        std::env::set_var("VFS_VIRTUAL_DIR", d);
+        std::env::set_var(vfs_env::VIRTUAL_DIR, d);
     }
     let _ = std::fs::remove_file(&cfg.ready_path);
 

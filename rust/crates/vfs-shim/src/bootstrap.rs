@@ -103,7 +103,7 @@ pub fn bootstrap_from_config_path_with_payload(
             from_arg
         } else {
             let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-            if let Ok(file) = std::env::var("VFS_PAYLOAD_CFG_FILE") {
+            if let Some(file) = vfs_env::text(vfs_env::PAYLOAD_CFG_FILE) {
                 candidates.push(std::path::PathBuf::from(file));
             }
             candidates.push(crate::inject::payload_cfg_path_for_pid(std::process::id()));
@@ -138,15 +138,14 @@ pub fn bootstrap_from_config_path_with_payload(
 /// `payload_cfg` must be null or a valid early-payload Config in this process
 /// (caller contract; not checked).
 pub fn sync_bootstrap(payload_cfg: *mut c_void) -> u32 {
-    let config = match std::env::var("VFS_SHIM_CONFIG") {
-        Ok(c) => c,
-        Err(_) => return 1,
+    let Some(config) = vfs_env::text(vfs_env::SHIM_CONFIG) else {
+        return 1;
     };
     let cfg = payload_cfg as *mut PayloadConfig;
     match bootstrap_from_config_path_with_payload(&config, cfg) {
         Ok(guard) => {
             core::mem::forget(guard);
-            if let Ok(ready) = std::env::var("VFS_SHIM_READY") {
+            if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
                 let _ = std::fs::write(&ready, b"ready");
             }
             0

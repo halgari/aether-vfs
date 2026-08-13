@@ -42,7 +42,7 @@ fn ready_event_name(pid: u32) -> Vec<u16> {
 /// (searches parent / deps / current exe).
 pub fn payload_dll_path() -> Option<String> {
     let self_dll = self_dll_path()?;
-    let preferred = std::env::var("VFS_PAYLOAD_PATH").ok();
+    let preferred = vfs_env::text(vfs_env::PAYLOAD_PATH);
     vfs_inject::ensure_payload_beside_shim(&self_dll, preferred.as_deref())
 }
 
@@ -50,9 +50,8 @@ pub fn payload_dll_path() -> Option<String> {
 /// loaded from `VFS_SHIM_CONFIG` (inherited when `lpEnvironment` is null).
 fn child_preinit_redirects() -> Vec<PreinitRedirect> {
     const MAX: usize = 4;
-    let path = match std::env::var("VFS_SHIM_CONFIG") {
-        Ok(p) => p,
-        Err(_) => return Vec::new(),
+    let Some(path) = vfs_env::text(vfs_env::SHIM_CONFIG) else {
+        return Vec::new();
     };
     // Prefer vfs-inject parser (same wire format) so child matches director.
     vfs_inject::merge_preinit_redirects(&path, &[])

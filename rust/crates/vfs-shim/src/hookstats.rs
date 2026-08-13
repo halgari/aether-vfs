@@ -71,7 +71,7 @@ static REPORTER: AtomicBool = AtomicBool::new(false);
 /// Whether instrumentation is on, resolved once.
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VFS_SHIM_STATS_LOG").is_some())
+    *ON.get_or_init(|| vfs_env::present(vfs_env::SHIM_STATS_LOG))
 }
 
 /// Times one hook invocation and records it on drop.
@@ -555,7 +555,7 @@ pub fn start_reporter() {
     if !enabled() || REPORTER.swap(true, Ordering::SeqCst) {
         return;
     }
-    let Some(path) = std::env::var_os("VFS_SHIM_STATS_LOG") else {
+    let Some(path) = vfs_env::raw(vfs_env::SHIM_STATS_LOG) else {
         return;
     };
     let _ = std::thread::Builder::new()

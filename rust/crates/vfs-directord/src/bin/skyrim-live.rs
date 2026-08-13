@@ -61,10 +61,10 @@ fn run() -> Result<(), String> {
     // Load benchmark: record phase timings and, when VFS_BENCH=1, stop at the
     // first rendered frame instead of running the game indefinitely.
     let mut timeline = vfs_director::bench::Timeline::new();
-    let bench = std::env::var("VFS_BENCH").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    let bench = vfs_env::opt_in(vfs_env::BENCH);
 
-    let zip_path = env_path("VFS_SKYRIM_ZIP", r"C:\tmp\skyrimse.zip");
-    let data = env_path("VFS_SKYRIM_DATA", r"C:\tmp\skyrim-data");
+    let zip_path = env_path(vfs_env::SKYRIM_ZIP, r"C:\tmp\skyrimse.zip");
+    let data = env_path(vfs_env::SKYRIM_DATA, r"C:\tmp\skyrim-data");
     let state = data.join("vfs-state");
     let saves = data.join("saves");
     let profiles = data.join("profiles");
@@ -80,10 +80,10 @@ fn run() -> Result<(), String> {
     // an image under C:\tmp — Steam associates the process via steam_appid.txt
     // and the running client, not the image path. `VFS_LAUNCH_IMAGE` overrides,
     // for bisecting against a real install.
-    let preset_host = std::env::var("VFS_LAUNCH_IMAGE").ok().filter(|h| Path::new(h).is_file());
+    let preset_host = vfs_env::text(vfs_env::LAUNCH_IMAGE).filter(|h| Path::new(h).is_file());
 
     // Managed root: never the Steam tree. Content is served here from the zip.
-    let root = if let Some(r) = std::env::var_os("VFS_SKYRIM_ROOT") {
+    let root = if let Some(r) = vfs_env::raw(vfs_env::SKYRIM_ROOT) {
         PathBuf::from(r)
     } else {
         PathBuf::from(r"C:\tmp\skyrim-runtime")
@@ -92,9 +92,9 @@ fn run() -> Result<(), String> {
 
     // Optional mod overlay (e.g. an unpacked SKSE) composed over the zip, and
     // the executable to launch — `skse64_loader.exe` to go through SKSE.
-    let mods_dir = std::env::var_os("VFS_SKYRIM_MODS").map(PathBuf::from);
+    let mods_dir = vfs_env::path(vfs_env::SKYRIM_MODS);
     let launch_exe =
-        std::env::var("VFS_SKYRIM_LAUNCH").unwrap_or_else(|_| "SkyrimSE.exe".to_string());
+        vfs_env::text(vfs_env::SKYRIM_LAUNCH).unwrap_or_else(|| "SkyrimSE.exe".to_string());
 
     eprintln!("skyrim-live");
     eprintln!("  zip:       {}", zip_path.display());
@@ -153,12 +153,12 @@ fn run() -> Result<(), String> {
     //
     // Default on, but honour an explicit setting. `VFS_KEEP_HOST_STEAM_API=0`
     // serves steam_api* from the zip instead.
-    if std::env::var_os("VFS_KEEP_HOST_STEAM_API").is_none() {
-        std::env::set_var("VFS_KEEP_HOST_STEAM_API", "1");
+    if !vfs_env::present(vfs_env::KEEP_HOST_STEAM_API) {
+        std::env::set_var(vfs_env::KEEP_HOST_STEAM_API, "1");
     }
-    std::env::remove_var("VFS_ALLOW_DISK_FALLTHROUGH");
-    std::env::remove_var("VFS_DISK_ONLY_ROOT");
-    if let Some(p) = std::env::var_os("VFS_DIRECTOR_OPEN_LOG") {
+    std::env::remove_var(vfs_env::ALLOW_DISK_FALLTHROUGH);
+    std::env::remove_var(vfs_env::DISK_ONLY_ROOT);
+    if let Some(p) = vfs_env::raw(vfs_env::DIRECTOR_OPEN_LOG) {
         eprintln!("  director-open log: {}", p.to_string_lossy());
     }
 
@@ -167,7 +167,7 @@ fn run() -> Result<(), String> {
     // point is differential diagnosis: it keeps the shim, the staging, the
     // sealed root and the launch path identical while changing only where bytes
     // come from, so a behaviour that survives the swap is not the archive's.
-    let disk_src = std::env::var_os("VFS_SKYRIM_DISK").map(PathBuf::from);
+    let disk_src = vfs_env::path(vfs_env::SKYRIM_DISK);
     let backend: Arc<dyn Backend> = if let Some(d) = &disk_src {
         if !d.is_dir() {
             return Err(format!("VFS_SKYRIM_DISK not a directory: {}", d.display()));
@@ -311,7 +311,7 @@ fn run() -> Result<(), String> {
                 staged.staged().join(", ")
             );
             let exe = staged.exe().to_string_lossy().into_owned();
-            std::env::set_var("VFS_LAUNCH_IMAGE", &exe);
+            std::env::set_var(vfs_env::LAUNCH_IMAGE, &exe);
             _staged = staged;
             exe
         }
@@ -326,7 +326,7 @@ fn run() -> Result<(), String> {
     // Preflight host open/read is not ring I/O — reset so post-launch stats are clean.
     vfs_director::io_stats_reset();
 
-    let wait = std::env::var("VFS_WAIT").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    let wait = vfs_env::opt_in(vfs_env::WAIT);
     let code = session.launch(&LaunchOpts {
         image: host.clone(),
         args: vec![],
@@ -352,7 +352,7 @@ fn run() -> Result<(), String> {
         timeline.mark("window visible");
 
         let totals = vfs_director::io_stats::totals();
-        let label = std::env::var("VFS_BENCH_LABEL").unwrap_or_else(|_| "run".to_string());
+        let label = vfs_env::text(vfs_env::BENCH_LABEL).unwrap_or_else(|| "run".to_string());
         eprint!("{}", bench::report(&timeline, &totals, &label));
         match size {
             Some((w, h)) => eprintln!("  window: {w}x{h} (pid {pid})"),

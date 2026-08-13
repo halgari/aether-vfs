@@ -7,5 +7,6 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+vfs-env = { path = "../vfs-env" }
 vfs-shim = { path = "../vfs-shim" }
 windows-sys = { version = "0.59", features = ["Win32_Foundation"] }

@@ -57,7 +57,7 @@ pub fn ensure_payload_beside_shim(shim_dll: &str, preferred_payload: Option<&str
             candidates.push(c);
         }
     }
-    if let Ok(p) = std::env::var("VFS_PAYLOAD_PATH") {
+    if let Some(p) = vfs_env::text(vfs_env::PAYLOAD_PATH) {
         let c = PathBuf::from(p);
         if c.is_file() {
             candidates.push(c);

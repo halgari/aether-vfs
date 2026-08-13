@@ -139,7 +139,28 @@ policy is unit-testable away from the hooks.
 Getting the shim into the process before the process needs the VFS. This is the
 subtlest part of the system and gets its own section below.
 
-### 3.7 Control plane — `vfs-control`, `vfs-directord`, `vfs-launch`
+### 3.7 Configuration — `vfs-env`
+
+Almost all configuration crosses a process boundary: the host sets environment
+variables, `CreateProcessW` inherits them, and the shim reads them inside the
+game. That is the right mechanism for a boundary we do not otherwise control,
+but spelling the names as literals at both ends made drift free and silent — a
+rename at the writer that misses the reader produces no error, just a feature
+that quietly stops working.
+
+`vfs-env` holds one constant per name, a table describing all of them, and a
+test that fails if any crate reads a `VFS_*` name absent from that table. It has
+no dependencies, so even the shim can use it.
+
+Two boolean forms, because the tree already had both spelled inconsistently:
+`opt_in` is off unless explicitly enabled (used for anything that relaxes a
+guarantee — `ALLOW_DISK_FALLTHROUGH` un-seals the managed root, and must not be
+enableable by accident), and `opt_out` is on unless explicitly disabled.
+
+`vfs_env::describe()` prints the whole surface; the rustdoc on each constant is
+the reference.
+
+### 3.8 Control plane — `vfs-control`, `vfs-directord`, `vfs-launch`
 
 A gRPC contract plus a declarative config schema, a daemon that can hold many
 sessions, and CLIs. The control plane is language-agnostic; the data plane is
@@ -471,6 +492,7 @@ observer before concluding the process is idle.
 | `vfs-director` | FUSE kernel, session, staging, launch |
 | `vfs-directord` | daemon + CLI; `skyrim-live` harness |
 | `vfs-control` | gRPC contract + config schema |
+| `vfs-env` | every `VFS_*` switch, defined once, with a drift test |
 | `vfs-redirect` | pure redirect-decision core |
 | `vfs-shim` / `vfs-shim-dll` | NT detours, FUSE client, synthetic handles, sections |
 | `vfs-payload` | `no_std` pre-init hook payload |

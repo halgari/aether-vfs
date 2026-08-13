@@ -252,7 +252,7 @@ impl Session {
             std::env::set_var(k, v);
         }
 
-        let ready_timeout = std::env::var("VFS_READY_TIMEOUT_SECS")
+        let ready_timeout = vfs_env::text(vfs_env::READY_TIMEOUT_SECS).ok_or(())
             .ok()
             .and_then(|s| s.parse().ok())
             .map(Duration::from_secs)

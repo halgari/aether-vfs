@@ -31,7 +31,7 @@ pub extern "system" fn vfs_shim_sync_bootstrap(payload_cfg: *mut c_void) -> u32 
 
 /// Classic async bootstrap (loader-lock safe: runs off DllMain).
 fn bootstrap() {
-    let config = match std::env::var("VFS_SHIM_CONFIG") {
+    let config = match vfs_env::text(vfs_env::SHIM_CONFIG).ok_or(()) {
         Ok(c) => c,
         Err(_) => {
             log_boot("VFS_SHIM_CONFIG unset");
@@ -41,7 +41,7 @@ fn bootstrap() {
     match vfs_shim::bootstrap_from_config_path(&config) {
         Ok(guard) => {
             core::mem::forget(guard);
-            if let Ok(ready) = std::env::var("VFS_SHIM_READY") {
+            if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
                 let _ = std::fs::write(&ready, b"ready");
             }
         }
@@ -52,7 +52,7 @@ fn bootstrap() {
 }
 
 fn log_boot(msg: &str) {
-    if let Ok(ready) = std::env::var("VFS_SHIM_READY") {
+    if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
         let path = format!("{ready}.boot.log");
         let _ = std::fs::write(&path, msg.as_bytes());
     }

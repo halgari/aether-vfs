@@ -16,7 +16,7 @@ pub struct Discovery {
 /// Default discovery path: `%LOCALAPPDATA%/vfs-director/discovery.json` on
 /// Windows, `~/.cache/vfs-director/discovery.json` elsewhere.
 pub fn default_discovery_path() -> PathBuf {
-    if let Ok(p) = std::env::var("VFS_DISCOVERY_PATH") {
+    if let Some(p) = vfs_env::text(vfs_env::DISCOVERY_PATH) {
         return PathBuf::from(p);
     }
     if let Ok(base) = std::env::var("LOCALAPPDATA") {

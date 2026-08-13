@@ -73,7 +73,7 @@ impl EventNotifier {
 fn spin_budget() -> Duration {
     static US: OnceLock<u64> = OnceLock::new();
     Duration::from_micros(*US.get_or_init(|| {
-        std::env::var("VFS_RING_SPIN_US")
+        vfs_env::text(vfs_env::RING_SPIN_US).ok_or(())
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(400)

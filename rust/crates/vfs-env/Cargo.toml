@@ -1,0 +1,9 @@
+[package]
+name = "vfs-env"
+version = "0.1.0"
+edition = "2021"
+description = "The complete VFS_* environment switch surface: one definition per name."
+
+# Deliberately no dependencies. Every crate that reads a switch depends on this,
+# including the shim that runs inside the game, so it must stay free.
+[dependencies]

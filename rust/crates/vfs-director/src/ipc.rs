@@ -155,15 +155,15 @@ impl IpcServe {
 
     pub fn apply_env(&self, virtual_root: &str, thin_cfg: &std::path::Path) {
         // Process-global env is for the injected child (and single-session hosts).
-        std::env::set_var("VFS_RING_SECTION", &self.section_name);
-        std::env::set_var("VFS_RING_BYTES", self.map_bytes.to_string());
-        std::env::set_var("VFS_RING_PAYLOAD_CAP", self.payload_cap.to_string());
-        std::env::set_var("VFS_ARENA_OFFSET", self.arena_offset.to_string());
-        std::env::set_var("VFS_ARENA_LEN", self.arena_len.to_string());
-        std::env::set_var("VFS_SERVER_EV", &self.server_ev_name);
-        std::env::set_var("VFS_CLIENT_EV", &self.client_ev_name);
-        std::env::set_var("VFS_FUSE_CFG", thin_cfg.to_string_lossy().as_ref());
-        std::env::set_var("VFS_VIRTUAL_DIR", virtual_root);
+        std::env::set_var(vfs_env::RING_SECTION, &self.section_name);
+        std::env::set_var(vfs_env::RING_BYTES, self.map_bytes.to_string());
+        std::env::set_var(vfs_env::RING_PAYLOAD_CAP, self.payload_cap.to_string());
+        std::env::set_var(vfs_env::ARENA_OFFSET, self.arena_offset.to_string());
+        std::env::set_var(vfs_env::ARENA_LEN, self.arena_len.to_string());
+        std::env::set_var(vfs_env::SERVER_EV, &self.server_ev_name);
+        std::env::set_var(vfs_env::CLIENT_EV, &self.client_ev_name);
+        std::env::set_var(vfs_env::FUSE_CFG, thin_cfg.to_string_lossy().as_ref());
+        std::env::set_var(vfs_env::VIRTUAL_DIR, virtual_root);
     }
 }
 

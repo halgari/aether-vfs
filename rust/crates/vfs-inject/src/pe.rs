@@ -86,11 +86,14 @@ pub fn is_system_import_dll(name: &str) -> bool {
         )
 }
 
+/// Whether `steam_api*.dll` stays the host copy rather than being served from
+/// the VFS.
+///
+/// Unset means **false** here and **true** in `vfs-shim`, which is deliberate:
+/// the shim's exception predates the switch, so a launch that never sets it
+/// must keep seeing the host copy. Both read the same name from `vfs-env`.
 pub fn keep_host_steam_api() -> bool {
-    match std::env::var("VFS_KEEP_HOST_STEAM_API") {
-        Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("no")),
-        Err(_) => false,
-    }
+    vfs_env::present(vfs_env::KEEP_HOST_STEAM_API) && vfs_env::opt_out(vfs_env::KEEP_HOST_STEAM_API)
 }
 
 pub fn map_image_from_pe_bytes_local(pe: &[u8]) -> Result<(*mut c_void, usize), &'static str> {

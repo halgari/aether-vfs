@@ -11,6 +11,7 @@ vfs-protocol = { path = "../vfs-protocol" }
 vfs-ipc = { path = "../vfs-ipc" }
 vfs-win = { path = "../vfs-win" }
 # Dual-layer vehicle (reflective map + RIP-redirect + spin gate) for children.
+vfs-env = { path = "../vfs-env" }
 vfs-inject = { path = "../vfs-inject" }
 retour = { version = "0.3", default-features = false }
 windows-sys = { version = "0.59", features = [

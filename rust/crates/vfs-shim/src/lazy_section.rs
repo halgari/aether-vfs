@@ -185,7 +185,7 @@ pub unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option<isize>
         return None;
     }
     // Install VEH only if not disabled (VFS_LAZY_NO_VEH=1 for debug).
-    if std::env::var_os("VFS_LAZY_NO_VEH").is_none() {
+    if !vfs_env::present(vfs_env::LAZY_NO_VEH) {
         ensure_veh();
     }
     ensure_worker();

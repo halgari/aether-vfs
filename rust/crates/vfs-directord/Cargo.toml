@@ -18,6 +18,7 @@ name = "skyrim-live"
 path = "src/bin/skyrim-live.rs"
 
 [dependencies]
+vfs-env = { path = "../vfs-env" }
 vfs-control = { path = "../vfs-control" }
 vfs-source = { path = "../vfs-source" }
 vfs-director = { path = "../vfs-director" }

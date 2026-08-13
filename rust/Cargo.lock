@@ -1563,6 +1563,7 @@ name = "vfs-director"
 version = "0.1.0"
 dependencies = [
  "vfs-compose",
+ "vfs-env",
  "vfs-inject",
  "vfs-ipc",
  "vfs-protocol",
@@ -1589,10 +1590,15 @@ dependencies = [
  "vfs-compose",
  "vfs-control",
  "vfs-director",
+ "vfs-env",
  "vfs-protocol",
  "vfs-source",
  "vfs-zip",
 ]
+
+[[package]]
+name = "vfs-env"
+version = "0.1.0"
 
 [[package]]
 name = "vfs-fixture-read"
@@ -1619,6 +1625,7 @@ name = "vfs-inject"
 version = "0.1.0"
 dependencies = [
  "vfs-core",
+ "vfs-env",
  "vfs-shared",
  "vfs-shim",
  "vfs-zip",
@@ -1692,6 +1699,7 @@ version = "0.1.0"
 dependencies = [
  "retour",
  "vfs-core",
+ "vfs-env",
  "vfs-inject",
  "vfs-ipc",
  "vfs-protocol",
@@ -1705,6 +1713,7 @@ dependencies = [
 name = "vfs-shim-dll"
 version = "0.1.0"
 dependencies = [
+ "vfs-env",
  "vfs-shim",
  "windows-sys 0.59.0",
 ]
@@ -1730,6 +1739,7 @@ dependencies = [
 name = "vfs-win"
 version = "0.1.0"
 dependencies = [
+ "vfs-env",
  "vfs-ipc",
  "windows-sys 0.59.0",
 ]

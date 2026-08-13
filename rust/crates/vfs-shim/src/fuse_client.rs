@@ -51,20 +51,18 @@ pub fn try_init_from_env() -> Result<(), String> {
     if FUSE.get().is_some() {
         return Ok(());
     }
-    let section = std::env::var("VFS_RING_SECTION").map_err(|_| "VFS_RING_SECTION unset")?;
-    let ring_bytes: usize = std::env::var("VFS_RING_BYTES")
-        .ok()
+    let section = vfs_env::text(vfs_env::RING_SECTION).ok_or("VFS_RING_SECTION unset")?;
+    let ring_bytes: usize = vfs_env::text(vfs_env::RING_BYTES)
         .and_then(|s| s.parse().ok())
         .unwrap_or(2 * 1024 * 1024);
-    let payload_cap: u32 = std::env::var("VFS_RING_PAYLOAD_CAP")
-        .ok()
+    let payload_cap: u32 = vfs_env::text(vfs_env::RING_PAYLOAD_CAP)
         .and_then(|s| s.parse().ok())
         .unwrap_or(1_048_576);
-    let arena_len: usize = std::env::var("VFS_ARENA_LEN")
-        .ok()
+    let arena_len: usize = vfs_env::text(vfs_env::ARENA_LEN)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let root = std::env::var("VFS_VIRTUAL_DIR").unwrap_or_else(|_| r"C:\GameLayers\runtime".into());
+    let root = vfs_env::text(vfs_env::VIRTUAL_DIR)
+        .unwrap_or_else(|| r"C:\GameLayers\runtime".into());
     let client = FuseClient::connect(&section, &root, payload_cap, ring_bytes, arena_len)?;
     client.heartbeat()?;
     let _ = FUSE.set(client);
@@ -151,8 +149,7 @@ impl FuseClient {
         let geom = vfs_ipc::ring::open(mapping.seg()).map_err(|e| format!("ring open: {e:?}"))?;
         // Opening the director's wake event is best-effort: without it the ring
         // still works, it just falls back to the director's timed wait.
-        let server_ev = std::env::var("VFS_SERVER_EV")
-            .ok()
+        let server_ev = vfs_env::text(vfs_env::SERVER_EV)
             .map(|n| {
                 let w: Vec<u16> = n.encode_utf16().chain(core::iter::once(0)).collect();
                 // SAFETY: name is NUL-terminated; a failed open returns null.
@@ -507,12 +504,17 @@ impl FuseClient {
     }
 }
 
-/// Directory holding the staged launch image, derived from `VFS_HOLLOW_HOST`.
+/// Directory holding the staged launch image, derived from [`vfs_env::LAUNCH_IMAGE`].
 ///
 /// The staged EXE and its imports live there physically; everything else the
 /// game asks for beside it must come from the VFS.
+///
+/// This read used the pre-rename name until 2026-08-13, so the alias silently
+/// resolved to nothing after the hollow removal renamed the writer. It did not
+/// bite because the same change moved the child's cwd to the managed root — but
+/// nothing reported it, which is why the name now comes from `vfs-env`.
 fn stage_root_from_env() -> Option<String> {
-    let host = std::env::var("VFS_HOLLOW_HOST").ok()?;
+    let host = vfs_env::text(vfs_env::LAUNCH_IMAGE)?;
     let dir = std::path::Path::new(&host).parent()?;
     let s = dir.to_string_lossy();
     if s.is_empty() {

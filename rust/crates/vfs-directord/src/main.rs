@@ -86,7 +86,7 @@ async fn main() -> ExitCode {
 async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let discovery = cli.discovery.clone().or_else(|| {
-        std::env::var_os("VFS_DISCOVERY_PATH").map(PathBuf::from)
+        vfs_env::path(vfs_env::DISCOVERY_PATH)
     });
 
     match cli.command {
@@ -94,7 +94,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let addr: SocketAddr = bind.parse().map_err(|e| format!("bad --bind {bind}: {e}"))?;
             let path = discovery.unwrap_or_else(default_discovery_path);
             if let Some(p) = discovery_path_for_env(&path) {
-                std::env::set_var("VFS_DISCOVERY_PATH", p);
+                std::env::set_var(vfs_env::DISCOVERY_PATH, p);
             }
             serve_daemon(addr, path)
                 .await

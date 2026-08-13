@@ -39,10 +39,7 @@ fn in_hook_reenter() -> bool {
 /// come from the director (zip/overrides), never the Steam library tree.
 fn allow_disk_fallthrough() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| match std::env::var("VFS_ALLOW_DISK_FALLTHROUGH") {
-        Ok(v) => v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"),
-        Err(_) => false,
-    })
+    *FLAG.get_or_init(|| vfs_env::opt_in(vfs_env::ALLOW_DISK_FALLTHROUGH))
 }
 
 /// Whether `steam_api*.dll` stays the host-install copy (excepted from the
@@ -57,10 +54,7 @@ fn allow_disk_fallthrough() -> bool {
 /// without setting the variable must keep seeing the host copy.
 fn keep_host_steam_api() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| match std::env::var("VFS_KEEP_HOST_STEAM_API") {
-        Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("no")),
-        Err(_) => true,
-    })
+    *FLAG.get_or_init(|| vfs_env::opt_out(vfs_env::KEEP_HOST_STEAM_API))
 }
 
 /// Whether a child process we inject starts with its working directory set to
@@ -74,10 +68,7 @@ fn keep_host_steam_api() -> bool {
 /// where both actually live.
 fn child_cwd_root() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| match std::env::var("VFS_CHILD_CWD_ROOT") {
-        Ok(v) => !(v == "0" || v.eq_ignore_ascii_case("false") || v.eq_ignore_ascii_case("no")),
-        Err(_) => true,
-    })
+    *FLAG.get_or_init(|| vfs_env::opt_out(vfs_env::CHILD_CWD_ROOT))
 }
 
 /// Experiment switch: when `VFS_FUSE_SKYRIM_EXE=1`, serve `SkyrimSE.exe`
@@ -103,10 +94,7 @@ fn child_cwd_root() -> bool {
 /// launcher stay excepted.
 fn fuse_skyrim_exe() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| match std::env::var("VFS_FUSE_SKYRIM_EXE") {
-        Ok(v) => v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"),
-        Err(_) => false,
-    })
+    *FLAG.get_or_init(|| vfs_env::opt_in(vfs_env::FUSE_SKYRIM_EXE))
 }
 
 use retour::RawDetour;
@@ -264,11 +252,9 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let default = std::env::var("VFS_STATE_DIR")
-            .ok()
+        let default = vfs_env::text(vfs_env::STATE_DIR)
             .map(|d| format!("{d}\\shim-panic.log"));
-        let path = std::env::var("VFS_SHIM_PANIC_LOG")
-            .ok()
+        let path = vfs_env::text(vfs_env::SHIM_PANIC_LOG)
             .or(default)
             .unwrap_or_else(|| r"C:\tmp\skyrim-data\vfs-state\shim-panic.log".to_string());
         let prev = std::panic::take_hook();
@@ -867,7 +853,7 @@ unsafe fn try_fuse_create(
 /// `rel` marks a FUSE-relative OA (RootDirectory is a synthetic handle), which
 /// is the shape that previously failed with `STATUS_OBJECT_NAME_NOT_FOUND`.
 fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool, via_director: bool) {
-    let Some(path) = std::env::var_os("VFS_DRM_EXE_LOG").map(std::path::PathBuf::from) else {
+    let Some(path) = vfs_env::path(vfs_env::DRM_EXE_LOG) else {
         return;
     };
     let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
@@ -898,7 +884,7 @@ fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool, via_director: boo
 /// Optional proof that opens went through the director (not host disk).
 /// Set `VFS_DIRECTOR_OPEN_LOG` to a file path.
 fn director_open_trace(nt_or_win_path: &str, size: u64) {
-    let Some(path) = std::env::var_os("VFS_DIRECTOR_OPEN_LOG").map(std::path::PathBuf::from) else {
+    let Some(path) = vfs_env::path(vfs_env::DIRECTOR_OPEN_LOG) else {
         return;
     };
     let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
@@ -2435,7 +2421,7 @@ unsafe fn fuse_create_section(
     // view are page faults served by the lazy-section VEH, so they appear in
     // neither NtReadFile nor the hook counters. Bypassing it makes that traffic
     // visible as ordinary reads.
-    if std::env::var_os("VFS_REJECT_FUSE_DATA_SECTION").is_some() {
+    if vfs_env::present(vfs_env::REJECT_FUSE_DATA_SECTION) {
         return STATUS_INVALID_FILE_FOR_SECTION;
     }
 
@@ -2483,7 +2469,7 @@ unsafe fn fuse_create_section(
     };
     // Opt-in trace only: this runs inside NtCreateSection, so the file I/O
     // re-enters our own hooks on every section the game creates.
-    if let Some(path) = std::env::var_os("VFS_SECTION_FILL_LOG") {
+    if let Some(path) = vfs_env::raw(vfs_env::SECTION_FILL_LOG) {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
             use std::io::Write;
             let _ = writeln!(f, "eager fh={fh} size={size} ok={fill_ok}");
@@ -2533,7 +2519,7 @@ unsafe extern "system" fn create_section_hook(
     // Without this, NtCreateSection fails on fake handles (game mmap of BSAs).
     if crate::fuse_synth::is_fuse_synth(file_handle as isize) {
         // Debug: VFS_REJECT_FUSE_SECTION=1 forces ReadFile path (no section map).
-        if std::env::var_os("VFS_REJECT_FUSE_SECTION").is_some() {
+        if vfs_env::present(vfs_env::REJECT_FUSE_SECTION) {
             return STATUS_INVALID_FILE_FOR_SECTION;
         }
         return fuse_create_section(
@@ -2731,8 +2717,7 @@ unsafe extern "system" fn cpiw_hook(
     // (see `child_cwd_root`). Kept alive for the whole call: `cur_dir_eff` may
     // point into it.
     let root_cwd_w: Option<Vec<u16>> = if child_cwd_root() {
-        std::env::var("VFS_VIRTUAL_DIR")
-            .ok()
+        vfs_env::text(vfs_env::VIRTUAL_DIR)
             .filter(|d| !d.is_empty())
             .map(|d| d.encode_utf16().chain(core::iter::once(0)).collect())
     } else {

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+vfs-env = { path = "../vfs-env" }
 vfs-core = { path = "../vfs-core" }
 vfs-zip = { path = "../vfs-zip" }
 windows-sys = { version = "0.59", features = [
