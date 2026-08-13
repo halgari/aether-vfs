@@ -1,0 +1,293 @@
+# No Bypass and Real Roots — Design Spec
+
+**Date:** 2026-08-13
+**Status:** Approved, not implemented. Stage 2 of the five-stage plan in
+[2026-08-13-pluggable-providers-design.md](2026-08-13-pluggable-providers-design.md).
+**Scope:** Windows-only. This is entirely about the shim/director boundary.
+
+## 1. Goal
+
+Two things, in this order:
+
+1. **No bypass.** If a path resolves under a managed root, every NT operation on
+   it is answered by the director. The real filesystem under a managed root is
+   unreachable by any spelling, by any process in the session.
+2. **Real roots.** A session virtualizes several filesystem locations, each with
+   exactly one provider, addressed as `(RootId, root-relative path)`.
+
+Stage 1 put `RootId` in the type system with every call site passing
+`RootId::DEFAULT`. This stage makes it mean something — but not before the
+bypass work, for the reason in §7.
+
+## 2. Locked decisions
+
+| Fork | Decision |
+|------|----------|
+| Bypass scope | **Every byte routes through the director.** `Redirect` and `Serve` are deleted, not narrowed. |
+| Real files under a root that no provider serves | **Invisible.** The root is fully virtual; mount a `disk` provider to expose a real tree. |
+| Published snapshot | **Deleted as a shim input.** All metadata routes. The shim keeps one local predicate: is this path under a managed root? |
+| DRM/identity exceptions | **Closed completely.** No allow-list, no fallback. |
+| Ordering | **No-bypass (2a) before real roots (2b).** |
+
+### The cost question, answered before it is asked
+
+Routing everything is not a new cost. `try_fuse_create` already runs *before*
+the `decision_for` match (`vfs-shim/src/hook.rs:1044`), so when the FUSE client
+is active it takes every under-root open and `Redirect`/`Serve` are never
+reached — they are the fallback for when the client failed to initialise. Every
+figure in `rust/docs/benchmarks/` (the A/B/C optimisation series, the bulk
+arena, spin-then-wait) measured the ring path, not the redirect path.
+
+The work here is mostly deletion. The redirect fast path could only ever serve
+the disk provider anyway: `Decision::Redirect` carries a real NT path, which a
+`memory` provider or a host-language provider does not have.
+
+## 3. The invariant
+
+> For any path P and any process in the session, if P resolves under a managed
+> root, every NT operation on P is answered by the director.
+
+### What 2a achieves, and the one hole it leaves
+
+2a achieves this for **opens, reads, metadata queries, and directory
+enumeration**. It does **not** close writes, and that must be stated plainly
+rather than discovered later.
+
+The reason is a hard dependency: the director cannot serve a write today.
+`Director::open` rejects `OPEN_WRITE` and `ring_dispatch` implements no write
+opcodes, so an under-root write open has nowhere to go. The shim's comment at
+`hook.rs:797` — "Writes may fall through for shim-local overlay redirect" — is
+load-bearing until Stage 3 routes writes through the provider stack. Closing it
+in 2a without Stage 3 would mean the game cannot write its INIs, logs, or
+saves.
+
+So during 2a the write path is a **declared, counted, reported** exception:
+every write that falls through is recorded by `(root, path)` and surfaced in
+`vfs stats`, exactly like the rejected-write diagnostics Stage 3 specifies.
+The no-bypass property is **incomplete until Stage 3**, and this spec does not
+claim otherwise.
+
+### Fail-closed replaces fail-open
+
+The current decision logic is explicitly fail-safe in the opposite direction.
+`vfs-redirect/src/lib.rs:47`:
+
+> Fail-safe: any path that is malformed, outside the root, or does not
+> positively resolve to a virtualized file yields `PassThrough`.
+
+Uncertainty currently resolves toward the real filesystem. This stage inverts
+that: under a managed root, uncertainty resolves toward the director.
+
+Three consequences, each a behaviour change:
+
+- **FUSE init failure becomes a launch failure.** Today `fuse_client::global()`
+  returning `None` means every path passes through — the game runs completely
+  un-virtualized and nothing reports it. This is the largest bypass in the
+  system and it is silent.
+- **`NotFound` under a root returns not-found.** The real filesystem no longer
+  answers.
+- **`Dir` under a root returns a director-served handle.** No real directory
+  handles are issued for paths under a root.
+
+### One predicate
+
+The shim currently makes five independent policy decisions: `decide()`,
+`query_attributes()`, `merge_directory()`, the DRM filename match, and
+`fuse_root_directory` handling. Each is a place an escape can hide, and each
+would separately need to become multi-root aware in 2b.
+
+After 2a the shim decides exactly one thing: **is this path under a managed
+root?** Everything else is the director's answer. One predicate can be
+enumerated against and tested exhaustively; five cannot.
+
+## 4. What is deleted, what survives
+
+| Component | Fate |
+|---|---|
+| `Decision::Redirect` / `Serve` / `Deny` | Deleted. The enum collapses to under-root or not. |
+| `AttrDecision`, `query_attributes`, `merge_directory` | Deleted — metadata routes. |
+| `vfs-redirect` snapshot-consuming logic | Deleted (~1,000 lines). `RootMap` survives and becomes multi-root in 2b. |
+| `vfs-shim`'s `zipserve` legacy synthetic path | Deleted — the FUSE synthetic-handle path supersedes it. |
+| DRM filename exceptions (`hook.rs:751-795`) | Deleted. See §6. |
+| `vfs-shared` snapshot / seqlock / builder | **Retained.** Removing the shim as a consumer is in scope; retiring the crate is not — see below. |
+
+**Why `vfs-shared` stays.** `vfs-server` and `xtask-descriptor` still consume
+it. `vfs-server` is not the product path, but its own docs record that it is the
+stable baseline the published benchmark numbers are measured against, and that
+it should be retired only once the benchmark can express the same thing against
+the director. That is not this stage's job.
+
+The shim **keeps** its synthetic-handle table, section mapping, and
+`NtReadFile`/`NtWriteFile` routing. That is the surviving path, and it is the
+one the benchmarks already measure.
+
+## 5. Escapes
+
+### The vectors
+
+| # | Vector | Example |
+|---|---|---|
+| 1 | 8.3 short name | `C:\Games\SKYRIM~1\Data\x.esp` |
+| 2 | Extended-length prefix | `\\?\C:\Games\Skyrim\…` |
+| 3 | NT device path | `\Device\HarddiskVolume3\Games\Skyrim\…` |
+| 4 | Volume GUID path | `\\?\Volume{…}\Games\Skyrim\…` |
+| 5 | Handle-relative open | `OBJECT_ATTRIBUTES.RootDirectory` outside the root, relative name into it |
+| 6 | CWD-relative | `Data\x.esp` |
+| 7 | Junction / reparse point | a junction into or out of the root |
+| 8 | Hardlink | a link outside the root to a staged file inside it |
+| 9 | UNC / subst / mapped drive | `\\localhost\C$\Games\Skyrim\…`, `Z:\` subst to the root |
+| 10 | Unicode form, trailing dots or spaces | `Data.` ≡ `Data` |
+| 11 | Alternate data stream | `x.esp:stream` |
+| 12 | `.` / `..` components, trailing separators | `…\Data\..\Data\x.esp` |
+| 13 | Handle opened before the root registered | enumeration on a stale real directory handle |
+| 14 | Child process without the shim | a game-spawned helper sees the raw tree |
+
+Vector 6 is not hypothetical: CWD-relative opens being undecodable is what
+produced an empty load order previously.
+
+### Resolution strategy
+
+Canonicalise rather than pattern-match. Every under-root candidate resolves to
+one canonical form:
+
+- resolve the volume device prefix once at session start
+  (`\Device\HarddiskVolumeN` ↔ `C:`),
+- expand 8.3 names,
+- strip extended-length and volume-GUID prefixes,
+- fold `.` and `..` and trailing separators,
+- split off any alternate-stream suffix,
+- case-fold as today.
+
+Canonicalisation is cached keyed on the raw input string. The existing
+instrumentation already shows opens repeat heavily during load, so the cache
+should absorb nearly all of the cost.
+
+Handle-relative opens (5) reuse machinery the shim already has: `record_path`,
+`record_identity`, and `tag_under_root` track handles the shim issued. For a
+handle the shim never saw, it queries the OS for the final path rather than
+guessing.
+
+### Undecodable paths become errors
+
+`note_undecodable` exists today as a counter. Under fail-closed: attempt OS
+canonicalisation; if that fails and any evidence relates the path to a root,
+deny and log loudly. A nonzero undecodable count fails the test run.
+
+### Proving closure — the dual canary suite
+
+Containment is a negative property, so the evidence has to be a negative test.
+
+- **Negative canary.** A real file on disk under the managed root that no
+  provider serves. A fixture attempts all fourteen spellings. **Every attempt
+  must fail with not-found.** Any spelling that reaches it fails the suite and
+  names the spelling.
+- **Positive canary.** A file the provider *does* serve, reached via the same
+  fourteen spellings. **Every attempt must succeed** with byte-identical
+  content.
+
+The positive canary exists because the cheap way to pass the negative test is to
+break legitimate access. Both run in one fixture (`vfs-fixture-escape`) under a
+real session and report a 14 × 2 matrix.
+
+Vectors needing setup that is scriptable without admin — junctions via
+`mklink /J`, `subst` for mapped drives, same-volume hardlinks — are set up by
+the harness. Any vector that genuinely cannot be constructed in a given
+environment is **reported as unbuildable, never silently skipped**: a skipped
+containment test that reads as a pass is how this property rots.
+
+### The continuous check
+
+The shim counts opens it classified as under-root; the director counts opens it
+received. **These must be equal.** Any drift is a bypass by definition.
+Surfaced in `vfs stats` and asserted in the end-to-end test, this turns the
+invariant from something proven once into something monitored — which matters
+because escapes are reintroduced by ordinary refactoring, not by malice.
+
+## 6. The DRM exceptions, and the risk
+
+Four host-tree filenames currently trampoline to the real filesystem
+(`vfs-shim/src/hook.rs:751-795`): `steam_appid.txt`, `SkyrimSELauncher.exe`,
+`steam_api*.dll` (under `keep_host_steam_api`), and `SkyrimSE.exe` (unless
+`fuse_skyrim_exe`).
+
+**They are closed completely. No allow-list, no fallback.** The Steam host tree
+is instead mounted as a `disk`-provider root, so those files are served by the
+director from real bytes.
+
+The code's own comment records the hypothesis this rests on:
+
+> Serving it through FUSE was observed to produce "Steam Error"; the cause is an
+> open that fails to resolve (see `tramp_create_abs` and
+> `STATUS_OBJECT_NAME_NOT_FOUND` on FUSE-relative OA), not an integrity check.
+
+and warns explicitly against the competing theory:
+
+> Steam does NOT compare the in-memory image against the on-disk PE. […] Do not
+> "fix" anything here on the theory that the mapped image must match disk.
+
+So the plan is to fix FUSE-relative `OBJECT_ATTRIBUTES` resolution and route
+these paths. **That hypothesis may be wrong.**
+
+**Contingency.** A real Skyrim launch is part of 2a's gate. If it fails with the
+exceptions closed, implementation stops and reports the `drm_exe_trace` output
+and the diagnosis. A bypass is not quietly reintroduced to make the gate green,
+and the stage is not declared done with a game that does not launch.
+
+## 7. Decomposition
+
+### Stage 2a — No bypass
+
+Single root throughout. FUSE routing becomes mandatory; the legacy decision
+paths are deleted; the root becomes fully virtual; paths are canonicalised and
+escapes closed; DRM exceptions removed; the canary suite and the open-count
+reconciliation are built.
+
+### Stage 2b — Real roots
+
+`RootId` threaded through the director and shim; `RootMap` becomes multi-root;
+one provider per root enforced, deleting `Director`'s layer-ordered mount merge
+and the `layer` config field; the root folded into cache keys
+(`vfs-cache/src/provider.rs` carries a comment marking this); named roots in
+config.
+
+### Why this order
+
+2a collapses five decision surfaces to one predicate, so 2b's multi-root work
+modifies one code path. Reversed, `Redirect`, `Serve`, `query_attributes`, and
+`merge_directory` would each be made multi-root aware and then deleted — waste,
+and it would triple the surface the canary suite must cover.
+
+## 8. Stage 2a acceptance criteria
+
+1. Canary matrix green for **read, metadata, and enumeration** access: 14
+   spellings × 2 canaries. Unbuildable vectors reported as unbuildable, never
+   silently skipped. Write access to the negative canary is expected to fall
+   through in 2a and is asserted as *counted*, not as *blocked* — see §3.
+2. Zero undecodable paths across a full game load.
+3. Under-root non-write open count at the shim equals open count at the
+   director. Write opens are counted separately and reported, not zero.
+4. FUSE init failure aborts the launch, with a test asserting it.
+5. Skyrim launches under `tools/gamectl.ps1` and shows the expected load order.
+6. No regression against the figures in `rust/docs/benchmarks/`.
+7. Zero clippy warnings; full suite green.
+
+## 9. Stage 2b acceptance criteria
+
+1. A two-root Skyrim session — game directory and `Documents\My Games\Skyrim` —
+   with a different provider on each.
+2. The same relative path under two roots resolves independently, including
+   through the block cache (the collision the Stage 1 comment records).
+3. `Director` has no mount merge; `layer` is gone from config.
+4. The canary suite passes against every root, not just the first.
+5. No regression against recorded benchmarks; zero clippy; suite green.
+
+## 10. Deferred
+
+- Retiring `vfs-server` and the `vfs-shared` snapshot machinery, which needs the
+  benchmark rebased onto the director first.
+- Write routing through the provider stack — Stage 3. This is the one hole 2a
+  leaves open, for the dependency reason in §3. Until Stage 3 lands, the
+  no-bypass property covers reads, metadata, and enumeration only. The
+  open-count reconciliation keeps the remaining write bypass visible and
+  measured rather than forgotten.
+- Hook-boundary `catch_unwind`, still unimplemented (see the Stage 1 spec).
