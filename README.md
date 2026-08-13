@@ -17,6 +17,7 @@ shared-memory ring + inject/payload/shim stack.
 | [Architectural overview](rust/docs/architecture.md) | Engineers: how the system fits together, and how the hard parts are solved |
 | [Product overview](docs/product-overview.md) | Non-technical: what it does and why it matters |
 | [Benchmarks](rust/docs/benchmarks/) | Measurements and the analysis behind them |
+| [Code audit](rust/docs/audit-2026-08-13.md) | Full-tree review: findings, what was fixed, what was not |
 | [vfs-summary.md](rust/docs/vfs-summary.md) | Earlier long-form technical narrative |
 
 ## Quick start
