@@ -519,7 +519,27 @@ Expected: compile error — `OverlayProvider::new` has the old signature.
 
 - [ ] **Step 3: Implement**
 
-Change `OverlayProvider` to hold `base: Arc<dyn Provider>` and `upper: Arc<dyn Provider>`. `new` validates `upper.capabilities().access == Access::ReadWrite` and returns `Err(&'static str)` otherwise. `capabilities` returns the base's capabilities with `access` forced to `ReadWrite` (a writable upper makes the stack writable regardless of base).
+Change `OverlayProvider` to hold `base: Arc<dyn Provider>` and `upper: Arc<dyn Provider>`. `new` validates `upper.capabilities().access == Access::ReadWrite` and returns `Err(&'static str)` otherwise.
+
+`capabilities` must force **both** `access` and `immutable`:
+
+```rust
+    fn capabilities(&self) -> Capabilities {
+        // A writable upper makes the stack writable regardless of the base, and
+        // a stack you can write to is by definition not immutable — declaring
+        // otherwise would be a promise a caching layer would act on.
+        // `slow` and `preferred_block` still combine across both children.
+        Capabilities {
+            access: Access::ReadWrite,
+            immutable: false,
+            ..Capabilities::weakest([self.base.capabilities(), self.upper.capabilities()])
+        }
+    }
+```
+
+**Forcing `immutable: false` is required, not cosmetic.** `Capabilities::validate()` rejects `ReadWrite + immutable` as self-contradictory, and `InlineProvider` — the base in the conformance test above — declares `immutable: true`. Passing the base's `immutable` through would make `assert_conformance` panic on its own validation call.
+
+**One pre-existing test must be rewritten**, which is the single assertion change authorised in this task: `overlay_capabilities_derive_from_base_but_clamp_access_to_read` asserts the Stage-1 read-only semantics this task supersedes, and can no longer pass under any valid construction. Rename it to `overlay_reports_read_write_and_is_never_immutable`, assert the new semantics, and comment *why* `immutable` is false so a later reader does not "fix" it back.
 
 Whiteouts keep the `.wh.<name>` convention but are now created through the upper provider's `open`/`write_at`, so an in-memory upper gets deletes for free.
 
