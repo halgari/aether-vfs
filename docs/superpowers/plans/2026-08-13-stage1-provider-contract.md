@@ -868,7 +868,7 @@ sub/b.txt      "world!"
 
 - [ ] **Step 1: Read the existing suite before replacing it**
 
-Read `crates/vfs-source/src/conformance.rs` in full. The new suite must assert at least everything it does, or providers could regress silently.
+Read `crates/vfs-source/src/conformance.rs` in full. The new suite must assert at least everything it does, or providers could regress silently. Produce a comparison table in your report: every assertion the old suite makes, and where the new suite makes it. Any gap is a finding, not a footnote — six ports are validated by this suite.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -1152,6 +1152,18 @@ fn assert_common(p: &Arc<dyn Provider>) {
         "root scoping: a.txt resolved under root 0 but not under root 7 — \
          the provider is ignoring the root id"
     );
+
+    // Opening an absent path fails with NOT_FOUND, not some other error and
+    // not success. The old vfs-source suite asserted this; six ports depend
+    // on it staying true.
+    match p.open(VPath::at_default("nope.txt"), crate::OPEN_READ) {
+        Err(e) if e == crate::not_found() => {}
+        Err(e) => panic!("open of an absent path returned status {e}, expected ST_NOT_FOUND"),
+        Ok((h, _, _)) => {
+            let _ = p.close(h);
+            panic!("open of an absent path succeeded; it must fail with ST_NOT_FOUND");
+        }
+    }
 
     // Handles are provider-scoped: two opens are independent.
     let (h1, _, _) = p.open(VPath::at_default("a.txt"), crate::OPEN_READ).expect("open #1");
