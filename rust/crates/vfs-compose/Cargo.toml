@@ -10,4 +10,4 @@ name = "vfs_compose"
 path = "src/lib.rs"
 
 [dependencies]
-vfs-protocol = { path = "../vfs-protocol" }
+vfs-provider = { path = "../vfs-provider" }

@@ -8,28 +8,40 @@ mod inline;
 mod layered;
 mod overlay;
 mod router;
-mod strip_prefix;
+mod subdir;
 
-pub use inline::InlineBackend;
-pub use layered::LayeredBackend;
-pub use overlay::OverlayBackend;
-pub use router::{Route, RouterBackend};
-pub use strip_prefix::StripPrefixBackend;
+pub use inline::InlineProvider;
+/// Deprecated: renamed to [`InlineProvider`]. Removed at the end of Stage 1.
+pub use inline::InlineProvider as InlineBackend;
+pub use layered::LayeredProvider;
+/// Deprecated: renamed to [`LayeredProvider`]. Removed at the end of Stage 1.
+pub use layered::LayeredProvider as LayeredBackend;
+pub use overlay::OverlayProvider;
+/// Deprecated: renamed to [`OverlayProvider`]. Removed at the end of Stage 1.
+pub use overlay::OverlayProvider as OverlayBackend;
+/// Deprecated: renamed to [`RouterProvider`]. Removed at the end of Stage 1.
+pub use router::RouterProvider as RouterBackend;
+pub use router::{Route, RouterProvider};
+pub use subdir::SubdirProvider;
+/// Deprecated: renamed to [`SubdirProvider`]. Removed at the end of Stage 1.
+pub use subdir::SubdirProvider as StripPrefixBackend;
 
 use std::sync::Arc;
-use vfs_protocol::Backend;
+use vfs_provider::Provider;
 
-/// Stack backends bottom→top so the last entry wins on conflicts (layer order).
+/// Stack providers bottom→top so the last entry wins on conflicts (layer order).
 ///
 /// Empty input is rejected. A single entry is returned as-is.
-pub fn stack_layers(layers_bottom_to_top: Vec<Arc<dyn Backend>>) -> Result<Arc<dyn Backend>, &'static str> {
+pub fn stack_layers(
+    layers_bottom_to_top: Vec<Arc<dyn Provider>>,
+) -> Result<Arc<dyn Provider>, &'static str> {
     if layers_bottom_to_top.is_empty() {
         return Err("stack_layers: empty");
     }
     let mut iter = layers_bottom_to_top.into_iter();
     let mut acc = iter.next().unwrap();
     for upper in iter {
-        acc = Arc::new(LayeredBackend::new(upper, acc));
+        acc = Arc::new(LayeredProvider::new(upper, acc));
     }
     Ok(acc)
 }
@@ -37,7 +49,7 @@ pub fn stack_layers(layers_bottom_to_top: Vec<Arc<dyn Backend>>) -> Result<Arc<d
 #[cfg(test)]
 mod stack_tests {
     use super::*;
-    use vfs_protocol::OPEN_READ;
+    use vfs_provider::{VPath, OPEN_READ};
 
     #[test]
     fn stack_layers_rejects_empty() {
@@ -46,15 +58,56 @@ mod stack_tests {
 
     #[test]
     fn stack_layers_top_wins_over_two_bases() {
-        let bottom = Arc::new(InlineBackend::from_files([("f", b"0".as_slice())]));
-        let mid = Arc::new(InlineBackend::from_files([("f", b"1".as_slice())]));
-        let top = Arc::new(InlineBackend::from_files([("f", b"2".as_slice())]));
+        let bottom = Arc::new(InlineProvider::from_files([("f", b"0".as_slice())]));
+        let mid = Arc::new(InlineProvider::from_files([("f", b"1".as_slice())]));
+        let top = Arc::new(InlineProvider::from_files([("f", b"2".as_slice())]));
         let stacked = stack_layers(vec![bottom, mid, top]).unwrap();
-        let (h, size, _) = stacked.open("f", OPEN_READ).unwrap();
+        let (h, size, _) = stacked.open(VPath::at_default("f"), OPEN_READ).unwrap();
         assert_eq!(size, 1);
         let mut buf = [0u8; 4];
-        let n = stacked.read(h, 0, &mut buf).unwrap();
+        let n = stacked.read_at(h, 0, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"2");
-        stacked.release(h).unwrap();
+        stacked.close(h).unwrap();
+    }
+
+    #[test]
+    fn a_layered_stack_reports_the_weakest_access_of_its_children() {
+        use vfs_provider::Access;
+        let bottom = Arc::new(InlineProvider::from_files([("f", b"0".as_slice())]));
+        let top = Arc::new(InlineProvider::from_files([("f", b"1".as_slice())]));
+        let stacked = stack_layers(vec![bottom, top]).unwrap();
+        assert_eq!(stacked.capabilities().access, Access::Read);
+    }
+
+    #[test]
+    fn a_layered_stack_of_immutable_children_is_immutable() {
+        let bottom = Arc::new(InlineProvider::from_files([("f", b"0".as_slice())]));
+        let top = Arc::new(InlineProvider::from_files([("f", b"1".as_slice())]));
+        let stacked = stack_layers(vec![bottom, top]).unwrap();
+        assert!(
+            stacked.capabilities().immutable,
+            "inline content never changes"
+        );
+    }
+
+    #[test]
+    fn inline_provider_passes_conformance() {
+        let p: Arc<dyn vfs_provider::Provider> = Arc::new(InlineProvider::from_files(
+            vfs_provider::FIXTURE_FILES.iter().copied(),
+        ));
+        vfs_provider::assert_conformance(p);
+    }
+
+    #[test]
+    fn a_layered_stack_passes_conformance() {
+        // Bottom holds the full fixture tree, top holds nothing: the stack
+        // must still present the reference tree.
+        let bottom: Arc<dyn vfs_provider::Provider> = Arc::new(InlineProvider::from_files(
+            vfs_provider::FIXTURE_FILES.iter().copied(),
+        ));
+        let top: Arc<dyn vfs_provider::Provider> = Arc::new(InlineProvider::from_files(
+            std::iter::empty::<(&str, &[u8])>(),
+        ));
+        vfs_provider::assert_conformance(stack_layers(vec![bottom, top]).unwrap());
     }
 }
