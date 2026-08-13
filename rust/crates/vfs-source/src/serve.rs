@@ -44,7 +44,12 @@ fn is_wire_path_safe(path: &str) -> bool {
 #[tonic::async_trait]
 impl Source for ProviderSourceService {
     async fn get_capabilities(&self, _req: Request<Empty>) -> Result<Response<CapsResp>, Status> {
-        let caps = self.provider.capabilities();
+        // The Stage-1 wire contract has no write RPCs (no Write/SetLen/Flush/
+        // Mkdir/Remove/Rename/SetAttr messages) — so advertising ReadWrite
+        // here would promise a capability the transport cannot keep. Clamp
+        // to what can actually cross the wire; the write half arrives with
+        // Stage 3's proto extension.
+        let caps = self.provider.capabilities().read_only_clamp();
         let access = match caps.access {
             Access::SeqRead => 0,
             Access::Read => 1,
