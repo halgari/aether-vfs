@@ -405,7 +405,7 @@ Copy-up is **whole-file, not lazy per block** — the files games write are INIs
         let dir = std::env::temp_dir().join(format!("vfs-ovrw-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let ov = OverlayProvider::new(base, vfs_provider::RwMemFixture::new()).unwrap();
+        let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
         assert_eq!(ov.capabilities().access, Access::ReadWrite);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -427,7 +427,7 @@ Copy-up is **whole-file, not lazy per block** — the files games write are INIs
         let dir = std::env::temp_dir().join(format!("vfs-ovcu-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let ov = OverlayProvider::new(base.clone(), vfs_provider::RwMemFixture::new()).unwrap();
+        let ov = OverlayProvider::new(base.clone(), MemUpper::default()).unwrap();
 
         let f = VPath::at_default("a.txt");
         let (h, _, _) = ov.open(f, OPEN_WRITE).expect("open for write copies up");
@@ -455,7 +455,7 @@ Copy-up is **whole-file, not lazy per block** — the files games write are INIs
         let dir = std::env::temp_dir().join(format!("vfs-ovwh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let ov = OverlayProvider::new(base, vfs_provider::RwMemFixture::new()).unwrap();
+        let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
         let f = VPath::at_default("a.txt");
         ov.remove(f).expect("remove");
         assert!(ov.getattr(f).expect("getattr").is_none(), "whiteout did not hide the base file");
@@ -475,7 +475,7 @@ Copy-up is **whole-file, not lazy per block** — the files games write are INIs
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let ov: StdArc<OverlayProvider> =
-            StdArc::new(OverlayProvider::new(base, vfs_provider::RwMemFixture::new()).unwrap());
+            StdArc::new(OverlayProvider::new(base, MemUpper::default()).unwrap());
 
         let mut hs = Vec::new();
         for _ in 0..8 {
@@ -502,13 +502,21 @@ Copy-up is **whole-file, not lazy per block** — the files games write are INIs
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let ov: Arc<dyn vfs_provider::Provider> =
-            Arc::new(OverlayProvider::new(base, vfs_provider::RwMemFixture::new()).unwrap());
+            Arc::new(OverlayProvider::new(base, MemUpper::default()).unwrap());
         vfs_provider::assert_conformance(ov);
         let _ = std::fs::remove_dir_all(&dir);
     }
 ```
 
-**Note:** `OverlayProvider::new` changes signature — it now takes an `Arc<dyn Provider>` upper rather than a `PathBuf`, and returns `Result`. The tests above use `RwMemFixture` from `vfs-provider` as the upper deliberately: it is a `ReadWrite` provider and needs no new dependency. Do **not** reach for `vfs-director::DiskProvider` here — `vfs-director` already dev-depends on `vfs-compose`, and adding the reverse edge creates a dev-dependency cycle that made `--all-targets` unusable once before (see the comment in `vfs-inject/Cargo.toml` about cargo#6313).
+**Note:** `OverlayProvider::new` changes signature — it now takes an `Arc<dyn Provider>` upper rather than a `PathBuf`, and returns `Result`.
+
+**The upper must be a blank, test-local writable provider — not `RwMemFixture`.** `RwMemFixture` is a *conformance* fixture, permanently obligated to serve `FIXTURE_FILES` so it can pass the suite; an overlay's upper must start empty. Using it as the upper breaks copy-up tests (the upper already "contains" `a.txt`) and, worse, makes `overlay_passes_write_conformance` pass **even if the overlay ignored its base entirely** — the upper's phantom copy answers everything.
+
+Define a `MemUpper` in `vfs-compose`'s `#[cfg(test)]` module: an in-memory `Access::ReadWrite` provider backed purely by a `files` map and a `dirs` set, starting empty. Keep it test-local — it is a test double, not public API, and `vfs-provider` stays untouched.
+
+Do **not** reach for `vfs-director::DiskProvider` either — `vfs-director` already dev-depends on `vfs-compose`, and the reverse edge creates a dev-dependency cycle that made `--all-targets` unusable once before (see the comment in `vfs-inject/Cargo.toml` about cargo#6313).
+
+Two assertions prove the fixture choice was right: `writing_a_base_file_copies_it_up…` must read back `"UPSE"` (4 bytes, from `"BASE"`) and not 5 bytes from a shadowing upper; and `overlay_passes_write_conformance` must fail if `OverlayProvider::getattr` is temporarily made to skip its base.
 
 Since the tests use an in-memory upper, the whiteout and copy-up code must work through the **provider interface**, not through `std::fs` — which is the point: an in-memory upper gets deletes for free only if whiteouts are written through `upper.open`/`upper.write_at`.
 
