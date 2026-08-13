@@ -28,6 +28,11 @@ impl LiveSession {
     }
 }
 
+/// Process-wide sequence for session base-directory naming — see the comment
+/// in [`SessionRegistry::create`] for why this must be independent of any one
+/// registry's own session-id counter.
+static SESSION_BASE_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Process-wide multi-session table owned by the daemon.
 #[derive(Clone)]
 pub struct SessionRegistry {
@@ -70,7 +75,17 @@ impl SessionRegistry {
 
     pub fn create(&self, name: String) -> Result<SessionSummary, String> {
         let id = format!("s{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
-        let base = std::env::temp_dir().join(format!("vfs-daemon-{}-{id}", std::process::id()));
+        // `base_seq` is process-wide, deliberately independent of `id`/`next_id`
+        // (which are per-registry): two `SessionRegistry`s in the same process —
+        // e.g. two `#[tokio::test]`s in one test binary — each start `next_id`
+        // at 1, so `id` alone repeats ("s1") across registries. Keying the base
+        // directory on `id` alone let a second session's root/overlay collide
+        // with the first's, physically, at the same path — cross-contaminating
+        // any test that actually reads/writes bytes through a mounted
+        // `DiskProvider` rather than only exercising RPC bookkeeping.
+        let base_seq = SESSION_BASE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir()
+            .join(format!("vfs-daemon-{}-{base_seq}-{id}", std::process::id()));
         let root = base.join("root");
         let overlay = base.join("overlay");
         let state = base.join("state");

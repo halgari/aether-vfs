@@ -240,12 +240,16 @@ impl FuseClient {
         decode_open_resp(&r.payload).ok_or(vfs_protocol::ST_BAD_REQUEST)
     }
 
-    /// Open a virtual path for WRITE (the JVM overlay creates/opens it writable).
-    pub fn open_write(&self, vpath: &str) -> Result<OpenResp, i32> {
+    /// Open a virtual path for WRITE. `create_flags` carries the
+    /// `OPEN_CREATE`/`OPEN_EXCL`/`OPEN_TRUNC` bits derived from the caller's NT
+    /// create-disposition (see `hook::open_create_flags`) — folded in here
+    /// rather than hardcoding `OPEN_WRITE` alone, which is what used to make
+    /// every brand-new file report `ST_NOT_FOUND` regardless of disposition.
+    pub fn open_write(&self, vpath: &str, create_flags: u32) -> Result<OpenResp, i32> {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_OPEN, 0, &encode_open_req(OPEN_WRITE, vpath))
+            .submit(OP_OPEN, 0, &encode_open_req(OPEN_WRITE | create_flags, vpath))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);

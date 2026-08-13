@@ -736,11 +736,73 @@ fn is_write_open(access: u32, disposition: u32) -> bool {
     (access & WRITE_ACCESS) != 0 || matches!(disposition, 0 | 2 | 4 | 5)
 }
 
+/// True for NT's append-only access grant: `FILE_APPEND_DATA` without
+/// `FILE_WRITE_DATA`. A real file object forces every write on such a handle
+/// to the current end of file, ignoring any caller-supplied offset, because
+/// the kernel enforces it at the file-object level. A synthetic handle has no
+/// kernel object to do that for it, so the open path has to seed the tracked
+/// position at the file's current size (`fuse_synth::open_fuse_at_ex`) and
+/// `write_hook` has to keep pinning it there — see both for the other half.
+///
+/// `Rust`'s `OpenOptions::append(true)` without `.write(true)` — the fixture's
+/// reopen-for-append step — requests exactly this access, which is how the
+/// gap surfaced: an append reopen's first write landed at position 0 (the
+/// hardcoded initial value) and silently overwrote the file's existing bytes
+/// instead of extending it.
+fn is_append_only(access: u32) -> bool {
+    const FILE_WRITE_DATA: u32 = 0x0002;
+    const FILE_APPEND_DATA: u32 = 0x0004;
+    access & FILE_APPEND_DATA != 0 && access & FILE_WRITE_DATA == 0
+}
+
+/// Map an NT create-disposition to the ring's `OPEN_CREATE`/`OPEN_EXCL`/
+/// `OPEN_TRUNC` bits (`OPEN_WRITE` itself is added by the caller). Forwarding
+/// this is what closes the gap Task 6 found: without it every brand-new file
+/// gets `ST_NOT_FOUND` from the director regardless of disposition, and the
+/// call falls through to the shim-local overlay redirect.
+///
+/// Verified against NT `CreateDisposition` semantics one value at a time
+/// (a prior draft of this mapping under-specified two of the six):
+/// - `FILE_SUPERSEDE` (0): create if absent, replace if present -> needs
+///   **both** `OPEN_CREATE` and `OPEN_TRUNC` — a `OPEN_TRUNC`-only mapping
+///   fails `ST_NOT_FOUND` on an absent file, which is exactly the bug this
+///   function exists to close.
+/// - `FILE_OPEN` (1): open only, must fail if absent -> no flags.
+/// - `FILE_CREATE` (2): create only, must fail if present -> `OPEN_CREATE |
+///   OPEN_EXCL`.
+/// - `FILE_OPEN_IF` (3): open if present (no data loss), create if absent ->
+///   `OPEN_CREATE` alone (the provider's `OPEN_CREATE` is a no-op on an
+///   existing file — it does not also truncate).
+/// - `FILE_OVERWRITE` (4): must already exist, truncate -> `OPEN_TRUNC` alone
+///   (no `OPEN_CREATE`, so an absent file still fails `ST_NOT_FOUND`, matching
+///   "fail if it does not exist").
+/// - `FILE_OVERWRITE_IF` (5): overwrite if present, create if absent -> needs
+///   **both**, same as `FILE_SUPERSEDE` — this is the case the brief already
+///   flagged for a re-check.
+///
+/// Cross-checked against `DiskProvider::open` (`disk.rs`), which folds these
+/// straight into `OpenOptions::create/create_new/truncate`, and the
+/// conformance fixture's `open`, which create-if-absent-then-truncate in that
+/// order — both agree with the mapping above.
+fn open_create_flags(disposition: u32) -> u32 {
+    use vfs_protocol::{OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC};
+    match disposition {
+        0 => OPEN_CREATE | OPEN_TRUNC,
+        2 => OPEN_CREATE | OPEN_EXCL,
+        3 => OPEN_CREATE,
+        4 => OPEN_TRUNC,
+        5 => OPEN_CREATE | OPEN_TRUNC,
+        _ => 0, // FILE_OPEN (1), and anything unrecognized.
+    }
+}
+
 unsafe fn try_fuse_create(
     file_handle: *mut HANDLE,
     oa: *const ObjectAttributes,
     iosb: *mut c_void,
     write: bool,
+    create_flags: u32,
+    append_only: bool,
 ) -> Option<NTSTATUS> {
     let client = crate::fuse_client::global()?;
     let path = path_of(oa)?;
@@ -797,16 +859,21 @@ unsafe fn try_fuse_create(
     // All other under-root *reads* go through the director (zip / composed).
     // Writes may fall through for shim-local overlay redirect.
     // (Primary stack is expanded to 16 MiB by vfs-inject; open is a shallow ring op.)
-    let opened = if write { client.open_write(vp) } else { client.open(vp) };
+    let opened = if write {
+        client.open_write(vp, create_flags)
+    } else {
+        client.open(vp)
+    };
     match opened {
         Ok(resp) => {
             // Record absolute path on the handle so later relative opens
             // (RootDirectory=this handle) resolve through the director.
-            let h = crate::fuse_synth::open_fuse_at(
+            let h = crate::fuse_synth::open_fuse_at_ex(
                 resp.fh,
                 resp.size,
                 resp.is_dir,
                 Some(path.clone()),
+                append_only,
             )?;
             if !file_handle.is_null() {
                 *file_handle = h as HANDLE;
@@ -1041,7 +1108,14 @@ unsafe extern "system" fn create_hook(
         // are hiding anywhere, it is here.
         None => crate::hookstats::note_undecodable(oa_name_only(oa).as_deref()),
     }
-    if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, disp)) {
+    if let Some(st) = try_fuse_create(
+        file_handle,
+        oa,
+        iosb,
+        is_write_open(access, disp),
+        open_create_flags(disp),
+        is_append_only(access),
+    ) {
         if crate::hookstats::enabled() {
             if let Some(p) = path_of(oa) {
                 crate::hookstats::note_trace("open", &p, if st >= 0 { "ok" } else { "FAIL" });
@@ -1258,7 +1332,16 @@ unsafe extern "system" fn open_hook(
     // NtOpenFile has no disposition — it always opens existing (FILE_OPEN). Pass
     // FILE_OPEN (1), NOT 0: 0 is FILE_SUPERSEDE, which is in is_write_open's
     // create/overwrite set and would misclassify every open as a write.
-    if let Some(st) = try_fuse_create(file_handle, oa, iosb, is_write_open(access, vfs_redirect::FILE_OPEN)) {
+    // create_flags is always 0 here: an open-only call never creates,
+    // truncates, or excludes.
+    if let Some(st) = try_fuse_create(
+        file_handle,
+        oa,
+        iosb,
+        is_write_open(access, vfs_redirect::FILE_OPEN),
+        0,
+        is_append_only(access),
+    ) {
         if crate::hookstats::enabled() {
             if let Some(p) = path_of(oa) {
                 crate::hookstats::note_trace("open", &p, if st >= 0 { "ok" } else { "FAIL" });
@@ -1731,7 +1814,7 @@ unsafe extern "system" fn setinfo_hook(
             && length as usize >= core::mem::size_of::<FileEndOfFileInformation>()
         {
             let eof = (*(info as *const FileEndOfFileInformation)).end_of_file;
-            if let (Some((fh, _, _, _)), Some(c)) = (
+            if let (Some((fh, _, _, _, _)), Some(c)) = (
                 crate::fuse_synth::lookup(handle as isize),
                 crate::fuse_client::global(),
             ) {
@@ -1774,8 +1857,18 @@ unsafe extern "system" fn setinfo_hook(
                     }
                     return STATUS_UNSUCCESSFUL;
                 }
+                // is_delete/is_rename matched the class but the handle's path
+                // or vpath could not be resolved — falls through to the soft
+                // no-op below rather than a hard failure. Still worth logging:
+                // it means a delete/rename was silently swallowed.
             }
         }
+        // Everything else lands here: a class we deliberately never act on
+        // (or a delete/rename we recognized but could not route). Silent
+        // success here for a class we actually needed to handle is exactly
+        // the bug this counter exists to make discoverable — see
+        // `hookstats::note_setinfo_noop`.
+        crate::hookstats::note_setinfo_noop(class);
         return STATUS_SUCCESS;
     }
     if crate::zipserve::is_synth(handle as isize) {
@@ -1835,7 +1928,8 @@ unsafe fn fuse_query_information(
     length: u32,
     class: u32,
 ) -> NTSTATUS {
-    let Some((fh, size, is_dir, pos)) = crate::fuse_synth::lookup(handle as isize) else {
+    let Some((fh, size, is_dir, pos, _append_only)) = crate::fuse_synth::lookup(handle as isize)
+    else {
         return STATUS_INVALID_HANDLE;
     };
     let _ = fh;
@@ -2183,8 +2277,14 @@ unsafe extern "system" fn write_hook(
                 Some(v as u64)
             }
         };
-        if let Some((fh, _size, _is_dir, pos)) = crate::fuse_synth::lookup(handle as isize) {
-            let off = explicit.unwrap_or(pos);
+        if let Some((fh, _size, _is_dir, pos, append_only)) =
+            crate::fuse_synth::lookup(handle as isize)
+        {
+            // Append-only access (FILE_APPEND_DATA without FILE_WRITE_DATA)
+            // forces every write to the current end of file at the kernel
+            // level, ignoring any offset the caller supplies — a real handle
+            // enforces this itself; ours has to do it here.
+            let off = if append_only { pos } else { explicit.unwrap_or(pos) };
             let want = length as usize;
             let n = if want == 0 || buffer.is_null() {
                 0usize
@@ -2206,7 +2306,10 @@ unsafe extern "system" fn write_hook(
                     }
                 }
             };
-            if explicit.is_none() {
+            // Append-only always tracks position (every write moved EOF
+            // forward regardless of what the caller passed); otherwise only
+            // an implicit-offset write consumes the file pointer.
+            if append_only || explicit.is_none() {
                 crate::fuse_synth::set_position(handle as isize, off + n as u64);
             }
             if !iosb.is_null() {
@@ -2257,7 +2360,9 @@ unsafe extern "system" fn read_hook(
                 Some(v as u64)
             }
         };
-        if let Some((fh, size, _is_dir, pos)) = crate::fuse_synth::lookup(handle as isize) {
+        if let Some((fh, size, _is_dir, pos, _append_only)) =
+            crate::fuse_synth::lookup(handle as isize)
+        {
             let off = explicit.unwrap_or(pos);
             let want = length as usize;
             if off >= size {
@@ -2373,7 +2478,7 @@ unsafe fn fuse_create_section(
     alloc_attrs: u32,
     file_handle: HANDLE,
 ) -> NTSTATUS {
-    let Some((fh, size, is_dir, _)) = crate::fuse_synth::lookup(file_handle as isize) else {
+    let Some((fh, size, is_dir, _, _)) = crate::fuse_synth::lookup(file_handle as isize) else {
         return STATUS_INVALID_HANDLE;
     };
     if is_dir || size == 0 {

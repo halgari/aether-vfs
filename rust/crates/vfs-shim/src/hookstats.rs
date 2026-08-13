@@ -278,6 +278,49 @@ fn render_fills() -> String {
     )
 }
 
+/// `NtSetInformationFile` classes that took the soft no-op on a synthetic
+/// handle — i.e. neither position, EOF/truncate, delete, rename, nor
+/// completion-port bind, and (for delete/rename) any recognized-but-unrouted
+/// case where the handle's path or vpath could not be resolved. The hook
+/// reports `STATUS_SUCCESS` for all of these without doing anything, which is
+/// deliberate for classes we genuinely don't need to act on — but "the set of
+/// classes this applies to is empty" was exactly the assumption that let a
+/// real delete/rename silently no-op before this counter existed. Counting by
+/// class number, not asserting the set is empty, is what keeps that
+/// assumption checkable.
+static SETINFO_NOOP: Mutex<Option<HashMap<u32, u64>>> = Mutex::new(None);
+
+pub fn note_setinfo_noop(class: u32) {
+    if !enabled() {
+        return;
+    }
+    let Ok(mut g) = SETINFO_NOOP.lock() else { return };
+    let map = g.get_or_insert_with(HashMap::new);
+    *map.entry(class).or_insert(0) += 1;
+}
+
+fn render_setinfo_noop() -> String {
+    let Ok(g) = SETINFO_NOOP.lock() else {
+        return String::new();
+    };
+    let Some(map) = g.as_ref() else {
+        return String::new();
+    };
+    if map.is_empty() {
+        return String::new();
+    }
+    let mut rows: Vec<(&u32, &u64)> = map.iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let mut s = format!(
+        "\nNtSetInformationFile classes taking the soft no-op on synthetic handles ({} distinct):\n",
+        rows.len()
+    );
+    for (class, count) in rows {
+        s.push_str(&format!("  {count:>6}x  class={class}\n"));
+    }
+    s
+}
+
 /// A synthetic handle was bound to an I/O completion port.
 pub fn note_iocp_bind() {
     if !enabled() {
@@ -563,7 +606,7 @@ pub fn start_reporter() {
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(250));
             let body = format!(
-                "{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}",
                 render(),
                 render_async(),
                 render_fills(),
@@ -571,7 +614,8 @@ pub fn start_reporter() {
                 render_trace(),
                 render_undecodable(),
                 render_readdirs(),
-                render_passthrough()
+                render_passthrough(),
+                render_setinfo_noop()
             );
             // Write via a temp + rename so a reader never sees a half file.
             let tmp = std::path::PathBuf::from(&path).with_extension("tmp");
