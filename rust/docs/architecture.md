@@ -370,17 +370,26 @@ file's.
 ## 5. Performance
 
 Time-to-window for Skyrim SE, three clean runs each
-([`benchmarks/load-debug-vs-release.md`](./benchmarks/load-debug-vs-release.md)):
+([`benchmarks/load-debug-vs-release.md`](./benchmarks/load-debug-vs-release.md),
+[`benchmarks/hollow-removal.md`](./benchmarks/hollow-removal.md)):
 
-| configuration | mean |
-|---|---:|
-| native, no VFS | 1.0 s |
-| VFS, before wake fixes | 10.34 s |
-| **VFS, after wake fixes** | **2.74 s** |
+| configuration | mean | measured |
+|---|---:|---|
+| native, no VFS | 1.0 s | 2026-08-12 |
+| VFS, before wake fixes | 10.34 s | 2026-08-12 |
+| VFS, after wake fixes (hollow still in) | 2.74 s | 2026-08-12 |
+| **VFS, staged launch (current)** | **2.81 s** | 2026-08-13 |
 
-Of the remaining ~1.7 s over native, ~0.72 s is work native never does at all
-(staging and injection) and ~0.58 s was hook time — since reduced to
-0.180 s by the client-wake change, which has not been re-measured end to end.
+The current figure is roughly 1.8 s over native. About 0.72 s of that is work
+native never does at all — staging, injection — and the rest is hook time.
+
+Two cautions about reading this table. The rows are not a clean progression:
+each was measured on the build of its day, and the 2026-08-12 rows predate the
+relative-name fixes (§4.5), which broadened what resolves through the VFS. On
+2026-08-13 the *same* benchmark put the hollow path at 5.1 s, so that path had
+regressed since its 2.74 s was recorded; removing it restored the profile
+(69.5 MiB read at the window, 164 KiB/read — an exact match for the historical
+table) rather than beating it.
 
 Content source is not a factor: zip and disk backends measure the same
 (10.34 vs 10.38 s pre-fix), which is what identified wake latency as the cost.
