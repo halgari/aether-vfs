@@ -1322,6 +1322,14 @@ fn assert_sequential(p: &Arc<dyn Provider>) {
                 break;
             }
             out.extend_from_slice(&buf[..n]);
+            // Bound the loop: a provider whose cursor does not advance would
+            // otherwise hang here instead of failing. Same mechanism as
+            // `read_all` — a test oracle that hangs looks like a slow machine.
+            assert!(
+                out.len() <= body.len(),
+                "read_next returned more than {rel}'s {} bytes — the cursor is not advancing",
+                body.len()
+            );
         }
         assert_eq!(out, *body, "read_next({rel}) content mismatch");
         p.close(h).expect("close");
