@@ -86,6 +86,20 @@ mod tests {
     use vfs_provider::OPEN_READ;
 
     #[test]
+    fn subdir_over_a_mounted_fixture_tree_passes_conformance() {
+        // Mount the reference tree under a prefix, then wrap with
+        // SubdirProvider so it appears at the root — the composition this
+        // combinator exists for (stripping an archive's root folder).
+        let mounted: Arc<dyn vfs_provider::Provider> = Arc::new(InlineProvider::from_files(
+            vfs_provider::FIXTURE_FILES
+                .iter()
+                .map(|(rel, body)| (format!("mounted/{rel}"), *body)),
+        ));
+        let p: Arc<dyn vfs_provider::Provider> = Arc::new(SubdirProvider::new(mounted, "mounted"));
+        vfs_provider::assert_conformance(p);
+    }
+
+    #[test]
     fn strips_archive_root() {
         let inner = Arc::new(InlineProvider::from_files([(
             "Game Root/Data/a.esp",

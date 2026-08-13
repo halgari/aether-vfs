@@ -120,6 +120,15 @@ mod tests {
     }
 
     #[test]
+    fn a_router_with_only_a_default_passes_conformance() {
+        let default: Arc<dyn vfs_provider::Provider> = Arc::new(InlineProvider::from_files(
+            vfs_provider::FIXTURE_FILES.iter().copied(),
+        ));
+        let r: Arc<dyn vfs_provider::Provider> = Arc::new(RouterProvider::new(default, vec![]));
+        vfs_provider::assert_conformance(r);
+    }
+
+    #[test]
     fn matched_path_routes_to_provider() {
         let r = RouterProvider::new(
             tag("default"),
