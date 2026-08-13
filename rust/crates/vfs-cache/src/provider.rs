@@ -71,6 +71,11 @@ impl Provider for CachingProvider {
         let path = p.rel;
         let st = self.inner.getattr(p)?;
         let (inner, size, is_dir) = self.inner.open(p, flags)?;
+        // DEFERRED (Stage 2): file_id_for keys on `path` alone, not `p.root`.
+        // Two different roots serving the same relative path with the same
+        // size and mtime would collide on the same cache entry. Inert today
+        // because every call site addresses VPath under RootId(0) — Stage 2
+        // makes roots real and must fold `p.root` into this key.
         let (file_id, size) = if let Some(s) = st {
             (Self::file_id_for(path, s.size, s.mtime), size)
         } else {
@@ -169,6 +174,15 @@ mod tests {
     use super::*;
     use crate::store::CacheConfig;
     use vfs_provider::{KIND_FILE, OPEN_READ};
+
+    #[test]
+    fn caching_provider_over_the_fixture_tree_passes_conformance() {
+        use vfs_provider::conformance::MemFixture;
+        let inner: Arc<dyn Provider> = Arc::new(MemFixture::new());
+        let cache = Arc::new(BlockCache::new(CacheConfig::default()));
+        let p: Arc<dyn Provider> = Arc::new(CachingProvider::new(inner, cache, 1));
+        vfs_provider::assert_conformance(p);
+    }
 
     struct CountingProvider {
         data: Vec<u8>,
