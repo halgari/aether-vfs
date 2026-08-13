@@ -36,9 +36,14 @@
 | `crates/vfs-director/src/director.rs` | `OPEN_WRITE`, append cursors, write routing, `ST_READ_ONLY` |
 | `crates/vfs-director/src/ring_dispatch.rs` | `OP_WRITE`, `OP_SETATTR`, `OP_RENAME`, `OP_DELETE`, `OP_MKDIR` |
 | `crates/vfs-director/src/io_stats.rs` | Write and rejected-write counters |
+| `crates/vfs-cache/src/provider.rs` | **Write-transparent cache**: forward the write half, invalidate on `write_at`/`set_len`, and drop the `OPEN_WRITE` rejection |
 | `crates/vfs-shim/src/hook.rs` | `NtSetInformationFile` delete/rename, `NtFlushBuffersFile` |
 
 **Created:** `crates/vfs-fixture-writepath/` (an end-to-end fixture executable).
+
+**A gap this plan originally missed.** `SessionRegistry::add_source` — the only production path, used by both the gRPC daemon and the end-to-end harness — wraps **every** mounted backend in `CachingProvider`. Its `open()` rejected `OPEN_WRITE` while its `capabilities()` forwarded the inner provider's `ReadWrite`, so writes through the real path were refused and then fell through to the shim's overlay redirect: the exact bypass this stage exists to close. No unit test could see it, because unit tests mount providers directly and skip the registry.
+
+The systematic guard, which belongs in whichever task touches `vfs-cache`: run `assert_conformance` over a `CachingProvider` wrapping a **writable** inner provider. Stage 1 added a cached-provider conformance test, but its inner was read-only, so the write cases never ran. That one test would have caught this before the end-to-end test did.
 
 ---
 
