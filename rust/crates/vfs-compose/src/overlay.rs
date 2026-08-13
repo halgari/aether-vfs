@@ -77,7 +77,14 @@ impl OverlayProvider {
 
 impl Provider for OverlayProvider {
     fn capabilities(&self) -> Capabilities {
-        Capabilities::read_only()
+        // Stage 1 overlay only ever offers positional `read_at` (`open`
+        // rejects OPEN_WRITE below, and there is no `read_next`), so access
+        // must land on `Read` no matter what the base declares: `seekable()`
+        // promotes a SeqRead base and `read_only_clamp()` demotes a
+        // ReadWrite one. immutable/slow/preferred_block are real properties
+        // of the base and must survive the wrap rather than being
+        // hard-coded away.
+        self.base.capabilities().seekable().read_only_clamp()
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
@@ -213,6 +220,64 @@ mod tests {
     use super::*;
     use crate::InlineProvider;
     use vfs_provider::OPEN_READ;
+
+    /// Slow and immutable, but sequential-only — exercises both the
+    /// pass-through fields and the forced access clamp at once.
+    struct SlowSeqBase;
+
+    impl Provider for SlowSeqBase {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                access: vfs_provider::Access::SeqRead,
+                immutable: true,
+                slow: true,
+                preferred_block: Some(4096),
+            }
+        }
+        fn getattr(&self, _p: VPath) -> Result<Option<Stat>, i32> {
+            Ok(None)
+        }
+        fn readdir(&self, _p: VPath) -> Result<Vec<DirEntry>, i32> {
+            Ok(Vec::new())
+        }
+        fn open(&self, _p: VPath, _f: u32) -> Result<(Handle, u64, bool), i32> {
+            Err(not_found())
+        }
+        fn close(&self, _h: Handle) -> Result<(), i32> {
+            Ok(())
+        }
+        fn read_at(&self, _h: Handle, _o: u64, _b: &mut [u8]) -> Result<usize, i32> {
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn overlay_capabilities_derive_from_base_but_clamp_access_to_read() {
+        let dir = std::env::temp_dir().join(format!("vfs-ovcaps-{}", std::process::id()));
+        let ov = OverlayProvider::new(Arc::new(SlowSeqBase), &dir);
+        let caps = ov.capabilities();
+        assert_eq!(
+            caps.access,
+            vfs_provider::Access::Read,
+            "overlay only ever exposes positional read_at, regardless of the base's access"
+        );
+        assert!(caps.immutable, "immutable is a real property of the base");
+        assert!(caps.slow, "slow is a real property of the base");
+        assert_eq!(caps.preferred_block, Some(4096));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overlay_over_the_fixture_tree_with_an_empty_upper_passes_conformance() {
+        let base: Arc<dyn Provider> = Arc::new(InlineProvider::from_files(
+            vfs_provider::FIXTURE_FILES.iter().copied(),
+        ));
+        let dir = std::env::temp_dir().join(format!("vfs-ovconf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p: Arc<dyn Provider> = Arc::new(OverlayProvider::new(base, &dir));
+        vfs_provider::assert_conformance(p);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn upper_wins_and_whiteout_hides() {
