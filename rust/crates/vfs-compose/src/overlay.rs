@@ -490,7 +490,7 @@ impl Provider for OverlayProvider {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::InlineProvider;
     use vfs_provider::{OPEN_EXCL, OPEN_READ};
@@ -531,8 +531,14 @@ mod tests {
     /// `FIXTURE_FILES` so it can pass the suite on its own — which means an
     /// overlay built on it would pass its tests even while ignoring its base
     /// entirely. An overlay's upper must start empty.
+    ///
+    /// `pub(crate)` so `SubdirProvider`'s writable-inner conformance test can
+    /// reuse it: `RwMemFixture` always serves `FIXTURE_FILES` at its own
+    /// root, which does not fit behind `SubdirProvider`'s path-prefix
+    /// rewrite, but a blank writable store that the test can seed under the
+    /// prefix itself does.
     #[derive(Default)]
-    struct MemUpper {
+    pub(crate) struct MemUpper {
         files: Mutex<HashMap<String, Vec<u8>>>,
         dirs: Mutex<HashSet<String>>,
         next: AtomicU64,

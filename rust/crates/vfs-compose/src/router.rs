@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use vfs_provider::{bad_fh, map_io_err, Capabilities, DirEntry, Handle, Provider, Stat, VPath};
+use vfs_provider::{
+    bad_fh, map_io_err, Capabilities, DirEntry, Handle, Provider, SetAttr, Stat, VPath,
+};
 
 use crate::glob;
 
@@ -99,6 +101,58 @@ impl Provider for RouterProvider {
         };
         provider.close(inner)
     }
+
+    fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
+        let (provider, inner) = {
+            let g = self.opens.lock().map_err(|_| map_io_err())?;
+            let (b, i) = g.get(&h).ok_or_else(bad_fh)?;
+            (Arc::clone(b), *i)
+        };
+        provider.write_at(inner, offset, buf)
+    }
+
+    fn set_len(&self, h: Handle, len: u64) -> Result<(), i32> {
+        let (provider, inner) = {
+            let g = self.opens.lock().map_err(|_| map_io_err())?;
+            let (b, i) = g.get(&h).ok_or_else(bad_fh)?;
+            (Arc::clone(b), *i)
+        };
+        provider.set_len(inner, len)
+    }
+
+    fn flush(&self, h: Handle) -> Result<(), i32> {
+        let (provider, inner) = {
+            let g = self.opens.lock().map_err(|_| map_io_err())?;
+            let (b, i) = g.get(&h).ok_or_else(bad_fh)?;
+            (Arc::clone(b), *i)
+        };
+        provider.flush(inner)
+    }
+
+    fn mkdir(&self, p: VPath) -> Result<(), i32> {
+        let path = p.rel;
+        self.provider_for(path).mkdir(p)
+    }
+
+    fn remove(&self, p: VPath) -> Result<(), i32> {
+        let path = p.rel;
+        self.provider_for(path).remove(p)
+    }
+
+    fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
+        // Both endpoints route by `from`'s path: a rename that would cross
+        // routes (from matches one glob, to matches another) is not a
+        // supported shape — the destination is forwarded to the same
+        // provider `from` resolved to, same as every other combinator in
+        // this crate that has no cross-child move.
+        let path = from.rel;
+        self.provider_for(path).rename(from, to)
+    }
+
+    fn set_attr(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
+        let path = p.rel;
+        self.provider_for(path).set_attr(p, attr)
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +178,20 @@ mod tests {
         let default: Arc<dyn vfs_provider::Provider> = Arc::new(InlineProvider::from_files(
             vfs_provider::FIXTURE_FILES.iter().copied(),
         ));
+        let r: Arc<dyn vfs_provider::Provider> = Arc::new(RouterProvider::new(default, vec![]));
+        vfs_provider::assert_conformance(r);
+    }
+
+    /// The systematic guard for this module's write-forwarding bug:
+    /// `RouterProvider::open` already forwarded `OPEN_WRITE` straight to the
+    /// default/routed provider and succeeded, but `write_at`/`set_len`/
+    /// `mkdir`/`remove`/`rename`/`set_attr` all fell through to the trait's
+    /// `ST_NOT_SUPPORTED` default — invisible to every prior conformance test
+    /// here because they all wrapped a read-only `InlineProvider`, so
+    /// `assert_writable`'s cases never ran.
+    #[test]
+    fn a_router_with_a_writable_default_passes_conformance() {
+        let default: Arc<dyn vfs_provider::Provider> = Arc::new(vfs_provider::RwMemFixture::new());
         let r: Arc<dyn vfs_provider::Provider> = Arc::new(RouterProvider::new(default, vec![]));
         vfs_provider::assert_conformance(r);
     }
