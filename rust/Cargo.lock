@@ -1601,9 +1601,6 @@ version = "0.1.0"
 [[package]]
 name = "vfs-fixture-staticimp"
 version = "0.1.0"
-dependencies = [
- "vfs-fixture-vproxy",
-]
 
 [[package]]
 name = "vfs-fixture-vproxy"
@@ -1624,7 +1621,6 @@ dependencies = [
  "vfs-core",
  "vfs-shared",
  "vfs-shim",
- "vfs-shim-dll",
  "vfs-zip",
  "windows-sys 0.59.0",
 ]

@@ -8,7 +8,9 @@ build = "build.rs"
 name = "vfs-staticimp"
 path = "src/main.rs"
 
-# Ensures vproxy is built first (cdylib + import lib). We still link the import
-# lib via build.rs / #[link] so the PE import table names vproxy.dll.
-[dependencies]
-vfs-fixture-vproxy = { path = "../vfs-fixture-vproxy" }
+# Deliberately no dependency on vfs-fixture-vproxy. A cdylib that is both a
+# workspace member and a path dependency is built as two units that write the
+# same `deps/vproxy.dll` (cargo#6313), which fails `--all-targets` with
+# LNK1104. build.rs links the import lib by path instead, and the one harness
+# that needs both — vfs-inject's `tests/common` — builds vproxy first in its
+# own cargo invocation so the ordering is explicit rather than inferred.

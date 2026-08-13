@@ -22,7 +22,12 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 vfs-shim = { path = "../vfs-shim" }
-vfs-shim-dll = { path = "../vfs-shim-dll" }
+# NOT a dev-dependency: a cdylib cannot be `use`d, so the edge only ordered the
+# build — and `tests/common` already builds this package (plus the other PE
+# fixtures) with a nested cargo at test runtime. As a dependency it was built a
+# second time as its own artifact target, and both units wrote
+# `deps/vfs_shim_dll.dll`, which is the cargo#6313 collision that made
+# `--all-targets` unusable.
 vfs-core = { path = "../vfs-core" }
 vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
 vfs-zip = { path = "../vfs-zip" }
