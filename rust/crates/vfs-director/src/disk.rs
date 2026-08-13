@@ -2,14 +2,15 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::ops::{
     bad_request, map_io_err, not_a_dir, not_found, Access, Capabilities, DirEntry, Handle,
-    Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
+    Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC,
+    OPEN_WRITE,
 };
 
 pub struct DiskProvider {
@@ -45,8 +46,8 @@ impl DiskProvider {
 impl Provider for DiskProvider {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            access: Access::Read, // writes arrive in Stage 3
-            immutable: false,     // a real directory can change underneath us
+            access: Access::ReadWrite,
+            immutable: false, // a real directory can change underneath us
             slow: false,
             preferred_block: None,
         }
@@ -113,17 +114,42 @@ impl Provider for DiskProvider {
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         let path = p.rel;
-        if flags & OPEN_WRITE != 0 {
-            return Err(bad_request());
-        }
         let p = self.resolve(path);
-        let meta = std::fs::metadata(&p).map_err(|_| not_found())?;
-        if meta.is_dir() {
+
+        if flags & OPEN_WRITE == 0 {
+            let meta = std::fs::metadata(&p).map_err(|_| not_found())?;
+            if meta.is_dir() {
+                let bh = self.next.fetch_add(1, Ordering::Relaxed);
+                return Ok((bh, 0, true));
+            }
+            let f = File::open(&p).map_err(|_| map_io_err())?;
+            let size = meta.len();
             let bh = self.next.fetch_add(1, Ordering::Relaxed);
-            return Ok((bh, 0, true));
+            self.opens.lock().map_err(|_| map_io_err())?.insert(bh, f);
+            return Ok((bh, size, false));
         }
-        let f = File::open(&p).map_err(|_| map_io_err())?;
-        let size = meta.len();
+
+        if flags & OPEN_CREATE != 0 {
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).map_err(|_| map_io_err())?;
+            }
+        }
+
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(flags & OPEN_CREATE != 0)
+            .create_new(flags & OPEN_EXCL != 0)
+            .truncate(flags & OPEN_TRUNC != 0)
+            .open(&p)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    not_found()
+                } else {
+                    map_io_err()
+                }
+            })?;
+        let size = f.metadata().map_err(|_| map_io_err())?.len();
         let bh = self.next.fetch_add(1, Ordering::Relaxed);
         self.opens.lock().map_err(|_| map_io_err())?.insert(bh, f);
         Ok((bh, size, false))
@@ -134,6 +160,70 @@ impl Provider for DiskProvider {
         let f = g.get_mut(&h).ok_or_else(crate::ops::bad_fh)?;
         f.seek(SeekFrom::Start(offset)).map_err(|_| map_io_err())?;
         f.read(buf).map_err(|_| map_io_err())
+    }
+
+    fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
+        let mut g = self.opens.lock().map_err(|_| map_io_err())?;
+        let f = g.get_mut(&h).ok_or_else(crate::ops::bad_fh)?;
+        f.seek(SeekFrom::Start(offset)).map_err(|_| map_io_err())?;
+        f.write(buf).map_err(|_| map_io_err())
+    }
+
+    fn set_len(&self, h: Handle, len: u64) -> Result<(), i32> {
+        let g = self.opens.lock().map_err(|_| map_io_err())?;
+        let f = g.get(&h).ok_or_else(crate::ops::bad_fh)?;
+        f.set_len(len).map_err(|_| map_io_err())
+    }
+
+    fn flush(&self, h: Handle) -> Result<(), i32> {
+        let g = self.opens.lock().map_err(|_| map_io_err())?;
+        let f = g.get(&h).ok_or_else(crate::ops::bad_fh)?;
+        f.sync_all().map_err(|_| map_io_err())
+    }
+
+    fn mkdir(&self, p: VPath) -> Result<(), i32> {
+        let path = self.resolve(p.rel);
+        std::fs::create_dir_all(&path).map_err(|_| map_io_err())
+    }
+
+    fn remove(&self, p: VPath) -> Result<(), i32> {
+        let path = self.resolve(p.rel);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(not_found()),
+            Err(_) => std::fs::remove_dir(&path).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    not_found()
+                } else {
+                    map_io_err()
+                }
+            }),
+        }
+    }
+
+    fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
+        if from.root != to.root {
+            return Err(bad_request());
+        }
+        let from_path = self.resolve(from.rel);
+        let to_path = self.resolve(to.rel);
+        std::fs::rename(&from_path, &to_path).map_err(|_| map_io_err())
+    }
+
+    fn set_attr(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
+        let path = self.resolve(p.rel);
+        if let Some(size) = attr.size {
+            let f = File::options().write(true).open(&path).map_err(|_| map_io_err())?;
+            f.set_len(size).map_err(|_| map_io_err())?;
+        }
+        if let Some(mtime) = attr.mtime {
+            let f = File::options().write(true).open(&path).map_err(|_| map_io_err())?;
+            let time = std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(mtime.max(0) as u64);
+            let times = std::fs::FileTimes::new().set_modified(time);
+            f.set_times(times).map_err(|_| map_io_err())?;
+        }
+        Ok(())
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
@@ -149,28 +239,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn disk_provider_declares_mutable_read_access() {
+    fn disk_provider_declares_read_write() {
         use vfs_provider::{Access, Provider};
-        let dir = std::env::temp_dir().join(format!("vfs-diskcaps-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vfs-diskrw-{}", std::process::id()));
         vfs_provider::write_fixture_tree(&dir);
-
         let p = DiskProvider::new(&dir);
         let caps = p.capabilities();
-        assert_eq!(caps.access, Access::Read, "writes arrive in Stage 3");
+        assert_eq!(caps.access, Access::ReadWrite);
         assert!(!caps.immutable, "a real directory can change underneath us");
-        caps.validate().expect("declaration must be self-consistent");
-
+        caps.validate().expect("ReadWrite must not claim immutable");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn disk_provider_passes_conformance() {
-        let dir = std::env::temp_dir().join(format!("vfs-diskconf-{}", std::process::id()));
+    fn disk_provider_passes_write_conformance() {
+        let dir = std::env::temp_dir().join(format!("vfs-diskwconf-{}", std::process::id()));
         vfs_provider::write_fixture_tree(&dir);
-
         let p: std::sync::Arc<dyn vfs_provider::Provider> = std::sync::Arc::new(DiskProvider::new(&dir));
         vfs_provider::assert_conformance(p);
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
