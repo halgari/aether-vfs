@@ -20,6 +20,8 @@ struct PathStats {
     open_size: u64,
     reads: u64,
     bytes: u64,
+    writes: u64,
+    write_bytes: u64,
     getattrs: u64,
     readdirs: u64,
     not_found: u64,
@@ -34,9 +36,14 @@ struct State {
     ops_readdir: u64,
     ops_open: u64,
     ops_read: u64,
+    ops_write: u64,
     ops_close: u64,
     ops_err: u64,
     total_bytes: u64,
+    total_write_bytes: u64,
+    /// Writes refused because the resolved mount had no `ReadWrite`
+    /// provider, keyed by path with a running count.
+    rejected_writes: HashMap<String, u64>,
 }
 
 
@@ -180,6 +187,50 @@ pub fn record_read(fh: u64, n: usize, err: bool) {
             e.bytes += n as u64;
         }
     });
+}
+
+pub fn record_write(fh: u64, n: usize, err: bool) {
+    let _ = with_state(|s| {
+        s.ops_write += 1;
+        if err {
+            s.ops_err += 1;
+            return;
+        }
+        s.total_write_bytes += n as u64;
+        if let Some(path) = s.fh_path.get(&fh).cloned() {
+            let e = s.by_path.entry(path).or_default();
+            e.writes += 1;
+            e.write_bytes += n as u64;
+        }
+    });
+}
+
+/// Record that `open(..., OPEN_WRITE)` was refused because the resolved
+/// mount's provider has no `ReadWrite` access. Keyed by path so a caller can
+/// tell "no provider here is writable" apart from a one-off mistake.
+pub fn record_rejected_write(path: &str) {
+    let path = norm_path(path);
+    let _ = with_state(|s| {
+        *s.rejected_writes.entry(path).or_insert(0) += 1;
+    });
+}
+
+/// Snapshot of `(path, count)` for every rejected write seen so far.
+pub fn rejected_writes() -> Vec<(String, u64)> {
+    let Ok(s) = state().lock() else {
+        return Vec::new();
+    };
+    s.rejected_writes
+        .iter()
+        .map(|(path, count)| (path.clone(), *count))
+        .collect()
+}
+
+/// Clear rejected-write tracking (tests; also useful before a fresh probe).
+pub fn reset_rejected_writes() {
+    if let Ok(mut s) = state().lock() {
+        s.rejected_writes.clear();
+    }
 }
 
 pub fn record_close(fh: u64) {

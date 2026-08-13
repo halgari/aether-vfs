@@ -1,16 +1,18 @@
 //! Ring opcode dispatch against the userspace FUSE director kernel.
 
 use vfs_protocol::{
-    decode_close_req, decode_open_req, decode_path_req, decode_read_req, encode_getattr_resp,
-    encode_open_resp, encode_read_resp, encode_read_resp_bulk, encode_readdir_resp, AttrResp,
-    DirEntryWire, OpenResp, FLAG_READ_BULK, OP_CLOSE, OP_GETATTR, OP_HEARTBEAT, OP_OPEN, OP_READ,
-    OP_READDIR, ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
+    decode_close_req, decode_mkdir_req, decode_open_req, decode_path_req, decode_read_req,
+    decode_rename_req, decode_setattr_req, decode_write_req, encode_getattr_resp,
+    encode_open_resp, encode_read_resp, encode_read_resp_bulk, encode_readdir_resp,
+    encode_write_resp, AttrResp, DirEntryWire, OpenResp, FLAG_READ_BULK, OP_CLOSE, OP_DELETE,
+    OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN, OP_READ, OP_READDIR, OP_RENAME, OP_SETATTR,
+    OP_WRITE, ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
 };
 use vfs_ipc::DataArena;
 
 use crate::director::Director;
 use crate::io_stats;
-use crate::ops::{KIND_DIR, OPEN_READ, OPEN_WRITE};
+use crate::ops::{KIND_DIR, OPEN_READ};
 
 const BULK_THRESHOLD: u32 = 64 * 1024;
 
@@ -91,9 +93,11 @@ pub fn dispatch_director(
         OP_HEARTBEAT => (ST_OK, Vec::new()),
         OP_OPEN => match decode_open_req(payload) {
             Some((oflags, path)) => {
-                if oflags & OPEN_WRITE != 0 {
-                    return (ST_BAD_REQUEST, Vec::new());
-                }
+                // No blanket rejection of OPEN_WRITE here: `Director::open`
+                // is the one place that knows whether the resolved mount's
+                // provider can actually serve writes, and it returns
+                // `ST_READ_ONLY` when it can't. Gating here too would just
+                // duplicate that policy in a place that can't see it.
                 let flags = if oflags == 0 { OPEN_READ } else { oflags };
                 match director.open(&path, flags) {
                     Ok((fh, size, is_dir)) => {
@@ -169,6 +173,121 @@ pub fn dispatch_director(
             },
             None => (ST_BAD_REQUEST, Vec::new()),
         },
+        OP_WRITE => match decode_write_req(payload) {
+            Some((req, data)) => match director.write(req.fh, req.offset, &data) {
+                Ok(n) => {
+                    io_stats::record_write(req.fh, n, false);
+                    (ST_OK, encode_write_resp(n as u32))
+                }
+                Err(st) => {
+                    io_stats::record_write(req.fh, 0, true);
+                    (st, Vec::new())
+                }
+            },
+            None => (ST_BAD_REQUEST, Vec::new()),
+        },
+        // `SetattrReq` is handle-keyed (`fh`, `size`) with no path, so this is
+        // "set end-of-file on an open handle" — `Director::set_len`, not the
+        // path-keyed `Provider::set_attr`. Do not "fix" this toward
+        // `set_attr`; that method has no wire route in this protocol.
+        OP_SETATTR => match decode_setattr_req(payload) {
+            Some(req) => match director.set_len(req.fh, req.size) {
+                Ok(()) => (ST_OK, Vec::new()),
+                Err(st) => (st, Vec::new()),
+            },
+            None => (ST_BAD_REQUEST, Vec::new()),
+        },
+        OP_RENAME => match decode_rename_req(payload) {
+            Some((from, to)) => match director.rename(&from, &to) {
+                Ok(()) => (ST_OK, Vec::new()),
+                Err(st) => (st, Vec::new()),
+            },
+            None => (ST_BAD_REQUEST, Vec::new()),
+        },
+        OP_DELETE => match decode_path_req(payload) {
+            Some(path) => match director.remove(&path) {
+                Ok(()) => (ST_OK, Vec::new()),
+                Err(st) => (st, Vec::new()),
+            },
+            None => (ST_BAD_REQUEST, Vec::new()),
+        },
+        OP_MKDIR => match decode_mkdir_req(payload) {
+            Some((_mode, path)) => match director.mkdir(&path) {
+                Ok(()) => (ST_OK, Vec::new()),
+                Err(st) => (st, Vec::new()),
+            },
+            None => (ST_BAD_REQUEST, Vec::new()),
+        },
         _ => (ST_BAD_REQUEST, Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_opcode_round_trips_through_dispatch() {
+        use vfs_protocol::{encode_open_req, encode_write_req, decode_open_resp, decode_write_resp,
+                           WriteReq, OP_OPEN, OP_WRITE, OPEN_CREATE, OPEN_WRITE, ST_OK};
+        let dir = std::env::temp_dir().join(format!("vfs-rdw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = Director::new();
+        d.mount("/", std::sync::Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+
+        let (st, payload) = dispatch_director(
+            &d, OP_OPEN, &encode_open_req(OPEN_WRITE | OPEN_CREATE, "w.txt"), 0, 4096, None);
+        assert_eq!(st, ST_OK, "open for write must succeed through dispatch");
+        let fh = decode_open_resp(&payload).unwrap().fh;
+
+        let req = WriteReq { fh, offset: 0, len: 5 };
+        let (st, payload) = dispatch_director(
+            &d, OP_WRITE, &encode_write_req(&req, b"hello"), 0, 4096, None);
+        assert_eq!(st, ST_OK, "write must succeed through dispatch");
+        assert_eq!(decode_write_resp(&payload).unwrap(), 5);
+
+        assert_eq!(std::fs::read(dir.join("w.txt")).unwrap(), b"hello");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_opcode_removes_the_file() {
+        use vfs_protocol::{encode_path_req, OP_DELETE, ST_OK};
+        let dir = std::env::temp_dir().join(format!("vfs-rdd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("gone.txt"), b"x").unwrap();
+        let d = Director::new();
+        d.mount("/", std::sync::Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+
+        let (st, _) = dispatch_director(&d, OP_DELETE, &encode_path_req("gone.txt"), 0, 4096, None);
+        assert_eq!(st, ST_OK);
+        assert!(!dir.join("gone.txt").exists(), "OP_DELETE did not remove the file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_write_against_a_read_only_provider_is_read_only_not_bad_request() {
+        use vfs_protocol::{encode_open_req, OP_OPEN, OPEN_WRITE, ST_READ_ONLY};
+        let d = Director::new();
+        // InlineProvider is Access::Read: the mount itself has no writable
+        // backend, so the director (not this dispatch arm) must be the one
+        // to say so.
+        d.mount(
+            "/",
+            std::sync::Arc::new(vfs_compose::InlineProvider::from_files([(
+                "f",
+                b"x".as_slice(),
+            )])),
+        )
+        .unwrap();
+
+        let (st, _) =
+            dispatch_director(&d, OP_OPEN, &encode_open_req(OPEN_WRITE, "f"), 0, 4096, None);
+        assert_eq!(
+            st, ST_READ_ONLY,
+            "OP_OPEN with OPEN_WRITE against a read-only mount must surface ST_READ_ONLY, not a blanket ST_BAD_REQUEST"
+        );
     }
 }

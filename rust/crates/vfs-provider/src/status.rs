@@ -1,7 +1,9 @@
 //! Status codes crossing the provider boundary, and open-request flags.
 //!
-//! Values `0` through `-7` are fixed by the existing ring protocol and must
-//! not be renumbered.
+//! Values `0` through `-9` are fixed by the existing ring protocol — and by
+//! the injected shim DLL, which matches statuses by number across the
+//! process boundary — and must not be renumbered. New statuses append at the
+//! next free negative number instead.
 
 pub const ST_OK: i32 = 0;
 pub const ST_NOT_FOUND: i32 = -1;
@@ -15,6 +17,8 @@ pub const ST_NO_SPACE: i32 = -7;
 pub const ST_NOT_SUPPORTED: i32 = -8;
 /// No `ReadWrite` provider serves this path.
 pub const ST_READ_ONLY: i32 = -9;
+/// `OPEN_EXCL` (create-new) refused because the path already exists.
+pub const ST_EXISTS: i32 = -10;
 
 pub fn ok() -> i32 { ST_OK }
 pub fn not_found() -> i32 { ST_NOT_FOUND }
@@ -25,6 +29,7 @@ pub fn is_dir() -> i32 { ST_IS_DIR }
 pub fn bad_fh() -> i32 { ST_BAD_FH }
 pub fn not_supported() -> i32 { ST_NOT_SUPPORTED }
 pub fn read_only() -> i32 { ST_READ_ONLY }
+pub fn exists() -> i32 { ST_EXISTS }
 
 /// Open wants read access.
 pub const OPEN_READ: u32 = 1;

@@ -116,6 +116,14 @@ mod tests {
         assert_eq!(remote.capabilities().access, vfs_provider::Access::Read);
         assert!(!remote.capabilities().immutable, "disk is mutable, and the wire must say so");
 
+        // The service wraps a ReadWrite DiskProvider, but the Stage-1 wire
+        // contract has no write RPCs — so what crosses the wire must be Read.
+        assert_eq!(
+            remote.capabilities().access,
+            vfs_provider::Access::Read,
+            "the gRPC service must clamp access to what the wire can serve"
+        );
+
         tokio::task::spawn_blocking(move || {
             vfs_provider::assert_conformance(remote);
         })

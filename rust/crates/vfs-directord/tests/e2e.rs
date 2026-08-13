@@ -54,7 +54,12 @@ fn ensure_inject_artifacts() {
     // binary). Co-locate them into the profile dir if cargo left them only in
     // deps/ or they were never built for this package.
     let profile = profile_dir();
-    let needed = ["vfs_shim_dll.dll", "vfs_payload.dll", "vfs-fixture-read.exe"];
+    let needed = [
+        "vfs_shim_dll.dll",
+        "vfs_payload.dll",
+        "vfs-fixture-read.exe",
+        "vfs-fixture-writepath.exe",
+    ];
     let missing = needed.iter().any(|n| !profile.join(n).is_file());
     if missing {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
@@ -69,6 +74,8 @@ fn ensure_inject_artifacts() {
                 "vfs-shim-dll",
                 "-p",
                 "vfs-fixture-read",
+                "-p",
+                "vfs-fixture-writepath",
                 "--quiet",
             ])
             .status()
@@ -102,8 +109,28 @@ fn ensure_inject_artifacts() {
     }
 }
 
+/// `Session::launch` configures the injected child through **process-global**
+/// environment variables (`IpcServe::apply_env`'s own doc comment: "for the
+/// injected child (and single-session hosts)"). Any two tests in this binary
+/// that each create a session and launch a real child process race on that
+/// global env under the default (parallel) test harness — whichever
+/// session's `apply_env` fires last wins for the whole process, so a child
+/// can silently connect to the *other* test's ring/session instead of its
+/// own. Flip-tested: without this lock, running this file's launching tests
+/// together is intermittently flaky (a write lands nowhere the assertions
+/// expect) even though each passes reliably alone.
+///
+/// This is the project's stated convention for a test touching process-global
+/// state (see `VA_LOCK` in `vfs-shim::lazy_section`) rather than moving every
+/// launching test into its own binary. An async `tokio::sync::Mutex`, not
+/// `std::sync::Mutex`: the guard is held across `.await` points for this
+/// test's whole session lifecycle, which clippy's `await_holding_lock` rightly
+/// refuses for a std lock.
+static LAUNCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test(flavor = "multi_thread")]
 async fn scenario_toml_disk_source_fixture_read() {
+    let _guard = LAUNCH_LOCK.lock().await;
     ensure_inject_artifacts();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -236,6 +263,320 @@ wait      = true
         Some(0),
         "fixture should exit 0 after reading 5 bytes via injected shim"
     );
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq {
+            session_id: session.id,
+        })
+        .await
+        .expect("teardown");
+
+    server.abort();
+}
+
+/// The decisive end-to-end assertion for the whole write-path phase: a
+/// launched, injected process's writes/rename/delete land through the real
+/// director + `DiskProvider`, not the shim-local overlay bypass.
+///
+/// Task 6 found that `try_fuse_create`/`open_write` never forwarded the NT
+/// create-disposition into the ring's `OP_OPEN`, so a brand-new file always
+/// got `ST_NOT_FOUND` from the director and silently fell through to
+/// `<session-base>/overlay/` — a shim-local directory the director never
+/// reads from. A test that only checks the bytes exist somewhere would pass
+/// with that bypass fully intact; the decisive check is that overlay/ stays
+/// EMPTY, proving the write actually crossed the ring instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn scenario_toml_disk_source_fixture_writepath() {
+    let _guard = LAUNCH_LOCK.lock().await;
+    ensure_inject_artifacts();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+    let registry = SessionRegistry::new();
+    let svc = DirectorService::new(registry);
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Empty scratch directory: the DiskProvider's backing store. Nothing
+    // pre-exists, so every byte the assertions find had to be written by the
+    // launched fixture through the real provider graph.
+    let content_dir = tempfile::tempdir().expect("tempdir");
+
+    let fixture = locate_artifact("vfs-fixture-writepath.exe");
+    let mut client = connect(&format!("{addr}")).await.expect("connect");
+
+    let session = client
+        .create_session(vfs_control::pb::CreateSessionReq {
+            name: "m0-e2e-writepath".into(),
+        })
+        .await
+        .expect("CreateSession")
+        .into_inner();
+    assert!(!session.id.is_empty());
+    assert!(!session.root.is_empty());
+
+    use vfs_control::pb::{launch_event, source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
+
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(PbSource {
+                kind: Some(source_spec::Kind::Disk(DiskSource {
+                    path: content_dir.path().to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: "/".into(),
+            layer: 0,
+        })
+        .await
+        .expect("AddSource");
+
+    let mut stream = client
+        .launch(LaunchReq {
+            session_id: session.id.clone(),
+            exec: fixture.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            wait: true,
+            env: Default::default(),
+        })
+        .await
+        .expect("Launch")
+        .into_inner();
+
+    let mut exit_code = None;
+    while let Some(ev) = stream.message().await.expect("stream") {
+        match ev.event {
+            Some(launch_event::Event::Exited(x)) => exit_code = Some(x.code),
+            Some(launch_event::Event::Started(_)) => {}
+            Some(launch_event::Event::Log(l)) => eprintln!("log: {}", l.line),
+            None => {}
+        }
+    }
+
+    assert_eq!(
+        exit_code,
+        Some(0),
+        "fixture should exit 0 after create/write/append/rename/delete all round-trip \
+         through the injected shim"
+    );
+
+    // The decisive assertions, on the filesystem, not on a director query:
+    // bytes must be in the DiskProvider's backing directory, and NOTHING may
+    // have landed in the shim-local overlay fallback.
+    let renamed = content_dir.path().join("renamed-probe.txt");
+    assert!(
+        renamed.is_file(),
+        "renamed file must be in the DiskProvider backing dir at {renamed:?}"
+    );
+    assert_eq!(
+        std::fs::read(&renamed).expect("read renamed-probe.txt"),
+        b"helloworld",
+        "renamed file must carry the create+append bytes through to the backing dir"
+    );
+    // The original name must be gone from the backing dir too (real rename,
+    // not a copy left behind).
+    assert!(
+        !content_dir.path().join("write-probe.txt").exists(),
+        "write-probe.txt must not remain in the backing dir after rename"
+    );
+    // delete-probe.txt was created then deleted by the fixture; it must never
+    // have been left behind in the backing dir.
+    assert!(
+        !content_dir.path().join("delete-probe.txt").exists(),
+        "delete-probe.txt must not remain in the backing dir after delete"
+    );
+
+    // session.root is "<session-base>/root"; overlay is its sibling.
+    let overlay = PathBuf::from(&session.root)
+        .parent()
+        .expect("session.root has a parent")
+        .join("overlay");
+    assert_overlay_empty(&overlay);
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq {
+            session_id: session.id,
+        })
+        .await
+        .expect("teardown");
+
+    server.abort();
+}
+
+/// `read_dir(...).unwrap_or_default()` turns a wrong or missing overlay path
+/// into a silent empty-Vec pass — the exact failure mode this assertion
+/// exists to catch would then go undetected. Assert the directory actually
+/// exists first, so a path mistake surfaces as a panic instead of a false
+/// green.
+fn assert_overlay_empty(overlay: &std::path::Path) {
+    assert!(
+        overlay.is_dir(),
+        "expected the shim-local overlay directory to exist at {overlay:?} \
+         (Session::launch creates it unconditionally) — a missing/wrong path \
+         here would make the emptiness check below pass vacuously"
+    );
+    let overlay_entries: Vec<_> = std::fs::read_dir(overlay)
+        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert!(
+        overlay_entries.is_empty(),
+        "nothing should land in the shim-local overlay fallback \
+         ({overlay:?} contains {overlay_entries:?}) — this is the bypass the phase closes"
+    );
+}
+
+/// Two root-mounted sources — the case Fix 1 exists for. A single mounted
+/// source never constructs a `LayeredProvider` at all (`stack_layers`
+/// returns a lone layer as-is), so the headline "writes cross the ring, not
+/// the overlay bypass" assertion above cannot see LayeredProvider's `open()`
+/// hard-rejecting `OPEN_WRITE` while its `capabilities()` advertised
+/// `ReadWrite` — exactly the shape `SessionRegistry::add_source` builds for
+/// any session with two or more root-mounted sources, the ordinary modded-
+/// game case. `layer = 1` mounts on top of `layer = 0`, and a layered stack
+/// routes every write to the topmost child that declares `ReadWrite` — both
+/// `DiskProvider`s here do — so the written bytes must land in the top
+/// content directory, not the bottom one and not the overlay fallback.
+#[tokio::test(flavor = "multi_thread")]
+async fn scenario_toml_two_disk_sources_fixture_writepath() {
+    let _guard = LAUNCH_LOCK.lock().await;
+    ensure_inject_artifacts();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+    let registry = SessionRegistry::new();
+    let svc = DirectorService::new(registry);
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Two empty scratch directories, mounted as two separate root sources.
+    let bottom_dir = tempfile::tempdir().expect("tempdir bottom");
+    let top_dir = tempfile::tempdir().expect("tempdir top");
+
+    let fixture = locate_artifact("vfs-fixture-writepath.exe");
+    let mut client = connect(&format!("{addr}")).await.expect("connect");
+
+    let session = client
+        .create_session(vfs_control::pb::CreateSessionReq {
+            name: "m0-e2e-writepath-two-sources".into(),
+        })
+        .await
+        .expect("CreateSession")
+        .into_inner();
+    assert!(!session.id.is_empty());
+    assert!(!session.root.is_empty());
+
+    use vfs_control::pb::{launch_event, source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
+
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(PbSource {
+                kind: Some(source_spec::Kind::Disk(DiskSource {
+                    path: bottom_dir.path().to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: "/".into(),
+            layer: 0,
+        })
+        .await
+        .expect("AddSource bottom");
+
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(PbSource {
+                kind: Some(source_spec::Kind::Disk(DiskSource {
+                    path: top_dir.path().to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: "/".into(),
+            layer: 1,
+        })
+        .await
+        .expect("AddSource top");
+
+    let mut stream = client
+        .launch(LaunchReq {
+            session_id: session.id.clone(),
+            exec: fixture.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            wait: true,
+            env: Default::default(),
+        })
+        .await
+        .expect("Launch")
+        .into_inner();
+
+    let mut exit_code = None;
+    while let Some(ev) = stream.message().await.expect("stream") {
+        match ev.event {
+            Some(launch_event::Event::Exited(x)) => exit_code = Some(x.code),
+            Some(launch_event::Event::Started(_)) => {}
+            Some(launch_event::Event::Log(l)) => eprintln!("log: {}", l.line),
+            None => {}
+        }
+    }
+
+    assert_eq!(
+        exit_code,
+        Some(0),
+        "fixture should exit 0 after create/write/append/rename/delete all round-trip \
+         through the injected shim over a two-source (LayeredProvider) stack"
+    );
+
+    // The decisive assertions: bytes in the TOP source's backing directory
+    // (the layer writes route to), nothing in the bottom source, and nothing
+    // in the shim-local overlay fallback.
+    let renamed = top_dir.path().join("renamed-probe.txt");
+    assert!(
+        renamed.is_file(),
+        "renamed file must be in the topmost DiskProvider's backing dir at {renamed:?}"
+    );
+    assert_eq!(
+        std::fs::read(&renamed).expect("read renamed-probe.txt"),
+        b"helloworld",
+        "renamed file must carry the create+append bytes through to the top backing dir"
+    );
+    assert!(
+        !top_dir.path().join("write-probe.txt").exists(),
+        "write-probe.txt must not remain in the top backing dir after rename"
+    );
+    assert!(
+        !top_dir.path().join("delete-probe.txt").exists(),
+        "delete-probe.txt must not remain in the top backing dir after delete"
+    );
+
+    // Nothing should have landed in the bottom (non-target) layer at all.
+    let bottom_entries: Vec<_> = std::fs::read_dir(bottom_dir.path())
+        .expect("read bottom dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    assert!(
+        bottom_entries.is_empty(),
+        "the bottom layer must stay untouched when the top layer is writable \
+         (found {bottom_entries:?})"
+    );
+
+    let overlay = PathBuf::from(&session.root)
+        .parent()
+        .expect("session.root has a parent")
+        .join("overlay");
+    assert_overlay_empty(&overlay);
 
     client
         .teardown_session(vfs_control::pb::TeardownReq {

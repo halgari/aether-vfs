@@ -36,9 +36,14 @@
 | `crates/vfs-director/src/director.rs` | `OPEN_WRITE`, append cursors, write routing, `ST_READ_ONLY` |
 | `crates/vfs-director/src/ring_dispatch.rs` | `OP_WRITE`, `OP_SETATTR`, `OP_RENAME`, `OP_DELETE`, `OP_MKDIR` |
 | `crates/vfs-director/src/io_stats.rs` | Write and rejected-write counters |
+| `crates/vfs-cache/src/provider.rs` | **Write-transparent cache**: forward the write half, invalidate on `write_at`/`set_len`, and drop the `OPEN_WRITE` rejection |
 | `crates/vfs-shim/src/hook.rs` | `NtSetInformationFile` delete/rename, `NtFlushBuffersFile` |
 
 **Created:** `crates/vfs-fixture-writepath/` (an end-to-end fixture executable).
+
+**A gap this plan originally missed.** `SessionRegistry::add_source` — the only production path, used by both the gRPC daemon and the end-to-end harness — wraps **every** mounted backend in `CachingProvider`. Its `open()` rejected `OPEN_WRITE` while its `capabilities()` forwarded the inner provider's `ReadWrite`, so writes through the real path were refused and then fell through to the shim's overlay redirect: the exact bypass this stage exists to close. No unit test could see it, because unit tests mount providers directly and skip the registry.
+
+The systematic guard, which belongs in whichever task touches `vfs-cache`: run `assert_conformance` over a `CachingProvider` wrapping a **writable** inner provider. Stage 1 added a cached-provider conformance test, but its inner was read-only, so the write cases never ran. That one test would have caught this before the end-to-end test did.
 
 ---
 
@@ -248,13 +253,23 @@ fn assert_writable(p: &Arc<dyn Provider>) {
         .expect("set_attr mtime");
     p.remove(keep).expect("cleanup");
 
-    // The reference tree survived: write cases must not disturb it.
+    // The reference tree survived: write cases must not disturb it. Compare
+    // bytes, not just size — a same-length scribble is the corruption this
+    // check exists to catch, and a size comparison cannot see it.
     for (rel, body) in FIXTURE_FILES {
+        let vp = VPath::at_default(rel);
         let st = p
-            .getattr(VPath::at_default(rel))
+            .getattr(vp)
             .unwrap_or_else(|e| panic!("getattr({rel}) after writes failed with {e}"))
             .unwrap_or_else(|| panic!("write cases destroyed {rel}"));
-        assert_eq!(st.size, body.len() as u64, "write cases altered {rel}");
+        assert_eq!(st.size, body.len() as u64, "write cases altered {rel}'s size");
+
+        let (h, _, _) = p
+            .open(vp, crate::OPEN_READ)
+            .unwrap_or_else(|e| panic!("reopen({rel}) after writes failed with {e}"));
+        let got = read_all(p, h, st.size);
+        p.close(h).expect("close");
+        assert_eq!(got, *body, "write cases altered {rel}'s content");
     }
 }
 ```
@@ -395,7 +410,7 @@ Copy-up is **whole-file, not lazy per block** — the files games write are INIs
         let dir = std::env::temp_dir().join(format!("vfs-ovrw-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let ov = OverlayProvider::new(base, vfs_provider::RwMemFixture::new()).unwrap();
+        let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
         assert_eq!(ov.capabilities().access, Access::ReadWrite);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -417,7 +432,7 @@ Copy-up is **whole-file, not lazy per block** — the files games write are INIs
         let dir = std::env::temp_dir().join(format!("vfs-ovcu-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let ov = OverlayProvider::new(base.clone(), vfs_provider::RwMemFixture::new()).unwrap();
+        let ov = OverlayProvider::new(base.clone(), MemUpper::default()).unwrap();
 
         let f = VPath::at_default("a.txt");
         let (h, _, _) = ov.open(f, OPEN_WRITE).expect("open for write copies up");
@@ -445,7 +460,7 @@ Copy-up is **whole-file, not lazy per block** — the files games write are INIs
         let dir = std::env::temp_dir().join(format!("vfs-ovwh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let ov = OverlayProvider::new(base, vfs_provider::RwMemFixture::new()).unwrap();
+        let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
         let f = VPath::at_default("a.txt");
         ov.remove(f).expect("remove");
         assert!(ov.getattr(f).expect("getattr").is_none(), "whiteout did not hide the base file");
@@ -465,7 +480,7 @@ Copy-up is **whole-file, not lazy per block** — the files games write are INIs
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let ov: StdArc<OverlayProvider> =
-            StdArc::new(OverlayProvider::new(base, vfs_provider::RwMemFixture::new()).unwrap());
+            StdArc::new(OverlayProvider::new(base, MemUpper::default()).unwrap());
 
         let mut hs = Vec::new();
         for _ in 0..8 {
@@ -492,13 +507,21 @@ Copy-up is **whole-file, not lazy per block** — the files games write are INIs
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let ov: Arc<dyn vfs_provider::Provider> =
-            Arc::new(OverlayProvider::new(base, vfs_provider::RwMemFixture::new()).unwrap());
+            Arc::new(OverlayProvider::new(base, MemUpper::default()).unwrap());
         vfs_provider::assert_conformance(ov);
         let _ = std::fs::remove_dir_all(&dir);
     }
 ```
 
-**Note:** `OverlayProvider::new` changes signature — it now takes an `Arc<dyn Provider>` upper rather than a `PathBuf`, and returns `Result`. The tests above use `RwMemFixture` from `vfs-provider` as the upper deliberately: it is a `ReadWrite` provider and needs no new dependency. Do **not** reach for `vfs-director::DiskProvider` here — `vfs-director` already dev-depends on `vfs-compose`, and adding the reverse edge creates a dev-dependency cycle that made `--all-targets` unusable once before (see the comment in `vfs-inject/Cargo.toml` about cargo#6313).
+**Note:** `OverlayProvider::new` changes signature — it now takes an `Arc<dyn Provider>` upper rather than a `PathBuf`, and returns `Result`.
+
+**The upper must be a blank, test-local writable provider — not `RwMemFixture`.** `RwMemFixture` is a *conformance* fixture, permanently obligated to serve `FIXTURE_FILES` so it can pass the suite; an overlay's upper must start empty. Using it as the upper breaks copy-up tests (the upper already "contains" `a.txt`) and, worse, makes `overlay_passes_write_conformance` pass **even if the overlay ignored its base entirely** — the upper's phantom copy answers everything.
+
+Define a `MemUpper` in `vfs-compose`'s `#[cfg(test)]` module: an in-memory `Access::ReadWrite` provider backed purely by a `files` map and a `dirs` set, starting empty. Keep it test-local — it is a test double, not public API, and `vfs-provider` stays untouched.
+
+Do **not** reach for `vfs-director::DiskProvider` either — `vfs-director` already dev-depends on `vfs-compose`, and the reverse edge creates a dev-dependency cycle that made `--all-targets` unusable once before (see the comment in `vfs-inject/Cargo.toml` about cargo#6313).
+
+Two assertions prove the fixture choice was right: `writing_a_base_file_copies_it_up…` must read back `"UPSE"` (4 bytes, from `"BASE"`) and not 5 bytes from a shadowing upper; and `overlay_passes_write_conformance` must fail if `OverlayProvider::getattr` is temporarily made to skip its base.
 
 Since the tests use an in-memory upper, the whiteout and copy-up code must work through the **provider interface**, not through `std::fs` — which is the point: an in-memory upper gets deletes for free only if whiteouts are written through `upper.open`/`upper.write_at`.
 
@@ -509,7 +532,27 @@ Expected: compile error — `OverlayProvider::new` has the old signature.
 
 - [ ] **Step 3: Implement**
 
-Change `OverlayProvider` to hold `base: Arc<dyn Provider>` and `upper: Arc<dyn Provider>`. `new` validates `upper.capabilities().access == Access::ReadWrite` and returns `Err(&'static str)` otherwise. `capabilities` returns the base's capabilities with `access` forced to `ReadWrite` (a writable upper makes the stack writable regardless of base).
+Change `OverlayProvider` to hold `base: Arc<dyn Provider>` and `upper: Arc<dyn Provider>`. `new` validates `upper.capabilities().access == Access::ReadWrite` and returns `Err(&'static str)` otherwise.
+
+`capabilities` must force **both** `access` and `immutable`:
+
+```rust
+    fn capabilities(&self) -> Capabilities {
+        // A writable upper makes the stack writable regardless of the base, and
+        // a stack you can write to is by definition not immutable — declaring
+        // otherwise would be a promise a caching layer would act on.
+        // `slow` and `preferred_block` still combine across both children.
+        Capabilities {
+            access: Access::ReadWrite,
+            immutable: false,
+            ..Capabilities::weakest([self.base.capabilities(), self.upper.capabilities()])
+        }
+    }
+```
+
+**Forcing `immutable: false` is required, not cosmetic.** `Capabilities::validate()` rejects `ReadWrite + immutable` as self-contradictory, and `InlineProvider` — the base in the conformance test above — declares `immutable: true`. Passing the base's `immutable` through would make `assert_conformance` panic on its own validation call.
+
+**One pre-existing test must be rewritten**, which is the single assertion change authorised in this task: `overlay_capabilities_derive_from_base_but_clamp_access_to_read` asserts the Stage-1 read-only semantics this task supersedes, and can no longer pass under any valid construction. Rename it to `overlay_reports_read_write_and_is_never_immutable`, assert the new semantics, and comment *why* `immutable` is false so a later reader does not "fix" it back.
 
 Whiteouts keep the `.wh.<name>` convention but are now created through the upper provider's `open`/`write_at`, so an in-memory upper gets deletes for free.
 

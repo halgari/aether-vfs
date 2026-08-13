@@ -202,6 +202,224 @@ impl Provider for SeqFixture {
     }
 }
 
+/// In-memory `ReadWrite` reference provider. The `FIXTURE_FILES` tree is served
+/// read-only from an inner `MemFixture`; written paths live in `extra`, so the
+/// read cases keep seeing the exact reference tree.
+pub struct RwMemFixture {
+    base: MemFixture,
+    extra: Mutex<HashMap<String, Vec<u8>>>,
+    dirs: Mutex<Vec<String>>,
+    next: AtomicU64,
+    opens: Mutex<HashMap<Handle, String>>,
+    discard: bool,
+}
+
+impl RwMemFixture {
+    pub fn new() -> Self {
+        Self::build(false)
+    }
+
+    /// Accepts writes and drops them — proves the suite catches a provider
+    /// whose writes do not stick.
+    pub fn discarding_writes() -> Self {
+        Self::build(true)
+    }
+
+    fn build(discard: bool) -> Self {
+        RwMemFixture {
+            base: MemFixture::new(),
+            extra: Mutex::new(HashMap::new()),
+            dirs: Mutex::new(Vec::new()),
+            next: AtomicU64::new(1),
+            opens: Mutex::new(HashMap::new()),
+            discard,
+        }
+    }
+}
+
+impl Default for RwMemFixture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Copy `body[offset..]` into `buf`, clamped like a positional read at EOF.
+fn copy_at(body: &[u8], offset: u64, buf: &mut [u8]) -> usize {
+    let start = (offset as usize).min(body.len());
+    let n = (body.len() - start).min(buf.len());
+    buf[..n].copy_from_slice(&body[start..start + n]);
+    n
+}
+
+impl Provider for RwMemFixture {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities { access: Access::ReadWrite, immutable: false, slow: false, preferred_block: None }
+    }
+
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        if let Some(body) = self.extra.lock().map_err(|_| map_io_err())?.get(p.rel) {
+            return Ok(Some(Stat { kind: KIND_FILE, size: body.len() as u64, mtime: 0 }));
+        }
+        if self.dirs.lock().map_err(|_| map_io_err())?.iter().any(|d| d == p.rel) {
+            return Ok(Some(Stat { kind: KIND_DIR, size: 0, mtime: 0 }));
+        }
+        self.base.getattr(p)
+    }
+
+    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+        let prefix = if p.rel.is_empty() { String::new() } else { format!("{}/", p.rel) };
+        let mut seen: HashMap<String, DirEntry> = HashMap::new();
+
+        match self.base.readdir(p) {
+            Ok(entries) => {
+                for e in entries {
+                    seen.insert(e.name.clone(), e);
+                }
+            }
+            Err(e) if e == not_found() => {}
+            Err(e) => return Err(e),
+        }
+
+        for (rel, body) in self.extra.lock().map_err(|_| map_io_err())?.iter() {
+            let Some(rest) = rel.strip_prefix(prefix.as_str()) else { continue };
+            if rest.is_empty() || rest.contains('/') {
+                continue;
+            }
+            seen.insert(
+                rest.to_string(),
+                DirEntry {
+                    name: rest.to_string(),
+                    stat: Stat { kind: KIND_FILE, size: body.len() as u64, mtime: 0 },
+                },
+            );
+        }
+
+        for d in self.dirs.lock().map_err(|_| map_io_err())?.iter() {
+            let Some(rest) = d.strip_prefix(prefix.as_str()) else { continue };
+            if rest.is_empty() || rest.contains('/') {
+                continue;
+            }
+            seen.entry(rest.to_string()).or_insert(DirEntry {
+                name: rest.to_string(),
+                stat: Stat { kind: KIND_DIR, size: 0, mtime: 0 },
+            });
+        }
+
+        if seen.is_empty() && !p.rel.is_empty() {
+            return Err(not_found());
+        }
+        let mut out: Vec<DirEntry> = seen.into_values().collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+        let mut extra = self.extra.lock().map_err(|_| map_io_err())?;
+        let exists = extra.contains_key(p.rel) || self.base.files.contains_key(p.rel);
+
+        if flags & crate::OPEN_EXCL != 0 && exists {
+            return Err(crate::bad_request());
+        }
+        if flags & crate::OPEN_CREATE != 0 {
+            extra.entry(p.rel.to_string()).or_default();
+        } else if !exists {
+            return Err(not_found());
+        }
+        if flags & crate::OPEN_TRUNC != 0 {
+            extra.insert(p.rel.to_string(), Vec::new());
+        }
+
+        let size = extra
+            .get(p.rel)
+            .map(|b| b.len())
+            .or_else(|| self.base.files.get(p.rel).map(|b| b.len()))
+            .unwrap_or(0) as u64;
+        drop(extra);
+
+        let h = self.next.fetch_add(1, Ordering::Relaxed);
+        self.opens.lock().map_err(|_| map_io_err())?.insert(h, p.rel.to_string());
+        Ok((h, size, false))
+    }
+
+    fn close(&self, h: Handle) -> Result<(), i32> {
+        self.opens.lock().map_err(|_| map_io_err())?.remove(&h);
+        Ok(())
+    }
+
+    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        let path = self.opens.lock().map_err(|_| map_io_err())?.get(&h).cloned().ok_or_else(crate::bad_fh)?;
+        let extra = self.extra.lock().map_err(|_| map_io_err())?;
+        if let Some(body) = extra.get(&path) {
+            return Ok(copy_at(body, offset, buf));
+        }
+        drop(extra);
+        if let Some(body) = self.base.files.get(&path) {
+            return Ok(copy_at(body, offset, buf));
+        }
+        Err(crate::bad_fh())
+    }
+
+    fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
+        let path = self.opens.lock().map_err(|_| map_io_err())?.get(&h).cloned().ok_or_else(crate::bad_fh)?;
+        let mut extra = self.extra.lock().map_err(|_| map_io_err())?;
+        let body = extra.entry(path).or_default();
+        let end = offset as usize + buf.len();
+        if body.len() < end {
+            body.resize(end, 0);
+        }
+        // A discarding fixture still tracks size (so getattr looks correct)
+        // but never actually stores the bytes — that gap is only visible on
+        // read-back, which is exactly what the suite must catch.
+        if !self.discard {
+            body[offset as usize..end].copy_from_slice(buf);
+        }
+        Ok(buf.len())
+    }
+
+    fn set_len(&self, h: Handle, len: u64) -> Result<(), i32> {
+        let path = self.opens.lock().map_err(|_| map_io_err())?.get(&h).cloned().ok_or_else(crate::bad_fh)?;
+        self.extra.lock().map_err(|_| map_io_err())?.entry(path).or_default().resize(len as usize, 0);
+        Ok(())
+    }
+
+    fn flush(&self, _h: Handle) -> Result<(), i32> {
+        Ok(())
+    }
+
+    fn mkdir(&self, p: VPath) -> Result<(), i32> {
+        self.dirs.lock().map_err(|_| map_io_err())?.push(p.rel.to_string());
+        Ok(())
+    }
+
+    fn remove(&self, p: VPath) -> Result<(), i32> {
+        let had_file = self.extra.lock().map_err(|_| map_io_err())?.remove(p.rel).is_some();
+        let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
+        let before = dirs.len();
+        dirs.retain(|d| d != p.rel);
+        let had_dir = dirs.len() != before;
+        drop(dirs);
+        if had_file || had_dir {
+            Ok(())
+        } else {
+            Err(not_found())
+        }
+    }
+
+    fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
+        if from.root != to.root {
+            return Err(crate::bad_request());
+        }
+        let mut extra = self.extra.lock().map_err(|_| map_io_err())?;
+        let body = extra.remove(from.rel).ok_or_else(not_found)?;
+        extra.insert(to.rel.to_string(), body);
+        Ok(())
+    }
+
+    fn set_attr(&self, _p: VPath, _attr: crate::SetAttr) -> Result<(), i32> {
+        Ok(())
+    }
+}
+
 /// Read every byte of an open handle, looping over short reads.
 fn read_all(p: &Arc<dyn Provider>, h: Handle, size: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(size as usize);
@@ -241,6 +459,9 @@ pub fn assert_conformance(p: Arc<dyn Provider>) {
     match caps.access {
         Access::SeqRead => assert_sequential(&p),
         Access::Read | Access::ReadWrite => assert_positional(&p),
+    }
+    if caps.access == Access::ReadWrite {
+        assert_writable(&p); // last: these cases mutate
     }
 }
 
@@ -433,6 +654,134 @@ fn assert_sequential(p: &Arc<dyn Provider>) {
     }
 }
 
+/// Write cases. Run last, because they mutate. Every path is `w_`-prefixed so
+/// the reference tree the read cases assert is never disturbed.
+fn assert_writable(p: &Arc<dyn Provider>) {
+    use crate::{OPEN_APPEND, OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC, OPEN_WRITE};
+
+    let f = VPath::at_default("w_new.txt");
+
+    // Create, write, read back through a fresh handle.
+    let (h, _, _) = p.open(f, OPEN_WRITE | OPEN_CREATE).expect("open create");
+    assert_eq!(p.write_at(h, 0, b"hello").expect("write_at"), 5);
+    p.flush(h).expect("flush");
+    p.close(h).expect("close");
+
+    let st = p.getattr(f).expect("getattr after write").expect("file must exist after write");
+    assert_eq!(st.size, 5, "size after write");
+
+    let (h, size, _) = p.open(f, crate::OPEN_READ).expect("reopen for read");
+    assert_eq!(size, 5);
+    let mut buf = [0u8; 8];
+    let n = p.read_at(h, 0, &mut buf).expect("read_at");
+    assert_eq!(&buf[..n], b"hello", "written bytes did not read back");
+    p.close(h).expect("close");
+
+    // EXCL refuses an existing path.
+    assert!(
+        p.open(f, OPEN_WRITE | OPEN_CREATE | OPEN_EXCL).is_err(),
+        "OPEN_EXCL must fail on an existing file"
+    );
+
+    // TRUNC empties it.
+    let (h, _, _) = p.open(f, OPEN_WRITE | OPEN_TRUNC).expect("open trunc");
+    p.close(h).expect("close");
+    assert_eq!(p.getattr(f).expect("getattr").expect("exists").size, 0, "TRUNC must empty the file");
+
+    // Positional overwrite mid-file.
+    let (h, _, _) = p.open(f, OPEN_WRITE).expect("open write");
+    p.write_at(h, 0, b"abcdef").expect("write_at");
+    p.write_at(h, 2, b"XY").expect("overwrite");
+    p.close(h).expect("close");
+    let (h, _, _) = p.open(f, crate::OPEN_READ).expect("reopen");
+    let n = p.read_at(h, 0, &mut buf).expect("read_at");
+    assert_eq!(&buf[..n], b"abXYef", "positional overwrite wrong");
+    p.close(h).expect("close");
+
+    // set_len shrinks and grows; growth zero-fills.
+    let (h, _, _) = p.open(f, OPEN_WRITE).expect("open");
+    p.set_len(h, 2).expect("shrink");
+    p.set_len(h, 4).expect("grow");
+    p.close(h).expect("close");
+    let (h, size, _) = p.open(f, crate::OPEN_READ).expect("reopen");
+    assert_eq!(size, 4, "set_len size wrong");
+    let n = p.read_at(h, 0, &mut buf).expect("read_at");
+    assert_eq!(&buf[..n], b"ab\0\0", "set_len growth must zero-fill");
+    p.close(h).expect("close");
+
+    // Append lands at end of file.
+    let (h, _, _) = p.open(f, OPEN_WRITE | OPEN_TRUNC).expect("open trunc");
+    p.write_at(h, 0, b"one").expect("write");
+    p.close(h).expect("close");
+    let (h, _, _) = p.open(f, OPEN_WRITE | OPEN_APPEND).expect("open append");
+    p.write_at(h, 3, b"two").expect("append");
+    p.close(h).expect("close");
+    let (h, _, _) = p.open(f, crate::OPEN_READ).expect("reopen");
+    let n = p.read_at(h, 0, &mut buf).expect("read_at");
+    assert_eq!(&buf[..n], b"onetwo", "append did not land at end");
+    p.close(h).expect("close");
+
+    // mkdir is visible to getattr and readdir.
+    let d = VPath::at_default("w_dir");
+    p.mkdir(d).expect("mkdir");
+    let st = p.getattr(d).expect("getattr dir").expect("dir must exist");
+    assert_eq!(st.kind, crate::KIND_DIR, "mkdir did not produce a directory");
+    assert!(
+        p.readdir(VPath::at_default(""))
+            .expect("readdir root")
+            .iter()
+            .any(|e| e.name == "w_dir"),
+        "mkdir not visible in readdir"
+    );
+
+    // rename moves content and clears the old name.
+    let g = VPath::at_default("w_moved.txt");
+    p.rename(f, g).expect("rename");
+    assert!(p.getattr(f).expect("getattr old").is_none(), "rename left the old name behind");
+    let st = p.getattr(g).expect("getattr new").expect("renamed file must exist");
+    assert_eq!(st.size, 6, "rename lost content");
+
+    // Cross-root rename is refused.
+    assert_eq!(
+        p.rename(g, VPath::new(RootId(9), "w_moved.txt")),
+        Err(crate::bad_request()),
+        "cross-root rename must be refused"
+    );
+
+    // remove clears a file and an empty directory.
+    p.remove(g).expect("remove file");
+    assert!(p.getattr(g).expect("getattr removed").is_none(), "remove did not delete the file");
+    p.remove(d).expect("remove dir");
+    assert!(p.getattr(d).expect("getattr removed dir").is_none(), "remove did not delete the dir");
+
+    // set_attr accepts an mtime without error.
+    let keep = VPath::at_default("w_attr.txt");
+    let (h, _, _) = p.open(keep, OPEN_WRITE | OPEN_CREATE).expect("open create");
+    p.close(h).expect("close");
+    p.set_attr(keep, crate::SetAttr { mtime: Some(1_700_000_000), size: None })
+        .expect("set_attr mtime");
+    p.remove(keep).expect("cleanup");
+
+    // The reference tree survived: write cases must not disturb it. Compare
+    // bytes, not just size — a same-length scribble is the corruption this
+    // check exists to catch, and a size comparison cannot see it.
+    for (rel, body) in FIXTURE_FILES {
+        let vp = VPath::at_default(rel);
+        let st = p
+            .getattr(vp)
+            .unwrap_or_else(|e| panic!("getattr({rel}) after writes failed with {e}"))
+            .unwrap_or_else(|| panic!("write cases destroyed {rel}"));
+        assert_eq!(st.size, body.len() as u64, "write cases altered {rel}'s size");
+
+        let (h, _, _) = p
+            .open(vp, crate::OPEN_READ)
+            .unwrap_or_else(|e| panic!("reopen({rel}) after writes failed with {e}"));
+        let got = read_all(p, h, st.size);
+        p.close(h).expect("close");
+        assert_eq!(got, *body, "write cases altered {rel}'s content");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,5 +832,16 @@ mod tests {
         let at3 = p.getattr(VPath::new(RootId(3), "same")).unwrap().unwrap();
         assert_eq!(at0.size, 0);
         assert_eq!(at3.size, 3, "the provider did not receive the root id");
+    }
+
+    #[test]
+    fn the_writable_fixture_passes_its_own_suite() {
+        assert_conformance(std::sync::Arc::new(RwMemFixture::new()));
+    }
+
+    #[test]
+    #[should_panic(expected = "read back")]
+    fn a_provider_whose_writes_vanish_fails_the_suite() {
+        assert_conformance(std::sync::Arc::new(RwMemFixture::discarding_writes()));
     }
 }
