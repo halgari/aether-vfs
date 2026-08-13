@@ -1608,6 +1608,9 @@ dependencies = [
 [[package]]
 name = "vfs-protocol"
 version = "0.1.0"
+dependencies = [
+ "vfs-provider",
+]
 
 [[package]]
 name = "vfs-provider"
@@ -1705,6 +1708,7 @@ version = "0.1.0"
 dependencies = [
  "vfs-core",
  "vfs-protocol",
+ "vfs-provider",
 ]
 
 [[package]]

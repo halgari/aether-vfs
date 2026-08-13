@@ -1,6 +1,6 @@
 //! ZIP central directory (ZIP64-aware).
 //!
-//! - **Preferred:** [`backend::ZipBackend`] implements [`vfs_protocol::Backend`]
+//! - **Preferred:** [`backend::ZipProvider`] implements [`vfs_provider::Provider`]
 //!   (userspace FUSE; no vfs-core types).
 //! - **Legacy:** [`read_layer`] still builds a `vfs-core` Layer with zip-window
 //!   sources for transitional inject/PE helpers.
@@ -13,11 +13,13 @@ use vfs_core::encode_zip_window;
 use vfs_core::{EntryKind, InputEntry, Layer, LayerId, SourceId};
 
 pub mod backend;
-pub use backend::ZipBackend;
+pub use backend::ZipProvider;
+/// Deprecated: renamed to [`ZipProvider`]. Removed at the end of Stage 1.
+pub use backend::ZipProvider as ZipBackend;
 
-/// Open a zip as a [`vfs_protocol::Backend`] (mount with `Director::mount` / `Session::mount`).
-pub fn open_backend(zip_path: &Path) -> Result<ZipBackend, ZipError> {
-    ZipBackend::open(zip_path)
+/// Open a zip as a [`vfs_provider::Provider`] (mount with `Director::mount` / `Session::mount`).
+pub fn open_backend(zip_path: &Path) -> Result<ZipProvider, ZipError> {
+    ZipProvider::open(zip_path)
 }
 
 #[derive(Debug)]
@@ -340,22 +342,27 @@ mod tests {
 
     #[test]
     fn zip_backend_getattr_open_read() {
-        use vfs_protocol::{Backend, OPEN_READ};
+        use vfs_protocol::{Provider, VPath, OPEN_READ};
 
         let dir = std::env::temp_dir().join(format!("vfs-zip-be-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let content = b"HELLO FROM INSIDE THE ZIP";
         let zip = write_plain_zip(&dir, "Data/hello.txt", content);
-        let be = ZipBackend::open(&zip).unwrap();
-        let st = be.getattr("Data/hello.txt").unwrap().unwrap();
+        let be = ZipProvider::open(&zip).unwrap();
+        let st = be
+            .getattr(VPath::at_default("Data/hello.txt"))
+            .unwrap()
+            .unwrap();
         assert_eq!(st.size, content.len() as u64);
         // Case-insensitive open (Windows game paths).
-        let (bh, size, is_dir) = be.open("data/HELLO.TXT", OPEN_READ).unwrap();
+        let (h, size, is_dir) = be
+            .open(VPath::at_default("data/HELLO.TXT"), OPEN_READ)
+            .unwrap();
         assert!(!is_dir && size == content.len() as u64);
         let mut buf = vec![0u8; content.len()];
-        let n = be.read(bh, 0, &mut buf).unwrap();
+        let n = be.read_at(h, 0, &mut buf).unwrap();
         assert_eq!(&buf[..n], content);
-        be.release(bh).unwrap();
+        be.close(h).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
