@@ -216,6 +216,18 @@ fn assert_common(p: &Arc<dyn Provider>) {
         "getattr of an absent path must report None"
     );
 
+    // Opening an absent path fails with NOT_FOUND, not some other error and
+    // not success. The old vfs-source suite asserted this; six ports depend
+    // on it staying true.
+    match p.open(VPath::at_default("nope.txt"), crate::OPEN_READ) {
+        Err(e) if e == crate::not_found() => {}
+        Err(e) => panic!("open of an absent path returned status {e}, expected ST_NOT_FOUND"),
+        Ok((h, _, _)) => {
+            let _ = p.close(h);
+            panic!("open of an absent path succeeded; it must fail with ST_NOT_FOUND");
+        }
+    }
+
     // readdir of the root lists both entries.
     let entries = p.readdir(VPath::at_default("")).expect("readdir: provider root");
     let mut names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
