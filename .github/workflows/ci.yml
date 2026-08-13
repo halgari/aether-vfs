@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test -p vfs-ipc -p vfs-protocol -p vfs-compose -p vfs-cache -p xtask-descriptor
+        run: cargo test -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p xtask-descriptor
         working-directory: rust
       - name: Regenerate protocol artifacts
         run: bin/regen-protocol
