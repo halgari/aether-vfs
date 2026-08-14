@@ -3,10 +3,14 @@
 //! The injected shim's pure redirect-decision core: map an incoming NT open path
 //! + a published snapshot to pass-through vs redirect-to-backing-file.
 
+mod canon;
+
 use std::collections::BTreeMap;
 
 use vfs_core::{fold, normalize_vpath, wildcard_match, PathError};
 use vfs_shared::{NodeKind, SnapResolution, SnapshotReader};
+
+pub use canon::{canonicalise, VolumeMap};
 
 /// The managed VFS install root (mount point), as normalized path components.
 pub struct RootMap {
