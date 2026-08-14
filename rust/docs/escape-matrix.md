@@ -73,10 +73,10 @@ machine/environment-dependent, not a fixed property of the vector.
 | 5 | Handle-relative open (`OBJECT_ATTRIBUTES.RootDirectory` = a real directory handle) | opened✓ | classified✓ | |
 | 5b | Handle-relative open against a handle `GetFinalPathNameByHandleW` cannot resolve (an anonymous pipe) | `error:ntstatus:0xC0000033` | not classified (by design) | **Caveat, not a failure — see "Vector 5's caveat" below.** `path_of_tracked` cannot decode a path at all for this shape, so it lands in the shim's separate "undecodable" counter, never in `under-root open outcomes`. Documented, accepted edge of Task 4's fix, not asserted as pass/fail either way. |
 | 6 | CWD-relative (plain filename, cwd set to the parent dir) | opened✓ | classified✓ | |
-| 7 | Junction / reparse point | opened✓ | classified✓ | **Closed — see "Vectors 7 and 9 closed: session-start alias resolution" below.** Was a verified, open gate-2 gap; fixed by resolving a junction that reparses into the managed root into a `VolumeMap` alias once per session. |
+| 7 | Junction / reparse point | opened✓ | classified✓ | **Closed for a junction within two ancestor levels of the managed root (this project's own session layout) — not junctions in general; see "Vectors 7 and 9 closed: session-start alias resolution" below for the residual.** Was a verified, open gate-2 gap; fixed by resolving such a junction into a `VolumeMap` alias once per session. |
 | 8 | Hardlink (new filename, same underlying bytes) | `not-found` (not `opened` — see "Vector 8's exception" below) | classified✓ | Sealed by the content-addressed provider policy, not a classification failure — `RootMap`/the canonicaliser is never even consulted for this vector when FUSE-routing claims the path first. |
 | 9 | UNC / `subst` / mapped drive (administrative loopback share, `\\localhost\C$\...`) | opened✓ | classified✓ | **Closed — see "Vectors 7 and 9 closed: session-start alias resolution" below.** Was a verified, open gate-2 gap; fixed by registering the admin-share's real NT spelling as a session-start alias. |
-| 10a | Case-flipped, `\\?\`-prefixed (verbatim) | opened✓ | not classified (`not-found`, unbuildable-adjacent) | NTFS resolves case regardless of the `\\?\` prefix; standalone-`opened` behaviour, unaffected by session or gate 2. Not asserted for the negative canary (an ordinary FUSE-routed/sealed case, no special canonicaliser involvement — see the fixture's own note). |
+| 10a | Case-flipped, `\\?\`-prefixed (verbatim) | opened✓ | classified✓ (`not-found`) | NTFS resolves case regardless of the `\\?\` prefix; standalone-`opened` behaviour, unaffected by session or gate 2. The e2e loop's negative-canary check skips only `unbuildable:` outcomes plus `5b`/`14` explicitly (see `classification_marker`/the skip check in `e2e.rs`) — `10a`'s outcome is neither, so it **is** asserted for the negative canary, and passes: the spelling lands in the shim's classified-paths set, correctly sealed (`not-found`) rather than left unclassified. |
 | 10b | Trailing dot, verbatim (`...\name.esp.`) | opened✓ (flip from standalone `not-found` — see "The 10/12 flip" below) | classified✓ | |
 | 10c | Trailing space, verbatim (`...\name.esp `) | opened✓ (flip) | classified✓ | |
 | 11 | Alternate data stream (`name.esp:probe`) | `not-found` (expected — see note) | classified✓ | Read-only `OPEN_EXISTING` against a stream this fixture never pre-creates; `not-found` means the stream doesn't exist, not that streams are unsupported. Same result standalone and under a session. |
@@ -124,6 +124,10 @@ fix, `3` was absent from the negative canary's classified set; after, it
 appears as its own distinct entry.
 
 ## Vectors 7 and 9 closed: session-start alias resolution
+
+**Vector 9 is closed unconditionally; vector 7 is closed only within the
+scanned ancestor depth — see "Scope of the junction scan, chosen
+deliberately" below for exactly what shape that is and is not.**
 
 A prior task verified these as real, open gate-2 gaps: both resolve to the
 real bytes via a spelling that is **syntactically unrelated** to the managed
@@ -189,6 +193,20 @@ a hypothetical. A real game session has no such tight timing window, but
 paying the extra cost and the extra exposure to unrelated system junctions
 buys nothing beyond the fixed, two-level convention this project's sessions
 already use.
+
+**The residual this leaves, stated plainly.** A junction whose real
+location requires climbing more than two ancestor levels above the managed
+root — anywhere else on the volume, not this project's own
+`<TEMP>/vfs-daemon-*/root` session layout — is never scanned, never
+registered as an alias, and is not classified: it stays outside-root,
+indistinguishable from any other unrelated path elsewhere on disk. Gate 2
+does not close that shape, and by this programme's own reasoning **no later
+gate closes it either**: gate 3's job is removing *under-root* `NotFound`
+passthrough, and a path the canonicaliser never recognises as under-root in
+the first place never reaches that passthrough to begin with. So "vector 7
+closed" throughout this document means closed for a junction within two
+levels of the managed root — this project's own session convention — not
+junctions in general.
 
 Two things this scan deliberately does **not** do, to stay on the safe side
 of the "must not pull anything in" requirement:
@@ -540,3 +558,72 @@ outcome here:
   `root_itself_being_a_reparse_point_is_never_aliased` (root's own ancestor
   chain is never an alias key, regardless of whether it is itself a reparse
   point).
+
+## Limitations recorded, not fixed, by this task
+
+Found during the final whole-branch review of this gate. None of these are
+believed to be reachable bypasses today — each is either bounded by a
+separate check or purely a cost concern — but they are real properties of
+the current code, worth a later gate's attention rather than silent
+tolerance.
+
+- **Unbounded alias table, two allocations per entry on every lookup.**
+  `VolumeMap`'s alias table (`crates/vfs-redirect/src/canon.rs`) grows by one
+  entry per mounted drive's device name, per drive's volume-GUID mount
+  point, per drive's admin-share alias, and per junction the ancestor scan
+  finds — no upper bound on the count. `VolumeMap::resolve` scans the whole
+  table linearly on every call, and for each entry calls `fold()` twice
+  (`fold(candidate) != fold(prefix)`) — an allocation per `fold` call. This
+  cost is paid on every `canonicalise` cache miss, not just once per
+  session; on a machine with an unusually large number of mounted drives or
+  discovered junctions, this scan's cost grows without bound. Not a
+  correctness issue, purely a scaling one — worth capping or memoizing the
+  fold if it ever shows up in a profile.
+- **Case-sensitive `Path` equality for the chain-node exclusion.**
+  `junction_aliases` (`crates/vfs-redirect/src/volumes.rs`, ~line 225) skips
+  aliasing a directory entry with `if candidate == child`, relying on
+  `PathBuf`'s `Eq` — which compares components byte-for-byte, not
+  case-insensitively, even though NTFS paths are case-insensitive. A
+  directory entry spelled with different case than `child`'s own literal
+  path (e.g. the OS returns a differently-cased name than the one this scan
+  constructed) would fail this equality check and fall through to the
+  ordinary reparse-point handling below, which is harmless today only
+  because the separate "target must resolve inside root" check
+  (`is_component_prefix`) already rejects root's own ancestor chain being
+  aliased to itself by a different route. Should this exclusion ever become
+  the only guard against re-aliasing an ancestor, it would need a
+  case-folded comparison instead.
+- **The admin-share alias assumes every mapped drive is local, unverified.**
+  `resolve_volume_map` (`crates/vfs-redirect/src/volumes.rs`) registers a
+  `\\localhost\<drive>$` alias for every drive `vfs_win::drive_mappings`
+  reports, including network-mapped drives (a mapped drive backed by
+  `\Device\LanmanRedirector\...` or similar passes `drive_mappings`'s
+  `\Device\...`-shaped filter same as a local volume). `\\localhost\<drive>$`
+  is only a meaningful alias for a drive that is actually local storage on
+  this machine; for a genuinely network-backed drive letter, nothing
+  verifies that the administrative loopback share even resolves to the same
+  object, let alone the same bytes. No known exploit path — a real Windows
+  installation's `\\localhost\<drive>$` administrative share for a
+  network-redirector drive typically fails to resolve to anything at all —
+  but the alias is registered unconditionally regardless, on an unverified
+  assumption.
+- **The Mod Organizer exposure is gate 3's, not gate 2's.** An MO2-style
+  junction *inside* the managed root pointing at external staging (e.g.
+  `root\Data\SomeMod` -> `D:\Mods\SomeMod`) is already classified under-root
+  today, by ordinary literal-spelling matching — no special handling needed,
+  and gate 2's own junction scan deliberately does not recurse into the
+  root's own subtree to find these (see "Scope of the junction scan" above)
+  precisely because pulling in a genuinely external directory that way would
+  be the over-eager failure this gate guards against, not a fix. The
+  reverse-direction junction (pointing *out* of the root) is genuinely
+  outside gate 2's scope for the same reason. **The concrete consequence for
+  gate 3 to handle:** gate 3's job is removing under-root `NotFound`
+  passthrough — and once that passthrough is gone, an MO2-style junction's
+  real content (physically outside the managed root, reached today only via
+  that passthrough falling through to the real disk) will be sealed along
+  with every other passthrough case. This is a predicted, concrete
+  regression for a real, common mod-manager setup, not a hypothetical edge
+  case — gate 3's implementer needs to design for it explicitly (e.g.
+  resolving such junctions into the content model itself, not just relying
+  on disk fallthrough) rather than discover it after passthrough removal
+  ships.
