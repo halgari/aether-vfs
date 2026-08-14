@@ -580,6 +580,166 @@ fn render_readdirs() -> String {
     s
 }
 
+/// Which code path an under-root open actually took.
+///
+/// The shim's decision for an open under the managed root is not binary:
+/// besides being routed to the director, it can fall through to the real
+/// filesystem for several *different* reasons — a redirect that resolved to
+/// nothing, a legacy zipserve `Serve` decision, the generic pass-through
+/// default, a DRM host-exe exception, or the write-fallback path — or be
+/// denied outright. A single "fell through" counter cannot tell which of
+/// those happened, and that distinction is the entire point: gates 2-5 each
+/// remove exactly one of these classes, and only a counter that stays
+/// distinct per class can show that the gate which removed a class actually
+/// drove it to zero, without also masking a regression in a class that gate
+/// did not touch. `FellThroughRedirect`/`FellThroughServe` are gate 3's,
+/// `FellThroughPassthrough` is gates 2 and 3's, `FellThroughWriteFallback` is
+/// gate 4's, and `FellThroughDrmException` is gate 5's.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum OpenOutcome {
+    Routed = 0,
+    FellThroughRedirect = 1,
+    FellThroughServe = 2,
+    FellThroughPassthrough = 3,
+    FellThroughDrmException = 4,
+    FellThroughWriteFallback = 5,
+    Denied = 6,
+}
+
+const OUTCOME_N: usize = 7;
+
+/// Every variant, for iteration in `render_outcomes` and for the test that
+/// checks labels stay distinct.
+pub const ALL_OUTCOMES: [OpenOutcome; OUTCOME_N] = [
+    OpenOutcome::Routed,
+    OpenOutcome::FellThroughRedirect,
+    OpenOutcome::FellThroughServe,
+    OpenOutcome::FellThroughPassthrough,
+    OpenOutcome::FellThroughDrmException,
+    OpenOutcome::FellThroughWriteFallback,
+    OpenOutcome::Denied,
+];
+
+impl OpenOutcome {
+    /// Rendered label. Must stay distinct across variants — see
+    /// `every_outcome_renders_with_a_distinct_label` — or a gate's removal of
+    /// one bypass class would be indistinguishable from another's in the
+    /// report.
+    pub fn label(&self) -> &'static str {
+        match self {
+            OpenOutcome::Routed => "routed",
+            OpenOutcome::FellThroughRedirect => "fell-through: redirect",
+            OpenOutcome::FellThroughServe => "fell-through: serve",
+            OpenOutcome::FellThroughPassthrough => "fell-through: passthrough",
+            OpenOutcome::FellThroughDrmException => "fell-through: drm-exception",
+            OpenOutcome::FellThroughWriteFallback => "fell-through: write-fallback",
+            OpenOutcome::Denied => "denied",
+        }
+    }
+}
+
+static OUTCOME_COUNTS: [AtomicU64; OUTCOME_N] = [const { AtomicU64::new(0) }; OUTCOME_N];
+
+/// Paths seen for each outcome, bounded the same way `PATHS` is: past the cap
+/// we stop learning new paths but keep counting known ones, so an early-
+/// starting loop still shows its true rate.
+static OUTCOME_PATHS: [Mutex<Option<HashMap<String, u64>>>; OUTCOME_N] =
+    [const { Mutex::new(None) }; OUTCOME_N];
+const OUTCOME_PATHS_MAX: usize = 4000;
+/// How many of the busiest paths to print per outcome. Smaller than
+/// `PATHS_SHOWN`: this table prints one such list per outcome, so it must
+/// stay skimmable rather than repeat the full passthrough dump seven times.
+const OUTCOME_PATHS_SHOWN: usize = 20;
+
+/// Current value of one outcome's counter. `pub` (not `#[cfg(test)]`) so a
+/// future gate's own tests can assert a class went to zero without reaching
+/// into the atomics directly.
+pub fn outcome_count(outcome: OpenOutcome) -> u64 {
+    OUTCOME_COUNTS[outcome as usize].load(Ordering::Relaxed)
+}
+
+/// Record which path an under-root open actually took. Cheap no-op when
+/// disabled, exactly like `note_passthrough`.
+///
+/// Not yet called from `hook.rs` — wiring each decision site to an
+/// `OpenOutcome` is a separate task so this gate changes no behaviour, only
+/// adds the ability to measure it. `#[allow(dead_code)]` reflects that
+/// deliberate gap, not an oversight.
+#[allow(dead_code)]
+pub fn note_open_outcome(outcome: OpenOutcome, path: &str) {
+    if !enabled() {
+        return;
+    }
+    let idx = outcome as usize;
+    OUTCOME_COUNTS[idx].fetch_add(1, Ordering::Relaxed);
+    let Ok(mut g) = OUTCOME_PATHS[idx].lock() else { return };
+    let map = g.get_or_insert_with(HashMap::new);
+    let lower = path.to_ascii_lowercase();
+    if let Some(c) = map.get_mut(&lower) {
+        *c += 1;
+        return;
+    }
+    if map.len() < OUTCOME_PATHS_MAX {
+        map.insert(lower, 1);
+    }
+}
+
+/// Busiest-first rendering of one outcome's paths, capped at
+/// `OUTCOME_PATHS_SHOWN` with the remainder called out explicitly — a
+/// truncated list silently presented as complete would make every later gate
+/// measure against a count that is quietly wrong.
+fn format_outcome_paths(mut pairs: Vec<(String, u64)>) -> String {
+    if pairs.is_empty() {
+        return String::new();
+    }
+    let distinct = pairs.len();
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let shown = pairs.len().min(OUTCOME_PATHS_SHOWN);
+    let mut s = String::new();
+    for (p, c) in pairs.iter().take(shown) {
+        s.push_str(&format!("      {c:>6}x  {p}\n"));
+    }
+    if distinct > shown {
+        s.push_str(&format!("      ... and {} more\n", distinct - shown));
+    }
+    s
+}
+
+/// One outcome's section: label, total count, and its busiest paths.
+fn render_outcome(outcome: OpenOutcome) -> String {
+    let count = outcome_count(outcome);
+    if count == 0 {
+        return String::new();
+    }
+    let idx = outcome as usize;
+    let paths = match OUTCOME_PATHS[idx].lock() {
+        Ok(g) => match g.as_ref() {
+            Some(map) => map.iter().map(|(p, c)| (p.clone(), *c)).collect(),
+            None => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+    format!(
+        "  {:<32} {count:>8}\n{}",
+        outcome.label(),
+        format_outcome_paths(paths)
+    )
+}
+
+/// Under-root open outcomes, one section per class so a gate that removes one
+/// bypass can be checked in isolation from the others.
+fn render_outcomes() -> String {
+    let mut body = String::new();
+    for outcome in ALL_OUTCOMES {
+        body.push_str(&render_outcome(outcome));
+    }
+    if body.is_empty() {
+        return String::new();
+    }
+    format!("\nunder-root open outcomes:\n{body}")
+}
+
 fn render_passthrough() -> String {
     let Ok(g) = PATHS.lock() else {
         return String::new();
@@ -606,7 +766,7 @@ pub fn start_reporter() {
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(250));
             let body = format!(
-                "{}{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}",
                 render(),
                 render_async(),
                 render_fills(),
@@ -615,7 +775,8 @@ pub fn start_reporter() {
                 render_undecodable(),
                 render_readdirs(),
                 render_passthrough(),
-                render_setinfo_noop()
+                render_setinfo_noop(),
+                render_outcomes()
             );
             // Write via a temp + rename so a reader never sees a half file.
             let tmp = std::path::PathBuf::from(&path).with_extension("tmp");
@@ -682,5 +843,25 @@ mod tests {
         // reports under a neighbour's label.
         assert_eq!(Hook::QByName as usize, N - 1);
         assert!(NAMES.iter().all(|n| !n.is_empty()));
+    }
+
+    #[test]
+    fn outcome_counters_are_free_when_disabled() {
+        // VFS_SHIM_STATS_LOG is unset under test, so `enabled()` is false and
+        // recording must not touch the counters at all.
+        let before = outcome_count(OpenOutcome::Routed);
+        note_open_outcome(OpenOutcome::Routed, "a.esp");
+        assert_eq!(outcome_count(OpenOutcome::Routed), before);
+    }
+
+    #[test]
+    fn every_outcome_renders_with_a_distinct_label() {
+        // A gate that removes one bypass class must be able to see that class
+        // alone; identical or missing labels would defeat that.
+        let mut labels: Vec<&str> = ALL_OUTCOMES.iter().map(|o| o.label()).collect();
+        let n = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), n, "outcome labels must be distinct: {labels:?}");
     }
 }
