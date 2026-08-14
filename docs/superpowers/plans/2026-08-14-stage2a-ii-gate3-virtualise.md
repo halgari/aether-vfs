@@ -21,7 +21,9 @@
 
 ### What this gate does and does not remove
 
-**Removes:** `Decision::Redirect`, `Decision::Serve`, `Decision::Deny`, `AttrDecision`, `query_attributes`, `merge_directory`, the legacy `zipserve` synthetic path, and `NotFound`/`Dir` → passthrough under a root.
+**Removes:** standalone (no-director) shim mode, `AttrDecision`, `query_attributes`, `merge_directory`, and `NotFound`/`Dir` → passthrough under a root.
+
+**Does NOT remove, contrary to this plan's first draft:** `Decision::Redirect`, `Serve`, `Deny`, and the legacy `zipserve` path. `Engine::cow_seed` depends on `Redirect` and `Serve` **at compile time** to materialise copy-on-write content for the overlay write path — the write fall-through **gate 4** owns. Their deletion moves to gate 4, after `cow_seed` sources copy-up from the director. The first draft had this backwards.
 
 **Keeps — later gates own these, and removing one here makes a failure un-attributable:**
 - The **write fall-through** (gate 4). Writes still fall back; the director cannot yet serve every write.
@@ -87,23 +89,35 @@ Report the failure through the launch path so a caller sees it. Do not merely lo
 
 ---
 
-### Task 3: Delete `Redirect`, `Serve`, and `Deny`
+### Task 3: Retire standalone mode
 
-**Files:** `crates/vfs-redirect/src/lib.rs`, `crates/vfs-shim/src/hook.rs`, `crates/vfs-shim/src/zipserve.rs`
+**Files:** `crates/vfs-shim/src/bootstrap.rs`, `crates/vfs-shim/src/fuse_client.rs`, and the four standalone tests
 
-**Interfaces:** `Decision` collapses to under-root or not. The legacy `zipserve` synthetic path is deleted.
+**Interfaces:** `FuseInitError::NotConfigured` stops being a legitimate outcome. A launch with no ring section fails exactly as a failed attach does.
 
-These are already unreachable when the FUSE client is active — `try_fuse_create` runs before the `decision_for` match — so this is largely deletion. **Verify that claim before relying on it**: if any path still reaches them, deleting changes behaviour and that is a finding.
+**This task replaces the original Task 3, which was wrong.** That task assumed `Decision::Redirect`/`Serve`/`Deny` were unreachable and could be deleted. They are not: with `VFS_RING_SECTION` unset the shim initialises `NotConfigured`, `try_fuse_create` returns `None` unconditionally, and those arms run. Four tests exercise them through real installed hooks — `hook_redirect.rs`, `hook_deny.rs`, `zip_serve_inproc.rs`, `hook_write.rs`.
 
-- [ ] **Step 1: Prove they are unreachable**
+**And deleting the variants is still not this gate's job**, even after standalone is retired. `Engine::cow_seed` depends on `Redirect` and `Serve` **at compile time** for the overlay write path — gate 4's write fall-through. Their deletion moves to gate 4. Do not attempt it here.
 
-Instrument or reason from the code, and state the argument in your report. The outcome counters from gate 1 (`FellThroughRedirect`, `FellThroughServe`) are the direct evidence — check what the recorded baseline in `rust/docs/bypass-baseline.md` says about them.
+- [ ] **Step 1: Write the failing test**
 
-- [ ] **Step 2: Delete, and fix the resulting compile errors**
+A launch with no `VFS_RING_SECTION` must return an error rather than running an un-virtualized process. Task 2 built the machinery for the `ConnectFailed` case; this extends it to `NotConfigured`. Assert the outcome, not a log line.
 
-- [ ] **Step 3: Verify** — `cargo test --workspace`, clippy, and the escape-matrix e2e must still pass.
+- [ ] **Step 2: Run to verify it fails** — today the launch succeeds and the process runs un-virtualized.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Implement**
+
+`bootstrap.rs` matches `NotConfigured` separately and swallows it. Make it fail like any other init failure.
+
+- [ ] **Step 4: Deal with the four standalone tests**
+
+They install hooks with no director and exercise the legacy arms — they test a retired mode.
+
+**Do not simply delete them.** For each, decide and record: does it assert behaviour that still matters under a director, in which case port it; or does it only assert the retired path, in which case remove it and say so. A test deleted without that judgement is coverage lost silently. State the disposition of each in your report.
+
+- [ ] **Step 5: Verify** — `cargo test --workspace`, clippy, and the escape-matrix e2e must still pass. If the test count drops, name every test removed and why.
+
+- [ ] **Step 6: Commit**
 
 ---
 
