@@ -99,8 +99,29 @@ reconciliation counter proves the previously-closed classes stayed closed.
 | **1. Measure** | nothing | — |
 | **2. Canonicalise** | escapes via alternate path spellings | path resolution |
 | **3. Virtualise** | `NotFound`/`Dir` → passthrough, and the legacy `Redirect`/`Serve` decision paths | the read/metadata routing |
+| **3.5. Real roots (2b)** | nothing — adds the second root | — |
 | **4. Writes** | the shim's write fall-through | the write path |
 | **5. DRM** | the four host-tree filename exceptions | Steam interaction, and nothing else |
+
+### Why 2b moved in between gates 3 and 4
+
+Gate 1's deep-session baseline established that **Skyrim's saves are invisible
+to the counters**: they travel through an NTFS junction
+(`Documents\My Games` → a real directory) that lies outside any managed root,
+so the shim tags them `outside-root` and neither `Routed` nor any fall-through
+class sees them. `FellThroughWriteFallback = 0` is therefore not evidence that
+the write path holds for a real save — the game's saves are not virtualized at
+all today.
+
+So gate 4 would close the write fall-through against a path nothing real
+exercises. It needs `Documents\My Games\Skyrim` to be a managed root first,
+which is 2b.
+
+2b sits *after* gate 3 rather than before gate 2 because gate 3 deletes the
+legacy `Redirect`, `Serve`, `query_attributes`, and `merge_directory` decision
+surfaces. Doing multi-root first would mean making all four multi-root aware and
+then deleting them. Gates 2 and 3 need only one root, so this ordering pays for
+multi-root exactly once, against the surviving code.
 
 **Gate 1 changes no behaviour at all.** It builds the shim-vs-director
 open-count reconciliation and the fall-through counter, surfaced in
@@ -344,6 +365,15 @@ and it would triple the surface the canary suite must cover.
    and writes its INI and save through the director.
 7. No regression against the figures in `rust/docs/benchmarks/`.
 8. Zero clippy warnings; full suite green.
+
+## 8b. A prerequisite gate 4 must not start without
+
+The director's `ops_write` and `total_write_bytes` counters exist in code but
+are **printed by no report**, so there is currently no way to observe under-root
+write activity short of grepping raw shim logs. Gate 4's entire job is driving
+write fall-through to zero; it cannot begin without a readable number for the
+writes that *did* route. Surface both counters alongside the open counts before
+gate 4 starts.
 
 ## 9. Stage 2b acceptance criteria
 
