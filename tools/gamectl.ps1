@@ -154,6 +154,26 @@ public class SkyCtl {
     u[0].type = 1; u[0].ki.wScan = scan; u[0].ki.dwFlags = baseFlags | KEYEVENTF_KEYUP;
     SendInput(1, u, Marshal.SizeOf(typeof(INPUT)));
   }
+
+  const ushort SCAN_LSHIFT = 0x2A;
+
+  // Needed for console text with an underscore (Skyrim global-variable editor
+  // IDs, e.g. Survival_PlayerHasBeenPrompted): underscore is Shift+Minus on a
+  // US layout, and the existing Tap() has no way to hold a modifier down
+  // across a second key. Holds left-shift, taps the given scan, releases
+  // shift -- same SendInput/KEYEVENTF_SCANCODE mechanism the header comment
+  // already mandates, just with the shift bracketing it.
+  public static void TapShifted(ushort scan, int holdMs) {
+    INPUT[] shiftDown = new INPUT[1];
+    shiftDown[0].type = 1; shiftDown[0].ki.wScan = SCAN_LSHIFT; shiftDown[0].ki.dwFlags = KEYEVENTF_SCANCODE;
+    SendInput(1, shiftDown, Marshal.SizeOf(typeof(INPUT)));
+    System.Threading.Thread.Sleep(20);
+    Tap(scan, false, holdMs);
+    System.Threading.Thread.Sleep(20);
+    INPUT[] shiftUp = new INPUT[1];
+    shiftUp[0].type = 1; shiftUp[0].ki.wScan = SCAN_LSHIFT; shiftUp[0].ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+    SendInput(1, shiftUp, Marshal.SizeOf(typeof(INPUT)));
+  }
 }
 "@
 
@@ -228,6 +248,9 @@ $chars = @{
   '0'=0x0B;'1'=0x02;'2'=0x03;'3'=0x04;'4'=0x05;'5'=0x06;'6'=0x07;'7'=0x08;'8'=0x09;'9'=0x0A
   ' '=0x39;'.'=0x34;'-'=0x0C
 }
+# Underscore is Shift+Minus on a US layout -- handled via TapShifted, not a
+# plain scancode, so it's kept out of $chars and special-cased in 'type'.
+$shiftedChars = @{ '_'=0x0C }
 
 switch ($Action.ToLower()) {
   'focus' {
@@ -271,6 +294,11 @@ switch ($Action.ToLower()) {
     if (-not [SkyCtl]::ForceForeground($hwnd)) { "WARN: window did not take foreground; keys may be lost" }
     foreach ($ch in $Arg1.ToLower().ToCharArray()) {
       $k = [string]$ch
+      if ($shiftedChars.ContainsKey($k)) {
+        [SkyCtl]::TapShifted([uint16]$shiftedChars[$k], 35)
+        Start-Sleep -Milliseconds 45
+        continue
+      }
       if (-not $chars.ContainsKey($k)) { "WARN: no scancode for '$k'"; continue }
       [SkyCtl]::Tap([uint16]$chars[$k], $false, 35)
       Start-Sleep -Milliseconds 45

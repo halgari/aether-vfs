@@ -351,3 +351,300 @@ are additive observability, consistent with the rest of this gate.
   `under-root open outcomes`, `fell-through: passthrough`, and
   `VFS_SHIM_STATS_INTERVAL_MS` (all present) after a clean `cargo build
   --release -p vfs-shim-dll`, per the project's known DLL-staleness traps.
+
+## Deep session: save, load, broader navigation (2026-08-13)
+
+This section extends the gate-1 baseline above with the session it explicitly
+called out as missing: a real in-game save, a reload of that save, and an
+interior/exterior transition. It keeps the original run above intact for
+comparison and adds a second data point rather than replacing the first.
+
+**Headline finding, stated up front:** the save and load both worked, and
+`FellThroughWriteFallback` reads 0 for this run — but that reading is **not**
+evidence that a save write routes through the director. The save's I/O
+never enters the region either counter observes at all. See "The save is
+invisible to this baseline's instrumentation" below before treating this as a
+clean bill of health for gate 4.
+
+### What the session did
+
+1. Confirmed prerequisites: Steam running and settled (~135,000s uptime,
+   offline mode), session unlocked (foreground window was a normal
+   application, `LockApp` present but suspended, not the lock screen).
+2. Verified the release binaries against the working tree: `vfs_shim_dll.dll`
+   and `skyrim-live.exe` were already newer than their last source commit;
+   `vfs_payload.dll` predated its last commit by 8 minutes, so it was
+   rebuilt — the rebuild was a no-op (`Finished in 0.01s`), because that
+   commit only added a comment to `Cargo.toml`, confirmed by inspecting the
+   commit's diff before trusting cargo's fingerprint.
+3. **Removed the Survival Mode Creation Club plugin from the load order.**
+   `Plugins.txt` (`C:\tmp\skyrim-data\profiles\LocalAppData\Plugins.txt`)
+   turned out to hold no plugin lines at all — it's just the standard
+   two-line header. The file that actually drives which Creation Club
+   content this content set loads is `Skyrim.ccc`, at the root of the staged
+   image (confirmed present in `C:\tmp\skyrimse.zip` at
+   `Skyrim Special Edition/Skyrim.ccc`, 75 lines). Wrote an override at
+   `C:\tmp\skyrim-data\overrides\Skyrim.ccc` — identical to the zip's copy
+   with exactly one line removed, `ccQDRSSE001-SurvivalMode.esl` (line 17 of
+   75) — which the director's mount composition (`zip` under `overrides`)
+   serves in place of the zip's copy without modifying the zip itself. This
+   is the file whose absence raised the "Enable Survival Mode?" dialog in the
+   gate-1 baseline; every other line is unchanged, so the load order for
+   this run differs from the shallow run's by exactly that one plugin.
+4. Launched via `tools/gamectl.ps1 launch`, reached the main menu (confirmed
+   by screenshot), opened the console, and ran `coc riverwood` — the same
+   known-good entry point the gate-1 baseline used.
+5. **No Survival Mode dialog appeared this time** (screenshot after the cell
+   loaded: clear Riverwood exterior, HUD compass visible, no modal). This is
+   the first empirical result of the plugin removal. One caveat, below.
+6. **Saved in-game via the console**: `save deepsession1`. Chosen over the
+   pause-menu Save option because console commands are the harness's proven
+   reliable input path (menu navigation risks new, undiscovered blocking
+   dialogs); this is still an in-game save through the engine's own save
+   system, not a quit. Confirmed by screenshot (command echoed, save icon
+   flash) and by the file landing on disk:
+   `C:\tmp\skyrim-data\saves\deepsession1.ess`, 2,482,241 bytes, timestamped
+   at the moment of the command.
+7. **Transitioned to an interior cell**: `coc qasmoke` (a stock vanilla test
+   cell, chosen because its editor ID is guaranteed valid in every Skyrim SE
+   install regardless of load order, unlike a specific building interior
+   that might depend on a mod). Screenshot confirmed a distinct interior
+   (stone cave room, chests and barrels) — a real exterior→interior
+   transition, pulling different loose files/BSAs than the Riverwood
+   exterior.
+8. **Loaded the save back**: `load deepsession1`. Screenshot confirmed the
+   game returned to the exact Riverwood exterior view the save was taken
+   from — direct visual proof the save round-tripped correctly, exercising a
+   read of the file the previous step's write had produced.
+9. **A second, different exterior** for broader navigation: `coc whiterun`.
+   Screenshot confirmed a visually distinct area (mountain-pass terrain, a
+   different HUD state), pulling yet another set of region assets.
+10. **Clean exit**: console `qqq`. `skyrim-live` detected the process exit,
+    wrote its final I/O dump, and exited itself — confirmed by
+    `game process not found — final I/O dump:` in its stderr and by no
+    `SkyrimSE`/`skyrim-live` process remaining afterward.
+
+Total session: main menu → console → `coc riverwood` → save → `coc qasmoke`
+(interior) → load → `coc whiterun` (exterior) → `qqq`, spanning ~496s from
+launch mark to exit (`vfs-io t+495.9s` at the final dump), versus the
+baseline's ~245s.
+
+### What went wrong along the way (recorded, not papered over)
+
+The console's known toggle-with-no-readable-state hazard recurred once,
+exactly as the project's own notes warn. After the first `coc riverwood`,
+a `GRAVE` intended to close the console was followed by a second `GRAVE`
+before the save attempt; the second one landed on a console that had
+already re-closed from an unrelated timing gap, so the subsequent
+`type "save deepsession1"` went to the game as raw keystrokes instead of
+console input. It opened the Favorites/Magic menu (visible in the
+screenshot: `ALL`/`DESTRUCTION`/`RESTORATION`/`POWERS`/`ACTIVE EFFECTS`
+tabs). Caught immediately because every command in this session was
+screenshotted before submitting, not after — recovered with `ESC`, then
+every subsequent console toggle was verified by screenshot (looking for the
+blinking input caret) before typing anything further. No corrupted input
+reached the game; the retried `save deepsession1` is the one that produced
+the file on disk.
+
+### Results
+
+Parsed from `VFS_SHIM_STATS_LOG`
+(`C:\tmp\skyrim-data\perf\deep-session2-shim-stats.log`) and `skyrim-live`'s
+own stderr (`deep-session2-shim-stats.live-err.log`), via
+`tools/gamectl.ps1 stats`:
+
+```
+=== shim: under-root open outcomes ===
+under-root open outcomes:
+  routed                                391
+  fell-through: drm-exception            16
+
+=== director: open totals ===
+  vfs-io opens: ok=75 err=316 (reconciliation target ok+err=391) rejected_writes=0 distinct path(s), 0 total
+```
+
+| Outcome | Count | Same pattern as gate-1 baseline? |
+|---|---:|---|
+| Routed | 391 | yes (392 there; not portable, see below) |
+| FellThroughRedirect | 0 | yes — still unexercised |
+| FellThroughServe | 0 | yes — still unexercised |
+| FellThroughPassthrough | 0 | yes — still unexercised |
+| FellThroughDrmException | 16 | yes, identical breakdown (15× staged EXE, 1× `steam_appid.txt`) |
+| **FellThroughWriteFallback** | **0** | yes — **but this run exercised a save, and it still reads 0; see below for why that is not the closure signal it looks like** |
+| Denied | 0 | yes — still unexercised |
+
+Reconciliation: shim `routed` = 391, director `opens_ok + opens_err` =
+75 + 316 = 391. **Drift = 0.** The invariant holds again, on a session more
+than 3x the wall-clock length of the baseline and with a save/load/multi-cell
+navigation the baseline never attempted.
+
+`rejected_writes=0 distinct path(s), 0 total`: the director never refused a
+write this session either.
+
+### The save is invisible to this baseline's instrumentation
+
+This is the deliverable's most important finding, and it complicates the
+headline question rather than answering it cleanly.
+
+`skyrim-live` remaps Skyrim's save/profile location with real NTFS
+junctions, not virtual mounts: `setup_my_games_junctions()`
+(`rust/crates/vfs-directord/src/bin/skyrim-live.rs`, around line 985) links
+`Documents\My Games\Skyrim Special Edition` (and its `Saves` subdirectory)
+straight to `C:\tmp\skyrim-data\profiles` / `saves` at the filesystem level.
+That is a genuinely different mechanism from `session.mount()` (used for the
+zip and the `overrides` write layer): a junction is resolved by the OS's own
+reparse-point handling, and it points at a path that is never inside the
+managed root (`C:\tmp\skyrim-runtime`) the shim's classifier checks against
+(`path_is_ours` / `is_under_root`, `rust/crates/vfs-shim/src/hook.rs` around
+line 737). The shim's own log confirms this directly — both the save and its
+temp file were tagged by the shim's classifier as outside the root it
+tracks:
+
+```
+       3x  outside-root \??\c:\users\tbaldrid\documents\my games\skyrim special edition\saves\deepsession1.ess
+       1x  outside-root \??\c:\users\tbaldrid\documents\my games\skyrim special edition\saves\deepsession1.ess.tmp
+```
+
+Consequently: the save write (and the load's read) never reaches the six-way
+`OpenOutcome` classifier (`Routed`/`FellThrough*`/`Denied`) at all, in either
+direction. It isn't `Routed` and it isn't `FellThroughWriteFallback` — it's
+structurally outside the domain either counter observes, the same shape of
+gap the gate-1 baseline already documented for the preinit-redirect table
+("A blind spot these counters cannot see"). `FellThroughWriteFallback`
+reading 0 here is therefore **not evidence that 2a-i's director-served-write
+path held for a real save** — it's evidence that the real save never
+attempted to go through that path in the first place, by a deliberate
+architectural choice (saves/profiles are real host directories reached by a
+real junction, precisely so tools like Windows Explorer and the game's own
+save browser keep working without VFS involvement).
+
+One caveat on causation for the plugin removal itself: `ccQDRSSE001-
+SurvivalMode.esl` still shows up **routed 3 times** in this run's outcome
+listing, meaning the engine still opened the plugin's file — removing it
+from `Skyrim.ccc` did not stop the file from loading. What changed
+observably is that its first-run "Enable Survival Mode?" prompt did not
+fire. Both facts are drawn from a single run each way (gate-1 baseline had
+the dialog with the entry present; this run didn't, with the entry absent),
+so this establishes correlation, not proof — a plausible mechanism is that
+`Skyrim.ccc` gates content recognition/first-run scripting rather than raw
+plugin loading, but that's inference, not something measured directly here.
+
+### Comparison: this run vs. the gate-1 baseline
+
+| | Gate-1 baseline | This run | Changed? |
+|---|---:|---:|---|
+| Session | main menu → `coc riverwood` → ~245s idle → `qqq` | main menu → `coc riverwood` → save → `coc qasmoke` → load → `coc whiterun` → `qqq` | richer navigation |
+| Load order | full `Skyrim.ccc` (75 entries) | `Skyrim.ccc` minus `ccQDRSSE001-SurvivalMode.esl` (74 entries) | **yes — content change, not a VFS change** |
+| Wall time (launch mark → exit) | ~245.0s | ~495.9s | longer |
+| Routed | 392 | 391 | not portable (different navigation/load order; see baseline's own caveat) |
+| FellThroughRedirect | 0 | 0 | unchanged — still unexercised |
+| FellThroughServe | 0 | 0 | unchanged — still unexercised |
+| FellThroughPassthrough | 0 | 0 | unchanged — still unexercised |
+| FellThroughDrmException | 16 | 16 | unchanged, identical breakdown |
+| FellThroughWriteFallback | 0 | 0 | unchanged in count, but now known **structurally unreachable for saves** (new information, not closure) |
+| Denied | 0 | 0 | unchanged — still unexercised |
+| Director opens_ok | 77 | 75 | within noise for different navigation |
+| Director opens_err | 315 | 316 | within noise |
+| Reconciliation drift | 0 | 0 | invariant holds again |
+| `getattr` / `read` / `bytes` / distinct paths | 4040 / 26430 / 1400.27 MiB / 613 | 8567 / 29693 / 1977.14 MiB / 671 | more content touched, consistent with richer navigation |
+| Survival Mode dialog | appeared, forced `qqq` escape | did not appear | plugin removed (see caveat above) |
+| In-game save performed | no | yes — `deepsession1.ess`, 2,482,241 bytes | new this run |
+| Save reloaded | no | yes — confirmed by screenshot match | new this run |
+| Interior/exterior transition | no | yes — Riverwood (ext) → QASmoke (int) → Riverwood (ext) → Whiterun (ext) | new this run |
+
+### What gates 2-5 can conclude now, and what's still open
+
+**Now established, that wasn't before:**
+- The reconciliation invariant (`routed == opens_ok + opens_err`, drift 0)
+  holds across a session with a real save, a real load, and multiple cell
+  transitions — not just an idle dwell. Three-for-three becomes four data
+  points against real live sessions, plus the e2e fixture.
+- `FellThroughRedirect`, `FellThroughServe`, `FellThroughPassthrough`, and
+  `Denied` remain at zero across *two* independently-scoped live sessions
+  now (idle-dwell and save/load/multi-cell), which is somewhat stronger
+  evidence they're genuinely rare in ordinary play than the single baseline
+  run gave — but see below for what kind of navigation still hasn't been
+  tried.
+- The engine's own save/load cycle works correctly against this content
+  image and this director (files write, and the game reads its own write
+  back correctly) — that much is a real, positive result, independent of
+  which counter does or doesn't see it.
+- The Creations-content and Survival Mode dialogs are both avoidable by
+  content-scenario changes (an unmissing-content save/`coc` origin for the
+  first, a `Skyrim.ccc` edit for the second) rather than input automation,
+  confirming the project's existing guidance on this point.
+
+**Still open, and now more precisely characterized than "coverage gap":**
+- **Gate 4's actual target (writes that fall through to real disk from
+  *under the managed root*) was not exercised by anything in either session
+  to date.** The one write this session performed — the save — is
+  structurally outside gate 4's observation domain by design (the My Games
+  junction), not merely unexercised. If gate 4 wants a data point for
+  in-game writes under the managed root, it needs a different write to
+  target: something that lands inside `C:\tmp\skyrim-runtime` proper (a
+  shader cache write is the most game-driven candidate; the `overrides`
+  write layer that `steam_appid.txt` uses is another, though that one is
+  written by `skyrim-live` itself rather than the game). Whether *any*
+  write went through the director's write path this session (successful or
+  rejected) cannot be answered from the printed reports at all —
+  `rejected_writes` counts only refused writes, and the director's
+  `ops_write`/`total_write_bytes` fields (`rust/crates/vfs-director/src/io_stats.rs`,
+  lines 39/43) exist but are never surfaced by `snapshot_report` or
+  `print_open_totals`. That is itself a reporting gap worth closing before
+  gate 4 starts, or gate 4 will have no way to see its own progress on
+  under-root writes short of grepping raw shim logs for outside-root tags.
+- `FellThroughRedirect`/`FellThroughServe`/`FellThroughPassthrough` are still
+  zero after a session that added an interior cell and two additional
+  exterior regions — a real increase in navigation breadth — so the case
+  that they're rare is a little stronger, but combat, inventory/container
+  access, fast travel, and a longer dwell in a busy location (a city
+  interior with NPCs and vendor containers) are all still untried. The
+  gate-1 baseline's caution stands: these are gaps in observed coverage,
+  not proof of closure.
+- Whether the Survival Mode dialog's removal really was caused by dropping
+  the `Skyrim.ccc` line (as opposed to some other run-to-run variation) is
+  inferred, not proven — one run each way is a correlation, not a
+  controlled experiment.
+
+### Code / harness changes this task made
+
+- **`rust/docs/bypass-baseline.md`** (this file): this section only. No
+  other part of the gate-1 baseline was edited.
+- **No Rust source was changed.** `vfs-payload` was rebuilt (a no-op) purely
+  to verify freshness per the project's DLL-staleness convention; no code
+  was edited. `cargo test --workspace` and clippy were not re-run because
+  nothing Rust changed — the 407-passing baseline from gate 1 stands.
+- **`tools/gamectl.ps1`**: the working tree already carried an uncommitted,
+  additive change before this task started — `TapShifted` (holds shift
+  across a scancode tap, for typing an underscore) and a `type` action
+  update to use it for `_`. That capability was **not used** for this
+  session (the plugin-removal approach made it unnecessary — no console
+  command typed here needed an underscore), and it does not touch dialog
+  handling. Left in place as-is and included in this task's commit since it
+  was already sitting in the working tree; it is a generic harness input
+  capability, not a dialog-bypass mechanism.
+- **Content-scenario file (outside the repo, not committed):**
+  `C:\tmp\skyrim-data\overrides\Skyrim.ccc` — a copy of the zip's
+  `Skyrim.ccc` with `ccQDRSSE001-SurvivalMode.esl` removed. This is picked
+  up by `skyrim-live`'s existing `overrides` mount layer with no code
+  change; it persists across launches (the `overrides` directory is never
+  wiped) and should be considered part of this deep-session scenario's
+  fixed configuration for any future run that wants comparable numbers.
+
+### Verification
+
+- No Rust files changed; `cargo test --workspace` / clippy were not
+  re-run, per the note above (nothing to invalidate the gate-1 result).
+- `tools/gamectl.ps1`'s only functional use in this task was existing
+  actions (`launch`, `key`, `type`, `shot`, `stats`); no new PowerShell
+  logic was added.
+- Every console command in this session was screenshotted and read before
+  being submitted with `ENTER`, including the one recorded miss above,
+  which was caught by that same discipline rather than assumed to have
+  worked.
+- Save file existence and size verified directly on disk
+  (`C:\tmp\skyrim-data\saves\deepsession1.ess`), not inferred from the
+  console echo alone.
+- Clean exit verified by both the absence of `SkyrimSE`/`skyrim-live`
+  processes afterward and the `game process not found — final I/O dump:`
+  line in `skyrim-live`'s own stderr.
