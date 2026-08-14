@@ -547,8 +547,13 @@ fn vector9_alias_drive(abs: &str) -> Line {
     let unc = format!(r"\\localhost\{drive}${rest}");
     match ffi::create_file_read(&ffi::wide(&unc)) {
         Ok(h) => {
+            let verdict = check_content(h);
             ffi::close(h);
-            Line::new("9", unc, "opened", "constructed via the administrative UNC share (\\\\localhost\\<drive>$)")
+            let outcome = match verdict {
+                Ok(()) => "opened".to_string(),
+                Err(detail) => format!("error:content-mismatch:{detail}"),
+            };
+            Line::new("9", unc, outcome, "constructed via the administrative UNC share (\\\\localhost\\<drive>$)")
         }
         Err(code) if code == ffi::ERROR_FILE_NOT_FOUND || code == ffi::ERROR_PATH_NOT_FOUND => Line::new(
             "9",
