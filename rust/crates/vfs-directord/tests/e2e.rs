@@ -902,6 +902,49 @@ fn positive_expectation(vector: &str) -> Option<&'static str> {
     if vector == "5b" || is_reported_not_closed(vector) {
         return None;
     }
+    // Gate 3, Task 5 flip, covering vectors 1, 3, 4, 7 and 9 together (each
+    // was `Some("opened")` before, folded into the catch-all below): all five
+    // are recognised as under-root *only* by `RootMap::compute_under_root`'s
+    // canonicalisation (`vfs-redirect`'s device/volume-GUID/GLOBALROOT/UNC-
+    // admin-share/junction-alias tables) — never by
+    // `fuse_client::vpath_under_root`, the shim-side router that decides
+    // whether an open reaches the director *at all*. `vpath_under_root` does
+    // plain, case/separator-normalized *string* prefix matching against the
+    // literal root and the staging-directory alias; it has no device-prefix,
+    // volume-GUID, `GLOBALROOT`-unwrap, UNC-admin-share, or junction-alias
+    // resolution of its own. So for all five of these spellings,
+    // `try_fuse_create` gives up (`vpath_under_root` returns `None`) and falls
+    // through to `decision_for`/`RootMap` — the ONLY place any of gate 2's
+    // canonicalisation work is ever consulted. In a real, live session the
+    // shim's own embedded `Engine` snapshot is always the empty tree
+    // (`vfs-director::Session::serve`'s `shim.cfg` — the FUSE ring is the only
+    // real content path), so every path `RootMap` places under the root there
+    // resolves `SnapResolution::NotFound` regardless of whether the director
+    // genuinely has the content. Before this task, `NotFound` passed through,
+    // and each of these vectors' positive canary "opened" by reading the
+    // byte-identical real file physically on `session.root` — never through
+    // the director, for any of these five spellings. After this task removes
+    // that passthrough, all five seal: `not-found`.
+    //
+    // This is a real, structural finding, not a predicted-in-advance edge:
+    // gate 2's alternate-spelling closures were classification-only (correct
+    // for the audit/counting exit criterion gate 2 was actually held to) —
+    // none of them ever made these spellings *reachable through the
+    // director*. This task's fix is what exposes that. Closing it fully would
+    // mean teaching `fuse_client::vpath_under_root` (or an equivalent
+    // mechanism) to recognise the same alternate spellings `RootMap` already
+    // does, so they route to the director like any ordinary path — out of
+    // this task's scope (`vfs-redirect/lib.rs`, `vfs-shim/hook.rs`), recorded
+    // here and in `rust/docs/escape-matrix.md` rather than silently absorbed.
+    // Not a concern for the real Skyrim launch this task also verifies: none
+    // of these five spellings is one the game (or SKSE, or Steam) constructs
+    // on its own — every one is an adversarial escape-matrix construction
+    // (an 8.3 short name, a raw device path, a volume-GUID path, a
+    // `GLOBALROOT`-wrapped device path, a UNC admin-share path, a junction one
+    // or two ancestor levels above root), not an ordinary access pattern.
+    if matches!(vector, "1" | "3" | "4" | "7" | "9") {
+        return Some("not-found");
+    }
     match vector {
         // A hardlink names the SAME bytes under a brand-new file name the
         // content-addressed provider has never heard of. FUSE-routing (the

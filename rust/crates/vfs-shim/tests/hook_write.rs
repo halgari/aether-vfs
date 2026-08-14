@@ -14,8 +14,14 @@ fn writes_land_in_overlay_with_cow() {
     std::fs::create_dir_all(&overlay).unwrap();
     std::fs::create_dir_all(&mods).unwrap();
 
-    // A real, non-virtualized file under the root, to be deleted (whiteout).
-    std::fs::write(root.join("to_delete.txt"), b"DELETE-ME").unwrap();
+    // Gate 3, Task 5: a bare, non-virtualized file placed directly on `root`
+    // is no longer visible at all (see
+    // `real_on_disk_file_under_root_not_in_snapshot_is_denied` in
+    // `engine.rs`'s tests), so a file this test can read-then-delete through
+    // the VFS has to be one the VFS already accounts for -- seeded straight
+    // into the overlay, as if left over from an earlier session, rather than
+    // written directly onto the real root directory.
+    std::fs::write(overlay.join("to_delete.txt"), b"DELETE-ME").unwrap();
 
     // A mod (virtual) file backed on disk, mapped by the snapshot.
     let backing = mods.join("mod_backing.esp");

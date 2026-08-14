@@ -31,7 +31,25 @@
 //! a CWD-relative `read_dir` no longer shows the mod-only file, and a
 //! handle-relative raw attribute query no longer finds it either — both
 //! assertions were flipped and are called out individually below.
-
+//!
+//! Gate 3, Task 5 flip: `RootMap::decide` now denies (rather than passes
+//! through) any `Dir`/`NotFound` resolution, and the managed root's own node
+//! -- and any directory the snapshot implies, such as `Data` here, since a
+//! `File` entry at `Data/added.esm` implicitly creates a `Dir` node for
+//! `Data` -- is always one of those two. With no director and no overlay,
+//! that made the bare root directory (and `Data` under it) impossible to
+//! even *open* any more, which is what this test used as its base for every
+//! CWD-relative and handle-relative check below. Rather than lose that
+//! coverage, this binary now gives the engine a write overlay and makes
+//! `Data` an overlay-backed directory (`Engine::overlay_state` is checked
+//! *before* `RootMap::decide`, so an overlay `Present` entry for `Data`
+//! bypasses the new `Dir` denial entirely) -- the real, physical directory
+//! CWD/handle opens land on is `overlay/data`, not `root/Data`, but the
+//! virtual path tracked for it (and so every relative open resolved against
+//! it) is still `root\Data`, unaffected. The root directory itself still
+//! cannot be opened bare (an overlay `Present` lookup refuses an empty
+//! remainder by construction — see `Overlay::lookup`), so this test anchors
+//! on `Data`, one level in, instead.
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 
@@ -45,16 +63,18 @@ fn relative_names_resolve_on_every_decoding_hook() {
     let pid = std::process::id();
     let base = std::env::temp_dir().join(format!("vfs-shim-relpath-{pid}"));
     let root = base.join("gameroot");
+    let overlay = base.join("overlay");
     let backing = base.join("backing");
-    // `Data` exists for real, exactly like a staged game tree. A real marker
-    // file keeps it non-empty (see the CWD-relative `read_dir` check below,
-    // which needs at least one real entry to enumerate — Task 4 removed the
-    // snapshot merge, so a directory with nothing real and nothing in the
-    // overlay reports `STATUS_NO_MORE_FILES` on the very first scan, same as
-    // a genuinely-empty real directory would once dot-entries are stripped;
-    // that is orthogonal to what this test checks).
-    std::fs::create_dir_all(root.join("Data")).unwrap();
-    std::fs::write(root.join("Data").join("real_marker.txt"), b"m").unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    // `Data` is overlay-backed (see the module doc comment for why): the real,
+    // physical directory a `Data` open lands on. A real marker file keeps it
+    // non-empty for the CWD-relative `read_dir` check below — Task 4 removed
+    // the snapshot merge, so a directory with nothing real and nothing else
+    // in the overlay reports `STATUS_NO_MORE_FILES` on the very first scan,
+    // same as a genuinely-empty real directory would once dot-entries are
+    // stripped; that is orthogonal to what this test checks.
+    std::fs::create_dir_all(overlay.join("data")).unwrap();
+    std::fs::write(overlay.join("data").join("real_marker.txt"), b"m").unwrap();
     std::fs::create_dir_all(&backing).unwrap();
     let backing_file = backing.join("added.esm");
     std::fs::write(&backing_file, PAYLOAD).unwrap();
@@ -74,10 +94,15 @@ fn relative_names_resolve_on_every_decoding_hook() {
         .unwrap();
         vfs_shared::bridge::flatten(&tree)
     };
-    let engine = vfs_shim::Engine::new(root.to_str().unwrap(), snapshot).unwrap();
+    let engine =
+        vfs_shim::Engine::with_overlay(root.to_str().unwrap(), overlay.to_str().unwrap(), snapshot)
+            .unwrap();
     let _guard = vfs_shim::install(engine).expect("install");
 
     // ── baseline: the absolute spelling, which already worked ───────────────
+    // An absolute open of the leaf file itself never needs `Data` to be
+    // independently openable — it resolves the full `data/added.esm` vpath
+    // directly against the snapshot, unaffected by anything above.
     let abs = root.join("Data").join("added.esm");
     assert_eq!(
         std::fs::read(&abs).expect("absolute read"),
@@ -88,17 +113,20 @@ fn relative_names_resolve_on_every_decoding_hook() {
     // ── current-directory-relative, via the ordinary Win32 surface ───────────
     // Whether ntdll expands this against the CWD *string* or hands the kernel
     // the CWD *handle* is its choice and varies by path shape; either way the
-    // caller must see the virtual file.
-    std::env::set_current_dir(&root).expect("set cwd");
+    // caller must see the virtual file. CWD anchors on `Data` (overlay-backed,
+    // openable), not bare root (never openable without a director — see the
+    // module doc comment).
+    let data_dir = root.join("Data");
+    std::env::set_current_dir(&data_dir).expect("set cwd");
     assert_eq!(
-        std::fs::read(r"Data\added.esm").expect("cwd-relative read"),
+        std::fs::read("added.esm").expect("cwd-relative read"),
         PAYLOAD,
         "a CWD-relative open must resolve through the VFS"
     );
     // `std::fs::metadata` opens a handle (`Decision`-backed), so this is
     // unaffected by Task 4 — unchanged from before.
     assert_eq!(
-        std::fs::metadata(r"Data\added.esm").expect("cwd-relative metadata").len(),
+        std::fs::metadata("added.esm").expect("cwd-relative metadata").len(),
         PAYLOAD.len() as u64,
         "a CWD-relative stat must report the virtual size"
     );
@@ -106,7 +134,7 @@ fn relative_names_resolve_on_every_decoding_hook() {
     // longer merge the snapshot in (Task 4 deleted `RootMap::merge_directory`),
     // so the mod-only file does not appear, flipped from "must include the
     // virtual file".
-    let listed: Vec<String> = std::fs::read_dir("Data")
+    let listed: Vec<String> = std::fs::read_dir(".")
         .expect("cwd-relative read_dir")
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
@@ -114,21 +142,26 @@ fn relative_names_resolve_on_every_decoding_hook() {
         !listed.iter().any(|n| n == "added.esm"),
         "a mod-added file leaked into a CWD-relative enumeration with no director: {listed:?}"
     );
+    assert!(
+        listed.iter().any(|n| n == "real_marker.txt"),
+        "the real, overlay-backed entry must still show: {listed:?}"
+    );
 
     // ── handle-relative, exercised deterministically ────────────────────────
     // The Win32 calls above may or may not produce the handle form. These do,
-    // unconditionally, so the (directory handle + name) path is really covered.
-    let dir = open_dir(&root);
-    assert!(!dir.is_null(), "could not open the root directory");
+    // unconditionally, so the (directory handle + name) path is really
+    // covered. Anchored on `Data`, same reason as the CWD section above.
+    let dir = open_dir(&data_dir);
+    assert!(!dir.is_null(), "could not open the Data directory");
 
     // NtCreateFile
-    let h = nt_create_relative(dir, r"Data\added.esm");
+    let h = nt_create_relative(dir, "added.esm");
     assert!(h.0 >= 0, "NtCreateFile relative to a handle: status {:#x}", h.0);
     assert_eq!(read_all(h.1), PAYLOAD, "NtCreateFile served the wrong bytes");
     close(h.1);
 
     // NtOpenFile
-    let h = nt_open_relative(dir, r"Data\added.esm");
+    let h = nt_open_relative(dir, "added.esm");
     assert!(h.0 >= 0, "NtOpenFile relative to a handle: status {:#x}", h.0);
     assert_eq!(read_all(h.1), PAYLOAD, "NtOpenFile served the wrong bytes");
     close(h.1);
@@ -138,18 +171,18 @@ fn relative_names_resolve_on_every_decoding_hook() {
     // fallback these attribute hooks used to have, so a relative stat of a
     // virtual-only file must now fail, flipped from "status {st:#x}" >= 0 —
     // see the module doc comment.
-    let (st, _attrs) = nt_query_attributes_relative(dir, r"Data\added.esm");
+    let (st, _attrs) = nt_query_attributes_relative(dir, "added.esm");
     assert!(st < 0, "NtQueryAttributesFile relative saw a virtual-only file with no director");
 
     // NtQueryFullAttributesFile — same flip.
-    let (st, _size) = nt_query_full_attributes_relative(dir, r"Data\added.esm");
+    let (st, _size) = nt_query_full_attributes_relative(dir, "added.esm");
     assert!(
         st < 0,
         "NtQueryFullAttributesFile relative saw a virtual-only file with no director"
     );
 
     // NtQueryInformationByName — Windows 11 routes existence checks here; same flip.
-    if let Some((st, _size)) = nt_query_by_name_relative(dir, r"Data\added.esm", 77) {
+    if let Some((st, _size)) = nt_query_by_name_relative(dir, "added.esm", 77) {
         assert!(
             st < 0,
             "NtQueryInformationByName(77) relative saw a virtual-only file with no director"
@@ -157,7 +190,7 @@ fn relative_names_resolve_on_every_decoding_hook() {
     }
 
     // A name that exists in neither the VFS nor on disk must still say so.
-    let (st, _) = nt_query_full_attributes_relative(dir, r"Data\absent.esm");
+    let (st, _) = nt_query_full_attributes_relative(dir, "absent.esm");
     assert!(st < 0, "a missing relative name must not report success");
 
     close(dir);

@@ -390,6 +390,104 @@ mod tests {
         assert!(!engine.is_under_root(r"\??\C:\Windows\notepad.exe"));
     }
 
+    /// Gate 3, Task 5's Step 1: the failing test written first. A REAL file,
+    /// physically on disk under a real managed root, that no provider serves
+    /// (the snapshot has an entry for a completely different vpath, so this
+    /// file is not even a `Dir` node in the tree) must be unreachable through
+    /// `Engine::decide` -- before this task's fix this returned
+    /// `Decision::PassThrough`, and `hook::create_hook`/`open_hook` trampoline
+    /// on exactly that verdict, opening the real bytes below.
+    #[test]
+    fn real_on_disk_file_under_root_not_in_snapshot_is_denied() {
+        let dir = std::env::temp_dir()
+            .join(format!("vfs-engine-negcanary-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Data")).unwrap();
+        let real_file = dir.join("Data").join("negative-canary.bin");
+        std::fs::write(&real_file, b"the real bytes physically on disk").unwrap();
+        assert!(real_file.is_file(), "setup: the real file must actually exist");
+
+        let engine = Engine::new(&dir.to_string_lossy(), snapshot_bytes()).unwrap();
+        let path = format!(r"\??\{}", real_file.to_string_lossy());
+        assert_eq!(
+            engine.decide(&path),
+            Decision::Deny,
+            "a real, on-disk file under the root with no provider must be denied, not opened"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Gate 3's own predicted consequence (gate 2's final review; see
+    /// `rust/docs/escape-matrix.md`'s "Mod Organizer exposure" note): a
+    /// junction *inside* the managed root pointing at external staging
+    /// content is a common real-world Skyrim/MO2 layout. Verified here with a
+    /// REAL junction (`mklink /J`), not merely reasoned about: the junction
+    /// makes the target's bytes genuinely, transparently reachable by
+    /// `std::fs` (proving the content really is there and the OS really does
+    /// resolve it), while `Engine::decide` -- operating on the same literal,
+    /// unresolved path string a real hooked open would present, exactly as
+    /// `RootMap::compute_under_root` does not follow junctions -- now denies
+    /// it. Before this task's fix this would have been `PassThrough`, and the
+    /// junction's transparency at the kernel level is exactly why that used
+    /// to work: the shim never needed to resolve the junction itself, because
+    /// passing through let the OS do it. Removing the passthrough seals that
+    /// content along with everything else `NotFound` covers, which is the gate
+    /// 2 review's prediction confirmed by reproduction rather than assumed.
+    #[test]
+    #[cfg(windows)]
+    fn mo2_style_junction_inside_root_pointing_to_external_staging_is_sealed() {
+        let base = std::env::temp_dir()
+            .join(format!("vfs-engine-mo2-junction-{}", std::process::id()));
+        let root_dir = base.join("root");
+        // Deliberately NOT under root, and NOT mounted as a provider anywhere
+        // -- the external mod-staging directory an MO2-style setup points at.
+        let staging_dir = base.join("staging");
+        std::fs::create_dir_all(root_dir.join("Data")).unwrap();
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        const BYTES: &[u8] = b"the mo2-staged mod's real bytes";
+        std::fs::write(staging_dir.join("mo2-mod.esp"), BYTES).unwrap();
+
+        let junction = root_dir.join("Data").join("SomeMod");
+        let ok = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &junction.to_string_lossy(),
+                &staging_dir.to_string_lossy(),
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ok {
+            // mklink unavailable/needs a privilege this account lacks: nothing
+            // to test here, same convention as this crate's own 8.3 tests.
+            std::fs::remove_dir_all(&base).ok();
+            return;
+        }
+
+        let via_junction = junction.join("mo2-mod.esp");
+        // Proves the junction is real and the OS really does resolve it
+        // transparently -- the exact mechanism the old passthrough relied on.
+        assert_eq!(
+            std::fs::read(&via_junction).unwrap(),
+            BYTES,
+            "setup: the junction must transparently resolve to the staging dir's real bytes"
+        );
+
+        let engine = Engine::new(&root_dir.to_string_lossy(), snapshot_bytes()).unwrap();
+        let path = format!(r"\??\{}", via_junction.to_string_lossy());
+        assert_eq!(
+            engine.decide(&path),
+            Decision::Deny,
+            "an MO2-style junction's real, externally-staged content must now be sealed \
+             -- mounting the staging directory as a provider is the required fix, not \
+             restoring the passthrough (see rust/docs/escape-matrix.md)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     // Task 4 removed `merge_directory_adds_virtual_children` and
     // `query_attributes_reports_virtual_file`: both asserted that a plain,
     // no-overlay `Engine` answers a directory listing / attribute query from

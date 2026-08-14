@@ -627,3 +627,132 @@ tolerance.
   resolving such junctions into the content model itself, not just relying
   on disk fallthrough) rather than discover it after passthrough removal
   ships.
+
+## Gate 3, Task 5: the root becomes fully virtual — what actually happened
+
+`vfs-redirect::RootMap::decide` no longer passes a `NotFound` or `Dir`
+resolution through to the real filesystem; both deny
+(`STATUS_OBJECT_NAME_NOT_FOUND`), matching the tombstone arm. `Located::Outside`
+is the only remaining `PassThrough`. See that function's own doc comment
+(`crates/vfs-redirect/src/lib.rs`) for why `Dir` denies rather than serving —
+this pure, snapshot-only function has no ring connection and cannot itself
+hand back a director-served directory handle; that handle comes from
+`vfs-shim::hook::try_fuse_create`'s live path, unaffected by this change and
+already correct for every directory the provider graph actually knows about.
+
+### The Mod Organizer consequence, confirmed by reproduction
+
+The prediction above is correct, and verified directly rather than assumed:
+`vfs-shim::engine::tests::mo2_style_junction_inside_root_pointing_to_external_staging_is_sealed`
+builds a real junction (`mklink /J`) inside a real managed root pointing at a
+real, external staging directory holding real bytes, confirms `std::fs::read`
+through the junction genuinely returns those bytes (proving the junction is
+real and transparent — exactly the mechanism the old passthrough relied on),
+and then confirms `Engine::decide` now denies the identical path. Before this
+task, `Decision::PassThrough` let that read reach the real, junctioned
+directory; after, `Decision::Deny` seals it before any real open is ever
+attempted — the junction's transparency at the kernel level no longer matters,
+because the shim now refuses the open before the kernel ever sees it.
+
+**The required configuration, stated plainly: mount the staging directory as
+a provider.** This cannot be made to work with no configuration at all — the
+whole point of gate 3 is that the provider graph is the sole authority for
+what exists under the root, so content the provider graph has never been told
+about is, by design, not going to appear. The junction itself becomes
+unnecessary (not merely ineffective) once this is done: add the mod's
+external staging directory as its own `DiskSource`, mounted at the same
+virtual path the junction used to expose (e.g. `mount = "Data/SomeMod"` for a
+junction at `root\Data\SomeMod`, `layer` above the base game content so it
+wins on any name collision). Once mounted, `try_fuse_create`'s live path
+recognises the vpath, asks the director, and the director's own `readdir`/
+`open` answer for it directly — the exact "director-served handle" this
+task's brief describes, regardless of whether an on-disk junction is present
+at all. A session/config that already enumerates every mod's staging
+directory as a mount (the ordinary way this project composes mods — see
+`scenario_toml_two_disk_sources_fixture_writepath` in
+`crates/vfs-directord/tests/e2e.rs` for the general shape) needs no special
+MO2 handling; it is only a *bare* on-disk junction with no corresponding
+mount that this task's fix seals. This must not be a surprise a user hits
+after the fact: any session tooling that lets a user point at an MO2-style
+mod-staging layout needs to mount that directory as a source, not merely
+leave the junction in place and rely on old passthrough behaviour that gate 3
+removes.
+
+### A second, structural finding: gate 2's alternate-spelling closures were classification-only, never routing
+
+Running the full suite after the `RootMap::decide` fix surfaced five more
+flips in the escape-matrix e2e's positive canary (vectors 1, 3, 4, 7 and 9 —
+8.3 short name, NT device path, volume-GUID path, junction, and UNC admin
+share), each going from `opened` to `not-found`. All five share one root
+cause, and it is more consequential than any single vector: **all five are
+recognised as under-root only by `RootMap::compute_under_root`'s
+canonicalisation — never by `vfs-shim::fuse_client::vpath_under_root`, the
+router that actually decides whether an open reaches the director at all.**
+`vpath_under_root` does plain, case/separator-normalized string prefix
+matching against the literal root and the staging-directory alias; it has no
+device-prefix table, no volume-GUID table, no `GLOBALROOT` unwrap, no UNC
+admin-share alias, and no junction-alias resolution — all of that lives
+solely in `vfs-redirect`'s `VolumeMap`/`canon.rs`/`volumes.rs`, consulted only
+from `RootMap::compute_under_root`, which `decision_for` reaches *after*
+`try_fuse_create` has already given up on routing to the director.
+
+In a real, live session the shim's own embedded `Engine` snapshot is always
+the empty tree (`vfs-director::Session::serve`'s `shim.cfg` — the FUSE ring
+to the director is the only real content path in a live session; see that
+function's own comment). So for any of these five spellings, `RootMap` places
+the path under the root correctly (that part of gate 2's fix still works
+exactly as documented above), but the snapshot behind it is empty —
+`SnapResolution::NotFound`, unconditionally, regardless of what the director's
+real provider graph actually has. Before this task, `NotFound` passed
+through, and each of these vectors "opened" by reading the byte-identical
+real file physically on `session.root` — **never through the director, for
+any of these five spellings, in any session that has ever existed.** Gate 2's
+own exit criterion was classification (a counted outcome bucket), which these
+five vectors correctly satisfy; none of them were ever evidence that the
+director actually served that spelling. This task's fix is what exposes the
+distinction: removing the passthrough that was quietly compensating for it
+turns "correctly classified, secretly still reaching disk" into "correctly
+classified, now also sealed" — for content that, had it been requested via an
+*ordinary* spelling, the director would have served correctly (the positive
+canary's content is real and mounted; only these five specific spellings
+never reach it).
+
+**Not fixed here, and stated plainly why.** Closing this fully would mean
+teaching `fuse_client::vpath_under_root` (or an equivalent mechanism reachable
+before `try_fuse_create` gives up) to recognise the same alternate spellings
+`RootMap` already does, so a director-backed session serves them exactly like
+any ordinary path. That is a change to `vfs-shim::fuse_client`, not to
+`vfs-redirect/src/lib.rs` or the `try_fuse_create`/`create_hook`/`open_hook`
+decision wiring in `vfs-shim/src/hook.rs` — outside this task's stated file
+scope, and a large enough change (duplicating or sharing `VolumeMap`
+resolution across two independent routers) to deserve its own task rather
+than a scope-creeping fix folded into this one. Recorded here as a real,
+confirmed limitation for exactly that reason, not glossed over: the escape
+matrix's own five affected vectors (`positive_expectation` in
+`crates/vfs-directord/tests/e2e.rs`) now assert `not-found`, each with the
+reasoning above, rather than silently accepting a weaker positive-canary
+check to hide the flip.
+
+**Why this does not threaten the real Skyrim launch this task also
+verifies.** None of these five spellings is one a real game process, SKSE, or
+Steam constructs on its own — every one is an adversarial escape-matrix
+construction (an 8.3 short name of a deep ancestor directory, a raw NT device
+path, a volume-GUID path, a `GLOBALROOT`-wrapped device path, a UNC
+administrative-share path, a junction one or two ancestor levels above the
+managed root). Ordinary game file access — plain drive-letter paths,
+CWD-relative paths, handle-relative opens — routes through
+`fuse_client::vpath_under_root` exactly as before and is unaffected (vectors
+2, 5, 6, 10a, 12a-c all still `opened✓`, unchanged by this task). The real
+launch via `tools/gamectl.ps1` is the actual arbiter for ordinary operation,
+not this synthetic matrix — see the task report for that outcome.
+
+### Verification (Task 5)
+
+- `cargo test --workspace`: see the task report for the exact count and any
+  further named flips found while finishing this task.
+- `cargo clippy --all-targets -- -D warnings`: see the task report.
+- Still present and unmodified: `Decision::Redirect`, `Decision::Serve`, the
+  legacy `zipserve` path, the DRM filename exceptions, and the write
+  fall-through (`try_fuse_create` still calls `client.open_write` even with a
+  director live, and the director still rejects writes, so writes still reach
+  `decide_open` — gate 4's job, not touched here).
