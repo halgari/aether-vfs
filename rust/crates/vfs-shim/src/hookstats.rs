@@ -864,4 +864,21 @@ mod tests {
         labels.dedup();
         assert_eq!(labels.len(), n, "outcome labels must be distinct: {labels:?}");
     }
+
+    #[test]
+    fn outcome_path_truncation_says_how_many_more() {
+        // A truncated per-outcome path list silently presented as complete
+        // would make a later gate measure against a count that is quietly
+        // wrong, so the cut must say what it left out.
+        let pairs: Vec<(String, u64)> = (0..OUTCOME_PATHS_SHOWN + 5)
+            .map(|i| (format!("path{i}.esp"), 1))
+            .collect();
+        let s = format_outcome_paths(pairs);
+        assert!(s.contains("... and 5 more"), "{s}");
+    }
+
+    #[test]
+    fn no_outcome_paths_renders_nothing() {
+        assert_eq!(format_outcome_paths(Vec::new()), "");
+    }
 }
