@@ -156,10 +156,10 @@ pub fn short_path_name(path: &str) -> Option<String> {
 }
 
 /// The authoritative real path of whatever `path` currently names: open a
-/// query-only handle and ask `GetFinalPathNameByHandleW`, which resolves 8.3
-/// short names, junctions, hardlinks, and `subst`/mapped drives all at once
-/// — each is a different spelling of "what does this handle actually point
-/// at", a question the OS already has to answer to service the open.
+/// query-only handle and delegate to [`final_path_for_handle`], which resolves
+/// 8.3 short names, junctions, hardlinks, and `subst`/mapped drives all at
+/// once — each is a different spelling of "what does this handle actually
+/// point at", a question the OS already has to answer to service the open.
 /// `None` if nothing could be opened at `path` (it may not exist, or name a
 /// form this process cannot open); callers fall back to
 /// [`expand_long_path`] in that case.
@@ -184,20 +184,55 @@ pub fn final_path_for_open(path: &str) -> Option<String> {
     if handle == INVALID_HANDLE_VALUE {
         return None;
     }
-    let result = grow_to_fit(|buf| {
-        // SAFETY: FFI. `handle` was just opened successfully above and is
-        // closed exactly once, immediately below, regardless of outcome;
-        // `buf` is valid for `buf.len()` `u16`s, matching `cchfilepath`.
-        unsafe {
-            GetFinalPathNameByHandleW(handle, buf.as_mut_ptr(), buf.len() as u32, FILE_NAME_NORMALIZED)
-        }
-    });
+    // SAFETY: `handle` was just opened successfully above, is a valid open
+    // handle, and is not used again after `final_path_for_handle` returns
+    // except to close it immediately below.
+    let result = unsafe { final_path_for_handle(handle) };
     // SAFETY: FFI. `handle` is the same valid handle opened above, closed
     // exactly once here on every path out of this function.
     unsafe {
         CloseHandle(handle);
     }
     result
+}
+
+/// The authoritative real path an already-open `handle` names, via
+/// `GetFinalPathNameByHandleW` directly on that handle — no new handle is
+/// opened, and this function never closes `handle`; the caller keeps
+/// ownership. This is the piece [`final_path_for_open`] wraps around its own
+/// `CreateFileW`, exposed separately for a caller (e.g. the shim decoding an
+/// `OBJECT_ATTRIBUTES.RootDirectory` it did not itself open) that already
+/// holds a valid handle and has no path to reopen it by.
+///
+/// Returns the `VOLUME_NAME_DOS` form, which is `\\?\`-prefixed — the Win32
+/// spelling, not the `\??\` a real NT open presents. Callers feeding this
+/// into `canon`/`RootMap` must re-canonicalise it, exactly as
+/// `vfs_redirect::expand_short_name`'s callers already do with
+/// `final_path_for_open`'s identical result shape; hand-stripping the prefix
+/// here instead would be the wrong fix.
+///
+/// `None` if `handle` is null, `INVALID_HANDLE_VALUE`, or does not support
+/// the query (e.g. a pipe, or an object with no path).
+///
+/// # Safety
+///
+/// `handle` must be a currently-valid, open handle (or null / `INVALID_HANDLE_VALUE`,
+/// both handled explicitly). Passing a closed, reused, or otherwise invalid
+/// non-null handle value is undefined behaviour at the `GetFinalPathNameByHandleW`
+/// FFI boundary, same as any other handle-consuming Win32 call.
+pub unsafe fn final_path_for_handle(handle: HANDLE) -> Option<String> {
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    grow_to_fit(|buf| {
+        // SAFETY: FFI. `handle` validity is the caller's contract (see this
+        // function's own safety doc); this call neither closes nor otherwise
+        // consumes it. `buf` is valid for `buf.len()` `u16`s, matching
+        // `cchfilepath`.
+        unsafe {
+            GetFinalPathNameByHandleW(handle, buf.as_mut_ptr(), buf.len() as u32, FILE_NAME_NORMALIZED)
+        }
+    })
 }
 
 /// Call `f` with a growing buffer until it reports success. Shared

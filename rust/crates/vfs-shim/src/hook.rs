@@ -535,7 +535,7 @@ unsafe fn cwd_from_peb() -> Option<(isize, String)> {
 
 /// The directory that a relative name is expressed against.
 ///
-/// Three kinds of parent reach us, and missing any one makes the child
+/// Four kinds of parent reach us, and missing any one makes the child
 /// undecodable — which is silent rather than an error: the call simply bypasses
 /// every decision we would have made and lands on whatever is really on disk.
 /// Shared by every hook that has to decode a name, so they cannot drift apart.
@@ -557,11 +557,38 @@ unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<String> {
     // 3. The current-directory handle. The OS creates it, so it is in no table
     //    of ours, yet it is the parent for every relative open a CRT makes:
     //    `CreateFileW("Data\X")` becomes (CWD handle + "Data\X").
-    let (cwd_handle, dos) = cwd_from_peb()?;
-    if cwd_handle != root {
-        return None;
+    if let Some((cwd_handle, dos)) = cwd_from_peb() {
+        if cwd_handle == root {
+            return Some(format!(r"\??\{}", dos.trim_end_matches(['\\', '/'])));
+        }
     }
-    Some(format!(r"\??\{}", dos.trim_end_matches(['\\', '/'])))
+    // 4. A handle we never saw opened — opened before injection, inherited
+    //    across a `CreateProcess`, or duplicated in from another process —
+    //    so it appears in none of our tables and is not the PEB's CWD
+    //    handle either. This is `NtCreateFile`'s
+    //    `OBJECT_ATTRIBUTES.RootDirectory` vector: the game holds a real
+    //    directory handle and names the child only relative to it, so the
+    //    string a hook sees (`Skyrim\Data\a.esp`) cannot be related to the
+    //    managed root by any amount of string canonicalisation — the root
+    //    information lives in the handle, not the string. Ask the OS
+    //    directly: `GetFinalPathNameByHandleW` on the handle itself needs no
+    //    reopen, since we already hold it.
+    //
+    //    Its answer is `VOLUME_NAME_DOS` (`\\?\`-prefixed), not the `\??\`
+    //    spelling a real NT open presents, but that is not parsed here —
+    //    `path_of`'s caller (`decision_for` -> `RootMap::under_root`) always
+    //    re-canonicalises the assembled path, and `canonicalise` already
+    //    treats `\\?\` as a recognised prefix. Handing back the OS string
+    //    unparsed is exactly what `vfs_redirect::expand_short_name`'s
+    //    callers already do with this same result shape (see its doc
+    //    comment) — hand-parsing it here instead would be a second, drifting
+    //    implementation of that same normalisation.
+    //
+    //    Expected to fire rarely: every handle the shim itself sees opened
+    //    (case 2, above) is already free to answer from that table, whether
+    //    or not it lies under the root — this branch is reached only for a
+    //    handle the shim was not present to observe.
+    vfs_win::final_path_for_handle(root_handle)
 }
 
 unsafe fn oa_name_only(oa: *const ObjectAttributes) -> Option<String> {

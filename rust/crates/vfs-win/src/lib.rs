@@ -9,6 +9,6 @@ mod volumes;
 pub use event_notifier::EventNotifier;
 pub use mapping::SharedMapping;
 pub use volumes::{
-    drive_mappings, expand_long_path, final_path_for_open, is_device_namespace_name,
-    short_path_name, DriveMapping,
+    drive_mappings, expand_long_path, final_path_for_handle, final_path_for_open,
+    is_device_namespace_name, short_path_name, DriveMapping,
 };
