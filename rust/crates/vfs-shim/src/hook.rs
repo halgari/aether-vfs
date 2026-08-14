@@ -598,6 +598,51 @@ unsafe fn decision_for(oa: *const ObjectAttributes, access: u32, disposition: u3
     Some(engine.decide_open(&path, access, disposition))
 }
 
+/// Record a `decision_for` fallthrough outcome (`Redirect`/`Serve`/`Deny`),
+/// unless `already` is set — meaning `try_fuse_create` already classified this
+/// same physical open (DRM exception / write fallback) before returning
+/// `None`. Both `create_hook` and `open_hook` call `decision_for`
+/// unconditionally whenever `try_fuse_create` returns `None`, regardless of
+/// *why* it returned `None`, so without this guard an open already recorded
+/// there would be counted a second time here.
+///
+/// Cheap when disabled: `path_of` is only evaluated once `enabled()` is known
+/// true, and `note_open_outcome` itself is a no-op otherwise.
+unsafe fn note_decision_outcome(
+    oa: *const ObjectAttributes,
+    already: bool,
+    outcome: crate::hookstats::OpenOutcome,
+) {
+    if already || !crate::hookstats::enabled() {
+        return;
+    }
+    if let Some(p) = path_of(oa) {
+        crate::hookstats::note_open_outcome(outcome, &p);
+    }
+}
+
+/// Same purpose as [`note_decision_outcome`], specialised for
+/// `Decision::PassThrough`: the brief scopes that outcome to opens **under a
+/// managed root** — a `PassThrough` decision also fires for paths outside
+/// every root (the ordinary case, e.g. `kernel32.dll`), and counting those
+/// would drown the fall-through signal in background noise unrelated to any
+/// bypass. `path_is_ours` is the one helper that already answers "under a
+/// managed root" correctly for both the engine's and the FUSE client's
+/// notions of the root (see its own doc comment).
+unsafe fn note_passthrough_outcome(oa: *const ObjectAttributes, already: bool) {
+    if already || !crate::hookstats::enabled() {
+        return;
+    }
+    if let Some(p) = path_of(oa) {
+        if path_is_ours(&p) {
+            crate::hookstats::note_open_outcome(
+                crate::hookstats::OpenOutcome::FellThroughPassthrough,
+                &p,
+            );
+        }
+    }
+}
+
 /// Record a freshly-opened handle as a candidate directory for enumeration
 /// virtualization: only when the open succeeded and its path is under the
 /// managed root. Harmless for file handles (they never receive a dir-enum call)
@@ -872,6 +917,7 @@ fn disposition_information(disposition: u32, existed_before: bool) -> usize {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn try_fuse_create(
     file_handle: *mut HANDLE,
     oa: *const ObjectAttributes,
@@ -880,6 +926,13 @@ unsafe fn try_fuse_create(
     disposition: u32,
     create_flags: u32,
     append_only: bool,
+    // Set to `true` when this call already recorded an `OpenOutcome` for the
+    // physical open (DRM exception / write fallback) before returning `None`.
+    // Both callers (`create_hook`/`open_hook`) still unconditionally call
+    // `decision_for` afterward for the actual routing decision, and without
+    // this out-param that second classification would double-count the same
+    // open — see the callers' use of it for the full argument.
+    outcome_recorded: &mut bool,
 ) -> Option<NTSTATUS> {
     let client = crate::fuse_client::global()?;
     let path = path_of(oa)?;
@@ -910,6 +963,11 @@ unsafe fn try_fuse_create(
         if base.eq_ignore_ascii_case("steam_appid.txt")
             || base.eq_ignore_ascii_case("SkyrimSELauncher.exe")
         {
+            crate::hookstats::note_open_outcome(
+                crate::hookstats::OpenOutcome::FellThroughDrmException,
+                &path,
+            );
+            *outcome_recorded = true;
             return None; // tramp → the staged image's own directory
         }
         // steam_api* follows the same policy vfs-inject uses: when no copy is
@@ -919,6 +977,11 @@ unsafe fn try_fuse_create(
             || base.eq_ignore_ascii_case("steam_api.dll"))
             && keep_host_steam_api()
         {
+            crate::hookstats::note_open_outcome(
+                crate::hookstats::OpenOutcome::FellThroughDrmException,
+                &path,
+            );
+            *outcome_recorded = true;
             return None;
         }
         // SkyrimSE.exe is excepted the same way by default, but is the one we
@@ -928,6 +991,11 @@ unsafe fn try_fuse_create(
             let via_director = fuse_skyrim_exe();
             drm_exe_trace(&path, fuse_root_directory(oa), write, via_director);
             if !via_director {
+                crate::hookstats::note_open_outcome(
+                    crate::hookstats::OpenOutcome::FellThroughDrmException,
+                    &path,
+                );
+                *outcome_recorded = true;
                 return None;
             }
         }
@@ -993,7 +1061,21 @@ unsafe fn try_fuse_create(
         // Writes fall through so overlay redirect / create still works.
         // steam_appid.txt must live in the overrides mount (skyrim-live writes it).
         Err(st) if st == vfs_protocol::ST_NOT_FOUND => {
-            if write || allow_disk_fallthrough() {
+            if write {
+                // Same "write falls through to the shim-local overlay" case as
+                // the generic `Err(_) if write` arm below, just reached via a
+                // distinct director error (ST_NOT_FOUND rather than any other
+                // failure). Recorded here too, not just below — leaving this
+                // arm silent would undercount FellThroughWriteFallback for
+                // every create/write against a path the director does not
+                // have yet, which is the common case for a brand-new file.
+                crate::hookstats::note_open_outcome(
+                    crate::hookstats::OpenOutcome::FellThroughWriteFallback,
+                    &path,
+                );
+                *outcome_recorded = true;
+                None
+            } else if allow_disk_fallthrough() {
                 None
             } else {
                 Some(STATUS_OBJECT_NAME_NOT_FOUND)
@@ -1008,7 +1090,14 @@ unsafe fn try_fuse_create(
         Err(st) if st == vfs_protocol::ST_EXISTS => Some(STATUS_OBJECT_NAME_COLLISION),
         // Director rejects OPEN_WRITE (overlay is shim-local). Fall through so
         // write/create under the root hits the overlay redirect path.
-        Err(_) if write => None,
+        Err(_) if write => {
+            crate::hookstats::note_open_outcome(
+                crate::hookstats::OpenOutcome::FellThroughWriteFallback,
+                &path,
+            );
+            *outcome_recorded = true;
+            None
+        }
         Err(_) => {
             // Director down / I/O — do not fall through to the Steam tree.
             Some(STATUS_UNSUCCESSFUL)
@@ -1210,6 +1299,11 @@ unsafe extern "system" fn create_hook(
         // are hiding anywhere, it is here.
         None => crate::hookstats::note_undecodable(oa_name_only(oa).as_deref()),
     }
+    // Set by `try_fuse_create` when it already recorded an outcome (DRM
+    // exception / write fallback) for this open before returning `None` — see
+    // `note_decision_outcome` below for why that must suppress the
+    // `decision_for`-based recording that always runs next.
+    let mut outcome_recorded = false;
     if let Some(st) = try_fuse_create(
         file_handle,
         oa,
@@ -1218,10 +1312,12 @@ unsafe extern "system" fn create_hook(
         disp,
         open_create_flags(disp),
         is_append_only(access),
+        &mut outcome_recorded,
     ) {
         if crate::hookstats::enabled() {
             if let Some(p) = path_of(oa) {
                 crate::hookstats::note_trace("open", &p, if st >= 0 { "ok" } else { "FAIL" });
+                crate::hookstats::note_open_outcome(crate::hookstats::OpenOutcome::Routed, &p);
             }
         }
         _hs.mark_rooted();
@@ -1231,8 +1327,15 @@ unsafe extern "system" fn create_hook(
         crate::hookstats::note_open_sync(opts & 0x0000_0030 != 0);
         return st;
     }
-    match decision_for(oa, access, disp) {
+    let decision = decision_for(oa, access, disp);
+    let is_passthrough = matches!(&decision, Some(Decision::PassThrough));
+    match decision {
         Some(Decision::Redirect { target_nt }) => {
+            note_decision_outcome(
+                oa,
+                outcome_recorded,
+                crate::hookstats::OpenOutcome::FellThroughRedirect,
+            );
             let mut wbuf: Vec<u16> = target_nt.encode_utf16().collect();
             let byte_len = (wbuf.len() * 2) as u16;
             let new_us = UnicodeString {
@@ -1258,6 +1361,11 @@ unsafe extern "system" fn create_hook(
             status
         }
         Some(Decision::Serve { container_nt, offset, length }) => {
+            note_decision_outcome(
+                oa,
+                outcome_recorded,
+                crate::hookstats::OpenOutcome::FellThroughServe,
+            );
             // Legacy Serve path: only if FUSE client is not active.
             if crate::fuse_client::global().is_some() {
                 return STATUS_OBJECT_NAME_NOT_FOUND;
@@ -1283,8 +1391,14 @@ unsafe extern "system" fn create_hook(
                 ),
             }
         }
-        Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
+        Some(Decision::Deny) => {
+            note_decision_outcome(oa, outcome_recorded, crate::hookstats::OpenOutcome::Denied);
+            STATUS_OBJECT_NAME_NOT_FOUND
+        }
         Some(Decision::PassThrough) | None => {
+            if is_passthrough {
+                note_passthrough_outcome(oa, outcome_recorded);
+            }
             // Never pass a FUSE RootDirectory to the kernel (invalid handle).
             // DRM host exceptions resolve via path_of → absolute tramp instead.
             if fuse_root_directory(oa) {
@@ -1432,6 +1546,11 @@ unsafe extern "system" fn open_hook(
         Some(p) => crate::hookstats::note_passthrough(&p),
         None => crate::hookstats::note_undecodable(oa_name_only(oa).as_deref()),
     }
+    // Set by `try_fuse_create` when it already recorded an outcome (DRM
+    // exception / write fallback) for this open before returning `None` — see
+    // `note_decision_outcome` for why that must suppress the
+    // `decision_for`-based recording that always runs next.
+    let mut outcome_recorded = false;
     // NtOpenFile has no disposition — it always opens existing (FILE_OPEN). Pass
     // FILE_OPEN (1), NOT 0: 0 is FILE_SUPERSEDE, which is in is_write_open's
     // create/overwrite set and would misclassify every open as a write.
@@ -1445,18 +1564,27 @@ unsafe extern "system" fn open_hook(
         vfs_redirect::FILE_OPEN,
         0,
         is_append_only(access),
+        &mut outcome_recorded,
     ) {
         if crate::hookstats::enabled() {
             if let Some(p) = path_of(oa) {
                 crate::hookstats::note_trace("open", &p, if st >= 0 { "ok" } else { "FAIL" });
+                crate::hookstats::note_open_outcome(crate::hookstats::OpenOutcome::Routed, &p);
             }
         }
         _hs.mark_rooted();
         return st;
     }
     // NtOpenFile has no disposition; it always opens existing (FILE_OPEN).
-    match decision_for(oa, access, vfs_redirect::FILE_OPEN) {
+    let decision = decision_for(oa, access, vfs_redirect::FILE_OPEN);
+    let is_passthrough = matches!(&decision, Some(Decision::PassThrough));
+    match decision {
         Some(Decision::Redirect { target_nt }) => {
+            note_decision_outcome(
+                oa,
+                outcome_recorded,
+                crate::hookstats::OpenOutcome::FellThroughRedirect,
+            );
             let mut wbuf: Vec<u16> = target_nt.encode_utf16().collect();
             let byte_len = (wbuf.len() * 2) as u16;
             let new_us = UnicodeString {
@@ -1480,6 +1608,11 @@ unsafe extern "system" fn open_hook(
             status
         }
         Some(Decision::Serve { container_nt, offset, length }) => {
+            note_decision_outcome(
+                oa,
+                outcome_recorded,
+                crate::hookstats::OpenOutcome::FellThroughServe,
+            );
             if crate::fuse_client::global().is_some() {
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
@@ -1501,8 +1634,14 @@ unsafe extern "system" fn open_hook(
                 None => tramp(file_handle, access, oa, iosb, share, opts),
             }
         }
-        Some(Decision::Deny) => STATUS_OBJECT_NAME_NOT_FOUND,
+        Some(Decision::Deny) => {
+            note_decision_outcome(oa, outcome_recorded, crate::hookstats::OpenOutcome::Denied);
+            STATUS_OBJECT_NAME_NOT_FOUND
+        }
         Some(Decision::PassThrough) | None => {
+            if is_passthrough {
+                note_passthrough_outcome(oa, outcome_recorded);
+            }
             if fuse_root_directory(oa) {
                 if let Some(path) = path_of(oa) {
                     let status =

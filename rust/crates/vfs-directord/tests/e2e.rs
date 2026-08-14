@@ -309,6 +309,13 @@ async fn scenario_toml_disk_source_fixture_writepath() {
     // launched fixture through the real provider graph.
     let content_dir = tempfile::tempdir().expect("tempdir");
 
+    // A separate directory (not the DiskProvider's backing store) for the
+    // shim's own stats report, so `VFS_SHIM_STATS_LOG`'s temp/rename dance
+    // never shows up as a stray entry when the write-path assertions below
+    // list content_dir.
+    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_log = stats_dir.path().join("shim-stats.log");
+
     let fixture = locate_artifact("vfs-fixture-writepath.exe");
     let mut client = connect(&format!("{addr}")).await.expect("connect");
 
@@ -338,13 +345,28 @@ async fn scenario_toml_disk_source_fixture_writepath() {
         .await
         .expect("AddSource");
 
+    let mut env = std::collections::HashMap::new();
+    env.insert(
+        "VFS_SHIM_STATS_LOG".to_string(),
+        stats_log.to_string_lossy().into_owned(),
+    );
+    // This fixture's whole create/write/append/rename/delete sequence
+    // completes in well under 250ms (measured ~70-90ms wall clock for the
+    // entire launch), faster than the reporter's default tick — confirmed by
+    // running with the default: the report file never appeared at all, not
+    // even a partial one, because the process exits (and takes its reporter
+    // thread down with it — nothing flushes on exit) before the first tick.
+    // A short override makes the snapshot land reliably without changing the
+    // default cadence any real, longer-lived launch gets.
+    env.insert("VFS_SHIM_STATS_INTERVAL_MS".to_string(), "5".to_string());
+
     let mut stream = client
         .launch(LaunchReq {
             session_id: session.id.clone(),
             exec: fixture.to_string_lossy().into_owned(),
             args: Vec::new(),
             wait: true,
-            env: Default::default(),
+            env,
         })
         .await
         .expect("Launch")
@@ -400,6 +422,19 @@ async fn scenario_toml_disk_source_fixture_writepath() {
         .join("overlay");
     assert_overlay_empty(&overlay);
 
+    // Proves gate 1's classifier is actually wired and firing, not merely
+    // compiled: every under-root open this fixture makes that the director
+    // actually serves (the create/write/append/rename/delete sequence above)
+    // must show up as `routed` in the shim's own report, not just as a
+    // passing exit code.
+    let routed = routed_outcome_count(&stats_log);
+    assert!(
+        routed > 0,
+        "expected at least one `routed` under-root open outcome in the shim \
+         report at {stats_log:?}, got 0 (report contents: {:?})",
+        std::fs::read_to_string(&stats_log)
+    );
+
     client
         .teardown_session(vfs_control::pb::TeardownReq {
             session_id: session.id,
@@ -408,6 +443,33 @@ async fn scenario_toml_disk_source_fixture_writepath() {
         .expect("teardown");
 
     server.abort();
+}
+
+/// Read the shim's `VFS_SHIM_STATS_LOG` report and pull out the `routed`
+/// under-root-open-outcome count from its "under-root open outcomes:"
+/// section (see `hookstats::render_outcome`, which renders one
+/// `"  {label:<32} {count:>8}\n"` line per non-zero outcome).
+///
+/// The reporter thread rewrites the whole file every 250ms via a temp+rename,
+/// so by the time the launched (and by now exited) child's last write landed,
+/// the file is either absent (never got a tick in) or a complete snapshot —
+/// never a half-written one. `0` covers both "absent" and "present but the
+/// classifier never fired", which is exactly what the caller's `> 0` check
+/// distinguishes from a real pass.
+fn routed_outcome_count(stats_log: &std::path::Path) -> u64 {
+    let Ok(text) = std::fs::read_to_string(stats_log) else {
+        return 0;
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("routed") {
+            if let Some(n) = rest.split_whitespace().next() {
+                if let Ok(v) = n.parse::<u64>() {
+                    return v;
+                }
+            }
+        }
+    }
+    0
 }
 
 /// `read_dir(...).unwrap_or_default()` turns a wrong or missing overlay path

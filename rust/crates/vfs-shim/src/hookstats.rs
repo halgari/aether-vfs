@@ -662,11 +662,9 @@ pub fn outcome_count(outcome: OpenOutcome) -> u64 {
 /// Record which path an under-root open actually took. Cheap no-op when
 /// disabled, exactly like `note_passthrough`.
 ///
-/// Not yet called from `hook.rs` — wiring each decision site to an
-/// `OpenOutcome` is a separate task so this gate changes no behaviour, only
-/// adds the ability to measure it. `#[allow(dead_code)]` reflects that
-/// deliberate gap, not an oversight.
-#[allow(dead_code)]
+/// Wired from every under-root decision site in `hook.rs`'s `create_hook` /
+/// `open_hook` / `try_fuse_create` — see those for the full site-by-site
+/// argument that each open records exactly once.
 pub fn note_open_outcome(outcome: OpenOutcome, path: &str) {
     if !enabled() {
         return;
@@ -754,6 +752,20 @@ fn render_passthrough() -> String {
 ///
 /// A snapshot rather than an exit dump: a game that is killed, or one still
 /// running at the benchmark's window mark, would never produce an exit report.
+///
+/// The 250ms default assumes a session lasting well past that — true for
+/// every real launch, but not for a millisecond-scale e2e fixture: nothing
+/// flushes on exit (the workspace builds with `panic = "abort"` and there is
+/// no `DLL_PROCESS_DETACH` hook for this), so a process that exits before its
+/// first tick produces no report file at all, not even a partial one.
+/// `VFS_SHIM_STATS_INTERVAL_MS` (see `vfs_env::SHIM_STATS_INTERVAL_MS`)
+/// overrides the interval for exactly that case — a short-lived test child
+/// can opt into a fast tick for just itself; unset, every existing caller
+/// keeps the same 250ms cadence.
+fn report_interval() -> std::time::Duration {
+    std::time::Duration::from_millis(vfs_env::parsed_or(vfs_env::SHIM_STATS_INTERVAL_MS, 250))
+}
+
 pub fn start_reporter() {
     if !enabled() || REPORTER.swap(true, Ordering::SeqCst) {
         return;
@@ -761,10 +773,11 @@ pub fn start_reporter() {
     let Some(path) = vfs_env::raw(vfs_env::SHIM_STATS_LOG) else {
         return;
     };
+    let interval = report_interval();
     let _ = std::thread::Builder::new()
         .name("vfs-shim-stats".into())
         .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(250));
+            std::thread::sleep(interval);
             let body = format!(
                 "{}{}{}{}{}{}{}{}{}{}",
                 render(),
