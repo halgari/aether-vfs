@@ -1556,6 +1556,10 @@ name = "vfs-env"
 version = "0.1.0"
 
 [[package]]
+name = "vfs-fixture-escape"
+version = "0.1.0"
+
+[[package]]
 name = "vfs-fixture-read"
 version = "0.1.0"
 

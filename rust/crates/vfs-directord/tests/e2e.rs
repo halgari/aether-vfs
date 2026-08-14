@@ -61,6 +61,7 @@ fn ensure_inject_artifacts() {
         "vfs_payload.dll",
         "vfs-fixture-read.exe",
         "vfs-fixture-writepath.exe",
+        "vfs-fixture-escape.exe",
     ];
     let missing = needed.iter().any(|n| !profile.join(n).is_file());
     if missing {
@@ -78,6 +79,8 @@ fn ensure_inject_artifacts() {
                 "vfs-fixture-read",
                 "-p",
                 "vfs-fixture-writepath",
+                "-p",
+                "vfs-fixture-escape",
                 "--quiet",
             ])
             .status()
