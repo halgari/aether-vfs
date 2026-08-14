@@ -7,6 +7,7 @@ mod canon;
 mod volumes;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use vfs_core::{fold, normalize_vpath, wildcard_match, PathError};
@@ -110,10 +111,16 @@ pub struct RootMap {
     /// here — never re-resolved per open, which would be several Win32 calls
     /// per drive on every single open.
     volumes: VolumeMap,
-    /// Absorbs the cost of re-deriving the same open path's root membership —
-    /// including the OS call `compute_under_root`'s fallback can make — across
-    /// repeated opens of the same raw spelling.
+    /// Absorbs the cost of re-deriving the same open path's root membership,
+    /// for the raw spellings `compute_under_root` can answer purely from the
+    /// string — see [`Resolution`] for why an OS-consulted answer never lands
+    /// here.
     cache: PathCache,
+    /// Count of lookups that consulted the OS (the `~`-gated fallback branch
+    /// in `compute_under_root`). Cheap — one relaxed increment on an already
+    /// rare branch — kept so how rarely that branch fires is a measured
+    /// claim, not just an asserted one.
+    os_consults: AtomicU64,
 }
 
 impl RootMap {
@@ -142,13 +149,22 @@ impl RootMap {
         } else {
             norm.split('/').map(str::to_string).collect()
         };
-        Ok(RootMap { root, volumes, cache: PathCache::new(capacity) })
+        Ok(RootMap { root, volumes, cache: PathCache::new(capacity), os_consults: AtomicU64::new(0) })
     }
 
-    /// The number of entries currently cached. Test-only, to verify the bound.
+    /// The number of entries currently cached. Test-only, to verify the bound
+    /// and the cache/no-cache boundary.
     #[cfg(test)]
     fn cache_len(&self) -> usize {
         self.cache.len()
+    }
+
+    /// The number of lookups so far that consulted the OS. Test-only, to
+    /// prove an OS-consulted answer was recomputed rather than served from
+    /// the cache.
+    #[cfg(test)]
+    fn os_consult_count(&self) -> u64 {
+        self.os_consults.load(Ordering::Relaxed)
     }
 
     /// The normalized root components (original case). For tests/diagnostics.
@@ -211,29 +227,53 @@ impl RootMap {
 
     /// Folded remainder components if `nt_path` is under the managed root, else
     /// `None` (out of root, malformed, or escaping). Cached on the raw `nt_path`
-    /// string — see [`PathCache`] — so repeated opens of the same spelling
-    /// (the common case during a game's load) pay the cost in
-    /// [`Self::compute_under_root`] at most once.
+    /// string for the [`Resolution::Deterministic`] case only — see
+    /// [`Resolution`] and the comment at the `cache.insert` call below for why
+    /// an OS-consulted answer is deliberately excluded.
     fn under_root(&self, nt_path: &str) -> Option<Vec<String>> {
         if let Some(cached) = self.cache.get(nt_path) {
             return cached;
         }
-        let result = self.compute_under_root(nt_path);
-        self.cache.insert(nt_path.to_string(), result.clone());
-        result
+        match self.compute_under_root(nt_path) {
+            Resolution::Deterministic(result) => {
+                // Safe to cache: a pure function of `nt_path` and the
+                // session-frozen `self.volumes`, so it can never go stale.
+                self.cache.insert(nt_path.to_string(), result.clone());
+                result
+            }
+            Resolution::OsConsulted(result) => {
+                // Never cache this. An OS-resolved identity (an 8.3
+                // short-name slot, a junction target) is a fact about the
+                // filesystem *now*, not a fact about the string — the slot
+                // can be reused after a delete-and-recreate, or a junction
+                // retargeted, mid-session. A stale POSITIVE is the dangerous
+                // direction: an in-root short-name alias cached as "inside"
+                // would keep being treated as inside after the real target
+                // is swapped for something outside the root, which is
+                // exactly the over-eager failure class this gate exists to
+                // avoid (the same class Task 2 already found and fixed once
+                // in `VolumeMap`). Recomputing this branch on every call is
+                // the deliberate cost of staying correct; do not "fix" this
+                // by caching it — see `os_consulted_resolution_is_never_cached`.
+                result
+            }
+        }
     }
 
     /// The actual (possibly Win32-calling) resolution behind [`Self::under_root`],
     /// run only on a cache miss.
     ///
-    /// Two passes:
+    /// Two passes, and the return type keeps them distinguishable to the
+    /// caller so only the first can ever be cached:
     ///
     /// 1. Pure syntactic canonicalisation ([`canonicalise`]): resolves a
     ///    device or volume-GUID prefix via `self.volumes`, strips NT/DOS
     ///    prefixes, refuses a drive-relative spelling, clamps `..` at a drive
-    ///    root. No Win32 call. This alone closes the device-path and
-    ///    volume-GUID vectors, and every syntactic escape vector Task 1
-    ///    closed in `canonicalise` itself.
+    ///    root. No Win32 call, and a deterministic function of `nt_path` (and
+    ///    `self.volumes`, itself frozen for the session) — this alone closes
+    ///    the device-path and volume-GUID vectors, and every syntactic escape
+    ///    vector Task 1 closed in `canonicalise` itself. Returned as
+    ///    [`Resolution::Deterministic`].
     /// 2. Only if that syntactic form does not already place the path under
     ///    the root, and only if it contains `~` — the character every
     ///    OS-generated 8.3 short name contains, and the only shape this pass
@@ -241,33 +281,45 @@ impl RootMap {
     ///    ([`expand_short_name`]), then canonicalise *that* and match again.
     ///    A short-name spelling of a component of the root itself (`GAMES~1`
     ///    for `Games`) cannot be recognised any other way: it is an on-disk
-    ///    fact, not something derivable from the string alone.
+    ///    fact, not something derivable from the string alone. Returned as
+    ///    [`Resolution::OsConsulted`] regardless of outcome (including a
+    ///    negative one — `expand_short_name` returning `None`), because
+    ///    "nothing exists there yet" can also stop being true mid-session.
     ///
     /// The `~` gate matters for cost, not correctness: without it, every
     /// single open that does not syntactically match the root — the common
     /// case for anything outside the VFS, e.g. every system DLL a game
     /// loads — would pay a Win32 round trip. Every real 8.3 short name
     /// contains `~` by construction, so nothing this gate is responsible for
-    /// closing is missed by requiring it.
-    fn compute_under_root(&self, nt_path: &str) -> Option<Vec<String>> {
-        let canon = canonicalise(nt_path, &self.volumes).ok()?;
+    /// closing is missed by requiring it. In practice this makes the
+    /// OS-consulted branch rare: see `plainly_outside_path_never_consults_the_os`
+    /// and the cost discussion in the task report.
+    fn compute_under_root(&self, nt_path: &str) -> Resolution {
+        let Ok(canon) = canonicalise(nt_path, &self.volumes) else {
+            return Resolution::Deterministic(None);
+        };
         if let Some(folded) = self.match_canonical(&canon) {
-            return Some(folded);
+            return Resolution::Deterministic(Some(folded));
         }
         if !canon.contains('~') {
-            return None;
+            return Resolution::Deterministic(None);
         }
+        self.os_consults.fetch_add(1, Ordering::Relaxed);
         // `canon` is already an absolute, NT/DOS-prefix-free, drive-letter
         // form (e.g. `C:/Games~1/Data/a.esp`); backslashes make it a path
         // `CreateFileW` (behind `expand_short_name`) accepts directly.
         let win32_candidate = canon.replace('/', "\\");
-        let resolved = expand_short_name(&win32_candidate)?;
+        let Some(resolved) = expand_short_name(&win32_candidate) else {
+            return Resolution::OsConsulted(None);
+        };
         // The OS's answer may itself carry an NT/DOS prefix (`final_path_for_open`
         // returns VOLUME_NAME_DOS, `\\?\`-prefixed) — canonicalise strips
         // whatever recognised prefix is present rather than requiring the
         // caller to know which one, so this is not a second special case.
-        let canon2 = canonicalise(&resolved, &self.volumes).ok()?;
-        self.match_canonical(&canon2)
+        let Ok(canon2) = canonicalise(&resolved, &self.volumes) else {
+            return Resolution::OsConsulted(None);
+        };
+        Resolution::OsConsulted(self.match_canonical(&canon2))
     }
 
     /// Fold-compare an already-canonicalised path's components against the
@@ -339,6 +391,22 @@ impl RootMap {
             })
             .collect()
     }
+}
+
+/// The outcome of [`RootMap::compute_under_root`], tagged by whether it
+/// consulted the OS — the boundary `RootMap::under_root` uses to decide what
+/// may be cached. See the doc comment on `RootMap::under_root`'s `cache.insert`
+/// call for why [`Resolution::OsConsulted`] must never reach the cache: it is
+/// an answer about the filesystem *now*, not a pure function of the input
+/// string, and a stale positive here is the over-eager failure class this
+/// gate exists to avoid.
+enum Resolution {
+    /// A pure function of the raw input string (and the session-frozen
+    /// `VolumeMap`) — safe to cache indefinitely.
+    Deterministic(Option<Vec<String>>),
+    /// Reached by asking the OS what the path currently names (8.3 short-name
+    /// / junction resolution). Never cached.
+    OsConsulted(Option<Vec<String>>),
 }
 
 /// Where an NT path lands relative to the managed root.
@@ -1305,6 +1373,85 @@ mod tests {
         assert!(map.contains(&raw), "8.3-spelled root was not recognised as inside: {raw}");
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A resolution that never left the raw string (pure `canonicalise` +
+    /// component match, no OS call) is a deterministic function of its input
+    /// and is safe to cache: the second lookup of the same raw spelling must
+    /// be served from the cache rather than recomputed.
+    #[test]
+    fn deterministic_resolution_is_cached() {
+        let map = RootMap::new_with_cache_capacity(r"C:\Games\Skyrim", VolumeMap::empty(), 8)
+            .unwrap();
+        let raw = r"C:\Games\Skyrim\Data\a.esp"; // no `~`: never reaches the OS branch.
+        assert!(map.contains(raw));
+        assert_eq!(map.cache_len(), 1, "a deterministic resolution was not cached");
+        assert!(map.contains(raw));
+        assert_eq!(map.cache_len(), 1, "the second lookup added a second entry");
+    }
+
+    /// The finding this test guards: an OS-resolved identity (an 8.3
+    /// short-name slot, a junction target) is not stable for the life of a
+    /// cache entry — the slot can be reused after a delete-and-recreate, or
+    /// the junction retargeted, mid-session. A stale POSITIVE is the
+    /// dangerous direction: an in-root short-name alias cached as "inside"
+    /// would stay "inside" after the real on-disk target is swapped for
+    /// something outside the root, which is exactly the over-eager failure
+    /// class this gate exists to avoid.
+    ///
+    /// So: any resolution that consulted the OS (`compute_under_root`'s `~`
+    /// fallback) must never be cached, positive or negative. Proven here two
+    /// ways: the cache stays empty across two lookups of the same raw 8.3
+    /// spelling, and the OS-consult counter increments on BOTH lookups (proof
+    /// it was recomputed the second time, not served from a cache miss that
+    /// happened to also be empty for some other reason).
+    #[test]
+    #[cfg(windows)]
+    fn os_consulted_resolution_is_never_cached() {
+        let base = std::env::temp_dir()
+            .join(format!("vfs-redirect-830-no-cache-{}", std::process::id()));
+        let long_name = "ThisIsALongRootDirectoryNameForNoCacheTesting";
+        let root_dir = base.join(long_name);
+        std::fs::create_dir_all(root_dir.join("Data")).unwrap();
+        std::fs::write(root_dir.join("Data").join("a.esp"), b"x").unwrap();
+        let root_str = root_dir.to_str().unwrap().to_string();
+
+        let short_root = match vfs_win::short_path_name(&root_str) {
+            Some(s) if !s.eq_ignore_ascii_case(&root_str) => s,
+            _ => {
+                // 8.3 disabled on this volume: nothing forces the OS-consulted
+                // branch here (Task 6's `unbuildable` case, not a failure).
+                std::fs::remove_dir_all(&base).ok();
+                return;
+            }
+        };
+
+        let map = RootMap::new(&root_str, VolumeMap::empty()).unwrap();
+        let raw = format!(r"{short_root}\Data\a.esp");
+
+        assert!(map.contains(&raw));
+        assert_eq!(map.cache_len(), 0, "an OS-consulted resolution was cached");
+        assert_eq!(map.os_consult_count(), 1);
+
+        assert!(map.contains(&raw));
+        assert_eq!(map.cache_len(), 0, "an OS-consulted resolution was cached on a second lookup");
+        assert_eq!(
+            map.os_consult_count(),
+            2,
+            "the second lookup did not re-consult the OS -- it must have been served from a cache"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A path that never contains `~` and never matches the root deterministically
+    /// fails closed without ever touching the OS-consult counter — confirms the
+    /// `~` gate, not just the cache boundary, is doing its job.
+    #[test]
+    fn plainly_outside_path_never_consults_the_os() {
+        let map = RootMap::new(r"C:\Games\Skyrim", VolumeMap::empty()).unwrap();
+        assert!(!map.contains(r"C:\Windows\System32\kernel32.dll"));
+        assert_eq!(map.os_consult_count(), 0);
     }
 
     /// `vfs_win::final_path_for_open` returns `GetFinalPathNameByHandleW`'s
