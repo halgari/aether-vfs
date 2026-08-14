@@ -81,6 +81,40 @@ when they land separately.
   open-count reconciliation.
   *Gate:* the full acceptance criteria in §8.
 
+### 2a-ii runs in five gates, and the order is the point
+
+Phase 2a-i found **nine** distinct places where the correct path silently did
+not work and traffic quietly took the bypass instead — a cache refusing writes
+it advertised, four combinators doing the same, a shim never forwarding create
+disposition, append handles starting at zero. Every one was invisible until
+something forced it into the open. The fall-through has been absorbing that
+entire class of defect.
+
+Removing it in one step would mean a launch failure has a dozen candidate
+causes. So each gate removes exactly **one** class of bypass, and the
+reconciliation counter proves the previously-closed classes stayed closed.
+
+| Gate | Removes | Failure points at |
+|---|---|---|
+| **1. Measure** | nothing | — |
+| **2. Canonicalise** | escapes via alternate path spellings | path resolution |
+| **3. Virtualise** | `NotFound`/`Dir` → passthrough, and the legacy `Redirect`/`Serve` decision paths | the read/metadata routing |
+| **4. Writes** | the shim's write fall-through | the write path |
+| **5. DRM** | the four host-tree filename exceptions | Steam interaction, and nothing else |
+
+**Gate 1 changes no behaviour at all.** It builds the shim-vs-director
+open-count reconciliation and the fall-through counter, surfaced in
+`vfs stats`, then runs the game to get a baseline: how many opens take the
+fall-through today, and by which paths. That converts the remaining bypass
+from invisible to enumerated, and hands gates 2-5 a concrete list of what will
+break — data rather than hope. Given how 2a-i went, starting from measurement
+is worth a gate on its own.
+
+**Gate 5 is deliberately last and alone.** Closing the DRM exceptions is the
+highest-risk, least-predictable change in the phase — the code's own comment
+concedes its "Steam Error" diagnosis is a hypothesis. Landing it by itself
+means a launch failure has exactly one candidate cause.
+
 ### Fail-closed replaces fail-open
 
 The current decision logic is explicitly fail-safe in the opposite direction.
