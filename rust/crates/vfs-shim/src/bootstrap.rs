@@ -84,17 +84,24 @@ pub fn bootstrap_from_config_path_with_payload(
 ) -> Result<HookGuard, BootstrapError> {
     let bytes = std::fs::read(path).map_err(|_| BootstrapError::Io)?;
     let (root, overlay, snapshot) = decode_config(&bytes).ok_or(BootstrapError::BadConfig)?;
-    // Attach to the parent director's FUSE ring when one was configured. A
-    // process that named no ring at all (`NotConfigured`) is a legitimate
-    // standalone launch — the `Engine` snapshot below governs composition on
-    // its own, and this crate's own tests rely on exactly that. But a ring
-    // *was* named and still failed to attach (`ConnectFailed`) means this
-    // launch intended full virtualisation through the director and silently
-    // would not have gotten it — every path was about to fall straight
-    // through to the real filesystem. That must abort here, before the
-    // `Engine` is built or any hook installs.
+    // Attach to the parent director's FUSE ring. Standalone (no-director)
+    // shim launches are retired: a process that names no ring at all
+    // (`NotConfigured`) used to be treated as a legitimate deployment, with
+    // the `Engine` snapshot below governing composition on its own — but that
+    // is exactly the mode in which a game runs completely un-virtualised
+    // while appearing to work, which this whole programme exists to
+    // eliminate. It now fails exactly like a named ring that failed to
+    // attach (`ConnectFailed`): before the `Engine` is built or any hook
+    // installs.
     match crate::fuse_client::try_init_from_env() {
-        Ok(()) | Err(crate::fuse_client::FuseInitError::NotConfigured) => {}
+        Ok(()) => {}
+        Err(crate::fuse_client::FuseInitError::NotConfigured) => {
+            return Err(BootstrapError::Fuse(
+                "no VFS_RING_SECTION configured: standalone (no-director) shim launches are \
+                 retired — a director must be attached"
+                    .to_string(),
+            ));
+        }
         Err(crate::fuse_client::FuseInitError::ConnectFailed(msg)) => {
             return Err(BootstrapError::Fuse(msg));
         }
@@ -446,6 +453,30 @@ mod tests {
             bootstrap_from_config_path(r"C:\nope\does-not-exist.cfg"),
             Err(BootstrapError::Io)
         ));
+    }
+
+    // Direct unit coverage for `payload_cfg_usable`'s garbage-pointer rejection —
+    // the safety property `bad_payload_cfg.rs` used to exercise indirectly via a
+    // full `bootstrap_from_config_path` call. That integration test was removed
+    // for gate 3, Task 3 ("retire standalone mode"): with no `VFS_RING_SECTION`
+    // configured, `bootstrap_from_config_path` now aborts on
+    // `FuseInitError::NotConfigured` before ever reaching the dual-layer
+    // cfg-pointer logic these two functions guard, so it could no longer reach
+    // the code it was meant to test. Standing up a real director ring just to
+    // reach a null/garbage-pointer guard several steps past the FUSE gate would
+    // be disproportionate to what the guard itself asserts, so this narrower,
+    // ring-free unit test takes its place instead of leaving the guard
+    // unverified.
+    #[test]
+    fn payload_cfg_usable_rejects_null() {
+        assert!(!payload_cfg_usable(core::ptr::null_mut()));
+    }
+
+    #[test]
+    fn payload_cfg_usable_rejects_unmapped_garbage_address() {
+        // A dangling (never-committed) pointer: VirtualQuery must report it as
+        // such (MEM_FREE), so this must be rejected before ever dereferencing it.
+        assert!(!payload_cfg_usable(std::ptr::dangling_mut::<PayloadConfig>()));
     }
 
     #[test]

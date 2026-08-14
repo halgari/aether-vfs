@@ -1,75 +1,17 @@
 //! Lightweight asserts for dual-layer machinery side-effects.
+//!
+//! `dual_layer_writes_ready_marker_and_payload_cfg_file` was removed here for
+//! gate 3, Task 3 ("retire standalone mode"): it launched a full dual-layer
+//! `run_target_with_shim` process with no `VFS_RING_SECTION` set and asserted
+//! the ready-marker plus a virtual-file read, both through the now-retired
+//! no-director bootstrap path (`bootstrap_from_config_path_with_payload`
+//! aborts on `FuseInitError::NotConfigured`). The remaining test below is a
+//! pure-function check of `merge_preinit_redirects` and does not touch
+//! bootstrap at all.
 mod common;
 
-use std::time::Duration;
-use vfs_inject::{merge_preinit_redirects, run_target_with_shim, RunConfig};
+use vfs_inject::merge_preinit_redirects;
 use vfs_shim::{encode_config_full, StaticImport};
-
-#[test]
-fn dual_layer_writes_ready_marker_and_payload_cfg_file() {
-    let pid = std::process::id();
-    let base = std::env::temp_dir().join(format!("vfs-mach-{pid}"));
-    let root = base.join("root");
-    let mods = base.join("mods");
-    let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&mods).unwrap();
-
-    let backing = mods.join("asset.dat");
-    std::fs::write(&backing, b"SMOKE").unwrap();
-    let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        vfs_shared::bridge::flatten(
-            &build(vec![Layer {
-                id: LayerId(0),
-                entries: vec![InputEntry {
-                    vpath: "asset.dat".into(),
-                    kind: EntryKind::File,
-                    source: backing.to_str().unwrap().into(),
-                    size: 5,
-                    mtime: 1,
-                }],
-            }])
-            .unwrap(),
-        )
-    };
-    let config_path = base.join("shim.cfg");
-    std::fs::write(
-        &config_path,
-        encode_config_full(root.to_str().unwrap(), "", &[], &snapshot),
-    )
-    .unwrap();
-
-    let ready = base.join("ready.flag");
-    let _ = std::fs::remove_file(&ready);
-
-    let out = base.join("out.bin");
-    let virtual_path = root.join("asset.dat");
-    let (dll, payload) = common::locate_shim_and_payload();
-    let exit = run_target_with_shim(RunConfig {
-        target_exe: env!("CARGO_BIN_EXE_vfs-probe").to_string(),
-        current_dir: None,
-        args: vec![
-            virtual_path.to_str().unwrap().to_string(),
-            out.to_str().unwrap().to_string(),
-        ],
-        dll_path: dll,
-        config_path: config_path.to_str().unwrap().to_string(),
-        ready_path: ready.to_str().unwrap().to_string(),
-        ready_timeout: Duration::from_secs(15),
-        payload_path: payload,
-        preinit_redirects: vec![],
-        detach: false,
-    })
-    .expect("dual-layer probe");
-
-    assert_eq!(exit, 0);
-    assert_eq!(std::fs::read(&out).unwrap(), b"SMOKE");
-    assert!(
-        ready.exists(),
-        "VFS_SHIM_READY marker must be written (full shim bootstrap completed)"
-    );
-}
 
 #[test]
 fn explicit_preinit_overrides_config_same_suffix() {

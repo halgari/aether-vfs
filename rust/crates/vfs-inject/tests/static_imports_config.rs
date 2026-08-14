@@ -1,77 +1,31 @@
 //! Static-import redirects come from the **config file** (not only RunConfig),
 //! so director and children share one source of truth.
+//!
+//! `config_static_import_via_dual_layer` was removed here for gate 3, Task 3
+//! ("retire standalone mode"): it drove a full `run_target_with_shim` launch
+//! with no `VFS_RING_SECTION`, so it aborts on `FuseInitError::NotConfigured`
+//! before the early-payload static-import redirect it wanted to prove ever
+//! gets a chance to run. That is a genuine, unmitigated coverage gap, not
+//! merely a retired assertion: static-import (PE import table) redirection
+//! via dual-layer preinit is a real, still-supported mechanism unrelated to
+//! the FUSE virtualisation bypass this gate closes, and nothing today proves
+//! it end-to-end through a real director — `vfs_director::Session::launch`
+//! (`crates/vfs-director/src/session.rs`) hardcodes `preinit_redirects:
+//! vec![]` and has no config-file static-import plumbing either. Restoring
+//! this coverage needs either a director-mediated static-import path (a
+//! `vfs-director` feature change) or a minimal in-process test-only ring
+//! (e.g. `vfs_director::ipc::IpcServe` as a dev-dependency here, which Cargo
+//! permits despite the reverse production dependency) — both are follow-up
+//! decisions beyond this task, not something to force through here.
+//! `merge_preinit_loads_config_statics` below still directly covers the
+//! config-file parsing this test also exercised, and
+//! `preinit_only_still_accepts_explicit_redirects` still proves the
+//! preinit-only redirect path end-to-end (it never calls
+//! `bootstrap_from_config_path` / `run_target_with_shim` at all).
 mod common;
 
-use std::time::Duration;
-use vfs_inject::{run_target_with_preinit, run_target_with_shim, PreinitConfig, RunConfig};
+use vfs_inject::{run_target_with_preinit, PreinitConfig};
 use vfs_shim::{encode_config_full, StaticImport};
-
-#[test]
-fn config_static_import_via_dual_layer() {
-    let pid = std::process::id();
-    let base = std::env::temp_dir().join(format!("vfs-stcfg-{pid}"));
-    let app_dir = base.join("app");
-    let mods = base.join("mods");
-    let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(&app_dir).unwrap();
-    std::fs::create_dir_all(&mods).unwrap();
-
-    let backing_src = common::locate_artifact("vproxy.dll");
-    let backing = mods.join("vproxy_backing.dll");
-    std::fs::copy(&backing_src, &backing).unwrap();
-
-    let snapshot = {
-        use vfs_core::{build, Layer, LayerId};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-
-    let config_bytes = encode_config_full(
-        app_dir.to_str().unwrap(),
-        "",
-        &[StaticImport {
-            dll_name: "vproxy.dll".into(),
-            backing_path: backing.to_str().unwrap().to_string(),
-        }],
-        &snapshot,
-    );
-    let config_path = base.join("shim.cfg");
-    std::fs::write(&config_path, &config_bytes).unwrap();
-
-    let tgt_src = common::locate_artifact("vfs-staticimp.exe");
-    let tgt = app_dir.join("vfs-staticimp.exe");
-    std::fs::copy(&tgt_src, &tgt).unwrap();
-    assert!(!app_dir.join("vproxy.dll").exists());
-
-    let result_path = app_dir.join("result.txt");
-    let ready = base.join("ready.flag");
-    let _ = std::fs::remove_file(&result_path);
-    let _ = std::fs::remove_file(&ready);
-
-    let (dll, payload) = common::locate_shim_and_payload();
-    let exit = run_target_with_shim(RunConfig {
-        target_exe: tgt.to_str().unwrap().to_string(),
-        current_dir: None,
-        args: vec![result_path.to_str().unwrap().to_string()],
-        dll_path: dll,
-        config_path: config_path.to_str().unwrap().to_string(),
-        ready_path: ready.to_str().unwrap().to_string(),
-        ready_timeout: Duration::from_secs(15),
-        payload_path: payload,
-        preinit_redirects: vec![],
-        detach: false,
-    })
-    .expect("run_target_with_shim");
-
-    assert_eq!(exit, 0);
-    let out = std::fs::read_to_string(&result_path).expect("result");
-    assert_eq!(out.trim(), "vproxy_value=4242");
-    assert!(!app_dir.join("vproxy.dll").exists());
-}
 
 #[test]
 fn merge_preinit_loads_config_statics() {

@@ -58,18 +58,20 @@ where
 
 /// Why [`try_init_from_env`] did not leave a live [`FuseClient`] installed.
 ///
-/// The two cases are not the same failure and must not be reported the same
-/// way. A standalone shim (no ring named at all) is a legitimate deployment —
-/// the local `Engine` snapshot governs composition alone, and plenty of this
-/// crate's own tests run exactly that way. A director-launched process names
-/// a ring (`VFS_RING_SECTION`) precisely because it *requires* virtualisation
-/// through it; if that then fails to attach, the process is about to run
-/// completely un-virtualised while looking like a normal launch — the bypass
-/// this type exists to make impossible to ignore.
+/// Both variants are fatal to the caller (`bootstrap.rs` aborts the launch on
+/// either). Standalone shim launches — no ring named at all, the local
+/// `Engine` snapshot governing composition alone — used to be treated as a
+/// legitimate deployment, and plenty of this crate's own tests used to run
+/// exactly that way. That mode is retired: it is precisely the one in which a
+/// game runs completely un-virtualised while looking like a normal launch —
+/// the bypass this type exists to make impossible to ignore. The two cases
+/// are still kept distinct because their messages differ (a name for one, a
+/// connection failure reason for the other), not because either is safe to
+/// swallow.
 #[derive(Debug)]
 pub enum FuseInitError {
-    /// No ring was named (`VFS_RING_SECTION` unset). This process was not
-    /// launched to talk to a director; not a failure.
+    /// No ring was named (`VFS_RING_SECTION` unset). The process was not
+    /// launched to talk to a director — no longer a supported deployment.
     NotConfigured,
     /// A ring was named but the client could not attach, or the post-connect
     /// heartbeat failed. The caller intended virtualisation and it silently
