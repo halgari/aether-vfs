@@ -99,7 +99,7 @@ fn fuse_skyrim_exe() -> bool {
 
 use retour::RawDetour;
 use vfs_redirect::{
-    nt_to_volume_relative, parse_full_dir_info, write_dir_info, write_file_name_info, AttrDecision,
+    nt_to_volume_relative, parse_full_dir_info, write_dir_info, write_file_name_info,
     Decision, DirInfoClass, DirItem, DirStatus,
 };
 use windows_sys::Win32::Foundation::{HANDLE, HMODULE, NTSTATUS};
@@ -110,6 +110,7 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::engine::Engine;
 use crate::inject::{inject_child, re_suspend, self_dll_path};
+use crate::overlay::OverlayState;
 use crate::ntdef::{
     FileAttributeTagInformation, FileBasicInformation, FileFsDeviceInformation,
     FileEndOfFileInformation, FileInternalInformation, FileNetworkOpenInformation,
@@ -1938,13 +1939,16 @@ unsafe extern "system" fn qibn_hook(
                 Err(_) => return STATUS_UNSUCCESSFUL,
             }
         }
-        // The snapshot engine answers when no director is attached. Every other
-        // metadata hook consults both sources; consulting only one here would
-        // make this API disagree with `NtQueryAttributesFile` about whether the
-        // very same file exists.
+        // Task 4: the local snapshot no longer answers attribute queries (that
+        // was `RootMap::query_attributes`/`AttrDecision`, both deleted) — the
+        // director already had first refusal via `fuse_path_attr` above. The
+        // shim-local write overlay (gate 4's mechanism) is the only thing
+        // left that can still answer without the director, since it holds
+        // content the director never sees (a just-created/modified file, or
+        // a runtime delete's whiteout).
         if let Some(engine) = ENGINE.get() {
-            match engine.query_attributes(&path) {
-                AttrDecision::Attributes { is_dir, size, .. } => {
+            match engine.overlay_state(&path) {
+                Some(OverlayState::Present { is_dir, size, .. }) => {
                     if let Some(n) = fill_by_name(class_raw, info, length, is_dir, size) {
                         if !iosb.is_null() {
                             let q = iosb as *mut u8;
@@ -1954,8 +1958,8 @@ unsafe extern "system" fn qibn_hook(
                         return STATUS_SUCCESS;
                     }
                 }
-                AttrDecision::Deny => return STATUS_OBJECT_NAME_NOT_FOUND,
-                AttrDecision::PassThrough => {}
+                Some(OverlayState::Whiteout) => return STATUS_OBJECT_NAME_NOT_FOUND,
+                Some(OverlayState::Absent) | None => {}
             }
         }
     }
@@ -2011,9 +2015,11 @@ unsafe extern "system" fn qattr_hook(
                 Err(_) => return STATUS_UNSUCCESSFUL,
             }
         }
+        // Task 4: overlay-only fallback (see `qibn_hook`'s comment on the
+        // equivalent branch) — no more local snapshot answering here.
         if let Some(engine) = ENGINE.get() {
-            match engine.query_attributes(&path) {
-                AttrDecision::Attributes { is_dir, .. } => {
+            match engine.overlay_state(&path) {
+                Some(OverlayState::Present { is_dir, .. }) => {
                     if !info.is_null() {
                         (*info).creation_time = 0;
                         (*info).last_access_time = 0;
@@ -2024,8 +2030,8 @@ unsafe extern "system" fn qattr_hook(
                     }
                     return STATUS_SUCCESS;
                 }
-                AttrDecision::Deny => return STATUS_OBJECT_NAME_NOT_FOUND,
-                AttrDecision::PassThrough => {}
+                Some(OverlayState::Whiteout) => return STATUS_OBJECT_NAME_NOT_FOUND,
+                Some(OverlayState::Absent) | None => {}
             }
         }
     }
@@ -2080,9 +2086,11 @@ unsafe extern "system" fn qfull_hook(
                 Err(_) => return STATUS_UNSUCCESSFUL,
             }
         }
+        // Task 4: overlay-only fallback (see `qibn_hook`'s comment on the
+        // equivalent branch) — no more local snapshot answering here.
         if let Some(engine) = ENGINE.get() {
-            match engine.query_attributes(&path) {
-                AttrDecision::Attributes { is_dir, size, .. } => {
+            match engine.overlay_state(&path) {
+                Some(OverlayState::Present { is_dir, size, .. }) => {
                     if !info.is_null() {
                         (*info).creation_time = 0;
                         (*info).last_access_time = 0;
@@ -2095,8 +2103,8 @@ unsafe extern "system" fn qfull_hook(
                     }
                     return STATUS_SUCCESS;
                 }
-                AttrDecision::Deny => return STATUS_OBJECT_NAME_NOT_FOUND,
-                AttrDecision::PassThrough => {}
+                Some(OverlayState::Whiteout) => return STATUS_OBJECT_NAME_NOT_FOUND,
+                Some(OverlayState::Absent) | None => {}
             }
         }
     }
@@ -3479,8 +3487,17 @@ unsafe fn serve_dir_query(
     };
 
     // Phase 2 (unlocked): build listing. Prefer director OP_READDIR when FUSE
-    // is live (no in-shim snapshot merge). `drain_real` may call the syscall,
-    // so the lock must NOT be held here (NtClose also takes it).
+    // is live and recognises this directory — its answer is authoritative,
+    // never merged with anything real. Otherwise (no director, or this
+    // particular directory is not one the director's own root notion
+    // recognises — see `path_is_ours`'s doc comment on why that can differ
+    // from the engine's) Task 4 removed the local snapshot merge
+    // (`RootMap::merge_directory`/`Engine::merge_directory`) that used to
+    // paper over this case: the fallback is now exactly the real directory's
+    // own entries, with only the shim-local write overlay (gate 4's
+    // mechanism, untouched here) layered on top via `overlay_listing`.
+    // `drain_real` may call the syscall, so the lock must NOT be held here
+    // (NtClose also takes it).
     let rebuilt = if need_build {
         let wildcard = wildcard_of(file_name);
         if let Some(client) = crate::fuse_client::global() {
@@ -3510,14 +3527,14 @@ unsafe fn serve_dir_query(
             } else {
                 let real = drain(handle);
                 Some(match ENGINE.get() {
-                    Some(engine) => engine.merge_directory(&dir_path, &real, wildcard.as_deref()),
+                    Some(engine) => engine.overlay_listing(&dir_path, &real, wildcard.as_deref()),
                     None => real,
                 })
             }
         } else {
             let real = drain(handle);
             Some(match ENGINE.get() {
-                Some(engine) => engine.merge_directory(&dir_path, &real, wildcard.as_deref()),
+                Some(engine) => engine.overlay_listing(&dir_path, &real, wildcard.as_deref()),
                 None => real,
             })
         }

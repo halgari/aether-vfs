@@ -11,6 +11,19 @@
 //! enabled, and a detour that is never enabled looks exactly like an API the
 //! process never calls. A functional test per entry point is the only thing
 //! that can tell those apart, so this compares the two directly.
+//!
+//! Task 4: this binary installs the shim with **no director** attached
+//! (`vfs_shim::install`, not a real launch). Before Task 4, a directory
+//! listing without a director still merged in the snapshot's virtual
+//! children and hid its tombstones (`RootMap::merge_directory`). That local
+//! merge is deleted: with no director, a listing is exactly the real
+//! directory (plus any write-overlay entries, gate 4's mechanism, unaffected
+//! here). So `added.esm` (mod-only) no longer appears, and `hidden.esp`
+//! (tombstoned only in the snapshot) is no longer hidden — both assertions
+//! below were flipped for that reason. The two-entry-point agreement itself —
+//! this test's actual point — is unchanged and still the thing being proven:
+//! whatever the real directory contains, both entry points must show it
+//! identically.
 
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
@@ -83,14 +96,22 @@ fn classic_and_ex_enumeration_agree() {
         "the two enumeration entry points disagree; one of them is not virtualised"
     );
 
-    // Spell out what the merged view must contain, so a listing that is merely
-    // *consistently wrong* still fails.
-    for want in ["real.txt", "added.esm"] {
-        assert!(via_classic.iter().any(|n| n == want), "{want} missing: {via_classic:?}");
-    }
+    // Spell out what the listing must contain, so a result that is merely
+    // *consistently wrong* still fails. With no director, this is exactly the
+    // real directory: `real.txt` and `hidden.esp` (real files) show, and
+    // `added.esm` (mod-only, snapshot only) does not — see the module doc
+    // comment for why this flipped from the old merged-view expectations.
     assert!(
-        !via_classic.iter().any(|n| n == "hidden.esp"),
-        "tombstoned file leaked through the classic entry point: {via_classic:?}"
+        via_classic.iter().any(|n| n == "real.txt"),
+        "real.txt missing: {via_classic:?}"
+    );
+    assert!(
+        !via_classic.iter().any(|n| n == "added.esm"),
+        "a mod-added file leaked in without a director consulting the snapshot: {via_classic:?}"
+    );
+    assert!(
+        via_classic.iter().any(|n| n == "hidden.esp"),
+        "no director means no snapshot tombstone — the real file must not be hidden: {via_classic:?}"
     );
 
     let _ = std::fs::remove_dir_all(&base);

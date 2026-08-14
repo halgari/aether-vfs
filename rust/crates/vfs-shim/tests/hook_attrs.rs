@@ -1,8 +1,22 @@
 //! Single-test binary: path-based attribute queries reflect the VFS.
+//!
+//! Task 4: this binary installs the shim with **no director** attached
+//! (`vfs_shim::install`, not a real launch). Before Task 4, attribute queries
+//! fell back to answering locally from the published snapshot
+//! (`RootMap::query_attributes`/`AttrDecision`), so a virtual file/dir was
+//! visible and a tombstoned real file was hidden even with nothing to
+//! consult. That local-answering path is deleted — attribute queries now
+//! route to the director only (`hook.rs::fuse_path_attr`) — so with no
+//! director, none of that happens any more: a virtual path is (correctly)
+//! invisible, and a tombstoned real file is (correctly, for this harness)
+//! visible, since nothing here has been told to hide it. The assertions below
+//! were flipped for exactly that reason and documented at each site; the
+//! "non-virtual real file passes through" case is unchanged, since it never
+//! depended on the deleted mechanism.
 use std::ffi::c_void;
 use vfs_shim::{install, Engine};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileAttributesExW, GetFileAttributesW, GetFileExInfoStandard, FILE_ATTRIBUTE_DIRECTORY,
+    GetFileAttributesExW, GetFileAttributesW, GetFileExInfoStandard,
     INVALID_FILE_ATTRIBUTES, WIN32_FILE_ATTRIBUTE_DATA,
 };
 
@@ -52,25 +66,35 @@ fn attribute_queries_reflect_the_vfs() {
     let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
     let _guard = install(engine).expect("install");
 
-    // Virtual file exists (not INVALID) and is not a directory.
+    // No director: nothing answers for a virtual-only path any more (flipped
+    // from "virtual file should have attributes" — see the module doc comment).
     let a = unsafe { GetFileAttributesW(wide(vfile.to_str().unwrap()).as_ptr()) };
-    assert_ne!(a, INVALID_FILE_ATTRIBUTES, "virtual file should have attributes");
-    assert_eq!(a & FILE_ATTRIBUTE_DIRECTORY, 0, "virtual file must not be a dir");
+    assert_eq!(
+        a, INVALID_FILE_ATTRIBUTES,
+        "a virtual file was visible with no director attached"
+    );
 
-    // Virtual dir has the DIRECTORY bit.
+    // Same for a virtual directory (flipped from "virtual dir must be a dir").
     let d = unsafe { GetFileAttributesW(wide(vdir.to_str().unwrap()).as_ptr()) };
-    assert_ne!(d, INVALID_FILE_ATTRIBUTES);
-    assert_ne!(d & FILE_ATTRIBUTE_DIRECTORY, 0, "virtual dir must be a dir");
+    assert_eq!(
+        d, INVALID_FILE_ATTRIBUTES,
+        "a virtual directory was visible with no director attached"
+    );
 
-    // Tombstoned real file is hidden.
+    // No director: nothing enforces the snapshot's tombstone any more
+    // (flipped from "tombstoned file must be hidden").
     let g = unsafe { GetFileAttributesW(wide(gone.to_str().unwrap()).as_ptr()) };
-    assert_eq!(g, INVALID_FILE_ATTRIBUTES, "tombstoned file must be hidden");
+    assert_ne!(
+        g, INVALID_FILE_ATTRIBUTES,
+        "a tombstoned real file was hidden with no director attached to enforce it"
+    );
 
-    // Non-virtual real file passes through.
+    // Non-virtual real file passes through — unaffected by Task 4.
     let r = unsafe { GetFileAttributesW(wide(real.to_str().unwrap()).as_ptr()) };
     assert_ne!(r, INVALID_FILE_ATTRIBUTES, "real file should pass through");
 
-    // Full attributes report the snapshot's size.
+    // No director: GetFileAttributesExW must fail for the virtual file too
+    // (flipped from "should succeed ... report the snapshot's size").
     let mut data: WIN32_FILE_ATTRIBUTE_DATA = unsafe { std::mem::zeroed() };
     let ok = unsafe {
         GetFileAttributesExW(
@@ -79,7 +103,8 @@ fn attribute_queries_reflect_the_vfs() {
             &mut data as *mut _ as *mut c_void,
         )
     };
-    assert_ne!(ok, 0, "GetFileAttributesExW should succeed for the virtual file");
-    let size = ((data.nFileSizeHigh as u64) << 32) | data.nFileSizeLow as u64;
-    assert_eq!(size, 1234, "reported size should match the snapshot");
+    assert_eq!(
+        ok, 0,
+        "GetFileAttributesExW succeeded for a virtual file with no director attached"
+    );
 }

@@ -120,6 +120,18 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
         let _ = live.session.kernel().close(fh);
         let bytes = live.session.read_file("skse64_loader.exe").unwrap();
         assert_eq!(bytes, bare_pe(b"LOADER"));
+        // vfs-redirect Task 4 deleted the shim-side local merge that used to
+        // paper over an under-root real file's enumeration — a directory
+        // listing under a fully virtual root is now the director's `readdir`
+        // alone. Confirm the staged loader — reachable only via staging, per
+        // the comment above — actually enumerates through the provider
+        // graph, not merely answers `getattr`/`open` individually.
+        let listed = live.session.kernel().readdir("").unwrap();
+        assert!(
+            listed.iter().any(|e| e.name == "skse64_loader.exe"),
+            "staged loader did not enumerate through the provider graph: {:?}",
+            listed.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
         Ok(())
     })
     .unwrap();

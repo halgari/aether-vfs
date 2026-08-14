@@ -14,6 +14,23 @@
 //! all used absolute paths, so the whole dimension was untested. This binary
 //! covers it once per API rather than once, so closing the hole in one hook
 //! cannot leave it open in another.
+//!
+//! Task 4: this binary installs the shim with **no director** attached
+//! (`vfs_shim::install`, not a real launch). `NtCreateFile`/`NtOpenFile`
+//! relative-name resolution, and anything built on top of an opened handle
+//! (`std::fs::read`, `std::fs::metadata` — Rust's std opens a handle for
+//! `metadata()` too, it does not call `NtQueryAttributesFile` directly), goes
+//! through `Decision` (untouched by Task 4; that deletion is gate 4's), so
+//! every read and `metadata()` assertion below is unchanged.
+//!
+//! What Task 4 did change: directory enumeration (`RootMap::merge_directory`,
+//! deleted) and the *name-based, no-handle* attribute queries
+//! (`NtQueryAttributesFile`, `NtQueryFullAttributesFile`,
+//! `NtQueryInformationByName` — `RootMap::query_attributes`/`AttrDecision`,
+//! deleted) now route to the director only. With no director attached here,
+//! a CWD-relative `read_dir` no longer shows the mod-only file, and a
+//! handle-relative raw attribute query no longer finds it either — both
+//! assertions were flipped and are called out individually below.
 
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
@@ -29,9 +46,15 @@ fn relative_names_resolve_on_every_decoding_hook() {
     let base = std::env::temp_dir().join(format!("vfs-shim-relpath-{pid}"));
     let root = base.join("gameroot");
     let backing = base.join("backing");
-    // `Data` exists for real but is empty, exactly like a staged game tree: the
-    // file the caller wants lives only in the VFS.
+    // `Data` exists for real, exactly like a staged game tree. A real marker
+    // file keeps it non-empty (see the CWD-relative `read_dir` check below,
+    // which needs at least one real entry to enumerate — Task 4 removed the
+    // snapshot merge, so a directory with nothing real and nothing in the
+    // overlay reports `STATUS_NO_MORE_FILES` on the very first scan, same as
+    // a genuinely-empty real directory would once dot-entries are stripped;
+    // that is orthogonal to what this test checks).
     std::fs::create_dir_all(root.join("Data")).unwrap();
+    std::fs::write(root.join("Data").join("real_marker.txt"), b"m").unwrap();
     std::fs::create_dir_all(&backing).unwrap();
     let backing_file = backing.join("added.esm");
     std::fs::write(&backing_file, PAYLOAD).unwrap();
@@ -72,18 +95,24 @@ fn relative_names_resolve_on_every_decoding_hook() {
         PAYLOAD,
         "a CWD-relative open must resolve through the VFS"
     );
+    // `std::fs::metadata` opens a handle (`Decision`-backed), so this is
+    // unaffected by Task 4 — unchanged from before.
     assert_eq!(
         std::fs::metadata(r"Data\added.esm").expect("cwd-relative metadata").len(),
         PAYLOAD.len() as u64,
         "a CWD-relative stat must report the virtual size"
     );
+    // `read_dir` enumerates via the handle-based directory hooks, which no
+    // longer merge the snapshot in (Task 4 deleted `RootMap::merge_directory`),
+    // so the mod-only file does not appear, flipped from "must include the
+    // virtual file".
     let listed: Vec<String> = std::fs::read_dir("Data")
         .expect("cwd-relative read_dir")
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert!(
-        listed.iter().any(|n| n == "added.esm"),
-        "a CWD-relative enumeration must include the virtual file: {listed:?}"
+        !listed.iter().any(|n| n == "added.esm"),
+        "a mod-added file leaked into a CWD-relative enumeration with no director: {listed:?}"
     );
 
     // ── handle-relative, exercised deterministically ────────────────────────
@@ -105,19 +134,26 @@ fn relative_names_resolve_on_every_decoding_hook() {
     close(h.1);
 
     // NtQueryAttributesFile — existence only, but that is what callers branch on.
-    let (st, attrs) = nt_query_attributes_relative(dir, r"Data\added.esm");
-    assert!(st >= 0, "NtQueryAttributesFile relative: status {st:#x}");
-    assert_eq!(attrs & FILE_ATTRIBUTE_DIRECTORY, 0, "virtual file reported as a directory");
+    // No director attached: Task 4 deleted the local snapshot-answering
+    // fallback these attribute hooks used to have, so a relative stat of a
+    // virtual-only file must now fail, flipped from "status {st:#x}" >= 0 —
+    // see the module doc comment.
+    let (st, _attrs) = nt_query_attributes_relative(dir, r"Data\added.esm");
+    assert!(st < 0, "NtQueryAttributesFile relative saw a virtual-only file with no director");
 
-    // NtQueryFullAttributesFile — carries the size a caller may act on.
-    let (st, size) = nt_query_full_attributes_relative(dir, r"Data\added.esm");
-    assert!(st >= 0, "NtQueryFullAttributesFile relative: status {st:#x}");
-    assert_eq!(size, PAYLOAD.len() as i64, "wrong EndOfFile from a relative stat");
+    // NtQueryFullAttributesFile — same flip.
+    let (st, _size) = nt_query_full_attributes_relative(dir, r"Data\added.esm");
+    assert!(
+        st < 0,
+        "NtQueryFullAttributesFile relative saw a virtual-only file with no director"
+    );
 
-    // NtQueryInformationByName — Windows 11 routes existence checks here.
-    if let Some((st, size)) = nt_query_by_name_relative(dir, r"Data\added.esm", 77) {
-        assert!(st >= 0, "NtQueryInformationByName(77) relative: status {st:#x}");
-        assert_eq!(size, PAYLOAD.len() as i64, "wrong EndOfFile from class 77");
+    // NtQueryInformationByName — Windows 11 routes existence checks here; same flip.
+    if let Some((st, _size)) = nt_query_by_name_relative(dir, r"Data\added.esm", 77) {
+        assert!(
+            st < 0,
+            "NtQueryInformationByName(77) relative saw a virtual-only file with no director"
+        );
     }
 
     // A name that exists in neither the VFS nor on disk must still say so.

@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use vfs_redirect::{classify_open, to_nt, AttrDecision, Decision, DirItem, RootMap, VolumeMap};
+use vfs_redirect::{classify_open, to_nt, Decision, DirItem, RootMap, VolumeMap};
 use vfs_shared::{LayoutError, SnapshotReader};
 
 use crate::overlay::{Overlay, OverlayState};
@@ -18,7 +18,7 @@ thread_local! {
     /// while resolving the alias table. Inside an injected process whose own
     /// file APIs are hooked — this crate's whole reason for existing — those
     /// calls are themselves intercepted and fed back through the very same
-    /// chain (hook -> `Engine::decide`/`query_attributes` -> `Engine::map`)
+    /// chain (hook -> `Engine::decide`/`overlay_state` -> `Engine::map`)
     /// on the *same thread*, before the first call's
     /// `OnceLock::get_or_init` closure has returned. `std::sync::Once`
     /// documents same-thread reentrant `call_once` as unspecified behaviour
@@ -167,7 +167,17 @@ impl Engine {
     /// The overlay resolution for `nt_path`, if an overlay is configured, the
     /// engine's `RootMap` is currently available (see [`Engine::map`]), and
     /// the path is under the root.
-    fn overlay_state(&self, nt_path: &str) -> Option<OverlayState> {
+    ///
+    /// `pub(crate)` (rather than private): since Task 4 deleted
+    /// `RootMap::query_attributes` and `AttrDecision` — the local
+    /// snapshot-backed attribute answering this crate used to fall back to —
+    /// the shim-local write overlay is the only thing left that can still
+    /// answer an attribute query without asking the director. `hook.rs`'s
+    /// `qattr_hook`/`qfull_hook`/`qibn_hook` call this directly for exactly
+    /// that: a file just created/modified through the overlay write
+    /// fallback (gate 4's mechanism, untouched by Task 4) must still report
+    /// sane attributes even though the director has never heard of it.
+    pub(crate) fn overlay_state(&self, nt_path: &str) -> Option<OverlayState> {
         let ov = self.overlay.as_ref()?;
         let comps = self.map()?.remainder(nt_path)?;
         Some(ov.lookup(&comps))
@@ -188,21 +198,6 @@ impl Engine {
         match (self.map(), SnapshotReader::open(&self.snapshot)) {
             (Some(map), Ok(reader)) => map.decide(nt_path, &reader),
             _ => Decision::PassThrough,
-        }
-    }
-
-    /// Answer a path-based attribute query. Overlay-first, then snapshot.
-    pub fn query_attributes(&self, nt_path: &str) -> AttrDecision {
-        match self.overlay_state(nt_path) {
-            Some(OverlayState::Present { is_dir, size, mtime, .. }) => {
-                return AttrDecision::Attributes { is_dir, size, mtime }
-            }
-            Some(OverlayState::Whiteout) => return AttrDecision::Deny,
-            Some(OverlayState::Absent) | None => {}
-        }
-        match (self.map(), SnapshotReader::open(&self.snapshot)) {
-            (Some(map), Ok(reader)) => map.query_attributes(nt_path, &reader),
-            _ => AttrDecision::PassThrough,
         }
     }
 
@@ -317,24 +312,28 @@ impl Engine {
         true
     }
 
-    /// Merge a directory's real on-disk entries with the snapshot's virtual
-    /// children, then apply the overlay (adds/overrides win, whiteouts remove).
-    /// Fail-safe: on snapshot re-open failure, or if the `RootMap` is not
-    /// currently available (see [`Engine::map`]), returns `real` unchanged.
-    pub fn merge_directory(
+    /// Apply the shim-local write overlay (adds/overrides win, whiteouts
+    /// remove) on top of a directory's real on-disk entries.
+    ///
+    /// Task 4 deleted `RootMap::merge_directory`, which used to blend the
+    /// published snapshot's virtual children into `real` here — a directory
+    /// listing under a managed root now comes solely from the director's own
+    /// `readdir` (see `hook.rs::serve_dir_query`), never from a local
+    /// snapshot merge. This method keeps only the overlay half: the write
+    /// fallback (gate 4's mechanism, explicitly out of scope for this task)
+    /// still needs a just-created/modified/deleted overlay entry to show up
+    /// in a listing the director cannot itself account for. Fail-safe: no
+    /// overlay configured, or the `RootMap` not currently available (see
+    /// [`Engine::map`]), returns `real` unchanged.
+    pub fn overlay_listing(
         &self,
         dir_nt_path: &str,
         real: &[DirItem],
         wildcard: Option<&str>,
     ) -> Vec<DirItem> {
-        let map = self.map();
-        let merged = match (map, SnapshotReader::open(&self.snapshot)) {
-            (Some(m), Ok(reader)) => m.merge_directory(dir_nt_path, &reader, real, wildcard),
+        match (&self.overlay, self.map().and_then(|m| m.remainder(dir_nt_path))) {
+            (Some(ov), Some(comps)) => ov.apply_to_listing(&comps, real.to_vec(), wildcard),
             _ => real.to_vec(),
-        };
-        match (&self.overlay, map.and_then(|m| m.remainder(dir_nt_path))) {
-            (Some(ov), Some(comps)) => ov.apply_to_listing(&comps, merged, wildcard),
-            _ => merged,
         }
     }
 }
@@ -391,25 +390,37 @@ mod tests {
         assert!(!engine.is_under_root(r"\??\C:\Windows\notepad.exe"));
     }
 
+    // Task 4 removed `merge_directory_adds_virtual_children` and
+    // `query_attributes_reports_virtual_file`: both asserted that a plain,
+    // no-overlay `Engine` answers a directory listing / attribute query from
+    // its local snapshot alone (no director involved). That is exactly the
+    // local-answering path Task 4 deletes — `RootMap::merge_directory` and
+    // `RootMap::query_attributes` no longer exist for `Engine` to call.
+    // A directory listing under a managed root is now the director's
+    // `readdir` alone (`hook.rs::serve_dir_query`); an attribute query is the
+    // director's `getattr` alone (`hook.rs::fuse_path_attr`). Neither is
+    // reachable from this crate's fast, no-director unit tests without a
+    // live ring, so there is no in-crate equivalent to port these two to —
+    // see the task report for this named gap. `overlay_listing_adds_overlay_children`
+    // below replaces the still-relevant half: the shim-local write overlay
+    // (gate 4's mechanism, unaffected by Task 4) must still contribute to a
+    // listing regardless of what answers the rest of it.
     #[test]
-    fn merge_directory_adds_virtual_children() {
+    fn overlay_listing_adds_overlay_children() {
         use vfs_redirect::DirItem;
-        let engine = Engine::new(r"\??\C:\Games\Skyrim", snapshot_bytes()).unwrap();
+        let dir = std::env::temp_dir().join(format!("vfs-ovl-listing-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(dir.join("data").join("overlaid.txt"), b"x").unwrap();
+        let engine = overlay_engine(&dir);
         let real = vec![DirItem { name: "real.txt".into(), is_dir: false, size: 1, mtime: 0 }];
-        let merged = engine.merge_directory(r"\??\C:\Games\Skyrim\Data", &real, None);
-        let names: Vec<&str> = merged.iter().map(|e| e.name.as_str()).collect();
-        assert!(names.contains(&"real.txt"));
-        assert!(names.contains(&"foo.esp"));
-    }
-
-    #[test]
-    fn query_attributes_reports_virtual_file() {
-        use vfs_redirect::AttrDecision;
-        let engine = Engine::new(r"\??\C:\Games\Skyrim", snapshot_bytes()).unwrap();
-        assert_eq!(
-            engine.query_attributes(r"\??\C:\Games\Skyrim\Data\foo.esp"),
-            AttrDecision::Attributes { is_dir: false, size: 10, mtime: 1 }
-        );
+        let listed = engine.overlay_listing(r"\??\C:\Games\Skyrim\Data", &real, None);
+        let names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"real.txt"), "real entry dropped: {names:?}");
+        assert!(names.contains(&"overlaid.txt"), "overlay entry missing: {names:?}");
+        // The snapshot's "foo.esp" must NOT appear: no director, no overlay
+        // entry for it -- nothing answers for it anymore.
+        assert!(!names.contains(&"foo.esp"), "snapshot leaked into the listing: {names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Overlay-aware resolution (W1). Uses a real temp overlay directory.
@@ -442,17 +453,20 @@ mod tests {
 
     #[test]
     fn overlay_whiteout_hides_snapshot_file() {
-        use vfs_redirect::AttrDecision;
+        use crate::overlay::OverlayState;
         let dir = std::env::temp_dir().join(format!("vfs-ovl-wh-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("data")).unwrap();
         // Whiteout marker for data/foo.esp.
         std::fs::write(dir.join("data").join("foo.esp.__vfs_wh__"), b"").unwrap();
         let engine = overlay_engine(&dir);
         assert_eq!(engine.decide(r"\??\C:\Games\Skyrim\Data\foo.esp"), Decision::Deny);
-        assert_eq!(
-            engine.query_attributes(r"\??\C:\Games\Skyrim\Data\foo.esp"),
-            AttrDecision::Deny
-        );
+        // `AttrDecision`/`Engine::query_attributes` are gone (Task 4); the
+        // overlay's own whiteout state is what a caller now consults for an
+        // attribute-query fallback (see `hook.rs`'s qattr/qfull/qibn hooks).
+        assert!(matches!(
+            engine.overlay_state(r"\??\C:\Games\Skyrim\Data\foo.esp"),
+            Some(OverlayState::Whiteout)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

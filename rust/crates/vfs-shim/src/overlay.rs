@@ -12,7 +12,7 @@ use vfs_redirect::{is_whiteout, whiteout_marker, DirItem};
 /// What the overlay says about a path.
 pub enum OverlayState {
     /// An overlay file or directory exists here.
-    Present { path: PathBuf, is_dir: bool, size: u64, mtime: i64 },
+    Present { path: PathBuf, is_dir: bool, size: u64 },
     /// A whiteout marker hides this path (mod-deleted at runtime).
     Whiteout,
     /// The overlay has nothing for this path; fall through to snapshot/real.
@@ -62,12 +62,7 @@ impl Overlay {
         }
         let f = self.file_path(comps);
         if let Ok(md) = std::fs::symlink_metadata(&f) {
-            return OverlayState::Present {
-                path: f,
-                is_dir: md.is_dir(),
-                size: md.len(),
-                mtime: Self::mtime_of(&md),
-            };
+            return OverlayState::Present { path: f, is_dir: md.is_dir(), size: md.len() };
         }
         if self.whiteout_path(comps).exists() {
             return OverlayState::Whiteout;

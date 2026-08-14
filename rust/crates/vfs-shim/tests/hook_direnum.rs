@@ -1,8 +1,22 @@
-//! Single-test binary: `std::fs::read_dir` sees the merged VFS view.
+//! Single-test binary: without a director, `std::fs::read_dir` shows exactly
+//! the real directory (plus any overlay) — the local snapshot no longer
+//! contributes anything.
+//!
+//! Before Task 4, `RootMap::merge_directory` blended the snapshot's virtual
+//! children into whatever the OS returned for a directory the shim could not
+//! (or, in this harness, did not) ask a real director about. That let a
+//! locally-improvised composition stand in for "the provider graph says", the
+//! thing the game actually needs to trust. This test proves the blending is
+//! gone: a mod-added/overriding/tombstoning snapshot no longer changes what a
+//! listing shows in the absence of a director — it is exactly the real
+//! directory, because nothing authoritative was consulted to say otherwise.
+//! (When a director *is* attached and recognises the directory, the listing
+//! comes solely from its `readdir` — see `serve_dir_query` in `hook.rs` —
+//! which was already merge-free before this task and is unchanged by it.)
 use vfs_shim::{install, Engine};
 
 #[test]
-fn read_dir_reflects_the_merged_vfs() {
+fn read_dir_without_a_director_is_exactly_the_real_directory() {
     let pid = std::process::id();
     let root = std::env::temp_dir().join(format!("vfs-shim-direnum-{pid}"));
     // Backing files live OUTSIDE the root so they do not appear in the listing.
@@ -14,11 +28,12 @@ fn read_dir_reflects_the_merged_vfs() {
     // Real on-disk contents of the enumerated directory.
     std::fs::write(root.join("real_a.txt"), b"a").unwrap();
     std::fs::write(root.join("real_b.txt"), b"b").unwrap();
-    std::fs::write(root.join("over.esp"), vec![0u8; 3]).unwrap(); // overridden
-    std::fs::write(root.join("gone.esp"), b"x").unwrap(); // tombstoned
+    std::fs::write(root.join("over.esp"), vec![0u8; 3]).unwrap(); // would-be override
+    std::fs::write(root.join("gone.esp"), b"x").unwrap(); // would-be tombstone
     std::fs::create_dir_all(root.join("realdir")).unwrap();
 
-    // Backing files for the mod override / add.
+    // Backing files for the mod override / add — never read, since nothing
+    // consults the snapshot for enumeration without a director.
     let over_backing = backing_dir.join("over.esp");
     std::fs::write(&over_backing, vec![0u8; 4096]).unwrap();
     let add_backing = backing_dir.join("added.esp");
@@ -54,19 +69,35 @@ fn read_dir_reflects_the_merged_vfs() {
         .collect();
     names.sort();
 
-    assert!(names.contains(&"added.esp".to_string()), "mod-added missing: {names:?}");
+    // Real entries are unaffected either way.
     assert!(names.contains(&"real_a.txt".to_string()), "{names:?}");
     assert!(names.contains(&"real_b.txt".to_string()), "{names:?}");
-    assert!(names.contains(&"over.esp".to_string()), "{names:?}");
     assert!(names.contains(&"realdir".to_string()), "{names:?}");
-    assert!(names.contains(&"vdir".to_string()), "virtual dir missing: {names:?}");
-    assert!(!names.contains(&"gone.esp".to_string()), "tombstone shown: {names:?}");
 
-    // Override wins: over.esp reports the mod size (4096), not the real 3.
+    // The snapshot no longer contributes anything without a director:
+    // mod-added and mod-only-virtual entries do not appear...
+    assert!(
+        !names.contains(&"added.esp".to_string()),
+        "a mod-added file leaked in without a director consulting the snapshot: {names:?}"
+    );
+    assert!(
+        !names.contains(&"vdir".to_string()),
+        "a virtual-only directory leaked in without a director: {names:?}"
+    );
+    // ...an "override" is really just the real file now (no snapshot to win)...
     let over = std::fs::read_dir(&root)
         .unwrap()
         .map(|e| e.unwrap())
         .find(|e| e.file_name().to_string_lossy() == "over.esp")
         .unwrap();
-    assert_eq!(over.metadata().unwrap().len(), 4096, "override size should win");
+    assert_eq!(
+        over.metadata().unwrap().len(),
+        3,
+        "no director means no snapshot override — the real file's own size must show"
+    );
+    // ...and a "tombstone" no longer hides the real file it used to hide.
+    assert!(
+        names.contains(&"gone.esp".to_string()),
+        "no director means no snapshot tombstone — the real file must not be hidden: {names:?}"
+    );
 }
