@@ -1,13 +1,37 @@
 //! Live session registry: id → host [`Session`].
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vfs_cache::{BlockCache, CacheConfig, CachingProvider};
 use vfs_compose::stack_layers;
-use vfs_director::{LaunchOpts, Provider, Session};
+use vfs_director::stage::{ImageSource, StagedDir};
+use vfs_director::{DiskProvider, LaunchOpts, Provider, Session};
+
+/// Layer for the disk provider mounted over a staged launch directory (see
+/// [`SessionRegistry::stage_launch`]).
+///
+/// Staging exists only so `CreateProcess`/the loader can find a real image
+/// before the shim does; the bytes it writes are a point-in-time copy of
+/// whatever the provider graph already said. Mounting it at the lowest
+/// possible layer means a real, curated content or mod layer always wins on
+/// a shared path — the staged copy only answers for paths nothing else
+/// serves (e.g. a launcher's runtime DLL, or an import-closure DLL pulled
+/// from a fallback dir rather than the VFS).
+const STAGING_LAYER: i32 = i32::MIN;
+
+/// Arguments for [`SessionRegistry::stage_launch`], bundled to stay under
+/// clippy's argument-count limit — see [`vfs_director::stage::stage_launch_with`]
+/// for what each field means.
+pub struct StageLaunchOpts<'a> {
+    pub exe_vpath: &'a str,
+    pub also: &'a [&'a str],
+    pub stage_root: &'a Path,
+    pub tag: &'a str,
+    pub fallback_dirs: &'a [PathBuf],
+}
 
 /// One live host session plus metadata returned on ListSessions.
 pub struct LiveSession {
@@ -167,6 +191,41 @@ impl SessionRegistry {
             id
         };
         Ok(source_id)
+    }
+
+    /// Stage a launch image (plus import closure / companion images) onto
+    /// real disk, then mount the staging directory into the session's own
+    /// provider graph so every staged path resolves there too — not only
+    /// via disk passthrough.
+    ///
+    /// `session.launch()` still needs `staged.exe()`'s literal on-disk path
+    /// for `CreateProcess` (Windows cannot create a process from bytes), so
+    /// staging to disk stays mandatory. What changes here is that the *same*
+    /// files also become resolvable through `getattr`/`open` at their
+    /// under-root vpath (e.g. `SkyrimSE.exe`), which is what a later,
+    /// hook-mediated open of that same path — a launcher spawning its target
+    /// by relative name beneath the managed root, say — needs once the root
+    /// is fully virtual and disk passthrough is gone.
+    ///
+    /// Mounted at [`STAGING_LAYER`] (via [`Self::add_source`]) so real game
+    /// content always wins over the staged copy on a shared path.
+    pub fn stage_launch(
+        &self,
+        session_id: &str,
+        source: &dyn ImageSource,
+        opts: &StageLaunchOpts,
+    ) -> Result<StagedDir, String> {
+        let staged = vfs_director::stage::stage_launch_with(
+            source,
+            opts.exe_vpath,
+            opts.also,
+            opts.stage_root,
+            opts.tag,
+            opts.fallback_dirs,
+        )?;
+        let disk: Arc<dyn Provider> = Arc::new(DiskProvider::new(staged.dir()));
+        self.add_source(session_id, "/", STAGING_LAYER, disk)?;
+        Ok(staged)
     }
 
     pub fn with_session_mut<R>(
