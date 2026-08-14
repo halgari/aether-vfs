@@ -54,6 +54,12 @@ pub enum BootstrapError {
     Io,
     /// The config bytes were malformed.
     BadConfig,
+    /// A director was configured (a ring was named) but the FUSE client
+    /// failed to attach. Fails before the `Engine` is even built, hooks are
+    /// never installed, and the game's primary thread stays parked behind
+    /// the pre-init spin gate — nothing has run yet, so the caller can (and
+    /// must) tear the process down rather than let it start un-virtualised.
+    Fuse(String),
     /// The engine could not be built (bad root or snapshot).
     Engine(EngineError),
     /// The hook could not be installed.
@@ -78,8 +84,21 @@ pub fn bootstrap_from_config_path_with_payload(
 ) -> Result<HookGuard, BootstrapError> {
     let bytes = std::fs::read(path).map_err(|_| BootstrapError::Io)?;
     let (root, overlay, snapshot) = decode_config(&bytes).ok_or(BootstrapError::BadConfig)?;
-    // Attach to parent director FUSE ring when env/config is present.
-    let _ = crate::fuse_client::try_init_from_env();
+    // Attach to the parent director's FUSE ring when one was configured. A
+    // process that named no ring at all (`NotConfigured`) is a legitimate
+    // standalone launch — the `Engine` snapshot below governs composition on
+    // its own, and this crate's own tests rely on exactly that. But a ring
+    // *was* named and still failed to attach (`ConnectFailed`) means this
+    // launch intended full virtualisation through the director and silently
+    // would not have gotten it — every path was about to fall straight
+    // through to the real filesystem. That must abort here, before the
+    // `Engine` is built or any hook installs.
+    match crate::fuse_client::try_init_from_env() {
+        Ok(()) | Err(crate::fuse_client::FuseInitError::NotConfigured) => {}
+        Err(crate::fuse_client::FuseInitError::ConnectFailed(msg)) => {
+            return Err(BootstrapError::Fuse(msg));
+        }
+    }
     let engine = if overlay.is_empty() {
         Engine::new(&root, snapshot)
     } else {
@@ -146,9 +165,20 @@ pub fn sync_bootstrap(payload_cfg: *mut c_void) -> u32 {
         Ok(guard) => {
             core::mem::forget(guard);
             if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
-                let _ = std::fs::write(&ready, b"ready");
+                let _ = std::fs::write(&ready, vfs_env::READY_OK);
             }
             0
+        }
+        // A director was configured and the FUSE client failed to attach.
+        // Still write the ready file — the caller (`run_target_with_shim`)
+        // is spin-waiting on it — but with the failure spelling instead of
+        // "ready", so it terminates this (still fully parked, pre-release)
+        // process instead of letting it run un-virtualised.
+        Err(BootstrapError::Fuse(msg)) => {
+            if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
+                let _ = std::fs::write(&ready, format!("{}{msg}", vfs_env::READY_FUSE_FAILED_PREFIX));
+            }
+            3
         }
         Err(_) => 2,
     }

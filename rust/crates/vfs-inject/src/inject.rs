@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, CreateRemoteThread, GetExitCodeProcess, ResumeThread,
+    CreateProcessW, CreateRemoteThread, GetExitCodeProcess, ResumeThread, TerminateProcess,
     WaitForSingleObject, CREATE_SUSPENDED, INFINITE, LPTHREAD_START_ROUTINE, PROCESS_INFORMATION,
     STARTUPINFOW,
 };
@@ -642,9 +642,34 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
             return Err(e);
         }
 
-        // Wait for full shim ready marker.
+        // Wait for the full shim's ready marker. Its *content*, not merely its
+        // existence, is the protocol (see `vfs_env::READY_OK` /
+        // `READY_FUSE_FAILED_PREFIX`): a director-configured launch whose FUSE
+        // client failed to attach still touches this file, but with the
+        // failure spelling, so it is distinguishable here from both success
+        // and from a shim that never loaded at all (which leaves the file
+        // absent and falls to the `Timeout` case below, unchanged).
         let deadline = Instant::now() + cfg.ready_timeout;
-        while !std::path::Path::new(&cfg.ready_path).exists() {
+        loop {
+            match std::fs::read_to_string(&cfg.ready_path) {
+                Ok(content) if content.starts_with(vfs_env::READY_FUSE_FAILED_PREFIX) => {
+                    let msg = content
+                        .strip_prefix(vfs_env::READY_FUSE_FAILED_PREFIX)
+                        .unwrap_or(&content)
+                        .to_string();
+                    // Hooks may be live, but the primary thread is still
+                    // parked behind the pre-init spin gate — nothing has run
+                    // yet. Kill it outright rather than release it into an
+                    // un-virtualised game, which the release below would
+                    // otherwise do.
+                    let _ = TerminateProcess(pi.hProcess, 1);
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                    return Err(InjectError::FuseInit(msg));
+                }
+                Ok(content) if content == vfs_env::READY_OK => break,
+                _ => {}
+            }
             if Instant::now() >= deadline {
                 let one = 1u32.to_le_bytes();
                 let _ = wpm(pi.hProcess, arm.release_flag, &one);

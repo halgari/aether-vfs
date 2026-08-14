@@ -83,6 +83,14 @@ pub enum InjectError {
     PeParse,
     ThreadContext,
     Config,
+    /// The shim's hooks came up, but a director was configured (a ring was
+    /// named) and its FUSE client failed to attach — the process would have
+    /// run completely un-virtualised. It is killed before ever being
+    /// released past the pre-init spin gate, i.e. before a byte of game code
+    /// runs. Distinct from [`Timeout`], which also covers a shim that never
+    /// loaded at all (no injection happened) — that is not a FUSE failure and
+    /// must not be reported as one.
+    FuseInit(String),
 }
 
 pub use artifacts::{ensure_payload_beside_shim, find_near, resolve_payload_for_run};
