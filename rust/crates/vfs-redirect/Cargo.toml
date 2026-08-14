@@ -6,6 +6,10 @@ edition = "2021"
 [dependencies]
 vfs-core = { path = "../vfs-core" }
 vfs-shared = { path = "../vfs-shared" }
+# Raw Win32 volume/path lookups (QueryDosDeviceW, GetVolumeNameForVolumeMountPointW,
+# GetLongPathNameW, GetFinalPathNameByHandleW) live in vfs-win, not here: this crate
+# is `#![forbid(unsafe_code)]`, and vfs-win is the existing home for confined FFI.
+vfs-win = { path = "../vfs-win" }
 
 [dev-dependencies]
 # `bridge` (test-only) provides `flatten` for building snapshot fixtures.

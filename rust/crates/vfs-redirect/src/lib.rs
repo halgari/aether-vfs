@@ -4,6 +4,7 @@
 //! + a published snapshot to pass-through vs redirect-to-backing-file.
 
 mod canon;
+mod volumes;
 
 use std::collections::BTreeMap;
 
@@ -11,6 +12,7 @@ use vfs_core::{fold, normalize_vpath, wildcard_match, PathError};
 use vfs_shared::{NodeKind, SnapResolution, SnapshotReader};
 
 pub use canon::{canonicalise, VolumeMap};
+pub use volumes::{expand_short_name, resolve_volume_map};
 
 /// The managed VFS install root (mount point), as normalized path components.
 pub struct RootMap {
