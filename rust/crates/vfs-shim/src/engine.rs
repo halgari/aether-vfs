@@ -1,11 +1,72 @@
 //! The redirect engine: a `RootMap` plus the snapshot bytes it resolves against.
 
+use std::cell::Cell;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
-use vfs_redirect::{classify_open, to_nt, AttrDecision, Decision, DirItem, RootMap};
+use vfs_redirect::{classify_open, to_nt, AttrDecision, Decision, DirItem, RootMap, VolumeMap};
 use vfs_shared::{LayoutError, SnapshotReader};
 
 use crate::overlay::{Overlay, OverlayState};
+
+thread_local! {
+    /// Guards [`Engine::map`]'s lazy `RootMap` resolution against re-entering
+    /// itself on the same thread.
+    ///
+    /// `resolve_volume_map`'s junction scan makes real Win32 calls
+    /// (`vfs_win::reparse_point_target`'s `CreateFileW`, directory listings)
+    /// while resolving the alias table. Inside an injected process whose own
+    /// file APIs are hooked — this crate's whole reason for existing — those
+    /// calls are themselves intercepted and fed back through the very same
+    /// chain (hook -> `Engine::decide`/`query_attributes` -> `Engine::map`)
+    /// on the *same thread*, before the first call's
+    /// `OnceLock::get_or_init` closure has returned. `std::sync::Once`
+    /// documents same-thread reentrant `call_once` as unspecified behaviour
+    /// ("a panic or a deadlock") — verified by reproduction, not assumed:
+    /// this exact shape hung the escape-matrix e2e test's injected fixture
+    /// process (high, sustained CPU use, not a clean crash — consistent with
+    /// undefined behaviour at the FFI boundary a panic there would cross)
+    /// before this guard existed. Same failure class, same fix shape, as
+    /// `vfs-redirect`'s own `OS_CONSULT_DEPTH`/`OsConsultGuard` for the
+    /// unrelated (but structurally identical) 8.3-short-name OS-consult
+    /// reentrancy this project already found and fixed once.
+    ///
+    /// The break: a reentrant call finds the guard already held and
+    /// `Engine::map` answers `None` ("not ready yet") instead of touching
+    /// the still-initializing `OnceLock` again — every caller already has a
+    /// fail-safe `PassThrough`/`false`/`None` fallback for "not resolved",
+    /// the same shape used everywhere else in this file for "outside the
+    /// root" or "no overlay". The nested Win32 call's own hook invocation
+    /// then takes that fall-through path and reaches the real, unhooked
+    /// syscall, so `reparse_point_target`'s handle operations still complete
+    /// normally — nothing is answered incorrectly, only the nested attempt
+    /// to finish initializing `self.map` a second time is skipped.
+    static MAP_INIT_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// RAII guard for [`MAP_INIT_DEPTH`]. `enter()` returns `None` when the guard
+/// is already held on this thread — the caller's signal to answer "not ready
+/// yet" rather than recurse into the still-initializing `RootMap`.
+struct MapInitGuard(());
+
+impl MapInitGuard {
+    fn enter() -> Option<Self> {
+        MAP_INIT_DEPTH.with(|c| {
+            if c.get() > 0 {
+                None
+            } else {
+                c.set(1);
+                Some(MapInitGuard(()))
+            }
+        })
+    }
+}
+
+impl Drop for MapInitGuard {
+    fn drop(&mut self) {
+        MAP_INIT_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
 
 /// Strip a `\??\` / `\\?\` device prefix, leaving a Win32 path (drive intact).
 fn strip_nt(p: &str) -> String {
@@ -24,7 +85,10 @@ pub enum EngineError {
 /// Owns the redirect policy, the snapshot it resolves against, and an optional
 /// write overlay consulted ahead of the snapshot.
 pub struct Engine {
-    map: RootMap,
+    root: String,
+    /// The volume-aware `RootMap`, built lazily — see [`Engine::map`] for why
+    /// this is deferred past `build()` rather than eager.
+    map: OnceLock<RootMap>,
     snapshot: Vec<u8>,
     overlay: Option<Overlay>,
 }
@@ -48,27 +112,71 @@ impl Engine {
     }
 
     fn build(root: &str, overlay_root: Option<&str>, snapshot: Vec<u8>) -> Result<Self, EngineError> {
-        // Resolved once per `Engine` (i.e. once per game session — `Engine` is
-        // constructed exactly once by the shim's bootstrap), never per open:
-        // several Win32 calls per currently-mounted drive.
-        let volumes = vfs_redirect::resolve_volume_map();
-        let map = RootMap::new(root, volumes).map_err(EngineError::Root)?;
+        // Validate the root shape eagerly, so a bad root is still reported
+        // from `Engine::new`/`with_overlay` immediately (unchanged observable
+        // behaviour) — but with an empty `VolumeMap`, since this call exists
+        // only to surface `PathError`, not to build the real, volume-aware
+        // map the engine will actually use. See `Engine::map` for why the
+        // real one is deferred.
+        RootMap::new(root, VolumeMap::empty()).map_err(EngineError::Root)?;
         SnapshotReader::open(&snapshot).map_err(EngineError::Snapshot)?;
         let overlay = overlay_root.map(Overlay::new);
-        Ok(Engine { map, snapshot, overlay })
+        Ok(Engine { root: root.to_string(), map: OnceLock::new(), snapshot, overlay })
     }
 
-    /// The overlay resolution for `nt_path`, if an overlay is configured and the
-    /// path is under the root.
+    /// The volume-aware `RootMap`, built on first use and memoized for the
+    /// rest of the engine's life — exactly once per session, same cost as
+    /// building it eagerly in `build()`, but deliberately *not* eager.
+    ///
+    /// `resolve_volume_map`'s junction scan (escape-matrix vector 7) reads
+    /// the real filesystem at the moment it runs. `build()` runs from the
+    /// shim's own DLL bootstrap, which the injector guarantees completes
+    /// (and hooks go live) *before* the target's own `main()` executes any
+    /// application code — see `vfs-shim-dll`'s module doc. A junction a game
+    /// or mod manager already has in place before the game process even
+    /// starts is unaffected either way: bootstrap-time and first-decision-
+    /// time are the same instant for all practical purposes, both well
+    /// before the game does anything with the filesystem. The two moments
+    /// only diverge for an artificial case this project's own escape-matrix
+    /// fixture happens to construct: a junction created *by the injected
+    /// process's own later code*, after bootstrap already ran. Deferring to
+    /// first use costs nothing extra in the real-world case (still one
+    /// resolution for the session) while no longer silently assuming
+    /// injection-time is early enough to see everything that will ever
+    /// matter — a strictly more honest reading of "session start" than
+    /// "the instant the DLL loads".
+    ///
+    /// `None` only while the *first-ever* call on this engine is still in
+    /// progress and a nested, same-thread call reaches this function again
+    /// before that first call returns — see [`MAP_INIT_DEPTH`]. Every
+    /// caller treats `None` exactly like "not under any managed root",
+    /// which is always a safe answer for an open the shim's own resolution
+    /// machinery made about itself, not the game.
+    fn map(&self) -> Option<&RootMap> {
+        if let Some(m) = self.map.get() {
+            return Some(m);
+        }
+        let _guard = MapInitGuard::enter()?;
+        Some(self.map.get_or_init(|| {
+            let volumes = vfs_redirect::resolve_volume_map(&self.root);
+            RootMap::new(&self.root, volumes)
+                .expect("root shape already validated by build()'s empty-VolumeMap check")
+        }))
+    }
+
+    /// The overlay resolution for `nt_path`, if an overlay is configured, the
+    /// engine's `RootMap` is currently available (see [`Engine::map`]), and
+    /// the path is under the root.
     fn overlay_state(&self, nt_path: &str) -> Option<OverlayState> {
         let ov = self.overlay.as_ref()?;
-        let comps = self.map.remainder(nt_path)?;
+        let comps = self.map()?.remainder(nt_path)?;
         Some(ov.lookup(&comps))
     }
 
     /// Decide how to handle an incoming NT open path. Overlay-first, then
-    /// snapshot. Fail-safe: if the snapshot somehow fails to re-open, pass
-    /// through (cannot happen after construction).
+    /// snapshot. Fail-safe: if the snapshot somehow fails to re-open, or the
+    /// `RootMap` is not currently available (see [`Engine::map`]), pass
+    /// through.
     pub fn decide(&self, nt_path: &str) -> Decision {
         match self.overlay_state(nt_path) {
             Some(OverlayState::Present { path, .. }) => {
@@ -77,9 +185,9 @@ impl Engine {
             Some(OverlayState::Whiteout) => return Decision::Deny,
             Some(OverlayState::Absent) | None => {}
         }
-        match SnapshotReader::open(&self.snapshot) {
-            Ok(reader) => self.map.decide(nt_path, &reader),
-            Err(_) => Decision::PassThrough,
+        match (self.map(), SnapshotReader::open(&self.snapshot)) {
+            (Some(map), Ok(reader)) => map.decide(nt_path, &reader),
+            _ => Decision::PassThrough,
         }
     }
 
@@ -92,9 +200,9 @@ impl Engine {
             Some(OverlayState::Whiteout) => return AttrDecision::Deny,
             Some(OverlayState::Absent) | None => {}
         }
-        match SnapshotReader::open(&self.snapshot) {
-            Ok(reader) => self.map.query_attributes(nt_path, &reader),
-            Err(_) => AttrDecision::PassThrough,
+        match (self.map(), SnapshotReader::open(&self.snapshot)) {
+            (Some(map), Ok(reader)) => map.query_attributes(nt_path, &reader),
+            _ => AttrDecision::PassThrough,
         }
     }
 
@@ -111,7 +219,8 @@ impl Engine {
             Some(o) => o,
             None => return Decision::PassThrough,
         };
-        let comps = match self.map.remainder(nt_path) {
+        let Some(map) = self.map() else { return Decision::PassThrough };
+        let comps = match map.remainder(nt_path) {
             Some(c) if !c.is_empty() => c,
             _ => return Decision::PassThrough,
         };
@@ -133,8 +242,8 @@ impl Engine {
     /// Seed an overlay path with existing content (disk redirect, zip window, or
     /// real file). Returns true when bytes were written to `dest`.
     fn cow_seed(&self, nt_path: &str, dest: &std::path::Path) -> bool {
-        if let Ok(reader) = SnapshotReader::open(&self.snapshot) {
-            match self.map.decide(nt_path, &reader) {
+        if let (Some(map), Ok(reader)) = (self.map(), SnapshotReader::open(&self.snapshot)) {
+            match map.decide(nt_path, &reader) {
                 Decision::Redirect { target_nt } => {
                     return std::fs::copy(strip_nt(&target_nt), dest).is_ok();
                 }
@@ -159,19 +268,20 @@ impl Engine {
 
     /// Whether `nt_path` lies under the managed root.
     pub fn is_under_root(&self, nt_path: &str) -> bool {
-        self.map.contains(nt_path)
+        self.map().is_some_and(|m| m.contains(nt_path))
     }
 
     /// The folded remainder components of `nt_path` under the root, or `None`.
     pub fn remainder(&self, nt_path: &str) -> Option<Vec<String>> {
-        self.map.remainder(nt_path)
+        self.map()?.remainder(nt_path)
     }
 
     /// Whiteout `nt_path` in the overlay (mark as deleted). Returns whether an
     /// overlay handled it; `false` means the caller should let the real delete
     /// proceed (read-only VFS or path outside the root).
     pub fn whiteout(&self, nt_path: &str) -> bool {
-        match (&self.overlay, self.map.remainder(nt_path)) {
+        let Some(map) = self.map() else { return false };
+        match (&self.overlay, map.remainder(nt_path)) {
             (Some(ov), Some(comps)) if !comps.is_empty() => {
                 ov.whiteout(&comps);
                 true
@@ -189,11 +299,12 @@ impl Engine {
             Some(o) => o,
             None => return false,
         };
-        let from = match self.map.remainder(from_nt) {
+        let Some(map) = self.map() else { return false };
+        let from = match map.remainder(from_nt) {
             Some(c) if !c.is_empty() => c,
             _ => return false,
         };
-        let to = match self.map.remainder(to_nt) {
+        let to = match map.remainder(to_nt) {
             Some(c) if !c.is_empty() => c,
             _ => return false,
         };
@@ -208,18 +319,20 @@ impl Engine {
 
     /// Merge a directory's real on-disk entries with the snapshot's virtual
     /// children, then apply the overlay (adds/overrides win, whiteouts remove).
-    /// Fail-safe: on snapshot re-open failure, returns `real` unchanged.
+    /// Fail-safe: on snapshot re-open failure, or if the `RootMap` is not
+    /// currently available (see [`Engine::map`]), returns `real` unchanged.
     pub fn merge_directory(
         &self,
         dir_nt_path: &str,
         real: &[DirItem],
         wildcard: Option<&str>,
     ) -> Vec<DirItem> {
-        let merged = match SnapshotReader::open(&self.snapshot) {
-            Ok(reader) => self.map.merge_directory(dir_nt_path, &reader, real, wildcard),
-            Err(_) => real.to_vec(),
+        let map = self.map();
+        let merged = match (map, SnapshotReader::open(&self.snapshot)) {
+            (Some(m), Ok(reader)) => m.merge_directory(dir_nt_path, &reader, real, wildcard),
+            _ => real.to_vec(),
         };
-        match (&self.overlay, self.map.remainder(dir_nt_path)) {
+        match (&self.overlay, map.and_then(|m| m.remainder(dir_nt_path))) {
             (Some(ov), Some(comps)) => ov.apply_to_listing(&comps, merged, wildcard),
             _ => merged,
         }

@@ -455,6 +455,27 @@ fn vector7_junction(abs: &str) -> Line {
     let Some((dir, name)) = parent_dir_and_filename(abs) else {
         return unbuildable("7", abs, "target path has no parent directory component");
     };
+
+    // `VFS_ESCAPE_VECTOR7_LINK_DIR`: a junction the *caller* already created
+    // before this process was even launched — see that name's own doc
+    // comment in `vfs-env` for the full reasoning. In short: this
+    // function's own `mklink /J` spawn below is itself real, hooked file
+    // activity inside an injected process, and `vfs-redirect`'s
+    // volume/junction alias table is resolved once, on the session's first
+    // such activity — if that spawn (needed to bring the junction into
+    // existence) is itself what triggers that first resolution, the table
+    // gets built *before* the junction exists and never sees it. A
+    // pre-existing junction removes the ordering question entirely, and is
+    // exactly what a real mod manager's own junction looks like (already
+    // there before the game process starts). Used only under a session;
+    // unset for a standalone reproduction, which falls back to
+    // self-construction below exactly as before.
+    if let Ok(link_dir_str) = std::env::var("VFS_ESCAPE_VECTOR7_LINK_DIR") {
+        let spelling = format!(r"{link_dir_str}\{name}");
+        let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+        return Line::new("7", spelling, outcome, "pre-existing junction supplied by the caller");
+    }
+
     let link_dir = std::env::temp_dir().join(format!("vfs-escape-junction-{}", std::process::id()));
     if link_dir.exists() {
         let _ = std::fs::remove_dir(&link_dir);
@@ -967,7 +988,21 @@ fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(250);
-    std::thread::sleep(std::time::Duration::from_millis(interval_ms.saturating_mul(2)));
+    // Floored at 20ms regardless of how small `interval_ms` is: Windows'
+    // default system timer resolution is coarser than either fast-tick
+    // interval this project configures (5ms, or 1ms) — a thread that calls
+    // `Sleep(N)` for `N` under roughly 15.6ms is not guaranteed to actually
+    // wake up anywhere near `N`, only "no earlier than `N`, next tick or
+    // later", so `interval_ms * 2` alone (10ms for a 5ms interval) is not
+    // reliably enough margin to guarantee even one reporter tick landed —
+    // found by reproduction during the vectors-7/9 closeout: an isolated
+    // single-vector run occasionally exited before any tick fired, an
+    // intermittent classification miss unrelated to that closeout's own
+    // canonicalisation logic. 20ms comfortably clears the default ~15.6ms
+    // granularity with margin, for either configured interval.
+    let wait = std::time::Duration::from_millis(interval_ms.saturating_mul(2))
+        .max(std::time::Duration::from_millis(20));
+    std::thread::sleep(wait);
 
     std::process::exit(0);
 }

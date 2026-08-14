@@ -21,16 +21,27 @@ use vfs_core::{fold, normalize_vpath, PathError};
 /// slash forms.
 const NT_PREFIXES: [&str; 4] = [r"\??\", r"\\?\", "/??/", "//?/"];
 
-/// A table from NT device/volume-GUID prefixes to the drive letter they are
-/// currently mounted as. Built by resolving the OS's device namespace
-/// (`Task 2`); `empty()` is for tests that exercise no device paths.
+/// A table from a raw NT-presented path prefix to the text that replaces it —
+/// a drive letter (`C:`) for a device/volume-GUID prefix, or an arbitrary
+/// absolute path for a junction/UNC-share alias that resolves into the
+/// managed root. Built by resolving the OS's device namespace (`Task 2`) and,
+/// since this task, the session's junction and administrative-UNC-share
+/// aliases (`resolve_volume_map`); `empty()` is for tests that exercise none
+/// of this.
+///
+/// One representation serves both needs: a device prefix is just an alias
+/// whose replacement happens to be two bytes long (`X:`), so
+/// `resolve_device_prefix`'s `format!("{replacement}{rest}")` already does
+/// the right thing for a multi-component replacement (a junction's real
+/// target path) with no special-casing.
 #[derive(Debug, Clone, Default)]
 pub struct VolumeMap {
-    entries: Vec<(String, char)>,
+    entries: Vec<(String, String)>,
 }
 
 impl VolumeMap {
-    /// A map with no device or volume-GUID prefixes registered.
+    /// A map with no device, volume-GUID, junction, or UNC-share aliases
+    /// registered.
     pub fn empty() -> Self {
         VolumeMap { entries: Vec::new() }
     }
@@ -39,24 +50,39 @@ impl VolumeMap {
     /// volume-GUID prefix (e.g. `\\?\Volume{guid}`) as currently mounted on
     /// `drive`.
     pub fn insert(&mut self, prefix: &str, drive: char) {
-        self.entries.push((prefix.to_string(), drive));
+        self.insert_alias(prefix, &format!("{drive}:"));
+    }
+
+    /// Register an arbitrary path alias: a raw path starting with `prefix`
+    /// (matched the same way as [`Self::insert`] — case-insensitively, at a
+    /// component boundary) canonicalises as if it had been spelled with
+    /// `prefix` replaced by `replacement` instead. `replacement` may be a
+    /// bare drive (`"C:"`, what [`Self::insert`] uses) or a full absolute
+    /// path (what a junction alias needs) — either way it is fed back
+    /// through the same downstream pipeline (`strip_all_nt_prefixes`,
+    /// drive-relative rejection, `..` clamping, `normalize_vpath`) as if the
+    /// caller had spelled `replacement` themselves, so a multi-component
+    /// replacement works with no extra handling.
+    pub fn insert_alias(&mut self, prefix: &str, replacement: &str) {
+        self.entries.push((prefix.to_string(), replacement.to_string()));
     }
 
     /// If `path` starts with a registered prefix at a component boundary
     /// (the match ends the string or is followed by a separator, so
     /// `HarddiskVolume3` cannot match a path actually naming
-    /// `HarddiskVolume30`), the drive letter and the byte length of the
+    /// `HarddiskVolume30`), the replacement text and the byte length of the
     /// matched prefix. Longest match wins if more than one registered
     /// prefix matches.
     ///
     /// The match is case-insensitive: NT object-manager names are
     /// case-insensitive, so `\device\harddiskvolume3` is as valid a spelling
-    /// as `\Device\HarddiskVolume3`. Both sides are folded for the
-    /// comparison rather than lowercasing the stored key, so the returned
-    /// drive letter keeps whatever case was registered.
-    fn resolve(&self, path: &str) -> Option<(char, usize)> {
-        let mut best: Option<(char, usize)> = None;
-        for (prefix, drive) in &self.entries {
+    /// as `\Device\HarddiskVolume3`, and Win32 directory paths are
+    /// case-insensitive too. Both sides are folded for the comparison rather
+    /// than lowercasing the stored key, so the returned replacement text
+    /// keeps whatever case was registered.
+    fn resolve(&self, path: &str) -> Option<(&str, usize)> {
+        let mut best: Option<(&str, usize)> = None;
+        for (prefix, replacement) in &self.entries {
             let Some(candidate) = path.get(..prefix.len()) else {
                 continue;
             };
@@ -72,7 +98,7 @@ impl VolumeMap {
                 None => true,
             };
             if is_longer {
-                best = Some((*drive, prefix.len()));
+                best = Some((replacement.as_str(), prefix.len()));
             }
         }
         best
@@ -132,7 +158,7 @@ fn strip_stream_suffix(raw: &str) -> &str {
 /// never be guessed into a drive.
 fn resolve_device_prefix(path: &str, volumes: &VolumeMap) -> String {
     match volumes.resolve(path) {
-        Some((drive, matched_len)) => format!("{drive}:{}", &path[matched_len..]),
+        Some((replacement, matched_len)) => format!("{replacement}{}", &path[matched_len..]),
         None => path.to_string(),
     }
 }
@@ -490,5 +516,74 @@ mod tests {
     fn globalroot_fallback_does_not_disturb_an_ordinary_path() {
         let got = canonicalise(r"C:\Games\Skyrim\Data\a.esp", &vols()).unwrap();
         assert_eq!(got.to_ascii_lowercase(), "c:/games/skyrim/data/a.esp");
+    }
+
+    /// Vector 7 (junction): `insert_alias` with a *multi-component* absolute
+    /// path as the replacement — a junction's own location aliased to its
+    /// real target — must resolve exactly like the target had been spelled
+    /// directly, remainder and all. This is the mechanism
+    /// `resolve_volume_map`'s ancestor scan uses to close the junction
+    /// vector: `VolumeMap` itself does not care whether a replacement is two
+    /// bytes (a drive letter) or a whole path.
+    #[test]
+    fn insert_alias_resolves_a_multi_component_junction_target() {
+        let mut v = vols();
+        v.insert_alias(
+            r"\??\C:\Users\me\AppData\Local\Temp\vfs-escape-junction-1234",
+            "C:/Games/Skyrim/Data",
+        );
+        let raw = r"\??\C:\Users\me\AppData\Local\Temp\vfs-escape-junction-1234\a.esp";
+        assert_eq!(
+            canonicalise(raw, &v).unwrap().to_ascii_lowercase(),
+            "c:/games/skyrim/data/a.esp"
+        );
+    }
+
+    /// Vector 9 (UNC admin share): the NT spelling of `\\localhost\C$\...`
+    /// (`\??\UNC\localhost\C$\...` — the `\??\UNC` object-manager symlink to
+    /// `\Device\Mup`, exactly the sibling trap already found once for
+    /// volume-GUID keys) must resolve identically to the plain drive-letter
+    /// form once the alias is registered.
+    #[test]
+    fn insert_alias_resolves_the_unc_admin_share_nt_spelling() {
+        let mut v = vols();
+        v.insert_alias(r"\??\UNC\localhost\C$", "C:");
+        let raw = r"\??\UNC\localhost\C$\Games\Skyrim\Data\a.esp";
+        assert_eq!(
+            canonicalise(raw, &v).unwrap().to_ascii_lowercase(),
+            "c:/games/skyrim/data/a.esp"
+        );
+    }
+
+    /// The sibling of the `GLOBALROOT` trap this gate already found once: a
+    /// real NT open of `\\localhost\C$\...` presents `\??\UNC\...`, never
+    /// the Win32 `\\?\UNC\...` spelling — a map keyed with the latter would
+    /// match nothing and fail *closed* (not a bypass, but silently useless,
+    /// exactly the failure this test guards against reintroducing).
+    #[test]
+    fn unc_admin_share_alias_does_not_match_the_win32_spelling() {
+        let mut v = vols();
+        v.insert_alias(r"\??\UNC\localhost\C$", "C:");
+        let raw = r"\\?\UNC\localhost\C$\Games\Skyrim\Data\a.esp";
+        let got = canonicalise(raw, &v).unwrap();
+        assert!(
+            !got.to_ascii_lowercase().starts_with("c:"),
+            "a \\??\\-keyed UNC alias must not match the \\\\?\\-spelled convenience form: {got}"
+        );
+    }
+
+    /// Over-eager guard: an alias registered for one junction/UNC location
+    /// must never engage for an unrelated path that merely shares a prefix
+    /// substring but not a full component match (`...-1234` vs `...-12345`).
+    #[test]
+    fn alias_does_not_match_a_similarly_prefixed_unrelated_path() {
+        let mut v = vols();
+        v.insert_alias(r"\??\C:\Temp\vfs-escape-junction-1234", "C:/Games/Skyrim/Data");
+        let raw = r"\??\C:\Temp\vfs-escape-junction-12345\a.esp";
+        let got = canonicalise(raw, &v).unwrap();
+        assert!(
+            !got.to_ascii_lowercase().starts_with("c:/games"),
+            "an alias hijacked an unrelated, similarly-named sibling path: {got}"
+        );
     }
 }

@@ -73,9 +73,9 @@ machine/environment-dependent, not a fixed property of the vector.
 | 5 | Handle-relative open (`OBJECT_ATTRIBUTES.RootDirectory` = a real directory handle) | opened✓ | classified✓ | |
 | 5b | Handle-relative open against a handle `GetFinalPathNameByHandleW` cannot resolve (an anonymous pipe) | `error:ntstatus:0xC0000033` | not classified (by design) | **Caveat, not a failure — see "Vector 5's caveat" below.** `path_of_tracked` cannot decode a path at all for this shape, so it lands in the shim's separate "undecodable" counter, never in `under-root open outcomes`. Documented, accepted edge of Task 4's fix, not asserted as pass/fail either way. |
 | 6 | CWD-relative (plain filename, cwd set to the parent dir) | opened✓ | classified✓ | |
-| 7 | Junction / reparse point | opened✓ | **not classified** | **Verified, open gate-2 gap — see "Two vectors verified NOT to classify" below.** Reachable (real bytes, correctly, for the positive canary) but genuinely invisible to every counter for the negative canary. |
+| 7 | Junction / reparse point | opened✓ | classified✓ | **Closed — see "Vectors 7 and 9 closed: session-start alias resolution" below.** Was a verified, open gate-2 gap; fixed by resolving a junction that reparses into the managed root into a `VolumeMap` alias once per session. |
 | 8 | Hardlink (new filename, same underlying bytes) | `not-found` (not `opened` — see "Vector 8's exception" below) | classified✓ | Sealed by the content-addressed provider policy, not a classification failure — `RootMap`/the canonicaliser is never even consulted for this vector when FUSE-routing claims the path first. |
-| 9 | UNC / `subst` / mapped drive (administrative loopback share, `\\localhost\C$\...`) | opened✓ | **not classified** | **Verified, open gate-2 gap — see "Two vectors verified NOT to classify" below.** Same shape of gap as vector 7. |
+| 9 | UNC / `subst` / mapped drive (administrative loopback share, `\\localhost\C$\...`) | opened✓ | classified✓ | **Closed — see "Vectors 7 and 9 closed: session-start alias resolution" below.** Was a verified, open gate-2 gap; fixed by registering the admin-share's real NT spelling as a session-start alias. |
 | 10a | Case-flipped, `\\?\`-prefixed (verbatim) | opened✓ | not classified (`not-found`, unbuildable-adjacent) | NTFS resolves case regardless of the `\\?\` prefix; standalone-`opened` behaviour, unaffected by session or gate 2. Not asserted for the negative canary (an ordinary FUSE-routed/sealed case, no special canonicaliser involvement — see the fixture's own note). |
 | 10b | Trailing dot, verbatim (`...\name.esp.`) | opened✓ (flip from standalone `not-found` — see "The 10/12 flip" below) | classified✓ | |
 | 10c | Trailing space, verbatim (`...\name.esp `) | opened✓ (flip) | classified✓ | |
@@ -123,42 +123,234 @@ that already matched the bare form). Verified via reproduction: before the
 fix, `3` was absent from the negative canary's classified set; after, it
 appears as its own distinct entry.
 
-## Two vectors verified NOT to classify: 7 (junction) and 9 (UNC)
+## Vectors 7 and 9 closed: session-start alias resolution
 
-Unlike vector 3, these are **not fixed here** — they are a real, currently
-open gap in gate 2's own exit criterion ("`RootMap::under_root` recognises
-every buildable spelling"), verified by isolated reproduction and reported
-rather than patched, because closing them correctly is a design trade-off,
-not a one-line fix.
+A prior task verified these as real, open gate-2 gaps: both resolve to the
+real bytes via a spelling that is **syntactically unrelated** to the managed
+root — a completely different directory tree for the junction, a
+`UNC\localhost\C$\...` form for the admin share — and contains no `~`, so
+`RootMap::compute_under_root`'s `~`-gated OS-consult branch never fires for
+either. Widening that gate to catch them was explicitly rejected as the
+fix: the gate exists so an ordinary out-of-root open (the overwhelming
+majority of a real game's I/O — `System32`, driver, CRT paths) never pays a
+Win32 round trip, and both vectors are common enough in real installs
+(mod-manager staging junctions, administrative shares) that they need a
+correct answer on every session, not a rare, expensive one on every open.
 
-Both resolve to the real bytes via a spelling that is **syntactically
-unrelated** to the managed root — a completely different directory tree for
-the junction, a `UNC\localhost\C$\...` form for the admin share — and
-contains no `~`. `RootMap::compute_under_root`'s only path to recognising a
-syntactically unrelated spelling is its OS-consult branch
-(`expand_short_name`, via `GetFinalPathNameByHandleW`/`GetLongPathNameW`),
-and that branch is gated on the presence of `~` for cost: without the gate,
-every ordinary out-of-root open (the overwhelming majority of a real game's
-I/O — `System32`, driver, CRT paths) would pay a Win32 round trip. Neither
-a junction target nor a loopback UNC share necessarily contains `~`, so
-neither ever reaches that branch. `path_is_ours` answers false for both;
-`tramp` still finds the real file (reachability, again, is unaffected);
-`note_passthrough_outcome` never fires.
+**The fix extends the existing session-start pattern instead**, the same
+one the device/volume-GUID table already uses: resolve each alias once,
+into the same `VolumeMap`, rather than consulting the OS per open.
 
-**This is squarely gate 2's own scope**, not a downstream gate's — unlike
-vector 8's provider-sealing (a different layer entirely) or vectors 13/14's
-own documented deferrals. Closing it needs the OS-consult trigger condition
-widened past the `~` gate without reintroducing the per-open cost that gate
-exists to avoid for the common case. That is a real design call — plausible
-directions include triggering the OS-consult whenever the syntactic form
-doesn't match *any* known shape (device/volume-GUID/8.3/plain-drive) rather
-than only when it contains `~`, or restricting the widened check to reads
-that already have a real handle available (Task 4's flow) rather than the
-pure-string `canonicalise` path — but it is not this task's call to make
-unilaterally, and is not attempted here. Verified via isolated per-vector
-reruns (`VFS_ESCAPE_ONLY_VECTOR=7` / `=9`), each showing an empty classified
-set for that vector specifically, not merely absent from a shared/combined
-one (see the methodology note below for why that distinction matters).
+- **Vector 9 (UNC admin share).** `vfs-redirect::volumes::resolve_volume_map`
+  now registers `\??\UNC\localhost\<drive>$` — the real NT spelling Windows
+  presents to `NtCreateFile` for a `\\localhost\<drive>$\...` Win32 open,
+  via the `\??\UNC` object-manager symlink to `\Device\Mup` — as an alias
+  for `<drive>:`, for every drive `vfs_win::drive_mappings` already
+  enumerates. **A sibling of the exact trap vector 3's `GLOBALROOT` fix
+  found** (a map keyed with the `\\?\` spelling instead of the `\??\` a real
+  open actually presents, matching nothing and failing *closed*) was caught
+  before it could repeat here — a dedicated unit test
+  (`unc_admin_share_alias_does_not_match_the_win32_spelling`) asserts the
+  `\\?\`-spelled key does *not* match, alongside one asserting the `\??\`
+  key does.
+- **Vector 7 (junction).** `resolve_volume_map` also walks the managed
+  root's own ancestor chain (root's parent, that directory's parent, and so
+  on up to the drive root), doing one non-recursive directory listing per
+  level. Any entry other than the chain node itself that is a directory
+  reparse point, and whose resolved target's canonical form has the root's
+  own components as a prefix, is registered as an alias from its own
+  location to that target — so a path spelled through the junction
+  canonicalises to the identical root-rooted form by ordinary string
+  comparison, no OS consult needed per open. See
+  `vfs-redirect/src/volumes.rs`'s `junction_aliases` doc comment for the
+  full mechanism.
+
+**Scope of the junction scan, chosen deliberately.** Scanning an entire
+volume for reparse points at session start is too slow. Scanning the
+managed root's own ancestor chain (not a recursive walk of the root's own,
+potentially huge, content subtree) is the right general shape, but even
+that chain is climbed only **two levels** (`MAX_ANCESTOR_LEVELS` in
+`junction_aliases`) — not all the way to the drive root. Two levels is
+exactly `vfs-directord::registry`'s own `<TEMP>/vfs-daemon-<pid>-<seq>-<id>/root`
+convention: one level past the per-session base directory, one more past
+the system temp directory itself, and no further into the broader user
+profile tree. This was not a guess — climbing further was tried first and
+measured to cost real time on an ordinary, long-used Windows profile:
+`C:\Users\<name>\AppData\Local` alone carries a handful of Windows' own
+built-in legacy-compatibility junctions (`Application Data`, `History`,
+`Temporary Internet Files`, and on this development machine an
+application-specific one besides), and `C:\Users\<name>` itself carries a
+dozen more (`Cookies`, `SendTo`, `Start Menu`, ...). Reading even just their
+on-disk metadata (never their targets — see the hang below) added enough
+latency to the session's *first* redirect decision to occasionally miss the
+shim's own stats reporter's tick window in a short-lived test process — a
+real, observed classification miss during this task's own verification, not
+a hypothetical. A real game session has no such tight timing window, but
+paying the extra cost and the extra exposure to unrelated system junctions
+buys nothing beyond the fixed, two-level convention this project's sessions
+already use.
+
+Two things this scan deliberately does **not** do, to stay on the safe side
+of the "must not pull anything in" requirement:
+
+1. **An ancestor being a reparse point itself is never aliased**, even
+   though it looks tempting (e.g. `C:\Games` symlinked to a Steam library at
+   `D:\Library\Games`, with root spelled `C:\Games\Skyrim`) — `RootMap`'s own
+   root components are always root's *literal* spelling, never resolved
+   through any junction, so aliasing one of root's own ancestors would
+   rewrite **every ordinary in-root open** (which necessarily starts with
+   that same ancestor's literal path) away from matching root's own
+   registered components. That would be an active regression breaking
+   legitimate traffic, not merely a missed vector — worse than either named
+   vector left open. Every alias this scan actually registers is a genuine
+   *sibling*, disjoint from root's own ancestor chain by construction, so
+   this invariant holds automatically. Verified directly by
+   `root_itself_being_a_reparse_point_is_never_aliased`.
+2. **The managed root's own subtree is not recursively scanned** for a
+   reparse point pointing *out* of the root (a Mod-Organizer-style staging
+   junction, `root\Data\SomeMod` -> `D:\Mods\SomeMod`). Under the same
+   "target must resolve inside root" discipline the sibling scan uses, a
+   root-subtree junction only ever produces a redundant no-op (its target is
+   already inside root, so both spellings already canonicalise correctly on
+   their own) or would require admitting a genuinely external, unrelated
+   directory into the managed root — exactly the over-eager failure class
+   this project has already hit twice (the `subst`-hijack and
+   `GLOBALROOT`-wrapper regressions). Left as a documented non-goal for a
+   future gate to evaluate explicitly, not a side effect of closing vector 7.
+
+Both directions were tested explicitly, not just the closing direction: a
+junction whose target is a genuinely unrelated directory (outside the
+managed root entirely) registers nothing
+(`junction_pointing_outside_root_is_not_aliased`), and root itself being a
+reparse point registers nothing keyed to root's own path
+(`root_itself_being_a_reparse_point_is_never_aliased`).
+
+**Staleness, same limit the device/volume-GUID table already carries**: a
+junction created, retargeted, or removed after the alias scan runs is not
+reflected until the session is rebuilt — the identical limitation already
+documented for `subst`. Also documented, deliberately narrow: only the
+`localhost` hostname spelling of the admin share is aliased; the machine's
+own NetBIOS/DNS name and loopback address forms (`\\127.0.0.1\C$\...`,
+`\\[::1]\C$\...`) resolve to the same object but are not — closing every
+hostname spelling that could ever resolve to "this machine" is unbounded,
+for marginal benefit over the one spelling this gate's own escape matrix
+exercises.
+
+**A real timing defect found and fixed while verifying this.** The obvious
+place to resolve these aliases is `vfs-shim::Engine::build` — called once
+from the shim's DLL bootstrap, which seemed like "session start". It is not
+early enough: the injector's own bootstrap sequence guarantees hooks are
+live *before* the target process's own `main()` runs, which means a
+junction the injected process's *own later code* creates (exactly what
+`vfs-fixture-escape`'s vector 7 does — `mklink /J` immediately before its
+own attempted open, all inside the same already-injected process) does not
+exist yet at bootstrap time. Building the alias table eagerly in `build()`
+therefore saw an empty ancestor scan every time, even though the mechanism
+itself was correct — verified by isolated reproduction before concluding
+the fix worked, not assumed from unit tests passing. Fixed by deferring the
+volume-aware `RootMap` construction from `Engine::build` to the engine's
+first real decision (`Engine::map`, memoized in a `OnceLock` for the rest of
+the session) — still exactly one resolution per session, at the same cost
+as building it eagerly, just triggered by first use rather than by DLL
+load. For a real game, bootstrap-time and first-decision-time are the same
+instant for all practical purposes (both occur before the game does
+anything with the filesystem, and any junction a mod manager set up already
+existed long before the game process even started); the two moments only
+ever diverge for this project's own synthetic fixture construction. This
+does not reintroduce a per-open OS consult: it is one deferred, memoized
+resolution, not a repeated one.
+
+**A second reentrancy bug found and fixed, structurally identical to an
+existing one.** Deferring resolution to the engine's first real decision
+introduced a *new* re-entrancy hazard, the same shape as the
+`OS_CONSULT_DEPTH` bug documented below but in a different crate:
+`junction_aliases`'s directory scan makes real Win32 calls
+(`vfs_win::reparse_point_target`'s `CreateFileW`, directory listings) from
+inside the very first hooked call ever made in the process. Since that call
+is itself intercepted by the same injected process's hooks, it re-enters
+`vfs-shim::Engine::map` on the same thread, before the first call's
+`OnceLock::get_or_init` closure has returned — `std::sync::Once` documents
+that shape as unspecified behaviour ("a panic or a deadlock"), observed
+here as an unresponsive process burning CPU rather than a clean crash.
+Fixed with `vfs-shim::engine`'s own thread-local guard (`MAP_INIT_DEPTH` /
+`MapInitGuard`): a re-entrant call answers `None` ("not ready yet") instead
+of touching the still-initializing `RootMap` again, and every caller
+already had a fail-safe `PassThrough`/`false`/`None` path for exactly this
+shape of answer.
+
+**A hang found and fixed: resolving a reparse point's target must never
+follow it.** The first version of the junction scan resolved a candidate's
+target with `vfs_win::final_path_for_open` (open-and-ask-Windows, the same
+helper the 8.3-short-name path already used) — which opens, and therefore
+*follows*, whatever the candidate names. Walking a real Windows profile's
+ancestor chain encounters real, pre-existing junctions with no relation to
+this project — Windows' own legacy-compatibility redirects, and on this
+development machine an application-specific one pointing at another drive
+— and following one whose target is offline, disconnected, or merely slow
+to answer blocks on the OS's own device/network timeout, tens of seconds,
+once per such junction. This hung the escape-matrix fixture outright.
+Fixed by reading the reparse point's own on-disk substitute-name data
+directly (`vfs_win::reparse_point_target`, `FSCTL_GET_REPARSE_POINT` on a
+handle opened with `FILE_FLAG_OPEN_REPARSE_POINT` — opens the reparse point
+itself, never what it names) rather than opening a handle that follows it.
+Proven by a dedicated test that deletes the junction's target *after*
+creating it but *before* reading it: `final_path_for_open` would now fail
+outright (nothing left to open); `reparse_point_target` still succeeds,
+because it never depended on the target existing at all.
+
+**A correctness/performance bug found and fixed: a cheap pre-filter is not
+optional.** A directory reparse-point check still needs *some* per-entry
+work, and the first working version of the ancestor scan did that work with
+`std::fs::symlink_metadata` — a separate, real, hooked query — on *every*
+entry in the scanned directory, not just the reparse points among them. An
+ordinary ancestor directory on a real, long-used machine (an unremarkable
+`%TEMP%`) can hold thousands of entries, so this multiplied the shim's own
+`NtCreateFile` call count by thousands for no reason. This was not merely
+slow: an unrelated write-path e2e test's own shim/director open-count
+reconciliation check (a drift assertion — every open one side records must
+show up on the other) started failing, catching a real side effect this
+scan's own noise caused, not a bypass in the write path itself. Fixed by
+pre-filtering with `std::fs::DirEntry::file_type()` (`FileTypeExt::is_symlink_dir`)
+first — data the directory enumeration itself already returned, no extra
+syscall — and only calling `reparse_point_target` for entries that pass it.
+
+**A related timing defect in the test harness, found and fixed at its
+source.** `hookstats::start_reporter`'s own doc comment already states that
+nothing flushes its report on process exit — a process that exits before
+the reporter's first periodic tick produces no report at all. The escape
+matrix's own `vfs-fixture-escape` already accounted for this with an
+end-of-run wait (`interval_ms * 2`), but `VFS_SHIM_STATS_INTERVAL_MS=5`
+made that a 10ms wait — under Windows' default ~15.6ms system timer
+resolution, where `Sleep(10)` is not reliably "wakes at 10ms", only "wakes
+no earlier than 10ms, next tick or later". An **isolated** single-vector
+run (`VFS_ESCAPE_ONLY_VECTOR`) is exactly the case with no margin to spare:
+the selected vector's own decision is the only real file activity in the
+whole process, so the process's total lifetime is short enough that this
+occasionally raced process exit, an intermittent, any-vector classification
+miss unrelated to canonicalisation itself — reproduced directly, not
+hypothesised. Fixed by flooring the fixture's end-of-run wait at 20ms,
+comfortably clearing that granularity regardless of the configured
+interval.
+
+**A methodology fix, not a production change: vector 7's junction is now
+created by the test harness, not the fixture.** `vfs-fixture-escape`'s own
+`mklink /J` spawn (needed to construct its test junction) is itself real,
+hooked file activity inside the already-injected fixture process — and
+since `RootMap`'s volume/junction table is now resolved on the session's
+*first* such activity, a fixture that spawns `mklink` before its own
+intended open can trigger that first resolution before the junction it is
+about to create exists, which is exactly the ordering bug the lazy-resolve
+fix above exists to close, one level deeper. The fix is not to make
+resolution re-run (that reintroduces a per-open cost) but to remove the
+ordering question: the e2e test now creates vector 7's junction itself,
+before launching the fixture process at all (`VFS_ESCAPE_VECTOR7_LINK_DIR`,
+registered in `vfs-env`), exactly as it already does for the positive and
+negative canary files. This is indistinguishable, from the shim's
+perspective, from a junction a real mod manager already had in place
+before the game process started — which is the only shape this project
+ever claims to close. `vfs-fixture-escape` still falls back to constructing
+its own junction when that variable is unset, for a standalone
+(non-session) reproduction.
 
 ## A methodology defect found and fixed, before it could hide the above
 
@@ -306,7 +498,7 @@ outcome here:
   2 in either direction. Whether this is even a shim-layer fix at all is an
   open question for a later gate.
 
-## Verification
+## Verification (vector 3 / `GLOBALROOT` closeout)
 
 - `cargo build --all-targets`, `cargo build --manifest-path
   crates/vfs-payload/Cargo.toml --target-dir target`: clean.
@@ -322,3 +514,29 @@ outcome here:
   makes (`vfs-redirect`'s `GLOBALROOT` fix) only affects **classification**
   — whether an already-reachable open is counted — never whether it is
   reachable.
+
+## Verification (vectors 7 / 9 closeout)
+
+- `cargo build --all-targets`: clean.
+- `cargo test --workspace`: 459 passed, 0 failed, 0 ignored, run twice back
+  to back for stability — at or above the stated 448 baseline (the increase
+  is this task's own new unit tests: `insert_alias`/UNC-alias coverage in
+  `vfs-redirect::canon`, junction/UNC/reentrancy coverage in
+  `vfs-redirect::volumes`, and `reparse_point_target` coverage in
+  `vfs-win::volumes`).
+- `escape_matrix_positive_and_negative_canary` re-run five times back to
+  back post-fix with no failures (previously flaky mid-investigation runs,
+  documented above, are not this number).
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- No bypass removed: `Decision::Redirect`, `Decision::Serve`, the DRM
+  exceptions, the passthrough, and the write fall-through are all still
+  present and unmodified by this task. `vfs-shim::Engine::map`'s lazy
+  resolution and its reentrancy guard change *when* and *how safely* the
+  volume/junction table is built, never what a decision does once it has
+  one.
+- Both failure directions tested explicitly for vector 7, not just the
+  closing one: `junction_pointing_outside_root_is_not_aliased` (a junction
+  whose target is outside the root registers nothing) and
+  `root_itself_being_a_reparse_point_is_never_aliased` (root's own ancestor
+  chain is never an alias key, regardless of whether it is itself a reparse
+  point).

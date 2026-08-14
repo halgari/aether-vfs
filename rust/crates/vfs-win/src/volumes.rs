@@ -6,13 +6,17 @@
 //! back plain, owned `String`s.
 #![allow(unsafe_code)]
 
+use windows_sys::Wdk::Storage::FileSystem::REPARSE_DATA_BUFFER;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, GetFinalPathNameByHandleW, GetLogicalDrives, GetLongPathNameW,
     GetShortPathNameW, GetVolumeNameForVolumeMountPointW, QueryDosDeviceW,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
+use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+use windows_sys::Win32::System::SystemServices::{IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK};
+use windows_sys::Win32::System::IO::DeviceIoControl;
 
 /// What one currently-mounted drive letter resolves to at the NT layer.
 ///
@@ -196,6 +200,145 @@ pub fn final_path_for_open(path: &str) -> Option<String> {
     result
 }
 
+/// The raw substitute-name target of a directory junction or symlink
+/// reparse point, read directly from the reparse point's own on-disk
+/// metadata — **never opening or following whatever it points at**. `None`
+/// if `path` is not a reparse point, is a reparse point of some other kind
+/// (a `subst`/mapped-drive-style directory alias behaves like a genuine
+/// junction here — `IO_REPARSE_TAG_MOUNT_POINT` covers both — but a
+/// deduplication or WOF-compressed file, an `AppExecLink`, or a cloud
+/// storage placeholder like a OneDrive "online-only" file/folder is a
+/// different reparse tag entirely and is deliberately left alone), or
+/// cannot be read.
+///
+/// **This is deliberately not [`final_path_for_open`].** That function opens
+/// (and therefore follows) whatever `path` names, which is the wrong tool
+/// for scanning directories a real Windows profile accumulates rather than
+/// ones the caller already knows are safe to enter: a junction whose target
+/// device is offline, disconnected, or asleep blocks on the OS's own
+/// device/network timeout (tens of seconds, once per such junction) before
+/// `CreateFileW` returns at all. This is not a hypothetical — a session-start
+/// ancestor scan of an ordinary user profile genuinely encounters several
+/// real reparse points before it ever reaches anything project-specific:
+/// Windows' own built-in legacy-compatibility junctions
+/// (`AppData\Local\Application Data`, `<profile>\Cookies`,
+/// `<profile>\SendTo`, `Users\All Users`, `C:\Documents and Settings`, and
+/// more), which are normally fast to reject (an explicit ACL denies
+/// traversal) but are not a bet worth making, and applications that redirect
+/// their own AppData folder to another drive via a real junction. Reading
+/// the reparse point's own metadata — stored in its own directory entry, on
+/// the *reparse point's* volume, never the target's — touches only that one
+/// local, already-open handle and cannot block on anything the target
+/// implies. Found by reproduction, not assumed: the escape-matrix vector 7
+/// closeout's own session-start scan hung on exactly this shape of junction
+/// before this function replaced a `final_path_for_open`-based first draft.
+pub fn reparse_point_target(path: &str) -> Option<String> {
+    let wide = to_wide(path);
+    // SAFETY: FFI. `FILE_FLAG_OPEN_REPARSE_POINT` is what makes this open
+    // the reparse point itself rather than following it — the entire point
+    // of this function. Desired access 0 (query only) plus full sharing,
+    // same convention as `final_path_for_open`.
+    let handle: HANDLE = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            core::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            core::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let result = reparse_target_from_handle(handle);
+    // SAFETY: FFI. `handle` is the same valid handle opened above, closed
+    // exactly once here on every path out of this function.
+    unsafe {
+        CloseHandle(handle);
+    }
+    result
+}
+
+/// `MAXIMUM_REPARSE_DATA_BUFFER_SIZE` (16 KiB) — MSDN's own documented upper
+/// bound on a reparse data buffer's size, so a single fixed-size buffer is
+/// always sufficient for `FSCTL_GET_REPARSE_POINT`, no growth loop needed.
+const MAX_REPARSE_DATA_BUFFER_SIZE: usize = 16 * 1024;
+
+/// The `DeviceIoControl(FSCTL_GET_REPARSE_POINT)` + parsing behind
+/// [`reparse_point_target`], split out so the handle-closing path above stays
+/// a single, obvious `unsafe` block per operation.
+fn reparse_target_from_handle(handle: HANDLE) -> Option<String> {
+    let mut buf = vec![0u8; MAX_REPARSE_DATA_BUFFER_SIZE];
+    let mut returned: u32 = 0;
+    // SAFETY: FFI. `handle` is a valid, just-opened handle (caller's
+    // contract); `buf` is valid for `buf.len()` bytes, matching
+    // `noutbuffersize`; `returned` is a valid `u32` out-param. No input
+    // buffer is needed for this control code.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_GET_REPARSE_POINT,
+            core::ptr::null(),
+            0,
+            buf.as_mut_ptr() as *mut core::ffi::c_void,
+            buf.len() as u32,
+            &mut returned,
+            core::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    // SAFETY: `buf` was populated by the OS above with at least
+    // `size_of::<REPARSE_DATA_BUFFER>()` valid bytes (any smaller `returned`
+    // would mean `DeviceIoControl` itself failed, already handled above) —
+    // reading the fixed header through a raw pointer, never materializing a
+    // `&REPARSE_DATA_BUFFER` that would claim the trailing flexible
+    // `PathBuffer` is fully initialized (it is not, as declared — only
+    // `returned` bytes are).
+    let rdb_ptr = buf.as_ptr() as *const REPARSE_DATA_BUFFER;
+    let tag = unsafe { (*rdb_ptr).ReparseTag };
+    let (name_offset, name_len, path_buf_ptr) = match tag {
+        IO_REPARSE_TAG_MOUNT_POINT => {
+            // SAFETY: `addr_of!` projects a field address without reading
+            // through an intermediate reference, safe even though the
+            // trailing `PathBuffer` is not fully initialized per its
+            // nominal `[u16; 1]` declaration.
+            let mp = unsafe { core::ptr::addr_of!((*rdb_ptr).Anonymous.MountPointReparseBuffer) };
+            let path_buf = unsafe { core::ptr::addr_of!((*mp).PathBuffer) as *const u16 };
+            (unsafe { (*mp).SubstituteNameOffset }, unsafe { (*mp).SubstituteNameLength }, path_buf)
+        }
+        IO_REPARSE_TAG_SYMLINK => {
+            let sl = unsafe { core::ptr::addr_of!((*rdb_ptr).Anonymous.SymbolicLinkReparseBuffer) };
+            let path_buf = unsafe { core::ptr::addr_of!((*sl).PathBuffer) as *const u16 };
+            (unsafe { (*sl).SubstituteNameOffset }, unsafe { (*sl).SubstituteNameLength }, path_buf)
+        }
+        // Any other reparse tag (cloud-file placeholders, deduplication,
+        // WOF-compressed files, AppExecLink, ...) is out of scope — see this
+        // function's own doc comment for why that is deliberate, not a gap.
+        _ => return None,
+    };
+    read_utf16_bounded(&buf, path_buf_ptr, name_offset, name_len)
+}
+
+/// Read a UTF-16 substring of `len` bytes starting `offset` bytes after
+/// `base`, bounds-checked against `buf` (the buffer `base` points into) —
+/// `offset`/`len` come from the OS, but this never trusts them past the
+/// buffer actually allocated for `FSCTL_GET_REPARSE_POINT`'s output.
+fn read_utf16_bounded(buf: &[u8], base: *const u16, offset: u16, len: u16) -> Option<String> {
+    let base_off = (base as usize).checked_sub(buf.as_ptr() as usize)?;
+    let start = base_off.checked_add(offset as usize)?;
+    let end = start.checked_add(len as usize)?;
+    if end > buf.len() || !len.is_multiple_of(2) {
+        return None;
+    }
+    let units: Vec<u16> =
+        buf[start..end].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
 /// The authoritative real path an already-open `handle` names, via
 /// `GetFinalPathNameByHandleW` directly on that handle — no new handle is
 /// opened, and this function never closes `handle`; the caller keeps
@@ -346,5 +489,65 @@ mod tests {
     fn final_path_for_open_is_none_for_a_nonexistent_path() {
         let missing = std::env::temp_dir().join("vfs-win-does-not-exist-xyz-12345.txt");
         assert!(final_path_for_open(&missing.to_string_lossy()).is_none());
+    }
+
+    /// `reparse_point_target` reads a real junction's substitute name
+    /// without ever opening the target — proven directly by pointing the
+    /// junction at a directory this test deletes *before* calling
+    /// `reparse_point_target`. `final_path_for_open`/`GetFinalPathNameByHandleW`
+    /// would fail outright once the target is gone (it has to open it); a
+    /// function that reads the reparse point's own on-disk metadata must not
+    /// care either way.
+    #[test]
+    fn reparse_point_target_reads_a_junction_without_opening_its_target() {
+        let base =
+            std::env::temp_dir().join(format!("vfs-win-reparse-target-test-{}", std::process::id()));
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = base.join("link");
+        let _ = std::fs::remove_dir(&link);
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &link.to_string_lossy(), &target.to_string_lossy()])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !made {
+            // No `mklink /J` support/privilege on this box — inconclusive.
+            std::fs::remove_dir_all(&base).ok();
+            return;
+        }
+
+        // Delete the target *after* creating the junction but *before*
+        // reading it — an ordinary open-and-follow approach would now fail;
+        // reading the reparse point's own metadata must not.
+        std::fs::remove_dir(&target).ok();
+
+        let got = reparse_point_target(&link.to_string_lossy())
+            .expect("reparse_point_target should read the substitute name regardless of whether the target still exists");
+        assert!(
+            got.to_ascii_lowercase().contains("target"),
+            "unexpected reparse target: {got}"
+        );
+
+        std::fs::remove_dir(&link).ok();
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// An ordinary directory (no reparse point) has nothing to report.
+    #[test]
+    fn reparse_point_target_is_none_for_an_ordinary_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("vfs-win-reparse-target-ordinary-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(reparse_point_target(&dir.to_string_lossy()).is_none());
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    /// A nonexistent path has nothing to report either — the failure mode
+    /// must be `None`, not a panic.
+    #[test]
+    fn reparse_point_target_is_none_for_a_nonexistent_path() {
+        let missing = std::env::temp_dir().join("vfs-win-reparse-target-missing-xyz-12345");
+        assert!(reparse_point_target(&missing.to_string_lossy()).is_none());
     }
 }

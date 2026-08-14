@@ -947,33 +947,29 @@ fn positive_expectation(vector: &str) -> Option<&'static str> {
 /// not a gate-2 classification miss — see this vector's own note in the
 /// matrix.
 ///
-/// `"7"` (junction) and `"9"` (UNC admin share) are excluded for a THIRD,
-/// more serious reason: verified by isolated reproduction (running each
-/// alone, with every other vector skipped — see
-/// `VFS_ESCAPE_ONLY_VECTOR`) — **they genuinely do not classify**. Both
-/// resolve to the real bytes via a syntactically unrelated path (a
-/// different directory tree for the junction; a `UNC\localhost\C$\...` form
-/// for the admin share) that contains no `~`, so `RootMap::compute_under_root`
-/// never reaches its OS-consult branch (`expand_short_name`), which is
-/// gated on `~` for cost — see that function's own doc comment — and is
-/// also the *only* place a syntactically unrelated path like these could
-/// ever be recognised. `path_is_ours` then answers false for both, so
-/// `tramp` still finds the real file (nothing about *reachability* changes)
-/// while `note_passthrough_outcome` never fires — invisible to every
-/// counter. This is a real, currently-open gate-2 gap, not a downstream
-/// gate's concern (unlike vector 8's provider-sealing, or 13/14's own
-/// documented deferrals) — `RootMap::under_root` recognising every buildable
-/// spelling is this gate's own exit criterion. Closing it needs the
-/// OS-consult branch's trigger condition widened past the `~` gate without
-/// reintroducing the per-open Win32 round-trip cost that gate exists to
-/// avoid for the (overwhelming) common case of a path that is not, and was
-/// never going to be, under any managed root — a real design trade-off, not
-/// a one-line fix, and not this task's call to make unilaterally. See
-/// `task-6-report.md` and `rust/docs/escape-matrix.md` for the full account
-/// and a suggested direction.
+/// `"7"` (junction) and `"9"` (UNC admin share) **used to be excluded here
+/// too**, for a third, more serious reason: verified by isolated
+/// reproduction, they genuinely did not classify — both resolve to the real
+/// bytes via a syntactically unrelated path (a different directory tree for
+/// the junction; a `UNC\localhost\C$\...` form for the admin share) that
+/// contains no `~`, so `RootMap::compute_under_root` never reached its
+/// OS-consult branch (`expand_short_name`), the only place a syntactically
+/// unrelated path like these could ever be recognised.
+///
+/// Both are now closed by resolving each into a `VolumeMap` alias **once at
+/// session start**, the same pattern the device/volume-GUID table already
+/// uses, rather than widening the per-open OS-consult gate: `vfs-redirect`'s
+/// `resolve_volume_map` now also (a) registers `\??\UNC\localhost\<drive>$`
+/// as an alias for `<drive>:` for every mounted drive, and (b) walks the
+/// managed root's own ancestor chain, one non-recursive directory listing
+/// per level, registering any *sibling* reparse point whose resolved target
+/// lands inside the root. See `vfs-redirect/src/volumes.rs`'s
+/// `junction_aliases` and `admin_share_nt_key` doc comments for the full
+/// mechanism, the scope this task deliberately chose (and rejected), and
+/// `rust/docs/escape-matrix.md` for the verified before/after.
 fn classification_marker(vector: &str, basename: &str) -> Option<String> {
     match vector {
-        "14" | "5b" | "7" | "9" => None,
+        "14" | "5b" => None,
         // The hardlink itself, not the original canary name.
         "8" => Some("vfs-escape-hardlink".to_string()),
         _ => Some(basename.to_ascii_lowercase()),
@@ -984,26 +980,60 @@ fn classification_marker(vector: &str, basename: &str) -> Option<String> {
 /// `session_id`, with hook-stats logging enabled, and return its own parsed
 /// TSV lines plus the shim's classified-paths set (see
 /// `support::classified_paths`) built from the same run.
+/// The parts of an escape-matrix fixture launch that stay constant across
+/// every call in one test run — bundled so `run_escape_fixture` itself
+/// stays under clippy's argument-count lint rather than growing a ninth
+/// positional parameter for every future per-vector wrinkle.
+#[derive(Clone, Copy)]
+struct EscapeFixtureCtx<'a> {
+    session_id: &'a str,
+    fixture: &'a Path,
+    stats_log: &'a Path,
+    /// See `VFS_ESCAPE_VECTOR7_LINK_DIR`'s doc comment in `vfs-env`: a
+    /// junction created by this test harness itself, before any fixture
+    /// process is launched, so vector 7 never has to construct one from
+    /// inside an already-injected process.
+    vector7_link_dir: Option<&'a str>,
+}
+
 async fn run_escape_fixture(
     client: &mut vfs_control::pb::director_client::DirectorClient<tonic::transport::Channel>,
-    session_id: &str,
-    fixture: &Path,
+    ctx: &EscapeFixtureCtx<'_>,
     target: &Path,
     out_file: &Path,
-    stats_log: &Path,
     only_vector: Option<&str>,
 ) -> (i32, Vec<EscapeLine>, std::collections::BTreeSet<String>, bool) {
     use vfs_control::pb::{launch_event, LaunchReq};
+    let EscapeFixtureCtx { session_id, fixture, stats_log, vector7_link_dir } = *ctx;
 
     let _ = std::fs::remove_file(stats_log);
     let _ = std::fs::remove_file(out_file);
 
     let mut env = std::collections::HashMap::new();
     env.insert("VFS_SHIM_STATS_LOG".to_string(), stats_log.to_string_lossy().into_owned());
+    if let Some(dir) = vector7_link_dir {
+        env.insert("VFS_ESCAPE_VECTOR7_LINK_DIR".to_string(), dir.to_string());
+    }
     // Fast tick: this whole run (nineteen lines plus a couple of helper
     // process spawns) finishes in well under the reporter's 250ms default,
     // so a short override is what makes the classification snapshot land at
     // all — same reasoning as the write-path e2e tests' identical override.
+    //
+    // The vectors-7/9 closeout found that this alone is not quite enough
+    // margin for an *isolated* single-vector run specifically: with
+    // `VFS_ESCAPE_ONLY_VECTOR` set, the selected vector's own decision is
+    // the *only* real file activity in the whole process, so the process's
+    // total lifetime can be short enough that `vfs-fixture-escape`'s own
+    // end-of-run wait (`interval_ms * 2` = 10ms here) lands under Windows'
+    // default ~15.6ms system timer resolution — a `Sleep(10)` on Windows is
+    // not reliably "wakes at 10ms", only "wakes no earlier than 10ms, next
+    // tick or later" — occasionally letting the process exit before the
+    // reporter's first tick ever fires, an intermittent classification miss
+    // unrelated to canonicalisation itself. Fixed at the source
+    // (`vfs-fixture-escape::main`'s end-of-run wait is now floored at 20ms,
+    // comfortably clearing that granularity) rather than by tuning this
+    // interval further, since shrinking it below Windows' own timer
+    // resolution floor would not have helped either.
     env.insert("VFS_SHIM_STATS_INTERVAL_MS".to_string(), "5".to_string());
     if let Some(v) = only_vector {
         env.insert("VFS_ESCAPE_ONLY_VECTOR".to_string(), v.to_string());
@@ -1149,19 +1179,41 @@ async fn escape_matrix_positive_and_negative_canary() {
     std::fs::write(root.join(&neg_rel), b"the-negative-canary-bytes")
         .expect("write negative canary");
 
+    // Vector 7's junction, created here — by this test harness's own,
+    // never-injected process — rather than by the fixture at runtime. See
+    // `VFS_ESCAPE_VECTOR7_LINK_DIR`'s doc comment in `vfs-env` for why: the
+    // fixture spawning `mklink /J` itself would be real, hooked file
+    // activity inside the injected process, racing `vfs-redirect`'s
+    // once-per-session volume/junction resolution (found by reproduction —
+    // an isolated vector-7 run consistently failed to classify until this
+    // moved out of the fixture). Points at the shared `Data` directory both
+    // canaries live in, so one junction covers both.
+    let vector7_link = std::env::temp_dir().join(format!("vfs-escape-junction-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir(&vector7_link);
+    let vector7_link_ready = std::process::Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            &vector7_link.to_string_lossy(),
+            &root.join(&sub).to_string_lossy(),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let vector7_link_dir = vector7_link_ready.then(|| vector7_link.to_string_lossy().into_owned());
+    let ctx = EscapeFixtureCtx {
+        session_id: &session.id,
+        fixture: &fixture,
+        stats_log: &stats_log,
+        vector7_link_dir: vector7_link_dir.as_deref(),
+    };
+
     // ---------------------------------------------------------------
     // Positive canary: every buildable spelling opens it, byte-identical.
     // ---------------------------------------------------------------
-    let (pos_exit, pos_lines, _pos_classified, _pos_truncated) = run_escape_fixture(
-        &mut client,
-        &session.id,
-        &fixture,
-        &root.join(&pos_rel),
-        &out_file,
-        &stats_log,
-        None,
-    )
-    .await;
+    let (pos_exit, pos_lines, _pos_classified, _pos_truncated) =
+        run_escape_fixture(&mut client, &ctx, &root.join(&pos_rel), &out_file, None).await;
     if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
         eprintln!("=== POSITIVE lines ===");
         for l in &pos_lines {
@@ -1203,16 +1255,8 @@ async fn escape_matrix_positive_and_negative_canary() {
     // `rust/docs/escape-matrix.md` for what this half does and does not
     // establish.
     // ---------------------------------------------------------------
-    let (neg_exit, neg_lines, neg_classified, neg_truncated) = run_escape_fixture(
-        &mut client,
-        &session.id,
-        &fixture,
-        &root.join(&neg_rel),
-        &out_file,
-        &stats_log,
-        None,
-    )
-    .await;
+    let (neg_exit, neg_lines, neg_classified, neg_truncated) =
+        run_escape_fixture(&mut client, &ctx, &root.join(&neg_rel), &out_file, None).await;
     if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
         eprintln!("=== NEGATIVE lines ===");
         for l in &neg_lines {
@@ -1265,11 +1309,9 @@ async fn escape_matrix_positive_and_negative_canary() {
         };
         let (iso_exit, iso_lines, iso_classified, iso_truncated) = run_escape_fixture(
             &mut client,
-            &session.id,
-            &fixture,
+            &ctx,
             &root.join(&neg_rel),
             &out_file,
-            &stats_log,
             Some(line.vector.as_str()),
         )
         .await;
@@ -1306,6 +1348,9 @@ async fn escape_matrix_positive_and_negative_canary() {
         .expect("teardown");
 
     server.abort();
+    if vector7_link_ready {
+        let _ = std::fs::remove_dir(&vector7_link);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

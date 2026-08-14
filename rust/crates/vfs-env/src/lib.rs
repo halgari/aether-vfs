@@ -177,6 +177,28 @@ pub const FIXTURE_DIR: &str = "VFS_FIXTURE_DIR";
 /// a caller correlating against the shim's own (not vector-keyed) hook-stats
 /// report needs this to isolate one vector's own classification effect.
 pub const ESCAPE_ONLY_VECTOR: &str = "VFS_ESCAPE_ONLY_VECTOR";
+/// A pre-existing junction directory for vector 7 (junction/reparse point)
+/// to open through, created by the *caller* before launching the fixture at
+/// all — not by the fixture itself. Set, `vector7_junction` opens
+/// `<this>\<target's own filename>` directly and skips its own `mklink /J`
+/// construction step entirely; unset, it falls back to constructing (and
+/// cleaning up) its own junction exactly as before, for a standalone
+/// (uninjected) reproduction where no such pre-existing junction is set up.
+///
+/// Needed once `vfs-redirect`'s `RootMap` volume/junction table is resolved
+/// lazily on a session's first real decision rather than eagerly at
+/// bootstrap (see `vfs-shim::Engine::map`): the fixture's own `mklink /J`
+/// spawn is itself real, hooked file activity in the injected process, so
+/// if the fixture created the junction *after* that first decision had
+/// already fired — which it reliably had, since spawning `cmd.exe` to run
+/// `mklink` is exactly such activity — the junction would not exist yet at
+/// the moment resolution ran, and would never be picked up afterward (the
+/// table is resolved once, not on a schedule). Creating the junction from
+/// the test harness process (never injected) before the fixture is even
+/// launched sidesteps the ordering question entirely — indistinguishable,
+/// from the shim's perspective, from a junction a real mod manager already
+/// had in place before the game process started.
+pub const ESCAPE_VECTOR7_LINK_DIR: &str = "VFS_ESCAPE_VECTOR7_LINK_DIR";
 
 /// What a switch is for, so the surface can be listed and reviewed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,6 +274,11 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_DATA, kind: Kind::Fixture, default: "\"written-bytes\"" },
     Var { name: FIXTURE_DIR, kind: Kind::Fixture, default: "required" },
     Var { name: ESCAPE_ONLY_VECTOR, kind: Kind::Fixture, default: "unset (every vector runs)" },
+    Var {
+        name: ESCAPE_VECTOR7_LINK_DIR,
+        kind: Kind::Fixture,
+        default: "unset (vector 7 constructs its own junction)",
+    },
 ];
 
 /// Is `name` a known switch?
