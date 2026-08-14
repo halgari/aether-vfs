@@ -372,6 +372,7 @@ fn run() -> Result<(), String> {
     } else if wait {
         eprintln!("game exited with code {code}");
         eprint!("{}", vfs_director::io_stats_report(40));
+        print_open_totals();
         session.stop_serve();
     } else {
         eprintln!("game launched (detached). Keep this process alive for IPC — Ctrl+C to stop.");
@@ -393,6 +394,7 @@ fn run() -> Result<(), String> {
             // Every 10s: full top-path I/O report.
             if ticks.is_multiple_of(2) {
                 eprint!("{}", vfs_director::io_stats_report(25));
+                print_open_totals();
             }
             if ticks.is_multiple_of(6) {
                 eprintln!(
@@ -403,6 +405,7 @@ fn run() -> Result<(), String> {
             if !alive && ticks >= 3 {
                 eprintln!("  game process not found — final I/O dump:");
                 eprint!("{}", vfs_director::io_stats_report(40));
+                print_open_totals();
                 session.stop_serve();
                 break;
             }
@@ -855,6 +858,25 @@ fn is_safe_to_wipe(root: &Path) -> bool {
         || s.contains("skyrim-runtime")
         || s.contains("skyrim-data")
         || s.contains(r"\temp\")
+}
+
+/// Director-side open counts, for reconciling against the shim's `routed`
+/// outcome count (see `rust/docs/bypass-baseline.md`).
+///
+/// `skyrim-live` embeds the director directly rather than through the
+/// `vfs-directord` gRPC daemon, so there is no `vfs stats` endpoint to query
+/// for a live game run; this prints the same `io_stats::open_totals()` /
+/// `rejected_writes()` the gRPC `stats` RPC exposes for the daemon case.
+/// Purely additive stderr output — no I/O routing decision reads this.
+fn print_open_totals() {
+    let (ok, err) = vfs_director::io_stats::open_totals();
+    let rejected = vfs_director::io_stats::rejected_writes();
+    let rejected_total: u64 = rejected.iter().map(|(_, c)| *c).sum();
+    eprintln!(
+        "  vfs-io opens: ok={ok} err={err} (reconciliation target ok+err={}) rejected_writes={} distinct path(s), {rejected_total} total",
+        ok + err,
+        rejected.len()
+    );
 }
 
 fn game_process_alive() -> bool {
