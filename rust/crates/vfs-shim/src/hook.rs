@@ -533,35 +533,81 @@ unsafe fn cwd_from_peb() -> Option<(isize, String)> {
     Some((handle, String::from_utf16_lossy(core::slice::from_raw_parts(buf, units))))
 }
 
-/// The directory that a relative name is expressed against.
+/// The directory that a relative name is expressed against, plus whether
+/// finding it required consulting the OS about a handle's *current* target
+/// rather than reading something the shim already knew deterministically.
+/// See [`DecodedPath`] for why that distinction has to travel with the path.
 ///
-/// Three kinds of parent reach us, and missing any one makes the child
+/// Four kinds of parent reach us, and missing any one makes the child
 /// undecodable — which is silent rather than an error: the call simply bypasses
 /// every decision we would have made and lands on whatever is really on disk.
 /// Shared by every hook that has to decode a name, so they cannot drift apart.
-unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<String> {
+unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<(String, bool)> {
     let root = root_handle as isize;
     // 1. Our own synthetic directory handles.
     if crate::fuse_synth::is_fuse_synth(root) {
         // Prefer PATH_TABLE (recorded on open); fall back to fuse_synth abs_path.
-        return PATH_TABLE
+        let p = PATH_TABLE
             .lock()
             .ok()
             .and_then(|t| t.get(&root).cloned())
-            .or_else(|| crate::fuse_synth::abs_path(root));
+            .or_else(|| crate::fuse_synth::abs_path(root))?;
+        return Some((p, false));
     }
     // 2. A real directory the process opened; we remember every one.
     if let Some(p) = path_of_handle(root_handle) {
-        return Some(p);
+        return Some((p, false));
     }
     // 3. The current-directory handle. The OS creates it, so it is in no table
     //    of ours, yet it is the parent for every relative open a CRT makes:
     //    `CreateFileW("Data\X")` becomes (CWD handle + "Data\X").
-    let (cwd_handle, dos) = cwd_from_peb()?;
-    if cwd_handle != root {
-        return None;
+    if let Some((cwd_handle, dos)) = cwd_from_peb() {
+        if cwd_handle == root {
+            return Some((format!(r"\??\{}", dos.trim_end_matches(['\\', '/'])), false));
+        }
     }
-    Some(format!(r"\??\{}", dos.trim_end_matches(['\\', '/'])))
+    // 4. A handle we never saw opened — opened before injection, inherited
+    //    across a `CreateProcess`, or duplicated in from another process —
+    //    so it appears in none of our tables and is not the PEB's CWD
+    //    handle either. This is `NtCreateFile`'s
+    //    `OBJECT_ATTRIBUTES.RootDirectory` vector: the game holds a real
+    //    directory handle and names the child only relative to it, so the
+    //    string a hook sees (`Skyrim\Data\a.esp`) cannot be related to the
+    //    managed root by any amount of string canonicalisation — the root
+    //    information lives in the handle, not the string. Ask the OS
+    //    directly: `GetFinalPathNameByHandleW` on the handle itself needs no
+    //    reopen, since we already hold it.
+    //
+    //    Its answer is `VOLUME_NAME_DOS` (`\\?\`-prefixed), not the `\??\`
+    //    spelling a real NT open presents, but that is not parsed here —
+    //    `path_of`'s callers always re-canonicalise the assembled path
+    //    (`decision_for` -> `RootMap::under_root`, `path_is_ours` ->
+    //    `RootMap::contains`), and `canonicalise` already treats `\\?\` as a
+    //    recognised prefix. Handing back the OS string unparsed is exactly
+    //    what `vfs_redirect::expand_short_name`'s callers already do with
+    //    this same result shape (see its doc comment) — hand-parsing it here
+    //    instead would be a second, drifting implementation of that same
+    //    normalisation.
+    //
+    //    Expected to fire rarely: every handle the shim itself sees opened
+    //    (case 2, above) is already free to answer from that table, whether
+    //    or not it lies under the root — this branch is reached only for a
+    //    handle the shim was not present to observe. Its cost is coupled to
+    //    `tag_under_root` recording *every* handle unconditionally (not just
+    //    ones under the root) — see that function's own doc comment.
+    //
+    //    SAFETY: `root_handle` is `OBJECT_ATTRIBUTES.RootDirectory` from an
+    //    in-flight NT call this process is making right now — by
+    //    construction a currently-valid, open handle owned by the caller
+    //    (the game), which is exactly what `final_path_for_handle` requires.
+    //    This function does not close it or otherwise take ownership of it.
+    let resolved = vfs_win::final_path_for_handle(root_handle)?;
+    // `true`: this string is a snapshot of the handle's target *right now*,
+    // not a pure function of anything in `root_handle`/the relative name
+    // bytes — every caller that turns this into a `RootMap`-backed decision
+    // must say so too (`vfs_redirect::UncachedScope`), or the decision could
+    // be cached under a string that stops being true later in the session.
+    Some((resolved, true))
 }
 
 unsafe fn oa_name_only(oa: *const ObjectAttributes) -> Option<String> {
@@ -571,31 +617,65 @@ unsafe fn oa_name_only(oa: *const ObjectAttributes) -> Option<String> {
     object_name_str(oa)
 }
 
-unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
+/// A path decoded from an `OBJECT_ATTRIBUTES`, tagged with whether decoding it
+/// required consulting the OS about a handle's current target
+/// (`parent_dir_of_handle`'s case 4) rather than being derivable purely from
+/// the shim's own tables, the raw name string, or the process's own PEB.
+///
+/// `os_consulted` is the caller-side half of `vfs_redirect::UncachedScope`'s
+/// contract: any `RootMap`-backed decision made with `path` — directly via
+/// `decision_for`, or indirectly via `path_is_ours` — must hold that guard
+/// for as long as it is deciding with `path`, because the answer is itself
+/// only a fact about a handle's target *at this moment*, not a pure function
+/// of `path`'s bytes that would be safe to cache under them.
+struct DecodedPath {
+    path: String,
+    os_consulted: bool,
+}
+
+/// Decode `oa` to a full path, once, tracking whether the decode needed an OS
+/// consult. [`path_of`] is the provenance-blind convenience wrapper for the
+/// many callers (filename matching, tracing, hookstats) that only ever read
+/// the string and never feed it back into a cached `RootMap` decision.
+unsafe fn path_of_tracked(oa: *const ObjectAttributes) -> Option<DecodedPath> {
     if oa.is_null() {
         return None;
     }
     let oa_ref = &*oa;
     let name = object_name_str(oa)?;
     if oa_ref.root_directory.is_null() {
-        return if name.is_empty() { None } else { Some(name) };
+        return if name.is_empty() {
+            None
+        } else {
+            Some(DecodedPath { path: name, os_consulted: false })
+        };
     }
-    let parent = parent_dir_of_handle(oa_ref.root_directory)?;
+    let (parent, os_consulted) = parent_dir_of_handle(oa_ref.root_directory)?;
     let parent = parent.trim_end_matches(['\\', '/']);
     let rel = name.trim_start_matches(['\\', '/']);
-    if rel.is_empty() {
-        Some(parent.to_string())
-    } else {
-        Some(format!("{parent}\\{rel}"))
-    }
+    let path = if rel.is_empty() { parent.to_string() } else { format!("{parent}\\{rel}") };
+    Some(DecodedPath { path, os_consulted })
 }
 
-/// Decode + ask the engine what to do with an open, given its access mask and
-/// create disposition (write-path aware).
-unsafe fn decision_for(oa: *const ObjectAttributes, access: u32, disposition: u32) -> Option<Decision> {
+unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
+    path_of_tracked(oa).map(|d| d.path)
+}
+
+/// Decide what to do with an already-decoded `path`, given its access mask
+/// and create disposition (write-path aware). Takes the path rather than
+/// `oa` so a single invocation's decode (`path_of_tracked`, done once by
+/// `create_hook`/`open_hook`) is reused rather than re-run here — see
+/// `tag_under_root`'s doc comment for why re-running it matters for cost, not
+/// just style.
+///
+/// Caller's responsibility, not this function's: if the path came from an
+/// OS-consulted decode, hold a `vfs_redirect::UncachedScope` around this call
+/// (and any other `RootMap`-backed call made with the same path) so the
+/// answer is never cached under it.
+fn decision_for(path: Option<&str>, access: u32, disposition: u32) -> Option<Decision> {
     let engine = ENGINE.get()?;
-    let path = path_of(oa)?;
-    Some(engine.decide_open(&path, access, disposition))
+    let path = path?;
+    Some(engine.decide_open(path, access, disposition))
 }
 
 /// Record a `decision_for` fallthrough outcome (`Redirect`/`Serve`/`Deny`),
@@ -606,18 +686,20 @@ unsafe fn decision_for(oa: *const ObjectAttributes, access: u32, disposition: u3
 /// *why* it returned `None`, so without this guard an open already recorded
 /// there would be counted a second time here.
 ///
-/// Cheap when disabled: `path_of` is only evaluated once `enabled()` is known
-/// true, and `note_open_outcome` itself is a no-op otherwise.
-unsafe fn note_decision_outcome(
-    oa: *const ObjectAttributes,
+/// Cheap when disabled: the caller passes an already-decoded `path` rather
+/// than this function re-decoding `oa` itself (see `tag_under_root`'s doc
+/// comment for why re-decoding independently, per caller, is the thing to
+/// avoid), and `note_open_outcome` itself is a no-op when stats are disabled.
+fn note_decision_outcome(
+    path: Option<&str>,
     already: bool,
     outcome: crate::hookstats::OpenOutcome,
 ) {
     if already || !crate::hookstats::enabled() {
         return;
     }
-    if let Some(p) = path_of(oa) {
-        crate::hookstats::note_open_outcome(outcome, &p);
+    if let Some(p) = path {
+        crate::hookstats::note_open_outcome(outcome, p);
     }
 }
 
@@ -629,15 +711,19 @@ unsafe fn note_decision_outcome(
 /// bypass. `path_is_ours` is the one helper that already answers "under a
 /// managed root" correctly for both the engine's and the FUSE client's
 /// notions of the root (see its own doc comment).
-unsafe fn note_passthrough_outcome(oa: *const ObjectAttributes, already: bool) {
+///
+/// Caller's responsibility: hold a `vfs_redirect::UncachedScope` around this
+/// call if `path` came from an OS-consulted decode — `path_is_ours` reaches
+/// the same cached `RootMap::under_root` `decision_for` does.
+fn note_passthrough_outcome(path: Option<&str>, already: bool) {
     if already || !crate::hookstats::enabled() {
         return;
     }
-    if let Some(p) = path_of(oa) {
-        if path_is_ours(&p) {
+    if let Some(p) = path {
+        if path_is_ours(p) {
             crate::hookstats::note_open_outcome(
                 crate::hookstats::OpenOutcome::FellThroughPassthrough,
-                &p,
+                p,
             );
         }
     }
@@ -648,30 +734,53 @@ unsafe fn note_passthrough_outcome(oa: *const ObjectAttributes, already: bool) {
 /// managed root. Harmless for file handles (they never receive a dir-enum call)
 /// and reclaimed by `NtClose`. Shared by the `NtCreateFile` and `NtOpenFile`
 /// pass-through paths.
-unsafe fn tag_under_root(
-    file_handle: *mut HANDLE,
-    oa: *const ObjectAttributes,
-    status: NTSTATUS,
-) {
+///
+/// Takes the already-decoded `path` rather than `oa`: `create_hook`/
+/// `open_hook` decode once per invocation (`path_of_tracked`) and thread the
+/// result through every function that used to call `path_of(oa)`
+/// independently — including this one, `record_path`, `record_identity`,
+/// `note_decision_outcome`, and `note_passthrough_outcome`. Before that, a
+/// single hooked `NtCreateFile` could re-run the decode 2-5 times over; for
+/// an unresolved handle-relative open that decode is `parent_dir_of_handle`'s
+/// OS-consulted case 4 (a `GetFinalPathNameByHandleW` call), so re-running it
+/// per caller meant several syscalls per open rather than one. Resolving once
+/// and passing the `&str` down is safe to do — nothing changes underneath a
+/// single hook invocation's decoded path in the window between its callers —
+/// which is a different claim from *caching* it across invocations, and must
+/// not be confused with the caching `vfs_redirect::UncachedScope` forbids for
+/// an OS-consulted path (see `parent_dir_of_handle`'s case 4).
+///
+/// Caller's responsibility: hold a `vfs_redirect::UncachedScope` around this
+/// call if `path` came from an OS-consulted decode — `path_is_ours` below
+/// reaches the same cached `RootMap::under_root` `decision_for` does.
+unsafe fn tag_under_root(file_handle: *mut HANDLE, path: Option<&str>, status: NTSTATUS) {
     // NT_SUCCESS is status >= 0.
     if status < 0 || file_handle.is_null() {
         return;
     }
-    let Some(path) = path_of(oa) else { return };
+    let Some(path) = path else { return };
     let key = *file_handle as isize;
     // Remember every handle's path, not just the ones under the root. NT lets a
     // caller open a file as (directory handle + leaf name), and without the
     // parent's path such an open cannot be decoded at all -- it is invisible to
     // every decision we make and reaches the real directory behind the mount.
     // The parent is often outside the root while the child is under it.
+    //
+    // Load-bearing for cost, not just correctness: `parent_dir_of_handle`'s
+    // case 4 (OS-consulted fallback for a handle unseen by the shim) reasons
+    // that it fires rarely *because* every handle the shim does see reach a
+    // hooked create/open lands here unconditionally. Narrowing this insert to
+    // only under-root handles (matching the `DIR_TABLE` insert just below)
+    // would make case 4 fire for every outside-root ancestor handle too,
+    // changing that branch from a rare safety net into a per-open cost.
     if let Ok(mut t) = HANDLE_PATHS.lock() {
         if t.len() < HANDLE_PATHS_MAX {
-            t.insert(key, path.clone());
+            t.insert(key, path.to_string());
         }
     }
-    if path_is_ours(&path) {
+    if path_is_ours(path) {
         if let Ok(mut table) = DIR_TABLE.lock() {
-            table.insert(key, DirTracked { dir_nt_path: path, state: None });
+            table.insert(key, DirTracked { dir_nt_path: path.to_string(), state: None });
         }
     }
 }
@@ -687,20 +796,20 @@ fn path_of_handle(handle: HANDLE) -> Option<String> {
 }
 
 /// Record a redirected handle's virtual identity: after a successful redirected
-/// open, map the handle to the volume-relative form of the ORIGINAL virtual path
-/// (`oa` still holds it — only a local `new_oa` was rewritten). Reclaimed by
-/// `NtClose`. Enables the `NtQueryInformationFile` class-48 spoof.
-unsafe fn record_identity(
-    file_handle: *mut HANDLE,
-    oa: *const ObjectAttributes,
-    status: NTSTATUS,
-) {
+/// open, map the handle to the volume-relative form of the ORIGINAL virtual
+/// path (the caller's `oa` still held it — only a local `new_oa` was
+/// rewritten before the trampoline call). Reclaimed by `NtClose`. Enables the
+/// `NtQueryInformationFile` class-48 spoof.
+///
+/// Takes the already-decoded `path` — see `tag_under_root`'s doc comment for
+/// why callers thread this through rather than re-decoding independently.
+unsafe fn record_identity(file_handle: *mut HANDLE, path: Option<&str>, status: NTSTATUS) {
     if status < 0 || file_handle.is_null() {
         return;
     }
-    if let Some(path) = path_of(oa) {
+    if let Some(path) = path {
         if let Ok(mut t) = IDENTITY_TABLE.lock() {
-            t.insert(*file_handle as isize, nt_to_volume_relative(&path));
+            t.insert(*file_handle as isize, nt_to_volume_relative(path));
         }
     }
 }
@@ -708,14 +817,20 @@ unsafe fn record_identity(
 /// Record a successful under-root open's handle -> folded vpath components, so
 /// a later handle-based delete/rename can act by vpath. Shared by both open
 /// hooks across all decision branches.
-unsafe fn record_path(file_handle: *mut HANDLE, oa: *const ObjectAttributes, status: NTSTATUS) {
+///
+/// Takes the already-decoded `path` — see `tag_under_root`'s doc comment for
+/// why callers thread this through rather than re-decoding independently.
+/// Caller's responsibility: hold a `vfs_redirect::UncachedScope` around this
+/// call if `path` came from an OS-consulted decode (`path_is_ours` below
+/// reaches the same cached `RootMap::under_root` `decision_for` does).
+unsafe fn record_path(file_handle: *mut HANDLE, path: Option<&str>, status: NTSTATUS) {
     if status < 0 || file_handle.is_null() {
         return;
     }
-    if let Some(path) = path_of(oa) {
-        if path_is_ours(&path) {
+    if let Some(path) = path {
+        if path_is_ours(path) {
             if let Ok(mut t) = PATH_TABLE.lock() {
-                t.insert(*file_handle as isize, path);
+                t.insert(*file_handle as isize, path.to_string());
             }
         }
     }
@@ -763,7 +878,15 @@ unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Option<String> 
     // `vpath_under_root`, which needs a full path, so join it here — and
     // decline when the parent is unknown rather than passing a bare leaf name
     // off as if it were absolute.
-    let parent = parent_dir_of_handle(root_dir as HANDLE)?;
+    //
+    // NOTE: discards `parent_dir_of_handle`'s OS-consulted provenance bit.
+    // Its case-4 fallback can fire here exactly as it can for a handle-relative
+    // create/open, and this rename/delete path's callers (`engine.rename`/
+    // `engine.whiteout`) are `RootMap`-backed and cached the same way
+    // `decision_for` is — so an OS-consulted rename target has the same
+    // caching exposure `create_hook`/`open_hook` were fixed for, not yet
+    // closed here. Tracked as a known gap rather than silently assumed safe.
+    let (parent, _os_consulted) = parent_dir_of_handle(root_dir as HANDLE)?;
     let parent = parent.trim_end_matches(['\\', '/']);
     let rel = name.trim_start_matches(['\\', '/']);
     if rel.is_empty() {
@@ -921,6 +1044,11 @@ fn disposition_information(disposition: u32, existed_before: bool) -> usize {
 unsafe fn try_fuse_create(
     file_handle: *mut HANDLE,
     oa: *const ObjectAttributes,
+    // Already-decoded path for this same invocation (`create_hook`/`open_hook`
+    // call `path_of_tracked` once and pass its `.path` down) — see
+    // `tag_under_root`'s doc comment for why this is threaded through rather
+    // than re-decoded here via `path_of(oa)`.
+    path: Option<&str>,
     iosb: *mut c_void,
     write: bool,
     disposition: u32,
@@ -935,7 +1063,7 @@ unsafe fn try_fuse_create(
     outcome_recorded: &mut bool,
 ) -> Option<NTSTATUS> {
     let client = crate::fuse_client::global()?;
-    let path = path_of(oa)?;
+    let path = path?.to_string();
     let vpath = client.vpath_under_root(&path)?;
     // Directory open of root: empty vpath → "."
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
@@ -1050,9 +1178,9 @@ unsafe fn try_fuse_create(
             if let Ok(mut t) = PATH_TABLE.lock() {
                 t.insert(h, path.clone());
             }
-            record_path(file_handle, oa, STATUS_SUCCESS);
+            record_path(file_handle, Some(&path), STATUS_SUCCESS);
             if resp.is_dir {
-                tag_under_root(file_handle, oa, STATUS_SUCCESS);
+                tag_under_root(file_handle, Some(&path), STATUS_SUCCESS);
             }
             director_open_trace(&path, resp.size);
             Some(STATUS_SUCCESS)
@@ -1192,7 +1320,10 @@ fn director_open_trace(nt_or_win_path: &str, size: u64) {
 /// a dir create, or no FUSE client) so the caller falls through.
 unsafe fn try_fuse_mkdir(
     file_handle: *mut HANDLE,
-    oa: *const ObjectAttributes,
+    // Already-decoded path for this same invocation — see `tag_under_root`'s
+    // doc comment for why callers thread this through rather than each
+    // re-decoding via `path_of(oa)` independently.
+    path: Option<&str>,
     iosb: *mut c_void,
     opts: u32,
     disp: u32,
@@ -1205,8 +1336,8 @@ unsafe fn try_fuse_mkdir(
         return None;
     }
     let client = crate::fuse_client::global()?;
-    let path = path_of(oa)?;
-    let vpath = client.vpath_under_root(&path)?;
+    let path = path?;
+    let vpath = client.vpath_under_root(path)?;
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
     match client.mkdir(vp, 0o755) {
         Ok(()) => {
@@ -1225,8 +1356,8 @@ unsafe fn try_fuse_mkdir(
                 core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
                 core::ptr::write_unaligned(p.add(8) as *mut usize, FILE_CREATED);
             }
-            record_path(file_handle, oa, STATUS_SUCCESS);
-            tag_under_root(file_handle, oa, STATUS_SUCCESS);
+            record_path(file_handle, Some(path), STATUS_SUCCESS);
+            tag_under_root(file_handle, Some(path), STATUS_SUCCESS);
             Some(STATUS_SUCCESS)
         }
         // Parent missing → name-not-found (do not fall through to a real on-disk
@@ -1252,8 +1383,8 @@ unsafe fn try_fuse_mkdir(
                         core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
                         core::ptr::write_unaligned(p.add(8) as *mut usize, crate::ntdef::FILE_OPENED);
                     }
-                    record_path(file_handle, oa, STATUS_SUCCESS);
-                    tag_under_root(file_handle, oa, STATUS_SUCCESS);
+                    record_path(file_handle, Some(path), STATUS_SUCCESS);
+                    tag_under_root(file_handle, Some(path), STATUS_SUCCESS);
                     Some(STATUS_SUCCESS)
                 }
             }
@@ -1286,15 +1417,30 @@ unsafe extern "system" fn create_hook(
             file_handle, access, oa, iosb, alloc, attrs, share, disp, opts, ea, ealen,
         );
     }
+    // Decode once for the whole call and thread the result through every
+    // function below that used to call `path_of(oa)` independently — see
+    // `tag_under_root`'s doc comment for the cost argument.
+    let decoded = path_of_tracked(oa);
+    let path: Option<&str> = decoded.as_ref().map(|d| d.path.as_str());
+    let os_consulted = decoded.as_ref().is_some_and(|d| d.os_consulted);
+    // Held for the rest of this call whenever `path` is itself a snapshot of
+    // a live OS query (an unseen handle's current target — `parent_dir_of_handle`
+    // case 4) rather than a pure function of its own bytes: every
+    // `RootMap`-backed decision made below with `path` (`decision_for`, and
+    // `path_is_ours` via `tag_under_root`/`record_path`/
+    // `note_passthrough_outcome`) must not be cached under it. See
+    // `vfs_redirect::UncachedScope`'s doc comment.
+    let _uncached_guard = os_consulted.then(vfs_redirect::UncachedScope::enter);
+
     // Directory create under the managed root → ring OP_MKDIR (must precede the
     // generic file open below, which would otherwise create a FILE named as the
     // directory via the write-create path).
-    if let Some(st) = try_fuse_mkdir(file_handle, oa, iosb, opts, disp) {
+    if let Some(st) = try_fuse_mkdir(file_handle, path, iosb, opts, disp) {
         return st;
     }
     // Prefer director FUSE for managed-root content (no in-shim zipserve).
-    match path_of(oa) {
-        Some(p) => crate::hookstats::note_passthrough(&p),
+    match path {
+        Some(p) => crate::hookstats::note_passthrough(p),
         // An open we cannot decode is an open we cannot serve. If the masters
         // are hiding anywhere, it is here.
         None => crate::hookstats::note_undecodable(oa_name_only(oa).as_deref()),
@@ -1307,6 +1453,7 @@ unsafe extern "system" fn create_hook(
     if let Some(st) = try_fuse_create(
         file_handle,
         oa,
+        path,
         iosb,
         is_write_open(access, disp),
         disp,
@@ -1315,9 +1462,9 @@ unsafe extern "system" fn create_hook(
         &mut outcome_recorded,
     ) {
         if crate::hookstats::enabled() {
-            if let Some(p) = path_of(oa) {
-                crate::hookstats::note_trace("open", &p, if st >= 0 { "ok" } else { "FAIL" });
-                crate::hookstats::note_open_outcome(crate::hookstats::OpenOutcome::Routed, &p);
+            if let Some(p) = path {
+                crate::hookstats::note_trace("open", p, if st >= 0 { "ok" } else { "FAIL" });
+                crate::hookstats::note_open_outcome(crate::hookstats::OpenOutcome::Routed, p);
             }
         }
         _hs.mark_rooted();
@@ -1327,12 +1474,12 @@ unsafe extern "system" fn create_hook(
         crate::hookstats::note_open_sync(opts & 0x0000_0030 != 0);
         return st;
     }
-    let decision = decision_for(oa, access, disp);
+    let decision = decision_for(path, access, disp);
     let is_passthrough = matches!(&decision, Some(Decision::PassThrough));
     match decision {
         Some(Decision::Redirect { target_nt }) => {
             note_decision_outcome(
-                oa,
+                path,
                 outcome_recorded,
                 crate::hookstats::OpenOutcome::FellThroughRedirect,
             );
@@ -1356,13 +1503,13 @@ unsafe extern "system" fn create_hook(
                 file_handle, access, &new_oa, iosb, alloc, attrs, share, disp, opts, ea, ealen,
             );
             drop(wbuf);
-            record_identity(file_handle, oa, status);
-            record_path(file_handle, oa, status);
+            record_identity(file_handle, path, status);
+            record_path(file_handle, path, status);
             status
         }
         Some(Decision::Serve { container_nt, offset, length }) => {
             note_decision_outcome(
-                oa,
+                path,
                 outcome_recorded,
                 crate::hookstats::OpenOutcome::FellThroughServe,
             );
@@ -1392,31 +1539,31 @@ unsafe extern "system" fn create_hook(
             }
         }
         Some(Decision::Deny) => {
-            note_decision_outcome(oa, outcome_recorded, crate::hookstats::OpenOutcome::Denied);
+            note_decision_outcome(path, outcome_recorded, crate::hookstats::OpenOutcome::Denied);
             STATUS_OBJECT_NAME_NOT_FOUND
         }
         Some(Decision::PassThrough) | None => {
             if is_passthrough {
-                note_passthrough_outcome(oa, outcome_recorded);
+                note_passthrough_outcome(path, outcome_recorded);
             }
             // Never pass a FUSE RootDirectory to the kernel (invalid handle).
             // DRM host exceptions resolve via path_of → absolute tramp instead.
             if fuse_root_directory(oa) {
-                if let Some(path) = path_of(oa) {
+                if let Some(path) = path {
                     let status = tramp_create_abs(
                         tramp, file_handle, access, oa, iosb, alloc, attrs, share, disp, opts,
-                        ea, ealen, &path,
+                        ea, ealen, path,
                     );
-                    tag_under_root(file_handle, oa, status);
-                    record_path(file_handle, oa, status);
+                    tag_under_root(file_handle, Some(path), status);
+                    record_path(file_handle, Some(path), status);
                     return status;
                 }
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
             let status =
                 tramp(file_handle, access, oa, iosb, alloc, attrs, share, disp, opts, ea, ealen);
-            tag_under_root(file_handle, oa, status);
-            record_path(file_handle, oa, status);
+            tag_under_root(file_handle, path, status);
+            record_path(file_handle, path, status);
             status
         }
     }
@@ -1542,8 +1689,15 @@ unsafe extern "system" fn open_hook(
     if in_hook_reenter() {
         return tramp(file_handle, access, oa, iosb, share, opts);
     }
-    match path_of(oa) {
-        Some(p) => crate::hookstats::note_passthrough(&p),
+    // Decode once for the whole call — see `create_hook` and `tag_under_root`'s
+    // doc comment for why, and for what the `UncachedScope` guard is for.
+    let decoded = path_of_tracked(oa);
+    let path: Option<&str> = decoded.as_ref().map(|d| d.path.as_str());
+    let os_consulted = decoded.as_ref().is_some_and(|d| d.os_consulted);
+    let _uncached_guard = os_consulted.then(vfs_redirect::UncachedScope::enter);
+
+    match path {
+        Some(p) => crate::hookstats::note_passthrough(p),
         None => crate::hookstats::note_undecodable(oa_name_only(oa).as_deref()),
     }
     // Set by `try_fuse_create` when it already recorded an outcome (DRM
@@ -1559,6 +1713,7 @@ unsafe extern "system" fn open_hook(
     if let Some(st) = try_fuse_create(
         file_handle,
         oa,
+        path,
         iosb,
         is_write_open(access, vfs_redirect::FILE_OPEN),
         vfs_redirect::FILE_OPEN,
@@ -1567,21 +1722,21 @@ unsafe extern "system" fn open_hook(
         &mut outcome_recorded,
     ) {
         if crate::hookstats::enabled() {
-            if let Some(p) = path_of(oa) {
-                crate::hookstats::note_trace("open", &p, if st >= 0 { "ok" } else { "FAIL" });
-                crate::hookstats::note_open_outcome(crate::hookstats::OpenOutcome::Routed, &p);
+            if let Some(p) = path {
+                crate::hookstats::note_trace("open", p, if st >= 0 { "ok" } else { "FAIL" });
+                crate::hookstats::note_open_outcome(crate::hookstats::OpenOutcome::Routed, p);
             }
         }
         _hs.mark_rooted();
         return st;
     }
     // NtOpenFile has no disposition; it always opens existing (FILE_OPEN).
-    let decision = decision_for(oa, access, vfs_redirect::FILE_OPEN);
+    let decision = decision_for(path, access, vfs_redirect::FILE_OPEN);
     let is_passthrough = matches!(&decision, Some(Decision::PassThrough));
     match decision {
         Some(Decision::Redirect { target_nt }) => {
             note_decision_outcome(
-                oa,
+                path,
                 outcome_recorded,
                 crate::hookstats::OpenOutcome::FellThroughRedirect,
             );
@@ -1603,13 +1758,13 @@ unsafe extern "system" fn open_hook(
             };
             let status = tramp(file_handle, access, &new_oa, iosb, share, opts);
             drop(wbuf);
-            record_identity(file_handle, oa, status);
-            record_path(file_handle, oa, status);
+            record_identity(file_handle, path, status);
+            record_path(file_handle, path, status);
             status
         }
         Some(Decision::Serve { container_nt, offset, length }) => {
             note_decision_outcome(
-                oa,
+                path,
                 outcome_recorded,
                 crate::hookstats::OpenOutcome::FellThroughServe,
             );
@@ -1635,26 +1790,26 @@ unsafe extern "system" fn open_hook(
             }
         }
         Some(Decision::Deny) => {
-            note_decision_outcome(oa, outcome_recorded, crate::hookstats::OpenOutcome::Denied);
+            note_decision_outcome(path, outcome_recorded, crate::hookstats::OpenOutcome::Denied);
             STATUS_OBJECT_NAME_NOT_FOUND
         }
         Some(Decision::PassThrough) | None => {
             if is_passthrough {
-                note_passthrough_outcome(oa, outcome_recorded);
+                note_passthrough_outcome(path, outcome_recorded);
             }
             if fuse_root_directory(oa) {
-                if let Some(path) = path_of(oa) {
+                if let Some(path) = path {
                     let status =
-                        tramp_open_abs(tramp, file_handle, access, oa, iosb, share, opts, &path);
-                    tag_under_root(file_handle, oa, status);
-                    record_path(file_handle, oa, status);
+                        tramp_open_abs(tramp, file_handle, access, oa, iosb, share, opts, path);
+                    tag_under_root(file_handle, Some(path), status);
+                    record_path(file_handle, Some(path), status);
                     return status;
                 }
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
             let status = tramp(file_handle, access, oa, iosb, share, opts);
-            tag_under_root(file_handle, oa, status);
-            record_path(file_handle, oa, status);
+            tag_under_root(file_handle, path, status);
+            record_path(file_handle, path, status);
             status
         }
     }

@@ -1,0 +1,8 @@
+[package]
+name = "vfs-fixture-escape"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "vfs-fixture-escape"
+path = "src/main.rs"

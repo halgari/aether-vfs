@@ -1,9 +1,10 @@
 //! M0 acceptance: daemon → CreateSession → AddSource(disk) → Launch(fixture-read)
 //! via a scenario.toml, asserting the fixture reads virtual bytes through the ring.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use tokio::net::TcpListener;
 use tonic::transport::Server;
@@ -51,23 +52,141 @@ fn locate_artifact(name: &str) -> PathBuf {
     );
 }
 
+/// Every crate directory reachable from `crate_dir` by following `path =
+/// "..."` dependencies — normal, dev, build, and per-target — transitively,
+/// including `crate_dir` itself. Parsed straight from each crate's
+/// `Cargo.toml` rather than hand-maintained: a fixed list of "the crates that
+/// feed vfs-shim-dll" silently stops covering the graph the moment a
+/// dependency is added or changed, which is exactly how this function's
+/// caller earned its history of testing against a stale DLL.
+///
+/// Some of these crates depend on each other in both directions across the
+/// normal/dev split (`vfs-shim` depends on `vfs-inject`; `vfs-inject`
+/// dev-depends on `vfs-shim`), so this canonicalizes each directory before
+/// checking whether it has already been queued — without that, a `path =
+/// "../x"` hop back into an already-visited crate would never match its
+/// earlier, differently-`..`-laden spelling, and the walk would not
+/// terminate.
+fn transitive_crate_dirs(crate_dir: &Path) -> Vec<PathBuf> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut queue: VecDeque<PathBuf> = VecDeque::new();
+    queue.push_back(crate_dir.to_path_buf());
+    while let Some(raw_dir) = queue.pop_front() {
+        let dir = raw_dir.canonicalize().unwrap_or(raw_dir);
+        if seen.contains(&dir) {
+            continue;
+        }
+        seen.push(dir.clone());
+        let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+            continue;
+        };
+        let Ok(manifest) = text.parse::<toml::Value>() else {
+            continue;
+        };
+        let mut dep_tables: Vec<&toml::Value> = Vec::new();
+        for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
+            if let Some(t) = manifest.get(key) {
+                dep_tables.push(t);
+            }
+        }
+        if let Some(targets) = manifest.get("target").and_then(|t| t.as_table()) {
+            for platform in targets.values() {
+                for key in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                    if let Some(t) = platform.get(key) {
+                        dep_tables.push(t);
+                    }
+                }
+            }
+        }
+        for table in dep_tables {
+            let Some(table) = table.as_table() else { continue };
+            for spec in table.values() {
+                if let Some(rel) = spec.get("path").and_then(|p| p.as_str()) {
+                    queue.push_back(dir.join(rel));
+                }
+            }
+        }
+    }
+    seen
+}
+
+/// Latest modification time of any file under `dir`, recursively, skipping
+/// `target` and `.git`. `None` if `dir` has no files (or does not exist).
+fn newest_mtime(dir: &Path) -> Option<SystemTime> {
+    let mut newest: Option<SystemTime> = None;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if matches!(entry.file_name().to_str(), Some("target") | Some(".git")) {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
+                newest = Some(newest.map_or(mtime, |n| n.max(mtime)));
+            }
+        }
+    }
+    newest
+}
+
+/// Whether `artifact` is missing, or older than any file feeding the crate at
+/// `crate_dir` through its transitive local dependency graph.
+///
+/// This is the check the old `ensure_inject_artifacts` skipped: it rebuilt
+/// only when an artifact file did not exist, so `cargo test -p vfs-directord`
+/// would silently validate a change to `vfs-redirect` or `vfs-shim` against
+/// whatever DLL a previous, unrelated build had left behind — no error, just
+/// a passing test that measured the wrong binary. A needless rebuild costs
+/// seconds; a stale one costs a false pass, so staleness (not mere absence)
+/// is the bar, and every direction of that comparison is biased toward
+/// rebuilding: `artifact_is_stale` treats an unreadable artifact as stale
+/// (not "assume fresh"), and treats an unreadable dependency directory as
+/// contributing no mtime (so it can never *suppress* a rebuild it should not).
+fn artifact_is_stale(artifact: &Path, crate_dir: &Path) -> bool {
+    let Ok(artifact_mtime) = std::fs::metadata(artifact).and_then(|m| m.modified()) else {
+        return true;
+    };
+    transitive_crate_dirs(crate_dir)
+        .iter()
+        .filter_map(|dir| newest_mtime(dir))
+        .any(|source_mtime| source_mtime > artifact_mtime)
+}
+
 fn ensure_inject_artifacts() {
     // Session::launch locates shim/payload near the current exe (the test
     // binary). Co-locate them into the profile dir if cargo left them only in
     // deps/ or they were never built for this package.
     let profile = profile_dir();
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
     let needed = [
         "vfs_shim_dll.dll",
         "vfs_payload.dll",
         "vfs-fixture-read.exe",
         "vfs-fixture-writepath.exe",
+        "vfs-fixture-escape.exe",
     ];
-    let missing = needed.iter().any(|n| !profile.join(n).is_file());
-    if missing {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+
+    // vfs_payload.dll is its own separate workspace (see below); the rest
+    // build together as part of this one. Each is checked for staleness
+    // against its own crate's transitive source, not merely for presence.
+    let main_artifact_crates: [(&str, &str); 4] = [
+        ("vfs_shim_dll.dll", "vfs-shim-dll"),
+        ("vfs-fixture-read.exe", "vfs-fixture-read"),
+        ("vfs-fixture-writepath.exe", "vfs-fixture-writepath"),
+        ("vfs-fixture-escape.exe", "vfs-fixture-escape"),
+    ];
+    let main_stale = main_artifact_crates.iter().any(|(artifact, crate_name)| {
+        artifact_is_stale(&profile.join(artifact), &workspace.join("crates").join(crate_name))
+    });
+    if main_stale {
         let status = std::process::Command::new(&cargo)
             .current_dir(&workspace)
             .args([
@@ -78,15 +197,23 @@ fn ensure_inject_artifacts() {
                 "vfs-fixture-read",
                 "-p",
                 "vfs-fixture-writepath",
+                "-p",
+                "vfs-fixture-escape",
                 "--quiet",
             ])
             .status()
             .expect("spawn cargo");
         assert!(status.success(), "fixture/artifact build failed: {status}");
+    }
 
-        // vfs-payload lives in its own workspace (panic = "abort"). Build it
-        // into the same target dir so the co-location below finds it unchanged.
-        let target_dir = workspace.join("target");
+    // vfs-payload lives in its own workspace (panic = "abort"). Build it
+    // into the same target dir so the co-location below finds it unchanged.
+    let target_dir = workspace.join("target");
+    let payload_stale = artifact_is_stale(
+        &profile.join("vfs_payload.dll"),
+        &workspace.join("crates").join("vfs-payload"),
+    );
+    if payload_stale {
         let status = std::process::Command::new(&cargo)
             .current_dir(&workspace)
             .env("CARGO_TARGET_DIR", &target_dir)
@@ -100,13 +227,21 @@ fn ensure_inject_artifacts() {
             .expect("spawn cargo to build vfs-payload");
         assert!(status.success(), "vfs-payload cargo build failed: {status}");
     }
-    // Copy into profile root so Session::launch's find_near works from the test exe.
+
+    // Copy into profile root so Session::launch's find_near works from the
+    // test exe. Always overwrite: a rebuilt artifact must replace whatever
+    // was co-located here before, not sit next to a stale copy that a
+    // skip-if-exists check would otherwise leave in place untouched.
     for name in needed {
         let dest = profile.join(name);
-        if dest.is_file() {
+        let src = locate_artifact(name);
+        let same_file = match (src.canonicalize(), dest.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if same_file {
             continue;
         }
-        let src = locate_artifact(name);
         let _ = std::fs::copy(&src, &dest);
     }
 }
@@ -708,6 +843,514 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
         .expect("teardown");
 
     server.abort();
+}
+
+/// One parsed line of `vfs-fixture-escape`'s TSV output — see that crate's
+/// module doc for the exact format this mirrors.
+#[derive(Debug, Clone)]
+struct EscapeLine {
+    vector: String,
+    spelling: String,
+    outcome: String,
+    note: String,
+}
+
+fn parse_escape_lines(text: &str) -> Vec<EscapeLine> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| {
+            let mut parts = l.splitn(4, '\t');
+            Some(EscapeLine {
+                vector: parts.next()?.to_string(),
+                spelling: parts.next()?.to_string(),
+                outcome: parts.next()?.to_string(),
+                note: parts.next().unwrap_or("").to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The full, fixed vector-id order `vfs-fixture-escape` emits — used to
+/// assert every expected line actually showed up (a vector silently
+/// missing from the output would otherwise read as "nothing to check"
+/// rather than the fixture-contract violation it would be).
+const ALL_VECTOR_IDS: &[&str] = &[
+    "1", "2", "3", "4", "5", "5b", "6", "7", "8", "9", "10a", "10b", "10c", "11", "12a", "12b",
+    "12c", "13", "14",
+];
+
+/// This gate's own scope note (`docs/superpowers/plans/...`): vectors 13
+/// and 14 are reported, not closed, here — 13 needs gate 3's timing fix, 14
+/// may not be a shim fix at all. Neither gets a strict outcome assertion in
+/// either canary; both still have their line printed and preserved in the
+/// matrix, with the fixture's own "reported, not closed" note carried
+/// through, so a reader can never mistake a blank for a pass.
+fn is_reported_not_closed(vector: &str) -> bool {
+    matches!(vector, "13" | "14")
+}
+
+/// The positive canary's expected outcome per vector, or `None` for a
+/// vector this test does not assert an exact outcome for (the two
+/// reported-not-closed vectors, and `5b`'s documented caveat — see its own
+/// doc comment in `vfs-fixture-escape`).
+///
+/// Every other buildable vector must open the real bytes: this is the half
+/// of the matrix the brief calls "fully assertable now... the cheap way to
+/// pass a containment test is to break all access, and the positive canary
+/// is what forbids that."
+fn positive_expectation(vector: &str) -> Option<&'static str> {
+    if vector == "5b" || is_reported_not_closed(vector) {
+        return None;
+    }
+    match vector {
+        // A hardlink names the SAME bytes under a brand-new file name the
+        // content-addressed provider has never heard of. FUSE-routing (the
+        // shim's pre-existing, gate-2-independent `vpath_under_root`
+        // matcher, not this gate's canonicaliser) recognises the ordinary,
+        // unmangled path and asks the director for that name first; the
+        // director correctly answers "no such name" (`ST_NOT_FOUND`), and
+        // with disk-fallthrough at its secure default (off,
+        // `VFS_ALLOW_DISK_FALLTHROUGH` unset), that answer is sealed rather
+        // than falling through to the real, hardlinked bytes still sitting
+        // on disk. Verified by reproduction, not assumed: this is an
+        // inherent property of naming the same bytes under a name the
+        // content model has never seen — orthogonal to gate 2's
+        // canonicaliser, which is never even consulted for this vector
+        // whenever FUSE-routing claims the path first.
+        "8" => Some("not-found"),
+        // Read-only, `OPEN_EXISTING`, against a stream this fixture never
+        // pre-creates (see the fixture's own vector-11 doc comment) —
+        // legitimately absent, standalone or under a session.
+        "11" => Some("not-found"),
+        _ => Some("opened"),
+    }
+}
+
+/// The substring this test searches for in the shim's classified-paths set
+/// (see `support::classified_paths`) to decide whether a given vector's
+/// attempt was classified under-root, or `None` for a vector this check
+/// does not apply to.
+///
+/// `"14"` is excluded unconditionally: it deliberately spawns a **child
+/// process with no shim injected at all** (that is the vector), so its open
+/// happens in a process whose hook stats this test can never see — absence
+/// there proves nothing about gate 2, only that the child had no hook to
+/// intercept it, exactly as documented.
+///
+/// `"5b"` is excluded too, but for the opposite reason: it *is* an
+/// in-process, hooked open, but one whose `OBJECT_ATTRIBUTES.RootDirectory`
+/// (an anonymous pipe) `GetFinalPathNameByHandleW` cannot resolve, so
+/// `path_of_tracked` never decodes a path for it at all — the open is real
+/// but genuinely un-decodable, landing in the shim's separate "undecodable"
+/// counter, never in "under-root open outcomes". That is Task 4's
+/// documented, accepted edge (falls back to the pre-existing passthrough),
+/// not a gate-2 classification miss — see this vector's own note in the
+/// matrix.
+///
+/// `"7"` (junction) and `"9"` (UNC admin share) **used to be excluded here
+/// too**, for a third, more serious reason: verified by isolated
+/// reproduction, they genuinely did not classify — both resolve to the real
+/// bytes via a syntactically unrelated path (a different directory tree for
+/// the junction; a `UNC\localhost\C$\...` form for the admin share) that
+/// contains no `~`, so `RootMap::compute_under_root` never reached its
+/// OS-consult branch (`expand_short_name`), the only place a syntactically
+/// unrelated path like these could ever be recognised.
+///
+/// Both are now closed by resolving each into a `VolumeMap` alias **once at
+/// session start**, the same pattern the device/volume-GUID table already
+/// uses, rather than widening the per-open OS-consult gate: `vfs-redirect`'s
+/// `resolve_volume_map` now also (a) registers `\??\UNC\localhost\<drive>$`
+/// as an alias for `<drive>:` for every mounted drive, and (b) walks the
+/// managed root's own ancestor chain, one non-recursive directory listing
+/// per level, registering any *sibling* reparse point whose resolved target
+/// lands inside the root. See `vfs-redirect/src/volumes.rs`'s
+/// `junction_aliases` and `admin_share_nt_key` doc comments for the full
+/// mechanism, the scope this task deliberately chose (and rejected), and
+/// `rust/docs/escape-matrix.md` for the verified before/after.
+fn classification_marker(vector: &str, basename: &str) -> Option<String> {
+    match vector {
+        "14" | "5b" => None,
+        // The hardlink itself, not the original canary name.
+        "8" => Some("vfs-escape-hardlink".to_string()),
+        _ => Some(basename.to_ascii_lowercase()),
+    }
+}
+
+/// Launch `vfs-fixture-escape.exe` against `target` under `client`'s
+/// `session_id`, with hook-stats logging enabled, and return its own parsed
+/// TSV lines plus the shim's classified-paths set (see
+/// `support::classified_paths`) built from the same run.
+/// The parts of an escape-matrix fixture launch that stay constant across
+/// every call in one test run — bundled so `run_escape_fixture` itself
+/// stays under clippy's argument-count lint rather than growing a ninth
+/// positional parameter for every future per-vector wrinkle.
+#[derive(Clone, Copy)]
+struct EscapeFixtureCtx<'a> {
+    session_id: &'a str,
+    fixture: &'a Path,
+    stats_log: &'a Path,
+    /// See `VFS_ESCAPE_VECTOR7_LINK_DIR`'s doc comment in `vfs-env`: a
+    /// junction created by this test harness itself, before any fixture
+    /// process is launched, so vector 7 never has to construct one from
+    /// inside an already-injected process.
+    vector7_link_dir: Option<&'a str>,
+}
+
+async fn run_escape_fixture(
+    client: &mut vfs_control::pb::director_client::DirectorClient<tonic::transport::Channel>,
+    ctx: &EscapeFixtureCtx<'_>,
+    target: &Path,
+    out_file: &Path,
+    only_vector: Option<&str>,
+) -> (i32, Vec<EscapeLine>, std::collections::BTreeSet<String>, bool) {
+    use vfs_control::pb::{launch_event, LaunchReq};
+    let EscapeFixtureCtx { session_id, fixture, stats_log, vector7_link_dir } = *ctx;
+
+    let _ = std::fs::remove_file(stats_log);
+    let _ = std::fs::remove_file(out_file);
+
+    let mut env = std::collections::HashMap::new();
+    env.insert("VFS_SHIM_STATS_LOG".to_string(), stats_log.to_string_lossy().into_owned());
+    if let Some(dir) = vector7_link_dir {
+        env.insert("VFS_ESCAPE_VECTOR7_LINK_DIR".to_string(), dir.to_string());
+    }
+    // Fast tick: this whole run (nineteen lines plus a couple of helper
+    // process spawns) finishes in well under the reporter's 250ms default,
+    // so a short override is what makes the classification snapshot land at
+    // all — same reasoning as the write-path e2e tests' identical override.
+    //
+    // The vectors-7/9 closeout found that this alone is not quite enough
+    // margin for an *isolated* single-vector run specifically: with
+    // `VFS_ESCAPE_ONLY_VECTOR` set, the selected vector's own decision is
+    // the *only* real file activity in the whole process, so the process's
+    // total lifetime can be short enough that `vfs-fixture-escape`'s own
+    // end-of-run wait (`interval_ms * 2` = 10ms here) lands under Windows'
+    // default ~15.6ms system timer resolution — a `Sleep(10)` on Windows is
+    // not reliably "wakes at 10ms", only "wakes no earlier than 10ms, next
+    // tick or later" — occasionally letting the process exit before the
+    // reporter's first tick ever fires, an intermittent classification miss
+    // unrelated to canonicalisation itself. Fixed at the source
+    // (`vfs-fixture-escape::main`'s end-of-run wait is now floored at 20ms,
+    // comfortably clearing that granularity) rather than by tuning this
+    // interval further, since shrinking it below Windows' own timer
+    // resolution floor would not have helped either.
+    env.insert("VFS_SHIM_STATS_INTERVAL_MS".to_string(), "5".to_string());
+    if let Some(v) = only_vector {
+        env.insert("VFS_ESCAPE_ONLY_VECTOR".to_string(), v.to_string());
+    }
+
+    let mut stream = client
+        .launch(LaunchReq {
+            session_id: session_id.to_string(),
+            exec: fixture.to_string_lossy().into_owned(),
+            args: vec![
+                target.to_string_lossy().into_owned(),
+                out_file.to_string_lossy().into_owned(),
+            ],
+            wait: true,
+            env,
+        })
+        .await
+        .expect("Launch")
+        .into_inner();
+
+    let mut exit_code = None;
+    while let Some(ev) = stream.message().await.expect("stream") {
+        match ev.event {
+            Some(launch_event::Event::Exited(x)) => exit_code = Some(x.code),
+            Some(launch_event::Event::Started(_)) => {}
+            Some(launch_event::Event::Log(l)) => eprintln!("escape fixture log: {}", l.line),
+            None => {}
+        }
+    }
+
+    let text = std::fs::read_to_string(out_file).unwrap_or_default();
+    let lines = parse_escape_lines(&text);
+    let (classified, truncated) = support::classified_paths(stats_log);
+    (exit_code.unwrap_or(-1), lines, classified, truncated)
+}
+
+/// Task 6: the canary matrix. Runs `vfs-fixture-escape` under a real,
+/// composed session — daemon, director, injected shim, the works — against
+/// two targets, and checks the two halves the gate's scope note draws:
+///
+/// - **Positive canary** (`escape-positive-canary.esp`, mirrored
+///   byte-for-byte into both the `DiskProvider`'s backing directory and the
+///   physical, on-disk managed root): every buildable spelling must open
+///   it, with the *exact same bytes* — checked by the fixture itself
+///   (`vfs-fixture-escape` now reads every successful open back and
+///   compares against a baseline read of the literal path, failing closed
+///   to `error:content-mismatch:...` on any difference; see that crate's
+///   module doc). This is the half that forbids "pass by breaking
+///   everything".
+/// - **Negative canary** (`escape-negative-canary.bin`, a real file
+///   physically on the managed root that the `DiskProvider` never serves):
+///   every buildable spelling must be **classified** — appear in a counted
+///   outcome bucket in the shim's own hook-stats report — never merely
+///   *reachable*. See `rust/docs/escape-matrix.md` for why reachability is
+///   not asserted here and is not evidence of anything this gate changed.
+///
+/// A stack-overflow crash was found and fixed while building this test (see
+/// `vfs_redirect`'s `OS_CONSULT_DEPTH` guard) — vector 1 (8.3 short name)
+/// recursed without bound the first time this matrix was run against a
+/// *served* target, because `RootMap::compute_under_root`'s OS-consult
+/// branch made its own hooked `CreateFileW` call with no re-entrancy guard.
+/// See `task-6-report.md` for the full account.
+#[tokio::test(flavor = "multi_thread")]
+async fn escape_matrix_positive_and_negative_canary() {
+    let _guard = LAUNCH_LOCK.lock().await;
+    ensure_inject_artifacts();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+    let registry = SessionRegistry::new();
+    let svc = DirectorService::new(registry);
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The DiskProvider's backing store — deliberately NOT session.root, so
+    // the negative canary (written only to session.root below) is a real
+    // file under the managed root that this provider genuinely does not
+    // have, rather than something this test would have to fake.
+    let content_dir = tempfile::tempdir().expect("tempdir");
+    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_log = stats_dir.path().join("shim-stats.log");
+    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_file = out_dir.path().join("escape-out.tsv");
+
+    let fixture = locate_artifact("vfs-fixture-escape.exe");
+    let mut client = connect(&format!("{addr}")).await.expect("connect");
+
+    let session = client
+        .create_session(vfs_control::pb::CreateSessionReq {
+            name: "escape-matrix".into(),
+        })
+        .await
+        .expect("CreateSession")
+        .into_inner();
+    assert!(!session.id.is_empty());
+    assert!(!session.root.is_empty());
+
+    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, SourceSpec as PbSource};
+
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(PbSource {
+                kind: Some(source_spec::Kind::Disk(DiskSource {
+                    path: content_dir.path().to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: "/".into(),
+            layer: 0,
+        })
+        .await
+        .expect("AddSource");
+
+    let root = PathBuf::from(&session.root);
+    let sub = PathBuf::from("Games").join("Skyrim").join("Data");
+    std::fs::create_dir_all(root.join(&sub)).expect("mkdir under session root");
+    std::fs::create_dir_all(content_dir.path().join(&sub)).expect("mkdir under content dir");
+
+    // Positive canary: identical bytes physically on session.root AND in
+    // the DiskProvider's backing dir. Whichever mechanism actually serves a
+    // given spelling — FUSE-routed (the director, reading content_dir) or
+    // real-disk passthrough (reading session.root directly) — the bytes are
+    // the same either way, so "opened" is a meaningful byte-identity
+    // signal regardless of which path served it.
+    const POSITIVE_BASENAME: &str = "escape-positive-canary.esp";
+    const POSITIVE_BYTES: &[u8] = b"the-positive-canary-bytes";
+    let pos_rel = sub.join(POSITIVE_BASENAME);
+    std::fs::write(root.join(&pos_rel), POSITIVE_BYTES).expect("write positive canary (root)");
+    std::fs::write(content_dir.path().join(&pos_rel), POSITIVE_BYTES)
+        .expect("write positive canary (content_dir)");
+
+    // Negative canary: real bytes ONLY on session.root — a file under the
+    // managed root that the DiskProvider's backing dir never has.
+    const NEGATIVE_BASENAME: &str = "escape-negative-canary.bin";
+    let neg_rel = sub.join(NEGATIVE_BASENAME);
+    std::fs::write(root.join(&neg_rel), b"the-negative-canary-bytes")
+        .expect("write negative canary");
+
+    // Vector 7's junction, created here — by this test harness's own,
+    // never-injected process — rather than by the fixture at runtime. See
+    // `VFS_ESCAPE_VECTOR7_LINK_DIR`'s doc comment in `vfs-env` for why: the
+    // fixture spawning `mklink /J` itself would be real, hooked file
+    // activity inside the injected process, racing `vfs-redirect`'s
+    // once-per-session volume/junction resolution (found by reproduction —
+    // an isolated vector-7 run consistently failed to classify until this
+    // moved out of the fixture). Points at the shared `Data` directory both
+    // canaries live in, so one junction covers both.
+    let vector7_link = std::env::temp_dir().join(format!("vfs-escape-junction-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir(&vector7_link);
+    let vector7_link_ready = std::process::Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            &vector7_link.to_string_lossy(),
+            &root.join(&sub).to_string_lossy(),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let vector7_link_dir = vector7_link_ready.then(|| vector7_link.to_string_lossy().into_owned());
+    let ctx = EscapeFixtureCtx {
+        session_id: &session.id,
+        fixture: &fixture,
+        stats_log: &stats_log,
+        vector7_link_dir: vector7_link_dir.as_deref(),
+    };
+
+    // ---------------------------------------------------------------
+    // Positive canary: every buildable spelling opens it, byte-identical.
+    // ---------------------------------------------------------------
+    let (pos_exit, pos_lines, _pos_classified, _pos_truncated) =
+        run_escape_fixture(&mut client, &ctx, &root.join(&pos_rel), &out_file, None).await;
+    if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
+        eprintln!("=== POSITIVE lines ===");
+        for l in &pos_lines {
+            eprintln!("{}\t{}\t{}\t{}", l.vector, l.spelling, l.outcome, l.note);
+        }
+    }
+    assert_eq!(
+        pos_exit, 0,
+        "vfs-fixture-escape must exit 0 against the positive canary — a nonzero/crash exit \
+         (e.g. STATUS_STACK_OVERFLOW, -1073741571) means a vector took the process down before \
+         the rest of the matrix could even be attempted, which is worse than any single \
+         vector's own outcome. Lines captured before the crash: {pos_lines:?}"
+    );
+    for id in ALL_VECTOR_IDS {
+        assert!(
+            pos_lines.iter().any(|l| &l.vector == id),
+            "positive canary: vector {id} produced no line at all in {out_file:?} — a missing \
+             line must never be readable as a pass"
+        );
+    }
+    for line in &pos_lines {
+        let Some(want) = positive_expectation(&line.vector) else { continue };
+        if line.outcome.starts_with("unbuildable:") {
+            // A first-class, environment-dependent outcome — recorded in
+            // the matrix, not a failure of this assertion.
+            continue;
+        }
+        assert_eq!(
+            line.outcome, want,
+            "positive canary vector {}: expected `{want}`, got `{}` (spelling: {:?}, note: {:?})",
+            line.vector, line.outcome, line.spelling, line.note
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Negative canary: every buildable spelling is classified under-root
+    // (appears in the shim's own counted outcome buckets), never merely
+    // "reachable" and never invisible as outside-root. See
+    // `rust/docs/escape-matrix.md` for what this half does and does not
+    // establish.
+    // ---------------------------------------------------------------
+    let (neg_exit, neg_lines, neg_classified, neg_truncated) =
+        run_escape_fixture(&mut client, &ctx, &root.join(&neg_rel), &out_file, None).await;
+    if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
+        eprintln!("=== NEGATIVE lines ===");
+        for l in &neg_lines {
+            eprintln!("{}\t{}\t{}\t{}", l.vector, l.spelling, l.outcome, l.note);
+        }
+        eprintln!("=== NEGATIVE classified set (truncated={neg_truncated}) ===");
+        for p in &neg_classified {
+            eprintln!("{p}");
+        }
+    }
+    assert_eq!(
+        neg_exit, 0,
+        "vfs-fixture-escape must exit 0 against the negative canary too. Lines captured: {neg_lines:?}"
+    );
+    for id in ALL_VECTOR_IDS {
+        assert!(
+            neg_lines.iter().any(|l| &l.vector == id),
+            "negative canary: vector {id} produced no line at all in {out_file:?}"
+        );
+    }
+    assert!(
+        !neg_truncated,
+        "the shim report's per-outcome path list was truncated (more than 20 distinct paths in \
+         one outcome bucket) — this test's per-vector classification search below cannot be \
+         trusted against a truncated list, so this must never happen for a run this small. \
+         Report: {stats_log:?}"
+    );
+    // The combined run above shares one shim-stats report across all
+    // nineteen attempts, and the report's classified-paths set is not keyed
+    // by vector — several *different* spellings legitimately canonicalise
+    // to the identical recorded path (that collapsing is the whole point of
+    // the canonicaliser), so "some entry contains this vector's marker" in
+    // the combined set does not prove *this* vector's own attempt was the
+    // one that produced it. A vector whose own attempt was silently
+    // unclassified (outside-root, invisible) would still pass that check
+    // for free, riding on an unrelated vector's classified entry that
+    // happens to share the same filename substring — exactly the "silently
+    // probed nothing and reported closed" failure this project has hit
+    // before. Re-run each buildable vector *alone* (`VFS_ESCAPE_ONLY_VECTOR`
+    // — see `vfs-fixture-escape`'s module doc), so its isolated run's
+    // classified set can only ever contain its own attempt's effect, plus
+    // the handful of incidental opens (parent-directory probes, etc.) every
+    // launch makes regardless of which vector is selected.
+    for line in &neg_lines {
+        if line.outcome.starts_with("unbuildable:") {
+            continue; // Never attempted at the OS level; nothing to classify.
+        }
+        let Some(marker) = classification_marker(&line.vector, NEGATIVE_BASENAME) else {
+            continue; // `5b` / `14` — see `classification_marker`'s doc comment.
+        };
+        let (iso_exit, iso_lines, iso_classified, iso_truncated) = run_escape_fixture(
+            &mut client,
+            &ctx,
+            &root.join(&neg_rel),
+            &out_file,
+            Some(line.vector.as_str()),
+        )
+        .await;
+        assert_eq!(
+            iso_exit, 0,
+            "negative canary, isolated run for vector {}: must exit 0. Lines: {iso_lines:?}",
+            line.vector
+        );
+        assert!(!iso_truncated, "isolated run for vector {} truncated its path list", line.vector);
+        if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
+            eprintln!("--- isolated vector {} classified set (marker={marker:?}) ---", line.vector);
+            for p in &iso_classified {
+                eprintln!("{p}");
+            }
+        }
+        let found = iso_classified.iter().any(|p| p.contains(&marker));
+        assert!(
+            found,
+            "negative canary vector {}: run in isolation (every other vector skipped), no entry \
+             containing {marker:?} appears in the shim's classified-paths set for that run — \
+             this spelling was not recognised as under-root at all (outside-root, invisible to \
+             every counter), which is exactly the failure mode this test exists to catch. \
+             Spelling: {:?}, fixture-observed outcome (combined run): {}, note: {:?}. Isolated \
+             classified set: {:?}",
+            line.vector, line.spelling, line.outcome, line.note, iso_classified
+        );
+    }
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq {
+            session_id: session.id,
+        })
+        .await
+        .expect("teardown");
+
+    server.abort();
+    if vector7_link_ready {
+        let _ = std::fs::remove_dir(&vector7_link);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
