@@ -27,6 +27,14 @@ use crate::canon::VolumeMap;
 /// Each drive's volume-GUID mount point is registered as `\??\Volume{guid}`,
 /// **not** the `\\?\Volume{guid}` spelling `GetVolumeNameForVolumeMountPointW`
 /// returns — see [`win32_guid_to_nt`] for why that distinction is load-bearing.
+///
+/// Relies on `vfs_win::drive_mappings` having already screened out any
+/// `subst`/directory-alias target (`vfs_win::is_device_namespace_name`):
+/// every `DriveMapping` this loop sees is guaranteed to carry a genuine
+/// `\Device\...` name, never a drive alias, so this function itself never
+/// needs to re-check the shape. See `vfs-win`'s `drive_mappings` docs for
+/// why registering a `subst` alias here would be an active regression
+/// (hijacking an already-correct in-root path), not just a missed vector.
 pub fn resolve_volume_map() -> VolumeMap {
     let mut map = VolumeMap::empty();
     for m in vfs_win::drive_mappings() {
@@ -76,6 +84,15 @@ fn win32_guid_to_nt(win32_guid: &str) -> Option<String> {
 /// to, and it collapses all four spellings above in one call — falling back
 /// to `GetLongPathNameW` only when nothing could be opened at `path` (e.g.
 /// it does not exist).
+///
+/// **Caution for callers feeding this into `canon`/`RootMap` (Task 3):** the
+/// returned string is `GetFinalPathNameByHandleW`'s default `VOLUME_NAME_DOS`
+/// form, which is `\\?\`-prefixed Win32 spelling — the exact sibling of the
+/// volume-GUID trap fixed in `resolve_volume_map`/`win32_guid_to_nt`. A real
+/// NT open never presents `\\?\`; it presents `\??\` (Windows rewrites one
+/// to the other ahead of the NT layer). Treat this return value as needing
+/// the same `\\?\` -> `\??\` normalisation before comparing it against, or
+/// feeding it back into, anything that expects the NT spelling.
 pub fn expand_short_name(path: &str) -> Option<String> {
     vfs_win::final_path_for_open(path).or_else(|| vfs_win::expand_long_path(path))
 }
@@ -196,6 +213,42 @@ mod tests {
 
         std::fs::remove_file(&long_path).ok();
         std::fs::remove_dir(&dir).ok();
+    }
+
+    /// A `subst`-shaped candidate (what `subst Z: C:\Games` makes
+    /// `QueryDosDeviceW("Z:")` return: `\??\C:\Games`, a drive alias, not a
+    /// device) must never survive into a `VolumeMap`, because its prefix
+    /// matches a path that already canonicalised correctly — the
+    /// `canon.rs` fixture path `\??\C:\Games\Skyrim\Data\a.esp` is exactly
+    /// such a path. Constructed directly (no `subst` shelled out, whose
+    /// effect would otherwise persist in the CI session) and gated on the
+    /// same guard `vfs_win::drive_mappings` relies on
+    /// (`vfs_win::is_device_namespace_name`), so this is a faithful replay
+    /// of what `resolve_volume_map` actually assembles, not a hand-waved
+    /// approximation. Flip-tested by hand: with the guard removed, this
+    /// fails (the fixture path hijacks to `Z:`); with it restored, it
+    /// passes.
+    #[test]
+    #[cfg(windows)]
+    fn a_subst_shaped_candidate_is_screened_out_and_does_not_hijack_an_in_root_path() {
+        let candidates: [(&str, char); 2] = [
+            (r"\Device\HarddiskVolume3", 'C'),
+            // What `subst Z: C:\Games` produces -- must never reach the map.
+            (r"\??\C:\Games", 'Z'),
+        ];
+        let mut map = VolumeMap::empty();
+        for (device_name, drive) in candidates {
+            if vfs_win::is_device_namespace_name(device_name) {
+                map.insert(device_name, drive);
+            }
+        }
+
+        let raw = r"\??\C:\Games\Skyrim\Data\a.esp";
+        let got = crate::canon::canonicalise(raw, &map).unwrap();
+        assert!(
+            got.to_ascii_lowercase().starts_with("c:"),
+            "a subst-shaped candidate hijacked an in-root path: {got}"
+        );
     }
 
     /// The current drive letter, from the working directory (always a real,

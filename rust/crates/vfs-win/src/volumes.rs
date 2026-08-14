@@ -15,6 +15,11 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 /// What one currently-mounted drive letter resolves to at the NT layer.
+///
+/// Invariant: `device_name` always names a genuine NT device-namespace
+/// object (`is_device_namespace_name(&device_name)` is always `true`) —
+/// never a `subst`/directory-alias target such as `\??\C:\Windows`. See
+/// `drive_mappings` for why that distinction is load-bearing, not cosmetic.
 #[derive(Debug, Clone)]
 pub struct DriveMapping {
     pub drive: char,
@@ -30,23 +35,47 @@ pub struct DriveMapping {
     pub volume_guid_win32: Option<String>,
 }
 
-/// Every drive letter Windows currently reports as in use, with each one's
-/// device name and volume-GUID mount point. Cheap enough to call once per
-/// session, but the result is a snapshot: a drive mounted or unmounted
-/// afterwards is not reflected until this is called again.
+/// Every drive letter Windows currently reports as in use that genuinely
+/// needs device-namespace resolution, with each one's device name and
+/// volume-GUID mount point. Cheap enough to call once per session, but the
+/// result is a snapshot: a drive mounted or unmounted afterwards is not
+/// reflected until this is called again.
+///
+/// A drive whose `QueryDosDeviceW` target is not a `\Device\...` name is
+/// skipped entirely rather than included as-is. The case that matters:
+/// `subst Z: C:\Games` (no elevation required, takes effect immediately in
+/// the calling session) makes `QueryDosDeviceW("Z:")` return
+/// `\??\C:\Games` — a drive alias, not a device. If that were registered in
+/// `VolumeMap` the way a real device is, its prefix would match any path
+/// under `C:\Games` (including a path already spelled correctly as
+/// `C:\...` or `\??\C:\...`) and rewrite it to `Z:`, which is not merely an
+/// unmapped-device miss but an active regression: the path canonicalised
+/// correctly *before* this map had an opinion about it. A `subst`
+/// alias resolves the way any other alias to a path does — through
+/// final-path resolution — not through this device-namespace map.
 pub fn drive_mappings() -> Vec<DriveMapping> {
     let mask = logical_drives_mask();
     (0..26u32)
         .filter(|bit| mask & (1 << bit) != 0)
         .filter_map(|bit| {
             let drive = (b'A' + bit as u8) as char;
-            query_dos_device(drive).map(|device_name| DriveMapping {
-                drive,
-                device_name,
-                volume_guid_win32: volume_guid_for_drive(drive),
-            })
+            let device_name = query_dos_device(drive)?;
+            if !is_device_namespace_name(&device_name) {
+                return None;
+            }
+            Some(DriveMapping { drive, device_name, volume_guid_win32: volume_guid_for_drive(drive) })
         })
         .collect()
+}
+
+/// Whether `device_name` (as `QueryDosDeviceW` returns it for a drive
+/// letter) genuinely names an NT device-namespace object (`\Device\...`)
+/// rather than a `subst`/directory-alias target (`\??\C:\Windows` and the
+/// like). Public so a caller building a `VolumeMap` from raw drive data —
+/// or a regression test reproducing a `subst` shape without actually
+/// running `subst` — can apply the exact guard `drive_mappings` relies on.
+pub fn is_device_namespace_name(device_name: &str) -> bool {
+    device_name.get(..8).is_some_and(|p| p.eq_ignore_ascii_case(r"\Device\"))
 }
 
 /// Bitmask of drive letters currently in use, bit 0 = A ... bit 25 = Z.
@@ -210,6 +239,20 @@ fn wide_buf_to_string(buf: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `subst Z: C:\Windows` (or any directory) makes `QueryDosDeviceW`
+    /// return `\??\C:\Windows` for `Z:` — a drive alias, not a device. This
+    /// shape must never pass the guard `drive_mappings` relies on to decide
+    /// what belongs in a `VolumeMap`, on any drive letter.
+    #[test]
+    fn subst_shaped_target_is_not_a_device_namespace_name() {
+        assert!(!is_device_namespace_name(r"\??\C:\Windows"));
+        assert!(!is_device_namespace_name(r"\??\Z:\SomeDir"));
+        assert!(!is_device_namespace_name(r"\??\C:\Games"));
+        // A real device name, including case-insensitively, still passes.
+        assert!(is_device_namespace_name(r"\Device\HarddiskVolume3"));
+        assert!(is_device_namespace_name(r"\device\harddiskvolume7"));
+    }
 
     /// The current drive must show up with a `\Device\...`-shaped name.
     #[test]
