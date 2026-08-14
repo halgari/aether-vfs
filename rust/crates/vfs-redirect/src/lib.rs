@@ -6,6 +6,7 @@
 mod canon;
 mod volumes;
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
@@ -15,6 +16,57 @@ use vfs_shared::{NodeKind, SnapResolution, SnapshotReader};
 
 pub use canon::{canonicalise, VolumeMap};
 pub use volumes::{expand_short_name, resolve_volume_map};
+
+thread_local! {
+    /// Depth counter behind [`UncachedScope`]. A counter rather than a bare
+    /// flag so nested or overlapping guards on the same thread compose
+    /// correctly: an inner guard's `Drop` must not re-enable caching while an
+    /// outer guard (from a caller further up the same call chain) is still
+    /// held.
+    static SUPPRESS_CACHE_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+fn cache_suppressed() -> bool {
+    SUPPRESS_CACHE_DEPTH.with(|c| c.get() > 0)
+}
+
+/// While one or more of these guards is alive on the current thread, every
+/// [`RootMap::under_root`] lookup made on that thread is ineligible for
+/// caching — including a lookup `compute_under_root` would otherwise classify
+/// as [`Resolution::Deterministic`].
+///
+/// This exists for one situation `compute_under_root` cannot detect on its
+/// own: a caller assembling `nt_path` from something that is itself a
+/// snapshot of live, mutable state — for instance `GetFinalPathNameByHandleW`
+/// on a directory handle, whose current target is a fact about the
+/// filesystem *now*, not a property of the resulting string's bytes.
+/// `compute_under_root`'s own `~`-gated OS-consulted tracking (see
+/// [`Resolution`]) only catches paths *this crate* sent to the OS itself —
+/// a path a caller already resolved via its own OS query before ever handing
+/// it to `RootMap` looks, from here, exactly like an ordinary literal path.
+/// Caching it under its own bytes would resurrect the same staleness bug
+/// `Resolution::OsConsulted` exists to prevent (an 8.3 slot reused, a
+/// junction retargeted — here, a handle's target renamed or replaced mid-
+/// session), just arriving from outside this crate instead of from inside
+/// `compute_under_root`. The caller who knows the provenance must say so
+/// explicitly, by holding this guard for the duration of every
+/// `RootMap`-backed decision it makes with such a path. See `vfs-shim`'s
+/// `parent_dir_of_handle` for the concrete caller-side case.
+#[must_use = "the suppression ends as soon as this guard is dropped"]
+pub struct UncachedScope(());
+
+impl UncachedScope {
+    pub fn enter() -> Self {
+        SUPPRESS_CACHE_DEPTH.with(|c| c.set(c.get() + 1));
+        UncachedScope(())
+    }
+}
+
+impl Drop for UncachedScope {
+    fn drop(&mut self) {
+        SUPPRESS_CACHE_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
 
 /// Default bound on [`PathCache`]'s entry count. Generous enough to hold every
 /// distinct path a game session opens (the instrumentation this gate is
@@ -121,6 +173,14 @@ pub struct RootMap {
     /// rare branch — kept so how rarely that branch fires is a measured
     /// claim, not just an asserted one.
     os_consults: AtomicU64,
+    /// Count of calls to `compute_under_root` — i.e. cache misses, of either
+    /// [`Resolution`] variant. Test-only: lets a test prove a lookup was
+    /// actually *recomputed* (this counter moves) rather than merely
+    /// inferring it from the cache staying empty, which a bug elsewhere could
+    /// also produce for the wrong reason. See
+    /// `uncached_scope_suppresses_caching_of_an_otherwise_deterministic_path`.
+    #[cfg(test)]
+    computes: AtomicU64,
 }
 
 impl RootMap {
@@ -149,7 +209,14 @@ impl RootMap {
         } else {
             norm.split('/').map(str::to_string).collect()
         };
-        Ok(RootMap { root, volumes, cache: PathCache::new(capacity), os_consults: AtomicU64::new(0) })
+        Ok(RootMap {
+            root,
+            volumes,
+            cache: PathCache::new(capacity),
+            os_consults: AtomicU64::new(0),
+            #[cfg(test)]
+            computes: AtomicU64::new(0),
+        })
     }
 
     /// The number of entries currently cached. Test-only, to verify the bound
@@ -165,6 +232,15 @@ impl RootMap {
     #[cfg(test)]
     fn os_consult_count(&self) -> u64 {
         self.os_consults.load(Ordering::Relaxed)
+    }
+
+    /// The number of times `compute_under_root` actually ran (i.e. cache
+    /// misses, of either `Resolution` variant). Test-only, to prove a lookup
+    /// was recomputed rather than served from the cache — see this struct's
+    /// `computes` field doc comment.
+    #[cfg(test)]
+    fn compute_count(&self) -> u64 {
+        self.computes.load(Ordering::Relaxed)
     }
 
     /// The normalized root components (original case). For tests/diagnostics.
@@ -229,16 +305,28 @@ impl RootMap {
     /// `None` (out of root, malformed, or escaping). Cached on the raw `nt_path`
     /// string for the [`Resolution::Deterministic`] case only — see
     /// [`Resolution`] and the comment at the `cache.insert` call below for why
-    /// an OS-consulted answer is deliberately excluded.
+    /// an OS-consulted answer is deliberately excluded. Also skipped, for
+    /// *either* variant, while an [`UncachedScope`] is held on this thread —
+    /// see its doc comment for the caller-side half of this same rule.
     fn under_root(&self, nt_path: &str) -> Option<Vec<String>> {
-        if let Some(cached) = self.cache.get(nt_path) {
-            return cached;
+        let suppressed = cache_suppressed();
+        if !suppressed {
+            if let Some(cached) = self.cache.get(nt_path) {
+                return cached;
+            }
         }
         match self.compute_under_root(nt_path) {
             Resolution::Deterministic(result) => {
                 // Safe to cache: a pure function of `nt_path` and the
-                // session-frozen `self.volumes`, so it can never go stale.
-                self.cache.insert(nt_path.to_string(), result.clone());
+                // session-frozen `self.volumes`, so it can never go stale --
+                // unless the caller has told us (via `UncachedScope`) that
+                // `nt_path` itself is not such a pure function, e.g. it was
+                // assembled from a live OS query of a handle's current
+                // target. `compute_under_root` has no way to see that on its
+                // own; the `suppressed` check here is what honors it.
+                if !suppressed {
+                    self.cache.insert(nt_path.to_string(), result.clone());
+                }
                 result
             }
             Resolution::OsConsulted(result) => {
@@ -295,6 +383,8 @@ impl RootMap {
     /// OS-consulted branch rare: see `plainly_outside_path_never_consults_the_os`
     /// and the cost discussion in the task report.
     fn compute_under_root(&self, nt_path: &str) -> Resolution {
+        #[cfg(test)]
+        self.computes.fetch_add(1, Ordering::Relaxed);
         let Ok(canon) = canonicalise(nt_path, &self.volumes) else {
             return Resolution::Deterministic(None);
         };
@@ -1442,6 +1532,62 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Gate-review finding: a path a *caller* assembled from its own OS query
+    /// (e.g. `vfs-shim` resolving `OBJECT_ATTRIBUTES.RootDirectory` via
+    /// `GetFinalPathNameByHandleW` on a handle it does not own) carries no `~`
+    /// and no other marker `compute_under_root` can see — from here it is
+    /// indistinguishable from an ordinary literal path, so on its own it
+    /// would be classified `Resolution::Deterministic` and cached permanently
+    /// even though the caller knows it is a snapshot of live, mutable state.
+    /// `UncachedScope` is the caller-side escape hatch for exactly this case.
+    ///
+    /// Proven the same way `os_consulted_resolution_is_never_cached` proves
+    /// its case: a recomputation-counter delta, not merely an empty cache
+    /// (which a bug elsewhere could also produce for the wrong reason). Also
+    /// confirms the suppression is scoped to the guard's lifetime, not a
+    /// permanent regression: caching resumes once it is dropped.
+    #[test]
+    fn uncached_scope_suppresses_caching_of_an_otherwise_deterministic_path() {
+        let map =
+            RootMap::new_with_cache_capacity(r"C:\Games\Skyrim", VolumeMap::empty(), 8).unwrap();
+        // No `~`: purely deterministic shape by `compute_under_root`'s own
+        // rules -- would be cached on the very first lookup without the guard.
+        let raw = r"C:\Games\Skyrim\Data\a.esp";
+
+        {
+            let _guard = UncachedScope::enter();
+            assert!(map.contains(raw));
+            assert_eq!(map.compute_count(), 1, "the first guarded lookup did not compute at all");
+            assert_eq!(map.cache_len(), 0, "a guarded lookup was cached");
+
+            assert!(map.contains(raw));
+            assert_eq!(
+                map.compute_count(),
+                2,
+                "a second lookup of the identical raw string, still under the guard, was served \
+                 from the cache instead of being recomputed -- it must recompute every time"
+            );
+            assert_eq!(map.cache_len(), 0, "a guarded lookup was cached on a second pass");
+        }
+
+        // The guard is dropped: this is a genuine first-ever cache miss for
+        // `raw` (nothing above ever inserted), so it recomputes once more and
+        // this time gets cached.
+        assert!(map.contains(raw));
+        assert_eq!(map.compute_count(), 3, "the first unguarded lookup did not recompute");
+        assert_eq!(map.cache_len(), 1, "caching did not resume once the guard was dropped");
+
+        // A second unguarded lookup is a genuine cache hit: proves the
+        // suppression above came specifically from the guard, not from some
+        // other reason `compute_count` might have kept moving.
+        assert!(map.contains(raw));
+        assert_eq!(
+            map.compute_count(),
+            3,
+            "a cache hit outside the guard was recomputed instead of served from the cache"
+        );
     }
 
     /// A path that never contains `~` and never matches the root deterministically
