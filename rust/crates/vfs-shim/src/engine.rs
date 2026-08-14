@@ -48,7 +48,11 @@ impl Engine {
     }
 
     fn build(root: &str, overlay_root: Option<&str>, snapshot: Vec<u8>) -> Result<Self, EngineError> {
-        let map = RootMap::new(root).map_err(EngineError::Root)?;
+        // Resolved once per `Engine` (i.e. once per game session — `Engine` is
+        // constructed exactly once by the shim's bootstrap), never per open:
+        // several Win32 calls per currently-mounted drive.
+        let volumes = vfs_redirect::resolve_volume_map();
+        let map = RootMap::new(root, volumes).map_err(EngineError::Root)?;
         SnapshotReader::open(&snapshot).map_err(EngineError::Snapshot)?;
         let overlay = overlay_root.map(Overlay::new);
         Ok(Engine { map, snapshot, overlay })
