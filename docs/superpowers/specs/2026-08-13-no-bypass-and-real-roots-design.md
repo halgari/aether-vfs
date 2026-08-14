@@ -27,6 +27,7 @@ bypass work, for the reason in §7.
 | Real files under a root that no provider serves | **Invisible.** The root is fully virtual; mount a `disk` provider to expose a real tree. |
 | Published snapshot | **Deleted as a shim input.** All metadata routes. The shim keeps one local predicate: is this path under a managed root? |
 | DRM/identity exceptions | **Closed completely.** No allow-list, no fallback. |
+| Standalone shim mode | **Retired.** The director is the only mode. See §3b. |
 | Writes | **Inside the invariant.** 2a absorbs the write path from what was Stage 3, because the fall-through cannot be closed without a replacement. |
 | Ordering | **No-bypass (2a) before real roots (2b)**, and within 2a, the write path before closing the bypass. |
 
@@ -80,6 +81,37 @@ when they land separately.
   the escapes, remove the DRM exceptions, and build the canary suite and the
   open-count reconciliation.
   *Gate:* the full acceptance criteria in §8.
+
+## 3b. Standalone shim mode is retired
+
+Gate 3 discovered that the legacy decision paths were **not** unreachable, for a
+reason the plan had missed: with `VFS_RING_SECTION` unset the shim initialises
+with `FuseInitError::NotConfigured`, which was treated as a legitimate
+deployment. In that mode there is no director, `try_fuse_create` returns `None`
+unconditionally, and `Decision::Redirect` / `Serve` / `Deny` are live. Four
+tests exercised them through real installed hooks.
+
+That mode is now **retired**. A missing ring section aborts the launch exactly
+as a failed attach does. The reasons:
+
+- Nothing in the direction this project is heading — pluggable providers, an
+  embeddable library, a Python host — involves the standalone snapshot path.
+- Keeping it makes "no bypass" a *conditional* property ("holds in
+  director-managed sessions"), and the shim carries two decision paths forever.
+- It is the mode in which a silently un-virtualized game is possible, which is
+  the failure this whole programme exists to eliminate.
+
+### A consequence the gate ordering must respect
+
+Retiring standalone makes `Redirect` / `Serve` / `Deny` unreachable **at
+runtime**, but not removable **at compile time**: `Engine::cow_seed` depends on
+`Redirect` and `Serve` to materialise copy-on-write content for the overlay
+write path — which is the write fall-through **gate 4** owns.
+
+So deleting those variants belongs to gate 4, after `cow_seed` is redesigned to
+source copy-up content from the director. Gate 3 retires standalone mode and
+deletes the metadata and enumeration paths; it does not delete the `Decision`
+variants. The original plan had this backwards.
 
 ### 2a-ii runs in five gates, and the order is the point
 
