@@ -116,24 +116,120 @@ impl Drop for Timed {
     }
 }
 
-/// Current counters as a human-readable table.
-pub fn render() -> String {
+/// One consistent instant across every counter this module tracks.
+///
+/// Each `render_*` function used to read its own globals live, at the moment
+/// it happened to run inside `start_reporter`'s one `format!` call. Rendering
+/// does real work between those reads — formatting rows, cloning and sorting
+/// HashMaps — so hook calls landing during that work were picked up by later
+/// sections but not earlier ones, and the report could contradict itself:
+/// observed in practice, a run whose "routed" row read 11 while its trace
+/// section — rendered earlier in the same file — said "10" operations.
+/// Taking every raw value up front, before any formatting starts, shrinks the
+/// window in which that can happen from "however long rendering takes" down
+/// to "however long these loads take": a handful of atomic reads and small
+/// clones, done back to back. The counters themselves stay lock-free and
+/// keep moving; what changes is that a single report is built from one set
+/// of readings instead of several taken at different times.
+struct Snapshot {
+    calls: [u64; N],
+    nanos: [u64; N],
+    rooted: [u64; N],
+    max_nanos: [u64; N],
+    slow: [u64; N],
+    async_opens: u64,
+    sync_opens: u64,
+    apc_reads: u64,
+    event_reads: u64,
+    bare_reads: u64,
+    iocp_binds: u64,
+    fills_started: u64,
+    fills_completed: u64,
+    fills_failed: u64,
+    fill_bytes: u64,
+    fill_nanos: u64,
+    fill_max_nanos: u64,
+    setinfo_noop: HashMap<u32, u64>,
+    passthrough: HashMap<String, u64>,
+    undecodable: HashMap<String, u64>,
+    trace: Vec<String>,
+    stats: HashMap<String, u64>,
+    readdirs: Vec<String>,
+    outcome_counts: [u64; OUTCOME_N],
+    outcome_paths: [HashMap<String, u64>; OUTCOME_N],
+}
+
+fn snapshot() -> Snapshot {
+    let mut calls = [0u64; N];
+    let mut nanos = [0u64; N];
+    let mut rooted = [0u64; N];
+    let mut max_nanos = [0u64; N];
+    let mut slow = [0u64; N];
+    for i in 0..N {
+        calls[i] = CALLS[i].load(Ordering::Relaxed);
+        nanos[i] = NANOS[i].load(Ordering::Relaxed);
+        rooted[i] = ROOTED[i].load(Ordering::Relaxed);
+        max_nanos[i] = MAX_NANOS[i].load(Ordering::Relaxed);
+        slow[i] = SLOW[i].load(Ordering::Relaxed);
+    }
+    let mut outcome_counts = [0u64; OUTCOME_N];
+    let mut outcome_paths: [HashMap<String, u64>; OUTCOME_N] = std::array::from_fn(|_| HashMap::new());
+    for (i, outcome) in ALL_OUTCOMES.into_iter().enumerate() {
+        outcome_counts[i] = outcome_count(outcome);
+        outcome_paths[i] =
+            OUTCOME_PATHS[i].lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default();
+    }
+    Snapshot {
+        calls,
+        nanos,
+        rooted,
+        max_nanos,
+        slow,
+        async_opens: ASYNC_OPENS.load(Ordering::Relaxed),
+        sync_opens: SYNC_OPENS.load(Ordering::Relaxed),
+        apc_reads: APC_READS.load(Ordering::Relaxed),
+        event_reads: EVENT_READS.load(Ordering::Relaxed),
+        bare_reads: BARE_READS.load(Ordering::Relaxed),
+        iocp_binds: IOCP_BINDS.load(Ordering::Relaxed),
+        fills_started: FILLS_STARTED.load(Ordering::Relaxed),
+        fills_completed: FILLS_COMPLETED.load(Ordering::Relaxed),
+        fills_failed: FILLS_FAILED.load(Ordering::Relaxed),
+        fill_bytes: FILL_BYTES.load(Ordering::Relaxed),
+        fill_nanos: FILL_NANOS.load(Ordering::Relaxed),
+        fill_max_nanos: FILL_MAX_NANOS.load(Ordering::Relaxed),
+        setinfo_noop: SETINFO_NOOP.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
+        passthrough: PATHS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
+        undecodable: UNDECODABLE.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
+        trace: TRACE.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
+        stats: STATS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
+        readdirs: READDIRS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
+        outcome_counts,
+        outcome_paths,
+    }
+}
+
+/// Counters as a human-readable table, as of `snap`.
+///
+/// `i` indexes five parallel fixed-size arrays plus `NAMES` at once; zipping
+/// all of them would be less readable than the plain index it replaces.
+#[allow(clippy::needless_range_loop)]
+fn render(snap: &Snapshot) -> String {
     let mut total_calls = 0u64;
     let mut total_nanos = 0u64;
     let mut total_rooted = 0u64;
     let mut rows = String::new();
     for i in 0..N {
-        let c = CALLS[i].load(Ordering::Relaxed);
+        let c = snap.calls[i];
         if c == 0 {
             continue;
         }
-        let ns = NANOS[i].load(Ordering::Relaxed);
-        let r = ROOTED[i].load(Ordering::Relaxed);
+        let ns = snap.nanos[i];
+        let r = snap.rooted[i];
         total_calls += c;
         total_nanos += ns;
         total_rooted += r;
-        let slow = SLOW[i].load(Ordering::Relaxed);
-        let max = MAX_NANOS[i].load(Ordering::Relaxed);
+        let slow = snap.slow[i];
+        let max = snap.max_nanos[i];
         // Share of total time owned by the calls that stalled: if this is most
         // of it, the mean is a wake-latency artefact, not per-call work.
         let stall_share = if ns == 0 {
@@ -254,22 +350,22 @@ pub fn note_fill_end(bytes: usize, nanos: u64, ok: bool) {
     FILL_MAX_NANOS.fetch_max(nanos, Ordering::Relaxed);
 }
 
-fn render_fills() -> String {
-    let started = FILLS_STARTED.load(Ordering::Relaxed);
-    let done = FILLS_COMPLETED.load(Ordering::Relaxed);
+fn render_fills(snap: &Snapshot) -> String {
+    let started = snap.fills_started;
+    let done = snap.fills_completed;
     if started == 0 {
         return String::new();
     }
-    let ns = FILL_NANOS.load(Ordering::Relaxed);
+    let ns = snap.fill_nanos;
     let inflight = started.saturating_sub(done);
     format!(
         "\ndemand-paged section fills:\n  \
          started {started} / completed {done} / failed {} / IN FLIGHT {inflight}\n  \
          {:.1} MiB, {:.3}s total, max {:.1}ms{}\n",
-        FILLS_FAILED.load(Ordering::Relaxed),
-        FILL_BYTES.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0),
+        snap.fills_failed,
+        snap.fill_bytes as f64 / (1024.0 * 1024.0),
         ns as f64 / 1e9,
-        FILL_MAX_NANOS.load(Ordering::Relaxed) as f64 / 1e6,
+        snap.fill_max_nanos as f64 / 1e6,
         if inflight > 0 {
             "   <-- a fill never returned; the faulting thread is wedged"
         } else {
@@ -299,13 +395,8 @@ pub fn note_setinfo_noop(class: u32) {
     *map.entry(class).or_insert(0) += 1;
 }
 
-fn render_setinfo_noop() -> String {
-    let Ok(g) = SETINFO_NOOP.lock() else {
-        return String::new();
-    };
-    let Some(map) = g.as_ref() else {
-        return String::new();
-    };
+fn render_setinfo_noop(snap: &Snapshot) -> String {
+    let map = &snap.setinfo_noop;
     if map.is_empty() {
         return String::new();
     }
@@ -329,17 +420,10 @@ pub fn note_iocp_bind() {
     IOCP_BINDS.fetch_add(1, Ordering::Relaxed);
 }
 
-fn render_async() -> String {
-    let (a, s) = (
-        ASYNC_OPENS.load(Ordering::Relaxed),
-        SYNC_OPENS.load(Ordering::Relaxed),
-    );
-    let (apc, ev, bare) = (
-        APC_READS.load(Ordering::Relaxed),
-        EVENT_READS.load(Ordering::Relaxed),
-        BARE_READS.load(Ordering::Relaxed),
-    );
-    let iocp = IOCP_BINDS.load(Ordering::Relaxed);
+fn render_async(snap: &Snapshot) -> String {
+    let (a, s) = (snap.async_opens, snap.sync_opens);
+    let (apc, ev, bare) = (snap.apc_reads, snap.event_reads, snap.bare_reads);
+    let iocp = snap.iocp_binds;
     if a + s + apc + ev + bare + iocp == 0 {
         return String::new();
     }
@@ -425,9 +509,8 @@ pub fn note_undecodable(name: Option<&str>) {
     *map.entry(key).or_insert(0) += 1;
 }
 
-fn render_undecodable() -> String {
-    let Ok(g) = UNDECODABLE.lock() else { return String::new() };
-    let Some(map) = g.as_ref() else { return String::new() };
+fn render_undecodable(snap: &Snapshot) -> String {
+    let map = &snap.undecodable;
     if map.is_empty() {
         return String::new();
     }
@@ -465,13 +548,8 @@ pub fn note_trace(op: &str, path: &str, result: &str) {
     v.push(format!("{:<10} {:<12} {}", op, result, path.to_ascii_lowercase()));
 }
 
-fn render_trace() -> String {
-    let Ok(g) = TRACE.lock() else {
-        return String::new();
-    };
-    let Some(v) = g.as_ref() else {
-        return String::new();
-    };
+fn render_trace(snap: &Snapshot) -> String {
+    let v = &snap.trace;
     if v.is_empty() {
         return String::new();
     }
@@ -514,13 +592,8 @@ pub fn note_stat(path: &str, outcome: &str) {
     }
 }
 
-fn render_stats() -> String {
-    let Ok(g) = STATS.lock() else {
-        return String::new();
-    };
-    let Some(map) = g.as_ref() else {
-        return String::new();
-    };
+fn render_stats(snap: &Snapshot) -> String {
+    let map = &snap.stats;
     if map.is_empty() {
         return String::new();
     }
@@ -563,13 +636,8 @@ pub fn note_readdir(dir: &str, wildcard: Option<&str>, count: usize, served: boo
     ));
 }
 
-fn render_readdirs() -> String {
-    let Ok(g) = READDIRS.lock() else {
-        return String::new();
-    };
-    let Some(v) = g.as_ref() else {
-        return String::new();
-    };
+fn render_readdirs(snap: &Snapshot) -> String {
+    let v = &snap.readdirs;
     if v.is_empty() {
         return String::new();
     }
@@ -705,19 +773,16 @@ fn format_outcome_paths(mut pairs: Vec<(String, u64)>) -> String {
 }
 
 /// One outcome's section: label, total count, and its busiest paths.
-fn render_outcome(outcome: OpenOutcome) -> String {
-    let count = outcome_count(outcome);
+fn render_outcome(outcome: OpenOutcome, snap: &Snapshot) -> String {
+    let idx = outcome as usize;
+    let count = snap.outcome_counts[idx];
     if count == 0 {
         return String::new();
     }
-    let idx = outcome as usize;
-    let paths = match OUTCOME_PATHS[idx].lock() {
-        Ok(g) => match g.as_ref() {
-            Some(map) => map.iter().map(|(p, c)| (p.clone(), *c)).collect(),
-            None => Vec::new(),
-        },
-        Err(_) => Vec::new(),
-    };
+    let paths = snap.outcome_paths[idx]
+        .iter()
+        .map(|(p, c)| (p.clone(), *c))
+        .collect();
     format!(
         "  {:<32} {count:>8}\n{}",
         outcome.label(),
@@ -727,10 +792,10 @@ fn render_outcome(outcome: OpenOutcome) -> String {
 
 /// Under-root open outcomes, one section per class so a gate that removes one
 /// bypass can be checked in isolation from the others.
-fn render_outcomes() -> String {
+fn render_outcomes(snap: &Snapshot) -> String {
     let mut body = String::new();
     for outcome in ALL_OUTCOMES {
-        body.push_str(&render_outcome(outcome));
+        body.push_str(&render_outcome(outcome, snap));
     }
     if body.is_empty() {
         return String::new();
@@ -738,14 +803,8 @@ fn render_outcomes() -> String {
     format!("\nunder-root open outcomes:\n{body}")
 }
 
-fn render_passthrough() -> String {
-    let Ok(g) = PATHS.lock() else {
-        return String::new();
-    };
-    let Some(map) = g.as_ref() else {
-        return String::new();
-    };
-    format_paths(map.iter().map(|(p, c)| (p.clone(), *c)).collect())
+fn render_passthrough(snap: &Snapshot) -> String {
+    format_paths(snap.passthrough.iter().map(|(p, c)| (p.clone(), *c)).collect())
 }
 
 /// Start a thread that rewrites the report periodically.
@@ -778,18 +837,22 @@ pub fn start_reporter() {
         .name("vfs-shim-stats".into())
         .spawn(move || loop {
             std::thread::sleep(interval);
+            // One snapshot feeds every section below, so a report can never
+            // show two sections disagreeing about counters that only look
+            // independent — see `Snapshot`'s doc comment.
+            let snap = snapshot();
             let body = format!(
                 "{}{}{}{}{}{}{}{}{}{}",
-                render(),
-                render_async(),
-                render_fills(),
-                render_stats(),
-                render_trace(),
-                render_undecodable(),
-                render_readdirs(),
-                render_passthrough(),
-                render_setinfo_noop(),
-                render_outcomes()
+                render(&snap),
+                render_async(&snap),
+                render_fills(&snap),
+                render_stats(&snap),
+                render_trace(&snap),
+                render_undecodable(&snap),
+                render_readdirs(&snap),
+                render_passthrough(&snap),
+                render_setinfo_noop(&snap),
+                render_outcomes(&snap)
             );
             // Write via a temp + rename so a reader never sees a half file.
             let tmp = std::path::PathBuf::from(&path).with_extension("tmp");
@@ -817,7 +880,7 @@ mod tests {
 
     #[test]
     fn render_reports_nothing_when_no_calls() {
-        let s = render();
+        let s = render(&snapshot());
         assert!(s.contains("hook stats"), "{s}");
         assert!(s.contains("TOTAL"), "{s}");
         // Never divide by zero on an idle process.
