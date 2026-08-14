@@ -22,12 +22,44 @@
 //!   hardlink, missing privilege for the admin share, ...). Never blank,
 //!   never silently skipped.
 //!
-//! `<vector-id>` is `1`..`14` matching the design doc's table, except vector
-//! 5 (handle-relative open) additionally emits `5b`: the same mechanism
-//! against a root handle (an anonymous pipe) that `GetFinalPathNameByHandleW`
-//! cannot resolve — the documented case where the fix falls back to the
-//! pre-existing passthrough. `5b` is a caveat report, not a second pass of
-//! vector 5, and must not be read as one.
+//! `<vector-id>` is `1`..`14` matching the design doc's table, with two
+//! expansions:
+//!
+//! - Vector 5 (handle-relative open) additionally emits `5b`: the same
+//!   mechanism against a root handle (an anonymous pipe) that
+//!   `GetFinalPathNameByHandleW` cannot resolve — the documented case where
+//!   the fix falls back to the pre-existing passthrough. `5b` is a caveat
+//!   report, not a second pass of vector 5, and must not be read as one.
+//!   Guarded independently of vector 5, so a panic constructing 5 can never
+//!   suppress the logically unrelated attempt at 5b.
+//! - Vectors 10 and 12 each split into their sub-cases — `10a`/`10b`/`10c`
+//!   (case fold, trailing dot, trailing space) and `12a`/`12b`/`12c` (a `.`
+//!   component, a `..` traversal, a doubled separator) — because each
+//!   sub-case became independently meaningful once given a `\\?\` prefix
+//!   (see below), and a combined line that passes says less than three that
+//!   do.
+//!
+//! **Why 10/10b/10c and 12a/12b/12c are built with a `\\?\` prefix.** Without
+//! one, the spelling goes through kernel32's `CreateFileW` ->
+//! `RtlGetFullPathName_U`, which strips trailing dots/spaces and collapses
+//! `.`/`..` *before* `NtCreateFile` is ever called — the shim hooks
+//! `NtCreateFile`/`NtOpenFile`, not `CreateFileW`, so an unprefixed spelling
+//! here would be normalised away by Win32 itself and `opened` would be
+//! guaranteed by the OS regardless of whether the shim's canonicaliser does
+//! anything at all. A `\\?\`-prefixed path is verbatim: Win32 does not touch
+//! it, so the divergent spelling actually reaches `NtCreateFile`. That also
+//! flips the correct standalone expectation: outside a session, nothing
+//! collapses `Data.` or `..` for the OS either, so the literal (nonexistent)
+//! component fails to resolve and `not-found` is the *correct* result, not a
+//! failure. Under a session (Task 6), the shim receives the same raw
+//! spelling and its canonicaliser is what is supposed to collapse it back to
+//! the real file — so `opened` there is evidence the canonicaliser works,
+//! and `not-found` there would be evidence it does not. Each of these lines'
+//! `<note>` says explicitly which of these two standalone/session pairings
+//! applies, so a standalone `not-found` on these ids is never misread as a
+//! regression. The case-fold sub-case (`10a`) is the one exception: NTFS
+//! itself resolves case-insensitively regardless of `\\?\`, so `opened`
+//! standalone is the correct result there too, prefix or not.
 //!
 //! Vectors 13 and 14 are reported, not closed, in this gate — their `<note>`
 //! field says so explicitly rather than leaving a reader to infer it from
@@ -191,31 +223,6 @@ fn guarded(vector: &'static str, f: impl FnOnce() -> Line + UnwindSafe) -> Line 
     }
 }
 
-fn guarded_pair(
-    primary: &'static str,
-    secondary: &'static str,
-    f: impl FnOnce() -> (Line, Line) + UnwindSafe,
-) -> (Line, Line) {
-    match std::panic::catch_unwind(f) {
-        Ok(pair) => pair,
-        Err(payload) => {
-            let msg = panic_message(&payload);
-            (
-                unbuildable(
-                    primary,
-                    "<construction panicked>",
-                    format!("vector construction panicked and was caught: {msg}"),
-                ),
-                unbuildable(
-                    secondary,
-                    "<construction panicked>",
-                    format!("skipped: {primary}'s construction panicked before reaching it: {msg}"),
-                ),
-            )
-        }
-    }
-}
-
 // ---------------------------------------------------------------------
 // Vector 1: 8.3 short name.
 // ---------------------------------------------------------------------
@@ -300,15 +307,15 @@ fn vector4_volume_guid(abs: &str) -> Line {
 }
 
 // ---------------------------------------------------------------------
-// Vector 5 (+5b): handle-relative open via OBJECT_ATTRIBUTES.RootDirectory.
+// Vector 5: handle-relative open via OBJECT_ATTRIBUTES.RootDirectory.
+// Guarded independently of 5b (below) — the two constructions share no
+// state, and a panic in one must never suppress the other.
 // ---------------------------------------------------------------------
-fn vector5_handle_relative(abs: &str) -> (Line, Line) {
+fn vector5_handle_relative(abs: &str) -> Line {
     let Some((dir, name)) = parent_dir_and_filename(abs) else {
-        let reason = "target path has no parent directory component";
-        return (unbuildable("5", abs, reason), unbuildable("5b", abs, reason));
+        return unbuildable("5", abs, "target path has no parent directory component");
     };
-
-    let line5 = match ffi::create_file_read(&ffi::wide(&dir)) {
+    match ffi::create_file_read(&ffi::wide(&dir)) {
         Err(code) => unbuildable(
             "5",
             format!("{name} (relative to a handle on {dir})"),
@@ -320,41 +327,46 @@ fn vector5_handle_relative(abs: &str) -> (Line, Line) {
             ffi::close(dir_handle);
             Line::new("5", spelling, outcome, "")
         }
-    };
+    }
+}
 
-    // 5b: the caveat. The fix in Task 4 asks the OS what a RootDirectory
-    // handle it never saw actually points at via GetFinalPathNameByHandleW;
-    // an anonymous pipe handle is a real, valid handle that call cannot
-    // resolve to a path. This line demonstrates that edge, not a second
-    // pass of vector 5.
+// ---------------------------------------------------------------------
+// Vector 5b: the caveat, not a second pass of vector 5. The fix in Task 4
+// asks the OS what a RootDirectory handle it never saw actually points at
+// via GetFinalPathNameByHandleW; an anonymous pipe handle is a real, valid
+// handle that call cannot resolve to a path. Independently buildable (needs
+// only the target's filename, not vector 5's directory handle), so it is
+// guarded on its own rather than sharing a closure with vector 5.
+// ---------------------------------------------------------------------
+fn vector5b_unresolvable_handle(abs: &str) -> Line {
+    let Some((_dir, name)) = parent_dir_and_filename(abs) else {
+        return unbuildable("5b", abs, "target path has no parent directory component");
+    };
     let mut read_handle: ffi::Handle = std::ptr::null_mut();
     let mut write_handle: ffi::Handle = std::ptr::null_mut();
     // SAFETY: FFI. Both out-pointers are valid locals; `nSize` 0 asks for
     // the system default buffer size.
     let created = unsafe { ffi::CreatePipe(&mut read_handle, &mut write_handle, std::ptr::null_mut(), 0) };
-    let line5b = if created == 0 {
-        unbuildable(
+    if created == 0 {
+        return unbuildable(
             "5b",
             "<relative to an anonymous pipe handle>",
             format!("CreatePipe failed: win32:{}", last_error()),
-        )
-    } else {
-        let spelling = format!("{name} (relative to an anonymous pipe handle, not a directory)");
-        let outcome = nt_outcome(ffi::nt_create_relative(read_handle, &name));
-        ffi::close(read_handle);
-        ffi::close(write_handle);
-        Line::new(
-            "5b",
-            spelling,
-            outcome,
-            "caveat, not a pass: a handle-relative open only classifies correctly when \
-             GetFinalPathNameByHandleW can resolve the root handle. A pipe cannot be resolved \
-             that way, so this line exercises the fallback edge Task 4 left open (falls back to \
-             the pre-existing passthrough), and must not be read as vector 5 succeeding twice.",
-        )
-    };
-
-    (line5, line5b)
+        );
+    }
+    let spelling = format!("{name} (relative to an anonymous pipe handle, not a directory)");
+    let outcome = nt_outcome(ffi::nt_create_relative(read_handle, &name));
+    ffi::close(read_handle);
+    ffi::close(write_handle);
+    Line::new(
+        "5b",
+        spelling,
+        outcome,
+        "caveat, not a pass: a handle-relative open only classifies correctly when \
+         GetFinalPathNameByHandleW can resolve the root handle. A pipe cannot be resolved \
+         that way, so this line exercises the fallback edge Task 4 left open (falls back to \
+         the pre-existing passthrough), and must not be read as vector 5 succeeding twice.",
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -537,13 +549,8 @@ fn free_drive_letter() -> Option<char> {
     (b'D'..=b'Z').rev().map(|b| b as char).find(|c| mask & (1u32 << (*c as u32 - 'A' as u32)) == 0)
 }
 
-// ---------------------------------------------------------------------
-// Vector 10: alternate Unicode case form, plus a trailing dot and trailing
-// space Win32 silently discards. Combined into one spelling.
-// ---------------------------------------------------------------------
-fn vector10_unicode_and_trailing(abs: &str) -> Line {
-    let flipped: String = abs
-        .chars()
+fn case_flip(s: &str) -> String {
+    s.chars()
         .map(|c| {
             if c.is_ascii_uppercase() {
                 c.to_ascii_lowercase()
@@ -553,17 +560,71 @@ fn vector10_unicode_and_trailing(abs: &str) -> Line {
                 c
             }
         })
-        .collect();
+        .collect()
+}
+
+// ---------------------------------------------------------------------
+// Vector 10a: alternate Unicode case form. Built with a `\\?\` prefix for
+// consistency with 10b/10c, though it does not depend on it: NTFS resolves
+// names case-insensitively at the filesystem-driver level regardless of
+// whether Win32's own path parsing ran, so `opened` is the correct result
+// standalone, with or without a session.
+// ---------------------------------------------------------------------
+fn vector10a_case_fold(abs: &str) -> Line {
+    let flipped = case_flip(abs);
     if flipped == abs {
-        return unbuildable("10", abs, "target path has no alphabetic characters to case-flip");
+        return unbuildable("10a", abs, "target path has no alphabetic characters to case-flip");
     }
-    let spelling = format!("{flipped}. ");
+    let spelling = format!(r"\\?\{flipped}");
     let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
     Line::new(
-        "10",
+        "10a",
         spelling,
         outcome,
-        "case-flipped from the given spelling, with a trailing '.' and trailing space appended",
+        "case-flipped from the given spelling; NTFS resolves names case-insensitively \
+         regardless of the \\\\?\\ prefix, so `opened` is expected standalone, session or not",
+    )
+}
+
+// ---------------------------------------------------------------------
+// Vector 10b: a trailing dot Win32 silently discards -- but only when it
+// gets the chance to. Built with a `\\?\` prefix so the raw spelling reaches
+// NtCreateFile unmodified: without one, kernel32's RtlGetFullPathName_U
+// strips the trailing dot before the shim's hook ever sees it, and `opened`
+// would be the OS's doing, not the canonicaliser's. Standalone (no session),
+// nothing strips it either, so the OS looks for a component that literally
+// ends in '.', which does not exist -- `not-found` is the correct result
+// here, not a failure. Under a session with a working canonicaliser this
+// should flip to `opened`; under one that does not strip trailing dots it
+// would stay `not-found`.
+// ---------------------------------------------------------------------
+fn vector10b_trailing_dot(abs: &str) -> Line {
+    let spelling = format!(r"\\?\{abs}.");
+    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    Line::new(
+        "10b",
+        spelling,
+        outcome,
+        "verbatim (\\\\?\\) path with a trailing '.' appended to the whole spelling; `not-found` \
+         is the correct standalone result (Win32 never got a chance to strip it, and no such \
+         literal name exists) -- a working canonicaliser under a session should flip this to \
+         `opened`, not the other way around",
+    )
+}
+
+// ---------------------------------------------------------------------
+// Vector 10c: a trailing space, same reasoning as 10b.
+// ---------------------------------------------------------------------
+fn vector10c_trailing_space(abs: &str) -> Line {
+    let spelling = format!(r"\\?\{abs} ");
+    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    Line::new(
+        "10c",
+        spelling,
+        outcome,
+        "verbatim (\\\\?\\) path with a trailing space appended to the whole spelling; \
+         `not-found` is the correct standalone result for the same reason as 10b -- a working \
+         canonicaliser under a session should flip this to `opened`",
     )
 }
 
@@ -586,27 +647,67 @@ fn vector11_ads(abs: &str) -> Line {
 }
 
 // ---------------------------------------------------------------------
-// Vector 12: '.'/'..' components and a redundant separator, combined into
-// one spelling. The intervening directory name does not need to exist:
-// Win32's non-verbatim path parsing collapses `.`/`..` lexically, not by
-// walking the filesystem.
+// Vector 12a/12b/12c: '.'/'..' components and a redundant separator, each
+// its own spelling, each `\\?\`-prefixed for the same reason as 10b/10c:
+// without the prefix, kernel32's RtlGetFullPathName_U collapses `.`/`..`
+// lexically before NtCreateFile is ever reached, so the shim's own
+// canonicaliser (which is supposed to do that collapsing) is never
+// exercised and `opened` would be guaranteed by Win32 regardless of whether
+// canonicalisation works. With the prefix, "." and ".." are literal,
+// unresolved component names as far as Win32 is concerned (documented
+// behaviour of the `\\?\` prefix), and NTFS stores no such directory
+// entries, so `not-found` is the correct standalone result for 12a/12b, not
+// a failure -- a working canonicaliser under a session should flip both to
+// `opened`.
 // ---------------------------------------------------------------------
-fn vector12_dot_dotdot(abs: &str) -> Line {
+fn vector12a_dot_component(abs: &str) -> Line {
     let Some((dir, name)) = parent_dir_and_filename(abs) else {
-        return unbuildable("12", abs, "target path has no parent directory component");
+        return unbuildable("12a", abs, "target path has no parent directory component");
     };
-    let mut spelling = dir;
-    spelling.push_str(r"\.\zz-vfs-escape-nonexistent-marker\..");
-    spelling.push('\\');
-    spelling.push('\\'); // redundant separator
-    spelling.push_str(&name);
+    let spelling = format!(r"\\?\{dir}\.\{name}");
     let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
     Line::new(
-        "12",
+        "12a",
         spelling,
         outcome,
-        "a '.' component, a '..' traversal through a directory name that need not exist, and a \
-         doubled separator",
+        "verbatim (\\\\?\\) path with a literal '.' component; `not-found` is the correct \
+         standalone result (NTFS has no directory entry literally named '.') -- a working \
+         canonicaliser under a session should flip this to `opened`",
+    )
+}
+
+fn vector12b_dotdot_traversal(abs: &str) -> Line {
+    let Some((dir, name)) = parent_dir_and_filename(abs) else {
+        return unbuildable("12b", abs, "target path has no parent directory component");
+    };
+    let spelling = format!(r"\\?\{dir}\zz-vfs-escape-nonexistent-marker\..\{name}");
+    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    Line::new(
+        "12b",
+        spelling,
+        outcome,
+        "verbatim (\\\\?\\) path traversing '..' through a directory name that does not exist; \
+         `not-found` is the correct standalone result -- the intermediate name is never really \
+         walked, and even if it existed Win32 does not resolve '..' in a verbatim path. A \
+         working canonicaliser under a session collapses this lexically (the intermediate name \
+         need not exist for that) and should flip this to `opened`",
+    )
+}
+
+fn vector12c_doubled_separator(abs: &str) -> Line {
+    let Some((dir, name)) = parent_dir_and_filename(abs) else {
+        return unbuildable("12c", abs, "target path has no parent directory component");
+    };
+    let spelling = format!(r"\\?\{dir}\\{name}");
+    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    Line::new(
+        "12c",
+        spelling,
+        outcome,
+        "verbatim (\\\\?\\) path with a doubled/redundant separator before the file name; \
+         unlike 12a/12b this does not depend on '.'/'..' resolution, so the standalone result \
+         here is whatever the NT object-manager namespace parser itself does with a doubled \
+         separator -- reported as observed, not asserted in advance",
     )
 }
 
@@ -665,21 +766,24 @@ fn main() {
         );
     }
 
-    let (line5, line5b) = guarded_pair("5", "5b", || vector5_handle_relative(&abs));
     let lines: Vec<Line> = vec![
         guarded("1", || vector1_short_name(&abs)),
         guarded("2", || vector2_extended_length(&abs)),
         guarded("3", || vector3_device_path(&abs)),
         guarded("4", || vector4_volume_guid(&abs)),
-        line5,
-        line5b,
+        guarded("5", || vector5_handle_relative(&abs)),
+        guarded("5b", || vector5b_unresolvable_handle(&abs)),
         guarded("6", || vector6_cwd_relative(&abs)),
         guarded("7", || vector7_junction(&abs)),
         guarded("8", || vector8_hardlink(&abs)),
         guarded("9", || vector9_alias_drive(&abs)),
-        guarded("10", || vector10_unicode_and_trailing(&abs)),
+        guarded("10a", || vector10a_case_fold(&abs)),
+        guarded("10b", || vector10b_trailing_dot(&abs)),
+        guarded("10c", || vector10c_trailing_space(&abs)),
         guarded("11", || vector11_ads(&abs)),
-        guarded("12", || vector12_dot_dotdot(&abs)),
+        guarded("12a", || vector12a_dot_component(&abs)),
+        guarded("12b", || vector12b_dotdot_traversal(&abs)),
+        guarded("12c", || vector12c_doubled_separator(&abs)),
         guarded("13", || vector13_preexisting_handle(&abs)),
         guarded("14", || vector14_child_without_shim(&abs)),
     ];
