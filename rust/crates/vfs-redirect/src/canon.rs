@@ -9,13 +9,16 @@
 //! guessed at: see `an_unmapped_device_does_not_silently_become_a_drive`
 //! below — treating an unrecognised device as some drive would make the VFS
 //! start intercepting paths that were never under the managed root.
+//!
+//! A drive-rooted path also needs its own `..` handling: Windows clamps `..`
+//! at the drive root (`C:\..` is `C:\`) rather than erroring or popping the
+//! drive letter itself away, and letting the drive be popped away is a real
+//! bypass — see `dotdot_traversal_through_the_drive_root_clamps_to_the_same_file`.
 
-use vfs_core::{normalize_vpath, PathError};
+use vfs_core::{fold, normalize_vpath, PathError};
 
 /// NT/DOS long-path prefixes `normalize_vpath` also recognises, in both
-/// slash forms. Used here only to find where a drive letter or device name
-/// starts, not to strip them permanently — final stripping is
-/// `normalize_vpath`'s job.
+/// slash forms.
 const NT_PREFIXES: [&str; 4] = [r"\??\", r"\\?\", "/??/", "//?/"];
 
 /// A table from NT device/volume-GUID prefixes to the drive letter they are
@@ -45,12 +48,22 @@ impl VolumeMap {
     /// `HarddiskVolume30`), the drive letter and the byte length of the
     /// matched prefix. Longest match wins if more than one registered
     /// prefix matches.
+    ///
+    /// The match is case-insensitive: NT object-manager names are
+    /// case-insensitive, so `\device\harddiskvolume3` is as valid a spelling
+    /// as `\Device\HarddiskVolume3`. Both sides are folded for the
+    /// comparison rather than lowercasing the stored key, so the returned
+    /// drive letter keeps whatever case was registered.
     fn resolve(&self, path: &str) -> Option<(char, usize)> {
         let mut best: Option<(char, usize)> = None;
         for (prefix, drive) in &self.entries {
-            let Some(rest) = path.strip_prefix(prefix.as_str()) else {
+            let Some(candidate) = path.get(..prefix.len()) else {
                 continue;
             };
+            if fold(candidate) != fold(prefix) {
+                continue;
+            }
+            let rest = &path[prefix.len()..];
             if !rest.is_empty() && !rest.starts_with(['\\', '/']) {
                 continue;
             }
@@ -66,9 +79,30 @@ impl VolumeMap {
     }
 }
 
-/// The byte length of a recognised NT/DOS prefix at the start of `s`, or 0.
+/// Strip every leading recognised NT/DOS prefix, looping in case more than
+/// one layer is stacked. `normalize_vpath` strips only one layer (a single
+/// pass, `break`s after the first match), which is fine for its own callers
+/// but not safe for us to rely on here: after we peel a prefix ourselves for
+/// other reasons (see `nt_prefix_len` and `resolve_device_prefix`), a second
+/// leftover layer would otherwise reach the final `normalize_vpath` call as
+/// an ordinary-looking component (`?` or `??`) and get folded into the
+/// canonical path as if it were a real directory name.
+fn strip_all_nt_prefixes(s: &str) -> &str {
+    let mut s = s;
+    while let Some(p) = NT_PREFIXES.iter().find(|p| s.starts_with(**p)) {
+        s = &s[p.len()..];
+    }
+    s
+}
+
+/// The byte length of every leading recognised NT/DOS prefix, stacked or
+/// not. Used only to find where a drive letter or device name starts for
+/// the alternate-data-stream check below; a naive single-layer measurement
+/// would stop after the outer prefix and mistake a nested prefix's own
+/// drive colon for a stream separator, truncating (not just failing to
+/// unify) the rest of the path.
 fn nt_prefix_len(s: &str) -> usize {
-    NT_PREFIXES.iter().find(|p| s.starts_with(*p)).map_or(0, |p| p.len())
+    s.len() - strip_all_nt_prefixes(s).len()
 }
 
 /// Split off a trailing alternate-data-stream suffix (`:stream` or
@@ -105,8 +139,8 @@ fn resolve_device_prefix(path: &str, volumes: &VolumeMap) -> String {
 
 /// Strip trailing dots and spaces from each path component, the way Win32
 /// silently discards them when resolving a name. `.` and `..` are left
-/// alone — they are navigation, not a name Win32 would trim — so
-/// `normalize_vpath`'s dot-dot handling still sees them intact.
+/// alone — they are navigation, not a name Win32 would trim — so the
+/// dot-dot handling below (and `normalize_vpath`'s) still sees them intact.
 fn strip_trailing_punctuation(path: &str) -> String {
     path.split(['/', '\\'])
         .map(|comp| {
@@ -120,11 +154,59 @@ fn strip_trailing_punctuation(path: &str) -> String {
         .join("/")
 }
 
+/// `C:foo` — a drive letter directly followed by a non-separator character,
+/// with no `\` or `/` in between — means "relative to the current directory
+/// on drive C", state that belongs to the OS process and that this pure
+/// function never has. Rather than guess (and risk guessing wrong, which is
+/// exactly the failure mode this gate exists to close), canonicalise refuses
+/// the spelling outright; resolving a CWD-relative open is the shim's job
+/// elsewhere, not this gate's.
+fn is_drive_relative(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && !matches!(b[2], b'\\' | b'/')
+}
+
+/// Whether a `/`-joined path's leading segment is a bare drive component
+/// (`C:`, exactly two bytes). Produced only by a genuine absolute Win32 form
+/// or by `resolve_device_prefix`'s replacement — never left over from a
+/// generic NT/DOS prefix — so seeing this shape reliably means "there is a
+/// drive root here to protect from `..`".
+fn is_drive_component(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+/// Resolve `.`/`..` in `remainder` — a `/`-joined path relative to a drive
+/// or resolved-device root — clamping any `..` that would climb past that
+/// root rather than erroring. This is what Windows actually does:
+/// `C:\..` resolves to `C:\`, not to an error, and not to the drive letter
+/// itself being popped away. `normalize_vpath` cannot provide this: it has
+/// no notion of a drive boundary and pops every component — including a
+/// leading drive letter — exactly like any other, which is how `..` was
+/// able to climb past `C:` entirely and reappear as an ordinary,
+/// non-drive-rooted path that no longer matched any root check.
+fn clamp_dotdot(remainder: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for comp in remainder.split(['/', '\\']) {
+        match comp {
+            "" | "." => continue,
+            ".." => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out.join("/")
+}
+
 /// Canonicalise one NT open path to a single form: strip any alternate-data-
 /// stream suffix, resolve a device or volume-GUID prefix to its drive letter
-/// via `volumes`, strip trailing per-component dots/spaces, then hand the
-/// result to [`normalize_vpath`] for separator folding and `.`/`..`
-/// resolution. Every spelling of the same file must come out identical.
+/// via `volumes`, strip every stacked NT/DOS prefix layer, refuse a
+/// drive-relative (`C:foo`) spelling, strip trailing per-component
+/// dots/spaces, clamp `..` at a drive boundary if one is present, then hand
+/// the result to [`normalize_vpath`] for separator folding and any remaining
+/// `.`/`..` resolution. Every spelling of the same file must come out
+/// identical.
 ///
 /// Case is preserved: folding case is the caller's job (`RootMap` already
 /// folds for comparison), and `DiskProvider` needs the original case to open
@@ -132,8 +214,18 @@ fn strip_trailing_punctuation(path: &str) -> String {
 pub fn canonicalise(raw: &str, volumes: &VolumeMap) -> Result<String, PathError> {
     let no_stream = strip_stream_suffix(raw);
     let resolved = resolve_device_prefix(no_stream, volumes);
-    let trimmed = strip_trailing_punctuation(&resolved);
-    normalize_vpath(&trimmed)
+    let unprefixed = strip_all_nt_prefixes(&resolved);
+    if is_drive_relative(unprefixed) {
+        return Err(PathError::EscapesRoot);
+    }
+    let trimmed = strip_trailing_punctuation(unprefixed);
+    match trimmed.split_once('/') {
+        Some((maybe_drive, rest)) if is_drive_component(maybe_drive) => {
+            let clamped = clamp_dotdot(rest);
+            normalize_vpath(&format!("{maybe_drive}/{clamped}"))
+        }
+        _ => normalize_vpath(&trimmed),
+    }
 }
 
 #[cfg(test)]
@@ -208,9 +300,75 @@ mod tests {
         );
     }
 
-    /// `..` may not climb out of the path entirely.
+    /// With no drive or device prefix to clamp against, an excess `..` still
+    /// has nowhere to go — this remains a hard error rather than a guess.
+    /// (Replaces the old `escaping_dotdot_is_refused`, which asserted this
+    /// for a *drive-rooted* path — see
+    /// `single_dotdot_at_drive_root_keeps_the_drive` and
+    /// `dotdot_traversal_through_the_drive_root_clamps_to_the_same_file`
+    /// for why that assumption was wrong.)
     #[test]
-    fn escaping_dotdot_is_refused() {
-        assert!(canonicalise(r"C:\..\..\Windows\System32\evil.dll", &vols()).is_err());
+    fn dotdot_escaping_with_no_drive_still_errors() {
+        assert!(canonicalise(r"..\Windows\System32\evil.dll", &vols()).is_err());
+    }
+
+    /// NT object-manager device names are case-insensitive:
+    /// `\device\harddiskvolume3` names the same volume as
+    /// `\Device\HarddiskVolume3`.
+    #[test]
+    fn device_prefix_matches_case_insensitively() {
+        let raw = r"\device\HARDDISKVOLUME3\Games\Skyrim\Data\a.esp";
+        assert_eq!(
+            canonicalise(raw, &vols()).unwrap().to_ascii_lowercase(),
+            "c:/games/skyrim/data/a.esp"
+        );
+    }
+
+    /// A doubled NT/DOS prefix must not corrupt or truncate the path — every
+    /// stacked layer is stripped, not just the outermost one, and the
+    /// alternate-data-stream check must not mistake an inner layer's drive
+    /// colon for a stream separator.
+    #[test]
+    fn nested_prefixes_are_fully_stripped() {
+        let raw = r"\??\\\?\C:\Games\Skyrim\Data\a.esp";
+        assert_eq!(
+            canonicalise(raw, &vols()).unwrap().to_ascii_lowercase(),
+            "c:/games/skyrim/data/a.esp"
+        );
+    }
+
+    /// `C:foo` (no separator after the drive colon) means "relative to
+    /// drive C's current directory" — state this pure function never has.
+    /// Rather than guess, canonicalise refuses the spelling outright; the
+    /// shim's existing CWD-relative-open handling is the right place to
+    /// resolve it, not this gate.
+    #[test]
+    fn drive_relative_form_is_rejected() {
+        assert!(canonicalise(r"C:Games\Skyrim\Data\a.esp", &vols()).is_err());
+    }
+
+    /// `..` cannot pop past the drive letter itself. Windows clamps at the
+    /// drive root rather than erroring — and critically, rather than
+    /// silently discarding the drive and reappearing as an ordinary
+    /// non-drive-rooted path, which is exactly how this traversal could
+    /// slip past a root check undetected while the OS still opened the
+    /// in-root file.
+    #[test]
+    fn dotdot_traversal_through_the_drive_root_clamps_to_the_same_file() {
+        let plain = canonicalise(r"C:\Games\Skyrim\Data\a.esp", &vols()).unwrap();
+        let traversal =
+            canonicalise(r"C:\Games\Skyrim\..\..\..\Games\Skyrim\Data\a.esp", &vols()).unwrap();
+        assert_eq!(traversal, plain);
+    }
+
+    /// A single `..` at the drive root clamps to the drive root; the drive
+    /// letter must survive, not be popped away.
+    #[test]
+    fn single_dotdot_at_drive_root_keeps_the_drive() {
+        let got = canonicalise(r"C:\..\Windows\System32\evil.dll", &vols()).unwrap();
+        assert!(
+            got.to_ascii_lowercase().starts_with("c:"),
+            "the drive did not survive a `..` at the root — {got}"
+        );
     }
 }
