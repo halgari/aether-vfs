@@ -226,6 +226,98 @@ From the shim's general hook-call counters, same run:
   330.4 MiB delivered) and `data\skyrim.esm` (249.8 MB, 240 reads, 238.2 MiB
   delivered).
 
+## A blind spot these counters cannot see
+
+`vfs-payload`'s `create_hook`/`open_hook` (`rust/crates/vfs-payload/src/lib.rs`,
+roughly lines 245-308) consult an early redirect table
+(`Config::redirects`, populated from `RunConfig::preinit_redirects`) before
+anything else runs. When `match_redirect` finds an entry (lines 261-271 for
+`NtCreateFile`, 295-301 for `NtOpenFile`), the open is redirected straight
+through the original ntdll trampoline (`orig(...)`) and the hook returns
+immediately, before `secondary_create`/`secondary_open` (the full-shim
+dispatch that `install_late` wires up) ever runs.
+
+That matters because both halves of this baseline's instrumentation sit
+downstream of that dispatch: the shim's under-root open outcomes classifier
+(the `Routed` / `FellThrough*` / `Denied` counts above) and the director's
+`record_open` (the `opens_ok`/`opens_err` reconciliation) each only see
+opens that reach `secondary_create`/`secondary_open`. An open matched by the
+preinit redirect table reaches neither. It doesn't increment `routed`,
+doesn't land in any `FellThrough*` class, and never reaches the director,
+so it doesn't show up as `Denied` either. Drift stays 0 and every
+`OpenOutcome` stays 0 regardless of what that table does, because neither
+counter can observe it.
+
+Today the table is empty: `rust/crates/vfs-director/src/session.rs` (around
+line 270) builds skyrim-live's `RunConfig` with `preinit_redirects: vec![]`,
+so `redirect_count` is 0, `match_redirect` never returns `Some`, and this
+path contributes nothing to any number in this document. The zeros and the
+`drift == 0` recorded above are earned; they are not being laundered
+through this table.
+
+**Gate 5 warning:** this table is exactly the mechanism someone would reach
+for to relocate the `FellThroughDrmException` handling (the
+`steam_appid.txt` / `SkyrimSE.exe` / `SkyrimSELauncher.exe` /
+`steam_api*.dll` exceptions in `hook.rs`), since it runs earlier than that
+check and would look like it solves the ordering constraint described
+above under "`FellThroughDrmException`". Doing that would not close the
+bypass. It would relocate it to a place neither counter can see: the DRM
+opens would stop appearing as `FellThroughDrmException`, the fall-through
+table would read all-zero, drift would stay 0, and the same
+real-filesystem access this whole exercise exists to eliminate would still
+be happening, just silently. Gate 5 must not move the DRM filename
+exceptions into the preinit redirect table. Whatever gate 5 does with
+those four filenames has to stay visible to at least one of the two
+counters this document relies on.
+
+## What's portable to gates 2-5, and what isn't
+
+The headline numbers above (`routed=392`, `opens_ok=77`, `opens_err=315`)
+are specific to this session: this content image (`C:\tmp\skyrimse.zip`,
+unmodified), and this navigation (main menu → `coc riverwood` → ~245s in
+Riverwood, no save, no inventory/container access, no fast travel), against
+a load order that references ~50 Creations Club plugins this zip image
+doesn't ship. Most of the 315 in `opens_err` is exactly those ~50 missing
+masters, each a real round trip to the director that came back negative.
+Point gate 2-5's measurement at a different image, in particular a
+complete image that actually has those Creations Club plugins, and
+`opens_err` should collapse toward zero, because the director starts
+saying yes instead of no. That is not a regression; it's the same
+invariant holding against a different, more complete input.
+
+**Portable comparison targets:** carry forward and expect gates 2-5 to
+match these:
+- `drift == 0` (`routed == opens_ok + opens_err`). This is the
+  reconciliation invariant; it doesn't depend on which opens happened,
+  only on every routed open being accounted for by the director.
+- The per-class zero/non-zero *pattern* in the outcome table:
+  `FellThroughDrmException` non-zero (until gate 5 closes it), the other
+  four fall-through classes and `Denied` at zero for this scope of
+  navigation (see "Zero is not closed" above: those zeros are a coverage
+  gap, not a proof of closure).
+
+**Not portable:** don't treat these as a target to reproduce:
+- The absolute counts (`392`, `77`, `315`, `16`, and the 408 total). They
+  are a deterministic function of the content set (which files and
+  plugins exist) and the navigation performed (how long, which areas,
+  whether a save happened). A different image or a different play session
+  will produce different counts even with the bypass fully closed.
+
+To compare absolute counts at all, a gate 2-5 run would have to hold the
+content image, the load order, and the navigation script (same start
+point, same duration, same actions) fixed against this session; otherwise
+a count difference says nothing about whether the gate changed anything.
+
+What establishes that these counts are a property of the image and
+navigation, and not run-to-run noise, is the cross-check above: the
+second, independently-launched live session against the *same* image
+reproduced `opens_err=312` (`routed=383`, `opens_ok=71`) before it stalled
+on an unrelated dialog. That's in the same neighborhood as the main run's
+315, consistent with a shorter, earlier-terminated navigation over the
+same missing-plugin load order. Two runs against the same image landing in
+the same neighborhood is what makes "image-determined" a finding rather
+than an assumption.
+
 ## Code changes (additive only; no routing behaviour touched)
 
 - **`rust/crates/vfs-directord/src/bin/skyrim-live.rs`**: added
