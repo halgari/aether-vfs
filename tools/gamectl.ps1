@@ -7,9 +7,26 @@
 #   gamectl.ps1 shot  <out.png>
 #   gamectl.ps1 key   <NAME> [repeat]
 #   gamectl.ps1 focus
+#   gamectl.ps1 click <x> <y>    (window-relative pixels, matching a `shot` screenshot)
+#   gamectl.ps1 launch [shim-stats-log-path]
+#   gamectl.ps1 stats  <shim-stats-log-path> [skyrim-live-stderr-log-path]
+#
+# `launch`/`stats` drive `skyrim-live.exe` for the bypass-baseline measurement
+# (rust/docs/bypass-baseline.md): `launch` starts it fully detached via
+# Start-Process (NOT a job-object child of this script's own process — a
+# `skyrim-live` launched as a backgrounded child dies when its parent task is
+# reaped, which is not a durable session), with VFS_SHIM_STATS_LOG set so the
+# injected shim turns on outcome classification. `stats` dumps the shim's
+# "under-root open outcomes" section and, if given skyrim-live's own stderr
+# log, the director-side `vfs-io opens: ok=.../err=...` line it prints itself
+# (skyrim-live embeds the director directly — there is no separate `vfs-directord`
+# gRPC daemon for a live game run, so there is no `vfs stats` endpoint to query;
+# this reads the same `io_stats::open_totals()` numbers skyrim-live now prints
+# to its own stderr).
 param(
   [Parameter(Mandatory=$true)][string]$Action,
   [string]$Arg1,
+  [string]$Arg2,
   [int]$Repeat = 1
 )
 
@@ -36,6 +53,49 @@ public class SkyCtl {
     [FieldOffset(8)] public KEYBDINPUT ki;
   }
   [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] p, int cb);
+
+  // A few menus (e.g. the "content not present" Creations warning) render as
+  // a dialog that only responds to a mouse click on Yes/No, not to a bound
+  // key. `SetCursorPos` alone (tried first) silently fails here for the same
+  // reason SendKeys fails for keyboard: it repositions the OS pointer without
+  // ever posting a move event, so the game's own cursor sprite never budges
+  // and the click lands wherever the game last thought the pointer was — not
+  // where the screenshot shows it. `SendInput` with MOUSEEVENTF_MOVE|ABSOLUTE
+  // (normalized to the virtual screen, same as a real relative-to-absolute
+  // hardware report) is what actually moves the game's notion of the cursor,
+  // mirroring why the header comment above insists on SendInput for keys.
+  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {
+    public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo;
+  }
+  [StructLayout(LayoutKind.Explicit, Size=40)] public struct MINPUT {
+    [FieldOffset(0)] public uint type;
+    [FieldOffset(8)] public MOUSEINPUT mi;
+  }
+  [DllImport("user32.dll", EntryPoint="SendInput")] public static extern uint SendMouseInput(uint n, MINPUT[] p, int cb);
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int nIndex);
+  const int SM_XVIRTUALSCREEN = 76;
+  const int SM_YVIRTUALSCREEN = 77;
+  const int SM_CXVIRTUALSCREEN = 78;
+  const int SM_CYVIRTUALSCREEN = 79;
+  const uint MOUSEEVENTF_MOVE = 0x0001;
+  const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
+  const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+  const uint MOUSEEVENTF_LEFTUP = 0x0004;
+  public static void ClickAt(int screenX, int screenY) {
+    int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    int nx = (int)(((long)(screenX - vx) * 65535) / vw);
+    int ny = (int)(((long)(screenY - vy) * 65535) / vh);
+    MINPUT[] mv = new MINPUT[1];
+    mv[0].type = 0; mv[0].mi.dx = nx; mv[0].mi.dy = ny; mv[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+    SendMouseInput(1, mv, Marshal.SizeOf(typeof(MINPUT)));
+    System.Threading.Thread.Sleep(100);
+    MINPUT[] down = new MINPUT[1]; down[0].type = 0; down[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    SendMouseInput(1, down, Marshal.SizeOf(typeof(MINPUT)));
+    System.Threading.Thread.Sleep(80);
+    MINPUT[] up = new MINPUT[1]; up[0].type = 0; up[0].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    SendMouseInput(1, up, Marshal.SizeOf(typeof(MINPUT)));
+  }
 
   // Without this the capture runs DPI-virtualised: GetWindowRect hands back
   // logical coords, CopyFromScreen wants physical, and you silently screenshot
@@ -99,6 +159,52 @@ public class SkyCtl {
 
 [SkyCtl]::GoDpiAware()
 
+# 'launch' starts the game (nothing to attach to yet) and 'stats' only reads
+# log files already on disk — neither needs a running SkyrimSE process, so
+# both are handled before the gate that every other action requires.
+if ($Action.ToLower() -eq 'launch') {
+  $repoRoot = Split-Path $PSScriptRoot -Parent
+  $liveExe = Join-Path $repoRoot 'rust\target\release\skyrim-live.exe'
+  if (-not (Test-Path $liveExe)) {
+    "ERROR: $liveExe not found - build it first:`n  cargo build --release -p vfs-shim-dll`n  cargo build --release --manifest-path crates/vfs-payload/Cargo.toml --target-dir target`n  cargo build --release -p vfs-directord --bin skyrim-live"
+    exit 1
+  }
+  $shimLog = if ($Arg1) { $Arg1 } else { 'C:\tmp\skyrim-data\perf\bypass-baseline-shim-stats.log' }
+  $base = [System.IO.Path]::Combine([System.IO.Path]::GetDirectoryName($shimLog), [System.IO.Path]::GetFileNameWithoutExtension($shimLog))
+  $outLog = "$base.live-out.log"
+  $errLog = "$base.live-err.log"
+  Remove-Item $shimLog, $outLog, $errLog -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Force -Path (Split-Path $shimLog) | Out-Null
+  # Inherited by the child (CreateProcessW with a null environment block
+  # inherits the caller's env), and by SkyrimSE.exe/skse64_loader.exe in turn
+  # -- the shim reads this from its own process environment once injected.
+  $env:VFS_SHIM_STATS_LOG = $shimLog
+  # Start-Process detaches fully: not a child job of this PowerShell process,
+  # so it survives this script (and this tool call) exiting.
+  $p = Start-Process -FilePath $liveExe -WorkingDirectory (Split-Path $liveExe) `
+    -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
+  "launched skyrim-live pid=$($p.Id)`n  shim_log=$shimLog`n  live_out=$outLog`n  live_err=$errLog"
+  exit 0
+}
+if ($Action.ToLower() -eq 'stats') {
+  if (-not $Arg1) { "ERROR: need a shim-stats-log path"; exit 1 }
+  if (-not (Test-Path $Arg1)) { "ERROR: shim stats log not found: $Arg1"; exit 1 }
+  $text = Get-Content $Arg1 -Raw
+  $idx = $text.IndexOf('under-root open outcomes:')
+  "=== shim: under-root open outcomes ($Arg1) ==="
+  if ($idx -ge 0) { $text.Substring($idx) } else { "(section absent - reporter never ticked, or nothing under-root was opened yet)" }
+  if ($Arg2) {
+    "=== director: open totals (from skyrim-live's own stderr, $Arg2) ==="
+    if (Test-Path $Arg2) {
+      $lines = Select-String -Path $Arg2 -Pattern 'vfs-io opens: ok=' | Select-Object -Last 1
+      if ($lines) { $lines.Line } else { "(no 'vfs-io opens:' line yet - game may still be starting)" }
+    } else {
+      "ERROR: $Arg2 not found"
+    }
+  }
+  exit 0
+}
+
 $proc = Get-Process -Name SkyrimSE -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $proc) { "ERROR: SkyrimSE not running"; exit 1 }
 $hwnd = [SkyCtl]::FindGameWindow($proc.Id)
@@ -149,6 +255,16 @@ switch ($Action.ToLower()) {
       Start-Sleep -Milliseconds 220
     }
     "sent $Arg1 x$Repeat to pid $($proc.Id)"
+  }
+  'click' {
+    if (-not $Arg1 -or -not $Arg2) { "ERROR: need x and y (window-relative pixels, matching a `shot` screenshot)"; exit 1 }
+    if (-not [SkyCtl]::ForceForeground($hwnd)) { "WARN: window did not take foreground; click may be lost" }
+    $r = New-Object SkyCtl+RECT
+    [void][SkyCtl]::GetWindowRect($hwnd, [ref]$r)
+    $sx = $r.L + [int]$Arg1
+    $sy = $r.T + [int]$Arg2
+    [SkyCtl]::ClickAt($sx, $sy)
+    "clicked window-relative ($Arg1,$Arg2) -> screen ($sx,$sy) on pid $($proc.Id)"
   }
   'type' {
     if (-not $Arg1) { "ERROR: need text"; exit 1 }

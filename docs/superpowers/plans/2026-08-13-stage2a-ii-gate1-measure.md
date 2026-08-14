@@ -193,7 +193,7 @@ git commit -m "feat(directord): expose open counts and rejected writes in stats"
 **Interfaces:**
 - Produces: `assert_reconciled(shim_report: &Path, opens_ok: u64) -> Reconciliation`, returning the parsed outcome counts plus the drift, and panicking with a message naming the drift when the routed count does not equal the director's open count.
 
-**The invariant:** `routed` (shim) == `opens_ok` (director). Any drift means an open the shim believed it routed never arrived — a bypass by definition.
+**The invariant:** shim `routed` == director `opens_ok` + `opens_err`. `Routed` means the director *answered*, including with a legitimate error.
 
 **What this gate does NOT assert:** that fall-through counts are zero. They are not zero yet, and asserting so would fail. Record them; gates 2-5 drive them down one class at a time.
 

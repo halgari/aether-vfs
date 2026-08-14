@@ -246,7 +246,28 @@ containment test that reads as a pass is how this property rots.
 ### The continuous check
 
 The shim counts opens it classified as under-root; the director counts opens it
-received. **These must be equal.** Any drift is a bypass by definition.
+received. The invariant is:
+
+```
+shim `routed`  ==  director `opens_ok` + director `opens_err`
+```
+
+**Not `opens_ok` alone.** The shim's `Routed` outcome means *the director
+answered* — including answering with a legitimate error. A game re-opening a
+file it just deleted, or issuing a second `CREATE_NEW` against an existing path,
+is correctly routed and correctly refused; nothing fell through to disk.
+Measured on the write-path fixture: `routed = 12`, `opens_ok = 9`,
+`opens_err = 3`.
+
+Comparing against `opens_ok` alone would fail on every run containing a
+legitimate error, and the natural response — weakening the assertion — would
+destroy the guarantee. Any drift in the sum is a bypass by definition.
+
+**Directory creates are out of scope for both counters.** `OP_MKDIR` reaches
+`Director::mkdir`, which never calls `record_open`; shim-side, `try_fuse_mkdir`
+never calls the classifier. The omissions cancel, so the invariant holds — but
+that is a property of the current wiring, not a guarantee, and a one-sided
+change to either would turn a cancelled pair into phantom drift.
 Surfaced in `vfs stats` and asserted in the end-to-end test, this turns the
 invariant from something proven once into something monitored — which matters
 because escapes are reintroduced by ordinary refactoring, not by malice.

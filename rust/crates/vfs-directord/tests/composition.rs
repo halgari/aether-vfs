@@ -207,6 +207,87 @@ async fn stats_rpc_reports_sessions_and_cache() {
     server.abort();
 }
 
+/// The measurement gate's director-side exposure: `Stats` must carry the
+/// director's own open counts (`io_stats::open_totals`), not just cache
+/// metrics. Drives a real open through `dispatch_director` (the same
+/// function the ring calls for `OP_OPEN`) rather than `Session::read_file`,
+/// since `read_file` goes straight through the kernel and never touches
+/// `io_stats::record_open`.
+#[tokio::test(flavor = "multi_thread")]
+async fn stats_rpc_reports_open_counts_after_session_activity() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let registry = SessionRegistry::new();
+    let svc = DirectorService::new(registry.clone());
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let mut client = connect(&format!("{addr}")).await.unwrap();
+    let before = client.stats(Empty {}).await.unwrap().into_inner();
+
+    let session = client
+        .create_session(CreateSessionReq {
+            name: "stats-opens".into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), b"hi").unwrap();
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(vfs_control::pb::SourceSpec {
+                kind: Some(source_spec::Kind::Disk(DiskSource {
+                    path: dir.path().to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: "/".into(),
+            layer: 0,
+        })
+        .await
+        .unwrap();
+
+    registry
+        .with_session_mut(&session.id, |live| {
+            let kernel = live.session.kernel();
+            let (st, payload) = vfs_director::ring_dispatch::dispatch_director(
+                kernel,
+                vfs_protocol::OP_OPEN,
+                &vfs_protocol::encode_open_req(vfs_director::OPEN_READ, "f.txt"),
+                0,
+                4096,
+                None,
+            );
+            assert_eq!(st, vfs_protocol::ST_OK, "the served open must succeed");
+            assert!(vfs_protocol::decode_open_resp(&payload).is_some());
+            Ok(())
+        })
+        .unwrap();
+
+    let after = client.stats(Empty {}).await.unwrap().into_inner();
+    assert!(
+        after.opens_ok > before.opens_ok,
+        "opens_ok did not reflect the served open: before={} after={}",
+        before.opens_ok,
+        after.opens_ok
+    );
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq {
+            session_id: session.id,
+        })
+        .await
+        .unwrap();
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn add_zip_source_via_grpc() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

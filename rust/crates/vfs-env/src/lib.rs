@@ -127,6 +127,12 @@ pub const BENCH: &str = "VFS_BENCH";
 
 /// Per-hook call counts, timings and path frequencies.
 pub const SHIM_STATS_LOG: &str = "VFS_SHIM_STATS_LOG";
+/// Overrides the report's periodic-write interval (milliseconds), default
+/// 250. Nothing flushes the report on process exit, so a process shorter
+/// than the interval — a millisecond-scale test fixture, never a real game
+/// session — produces no report file at all; this lets such a caller shorten
+/// the interval for just its own child instead of guessing at a longer sleep.
+pub const SHIM_STATS_INTERVAL_MS: &str = "VFS_SHIM_STATS_INTERVAL_MS";
 /// Every file the director serves, with its size.
 pub const DIRECTOR_OPEN_LOG: &str = "VFS_DIRECTOR_OPEN_LOG";
 /// Opens of the game EXE, for tracing DRM behaviour.
@@ -222,6 +228,7 @@ pub const ALL: &[Var] = &[
     Var { name: WAIT, kind: Kind::Behaviour, default: "false (detach)" },
     Var { name: BENCH, kind: Kind::Behaviour, default: "false" },
     Var { name: SHIM_STATS_LOG, kind: Kind::Diagnostic, default: "off" },
+    Var { name: SHIM_STATS_INTERVAL_MS, kind: Kind::Diagnostic, default: "250" },
     Var { name: DIRECTOR_OPEN_LOG, kind: Kind::Diagnostic, default: "off" },
     Var { name: DRM_EXE_LOG, kind: Kind::Diagnostic, default: "off" },
     Var { name: SECTION_FILL_LOG, kind: Kind::Diagnostic, default: "off" },

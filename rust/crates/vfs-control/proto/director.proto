@@ -83,7 +83,19 @@ message TeardownReq {
   string session_id = 1;
 }
 
-// Block-cache metrics (M2).
+// A write refused because the resolved mount had no `ReadWrite` provider,
+// keyed by path with a running count (`io_stats::rejected_writes`).
+message RejectedWrite {
+  string path = 1;
+  uint64 count = 2;
+}
+
+// Block-cache metrics (M2). Fields 9+ (measurement gate) are the
+// director-side half of the shim/director open-count reconciliation: the
+// shim classifies every under-root open by which path it took, and these
+// counts are what actually arrived at the director. This message is part of
+// the gRPC control plane, not the ring wire protocol the injected DLL speaks
+// — add fields here freely, but never renumber.
 message StatsResp {
   uint64 cache_hits = 1;
   uint64 cache_misses = 2;
@@ -93,4 +105,7 @@ message StatsResp {
   uint64 cache_bytes_from_source = 6;
   uint64 cache_ram_bytes = 7;
   uint32 sessions = 8;
+  uint64 opens_ok = 9;
+  uint64 opens_err = 10;
+  repeated RejectedWrite rejected_writes = 11;
 }

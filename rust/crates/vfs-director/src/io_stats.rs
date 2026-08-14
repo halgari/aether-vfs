@@ -41,6 +41,13 @@ struct State {
     ops_err: u64,
     total_bytes: u64,
     total_write_bytes: u64,
+    /// `record_open`'s ok/err split, kept apart from `ops_open` (every open,
+    /// regardless of outcome) and `ops_err` (every error, regardless of
+    /// operation) so `open_totals()` can report opens specifically. This is
+    /// the director-side half of the shim/director open-count reconciliation:
+    /// the shim's `Routed` outcome counter and this pair are meant to agree.
+    opens_ok: u64,
+    opens_err: u64,
     /// Writes refused because the resolved mount had no `ReadWrite`
     /// provider, keyed by path with a running count.
     rejected_writes: HashMap<String, u64>,
@@ -161,9 +168,11 @@ pub fn record_open(path: &str, fh: Option<u64>, size: u64, err: bool) {
         s.ops_open += 1;
         if err {
             s.ops_err += 1;
+            s.opens_err += 1;
             s.by_path.entry(path).or_default().errors += 1;
             return;
         }
+        s.opens_ok += 1;
         let e = s.by_path.entry(path.clone()).or_default();
         e.opens += 1;
         e.open_size = size;
@@ -171,6 +180,19 @@ pub fn record_open(path: &str, fh: Option<u64>, size: u64, err: bool) {
             s.fh_path.insert(fh, path);
         }
     });
+}
+
+/// `(ok, err)` counts of every open `record_open` has seen — the director's
+/// half of the shim/director open-count reconciliation. The shim classifies
+/// each under-root open by which path it took (`Routed` vs. a `FellThrough*`
+/// variant); this is the corresponding count of opens that actually arrived
+/// at the director. Gate 4 compares the two: an open the shim believed was
+/// `Routed` that never shows up here is a bypass, by definition.
+pub fn open_totals() -> (u64, u64) {
+    let Ok(s) = state().lock() else {
+        return (0, 0);
+    };
+    (s.opens_ok, s.opens_err)
 }
 
 pub fn record_read(fh: u64, n: usize, err: bool) {
@@ -362,6 +384,31 @@ mod tests {
         assert!(
             report.contains("3.00 MiB") || report.contains("2.99 MiB") || report.contains("3.0"),
             "expected ~3 MiB total: {report}"
+        );
+    }
+
+    /// Director-side half of the shim/director open-count reconciliation
+    /// (aether-vfs measurement gate): `open_totals()` must distinguish a
+    /// successful open from a failed one, not just count "opens happened".
+    ///
+    /// Uses deltas rather than a fresh `reset()` baseline: this crate's test
+    /// binary runs its `#[test]` fns concurrently, and several of them
+    /// (`ring_dispatch`'s dispatch tests in particular) drive real opens
+    /// through the same process-wide counters. A hard reset here would race
+    /// those threads; a delta does not.
+    #[test]
+    fn open_totals_counts_ok_and_err_separately() {
+        let (before_ok, before_err) = open_totals();
+        record_open("open-totals-probe-ok.dat", Some(u64::MAX - 7), 7, false);
+        record_open("open-totals-probe-err.dat", None, 0, true);
+        let (after_ok, after_err) = open_totals();
+        assert!(
+            after_ok > before_ok,
+            "ok open count did not increment: {before_ok} -> {after_ok}"
+        );
+        assert!(
+            after_err > before_err,
+            "err open count did not increment: {before_err} -> {after_err}"
         );
     }
 }

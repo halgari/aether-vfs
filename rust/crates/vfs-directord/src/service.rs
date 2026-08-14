@@ -11,7 +11,8 @@ use tonic::{Request, Response, Status};
 use vfs_control::pb::director_server::Director;
 use vfs_control::pb::{
     launch_event, source_spec, AddSourceReq, CreateSessionReq, Empty, HealthReq, HealthResp,
-    LaunchEvent, LaunchReq, Session, SessionList, SourceRef, StatsResp, TeardownReq,
+    LaunchEvent, LaunchReq, RejectedWrite, Session, SessionList, SourceRef, StatsResp,
+    TeardownReq,
 };
 use vfs_control::SourceSpec;
 use vfs_director::LaunchOpts;
@@ -154,6 +155,16 @@ impl Director for DirectorService {
 
     async fn stats(&self, _req: Request<Empty>) -> Result<Response<StatsResp>, Status> {
         let s = self.registry.cache().stats();
+        // Director-side half of the shim/director open-count reconciliation
+        // (aether-vfs measurement gate): the shim classifies every under-root
+        // open by which path it took; these are the opens that actually
+        // arrived here. `io_stats` is process-wide, not per-session, same as
+        // the cache metrics above.
+        let (opens_ok, opens_err) = vfs_director::io_stats::open_totals();
+        let rejected_writes = vfs_director::io_stats::rejected_writes()
+            .into_iter()
+            .map(|(path, count)| RejectedWrite { path, count })
+            .collect();
         Ok(Response::new(StatsResp {
             cache_hits: s.hits,
             cache_misses: s.misses,
@@ -163,6 +174,9 @@ impl Director for DirectorService {
             cache_bytes_from_source: s.bytes_from_source,
             cache_ram_bytes: s.ram_bytes,
             sessions: self.registry.len() as u32,
+            opens_ok,
+            opens_err,
+            rejected_writes,
         }))
     }
 }
