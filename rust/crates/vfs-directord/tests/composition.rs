@@ -153,6 +153,82 @@ fn registry_cache_hits_on_second_read() {
     assert!(stats.misses >= 1, "expected at least one miss: {stats:?}");
 }
 
+/// A non-root mount only ever matches a vpath spelled in the exact case the
+/// mount was registered with (`vfs-director::path::strip_prefix` is a plain,
+/// case-sensitive string comparison) — and every vpath the shim ever sends
+/// over the ring is already lowercased
+/// (`vfs-shim::fuse_client::normalize_path_for_root`), so a mixed-case mount
+/// like `escape-matrix.md`'s old `"Data/SomeMod"` remedy can never match a
+/// live open. Registering the mount in the same lowercase spelling the shim
+/// always sends fixes exactly that half of the problem: a direct, known-path
+/// open through the mount succeeds.
+///
+/// The other half is not a spelling problem and this test does not pretend
+/// otherwise: `Director::readdir` only asks a mount for entries when that
+/// mount's own prefix is at-or-above the queried path
+/// (`strip_prefix(query, mount.prefix)`); a mount rooted *below* the queried
+/// directory (here, `"data/somemod"` below a `readdir("data")`) never
+/// contributes an entry for itself to that listing. So even a
+/// correctly-cased non-root mount is invisible to a caller that discovers
+/// content by enumerating its parent directory rather than opening a name it
+/// already knows — a real, confirmed gap in non-root mount support, not
+/// merely an undocumented one.
+#[test]
+fn non_root_mount_matches_lowercase_open_but_not_parent_readdir() {
+    let root_dir = tempfile::tempdir().unwrap();
+    // A real, physical "Data" directory the root disk mount can enumerate,
+    // standing in for the base game content a real session always has.
+    let data_dir = root_dir.path().join("Data");
+    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::write(data_dir.join("Skyrim.esm"), b"BASE-CONTENT").unwrap();
+
+    // The mod's staging directory — physically anywhere else entirely, never
+    // nested under `root_dir`, exactly the MO2 shape the matrix documents.
+    let mod_dir = tempfile::tempdir().unwrap();
+    std::fs::write(mod_dir.path().join("foo.esp"), b"MOD-BYTES").unwrap();
+
+    let reg = SessionRegistry::new();
+    let summary = reg.create("nonroot".into()).unwrap();
+    let root_be = build_provider(&SourceSpec::Disk {
+        path: root_dir.path().to_string_lossy().into_owned(),
+    })
+    .unwrap();
+    let mod_be = build_provider(&SourceSpec::Disk {
+        path: mod_dir.path().to_string_lossy().into_owned(),
+    })
+    .unwrap();
+    reg.add_source(&summary.id, "/", 0, root_be).unwrap();
+    // Lowercase throughout — the spelling that actually matches what the
+    // shim sends, unlike the doc's old mixed-case example.
+    reg.add_source(&summary.id, "data/somemod", 10, mod_be).unwrap();
+
+    reg.with_session_mut(&summary.id, |live| {
+        // A direct open by a known relative path succeeds through the
+        // non-root mount.
+        let bytes = live.session.read_file("data/somemod/foo.esp").unwrap();
+        assert_eq!(bytes, b"MOD-BYTES");
+
+        // The base content is still there and enumerable...
+        let base_entries = live.session.kernel().readdir("data").unwrap();
+        assert!(
+            base_entries.iter().any(|e| e.name.eq_ignore_ascii_case("Skyrim.esm")),
+            "expected the real base content to still enumerate: {:?}",
+            base_entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+        // ...but the mount point itself never appears as a child entry: the
+        // confirmed gap this test exists to demonstrate.
+        assert!(
+            base_entries.iter().all(|e| !e.name.eq_ignore_ascii_case("somemod")),
+            "readdir(\"data\") unexpectedly listed the non-root mount point \
+             as a child entry — if this starts passing, the gap this test \
+             documents has been closed and escape-matrix.md needs updating: {:?}",
+            base_entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn stats_rpc_reports_sessions_and_cache() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

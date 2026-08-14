@@ -50,6 +50,17 @@
 //! cannot be opened bare (an overlay `Present` lookup refuses an empty
 //! remainder by construction — see `Overlay::lookup`), so this test anchors
 //! on `Data`, one level in, instead.
+//!
+//! Every relative name below dropped its old `Data\` prefix when the anchor
+//! moved from bare root to `Data` (single-component `"added.esm"` instead of
+//! `r"Data\added.esm"`), which quietly deleted this file's only coverage of
+//! *multi-component* relative decoding: resolving a name with its own
+//! interior separator (`r"Sub\added2.esm"`), not just a bare filename. That
+//! is exactly the class of the project's own empty-load-order bug (CWD-
+//! relative opens that were undecodable), so a second file one level deeper
+//! (`Data/Sub/added2.esm`) restores it below for the CWD-relative and
+//! handle-relative sections, alongside the single-component checks that flip
+//! for Task 4's reasons.
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 
@@ -57,6 +68,11 @@ mod ntapi;
 use ntapi::*;
 
 const PAYLOAD: &[u8] = b"master-plugin-bytes";
+/// Second file, one level deeper than `Data\`, so at least one relative open
+/// below has to decode a name with an interior separator of its own
+/// (`r"Sub\added2.esm"`), not just a bare filename — see the module doc
+/// comment for why that class needs its own dedicated coverage.
+const PAYLOAD2: &[u8] = b"multi-component-relative-bytes";
 
 #[test]
 fn relative_names_resolve_on_every_decoding_hook() {
@@ -78,18 +94,31 @@ fn relative_names_resolve_on_every_decoding_hook() {
     std::fs::create_dir_all(&backing).unwrap();
     let backing_file = backing.join("added.esm");
     std::fs::write(&backing_file, PAYLOAD).unwrap();
+    // One level deeper, for the multi-component relative-decoding checks —
+    // see the module doc comment.
+    let backing_file2 = backing.join("added2.esm");
+    std::fs::write(&backing_file2, PAYLOAD2).unwrap();
 
     let snapshot = {
         use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
         let tree = build(vec![Layer {
             id: LayerId(0),
-            entries: vec![InputEntry {
-                vpath: "Data/added.esm".into(),
-                kind: EntryKind::File,
-                source: backing_file.to_string_lossy().as_ref().into(),
-                size: PAYLOAD.len() as u64,
-                mtime: 0,
-            }],
+            entries: vec![
+                InputEntry {
+                    vpath: "Data/added.esm".into(),
+                    kind: EntryKind::File,
+                    source: backing_file.to_string_lossy().as_ref().into(),
+                    size: PAYLOAD.len() as u64,
+                    mtime: 0,
+                },
+                InputEntry {
+                    vpath: "Data/Sub/added2.esm".into(),
+                    kind: EntryKind::File,
+                    source: backing_file2.to_string_lossy().as_ref().into(),
+                    size: PAYLOAD2.len() as u64,
+                    mtime: 0,
+                },
+            ],
         }])
         .unwrap();
         vfs_shared::bridge::flatten(&tree)
@@ -130,6 +159,14 @@ fn relative_names_resolve_on_every_decoding_hook() {
         PAYLOAD.len() as u64,
         "a CWD-relative stat must report the virtual size"
     );
+    // Multi-component: the relative name itself has an interior separator
+    // (`Sub\added2.esm`), not just a bare filename — restores the coverage
+    // class the module doc comment describes.
+    assert_eq!(
+        std::fs::read(r"Sub\added2.esm").expect("multi-component cwd-relative read"),
+        PAYLOAD2,
+        "a multi-component CWD-relative open must resolve through the VFS"
+    );
     // `read_dir` enumerates via the handle-based directory hooks, which no
     // longer merge the snapshot in (Task 4 deleted `RootMap::merge_directory`),
     // so the mod-only file does not appear, flipped from "must include the
@@ -164,6 +201,35 @@ fn relative_names_resolve_on_every_decoding_hook() {
     let h = nt_open_relative(dir, "added.esm");
     assert!(h.0 >= 0, "NtOpenFile relative to a handle: status {:#x}", h.0);
     assert_eq!(read_all(h.1), PAYLOAD, "NtOpenFile served the wrong bytes");
+    close(h.1);
+
+    // Multi-component handle-relative: the name itself has an interior
+    // separator (`Sub\added2.esm`), exercised on both APIs — see the module
+    // doc comment for why this class needs its own dedicated coverage.
+    let h = nt_create_relative(dir, r"Sub\added2.esm");
+    assert!(
+        h.0 >= 0,
+        "NtCreateFile multi-component relative to a handle: status {:#x}",
+        h.0
+    );
+    assert_eq!(
+        read_all(h.1),
+        PAYLOAD2,
+        "NtCreateFile multi-component relative served the wrong bytes"
+    );
+    close(h.1);
+
+    let h = nt_open_relative(dir, r"Sub\added2.esm");
+    assert!(
+        h.0 >= 0,
+        "NtOpenFile multi-component relative to a handle: status {:#x}",
+        h.0
+    );
+    assert_eq!(
+        read_all(h.1),
+        PAYLOAD2,
+        "NtOpenFile multi-component relative served the wrong bytes"
+    );
     close(h.1);
 
     // NtQueryAttributesFile — existence only, but that is what callers branch on.
