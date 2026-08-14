@@ -95,6 +95,10 @@ impl Session {
         &self.virtual_root
     }
 
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
     pub fn mount(&self, prefix: &str, backend: Arc<dyn Provider>) -> Result<(), i32> {
         self.kernel.mount(prefix, backend)
     }

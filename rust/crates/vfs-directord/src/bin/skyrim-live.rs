@@ -89,6 +89,12 @@ fn run() -> Result<(), String> {
         PathBuf::from(r"C:\tmp\skyrim-runtime")
     };
     let stage_root = data.join("stage");
+    // Fixed per process run, computed up front so the disk provider mounted
+    // over the staging directory below (before staging has even happened)
+    // and the later `stage_launch_with` call agree on exactly the same path.
+    let stage_tag = std::process::id().to_string();
+    let staged_dir_path =
+        stage_root.join(format!("{}{stage_tag}", vfs_director::stage::STAGE_PREFIX));
 
     // Optional mod overlay (e.g. an unpacked SKSE) composed over the zip, and
     // the executable to launch — `skse64_loader.exe` to go through SKSE.
@@ -112,7 +118,7 @@ fn run() -> Result<(), String> {
     eprintln!("  profiles:  {}", profiles.display());
 
     // ── host dirs (never wipe the Steam library) ───────────────────────────
-    for d in [&state, &saves, &profiles, &overrides] {
+    for d in [&state, &saves, &profiles, &overrides, &root] {
         std::fs::create_dir_all(d).map_err(|e| format!("mkdir {}: {e}", d.display()))?;
     }
     if is_safe_to_wipe(&root) {
@@ -197,6 +203,9 @@ fn run() -> Result<(), String> {
     session.set_root(&root);
     session.set_overlay(&overrides);
     session.set_state_dir(&state);
+
+    mount_low_priority_disk_layers(&session, &root, &staged_dir_path)?;
+
     // Composition: zip (game content) under overrides (steam_appid, writes).
     // Do **not** mount the Steam library DiskProvider — that let the game load
     // masters/BSAs/DLLs from the host install and violated the VFS contract.
@@ -299,11 +308,16 @@ fn run() -> Result<(), String> {
                 &launch_exe,
                 &also,
                 &stage_root,
-                &std::process::id().to_string(),
+                &stage_tag,
                 // DirectX redistributables are static imports but ship with the
                 // DX runtime, not in the game archive.
                 &[data.join("dx-redist")],
             )?;
+            debug_assert_eq!(
+                staged.dir(),
+                staged_dir_path.as_path(),
+                "stage_launch_with must land exactly where the staging disk provider was mounted"
+            );
             eprintln!(
                 "  staged {} file(s) → {}: {}",
                 staged.staged().len(),
@@ -411,6 +425,38 @@ fn run() -> Result<(), String> {
             }
         }
     }
+    Ok(())
+}
+
+/// Mount two additive, lowest-priority layers, before any real content is
+/// mounted, so a same-named real content file always wins:
+///
+/// - `root` itself: `stage_dx_redist` copies DX runtime DLLs straight onto
+///   disk there (the loader's CWD-based DLL search needs them physically
+///   present before hooks exist — see that function's doc comment), and
+///   `write_steam_appid` drops a raw `steam_appid.txt` copy there too. Once
+///   the managed root goes fully virtual, only the provider graph gets
+///   asked — mounting `root` itself as a disk provider is this project's own
+///   decided answer for "want a real directory's contents visible? mount a
+///   disk provider", applied to every such file at once rather than one at a
+///   time.
+/// - `staged_dir_path`: where the launch EXE (and its import closure) will
+///   land once staged, mounted at its final path *before* anything is
+///   staged there. `DiskProvider` reads lazily, so this is safe as long as
+///   nothing queries it before staging actually runs — true here, since the
+///   caller mounts this immediately after `Session::new()`, well before
+///   `stage_launch_with` populates the directory later in `run()`.
+fn mount_low_priority_disk_layers(
+    session: &Session,
+    root: &Path,
+    staged_dir_path: &Path,
+) -> Result<(), String> {
+    session
+        .mount("", Arc::new(DiskProvider::new(root)))
+        .map_err(|st| format!("mount root-disk status {st}"))?;
+    session
+        .mount("", Arc::new(DiskProvider::new(staged_dir_path)))
+        .map_err(|st| format!("mount staging-disk status {st}"))?;
     Ok(())
 }
 
@@ -1215,5 +1261,128 @@ mod steam_gate_tests {
         assert!(once.contains("\"0\""), "{once}");
         assert!(!inject_enable_game_overlay_off(&path, "489830").unwrap());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Gate-3 task 1, GAP 2: `skyrim-live` (the harness Task 5's real-launch
+/// verification depends on) used to write DX-redist DLLs straight onto disk
+/// under `root` and stage the launch EXE in a directory the provider graph
+/// never covered. Both are real files sitting where a fully virtual root
+/// would need a provider to answer for them. These tests exercise
+/// `mount_low_priority_disk_layers` — the fix — directly: `getattr`/`open`
+/// must succeed through the director, not merely "the file happens to exist
+/// on disk".
+#[cfg(test)]
+mod staging_layer_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "vfs-skyrim-live-test-{}-{name}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A DX-redist-style file physically dropped straight into `root` (as
+    /// `stage_dx_redist` does) must resolve through the director's provider
+    /// graph, not only be "a file that happens to be on disk".
+    #[test]
+    fn a_file_dropped_straight_into_root_resolves_through_the_provider_graph() {
+        let root = tmp("root");
+        let staged_dir = tmp("staged"); // deliberately not yet created/populated
+        std::fs::write(root.join("X3DAudio1_7.dll"), b"REDIST-BYTES").unwrap();
+
+        let session = Session::new();
+        mount_low_priority_disk_layers(&session, &root, &staged_dir).unwrap();
+
+        let st = session
+            .kernel()
+            .getattr("X3DAudio1_7.dll")
+            .unwrap()
+            .expect("a file physically in root must resolve through the provider graph");
+        assert_eq!(st.kind, vfs_protocol::KIND_FILE);
+        assert_eq!(st.size, "REDIST-BYTES".len() as u64);
+        let (fh, size, is_dir) = session
+            .kernel()
+            .open("X3DAudio1_7.dll", vfs_protocol::OPEN_READ)
+            .expect("open must succeed through the provider graph");
+        assert!(!is_dir);
+        let mut buf = vec![0u8; size as usize];
+        let n = session.kernel().read(fh, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"REDIST-BYTES");
+        let _ = session.kernel().close(fh);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&staged_dir);
+    }
+
+    /// Real game content must still win over a same-named file physically
+    /// sitting in `root` — `mount_low_priority_disk_layers` is meant to be
+    /// mounted *before* content precisely so this holds.
+    #[test]
+    fn real_content_wins_over_a_same_named_file_in_root() {
+        let root = tmp("root-precedence");
+        let staged_dir = tmp("staged-precedence");
+        std::fs::write(root.join("shared.dll"), b"FROM-ROOT").unwrap();
+
+        let session = Session::new();
+        mount_low_priority_disk_layers(&session, &root, &staged_dir).unwrap();
+
+        let content_dir = tmp("content-precedence");
+        std::fs::write(content_dir.join("shared.dll"), b"FROM-CONTENT").unwrap();
+        session
+            .mount("", Arc::new(DiskProvider::new(&content_dir)))
+            .unwrap();
+
+        let bytes = session.read_file("shared.dll").unwrap();
+        assert_eq!(
+            bytes, b"FROM-CONTENT",
+            "content mounted after the low-priority disk layers must win"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&staged_dir);
+        let _ = std::fs::remove_dir_all(&content_dir);
+    }
+
+    /// The staging directory is mounted *before* `stage_launch_with` ever
+    /// runs (see the doc comment on `mount_low_priority_disk_layers`).
+    /// `DiskProvider` reads lazily, so a file written there afterward — the
+    /// same order `run()` uses — must still resolve through the provider
+    /// graph once it exists.
+    #[test]
+    fn the_staging_directory_resolves_once_populated_even_though_mounted_first() {
+        let root = tmp("root-late");
+        let staged_dir = tmp("staged-late");
+
+        let session = Session::new();
+        mount_low_priority_disk_layers(&session, &root, &staged_dir).unwrap();
+
+        assert!(
+            session.kernel().getattr("SkyrimSE.exe").unwrap().is_none(),
+            "must not be visible before staging happens"
+        );
+
+        // What `stage_launch_with` would do later in `run()`.
+        std::fs::write(staged_dir.join("SkyrimSE.exe"), b"STAGED-EXE-BYTES").unwrap();
+
+        let st = session
+            .kernel()
+            .getattr("SkyrimSE.exe")
+            .unwrap()
+            .expect("staged file must resolve through the provider graph once written");
+        assert_eq!(st.size, "STAGED-EXE-BYTES".len() as u64);
+        let bytes = session.read_file("SkyrimSE.exe").unwrap();
+        assert_eq!(bytes, b"STAGED-EXE-BYTES");
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&staged_dir);
     }
 }

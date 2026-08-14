@@ -40,15 +40,25 @@ pub struct LiveSession {
     pub root: PathBuf,
     pub session: Session,
     next_source_id: AtomicU64,
+    next_stage_tag: AtomicU64,
     /// Mounted backends bottom→top for rebuild (same mount "/" composition).
     layers: Vec<(i32, Arc<dyn Provider>)>,
     /// Sources with non-root mount prefixes (director path mounts).
     prefix_mounts: Vec<(String, Arc<dyn Provider>)>,
+    /// The most recent launch's staged directory, kept alive here so its
+    /// `Drop` (directory removal) does not race the child it was staged for.
+    /// Dropped (and thus cleaned up) when the session is torn down, or
+    /// replaced on the next relaunch. See [`SessionRegistry::launch`].
+    staged: Option<StagedDir>,
 }
 
 impl LiveSession {
     pub fn next_source_id(&self) -> u64 {
         self.next_source_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn next_stage_tag(&self) -> u64 {
+        self.next_stage_tag.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -132,8 +142,10 @@ impl SessionRegistry {
             root,
             session,
             next_source_id: AtomicU64::new(1),
+            next_stage_tag: AtomicU64::new(1),
             layers: Vec::new(),
             prefix_mounts: Vec::new(),
+            staged: None,
         };
 
         self.inner
@@ -270,8 +282,102 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// The production launch entrypoint (`DirectorService::launch` → here,
+    /// the same path `vfs launch --exec` and scenario-TOML `[launch] exec =`
+    /// drive). `opts.image` here names a VFS vpath, not an already-staged
+    /// disk path — same as any other content path a client asks the director
+    /// about. Stage it (and mount the staging directory into the provider
+    /// graph) before handing the resulting real, on-disk path to
+    /// `Session::launch`, so the same file is answerable through
+    /// `getattr`/`open` afterward too, not only reachable via the literal
+    /// path `CreateProcess` used.
+    ///
+    /// An absolute `opts.image` — an already-staged path (as
+    /// `skyrim-live.rs` builds and passes directly to `Session::launch`,
+    /// bypassing the registry), or a test-fixture binary that was never VFS
+    /// content — is left untouched, mirroring `Session::launch`'s own
+    /// absolute/relative split.
     pub fn launch(&self, id: &str, opts: LaunchOpts) -> Result<i32, String> {
+        let opts = self.stage_relative_launch_image(id, opts)?;
         self.with_session_mut(id, |live| live.session.launch(&opts))
+    }
+
+    /// See [`Self::launch`]. Split out so the staging step (fallible, does
+    /// file IO, and briefly re-enters the registry lock via
+    /// [`Self::stage_launch`]) stays separate from the single
+    /// `with_session_mut` call that performs the actual launch.
+    fn stage_relative_launch_image(
+        &self,
+        id: &str,
+        opts: LaunchOpts,
+    ) -> Result<LaunchOpts, String> {
+        if Path::new(&opts.image).is_absolute() {
+            return Ok(opts);
+        }
+
+        /// Reads whole files out of a session's own composed provider graph,
+        /// for [`vfs_director::stage`]. Mirrors `skyrim-live.rs`'s
+        /// `KernelSource` — kept private here since `stage.rs` deliberately
+        /// stays independent of how content is served.
+        struct KernelSource(Arc<vfs_director::Director>);
+        impl ImageSource for KernelSource {
+            fn read(&self, vpath: &str) -> Option<Vec<u8>> {
+                let (fh, size, is_dir) = self.0.open(vpath, vfs_director::OPEN_READ).ok()?;
+                if is_dir {
+                    let _ = self.0.close(fh);
+                    return None;
+                }
+                let mut buf = vec![0u8; size as usize];
+                let mut off = 0usize;
+                while off < buf.len() {
+                    match self.0.read(fh, off as u64, &mut buf[off..]) {
+                        Ok(0) => break,
+                        Ok(n) => off += n,
+                        Err(_) => {
+                            let _ = self.0.close(fh);
+                            return None;
+                        }
+                    }
+                }
+                let _ = self.0.close(fh);
+                buf.truncate(off);
+                Some(buf)
+            }
+        }
+
+        let (kernel, stage_root, tag) = self.with_session_mut(id, |live| {
+            Ok((
+                Arc::clone(live.session.kernel()),
+                live.session.state_dir().join("stage"),
+                live.next_stage_tag(),
+            ))
+        })?;
+
+        let source = KernelSource(kernel);
+        let staged = self.stage_launch(
+            id,
+            &source,
+            &StageLaunchOpts {
+                exe_vpath: &opts.image,
+                // Generic registry launches carry no game-specific knowledge
+                // of launcher/spawn-target chains or redistributable fallback
+                // dirs (that lives in game-specific tooling, e.g.
+                // `skyrim-live.rs`); a caller that needs either can call
+                // `stage_launch` directly before `launch`.
+                also: &[],
+                stage_root: &stage_root,
+                tag: &tag.to_string(),
+                fallback_dirs: &[],
+            },
+        )?;
+
+        let mut opts = opts;
+        opts.image = staged.exe().to_string_lossy().into_owned();
+        self.with_session_mut(id, |live| {
+            live.staged = Some(staged);
+            Ok(())
+        })?;
+        Ok(opts)
     }
 }
 

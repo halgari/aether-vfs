@@ -7,10 +7,11 @@
 //! content still wins over the staged copy where both could serve a path.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use vfs_control::SourceSpec;
 use vfs_director::stage::ImageSource;
-use vfs_director::KIND_FILE;
+use vfs_director::{LaunchOpts, KIND_FILE};
 use vfs_directord::SessionRegistry;
 use vfs_source::build_provider;
 
@@ -138,4 +139,121 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
     .unwrap();
 
     drop(staged);
+}
+
+/// GAP 1 closed: `SessionRegistry::launch` — the exact function
+/// `DirectorService::launch` calls, i.e. the real `vfs launch --exec` /
+/// scenario-TOML production path — must stage a relative launch image
+/// itself and serve it through the provider graph, not merely offer a
+/// `stage_launch` capability nothing calls.
+///
+/// The staged bytes here are not a runnable Windows image (same minimal
+/// `bare_pe` as above), so `Session::launch`'s later `CreateProcess`/shim
+/// steps are expected to fail — that failure is not what this test is
+/// about. What matters is what already happened *before* that failure:
+/// staging and provider-graph mounting, driven by `launch()` itself with no
+/// direct call to `stage_launch` from the test.
+///
+/// Disambiguation matters here: the content provider that seeds staging
+/// already serves `game.exe` at the same vpath, so `getattr`/`open`
+/// succeeding by itself would not prove staging ran — it could just be
+/// content answering as it always would. So the content copy is deleted
+/// from disk *after* `launch()` returns and *before* the provider-graph
+/// check: if `launch()` never staged the image, its only backing file is
+/// now gone and resolution must fail; if it did stage it, the *staging*
+/// provider's independent on-disk copy (a different `DiskProvider`, over a
+/// different directory) is what has to answer.
+#[test]
+fn production_launch_stages_a_relative_image_before_create_process() {
+    let content_dir = tempfile::tempdir().unwrap();
+    let content_exe = content_dir.path().join("game.exe");
+    std::fs::write(&content_exe, bare_pe(b"CONTENT")).unwrap();
+
+    let reg = SessionRegistry::new();
+    let summary = reg.create("launch-wiring-test".into()).unwrap();
+    let content_be = build_provider(&SourceSpec::Disk {
+        path: content_dir.path().to_string_lossy().into_owned(),
+    })
+    .unwrap();
+    reg.add_source(&summary.id, "/", 0, content_be).unwrap();
+
+    // `image` is a *relative* vpath — the production shape (`--exec
+    // SkyrimSE.exe`, `[launch] exec = "..."`), not an already-staged disk
+    // path. `Session::launch` alone cannot do anything useful with that: it
+    // would join it onto `virtual_root` and hand a nonexistent real path to
+    // `CreateProcess`. `SessionRegistry::launch` must stage it first.
+    let err = reg
+        .launch(
+            &summary.id,
+            LaunchOpts {
+                image: "game.exe".into(),
+                wait: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("the fake PE cannot actually run — CreateProcess/shim setup must fail");
+    assert!(!err.is_empty());
+
+    // Remove content's only backing file (see doc comment above).
+    std::fs::remove_file(&content_exe).unwrap();
+
+    reg.with_session_mut(&summary.id, |live| {
+        let st = live
+            .session
+            .kernel()
+            .getattr("game.exe")
+            .unwrap()
+            .expect(
+                "launch() must stage the relative image through the provider graph — \
+                 content's own backing file is gone, so only a staging mount can answer",
+            );
+        assert_eq!(st.kind, KIND_FILE);
+        let (fh, size, is_dir) = live
+            .session
+            .kernel()
+            .open("game.exe", vfs_director::OPEN_READ)
+            .expect("open must succeed through the provider graph after launch() staged it");
+        assert!(!is_dir);
+        assert_eq!(size, st.size);
+        let _ = live.session.kernel().close(fh);
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// An absolute `image` (an already-staged path, or a fixture binary that was
+/// never VFS content) must pass through untouched — no VFS lookup, matching
+/// `Session::launch`'s own absolute/relative split. Proven by pointing at a
+/// real file the session's content never claims to serve.
+#[test]
+fn production_launch_leaves_an_absolute_image_untouched() {
+    let outside = tempfile::tempdir().unwrap();
+    let exe = outside.path().join("already-staged.exe");
+    std::fs::write(&exe, bare_pe(b"PRESTAGED")).unwrap();
+    assert!(Path::new(&exe).is_absolute());
+
+    let reg = SessionRegistry::new();
+    let summary = reg.create("absolute-image-test".into()).unwrap();
+    // No content mounted at all — an absolute image must not need any.
+
+    let err = reg
+        .launch(
+            &summary.id,
+            LaunchOpts {
+                image: exe.to_string_lossy().into_owned(),
+                wait: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("the fake PE cannot actually run");
+    assert!(!err.is_empty());
+
+    // No staging happened, so the provider graph — which has nothing
+    // mounted — still knows nothing about this path. Confirms staging was
+    // correctly skipped rather than silently failing to serve it.
+    reg.with_session_mut(&summary.id, |live| {
+        assert!(live.session.kernel().getattr("already-staged.exe").unwrap().is_none());
+        Ok(())
+    })
+    .unwrap();
 }
