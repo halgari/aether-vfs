@@ -21,6 +21,7 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::exit;
+use std::time::Duration;
 
 const PATH: &str = "write-probe.txt";
 const RENAMED: &str = "renamed-probe.txt";
@@ -216,6 +217,22 @@ fn main() {
         }
     }
     println!("WRITEPATH FIXTURE OK: CREATE_NEW exclusivity held");
+
+    // The shim's hook-stats report is a periodic sample, not an exit dump —
+    // nothing flushes it when a process exits, so any open recorded after the
+    // reporter's last tick is invisible to a reader of the report file. A real
+    // game session runs for minutes and this never matters, but this fixture's
+    // last routed opens (the CREATE_NEW pair above) land microseconds before
+    // exit, well inside one tick's window. Outlive at least one full tick so
+    // the reporter has a chance to observe the fixture's final state before
+    // the process disappears. Derived from the same interval the harness
+    // configures (`VFS_SHIM_STATS_INTERVAL_MS`) rather than a fixed number, so
+    // this stays correct if that interval ever changes.
+    let interval_ms: u64 = std::env::var("VFS_SHIM_STATS_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(250);
+    std::thread::sleep(Duration::from_millis(interval_ms.saturating_mul(2)));
 
     exit(0);
 }
