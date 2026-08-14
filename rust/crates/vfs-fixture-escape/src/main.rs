@@ -13,10 +13,15 @@
 //! ```
 //!
 //! `<outcome>` is one of:
-//! - `opened` — the spelling opened the file.
+//! - `opened` — the spelling opened the file, **and**, whenever the target's
+//!   own bytes could be read at startup (see `EXPECTED_CONTENT`), the opened
+//!   handle's content matched them byte-for-byte. `opened` never means "some
+//!   handle came back"; it means the same file's real bytes came back.
 //! - `not-found` — the OS reported the name did not resolve to anything.
 //! - `error:<detail>` — any other failure (`win32:<code>`,
-//!   `ntstatus:0x########`, `cmd-exit:<code>`).
+//!   `ntstatus:0x########`, `cmd-exit:<code>`, `content-mismatch:<detail>` —
+//!   the spelling opened *something*, but its bytes did not match the real
+//!   target's, which is a worse result than `not-found`, not a pass).
 //! - `unbuildable:<reason>` — this environment could not even construct the
 //!   spelling (no free drive letter, 8.3 disabled, wrong filesystem for a
 //!   hardlink, missing privilege for the admin share, ...). Never blank,
@@ -69,6 +74,19 @@
 //! bug or an unexpected OS response on one vector must never stop the run
 //! before the rest are attempted, because a fixture that dies partway
 //! through tells you nothing about the vectors after it.
+//!
+//! **`VFS_ESCAPE_ONLY_VECTOR`**: when set to one of the vector ids above,
+//! every *other* vector is skipped entirely — not merely omitted from the
+//! output, but never constructed or attempted, so the shim's own hook-stats
+//! report for the run reflects that one open alone. A caller correlating
+//! this fixture's own per-line outcome against the shim's *aggregate*
+//! classification counters (which are not keyed by vector) cannot otherwise
+//! tell "this vector's own attempt was classified" apart from "some *other*
+//! vector sharing the same target filename was classified, and this one
+//! quietly was not" — precisely the ambiguity that let an earlier version
+//! of a fixture in this project report two vectors closed when they had
+//! silently probed nothing. Unset, every vector runs, exactly as before
+//! this existed.
 mod ffi;
 
 use std::io::Write;
@@ -125,11 +143,50 @@ fn last_error() -> u32 {
     unsafe { ffi::GetLastError() }
 }
 
+/// The target's own bytes, read once at startup via the plain, literal
+/// spelling (see `main`), before any of the fourteen vectors run. `None`
+/// when that baseline read itself failed (the "missing target" regression
+/// run this fixture is also exercised against) — every later `opened`
+/// result is then reported as-is, with no content check, exactly as before
+/// this check existed.
+///
+/// A `OnceLock` rather than a parameter threaded through every vector
+/// function: every vector's own construction code stays exactly as
+/// reviewed and unchanged; only the two outcome-classifying functions below
+/// need to know it.
+static EXPECTED_CONTENT: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+
+/// Read `handle`'s content back and compare it against the target's own
+/// baseline bytes (see `EXPECTED_CONTENT`). `Ok(())` when there is nothing
+/// to compare against (no baseline) or the content matches; `Err(detail)`
+/// on a mismatch, worded for direct use inside an `error:` outcome — a
+/// spelling that opens *something* but not the same bytes as the real
+/// target is a worse result than `not-found`, not a pass, and must not be
+/// reported as plain `opened`.
+fn check_content(handle: ffi::Handle) -> Result<(), String> {
+    let Some(Some(expected)) = EXPECTED_CONTENT.get() else {
+        return Ok(());
+    };
+    match ffi::read_all(handle) {
+        None => Err("could not read back the opened handle's content to verify it".to_string()),
+        Some(got) if &got == expected => Ok(()),
+        Some(got) => Err(format!(
+            "content mismatch: opened handle returned {} bytes, expected {} bytes matching the real target",
+            got.len(),
+            expected.len()
+        )),
+    }
+}
+
 fn win32_outcome(result: Result<ffi::Handle, u32>) -> String {
     match result {
         Ok(h) => {
+            let verdict = check_content(h);
             ffi::close(h);
-            "opened".to_string()
+            match verdict {
+                Ok(()) => "opened".to_string(),
+                Err(detail) => format!("error:content-mismatch:{detail}"),
+            }
         }
         Err(code) if code == ffi::ERROR_FILE_NOT_FOUND || code == ffi::ERROR_PATH_NOT_FOUND => {
             "not-found".to_string()
@@ -143,8 +200,12 @@ fn nt_outcome(result: Result<ffi::Handle, ffi::NtCreateError>) -> String {
     const STATUS_OBJECT_PATH_NOT_FOUND: i32 = 0xC000_003Au32 as i32;
     match result {
         Ok(h) => {
+            let verdict = check_content(h);
             ffi::close(h);
-            "opened".to_string()
+            match verdict {
+                Ok(()) => "opened".to_string(),
+                Err(detail) => format!("error:content-mismatch:{detail}"),
+            }
         }
         Err(ffi::NtCreateError::Unresolved) => {
             "unbuildable:ntdll!NtCreateFile export could not be resolved".to_string()
@@ -759,34 +820,122 @@ fn main() {
         std::process::exit(1);
     };
     let abs = normalize_target(target);
-    if std::fs::metadata(&abs).is_err() {
+
+    // See the module doc for `VFS_ESCAPE_ONLY_VECTOR`: when set, every other
+    // vector below is skipped entirely (never constructed, never attempted)
+    // rather than merely left out of the output, so a caller correlating
+    // against the shim's own (not vector-keyed) hook-stats report sees
+    // exactly one attempt's effect on it.
+    let only_vector = std::env::var("VFS_ESCAPE_ONLY_VECTOR").ok();
+    let wanted = |id: &str| match &only_vector {
+        Some(o) => o == id,
+        None => true,
+    };
+
+    // Existence check, purely informational (the warning below) — but
+    // `std::fs::metadata` on Windows opens a real handle
+    // (`CreateFileW`+`GetFileInformationByHandle`, not a lighter
+    // attributes-only query), so under a session this is itself a real,
+    // hooked, classifiable open of the *bare* target spelling. Skipped in
+    // isolation mode for the same reason the baseline read below is: it
+    // would contaminate the one signal isolation mode exists to produce,
+    // making every isolated vector's classified-paths set contain this
+    // unrelated bare-path entry regardless of that vector's own behaviour
+    // — found by reproduction (an isolated run for a vector whose own
+    // construction never touches the bare path at all still showed one
+    // classified entry for it).
+    if only_vector.is_none() && std::fs::metadata(&abs).is_err() {
         eprintln!(
             "vfs-fixture-escape: warning: target path {abs} does not currently exist; several \
              vectors will legitimately report not-found or unbuildable rather than opened"
         );
     }
 
-    let lines: Vec<Line> = vec![
-        guarded("1", || vector1_short_name(&abs)),
-        guarded("2", || vector2_extended_length(&abs)),
-        guarded("3", || vector3_device_path(&abs)),
-        guarded("4", || vector4_volume_guid(&abs)),
-        guarded("5", || vector5_handle_relative(&abs)),
-        guarded("5b", || vector5b_unresolvable_handle(&abs)),
-        guarded("6", || vector6_cwd_relative(&abs)),
-        guarded("7", || vector7_junction(&abs)),
-        guarded("8", || vector8_hardlink(&abs)),
-        guarded("9", || vector9_alias_drive(&abs)),
-        guarded("10a", || vector10a_case_fold(&abs)),
-        guarded("10b", || vector10b_trailing_dot(&abs)),
-        guarded("10c", || vector10c_trailing_space(&abs)),
-        guarded("11", || vector11_ads(&abs)),
-        guarded("12a", || vector12a_dot_component(&abs)),
-        guarded("12b", || vector12b_dotdot_traversal(&abs)),
-        guarded("12c", || vector12c_doubled_separator(&abs)),
-        guarded("13", || vector13_preexisting_handle(&abs)),
-        guarded("14", || vector14_child_without_shim(&abs)),
-    ];
+    // Baseline: the target's own bytes, read via the plain literal spelling,
+    // before any of the fourteen vectors run. Every vector that later
+    // reports `opened` is checked against this, not merely trusted, so a
+    // spelling that opens *something* other than the real target (wrong
+    // file, stale/zero-length synthetic handle, ...) reports a mismatch
+    // instead of a false `opened` — see `check_content`. `None` when the
+    // target cannot be read at all here (the "missing target" regression
+    // run this fixture is also exercised against), which turns the check
+    // into a no-op rather than a spurious failure.
+    //
+    // Skipped entirely in `VFS_ESCAPE_ONLY_VECTOR` isolation mode: this open
+    // is itself an ordinary, unmangled spelling of the target, so it would
+    // land in the shim's classified-paths set exactly like the vector under
+    // test — contaminating the one signal isolation mode exists to produce
+    // (that a *specific* vector's own attempt, and nothing else, explains
+    // whatever shows up classified). Content verification is not needed for
+    // an isolated classification-only run either, so there is nothing this
+    // skip costs a caller using isolation for that purpose.
+    if only_vector.is_none() {
+        let baseline = ffi::create_file_read(&ffi::wide(&abs)).ok().and_then(|h| {
+            let data = ffi::read_all(h);
+            ffi::close(h);
+            data
+        });
+        let _ = EXPECTED_CONTENT.set(baseline);
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    if wanted("1") {
+        lines.push(guarded("1", || vector1_short_name(&abs)));
+    }
+    if wanted("2") {
+        lines.push(guarded("2", || vector2_extended_length(&abs)));
+    }
+    if wanted("3") {
+        lines.push(guarded("3", || vector3_device_path(&abs)));
+    }
+    if wanted("4") {
+        lines.push(guarded("4", || vector4_volume_guid(&abs)));
+    }
+    if wanted("5") {
+        lines.push(guarded("5", || vector5_handle_relative(&abs)));
+    }
+    if wanted("5b") {
+        lines.push(guarded("5b", || vector5b_unresolvable_handle(&abs)));
+    }
+    if wanted("6") {
+        lines.push(guarded("6", || vector6_cwd_relative(&abs)));
+    }
+    if wanted("7") {
+        lines.push(guarded("7", || vector7_junction(&abs)));
+    }
+    if wanted("8") {
+        lines.push(guarded("8", || vector8_hardlink(&abs)));
+    }
+    if wanted("9") {
+        lines.push(guarded("9", || vector9_alias_drive(&abs)));
+    }
+    if wanted("10a") {
+        lines.push(guarded("10a", || vector10a_case_fold(&abs)));
+    }
+    if wanted("10b") {
+        lines.push(guarded("10b", || vector10b_trailing_dot(&abs)));
+    }
+    if wanted("10c") {
+        lines.push(guarded("10c", || vector10c_trailing_space(&abs)));
+    }
+    if wanted("11") {
+        lines.push(guarded("11", || vector11_ads(&abs)));
+    }
+    if wanted("12a") {
+        lines.push(guarded("12a", || vector12a_dot_component(&abs)));
+    }
+    if wanted("12b") {
+        lines.push(guarded("12b", || vector12b_dotdot_traversal(&abs)));
+    }
+    if wanted("12c") {
+        lines.push(guarded("12c", || vector12c_doubled_separator(&abs)));
+    }
+    if wanted("13") {
+        lines.push(guarded("13", || vector13_preexisting_handle(&abs)));
+    }
+    if wanted("14") {
+        lines.push(guarded("14", || vector14_child_without_shim(&abs)));
+    }
 
     let mut out: Box<dyn Write> = match args.get(2) {
         Some(path) => match std::fs::File::create(path) {
@@ -801,5 +950,24 @@ fn main() {
     for line in &lines {
         let _ = writeln!(out, "{}", line.render());
     }
+    let _ = out.flush();
+
+    // Same reasoning as `vfs-fixture-writepath`'s own end-of-run sleep: the
+    // shim's hook-stats reporter is a periodic sample (`VFS_SHIM_STATS_LOG`),
+    // not an exit dump, and nothing flushes it when this process exits. This
+    // fixture's own last few vectors (13, 14) can otherwise land inside the
+    // same handful of milliseconds this whole run takes, well within one
+    // tick's window — a caller reading the report for evidence that every
+    // vector's open was classified must not see a report that simply never
+    // ticked again after them. Derived from the same interval the caller may
+    // have configured (`VFS_SHIM_STATS_INTERVAL_MS`) rather than a fixed
+    // number, so this stays correct if that interval ever changes; a no-op
+    // when stats logging is off (nothing to outlive).
+    let interval_ms: u64 = std::env::var("VFS_SHIM_STATS_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(250);
+    std::thread::sleep(std::time::Duration::from_millis(interval_ms.saturating_mul(2)));
+
     std::process::exit(0);
 }

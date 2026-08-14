@@ -100,7 +100,7 @@
 //! below still fires — with a message that says the report was missing/
 //! empty, not a confusing string-parsing panic.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Parsed result of reconciling the shim's self-reported open-outcome
@@ -186,6 +186,71 @@ fn parse_outcomes(text: &str) -> (u64, BTreeMap<String, u64>, bool) {
         }
     }
     (routed, fell_through, true)
+}
+
+/// A nested per-path breakdown line under one outcome's summary row
+/// (`"      {count:>6}x  {path}\n"`, rendered by
+/// `vfs_shim::hookstats::format_outcome_paths`) — six-space indent, a count,
+/// a literal `x`, two spaces, then the path. Distinct from the truncation
+/// marker line (`"      ... and {n} more\n"`), which has no `x`-suffixed
+/// count and is reported separately rather than mistaken for a path.
+fn parse_outcome_path_line(line: &str) -> Option<&str> {
+    // A summary row is indented exactly two spaces; a nested path row is
+    // indented six, with the count then right-aligned *within* its own
+    // 6-wide field on top of that — so the line's total leading whitespace
+    // varies with the count's digit width and a bare `starts_with("      ")`
+    // (a fixed-length prefix check) would accept a 2-space summary row too
+    // once its own label happened to be short. Comparing indent *widths*
+    // rather than literal prefixes is what actually distinguishes the two.
+    let indent = line.len() - line.trim_start().len();
+    if indent < 6 {
+        return None;
+    }
+    let trimmed = line.trim();
+    let (count_x, path) = trimmed.split_once("  ")?;
+    let count_str = count_x.strip_suffix('x')?;
+    count_str.trim().parse::<u64>().ok()?;
+    Some(path)
+}
+
+/// Task 6's classification signal: every distinct (lowercased) path that
+/// appears *anywhere* in the shim report's "under-root open outcomes"
+/// section, regardless of which of the seven outcome classes it landed in.
+///
+/// This is deliberately not scoped to any one outcome label. Gate 2's own
+/// exit criterion for the negative canary is "classified under-root", not
+/// "reachable" and not "served" — a spelling that the director legitimately
+/// answers `NotFound` for (`routed`, sealed) is exactly as much evidence of
+/// correct classification as one that falls all the way through to
+/// `fell-through: passthrough`, because both mean *some* counter saw the
+/// open as ours. The only outcome that fails the exit criterion is total
+/// absence — an open the shim's own accounting never mentions at all, which
+/// is indistinguishable from ordinary background noise for a path genuinely
+/// outside every managed root.
+///
+/// Returns the set alongside whether any outcome's path list was truncated
+/// (`"... and N more"`, `format_outcome_paths`'s cap at
+/// `OUTCOME_PATHS_SHOWN` = 20) — a caller asserting *absence* of a marker
+/// from this set must know whether the list it searched was actually
+/// complete.
+pub fn classified_paths(shim_report: &Path) -> (BTreeSet<String>, bool) {
+    let text = std::fs::read_to_string(shim_report).unwrap_or_default();
+    let mut paths = BTreeSet::new();
+    let mut truncated = false;
+    let Some(idx) = text.find(OUTCOMES_HEADER) else {
+        return (paths, truncated);
+    };
+    let section = &text[idx + OUTCOMES_HEADER.len()..];
+    for line in section.lines() {
+        if line.trim_start().starts_with("... and ") {
+            truncated = true;
+            continue;
+        }
+        if let Some(path) = parse_outcome_path_line(line) {
+            paths.insert(path.to_ascii_lowercase());
+        }
+    }
+    (paths, truncated)
 }
 
 /// Reconcile the shim's `routed` under-root-open count (read from
@@ -305,6 +370,57 @@ mod tests {
             .unwrap_or_else(|| "<non-string panic payload>".into());
         assert!(msg.contains("drift"), "{msg}");
         assert!(msg.contains('1') && msg.contains('2'), "{msg}");
+    }
+
+    /// Mirrors `vfs_shim::hookstats::format_outcome_paths`'s exact row shape
+    /// (`"      {c:>6}x  {p}\n"`).
+    fn render_path_row(path: &str, count: u64) -> String {
+        format!("      {count:>6}x  {path}\n")
+    }
+
+    #[test]
+    fn classified_paths_collects_across_every_outcome_bucket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = dir.path().join("shim-stats.log");
+        let text = format!(
+            "{OUTCOMES_HEADER}{}{}{}{}",
+            render_summary_row("routed", 2),
+            render_path_row(r"\??\c:\root\data\A.esp", 1),
+            render_summary_row("fell-through: passthrough", 1),
+            render_path_row(r"\??\globalroot\device\harddiskvolume3\root\data\a.esp", 1),
+        );
+        std::fs::write(&report, text).unwrap();
+        let (paths, truncated) = classified_paths(&report);
+        assert!(!truncated);
+        // Case-folded: a caller searching for a marker must not have to
+        // guess whether the report happened to render upper- or lowercase.
+        assert!(paths.contains(r"\??\c:\root\data\a.esp"));
+        assert!(paths.contains(r"\??\globalroot\device\harddiskvolume3\root\data\a.esp"));
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn classified_paths_reports_truncation_rather_than_silently_dropping_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = dir.path().join("shim-stats.log");
+        let text = format!(
+            "{OUTCOMES_HEADER}{}{}      ... and 5 more\n",
+            render_summary_row("routed", 6),
+            render_path_row(r"\??\c:\root\data\a.esp", 1),
+        );
+        std::fs::write(&report, text).unwrap();
+        let (paths, truncated) = classified_paths(&report);
+        assert!(truncated);
+        assert_eq!(paths.len(), 1);
+    }
+
+    #[test]
+    fn classified_paths_empty_for_a_missing_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = dir.path().join("never-written.log");
+        let (paths, truncated) = classified_paths(&report);
+        assert!(paths.is_empty());
+        assert!(!truncated);
     }
 
     #[test]

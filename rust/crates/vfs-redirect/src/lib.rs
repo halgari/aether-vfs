@@ -30,6 +30,68 @@ fn cache_suppressed() -> bool {
     SUPPRESS_CACHE_DEPTH.with(|c| c.get() > 0)
 }
 
+thread_local! {
+    /// Guards [`RootMap::compute_under_root`]'s OS-consult branch
+    /// (`expand_short_name`) against re-entering itself.
+    ///
+    /// `expand_short_name` (via `vfs_win::final_path_for_open`) opens a real
+    /// `CreateFileW` handle on the candidate path to ask the OS what it
+    /// actually names. When this crate is consulted from inside an injected
+    /// process whose own `NtCreateFile`/`NtOpenFile` are hooked (`vfs-shim`'s
+    /// whole reason for existing), that `CreateFileW` call is itself
+    /// intercepted and fed back through the very same decision path —
+    /// `create_hook` -> `decision_for` -> `RootMap::under_root` ->
+    /// `compute_under_root` — for the identical `~`-bearing path, which hits
+    /// this same OS-consult branch again, which calls `expand_short_name`
+    /// again, without bound. Verified by reproduction: an escape-matrix
+    /// vector building an 8.3 short-name spelling of a path under a session's
+    /// managed root (any temp-directory session-base name longer than 8.3,
+    /// which every real session has: `vfs-daemon-<pid>-<seq>-<id>`) recursed
+    /// until the injected process's stack overflowed (`STATUS_STACK_OVERFLOW`,
+    /// `0xC00000FD`) — a real crash, not a misclassification, and one none of
+    /// this crate's own unit tests can see, since a plain test process has no
+    /// hook on `CreateFileW` for the recursion to loop through.
+    ///
+    /// The break: a re-entrant call finds the guard already held and skips
+    /// the OS consult, answering "not recognised here" instead
+    /// (`Resolution::OsConsulted(None)`). That does not lose the answer — it
+    /// only refuses to ask the OS *again* for the same fact the outer call is
+    /// already in the middle of asking. The re-entrant `CreateFileW`'s own
+    /// hook invocation then takes `Decision::PassThrough` and calls the
+    /// *real* trampoline, which is the actual, unhooked `NtCreateFile` this
+    /// whole call chain was trying to reach — so `final_path_for_open`'s
+    /// handle open still succeeds against the real filesystem, and the outer
+    /// call's `expand_short_name` still returns the resolved long path
+    /// exactly as it would have without the nested detour. Nothing is
+    /// answered incorrectly; the second and every further attempt to
+    /// re-derive the same fact from inside itself is simply skipped.
+    static OS_CONSULT_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// RAII guard for [`OS_CONSULT_DEPTH`]. `enter()` returns `None` when the
+/// guard is already held on this thread — the caller's signal to skip the OS
+/// consult rather than recurse into it.
+struct OsConsultGuard(());
+
+impl OsConsultGuard {
+    fn enter() -> Option<Self> {
+        OS_CONSULT_DEPTH.with(|c| {
+            if c.get() > 0 {
+                None
+            } else {
+                c.set(1);
+                Some(OsConsultGuard(()))
+            }
+        })
+    }
+}
+
+impl Drop for OsConsultGuard {
+    fn drop(&mut self) {
+        OS_CONSULT_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
 /// While one or more of these guards is alive on the current thread, every
 /// [`RootMap::under_root`] lookup made on that thread is ineligible for
 /// caching — including a lookup `compute_under_root` would otherwise classify
@@ -395,6 +457,15 @@ impl RootMap {
             return Resolution::Deterministic(None);
         }
         self.os_consults.fetch_add(1, Ordering::Relaxed);
+        // See `OS_CONSULT_DEPTH`'s doc comment: `expand_short_name` below
+        // makes a real `CreateFileW` call, which — when this crate is being
+        // consulted from inside a process whose own file APIs are hooked —
+        // can feed straight back into this same branch for the same path.
+        // Skip the OS consult on a re-entrant call rather than recursing into
+        // it without bound.
+        let Some(_guard) = OsConsultGuard::enter() else {
+            return Resolution::OsConsulted(None);
+        };
         // `canon` is already an absolute, NT/DOS-prefix-free, drive-letter
         // form (e.g. `C:/Games~1/Data/a.esp`); backslashes make it a path
         // `CreateFileW` (behind `expand_short_name`) accepts directly.
@@ -839,6 +910,23 @@ pub fn write_file_name_info(name: &str, buf: &mut [u8]) -> NameWriteResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `OsConsultGuard`'s own reentrancy mechanics, independent of any real
+    /// OS call or hook — the crash this guard fixes (see its doc comment)
+    /// can only be reproduced from inside a real injected session, but the
+    /// guard's own held/released bookkeeping is a pure, unit-testable fact:
+    /// a nested `enter()` while one is already held must refuse (`None`),
+    /// and the slot must become available again once the outer guard drops.
+    #[test]
+    fn os_consult_guard_refuses_reentry_and_releases_on_drop() {
+        let outer = OsConsultGuard::enter().expect("first enter must succeed");
+        assert!(OsConsultGuard::enter().is_none(), "a nested enter while held must refuse");
+        drop(outer);
+        assert!(
+            OsConsultGuard::enter().is_some(),
+            "the slot must be free again once the outer guard was dropped"
+        );
+    }
 
     #[test]
     fn new_normalizes_nt_and_win32_roots() {

@@ -38,6 +38,14 @@ extern "system" {
     pub fn GetLastError() -> u32;
     pub fn GetLogicalDrives() -> u32;
 
+    pub fn ReadFile(
+        hFile: Handle,
+        lpBuffer: *mut c_void,
+        nNumberOfBytesToRead: u32,
+        lpNumberOfBytesRead: *mut u32,
+        lpOverlapped: *mut c_void,
+    ) -> i32;
+
     pub fn QueryDosDeviceW(lpDeviceName: *const u16, lpTargetPath: *mut u16, ucchMax: u32) -> u32;
 
     pub fn GetVolumeNameForVolumeMountPointW(
@@ -282,6 +290,40 @@ pub fn create_file_read(path_wide: &[u16]) -> Result<Handle, u32> {
     } else {
         Ok(handle)
     }
+}
+
+/// Read the whole content of an already-open, synchronous, readable
+/// `handle`, up to a bound generous enough for any target this fixture is
+/// realistically pointed at (a game data file, not a multi-gigabyte
+/// archive). `None` if the first `ReadFile` call itself fails (a directory
+/// handle, an unreadable synthetic handle, ...) — distinct from an empty
+/// file, which reads zero bytes successfully and returns `Some(vec![])`.
+///
+/// Used only for the byte-identity check the positive canary needs: this
+/// fixture otherwise never cares what a successful open actually contains.
+pub fn read_all(handle: Handle) -> Option<Vec<u8>> {
+    const CHUNK: usize = 64 * 1024;
+    const MAX_CHUNKS: usize = 16; // 1 MiB cap — ample for a fixture target.
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; CHUNK];
+    for i in 0..MAX_CHUNKS {
+        let mut read: u32 = 0;
+        // SAFETY: FFI. `handle` is a valid, caller-owned open handle; `buf`
+        // is valid for `CHUNK` bytes, matching `nNumberOfBytesToRead`;
+        // `read` is a valid local `u32` out-pointer. `lpOverlapped` is null,
+        // matching the synchronous handles every caller here opens.
+        let ok = unsafe {
+            ReadFile(handle, buf.as_mut_ptr() as *mut c_void, CHUNK as u32, &mut read, std::ptr::null_mut())
+        };
+        if ok == 0 {
+            return if i == 0 { None } else { Some(out) };
+        }
+        out.extend_from_slice(&buf[..read as usize]);
+        if (read as usize) < CHUNK {
+            break;
+        }
+    }
+    Some(out)
 }
 
 /// Close a handle opened by this module. No-op on null/invalid.

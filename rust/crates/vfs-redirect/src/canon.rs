@@ -137,6 +137,64 @@ fn resolve_device_prefix(path: &str, volumes: &VolumeMap) -> String {
     }
 }
 
+/// `GLOBALROOT` is a real, well-known symlink *inside* the `\??\`
+/// (DosDevices) object directory that points straight at the object
+/// manager's own root (`\`) — so `\??\GLOBALROOT\Device\HarddiskVolume3\...`
+/// (what Windows presents to `NtCreateFile` for a
+/// `\\?\GLOBALROOT\Device\HarddiskVolume3\...` Win32 open, the trick that
+/// reaches a device name without going through an ordinary `\??\`
+/// (DosDevices) symlink at all — see `vfs-fixture-escape`'s vector 3) names
+/// *exactly* the same object as the bare `\Device\HarddiskVolume3\...` form.
+///
+/// Left unstripped, `resolve_device_prefix`'s `VolumeMap` lookup — which
+/// only ever matches a registered prefix *at the very start* of the string —
+/// would never see the `\Device\...`/`\\?\Volume{...}` text at all, because
+/// the literal `GLOBALROOT` token sits in front of it. The whole spelling
+/// would then canonicalise as an unrecognised, non-drive-rooted path:
+/// `RootMap::under_root` would answer "outside" for a path the OS itself
+/// resolves identically to the un-wrapped form — invisible to every
+/// counter, exactly the failure mode this gate exists to close. Found by
+/// reproduction (Task 6's session-based matrix), not asserted in advance:
+/// the OS-level open still succeeds either way (`tramp` doesn't care what
+/// `RootMap` thinks), so nothing about *reachability* ever signalled this
+/// gap — only classification did.
+///
+/// Returns the text after `GLOBALROOT` (starting with the following
+/// separator, so the caller can feed it straight back into
+/// `resolve_device_prefix`), or `None` if `path` has no such wrapper.
+fn strip_globalroot_wrapper(path: &str) -> Option<&str> {
+    const TOKEN: &str = "GLOBALROOT";
+    for prefix in NT_PREFIXES {
+        let Some(rest) = path.strip_prefix(prefix) else { continue };
+        let Some(candidate) = rest.get(..TOKEN.len()) else { continue };
+        if fold(candidate) != fold(TOKEN) {
+            continue;
+        }
+        let after = &rest[TOKEN.len()..];
+        if after.is_empty() || after.starts_with(['\\', '/']) {
+            return Some(after);
+        }
+    }
+    None
+}
+
+/// [`resolve_device_prefix`], additionally trying a `GLOBALROOT`-wrapped
+/// spelling if the bare form does not match. The bare form is tried first
+/// and wins outright when it matches, so an ordinary (unwrapped) device or
+/// volume-GUID path resolves exactly as it always did — this is a pure
+/// fallback for the wrapped shape, never a second, competing way to resolve
+/// the common case.
+fn resolve_device_prefix_with_globalroot(path: &str, volumes: &VolumeMap) -> String {
+    let bare = resolve_device_prefix(path, volumes);
+    if bare != path {
+        return bare;
+    }
+    match strip_globalroot_wrapper(path) {
+        Some(unwrapped) => resolve_device_prefix(unwrapped, volumes),
+        None => bare,
+    }
+}
+
 /// Strip trailing dots and spaces from each path component, the way Win32
 /// silently discards them when resolving a name. `.` and `..` are left
 /// alone — they are navigation, not a name Win32 would trim — so the
@@ -213,7 +271,7 @@ fn clamp_dotdot(remainder: &str) -> String {
 /// the real file on disk.
 pub fn canonicalise(raw: &str, volumes: &VolumeMap) -> Result<String, PathError> {
     let no_stream = strip_stream_suffix(raw);
-    let resolved = resolve_device_prefix(no_stream, volumes);
+    let resolved = resolve_device_prefix_with_globalroot(no_stream, volumes);
     let unprefixed = strip_all_nt_prefixes(&resolved);
     if is_drive_relative(unprefixed) {
         return Err(PathError::EscapesRoot);
@@ -370,5 +428,67 @@ mod tests {
             got.to_ascii_lowercase().starts_with("c:"),
             "the drive did not survive a `..` at the root — {got}"
         );
+    }
+
+    /// `\\?\GLOBALROOT\Device\...` names exactly the same object as
+    /// `\Device\...` — the `GLOBALROOT` object-manager symlink must not
+    /// hide a registered device prefix from `VolumeMap::resolve`. Found via
+    /// Task 6's session-based escape matrix: this exact wrapped spelling
+    /// (`vfs-fixture-escape`'s vector 3) reached the real file on disk via
+    /// plain OS passthrough while going completely unclassified by
+    /// `RootMap::under_root` — reachable, but invisible to every counter.
+    #[test]
+    fn globalroot_wrapped_device_prefix_resolves_like_the_bare_form() {
+        let bare = canonicalise(r"\Device\HarddiskVolume3\Games\Skyrim\Data\a.esp", &vols());
+        let wrapped = canonicalise(
+            r"\??\GLOBALROOT\Device\HarddiskVolume3\Games\Skyrim\Data\a.esp",
+            &vols(),
+        );
+        assert_eq!(bare.unwrap(), wrapped.unwrap());
+    }
+
+    /// The `\\?\` spelling of the same wrapper (what a Win32
+    /// `\\?\GLOBALROOT\...` open actually presents to `NtCreateFile` after
+    /// Windows' own `\\?\` -> `\??\` rewrite is a *different* case from this
+    /// pure function's perspective — both NT/DOS prefix spellings must work).
+    #[test]
+    fn globalroot_wrapper_matches_either_nt_dos_prefix_spelling() {
+        let a = canonicalise(r"\??\GLOBALROOT\Device\HarddiskVolume3\a.esp", &vols()).unwrap();
+        let b = canonicalise(r"\\?\GLOBALROOT\Device\HarddiskVolume3\a.esp", &vols()).unwrap();
+        assert_eq!(a, b);
+    }
+
+    /// Case-insensitively, like every other NT object-manager name.
+    #[test]
+    fn globalroot_wrapper_matches_case_insensitively() {
+        let got = canonicalise(
+            r"\??\globalroot\device\harddiskvolume3\Games\Skyrim\Data\a.esp",
+            &vols(),
+        );
+        assert_eq!(got.unwrap().to_ascii_lowercase(), "c:/games/skyrim/data/a.esp");
+    }
+
+    /// An unmapped device behind a `GLOBALROOT` wrapper must still not be
+    /// guessed into a drive — the same fail-closed rule as the bare form.
+    #[test]
+    fn globalroot_wrapped_unmapped_device_does_not_silently_become_a_drive() {
+        let got = canonicalise(
+            r"\??\GLOBALROOT\Device\HarddiskVolume9\Games\Skyrim\Data\a.esp",
+            &vols(),
+        )
+        .unwrap();
+        assert!(
+            !got.to_ascii_lowercase().starts_with("c:"),
+            "an unmapped device behind a GLOBALROOT wrapper resolved to C: — {got}"
+        );
+    }
+
+    /// An ordinary drive-letter path (no `GLOBALROOT` anywhere) must resolve
+    /// exactly as before — the fallback must never engage for the common
+    /// case, only for a spelling the bare match already failed on.
+    #[test]
+    fn globalroot_fallback_does_not_disturb_an_ordinary_path() {
+        let got = canonicalise(r"C:\Games\Skyrim\Data\a.esp", &vols()).unwrap();
+        assert_eq!(got.to_ascii_lowercase(), "c:/games/skyrim/data/a.esp");
     }
 }

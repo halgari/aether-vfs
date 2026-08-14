@@ -171,6 +171,12 @@ pub const FIXTURE_FILL: &str = "VFS_FIXTURE_FILL";
 pub const FIXTURE_DATA: &str = "VFS_FIXTURE_DATA";
 /// Directory the write-set fixture operates in.
 pub const FIXTURE_DIR: &str = "VFS_FIXTURE_DIR";
+/// Restrict `vfs-fixture-escape` to constructing and attempting exactly one
+/// of its fourteen vectors, skipping every other one entirely rather than
+/// merely omitting it from the output — see that crate's module doc for why
+/// a caller correlating against the shim's own (not vector-keyed) hook-stats
+/// report needs this to isolate one vector's own classification effect.
+pub const ESCAPE_ONLY_VECTOR: &str = "VFS_ESCAPE_ONLY_VECTOR";
 
 /// What a switch is for, so the surface can be listed and reviewed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +251,7 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_FILL, kind: Kind::Fixture, default: "none" },
     Var { name: FIXTURE_DATA, kind: Kind::Fixture, default: "\"written-bytes\"" },
     Var { name: FIXTURE_DIR, kind: Kind::Fixture, default: "required" },
+    Var { name: ESCAPE_ONLY_VECTOR, kind: Kind::Fixture, default: "unset (every vector runs)" },
 ];
 
 /// Is `name` a known switch?
