@@ -297,23 +297,36 @@ fn reparse_target_from_handle(handle: HANDLE) -> Option<String> {
     // reading the fixed header through a raw pointer, never materializing a
     // `&REPARSE_DATA_BUFFER` that would claim the trailing flexible
     // `PathBuffer` is fully initialized (it is not, as declared — only
-    // `returned` bytes are).
+    // `returned` bytes are). `buf` is a `Vec<u8>`, which only guarantees
+    // 1-byte alignment; the system allocator happens to hand back
+    // 16-byte-aligned memory for an allocation this size today, but nothing
+    // in `Vec`'s contract promises that, so `rdb_ptr` must be treated as
+    // possibly misaligned for `REPARSE_DATA_BUFFER`'s `u16`/`u32` fields.
+    // Every scalar field read below therefore goes through
+    // `read_unaligned` on a pointer obtained via `addr_of!` (which itself
+    // never dereferences), rather than an ordinary `(*ptr).field` place
+    // expression, which would assume an alignment `Vec<u8>` does not give.
     let rdb_ptr = buf.as_ptr() as *const REPARSE_DATA_BUFFER;
-    let tag = unsafe { (*rdb_ptr).ReparseTag };
+    let tag = unsafe { core::ptr::addr_of!((*rdb_ptr).ReparseTag).read_unaligned() };
     let (name_offset, name_len, path_buf_ptr) = match tag {
         IO_REPARSE_TAG_MOUNT_POINT => {
             // SAFETY: `addr_of!` projects a field address without reading
             // through an intermediate reference, safe even though the
             // trailing `PathBuffer` is not fully initialized per its
-            // nominal `[u16; 1]` declaration.
+            // nominal `[u16; 1]` declaration; `read_unaligned` on the
+            // scalar fields does not require `mp` itself to be aligned.
             let mp = unsafe { core::ptr::addr_of!((*rdb_ptr).Anonymous.MountPointReparseBuffer) };
             let path_buf = unsafe { core::ptr::addr_of!((*mp).PathBuffer) as *const u16 };
-            (unsafe { (*mp).SubstituteNameOffset }, unsafe { (*mp).SubstituteNameLength }, path_buf)
+            let offset = unsafe { core::ptr::addr_of!((*mp).SubstituteNameOffset).read_unaligned() };
+            let len = unsafe { core::ptr::addr_of!((*mp).SubstituteNameLength).read_unaligned() };
+            (offset, len, path_buf)
         }
         IO_REPARSE_TAG_SYMLINK => {
             let sl = unsafe { core::ptr::addr_of!((*rdb_ptr).Anonymous.SymbolicLinkReparseBuffer) };
             let path_buf = unsafe { core::ptr::addr_of!((*sl).PathBuffer) as *const u16 };
-            (unsafe { (*sl).SubstituteNameOffset }, unsafe { (*sl).SubstituteNameLength }, path_buf)
+            let offset = unsafe { core::ptr::addr_of!((*sl).SubstituteNameOffset).read_unaligned() };
+            let len = unsafe { core::ptr::addr_of!((*sl).SubstituteNameLength).read_unaligned() };
+            (offset, len, path_buf)
         }
         // Any other reparse tag (cloud-file placeholders, deduplication,
         // WOF-compressed files, AppExecLink, ...) is out of scope — see this
