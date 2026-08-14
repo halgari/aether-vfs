@@ -11,6 +11,8 @@ use vfs_control::pb::director_server::DirectorServer;
 use vfs_control::SessionConfig;
 use vfs_directord::{apply_session_config, connect, DirectorService, SessionRegistry};
 
+mod support;
+
 fn profile_dir() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
     let dir = exe.parent().unwrap();
@@ -360,6 +362,14 @@ async fn scenario_toml_disk_source_fixture_writepath() {
     // default cadence any real, longer-lived launch gets.
     env.insert("VFS_SHIM_STATS_INTERVAL_MS".to_string(), "5".to_string());
 
+    // Baseline for the director's open count, taken right before the launch
+    // that will drive real opens through `OP_OPEN`/`record_open`. `io_stats`
+    // is a process-wide static (not per-`DirectorService`), and this test
+    // binary runs other tests concurrently, so a delta — not an absolute
+    // reading — is what isolates this launch's own opens (same convention
+    // `io_stats::tests::open_totals_counts_ok_and_err_separately` uses).
+    let (opens_ok_before, opens_err_before) = vfs_director::io_stats::open_totals();
+
     let mut stream = client
         .launch(LaunchReq {
             session_id: session.id.clone(),
@@ -388,6 +398,20 @@ async fn scenario_toml_disk_source_fixture_writepath() {
         "fixture should exit 0 after create/write/append/rename/delete all round-trip \
          through the injected shim"
     );
+
+    // The process (and its reporter thread) has exited by now, `wait: true`
+    // having blocked until it did, so the director's open count for this
+    // launch is stable to read.
+    let (opens_ok_after, opens_err_after) = vfs_director::io_stats::open_totals();
+    // The reconciliation target is the director's *total* arrived-open
+    // count, not `opens_ok` alone: this fixture's own error probes (a
+    // failing re-open of a renamed-away name, a failing re-open of a
+    // deleted file, a failing second `CREATE_NEW`) are real opens that
+    // reach the director and get a legitimate negative answer back — the
+    // shim correctly records each as `Routed` regardless of that answer
+    // (see `support`'s module doc for the verification behind this).
+    let opens_ok_delta =
+        (opens_ok_after - opens_ok_before) + (opens_err_after - opens_err_before);
 
     // The decisive assertions, on the filesystem, not on a director query:
     // bytes must be in the DiskProvider's backing directory, and NOTHING may
@@ -422,16 +446,29 @@ async fn scenario_toml_disk_source_fixture_writepath() {
         .join("overlay");
     assert_overlay_empty(&overlay);
 
-    // Proves gate 1's classifier is actually wired and firing, not merely
-    // compiled: every under-root open this fixture makes that the director
-    // actually serves (the create/write/append/rename/delete sequence above)
-    // must show up as `routed` in the shim's own report, not just as a
-    // passing exit code.
-    let routed = routed_outcome_count(&stats_log);
+    // The reconciliation: gate 1's whole point. Every open the shim believed
+    // it routed to the director must actually have arrived there — checked
+    // by comparing the shim's own `routed` count (from its report) against
+    // the director's total arrived-open delta captured above. A mismatch is
+    // a live bypass (see `support::assert_reconciled`'s doc for why, and for
+    // what this comparison deliberately leaves out — directory creates).
+    let recon = support::assert_reconciled(&stats_log, opens_ok_delta);
     assert!(
-        routed > 0,
+        recon.routed > 0,
         "expected at least one `routed` under-root open outcome in the shim \
          report at {stats_log:?}, got 0 (report contents: {:?})",
+        std::fs::read_to_string(&stats_log)
+    );
+    // Not a claim that fall-through is zero — it isn't yet, that's the
+    // entire point of measuring before removing it (gates 2-5 do the
+    // removing). Only that the section this test depends on genuinely
+    // exists and parsed, rather than the reconciliation above having passed
+    // vacuously on an empty/missing report.
+    assert!(
+        recon.outcomes_section_found,
+        "expected the shim report at {stats_log:?} to contain an \
+         \"under-root open outcomes:\" section once the launch completed; \
+         got: {:?}",
         std::fs::read_to_string(&stats_log)
     );
 
@@ -443,33 +480,6 @@ async fn scenario_toml_disk_source_fixture_writepath() {
         .expect("teardown");
 
     server.abort();
-}
-
-/// Read the shim's `VFS_SHIM_STATS_LOG` report and pull out the `routed`
-/// under-root-open-outcome count from its "under-root open outcomes:"
-/// section (see `hookstats::render_outcome`, which renders one
-/// `"  {label:<32} {count:>8}\n"` line per non-zero outcome).
-///
-/// The reporter thread rewrites the whole file every 250ms via a temp+rename,
-/// so by the time the launched (and by now exited) child's last write landed,
-/// the file is either absent (never got a tick in) or a complete snapshot —
-/// never a half-written one. `0` covers both "absent" and "present but the
-/// classifier never fired", which is exactly what the caller's `> 0` check
-/// distinguishes from a real pass.
-fn routed_outcome_count(stats_log: &std::path::Path) -> u64 {
-    let Ok(text) = std::fs::read_to_string(stats_log) else {
-        return 0;
-    };
-    for line in text.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("routed") {
-            if let Some(n) = rest.split_whitespace().next() {
-                if let Ok(v) = n.parse::<u64>() {
-                    return v;
-                }
-            }
-        }
-    }
-    0
 }
 
 /// `read_dir(...).unwrap_or_default()` turns a wrong or missing overlay path
@@ -528,6 +538,13 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
     let bottom_dir = tempfile::tempdir().expect("tempdir bottom");
     let top_dir = tempfile::tempdir().expect("tempdir top");
 
+    // Separate from both source directories, same reasoning as the
+    // single-source test above: keeps the shim's `VFS_SHIM_STATS_LOG`
+    // temp/rename dance out of the bottom/top directory listings the
+    // assertions below rely on being exactly the fixture's own writes.
+    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_log = stats_dir.path().join("shim-stats.log");
+
     let fixture = locate_artifact("vfs-fixture-writepath.exe");
     let mut client = connect(&format!("{addr}")).await.expect("connect");
 
@@ -571,13 +588,29 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
         .await
         .expect("AddSource top");
 
+    let mut env = std::collections::HashMap::new();
+    env.insert(
+        "VFS_SHIM_STATS_LOG".to_string(),
+        stats_log.to_string_lossy().into_owned(),
+    );
+    // Same rationale as the single-source test: this fixture's full
+    // create/write/append/rename/delete sequence finishes well under the
+    // reporter's default 250ms tick, so a short-lived process here would
+    // otherwise exit before the reporter thread ever writes a report at all.
+    env.insert("VFS_SHIM_STATS_INTERVAL_MS".to_string(), "5".to_string());
+
+    // See the single-source test above for why this is a delta rather than
+    // an absolute reading: `io_stats` is a process-wide static shared by
+    // every test in this binary.
+    let (opens_ok_before, opens_err_before) = vfs_director::io_stats::open_totals();
+
     let mut stream = client
         .launch(LaunchReq {
             session_id: session.id.clone(),
             exec: fixture.to_string_lossy().into_owned(),
             args: Vec::new(),
             wait: true,
-            env: Default::default(),
+            env,
         })
         .await
         .expect("Launch")
@@ -599,6 +632,14 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
         "fixture should exit 0 after create/write/append/rename/delete all round-trip \
          through the injected shim over a two-source (LayeredProvider) stack"
     );
+
+    let (opens_ok_after, opens_err_after) = vfs_director::io_stats::open_totals();
+    // See the single-source test above: the target is the director's total
+    // arrived-open count, `opens_ok + opens_err`, not `opens_ok` alone —
+    // this fixture's own error probes are real, correctly-`Routed` opens
+    // that the director legitimately answered with an error.
+    let opens_ok_delta =
+        (opens_ok_after - opens_ok_before) + (opens_err_after - opens_err_before);
 
     // The decisive assertions: bytes in the TOP source's backing directory
     // (the layer writes route to), nothing in the bottom source, and nothing
@@ -639,6 +680,25 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
         .expect("session.root has a parent")
         .join("overlay");
     assert_overlay_empty(&overlay);
+
+    // The decisive reconciliation for the case this test exists to cover:
+    // `LayeredProvider` is exactly where an earlier phase found the bypass
+    // reintroduced, so this is the case where shim-`routed` vs.
+    // director-`opens_ok` drifting apart would matter most.
+    let recon = support::assert_reconciled(&stats_log, opens_ok_delta);
+    assert!(
+        recon.routed > 0,
+        "expected at least one `routed` under-root open outcome in the shim \
+         report at {stats_log:?}, got 0 (report contents: {:?})",
+        std::fs::read_to_string(&stats_log)
+    );
+    assert!(
+        recon.outcomes_section_found,
+        "expected the shim report at {stats_log:?} to contain an \
+         \"under-root open outcomes:\" section once the launch completed; \
+         got: {:?}",
+        std::fs::read_to_string(&stats_log)
+    );
 
     client
         .teardown_session(vfs_control::pb::TeardownReq {
