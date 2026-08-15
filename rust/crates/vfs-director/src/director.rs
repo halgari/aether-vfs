@@ -65,17 +65,27 @@ impl Director {
     }
 
     /// Set (or replace) the single provider serving `root`. Composition of
-    /// several sources into that one provider is the caller's job.
+    /// several sources into that one provider is the caller's job — use
+    /// [`crate::compose_root`] for it, so every route composes the same way.
     ///
-    /// **A host holding a [`crate::Session`] should not call this for a root
-    /// that session composes.** It *replaces* the root's provider, so a graph
-    /// built outside the session silently drops whatever the session's own
-    /// composition contributed — most damagingly the root's write layer, and
-    /// with it copy-on-write, which nothing but a write test notices (gate 4,
-    /// Task 6b). Go through `Session::mount` / `Session::set_root_mounts` /
-    /// `Session::set_write_layer_at` instead. Calling this directly is for a
-    /// provider the session does not track at all — e.g. `skyrim-live`'s
-    /// root 1, whose counters must wrap the *composed* provider.
+    /// **A root mounted here is not a root the session knows about, and the
+    /// two must not both own one.** This is legitimate for a provider the
+    /// session cannot express — `skyrim-live`'s root 1, whose counters wrap
+    /// the *composed* provider, which `Session` has no hook for. The hazard
+    /// runs the other way: a later `Session::mount_at(RootId(1), …)` /
+    /// `set_write_layer_at` would compose that root from the session's own
+    /// (empty) inputs and replace what was mounted here — dropping the
+    /// counters, the overlay, or both. `Session` refuses that rather than
+    /// doing it silently (`ST_EXISTS`), so the two owners cannot fight; call
+    /// [`Director::unmount`] first if a hand-mounted root really should
+    /// become session-composed.
+    ///
+    /// A host that *can* express its root through the session should always
+    /// prefer `Session::mount` / `Session::set_root_mounts` /
+    /// `Session::set_write_layer_at`: they compose the mounts and the write
+    /// layer together, and a graph built outside the session drops whichever
+    /// half it did not know about — copy-on-write, most damagingly, which
+    /// nothing but a write test notices (gate 4, Task 6b).
     pub fn mount(&self, root: RootId, backend: Arc<dyn Provider>) -> Result<(), i32> {
         self.roots
             .lock()
@@ -89,6 +99,13 @@ impl Director {
     pub fn unmount(&self, root: RootId) -> Result<(), i32> {
         self.roots.lock().map_err(|_| map_io_err())?.remove(&root);
         Ok(())
+    }
+
+    /// Whether anything currently serves `root`. `Session` uses this to
+    /// refuse composing over a root someone mounted directly — see
+    /// [`Director::mount`].
+    pub fn serves(&self, root: RootId) -> Result<bool, i32> {
+        Ok(self.roots.lock().map_err(|_| map_io_err())?.contains_key(&root))
     }
 
     fn provider_for(&self, root: RootId) -> Result<Option<Arc<dyn Provider>>, i32> {

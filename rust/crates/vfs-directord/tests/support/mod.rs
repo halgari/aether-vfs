@@ -320,6 +320,68 @@ pub fn assert_reconciled(shim_report: &Path, opens_ok: u64) -> Reconciliation {
     }
 }
 
+// ── a one-entry Stored zip, for scenarios that need read-only content ──
+//
+// Deliberately hand-rolled rather than pulled from a zip crate: these tests
+// are about what the director does with an archive, and a fixture archive
+// whose exact bytes are known is what makes "the source is byte-identical
+// afterwards" a meaningful assertion.
+
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+pub fn write_stored_zip(path: &std::path::Path, entry: &str, content: &[u8]) {
+    use std::io::Write;
+    let mut buf = Vec::new();
+    let crc = crc32(content);
+    let n = entry.len() as u16;
+    buf.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+    buf.extend_from_slice(&[0u8; 4]);
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&crc.to_le_bytes());
+    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&n.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(entry.as_bytes());
+    buf.extend_from_slice(content);
+    let cd_start = buf.len() as u32;
+    buf.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+    buf.extend_from_slice(&[0u8; 6]);
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&crc.to_le_bytes());
+    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&n.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    buf.extend_from_slice(&[0u8; 8]);
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    buf.extend_from_slice(entry.as_bytes());
+    let cd_size = buf.len() as u32 - cd_start;
+    buf.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    buf.extend_from_slice(&[0u8; 4]);
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());
+    buf.extend_from_slice(&cd_size.to_le_bytes());
+    buf.extend_from_slice(&cd_start.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

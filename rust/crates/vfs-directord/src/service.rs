@@ -102,14 +102,14 @@ impl Director for DirectorService {
             let id = self
                 .registry
                 .set_write_layer(&r.session_id, r.root, backend)
-                .map_err(Status::invalid_argument)?;
+                .map_err(registry_status)?;
             return Ok(Response::new(SourceRef { id }));
         }
 
         let id = self
             .registry
             .add_source(&r.session_id, r.root, &mount, r.layer, backend)
-            .map_err(Status::not_found)?;
+            .map_err(registry_status)?;
 
         Ok(Response::new(SourceRef { id }))
     }
@@ -213,6 +213,22 @@ impl Director for DirectorService {
             opens_err,
             rejected_writes,
         }))
+    }
+}
+
+/// Map a `SessionRegistry` error string onto a gRPC status.
+///
+/// The registry answers in prose, and the two failures behind `AddSource`
+/// are genuinely different: naming a session that does not exist is
+/// `NotFound`, while a request the session refuses (a read-only write layer,
+/// say) is `InvalidArgument`. Deciding that per call site let the same
+/// "unknown session" answer come back as `NotFound` for a source and
+/// `InvalidArgument` for a write layer — one function so the two agree.
+fn registry_status(err: String) -> Status {
+    if err.starts_with("unknown session") {
+        Status::not_found(err)
+    } else {
+        Status::invalid_argument(err)
     }
 }
 

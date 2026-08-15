@@ -450,6 +450,33 @@ async fn a_write_layer_declared_over_grpc_gives_the_session_copy_on_write() {
     assert_eq!(err.code(), tonic::Code::InvalidArgument, "{err:?}");
     assert!(err.message().contains("Data/SomeMod"), "{err:?}");
 
+    // An unknown session is an unknown session whichever kind of source names
+    // it: the write-layer branch used to answer `InvalidArgument` where the
+    // source branch answered `NotFound`, so a client could not tell "your
+    // session is gone" from "your request is wrong".
+    for is_write_layer in [false, true] {
+        let err = client
+            .add_source(AddSourceReq {
+                session_id: "no-such-session".into(),
+                source: Some(vfs_control::pb::SourceSpec {
+                    kind: Some(source_spec::Kind::Disk(DiskSource {
+                        path: overrides.to_string_lossy().into_owned(),
+                    })),
+                }),
+                mount: "/".into(),
+                layer: 0,
+                root: 0,
+                write_layer: is_write_layer,
+            })
+            .await
+            .expect_err("an unknown session cannot take a source");
+        assert_eq!(
+            err.code(),
+            tonic::Code::NotFound,
+            "write_layer={is_write_layer}: {err:?}"
+        );
+    }
+
     client
         .teardown_session(vfs_control::pb::TeardownReq {
             session_id: session.id,

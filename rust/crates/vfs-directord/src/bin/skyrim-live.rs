@@ -334,17 +334,31 @@ component match sees exactly what the game's own raw NT open spells)",
     // base, the shim's overlay is visible to reads and is copied up into
     // `profiles` on first write, instead of diverting the save away from the
     // directory this harness exists to observe.
+    //
+    // Composed by [`vfs_director::compose_root`] — the same function
+    // `Session::recompose` and the daemon's `SessionRegistry` use — rather
+    // than by assembling an `OverlayProvider` here. It cannot go through
+    // `Session` itself (the counters have to wrap the *composed* provider and
+    // `Session` composes internally, with no hook for a wrapper), but it can
+    // and must use the same composition: this harness is the only route with
+    // live evidence behind it, so it is the last route that should be off the
+    // shared path. What `compose_root` returns here differs from the previous
+    // hand-built overlay only by a transparent single-mount `MountGraph`
+    // around the base.
     let root1_shim_overlay = vfs_director::overlay_layer_dir(&overrides, RootId(1));
     std::fs::create_dir_all(&root1_shim_overlay)
         .map_err(|e| format!("mkdir {}: {e}", root1_shim_overlay.display()))?;
-    let root1_composed = vfs_compose::OverlayProvider::from_arcs(
-        Arc::new(DiskProvider::new(&root1_shim_overlay)),
-        Arc::new(DiskProvider::new(&profiles_target)),
+    let root1_composed = vfs_director::compose_root(
+        vec![(
+            String::new(),
+            Arc::new(DiskProvider::new(&root1_shim_overlay)) as Arc<dyn Provider>,
+        )],
+        Some(Arc::new(DiskProvider::new(&profiles_target))),
     )
-    .map_err(|e| format!("compose root1: {e}"))?;
+    .map_err(|st| format!("compose root1: status {st}"))?;
     // The counters wrap the whole composed root, not just its writable half,
     // so `print_open_totals` still reports everything root 1 answers.
-    let root1_counters = Arc::new(CountingProvider::new(Arc::new(root1_composed)));
+    let root1_counters = Arc::new(CountingProvider::new(root1_composed));
     session
         .kernel()
         .mount(RootId(1), Arc::clone(&root1_counters) as Arc<dyn Provider>)

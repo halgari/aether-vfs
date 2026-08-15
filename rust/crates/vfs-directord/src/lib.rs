@@ -237,6 +237,25 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     })
 }
 
+/// The `--write-layer DIR` flag as a config entry: root 0's writable upper.
+///
+/// A separate flag rather than a `--source` spelling because it is a
+/// different fact — `--source` says what the session *serves*, this says
+/// where its writes *land*, seeded from whatever the sources hold. Always a
+/// disk directory (nothing else in this workspace is writable), always root
+/// 0 (the CLI has no syntax for naming another root), always mounted at the
+/// root (the upper covers the whole root by construction).
+pub fn write_layer_flag_entry(path: &str) -> vfs_control::SourceEntry {
+    vfs_control::SourceEntry {
+        spec: vfs_control::SourceSpec::Disk {
+            path: path.to_string(),
+        },
+        mount: "/".to_string(),
+        root: 0,
+        write_layer: true,
+    }
+}
+
 /// Drive CreateSession → AddSource* → optional Launch from a [`SessionConfig`].
 ///
 /// Every source is sent, not only root 0's: `AddSourceReq` carries a `root`
@@ -367,6 +386,33 @@ pub async fn apply_session_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--source` and `--write-layer` must not be confusable: a source is
+    /// content, a write layer is where writes land. The flag that reaches the
+    /// daemon has to carry `write_layer: true`, or the CLI silently declares
+    /// one more mod directory instead of a copy-up target.
+    #[test]
+    fn write_layer_flag_declares_a_write_layer_not_a_source() {
+        let e = write_layer_flag_entry(r#"C:\mods\overwrite"#);
+        assert!(e.write_layer, "the --write-layer flag must set the flag");
+        assert_eq!(
+            e.spec,
+            vfs_control::SourceSpec::Disk {
+                path: r#"C:\mods\overwrite"#.into()
+            }
+        );
+        assert_eq!(e.mount, "/", "a write layer covers the whole root");
+        assert_eq!(e.root, 0);
+        // The contrast that makes the assertion above mean something.
+        assert!(!parse_source_flag(r#"disk:C:\mods\overwrite"#).unwrap().write_layer);
+        // …and the config it produces is one the daemon will accept.
+        vfs_control::SessionConfig {
+            sources: vec![e],
+            ..Default::default()
+        }
+        .validate_roots()
+        .expect("the flag must produce a config that validates");
+    }
 
     #[test]
     fn parse_source_flag_disk_windows_path() {

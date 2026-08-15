@@ -246,13 +246,36 @@ impl Session {
     ) -> Result<(), i32> {
         {
             let mut roots = self.roots.lock().map_err(|_| crate::ops::map_io_err())?;
-            roots
-                .entry(root.0)
-                .or_default()
+            self.claim(&mut roots, root)?
                 .mounts
                 .push((prefix.to_string(), backend));
         }
         self.recompose(root)
+    }
+
+    /// Begin (or continue) composing `root`, refusing to take over a root
+    /// something mounted on `Director` **directly**.
+    ///
+    /// A root this session has never composed, which the director already
+    /// serves, belongs to a caller that built its own provider — the shape
+    /// `Director::mount`'s doc describes, e.g. `skyrim-live`'s counter-wrapped
+    /// root 1. Composing it here would rebuild it from this session's own
+    /// (empty) inputs and replace that provider wholesale: the counters, the
+    /// overlay, or both would vanish, silently, with reads still working
+    /// against the wrong graph. `ST_EXISTS` says so instead; a caller that
+    /// really means to take the root over unmounts it first.
+    ///
+    /// Roots this session already composes pass straight through — this is a
+    /// check about *ownership*, not about re-composition.
+    fn claim<'m>(
+        &self,
+        roots: &'m mut BTreeMap<u32, RootComposition>,
+        root: RootId,
+    ) -> Result<&'m mut RootComposition, i32> {
+        if !roots.contains_key(&root.0) && self.kernel.serves(root)? {
+            return Err(crate::ops::exists());
+        }
+        Ok(roots.entry(root.0).or_default())
     }
 
     /// Replace `root`'s **entire** sibling-mount list, keeping its write
@@ -272,7 +295,7 @@ impl Session {
     ) -> Result<(), i32> {
         {
             let mut roots = self.roots.lock().map_err(|_| crate::ops::map_io_err())?;
-            roots.entry(root.0).or_default().mounts = mounts;
+            self.claim(&mut roots, root)?.mounts = mounts;
         }
         self.recompose(root)
     }
@@ -317,7 +340,7 @@ impl Session {
         }
         {
             let mut roots = self.roots.lock().map_err(|_| crate::ops::map_io_err())?;
-            roots.entry(root.0).or_default().write_layer = Some(upper);
+            self.claim(&mut roots, root)?.write_layer = Some(upper);
         }
         self.recompose(root)
     }
@@ -340,13 +363,36 @@ impl Session {
 
     /// Drop all of root 0's mounts before rebuilding composition. Its write
     /// layer, if any, is dropped with them — it is part of the same
-    /// composition. Other roots are untouched.
+    /// composition. **Other roots are untouched**, which is why this is
+    /// spelled as root 0's form of [`Session::clear_root`] rather than left
+    /// looking like it clears the session: a session is multi-root now, and
+    /// "clear the mounts" would be a lie about the other roots.
     pub fn clear_mounts(&self) -> Result<(), i32> {
+        self.clear_root(RootId::DEFAULT)
+    }
+
+    /// Forget everything this session composes for `root` — mounts and write
+    /// layer together — and stop serving it. Also the way to hand a root back
+    /// so something else can mount it directly (see [`Session::mount_at`]'s
+    /// ownership check).
+    pub fn clear_root(&self, root: RootId) -> Result<(), i32> {
         self.roots
             .lock()
             .map_err(|_| crate::ops::map_io_err())?
-            .remove(&RootId::DEFAULT.0);
-        self.kernel.unmount(RootId::DEFAULT)
+            .remove(&root.0);
+        self.kernel.unmount(root)
+    }
+
+    /// Whether `root` has a write layer — i.e. whether a write to content
+    /// only a read-only source holds can copy up, or must fail. The daemon
+    /// reports this per root when a session is composed, since an absent
+    /// write layer is otherwise invisible until the first in-place edit
+    /// fails, inside a running game.
+    pub fn has_write_layer(&self, root: RootId) -> bool {
+        self.roots
+            .lock()
+            .map(|roots| roots.get(&root.0).is_some_and(|c| c.write_layer.is_some()))
+            .unwrap_or(false)
     }
 
     /// Mount a Stored zip archive as a content backend (later mounts win on conflicts).
@@ -595,6 +641,118 @@ fn locate_shim_payload(opts: &LaunchOpts) -> Result<(String, String), String> {
         .or_else(|| vfs_inject::ensure_payload_beside_shim(&dll, None))
         .ok_or_else(|| "vfs_payload.dll not found".to_string())?;
     Ok((dll, payload))
+}
+
+/// Who owns a root's provider — the session that composes it, or a caller
+/// that mounted one on `Director` directly.
+///
+/// `skyrim-live` mounts root 1 by hand because its counters must wrap the
+/// composed provider, which `Session` has no hook for. That is legitimate,
+/// and it leaves a hazard pointing the other way: any later `mount_at` /
+/// `set_write_layer_at` on that root would recompose it from the session's
+/// own empty inputs and drop the hand-mounted provider — counters, overlay
+/// and all — while reads kept working against the wrong graph.
+#[cfg(test)]
+mod root_ownership_tests {
+    use super::*;
+    use crate::disk::DiskProvider;
+    use crate::ops::ST_EXISTS;
+
+    fn dir(tag: &str, file: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("vfs-own-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join(file), file.as_bytes()).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_hand_mounted_root_is_not_recomposed_away() {
+        let hand = dir("hand", "hand.txt");
+        let session_layer = dir("sess", "session.txt");
+
+        let s = Session::new();
+        s.kernel()
+            .mount(RootId(1), Arc::new(DiskProvider::new(&hand)))
+            .unwrap();
+
+        // Both mutators must refuse: each one alone would replace root 1's
+        // provider with a composition built from nothing.
+        assert_eq!(
+            s.mount_at(RootId(1), "", Arc::new(DiskProvider::new(&session_layer)))
+                .expect_err("composing a hand-mounted root must be refused, not performed"),
+            ST_EXISTS
+        );
+        assert_eq!(
+            s.set_write_layer_at(RootId(1), Arc::new(DiskProvider::new(&session_layer)))
+                .expect_err("a write layer on a hand-mounted root must be refused too"),
+            ST_EXISTS
+        );
+
+        // The hand-mounted provider still serves, and the refused mount never
+        // took effect — the refusal is not a half-applied change.
+        assert!(
+            s.kernel().getattr(RootId(1), "hand.txt").unwrap().is_some(),
+            "the hand-mounted provider must still be serving root 1"
+        );
+        assert!(
+            s.kernel().getattr(RootId(1), "session.txt").unwrap().is_none(),
+            "the refused mount must not be serving anything"
+        );
+
+        // Root 0 is unaffected: this is per-root ownership, not a session-wide
+        // freeze.
+        s.mount("", Arc::new(DiskProvider::new(&session_layer))).unwrap();
+        assert!(s.kernel().getattr(RootId::DEFAULT, "session.txt").unwrap().is_some());
+
+        // And the root can be handed over deliberately.
+        s.clear_root(RootId(1)).unwrap();
+        s.mount_at(RootId(1), "", Arc::new(DiskProvider::new(&session_layer)))
+            .expect("an unmounted root may be taken over");
+        assert!(s.kernel().getattr(RootId(1), "session.txt").unwrap().is_some());
+        assert!(
+            s.kernel().getattr(RootId(1), "hand.txt").unwrap_or(None).is_none(),
+            "after the handover the hand-mounted provider is gone, as asked for"
+        );
+    }
+
+    /// The check is about ownership, not about recomposition: a root the
+    /// session already composes keeps composing, however many times.
+    #[test]
+    fn a_session_composed_root_recomposes_as_often_as_asked() {
+        let first = dir("first", "first.txt");
+        let second = dir("second", "second.txt");
+
+        let s = Session::new();
+        s.mount_at(RootId(2), "", Arc::new(DiskProvider::new(&first))).unwrap();
+        s.mount_at(RootId(2), "", Arc::new(DiskProvider::new(&second))).unwrap();
+        s.set_write_layer_at(RootId(2), Arc::new(DiskProvider::new(&second)))
+            .unwrap();
+        s.set_root_mounts(
+            RootId(2),
+            vec![(String::new(), Arc::new(DiskProvider::new(&first)))],
+        )
+        .unwrap();
+
+        assert!(s.kernel().getattr(RootId(2), "first.txt").unwrap().is_some());
+        assert!(
+            s.has_write_layer(RootId(2)),
+            "the write layer must survive a later set_root_mounts"
+        );
+        assert!(
+            s.kernel().open(RootId(2), "first.txt", crate::ops::OPEN_WRITE).is_ok(),
+            "with a write layer, an in-place edit of the read side must copy up"
+        );
+
+        // Nothing leaked into root 0, which this session never composed.
+        assert!(
+            s.kernel()
+                .getattr(RootId::DEFAULT, "first.txt")
+                .unwrap()
+                .is_none(),
+            "an uncomposed root must answer for nothing, not for another root's content"
+        );
+    }
 }
 
 #[cfg(test)]

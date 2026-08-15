@@ -654,8 +654,39 @@ fn assert_overlay_empty(overlay: &std::path::Path) {
     assert!(
         overlay_entries.is_empty(),
         "nothing should land in the shim-local overlay fallback \
-         ({overlay:?} contains {overlay_entries:?}) — this is the bypass the phase closes"
+         ({overlay:?} contains {overlay_entries:?}) — this is the bypass the phase closes. \
+         Full tree: {:#?}",
+        // The top-level listing alone cannot distinguish the cases that
+        // matter: an empty root-scoped directory the shim created and did not
+        // use (`Overlay::ensure_parent` runs before a decision that may not
+        // need it), real diverted bytes underneath it, or — the one actually
+        // observed — a previous process's litter inherited at the same path
+        // (see `SessionRegistry::create`, which now clears the base
+        // directory). All three fail this assertion, deliberately; a failure
+        // that does not say which one costs an investigation.
+        overlay_tree(overlay)
     );
+}
+
+/// Every path under `dir`, files and directories alike, for a failure
+/// message that has to explain *what* landed in the overlay.
+fn overlay_tree(dir: &std::path::Path) -> Vec<PathBuf> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let is_dir = p.is_dir();
+            out.push(p.clone());
+            if is_dir {
+                walk(&p, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, &mut out);
+    out
 }
 
 /// Two root-mounted sources — the case Fix 1 exists for. A single mounted
@@ -868,6 +899,236 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
          got: {:?}",
         std::fs::read_to_string(&stats_log)
     );
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq {
+            session_id: session.id,
+        })
+        .await
+        .expect("teardown");
+
+    server.abort();
+}
+
+/// **Copy-on-write, live, on the daemon surface** (gate 4, Task 6b).
+///
+/// The two scenarios above prove writes cross the ring; neither proves a
+/// write can be *seeded* from content nothing writable holds. Everything that
+/// does is unit-level, and it is unit-level in a shape the daemon never
+/// builds — so three things had never run live before this test:
+///
+/// - **A layered base under the overlay.** `skyrim-live` hands `compose_root`
+///   four sibling `""` mounts; `SessionRegistry` hands it *one* `""` mount
+///   wrapping a `stack_layers` `LayeredProvider`. Copy-up reads its seed
+///   through whatever the base is, and this is the daemon's base.
+/// - **`CachingProvider` under the overlay.** Every registry source is cache-
+///   wrapped; `skyrim-live` mounts raw. So a copy-up seeded *through the block
+///   cache* — a cached read feeding a write — had never happened outside a
+///   unit test, in either direction.
+/// - **The whole declaration path**, from `AddSourceReq.write_layer` to a real
+///   `fopen(…, "r+b")` in an injected process.
+///
+/// The fixture's `VFS_FIXTURE_COW_PATH` step opens `Data/x.esp` — which only
+/// the read-only zip holds — for read+write with no create and no truncate,
+/// edits bytes 9..15, and reads the whole file back through the same handle.
+/// A refused open, a blank destination, or a truncating copy-up each exit
+/// non-zero with a distinct code rather than failing an assertion here.
+///
+/// The rest of the fixture (create, append, rename, delete) runs too, so this
+/// is also the first live exercise of those through an `OverlayProvider`
+/// upper rather than a bare writable mount.
+#[tokio::test(flavor = "multi_thread")]
+async fn scenario_zip_source_with_write_layer_copies_up_in_place() {
+    let _guard = LAUNCH_LOCK.lock().await;
+    ensure_inject_artifacts();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+    let registry = SessionRegistry::new();
+    let svc = DirectorService::new(registry);
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The read-only content: one Stored zip entry, spelled as an archive
+    // spells it. Its bytes are known exactly, so "the archive is untouched"
+    // is a byte comparison rather than a timestamp check.
+    const ZIP_ENTRY: &str = "Data/x.esp";
+    const ORIGINAL: &[u8] = b"ORIGINAL-ESP-BYTES";
+    let content_dir = tempfile::tempdir().expect("tempdir");
+    let zip = content_dir.path().join("content.zip");
+    support::write_stored_zip(&zip, ZIP_ENTRY, ORIGINAL);
+    let zip_before = std::fs::read(&zip).expect("read zip");
+
+    // The declared write layer: a directory of the user's choosing, not the
+    // session's own overlay. Left uncreated on purpose — an overwrite folder
+    // need not exist before the first write.
+    let overwrite_parent = tempfile::tempdir().expect("overwrite tempdir");
+    let overwrite = overwrite_parent.path().join("overwrite");
+
+    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_log = stats_dir.path().join("shim-stats.log");
+
+    let fixture = locate_artifact("vfs-fixture-writepath.exe");
+    let mut client = connect(&format!("{addr}")).await.expect("connect");
+
+    let session = client
+        .create_session(vfs_control::pb::CreateSessionReq {
+            name: "m0-e2e-cow-write-layer".into(),
+        })
+        .await
+        .expect("CreateSession")
+        .into_inner();
+
+    use vfs_control::pb::{
+        launch_event, source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
+        ZipSource,
+    };
+
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(PbSource {
+                kind: Some(source_spec::Kind::Zip(ZipSource {
+                    path: zip.to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: "/".into(),
+            layer: 0,
+            root: 0,
+            write_layer: false,
+        })
+        .await
+        .expect("AddSource (archive)");
+
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(PbSource {
+                kind: Some(source_spec::Kind::Disk(DiskSource {
+                    path: overwrite.to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: "/".into(),
+            layer: 0,
+            root: 0,
+            write_layer: true,
+        })
+        .await
+        .expect("AddSource (write layer)");
+
+    let mut env = std::collections::HashMap::new();
+    env.insert(
+        "VFS_SHIM_STATS_LOG".to_string(),
+        stats_log.to_string_lossy().into_owned(),
+    );
+    env.insert("VFS_SHIM_STATS_INTERVAL_MS".to_string(), "5".to_string());
+    // The step that needs a write layer. Spelled exactly as the archive
+    // spells it; the shim folds it on the way to the director.
+    env.insert("VFS_FIXTURE_COW_PATH".to_string(), ZIP_ENTRY.to_string());
+
+    let (opens_ok_before, opens_err_before) = vfs_director::io_stats::open_totals();
+
+    let mut stream = client
+        .launch(LaunchReq {
+            session_id: session.id.clone(),
+            exec: fixture.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            wait: true,
+            env,
+        })
+        .await
+        .expect("Launch")
+        .into_inner();
+
+    let mut exit_code = None;
+    while let Some(ev) = stream.message().await.expect("stream") {
+        match ev.event {
+            Some(launch_event::Event::Exited(x)) => exit_code = Some(x.code),
+            Some(launch_event::Event::Started(_)) => {}
+            Some(launch_event::Event::Log(l)) => eprintln!("log: {}", l.line),
+            None => {}
+        }
+    }
+    assert_eq!(
+        exit_code,
+        Some(0),
+        "the fixture exits 17 if the in-place open of archive content was refused, 18 if the \
+         write layer produced a blank file instead of a seeded copy-up, 19 on the write and \
+         20 if the readback lost the untouched bytes"
+    );
+
+    let (opens_ok_after, opens_err_after) = vfs_director::io_stats::open_totals();
+    let opens_ok_delta =
+        (opens_ok_after - opens_ok_before) + (opens_err_after - opens_err_before);
+
+    // The copied-up file, on disk, in the directory the wire named — with the
+    // edit applied and every other byte of the archive's content preserved.
+    let mut expected = ORIGINAL.to_vec();
+    expected[9..15].copy_from_slice(b"EDITED");
+    let copied = overwrite.join("Data").join("x.esp");
+    assert!(
+        copied.is_file(),
+        "copy-up must have materialised the archive entry in the declared write layer at \
+         {copied:?} (write layer contains: {:?})",
+        std::fs::read_dir(&overwrite).map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
+    );
+    assert_eq!(
+        std::fs::read(&copied).expect("read copied-up file"),
+        expected,
+        "the copied-up file must carry the in-place edit over seeded content"
+    );
+
+    // The archive is untouched, byte for byte. This is the assertion the
+    // whole feature rests on: copy-on-write, not write-through.
+    assert_eq!(
+        std::fs::read(&zip).expect("read zip after"),
+        zip_before,
+        "the read-only archive was modified — copy-up wrote through instead of copying"
+    );
+
+    // The fixture's ordinary writes land in the write layer too, since it is
+    // the only writable member of this graph.
+    let renamed = overwrite.join("renamed-probe.txt");
+    assert!(
+        renamed.is_file(),
+        "the fixture's renamed file must be in the write layer at {renamed:?}"
+    );
+    assert_eq!(
+        std::fs::read(&renamed).expect("read renamed-probe.txt"),
+        b"helloworld"
+    );
+    assert!(
+        !overwrite.join("write-probe.txt").exists(),
+        "write-probe.txt must not remain after the rename"
+    );
+
+    // The bypass detector, unchanged: nothing may have landed in the
+    // shim-local overlay, and every open the shim believed it routed must
+    // have arrived at the director.
+    let overlay = PathBuf::from(&session.root)
+        .parent()
+        .expect("session.root has a parent")
+        .join("overlay");
+    assert_overlay_empty(&overlay);
+
+    let recon = support::assert_reconciled(&stats_log, opens_ok_delta);
+    assert!(recon.routed > 0, "expected routed opens: {recon:?}");
+    assert_eq!(
+        recon.write_fallback(),
+        0,
+        "under-root writes fell through to the shim-local overlay {} time(s) — including, \
+         possibly, the in-place edit this scenario exists for. Report: {:?}",
+        recon.write_fallback(),
+        std::fs::read_to_string(&stats_log)
+    );
+    assert!(recon.outcomes_section_found, "no outcomes section: {recon:?}");
 
     client
         .teardown_session(vfs_control::pb::TeardownReq {

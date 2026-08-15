@@ -186,13 +186,14 @@ impl SessionConfig {
     /// provider for that root, which is a valid (if likely accidental)
     /// config.
     ///
-    /// Also checks the `write_layer` flag, which is a per-root singleton
-    /// mounted at the root: two of them, or one at a sub-path, would leave a
+    /// Also checks the `write_layer` flag, which is a per-root singleton, has
+    /// to be writable, and covers the whole root: two of them, one at a
+    /// sub-path, or one on a source that cannot be written would each leave a
     /// declaration silently doing nothing (the second replacing the first, a
-    /// prefix being ignored) — and a session that believes it has copy-on-write
-    /// and does not is the failure this flag exists to prevent. Checked before
-    /// the flat-list early return, because the flat form can declare a write
-    /// layer too.
+    /// prefix being ignored) or failing far from where it was written — and a
+    /// session that believes it has copy-on-write and does not is the failure
+    /// this flag exists to prevent. Checked before the flat-list early return,
+    /// because the flat form can declare a write layer too.
     pub fn validate_roots(&self) -> Result<(), String> {
         let mut write_layer_roots = std::collections::HashSet::new();
         for entry in self.sources.iter().filter(|e| e.write_layer) {
@@ -208,6 +209,18 @@ impl SessionConfig {
                     "write_layer source for root {} mounts at {:?}; a write layer is the \
                      root's writable upper and cannot be scoped to a sub-path",
                     entry.root, entry.mount
+                ));
+            }
+            // `disk` is the only writable source kind: a zip is read-only, and
+            // the `remote` wire has no write ops at all (it clamps to
+            // `Access::Read`), so either one is refused when the session
+            // composes. Say so here, where the author can see which line is
+            // wrong, rather than as a status code out of `AddSource`.
+            if !matches!(entry.spec, SourceSpec::Disk { .. }) {
+                return Err(format!(
+                    "write_layer source for root {} is {:?}; only a disk source is writable, \
+                     so nothing else can be a write layer",
+                    entry.root, entry.spec
                 ));
             }
         }
@@ -375,6 +388,22 @@ write_layer = true
         let cfg: SessionConfig = toml::from_str(toml).unwrap();
         let err = cfg.validate_roots().unwrap_err();
         assert!(err.contains("write_layer"), "{err}");
+    }
+
+    /// Only a disk source is writable, so nothing else can be a write layer.
+    /// Rejected here, at the line the author wrote, rather than as a status
+    /// code out of `AddSource` when the session composes.
+    #[test]
+    fn validate_rejects_a_write_layer_that_is_not_a_disk_source() {
+        let toml = r#"
+[[source]]
+type        = "zip"
+path        = "C:/layers/base.zip"
+write_layer = true
+"#;
+        let cfg: SessionConfig = toml::from_str(toml).unwrap();
+        let err = cfg.validate_roots().unwrap_err();
+        assert!(err.contains("disk"), "{err}");
     }
 
     /// The write layer is the root's writable upper, which covers the whole

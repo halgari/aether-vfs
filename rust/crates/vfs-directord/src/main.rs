@@ -163,12 +163,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                         entries.push(parse_source_flag(s)?);
                     }
                     if let Some(path) = &write_layer {
-                        entries.push(vfs_control::SourceEntry {
-                            spec: vfs_control::SourceSpec::Disk { path: path.clone() },
-                            mount: "/".to_string(),
-                            root: 0,
-                            write_layer: true,
-                        });
+                        entries.push(vfs_directord::write_layer_flag_entry(path));
                     }
                     let mut env_map = std::collections::BTreeMap::new();
                     for e in &env {

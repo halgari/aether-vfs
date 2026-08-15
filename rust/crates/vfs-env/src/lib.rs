@@ -210,6 +210,12 @@ pub const FIXTURE_FILL: &str = "VFS_FIXTURE_FILL";
 pub const FIXTURE_DATA: &str = "VFS_FIXTURE_DATA";
 /// Directory the write-set fixture operates in.
 pub const FIXTURE_DIR: &str = "VFS_FIXTURE_DIR";
+/// A path `vfs-fixture-writepath` edits **in place** before its other steps:
+/// read-write open with no create and no truncate, so only the director's
+/// copy-up can answer it (gate 4, Task 6b). Unset, that step does not run and
+/// the fixture behaves as it did before the step existed — which is what
+/// keeps the two pre-existing write-path scenarios unchanged.
+pub const FIXTURE_COW_PATH: &str = "VFS_FIXTURE_COW_PATH";
 /// Restrict `vfs-fixture-escape` to constructing and attempting exactly one
 /// of its fourteen vectors, skipping every other one entirely rather than
 /// merely omitting it from the output — see that crate's module doc for why
@@ -314,6 +320,11 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_FILL, kind: Kind::Fixture, default: "none" },
     Var { name: FIXTURE_DATA, kind: Kind::Fixture, default: "\"written-bytes\"" },
     Var { name: FIXTURE_DIR, kind: Kind::Fixture, default: "required" },
+    Var {
+        name: FIXTURE_COW_PATH,
+        kind: Kind::Fixture,
+        default: "unset (the in-place-edit step does not run)",
+    },
     Var { name: ESCAPE_ONLY_VECTOR, kind: Kind::Fixture, default: "unset (every vector runs)" },
     Var {
         name: ESCAPE_VECTOR7_LINK_DIR,

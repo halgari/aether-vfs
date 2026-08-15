@@ -131,6 +131,18 @@ impl RootBuild {
     }
 }
 
+/// Clear whatever a previous run left at a session's base directory, so the
+/// new session starts empty — see [`SessionRegistry::create`], which is the
+/// only caller and explains why the path can be inherited at all.
+///
+/// Best-effort: a directory that cannot be removed (a live handle in it, say)
+/// leaves the session running on top of it, which is what happened before this
+/// existed. Failing session creation outright would be worse — the litter is
+/// another process's, and it is not this session's job to be blocked by it.
+fn prepare_session_base(base: &Path) {
+    let _ = std::fs::remove_dir_all(base);
+}
+
 /// One live host session plus metadata returned on ListSessions.
 pub struct LiveSession {
     pub id: String,
@@ -157,6 +169,42 @@ impl LiveSession {
 
     fn next_stage_tag(&self) -> u64 {
         self.next_stage_tag.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Say, per root, whether that root can copy up — at **launch**, the
+    /// moment its composition is final and a real process is about to write
+    /// through it.
+    ///
+    /// Not at `add_source`: sources and the write layer arrive in config
+    /// order, so a session that declares its layer last would be warned about
+    /// and then immediately corrected, which trains readers to ignore the
+    /// line.
+    ///
+    /// A missing write layer is otherwise **invisible until it bites**, and
+    /// what it does then is not "the root is read-only" — that would at least
+    /// be obvious. Creates still succeed: a layered stack routes them to the
+    /// topmost writable source, so a game's new files land in whichever mod
+    /// directory happened to be declared last. Only an in-place edit of
+    /// content a read-only source holds fails, in-game, hours later, with
+    /// nothing naming the flag that would have fixed it.
+    fn report_write_layers(&self) {
+        for root in self.roots.keys().copied().collect::<std::collections::BTreeSet<_>>() {
+            if self.session.has_write_layer(RootId(root)) {
+                eprintln!(
+                    "vfs: session {} root {root}: writes copy up into its write layer",
+                    self.id
+                );
+            } else {
+                eprintln!(
+                    "vfs: session {} root {root}: NO write layer — writes cannot copy up. \
+                     An in-place edit of content a read-only source (zip/remote) holds will \
+                     fail, and new files land in the topmost writable source rather than a \
+                     directory of your choosing. Declare one with `write_layer = true` on a \
+                     disk source, or `vfs launch --write-layer <dir>`.",
+                    self.id
+                );
+            }
+        }
     }
 }
 
@@ -218,6 +266,21 @@ impl SessionRegistry {
         let base_seq = SESSION_BASE_SEQ.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir()
             .join(format!("vfs-daemon-{}-{base_seq}-{id}", std::process::id()));
+        // A new session starts from an empty directory. Every component of
+        // that name repeats across *runs* — the OS recycles pids freely, and
+        // `base_seq`/`id` both restart at zero in each new process — and
+        // nothing deletes a session's directory when the process that owned
+        // it dies. So a session can inherit a previous run's litter at
+        // exactly the same path.
+        //
+        // That is not a cosmetic leak. `overlay/` is the shim-local write
+        // overlay, and "the overlay is empty after this launch" is how the
+        // e2e scenarios detect the write bypass this gate closes: an inherited
+        // `overlay/root-0` from some earlier process fails that assertion
+        // while nothing at all fell through in the run being measured. It has
+        // been observed, and the directory it complained about had been
+        // written by a different test binary whose pid was later reused.
+        prepare_session_base(&base);
         let root = base.join("root");
         let overlay = base.join("overlay");
         let state = base.join("state");
@@ -464,7 +527,13 @@ impl SessionRegistry {
     /// absolute/relative split.
     pub fn launch(&self, id: &str, opts: LaunchOpts) -> Result<i32, String> {
         let opts = self.stage_relative_launch_image(id, opts)?;
-        self.with_session_mut(id, |live| live.session.launch(&opts))
+        self.with_session_mut(id, |live| {
+            // The composition is final here and about to be written through
+            // by a real process — the one moment where "this root cannot copy
+            // up" is both certainly true and still actionable.
+            live.report_write_layers();
+            live.session.launch(&opts)
+        })
     }
 
     /// See [`Self::launch`]. Split out so the staging step (fallible, does
@@ -578,6 +647,47 @@ mod root_graph_tests {
         }
         p.close(h).unwrap();
         buf
+    }
+
+    /// A session must not start on top of another run's files.
+    ///
+    /// Session directories are named `vfs-daemon-{pid}-{seq}-{id}` and every
+    /// component repeats across runs: the OS recycles pids, and both counters
+    /// restart at zero in each process. Nothing deletes a session's directory
+    /// when its process dies — this workspace's own suites had left **1551**
+    /// behind on the development machine, 96 with an `overlay/root-0` and 40
+    /// of those holding files.
+    ///
+    /// That is not housekeeping. `overlay/` is the shim-local write overlay,
+    /// and "the overlay is empty afterwards" is how the e2e write-path
+    /// scenarios detect the bypass gate 4 closes. An inherited `root-0` fails
+    /// that assertion with nothing having fallen through — observed, once,
+    /// from a directory a different test binary had written before its pid was
+    /// reused. The reverse is worse: a real bypass dismissed as this.
+    ///
+    /// Tested here rather than through `create`, whose path is derived from
+    /// the pid and a process-wide counter: a test cannot arrange a collision
+    /// with a *future* session without littering paths that other tests in the
+    /// same binary are concurrently handed — which broke two of them when
+    /// tried. `create`'s single call to this is verified by reading.
+    #[test]
+    fn prepare_session_base_clears_a_previous_runs_directory() {
+        let base = std::env::temp_dir()
+            .join(format!("vfs-prepare-base-{}-{}", std::process::id(), line!()));
+        let stale = base.join("overlay").join("root-0").join("data");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("x.esp"), b"PREVIOUS-RUN").unwrap();
+        assert!(stale.join("x.esp").is_file(), "litter must exist to be cleared");
+
+        prepare_session_base(&base);
+
+        assert!(
+            !base.exists(),
+            "a session's base directory must not survive into the next session that is \
+             handed the same path — {base:?} still holds {:?}",
+            std::fs::read_dir(&base).map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The config → graph route must agree with the live route about
