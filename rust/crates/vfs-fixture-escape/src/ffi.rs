@@ -13,10 +13,19 @@ pub type Handle = *mut c_void;
 pub const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
 
 pub const GENERIC_READ: u32 = 0x8000_0000;
+pub const GENERIC_WRITE: u32 = 0x4000_0000;
 pub const FILE_SHARE_READ: u32 = 0x1;
 pub const FILE_SHARE_WRITE: u32 = 0x2;
 pub const FILE_SHARE_DELETE: u32 = 0x4;
 pub const OPEN_EXISTING: u32 = 3;
+/// Open the file if it is there, create it if it is not — and **do not
+/// truncate**. The Win32 spelling of `FILE_OPEN_IF`, and the disposition the
+/// write half of this matrix uses everywhere: it is both a create (so a
+/// spelling that escapes containment would leave a real file behind, which is
+/// the thing the negative canary forbids) and a preserving open (so it is the
+/// shape that asks the director for a copy-up, the branch gate 4 closed).
+pub const OPEN_ALWAYS: u32 = 4;
+pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 pub const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
 pub const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -45,6 +54,14 @@ extern "system" {
         lpBuffer: *mut c_void,
         nNumberOfBytesToRead: u32,
         lpNumberOfBytesRead: *mut u32,
+        lpOverlapped: *mut c_void,
+    ) -> i32;
+
+    pub fn WriteFile(
+        hFile: Handle,
+        lpBuffer: *const c_void,
+        nNumberOfBytesToWrite: u32,
+        lpNumberOfBytesWritten: *mut u32,
         lpOverlapped: *mut c_void,
     ) -> i32;
 
@@ -100,6 +117,10 @@ pub struct ObjectAttributes {
 pub const OBJ_CASE_INSENSITIVE: u32 = 0x40;
 pub const FILE_SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 pub const FILE_OPEN: u32 = 1;
+/// The NT disposition [`OPEN_ALWAYS`] maps to — see that constant for why the
+/// write half of this matrix uses a create-and-preserve disposition rather
+/// than a truncating one.
+pub const FILE_OPEN_IF: u32 = 3;
 pub const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
 pub const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
 pub const SYNCHRONIZE: u32 = 0x0010_0000;
@@ -225,9 +246,40 @@ pub enum NtCreateError {
 /// Attempt `NtCreateFile` for `relative_name`, resolved against
 /// `root_directory` as `OBJECT_ATTRIBUTES.RootDirectory` — the handle-relative
 /// open shape a game can use instead of naming a file by its full path.
+///
+/// Read access, `FILE_OPEN`: never creates anything. See
+/// [`nt_create_relative_write`] for the write half's counterpart.
 pub fn nt_create_relative(
     root_directory: Handle,
     relative_name: &str,
+) -> Result<Handle, NtCreateError> {
+    nt_create_relative_with(root_directory, relative_name, GENERIC_READ | SYNCHRONIZE, FILE_OPEN)
+}
+
+/// [`nt_create_relative`] for the write half of the matrix: read+write access
+/// and [`FILE_OPEN_IF`], so this both writes through an existing file and
+/// *creates* one that is not there — the construction the negative canary
+/// exists to forbid reaching real disk.
+pub fn nt_create_relative_write(
+    root_directory: Handle,
+    relative_name: &str,
+) -> Result<Handle, NtCreateError> {
+    nt_create_relative_with(
+        root_directory,
+        relative_name,
+        GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE,
+        FILE_OPEN_IF,
+    )
+}
+
+/// The shared body of the two handle-relative opens above: identical
+/// `OBJECT_ATTRIBUTES` construction, differing only in the access mask and
+/// create disposition the caller asks for.
+fn nt_create_relative_with(
+    root_directory: Handle,
+    relative_name: &str,
+    desired_access: u32,
+    disposition: u32,
 ) -> Result<Handle, NtCreateError> {
     let Some(f) = nt_create_file_proc() else {
         return Err(NtCreateError::Unresolved);
@@ -257,13 +309,13 @@ pub fn nt_create_relative(
     let status = unsafe {
         f(
             &mut handle,
-            GENERIC_READ | SYNCHRONIZE,
+            desired_access,
             &oa,
             io_status_block.as_mut_ptr() as *mut c_void,
             std::ptr::null(),
             0,
             FILE_SHARE_ALL,
-            FILE_OPEN,
+            disposition,
             FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
             std::ptr::null(),
             0,
@@ -301,6 +353,72 @@ pub fn create_file_read(path_wide: &[u16]) -> Result<Handle, u32> {
     } else {
         Ok(handle)
     }
+}
+
+/// Open `path_wide` for **read+write**, creating it if it is not there and
+/// never truncating it ([`OPEN_ALWAYS`]). The caller decides the spelling,
+/// exactly as with [`create_file_read`]; the caller closes the handle.
+///
+/// No `FILE_FLAG_BACKUP_SEMANTICS` here, unlike the read helper: that flag
+/// exists so a *directory* can be opened, and a write attempt against a
+/// directory is not a vector this matrix builds. Plain
+/// `FILE_ATTRIBUTE_NORMAL` keeps this the ordinary file-write shape a game
+/// issues.
+pub fn create_file_write(path_wide: &[u16]) -> Result<Handle, u32> {
+    // SAFETY: FFI. `path_wide` is a NUL-terminated UTF-16 buffer (built by
+    // `wide`); no other pointer is dereferenced, and `hTemplateFile` is null
+    // as the API allows.
+    let handle = unsafe {
+        CreateFileW(
+            path_wide.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_ALL,
+            std::ptr::null_mut(),
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        // SAFETY: FFI, no arguments.
+        Err(unsafe { GetLastError() })
+    } else {
+        Ok(handle)
+    }
+}
+
+/// Write every byte of `data` to an already-open, synchronous, writable
+/// `handle`, at its current position (offset 0 for a freshly opened handle).
+/// `Err(code)` carries the `GetLastError` of the call that failed; a
+/// `WriteFile` that reports success while accepting zero bytes is treated as
+/// a failure rather than looped on forever.
+pub fn write_all(handle: Handle, data: &[u8]) -> Result<(), u32> {
+    let mut sent = 0usize;
+    while sent < data.len() {
+        let mut written: u32 = 0;
+        // SAFETY: FFI. `handle` is a valid, caller-owned open handle; the
+        // pointer/length pair is a subslice of `data`; `written` is a valid
+        // local out-pointer; `lpOverlapped` is null, matching the synchronous
+        // handles every caller here opens.
+        let ok = unsafe {
+            WriteFile(
+                handle,
+                data[sent..].as_ptr() as *const c_void,
+                (data.len() - sent) as u32,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            // SAFETY: FFI, no arguments.
+            return Err(unsafe { GetLastError() });
+        }
+        if written == 0 {
+            return Err(0);
+        }
+        sent += written as usize;
+    }
+    Ok(())
 }
 
 /// Read the whole content of an already-open, synchronous, readable

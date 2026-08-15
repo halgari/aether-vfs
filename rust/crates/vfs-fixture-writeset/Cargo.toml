@@ -1,8 +1,0 @@
-[package]
-name = "vfs-fixture-writeset"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "vfs-fixture-writeset"
-path = "src/main.rs"

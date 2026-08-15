@@ -654,6 +654,14 @@ outcome here:
   2 in either direction. Whether this is even a shim-layer fix at all is an
   open question for a later gate.
 
+  > **The premise of that bullet is false, and gate 4 task 8 measured it.**
+  > The child *is* injected — see "Gate 4, Task 8: the write matrix"
+  > below. The reading of the negative canary's `error:cmd-exit:1` given
+  > here ("the target doesn't exist" for an uninjected `type`) is
+  > particularly wrong: the target exists on real disk with real bytes, and
+  > an uninjected `type` would have printed them. The vector stays
+  > unasserted, but for a different reason than this bullet gives.
+
 ## Verification (vector 3 / `GLOBALROOT` closeout)
 
 - `cargo build --all-targets`, `cargo build --manifest-path
@@ -1061,3 +1069,172 @@ incrementable in production. Traffic that would have landed there now records
 as `Denied`. Measured runs showed zero either way, so no recorded figure moves —
 but this is a **merge**, not a drive-to-zero, and the rows below reading
 "still unexercised" should be read as "no longer reachable" from gate 4 onward.
+
+## Gate 4, Task 8: the write matrix
+
+Spec §8 criterion 1 asks for the canary matrix green for **write** access as
+well as read, with one clause carrying the weight: *"a write to the negative
+canary must be blocked, and must not create a file on the real filesystem
+under the root."* Everything above this section is about reads.
+
+`vfs-fixture-escape` now takes `VFS_ESCAPE_ACCESS=write`. Every vector builds
+exactly the same spelling as in read mode — only the call made against it
+changes — so the two matrices are comparable line for line. A write vector
+opens with `OPEN_ALWAYS`/`FILE_OPEN_IF` (create if absent, never truncate),
+writes a fixed-length payload that encodes its own vector id, and re-opens
+the *same* spelling to read it back. `written` therefore means "this vector's
+own bytes are durable through this name", not "the call returned success".
+The disposition is chosen for both halves at once: it creates, so a spelling
+that escapes leaves a file on disk for the harness to find; and it preserves,
+so it is the shape that asks the director for a copy-up.
+
+The test is `escape_matrix_write_access_positive_and_negative_canary`
+(`crates/vfs-directord/tests/e2e.rs`).
+
+### The geometry differs from the read matrix, and it has to
+
+The read matrix mounts a writable `DiskProvider` at `/` and calls a file its
+backing directory merely lacks "unserved". For reads that is exact: a read of
+an absent name is a refusal. For **writes** it is not — a *create* of that
+name under a writable mount is something the provider graph legitimately
+accepts and stores. Contained, but not blocked, and the spec says blocked.
+
+So the write matrix mounts its source at `/Games/Skyrim/Data` and puts the
+negative canary in a sibling directory, `Games/Skyrim/Unserved`, physically
+on the managed root and covered by no mount at all. Verified by mutation:
+adding a second writable mount over `Games/Skyrim/Unserved` flips every
+negative line from `not-found` to `written` while the real filesystem stays
+clean throughout — the same distinction, stated as a measurement.
+
+### The matrix
+
+Positive canary: `escape-write-positive-canary.esp`, seeded identically in
+the provider's backing store and physically under the root. Negative canary:
+`escape-write-negative-canary.bin`, physically under the root, served by
+nothing.
+
+| # | Vector | Positive (write) | Negative (write) |
+|---|---|---|---|
+| 1 | 8.3 short name | `written` | `unbuildable:GetShortPathNameW failed: win32:2` |
+| 2 | Extended-length prefix | `written` | not-found |
+| 3 | NT device path (`GLOBALROOT`) | `written` | not-found |
+| 4 | Volume GUID path | `written` | not-found |
+| 5 | Handle-relative open | `written` | not-found |
+| 5b | Handle-relative, unresolvable root handle | `error:ntstatus:0xC0000033` | `error:ntstatus:0xC0000033` |
+| 6 | CWD-relative | `written` | not-found |
+| 7 | Junction | `written` | not-found |
+| 8 | Hardlink | `written` | `unbuildable:std::fs::hard_link failed: os error 2` |
+| 9 | UNC admin share | `written` | not-found |
+| 10a | Case fold | `written` | not-found |
+| 10b | Trailing dot (verbatim) | `written` | not-found |
+| 10c | Trailing space (verbatim) | `written` | not-found |
+| 11 | Alternate data stream | `written` | not-found |
+| 12a | `.` component (verbatim) | `written` | not-found |
+| 12b | `..` traversal (verbatim) | `written` | not-found |
+| 12c | Doubled separator (verbatim) | `written` | not-found |
+| 13 | Handle predating root registration | `written` (reported, not closed) | not-found (reported, not closed) |
+| 14 | Child process | `written` (reported, not closed) | `error:cmd-exit:1` (reported, not closed) |
+
+Both `unbuildable` lines are honest consequences of containment, not
+environment gaps: `GetShortPathNameW` and `CreateHardLinkW` each have to
+resolve the target through hooked NT opens, and the negative canary is
+unreachable through those, so neither construction can be built at all. They
+are reported as unbuildable and excluded from the outcome assertion, never
+silently skipped.
+
+`5b`, `13` and `14` are exempt from the strict assertion for exactly the
+reasons the read matrix already documents.
+
+### The real-filesystem assertions, and where they are made
+
+A write that is refused at the API while still leaving a zero-byte file under
+the root has breached containment and reported success, so the status columns
+above are only half the claim. The other half is asserted **from the
+`vfs-directord` test process, which is never injected** — the equivalent of
+`write_seal.rs`'s `drop(hooks)` before it inspects the root, and stronger,
+because there is no detour in this process to drop. A hook-live `exists()`
+answers about the provider graph, which is precisely the answer a breached
+containment layer would want it to give.
+
+After the negative run: the canary's bytes are byte-identical to what the
+harness wrote; its directory contains nothing but the canary; and no named
+stream was created on it (vector 11 writes with a creating disposition, and a
+stream is a create no directory listing shows). After the positive run: the
+provider's copy holds a payload, the physically-mirrored copy under the root
+still holds its seed, and that directory has no strays either.
+
+Both canary directories are proved physically writable first, by creating and
+deleting a probe file in each from the harness. A "nothing was created"
+assertion against a directory that could not have been written to anyway
+establishes nothing.
+
+### Verification (Task 8)
+
+Every assertion was watched failing for its own distinct reason before it was
+watched passing:
+
+- **Real-disk stray detection.** With `VFS_ALLOW_DISK_FALLTHROUGH=1` in the
+  fixture's environment, the negative run leaves `.vfs-escape-hardlink-<pid>`
+  on real disk and the stray assertion names it. (Un-sealing also flips the
+  status column, so the status loop had to be skipped to reach this one.)
+- **Canary-content assertion.** Clobbering the canary from the harness before
+  the check fails it on the byte comparison, and on nothing else.
+- **Named-stream assertion.** Creating the stream from the harness fails it,
+  and only it.
+- **Negative status expectation.** Adding a writable mount over the unserved
+  directory flips vector 2 to `written` — the mutation that shows the mount
+  geometry above is load-bearing rather than incidental.
+- **Positive status expectation.** Moving the mount to a prefix that does not
+  cover the positive canary flips vector 2 to `not-found`, so the half that
+  forbids "pass by breaking everything" is not vacuous either.
+- **The assertions have teeth against the fixture itself.** Run standalone
+  and uninjected against an ordinary directory, the identical write matrix
+  creates `<name>.`, `<name> ` and the named stream — the exact artefacts the
+  session run must not produce.
+
+Classification-in-isolation (`VFS_ESCAPE_ONLY_VECTOR`) is **not** re-run for
+the write matrix. That property is about whether a spelling is recognised as
+under-root at all; it is established per spelling by the read matrix, and the
+spellings are identical in both modes. The write matrix asserts the stronger,
+more specific thing: the outcome, and the state of real disk afterwards.
+
+### A finding: vector 14's child is injected
+
+Vector 14 has been described throughout this document, in the fixture, and in
+the e2e expectation tables as "a child process launched without the shim
+injected... there is no hook in that process to intercept anything". That is
+not what happens. `vfs-shim/src/hook.rs` detours
+`kernelbase!CreateProcessInternalW` — the funnel under every `CreateProcess*`
+— force-suspends the child, and injects the same DLL into it. Measured:
+
+- read matrix, negative canary: `error:cmd-exit:1`. The file exists on real
+  disk with real bytes; an uninjected `cmd /C type` would have printed them.
+  The "Vectors 13 and 14" section above explains this line as "`type` exits
+  non-zero when the target doesn't exist", which reads a containment result
+  as an absence.
+- write matrix, positive canary: `written`, with the bytes landing in the
+  provider's store and not under the root.
+- write matrix, negative canary: `error:cmd-exit:1`, and no file on disk.
+
+So vector 14 is contained in practice for a child spawned by an
+already-injected process. It is still not asserted, and should not be on this
+evidence alone: `inject_child` is explicitly best-effort — force-suspend,
+inject, give up on timeout — so a green assertion here would be an assertion
+about scheduling. Closing it properly means deciding what happens when that
+inject fails, which is not gate 4's question. What has changed is that the
+reason for leaving it open is now recorded correctly.
+
+### Two unwired fixtures deleted
+
+`vfs-fixture-write` and `vfs-fixture-writeset` were workspace members no test
+harness invoked. Neither serves this task, so both were deleted rather than
+wired up, along with the `VFS_FIXTURE_DATA` and `VFS_FIXTURE_DIR` switches
+that existed only for them.
+
+`vfs-fixture-write` was strictly subsumed: `vfs-fixture-writepath`, which the
+e2e scenarios do run, does its create/write/read-back round trip and a good
+deal more. `vfs-fixture-writeset` was not — it covered `mkdir` (including the
+`AlreadyExists` idempotency idiom) and `set_len` truncation, and **nothing
+end-to-end covers those two today**. Deleting it removes a fixture that made
+that gap look covered; the gap itself is recorded here rather than left
+implied by a binary nobody runs.

@@ -1,9 +1,14 @@
-//! The escape fixture. Given a target file's path, attempts to open the same
+//! The escape fixture. Given a target file's path, attempts to reach the same
 //! file via each of the fourteen NT/Win32 path spellings the design doc's
 //! vector table enumerates, and writes one machine-readable result line per
-//! attempt. Never mutates the target file's own content — the constructions
-//! that need a helper artifact (a hardlink, a junction, a `subst`'d drive)
-//! create it alongside the target and clean it up before exiting.
+//! attempt. The constructions that need a helper artifact (a hardlink, a
+//! junction, a `subst`'d drive) create it alongside the target and clean it up
+//! before exiting.
+//!
+//! In its default **read** mode it never mutates the target's own content. In
+//! **write** mode (`VFS_ESCAPE_ACCESS=write`, below) mutating it is the whole
+//! point — that mode exists to establish the other half of the containment
+//! claim, and a caller runs it against canaries it is prepared to see written.
 //!
 //! **Output format** (tab-separated, one line per attempt, written to
 //! `args[2]` if given, else stdout):
@@ -13,19 +18,59 @@
 //! ```
 //!
 //! `<outcome>` is one of:
-//! - `opened` — the spelling opened the file, **and**, whenever the target's
-//!   own bytes could be read at startup (see `EXPECTED_CONTENT`), the opened
-//!   handle's content matched them byte-for-byte. `opened` never means "some
-//!   handle came back"; it means the same file's real bytes came back.
+//! - `opened` — **read mode only.** The spelling opened the file, **and**,
+//!   whenever the target's own bytes could be read at startup (see
+//!   `EXPECTED_CONTENT`), the opened handle's content matched them
+//!   byte-for-byte. `opened` never means "some handle came back"; it means
+//!   the same file's real bytes came back.
+//! - `written` — **write mode only.** The spelling opened the file for
+//!   write, this vector's own payload was written to it, and re-opening
+//!   *the same spelling* read that exact payload back. Like `opened`, it is
+//!   never "the call returned success": a write whose bytes cannot be read
+//!   back through the same name is reported as an error, not a pass.
 //! - `not-found` — the OS reported the name did not resolve to anything.
 //! - `error:<detail>` — any other failure (`win32:<code>`,
 //!   `ntstatus:0x########`, `cmd-exit:<code>`, `content-mismatch:<detail>` —
 //!   the spelling opened *something*, but its bytes did not match the real
-//!   target's, which is a worse result than `not-found`, not a pass).
+//!   target's, which is a worse result than `not-found`, not a pass — and, in
+//!   write mode, `write-failed:win32:<code>`, `readback-open:win32:<code>`,
+//!   `readback-unreadable` and `readback-mismatch:<detail>`).
 //! - `unbuildable:<reason>` — this environment could not even construct the
 //!   spelling (no free drive letter, 8.3 disabled, wrong filesystem for a
 //!   hardlink, missing privilege for the admin share, ...). Never blank,
 //!   never silently skipped.
+//!
+//! **`VFS_ESCAPE_ACCESS`** selects which access the whole matrix exercises:
+//! `read` (the default, and byte-for-byte the behaviour this fixture had
+//! before write mode existed) or `write`. Every vector builds the *same*
+//! spelling either way — only the call made against it changes, which is what
+//! keeps the two matrices comparable line for line.
+//!
+//! In write mode each vector opens its spelling with `OPEN_ALWAYS`
+//! (`FILE_OPEN_IF`) — create-if-absent, never truncate — writes its own
+//! fixed-length payload (`write_payload`, which encodes the vector id, so a
+//! read-back proves *this* vector's write landed and not a neighbour's), and
+//! then re-opens the same spelling read-only to check the payload comes back.
+//! The disposition is deliberate on both halves: it creates, so a spelling
+//! that escapes containment leaves a real file behind for the harness to find
+//! on disk; and it preserves, so it is the shape that asks the director for a
+//! copy-up rather than sidestepping the question with a truncate.
+//!
+//! Write mode changes one vector's *target*, not its spelling: vector 14
+//! (child process) writes to a sibling name (`<target><V14_WRITE_SUFFIX>`)
+//! instead of to the target itself.
+//!
+//! That vector has always been described as reaching real disk by
+//! construction, on the grounds that the child runs unhooked. **It does not**
+//! — the shim detours `CreateProcessInternalW` and injects into children, so
+//! under a session the child's write is answered by the director like any
+//! other (measured in gate 4 task 8; see `rust/docs/escape-matrix.md`). The
+//! sibling is used anyway, because that injection is explicitly best-effort:
+//! it force-suspends, injects, and gives up on a timeout. On the run where it
+//! does time out, a vector 14 aimed at the target would overwrite the very
+//! bytes the caller's real-filesystem assertions read, turning a scheduling
+//! hiccup into a false containment failure. Aimed at a sibling it shows
+//! exactly what it always showed and costs the caller nothing.
 //!
 //! `<vector-id>` is `1`..`14` matching the design doc's table, with two
 //! expansions:
@@ -170,6 +215,50 @@ fn last_error() -> u32 {
     unsafe { ffi::GetLastError() }
 }
 
+/// Which access this whole run exercises against every spelling — see the
+/// module doc's `VFS_ESCAPE_ACCESS` section.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Read,
+    Write,
+}
+
+/// Resolved once in `main` from `VFS_ESCAPE_ACCESS`. Defaults to `Read`,
+/// including when the variable holds something unrecognised: this fixture's
+/// whole job is to be un-skippable, so an unreadable switch must fall back to
+/// the mode that was here before write mode existed rather than silently
+/// exercising neither.
+static ACCESS: std::sync::OnceLock<Access> = std::sync::OnceLock::new();
+
+fn access() -> Access {
+    *ACCESS.get().unwrap_or(&Access::Read)
+}
+
+/// The bytes a write-mode vector writes, and the exact bytes its read-back
+/// must return.
+///
+/// **Fixed length on purpose.** The disposition is `OPEN_ALWAYS`, which does
+/// not truncate, so a shorter payload written over a longer file leaves the
+/// tail of the previous content behind and the read-back would compare
+/// unequal for a reason that has nothing to do with containment. Every id
+/// this fixture emits is at most four characters, so right-aligning to four
+/// makes every payload exactly 22 bytes whatever the vector — and the caller
+/// only has to keep its canary seeds shorter than that for the first write to
+/// fully overwrite them.
+///
+/// The id is *in* the payload so a read-back proves this vector's own write
+/// landed. Every vector writes to the same target; a payload shared across
+/// vectors would let a spelling that silently wrote nothing read back a
+/// neighbour's bytes and report `written`.
+fn write_payload(vector: &str) -> Vec<u8> {
+    format!("vfs-escape-write[{vector:>4}]").into_bytes()
+}
+
+/// Appended to the target's own path to give vector 14 a sibling to write to
+/// in write mode — see the module doc for why that vector, and only that
+/// vector, moves off the target. The caller matches on this exact suffix.
+const V14_WRITE_SUFFIX: &str = ".v14-child-write.txt";
+
 /// The target's own bytes, read once at startup via the plain, literal
 /// spelling (see `main`), before any of the fourteen vectors run. `None`
 /// when that baseline read itself failed (the "missing target" regression
@@ -266,6 +355,102 @@ fn nt_outcome(result: Result<ffi::Handle, ffi::NtCreateError>) -> String {
     }
 }
 
+/// **The one place a vector's spelling actually meets the OS.** Every
+/// name-based vector routes its constructed spelling through here rather than
+/// calling `CreateFileW` itself, so read mode and write mode differ in the
+/// call made and in nothing else — the spellings, their construction, and
+/// their per-vector notes stay literally the same code in both.
+fn attempt(vector: &str, spelling: &str) -> String {
+    match access() {
+        Access::Read => win32_outcome(ffi::create_file_read(&ffi::wide(spelling))),
+        Access::Write => write_outcome(vector, spelling),
+    }
+}
+
+/// [`attempt`] for the two handle-relative vectors, which name their target
+/// through `OBJECT_ATTRIBUTES.RootDirectory` + a relative name rather than as
+/// a single string, and so go through `NtCreateFile` directly.
+fn attempt_nt(vector: &str, root_directory: ffi::Handle, relative_name: &str) -> String {
+    match access() {
+        Access::Read => nt_outcome(ffi::nt_create_relative(root_directory, relative_name)),
+        Access::Write => nt_write_outcome(vector, root_directory, relative_name),
+    }
+}
+
+/// Write `vector`'s payload through `spelling`, then read it back through the
+/// *same* spelling.
+///
+/// The read-back is what makes `written` mean something. A write open that
+/// succeeds and a write that is actually durable through the name the caller
+/// used are different claims, and the second is the one the positive canary
+/// is for ("visible on read-back"). It is deliberately re-opened rather than
+/// rewound on the same handle: a same-handle read can be answered out of
+/// state the write left behind, which is precisely what a caller checking
+/// visibility must not accept as evidence.
+fn write_outcome(vector: &str, spelling: &str) -> String {
+    let payload = write_payload(vector);
+    let wide = ffi::wide(spelling);
+    let handle = match ffi::create_file_write(&wide) {
+        Ok(h) => h,
+        Err(code) if code == ffi::ERROR_FILE_NOT_FOUND || code == ffi::ERROR_PATH_NOT_FOUND => {
+            return "not-found".to_string();
+        }
+        Err(code) => return format!("error:win32:{code}"),
+    };
+    let wrote = ffi::write_all(handle, &payload);
+    ffi::close(handle);
+    if let Err(code) = wrote {
+        return format!("error:write-failed:win32:{code}");
+    }
+    read_back(&wide, &payload)
+}
+
+/// [`write_outcome`] for a handle-relative open.
+fn nt_write_outcome(vector: &str, root_directory: ffi::Handle, relative_name: &str) -> String {
+    let payload = write_payload(vector);
+    let handle = match ffi::nt_create_relative_write(root_directory, relative_name) {
+        Ok(h) => h,
+        Err(e) => return nt_outcome(Err(e)),
+    };
+    let wrote = ffi::write_all(handle, &payload);
+    ffi::close(handle);
+    if let Err(code) = wrote {
+        return format!("error:write-failed:win32:{code}");
+    }
+    match ffi::nt_create_relative(root_directory, relative_name) {
+        Err(e) => format!("error:readback-open:{}", nt_outcome(Err(e))),
+        Ok(h) => {
+            let got = ffi::read_all(h);
+            ffi::close(h);
+            compare_read_back(got, &payload)
+        }
+    }
+}
+
+/// Re-open `wide` read-only and check it hands back exactly `payload`.
+fn read_back(wide: &[u16], payload: &[u8]) -> String {
+    match ffi::create_file_read(wide) {
+        Err(code) => format!("error:readback-open:win32:{code}"),
+        Ok(h) => {
+            let got = ffi::read_all(h);
+            ffi::close(h);
+            compare_read_back(got, payload)
+        }
+    }
+}
+
+fn compare_read_back(got: Option<Vec<u8>>, payload: &[u8]) -> String {
+    match got {
+        Some(g) if g == payload => "written".to_string(),
+        Some(g) => format!(
+            "error:readback-mismatch:read back {} bytes, expected the {} this vector wrote",
+            g.len(),
+            payload.len()
+        ),
+        None => "error:readback-unreadable".to_string(),
+    }
+}
+
 /// `path` split into `('C', "\rest\of\path")`, or `None` if it has no drive
 /// letter (e.g. it is already a UNC or device-namespace spelling).
 fn split_drive(path: &str) -> Option<(char, String)> {
@@ -350,7 +535,7 @@ fn vector1_short_name(abs: &str) -> Line {
              or the name already fits within 8.3)",
         ),
         Some(short) => {
-            let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&short)));
+            let outcome = attempt("1", &short);
             Line::new("1", short, outcome, "")
         }
     }
@@ -361,7 +546,7 @@ fn vector1_short_name(abs: &str) -> Line {
 // ---------------------------------------------------------------------
 fn vector2_extended_length(abs: &str) -> Line {
     let spelling = format!(r"\\?\{abs}");
-    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    let outcome = attempt("2", &spelling);
     Line::new("2", spelling, outcome, "")
 }
 
@@ -387,7 +572,7 @@ fn vector3_device_path(abs: &str) -> Line {
         ),
         Some(device) => {
             let spelling = format!(r"\\?\GLOBALROOT{device}{rest}");
-            let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+            let outcome = attempt("3", &spelling);
             Line::new("3", spelling, outcome, "")
         }
     }
@@ -408,7 +593,7 @@ fn vector4_volume_guid(abs: &str) -> Line {
         ),
         Some(guid) => {
             let spelling = format!("{}{}", guid.trim_end_matches('\\'), rest);
-            let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+            let outcome = attempt("4", &spelling);
             Line::new("4", spelling, outcome, "")
         }
     }
@@ -466,7 +651,7 @@ fn vector5_handle_relative(abs: &str) -> Line {
         ),
         Ok(dir_handle) => {
             let spelling = format!("{name} (relative to an open handle on {dir})");
-            let outcome = nt_outcome(ffi::nt_create_relative(dir_handle, &name));
+            let outcome = attempt_nt("5", dir_handle, &name);
             ffi::close(dir_handle);
             Line::new("5", spelling, outcome, "")
         }
@@ -498,7 +683,7 @@ fn vector5b_unresolvable_handle(abs: &str) -> Line {
         );
     }
     let spelling = format!("{name} (relative to an anonymous pipe handle, not a directory)");
-    let outcome = nt_outcome(ffi::nt_create_relative(read_handle, &name));
+    let outcome = attempt_nt("5b", read_handle, &name);
     ffi::close(read_handle);
     ffi::close(write_handle);
     Line::new(
@@ -523,7 +708,7 @@ fn vector6_cwd_relative(abs: &str) -> Line {
     if let Err(e) = std::env::set_current_dir(&dir) {
         return unbuildable("6", &name, format!("could not chdir to {dir}: {e}"));
     }
-    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&name)));
+    let outcome = attempt("6", &name);
     if let Some(cwd) = original_cwd {
         let _ = std::env::set_current_dir(cwd);
     }
@@ -554,7 +739,7 @@ fn vector7_junction(abs: &str) -> Line {
     // self-construction below exactly as before.
     if let Ok(link_dir_str) = std::env::var("VFS_ESCAPE_VECTOR7_LINK_DIR") {
         let spelling = format!(r"{link_dir_str}\{name}");
-        let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+        let outcome = attempt("7", &spelling);
         return Line::new("7", spelling, outcome, "pre-existing junction supplied by the caller");
     }
 
@@ -573,7 +758,7 @@ fn vector7_junction(abs: &str) -> Line {
     match mklink {
         Ok(out) if out.status.success() => {
             let spelling = format!(r"{link_dir_str}\{name}");
-            let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+            let outcome = attempt("7", &spelling);
             let _ = std::fs::remove_dir(&link_dir);
             Line::new("7", spelling, outcome, "")
         }
@@ -606,7 +791,7 @@ fn vector8_hardlink(abs: &str) -> Line {
     let link_str = link_path.to_string_lossy().into_owned();
     match std::fs::hard_link(&target, &link_path) {
         Ok(()) => {
-            let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&link_str)));
+            let outcome = attempt("8", &link_str);
             let _ = std::fs::remove_file(&link_path);
             Line::new("8", link_str, outcome, "")
         }
@@ -627,86 +812,84 @@ fn vector9_alias_drive(abs: &str) -> Line {
         return unbuildable("9", abs, "target path has no drive letter");
     };
     let unc = format!(r"\\localhost\{drive}${rest}");
-    match ffi::create_file_read(&ffi::wide(&unc)) {
-        Ok(h) => {
-            let verdict = check_content(h);
-            ffi::close(h);
-            let outcome = match verdict {
-                Ok(()) => "opened".to_string(),
-                Err(detail) => format!("error:content-mismatch:{detail}"),
-            };
-            Line::new("9", unc, outcome, "constructed via the administrative UNC share (\\\\localhost\\<drive>$)")
-        }
-        Err(code) if code == ffi::ERROR_FILE_NOT_FOUND || code == ffi::ERROR_PATH_NOT_FOUND => Line::new(
+    let unc_outcome = attempt("9", &unc);
+    // The subst fallback exists for a UNC *construction* that this environment
+    // will not permit at all (no admin share, no privilege) — not for a share
+    // that resolved and answered. So it fires only on a bare `error:win32:`,
+    // which is what an unusable construction reports; `not-found`, a
+    // content mismatch, and every write-mode outcome all mean the spelling
+    // reached the OS and was answered, which is a result to report rather than
+    // a reason to try a different construction.
+    if !unc_outcome.starts_with("error:win32:") {
+        return Line::new(
             "9",
             unc,
-            "not-found",
+            unc_outcome,
             "constructed via the administrative UNC share (\\\\localhost\\<drive>$)",
+        );
+    }
+    let unc_err = unc_outcome;
+    let Some((dir, name)) = parent_dir_and_filename(abs) else {
+        return unbuildable(
+            "9",
+            unc,
+            format!(
+                "the administrative UNC share attempt failed ({unc_err}) and the target has no \
+                 parent directory for a subst fallback"
+            ),
+        );
+    };
+    match free_drive_letter() {
+        None => unbuildable(
+            "9",
+            unc,
+            format!(
+                "the administrative UNC share attempt failed ({unc_err}) and no free drive \
+                 letter is available for a subst fallback"
+            ),
         ),
-        Err(unc_err) => {
-            let Some((dir, name)) = parent_dir_and_filename(abs) else {
-                return unbuildable(
+        Some(letter) => {
+            let subst = std::process::Command::new("subst")
+                .arg(format!("{letter}:"))
+                .arg(&dir)
+                .output();
+            match subst {
+                Ok(out) if out.status.success() => {
+                    let spelling = format!("{letter}:\\{name}");
+                    let outcome = attempt("9", &spelling);
+                    let _ = std::process::Command::new("subst")
+                        .arg(format!("{letter}:"))
+                        .arg("/D")
+                        .output();
+                    Line::new(
+                        "9",
+                        spelling,
+                        outcome,
+                        format!(
+                            "the administrative UNC share attempt failed ({unc_err}); fell back \
+                             to `subst {letter}: {dir}`"
+                        ),
+                    )
+                }
+                Ok(out) => {
+                    let detail = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    unbuildable(
+                        "9",
+                        unc,
+                        format!(
+                            "the administrative UNC share attempt failed ({unc_err}) and `subst \
+                             {letter}: {dir}` also failed: {detail}"
+                        ),
+                    )
+                }
+                Err(e) => unbuildable(
                     "9",
                     unc,
                     format!(
-                        "the administrative UNC share attempt failed (win32:{unc_err}) and the \
-                         target has no parent directory for a subst fallback"
-                    ),
-                );
-            };
-            match free_drive_letter() {
-                None => unbuildable(
-                    "9",
-                    unc,
-                    format!(
-                        "the administrative UNC share attempt failed (win32:{unc_err}) and no \
-                         free drive letter is available for a subst fallback"
+                        "the administrative UNC share attempt failed ({unc_err}) and could not \
+                         spawn subst: {e}"
                     ),
                 ),
-                Some(letter) => {
-                    let subst = std::process::Command::new("subst")
-                        .arg(format!("{letter}:"))
-                        .arg(&dir)
-                        .output();
-                    match subst {
-                        Ok(out) if out.status.success() => {
-                            let spelling = format!("{letter}:\\{name}");
-                            let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
-                            let _ = std::process::Command::new("subst")
-                                .arg(format!("{letter}:"))
-                                .arg("/D")
-                                .output();
-                            Line::new(
-                                "9",
-                                spelling,
-                                outcome,
-                                format!(
-                                    "the administrative UNC share attempt failed (win32:{unc_err}); \
-                                     fell back to `subst {letter}: {dir}`"
-                                ),
-                            )
-                        }
-                        Ok(out) => {
-                            let detail = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                            unbuildable(
-                                "9",
-                                unc,
-                                format!(
-                                    "the administrative UNC share attempt failed (win32:{unc_err}) \
-                                     and `subst {letter}: {dir}` also failed: {detail}"
-                                ),
-                            )
-                        }
-                        Err(e) => unbuildable(
-                            "9",
-                            unc,
-                            format!(
-                                "the administrative UNC share attempt failed (win32:{unc_err}) and \
-                                 could not spawn subst: {e}"
-                            ),
-                        ),
-                    }
-                }
             }
         }
     }
@@ -745,7 +928,7 @@ fn vector10a_case_fold(abs: &str) -> Line {
         return unbuildable("10a", abs, "target path has no alphabetic characters to case-flip");
     }
     let spelling = format!(r"\\?\{flipped}");
-    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    let outcome = attempt("10a", &spelling);
     Line::new(
         "10a",
         spelling,
@@ -769,15 +952,18 @@ fn vector10a_case_fold(abs: &str) -> Line {
 // ---------------------------------------------------------------------
 fn vector10b_trailing_dot(abs: &str) -> Line {
     let spelling = format!(r"\\?\{abs}.");
-    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    let outcome = attempt("10b", &spelling);
     Line::new(
         "10b",
         spelling,
         outcome,
-        "verbatim (\\\\?\\) path with a trailing '.' appended to the whole spelling; `not-found` \
-         is the correct standalone result (Win32 never got a chance to strip it, and no such \
-         literal name exists) -- a working canonicaliser under a session should flip this to \
-         `opened`, not the other way around",
+        "verbatim (\\\\?\\) path with a trailing '.' appended to the whole spelling; in read mode \
+         `not-found` is the correct standalone result (Win32 never got a chance to strip it, and \
+         no such literal name exists) -- a working canonicaliser under a session should flip this \
+         to `opened`, not the other way around. In write mode the creating disposition means a \
+         standalone run *creates* that literal name instead, which is precisely the escape a \
+         session must not permit: under a session this must reach the canary's own vpath and \
+         leave no such file on real disk",
     )
 }
 
@@ -786,14 +972,15 @@ fn vector10b_trailing_dot(abs: &str) -> Line {
 // ---------------------------------------------------------------------
 fn vector10c_trailing_space(abs: &str) -> Line {
     let spelling = format!(r"\\?\{abs} ");
-    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    let outcome = attempt("10c", &spelling);
     Line::new(
         "10c",
         spelling,
         outcome,
         "verbatim (\\\\?\\) path with a trailing space appended to the whole spelling; \
-         `not-found` is the correct standalone result for the same reason as 10b -- a working \
-         canonicaliser under a session should flip this to `opened`",
+         `not-found` is the correct standalone read result for the same reason as 10b -- a \
+         working canonicaliser under a session should flip this to `opened`. Write mode creates \
+         the literal name standalone, same as 10b, and must not under a session",
     )
 }
 
@@ -805,7 +992,7 @@ fn vector10c_trailing_space(abs: &str) -> Line {
 // ---------------------------------------------------------------------
 fn vector11_ads(abs: &str) -> Line {
     let spelling = format!("{abs}:vfs-escape-fixture-probe");
-    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    let outcome = attempt("11", &spelling);
     Line::new(
         "11",
         spelling,
@@ -834,7 +1021,7 @@ fn vector12a_dot_component(abs: &str) -> Line {
         return unbuildable("12a", abs, "target path has no parent directory component");
     };
     let spelling = format!(r"\\?\{dir}\.\{name}");
-    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    let outcome = attempt("12a", &spelling);
     Line::new(
         "12a",
         spelling,
@@ -850,7 +1037,7 @@ fn vector12b_dotdot_traversal(abs: &str) -> Line {
         return unbuildable("12b", abs, "target path has no parent directory component");
     };
     let spelling = format!(r"\\?\{dir}\zz-vfs-escape-nonexistent-marker\..\{name}");
-    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    let outcome = attempt("12b", &spelling);
     Line::new(
         "12b",
         spelling,
@@ -868,7 +1055,7 @@ fn vector12c_doubled_separator(abs: &str) -> Line {
         return unbuildable("12c", abs, "target path has no parent directory component");
     };
     let spelling = format!(r"\\?\{dir}\\{name}");
-    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
+    let outcome = attempt("12c", &spelling);
     Line::new(
         "12c",
         spelling,
@@ -887,7 +1074,7 @@ fn vector12c_doubled_separator(abs: &str) -> Line {
 // shows the ordinary reachability the real scenario builds on.
 // ---------------------------------------------------------------------
 fn vector13_preexisting_handle(abs: &str) -> Line {
-    let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(abs)));
+    let outcome = attempt("13", abs);
     Line::new(
         "13",
         abs,
@@ -906,18 +1093,68 @@ fn vector13_preexisting_handle(abs: &str) -> Line {
 // this gate — may not be a shim fix at all.
 // ---------------------------------------------------------------------
 fn vector14_child_without_shim(abs: &str) -> Line {
-    let note = "reported, not closed in this gate: a child process launched without the shim \
-                injected reads the real filesystem directly, by construction -- there is no hook \
-                in that process to intercept anything. Whether this is even a shim-layer fix at \
-                all is an open question for a later gate, not settled here.";
-    let spelling = format!("cmd /C type {abs}");
-    match std::process::Command::new("cmd").arg("/C").arg("type").arg(abs).output() {
-        Ok(out) if out.status.success() => Line::new("14", spelling, "opened", note),
-        Ok(out) => {
-            let code = out.status.code().unwrap_or(-1);
-            Line::new("14", spelling, format!("error:cmd-exit:{code}"), note)
+    match access() {
+        Access::Read => {
+            let note = "reported, not closed in this gate: this vector spawns a child process, \
+                        on the assumption that it runs without the shim. MEASURED OTHERWISE in \
+                        gate 4 task 8: the shim hooks CreateProcessInternalW and injects its own \
+                        DLL into children, so under a session this child IS injected and its \
+                        read is answered by the director like any other -- under the negative \
+                        canary it reports error:cmd-exit:1, i.e. the real bytes were NOT \
+                        reachable. Still not asserted, because that injection is best-effort \
+                        (force-suspend, inject, give up on timeout), so a pass here would be a \
+                        pass about scheduling. See rust/docs/escape-matrix.md, 'Gate 4, Task 8'.";
+            let spelling = format!("cmd /C type {abs}");
+            match std::process::Command::new("cmd").arg("/C").arg("type").arg(abs).output() {
+                Ok(out) if out.status.success() => Line::new("14", spelling, "opened", note),
+                Ok(out) => {
+                    let code = out.status.code().unwrap_or(-1);
+                    Line::new("14", spelling, format!("error:cmd-exit:{code}"), note)
+                }
+                Err(e) => {
+                    Line::new("14", spelling, format!("unbuildable:could not spawn cmd: {e}"), note)
+                }
+            }
         }
-        Err(e) => Line::new("14", spelling, format!("unbuildable:could not spawn cmd: {e}"), note),
+        // A **sibling** of the target, not the target — see the module doc's
+        // `VFS_ESCAPE_ACCESS` section. This vector reaches real disk by
+        // construction, so pointing it at the target would overwrite the very
+        // bytes the caller's containment assertions read; pointing it at a
+        // sibling proves the same thing and hands the caller a positive
+        // control for those assertions at the same time.
+        Access::Write => {
+            let note = "reported, not closed in this gate: this vector spawns a child process, \
+                        on the assumption that it runs without the shim. MEASURED OTHERWISE in \
+                        gate 4 task 8: the shim hooks CreateProcessInternalW and injects into \
+                        children, so under a session this child's write is answered by the \
+                        director too -- `written` against the positive canary (the bytes land in \
+                        the provider store), error:cmd-exit:1 against the negative one. Not \
+                        asserted, because that injection is best-effort. Targets a SIBLING of \
+                        the canary (<target>.v14-child-write.txt) rather than the canary itself, \
+                        so that on the one run where the inject does time out, the canary's own \
+                        bytes stay a clean signal for the caller's real-filesystem assertions.";
+            let sibling = format!("{abs}{V14_WRITE_SUFFIX}");
+            let spelling = format!("cmd /C echo v14-child-write>{sibling}");
+            // `raw_arg`, not `arg`: the payload is a *shell* command line
+            // whose `>` is the redirection that does the writing. Rust's
+            // ordinary argument quoting escapes the embedded quotes, which
+            // cmd then reads as literal text and the whole thing fails with
+            // exit 1 (found by running this standalone, which is why the
+            // distinction is recorded here rather than left to be
+            // rediscovered).
+            use std::os::windows::process::CommandExt;
+            let command = format!("echo v14-child-write>\"{sibling}\"");
+            match std::process::Command::new("cmd").arg("/C").raw_arg(&command).output() {
+                Ok(out) if out.status.success() => Line::new("14", spelling, "written", note),
+                Ok(out) => {
+                    let code = out.status.code().unwrap_or(-1);
+                    Line::new("14", spelling, format!("error:cmd-exit:{code}"), note)
+                }
+                Err(e) => {
+                    Line::new("14", spelling, format!("unbuildable:could not spawn cmd: {e}"), note)
+                }
+            }
+        }
     }
 }
 
@@ -928,6 +1165,21 @@ fn main() {
         std::process::exit(1);
     };
     let abs = normalize_target(target);
+
+    // See the module doc's `VFS_ESCAPE_ACCESS` section. Resolved before any
+    // vector runs, so every vector in one run exercises the same access.
+    let requested = std::env::var("VFS_ESCAPE_ACCESS").unwrap_or_default();
+    let _ = ACCESS.set(if requested.eq_ignore_ascii_case("write") {
+        Access::Write
+    } else {
+        if !requested.is_empty() && !requested.eq_ignore_ascii_case("read") {
+            eprintln!(
+                "vfs-fixture-escape: warning: VFS_ESCAPE_ACCESS={requested:?} is not `read` or \
+                 `write`; running the read matrix"
+            );
+        }
+        Access::Read
+    });
 
     // See the module doc for `VFS_ESCAPE_ONLY_VECTOR`: when set, every other
     // vector below is skipped entirely (never constructed, never attempted)

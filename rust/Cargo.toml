@@ -22,8 +22,6 @@ members = [
   "crates/vfs-zip",
   "crates/vfs-launch",
   "crates/vfs-fixture-read",
-  "crates/vfs-fixture-write",
-  "crates/vfs-fixture-writeset",
   "crates/vfs-fixture-writepath",
   "crates/vfs-fixture-escape",
   "crates/vfs-fixture-vproxy",

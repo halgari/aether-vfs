@@ -206,10 +206,10 @@ pub const FIXTURE_PATH: &str = "VFS_FIXTURE_PATH";
 pub const FIXTURE_EXPECT: &str = "VFS_FIXTURE_EXPECT";
 /// Expected fill byte, for the read fixture.
 pub const FIXTURE_FILL: &str = "VFS_FIXTURE_FILL";
-/// Payload the write fixture writes.
-pub const FIXTURE_DATA: &str = "VFS_FIXTURE_DATA";
-/// Directory the write-set fixture operates in.
-pub const FIXTURE_DIR: &str = "VFS_FIXTURE_DIR";
+// `VFS_FIXTURE_DATA` and `VFS_FIXTURE_DIR` lived here for `vfs-fixture-write`
+// and `vfs-fixture-writeset`. Both fixture crates were deleted in gate 4 task
+// 8 — no test harness had ever invoked either — so the switches went with
+// them rather than staying as a surface nothing reads.
 /// A path `vfs-fixture-writepath` edits **in place** before its other steps:
 /// read-write open with no create and no truncate, so only the director's
 /// copy-up can answer it (gate 4, Task 6b). Unset, that step does not run and
@@ -222,6 +222,14 @@ pub const FIXTURE_COW_PATH: &str = "VFS_FIXTURE_COW_PATH";
 /// a caller correlating against the shim's own (not vector-keyed) hook-stats
 /// report needs this to isolate one vector's own classification effect.
 pub const ESCAPE_ONLY_VECTOR: &str = "VFS_ESCAPE_ONLY_VECTOR";
+/// Which access `vfs-fixture-escape` exercises against every one of its
+/// spellings: `read` (the default) or `write`. The spellings themselves are
+/// identical either way — only the call made against each one changes — so the
+/// two matrices are comparable line for line, which is what lets a reader see
+/// that a vector sealed for reads is also sealed for writes rather than
+/// inferring it. Anything else, including an unrecognised value, runs the read
+/// matrix: a containment fixture must never be switched off by a typo.
+pub const ESCAPE_ACCESS: &str = "VFS_ESCAPE_ACCESS";
 /// A pre-existing junction directory for vector 7 (junction/reparse point)
 /// to open through, created by the *caller* before launching the fixture at
 /// all — not by the fixture itself. Set, `vector7_junction` opens
@@ -318,14 +326,13 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_PATH, kind: Kind::Fixture, default: "fixture-specific" },
     Var { name: FIXTURE_EXPECT, kind: Kind::Fixture, default: "none" },
     Var { name: FIXTURE_FILL, kind: Kind::Fixture, default: "none" },
-    Var { name: FIXTURE_DATA, kind: Kind::Fixture, default: "\"written-bytes\"" },
-    Var { name: FIXTURE_DIR, kind: Kind::Fixture, default: "required" },
     Var {
         name: FIXTURE_COW_PATH,
         kind: Kind::Fixture,
         default: "unset (the in-place-edit step does not run)",
     },
     Var { name: ESCAPE_ONLY_VECTOR, kind: Kind::Fixture, default: "unset (every vector runs)" },
+    Var { name: ESCAPE_ACCESS, kind: Kind::Fixture, default: "read" },
     Var {
         name: ESCAPE_VECTOR7_LINK_DIR,
         kind: Kind::Fixture,

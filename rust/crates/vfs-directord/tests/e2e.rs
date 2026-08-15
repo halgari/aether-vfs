@@ -1358,11 +1358,15 @@ fn positive_expectation(vector: &str) -> Option<&'static str> {
 ///   not-found" question to assert here regardless of target.
 /// - `"13"`/`"14"` (`is_reported_not_closed`): per this gate's own scope
 ///   note, neither vector gets a strict outcome assertion in either canary.
-///   `"14"` in particular spawns a child process with **no shim injected at
-///   all**, so its read reaches the real, physical negative-canary bytes on
-///   `session.root` directly — genuinely reachable, by construction, and not
-///   evidence about this gate either way (see that vector's own note in
-///   `rust/docs/escape-matrix.md`).
+///   `"14"` spawns a child process, on the long-standing assumption that the
+///   child runs with **no shim injected** and so reads the real, physical
+///   negative-canary bytes directly. **Measured otherwise in gate 4 task 8**:
+///   the shim hooks `CreateProcessInternalW` and injects into children
+///   (`vfs-shim/src/hook.rs`), so the child is injected and this line actually
+///   reports `error:cmd-exit:1` — the real bytes were *not* reachable. Still
+///   unasserted, because that injection is explicitly best-effort (force
+///   suspend, inject, give up on timeout), so asserting it would be asserting
+///   a scheduling outcome. See `rust/docs/escape-matrix.md`, "Gate 4, Task 8".
 ///
 /// Every other buildable vector must now come back `not-found`: Gate 3 Task
 /// 5 stopped `RootMap::decide` passing `NotFound`/`Dir` through, and the
@@ -1450,6 +1454,10 @@ struct EscapeFixtureCtx<'a> {
     /// process is launched, so vector 7 never has to construct one from
     /// inside an already-injected process.
     vector7_link_dir: Option<&'a str>,
+    /// `true` sets `VFS_ESCAPE_ACCESS=write`, so every vector writes through
+    /// its spelling instead of reading through it. Unset (the default) the
+    /// fixture runs the read matrix exactly as it always has.
+    write_access: bool,
 }
 
 async fn run_escape_fixture(
@@ -1460,7 +1468,7 @@ async fn run_escape_fixture(
     only_vector: Option<&str>,
 ) -> (i32, Vec<EscapeLine>, std::collections::BTreeSet<String>, bool) {
     use vfs_control::pb::{launch_event, LaunchReq};
-    let EscapeFixtureCtx { session_id, fixture, stats_log, vector7_link_dir } = *ctx;
+    let EscapeFixtureCtx { session_id, fixture, stats_log, vector7_link_dir, write_access } = *ctx;
 
     let _ = std::fs::remove_file(stats_log);
     let _ = std::fs::remove_file(out_file);
@@ -1469,6 +1477,9 @@ async fn run_escape_fixture(
     env.insert("VFS_SHIM_STATS_LOG".to_string(), stats_log.to_string_lossy().into_owned());
     if let Some(dir) = vector7_link_dir {
         env.insert("VFS_ESCAPE_VECTOR7_LINK_DIR".to_string(), dir.to_string());
+    }
+    if write_access {
+        env.insert("VFS_ESCAPE_ACCESS".to_string(), "write".to_string());
     }
     // Fast tick: this whole run (nineteen lines plus a couple of helper
     // process spawns) finishes in well under the reporter's 250ms default,
@@ -1680,6 +1691,7 @@ async fn escape_matrix_positive_and_negative_canary() {
         fixture: &fixture,
         stats_log: &stats_log,
         vector7_link_dir: vector7_link_dir.as_deref(),
+        write_access: false,
     };
 
     // ---------------------------------------------------------------
@@ -1854,6 +1866,481 @@ async fn escape_matrix_positive_and_negative_canary() {
     }
 }
 
+/// The suffix `vfs-fixture-escape`'s **write-mode** vector 14 appends to the
+/// canary's own path — mirrored from that crate's `V14_WRITE_SUFFIX`, which
+/// documents why that one vector moves off the target in write mode.
+///
+/// This harness needs the name in order to *tolerate* it in the real-disk
+/// listing, and only it. Vector 14's containment rests on the shim's
+/// `CreateProcessInternalW` hook injecting the child (`vfs-shim/src/hook.rs`),
+/// which is explicitly best-effort — it force-suspends, injects, and gives up
+/// on a timeout. Observed here the child *is* injected and its write is
+/// answered by the director like any other (see this file's
+/// `negative_write_expectation` and the finding recorded in
+/// `rust/docs/escape-matrix.md`), so this file does not normally appear on
+/// disk at all. But a timed-out inject would leave it there through no fault
+/// of the canonicaliser, and turning that into a flaky containment failure
+/// would teach the next person to weaken the assertion. It is the one name
+/// this harness accepts; anything else in the directory is an escape.
+const V14_WRITE_SUFFIX: &str = ".v14-child-write.txt";
+
+/// The alternate-stream name `vfs-fixture-escape`'s vector 11 builds. In
+/// write mode that vector uses a creating disposition, so a spelling that
+/// escapes leaves a real named stream on the canary — a create on real disk
+/// that no directory listing would ever show.
+const ADS_PROBE_STREAM: &str = "vfs-escape-fixture-probe";
+
+/// The positive canary's expected outcome for a **write**, or `None` for a
+/// vector this test does not assert an exact outcome for.
+///
+/// Same three exemptions the read matrix carries, for the same documented
+/// reasons — `5b`'s construction fails at the NT level whatever the target,
+/// and `13`/`14` are reported-not-closed in this gate. Every other buildable
+/// spelling must come back `written`: opened for write, this vector's own
+/// payload written, and that exact payload read back through the same
+/// spelling (see `vfs-fixture-escape`'s module doc for why `written` is a
+/// read-back claim and not merely "the call succeeded").
+///
+/// This half is not decoration. Gate 4 has already produced the failure it
+/// guards against once — closing the write fall-through silently removed
+/// copy-on-write while 526 tests stayed green. A containment matrix that only
+/// asserted refusals would pass with every write broken.
+fn positive_write_expectation(vector: &str) -> Option<&'static str> {
+    if vector == "5b" || is_reported_not_closed(vector) {
+        return None;
+    }
+    Some("written")
+}
+
+/// The negative canary's expected outcome for a **write**: `not-found`, for
+/// every buildable spelling, with the same three exemptions as above.
+///
+/// Spec §8 criterion 1's load-bearing clause — "a write to the negative
+/// canary must be **blocked**, and must not create a file on the real
+/// filesystem under the root". The status half is this table; the filesystem
+/// half is asserted separately, from this (uninjected) harness process, after
+/// the run.
+///
+/// **Why the negative canary sits outside every mount here, rather than
+/// inside a root mount whose backing directory merely lacks it** — the
+/// construction the read matrix uses. A create is not a read: the read matrix
+/// can put a writable `DiskProvider` at `/` and still call a file it does not
+/// hold "unserved", because a read of an absent name is a refusal. A *create*
+/// of that same name under a writable mount is something the provider graph
+/// legitimately accepts and stores — contained, but not blocked. "A path no
+/// provider serves" therefore means something stricter once writes are in
+/// scope: no writable mount covers it at all. So the source here mounts at
+/// `/Games/Skyrim/Data` and the negative canary lives in a sibling directory
+/// under the same managed root, physically on disk, reachable by every one of
+/// the fourteen spellings and owned by nothing.
+fn negative_write_expectation(vector: &str) -> Option<&'static str> {
+    if vector == "5b" || is_reported_not_closed(vector) {
+        return None;
+    }
+    Some("not-found")
+}
+
+/// Every name directly inside `dir` on the **real** filesystem. Called only
+/// from this test harness process, which is never injected, so `read_dir`
+/// here answers about physical disk rather than about the provider graph.
+fn real_dir_names(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read_dir {dir:?}: {e}"))
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
+}
+
+/// The only two names this harness accepts in a canary directory's real-disk
+/// listing after a write run: the canary it put there itself, and vector 14's
+/// best-effort-injected child (see [`V14_WRITE_SUFFIX`]).
+///
+/// Vector 8's hardlink is deliberately **not** on this list. It is created by
+/// `CreateHardLinkW`, which the shim does not hook by name — but the NT opens
+/// underneath it are hooked, and observed behaviour is that the link either
+/// never comes into existence on real disk (the negative canary, where
+/// `hard_link` fails outright and the vector reports `unbuildable:`) or is
+/// gone again by the end of the run. Accepting the name "just in case" would
+/// mean a real-disk create could appear here forever without anyone noticing,
+/// which is the opposite of what this function is for. If it ever does show
+/// up, this test should fail and someone should find out why.
+fn accounted_for_on_real_disk(name: &str, canary: &str) -> bool {
+    name == canary || name == format!("{canary}{V14_WRITE_SUFFIX}")
+}
+
+/// Create a junction at a fresh temp path pointing at `target`, from this
+/// (never-injected) harness process. See `VFS_ESCAPE_VECTOR7_LINK_DIR` in
+/// `vfs-env` for why vector 7's junction must pre-date the fixture launch.
+fn make_escape_junction(tag: &str, target: &Path) -> (PathBuf, Option<String>) {
+    let link = std::env::temp_dir().join(format!("vfs-escape-junction-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir(&link);
+    let ready = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J", &link.to_string_lossy(), &target.to_string_lossy()])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let dir = ready.then(|| link.to_string_lossy().into_owned());
+    (link, dir)
+}
+
+/// **The write half of the canary matrix** (gate 4, Task 8).
+///
+/// Spec §8 criterion 1 asks for the matrix green for *write* access as well
+/// as read: 14 spellings × 2 canaries, unbuildable vectors reported as
+/// unbuildable, and — the clause that carries the weight — "a write to the
+/// negative canary must be **blocked**, and must not create a file on the
+/// real filesystem under the root".
+///
+/// A separate test from the read matrix rather than a second pass inside it,
+/// for a reason that is structural and not about runtime: the two need
+/// different mount geometry. See `negative_write_expectation`'s doc comment —
+/// a writable mount at `/` makes a create of *any* under-root name something
+/// the provider graph accepts, so the read matrix's negative canary (a name
+/// its backing directory merely lacks) is not unserved for writes at all. The
+/// source here mounts at `/Games/Skyrim/Data`; the negative canary lives in a
+/// sibling directory no mount covers.
+///
+/// **The real-filesystem assertions are the point, and they are made from
+/// this process.** A write that is refused at the API while still leaving a
+/// zero-byte file under the root has breached containment and reported
+/// success. `vfs-directord`'s test harness is never injected, so `read_dir`,
+/// `exists` and `read` here answer about physical disk — the equivalent of
+/// `write_seal.rs`'s `drop(hooks)` before it inspects the root, and stronger,
+/// because there is no detour in this process to drop. Four things are
+/// checked after the negative run:
+///
+/// 1. the canary's own bytes are byte-identical to what this harness wrote —
+///    no write reached it, and no truncating open emptied it;
+/// 2. its directory holds nothing but the canary and the two artefacts
+///    `accounted_for_on_real_disk` names — no spelling created a file;
+/// 3. no named stream was created on it (vector 11 writes with a creating
+///    disposition, and a stream is a create no directory listing shows);
+/// 4. **the vector-14 sibling *is* there.** Vector 14 spawns a child with no
+///    shim, so it reaches real disk by construction. Its file is this test's
+///    positive control: without it, 1-3 would also pass against a harness
+///    that was looking at the wrong directory, or against a run where the
+///    fixture never executed at all.
+///
+/// The canaries sit in directories this harness proves physically writable
+/// first, by creating and deleting a probe file in each. A "nothing was
+/// created" assertion against a directory that could not be written to
+/// anyway establishes nothing.
+///
+/// The positive canary is mirrored: identical seed bytes in the provider's
+/// backing store *and* physically under the managed root. That pairing is
+/// what makes both halves of its check meaningful — the writes must land in
+/// the provider's copy (asserted on `content_dir`) and must not touch the
+/// physical one (asserted on `session.root`), and every vector stays
+/// buildable because the physical file the 8.3-name and hardlink
+/// constructions need is really there.
+#[tokio::test(flavor = "multi_thread")]
+async fn escape_matrix_write_access_positive_and_negative_canary() {
+    let _guard = LAUNCH_LOCK.lock().await;
+    ensure_inject_artifacts();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+    let registry = SessionRegistry::new();
+    let svc = DirectorService::new(registry);
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let content_dir = tempfile::tempdir().expect("tempdir");
+    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_log = stats_dir.path().join("shim-stats.log");
+    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_file = out_dir.path().join("escape-write-out.tsv");
+
+    let fixture = locate_artifact("vfs-fixture-escape.exe");
+    let mut client = connect(&format!("{addr}")).await.expect("connect");
+
+    let session = client
+        .create_session(vfs_control::pb::CreateSessionReq {
+            name: "escape-matrix-write".into(),
+        })
+        .await
+        .expect("CreateSession")
+        .into_inner();
+    assert!(!session.id.is_empty());
+    assert!(!session.root.is_empty());
+
+    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, SourceSpec as PbSource};
+
+    // Mounted at a sub-path, deliberately — see the test's own doc comment.
+    // Everything under `Games/Skyrim/Data` is served (and writable, since a
+    // `DiskProvider` declares `Access::ReadWrite`); everything else under the
+    // managed root is owned by no provider at all.
+    const SERVED_MOUNT: &str = "/Games/Skyrim/Data";
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(PbSource {
+                kind: Some(source_spec::Kind::Disk(DiskSource {
+                    path: content_dir.path().to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: SERVED_MOUNT.into(),
+            layer: 0,
+            root: 0,
+            write_layer: false,
+        })
+        .await
+        .expect("AddSource");
+
+    let root = PathBuf::from(&session.root);
+    let served_sub = PathBuf::from("Games").join("Skyrim").join("Data");
+    let unserved_sub = PathBuf::from("Games").join("Skyrim").join("Unserved");
+    std::fs::create_dir_all(root.join(&served_sub)).expect("mkdir served dir under session root");
+    std::fs::create_dir_all(root.join(&unserved_sub)).expect("mkdir unserved dir under session root");
+
+    // Both seeds are shorter than the fixture's fixed 22-byte write payload,
+    // which matters: the write disposition is `OPEN_ALWAYS` (create, never
+    // truncate), so a longer seed would leave a tail behind and every
+    // read-back would mismatch for a reason unrelated to containment. See
+    // `write_payload` in `vfs-fixture-escape`.
+    const POSITIVE_BASENAME: &str = "escape-write-positive-canary.esp";
+    const POSITIVE_SEED: &[u8] = b"pos-seed";
+    const NEGATIVE_BASENAME: &str = "escape-write-negative-canary.bin";
+    const NEGATIVE_SEED: &[u8] = b"neg-seed";
+    /// Every write payload the fixture produces starts with this — see
+    /// `write_payload`. Used to recognise "a canary write landed here"
+    /// without pinning which vector wrote last.
+    const PAYLOAD_PREFIX: &str = "vfs-escape-write[";
+
+    let pos_on_disk = root.join(&served_sub).join(POSITIVE_BASENAME);
+    let pos_in_provider = content_dir.path().join(POSITIVE_BASENAME);
+    std::fs::write(&pos_on_disk, POSITIVE_SEED).expect("write positive canary (session root)");
+    std::fs::write(&pos_in_provider, POSITIVE_SEED).expect("write positive canary (content dir)");
+
+    let neg_on_disk = root.join(&unserved_sub).join(NEGATIVE_BASENAME);
+    std::fs::write(&neg_on_disk, NEGATIVE_SEED).expect("write negative canary");
+
+    // Both canary directories must be physically writable from here, or every
+    // "nothing was created on real disk" assertion below is satisfied by the
+    // filesystem rather than by containment.
+    for dir in [root.join(&served_sub), root.join(&unserved_sub)] {
+        let probe = dir.join(".harness-writability-probe");
+        std::fs::write(&probe, b"x").unwrap_or_else(|e| {
+            panic!(
+                "{dir:?} must be physically writable for this test to prove anything — a create \
+                 that could not have succeeded anyway is not evidence of containment: {e}"
+            )
+        });
+        std::fs::remove_file(&probe).expect("remove writability probe");
+    }
+
+    // One junction per canary directory: vector 7 opens `<junction>\<target
+    // filename>`, so a junction pointing at the served directory cannot serve
+    // the unserved canary's run.
+    let (pos_link, pos_link_dir) = make_escape_junction("write-pos", &root.join(&served_sub));
+    let (neg_link, neg_link_dir) = make_escape_junction("write-neg", &root.join(&unserved_sub));
+
+    // ---------------------------------------------------------------
+    // Positive canary: every buildable spelling writes, and reads its own
+    // payload back through the same spelling.
+    // ---------------------------------------------------------------
+    let pos_ctx = EscapeFixtureCtx {
+        session_id: &session.id,
+        fixture: &fixture,
+        stats_log: &stats_log,
+        vector7_link_dir: pos_link_dir.as_deref(),
+        write_access: true,
+    };
+    let (pos_exit, pos_lines, _pos_classified, pos_truncated) =
+        run_escape_fixture(&mut client, &pos_ctx, &pos_on_disk, &out_file, None).await;
+    if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
+        eprintln!("=== POSITIVE WRITE lines ===");
+        for l in &pos_lines {
+            eprintln!("{}\t{}\t{}\t{}", l.vector, l.spelling, l.outcome, l.note);
+        }
+    }
+    assert_eq!(
+        pos_exit, 0,
+        "vfs-fixture-escape (write mode) must exit 0 against the positive canary — a crash exit \
+         means a vector took the process down before the rest of the matrix was attempted. Lines \
+         captured: {pos_lines:?}"
+    );
+    assert!(!pos_truncated, "the shim report's path list truncated on the positive write run");
+    for id in ALL_VECTOR_IDS {
+        assert!(
+            pos_lines.iter().any(|l| &l.vector == id),
+            "positive canary, write access: vector {id} produced no line at all in {out_file:?} — \
+             a missing line must never be readable as a pass"
+        );
+    }
+    for line in &pos_lines {
+        let Some(want) = positive_write_expectation(&line.vector) else { continue };
+        if line.outcome.starts_with("unbuildable:") {
+            continue; // First-class, environment-dependent; recorded, not a failure.
+        }
+        assert_eq!(
+            line.outcome, want,
+            "positive canary, write access, vector {}: expected `{want}` — legitimate writes must \
+             keep working through every spelling, or containment has been bought by breaking the \
+             filesystem. Got `{}` (spelling: {:?}, note: {:?})",
+            line.vector, line.outcome, line.spelling, line.note
+        );
+    }
+    // The writes landed in the provider's store …
+    let served_bytes = std::fs::read(&pos_in_provider).expect("read positive canary in provider");
+    assert!(
+        String::from_utf8_lossy(&served_bytes).starts_with(PAYLOAD_PREFIX),
+        "the positive canary's writes must land where the provider graph says they land; \
+         {pos_in_provider:?} still holds {:?}",
+        String::from_utf8_lossy(&served_bytes)
+    );
+    // … and nowhere near the byte-identical physical file under the root.
+    assert_eq!(
+        std::fs::read(&pos_on_disk).expect("read positive canary on real disk"),
+        POSITIVE_SEED,
+        "a write reached the real file at {pos_on_disk:?} under the managed root. The provider \
+         serves this vpath, so every write had somewhere legitimate to go — landing here instead \
+         means a spelling escaped to disk"
+    );
+    assert_no_escaped_real_files(
+        &root.join(&served_sub),
+        POSITIVE_BASENAME,
+        &pos_on_disk,
+        "positive canary",
+    );
+
+    // ---------------------------------------------------------------
+    // Negative canary: a real file under the managed root that no mount
+    // covers. Every buildable spelling's write is refused, and real disk is
+    // untouched.
+    // ---------------------------------------------------------------
+    let neg_ctx = EscapeFixtureCtx {
+        session_id: &session.id,
+        fixture: &fixture,
+        stats_log: &stats_log,
+        vector7_link_dir: neg_link_dir.as_deref(),
+        write_access: true,
+    };
+    let (neg_exit, neg_lines, _neg_classified, neg_truncated) =
+        run_escape_fixture(&mut client, &neg_ctx, &neg_on_disk, &out_file, None).await;
+    if std::env::var("VFS_TEST_MATRIX_DUMP").is_ok() {
+        eprintln!("=== NEGATIVE WRITE lines ===");
+        for l in &neg_lines {
+            eprintln!("{}\t{}\t{}\t{}", l.vector, l.spelling, l.outcome, l.note);
+        }
+    }
+    assert_eq!(
+        neg_exit, 0,
+        "vfs-fixture-escape (write mode) must exit 0 against the negative canary too. Lines \
+         captured: {neg_lines:?}"
+    );
+    assert!(!neg_truncated, "the shim report's path list truncated on the negative write run");
+    for id in ALL_VECTOR_IDS {
+        assert!(
+            neg_lines.iter().any(|l| &l.vector == id),
+            "negative canary, write access: vector {id} produced no line at all in {out_file:?}"
+        );
+    }
+    for line in &neg_lines {
+        let Some(want) = negative_write_expectation(&line.vector) else { continue };
+        if line.outcome.starts_with("unbuildable:") {
+            continue; // Never attempted at the OS level; nothing to seal.
+        }
+        assert_eq!(
+            line.outcome, want,
+            "negative canary, write access, vector {}: expected `{want}` — a write to a path \
+             under the managed root that no provider serves must be blocked, for every buildable \
+             spelling. Got `{}` (spelling: {:?}, note: {:?})",
+            line.vector, line.outcome, line.spelling, line.note
+        );
+    }
+    // The filesystem half of spec §8 criterion 1, asserted on real disk from
+    // this never-injected process.
+    assert_eq!(
+        std::fs::read(&neg_on_disk).expect("read negative canary on real disk"),
+        NEGATIVE_SEED,
+        "the negative canary's real bytes at {neg_on_disk:?} changed. A refusal at the API that \
+         still modifies the file under the root is the breach this whole matrix exists to catch"
+    );
+    assert_no_escaped_real_files(
+        &root.join(&unserved_sub),
+        NEGATIVE_BASENAME,
+        &neg_on_disk,
+        "negative canary",
+    );
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq {
+            session_id: session.id,
+        })
+        .await
+        .expect("teardown");
+
+    server.abort();
+    let _ = std::fs::remove_dir(&pos_link);
+    let _ = std::fs::remove_dir(&neg_link);
+}
+
+/// The real-filesystem half of the write matrix, for one canary: nothing was
+/// created in its directory and no named stream was created on it.
+///
+/// **Called with the detours nowhere in sight.** This is the `vfs-directord`
+/// test process, which is never injected, so every `std::fs` call here reads
+/// physical disk — the same ordering `write_seal.rs` gets by doing
+/// `drop(hooks)` before it inspects the root, and stronger, because there is
+/// no detour in this process to drop in the first place. A hook-live
+/// `exists()` answers about the provider graph, which is exactly the answer a
+/// breached containment layer would want it to give.
+///
+/// **What stops these absences from being vacuous**, in order:
+///
+/// - the canary itself must be in the listing, so this is provably the
+///   physical directory the run targeted and not an empty lookalike;
+/// - the caller proved that directory physically writable, by creating and
+///   deleting a probe file in it before the run, so a create here genuinely
+///   could have succeeded;
+/// - the fixture reported an attempted spelling for all nineteen lines, each
+///   naming a path in this directory, and the caller asserted on every one of
+///   them;
+/// - and the same fixture in the same write mode, run standalone against an
+///   ordinary directory, *does* create `<name>.`, `<name> ` and the named
+///   stream (vectors 10b, 10c and 11 with a creating disposition). These
+///   assertions have teeth; they were watched failing before they were
+///   watched passing.
+fn assert_no_escaped_real_files(dir: &Path, canary: &str, canary_path: &Path, label: &str) {
+    let names = real_dir_names(dir);
+
+    assert!(
+        names.iter().any(|n| n == canary),
+        "{label}: {canary:?} is not in {dir:?} at all ({names:?}) — this harness is not looking \
+         at the physical directory the run targeted, so every `nothing was created` assertion \
+         below would pass for the wrong reason"
+    );
+
+    let stray: Vec<&String> =
+        names.iter().filter(|n| !accounted_for_on_real_disk(n, canary)).collect();
+    assert!(
+        stray.is_empty(),
+        "{label}: these files appeared on the REAL filesystem under the managed root at {dir:?}: \
+         {stray:?}. Every one of them is a spelling whose write was answered by disk instead of \
+         by the director — spec §8 criterion 1's `must not create a file on the real filesystem \
+         under the root`. (Trailing-dot and trailing-space spellings show up here as names that \
+         look identical to the canary's; a doubled entry is vector 10b or 10c escaping.)"
+    );
+
+    let stream = format!("{}:{ADS_PROBE_STREAM}", canary_path.display());
+    assert!(
+        std::fs::File::open(&stream).is_err(),
+        "{label}: vector 11 created the named stream {stream:?} on the real file under the \
+         managed root. A stream is a create that no directory listing shows, which is exactly \
+         why it is checked by name rather than left to the listing above"
+    );
+}
+
 /// Stage 2b exit criterion: **the escape matrix passes against every root,
 /// not just the first.**
 ///
@@ -2012,6 +2499,7 @@ async fn escape_matrix_holds_against_a_second_root() {
         fixture: &fixture,
         stats_log: &stats_log,
         vector7_link_dir: vector7_link_dir.as_deref(),
+        write_access: false,
     };
 
     let (pos_exit, pos_lines, _, _) = run_escape_fixture(
@@ -2200,6 +2688,7 @@ async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
         fixture: &fixture,
         stats_log: &stats_log,
         vector7_link_dir: None,
+        write_access: false,
     };
 
     let (exit, lines, _classified, _truncated) =
