@@ -78,6 +78,11 @@ fn copy_up_writes_its_destination_without_re_entering_the_hooks() {
         Fake::new()
             .with("data/seedme.esp", PROVIDER.to_vec(), ReadStyle::Whole)
             .read_only(),
+        // Inline: this fixture is a few dozen bytes, well under
+        // `BULK_THRESHOLD`, so an arena would go unused. The transports are
+        // covered in `cow_seed_reads_through_director`; what is under test
+        // here is which *filesystem* copy-up's destination write reaches.
+        0,
     );
 
     let engine =

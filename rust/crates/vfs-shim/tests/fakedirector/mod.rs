@@ -13,18 +13,28 @@
 //! does in production, so the code path under test is the production one; only
 //! the far side of the ring is a fake.
 //!
-//! It answers only what copy-up uses (HEARTBEAT, OPEN, READ, CLOSE) and
-//! deliberately gives a test control over *how* a READ is answered
+//! It answers only what copy-up uses (HEARTBEAT, GETATTR, OPEN, READ, CLOSE)
+//! and deliberately gives a test control over *how* a READ is answered
 //! ([`ReadStyle`]), because the read loop's correctness is mostly about what
 //! it does with awkward answers: a short read that is not EOF, a read that
 //! fails part-way, a file that turns out shorter than OPEN promised.
+//!
+//! **Both transports.** A READ is answered inline (data in the ring payload)
+//! or in **bulk** (data written into the shared arena, ring carries only
+//! length + offset), chosen exactly the way `dispatch_director` chooses: the
+//! client's `FLAG_READ_BULK`, or a request at or above `BULK_THRESHOLD`. This
+//! is not decoration. Live, `arena_len > 0` and copy-up's `SEED_CHUNK` is
+//! 256 KiB — four times the threshold — so **every real copy-up of a large
+//! file takes the bulk path**. A fixture with no arena tests fragment
+//! reassembly only on the transport production does not use, and silent
+//! truncation of a large file is the worst failure available here.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use vfs_ipc::{RingServer, SpinNotifier};
+use vfs_ipc::{DataArena, RingServer, SpinNotifier};
 use vfs_protocol as P;
 use vfs_win::SharedMapping;
 
@@ -33,8 +43,26 @@ use vfs_win::SharedMapping;
 /// trips. A test that only ever moved one payload's worth of data would pass
 /// against an implementation that reads once and calls it done.
 pub const PAYLOAD_CAP: u32 = 4096;
-pub const RING_BYTES: usize = 256 * 1024;
 pub const SLOTS: u32 = 8;
+
+/// Requests at or above this go bulk, matching `dispatch_director`'s and
+/// `FuseClient::read_fragmented`'s own constant. A fixture below it stays
+/// inline whatever the arena is, which is how one ring covers both transports.
+pub const BULK_THRESHOLD: u32 = 64 * 1024;
+
+/// An arena of `SLOTS` × 256 KiB. The bank size the client computes
+/// (`arena_len / slot_count`, clamped to at least 256 KiB) then agrees exactly
+/// with the one the server hands out, so a bulk read is not silently truncated
+/// to a smaller bank and resumed — which would still pass a byte-exactness
+/// test while hiding whether the bank sizing was right.
+pub const ARENA_LEN: usize = SLOTS as usize * 256 * 1024;
+
+/// Control ring length, and therefore the arena's offset within the section —
+/// same layout `IpcServe::start` uses (`arena_offset = ring_bytes`).
+fn ring_bytes() -> usize {
+    let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
+    40 + SLOTS as usize * stride
+}
 
 /// How the fake answers READ for one file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -68,6 +96,7 @@ pub struct Tally {
     opened: Mutex<HashMap<String, u64>>,
     closed: Mutex<HashMap<String, u64>>,
     reads: Mutex<HashMap<String, u64>>,
+    bulk_reads: Mutex<HashMap<String, u64>>,
 }
 
 impl Tally {
@@ -88,6 +117,12 @@ impl Tally {
     /// trips a copy-up of it actually cost.
     pub fn reads(&self, vpath: &str) -> u64 {
         Self::get(&self.reads, vpath)
+    }
+    /// Of those, the ones answered through the shared **arena** rather than
+    /// inline. This is what says a test covered the transport a real copy-up
+    /// of a large file uses, rather than only the small-file one.
+    pub fn bulk_reads(&self, vpath: &str) -> u64 {
+        Self::get(&self.bulk_reads, vpath)
     }
 }
 
@@ -129,7 +164,16 @@ impl Fake {
         self
     }
 
-    fn handle(&self, opcode: u32, payload: &[u8]) -> (i32, Vec<u8>) {
+    /// `arena` is `(arena, slot)` for this request, mirroring
+    /// `dispatch_director`'s own parameter — `None` only when the fixture was
+    /// installed with no arena at all.
+    fn handle(
+        &self,
+        opcode: u32,
+        flags: u32,
+        payload: &[u8],
+        arena: Option<(&DataArena<'_>, u32)>,
+    ) -> (i32, Vec<u8>) {
         match opcode {
             P::OP_HEARTBEAT => (P::ST_OK, Vec::new()),
             P::OP_GETATTR => {
@@ -190,7 +234,26 @@ impl Fake {
                 if let ReadStyle::Short(n) = e.style {
                     want = want.min(n);
                 }
-                (P::ST_OK, P::encode_read_resp(&e.bytes[start..start + want]))
+                let src = &e.bytes[start..start + want];
+                // Bulk chosen exactly as `dispatch_director` chooses it, so a
+                // fixture inherits production's transport rather than the
+                // fake's opinion of it.
+                let want_bulk = (flags & P::FLAG_READ_BULK) != 0 || req.len >= BULK_THRESHOLD;
+                if want_bulk {
+                    if let Some((arena, slot)) = arena {
+                        Tally::bump(&self.tally.bulk_reads, &vpath);
+                        let max = arena.bank_size.min(src.len());
+                        return match arena.fill_bank(slot, max, |buf| {
+                            let n = buf.len().min(src.len());
+                            buf[..n].copy_from_slice(&src[..n]);
+                            Ok(n)
+                        }) {
+                            Ok((off, n)) => (P::ST_OK, P::encode_read_resp_bulk(n as u32, off)),
+                            Err(st) => (st, Vec::new()),
+                        };
+                    }
+                }
+                (P::ST_OK, P::encode_read_resp(src))
             }
             P::OP_CLOSE => {
                 if let Some(fh) = P::decode_close_req(payload) {
@@ -217,36 +280,60 @@ impl Fake {
 ///
 /// `virtual_dir` becomes `VFS_VIRTUAL_DIR` — root 0 for both halves of the
 /// shim, so the `RootId` the `Engine` resolves is the one the client sends.
-pub fn install(virtual_dir: &std::path::Path, fake: Fake) -> &'static Fake {
+///
+/// `arena_len` of 0 forces every READ inline; [`ARENA_LEN`] gives the section
+/// a real bulk arena laid out the way `IpcServe::start` lays one out, so a
+/// request at or above [`BULK_THRESHOLD`] takes the same transport it takes
+/// live. Below the threshold reads stay inline either way, so one ring can
+/// cover both.
+pub fn install(virtual_dir: &std::path::Path, fake: Fake, arena_len: usize) -> &'static Fake {
     static FAKE: OnceLock<&'static Fake> = OnceLock::new();
     FAKE.get_or_init(|| {
         let fake: &'static Fake = Box::leak(Box::new(fake));
         let name = format!("Local\\vfs-shim-cowseed-{}", std::process::id());
+        let arena_offset = ring_bytes();
+        // Whole section, ring first then arena — `VFS_RING_BYTES` names the
+        // whole thing because the shim maps all of it and a bulk response's
+        // offset is section-absolute.
+        let map_bytes = ((arena_offset + arena_len + 0xFFFF) & !0xFFFF).max(256 * 1024);
         let mapping: &'static SharedMapping =
-            Box::leak(Box::new(SharedMapping::create(&name, RING_BYTES).expect("section")));
+            Box::leak(Box::new(SharedMapping::create(&name, map_bytes).expect("section")));
         vfs_ipc::ring::init(mapping.seg(), SLOTS, PAYLOAD_CAP).expect("ring init");
 
         std::thread::Builder::new()
             .name("fake-director".into())
             .spawn(move || {
                 let server = RingServer::new(mapping.seg(), SpinNotifier).expect("ring open");
+                // One arena for the life of the thread, banked per slot —
+                // `worker_loop`'s shape. `banks == slot_count` is what makes
+                // the client's `arena_len / slot_count` bank size agree with
+                // the server's.
+                let arena = (arena_len > 0).then(|| {
+                    DataArena::new(mapping.seg(), arena_offset, arena_len, SLOTS as usize)
+                });
                 // Runs until the ring goes away with the process. `serve_one`
                 // answers at most one request and returns `Ok(false)` when
                 // idle, so this is a spin — fine for a fixture whose whole
                 // life is a handful of copy-ups.
                 while server
-                    .serve_one(|req| fake.handle(req.opcode, &req.payload))
+                    .serve_one(|req| {
+                        fake.handle(
+                            req.opcode,
+                            req.flags,
+                            &req.payload,
+                            arena.as_ref().map(|a| (a, req.slot)),
+                        )
+                    })
                     .is_ok()
                 {}
             })
             .expect("server thread");
 
         std::env::set_var(vfs_env::RING_SECTION, &name);
-        std::env::set_var(vfs_env::RING_BYTES, RING_BYTES.to_string());
+        std::env::set_var(vfs_env::RING_BYTES, map_bytes.to_string());
         std::env::set_var(vfs_env::RING_PAYLOAD_CAP, PAYLOAD_CAP.to_string());
-        // No bulk arena: every READ rides the ring payload inline, which is
-        // what makes PAYLOAD_CAP the real fragment size above.
-        std::env::set_var(vfs_env::ARENA_LEN, "0");
+        std::env::set_var(vfs_env::ARENA_OFFSET, arena_offset.to_string());
+        std::env::set_var(vfs_env::ARENA_LEN, arena_len.to_string());
         std::env::set_var(vfs_env::VIRTUAL_DIR, virtual_dir);
         vfs_shim::fuse_client::try_init_from_env().expect("fuse client");
         fake

@@ -104,6 +104,11 @@ fn fixture() -> &'static Fixture {
                 .with("data/to-rename.esp", PROVIDER.to_vec(), ReadStyle::Whole)
                 .with("data/big.bin", pattern(700 * 1024), ReadStyle::Whole)
                 .with("data/dribble.bin", pattern(5_000), ReadStyle::Short(7))
+                .with(
+                    "data/bulk-dribble.bin",
+                    pattern(500 * 1024),
+                    ReadStyle::Short(100_000),
+                )
                 .with("data/broken.bin", pattern(50_000), ReadStyle::Error)
                 .with(
                     "data/liar.bin",
@@ -112,7 +117,15 @@ fn fixture() -> &'static Fixture {
                 )
                 .with("data/closecheck.esp", PROVIDER.to_vec(), ReadStyle::Whole)
                 .with("data/closecheck-broken.bin", pattern(9_000), ReadStyle::Error)
-                .with("data/roundtrips.bin", pattern(300 * 1024), ReadStyle::Whole),
+                // Just under `BULK_THRESHOLD`, so it stays inline whatever the
+                // arena is: the inline transport's own fragmentation case.
+                .with("data/inline-roundtrips.bin", pattern(63 * 1024), ReadStyle::Whole)
+                .with("data/streamed.esp", PROVIDER.to_vec(), ReadStyle::Whole),
+            // A real bulk arena. Copy-up's 256 KiB `SEED_CHUNK` is four times
+            // `BULK_THRESHOLD`, so live, every large-file copy-up rides the
+            // arena; a fixture without one tests fragment reassembly only on
+            // the transport production does not take.
+            fakedirector::ARENA_LEN,
         );
 
         let engine = Engine::with_overlay(
@@ -195,12 +208,17 @@ fn copy_up_never_seeds_from_a_real_file_under_the_root() {
     );
 }
 
-/// A file far larger than the ring can carry in one response. The ring's
-/// payload cap here is 4 KiB, so 700 KiB cannot arrive in one round trip: an
-/// implementation that reads once and stops produces 4088 bytes, and one that
-/// mishandles fragment offsets produces 700 KiB of the wrong bytes. Only a
-/// loop that runs to completion *and* keeps its offsets straight passes both
-/// halves.
+/// A file far larger than one round trip can carry, **over the transport a
+/// real copy-up uses**. `SEED_CHUNK` is 256 KiB, four times `BULK_THRESHOLD`,
+/// so each read is answered out of the shared arena: the ring carries only a
+/// length and an offset, and the bytes are copied from an arena bank that is
+/// reused across requests. An implementation that reads once produces 256 KiB;
+/// one that mishandles bank offsets or lets a bank be reused before it is
+/// copied produces 700 KiB of the wrong bytes.
+///
+/// The `bulk_reads` assertion is the load-bearing one for coverage: without it
+/// this test would silently pass on the inline path if the arena ever stopped
+/// being configured, which is precisely the gap it was written to close.
 #[test]
 fn copy_up_of_a_large_file_spans_round_trips_and_is_byte_exact() {
     let f = fixture();
@@ -214,13 +232,43 @@ fn copy_up_of_a_large_file_spans_round_trips_and_is_byte_exact() {
     assert_eq!(
         got.len(),
         want.len(),
-        "copy-up stopped short: {} of {} bytes, with a {PAYLOAD_CAP}-byte ring payload cap \
-         (~{} round trips required)",
+        "copy-up stopped short: {} of {} bytes",
         got.len(),
-        want.len(),
-        want.len() / (PAYLOAD_CAP as usize - 8) + 1
+        want.len()
     );
     assert!(got == want, "copy-up produced the right length but the wrong bytes");
+    let bulk = f.fake.tally.bulk_reads("data/big.bin");
+    assert!(
+        bulk >= 3,
+        "only {bulk} of this copy-up's reads went through the shared arena; a 700 KiB \
+         file at a 256 KiB seed chunk needs at least 3, and if this is 0 the test just \
+         covered the inline transport that production does not use for large files"
+    );
+}
+
+/// A short read on the **bulk** path is resumed too. Same claim as the inline
+/// short-read test, on the other transport: the provider serves 100 KiB per
+/// READ however much the 256 KiB seed chunk asked for, which is not EOF.
+///
+/// Worth having separately because the two transports return their length
+/// through different code (`decode_read_bulk_resp` + an arena copy, versus
+/// `decode_read_resp_into`), and a short bulk read additionally means the
+/// bank holds less than the client asked for.
+#[test]
+fn a_short_bulk_read_is_resumed_too() {
+    let f = fixture();
+    let want = pattern(500 * 1024);
+    let dest = f.dest(&["data", "bulk-dribble.bin"]);
+
+    f.engine.decide_open(&f.nt(&["Data", "bulk-dribble.bin"]), WRITE, FILE_OPEN_IF);
+
+    let got = std::fs::read(&dest).unwrap_or_default();
+    assert_eq!(got.len(), want.len(), "a short bulk read was treated as EOF");
+    assert!(got == want, "resumed at the wrong offset, or read a stale arena bank");
+    assert!(
+        f.fake.tally.bulk_reads("data/bulk-dribble.bin") >= 5,
+        "this fixture did not take the bulk path at all"
+    );
 }
 
 /// A short read is not EOF. The fake hands back at most 7 bytes per READ
@@ -307,15 +355,17 @@ fn copy_up_closes_the_handles_it_opens_including_failed_reads() {
     }
 }
 
-/// The round trips are real, not an artefact of how the assertion is written:
-/// the 700 KiB fixture cost the ring more than a hundred READs, counted on the
-/// server side.
+/// The inline transport's own fragmentation, counted on the server side rather
+/// than inferred. This fixture is 63 KiB — deliberately just under
+/// `BULK_THRESHOLD`, so it stays inline even though the ring has an arena —
+/// and a 4088-byte inline response cannot carry it in fewer than 15 READs.
 #[test]
-fn the_large_copy_up_really_did_cost_many_round_trips() {
+fn a_sub_threshold_copy_up_fragments_over_the_inline_transport() {
     let f = fixture();
-    let want = pattern(300 * 1024);
-    f.engine.decide_open(&f.nt(&["Data", "roundtrips.bin"]), WRITE, FILE_OPEN_IF);
-    let reads = f.fake.tally.reads("data/roundtrips.bin");
+    let want = pattern(63 * 1024);
+    f.engine.decide_open(&f.nt(&["Data", "inline-roundtrips.bin"]), WRITE, FILE_OPEN_IF);
+    let vpath = "data/inline-roundtrips.bin";
+    let reads = f.fake.tally.reads(vpath);
     let minimum = (want.len() / (PAYLOAD_CAP as usize - 8)) as u64;
     assert!(
         reads >= minimum,
@@ -323,8 +373,64 @@ fn the_large_copy_up_really_did_cost_many_round_trips() {
          {minimum} are structurally required, so this copy-up did not fragment",
         want.len()
     );
+    assert_eq!(
+        f.fake.tally.bulk_reads(vpath),
+        0,
+        "a request below BULK_THRESHOLD must stay inline; this test covers nothing \
+         the large-file test does not if it went bulk"
+    );
     assert!(
-        std::fs::read(f.dest(&["data", "roundtrips.bin"])).unwrap_or_default() == want,
+        std::fs::read(f.dest(&["data", vpath.rsplit('/').next().unwrap()])).unwrap_or_default()
+            == want,
         "bytes differ across the fragment boundaries"
+    );
+}
+
+/// A preserving write to a **named alternate data stream** seeds nothing.
+///
+/// `Engine::resolve` goes through `RootMap::canonicalise`, which drops the
+/// `:stream` suffix — right for unifying spellings of a file, wrong as the
+/// vpath to copy up from, because the base file's content is not the stream's.
+/// Answering `f.esp:probe` with `f.esp`'s bytes is a containment bug this
+/// project has already had once on the read path (`vfs-fixture-escape`'s
+/// vector 11, which is why `FuseClient::vpath_under_root` re-attaches the
+/// suffix). Copy-up declining is the honest answer; inventing stream support
+/// is a different task.
+///
+/// The base file is in the provider graph and copies up fine by its own name,
+/// which is what makes this test discriminating rather than an assertion that
+/// nothing works.
+#[test]
+fn a_write_to_an_alternate_data_stream_seeds_nothing() {
+    let f = fixture();
+    let base = f.dest(&["data", "streamed.esp"]);
+    let stream_nt = format!("{}:probe", f.nt(&["Data", "streamed.esp"]));
+
+    let d = f.engine.decide_open(&stream_nt, WRITE, FILE_OPEN_IF);
+
+    // Still redirected into the overlay: declining to *seed* must not push the
+    // write itself back to real disk.
+    assert!(
+        matches!(d, vfs_redirect::Decision::Redirect { .. }),
+        "the stream write must still be captured by the overlay, got {d:?}"
+    );
+    assert!(
+        !base.exists(),
+        "a write to `streamed.esp:probe` copied up `streamed.esp`'s content to {base:?} — \
+         the base file's bytes are not the named stream's"
+    );
+    assert_eq!(
+        f.fake.tally.opens("data/streamed.esp"),
+        0,
+        "the director was asked for the base file on behalf of a stream write"
+    );
+
+    // Control: the same file, named without the suffix, does copy up. Without
+    // this the assertions above would also pass if copy-up were simply broken.
+    f.engine.decide_open(&f.nt(&["Data", "streamed.esp"]), WRITE, FILE_OPEN_IF);
+    assert_eq!(
+        std::fs::read(&base).unwrap_or_default(),
+        PROVIDER,
+        "the base file must still copy up under its own name"
     );
 }

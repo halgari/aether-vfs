@@ -157,6 +157,9 @@ struct Snapshot {
     readdirs: Vec<String>,
     outcome_counts: [u64; OUTCOME_N],
     outcome_paths: [HashMap<String, u64>; OUTCOME_N],
+    copy_up_counts: [u64; COPYUP_N],
+    copy_up_bytes: u64,
+    copy_ups: HashMap<String, u64>,
 }
 
 fn snapshot() -> Snapshot {
@@ -205,6 +208,9 @@ fn snapshot() -> Snapshot {
         readdirs: READDIRS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
         outcome_counts,
         outcome_paths,
+        copy_up_counts: std::array::from_fn(|i| copy_up_count(ALL_COPY_UPS[i])),
+        copy_up_bytes: COPYUP_BYTES.load(Ordering::Relaxed),
+        copy_ups: COPYUPS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
     }
 }
 
@@ -807,6 +813,152 @@ fn render_passthrough(snap: &Snapshot) -> String {
     format_paths(snap.passthrough.iter().map(|(p, c)| (p.clone(), *c)).collect())
 }
 
+/// How a copy-on-write copy-up ended.
+///
+/// Copy-up (`Engine::cow_seed`) reads a file's existing content through the
+/// director so a preserving write can start from it. Every way it can decline
+/// or fail is silent from every other vantage point in this module: the open
+/// that triggered it is still counted as `FellThroughWriteFallback`, still
+/// answered with a `Redirect`, and the game simply receives an empty overlay
+/// file (or, for `FILE_OPEN`, a not-found from the redirected open). Nothing
+/// says the content went missing, and nothing says why.
+///
+/// That matters more here than the counter's size suggests. This gate's
+/// defects have all been invisible to a green test suite and visible only in a
+/// live session, and "the game's save/ini/plugin file came back empty" is
+/// exactly that shape. So the reasons are kept **distinct** rather than
+/// collapsed into one failure count: "the director does not have this file"
+/// (ordinary, and the invariant working as intended for content no provider
+/// serves), "the read failed part-way" (a director hiccup mid-session) and "no
+/// ring at all" (a misconfigured launch) call for completely different
+/// responses, and a single counter cannot tell them apart.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum CopyUp {
+    /// The destination holds the director's bytes, in full.
+    Seeded = 0,
+    /// No `FuseClient` — nothing was configured to read from.
+    DeclinedNoDirector = 1,
+    /// Shim-initiated I/O was already in flight on this thread; copy-up
+    /// declined rather than recursing (see `hook::ShimIoGuard`).
+    DeclinedReentrant = 2,
+    /// The path named an alternate data stream. The resolved remainder has no
+    /// stream in it, so seeding would copy the *base* file's content into a
+    /// write aimed at a named stream.
+    DeclinedStream = 3,
+    /// The director's OPEN failed — usually not-found, i.e. no provider serves
+    /// this path. The empty overlay file the caller then gets is consistent
+    /// with the not-found the same path reads as.
+    DirectorRefused = 4,
+    /// OPEN succeeded and the read did not: an error status, or fewer bytes
+    /// than OPEN promised. The partial destination is removed.
+    ReadFailed = 5,
+    /// The destination file could not be created or written.
+    DestWriteFailed = 6,
+}
+
+const COPYUP_N: usize = 7;
+
+/// Every variant, for iteration in `render_copy_ups` and the label test.
+pub const ALL_COPY_UPS: [CopyUp; COPYUP_N] = [
+    CopyUp::Seeded,
+    CopyUp::DeclinedNoDirector,
+    CopyUp::DeclinedReentrant,
+    CopyUp::DeclinedStream,
+    CopyUp::DirectorRefused,
+    CopyUp::ReadFailed,
+    CopyUp::DestWriteFailed,
+];
+
+impl CopyUp {
+    /// Rendered label. Distinct across variants — see
+    /// `every_copy_up_outcome_renders_with_a_distinct_label` — for the same
+    /// reason `OpenOutcome::label` is.
+    pub fn label(&self) -> &'static str {
+        match self {
+            CopyUp::Seeded => "seeded",
+            CopyUp::DeclinedNoDirector => "declined: no director",
+            CopyUp::DeclinedReentrant => "declined: reentrant",
+            CopyUp::DeclinedStream => "declined: stream suffix",
+            CopyUp::DirectorRefused => "FAILED: director refused",
+            CopyUp::ReadFailed => "FAILED: read",
+            CopyUp::DestWriteFailed => "FAILED: destination write",
+        }
+    }
+}
+
+static COPYUP_COUNTS: [AtomicU64; COPYUP_N] = [const { AtomicU64::new(0) }; COPYUP_N];
+static COPYUP_BYTES: AtomicU64 = AtomicU64::new(0);
+/// `label` + root-qualified vpath, counted — the `STATS` shape, so outcomes
+/// group together when the rows are sorted by key and two reports diff cleanly.
+static COPYUPS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+const COPYUPS_MAX: usize = 2000;
+
+/// Current value of one copy-up counter. `pub` for the same reason
+/// [`outcome_count`] is: a gate's own test can assert a class went to zero
+/// without reaching into the atomics.
+pub fn copy_up_count(outcome: CopyUp) -> u64 {
+    COPYUP_COUNTS[outcome as usize].load(Ordering::Relaxed)
+}
+
+/// Record a copy-up's outcome. `bytes` is what was written (0 unless
+/// [`CopyUp::Seeded`]). Cheap no-op when disabled, like every counter here.
+///
+/// Also lands in the ordered trace: a copy-up that failed matters most in
+/// relation to what the game did next, and only the trace preserves that.
+pub fn note_copy_up(outcome: CopyUp, root: u32, vpath: &str, bytes: u64) {
+    if !enabled() {
+        return;
+    }
+    COPYUP_COUNTS[outcome as usize].fetch_add(1, Ordering::Relaxed);
+    // Only a completed copy-up contributes to the seeded total — a failed one
+    // had whatever it wrote removed, so counting its bytes would report data
+    // as delivered that no longer exists. The partial count is not lost: the
+    // trace line below carries it, which is where a mid-session failure wants
+    // to be read anyway (in sequence with what the game did next).
+    if outcome == CopyUp::Seeded {
+        COPYUP_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+    let path = format!("root{root}/{}", vpath.to_ascii_lowercase());
+    note_trace("copy-up", &path, &format!("{} {bytes}B", outcome.label()));
+    let Ok(mut g) = COPYUPS.lock() else { return };
+    let map = g.get_or_insert_with(HashMap::new);
+    let key = format!("{:<26} {path}", outcome.label());
+    if let Some(c) = map.get_mut(&key) {
+        *c += 1;
+        return;
+    }
+    if map.len() < COPYUPS_MAX {
+        map.insert(key, 1);
+    }
+}
+
+fn render_copy_ups(snap: &Snapshot) -> String {
+    let total: u64 = snap.copy_up_counts.iter().sum();
+    if total == 0 {
+        return String::new();
+    }
+    let mut s = format!(
+        "\ncopy-on-write copy-ups ({total}, {:.1} MiB seeded):\n",
+        snap.copy_up_bytes as f64 / (1024.0 * 1024.0)
+    );
+    for outcome in ALL_COPY_UPS {
+        let c = snap.copy_up_counts[outcome as usize];
+        if c != 0 {
+            s.push_str(&format!("  {:<32} {c:>8}\n", outcome.label()));
+        }
+    }
+    // Every copy-up by path, not just the failures: "which file did this
+    // succeed for" is the other half of explaining an empty file, and the
+    // volume is a handful per session, not thousands.
+    let mut rows: Vec<(&String, &u64)> = snap.copy_ups.iter().collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+    for (k, c) in rows {
+        s.push_str(&format!("    {c:>6}x  {k}\n"));
+    }
+    s
+}
+
 /// Start a thread that rewrites the report periodically.
 ///
 /// A snapshot rather than an exit dump: a game that is killed, or one still
@@ -842,7 +994,7 @@ pub fn start_reporter() {
             // independent — see `Snapshot`'s doc comment.
             let snap = snapshot();
             let body = format!(
-                "{}{}{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}{}",
                 render(&snap),
                 render_async(&snap),
                 render_fills(&snap),
@@ -852,7 +1004,8 @@ pub fn start_reporter() {
                 render_readdirs(&snap),
                 render_passthrough(&snap),
                 render_setinfo_noop(&snap),
-                render_outcomes(&snap)
+                render_outcomes(&snap),
+                render_copy_ups(&snap)
             );
             // Write via a temp + rename so a reader never sees a half file.
             let tmp = std::path::PathBuf::from(&path).with_extension("tmp");
@@ -956,5 +1109,117 @@ mod tests {
     #[test]
     fn no_outcome_paths_renders_nothing() {
         assert_eq!(format_outcome_paths(Vec::new()), "");
+    }
+
+    #[test]
+    fn every_copy_up_outcome_renders_with_a_distinct_label() {
+        // The whole value of this counter is telling "the director does not
+        // have it" apart from "the read failed part-way" — they call for
+        // different responses. Shared or missing labels would collapse them
+        // back into the single silent failure the counter exists to replace.
+        let mut labels: Vec<&str> = ALL_COPY_UPS.iter().map(|o| o.label()).collect();
+        let n = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), n, "copy-up labels must be distinct: {labels:?}");
+        assert_eq!(ALL_COPY_UPS.len(), COPYUP_N);
+        // `snapshot` indexes the counter array by position in `ALL_COPY_UPS`,
+        // so a variant listed out of order would report under a neighbour's
+        // label — silently, and only in a live report nobody diffs.
+        for (i, o) in ALL_COPY_UPS.into_iter().enumerate() {
+            assert_eq!(o as usize, i, "{o:?} is listed at position {i}");
+        }
+        // A failure must be visibly a failure at a glance in a live report;
+        // the declines are ordinary and must not shout.
+        for o in ALL_COPY_UPS {
+            let loud = o.label().starts_with("FAILED");
+            assert_eq!(
+                loud,
+                matches!(
+                    o,
+                    CopyUp::DirectorRefused | CopyUp::ReadFailed | CopyUp::DestWriteFailed
+                ),
+                "{:?} is labelled {:?}",
+                o,
+                o.label()
+            );
+        }
+    }
+
+    #[test]
+    fn copy_up_counters_are_free_when_disabled() {
+        // VFS_SHIM_STATS_LOG is unset under test, so `enabled()` is false and
+        // recording must not touch the counters at all.
+        let before = copy_up_count(CopyUp::ReadFailed);
+        note_copy_up(CopyUp::ReadFailed, 0, "data/foo.esp", 0);
+        assert_eq!(copy_up_count(CopyUp::ReadFailed), before);
+    }
+
+    #[test]
+    fn copy_up_rendering_groups_by_outcome_and_names_the_file() {
+        // Built from a synthetic snapshot rather than the process-wide
+        // counters, which are inert under test — same approach as
+        // `busiest_path_is_reported_first`.
+        let mut counts = [0u64; COPYUP_N];
+        counts[CopyUp::Seeded as usize] = 2;
+        counts[CopyUp::ReadFailed as usize] = 1;
+        let mut copy_ups = HashMap::new();
+        copy_ups.insert(format!("{:<26} root0/data/a.esp", CopyUp::Seeded.label()), 2);
+        copy_ups.insert(format!("{:<26} root1/saves/s.ess", CopyUp::ReadFailed.label()), 1);
+        let snap = Snapshot {
+            copy_up_counts: counts,
+            copy_up_bytes: 3 * 1024 * 1024,
+            copy_ups,
+            ..empty_snapshot()
+        };
+        let s = render_copy_ups(&snap);
+        assert!(s.contains("copy-on-write copy-ups (3, 3.0 MiB seeded)"), "{s}");
+        assert!(s.contains("FAILED: read"), "{s}");
+        // The file that failed has to be nameable from the report alone —
+        // "something failed" is what the silent version already told you.
+        assert!(s.contains("root1/saves/s.ess"), "{s}");
+        // An outcome that did not happen must not appear at all.
+        assert!(!s.contains("declined: reentrant"), "{s}");
+    }
+
+    #[test]
+    fn no_copy_ups_renders_nothing() {
+        assert_eq!(render_copy_ups(&empty_snapshot()), "");
+    }
+
+    /// A zeroed `Snapshot` for rendering tests, so one can be built without
+    /// the process-wide counters (inert under test) and without every test
+    /// listing all twenty-odd fields.
+    fn empty_snapshot() -> Snapshot {
+        Snapshot {
+            calls: [0; N],
+            nanos: [0; N],
+            rooted: [0; N],
+            max_nanos: [0; N],
+            slow: [0; N],
+            async_opens: 0,
+            sync_opens: 0,
+            apc_reads: 0,
+            event_reads: 0,
+            bare_reads: 0,
+            iocp_binds: 0,
+            fills_started: 0,
+            fills_completed: 0,
+            fills_failed: 0,
+            fill_bytes: 0,
+            fill_nanos: 0,
+            fill_max_nanos: 0,
+            setinfo_noop: HashMap::new(),
+            passthrough: HashMap::new(),
+            undecodable: HashMap::new(),
+            trace: Vec::new(),
+            stats: HashMap::new(),
+            readdirs: Vec::new(),
+            outcome_counts: [0; OUTCOME_N],
+            outcome_paths: std::array::from_fn(|_| HashMap::new()),
+            copy_up_counts: [0; COPYUP_N],
+            copy_up_bytes: 0,
+            copy_ups: HashMap::new(),
+        }
     }
 }

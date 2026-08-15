@@ -322,17 +322,48 @@ impl Engine {
         // copy already exists.
         if intent.preserves && !ov.has_file(root, &comps) {
             let dest = ov.file_path(root, &comps);
-            // Best-effort by design, and the failure is not silent guesswork:
-            // a director that will not hand over the existing content leaves
-            // the overlay file to be created empty by the write itself, which
-            // is the same thing the path reads as (`Deny`/not-found). What it
-            // must never do is fall back to real disk under the root — see
-            // `cow_seed`.
-            let _ = self.cow_seed(root, &comps, &dest);
+            self.copy_up(root, nt_path, &comps, &dest);
         }
         Decision::Redirect {
             target_nt: to_nt(&ov.file_path(root, &comps).to_string_lossy()),
         }
+    }
+
+    /// The copy-up policy both call sites share: decline outright for a named
+    /// alternate data stream, otherwise seed through the director.
+    ///
+    /// Copy-up is best-effort by design and the caller ignores the result —
+    /// a director that will not hand over the existing content leaves the
+    /// overlay file to be created empty by the write itself, which is the same
+    /// thing the path *reads* as. What it must never do is fall back to real
+    /// disk under the root (see [`Engine::cow_seed`]). But "best-effort" used
+    /// to mean "silent": nothing recorded that the content went missing, and
+    /// this gate's defects have all been the kind a green test suite cannot
+    /// see. Every outcome is now counted and named in the shim's own stats
+    /// report ([`crate::hookstats::CopyUp`]), including the successes, so an
+    /// empty file in a live session is explainable from the report rather than
+    /// by bisection.
+    ///
+    /// **The stream case.** `Engine::resolve` goes through
+    /// `RootMap::canonicalise`, which discards a `:stream` suffix — correctly
+    /// for its own purpose, since `f.esp:s` and `f.esp` are spellings of the
+    /// same *file*. But they are not the same *content*, and copy-up consumes
+    /// the remainder, so seeding a preserving write to `f.esp:s` would fill it
+    /// with `f.esp`'s bytes. That is the same mistake as answering a read of
+    /// `f.esp:probe` with `f.esp` — a containment bug this project has already
+    /// had once, which is why `FuseClient::vpath_under_root` re-attaches the
+    /// suffix on the read path. Declining is the honest answer: nothing here
+    /// knows what a named stream's prior content is, and inventing stream
+    /// support to find out is a different task. Before this change nothing was
+    /// seeded either, because the suffixed vpath came back not-found — so this
+    /// preserves the old behaviour rather than restoring something.
+    fn copy_up(&self, root: RootId, nt_path: &str, rel: &[String], dest: &Path) {
+        use crate::hookstats::{note_copy_up, CopyUp};
+        if vfs_redirect::split_stream_suffix(nt_path).1.is_some() {
+            note_copy_up(CopyUp::DeclinedStream, root.0, &rel.join("/"), 0);
+            return;
+        }
+        let _ = self.cow_seed(root, rel, dest);
     }
 
     /// Materialise `(root, rel)`'s existing content at `dest` by reading it
@@ -376,40 +407,64 @@ impl Engine {
     ///   partially written `dest` is removed, so "false" means the same thing
     ///   it always did: nothing was seeded, and the caller's write starts from
     ///   an empty overlay file.
-    /// - **It cannot re-enter the hook that called it.** `decide_open` runs
-    ///   inside `create_hook`, so `File::create(dest)` below is an NT open
-    ///   made from inside a hook — and `dest` is a path the shim itself
-    ///   chose, which nothing says cannot be under a managed root. Without a
-    ///   guard that open re-enters `create_hook` -> `decide_open` -> here, and
-    ///   recurses until the stack is gone (this project has already lost a
-    ///   process to exactly that shape twice: `vfs_redirect`'s
-    ///   `OS_CONSULT_DEPTH` and this file's own `MAP_INIT_DEPTH`).
-    ///   [`crate::hook::ShimIoGuard`] is the crate's existing answer — the same
-    ///   counter `create_hook` tests on entry before trampolining straight to
-    ///   the real ntdll — held across the whole seed. Held rather than
-    ///   declined-on-conflict for the destination's sake: while it is up, our
-    ///   own writes reach the real filesystem instead of being re-decided.
+    /// - **It cannot be re-decided by the hook that called it.**
+    ///   `decide_open` runs inside `create_hook`, so `File::create(dest)`
+    ///   below is an NT open made from inside a hook — and `dest` is a path
+    ///   the shim itself chose, which nothing says cannot be under a managed
+    ///   root. Unguarded, that open is answered by the VFS instead of the
+    ///   filesystem, and copy-up's bytes land somewhere other than where the
+    ///   very same `decide_open` call is about to point the game — the failure
+    ///   `cow_seed_reentrancy.rs` reproduces. Note it is *misrouting*, not
+    ///   stack exhaustion: `File::create` truncates, so the re-entered
+    ///   `decide_open` does not take the `intent.preserves` branch and does
+    ///   not recurse. Unbounded recursion is the same family (this project has
+    ///   lost a process to it twice: `vfs_redirect`'s `OS_CONSULT_DEPTH` and
+    ///   this file's own `MAP_INIT_DEPTH`) and would need a preserving
+    ///   shim-issued open on an under-root destination — not reachable today,
+    ///   and not something to leave depending on which disposition a helper
+    ///   happens to use. [`crate::hook::ShimIoGuard`] is the crate's existing
+    ///   answer — the same counter `create_hook` tests on entry before
+    ///   trampolining straight to the real ntdll — held across the whole seed.
+    ///   Held rather than declined-on-conflict for the destination's sake:
+    ///   while it is up, our own writes reach the real filesystem instead of
+    ///   being re-decided.
+    ///
+    /// Every exit is counted and named in the shim's stats report — see
+    /// [`Engine::copy_up`] for why a silent best-effort was not good enough.
     fn cow_seed(&self, root: RootId, rel: &[String], dest: &Path) -> bool {
+        use crate::hookstats::{note_copy_up, CopyUp};
         if rel.is_empty() {
             return false;
         }
+        let vpath = rel.join("/");
         // No director, no copy-up. The old code's answer here was to read the
         // disk, which is the whole bug; a shim with no ring has no legitimate
         // source for these bytes.
         let Some(client) = crate::fuse_client::global() else {
+            note_copy_up(CopyUp::DeclinedNoDirector, root.0, &vpath, 0);
             return false;
         };
         // Already inside shim-initiated I/O on this thread: this call *is* the
         // recursion the guard exists to stop, so decline rather than deepen it.
         let Some(_io) = crate::hook::ShimIoGuard::enter() else {
+            note_copy_up(CopyUp::DeclinedReentrant, root.0, &vpath, 0);
             return false;
         };
-        if seed_from_director(client, root, &rel.join("/"), dest) {
+        let (outcome, bytes) = seed_from_director(client, root, &vpath, dest);
+        note_copy_up(outcome, root.0, &vpath, bytes);
+        if outcome == CopyUp::Seeded {
             return true;
         }
         // Failed part-way: a truncated seed is worse than none, because the
         // game would edit it believing it whole. Leave the caller the empty
         // overlay file it gets for any other unseedable path.
+        //
+        // Runs even when `File::create` was never reached (the OPEN failed, or
+        // the vpath is a directory), which is safe only because both callers
+        // gate on `!ov.has_file(...)`: `dest` did not exist when copy-up
+        // started, so there is nothing here for this to destroy. A future
+        // caller that seeds over an existing overlay copy must move this
+        // cleanup inside the "we created it" case first.
         let _ = std::fs::remove_file(dest);
         false
     }
@@ -475,13 +530,14 @@ impl Engine {
         ov.ensure_parent(from_root, &from);
         if !ov.has_file(from_root, &from) {
             let dest = ov.file_path(from_root, &from);
-            // Same contract as `decide_open`'s copy-up: a director that
-            // declines leaves nothing at `dest`, so the rename moves an
-            // absent/empty file rather than one seeded off real disk. The
-            // rename itself is still handled (`true`) — declining here would
-            // hand the operation back to the real filesystem, which is the
-            // one outcome an under-root path must never get.
-            let _ = self.cow_seed(from_root, &from, &dest);
+            // Same policy as `decide_open`'s copy-up, through the same
+            // function: a director that declines leaves nothing at `dest`, so
+            // the rename moves an absent/empty file rather than one seeded off
+            // real disk, and the reason is recorded either way. The rename
+            // itself is still handled (`true`) — declining here would hand the
+            // operation back to the real filesystem, which is the one outcome
+            // an under-root path must never get.
+            self.copy_up(from_root, from_nt, &from, &dest);
         }
         ov.rename(from_root, &from, &to);
         true
@@ -519,20 +575,29 @@ impl Engine {
 /// [`Engine::cow_seed`] so the handle is closed on every path out of the read
 /// loop, including the failing ones — a leaked `fh` is a provider-side file
 /// the director never releases.
+///
+/// Returns the outcome to record plus the bytes written (0 unless seeded).
 fn seed_from_director(
     client: &crate::fuse_client::FuseClient,
     root: RootId,
     vpath: &str,
     dest: &Path,
-) -> bool {
+) -> (crate::hookstats::CopyUp, u64) {
+    use crate::hookstats::CopyUp;
     let Ok(opened) = client.open(root, vpath) else {
-        return false;
+        return (CopyUp::DirectorRefused, 0);
     };
-    // A directory is not copy-up material; `File::create` on `dest` would
-    // otherwise leave a zero-length file standing in for one.
-    let ok = !opened.is_dir && write_director_file(client, opened.fh, opened.size, dest);
+    let out = if opened.is_dir {
+        // A directory is not copy-up material; `File::create` on `dest` would
+        // otherwise leave a zero-length file standing in for one. Recorded as
+        // a refusal rather than a read failure: the director answered
+        // correctly, this path just has nothing to copy up.
+        (CopyUp::DirectorRefused, 0)
+    } else {
+        write_director_file(client, opened.fh, opened.size, dest)
+    };
     let _ = client.close(opened.fh);
-    ok
+    out
 }
 
 /// Stream `size` bytes of `fh` into a freshly created `dest`.
@@ -547,9 +612,10 @@ fn write_director_file(
     fh: u64,
     size: u64,
     dest: &Path,
-) -> bool {
+) -> (crate::hookstats::CopyUp, u64) {
+    use crate::hookstats::CopyUp;
     let Ok(mut f) = std::fs::File::create(dest) else {
-        return false;
+        return (CopyUp::DestWriteFailed, 0);
     };
     // A zero-byte file in the provider graph copies up as a zero-byte overlay
     // file — the loop below simply does not run. The lower clamp bound only
@@ -559,17 +625,20 @@ fn write_director_file(
     while done < size {
         let want = ((size - done) as usize).min(buf.len());
         let Ok(n) = client.read_fragmented(fh, done, &mut buf[..want]) else {
-            return false;
+            return (CopyUp::ReadFailed, done);
         };
         if n == 0 {
-            return false;
+            return (CopyUp::ReadFailed, done);
         }
         if f.write_all(&buf[..n]).is_err() {
-            return false;
+            return (CopyUp::DestWriteFailed, done);
         }
         done += n as u64;
     }
-    f.flush().is_ok()
+    if f.flush().is_err() {
+        return (CopyUp::DestWriteFailed, done);
+    }
+    (CopyUp::Seeded, done)
 }
 
 #[cfg(test)]
