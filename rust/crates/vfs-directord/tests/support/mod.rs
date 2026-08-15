@@ -275,6 +275,76 @@ pub fn classified_paths(shim_report: &Path) -> (BTreeSet<String>, bool) {
     (paths, truncated)
 }
 
+/// One line of the shim report's `directory enumerations` section — one
+/// `NtQueryDirectoryFile(Ex)` listing the shim built or declined to build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadDirRecord {
+    /// `vfs_shim::hookstats::ReadDirSource::label()` — `director`,
+    /// `contained`, or `OS`. This is the field that says *which mechanism
+    /// produced the listing*, and it is the whole reason this parser exists:
+    /// until gate 4 task 8b the counter was a `served: bool` that read `true`
+    /// both for a director-authored listing and for one drained off the real
+    /// directory behind the mount, so no assertion could tell them apart.
+    pub source: String,
+    /// How many entries the shim handed back. `0` for an `OS` row: the shim
+    /// never sees the entries the OS returns for a path outside every root.
+    pub count: u64,
+    /// The wildcard the caller asked for, or `*`.
+    pub filter: String,
+    /// The enumerated directory, lowercased by the reporter.
+    pub dir: String,
+}
+
+const READDIRS_HEADER: &str = "\ndirectory enumerations (";
+
+/// Parse the shim report's `directory enumerations` section. Returns an empty
+/// vector for a report with no such section (including a missing file) rather
+/// than erroring — same tolerance `classified_paths` has, and for the same
+/// reason: a process that exits before the reporter's first tick writes no
+/// report at all, and that must surface as a named assertion failure at the
+/// call site, not a parse panic here.
+pub fn readdir_records(shim_report: &Path) -> Vec<ReadDirRecord> {
+    parse_readdirs(&std::fs::read_to_string(shim_report).unwrap_or_default())
+}
+
+fn parse_readdirs(text: &str) -> Vec<ReadDirRecord> {
+    let mut out = Vec::new();
+    let Some(idx) = text.find(READDIRS_HEADER) else {
+        return out;
+    };
+    // Skip the header line itself; the section runs until the first line that
+    // is not one of its own two-space-indented rows (the next section's
+    // leading blank line, in practice).
+    let after = &text[idx + 1..];
+    for line in after.lines().skip(1) {
+        if !line.starts_with("  ") {
+            break;
+        }
+        // `"  {source:<9} {count:>4} entries  filter={filter:<16} {dir}"` —
+        // mirrored from `vfs_shim::hookstats::note_readdir`.
+        let mut it = line.trim_start().splitn(2, char::is_whitespace);
+        let Some(source) = it.next() else { continue };
+        let Some(rest) = it.next() else { continue };
+        let rest = rest.trim_start();
+        let Some((count_str, rest)) = rest.split_once(' ') else { continue };
+        let Ok(count) = count_str.parse::<u64>() else { continue };
+        let Some(rest) = rest.trim_start().strip_prefix("entries") else { continue };
+        let Some(rest) = rest.trim_start().strip_prefix("filter=") else { continue };
+        // The filter field is left-padded to 16 and the directory follows it,
+        // so the *first* run of whitespace after the filter token separates
+        // them. A directory path can contain spaces; a wildcard here cannot
+        // (it is one path component the caller passed to `FindFirstFileW`).
+        let Some((filter, dir)) = rest.split_once(char::is_whitespace) else { continue };
+        out.push(ReadDirRecord {
+            source: source.to_string(),
+            count,
+            filter: filter.to_string(),
+            dir: dir.trim().to_ascii_lowercase(),
+        });
+    }
+    out
+}
+
 /// Reconcile the shim's `routed` under-root-open count (read from
 /// `shim_report`) against the director's total arrived-open count (supplied
 /// by the caller as `opens_ok`, which must be `opens_ok + opens_err` — see
@@ -505,6 +575,51 @@ mod tests {
         let (paths, truncated) = classified_paths(&report);
         assert!(paths.is_empty());
         assert!(!truncated);
+    }
+
+    /// Mirrors `vfs_shim::hookstats::note_readdir`'s exact row shape, so this
+    /// parser fails loudly here if that format string ever drifts.
+    fn render_readdir_row(source: &str, count: u64, filter: &str, dir: &str) -> String {
+        format!("  {source:<9} {count:>4} entries  filter={filter:<16} {dir}\n")
+    }
+
+    #[test]
+    fn parses_every_readdir_row_with_its_source() {
+        let text = format!(
+            "vfs-shim hook stats (pid 1)\n\ndirectory enumerations (3):\n{}{}{}\n\
+             under-root open outcomes:\n",
+            render_readdir_row("director", 2, "*", r"\??\c:\root\games\skyrim\data"),
+            render_readdir_row("contained", 0, "*.esp", r"\??\c:\root\other"),
+            render_readdir_row("OS", 0, "*", r"c:\windows\system32"),
+        );
+        let rows = parse_readdirs(&text);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0].source, "director");
+        assert_eq!(rows[0].count, 2);
+        assert_eq!(rows[0].filter, "*");
+        assert_eq!(rows[0].dir, r"\??\c:\root\games\skyrim\data");
+        assert_eq!(rows[1].source, "contained");
+        assert_eq!(rows[1].filter, "*.esp");
+        assert_eq!(rows[2].source, "OS");
+        // The section stops at the next section rather than swallowing it.
+        assert!(rows.iter().all(|r| !r.dir.contains("outcomes")));
+    }
+
+    #[test]
+    fn readdir_rows_keep_directory_paths_containing_spaces_intact() {
+        let text = format!(
+            "\ndirectory enumerations (1):\n{}",
+            render_readdir_row("director", 1, "*", r"\??\c:\program files\game\data"),
+        );
+        let rows = parse_readdirs(&text);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].dir, r"\??\c:\program files\game\data");
+    }
+
+    #[test]
+    fn missing_readdir_section_parses_as_empty_not_an_error() {
+        assert!(parse_readdirs("vfs-shim hook stats (pid 1)\n").is_empty());
+        assert!(parse_readdirs("").is_empty());
     }
 
     #[test]

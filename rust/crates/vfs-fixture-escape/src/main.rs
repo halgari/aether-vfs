@@ -147,6 +147,33 @@
 //! `metadata_queries_are_sealed_for_canonicaliser_only_spellings` for the
 //! test that uses it.
 //!
+//! **Vector `enum`: directory enumeration, opt-in only, not part of the
+//! fourteen-vector matrix either.** Every other vector in this file asks
+//! "can this spelling reach the target?". This one asks the question no
+//! vector asked: **what does a listing of the directory the target sits in
+//! show?** Enumeration is a separate mechanism from the open path — it runs
+//! on an already-opened handle, through `NtQueryDirectoryFile(Ex)`, and its
+//! own under-root predicate is the FUSE client's rather than
+//! `RootMap::decide` — so the containment of one is not the containment of
+//! the other. `rust/docs/escape-matrix.md` asserted for two gates that it
+//! was, by argument rather than by test; gate 4 task 8b found a live
+//! real-disk drain sitting behind that argument. This vector is the
+//! measurement that replaced it.
+//!
+//! It lists the target's parent with `std::fs::read_dir`
+//! (`FindFirstFileW`/`FindNextFileW` on Windows) and reports
+//! `listed:<count>` with the sorted entry names packed into its `<note>`
+//! field, separated by `|` — a character no Windows filename may contain, so
+//! no name can forge a boundary. That shape lets a caller assert both
+//! directions of the same listing: the provider-served name must be present
+//! *and* a physically-present, unserved file must be absent. Asserting only
+//! the second would pass on a listing that came back empty because
+//! everything broke.
+//!
+//! Dispatched only when `VFS_ESCAPE_ONLY_VECTOR` is exactly `"enum"`. See
+//! `crates/vfs-directord/tests/e2e.rs`'s
+//! `directory_enumeration_under_a_managed_root_hides_an_unserved_real_file`.
+//!
 //! **`VFS_ESCAPE_ONLY_VECTOR`**: when set to one of the vector ids above,
 //! every *other* vector is skipped entirely — not merely omitted from the
 //! output, but never constructed or attempted, so the shim's own hook-stats
@@ -633,6 +660,55 @@ fn vector4_metadata_query(abs: &str) -> Line {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// Vector `enum`: list the target's own parent directory. Opt-in only — see
+// the module doc comment ("Vector `enum`").
+// ---------------------------------------------------------------------
+
+/// Separates the entry names packed into this vector's `<note>` field.
+/// Mirrored by `crates/vfs-directord/tests/e2e.rs`, which splits on it.
+/// A Windows filename cannot contain `|`, so no name can forge a boundary.
+const ENUM_NAME_SEP: char = '|';
+
+fn vector_enum_listing(abs: &str) -> Line {
+    let Some((dir, _name)) = parent_dir_and_filename(abs) else {
+        return unbuildable("enum", abs, "target path has no parent directory to enumerate");
+    };
+    // `std::fs::read_dir` is `FindFirstFileW`/`FindNextFileW` on Windows,
+    // which reaches `NtOpenFile` on the directory plus
+    // `NtQueryDirectoryFile(Ex)` with a `*` wildcard — the two hooks
+    // `serve_dir_query` sits behind. Deliberately the ordinary API a game or
+    // a mod manager would use, not a hand-rolled NT call: this vector is
+    // about what an unremarkable listing shows, and the two entry points'
+    // agreement is already covered by `vfs-shim`'s `hook_enum_parity`.
+    match std::fs::read_dir(&dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Line::new("enum", dir, "not-found", ENUM_NOTE)
+        }
+        Err(e) => Line::new(
+            "enum",
+            dir,
+            format!("error:read-dir:{}", e.raw_os_error().unwrap_or(-1)),
+            ENUM_NOTE,
+        ),
+        Ok(rd) => {
+            let mut names: Vec<String> = rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            // The count is in the outcome and the names are in the note, so a
+            // caller can assert presence *and* absence, and a listing that
+            // came back empty is never mistaken for one that was not
+            // attempted.
+            Line::new("enum", dir, format!("listed:{}", names.len()), names.join(&ENUM_NAME_SEP.to_string()))
+        }
+    }
+}
+
+const ENUM_NOTE: &str = "directory enumeration of the target's parent (std::fs::read_dir -> \
+                         FindFirstFileW); on failure there are no names to report";
 
 // ---------------------------------------------------------------------
 // Vector 5: handle-relative open via OBJECT_ATTRIBUTES.RootDirectory.
@@ -1262,6 +1338,13 @@ fn main() {
     // module doc comment ("Vector `4m`") for why it exists.
     if only_vector.as_deref() == Some("4m") {
         lines.push(guarded("4m", || vector4_metadata_query(&abs)));
+    }
+    // Opt-in only for the same reason `4m` is, and gated the same way: it
+    // reports a *listing*, not an open outcome, so it belongs to neither
+    // expectation table and must never change an existing matrix run's line
+    // count. See the module doc comment ("Vector `enum`").
+    if only_vector.as_deref() == Some("enum") {
+        lines.push(guarded("enum", || vector_enum_listing(&abs)));
     }
     if wanted("5") {
         lines.push(guarded("5", || vector5_handle_relative(&abs)));

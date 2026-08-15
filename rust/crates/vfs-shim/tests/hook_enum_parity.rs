@@ -16,14 +16,23 @@
 //! (`vfs_shim::install`, not a real launch). Before Task 4, a directory
 //! listing without a director still merged in the snapshot's virtual
 //! children and hid its tombstones (`RootMap::merge_directory`). That local
-//! merge is deleted: with no director, a listing is exactly the real
-//! directory (plus any write-overlay entries, gate 4's mechanism, unaffected
-//! here). So `added.esm` (mod-only) no longer appears, and `hidden.esp`
-//! (tombstoned only in the snapshot) is no longer hidden — both assertions
-//! below were flipped for that reason. The two-entry-point agreement itself —
-//! this test's actual point — is unchanged and still the thing being proven:
-//! whatever the real directory contains, both entry points must show it
-//! identically.
+//! merge is deleted, so `added.esm` (mod-only) no longer appears and
+//! `hidden.esp` (tombstoned only in the snapshot) is no longer hidden — both
+//! assertions below were flipped for that reason. The two-entry-point
+//! agreement itself — this test's actual point — is unchanged and still the
+//! thing being proven: whatever the listing contains, both entry points must
+//! show it identically.
+//!
+//! Gate 4, Task 8b correction: this comment used to say a no-director listing
+//! "is exactly the real directory (plus any write-overlay entries)". That was
+//! true, and it was the bug — `serve_dir_query` drained the real directory
+//! behind the mount for any listing the director could not be asked about, so
+//! a real, unserved file under a managed root was listed by name. The drain
+//! is deleted; a no-director listing is now the write overlay's own entries
+//! and nothing else. The expectations below did not move, because the
+//! directory this test lists (`Data`, made overlay-backed by the Gate 3 Task 5
+//! note below) *is* the overlay's own physical directory, so the overlay
+//! answers with exactly what the drain used to return for it.
 //!
 //! Gate 3, Task 5 flip: `RootMap::decide` now denies (rather than passes
 //! through) any `Dir`/`NotFound` resolution, and this test's own enumerated
@@ -126,10 +135,12 @@ fn classic_and_ex_enumeration_agree() {
     );
 
     // Spell out what the listing must contain, so a result that is merely
-    // *consistently wrong* still fails. With no director, this is exactly the
-    // real directory: `real.txt` and `hidden.esp` (real files) show, and
-    // `added.esm` (mod-only, snapshot only) does not — see the module doc
-    // comment for why this flipped from the old merged-view expectations.
+    // *consistently wrong* still fails. With no director, this is the write
+    // overlay's own entries: `real.txt` and `hidden.esp` (both physically in
+    // the overlay) show, and `added.esm` (mod-only, snapshot only) does not —
+    // see the module doc comment for why this flipped from the old merged-view
+    // expectations, and for why it did *not* move again when gate 4 task 8b
+    // deleted the real-directory drain.
     assert!(
         via_classic.iter().any(|n| n == "real.txt"),
         "real.txt missing: {via_classic:?}"

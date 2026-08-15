@@ -839,46 +839,6 @@ pub fn write_dir_info(
     DirWriteResult { bytes: last_end, count, status }
 }
 
-/// Parse a `FILE_FULL_DIR_INFORMATION` (class 2) chain into items, skipping `.`
-/// and `..`. Bounds-checked: a record that would read past `buf` ends the walk
-/// (fail-safe, never panics). The shim always *drains the OS in class 2*, so
-/// only this one class needs a parser.
-pub fn parse_full_dir_info(buf: &[u8]) -> Vec<DirItem> {
-    const HDR: usize = 68;
-    let mut out = Vec::new();
-    let mut o = 0usize;
-    loop {
-        if o + HDR > buf.len() {
-            break;
-        }
-        let next = u32::from_le_bytes(buf[o..o + 4].try_into().unwrap()) as usize;
-        let size = i64::from_le_bytes(buf[o + 40..o + 48].try_into().unwrap());
-        let attrs = u32::from_le_bytes(buf[o + 56..o + 60].try_into().unwrap());
-        let namelen = u32::from_le_bytes(buf[o + 60..o + 64].try_into().unwrap()) as usize;
-        if o + HDR + namelen > buf.len() {
-            break;
-        }
-        let units: Vec<u16> = buf[o + HDR..o + HDR + namelen]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        let name = String::from_utf16_lossy(&units);
-        if !name.is_empty() && name != "." && name != ".." {
-            out.push(DirItem {
-                name,
-                is_dir: attrs & 0x10 != 0,
-                size: size.max(0) as u64,
-                mtime: 0,
-            });
-        }
-        if next == 0 {
-            break;
-        }
-        o += next;
-    }
-    out
-}
-
 /// NtCreateFile create dispositions.
 pub const FILE_SUPERSEDE: u32 = 0;
 pub const FILE_OPEN: u32 = 1;
@@ -1448,29 +1408,6 @@ mod tests {
         assert_eq!(DirInfoClass::from_u32(3), Some(DirInfoClass::BothDirectory));
         assert_eq!(DirInfoClass::from_u32(12), Some(DirInfoClass::Names));
         assert_eq!(DirInfoClass::from_u32(99), None);
-    }
-
-    #[test]
-    fn parse_full_dir_round_trips_and_skips_dots() {
-        let items = [
-            ditem(".", true, 0),
-            ditem("..", true, 0),
-            ditem("keep.esp", false, 42),
-            ditem("kids", true, 0),
-        ];
-        let mut buf = vec![0u8; 4096];
-        let w = write_dir_info(DirInfoClass::FullDirectory, &items, &mut buf, false);
-        assert_eq!(w.status, DirStatus::Success);
-        let parsed = parse_full_dir_info(&buf);
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0], DirItem { name: "keep.esp".into(), is_dir: false, size: 42, mtime: 0 });
-        assert_eq!(parsed[1], DirItem { name: "kids".into(), is_dir: true, size: 0, mtime: 0 });
-    }
-
-    #[test]
-    fn parse_full_dir_empty_buffer_is_empty() {
-        let buf = vec![0u8; 68];
-        let _ = parse_full_dir_info(&buf); // must not panic
     }
 
     #[test]

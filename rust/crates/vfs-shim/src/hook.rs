@@ -126,7 +126,7 @@ fn fuse_skyrim_exe() -> bool {
 
 use retour::RawDetour;
 use vfs_redirect::{
-    nt_to_volume_relative, parse_full_dir_info, write_dir_info, write_file_name_info,
+    nt_to_volume_relative, write_dir_info, write_file_name_info,
     Decision, DirInfoClass, DirItem, DirStatus,
 };
 use windows_sys::Win32::Foundation::{HANDLE, HMODULE, NTSTATUS};
@@ -216,9 +216,15 @@ static SELF_DLL: OnceLock<String> = OnceLock::new();
 /// before resuming the child anyway (unvirtualized rather than hung).
 const CHILD_READY_TIMEOUT_MS: u32 = 5_000;
 
-/// Per-handle enumeration cursor over a merged directory listing.
+/// Per-handle enumeration cursor over a built directory listing.
+///
+/// The field was `merged` when a listing really was a merge of the real
+/// directory with a snapshot or overlay. Nothing merges any more: under a
+/// managed root this is the director's own `readdir`, whole and unaltered
+/// (see `serve_dir_query`), and a directory outside every root never gets an
+/// `EnumState` at all — the OS answers it directly.
 struct EnumState {
-    merged: Vec<DirItem>,
+    entries: Vec<DirItem>,
     cursor: usize,
 }
 
@@ -3191,39 +3197,6 @@ unsafe fn wildcard_of(file_name: *const UnicodeString) -> Option<String> {
     }
 }
 
-/// Drain a real directory's entries by calling the trampoline in class 2
-/// (FileFullDirectoryInformation) with SL_RESTART_SCAN, until a negative status
-/// (STATUS_NO_MORE_FILES or any error). The trampoline bypasses this detour, so
-/// draining does not recurse.
-unsafe fn drain_real(handle: HANDLE, tramp: NtQueryDirectoryFileExFn) -> Vec<DirItem> {
-    const CLASS_FULL_DIR: u32 = 2;
-    let mut out = Vec::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut first = true;
-    loop {
-        let mut local_iosb = [0u8; 16];
-        let flags = if first { SL_RESTART_SCAN } else { 0 };
-        first = false;
-        let st = tramp(
-            handle,
-            core::ptr::null_mut(),
-            core::ptr::null(),
-            core::ptr::null(),
-            local_iosb.as_mut_ptr() as *mut c_void,
-            buf.as_mut_ptr() as *mut c_void,
-            buf.len() as u32,
-            CLASS_FULL_DIR,
-            flags,
-            core::ptr::null(),
-        );
-        if st < 0 {
-            break; // STATUS_NO_MORE_FILES or an error ends the drain
-        }
-        out.extend(parse_full_dir_info(&buf));
-    }
-    out
-}
-
 #[allow(clippy::too_many_arguments)]
 unsafe extern "system" fn qdirex_hook(
     handle: HANDLE,
@@ -3252,7 +3225,6 @@ unsafe extern "system" fn qdirex_hook(
         flags & SL_RETURN_SINGLE_ENTRY != 0,
         file_name,
         &|| tramp(handle, event, apc, apc_ctx, iosb, info, length, class_raw, flags, file_name),
-        &|h| drain_real(h, tramp),
     )
 }
 
@@ -3276,9 +3248,6 @@ unsafe extern "system" fn qdir_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    // Draining still goes through the Ex trampoline: it is the same directory
-    // and the Ex form is what `drain_real` speaks. Fall back to the classic
-    // trampoline if Ex was never resolved.
     serve_dir_query(
         handle,
         iosb,
@@ -3294,42 +3263,7 @@ unsafe extern "system" fn qdir_hook(
                 restart,
             )
         },
-        &|h| match TRAMP_QDIREX {
-            Some(ex) => drain_real(h, ex),
-            None => drain_real_classic(h, tramp),
-        },
     )
-}
-
-/// `drain_real` for the classic trampoline, used only when `Ex` is unavailable.
-unsafe fn drain_real_classic(handle: HANDLE, tramp: NtQueryDirectoryFileFn) -> Vec<DirItem> {
-    const CLASS_FULL_DIR: u32 = 2;
-    let mut out = Vec::new();
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut first = true;
-    loop {
-        let mut local_iosb = [0u8; 16];
-        let restart = if first { 1u8 } else { 0u8 };
-        first = false;
-        let st = tramp(
-            handle,
-            core::ptr::null_mut(),
-            core::ptr::null(),
-            core::ptr::null(),
-            local_iosb.as_mut_ptr() as *mut c_void,
-            buf.as_mut_ptr() as *mut c_void,
-            buf.len() as u32,
-            CLASS_FULL_DIR,
-            0,
-            core::ptr::null(),
-            restart,
-        );
-        if st < 0 {
-            break;
-        }
-        out.extend(parse_full_dir_info(&buf));
-    }
-    out
 }
 
 /// Shared body for both enumeration entry points.
@@ -3344,7 +3278,6 @@ unsafe fn serve_dir_query(
     single: bool,
     file_name: *const UnicodeString,
     passthrough: &dyn Fn() -> NTSTATUS,
-    drain: &dyn Fn(HANDLE) -> Vec<DirItem>,
 ) -> NTSTATUS {
     // Unknown info class -> let the OS handle it verbatim.
     let class = match DirInfoClass::from_u32(class_raw) {
@@ -3371,7 +3304,7 @@ unsafe fn serve_dir_query(
                         &dir,
                         wildcard_of(file_name).as_deref(),
                         0,
-                        false,
+                        crate::hookstats::ReadDirSource::Os,
                     );
                 }
                 return passthrough();
@@ -3380,24 +3313,66 @@ unsafe fn serve_dir_query(
         }
     };
 
-    // Phase 2 (unlocked): build listing. Prefer director OP_READDIR when FUSE
-    // is live and recognises this directory — its answer is authoritative,
-    // never merged with anything real. Otherwise (no director, or this
-    // particular directory is not one the director's own root notion
-    // recognises — see `path_is_ours`'s doc comment on why that can differ
-    // from the engine's) Task 4 removed the local snapshot merge
-    // (`RootMap::merge_directory`/`Engine::merge_directory`) that used to
-    // paper over this case: the fallback is now exactly the real directory's
-    // own entries, with only the shim-local write overlay (gate 4's
-    // mechanism, untouched here) layered on top via `overlay_listing`.
-    // `drain_real` may call the syscall, so the lock must NOT be held here
-    // (NtClose also takes it).
+    // Phase 2 (unlocked): build the listing. The handle only reached
+    // `DIR_TABLE` because `tag_under_root` found `path_is_ours` true for it,
+    // so *every* listing built here is a listing under a managed root — and
+    // the governing invariant says the real filesystem beneath a managed root
+    // is unreachable by any spelling. A directory listing is a spelling. So
+    // there are exactly two things that may appear in one:
+    //
+    // 1. What the director serves. When the FUSE client recognises the
+    //    directory its `readdir` is the whole answer, authoritative and
+    //    unmerged.
+    // 2. Failing that, the shim-local write overlay's own entries — content
+    //    this process created through gate 4's write path, which physically
+    //    lives outside the root and which the director may not know about.
+    //
+    // What may **not** appear is the real directory behind the mount.
+    // Until gate 4 task 8b this function had a third branch that drained
+    // exactly that (`drain_real` over the handle) whenever the client was
+    // absent or did not recognise the path, and put the overlay on top of it —
+    // so a real, unserved file under a managed root was listed. Reads,
+    // metadata and writes were each sealed and proven by the escape matrix;
+    // enumeration was only ever *argued* to follow from read-open containment,
+    // and it does not follow: the two mechanisms have separate predicates and
+    // this one had no test at all. The drain is gone, along with `drain_real`,
+    // `drain_real_classic` and `parse_full_dir_info`, so containment here is
+    // structural rather than conditional — there is no longer any code that
+    // can read a real directory into a served listing.
+    //
+    // The two ways of reaching case 2 are different failures and are recorded
+    // as such even though they answer the same way:
+    //
+    // - **No client at all.** Standalone mode is retired (see
+    //   `fuse_client::FuseInitError`): bootstrap aborts the launch when the
+    //   ring cannot be attached, so an injected game process always has one.
+    //   Only this crate's own hook tests reach here, via `vfs_shim::install`
+    //   with no ring. Answering "the overlay, and nothing else" is what those
+    //   harnesses already observe, because the handle they hold *is* the
+    //   overlay's physical directory; and it is the only answer that does not
+    //   make "no director" mean "the real tree is visible", which is precisely
+    //   the un-virtualised launch the retirement of standalone mode exists to
+    //   make impossible.
+    // - **A client that does not recognise this directory.** The engine's root
+    //   notion accepted the path at open time and the client's did not. Both
+    //   are `RootMap`s over the same declared roots today (the client also
+    //   holds the staged-launch alias, making it a superset), so this should
+    //   be unreachable — but these two predicates *have* drifted apart before,
+    //   for five spellings at once, and the code comment this task inherited
+    //   says plainly that they "can differ". It gets its own counter rather
+    //   than a shared one, so the drift is visible as a number instead of as a
+    //   directory that mysteriously lists nothing.
+    //
+    // The ring round trip and the overlay's own `read_dir` both call out, so
+    // the lock must NOT be held here (NtClose also takes it).
     let rebuilt = if need_build {
         let wildcard = wildcard_of(file_name);
-        if let Some(client) = crate::fuse_client::global() {
-            if let Some((root, vpath)) = client.vpath_under_root(&dir_path) {
+        let routed = crate::fuse_client::global()
+            .and_then(|c| c.vpath_under_root(&dir_path).map(|hit| (c, hit)));
+        match routed {
+            Some((client, (root, vpath))) => {
                 let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
-                match client.readdir(root, vp) {
+                let items = match client.readdir(root, vp) {
                     Ok(entries) => {
                         let mut items: Vec<DirItem> = entries
                             .into_iter()
@@ -3414,29 +3389,31 @@ unsafe fn serve_dir_query(
                                     || i.name.eq_ignore_ascii_case(w)
                             });
                         }
-                        Some(items)
+                        items
                     }
-                    Err(_) => Some(Vec::new()),
-                }
-            } else {
-                let real = drain(handle);
-                Some(match ENGINE.get() {
-                    Some(engine) => engine.overlay_listing(&dir_path, &real, wildcard.as_deref()),
-                    None => real,
-                })
+                    Err(_) => Vec::new(),
+                };
+                Some((items, crate::hookstats::ReadDirSource::Director))
             }
-        } else {
-            let real = drain(handle);
-            Some(match ENGINE.get() {
-                Some(engine) => engine.overlay_listing(&dir_path, &real, wildcard.as_deref()),
-                None => real,
-            })
+            None => {
+                // No real base to layer onto — that is the whole point. An
+                // overlay-only listing is `overlay_listing` over an empty
+                // base, which also means every entry now passes through the
+                // wildcard filter: `apply_to_listing` only filters what it
+                // *adds*, so the drained base used to skip the filter
+                // entirely and answer `*.esp` with the whole directory.
+                let items = match ENGINE.get() {
+                    Some(engine) => engine.overlay_listing(&dir_path, &[], wildcard.as_deref()),
+                    None => Vec::new(),
+                };
+                Some((items, crate::hookstats::ReadDirSource::ContainedNoDirector))
+            }
         }
     } else {
         None
     };
 
-    // Phase 3 (locked): store the merged view (if rebuilt) and serve a slice.
+    // Phase 3 (locked): store the built listing (if rebuilt) and serve a slice.
     let mut table = match DIR_TABLE.lock() {
         Ok(t) => t,
         Err(_) => return passthrough(),
@@ -3445,21 +3422,21 @@ unsafe fn serve_dir_query(
         Some(t) => t,
         None => return passthrough(),
     };
-    if let Some(merged) = rebuilt {
+    if let Some((entries, source)) = rebuilt {
         crate::hookstats::note_readdir(
             &dir_path,
             wildcard_of(file_name).as_deref(),
-            merged.len(),
-            true,
+            entries.len(),
+            source,
         );
-        tracked.state = Some(EnumState { merged, cursor: 0 });
+        tracked.state = Some(EnumState { entries, cursor: 0 });
     }
     let st = match tracked.state.as_mut() {
         Some(s) => s,
         None => return passthrough(),
     };
     let buf = core::slice::from_raw_parts_mut(info as *mut u8, length as usize);
-    let result = write_dir_info(class, &st.merged[st.cursor..], buf, single);
+    let result = write_dir_info(class, &st.entries[st.cursor..], buf, single);
     st.cursor += result.count;
     drop(table);
 

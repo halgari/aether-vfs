@@ -403,13 +403,22 @@ Two fixes, both about who is awake:
 The lesson encoded in the tooling: report max and stall counts, never a bare
 mean, because the two shapes of "slow" want opposite fixes.
 
-### 4.8 Merged directory listings
+### 4.8 Directory listings
 
-An enumeration must show the union of real and virtual entries, hide
-tombstones, apply the caller's wildcard, honour case-insensitivity, and remain
-stable across the restart-scan and single-entry-at-a-time protocols NT allows.
-It is also stateful: a directory handle carries a cursor, so the merged listing
-is built once per scan and served in slices.
+An enumeration must apply the caller's wildcard, honour case-insensitivity,
+and remain stable across the restart-scan and single-entry-at-a-time protocols
+NT allows. It is also stateful: a directory handle carries a cursor, so the
+listing is built once per scan and served in slices.
+
+It must **not** show the union of real and virtual entries. This section said
+it must until gate 4, and the shim did merge that way; both were wrong for the
+same reason §4.9 gives. A directory listing is a spelling of the paths it
+names, so the sealed root applies to it in full: under a managed root the
+director's `readdir` is the whole answer, never merged with the real directory
+behind the mount. The only other thing that may appear is the shim-local write
+overlay's own entries, and only where the director cannot be asked at all. See
+`serve_dir_query` in `hook.rs`, and `docs/escape-matrix.md`'s "Gate 4, Task 8b"
+for the fall-through this replaced and the test that holds it closed.
 
 ### 4.9 Isolation
 
@@ -510,9 +519,12 @@ on with `VFS_SHIM_STATS_LOG` and answers questions counters normally cannot:
 - per-hook calls, total and **max** time, and a `>1 ms` stall count;
 - **open paths by frequency** — a retry loop reopens one path thousands of
   times, and a deduplicated list hides exactly the path that matters;
-- **every directory enumeration** with its filter, entry count, and whether we
-  served it or the OS did — "listed `Data`, got nothing" and "never listed
-  `Data`" are different bugs with identical symptoms;
+- **every directory enumeration** with its filter, entry count, and which
+  mechanism answered it — `director`, `contained` (under a root, but the
+  director could not be asked: the write overlay alone), or `OS` (outside every
+  root). "Listed `Data`, got nothing" and "never listed `Data`" are different
+  bugs with identical symptoms, and so are "the director listed it" and
+  "something else did";
 - **every attribute query with its outcome**, since a stat that wrongly says no
   never becomes an open;
 - an **ordered trace** of under-root operations, because counts cannot show

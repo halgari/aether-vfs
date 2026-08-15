@@ -175,7 +175,9 @@ fn relative_names_resolve_on_every_decoding_hook() {
     // `read_dir` enumerates via the handle-based directory hooks, which no
     // longer merge the snapshot in (Task 4 deleted `RootMap::merge_directory`),
     // so the mod-only file does not appear, flipped from "must include the
-    // virtual file".
+    // virtual file". Since gate 4 task 8b they do not drain the real directory
+    // either — with no director this listing is the write overlay's own
+    // entries alone, which is where `real_marker.txt` physically lives.
     let listed: Vec<String> = std::fs::read_dir(".")
         .expect("cwd-relative read_dir")
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

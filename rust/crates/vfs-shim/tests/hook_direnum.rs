@@ -8,6 +8,11 @@
 //! a directory the shim could not (or, in this harness, did not) ask a real
 //! director about; Task 4 removed that blending, so a no-director listing
 //! became exactly the real directory — the assertion this test used to make.
+//! That intermediate state was itself the fall-through gate 4 task 8b closed:
+//! a no-director listing is now the write overlay's own entries alone, and
+//! nothing drains a real directory into a served listing any more. This test
+//! never reaches that code — the open is denied one level earlier, see below —
+//! but the sentence above should not be read as describing today's behaviour.
 //!
 //! Task 5 goes one step further: the managed root's own directory node is
 //! always `SnapResolution::Dir` in any snapshot (`SnapshotReader::resolve`'s

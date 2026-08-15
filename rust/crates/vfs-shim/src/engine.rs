@@ -654,29 +654,39 @@ impl Engine {
     }
 
     /// Apply the shim-local write overlay (adds/overrides win, whiteouts
-    /// remove) on top of a directory's real on-disk entries.
+    /// remove) on top of `base`.
     ///
     /// Task 4 deleted `RootMap::merge_directory`, which used to blend the
-    /// published snapshot's virtual children into `real` here — a directory
-    /// listing under a managed root now comes solely from the director's own
-    /// `readdir` (see `hook.rs::serve_dir_query`), never from a local
-    /// snapshot merge. This method keeps only the overlay half: the write
-    /// fallback (gate 4's mechanism, explicitly out of scope for this task)
-    /// still needs a just-created/modified/deleted overlay entry to show up
-    /// in a listing the director cannot itself account for. Fail-safe: no
-    /// overlay configured, or the `RootMap` not currently available (see
-    /// [`Engine::map`]), returns `real` unchanged.
+    /// published snapshot's virtual children in here — a directory listing
+    /// under a managed root comes solely from the director's own `readdir`
+    /// (see `hook.rs::serve_dir_query`), never from a local snapshot merge.
+    /// This method keeps only the overlay half: the write path still needs a
+    /// just-created/modified/deleted overlay entry to show up in a listing
+    /// the director cannot itself account for.
+    ///
+    /// **`base` is always empty at the only call site, and that is the point.**
+    /// It used to be the real directory's own drained entries, which is how a
+    /// real, unserved file under a managed root got listed — gate 4 task 8b
+    /// deleted the drain (see `serve_dir_query`, and `docs/escape-matrix.md`'s
+    /// "Gate 4, Task 8b"). The parameter is kept rather than dropped because
+    /// this method's contract is "overlay on top of whatever the caller
+    /// legitimately has", and the unit tests exercise it with a non-empty
+    /// base; a caller passing a real-disk listing here would be the
+    /// regression, not the signature.
+    ///
+    /// Fail-safe: no overlay configured, or the `RootMap` not currently
+    /// available (see [`Engine::map`]), returns `base` unchanged.
     pub fn overlay_listing(
         &self,
         dir_nt_path: &str,
-        real: &[DirItem],
+        base: &[DirItem],
         wildcard: Option<&str>,
     ) -> Vec<DirItem> {
         match (&self.overlay, self.resolve(dir_nt_path)) {
             (Some(ov), Some((root, comps))) => {
-                ov.apply_to_listing(root, &comps, real.to_vec(), wildcard)
+                ov.apply_to_listing(root, &comps, base.to_vec(), wildcard)
             }
-            _ => real.to_vec(),
+            _ => base.to_vec(),
         }
     }
 }

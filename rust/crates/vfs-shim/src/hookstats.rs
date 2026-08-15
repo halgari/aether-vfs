@@ -631,8 +631,47 @@ fn render_stats(snap: &Snapshot) -> String {
 static READDIRS: Mutex<Option<Vec<String>>> = Mutex::new(None);
 const READDIRS_MAX: usize = 300;
 
-/// `served` distinguishes a listing we produced from one we handed to the OS.
-pub fn note_readdir(dir: &str, wildcard: Option<&str>, count: usize, served: bool) {
+/// Which mechanism produced a directory listing.
+///
+/// This used to be a `served: bool` — "a listing we produced" vs "one we
+/// handed to the OS" — and that is not the distinction containment turns on.
+/// Both of `serve_dir_query`'s under-root branches recorded `served: true`,
+/// including the one that drained the *real* directory behind the mount and
+/// merged the shim-local overlay onto it, so the one counter that could have
+/// shown an under-root listing coming off real disk reported it identically
+/// to a director-authored one. Gate 4 task 8b split the two and deleted the
+/// draining branch; the three-way label is what makes a regression back to it
+/// visible in the report rather than only in the bytes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ReadDirSource {
+    /// The director's own `OP_READDIR` answered. Authoritative and unmerged:
+    /// nothing from the real filesystem can appear in it.
+    Director,
+    /// Under a managed root, but the director could not be asked about this
+    /// directory (no client installed, or its `vpath_under_root` does not
+    /// recognise the path the engine's own root notion accepted). The listing
+    /// is the shim-local write overlay's entries and nothing else — real disk
+    /// is never drained under a managed root. A nonzero count here in a live
+    /// session means the two under-root predicates have drifted apart again.
+    ContainedNoDirector,
+    /// Outside every managed root: the OS answered it verbatim, and the
+    /// recorded count is `0` because the shim never sees the entries.
+    Os,
+}
+
+impl ReadDirSource {
+    /// The token this renders as in the report. Parsed by
+    /// `vfs-directord`'s test `support::readdir_records`; keep them in step.
+    pub fn label(self) -> &'static str {
+        match self {
+            ReadDirSource::Director => "director",
+            ReadDirSource::ContainedNoDirector => "contained",
+            ReadDirSource::Os => "OS",
+        }
+    }
+}
+
+pub fn note_readdir(dir: &str, wildcard: Option<&str>, count: usize, source: ReadDirSource) {
     if !enabled() {
         return;
     }
@@ -642,8 +681,8 @@ pub fn note_readdir(dir: &str, wildcard: Option<&str>, count: usize, served: boo
         return;
     }
     v.push(format!(
-        "{:<8} {:>4} entries  filter={:<16} {}",
-        if served { "served" } else { "OS" },
+        "{:<9} {:>4} entries  filter={:<16} {}",
+        source.label(),
         count,
         wildcard.unwrap_or("*"),
         dir.to_ascii_lowercase()

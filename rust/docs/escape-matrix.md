@@ -77,12 +77,22 @@ alongside it, see below — and requires `not-found`, failing the test outright
 if any spelling still opens the real bytes. **Corrected statement, precise
 about what still varies by class:** this matrix now establishes
 **containment**, not merely classification, for the negative canary's
-**read**, and for **directory enumeration** — `readdir`
-(`NtQueryDirectoryFile(Ex)`) operates on a handle obtained from an
-already-succeeded open, and that open went through the same `create_hook`/
-`open_hook` → `decision_for` → `RootMap::decide` path this section is
-about, so enumeration containment follows directly from read-open
-containment rather than being a separate mechanism this task had to close.
+**read**.
+
+> **The paragraph above used to extend that claim to directory enumeration by
+> argument, and the argument was wrong. Gate 4 task 8b found a live
+> real-disk drain behind it.** The claim ran: `readdir`
+> (`NtQueryDirectoryFile(Ex)`) operates on a handle from an already-succeeded
+> open, that open went through `create_hook`/`open_hook` → `decision_for` →
+> `RootMap::decide`, so enumeration containment follows from read-open
+> containment rather than being a separate mechanism. It does not follow.
+> Enumeration has its own predicate (`FuseClient::vpath_under_root`, not
+> `RootMap::decide`) and had its own fall-through: `serve_dir_query`'s
+> no-director / client-does-not-recognise-this-directory branch drained the
+> real directory behind the mount and listed whatever was physically there,
+> for a handle whose *open* was entirely legitimate. Enumeration is now
+> closed by construction and proven by test — see "Gate 4, Task 8b:
+> enumeration" below.
 
 **Correction: this did not extend to name-based metadata queries, and an
 earlier version of this document claimed it did by the same mechanism —
@@ -131,11 +141,13 @@ applies** — gate 4's write fall-through (`Engine::cow_seed`, above) means a
 write open on the negative canary still succeeds against real bytes; that
 class is classified (it would show up in `FellThroughWriteFallback`) but not
 contained. Every "unreachable"/"sealed"/"closed" claim anywhere in this
-document remains a **read-open-only** claim: it says nothing about
-directory-enumeration's own dependency on read-open containment being
-correct (which it is, by the reasoning above), and nothing about a
-name-based attribute query, which is a different hook family with no path
-to `decide` at all.
+document remains a **read-open-only** claim: it says nothing about directory
+enumeration, which is a separate mechanism with its own predicate and had a
+fall-through of its own until gate 4 task 8b closed it (this sentence used to
+assert enumeration's "own dependency on read-open containment being correct
+(which it is, by the reasoning above)" — see the correction above and the task
+8b section below), and nothing about a name-based attribute query, which is a
+different hook family with no path to `decide` at all.
 
 One more finding this task's own construction of the new assertion surfaced,
 not predicted in advance: **vector 8 (hardlink) is no longer buildable at all
@@ -1238,3 +1250,126 @@ deal more. `vfs-fixture-writeset` was not — it covered `mkdir` (including the
 end-to-end covers those two today**. Deleting it removes a fixture that made
 that gap look covered; the gap itself is recorded here rather than left
 implied by a binary nobody runs.
+
+## Gate 4, Task 8b: enumeration
+
+Reads, metadata and writes are each sealed above and proven by the fourteen
+spellings. Enumeration was never proven — it was *argued*, in the two places
+this section's corrections above now point at, on the grounds that a listing
+runs on a handle whose open already went through `RootMap::decide`.
+
+**The argument is unsound and there was a live fall-through behind it.**
+Enumeration does not consult `RootMap::decide` at all. `serve_dir_query`
+(`crates/vfs-shim/src/hook.rs`) asks `FuseClient::vpath_under_root`, a
+different predicate from the one that admitted the handle to the shim's
+directory table (`path_is_ours`, which accepts either the engine's root notion
+or the client's). When the two disagreed, or when no client was installed, the
+function drained the real directory behind the mount — `drain_real` over the
+handle, in `FileFullDirectoryInformation` — and layered the shim-local write
+overlay on top. A real, unserved file physically under the managed root was
+listed by name. The open that produced the handle could be entirely
+legitimate, which is exactly why read-open containment does not imply this.
+
+Nothing tested either branch. No fixture called `read_dir` or
+`FindFirstFileW` under a session; every `read_dir` in `e2e.rs` and
+`write_seal.rs` ran in the uninjected harness against physical disk. The
+shim-level enumeration tests (`hook_direnum.rs`, `hook_enum_parity.rs`,
+`hook_relative_paths.rs`) install real detours but attach no director, and
+their fake director implements no `OP_READDIR`. The director-level `readdir`
+tests are numerous and all positive-presence or de-duplication; none asserted
+that an unserved real file was **absent**.
+
+### What each branch does now
+
+The handle reached the directory table only because the path is under a
+managed root, so every listing built here is a listing under a managed root,
+and only two things may appear in one: what the director serves, and the
+shim-local write overlay's own entries. The real directory behind the mount
+may not.
+
+- **The client recognises the directory.** The director's `readdir` is the
+  whole answer, authoritative and unmerged. Unchanged.
+- **No client at all.** Answered from the write overlay alone. Standalone mode
+  was retired earlier in this programme — `bootstrap` aborts the launch when
+  the ring cannot be attached — so an injected game process always has a
+  client and only this project's own hook tests reach here. Those tests hold a
+  handle on the overlay's *own* physical directory, so the overlay answer is
+  byte-for-byte what the drain used to produce for them; nothing about their
+  coverage was weakened to close this. The alternative — keeping the drain
+  because "no director" is a test-only state — would make "no director" mean
+  "the real tree is visible", which is the un-virtualised launch the
+  retirement of standalone mode exists to prevent.
+- **A client that does not recognise this directory.** Same answer, different
+  counter. This is the branch the code's own comment says can happen in normal
+  operation, and it is the one that deserves to be loud rather than quiet: the
+  two predicates are both `RootMap`s over the same declared roots today (the
+  client's is a superset, holding the staged-launch alias besides), so a
+  listing landing here means they have drifted apart again — which this tree
+  has done before, for five spellings at once. It records as `contained`, so
+  the drift is a number in the report rather than a directory that
+  mysteriously lists nothing.
+
+`drain_real`, `drain_real_classic` and `vfs-redirect`'s
+`parse_full_dir_info` are deleted along with the branch. Containment here is
+now structural: no code remains that can read a real directory into a served
+listing.
+
+### The counter now says which mechanism answered
+
+`hookstats::note_readdir` recorded a `served: bool` — "a listing we produced"
+versus "one we handed to the OS". That is not the distinction containment
+turns on, and **nothing anywhere asserted it**. Both under-root branches
+recorded `served: true`, the draining one included, so the single instrument
+that could have shown an under-root listing coming off real disk reported it
+identically to a director-authored one. It is a three-way `ReadDirSource` now
+— `director` / `contained` / `OS` — and the e2e test below asserts it.
+
+### The test
+
+`directory_enumeration_under_a_managed_root_hides_an_unserved_real_file`
+(`crates/vfs-directord/tests/e2e.rs`) runs `vfs-fixture-escape`'s new,
+opt-in-only `enum` vector under a real composed session against the same
+two-canary geometry the read matrix uses: a served canary in both the
+provider's backing store and physically under the root, and an unserved canary
+physically under the root alone. The fixture lists the directory with
+`std::fs::read_dir` (`FindFirstFileW` on Windows) and reports the sorted entry
+names. The harness asserts, from its own never-injected process, that both
+files really are in the physical directory first — an absence assertion
+against a directory that never held the file establishes nothing — and then
+that the listing contains the served name, does not contain the unserved one,
+and that every recorded enumeration of that directory names `director` as its
+source.
+
+### Verification by mutation
+
+The test was watched failing before it was watched passing, and against the
+real defect rather than a proxy. Both mutations reconstruct states this tree
+has genuinely been in: `FuseClient::vpath_under_root` declining the target
+directory (the predicate drift the `path_is_ours` comment records as
+possible), plus `RootMap::decide`'s `NotFound` arm returning `PassThrough` (its
+behaviour before gate 3 task 5). Together they produce what the fall-through
+needs and nothing else in the current tree produces: a real directory handle
+under the managed root that the client does not claim.
+
+- **Against the pre-fix code, with both mutations.** The listing came back
+  `["enum-served-canary.esp", "enum-unserved-canary.bin"]` and the test failed
+  on the absence assertion, naming the leaked file. The served canary was
+  present in that same listing, so the failure is the leak and not a broken
+  enumeration.
+- **Against the fixed code, with the same two mutations.** The listing came
+  back empty (`FindFirstFileW` reporting `ERROR_NO_MORE_FILES`) and the shim
+  recorded `contained, 0 entries` for the directory. The test failed on the
+  presence assertion, and the counter named the branch. So the fix removes the
+  leak, and the source column catches the fallback even when there is no leak
+  left to see.
+- **Unmutated.** Passes: `director, 1 entry`, the served canary present, the
+  unserved canary absent.
+
+One thing the mutations establish that is worth stating on its own: **in the
+current tree the fall-through is not reachable in a live session.** Getting a
+real under-root directory handle requires an open the client does not route,
+and since gate 3 task 5 every such open is denied before a handle exists. It
+took reverting that seal *as well* to reach the branch. That does not make the
+branch harmless — it was one predicate change away from live, behind a
+document that claimed it could not happen — but a reader should not take the
+fix as having closed a hole a game could have fallen into today.
