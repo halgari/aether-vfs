@@ -75,6 +75,10 @@ pub struct Totals {
     pub bytes: u64,
     /// Distinct paths touched (opened, statted or listed).
     pub paths: u64,
+    /// Write RPCs — see `ops_write` (:39). Appended after `paths` rather than
+    /// alongside `reads`/`bytes` so existing field order is untouched.
+    pub write_ops: u64,
+    pub write_bytes: u64,
 }
 
 impl Totals {
@@ -114,6 +118,8 @@ pub fn totals() -> Totals {
         errors: s.ops_err,
         bytes: s.total_bytes,
         paths: s.by_path.len() as u64,
+        write_ops: s.ops_write,
+        write_bytes: s.total_write_bytes,
     }
 }
 
@@ -286,7 +292,7 @@ pub fn snapshot_report(top_n: usize) -> String {
 
     let mut out = String::new();
     out.push_str(&format!(
-        "vfs-io t+{:.1}s ops: getattr={} readdir={} open={} read={} close={} err={} bytes={:.2} MiB paths={}\n",
+        "vfs-io t+{:.1}s ops: getattr={} readdir={} open={} read={} close={} err={} bytes={:.2} MiB paths={} write={} write_bytes={:.2} MiB\n",
         since_launch as f64 / 1000.0,
         s.ops_getattr,
         s.ops_readdir,
@@ -296,6 +302,8 @@ pub fn snapshot_report(top_n: usize) -> String {
         s.ops_err,
         s.total_bytes as f64 / (1024.0 * 1024.0),
         s.by_path.len(),
+        s.ops_write,
+        s.total_write_bytes as f64 / (1024.0 * 1024.0),
     ));
 
     for (path, st) in paths.into_iter().take(top_n) {
@@ -305,11 +313,12 @@ pub fn snapshot_report(top_n: usize) -> String {
             && st.readdirs == 0
             && st.not_found == 0
             && st.errors == 0
+            && st.writes == 0
         {
             continue;
         }
         out.push_str(&format!(
-            "  {path}: open={} size={} read_ops={} bytes={:.2} MiB getattr={} readdir={} nf={} err={}\n",
+            "  {path}: open={} size={} read_ops={} bytes={:.2} MiB getattr={} readdir={} nf={} err={} write_ops={} write_bytes={:.2} MiB\n",
             st.opens,
             st.open_size,
             st.reads,
@@ -318,6 +327,8 @@ pub fn snapshot_report(top_n: usize) -> String {
             st.readdirs,
             st.not_found,
             st.errors,
+            st.writes,
+            st.write_bytes as f64 / (1024.0 * 1024.0),
         ));
     }
 
@@ -409,6 +420,55 @@ mod tests {
         assert!(
             after_err > before_err,
             "err open count did not increment: {before_err} -> {after_err}"
+        );
+    }
+
+    /// Gate 4 prerequisite: `record_write` already updates `ops_write` /
+    /// `total_write_bytes` and `PathStats::writes`/`write_bytes`, but neither
+    /// `snapshot_report` nor `totals()` printed them — leaving no way to tell
+    /// "writes routed" from "no writes happened" (the ambiguity that made
+    /// stage 2b's `FellThroughWriteFallback=0` uninformative). Uses a
+    /// `totals()` delta for the same concurrency reason as
+    /// `open_totals_counts_ok_and_err_separately`; the per-path assertion
+    /// keys on a path unique to this test so concurrently-running tests
+    /// can't touch its counts.
+    #[test]
+    fn write_ops_and_bytes_are_surfaced() {
+        let before = totals();
+        record_open("write-ops-probe.dat", Some(u64::MAX - 42), 0, false);
+        record_write(u64::MAX - 42, 1_048_576, false);
+        record_write(u64::MAX - 42, 1_048_576, false);
+        let after = totals();
+        assert!(
+            after.write_ops >= before.write_ops + 2,
+            "write op count did not increment: {} -> {}",
+            before.write_ops,
+            after.write_ops
+        );
+        assert!(
+            after.write_bytes >= before.write_bytes + 2 * 1_048_576,
+            "write byte count did not increment: {} -> {}",
+            before.write_bytes,
+            after.write_bytes
+        );
+
+        let report = snapshot_report(usize::MAX);
+        let line = report
+            .lines()
+            .find(|l| l.contains("write-ops-probe.dat"))
+            .unwrap_or_else(|| panic!("no per-path line for write-ops-probe.dat: {report}"));
+        assert!(
+            line.contains("write_ops=2 write_bytes=2.00 MiB"),
+            "write counters missing from per-path line: {line}"
+        );
+
+        let totals_line = report
+            .lines()
+            .next()
+            .unwrap_or_else(|| panic!("report has no lines: {report}"));
+        assert!(
+            totals_line.contains("write=") && totals_line.contains("write_bytes="),
+            "aggregate line missing write fields: {totals_line}"
         );
     }
 }
