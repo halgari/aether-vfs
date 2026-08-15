@@ -143,6 +143,7 @@ fn run() -> Result<(), String> {
     // ── remap My Games saves + profile/ini area ────────────────────────────
     let my_games_docs = setup_my_games_junctions(&profiles, &saves)?;
     setup_localappdata_junction(&profiles)?;
+    seed_profile_settings(&profiles)?;
 
     // DRM path: talk to the *already-running* Steam client only.
     // - Never set SteamAppId/SteamGameId env — that makes RestartAppIfNecessary
@@ -697,6 +698,15 @@ impl CountingProvider {
             self.open_read_ok.load(ord) + self.open_write_ok.load(ord),
             self.open_read_err.load(ord) + self.open_write_err.load(ord),
         )
+    }
+
+    /// `(ops, bytes)` of the writes this root's provider actually served, so
+    /// `print_write_totals` can subtract them from the global pair and report
+    /// root 0's implied share — the same shape [`Self::open_totals`] has, for
+    /// the same reason.
+    fn write_totals(&self) -> (u64, u64) {
+        let ord = Ordering::Relaxed;
+        (self.writes.load(ord), self.write_bytes.load(ord))
     }
 
     /// Human-readable, self-contained root-1 section for `print_open_totals`.
@@ -1314,6 +1324,7 @@ fn print_open_totals(root1: &CountingProvider) {
         err.saturating_sub(root1_open_err)
     );
     eprint!("{}", root1.report());
+    print_write_totals(root1);
     eprintln!(
         "  root 1's provider is unconditionally ReadWrite (an OverlayProvider whose upper is a \
 DiskProvider), so a director-level write rejection (the {rejected_total} count above) is \
@@ -1321,6 +1332,55 @@ expected to be entirely root 0's — root 1 would only ever contribute an `open 
 never a rejected_writes entry. Root 0 is now copy-on-write too, so its own rejected_writes \
 should be near zero: a write refused by the read-only layers is copied up instead of refused"
     );
+}
+
+/// Routed **write** ops and bytes — the number gate 4 cannot see its own
+/// progress without, and the reporting gap `rust/docs/bypass-baseline.md`
+/// (§"Still open") named explicitly.
+///
+/// Appended after the existing block rather than woven into it: `gamectl.ps1`
+/// parses that text and `bypass-baseline.md` compares it against four
+/// recorded sessions that cannot be re-run, so the existing field names,
+/// values and order are left byte-identical and this is purely additive.
+///
+/// **Why both a combined and a per-root figure.** `vfs_director::io_stats`
+/// counts every `OP_WRITE` that reaches the ring, with no root dimension
+/// (`ring_dispatch.rs` calls `record_write` with a bare `fh`) — that is the
+/// authoritative "a write routed through the director" count, and it is the
+/// one the acceptance criterion turns on. [`CountingProvider`] counts root
+/// 1's writes at the provider it wraps, so root 0's share can be reported as
+/// the difference. The two are measured at different layers and are expected
+/// to agree; if they do not, the discrepancy is itself the finding.
+///
+/// **The reading this exists to make possible.** `FellThroughWriteFallback =
+/// 0` is only evidence when a write actually happened. Stage 2b's zero proved
+/// nothing because `ops` here would have been zero too — the session never
+/// reached a save. So: `ops > 0` with a zero fall-through is the result;
+/// `ops == 0` means the run did not exercise the thing it was for, whatever
+/// the fall-through counter says.
+fn print_write_totals(root1: &CountingProvider) {
+    let totals = vfs_director::io_stats::totals();
+    let (r1_ops, r1_bytes) = root1.write_totals();
+    let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+    eprintln!(
+        "  vfs-io writes: ops={} bytes={} ({:.2} MiB) (both roots combined — director-side \
+routed writes; ops>0 is what makes a zero FellThroughWriteFallback mean anything)",
+        totals.write_ops,
+        totals.write_bytes,
+        mib(totals.write_bytes)
+    );
+    eprintln!(
+        "  root 0 (implied = combined − root 1): write_ops={} write_bytes={} ({:.2} MiB)",
+        totals.write_ops.saturating_sub(r1_ops),
+        totals.write_bytes.saturating_sub(r1_bytes),
+        mib(totals.write_bytes.saturating_sub(r1_bytes))
+    );
+    if totals.write_ops == 0 {
+        eprintln!(
+            "  READ THIS AS: no write reached the director at all. Any FellThroughWriteFallback \
+figure from this session — including zero — says nothing about gate 4."
+        );
+    }
 }
 
 fn game_process_alive() -> bool {
@@ -1515,6 +1575,286 @@ fn setup_localappdata_junction(profiles: &Path) -> Result<(), String> {
         target.display()
     );
     Ok(())
+}
+
+/// `SkyrimPrefs.ini` settings this harness seeds before launch, so a
+/// main-menu dialog cannot hold an unattended session (gate 4, Task 9).
+///
+/// Every name here is a real setting read by this exact build of the game:
+/// each one appears verbatim in `SkyrimSE.exe`'s setting table as
+/// `name:Section` (`bUpsellOwned:General`, `bFreebiesSeen:General`,
+/// `bEnablePlatform:Bethesda.net`, `bCheckForMissingContentOnStartup:Gameplay`).
+/// That is where the spellings come from — they were read out of the binary,
+/// not guessed from a wiki.
+///
+/// **What this is fixing, and how confident that is.** Stage 2b's session
+/// never reached gameplay: the main menu carried an Anniversary Edition
+/// "Thanks for buying Skyrim Anniversary Edition! Download and activate?"
+/// box (the exact localisation key is in the exe next to `$DOWNLOAD` and the
+/// menu's `Sky10DLCPressed` callback), whose only action opens the
+/// Bethesda.net marketplace — which cannot resolve with Steam offline. The
+/// project's convention is to fix such a dialog by changing content, not by
+/// scripting a click past it.
+///
+/// Two of these are certain to be *related* and uncertain to be *sufficient*:
+///
+/// - `bFreebiesSeen` / `bUpsellOwned` were **already** `1` in
+///   `profiles\SkyrimPrefs.ini` before the session that showed the dialog
+///   (the file predates that run), so on their own they demonstrably do not
+///   suppress it. They are seeded anyway because the profile is not
+///   guaranteed to carry them on a fresh machine and they cost nothing.
+/// - `bEnablePlatform=0` is the load-bearing one: it turns off the
+///   Bethesda.net platform that owns entitlements, the Creations/marketplace
+///   menu and the download the box offers. The menu has a
+///   `CClubBlockedByBnet` branch for exactly this state. This is the change
+///   expected to remove the box, and it is an inference from the binary's
+///   own strings rather than an observed result — no session has run with it
+///   yet.
+/// - `bCheckForMissingContentOnStartup=0` addresses a *different*, separately
+///   observed dialog (the "content not present" Creations warning this
+///   image provokes, since `Skyrim.ccc` lists 74 Creations and the content
+///   image ships 8). It is not the AE box.
+///
+/// Set [`vfs_env::SKYRIM_NO_PROFILE_SEED`] to run without any of this — the
+/// control arm if the dialog turns out to be unrelated to the profile.
+const SEEDED_PREFS: &[(&str, &str, &str)] = &[
+    ("General", "bFreebiesSeen", "1"),
+    ("General", "bUpsellOwned", "1"),
+    ("Bethesda.net", "bEnablePlatform", "0"),
+    ("GamePlay", "bCheckForMissingContentOnStartup", "0"),
+];
+
+/// Apply [`SEEDED_PREFS`] to `profiles\SkyrimPrefs.ini`, in place, preserving
+/// every other line — the file also carries the display/resolution settings
+/// this harness's capture depends on, so rewriting it wholesale would be a
+/// regression dressed as a fix.
+///
+/// Prints what it changed *and* the resolved value of every seeded setting,
+/// whether or not it had to write: the point is that an operator can read the
+/// profile state off the launch log **before** the window appears, rather
+/// than inferring it from whichever dialog does or does not show up.
+fn seed_profile_settings(profiles: &Path) -> Result<(), String> {
+    let path = profiles.join("SkyrimPrefs.ini");
+    if vfs_env::opt_in(vfs_env::SKYRIM_NO_PROFILE_SEED) {
+        eprintln!(
+            "  profile seed: SKIPPED ({} set) — {} is whatever is on disk",
+            vfs_env::SKYRIM_NO_PROFILE_SEED,
+            path.display()
+        );
+        return Ok(());
+    }
+    let before = std::fs::read_to_string(&path).unwrap_or_default();
+    let (after, changes) = merge_ini_settings(&before, SEEDED_PREFS);
+    if changes.is_empty() {
+        eprintln!(
+            "  profile seed: {} already carries all {} setting(s)",
+            path.display(),
+            SEEDED_PREFS.len()
+        );
+    } else {
+        std::fs::write(&path, &after).map_err(|e| format!("write {}: {e}", path.display()))?;
+        eprintln!("  profile seed: {} — {} change(s)", path.display(), changes.len());
+        for c in &changes {
+            eprintln!("    {c}");
+        }
+    }
+    for (section, key, value) in SEEDED_PREFS {
+        eprintln!("  profile seed in effect: [{section}] {key}={value}");
+    }
+    Ok(())
+}
+
+/// Merge `wanted` (`section`, `key`, `value`) into an INI document, returning
+/// the new text and a human-readable list of what changed.
+///
+/// Section and key matching is ASCII-case-insensitive, because the game's own
+/// setting table spells the section `Gameplay` while the file the game writes
+/// spells it `GamePlay` — a case-sensitive match would append a duplicate
+/// section that the game then reads *after* the real one, quietly inverting
+/// the setting.
+///
+/// Everything not named in `wanted` is preserved verbatim, including comments,
+/// blank lines and the file's existing line endings. Returning an empty change
+/// list rather than rewriting an identical file keeps the profile's mtime
+/// meaningful as "when the game last wrote it".
+fn merge_ini_settings(text: &str, wanted: &[(&str, &str, &str)]) -> (String, Vec<String>) {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut lines: Vec<String> = text
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+        .collect();
+    // A trailing newline leaves an empty final element; drop it and restore a
+    // trailing newline at the end unconditionally (an INI without one is
+    // legal but a needless diff against every file the game writes).
+    if lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+
+    let is_header = |l: &str| {
+        let t = l.trim();
+        t.starts_with('[') && t.ends_with(']') && t.len() >= 2
+    };
+    let header_name = |l: &str| {
+        let t = l.trim();
+        t[1..t.len() - 1].to_string()
+    };
+
+    let mut changes = Vec::new();
+    for (section, key, value) in wanted {
+        let setting = format!("{key}={value}");
+        let start = lines
+            .iter()
+            .position(|l| is_header(l) && header_name(l).eq_ignore_ascii_case(section));
+        let Some(start) = start else {
+            lines.push(format!("[{section}]"));
+            lines.push(setting.clone());
+            changes.push(format!("[{section}] created, + {setting}"));
+            continue;
+        };
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, l)| is_header(l))
+            .map(|(i, _)| i)
+            .unwrap_or(lines.len());
+        let existing = (start + 1..end).find(|&i| {
+            lines[i]
+                .split_once('=')
+                .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case(key))
+        });
+        match existing {
+            Some(i) if lines[i] == setting => {}
+            Some(i) => {
+                changes.push(format!("[{section}] {}  ->  {setting}", lines[i].trim()));
+                lines[i] = setting;
+            }
+            None => {
+                // Before any trailing blank lines, so the setting stays
+                // inside its own section rather than drifting into the gap
+                // ahead of the next one.
+                let mut at = end;
+                while at > start + 1 && lines[at - 1].trim().is_empty() {
+                    at -= 1;
+                }
+                lines.insert(at, setting.clone());
+                changes.push(format!("[{section}] + {setting}"));
+            }
+        }
+    }
+
+    let mut out = lines.join(newline);
+    out.push_str(newline);
+    (out, changes)
+}
+
+/// `merge_ini_settings` is the whole of the AE-dialog fix that can be checked
+/// without launching the game, so it is checked hard: the failure modes here
+/// are all silent ones that would only surface as "the dialog is still there"
+/// several minutes into a live session.
+#[cfg(test)]
+mod profile_seed_tests {
+    use super::*;
+
+    #[test]
+    fn an_existing_setting_is_rewritten_in_place_and_nothing_else_moves() {
+        let before = "[Display]\niSize W=800\n[General]\nbUpsellOwned=0\nuLargeRefLODGridSize=11\n";
+        let (after, changes) =
+            merge_ini_settings(before, &[("General", "bUpsellOwned", "1")]);
+        assert_eq!(
+            after,
+            "[Display]\niSize W=800\n[General]\nbUpsellOwned=1\nuLargeRefLODGridSize=11\n"
+        );
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        // The display settings this harness's capture depends on must survive.
+        assert!(after.contains("iSize W=800"), "{after}");
+    }
+
+    #[test]
+    fn a_missing_setting_lands_inside_its_own_section() {
+        let before = "[General]\nuLargeRefLODGridSize=11\n[MAIN]\nbSaveOnPause=0\n";
+        let (after, _) = merge_ini_settings(before, &[("General", "bFreebiesSeen", "1")]);
+        let general = after.find("[General]").unwrap();
+        let main = after.find("[MAIN]").unwrap();
+        let seeded = after.find("bFreebiesSeen=1").unwrap();
+        assert!(
+            general < seeded && seeded < main,
+            "setting drifted out of its section: {after}"
+        );
+    }
+
+    #[test]
+    fn section_and_key_matching_ignores_case() {
+        // The exe's setting table spells it `bCheckForMissingContentOnStartup:Gameplay`;
+        // the file the game writes spells the section `[GamePlay]`. A
+        // case-sensitive match would append a second section and the game
+        // would read the *later* one, inverting the setting.
+        let before = "[GamePlay]\nbCheckForMissingContentOnStartup=1\n";
+        let (after, changes) =
+            merge_ini_settings(before, &[("Gameplay", "bcheckformissingcontentonstartup", "0")]);
+        assert_eq!(after.matches('[').count(), 1, "duplicate section: {after}");
+        assert!(after.contains("bcheckformissingcontentonstartup=0"), "{after}");
+        assert_eq!(changes.len(), 1, "{changes:?}");
+    }
+
+    #[test]
+    fn an_absent_section_is_created() {
+        let before = "[General]\nbUpsellOwned=1\n";
+        let (after, changes) =
+            merge_ini_settings(before, &[("Bethesda.net", "bEnablePlatform", "0")]);
+        assert!(after.contains("[Bethesda.net]\nbEnablePlatform=0"), "{after}");
+        assert_eq!(changes.len(), 1, "{changes:?}");
+    }
+
+    #[test]
+    fn a_file_already_carrying_every_setting_reports_no_change() {
+        // No change means no write, which keeps the profile's mtime honest as
+        // "when the game last wrote it" — the evidence used to work out which
+        // session produced which profile state.
+        let before = "[General]\nbFreebiesSeen=1\nbUpsellOwned=1\n";
+        let (_, changes) = merge_ini_settings(
+            before,
+            &[("General", "bFreebiesSeen", "1"), ("General", "bUpsellOwned", "1")],
+        );
+        assert!(changes.is_empty(), "{changes:?}");
+    }
+
+    #[test]
+    fn crlf_files_stay_crlf() {
+        // Every INI the game writes is CRLF; rewriting one as LF would make
+        // the next diff of a profile unreadable.
+        let before = "[General]\r\nbUpsellOwned=0\r\n";
+        let (after, _) = merge_ini_settings(before, &[("General", "bUpsellOwned", "1")]);
+        assert_eq!(after, "[General]\r\nbUpsellOwned=1\r\n");
+    }
+
+    #[test]
+    fn an_empty_profile_gets_every_setting() {
+        let (after, changes) = merge_ini_settings("", SEEDED_PREFS);
+        assert_eq!(changes.len(), SEEDED_PREFS.len(), "{changes:?}");
+        for (section, key, value) in SEEDED_PREFS {
+            assert!(after.contains(&format!("[{section}]")), "{after}");
+            assert!(after.contains(&format!("{key}={value}")), "{after}");
+        }
+        // `[General]` carries two of them and must appear exactly once.
+        assert_eq!(after.matches("[General]").count(), 1, "{after}");
+    }
+
+    #[test]
+    fn the_seeded_set_is_the_one_the_binary_actually_reads() {
+        // These four spellings were read out of `SkyrimSE.exe`'s setting
+        // table (`name:Section`). Pinning them here means a well-meaning
+        // rename cannot quietly turn the seeding into a no-op the game
+        // ignores — which is exactly what an unrecognised INI key is.
+        let expect = [
+            ("General", "bFreebiesSeen"),
+            ("General", "bUpsellOwned"),
+            ("Bethesda.net", "bEnablePlatform"),
+            ("GamePlay", "bCheckForMissingContentOnStartup"),
+        ];
+        let got: Vec<(&str, &str)> = SEEDED_PREFS.iter().map(|(s, k, _)| (*s, *k)).collect();
+        assert_eq!(got, expect.to_vec());
+    }
 }
 
 fn merge_dir(src: &Path, dest: &Path) -> Result<(), String> {

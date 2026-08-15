@@ -16,13 +16,20 @@
 # Start-Process (NOT a job-object child of this script's own process — a
 # `skyrim-live` launched as a backgrounded child dies when its parent task is
 # reaped, which is not a durable session), with VFS_SHIM_STATS_LOG set so the
-# injected shim turns on outcome classification. `stats` dumps the shim's
-# "under-root open outcomes" section and, if given skyrim-live's own stderr
-# log, the director-side `vfs-io opens: ok=.../err=...` line it prints itself
-# (skyrim-live embeds the director directly — there is no separate `vfs-directord`
-# gRPC daemon for a live game run, so there is no `vfs stats` endpoint to query;
-# this reads the same `io_stats::open_totals()` numbers skyrim-live now prints
-# to its own stderr).
+# injected shim turns on outcome classification. `stats` reports four things:
+#
+#   1. directory enumerations by ReadDirSource (director / contained / OS)
+#   2. under-root open outcomes, one line per class
+#   3. copy-on-write copy-up outcomes and shim-local overlay failures
+#   4. the director's own open AND routed-write totals, per root
+#
+# 1-3 come from the shim's stats log; 4 comes from skyrim-live's stderr log
+# (skyrim-live embeds the director directly — there is no separate
+# `vfs-directord` gRPC daemon for a live game run, so there is no `vfs stats`
+# endpoint to query; this reads the same `io_stats` numbers skyrim-live prints
+# to its own stderr). Gate 4's acceptance reading needs 2 and 4 together:
+# `fell-through: write-fallback` absent/zero is only evidence when the
+# director's `vfs-io writes: ops=` is greater than zero.
 param(
   [Parameter(Mandatory=$true)][string]$Action,
   [string]$Arg1,
@@ -210,14 +217,69 @@ if ($Action.ToLower() -eq 'stats') {
   if (-not $Arg1) { "ERROR: need a shim-stats-log path"; exit 1 }
   if (-not (Test-Path $Arg1)) { "ERROR: shim stats log not found: $Arg1"; exit 1 }
   $text = Get-Content $Arg1 -Raw
+
+  # Directory-enumeration source breakdown. `hookstats::render_readdirs` emits
+  # one line per enumeration tagged with `ReadDirSource::label()` -- director /
+  # contained / OS -- and that section renders BEFORE 'under-root open
+  # outcomes:', so the substring dump below never reaches it. `contained` is
+  # the one that matters: nonzero means the shim answered an under-root
+  # listing without the director, i.e. the two under-root predicates have
+  # drifted apart again (gate 4 task 8b).
+  "=== shim: directory enumerations by source ($Arg1) ==="
+  $rdIdx = $text.IndexOf('directory enumerations (')
+  if ($rdIdx -lt 0) {
+    "(section absent - no directory enumeration recorded yet)"
+  } else {
+    $rdEnd = $text.IndexOf("`n`n", $rdIdx)
+    if ($rdEnd -lt 0) { $rdEnd = $text.Length }
+    $rdText = $text.Substring($rdIdx, $rdEnd - $rdIdx)
+    $counts = [ordered]@{ 'director' = 0; 'contained' = 0; 'OS' = 0 }
+    $entries = [ordered]@{ 'director' = 0; 'contained' = 0; 'OS' = 0 }
+    foreach ($m in [regex]::Matches($rdText, '(?m)^\s{2}(director|contained|OS|served)\s+(\d+) entries')) {
+      $k = $m.Groups[1].Value
+      if (-not $counts.Contains($k)) { $counts[$k] = 0; $entries[$k] = 0 }
+      $counts[$k]++
+      $entries[$k] += [int]$m.Groups[2].Value
+    }
+    foreach ($k in $counts.Keys) { "  {0,-10} {1,5} listing(s), {2,6} entries" -f $k, $counts[$k], $entries[$k] }
+    if ($counts['contained'] -gt 0) {
+      "  WARNING: 'contained' is nonzero - an under-root listing was answered without the director"
+    }
+    if ($counts.Contains('served') -and $counts['served'] -gt 0) {
+      "  NOTE: 'served' is the pre-task-8b label; this log predates the director/contained split"
+    }
+  }
+
+  # This substring carries three sections in one go, because
+  # `hookstats::start_reporter` renders them last and in this order: the
+  # per-class open outcomes, the copy-on-write copy-up outcomes (the seven
+  # `CopyUp` variants, only the nonzero ones), and the shim-local overlay
+  # failures. An absent copy-up section means zero copy-ups, not a missing
+  # instrument.
   $idx = $text.IndexOf('under-root open outcomes:')
-  "=== shim: under-root open outcomes ($Arg1) ==="
+  "=== shim: open outcomes + copy-ups + overlay failures ($Arg1) ==="
   if ($idx -ge 0) { $text.Substring($idx) } else { "(section absent - reporter never ticked, or nothing under-root was opened yet)" }
+  if ($idx -ge 0 -and $text.IndexOf('copy-on-write copy-ups') -lt 0) {
+    "(no copy-on-write copy-ups section: zero copy-ups of every kind, including 'seeded')"
+  }
+
   if ($Arg2) {
-    "=== director: open totals (from skyrim-live's own stderr, $Arg2) ==="
+    # The whole director block, not just its first line: `print_open_totals`
+    # now prints per-root opens AND routed write ops/bytes across several
+    # following lines, and 'routed writes > 0' is half the acceptance
+    # criterion this run exists to read.
+    "=== director: open + write totals (from skyrim-live's own stderr, $Arg2) ==="
     if (Test-Path $Arg2) {
-      $lines = Select-String -Path $Arg2 -Pattern 'vfs-io opens: ok=' | Select-Object -Last 1
-      if ($lines) { $lines.Line } else { "(no 'vfs-io opens:' line yet - game may still be starting)" }
+      $all = @(Get-Content $Arg2)
+      $start = -1
+      for ($i = 0; $i -lt $all.Count; $i++) { if ($all[$i] -match 'vfs-io opens: ok=') { $start = $i } }
+      if ($start -lt 0) {
+        "(no 'vfs-io opens:' line yet - game may still be starting)"
+      } else {
+        $end = $start
+        while (($end + 1) -lt $all.Count -and $all[$end + 1].StartsWith('  ') -and ($end - $start) -lt 14) { $end++ }
+        $all[$start..$end]
+      }
     } else {
       "ERROR: $Arg2 not found"
     }

@@ -593,6 +593,20 @@ plugin loading, but that's inference, not something measured directly here.
   `print_open_totals`. That is itself a reporting gap worth closing before
   gate 4 starts, or gate 4 will have no way to see its own progress on
   under-root writes short of grepping raw shim logs for outside-root tags.
+
+  **Closed (gate 4, Task 9 harness prep).** `snapshot_report` surfaces
+  `write=`/`write_bytes=` on its aggregate line and `write_ops=`/`write_bytes=`
+  per path, and `print_open_totals` now calls `print_write_totals`, which adds
+  two lines after the existing block — combined `vfs-io writes: ops= bytes=`
+  from `io_stats::totals()` and root 0's implied share against
+  `CountingProvider`'s root-1 tally — plus an explicit `READ THIS AS:` line
+  when `ops` is zero. The existing field names, values and order above those
+  two lines are unchanged, so the four sessions recorded in this file remain
+  comparable line for line. `tools\gamectl.ps1 -Action stats` prints the whole
+  director block rather than only its first line, and adds a
+  `ReadDirSource` (director / contained / OS) breakdown that the outcomes
+  substring could never reach, because `hookstats` renders enumerations
+  before outcomes.
 - `FellThroughRedirect`/`FellThroughServe`/`FellThroughPassthrough` are still
   zero after a session that added an interior cell and two additional
   exterior regions — a real increase in navigation breadth — so the case

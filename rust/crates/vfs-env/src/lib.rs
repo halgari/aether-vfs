@@ -197,6 +197,14 @@ pub const SKYRIM_MODS: &str = "VFS_SKYRIM_MODS";
 pub const SKYRIM_LAUNCH: &str = "VFS_SKYRIM_LAUNCH";
 /// Serve from an extracted tree instead of the archive, for differential runs.
 pub const SKYRIM_DISK: &str = "VFS_SKYRIM_DISK";
+/// Skip the harness's `SkyrimPrefs.ini` seeding (gate 4, Task 9).
+///
+/// The seeding turns off the Bethesda.net platform and the missing-content
+/// startup check so a main-menu dialog cannot hold an unattended session. Set
+/// this to run with the profile exactly as it is on disk — the control arm for
+/// deciding whether a menu dialog was caused by the seeding or merely
+/// unaffected by it.
+pub const SKYRIM_NO_PROFILE_SEED: &str = "VFS_SKYRIM_NO_PROFILE_SEED";
 
 // ─── test fixtures ───────────────────────────────────────────────────────────
 
@@ -323,6 +331,11 @@ pub const ALL: &[Var] = &[
     Var { name: SKYRIM_MODS, kind: Kind::Harness, default: "no overlay" },
     Var { name: SKYRIM_LAUNCH, kind: Kind::Harness, default: "SkyrimSE.exe" },
     Var { name: SKYRIM_DISK, kind: Kind::Harness, default: "use the archive" },
+    Var {
+        name: SKYRIM_NO_PROFILE_SEED,
+        kind: Kind::Harness,
+        default: "false (the harness seeds SkyrimPrefs.ini)",
+    },
     Var { name: FIXTURE_PATH, kind: Kind::Fixture, default: "fixture-specific" },
     Var { name: FIXTURE_EXPECT, kind: Kind::Fixture, default: "none" },
     Var { name: FIXTURE_FILL, kind: Kind::Fixture, default: "none" },
