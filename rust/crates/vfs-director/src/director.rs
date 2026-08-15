@@ -164,19 +164,33 @@ impl Director {
         // opened by a known path but never discovered. Surface the mount's
         // next path component as a synthetic directory entry, alongside
         // whatever a provider already returned above. A provider-supplied
-        // entry for the same name always wins — `entry().or_insert_with`
-        // leaves it untouched — so a mount that shadows a real subdirectory
-        // does not clobber it with a placeholder.
+        // entry for the same name always wins — the `contains_key` check
+        // below skips the mount entirely, without even probing it — so a
+        // mount that shadows a real subdirectory does not clobber it with a
+        // placeholder.
         let mut mount_derived = false;
         for m in mounts.iter() {
             let Some(name) = mount_child_name(&path, &m.prefix) else {
                 continue;
             };
-            mount_derived = true;
-            map.entry(name.to_ascii_lowercase()).or_insert_with(|| DirEntry {
-                name,
-                stat: Stat { kind: KIND_DIR, size: 0, mtime: 0 },
-            });
+            let key = name.to_ascii_lowercase();
+            if map.contains_key(&key) {
+                continue;
+            }
+            // A registered prefix alone does not prove the mount resolves to
+            // anything — a mount whose backend has nothing at its own root
+            // (e.g. a `DiskProvider` pointed at a directory that no longer
+            // exists) would otherwise list a child that opens into nothing.
+            // Probing `getattr` on the mount's own root (empty relative
+            // path) both confirms it resolves and supplies the entry's real
+            // kind/size/mtime, so a single-file mount is surfaced as a file
+            // rather than an assumed, possibly-wrong `KIND_DIR`. Bounded by
+            // the mount count already walked twice per `readdir` call, so
+            // this adds no new order of growth.
+            if let Ok(Some(stat)) = m.backend.getattr(VPath::at_default("")) {
+                mount_derived = true;
+                map.insert(key, DirEntry { name, stat });
+            }
         }
         if !saw_dir && !mount_derived {
             if not_dir {
@@ -378,7 +392,7 @@ impl Director {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::OPEN_READ;
+    use crate::ops::{KIND_FILE, OPEN_READ};
 
     #[test]
     fn open_for_write_against_a_read_only_provider_is_read_only_not_bad_request() {
@@ -525,15 +539,19 @@ mod tests {
 
     #[test]
     fn readdir_does_not_duplicate_a_name_a_provider_already_supplies() {
-        // The parent mount already serves a real "somemod" directory entry;
-        // the synthetic entry derived from the deeper mount must not
-        // shadow or duplicate it.
+        // The parent mount already serves a real "somemod" *file* entry —
+        // deliberately a file, not a directory, so its stat (KIND_FILE,
+        // nonzero size) is distinguishable from the synthetic placeholder a
+        // naive implementation would produce (always KIND_DIR, size 0).
+        // Without that distinction this test could pass even if the
+        // synthetic entry silently overwrote the real one with a
+        // same-shaped placeholder.
         let d = Director::new();
         d.mount(
             "data",
             Arc::new(vfs_compose::InlineProvider::from_files([(
-                "somemod/real.txt",
-                b"x".as_slice(),
+                "somemod",
+                b"real-file-not-a-directory".as_slice(),
             )])),
         )
         .unwrap();
@@ -546,6 +564,104 @@ mod tests {
         let entries = d.readdir("data").unwrap();
         let matches: Vec<_> = entries.iter().filter(|e| e.name == "somemod").collect();
         assert_eq!(matches.len(), 1, "expected exactly one 'somemod' entry, got {entries:?}");
+        assert_eq!(
+            matches[0].stat.kind, KIND_FILE,
+            "the real provider-supplied file entry must survive untouched, \
+             not be reshaped into a directory placeholder: {:?}",
+            matches[0]
+        );
+    }
+
+    #[test]
+    fn readdir_skips_a_synthetic_entry_when_the_deeper_mounts_own_root_does_not_resolve() {
+        // A registered prefix alone does not prove the mount serves
+        // anything. `InlineProvider` always answers its own root as an
+        // (empty) directory regardless of content, so it can't demonstrate
+        // this; a `DiskProvider` pointed at a directory that was never
+        // created genuinely reports `None` for `getattr("")`, exactly the
+        // "registered but resolves to nothing" case the probe must catch.
+        let dir = std::env::temp_dir()
+            .join(format!("vfs-dir-nonexistent-mount-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Deliberately do not create `dir` — the mount's own root must not
+        // resolve.
+        let d = Director::new();
+        d.mount("data/ghostmod", Arc::new(crate::DiskProvider::new(&dir)))
+            .unwrap();
+
+        let entries = d.readdir("data").unwrap_or_default();
+        assert!(
+            entries.iter().all(|e| e.name != "ghostmod"),
+            "a mount whose own root does not resolve must not list a child \
+             the user would only open into nothing: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn readdir_derives_the_synthetic_entrys_kind_from_the_mount_provider() {
+        // A single-file mount (the backend's own root, addressed by an
+        // empty relative path, resolves to a file rather than a directory)
+        // must be surfaced as a file with its real size, not an assumed
+        // KIND_DIR/0 placeholder — the same probe that confirms the mount
+        // resolves at all also supplies its real shape.
+        let dir = std::env::temp_dir().join(format!("vfs-dir-filemount-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("payload.bin"), b"12345").unwrap();
+        let d = Director::new();
+        // Mount a DiskProvider whose *root* is the file itself — resolve("")
+        // returns the provider's root path, so this mount's own root stats
+        // as a file, not a directory.
+        d.mount(
+            "data/singlefile",
+            Arc::new(crate::DiskProvider::new(dir.join("payload.bin"))),
+        )
+        .unwrap();
+
+        let entries = d.readdir("data").unwrap();
+        let e = entries
+            .iter()
+            .find(|e| e.name == "singlefile")
+            .unwrap_or_else(|| panic!("expected a 'singlefile' entry, got {entries:?}"));
+        assert_eq!(e.stat.kind, KIND_FILE, "expected the file-shaped mount to surface as KIND_FILE");
+        assert_eq!(e.stat.size, 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn readdir_of_a_mounts_own_directory_does_not_synthesize_a_self_entry() {
+        // A mount whose prefix is exactly the queried path must contribute
+        // only its own provider's real entries, never a synthetic entry
+        // for itself.
+        let d = Director::new();
+        d.mount(
+            "data",
+            Arc::new(vfs_compose::InlineProvider::from_files([("a.txt", b"x".as_slice())])),
+        )
+        .unwrap();
+
+        let entries = d.readdir("data").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "a.txt");
+    }
+
+    #[test]
+    fn readdir_of_the_root_surfaces_only_the_first_component_of_a_deep_mount() {
+        // Listing the virtual root with only a mount two levels down
+        // present (nothing mounted at "" or at "data") must still surface
+        // "data" — the boundary case Task 3's merge deletion is most likely
+        // to disturb.
+        let d = Director::new();
+        d.mount(
+            "data/somemod",
+            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+        )
+        .unwrap();
+
+        let entries = d.readdir("").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "data");
+        assert_eq!(entries[0].stat.kind, KIND_DIR);
     }
 
     #[test]
