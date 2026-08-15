@@ -200,6 +200,32 @@ If some of it is still reachable, keep exactly that much and record why, with th
 
 ---
 
+### Task 6b: Copy-on-write on the daemon surface, not just the harness
+
+**Files:** `crates/vfs-directord/src/registry.rs`, `crates/vfs-director/src/session.rs`
+
+**Interfaces:** A session composed through `SessionRegistry::add_source` gets the same copy-up composition `Session::set_write_layer` gives `skyrim-live`.
+
+**Added after Task 6's review.** Task 6 restored copy-on-write by composing the mount graph as an `OverlayProvider` base with a writable upper — but only for `skyrim-live`, which is a **test harness**. `SessionRegistry::add_source` (`registry.rs:250`) is the gRPC/TOML surface, and it still composes with `stack_layers`, which cannot copy up. So a daemon session with an archive plus a writable layer still cannot edit a file in place; it fails with `ST_NOT_FOUND` rather than `ST_READ_ONLY`.
+
+**That surface is what the product uses.** Shipping the gate with copy-on-write working in the harness and not the daemon would make the acceptance evidence describe something users do not get. The reviewer's ruling was explicit: acceptable to ship in Task 6, **not acceptable to close gate 4**.
+
+**Budget more than a call.** `add_source` mounts via `kernel().mount` directly (`registry.rs:258`), bypassing `Session::recompose`, so naively adding a write layer would **clobber** it rather than compose with it. Work out the composition properly.
+
+- [ ] **Step 1: Write the failing test**
+
+A session built through `SessionRegistry::add_source` with a read-only archive source and a writable layer: open a file the archive holds for read-write, edit it in place, read it back through the director, and assert the archive is byte-identical afterwards. This must fail before the fix.
+
+- [ ] **Step 2: Run to verify it fails**, and record the status it fails with, so the fix is confirmed to change the right thing.
+
+- [ ] **Step 3: Implement**
+
+- [ ] **Step 4: Verify** — the two write-path e2e scenarios run through this surface and are the decisive proof for the phase. If either fails, **stop and report**; that is a regression, not a test to update.
+
+- [ ] **Step 5: Commit**
+
+---
+
 ### Task 7: Delete the stranded decision variants and the zip-window half
 
 **Files:** `crates/vfs-redirect/src/lib.rs`, `crates/vfs-shim/src/hook.rs`, `crates/vfs-shim/src/engine.rs`, `crates/vfs-shim/src/zipserve.rs`
@@ -293,7 +319,8 @@ cargo clippy --all-targets -- -D warnings
 - [ ] `FellThroughWriteFallback` is still wired, and reads **zero** in a live session in which routed writes are **non-zero**.
 - [ ] Copy-up sources its bytes from the director, and does **not** seed from the real filesystem under a managed root.
 - [ ] `Engine` is multi-root; the stage-2b recorded-gap test has been flipped to assert the closed behaviour.
-- [ ] The overlay is root-aware, or the overlay write path is gone — whichever Task 6 established, with the finding recorded.
+- [ ] The overlay is root-aware, and the shim overlay write path is **kept** — Task 5 established it is still live, because the DRM/identity exceptions return `None` before the ring, so a write to `steam_appid.txt` still reaches it. Gate 5 owns those exceptions.
+- [ ] **An in-place edit of read-only layered content works on the daemon surface, not only in the `skyrim-live` harness** (Task 6b). Copy-on-write over read-only content is the core function of this VFS; harness-only is not shipped.
 - [ ] `Decision::Redirect`/`Serve`/`Deny` are deleted; `zipserve`'s zip-window half is deleted and its synthetic-section half still compiles and passes `lazy_section` tests.
 - [ ] The canary matrix is green for **write** access, 14 spellings × 2 canaries, with unbuildable vectors reported as unbuildable.
 - [ ] Whether the game's save routes through the director is recorded either way, with routed-write counts that make a zero fall-through meaningful.
