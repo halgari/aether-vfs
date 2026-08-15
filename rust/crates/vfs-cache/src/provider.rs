@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vfs_provider::{
-    bad_fh, is_dir, map_io_err, Capabilities, DirEntry, Handle, Provider, SetAttr, Stat, VPath,
+    bad_fh, is_dir, map_io_err, Capabilities, DirEntry, Handle, Provider, RootId, SetAttr, Stat,
+    VPath,
 };
 
 use crate::store::{BlockCache, BlockKey};
@@ -37,9 +38,21 @@ impl CachingProvider {
         }
     }
 
-    fn file_id_for(path: &str, size: u64, mtime: i64) -> u64 {
-        // Stable-enough for immutable sources: path hash mixed with size/mtime.
+    /// Stable-enough for immutable sources within one root: path hash mixed
+    /// with size/mtime/root. This is a heuristic identity, not a content
+    /// hash — it is only sound because `immutable` sources are the only
+    /// ones this cache is allowed to hold onto without re-checking the OS
+    /// (see the write/set_len invalidation paths below, which throw the
+    /// whole file away rather than trust this key across a mutation).
+    /// Two different roots serving the same relative path with the same
+    /// size and mtime are two different files, so `root` is mixed in
+    /// exactly like `path`: it is part of what identifies "which file",
+    /// not a separate cache dimension the way `source_id` is (that one
+    /// namespaces distinct provider instances sharing one `BlockCache`).
+    fn file_id_for(root: RootId, path: &str, size: u64, mtime: i64) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        h ^= u64::from(root.0);
+        h = h.wrapping_mul(0x100_0000_01b3);
         for b in path.as_bytes() {
             h ^= *b as u64;
             h = h.wrapping_mul(0x100_0000_01b3);
@@ -69,18 +82,14 @@ impl Provider for CachingProvider {
         // already forwards the inner's access level via `.cached()`, so
         // rejecting writes here made that declaration a lie the moment a
         // caller acted on it — exactly the bug class this method now avoids.
+        let root = p.root;
         let path = p.rel;
         let st = self.inner.getattr(p)?;
         let (inner, size, is_dir) = self.inner.open(p, flags)?;
-        // DEFERRED (Stage 2): file_id_for keys on `path` alone, not `p.root`.
-        // Two different roots serving the same relative path with the same
-        // size and mtime would collide on the same cache entry. Inert today
-        // because every call site addresses VPath under RootId(0) — Stage 2
-        // makes roots real and must fold `p.root` into this key.
         let (file_id, size) = if let Some(s) = st {
-            (Self::file_id_for(path, s.size, s.mtime), size)
+            (Self::file_id_for(root, path, s.size, s.mtime), size)
         } else {
-            (Self::file_id_for(path, size, 0), size)
+            (Self::file_id_for(root, path, size, 0), size)
         };
         let h = self.next.fetch_add(1, Ordering::Relaxed);
         self.opens
@@ -243,7 +252,7 @@ impl Provider for CachingProvider {
 mod tests {
     use super::*;
     use crate::store::CacheConfig;
-    use vfs_provider::{KIND_FILE, OPEN_READ};
+    use vfs_provider::{RootId, KIND_FILE, OPEN_READ};
 
     #[test]
     fn caching_provider_over_the_fixture_tree_passes_conformance() {
@@ -392,5 +401,72 @@ mod tests {
         assert!(!caps.slow, "a cached provider is no longer slow");
         assert_eq!(caps.access, Access::Read, "access passes through");
         assert_eq!(caps.preferred_block, Some(1 << 20), "the block hint survives");
+    }
+
+    /// Serves the same relative path under two roots with identical size and
+    /// mtime but different bytes — exactly what Stage 2b makes possible once
+    /// `RootId` is real. Encodes the requested root into the returned handle
+    /// so `read_at` can hand back root-specific content without needing any
+    /// open-record bookkeeping of its own.
+    struct TwoRootProvider;
+
+    impl Provider for TwoRootProvider {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::read_only()
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            if p.rel == "f" {
+                Ok(Some(Stat { kind: KIND_FILE, size: 4, mtime: 1000 }))
+            } else {
+                Ok(None)
+            }
+        }
+        fn readdir(&self, _p: VPath) -> Result<Vec<DirEntry>, i32> {
+            Ok(vec![])
+        }
+        fn open(&self, p: VPath, _flags: u32) -> Result<(Handle, u64, bool), i32> {
+            if p.rel != "f" {
+                return Err(vfs_provider::not_found());
+            }
+            // Handle doubles as the root id so `read_at` knows which root's
+            // bytes to serve without any extra state.
+            Ok((u64::from(p.root.0), 4, false))
+        }
+        fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+            let data: &[u8] = if h == 0 { b"AAAA" } else { b"BBBB" };
+            let start = offset as usize;
+            if start >= data.len() {
+                return Ok(0);
+            }
+            let n = buf.len().min(data.len() - start);
+            buf[..n].copy_from_slice(&data[start..start + n]);
+            Ok(n)
+        }
+        fn close(&self, _h: Handle) -> Result<(), i32> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn two_roots_same_path_size_and_mtime_do_not_collide() {
+        let inner: Arc<dyn Provider> = Arc::new(TwoRootProvider);
+        let cache = Arc::new(BlockCache::new(CacheConfig::default()));
+        let p = CachingProvider::new(inner, cache, 1);
+
+        let (h0, _, _) = p.open(VPath::new(RootId(0), "f"), OPEN_READ).unwrap();
+        let mut buf0 = [0u8; 4];
+        assert_eq!(p.read_at(h0, 0, &mut buf0).unwrap(), 4);
+        p.close(h0).unwrap();
+
+        let (h1, _, _) = p.open(VPath::new(RootId(1), "f"), OPEN_READ).unwrap();
+        let mut buf1 = [0u8; 4];
+        assert_eq!(p.read_at(h1, 0, &mut buf1).unwrap(), 4);
+        p.close(h1).unwrap();
+
+        assert_eq!(&buf0, b"AAAA", "root 0 should read its own bytes");
+        assert_eq!(
+            &buf1, b"BBBB",
+            "root 1 got root 0's cached bytes back — file_id_for collided across roots"
+        );
     }
 }
