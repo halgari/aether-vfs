@@ -17,6 +17,20 @@
 ///
 /// If this function's definition ever changes, both sides move together; a
 /// change here is a wire-visible change.
+///
+/// Two properties it does **not** have, both of which have already produced
+/// bugs here:
+///
+/// 1. **Not length-preserving.** `İ` (U+0130) is two bytes and folds to three
+///    (`i` + U+0307). Never slice a folded string by an offset measured on the
+///    unfolded one — walk components instead. `strip_prefix` and
+///    `mount_child_name` both did exactly that before the `feat/real-roots`
+///    final review.
+/// 2. **Not NTFS-case-equivalent.** That same `İ` folds to a genuinely
+///    different name, not a case variant of the input. So "NTFS is
+///    case-insensitive, therefore the folded spelling names the same file" is
+///    **not** a sound argument, and must not be used to wave through a change
+///    to any spelling that reaches the filesystem.
 pub fn fold(s: &str) -> String {
     s.chars().flat_map(char::to_lowercase).collect()
 }
