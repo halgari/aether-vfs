@@ -174,8 +174,10 @@ fn copy_up_takes_the_provider_graph_s_bytes() {
 /// **The invariant.** A file present only on real disk under the managed root
 /// — the negative canary — must not be seeded from. This is the assertion the
 /// whole task exists for: reads have been sealed since gate 3, and
-/// `vfs-directord`'s escape matrix scopes its negative-canary check to reads
-/// precisely because a *write* still reached the file through copy-up.
+/// `vfs-directord`'s escape matrix scoped its negative-canary check to reads
+/// precisely because a *write* still reached the file through copy-up. The
+/// matrix has a write half now; this is the unit-level half of the same
+/// claim.
 #[test]
 fn copy_up_never_seeds_from_a_real_file_under_the_root() {
     let f = fixture();

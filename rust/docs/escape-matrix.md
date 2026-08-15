@@ -54,15 +54,23 @@ matrix is evidence about.**
 buildable vector's negative-canary *read* is now sealed — see "Gate 3, Task
 5" below. This does **not** make the negative canary unreachable outright.
 A **write** open (`FILE_OPEN`/`FILE_OPEN_IF` against the negative canary,
-which physically exists on `session.root`) still reaches it: `Engine::
-cow_seed`'s last-resort branch (`crates/vfs-shim/src/engine.rs`, ~line 260)
-copies real on-disk bytes into the overlay whenever neither `Redirect` nor
-`Serve` applies — which now includes `Deny`, exactly as it included
-`PassThrough` before this task — so the negative canary becomes readable
-through the overlay once opened for write. That is gate 4's write path, not
-touched by this task and not fixed here; every "unreachable"/"sealed"/
-"closed" claim anywhere in this document is about **reads** unless it says
-otherwise.
+which physically exists on `session.root`) still reached it at the time this
+paragraph was written: `Engine::cow_seed`'s last-resort branch copied real
+on-disk bytes into the overlay whenever neither `Redirect` nor `Serve`
+applied — which then included `Deny`, exactly as it had included
+`PassThrough` before that task — so the negative canary became readable
+through the overlay once opened for write. That was gate 4's write path, not
+touched by gate 3.
+
+**Superseded by gate 4, Task 5** (see "Gate 4 note" and the write matrix
+below): that branch is deleted, `cow_seed` now reads only through the
+director, and a write open on the negative canary comes back `not-found`
+with no bytes and no stray file on the real filesystem. So the read/write
+split this paragraph set up no longer holds: an "unreachable"/"sealed"/
+"closed" claim in this document is about **reads and writes**, and — since
+Task 8b — about directory enumeration too. What it is still silent on is a
+name-based attribute query, a different hook family with no path to
+`decide` (see the metadata-query correction below).
 
 **Update, Gate 3, Task 6 — the concluding sentence two paragraphs up is now
 wrong for reads, and this is the correction.** "Classification, not
@@ -145,18 +153,30 @@ they still come back `not-found` against the negative canary that no
 provider serves. Reachable when a provider has it, sealed when none does,
 for every spelling this fixture can build. See the matrix table below.
 
-**Writes remain the other class where classification, not containment,
-applies** — gate 4's write fall-through (`Engine::cow_seed`, above) means a
-write open on the negative canary still succeeds against real bytes; that
-class is classified (it would show up in `FellThroughWriteFallback`) but not
-contained. Every "unreachable"/"sealed"/"closed" claim anywhere in this
-document remains a **read-open-only** claim: it says nothing about directory
-enumeration, which is a separate mechanism with its own predicate and had a
-fall-through of its own until gate 4 task 8b closed it (this sentence used to
-assert enumeration's "own dependency on read-open containment being correct
-(which it is, by the reasoning above)" — see the correction above and the task
-8b section below), and nothing about a name-based attribute query, which is a
-different hook family with no path to `decide` at all.
+**Writes were the other class where classification, not containment,
+applied** — gate 4's write fall-through (`Engine::cow_seed`, above) meant a
+write open on the negative canary succeeded against real bytes; that class
+was classified (it showed up in `FellThroughWriteFallback`) but not
+contained.
+
+**Gate 4's Task 5 closed it, so that is no longer true.** `cow_seed`'s
+last-resort real-disk branch is gone, a write the director cannot serve
+fails instead of reaching disk, and the **write matrix** below asserts it
+directly: every buildable vector's negative-canary write comes back
+`not-found`, the canary's bytes on the real filesystem are unchanged, and no
+stray file is created under the root. `FellThroughWriteFallback` is now
+reachable only behind the `allow_disk_fallthrough` opt-out, off by default.
+
+What an "unreachable"/"sealed"/"closed" claim in this document still does
+*not* cover: a name-based attribute query, a different hook family with no
+path to `decide` at all (see the metadata-query correction above, and the
+e2e assertion that covers it instead). Directory enumeration used to belong
+on that list too — it is a separate mechanism with its own predicate and had
+a fall-through of its own — but gate 4 task 8b closed it; see the task 8b
+section below. (This sentence originally also asserted enumeration's "own
+dependency on read-open containment being correct (which it is, by the
+reasoning above)", which was the unsound part the task 8b correction
+replaced.)
 
 One more finding this task's own construction of the new assertion surfaced,
 not predicted in advance: **vector 8 (hardlink) is no longer buildable at all
@@ -808,14 +828,17 @@ hand back a director-served directory handle; that handle comes from
 already correct for every directory the provider graph actually knows about.
 
 **Scope: reads only.** This closes the *read* path — a write open
-(`FILE_OPEN`/`FILE_OPEN_IF` against a file that already exists) is a separate
-mechanism (`Engine::decide_open`/`cow_seed`) that still seeds the overlay
-from real on-disk bytes when neither `Redirect` nor `Serve` applies, which
-after this task includes `Deny` exactly as it included `PassThrough` before.
-That write-path residual is unchanged by this task and is gate 4's to close,
-not gate 3's — see "What this matrix does and does not establish" above for
-the full reasoning. Every claim of "unreachable", "sealed", or "closed"
-anywhere in this document is about reads unless stated otherwise.
+(`FILE_OPEN`/`FILE_OPEN_IF` against a file that already exists) was a separate
+mechanism (`Engine::decide_open`/`cow_seed`) that at the time still seeded the
+overlay from real on-disk bytes when neither `Redirect` nor `Serve` applied,
+which after this task included `Deny` exactly as it had included
+`PassThrough` before. That write-path residual was gate 4's to close, not
+gate 3's.
+
+**Superseded by gate 4, Task 5:** it is closed. `cow_seed`'s last-resort
+real-disk branch is deleted and copy-up now reads only through the director,
+so the read/write scope split this paragraph introduced no longer applies —
+see "Gate 4 note" and the write matrix below.
 
 ### What the shipping config's own launch does and does not demonstrate
 

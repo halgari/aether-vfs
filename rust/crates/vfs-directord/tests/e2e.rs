@@ -1572,9 +1572,12 @@ async fn run_escape_fixture(
 ///     finding") — classification alone was never proof of containment.
 ///     This is the assertion that closes that gap: a vector that is merely
 ///     classified while still opening the real bytes now fails this test.
-///     Scoped to reads only — a **write** open still reaches the negative
-///     canary through `Engine::cow_seed`'s last-resort branch, which is gate
-///     4's to close, not asserted here. `5b` (undecodable handle-relative
+///     Scoped to reads only, because when this was written a **write** open
+///     still reached the negative canary through `Engine::cow_seed`'s
+///     last-resort branch. Gate 4's Task 5 deleted that branch, and
+///     `escape_matrix_write_access_positive_and_negative_canary` below now
+///     asserts the write half — so the scope note describes this test's
+///     coverage, not a remaining hole. `5b` (undecodable handle-relative
 ///     open) and the two reported-not-closed vectors (`13`, `14`) are exempt
 ///     from this assertion for the same documented reasons the positive
 ///     canary's own `positive_expectation` already exempts them — see
@@ -1789,9 +1792,10 @@ async fn escape_matrix_positive_and_negative_canary() {
     // (land in a counted bucket) while still opening the real bytes on
     // `session.root` (see "A second, structural finding" in
     // `rust/docs/escape-matrix.md` — vectors 1/3/4/7/9 were exactly this).
-    // Scoped to reads only, per the brief: a write open still reaches this
-    // same file through `Engine::cow_seed`'s last-resort branch, gate 4's to
-    // close, not asserted here.
+    // Scoped to reads only, per the brief. When that scope was set, a write
+    // open still reached this same file through `Engine::cow_seed`'s
+    // last-resort branch; gate 4's Task 5 deleted it, and the write half is
+    // asserted by `escape_matrix_write_access_positive_and_negative_canary`.
     for line in &neg_lines {
         let Some(want) = negative_expectation(&line.vector) else { continue };
         if line.outcome.starts_with("unbuildable:") {

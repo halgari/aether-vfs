@@ -242,6 +242,18 @@ impl Engine {
             // way for the same reason.
             let scan: Vec<&str> = self.roots.iter().map(|(_, p)| p.as_str()).collect();
             let volumes = vfs_redirect::resolve_volume_map_for(&scan);
+            // The one panic site in this crate's production code, and it is
+            // dead: `build()` already ran this exact call over these exact
+            // strings, and `RootMap::with_capacity`'s only two error exits
+            // (`normalize_vpath`, and the empty-normalisation check) never
+            // read `volumes` — so its `VolumeMap::empty()` and this real one
+            // cannot disagree. **That is the invariant to preserve:** adding
+            // volume-dependent root validation to `vfs-redirect` makes this
+            // reachable, and reachable here means an abort inside the game.
+            // Deliberately not softened to `None`: `map()` returning `None`
+            // sends `decide_open` to `Decision::PassThrough`, trading a dead
+            // abort for a live real-disk fall-through. See §1 of
+            // `rust/docs/audit-2026-08-13.md`.
             RootMap::with_roots(&Self::refs(&self.roots), volumes)
                 .expect("root shapes already validated by build()'s empty-VolumeMap check")
         }))
@@ -453,10 +465,12 @@ impl Engine {
     /// a managed root that the invariant says is unreachable: a real file the
     /// provider graph does not serve reads as not-found, and then a preserving
     /// *write* to the same path copied it up anyway and handed the game its
-    /// bytes. `vfs-directord`'s escape matrix names this exact hole — its
-    /// negative-canary assertion is scoped to reads because the write open
+    /// bytes. `vfs-directord`'s escape matrix named this exact hole — its
+    /// negative-canary assertion was scoped to reads because the write open
     /// still reached the canary "through `Engine::cow_seed`'s last-resort
-    /// branch". This is that branch, gone.
+    /// branch". This is that branch, gone; the matrix now carries a write
+    /// half (`escape_matrix_write_access_positive_and_negative_canary`) that
+    /// asserts the other side.
     ///
     /// It also takes the resolved [`RootId`] and the folded remainder rather
     /// than an NT path, so there is no second, private re-derivation of which
@@ -1232,10 +1246,11 @@ mod tests {
     /// best available answer while `cow_seed` had no way to ask the director
     /// anything — it at least ruled out the worse failure of seeding root 1's
     /// copy from root 0's snapshot entry for the same relative path — but it
-    /// pinned a hole open. `vfs-directord`'s escape matrix names the same one
+    /// pinned a hole open. `vfs-directord`'s escape matrix named the same one
     /// from the other side: its negative canary is unreachable by a read, and
-    /// its "scoped to reads only" note exists because a *write* open still
-    /// reached the canary here.
+    /// its read test's "scoped to reads only" note existed because a *write*
+    /// open still reached the canary here. That scope is now covered by the
+    /// matrix's own write half, not left open.
     ///
     /// Two roots rather than one, because the cross-root claim is still worth
     /// keeping: neither root's copy-up may seed from the other's snapshot

@@ -874,10 +874,18 @@ fn render_passthrough(snap: &Snapshot) -> String {
 /// Copy-up (`Engine::cow_seed`) reads a file's existing content through the
 /// director so a preserving write can start from it. Every way it can decline
 /// or fail is silent from every other vantage point in this module: the open
-/// that triggered it is still counted as `FellThroughWriteFallback`, still
-/// answered with a `Redirect`, and the game simply receives an empty overlay
-/// file (or, for `FILE_OPEN`, a not-found from the redirected open). Nothing
-/// says the content went missing, and nothing says why.
+/// that triggered it is still answered with a `Redirect`, and the game simply
+/// receives an empty overlay file (or, for `FILE_OPEN`, a not-found from the
+/// redirected open). Nothing says the content went missing, and nothing says
+/// why.
+///
+/// Which outcome that open is counted as changed with gate 4's Task 5. This
+/// comment used to say `FellThroughWriteFallback`, and that is no longer the
+/// live answer: since Task 5 the only route that reaches copy-up in a normal
+/// session is a DRM/identity filename exception (`hook.rs`'s `steam_appid.txt`
+/// / launcher / `steam_api*` branch), which records
+/// `FellThroughDrmException`. `FellThroughWriteFallback` is now only
+/// reachable behind the `allow_disk_fallthrough` opt-out, off by default.
 ///
 /// That matters more here than the counter's size suggests. This gate's
 /// defects have all been invisible to a green test suite and visible only in a
