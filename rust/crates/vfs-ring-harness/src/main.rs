@@ -25,8 +25,14 @@ fn main() {
         .unwrap_or_else(|e| fail(&format!("ring open: {e:?}")));
 
     // getattr /hello.txt -> size 5
+    //
+    // Every path-carrying payload leads with the root (see
+    // `P::encode_path_req`), GETATTR and READDIR included — a bare path here
+    // would be parsed as `root = 0x6C65682F` with the rest of the bytes as
+    // the vpath. The OPEN calls below were updated for the root prefix when
+    // the wire changed; these two were not, and CI only builds this crate.
     let r = client
-        .submit(P::OP_GETATTR, 0, b"/hello.txt")
+        .submit(P::OP_GETATTR, 0, &P::encode_path_req(0, "/hello.txt"))
         .unwrap_or_else(|e| fail(&format!("getattr: {e:?}")));
     let attr = P::decode_getattr_resp(&r.payload).unwrap_or_else(|| fail("getattr decode"));
     if !attr.found || attr.size != 5 {
@@ -35,7 +41,7 @@ fn main() {
 
     // readdir / -> contains hello.txt and big.bin
     let r = client
-        .submit(P::OP_READDIR, 0, b"/")
+        .submit(P::OP_READDIR, 0, &P::encode_path_req(0, "/"))
         .unwrap_or_else(|e| fail(&format!("readdir: {e:?}")));
     let entries = P::decode_readdir_resp(&r.payload).unwrap_or_else(|| fail("readdir decode"));
     if !entries.iter().any(|e| e.name == "hello.txt") || !entries.iter().any(|e| e.name == "big.bin") {
