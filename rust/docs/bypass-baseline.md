@@ -910,3 +910,111 @@ either, for the same structural reason.
   table above), per the project's own DLL-staleness convention.
 - No stray `vfs.exe`/`SkyrimSE.exe`/`skyrim-live.exe` process was running
   before this launch or after it exited (`tasklist` checked both times).
+
+## Stage 2b, Task 6: the two-root session (2026-08-14)
+
+The question this stage exists to answer, from gate 1's deep session: Skyrim's
+saves and profile files travel through the NTFS junction
+`Documents\My Games\Skyrim Special Edition` → `C:\tmp\skyrim-data\profiles`.
+That junction sat outside any managed root, so the shim tagged everything under
+it `outside-root` and neither `Routed` nor any fall-through class ever saw it.
+Stage 2b makes that location a second managed root.
+
+### Session
+
+`tools\gamectl.ps1 -Action launch`, `skyrim-live` pid 25108, game pid 28180.
+Two roots: `C:\tmp\skyrim-runtime` (root 0, zip + overrides) and
+`Documents\My Games\Skyrim Special Edition` (root 1, `DiskProvider` over the
+junction's resolved target).
+
+**Root 1 is declared with the literal, unresolved junction path.** This is the
+opposite of what the task brief instructed, and the brief was wrong. The shim
+hooks `NtCreateFile` *before* the kernel resolves the junction, so the spelling
+it sees is the literal one — which gate 1's own captured log shows directly
+(line 504 of this file records the save open as
+`\??\c:\users\...\my games\skyrim special edition\saves\deepsession1.ess`, never
+a resolved target). `RootMap`'s OS-consult fallback is `~`-gated and never fires
+for an ordinary junction path. Declaring the resolved target would have produced
+a root the shim could never match: root 1's counters would have read zero, and
+that zero would have been indistinguishable from "saves still bypass". The
+provider mounted at root 1 uses the *resolved* target; only the matching path is
+literal. The harness prints and cross-checks the resolution before launching, so
+a misconfigured root announces itself as a WARNING rather than as a false
+negative.
+
+### Results
+
+```
+under-root open outcomes:
+  routed                               4393
+        1858x  ...\my games\skyrim special edition\skyrim.ini
+        1708x  ...\my games\skyrim special edition\skyrimcustom.ini
+         450x  ...\my games\skyrim special edition\skyrimprefs.ini
+           5x  ...\my games\skyrim special edition\saves\
+           (remainder under c:\tmp\skyrim-runtime — root 0)
+  fell-through: drm-exception            16
+          15x  ...\vfs-stage-25108\skyrimse.exe
+           1x  ...\skyrim-runtime\steam_appid.txt
+
+vfs-io opens: ok=2375 err=2018 (reconciliation target ok+err=4393) rejected_writes=0
+root 0 (implied = combined − root 1): open ok=62  err=310
+root 1: getattr ok=301 notfound=0 err=0
+        open read ok=2013 err=1708  write ok=300 err=0
+        read_ops=0 read_bytes=0  write_ops=0 write_bytes=0
+```
+
+**Reconciliation is exact:** 2375 + 2018 = 4393 = the shim's `routed`. The
+invariant is `routed == opens_ok + opens_err`, not `opens_ok` alone.
+
+**The headline answer: the My Games root now routes.** Every path that gate 1
+recorded under `outside-root` is now under `routed`. There is no `outside-root`
+class in this run at all. The only fall-through is the four DRM filename
+exceptions, which gate 5 owns and which are expected to be non-zero until then.
+
+**Writes to root 1 route at open time:** 300 successful write-opens, 0 errors,
+0 rejections. `rejected_writes=0` is the honest reading here rather than a
+silent instrument: root 1's provider is unconditionally `ReadWrite`, so it can
+never contribute a director-level rejection — a root-1 write failure would
+appear as `open write err`, which is 0.
+
+### What this run did NOT establish
+
+**No `.ess` save was written.** The session never reached gameplay: the
+Anniversary Edition "Thanks for buying / DOWNLOAD" modal held the main menu and
+could not resolve, almost certainly because Steam is in offline mode. Input was
+confirmed reaching the game (the cursor moves) — the dialog simply swallows it.
+Per the standing convention in this project, a blocking dialog is a content
+problem, not an input problem, so this was not scripted around.
+
+The consequence for gate 4 is specific and worth stating precisely:
+`FellThroughWriteFallback` is **0 in this run, and that zero is not evidence of
+anything**. It is 0 because the 300 write-opens that did occur all routed
+successfully, and because the one write class gate 4 most wants to see — the
+save file itself — never happened. Gate 4 must not read this as "no write
+fall-through work to do."
+
+`write_ops=0 / write_bytes=0` alongside `open write ok=300` says the INI files
+were opened for write at menu time but no ring-level write op followed.
+
+### Follow-up this run identified
+
+The AE upsell modal needs a **content-level** fix in `skyrim-live`'s profile
+seeding, not input automation — the profiles directory is fresh each run, so
+the game re-shows the one-time prompt every session. Until that lands, this
+harness cannot reach gameplay on this machine, and therefore cannot produce a
+save.
+
+### Verification
+
+Both release artifacts were confirmed fresh before launching, and both were
+stale on first inspection: `target\release\skyrim-live.exe` and
+`vfs_shim_dll.dll` dated 17:14/17:15, predating stage 2b's wire change and this
+task's harness. `gamectl.ps1 launch` runs the **release** binary, so verifying
+the debug build proves nothing. Rebuilt, sizes changed (861696→905216,
+1006592→1026048), and markers (`VFS_VIRTUAL_ROOTS`, `root 1 resolves`,
+`EmptyRoot`) confirmed present in both.
+
+Had the stale DLL been launched, it would have spoken wire VERSION 1 to a
+VERSION 2 director. Stage 2b's version bump (`vfs-ipc/layout.rs`, rejected at
+`ring.rs` open) would have failed the attach loudly rather than misparsing a
+root-prefixed payload as a path — the guard behaving as designed.

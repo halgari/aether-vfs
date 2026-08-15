@@ -17,7 +17,7 @@
 - `vfs-payload` is a separate workspace: `cargo build --manifest-path crates/vfs-payload/Cargo.toml --target-dir target`.
 - **The full suite exceeds ten minutes** and launches real processes. Scope your runs and say what you ran.
 - A stray `vfs.exe` daemon can lock the build so `cargo test` yields **no result at all** rather than a failure. Check before concluding a run failed.
-- Two tests are known flaky under parallel contention: `vfs-inject::injected_shim_passes_full_acceptance_suite`, `vfs-shim::writes_land_in_overlay_with_cow`. Both pass standalone.
+- `vfs-shim::writes_land_in_overlay_with_cow` (`crates/vfs-shim/tests/hook_write.rs`) has been flaky under parallel contention; it passes standalone. **Do not extend this allowance to any other test.** An earlier version of this line also named `vfs-inject::injected_shim_passes_full_acceptance_suite` — that test does not exist and never did, and a phantom "known flake" is an invitation to dismiss a real failure. If a test fails, it failed.
 - Conventional commit prefixes. Commit after every task.
 
 ### Why this stage sits between gates 3 and 4
