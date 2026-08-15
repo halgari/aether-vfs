@@ -9,9 +9,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build daemon + inject artifacts
-        # Ensure shim/payload/fixture sit next to the test profile so the
-        # daemon e2e can inject vfs-fixture-read without a nested cargo build.
-        run: cargo build -p vfs-directord -p vfs-source -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-write -p vfs-fixture-writeset -p vfs-ring-harness
+        # Ensure shim/payload/fixtures sit next to the test profile so the
+        # daemon e2e can inject them without a nested cargo build. The fixture
+        # list must stay in step with `ensure_inject_artifacts`'s `needed`
+        # array in crates/vfs-directord/tests/e2e.rs — that is the code that
+        # decides which artifacts have to be present, and it re-runs cargo
+        # itself for anything missing or stale.
+        run: cargo build -p vfs-directord -p vfs-source -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-writepath -p vfs-fixture-escape -p vfs-ring-harness
         working-directory: rust
       - name: Build vfs-payload (separate workspace)
         working-directory: rust
