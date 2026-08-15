@@ -25,4 +25,5 @@ pub use bootstrap::{
 };
 pub use engine::{Engine, EngineError};
 pub use hook::{install, install_late, HookGuard, InstallError};
+pub use overlay::overlay_layer_dir;
 pub use payload_abi::PayloadConfig;

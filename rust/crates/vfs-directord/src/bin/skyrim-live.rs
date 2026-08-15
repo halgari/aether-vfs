@@ -220,7 +220,7 @@ fn run() -> Result<(), String> {
     // Composition: zip (game content) under overrides (steam_appid, writes).
     // Do **not** mount the Steam library DiskProvider — that let the game load
     // masters/BSAs/DLLs from the host install and violated the VFS contract.
-    // steam_appid.txt is written into `overrides` before launch.
+    // steam_appid.txt is written into the overrides layer before launch.
     session
         .mount("", backend)
         .map_err(|st| format!("mount zip status {st}"))?;
@@ -235,12 +235,23 @@ fn run() -> Result<(), String> {
             .mount("", Arc::new(DiskProvider::new(m)))
             .map_err(|st| format!("mount mods status {st}"))?;
     }
+    // Mount the root-0 subdirectory the shim's local write overlay actually
+    // uses (`Session::overlay_layer_dir`), not `overrides` itself: the
+    // overlay is root-scoped on disk (gate 4, Task 2), so mounting the bare
+    // `overrides` directory here would show the director an empty layer
+    // while every write the shim makes lands one level deeper, under
+    // `overrides/root-0/` — a write→read-back round trip through the
+    // director would silently see nothing back. `write_steam_appid` already
+    // created this subdirectory (and seeded `steam_appid.txt` into it), so it
+    // exists by the time this mounts.
+    let overrides_root0 = session.overlay_layer_dir(RootId::DEFAULT);
     session
-        .mount("", Arc::new(DiskProvider::new(&overrides)))
+        .mount("", Arc::new(DiskProvider::new(&overrides_root0)))
         .map_err(|st| format!("mount overrides status {st}"))?;
     eprintln!(
-        "  composition: zip{} + overrides (no Steam-disk mount; under-root sealed to director)",
-        if mods_dir.is_some() { " + mods" } else { "" }
+        "  composition: zip{} + overrides ({}; no Steam-disk mount; under-root sealed to director)",
+        if mods_dir.is_some() { " + mods" } else { "" },
+        overrides_root0.display()
     );
 
     // ── second managed root: Documents\My Games\Skyrim Special Edition ─────
@@ -764,13 +775,32 @@ const SKYRIM_SE_APP_ID: &str = "489830";
 
 /// Valve steam_appid.txt: lets SteamAPI_Init talk to the running client without
 /// RestartAppIfNecessary → steam://run (Remote Play / UI relaunch).
+///
+/// The overlay copy is written directly with `std::fs`, not through the
+/// shim's `Overlay` type (this runs before a `Session`/`Engine` exists at
+/// all) — but it still has to land exactly where `Engine`'s local overlay
+/// will look for it once the shim is live: `Engine::decide`'s DRM-exception
+/// path for `steam_appid.txt` (`hook.rs`) checks the overlay *before* ever
+/// reaching the director, so this write and that lookup must agree on the
+/// physical path or the file is invisible to the VFS (gate 4, Task 2's
+/// review round 1: this used to be `overrides.join("steam_appid.txt")`,
+/// which stopped matching once the overlay became root-scoped). Root 0 is
+/// the only root a plain, single-`Session` binary like this one has, so
+/// `RootId::DEFAULT` is not a guess to revisit later — it is what root 0
+/// *is* here.
 fn write_steam_appid(root: &Path, overrides: &Path) -> Result<(), String> {
     let body = format!("{SKYRIM_SE_APP_ID}\n");
     // Physical next to host (anything that bypasses VFS early).
     let on_disk = root.join("steam_appid.txt");
     std::fs::write(&on_disk, &body).map_err(|e| format!("write {}: {e}", on_disk.display()))?;
-    // Overlay so dual-layer/VFS open of <root>\steam_appid.txt sees it too.
-    let in_overlay = overrides.join("steam_appid.txt");
+    // Overlay so dual-layer/VFS open of <root>\steam_appid.txt sees it too —
+    // at the same root-scoped subdirectory `Engine`'s local overlay (and the
+    // director's own mounted layer over it, see `overlay_layer_dir`'s doc
+    // comment) both resolve against.
+    let overlay_dir = vfs_director::overlay_layer_dir(overrides, RootId::DEFAULT);
+    std::fs::create_dir_all(&overlay_dir)
+        .map_err(|e| format!("mkdir {}: {e}", overlay_dir.display()))?;
+    let in_overlay = overlay_dir.join("steam_appid.txt");
     std::fs::write(&in_overlay, &body)
         .map_err(|e| format!("write {}: {e}", in_overlay.display()))?;
     eprintln!(

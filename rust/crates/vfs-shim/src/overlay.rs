@@ -3,11 +3,30 @@
 //! filesystem access — no `unsafe`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use vfs_core::{fold, wildcard_match};
 use vfs_redirect::{is_whiteout, whiteout_marker, DirItem, RootId};
+
+/// The physical subdirectory an [`Overlay`] rooted at `overlay_root` uses for
+/// `root`'s writes — [`Overlay::root_dir`] calls this too, so it is the one
+/// place the naming scheme is defined.
+///
+/// Exposed (re-exported at the crate root) because the shim's local overlay
+/// is not the only thing that reads this directory: a host-side session can
+/// separately mount a read layer (e.g. a `DiskProvider`) over the same
+/// physical directory so the director sees what the overlay writes, without
+/// the shim and the director ever talking to each other about it — the
+/// filesystem is the shared state. That caller needs the exact subtree the
+/// overlay actually uses, not a re-derived or hardcoded guess at it. See
+/// `vfs-director::Session::overlay_layer_dir` and its caller in
+/// `vfs-directord/src/bin/skyrim-live.rs`, which mounts
+/// `overlay_layer_dir(&overrides, RootId::DEFAULT)` instead of `&overrides`
+/// itself for exactly this reason.
+pub fn overlay_layer_dir(overlay_root: &Path, root: RootId) -> PathBuf {
+    overlay_root.join(format!("root-{}", root.0))
+}
 
 /// What the overlay says about a path.
 pub enum OverlayState {
@@ -31,6 +50,22 @@ pub enum OverlayState {
 /// fixed here one layer up, before `Engine` (still single-root; see the
 /// `SINGLE ROOT` notes in `engine.rs`) becomes multi-root and the collision
 /// would otherwise go live.
+///
+/// **Upgrade note, no migration provided:** before this change, an overlay
+/// directory had no root subdirectory at all — `<overlay_root>/data/x.ini`.
+/// After it, the identical write lives at `<overlay_root>/root-0/data/x.ini`
+/// (see [`overlay_layer_dir`]). Nothing here reads the old layout as a
+/// fallback, and nothing migrates old content into the new one. **Empty any
+/// overlay directory left over from before this change when upgrading** —
+/// otherwise every copy-on-write edit it held reverts to the pre-existing
+/// snapshot/real content (its bytes sit at a path this code no longer looks
+/// at), and every whiteout stops applying, so files deleted at runtime
+/// silently reappear. This was a deliberate call, not an oversight: the only
+/// two callers that set a persistent overlay path are dev-harness binaries
+/// with no shipped users (`vfs-directord/src/bin/skyrim-live.rs`,
+/// `vfs-launch`), and a migrator would have to assume "everything at the old
+/// top level belongs to root 0" — exactly the assumption the next task
+/// (multi-root `Engine`) makes false.
 pub struct Overlay {
     root: PathBuf,
 }
@@ -42,9 +77,10 @@ impl Overlay {
 
     /// The root-scoped overlay subdirectory: distinct roots get distinct
     /// on-disk subtrees so identical relative paths under different roots
-    /// never collide. See the module-level fix note above.
+    /// never collide. See the module-level fix note above and
+    /// [`overlay_layer_dir`], which this delegates to.
     fn root_dir(&self, root: RootId) -> PathBuf {
-        self.root.join(format!("root-{}", root.0))
+        overlay_layer_dir(&self.root, root)
     }
 
     /// The overlay file path for `root`'s folded `comps`.
@@ -228,6 +264,40 @@ mod tests {
             OverlayState::Whiteout => panic!("root 0's whiteout leaked into root 1's lookup"),
             OverlayState::Absent => panic!("root 1's overlay file went missing"),
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `two_roots_same_path_do_not_collide`'s whiteout check above cannot
+    /// fail on its own: `lookup` checks the overlay file before the whiteout
+    /// marker (see `lookup`'s body), and that test's root 1 always has its
+    /// own file at the shared path, so `Present` shadows the marker check
+    /// entirely regardless of whether `whiteout_path` is root-scoped. This
+    /// test removes that shadow: root 1 has no overlay file at all for this
+    /// path, so its `lookup` must fall through to the whiteout-marker check —
+    /// exactly the branch that would expose a root-blind `whiteout_path`
+    /// (root 0's marker landing somewhere root 1's lookup also checks).
+    #[test]
+    fn whiteout_under_one_root_is_absent_not_whiteout_under_another() {
+        let dir = std::env::temp_dir()
+            .join(format!("vfs-overlay-wh-noleak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ov = Overlay::new(dir.to_str().unwrap());
+        let comps = vec!["data".to_string(), "solo.esp".to_string()];
+
+        // Root 0 only: root 1 never had anything at this path.
+        ov.ensure_parent(RootId(0), &comps);
+        std::fs::write(ov.file_path(RootId(0), &comps), b"ROOT0-ONLY").unwrap();
+        ov.whiteout(RootId(0), &comps);
+
+        assert!(
+            matches!(ov.lookup(RootId(0), &comps), OverlayState::Whiteout),
+            "root 0 should read as whited-out"
+        );
+        assert!(
+            matches!(ov.lookup(RootId(1), &comps), OverlayState::Absent),
+            "root 0's whiteout marker leaked into root 1's lookup for a path root 1 never wrote"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

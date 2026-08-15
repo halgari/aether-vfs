@@ -109,6 +109,23 @@ impl Session {
         &self.virtual_root
     }
 
+    /// The physical subdirectory of this session's overlay that `root`'s
+    /// writes actually land in — see `vfs_shim::overlay_layer_dir`, which
+    /// this delegates to, and `Overlay::root_dir` on the shim side (the
+    /// same directory `Engine`'s local write overlay resolves against).
+    ///
+    /// A host mounting its *own* read layer over the overlay directory
+    /// (e.g. a `DiskProvider`, so the director sees content the shim's
+    /// overlay has written — see `vfs-directord/src/bin/skyrim-live.rs`)
+    /// must mount exactly this path, not [`Session::set_overlay`]'s bare
+    /// path: the shim's overlay is root-scoped on disk (gate 4, Task 2), so
+    /// mounting the bare overlay directory would show nothing the overlay
+    /// has actually written, and any writer/reader pair that disagrees on
+    /// this path silently desyncs.
+    pub fn overlay_layer_dir(&self, root: RootId) -> PathBuf {
+        vfs_shim::overlay_layer_dir(&self.overlay, root)
+    }
+
     /// Declare a second (third, …) managed root: the host directory that
     /// `RootId(id)` virtualizes. Root `0` is [`Session::set_root`] and cannot
     /// be declared here.
