@@ -21,6 +21,21 @@ pub enum OverlayState {
 
 /// The overlay directory. Paths are addressed by *folded* (lowercased)
 /// components — consistent with the snapshot and safe on case-insensitive NTFS.
+///
+/// NO ROOT COMPONENT. The key is the relative vpath alone, so `Data/x.ini`
+/// under root 0 and `Data/x.ini` under root 1 are the same overlay file. That
+/// is inert today only because root ≥1 never reaches here: `Engine` builds a
+/// single-root `RootMap` (see the `SINGLE ROOT` notes in `engine.rs`), so
+/// `Engine::decide_open` answers `PassThrough` for anything outside root 0 and
+/// never asks the overlay about it.
+///
+/// It stops being inert the moment `Engine` becomes multi-root, which gate 4
+/// owns. Whoever does that must key the overlay by `(RootId, comps)` in the
+/// same change — this is the *same* collision the block cache had before this
+/// branch mixed `RootId` into `CachingProvider::file_id_for` (see
+/// `two_roots_same_path_size_and_mtime_do_not_collide` in `vfs-cache`),
+/// rediscovered one layer up. Two roots writing the same relative path would
+/// silently share one overlay file.
 pub struct Overlay {
     root: PathBuf,
 }

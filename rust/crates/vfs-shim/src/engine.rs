@@ -118,6 +118,17 @@ impl Engine {
         // only to surface `PathError`, not to build the real, volume-aware
         // map the engine will actually use. See `Engine::map` for why the
         // real one is deferred.
+        //
+        // SINGLE ROOT. `RootMap::new` declares exactly one root, always
+        // `RootId::DEFAULT` — `bootstrap.rs` passes one path, and this engine
+        // has no way to hear about a second. `RootMap::with_roots` is what a
+        // multi-root engine would call. Consequence, recorded by
+        // `a_write_under_a_second_root_passes_through_to_real_disk_today`:
+        // a path under root ≥1 is `Outside` to this map, so `decide_open`
+        // answers `PassThrough` for it — a write that misses the director
+        // lands on real disk with no `Deny` and no overlay redirect, where
+        // the same write under root 0 would be redirected into the overlay.
+        // Gate 4 owns the write path and makes this multi-root.
         RootMap::new(root, VolumeMap::empty()).map_err(EngineError::Root)?;
         SnapshotReader::open(&snapshot).map_err(EngineError::Snapshot)?;
         let overlay = overlay_root.map(Overlay::new);
@@ -159,6 +170,9 @@ impl Engine {
         let _guard = MapInitGuard::enter()?;
         Some(self.map.get_or_init(|| {
             let volumes = vfs_redirect::resolve_volume_map(&self.root);
+            // SINGLE ROOT (`RootId::DEFAULT` only) — see `build`'s note at the
+            // other `RootMap::new` site for what root ≥1 costs today and who
+            // owns fixing it.
             RootMap::new(&self.root, volumes)
                 .expect("root shape already validated by build()'s empty-VolumeMap check")
         }))
@@ -566,6 +580,86 @@ mod tests {
             Some(OverlayState::Whiteout)
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RECORDED GAP, NOT A GUARANTEE. This test exists to make the current
+    /// single-root `Engine` visible and to fail loudly when it stops being
+    /// single-root — it asserts behaviour that is wrong, deliberately, so
+    /// that fixing it cannot happen silently.
+    ///
+    /// `Engine` builds its `RootMap` with `RootMap::new` (see the two
+    /// `SINGLE ROOT` notes above): one root, always `RootId::DEFAULT`.
+    /// `bootstrap.rs` has only one root to give it. So a path under a second
+    /// declared root — which the *client* side (`FuseClient`'s own multi-root
+    /// `RootMap`) does know about, and which the ring carries a `root:u32`
+    /// for — is `Outside` as far as this engine is concerned, and
+    /// `decide_open` answers `PassThrough`.
+    ///
+    /// For a read that is survivable: `hook.rs` seals reads at the client
+    /// (`try_fuse_create`), so a root-≥1 read that misses the director does
+    /// not reach disk. For a *write* it is not: `PassThrough` is the verdict
+    /// `create_hook`/`open_hook` trampoline on, so the write lands on the
+    /// real file. The identical write under root 0 gets `Redirect` into the
+    /// overlay, which is the asymmetry asserted below.
+    ///
+    /// Gate 4 owns the write path and will make `Engine` multi-root. When it
+    /// does, this test fails — that is the point. Rewrite it then to assert
+    /// the redirect, do not relax it.
+    #[test]
+    fn a_write_under_a_second_root_passes_through_to_real_disk_today() {
+        use vfs_redirect::{FILE_OPEN_IF, FILE_OVERWRITE_IF};
+        // GENERIC_WRITE — `classify_open` reads this as a write intent.
+        const WRITE: u32 = 0x4000_0000;
+
+        let base = std::env::temp_dir().join(format!("vfs-engine-2root-{}", std::process::id()));
+        let root0 = base.join("root0");
+        // A second root a multi-root session would declare. Deliberately not
+        // under `root0`: it is a separate location, the way a staged launch
+        // directory or a second managed tree is.
+        let root1 = base.join("root1");
+        let overlay_dir = base.join("overlay");
+        std::fs::create_dir_all(root0.join("Data")).unwrap();
+        std::fs::create_dir_all(root1.join("Data")).unwrap();
+        std::fs::create_dir_all(&overlay_dir).unwrap();
+
+        let engine =
+            Engine::with_overlay(&root0.to_string_lossy(), overlay_dir.to_str().unwrap(), snapshot_bytes())
+                .unwrap();
+
+        // Root 0: a write is captured by the overlay, as it must be.
+        let under_root0 = format!(r"\??\{}", root0.join("Data").join("w.ini").to_string_lossy());
+        assert!(
+            matches!(
+                engine.decide_open(&under_root0, WRITE, FILE_OVERWRITE_IF),
+                Decision::Redirect { .. }
+            ),
+            "a write under root 0 must land in the overlay — the behaviour the \
+             root-≥1 case below does not get"
+        );
+
+        // Root 1: the same shape of write, and the engine has never heard of
+        // this root. No Deny, no Redirect — straight to the real file.
+        let under_root1 = format!(r"\??\{}", root1.join("Data").join("w.ini").to_string_lossy());
+        assert_eq!(
+            engine.decide_open(&under_root1, WRITE, FILE_OVERWRITE_IF),
+            Decision::PassThrough,
+            "RECORDED GAP: a write under a second declared root falls through \
+             to real disk. If this now says Redirect, `Engine` became \
+             multi-root — rewrite this test to assert that, do not relax it."
+        );
+        assert_eq!(
+            engine.decide_open(&under_root1, WRITE, FILE_OPEN_IF),
+            Decision::PassThrough,
+            "RECORDED GAP: same for the copy-on-write disposition."
+        );
+        // And the reason: root 1 is simply not in this engine's map.
+        assert!(
+            !engine.is_under_root(&under_root1),
+            "setup: the gap is that root 1 is invisible to a single-root Engine"
+        );
+        assert!(engine.is_under_root(&under_root0));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
