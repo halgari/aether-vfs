@@ -53,7 +53,9 @@ enum Command {
     },
     /// Launch an executable in a fresh session from `--source` flags.
     Launch {
-        /// `TYPE:PATH@MOUNT#LAYER`, repeatable.
+        /// `TYPE:PATH@MOUNT`, repeatable. Precedence is declaration order
+        /// (later flag wins on a shared path), same as the config file's
+        /// flat `[[source]]` list.
         #[arg(long = "source")]
         sources: Vec<String>,
         #[arg(long)]
@@ -163,6 +165,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     }
                     let cfg = vfs_control::SessionConfig {
                         session: vfs_control::SessionMeta { name: None },
+                        roots: vec![],
                         sources: entries,
                         launch: Some(vfs_control::LaunchConfig {
                             exec,

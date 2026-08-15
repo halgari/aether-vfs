@@ -2,24 +2,51 @@
 //! shared by the daemon, the `vfs` CLI, and the integration tests so there is a
 //! single source of truth for "how a session is set up".
 //!
+//! A session virtualizes one or more real filesystem locations — **roots** —
+//! each served by exactly one provider (see
+//! `docs/superpowers/specs/2026-08-13-pluggable-providers-design.md` §6).
+//! Roots are declared with an id, a name, and a host path:
+//!
 //! ```toml
 //! [session]
 //! name = "skyrim-test"
 //!
+//! [[root]]
+//! id   = 0
+//! name = "game"
+//! path = "C:/Games/Skyrim"
+//!
+//! [[root]]
+//! id   = 1
+//! name = "docs"
+//! path = "C:/Users/me/Documents/My Games/Skyrim"
+//!
 //! [[source]]
 //! type  = "zip"
 //! path  = "C:/GameLayers/base.zip"
-//! mount = "/"
-//! layer = 0
+//! root  = 0
 //!
 //! [[source]]
 //! type  = "disk"
 //! path  = "C:/mods/SkyUI"
-//! layer = 20
+//! root  = 0
+//!
+//! [[source]]
+//! type  = "disk"
+//! path  = "C:/scratch/skyrim-docs"
+//! root  = 1
 //!
 //! [launch]
 //! exec = "SkyrimSE.exe"
 //! ```
+//!
+//! **The flat `[[source]]` list is documented sugar, deprecated but kept for
+//! compatibility.** A `source` entry with no `root` defaults to root `0`, and
+//! entries sharing a root are combined in declaration order — later entries
+//! win on a shared path — which is exactly what a single-root config with no
+//! `[[root]]` table at all has always meant. Prefer declaring roots and a
+//! `root` per source; the flat form is for configs that only ever needed one
+//! root.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -43,15 +70,35 @@ fn default_true() -> bool {
     true
 }
 
-/// One `[[source]]` entry: a spec plus where it mounts and its precedence.
+/// One `[[root]]` entry: a real filesystem location the session virtualizes,
+/// served by exactly one provider. `id` is what travels the hot path and the
+/// wire; `name` exists for config, logs, and error messages. `path` is the
+/// host directory this root maps onto.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootEntry {
+    pub id: u32,
+    pub name: String,
+    pub path: String,
+}
+
+/// One `[[source]]` entry: a spec, where it mounts under its root, and which
+/// root it belongs to.
+///
+/// `layer` is gone: combining several sources at the same root is no longer
+/// an implicit numeric ordering — it is the flat-list sugar's own rule
+/// (declaration order, later wins) or, outside the sugar, an explicit
+/// `layered(...)` in the provider graph. See the module doc for the sugar's
+/// exact meaning.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceEntry {
     #[serde(flatten)]
     pub spec: SourceSpec,
     #[serde(default = "default_mount")]
     pub mount: String,
+    /// Which declared root this source belongs to. Defaults to `0`, the root
+    /// every single-root config (no `[[root]]` table) has always used.
     #[serde(default)]
-    pub layer: i32,
+    pub root: u32,
 }
 
 /// The `[launch]` block.
@@ -81,11 +128,16 @@ pub struct SessionMeta {
     pub name: Option<String>,
 }
 
-/// A whole scenario: session meta, sources, an optional launch, optional cache.
+/// A whole scenario: session meta, roots, sources, an optional launch,
+/// optional cache.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionConfig {
     #[serde(default)]
     pub session: SessionMeta,
+    /// Declared roots. May be empty — a config with no `[[root]]` table is
+    /// the single-root case, root `0`, implicitly.
+    #[serde(default, rename = "root")]
+    pub roots: Vec<RootEntry>,
     #[serde(default, rename = "source")]
     pub sources: Vec<SourceEntry>,
     #[serde(default)]
@@ -131,13 +183,11 @@ name = "skyrim-test"
 [[source]]
 type  = "zip"
 path  = "C:/GameLayers/base.zip"
-layer = 0
 
 [[source]]
 type  = "disk"
 path  = "C:/mods/SkyUI"
 mount = "/"
-layer = 20
 
 [launch]
 exec = "SkyrimSE.exe"
@@ -145,10 +195,12 @@ args = ["--foo"]
 "#;
         let cfg: SessionConfig = toml::from_str(toml).unwrap();
         assert_eq!(cfg.session.name.as_deref(), Some("skyrim-test"));
+        assert!(cfg.roots.is_empty(), "no [[root]] table declared");
         assert_eq!(cfg.sources.len(), 2);
         assert_eq!(cfg.sources[0].spec, SourceSpec::Zip { path: "C:/GameLayers/base.zip".into() });
         assert_eq!(cfg.sources[0].mount, "/"); // defaulted
-        assert_eq!(cfg.sources[1].layer, 20);
+        assert_eq!(cfg.sources[0].root, 0); // defaulted — the flat-list sugar
+        assert_eq!(cfg.sources[1].root, 0);
         let launch = cfg.launch.unwrap();
         assert_eq!(launch.exec, "SkyrimSE.exe");
         assert!(launch.wait); // defaulted true
@@ -158,12 +210,59 @@ args = ["--foo"]
     fn parses_json_equivalent() {
         let json = r#"
         { "session": {"name": "t"},
-          "source": [ {"type":"disk","path":"C:/x","layer":5} ],
+          "source": [ {"type":"disk","path":"C:/x","root":1} ],
           "launch": {"exec":"a.exe","wait":false} }"#;
         let cfg: SessionConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.sources[0].spec, SourceSpec::Disk { path: "C:/x".into() });
-        assert_eq!(cfg.sources[0].layer, 5);
+        assert_eq!(cfg.sources[0].root, 1);
         assert!(!cfg.launch.unwrap().wait);
+    }
+
+    #[test]
+    fn parses_a_declared_root_table() {
+        let toml = r#"
+[[root]]
+id   = 0
+name = "game"
+path = "C:/Games/Skyrim"
+
+[[root]]
+id   = 1
+name = "docs"
+path = "C:/Users/me/Documents/My Games/Skyrim"
+
+[[source]]
+type = "disk"
+path = "C:/Games/Skyrim"
+root = 0
+
+[[source]]
+type = "disk"
+path = "C:/scratch/skyrim-docs"
+root = 1
+"#;
+        let cfg: SessionConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.roots.len(), 2);
+        assert_eq!(cfg.roots[0], RootEntry { id: 0, name: "game".into(), path: "C:/Games/Skyrim".into() });
+        assert_eq!(cfg.roots[1].name, "docs");
+        assert_eq!(cfg.sources[0].root, 0);
+        assert_eq!(cfg.sources[1].root, 1);
+    }
+
+    /// A config authored before `layer` was removed still parses: serde
+    /// silently ignores unknown fields, so a stray `layer = N` left over
+    /// from an old config is harmless rather than a parse error. This is
+    /// the compatibility guarantee the flat-list sugar depends on.
+    #[test]
+    fn a_stray_layer_key_from_an_old_config_is_ignored_not_rejected() {
+        let toml = r#"
+[[source]]
+type  = "disk"
+path  = "C:/x"
+layer = 20
+"#;
+        let cfg: SessionConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.sources[0].root, 0);
     }
 
     #[test]

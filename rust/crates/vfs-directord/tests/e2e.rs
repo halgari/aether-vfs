@@ -315,7 +315,6 @@ name = "m0-e2e"
 type  = "disk"
 path  = {}
 mount = "/"
-layer = 0
 
 [launch]
 exec      = {}
@@ -354,7 +353,11 @@ wait      = true
         launch_event, source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
     };
 
-    for entry in &cfg.sources {
+    // Precedence is declaration order (the flat-list sugar), so position in
+    // `cfg.sources` becomes the RPC's numeric layer directly — see the
+    // comment in `apply_session_config` for why this is no longer a config
+    // field.
+    for (layer, entry) in cfg.sources.iter().enumerate() {
         let path = match &entry.spec {
             vfs_control::SourceSpec::Disk { path } => path.clone(),
             other => panic!("expected disk source, got {other:?}"),
@@ -366,7 +369,7 @@ wait      = true
                     kind: Some(source_spec::Kind::Disk(DiskSource { path })),
                 }),
                 mount: entry.mount.clone(),
-                layer: entry.layer,
+                layer: layer as i32,
             })
             .await
             .expect("AddSource");
@@ -1654,12 +1657,13 @@ async fn apply_session_config_health_and_list() {
         session: vfs_control::SessionMeta {
             name: Some("list-me".into()),
         },
+        roots: vec![],
         sources: vec![vfs_control::SourceEntry {
             spec: vfs_control::SourceSpec::Disk {
                 path: dir.path().to_string_lossy().into_owned(),
             },
             mount: "/".into(),
-            layer: 0,
+            root: 0,
         }],
         launch: None,
         cache: None,

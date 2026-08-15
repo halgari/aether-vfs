@@ -436,6 +436,12 @@ wait = false
     .unwrap();
     let cfg = vfs_control::load(&path).unwrap();
     assert_eq!(cfg.session.name.as_deref(), Some("from-file"));
-    assert_eq!(cfg.sources[0].layer, 3);
+    // `layer` is no longer a schema field (stage 2b task 2 — see
+    // `vfs_control::config`'s module doc): a config file left over from
+    // before that change, still carrying a stray `layer = 3`, must load
+    // without error rather than be rejected, and the source must still
+    // desugar onto root 0 exactly as an undecorated flat `[[source]]`
+    // entry always has.
+    assert_eq!(cfg.sources[0].root, 0);
     assert!(!cfg.launch.unwrap().wait);
 }

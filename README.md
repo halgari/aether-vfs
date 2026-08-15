@@ -41,10 +41,10 @@ cargo build --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   
 # Config-driven session
 .\target\debug\vfs.exe up --config scenario.toml
 
-# Flag-driven
+# Flag-driven (precedence is declaration order — the second wins on a shared path)
 .\target\debug\vfs.exe launch `
-  --source disk:C:\content@/#0 `
-  --source zip:C:\GameLayers\base.zip@/#10 `
+  --source disk:C:\content@/ `
+  --source zip:C:\GameLayers\base.zip@/ `
   --exec C:\path\to\tool.exe --env KEY=VAL
 ```
 
@@ -58,7 +58,6 @@ name = "demo"
 type  = "disk"
 path  = "C:/content"
 mount = "/"
-layer = 0
 
 [launch]
 exec      = "C:/tools/my-probe.exe"

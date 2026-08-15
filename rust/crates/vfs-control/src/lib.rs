@@ -9,6 +9,6 @@ pub mod pb {
 pub mod config;
 
 pub use config::{
-    load, CacheConfig, ConfigError, LaunchConfig, SessionConfig, SessionMeta, SourceEntry,
-    SourceSpec,
+    load, CacheConfig, ConfigError, LaunchConfig, RootEntry, SessionConfig, SessionMeta,
+    SourceEntry, SourceSpec,
 };

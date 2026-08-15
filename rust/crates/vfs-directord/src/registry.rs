@@ -1,6 +1,6 @@
 //! Live session registry: id → host [`Session`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,6 +9,7 @@ use vfs_cache::{BlockCache, CacheConfig, CachingProvider};
 use vfs_compose::stack_layers;
 use vfs_director::stage::{ImageSource, StagedDir};
 use vfs_director::{DiskProvider, LaunchOpts, Provider, Session};
+use vfs_protocol::RootId;
 
 /// Layer for the disk provider mounted over a staged launch directory (see
 /// [`SessionRegistry::stage_launch`]).
@@ -31,6 +32,37 @@ pub struct StageLaunchOpts<'a> {
     pub stage_root: &'a Path,
     pub tag: &'a str,
     pub fallback_dirs: &'a [PathBuf],
+}
+
+/// Build the composed provider each root in a [`vfs_control::SessionConfig`]
+/// serves — the config → provider-graph half of stage 2b's "one provider per
+/// root" (design spec §6).
+///
+/// A source with no explicit `root` defaults to root `0`; sources sharing a
+/// root are combined with [`stack_layers`] in declaration order (later wins),
+/// exactly the documented flat-`[[source]]`-list sugar — generalized here to
+/// however many roots the config declares rather than assuming there is only
+/// one.
+///
+/// This builds provider objects and does **not** mount anything into a live
+/// [`Session`]/`Director`: `Director` is not yet root-aware (that lands in
+/// stage 2b task 3, which also deletes its mount-merge). Until then, the
+/// returned providers are addressed directly via [`vfs_protocol::VPath`],
+/// not through a session's ring/IPC path.
+pub fn build_provider_graph(
+    cfg: &vfs_control::SessionConfig,
+) -> Result<BTreeMap<RootId, Arc<dyn Provider>>, String> {
+    let mut by_root: BTreeMap<u32, Vec<Arc<dyn Provider>>> = BTreeMap::new();
+    for entry in &cfg.sources {
+        let backend = vfs_source::build_provider(&entry.spec).map_err(|e| e.to_string())?;
+        by_root.entry(entry.root).or_default().push(backend);
+    }
+    let mut graph = BTreeMap::new();
+    for (root, stack) in by_root {
+        let composed = stack_layers(stack).map_err(|e| e.to_string())?;
+        graph.insert(RootId(root), composed);
+    }
+    Ok(graph)
 }
 
 /// One live host session plus metadata returned on ListSessions.
@@ -388,4 +420,120 @@ pub struct SessionSummary {
     pub root: PathBuf,
 }
 
+#[cfg(test)]
+mod root_graph_tests {
+    use super::*;
+    use vfs_control::{SessionConfig, SourceEntry, SourceSpec};
+    use vfs_director::OPEN_READ;
+    use vfs_protocol::VPath;
+
+    fn read_whole(p: &Arc<dyn Provider>, root: RootId, rel: &str) -> Vec<u8> {
+        let (h, size, is_dir) = p.open(VPath::new(root, rel), OPEN_READ).unwrap();
+        assert!(!is_dir);
+        let mut buf = vec![0u8; size as usize];
+        let mut off = 0usize;
+        while off < buf.len() {
+            let n = p.read_at(h, off as u64, &mut buf[off..]).unwrap();
+            if n == 0 {
+                break;
+            }
+            off += n;
+        }
+        p.close(h).unwrap();
+        buf
+    }
+
+    /// Stage 2b task 2, step 1: a config declaring two roots with one
+    /// provider each parses, and the resulting graph resolves the same
+    /// relative path to different bytes under each root.
+    #[test]
+    fn two_roots_with_one_provider_each_resolve_independently() {
+        let game_dir = tempfile::tempdir().unwrap();
+        let docs_dir = tempfile::tempdir().unwrap();
+        std::fs::write(game_dir.path().join("same.txt"), b"GAME-BYTES").unwrap();
+        std::fs::write(docs_dir.path().join("same.txt"), b"DOCS-BYTES").unwrap();
+
+        let toml = format!(
+            r#"
+[[root]]
+id   = 0
+name = "game"
+path = {}
+
+[[root]]
+id   = 1
+name = "docs"
+path = {}
+
+[[source]]
+type = "disk"
+path = {}
+root = 0
+
+[[source]]
+type = "disk"
+path = {}
+root = 1
+"#,
+            toml_quote(&game_dir.path().to_string_lossy()),
+            toml_quote(&docs_dir.path().to_string_lossy()),
+            toml_quote(&game_dir.path().to_string_lossy()),
+            toml_quote(&docs_dir.path().to_string_lossy()),
+        );
+        let cfg: SessionConfig = toml::from_str(&toml).expect("parse two-root config");
+        assert_eq!(cfg.roots.len(), 2);
+
+        let graph = build_provider_graph(&cfg).expect("build provider graph");
+        assert_eq!(graph.len(), 2, "one provider per declared root");
+
+        let game = graph.get(&RootId(0)).expect("root 0 provider");
+        let docs = graph.get(&RootId(1)).expect("root 1 provider");
+        assert_eq!(read_whole(game, RootId(0), "same.txt"), b"GAME-BYTES");
+        assert_eq!(read_whole(docs, RootId(1), "same.txt"), b"DOCS-BYTES");
+    }
+
+    /// The flat `[[source]]` sugar (no `[[root]]` table, no `root` on any
+    /// source) must still desugar to "layered of these, mounted at root 0"
+    /// — the single-root behaviour every existing config relies on.
+    #[test]
+    fn flat_source_list_sugar_desugars_to_layered_root_zero() {
+        let base = tempfile::tempdir().unwrap();
+        let mod_dir = tempfile::tempdir().unwrap();
+        std::fs::write(base.path().join("shared.txt"), b"BASE").unwrap();
+        std::fs::write(mod_dir.path().join("shared.txt"), b"MOD-WINS").unwrap();
+
+        let cfg = SessionConfig {
+            sources: vec![
+                SourceEntry {
+                    spec: SourceSpec::Disk {
+                        path: base.path().to_string_lossy().into_owned(),
+                    },
+                    mount: "/".into(),
+                    root: 0,
+                },
+                SourceEntry {
+                    spec: SourceSpec::Disk {
+                        path: mod_dir.path().to_string_lossy().into_owned(),
+                    },
+                    mount: "/".into(),
+                    root: 0,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let graph = build_provider_graph(&cfg).expect("build provider graph");
+        assert_eq!(graph.len(), 1, "the flat list is a single root");
+        let root0 = graph.get(&RootId(0)).unwrap();
+        assert_eq!(
+            read_whole(root0, RootId(0), "shared.txt"),
+            b"MOD-WINS",
+            "later declaration order wins, same as the old default-layer ordering"
+        );
+    }
+
+    fn toml_quote(s: &str) -> String {
+        format!("{:?}", s)
+    }
+}
 

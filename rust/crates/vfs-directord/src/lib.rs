@@ -180,26 +180,24 @@ pub async fn serve_daemon(
     result.map_err(|e| e.into())
 }
 
-/// Parse `TYPE:PATH@MOUNT#LAYER` CLI source flags.
+/// Parse `TYPE:PATH@MOUNT` CLI source flags.
+///
+/// Precedence among several `--source` flags is declaration order (later
+/// flag wins on a shared path) — the same flat-list sugar
+/// [`vfs_control::config`] documents for `[[source]]`, not a per-flag numeric
+/// layer. Every entry this builds targets root `0`; the CLI has no syntax
+/// yet for naming a non-default root (config files do, via `[[root]]` +
+/// `root =`).
 pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     let (ty, rest) = s
         .split_once(':')
         .ok_or_else(|| format!("source flag needs TYPE:PATH…, got {s:?}"))?;
     let ty = ty.to_ascii_lowercase();
 
-    let (path_and_mount, layer) = if let Some((left, right)) = rest.rsplit_once('#') {
-        let layer: i32 = right
-            .parse()
-            .map_err(|_| format!("bad layer in source flag: {right:?}"))?;
-        (left, layer)
-    } else {
-        (rest, 0)
-    };
-
-    let (path, mount) = if let Some((p, m)) = path_and_mount.rsplit_once('@') {
+    let (path, mount) = if let Some((p, m)) = rest.rsplit_once('@') {
         (p.to_string(), m.to_string())
     } else {
-        (path_and_mount.to_string(), "/".to_string())
+        (rest.to_string(), "/".to_string())
     };
 
     if path.is_empty() {
@@ -217,7 +215,7 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     Ok(vfs_control::SourceEntry {
         spec,
         mount,
-        layer,
+        root: 0,
     })
 }
 
@@ -239,10 +237,18 @@ pub async fn apply_session_config(
         .into_inner();
     let session_id = session.id.clone();
 
-    let mut sources = cfg.sources.clone();
-    sources.sort_by_key(|s| s.layer);
-
-    for entry in &sources {
+    // `AddSourceReq.layer` is the RPC's own precedence field, unrelated to
+    // config's (now-removed) `SourceEntry.layer` — it still orders the single
+    // root this RPC path knows how to serve. Declaration order is precedence
+    // (the flat-list sugar's rule), so the position in `cfg.sources` becomes
+    // the numeric layer directly, with no re-sort.
+    //
+    // Only root-0 sources are applied here: `Director` is not yet root-aware
+    // (stage 2b task 3 threads `RootId` through it), so a config's other
+    // roots parse but are not actionable over this RPC path yet. Silently
+    // mounting a non-zero-root source into the one root this daemon actually
+    // serves today would be wrong, not merely incomplete.
+    for (layer, entry) in cfg.sources.iter().enumerate().filter(|(_, e)| e.root == 0) {
         let kind = match &entry.spec {
             vfs_control::SourceSpec::Disk { path } => {
                 source_spec::Kind::Disk(DiskSource { path: path.clone() })
@@ -264,7 +270,7 @@ pub async fn apply_session_config(
                 session_id: session_id.clone(),
                 source: Some(PbSource { kind: Some(kind) }),
                 mount: entry.mount.clone(),
-                layer: entry.layer,
+                layer: layer as i32,
             })
             .await
             .map_err(|e| format!("AddSource: {e}"))?;
@@ -314,7 +320,7 @@ mod tests {
 
     #[test]
     fn parse_source_flag_disk_windows_path() {
-        let e = parse_source_flag(r#"disk:C:\mods\SkyUI@/#20"#).unwrap();
+        let e = parse_source_flag(r#"disk:C:\mods\SkyUI@/"#).unwrap();
         assert_eq!(
             e.spec,
             vfs_control::SourceSpec::Disk {
@@ -322,7 +328,7 @@ mod tests {
             }
         );
         assert_eq!(e.mount, "/");
-        assert_eq!(e.layer, 20);
+        assert_eq!(e.root, 0);
     }
 
     #[test]
@@ -335,14 +341,14 @@ mod tests {
             }
         );
         assert_eq!(e.mount, "/");
-        assert_eq!(e.layer, 0);
+        assert_eq!(e.root, 0);
     }
 
     #[test]
-    fn parse_source_flag_mount_without_layer() {
+    fn parse_source_flag_mount_without_at() {
         let e = parse_source_flag("disk:C:/mods@/Data").unwrap();
         assert_eq!(e.mount, "/Data");
-        assert_eq!(e.layer, 0);
+        assert_eq!(e.root, 0);
     }
 
     #[test]
