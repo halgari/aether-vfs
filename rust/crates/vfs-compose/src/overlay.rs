@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use vfs_core::fold;
 use vfs_provider::{
     bad_fh, bad_request, map_io_err, not_found, not_supported, Access, Capabilities, DirEntry,
     Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_READ,
@@ -322,6 +323,11 @@ impl Provider for OverlayProvider {
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
         let path = p.rel;
+        // Keyed by `vfs_core::fold` throughout — the same fold the shim
+        // applies before a vpath crosses the ring. It matters most for the
+        // whiteout lookup below: an ASCII-only key means a `.wh.` marker for
+        // a non-ASCII-cased name never removes the base entry it names, so a
+        // mod-deleted file stays visible.
         let mut map: HashMap<String, DirEntry> = HashMap::new();
         let mut upper_is_dir = false;
 
@@ -329,7 +335,7 @@ impl Provider for OverlayProvider {
             match self.base.readdir(p) {
                 Ok(entries) => {
                     for e in entries {
-                        map.insert(e.name.to_ascii_lowercase(), e);
+                        map.insert(fold(&e.name), e);
                     }
                 }
                 Err(e) if e == not_found() => {}
@@ -342,7 +348,7 @@ impl Provider for OverlayProvider {
                 upper_is_dir = true;
                 for e in entries {
                     if let Some(target) = e.name.strip_prefix(".wh.") {
-                        map.remove(&target.to_ascii_lowercase());
+                        map.remove(&fold(target));
                         continue;
                     }
                     // A crashed copy-up's temp file must never surface as a
@@ -350,7 +356,7 @@ impl Provider for OverlayProvider {
                     if e.name.starts_with(".cu.") {
                         continue;
                     }
-                    map.insert(e.name.to_ascii_lowercase(), e);
+                    map.insert(fold(&e.name), e);
                 }
             }
             Err(e) if e == not_found() => {}
@@ -362,7 +368,7 @@ impl Provider for OverlayProvider {
         }
 
         let mut out: Vec<DirEntry> = map.into_values().collect();
-        out.sort_by_key(|a| a.name.to_ascii_lowercase());
+        out.sort_by_key(|a| fold(&a.name));
         Ok(out)
     }
 

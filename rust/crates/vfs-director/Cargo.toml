@@ -16,6 +16,10 @@ zip = ["dep:vfs-zip"]
 
 [dependencies]
 vfs-env = { path = "../vfs-env" }
+# `fold` only — the single source of truth for case-insensitive comparison,
+# shared with the shim above the ring so mount-prefix matching and directory
+# merging fold vpaths exactly the way the shim folded them.
+vfs-core = { path = "../vfs-core" }
 vfs-protocol = { path = "../vfs-protocol" }
 vfs-provider = { path = "../vfs-provider" }
 vfs-ipc = { path = "../vfs-ipc" }
@@ -37,3 +41,7 @@ windows-sys = { version = "0.61", features = [
 vfs-zip = { path = "../vfs-zip" }
 vfs-compose = { path = "../vfs-compose" }
 vfs-shim = { path = "../vfs-shim" }
+# `unicode_case_fold_across_the_ring` builds its vpaths with the *same*
+# `RootMap` the shim uses, rather than lowercasing a string in the test — the
+# whole point being that the two sides of the ring must fold identically.
+vfs-redirect = { path = "../vfs-redirect" }

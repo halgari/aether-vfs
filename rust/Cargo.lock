@@ -1486,6 +1486,7 @@ dependencies = [
 name = "vfs-compose"
 version = "0.1.0"
 dependencies = [
+ "vfs-core",
  "vfs-provider",
 ]
 
@@ -1517,11 +1518,13 @@ name = "vfs-director"
 version = "0.1.0"
 dependencies = [
  "vfs-compose",
+ "vfs-core",
  "vfs-env",
  "vfs-inject",
  "vfs-ipc",
  "vfs-protocol",
  "vfs-provider",
+ "vfs-redirect",
  "vfs-shim",
  "vfs-win",
  "vfs-zip",

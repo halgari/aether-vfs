@@ -13,10 +13,19 @@ pub fn matches(pattern: &str, path: &str) -> bool {
     )
 }
 
+/// Folded with [`vfs_core::fold`], the same fold the shim applies to vpath
+/// components before they cross the ring — a route pattern written
+/// `/Data/ÜBER/**` has to match the `data/über/…` the router is actually
+/// asked about.
+///
+/// `match_one` below still compares literals byte-by-byte, which is correct
+/// once both sides are folded the same way; only `?` is byte-scoped (it
+/// consumes one UTF-8 byte, not one character), unchanged by this and
+/// unrelated to case.
 fn normalize(s: &str) -> String {
     let s = s.replace('\\', "/");
     let s = s.trim_matches('/');
-    s.to_ascii_lowercase()
+    vfs_core::fold(s)
 }
 
 fn split_segs(s: &str) -> Vec<&str> {
@@ -100,5 +109,14 @@ mod tests {
     #[test]
     fn case_insensitive() {
         assert!(matches("/Game/**", "/game/A.DAT"));
+    }
+
+    #[test]
+    fn case_insensitive_beyond_ascii() {
+        // The shim folds with `vfs_core::fold`, so a route whose pattern has
+        // a non-ASCII-cased component must still match the folded vpath the
+        // router receives.
+        assert!(matches("/Data/ÜBER/**", &vfs_core::fold("/Data/ÜBER/a.esp")));
+        assert!(matches("/Data/Мод/*.esp", &vfs_core::fold("/Data/МОД/A.ESP")));
     }
 }

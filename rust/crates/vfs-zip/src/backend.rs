@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use vfs_core::fold;
 use vfs_provider::{
     Access, Capabilities, DirEntry, Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
@@ -37,7 +38,10 @@ pub struct ZipProvider {
     container: PathBuf,
     /// Canonical path (as in the zip CD) → node.
     nodes: HashMap<String, Node>,
-    /// ASCII-lowercase path → canonical key (Windows-style).
+    /// Folded path → canonical key (Windows-style). Folded with
+    /// [`vfs_core::fold`], the same function the shim folds vpath components
+    /// with before they cross the ring — an ASCII-only fold here would miss
+    /// every entry whose case only Unicode knows how to lower.
     by_fold: HashMap<String, String>,
     next: AtomicU64,
     opens: Mutex<HashMap<u64, Live>>,
@@ -88,7 +92,7 @@ impl ZipProvider {
 
         let mut by_fold = HashMap::with_capacity(nodes.len());
         for key in nodes.keys() {
-            by_fold.insert(key.to_ascii_lowercase(), key.clone());
+            by_fold.insert(fold(key), key.clone());
         }
 
         Ok(ZipProvider {
@@ -105,7 +109,7 @@ impl ZipProvider {
         if let Some(n) = self.nodes.get(p) {
             return Some(n);
         }
-        let canon = self.by_fold.get(&p.to_ascii_lowercase())?;
+        let canon = self.by_fold.get(&fold(p))?;
         self.nodes.get(canon)
     }
 }
@@ -169,7 +173,7 @@ impl Provider for ZipProvider {
             match self.get(p) {
                 Some(n) if n.is_dir => self
                     .by_fold
-                    .get(&p.to_ascii_lowercase())
+                    .get(&fold(p))
                     .cloned()
                     .unwrap_or_else(|| p.to_string()),
                 Some(_) => return Err(ST_NOT_A_DIRECTORY),
@@ -219,7 +223,7 @@ impl Provider for ZipProvider {
             }
         }
         let mut out: Vec<DirEntry> = kids.into_values().collect();
-        out.sort_by_key(|a| a.name.to_ascii_lowercase());
+        out.sort_by_key(|a| fold(&a.name));
         Ok(out)
     }
 

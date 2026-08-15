@@ -630,7 +630,13 @@ impl FuseClient {
         let (root, comps) = self.roots.resolve(path)?;
         let mut vpath = comps.join("/");
         if let Some(stream) = stream {
-            vpath.push_str(&stream.to_ascii_lowercase());
+            // `vfs_core::fold`, matching the components `RootMap` already
+            // folded: one string on the wire, one fold. Behaviourally
+            // identical for the ASCII stream names anything real uses, but a
+            // second fold spelled differently inside the very function that
+            // builds the wire vpath is how the ring's two sides drifted apart
+            // in the first place.
+            vpath.push_str(&vfs_core::fold(stream));
         }
         Some((root, vpath))
     }
@@ -723,7 +729,7 @@ mod tests {
         map.resolve(path).map(|(r, c)| {
             let mut v = c.join("/");
             if let Some(s) = stream {
-                v.push_str(&s.to_ascii_lowercase());
+                v.push_str(&vfs_core::fold(s));
             }
             (r, v)
         })

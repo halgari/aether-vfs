@@ -11,3 +11,8 @@ path = "src/lib.rs"
 
 [dependencies]
 vfs-provider = { path = "../vfs-provider" }
+# `fold` only — the single source of truth for case-insensitive comparison.
+# The shim folds vpath components with it before they cross the ring, so every
+# combinator that keys or compares a name below the ring has to use the same
+# function or the two sides disagree on anything Unicode-cased.
+vfs-core = { path = "../vfs-core" }

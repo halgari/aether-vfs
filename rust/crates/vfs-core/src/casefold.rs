@@ -2,6 +2,21 @@
 
 /// Lowercase simple case fold. MVP uses `char::to_lowercase` (Unicode simple
 /// folding). This is the single source of truth for case-insensitive matching.
+///
+/// It is load-bearing across the ring, not merely a convention. The shim folds
+/// every vpath component with this function before the vpath is sent
+/// (`vfs-redirect`'s `RootMap::match_canonical`), so everything that keys,
+/// compares, or orders a name on the other side — `vfs-zip`'s `by_fold` index,
+/// `vfs-director`'s mount-prefix matching and directory merges, `vfs-compose`'s
+/// layered/overlay merges and glob routes — has to fold with this same
+/// function. `to_ascii_lowercase` was used below the ring until the final
+/// review of `feat/real-roots` found the split: `Data/ÜBER/a.esp` crossed as
+/// `data/über/a.esp` and every index below was keyed `data/ÜBER/a.esp`, so the
+/// file resolved to not-found. `DiskProvider` hid it, because Windows folds
+/// Unicode itself.
+///
+/// If this function's definition ever changes, both sides move together; a
+/// change here is a wire-visible change.
 pub fn fold(s: &str) -> String {
     s.chars().flat_map(char::to_lowercase).collect()
 }

@@ -44,26 +44,25 @@ struct Mount {
 /// child), for a mount at or above `path`, or for a mount on an unrelated
 /// path that merely shares a string prefix (`"data2"` does not match
 /// `"data"`).
+///
+/// Folds with [`vfs_core::fold`], matching `path::strip_prefix` and the shim's
+/// own fold; see that function for why the comparison walks components instead
+/// of slicing at a byte offset.
 fn mount_child_name(path: &str, mount_prefix: &str) -> Option<String> {
     let mount_prefix = mount_prefix.trim_matches('/');
     if mount_prefix.is_empty() {
         return None;
     }
-    let rest = if path.is_empty() {
-        mount_prefix
-    } else {
-        let plen = path.len();
-        // `get` (not raw slicing) so a `plen` that doesn't land on a char
-        // boundary in `mount_prefix` returns `None` instead of panicking.
-        let head = mount_prefix.get(..plen)?;
-        if mount_prefix.as_bytes().get(plen) != Some(&b'/') {
+    let mut rest = mount_prefix;
+    for have in path.split('/').filter(|c| !c.is_empty()) {
+        // No `/` left in `rest` means the mount is at or above `path`, so it
+        // has no child component to surface.
+        let (head, tail) = rest.split_once('/')?;
+        if vfs_core::fold(head) != vfs_core::fold(have) {
             return None;
         }
-        if !head.eq_ignore_ascii_case(path) {
-            return None;
-        }
-        &mount_prefix[plen + 1..]
-    };
+        rest = tail;
+    }
     let name = rest.split('/').next()?;
     if name.is_empty() {
         None
@@ -162,7 +161,7 @@ impl Provider for MountGraph {
                 Ok(entries) => {
                     saw_dir = true;
                     for e in entries {
-                        map.insert(e.name.to_ascii_lowercase(), e);
+                        map.insert(vfs_core::fold(&e.name), e);
                     }
                 }
                 Err(e) if e == not_found() => {}
@@ -184,7 +183,7 @@ impl Provider for MountGraph {
             let Some(name) = mount_child_name(&path, &m.prefix) else {
                 continue;
             };
-            let key = name.to_ascii_lowercase();
+            let key = vfs_core::fold(&name);
             if map.contains_key(&key) {
                 continue;
             }
@@ -214,7 +213,7 @@ impl Provider for MountGraph {
             return Err(not_found());
         }
         let mut out: Vec<DirEntry> = map.into_values().collect();
-        out.sort_by_key(|a| a.name.to_ascii_lowercase());
+        out.sort_by_key(|a| vfs_core::fold(&a.name));
         Ok(out)
     }
 

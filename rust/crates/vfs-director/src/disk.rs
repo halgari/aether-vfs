@@ -123,7 +123,10 @@ impl Provider for DiskProvider {
                 },
             });
         }
-        out.sort_by_key(|a| a.name.to_ascii_lowercase());
+        // Folded, not ASCII-lowercased: every other listing in this stack
+        // orders by `vfs_core::fold`, and two providers whose entries are
+        // merged must agree on the ordering they were sorted by.
+        out.sort_by_key(|a| vfs_core::fold(&a.name));
         Ok(out)
     }
 

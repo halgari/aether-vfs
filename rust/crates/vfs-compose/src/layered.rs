@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use vfs_core::fold;
 use vfs_provider::{
     bad_fh, map_io_err, not_found, read_only, Access, Capabilities, DirEntry, Handle, Provider,
     SetAttr, Stat, VPath, OPEN_WRITE,
@@ -98,16 +99,20 @@ impl Provider for LayeredProvider {
             Err(e) => return Err(e),
         };
         let bottom_entries = self.bottom.readdir(p).unwrap_or_default();
+        // Keyed by `vfs_core::fold` — the same fold the shim applies to vpath
+        // components before they cross the ring. An ASCII-only key lets two
+        // spellings of one Unicode name survive as two entries, so a
+        // top-layer override of a non-ASCII-cased file stops overriding.
         let mut seen: HashMap<String, DirEntry> = HashMap::new();
         // Bottom first, top overwrites.
         for e in bottom_entries {
-            seen.insert(e.name.to_ascii_lowercase(), e);
+            seen.insert(fold(&e.name), e);
         }
         for e in top_entries {
-            seen.insert(e.name.to_ascii_lowercase(), e);
+            seen.insert(fold(&e.name), e);
         }
         let mut out: Vec<DirEntry> = seen.into_values().collect();
-        out.sort_by_key(|a| a.name.to_ascii_lowercase());
+        out.sort_by_key(|a| fold(&a.name));
         Ok(out)
     }
 
