@@ -1089,8 +1089,11 @@ fn vector13_preexisting_handle(abs: &str) -> Line {
 }
 
 // ---------------------------------------------------------------------
-// Vector 14: a child process without the shim. Reported, not closed, in
-// this gate — may not be a shim fix at all.
+// Vector 14: a child process, spawned on the assumption that it runs without
+// the shim. It does not — the shim detours CreateProcessInternalW and injects
+// into children, so the child is hooked and the director answers it (measured
+// in gate 4 task 8; see rust/docs/escape-matrix.md). Still reported, not
+// closed: that inject is best-effort, so neither outcome here is assertable.
 // ---------------------------------------------------------------------
 fn vector14_child_without_shim(abs: &str) -> Line {
     match access() {
@@ -1117,11 +1120,13 @@ fn vector14_child_without_shim(abs: &str) -> Line {
             }
         }
         // A **sibling** of the target, not the target — see the module doc's
-        // `VFS_ESCAPE_ACCESS` section. This vector reaches real disk by
-        // construction, so pointing it at the target would overwrite the very
-        // bytes the caller's containment assertions read; pointing it at a
-        // sibling proves the same thing and hands the caller a positive
-        // control for those assertions at the same time.
+        // `VFS_ESCAPE_ACCESS` section. Not because this vector reaches real
+        // disk by construction (it does not: the shim injects into children,
+        // measured in gate 4 task 8), but because that injection is
+        // best-effort. On the run where it times out, a vector 14 aimed at
+        // the target would overwrite the very bytes the caller's containment
+        // assertions read, turning a scheduling hiccup into a false
+        // containment failure.
         Access::Write => {
             let note = "reported, not closed in this gate: this vector spawns a child process, \
                         on the assumption that it runs without the shim. MEASURED OTHERWISE in \

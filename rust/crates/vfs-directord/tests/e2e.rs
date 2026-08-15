@@ -1391,11 +1391,19 @@ fn negative_expectation(vector: &str) -> Option<&'static str> {
 /// attempt was classified under-root, or `None` for a vector this check
 /// does not apply to.
 ///
-/// `"14"` is excluded unconditionally: it deliberately spawns a **child
-/// process with no shim injected at all** (that is the vector), so its open
-/// happens in a process whose hook stats this test can never see — absence
-/// there proves nothing about gate 2, only that the child had no hook to
-/// intercept it, exactly as documented.
+/// `"14"` is excluded unconditionally, though **not for the reason this
+/// comment used to give**. It said the child runs with no shim injected at
+/// all, so its open happens in a process whose hook stats this test can never
+/// see. The shim in fact detours `CreateProcessInternalW` and injects into
+/// children (`vfs-shim/src/hook.rs`; measured in gate 4 task 8 — see
+/// `rust/docs/escape-matrix.md`), so the child is hooked and, inheriting
+/// `VFS_SHIM_STATS_LOG`, may even report into this same file.
+///
+/// The exclusion stands anyway, and is now the stronger claim rather than the
+/// weaker one: whatever appears is a *different process's* classification of
+/// its own open, not this vector's, and whether it appears at all depends on
+/// a best-effort inject that is allowed to time out. Presence and absence are
+/// both scheduling outcomes here, so neither is evidence about gate 2.
 ///
 /// `"5b"` is excluded too, but for the opposite reason: it *is* an
 /// in-process, hooked open, but one whose `OBJECT_ATTRIBUTES.RootDirectory`
@@ -2011,17 +2019,20 @@ fn make_escape_junction(tag: &str, target: &Path) -> (PathBuf, Option<String>) {
 /// because there is no detour in this process to drop. Four things are
 /// checked after the negative run:
 ///
-/// 1. the canary's own bytes are byte-identical to what this harness wrote —
-///    no write reached it, and no truncating open emptied it;
-/// 2. its directory holds nothing but the canary and the two artefacts
-///    `accounted_for_on_real_disk` names — no spelling created a file;
-/// 3. no named stream was created on it (vector 11 writes with a creating
-///    disposition, and a stream is a create no directory listing shows);
-/// 4. **the vector-14 sibling *is* there.** Vector 14 spawns a child with no
-///    shim, so it reaches real disk by construction. Its file is this test's
-///    positive control: without it, 1-3 would also pass against a harness
-///    that was looking at the wrong directory, or against a run where the
-///    fixture never executed at all.
+/// 1. the canary is present in its directory at all — the guard that makes
+///    the three absences below mean something, because every one of them
+///    would also hold against an empty lookalike directory;
+/// 2. its bytes are byte-identical to what this harness wrote — no write
+///    reached it, and no truncating open emptied it;
+/// 3. that directory holds nothing besides the canary and the one artefact
+///    `accounted_for_on_real_disk` tolerates — no spelling created a file;
+/// 4. no named stream was created on it (vector 11 writes with a creating
+///    disposition, and a stream is a create no directory listing shows).
+///
+/// See `assert_no_escaped_real_files` for the rest of what stops those
+/// absences being vacuous: the writability probe below, the nineteen asserted
+/// outcome lines, and the standalone run of this same fixture that *does*
+/// produce the artefacts 3 and 4 forbid.
 ///
 /// The canaries sit in directories this harness proves physically writable
 /// first, by creating and deleting a probe file in each. A "nothing was

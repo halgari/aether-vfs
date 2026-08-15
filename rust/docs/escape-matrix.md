@@ -222,7 +222,7 @@ session.
 | 12b | `..` traversal through a non-existent intermediate name, verbatim | opened✓ (flip) | classified✓ | |
 | 12c | Doubled separator, verbatim | opened✓ (flip) | classified✓ | Standalone this reports `error:win32:123` (`ERROR_INVALID_NAME`); under a session it opens. |
 | 13 | Handle opened before the managed root was registered | opened (reported, not closed) | not-found (reported, not closed) | **Reported, not closed in this gate — gate 3's job.** This test cannot construct the real "handle predates root registration" timing; it only re-confirms ordinary reachability from within an already-injected process. See "Vectors 13 and 14" below. |
-| 14 | Child process launched without the shim injected | opened (reported, not closed) | `error:cmd-exit:1` (reported, not closed) | **Reported, not closed in this gate — may not be a shim fix at all.** By construction, this vector's own child process has no hook to intercept anything; its classification (or lack of it) is not evidence about gate 2 either way. See "Vectors 13 and 14" below. |
+| 14 | Child process launched without the shim injected | opened (reported, not closed) | `error:cmd-exit:1` (reported, not closed) | **Reported, not closed in this gate — may not be a shim fix at all.** By construction, this vector's own child process has no hook to intercept anything; its classification (or lack of it) is not evidence about gate 2 either way. See "Vectors 13 and 14" below. **The "by construction" premise here is false — the child *is* injected; see "Gate 4, Task 8".** |
 
 All fourteen vectors (nineteen lines, counting 5b/10a-c/12a-c) were
 buildable on this machine except vector 1's negative-canary line, which is
