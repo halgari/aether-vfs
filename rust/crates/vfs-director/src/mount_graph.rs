@@ -225,6 +225,14 @@ impl Provider for MountGraph {
                 continue;
             };
             if flags & OPEN_WRITE != 0 && m.backend.capabilities().access < Access::ReadWrite {
+                // Same discovery instrument `Director::open` records for a
+                // bare provider: without this, a graph containing *any*
+                // writable mount reports `ReadWrite` in aggregate
+                // (`capabilities()` takes the strongest child), so
+                // `Director`'s own coarse pre-check never fires and this was
+                // the only place left that could still see the rejection
+                // for this specific mount.
+                crate::io_stats::record_rejected_write(&path);
                 return Err(read_only());
             }
             match m.backend.open(VPath::new(p.root, &rel), flags) {
@@ -512,5 +520,43 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(st.kind, KIND_FILE);
+    }
+
+    #[test]
+    fn open_for_write_against_a_read_only_mount_is_recorded_even_though_a_sibling_mount_is_writable() {
+        // Task 3 review, Finding 1: `capabilities()` reports the *strongest*
+        // child access, so a graph with any writable source reports
+        // `ReadWrite` in aggregate — `Director`'s own coarse pre-check never
+        // fires for it, which makes this per-mount recording the only place
+        // left that can see a write refused by one *specific* mount. Gate
+        // 4's whole workflow ("launch, ask what was rejected, add a
+        // provider for it") depends on this staying discoverable.
+        let dir = std::env::temp_dir()
+            .join(format!("vfs-mg-rejected-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = graph(vec![
+            ("rw", Arc::new(crate::DiskProvider::new(&dir)) as Arc<dyn Provider>),
+            (
+                "ro",
+                Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+            ),
+        ]);
+        assert_eq!(
+            g.capabilities().access,
+            vfs_provider::Access::ReadWrite,
+            "the graph as a whole must report writable — the masking Finding 1 warned about"
+        );
+
+        crate::io_stats::reset_rejected_writes();
+        let result = g.open(VPath::at_default("ro/f"), vfs_provider::OPEN_WRITE);
+        assert_eq!(result, Err(vfs_provider::ST_READ_ONLY));
+        let rejected = crate::io_stats::rejected_writes();
+        assert!(
+            rejected.iter().any(|(path, count)| path == "ro/f" && *count >= 1),
+            "a write refused by one mount in a graph containing a writable \
+             sibling must still be discoverable, got {rejected:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -74,8 +74,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Named distinctly from `director::tests::unmount_drops_visibility` —
+    // this crate-root smoke test and that one exercised the identical
+    // behavior under the identical leaf name after both were independently
+    // renamed from `clear_mounts_drops_visibility`, which is exactly the
+    // kind of thing that makes a test count silently miscounted by one.
     #[test]
-    fn unmount_drops_visibility() {
+    fn bare_director_unmount_drops_visibility() {
         let dir = std::env::temp_dir().join(format!("vfs-clear-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("x.txt"), b"x").unwrap();

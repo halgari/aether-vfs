@@ -565,6 +565,48 @@ root = 1
         );
     }
 
+    /// Task 3 review, Finding 2: every other multi-root test here (including
+    /// `two_roots_with_one_provider_each_resolve_independently` above) goes
+    /// through `build_provider_graph`, a pure function that never touches
+    /// `Director` — it does not prove the *live* path the whole stage rests
+    /// on. This one goes through `SessionRegistry::add_source` (the
+    /// gRPC-backed path `apply_session_config`/`AddSourceReq.root` actually
+    /// drives) into the live `Session`'s `Director`, and reads back through
+    /// `Director::open`/`RootId`, not the graph builder.
+    #[test]
+    fn two_roots_resolve_independently_through_the_live_director() {
+        let game_dir = tempfile::tempdir().unwrap();
+        let docs_dir = tempfile::tempdir().unwrap();
+        std::fs::write(game_dir.path().join("same.txt"), b"GAME-BYTES").unwrap();
+        std::fs::write(docs_dir.path().join("same.txt"), b"DOCS-BYTES").unwrap();
+
+        let reg = SessionRegistry::new();
+        let summary = reg.create("two-root-live".into()).unwrap();
+        reg.add_source(&summary.id, 0, "/", 0, Arc::new(DiskProvider::new(game_dir.path())))
+            .unwrap();
+        reg.add_source(&summary.id, 1, "/", 0, Arc::new(DiskProvider::new(docs_dir.path())))
+            .unwrap();
+
+        reg.with_session_mut(&summary.id, |live| {
+            let kernel = live.session.kernel();
+            let (fh, size, _) = kernel.open(RootId(0), "same.txt", OPEN_READ).unwrap();
+            let mut buf = [0u8; 32];
+            let n = kernel.read(fh, 0, &mut buf).unwrap();
+            assert_eq!(&buf[..n], b"GAME-BYTES");
+            assert_eq!(size as usize, n);
+            kernel.close(fh).unwrap();
+
+            let (fh, size, _) = kernel.open(RootId(1), "same.txt", OPEN_READ).unwrap();
+            let mut buf = [0u8; 32];
+            let n = kernel.read(fh, 0, &mut buf).unwrap();
+            assert_eq!(&buf[..n], b"DOCS-BYTES");
+            assert_eq!(size as usize, n);
+            kernel.close(fh).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    }
+
     fn toml_quote(s: &str) -> String {
         format!("{:?}", s)
     }
