@@ -910,35 +910,52 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
     server.abort();
 }
 
-/// **Copy-on-write, live, on the daemon surface** (gate 4, Task 6b).
+/// **Copy-on-write over a layered base, live, on the daemon surface**
+/// (gate 4, Task 6b).
 ///
 /// The two scenarios above prove writes cross the ring; neither proves a
 /// write can be *seeded* from content nothing writable holds. Everything that
-/// does is unit-level, and it is unit-level in a shape the daemon never
-/// builds — so three things had never run live before this test:
+/// does is unit-level, and in a shape the daemon never builds — so this test
+/// exists for what had never run live:
 ///
 /// - **A layered base under the overlay.** `skyrim-live` hands `compose_root`
-///   four sibling `""` mounts; `SessionRegistry` hands it *one* `""` mount
-///   wrapping a `stack_layers` `LayeredProvider`. Copy-up reads its seed
-///   through whatever the base is, and this is the daemon's base.
+///   four sibling `""` mounts; `SessionRegistry` collapses a root's sources
+///   with `stack_layers` and hands it *one* `""` mount. That distinction only
+///   exists with **more than one** root-mounted source: `stack_layers` returns
+///   a lone layer unwrapped, so a single-source session builds no
+///   `LayeredProvider` at all. Hence three sources here — archive, then two
+///   mod directories — which is also what an ordinary modded game looks like.
 /// - **`CachingProvider` under the overlay.** Every registry source is cache-
 ///   wrapped; `skyrim-live` mounts raw. So a copy-up seeded *through the block
-///   cache* — a cached read feeding a write — had never happened outside a
-///   unit test, in either direction.
+///   cache* — a cached read feeding a write — had never happened live.
 /// - **The whole declaration path**, from `AddSourceReq.write_layer` to a real
 ///   `fopen(…, "r+b")` in an injected process.
 ///
-/// The fixture's `VFS_FIXTURE_COW_PATH` step opens `Data/x.esp` — which only
-/// the read-only zip holds — for read+write with no create and no truncate,
-/// edits bytes 9..15, and reads the whole file back through the same handle.
-/// A refused open, a blank destination, or a truncating copy-up each exit
-/// non-zero with a distinct code rather than failing an assertion here.
+/// Two paths are edited in place, and the pair is the point:
+///
+/// - `Data/x.esp` lives **only in the archive**, at the bottom of the stack,
+///   so copy-up has to read down through every layer to seed it.
+/// - `Data/mod.esp` lives in **both** mod directories with different bytes, so
+///   copy-up has to seed from the layer that *wins* precedence.
+///
+/// The two halves of this test catch different things, and both are needed.
+/// The fixture catches a refused open, a blank destination and a truncating
+/// copy-up, inside the process, with distinct exit codes. It cannot catch a
+/// seed from the *wrong layer* — it reads back through the same handle it
+/// wrote, so wrong-but-consistent bytes look fine to it (verified: reversing
+/// the layer order leaves the fixture exiting 0). That is what the host-side
+/// byte assertion below is for.
+///
+/// Neither source directory may be written to — the concern that makes the
+/// write layer a separate declaration in the first place is a game's writes
+/// scattering into whichever mod folder was declared last, and this asserts
+/// on disk that they did not.
 ///
 /// The rest of the fixture (create, append, rename, delete) runs too, so this
 /// is also the first live exercise of those through an `OverlayProvider`
 /// upper rather than a bare writable mount.
 #[tokio::test(flavor = "multi_thread")]
-async fn scenario_zip_source_with_write_layer_copies_up_in_place() {
+async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
     let _guard = LAUNCH_LOCK.lock().await;
     ensure_inject_artifacts();
 
@@ -956,15 +973,29 @@ async fn scenario_zip_source_with_write_layer_copies_up_in_place() {
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    // The read-only content: one Stored zip entry, spelled as an archive
-    // spells it. Its bytes are known exactly, so "the archive is untouched"
-    // is a byte comparison rather than a timestamp check.
+    // Layer 0, the read-only archive: one Stored zip entry, spelled as an
+    // archive spells it. Its bytes are known exactly, so "the archive is
+    // untouched" is a byte comparison rather than a timestamp check.
     const ZIP_ENTRY: &str = "Data/x.esp";
     const ORIGINAL: &[u8] = b"ORIGINAL-ESP-BYTES";
     let content_dir = tempfile::tempdir().expect("tempdir");
     let zip = content_dir.path().join("content.zip");
     support::write_stored_zip(&zip, ZIP_ENTRY, ORIGINAL);
     let zip_before = std::fs::read(&zip).expect("read zip");
+
+    // Layers 10 and 20: two mod directories holding the *same* path with
+    // different bytes, which is what makes the stack's precedence observable.
+    // Equal lengths so a copy-up that seeded from the loser cannot pass by
+    // accident of size, and both long enough for the fixture's offset-9 edit.
+    const MOD_ENTRY: &str = "Data/mod.esp";
+    const MOD_BOTTOM: &[u8] = b"BOTTOM-MOD-BYTES!!";
+    const MOD_TOP: &[u8] = b"TOP-MOD-BYTES-WIN!";
+    let mods_bottom = tempfile::tempdir().expect("mods-bottom tempdir");
+    let mods_top = tempfile::tempdir().expect("mods-top tempdir");
+    for (dir, bytes) in [(&mods_bottom, MOD_BOTTOM), (&mods_top, MOD_TOP)] {
+        std::fs::create_dir_all(dir.path().join("Data")).expect("mkdir Data");
+        std::fs::write(dir.path().join(MOD_ENTRY), bytes).expect("write mod entry");
+    }
 
     // The declared write layer: a directory of the user's choosing, not the
     // session's own overlay. Left uncreated on purpose — an overwrite folder
@@ -1007,6 +1038,28 @@ async fn scenario_zip_source_with_write_layer_copies_up_in_place() {
         .await
         .expect("AddSource (archive)");
 
+    // The two mod directories, as ordinary sources. These are what turn the
+    // root's base into a real `LayeredProvider` — with the archive alone,
+    // `stack_layers` would hand back the archive unwrapped and the layered
+    // path this test exists for would never execute.
+    for (layer, dir) in [(10, &mods_bottom), (20, &mods_top)] {
+        client
+            .add_source(AddSourceReq {
+                session_id: session.id.clone(),
+                source: Some(PbSource {
+                    kind: Some(source_spec::Kind::Disk(DiskSource {
+                        path: dir.path().to_string_lossy().into_owned(),
+                    })),
+                }),
+                mount: "/".into(),
+                layer,
+                root: 0,
+                write_layer: false,
+            })
+            .await
+            .unwrap_or_else(|e| panic!("AddSource (mods layer {layer}): {e}"));
+    }
+
     client
         .add_source(AddSourceReq {
             session_id: session.id.clone(),
@@ -1029,9 +1082,14 @@ async fn scenario_zip_source_with_write_layer_copies_up_in_place() {
         stats_log.to_string_lossy().into_owned(),
     );
     env.insert("VFS_SHIM_STATS_INTERVAL_MS".to_string(), "5".to_string());
-    // The step that needs a write layer. Spelled exactly as the archive
-    // spells it; the shim folds it on the way to the director.
-    env.insert("VFS_FIXTURE_COW_PATH".to_string(), ZIP_ENTRY.to_string());
+    // The steps that need a write layer: the archive-only path (seeded from
+    // the bottom of the stack) and the shadowed path (seeded from whichever
+    // layer wins). Spelled exactly as the sources spell them; the shim folds
+    // them on the way to the director.
+    env.insert(
+        "VFS_FIXTURE_COW_PATH".to_string(),
+        format!("{ZIP_ENTRY};{MOD_ENTRY}"),
+    );
 
     let (opens_ok_before, opens_err_before) = vfs_director::io_stats::open_totals();
 
@@ -1085,6 +1143,22 @@ async fn scenario_zip_source_with_write_layer_copies_up_in_place() {
         "the copied-up file must carry the in-place edit over seeded content"
     );
 
+    // The shadowed path: copy-up had to seed from the layer that *wins*, not
+    // merely from some layer that holds the path. Only the top mod
+    // directory's bytes can produce this, and only through a real
+    // `LayeredProvider` — which is what a second and third source build.
+    let mut expected_mod = MOD_TOP.to_vec();
+    expected_mod[9..15].copy_from_slice(b"EDITED");
+    let copied_mod = overwrite.join("Data").join("mod.esp");
+    assert_eq!(
+        std::fs::read(&copied_mod).ok(),
+        Some(expected_mod),
+        "copy-up of a path two layers hold must seed from the winning layer ({}), not the \
+         one beneath it ({})",
+        String::from_utf8_lossy(MOD_TOP),
+        String::from_utf8_lossy(MOD_BOTTOM)
+    );
+
     // The archive is untouched, byte for byte. This is the assertion the
     // whole feature rests on: copy-on-write, not write-through.
     assert_eq!(
@@ -1092,6 +1166,29 @@ async fn scenario_zip_source_with_write_layer_copies_up_in_place() {
         zip_before,
         "the read-only archive was modified — copy-up wrote through instead of copying"
     );
+
+    // Neither mod directory may be written to. Both are writable on disk, so
+    // nothing but the overlay composition stops a write landing in one — and
+    // "the game's saves ended up inside a mod folder" is the failure that
+    // makes the write layer a separate declaration rather than an inference.
+    for (label, dir, bytes) in [
+        ("bottom", &mods_bottom, MOD_BOTTOM),
+        ("top", &mods_top, MOD_TOP),
+    ] {
+        assert_eq!(
+            std::fs::read(dir.path().join(MOD_ENTRY)).expect("read mod entry after"),
+            bytes,
+            "the {label} mod directory was edited in place instead of copied up"
+        );
+        assert!(
+            !dir.path().join(ZIP_ENTRY).exists(),
+            "the archive-only file was copied into the {label} mod directory"
+        );
+        assert!(
+            !dir.path().join("renamed-probe.txt").exists(),
+            "the fixture's own writes leaked into the {label} mod directory"
+        );
+    }
 
     // The fixture's ordinary writes land in the write layer too, since it is
     // the only writable member of this graph.

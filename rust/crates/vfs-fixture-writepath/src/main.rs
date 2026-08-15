@@ -37,6 +37,12 @@ use std::time::Duration;
 /// director's copy-up can answer it. Unset (every scenario that predates gate
 /// 4 Task 6b) the step is skipped entirely and this fixture behaves exactly as
 /// before. Exit codes 17-20.
+///
+/// Several paths may be given, separated by `;`, and each is edited in turn.
+/// A host proving copy-up over a *layered* base needs at least two: one the
+/// bottom layer holds alone, and one an upper layer shadows — a copy-up that
+/// seeded from the wrong layer would produce the wrong bytes and fail here,
+/// inside the process, rather than being inferred afterwards from the host.
 const COW_PATH_ENV: &str = "VFS_FIXTURE_COW_PATH";
 /// Offset the in-place edit writes at, chosen so both ends of the original
 /// content stay untouched: a truncating or blank-file implementation cannot
@@ -54,8 +60,10 @@ fn main() {
     // 0. Copy-on-write, if the host asked for it: edit read-only content in
     //    place. Runs first so nothing this fixture wrote can be mistaken for
     //    the copied-up file.
-    if let Ok(cow_path) = std::env::var(COW_PATH_ENV) {
-        in_place_edit(&cow_path);
+    if let Ok(cow_paths) = std::env::var(COW_PATH_ENV) {
+        for cow_path in cow_paths.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+            in_place_edit(cow_path);
+        }
     }
 
     // 1. Create + write "hello".

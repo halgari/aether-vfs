@@ -188,7 +188,13 @@ impl LiveSession {
     /// content a read-only source holds fails, in-game, hours later, with
     /// nothing naming the flag that would have fixed it.
     fn report_write_layers(&self) {
-        for root in self.roots.keys().copied().collect::<std::collections::BTreeSet<_>>() {
+        // Every root the *session* composes, not every root `add_source`
+        // recorded: `set_write_layer` never touches `self.roots`, so a root
+        // declared with a write layer and no ordinary source would have been
+        // missing from both branches below — absent from the very report
+        // meant to make write-layer state visible.
+        for root in self.session.composed_roots() {
+            let root = root.0;
             if self.session.has_write_layer(RootId(root)) {
                 eprintln!(
                     "vfs: session {} root {root}: writes copy up into its write layer",

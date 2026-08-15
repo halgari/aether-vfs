@@ -383,6 +383,21 @@ impl Session {
         self.kernel.unmount(root)
     }
 
+    /// Every root this session composes, ascending — whether it got there
+    /// through [`Session::mount_at`], [`Session::set_root_mounts`] or
+    /// [`Session::set_write_layer_at`].
+    ///
+    /// The last of those is why this exists rather than callers keeping their
+    /// own list: a host that records sources per root (as `SessionRegistry`
+    /// does) has no entry for a root that was given *only* a write layer, so
+    /// its own bookkeeping cannot enumerate what the session actually serves.
+    pub fn composed_roots(&self) -> Vec<RootId> {
+        self.roots
+            .lock()
+            .map(|roots| roots.keys().copied().map(RootId).collect())
+            .unwrap_or_default()
+    }
+
     /// Whether `root` has a write layer — i.e. whether a write to content
     /// only a read-only source holds can copy up, or must fail. The daemon
     /// reports this per root when a session is composed, since an absent
@@ -714,6 +729,33 @@ mod root_ownership_tests {
             s.kernel().getattr(RootId(1), "hand.txt").unwrap_or(None).is_none(),
             "after the handover the hand-mounted provider is gone, as asked for"
         );
+    }
+
+    /// A root given only a write layer is still a root this session composes.
+    ///
+    /// The daemon enumerates roots through this to report whether each can
+    /// copy up. Its own per-root bookkeeping is filled in by `add_source`
+    /// alone, so a root declared with a write layer and no ordinary source
+    /// was missing from that report entirely — silently absent from the one
+    /// place that says whether writes copy up.
+    #[test]
+    fn composed_roots_includes_a_root_that_has_only_a_write_layer() {
+        let upper = dir("only-upper", "upper.txt");
+        let content = dir("with-source", "content.txt");
+
+        let s = Session::new();
+        s.mount_at(RootId(1), "", Arc::new(DiskProvider::new(&content))).unwrap();
+        s.set_write_layer_at(RootId(2), Arc::new(DiskProvider::new(&upper))).unwrap();
+
+        assert_eq!(
+            s.composed_roots(),
+            vec![RootId(1), RootId(2)],
+            "a write-layer-only root must be enumerated too, ascending"
+        );
+        assert!(!s.has_write_layer(RootId(1)));
+        assert!(s.has_write_layer(RootId(2)));
+        // Root 0 was never touched, so it is not composed and must not appear.
+        assert!(!s.composed_roots().contains(&RootId::DEFAULT));
     }
 
     /// The check is about ownership, not about recomposition: a root the
