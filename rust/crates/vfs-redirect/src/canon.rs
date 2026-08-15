@@ -139,6 +139,26 @@ fn nt_prefix_len(s: &str) -> usize {
 /// A drive-letter colon (`C:`) — right after any NT/DOS prefix that is
 /// present — is not itself a stream separator; the first colon *after* it
 /// is.
+/// [`strip_stream_suffix`] as a split: the path before any alternate-data-
+/// stream suffix, and the suffix itself (**including** its leading colon),
+/// or `None` when there is no stream.
+///
+/// Exposed because `canonicalise` deliberately *discards* the stream — its
+/// job is to unify spellings of a file, and `f.esp:s` and `f.esp` name the
+/// same file — but a caller building a vpath to send to the director must
+/// not discard it. A named stream that does not exist has to come back
+/// not-found; resolving it to the base path instead would answer a request
+/// for `f.esp:s` with `f.esp`'s bytes. See `vfs-shim`'s
+/// `FuseClient::vpath_under_root`, which re-attaches what this returns.
+pub fn split_stream_suffix(raw: &str) -> (&str, Option<&str>) {
+    let base = strip_stream_suffix(raw);
+    if base.len() == raw.len() {
+        (base, None)
+    } else {
+        (base, Some(&raw[base.len()..]))
+    }
+}
+
 fn strip_stream_suffix(raw: &str) -> &str {
     let prefix_len = nt_prefix_len(raw);
     let rest = &raw[prefix_len..];

@@ -15,10 +15,18 @@ use crate::open_table::{max_read_data, OpenTable};
 /// Threshold: READs larger than this prefer bulk arena when available (**B1**).
 pub const BULK_THRESHOLD: u32 = 64 * 1024;
 
+/// The legacy `vfs_server::Server` tree path, which predates roots entirely:
+/// a `VfsTree` is one flat namespace with no notion of a `RootId`, so the
+/// `root` every path-carrying payload now leads with is decoded (it must be,
+/// to find the path behind it) and then deliberately dropped here.
+///
+/// Dropping it is honest rather than lossy for this dispatcher: there is no
+/// second root for it to select. The production ring host is
+/// `vfs_director::ring_dispatch::dispatch_director`, which *does* route on it.
 pub fn dispatch(tree: &VfsTree, opcode: u32, payload: &[u8]) -> (i32, Vec<u8>) {
     match opcode {
         OP_GETATTR => match decode_path_req(payload) {
-            Some(vp) => {
+            Some((_root, vp)) => {
                 let resp = match tree.getattr(&vp) {
                     Some(s) => AttrResp {
                         found: true,
@@ -38,7 +46,7 @@ pub fn dispatch(tree: &VfsTree, opcode: u32, payload: &[u8]) -> (i32, Vec<u8>) {
             None => (ST_BAD_REQUEST, Vec::new()),
         },
         OP_READDIR => match decode_path_req(payload) {
-            Some(vp) => match tree.readdir(&vp, None) {
+            Some((_root, vp)) => match tree.readdir(&vp, None) {
                 Ok(entries) => {
                     let wire: Vec<DirEntryWire> = entries
                         .into_iter()
@@ -85,7 +93,7 @@ pub fn dispatch_full(
 ) -> (i32, Vec<u8>) {
     match opcode {
         OP_OPEN => match decode_open_req(payload) {
-            Some((oflags, path)) => match table.open_with_getattr(tree, &path, oflags) {
+            Some((_root, oflags, path)) => match table.open_with_getattr(tree, &path, oflags) {
                 Ok(r) => (ST_OK, encode_open_resp(&r)),
                 Err(st) => (st, Vec::new()),
             },
@@ -156,7 +164,7 @@ mod tests {
     #[test]
     fn getattr_hit_dir_and_miss() {
         let t = tree();
-        let (st, p) = dispatch(&t, OP_GETATTR, &encode_path_req("data/a.esp"));
+        let (st, p) = dispatch(&t, OP_GETATTR, &encode_path_req(0, "data/a.esp"));
         assert_eq!(st, ST_OK);
         let a = decode_getattr_resp(&p).unwrap();
         assert!(a.found && !a.is_dir && a.size == 10 && a.mtime == 1);
@@ -170,7 +178,7 @@ mod tests {
             &t,
             &table,
             OP_OPEN,
-            &encode_open_req(OPEN_READ, "nope.bin"),
+            &encode_open_req(0, OPEN_READ, "nope.bin"),
             65536,
         );
         assert_eq!(st, ST_NOT_FOUND);

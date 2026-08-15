@@ -84,52 +84,47 @@ already-succeeded open, and that open went through the same `create_hook`/
 about, so enumeration containment follows directly from read-open
 containment rather than being a separate mechanism this task had to close.
 
-**Correction: this does not extend to name-based metadata queries, and an
+**Correction: this did not extend to name-based metadata queries, and an
 earlier version of this document claimed it did by the same mechanism —
 that claim was false.** `qattr_hook`/`qfull_hook`/`qibn_hook`
-(`crates/vfs-shim/src/hook.rs:1969`, `2041`, `1897`) never call `decide` at
-all. Each asks `fuse_path_attr` (`hook.rs:1822-1831`), which consults
-`fuse_client::vpath_under_root` — the *client's* own string-prefix
-predicate, never `RootMap::compute_under_root` — then the shim-local write
-overlay, then falls through to the real filesystem if neither answers.
-Containment for a name-based attribute query therefore holds only for the
-spellings `vpath_under_root` itself recognises — the ordinary, unmangled
-ones — not for the five alternate spellings (vectors 1, 3, 4, 7, 9) this
-document's own "second, structural finding" (below) already documents as
-recognised only by `RootMap`'s canonicaliser, never by `vpath_under_root`.
-For those five, an attribute query on the negative canary still reaches the
-real, physical file today: `crates/vfs-directord/tests/e2e.rs`'s
-`documents_metadata_gap_for_unrecognised_spellings` proves this directly for
-vector 4 (an isolated `GetFileAttributesW` against the volume-GUID
-spelling), reporting `found` where the matching *read open* on the
-identical spelling reports `not-found`. Attribute queries are also not part
-of the `under-root open outcomes` accounting this matrix's own
-classification check parses at all (`qattr_hook` and friends call
-`hookstats::note_stat`, a separate counter, never `note_open_outcome`) —
-this gap is invisible to this document's classification signal, not merely
-uncontained by it.
+(`crates/vfs-shim/src/hook.rs`) never call `decide` at all. Each asks
+`fuse_path_attr`, which consults `fuse_client::vpath_under_root` — never
+`RootMap::decide` — then the shim-local write overlay, then falls through to
+the real filesystem if neither answers. While `vpath_under_root` was the
+client's *own string-prefix predicate*, containment for a name-based
+attribute query therefore held only for the spellings that predicate itself
+recognised — the ordinary, unmangled ones — not for the five alternate
+spellings (vectors 1, 3, 4, 7, 9) this document's own "second, structural
+finding" (below) documents as recognised only by `RootMap`'s canonicaliser.
+For those five, an attribute query on the negative canary reached the real,
+physical file.
 
-**This is the same asymmetry "second, structural finding" (below) already
-describes, surfacing exactly where that finding predicts it would, not a
-second, unrelated issue.** That finding's root cause is that
-`fuse_client::vpath_under_root` and `RootMap::compute_under_root` are two
-independent predicates recognising different spellings under-root — the
-finding traces the consequence for the *open* path (before Task 5, `NotFound`
-passed through for these five spellings; after, `RootMap::decide`'s `Deny`
-seals them, so opens are now contained). The metadata-query hooks route
-through `vpath_under_root` alone and have no fallback to `RootMap::decide`
-at all, so for them the same five spellings have nowhere to fall through
-*to* — they never engage canonicalisation and reach real disk directly, with
-no equivalent of Task 5's fix to close the gap even for reads. One root
-cause, two visible consequences: the open-path asymmetry Task 5 closed, and
-this metadata-query asymmetry, which nothing in this gate touches.
+**Closed in stage 2b, task 5.** The two predicates were unified: the routing
+half was deleted and `fuse_client::vpath_under_root` *is* a `RootMap` now
+(`FuseClient` holds one, built over every declared root plus the staged
+launch directory as an alias for root 0), so those five spellings are
+recognised and routed by the same canonicalisation that classified them.
+`crates/vfs-directord/tests/e2e.rs`'s
+`metadata_queries_are_sealed_for_canonicaliser_only_spellings` — the same
+test that used to record the gap, flipped rather than deleted — now asserts
+`not-found` for vector 4's isolated `GetFileAttributesW` against the
+volume-GUID spelling.
 
-**Do not fix the underlying asymmetry here.** Unifying `vpath_under_root`
-and `RootMap::compute_under_root` into one predicate both routers consult is
-real work with its own blast radius (see "second, structural finding"'s own
-"Not fixed here" paragraph below) — it deserves its own task, not a
-tail-end patch to this one. This section exists to correct the record and
-to pin the gap down with a test (above), not to close it.
+The hooks still do not route through `RootMap::decide`; that part of the
+correction stands. What changed is that the predicate they *do* consult is
+no longer a weaker one. Attribute queries also remain outside the
+`under-root open outcomes` accounting this matrix's classification check
+parses (`qattr_hook` and friends call `hookstats::note_stat`, a separate
+counter, never `note_open_outcome`), so this containment is asserted by the
+e2e test above rather than visible in this document's classification signal.
+
+**The open-path consequence flipped with it.** Vectors 1, 3, 4, 7 and 9 went
+`opened` → `not-found` in gate 3 task 5 (sealing a passthrough) and are back
+to `opened` now — but for a different reason and against a different
+mechanism: they reach the *director*, which serves the positive canary, and
+they still come back `not-found` against the negative canary that no
+provider serves. Reachable when a provider has it, sealed when none does,
+for every spelling this fixture can build. See the matrix table below.
 
 **Writes remain the other class where classification, not containment,
 applies** — gate 4's write fall-through (`Engine::cow_seed`, above) means a
@@ -189,34 +184,40 @@ The only two exceptions, both `unbuildable` rather than `classified✓`/
 gate 2 — see its own note) and vector 8 (hardlink construction itself now
 fails — a new Task 6 finding, see above and that row's own note).
 
-**Vectors 1, 3, 4, 7 and 9's positive canary flipped from `opened✓` to
-`not-found` in Gate 3, Task 5**, after this document was first written for
-gate 2 — rows below reflect the current, post-Task-5 behaviour, not the
-gate-2-era one. See "A second, structural finding: gate 2's alternate-
-spelling closures were classification-only, never routing" for the full
-mechanism: all five are recognised as under-root only by `RootMap`'s own
-canonicaliser, never by the shim's `vpath_under_root` string matcher, so
-once `RootMap::decide` stopped passing `NotFound` through (this task's
-change), these five now seal instead of reaching the director. Their
-negative-canary `classified✓` result is unaffected — that was always a
-`RootMap`-only property.
+**Vectors 1, 3, 4, 7 and 9's positive canary flipped twice.** Gate 3 Task 5
+took them from `opened✓` to `not-found` (sealing a real-disk passthrough);
+stage 2b Task 5 took them back to `opened✓`, this time *through the
+director*. See "A second, structural finding: gate 2's alternate-spelling
+closures were classification-only, never routing" for the full mechanism and
+its resolution: all five were recognised as under-root only by `RootMap`'s
+own canonicaliser and never by the shim's separate `vpath_under_root` string
+matcher, so they could be classified but never routed. Stage 2b Task 5
+deleted the second predicate — `vpath_under_root` *is* a `RootMap` now — so
+they route like any ordinary path. Their negative-canary results are
+unchanged throughout: a file no provider serves stays sealed.
+
+**These rows are asserted against every declared root, not just the first.**
+`escape_matrix_holds_against_a_second_root`
+(`crates/vfs-directord/tests/e2e.rs`) runs the identical fixture, canaries
+and expectation tables against a target under `RootId(1)` of a two-root
+session.
 
 | # | Vector | Positive canary | Negative canary | Note |
 |---|---|---|---|---|
-| 1 | 8.3 short name (`GetShortPathNameW` + open) | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | `unbuildable: GetShortPathNameW failed: win32:2` | See "Vector 1's negative-canary unbuildable reason" below for the negative-canary column — a real quirk of attribute-query fall-through, not a canonicaliser defect. Positive canary: recognised under-root only by `RootMap`'s canonicaliser (never by `vpath_under_root`), so it now hits `RootMap::decide`'s `NotFound` deny instead of the director; see "A second, structural finding" below. |
+| 1 | 8.3 short name (`GetShortPathNameW` + open) | opened✓ (restored, stage 2b Task 5 — see above) | `unbuildable: GetShortPathNameW failed: win32:2` | See "Vector 1's negative-canary unbuildable reason" below for the negative-canary column — a real quirk of attribute-query fall-through, not a canonicaliser defect. Positive canary: was recognised under-root only by `RootMap`'s canonicaliser and so never routed; since the two predicates were unified it reaches the director like any ordinary spelling. See "A second, structural finding" below. |
 | 2 | Extended-length prefix (`\\?\C:\...`) | opened✓ | classified✓ | |
-| 3 | NT device path (`\\?\GLOBALROOT\Device\HarddiskVolumeN\...`) | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | classified✓ | **Found broken, then fixed — see "A real bypass found and fixed" below** (that fix is about the negative canary's classification, still intact). **Positive canary flipped to `not-found` in Gate 3, Task 5** — recognised under-root only by `RootMap`'s canonicaliser, never by `vpath_under_root`; see "A second, structural finding" below. |
-| 4 | Volume-GUID path (`\\?\Volume{guid}\...`) | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | classified✓ | Same mechanism as vector 3/1/7/9 — see "A second, structural finding" below. |
+| 3 | NT device path (`\\?\GLOBALROOT\Device\HarddiskVolumeN\...`) | opened✓ (restored, stage 2b Task 5) | classified✓ | **Found broken, then fixed — see "A real bypass found and fixed" below** (that fix is about the negative canary's classification, still intact). **Positive canary flipped to `not-found` in Gate 3 Task 5 and back to `opened✓` in stage 2b Task 5**, once the client predicate became the same canonicaliser; see "A second, structural finding" below. |
+| 4 | Volume-GUID path (`\\?\Volume{guid}\...`) | opened✓ (restored, stage 2b Task 5) | classified✓ | Same mechanism as vector 3/1/7/9 — see "A second, structural finding" below. This is also the spelling the metadata-query gap was pinned on; it closed with the same change. |
 | 5 | Handle-relative open (`OBJECT_ATTRIBUTES.RootDirectory` = a real directory handle) | opened✓ | classified✓ | |
 | 5b | Handle-relative open against a handle `GetFinalPathNameByHandleW` cannot resolve (an anonymous pipe) | `error:ntstatus:0xC0000033` | not classified (by design) | **Caveat, not a failure — see "Vector 5's caveat" below.** `path_of_tracked` cannot decode a path at all for this shape, so it lands in the shim's separate "undecodable" counter, never in `under-root open outcomes`. Documented, accepted edge of Task 4's fix, not asserted as pass/fail either way. |
 | 6 | CWD-relative (plain filename, cwd set to the parent dir) | opened✓ | classified✓ | |
-| 7 | Junction / reparse point | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | classified✓ | Negative-canary classification **closed for a junction within two ancestor levels of the managed root (this project's own session layout) — not junctions in general; see "Vectors 7 and 9 closed: session-start alias resolution" below for the residual.** Was a verified, open gate-2 gap; fixed by resolving such a junction into a `VolumeMap` alias once per session. **Positive canary separately flipped to `not-found` in Gate 3, Task 5** — closed classification never made this spelling reachable *through the director*; see "A second, structural finding" below. |
+| 7 | Junction / reparse point | opened✓ (restored, stage 2b Task 5) | classified✓ | Negative-canary classification **closed for a junction within two ancestor levels of the managed root (this project's own session layout) — not junctions in general; see "Vectors 7 and 9 closed: session-start alias resolution" below for the residual.** Was a verified, open gate-2 gap; fixed by resolving such a junction into a `VolumeMap` alias once per session. **Positive canary flipped to `not-found` in Gate 3 Task 5 and back to `opened✓` in stage 2b Task 5** — closed classification never made this spelling reachable *through the director* until the predicates were unified; see "A second, structural finding" below. |
 | 8 | Hardlink (new filename, same underlying bytes) | `not-found` (not `opened` — see "Vector 8's exception" below) | `unbuildable:std::fs::hard_link failed: ... (os error 2)` (flip from `classified✓`, Gate 3 Task 6 — see above) | Positive canary: sealed by the content-addressed provider policy, not a classification failure — `RootMap`/the canonicaliser is never even consulted for this vector when FUSE-routing claims the path first. **Negative canary, Gate 3 Task 6 finding:** `CreateHardLinkW` needs a handle on the source (the negative canary itself) to create the link; `RootMap::decide` now denies that open, so the hardlink can no longer even be constructed — reproduced identically across five separate runs. Before Task 5 this was buildable (the source open passed through) and `classified✓`; the row above reflects current, post-Task-5 behaviour. |
-| 9 | UNC / `subst` / mapped drive (administrative loopback share, `\\localhost\C$\...`) | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | classified✓ | Negative-canary classification **closed — see "Vectors 7 and 9 closed: session-start alias resolution" below.** Was a verified, open gate-2 gap; fixed by registering the admin-share's real NT spelling as a session-start alias. **Positive canary separately flipped to `not-found` in Gate 3, Task 5** — same reason as vector 7; see "A second, structural finding" below. |
+| 9 | UNC / `subst` / mapped drive (administrative loopback share, `\\localhost\C$\...`) | opened✓ (restored, stage 2b Task 5) | classified✓ | Negative-canary classification **closed — see "Vectors 7 and 9 closed: session-start alias resolution" below.** Was a verified, open gate-2 gap; fixed by registering the admin-share's real NT spelling as a session-start alias. **Positive canary flipped to `not-found` in Gate 3 Task 5 and back to `opened✓` in stage 2b Task 5** — same reason as vector 7; see "A second, structural finding" below. |
 | 10a | Case-flipped, `\\?\`-prefixed (verbatim) | opened✓ | classified✓ (`not-found`) | NTFS resolves case regardless of the `\\?\` prefix; standalone-`opened` behaviour, unaffected by session or gate 2. The e2e loop's negative-canary check skips only `unbuildable:` outcomes plus `5b`/`14` explicitly (see `classification_marker`/the skip check in `e2e.rs`) — `10a`'s outcome is neither, so it **is** asserted for the negative canary, and passes: the spelling lands in the shim's classified-paths set, correctly sealed (`not-found`) rather than left unclassified. |
 | 10b | Trailing dot, verbatim (`...\name.esp.`) | opened✓ (flip from standalone `not-found` — see "The 10/12 flip" below) | classified✓ | |
 | 10c | Trailing space, verbatim (`...\name.esp `) | opened✓ (flip) | classified✓ | |
-| 11 | Alternate data stream (`name.esp:probe`) | `not-found` (expected — see note) | classified✓ | Read-only `OPEN_EXISTING` against a stream this fixture never pre-creates; `not-found` means the stream doesn't exist, not that streams are unsupported. Same result standalone and under a session. |
+| 11 | Alternate data stream (`name.esp:probe`) | `not-found` (expected — see note) | classified✓ | Read-only `OPEN_EXISTING` against a stream this fixture never pre-creates; `not-found` means the stream doesn't exist, not that streams are unsupported. Same result standalone and under a session. Stage 2b Task 5 note: `canonicalise` discards an ADS suffix (right for unifying spellings of a *file*), so the unified client predicate re-attaches it when building the vpath — without that, this row would read `opened` and be answering a named-stream request with the base file's bytes. See `FuseClient::vpath_under_root`. |
 | 12a | `.` component, verbatim | opened✓ (flip) | classified✓ | |
 | 12b | `..` traversal through a non-existent intermediate name, verbatim | opened✓ (flip) | classified✓ | |
 | 12c | Doubled separator, verbatim | opened✓ (flip) | classified✓ | Standalone this reports `error:win32:123` (`ERROR_INVALID_NAME`); under a session it opens. |
@@ -967,21 +968,43 @@ classified, now also sealed" — for content that, had it been requested via an
 canary's content is real and mounted; only these five specific spellings
 never reach it).
 
-**Not fixed here, and stated plainly why.** Closing this fully would mean
-teaching `fuse_client::vpath_under_root` (or an equivalent mechanism reachable
-before `try_fuse_create` gives up) to recognise the same alternate spellings
-`RootMap` already does, so a director-backed session serves them exactly like
-any ordinary path. That is a change to `vfs-shim::fuse_client`, not to
-`vfs-redirect/src/lib.rs` or the `try_fuse_create`/`create_hook`/`open_hook`
-decision wiring in `vfs-shim/src/hook.rs` — outside this task's stated file
-scope, and a large enough change (duplicating or sharing `VolumeMap`
-resolution across two independent routers) to deserve its own task rather
-than a scope-creeping fix folded into this one. Recorded here as a real,
-confirmed limitation for exactly that reason, not glossed over: the escape
-matrix's own five affected vectors (`positive_expectation` in
-`crates/vfs-directord/tests/e2e.rs`) now assert `not-found`, each with the
-reasoning above, rather than silently accepting a weaker positive-canary
-check to hide the flip.
+**Not fixed in gate 3 — fixed in stage 2b, task 5.** The prediction above
+("closing this fully would mean teaching `fuse_client::vpath_under_root` to
+recognise the same alternate spellings `RootMap` already does") is what
+happened, by the stronger route: there is no longer a `vpath_under_root`
+*to* teach. `FuseClient` holds a `RootMap` and `vpath_under_root` is that
+map's `resolve`, so one predicate answers for both routers and the two
+cannot drift apart again.
+
+Two things came with it, both structural rather than incidental:
+
+- **`RootMap` holds several roots**, answering `(RootId, remainder)` rather
+  than a bare "inside/outside" — which is what stage 2b needed anyway, and
+  what makes the answer routable. The staged-launch-directory alias that
+  used to be the client's own second prefix test is now just another
+  declared entry sharing root 0's id.
+- **The ring wire carries the root.** Every path-carrying payload leads with
+  a `root:u32` (`vfs_protocol::encode_path_req` and friends), and
+  `vfs_ipc::layout::VERSION` went to 2 so a stale injected DLL speaking the
+  old shape is refused at ring attach rather than having its first four path
+  bytes read as a root id.
+
+The five affected vectors' `positive_expectation` entries in
+`crates/vfs-directord/tests/e2e.rs` are back in the catch-all `opened` case
+they started in — and their `negative_expectation` entries are unchanged at
+`not-found`, which is the pair that makes it containment rather than an
+access regression in either direction.
+
+**One deliberate carry-over.** `canonicalise` discards an alternate-data-
+stream suffix, correctly: `f.esp:s` and `f.esp` are spellings of the same
+*file*, which is what a canonicaliser unifying spellings should say. A vpath
+built for the director must not discard it, though — a named stream that
+does not exist has to answer not-found, not the base file's bytes — so
+`FuseClient::vpath_under_root` re-attaches the suffix after resolving. The
+string predicate kept it by accident (it never parsed the path at all);
+keeping it deliberately is what holds vector 11 at `not-found`. Found by
+that vector flipping to `opened` on the first unification pass, not
+reasoned about in advance.
 
 **Why this does not threaten the real Skyrim launch this task also
 verifies.** None of these five spellings is one a real game process, SKSE, or

@@ -63,7 +63,7 @@ fn client_open_read_close_over_ring() {
         });
 
         let client = RingClient::new(seg, SpinNotifier).unwrap();
-        let open_pl = encode_open_req(OPEN_READ, "data/f.bin");
+        let open_pl = encode_open_req(0, OPEN_READ, "data/f.bin");
         let resp = client.submit(OP_OPEN, 0, &open_pl).unwrap();
         assert_eq!(resp.status, ST_OK);
         let OpenResp { fh, size, .. } = decode_open_resp(&resp.payload).unwrap();
@@ -137,14 +137,14 @@ fn client_getattr_readdir_over_ring() {
 
         let client = RingClient::new(seg, SpinNotifier).unwrap();
         let g = client
-            .submit(OP_GETATTR, 0, &encode_path_req("data/a.esp"))
+            .submit(OP_GETATTR, 0, &encode_path_req(0, "data/a.esp"))
             .unwrap();
         assert_eq!(g.status, ST_OK);
         let a = decode_getattr_resp(&g.payload).unwrap();
         assert!(a.found && !a.is_dir && a.size == 8);
 
         let d = client
-            .submit(OP_READDIR, 0, &encode_path_req("data"))
+            .submit(OP_READDIR, 0, &encode_path_req(0, "data"))
             .unwrap();
         assert_eq!(d.status, ST_OK);
         let names: Vec<_> = decode_readdir_resp(&d.payload)
@@ -211,7 +211,7 @@ fn client_bulk_read_into_arena() {
 
         let client = RingClient::new(seg, SpinNotifier).unwrap();
         let open = client
-            .submit(OP_OPEN, 0, &encode_open_req(OPEN_READ, "data/big.bin"))
+            .submit(OP_OPEN, 0, &encode_open_req(0, OPEN_READ, "data/big.bin"))
             .unwrap();
         assert_eq!(open.status, ST_OK);
         let OpenResp { fh, size, .. } = decode_open_resp(&open.payload).unwrap();

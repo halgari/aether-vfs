@@ -839,11 +839,18 @@ unsafe fn record_path(file_handle: *mut HANDLE, path: Option<&str>, status: NTST
 
 /// Is this path one we are responsible for?
 ///
-/// There are two notions of "ours" and they are not the same. The engine knows
-/// the managed root; the client *also* serves the staging directory as an alias
-/// for it — and a staged game's working directory is that staging directory, so
-/// it reaches our content by that name. Anything that asks the narrower question
-/// silently disowns the aliased half.
+/// There are two notions of "ours" and they are not the same. The engine
+/// knows *one* managed root — the shim's own local config names a single
+/// tree. The client knows every root the session declared, plus the staging
+/// directory as an alias for root 0 — and a staged game's working directory
+/// is that staging directory, so it reaches our content by that name.
+/// Anything that asks the narrower question silently disowns everything the
+/// engine has never heard of: the aliased half, and (since stage 2b) every
+/// root past the first.
+///
+/// Both halves canonicalise the same way now — the client's predicate is a
+/// `RootMap` too — so what differs is only *how many roots* each was told
+/// about, not which spellings each recognises.
 ///
 /// Every caller must ask through here. When `tag_under_root` asked the narrow
 /// question, the enumeration of `<stage>\Data` went untracked and fell through
@@ -1065,7 +1072,7 @@ unsafe fn try_fuse_create(
 ) -> Option<NTSTATUS> {
     let client = crate::fuse_client::global()?;
     let path = path?.to_string();
-    let vpath = client.vpath_under_root(&path)?;
+    let (root, vpath) = client.vpath_under_root(&path)?;
     // Directory open of root: empty vpath → "."
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
 
@@ -1144,12 +1151,12 @@ unsafe fn try_fuse_create(
     // create/open outcome, which the director still decides atomically.
     let existed_before = write
         && disposition_needs_existence_probe(disposition)
-        && matches!(client.getattr(vp), Ok(a) if a.found);
+        && matches!(client.getattr(root, vp), Ok(a) if a.found);
 
     let opened = if write {
-        client.open_write(vp, create_flags)
+        client.open_write(root, vp, create_flags)
     } else {
-        client.open(vp)
+        client.open(root, vp)
     };
     match opened {
         Ok(resp) => {
@@ -1338,9 +1345,9 @@ unsafe fn try_fuse_mkdir(
     }
     let client = crate::fuse_client::global()?;
     let path = path?;
-    let vpath = client.vpath_under_root(path)?;
+    let (root, vpath) = client.vpath_under_root(path)?;
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
-    match client.mkdir(vp, 0o755) {
+    match client.mkdir(root, vp, 0o755) {
         Ok(()) => {
             // Synthesize a virtual directory handle directly — do NOT OP_OPEN the
             // new dir: the overlay opens paths as FileChannels, and a directory
@@ -1370,7 +1377,7 @@ unsafe fn try_fuse_mkdir(
         // honor the disposition — FILE_CREATE(2) must report a name collision
         // (ERROR_ALREADY_EXISTS, so the create-and-ignore idiom works), while
         // FILE_OPEN_IF(3)/FILE_OVERWRITE_IF(5) open the existing directory.
-        Err(_) => match client.getattr(vp) {
+        Err(_) => match client.getattr(root, vp) {
             Ok(a) if a.found && a.is_dir => {
                 if disp == 2 {
                     Some(STATUS_OBJECT_NAME_COLLISION)
@@ -1821,9 +1828,9 @@ unsafe extern "system" fn open_hook(
 /// to the Steam tree on NOT_FOUND (seal under-root).
 unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), i32>> {
     let client = crate::fuse_client::global()?;
-    let vpath = client.vpath_under_root(path)?;
+    let (root, vpath) = client.vpath_under_root(path)?;
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
-    Some(match client.getattr(vp) {
+    Some(match client.getattr(root, vp) {
         Ok(a) if a.found => Ok((a.is_dir, a.size, a.mtime)),
         Ok(_) => Err(vfs_protocol::ST_NOT_FOUND),
         Err(st) => Err(st),
@@ -2242,19 +2249,25 @@ unsafe extern "system" fn setinfo_hook(
                 Err(_) => None,
             };
             if let (Some(nt), Some(c)) = (nt, crate::fuse_client::global()) {
-                if let Some(vpath) = c.vpath_under_root(&nt) {
+                if let Some((root, vpath)) = c.vpath_under_root(&nt) {
                     let src = if vpath.is_empty() { ".".to_string() } else { vpath };
                     let ok = if is_delete {
-                        c.delete(&src).is_ok()
+                        c.delete(root, &src).is_ok()
                     } else {
                         match parse_rename_target(info, length)
                             .and_then(|t| c.vpath_under_root(&t))
                         {
-                            Some(dstv) => {
+                            // A rename whose target lands under a *different*
+                            // root is declined rather than guessed at: the
+                            // wire carries one root for both sides, and the
+                            // provider contract has no cross-root move. It
+                            // falls through to the soft no-op below, the same
+                            // as an unresolvable target.
+                            Some((dst_root, dstv)) if dst_root == root => {
                                 let dst = if dstv.is_empty() { ".".to_string() } else { dstv };
-                                c.rename(&src, &dst).is_ok()
+                                c.rename(root, &src, &dst).is_ok()
                             }
-                            None => false,
+                            _ => false,
                         }
                     };
                     if ok {
@@ -3501,9 +3514,9 @@ unsafe fn serve_dir_query(
     let rebuilt = if need_build {
         let wildcard = wildcard_of(file_name);
         if let Some(client) = crate::fuse_client::global() {
-            if let Some(vpath) = client.vpath_under_root(&dir_path) {
+            if let Some((root, vpath)) = client.vpath_under_root(&dir_path) {
                 let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
-                match client.readdir(vp) {
+                match client.readdir(root, vp) {
                     Ok(entries) => {
                         let mut items: Vec<DirItem> = entries
                             .into_iter()

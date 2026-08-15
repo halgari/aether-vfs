@@ -220,7 +220,7 @@ fn main() {
 
         // --- GETATTR ---
         let mut ga = Stats::new("GETATTR RTT");
-        let path_pl = encode_path_req(&vpath);
+        let path_pl = encode_path_req(0, &vpath);
         for i in 0..(warmup + iters) {
             let t0 = Instant::now();
             let r = client.submit(OP_GETATTR, 0, &path_pl).unwrap();
@@ -236,7 +236,7 @@ fn main() {
         // --- OPEN + CLOSE ---
         let mut open_s = Stats::new("OPEN RTT");
         let mut close_s = Stats::new("CLOSE RTT");
-        let open_pl = encode_open_req(OPEN_READ, &vpath);
+        let open_pl = encode_open_req(0, OPEN_READ, &vpath);
         for i in 0..(warmup + iters) {
             let t0 = Instant::now();
             let r = client.submit(OP_OPEN, 0, &open_pl).unwrap();

@@ -3,7 +3,23 @@
 use core::mem::{align_of, offset_of, size_of};
 
 pub const MAGIC: u32 = 0x5646_4950;
-pub const VERSION: u32 = 1;
+/// Wire-format generation of the ring's *payloads*, not of the ring framing
+/// itself — `ring::open` refuses a segment whose version differs, which is the
+/// only defence against a stale injected DLL speaking the previous payload
+/// shape into a current director.
+///
+/// - **1** — original: path-carrying payloads were a bare path
+///   (`encode_path_req`) or `flags|path` (`encode_open_req`).
+/// - **2** — stage 2b task 5: every path-carrying payload gained a leading
+///   `root:u32` (see `vfs_protocol::encode_path_req`). A version-1 shim
+///   talking to a version-2 director would have the first four bytes of its
+///   path read as a root id and the remainder as a truncated path —
+///   plausible-looking garbage, never an error. Bumping this turns that into
+///   a loud failure at attach.
+///
+/// **Bump this whenever a payload layout changes.** Opcode numbers are a
+/// separate contract and must never be renumbered.
+pub const VERSION: u32 = 2;
 
 pub const ST_FREE: u32 = 0;
 pub const ST_CLAIMED: u32 = 1;

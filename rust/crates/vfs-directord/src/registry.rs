@@ -264,6 +264,29 @@ impl SessionRegistry {
         Ok(source_id)
     }
 
+    /// Declare the host directory a non-zero root virtualizes, so the
+    /// injected shim recognises paths under it as belonging to `root` rather
+    /// than to no one.
+    ///
+    /// The companion to [`Self::add_source`], and deliberately not folded
+    /// into it: `add_source` says *what a root serves*, this says *where the
+    /// game will look for it*. A config's `[[root]] path` is the source of
+    /// truth for this; `add_source` never sees it, because `AddSourceReq`
+    /// carries a root id and no path.
+    ///
+    /// Root 0 is the session's own root (`SessionSummary::root`) and is
+    /// rejected here rather than silently ignored — repointing it would
+    /// desynchronise the shim from the directory the daemon actually created.
+    pub fn declare_root(&self, session_id: &str, root: u32, path: &Path) -> Result<(), String> {
+        if root == 0 {
+            return Err("root 0 is the session's own root and cannot be re-declared".to_string());
+        }
+        self.with_session_mut(session_id, |live| {
+            live.session.declare_root(root, path);
+            Ok(())
+        })
+    }
+
     /// Stage a launch image (plus import closure / companion images) onto
     /// real disk, then mount the staging directory into the session's own
     /// provider graph so every staged path resolves there too — not only

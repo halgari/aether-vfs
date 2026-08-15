@@ -10,8 +10,8 @@ use tonic::{Request, Response, Status};
 
 use vfs_control::pb::director_server::Director;
 use vfs_control::pb::{
-    launch_event, source_spec, AddSourceReq, CreateSessionReq, Empty, HealthReq, HealthResp,
-    LaunchEvent, LaunchReq, RejectedWrite, Session, SessionList, SourceRef, StatsResp,
+    launch_event, source_spec, AddSourceReq, CreateSessionReq, DeclareRootReq, Empty, HealthReq,
+    HealthResp, LaunchEvent, LaunchReq, RejectedWrite, Session, SessionList, SourceRef, StatsResp,
     TeardownReq,
 };
 use vfs_control::SourceSpec;
@@ -53,6 +53,20 @@ impl Director for DirectorService {
             name: summary.name,
             root: summary.root.to_string_lossy().into_owned(),
         }))
+    }
+
+    async fn declare_root(
+        &self,
+        req: Request<DeclareRootReq>,
+    ) -> Result<Response<Empty>, Status> {
+        let r = req.into_inner();
+        if r.path.trim().is_empty() {
+            return Err(Status::invalid_argument("path is required"));
+        }
+        self.registry
+            .declare_root(&r.session_id, r.root, std::path::Path::new(&r.path))
+            .map_err(Status::invalid_argument)?;
+        Ok(Response::new(Empty {}))
     }
 
     async fn add_source(&self, req: Request<AddSourceReq>) -> Result<Response<SourceRef>, Status> {

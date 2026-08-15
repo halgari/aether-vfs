@@ -109,7 +109,7 @@ pub fn golden_vectors() -> Vec<(&'static str, Vec<u8>)> {
     vec![
         ("shim-config-root-runtime-empty-snapshot",
          shim_config_bytes(r"C:\GameLayers\runtime", "", &[])),
-        ("open-req-read-skyrim", P::encode_open_req(P::OPEN_READ, "Data/Skyrim.esm")),
+        ("open-req-read-skyrim", P::encode_open_req(0, P::OPEN_READ, "Data/Skyrim.esm")),
         ("getattr-resp-file-123",
          P::encode_getattr_resp(&AttrResp { found: true, is_dir: false, size: 123, mtime: -7 })),
         ("read-req-fh7-off10-len4",
@@ -128,8 +128,8 @@ pub fn golden_vectors() -> Vec<(&'static str, Vec<u8>)> {
         ("write-req-fh7-off10-abc",
          P::encode_write_req(&vfs_protocol::WriteReq { fh: 7, offset: 10, len: 3 }, b"abc")),
         ("write-resp-3", P::encode_write_resp(3)),
-        ("mkdir-req-mode493-dir", P::encode_mkdir_req(493, "sub/dir")),
-        ("rename-req-a-b", P::encode_rename_req("old.txt", "new.txt")),
+        ("mkdir-req-mode493-dir", P::encode_mkdir_req(0, 493, "sub/dir")),
+        ("rename-req-a-b", P::encode_rename_req(0, "old.txt", "new.txt")),
         ("setattr-req-fh5-size100",
          P::encode_setattr_req(&vfs_protocol::SetattrReq { fh: 5, size: 100 })),
         ("ring-header-slots4-cap256", {

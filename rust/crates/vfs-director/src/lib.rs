@@ -115,7 +115,7 @@ mod tests {
             let ipc = s.ipc().expect("ipc");
             let client = ipc.client().expect("client");
             let open = client
-                .submit(OP_OPEN, 0, &encode_open_req(OPEN_READ, "payload.bin"))
+                .submit(OP_OPEN, 0, &encode_open_req(0, OPEN_READ, "payload.bin"))
                 .unwrap();
             assert_eq!(open.status, ST_OK);
             let OpenResp { fh, size, .. } = decode_open_resp(&open.payload).unwrap();

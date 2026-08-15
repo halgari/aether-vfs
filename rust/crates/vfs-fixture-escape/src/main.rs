@@ -80,19 +80,27 @@
 //! final whole-branch review of Gate 3 found in `docs/escape-matrix.md`'s own
 //! claim of metadata containment: `qattr_hook`/`qfull_hook`/`qibn_hook`
 //! (`vfs-shim/src/hook.rs`) never call `RootMap::decide` at all. They consult
-//! `fuse_path_attr`, which asks `fuse_client::vpath_under_root` — the
-//! client's own string-prefix predicate, not the canonicaliser this whole
+//! `fuse_path_attr`, which asks `fuse_client::vpath_under_root` — which was
+//! the client's own string-prefix predicate, not the canonicaliser this whole
 //! matrix is about — before falling through to the real filesystem. `4m`
 //! reuses vector 4's own spelling (a volume-GUID path) but calls
 //! `GetFileAttributesW` instead of `CreateFileW`, so it exercises that hook
 //! family directly rather than the open path vectors 1-14 already cover.
+//!
+//! **That gap closed in stage 2b task 5**: `fuse_client::vpath_under_root` is
+//! now a `RootMap` — the same canonicaliser — so `4m` is expected to report
+//! `not-found`, not `found`, under a session whose providers do not serve the
+//! target. The vector is kept (and still opt-in) as the standing evidence
+//! that the hook family stays sealed; it is not obsolete just because it now
+//! passes for the good reason.
+//!
 //! Never runs as part of the default (`VFS_ESCAPE_ONLY_VECTOR` unset) matrix
 //! — it is dispatched only when that variable is set to exactly `"4m"`, so it
 //! cannot change any existing matrix run's line count or output. See
 //! `vector4_metadata_query`'s own doc comment and
 //! `crates/vfs-directord/tests/e2e.rs`'s
-//! `documents_metadata_gap_for_unrecognised_spellings` for the test that
-//! uses it.
+//! `metadata_queries_are_sealed_for_canonicaliser_only_spellings` for the
+//! test that uses it.
 //!
 //! **`VFS_ESCAPE_ONLY_VECTOR`**: when set to one of the vector ids above,
 //! every *other* vector is skipped entirely — not merely omitted from the
@@ -430,12 +438,12 @@ fn vector4_metadata_query(abs: &str) -> Line {
                 spelling,
                 outcome,
                 "metadata-only variant of vector 4 (GetFileAttributesW, not CreateFileW): proves \
-                 whether a name-based attribute query on this spelling still reaches real disk, \
-                 independent of Gate 3 Task 6's open-path (RootMap::decide) fix — qattr_hook/ \
-                 qfull_hook/qibn_hook consult fuse_client::vpath_under_root, not RootMap, so this \
-                 spelling's recognition-only-by-canonicaliser gap (see vector 4's own note) applies \
-                 here too, for a different reason (a different router never having the spelling \
-                 taught to it at all, not merely a passthrough that used to compensate for it)",
+                 whether a name-based attribute query on this spelling reaches real disk, \
+                 independent of Gate 3 Task 6's open-path (RootMap::decide) fix. qattr_hook/ \
+                 qfull_hook/qibn_hook still do not go through RootMap::decide — they consult \
+                 fuse_client::vpath_under_root — but since stage 2b task 5 that predicate IS a \
+                 RootMap, so this spelling is recognised and routed rather than falling to disk. \
+                 Expect not-found under a session whose providers do not serve the target",
             )
         }
     }

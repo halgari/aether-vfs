@@ -71,6 +71,22 @@ pub const RING_SPIN_US: &str = "VFS_RING_SPIN_US";
 /// longer exists, so an unset root connected the client to a path nothing
 /// matched and the failure surfaced later as missing content.
 pub const VIRTUAL_DIR: &str = "VFS_VIRTUAL_DIR";
+/// The session's *additional* managed roots, beyond root `0`
+/// ([`VIRTUAL_DIR`]): `id=path` entries separated by `;`, e.g.
+/// `1=C:\Users\me\Documents\My Games\Skyrim`.
+///
+/// A session virtualizes several real filesystem locations, one provider each
+/// (stage 2b). The shim must know every one of them, because the root id is
+/// what its ring requests now carry — a root the shim has never heard of is a
+/// root whose paths it classifies as "not ours" and lets fall to real disk.
+///
+/// Optional and additive: unset means the single-root session every caller
+/// before stage 2b had, and [`VIRTUAL_DIR`] alone still defines root `0`. A
+/// malformed entry is skipped rather than failing the launch — the same shape
+/// as an unparseable numeric switch elsewhere here — but an entry naming id
+/// `0` overrides [`VIRTUAL_DIR`]'s path for that root rather than being
+/// silently ignored.
+pub const VIRTUAL_ROOTS: &str = "VFS_VIRTUAL_ROOTS";
 /// Directory for session state (ready flag, configs, logs).
 pub const STATE_DIR: &str = "VFS_STATE_DIR";
 /// Absolute path of the image to launch, normally the staged EXE. The shim also
@@ -259,6 +275,7 @@ pub const ALL: &[Var] = &[
     Var { name: FUSE_CFG, kind: Kind::Handshake, default: "none" },
     Var { name: RING_SPIN_US, kind: Kind::Behaviour, default: "400" },
     Var { name: VIRTUAL_DIR, kind: Kind::Handshake, default: r"C:\GameLayers\runtime (see audit §2.6)" },
+    Var { name: VIRTUAL_ROOTS, kind: Kind::Handshake, default: "none (root 0 only)" },
     Var { name: STATE_DIR, kind: Kind::Handshake, default: "session state dir" },
     Var { name: LAUNCH_IMAGE, kind: Kind::Handshake, default: "none; staging derives it" },
     Var { name: DISCOVERY_PATH, kind: Kind::Handshake, default: "platform default" },

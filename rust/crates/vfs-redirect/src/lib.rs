@@ -12,10 +12,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 use vfs_core::{fold, normalize_vpath, PathError};
+pub use vfs_provider::RootId;
 use vfs_shared::{SnapResolution, SnapshotReader};
 
-pub use canon::{canonicalise, VolumeMap};
-pub use volumes::{expand_short_name, resolve_volume_map};
+pub use canon::{canonicalise, split_stream_suffix, VolumeMap};
+pub use volumes::{expand_short_name, resolve_volume_map, resolve_volume_map_for};
+
+/// What a [`RootMap`] lookup answers with: which declared root the path fell
+/// under, and its folded remainder components beneath that root.
+pub type RootHit = (RootId, Vec<String>);
 
 thread_local! {
     /// Depth counter behind [`UncachedScope`]. A counter rather than a bare
@@ -175,7 +180,7 @@ struct PathCache {
 
 #[derive(Default)]
 struct PathCacheState {
-    map: HashMap<String, Option<Vec<String>>>,
+    map: HashMap<String, Option<RootHit>>,
     order: VecDeque<String>,
 }
 
@@ -187,12 +192,12 @@ impl PathCache {
     /// A lock-poisoning thread (one that panicked while holding the lock) must
     /// not wedge every future open in a long-running game session — recover
     /// the guard rather than propagating the poison.
-    fn get(&self, key: &str) -> Option<Option<Vec<String>>> {
+    fn get(&self, key: &str) -> Option<Option<RootHit>> {
         let guard = self.state.read().unwrap_or_else(|e| e.into_inner());
         guard.map.get(key).cloned()
     }
 
-    fn insert(&self, key: String, value: Option<Vec<String>>) {
+    fn insert(&self, key: String, value: Option<RootHit>) {
         let mut guard = self.state.write().unwrap_or_else(|e| e.into_inner());
         // Another thread may have raced this one to compute and insert the
         // same key; the first writer wins rather than double-counting it in
@@ -216,10 +221,35 @@ impl PathCache {
     }
 }
 
-/// The managed VFS install root (mount point), as normalized path components.
+/// One declared root: the [`RootId`] it answers with and its normalized path
+/// components in original case, e.g. `["C:", "Games", "Skyrim"]`.
+struct Root {
+    id: RootId,
+    comps: Vec<String>,
+}
+
+/// The managed VFS install roots (mount points), as normalized path components.
+///
+/// **Several roots, not one** (stage 2b task 5). A session virtualizes more
+/// than one real filesystem location — the game directory *and*
+/// `Documents\My Games\Skyrim` — so the answer to "is this path ours?" is no
+/// longer a boolean plus a remainder: it is *which* root, plus the remainder
+/// under that root. See [`RootMap::resolve`].
+///
+/// Two roots may name the same [`RootId`]. That is how an **alias** is
+/// expressed — the shim serves the staged launch directory as a second
+/// spelling of the game root — and it costs nothing structurally: an alias is
+/// just another entry pointing at the same id.
 pub struct RootMap {
-    /// Normalized root components in original case, e.g. `["C:", "Games", "Skyrim"]`.
-    root: Vec<String>,
+    /// Declared roots, ordered **longest first** (most path components).
+    ///
+    /// Order is the whole of the nesting policy: if one root lies under
+    /// another (a `Documents\My Games\Skyrim` inside a root someone pointed at
+    /// `Documents`, say), the deeper one must win, because the shallower one
+    /// would match every path the deeper one does and swallow it. Sorting once
+    /// at construction makes that deterministic rather than dependent on
+    /// declaration order.
+    roots: Vec<Root>,
     /// NT device-name / volume-GUID -> drive-letter table, resolved once from
     /// the live OS at session start (see [`resolve_volume_map`]) and handed in
     /// here — never re-resolved per open, which would be several Win32 calls
@@ -246,11 +276,25 @@ pub struct RootMap {
 }
 
 impl RootMap {
+    /// A single root, answering as [`RootId::DEFAULT`] — the shape every
+    /// single-root caller (notably `vfs-shim`'s `Engine`) still wants.
+    ///
     /// `root` may be NT (`\??\C:\Games\Skyrim`) or Win32 (`C:\Games\Skyrim`).
     /// `volumes` is the OS's current device-name/volume-GUID table, resolved
     /// once per session (see [`resolve_volume_map`]) — never resolved here.
     pub fn new(root: &str, volumes: VolumeMap) -> Result<Self, PathError> {
-        Self::with_capacity(root, volumes, DEFAULT_CACHE_CAPACITY)
+        Self::with_roots(&[(RootId::DEFAULT, root)], volumes)
+    }
+
+    /// Several roots at once. Each entry is `(id, path)`; two entries may
+    /// share an `id` to declare an alias (see the struct doc).
+    ///
+    /// Fails on the first path that will not normalize, rather than silently
+    /// dropping it — a root that quietly failed to register would make every
+    /// path under it look like it belongs to no one, which is precisely the
+    /// "content simply missing" failure this project keeps rediscovering.
+    pub fn with_roots(roots: &[(RootId, &str)], volumes: VolumeMap) -> Result<Self, PathError> {
+        Self::with_capacity(roots, volumes, DEFAULT_CACHE_CAPACITY)
     }
 
     /// Test-only hook to exercise the cache's bound with a small capacity
@@ -261,18 +305,30 @@ impl RootMap {
         volumes: VolumeMap,
         capacity: usize,
     ) -> Result<Self, PathError> {
-        Self::with_capacity(root, volumes, capacity)
+        Self::with_capacity(&[(RootId::DEFAULT, root)], volumes, capacity)
     }
 
-    fn with_capacity(root: &str, volumes: VolumeMap, capacity: usize) -> Result<Self, PathError> {
-        let norm = normalize_vpath(root)?;
-        let root = if norm.is_empty() {
-            Vec::new()
-        } else {
-            norm.split('/').map(str::to_string).collect()
-        };
+    fn with_capacity(
+        roots: &[(RootId, &str)],
+        volumes: VolumeMap,
+        capacity: usize,
+    ) -> Result<Self, PathError> {
+        let mut parsed = Vec::with_capacity(roots.len());
+        for (id, path) in roots {
+            let norm = normalize_vpath(path)?;
+            let comps: Vec<String> = if norm.is_empty() {
+                Vec::new()
+            } else {
+                norm.split('/').map(str::to_string).collect()
+            };
+            parsed.push(Root { id: *id, comps });
+        }
+        // Longest first — see the `roots` field doc. `sort_by` is stable, so
+        // equal-depth roots keep declaration order and the answer stays
+        // reproducible.
+        parsed.sort_by_key(|r| std::cmp::Reverse(r.comps.len()));
         Ok(RootMap {
-            root,
+            roots: parsed,
             volumes,
             cache: PathCache::new(capacity),
             os_consults: AtomicU64::new(0),
@@ -305,21 +361,36 @@ impl RootMap {
         self.computes.load(Ordering::Relaxed)
     }
 
-    /// The normalized root components (original case). For tests/diagnostics.
+    /// The normalized components of the deepest declared root (original case).
+    /// For tests/diagnostics.
     pub fn root_components(&self) -> &[String] {
-        &self.root
+        self.roots.first().map(|r| r.comps.as_slice()).unwrap_or(&[])
     }
 
-    /// Whether `nt_path` lies under the managed root (well-formed, not escaping).
+    /// Which declared root `nt_path` falls under, and its folded remainder
+    /// components beneath that root — or `None` if it is outside every root,
+    /// malformed, or escaping.
+    ///
+    /// **This is the predicate.** `contains`/`remainder` are conveniences over
+    /// it for callers that already know there is only one root; anything that
+    /// has to *route* a request must ask this one, because the id is the half
+    /// the ring needs and the remainder alone cannot supply.
+    pub fn resolve(&self, nt_path: &str) -> Option<RootHit> {
+        self.under_root(nt_path)
+    }
+
+    /// Whether `nt_path` lies under any managed root (well-formed, not escaping).
     pub fn contains(&self, nt_path: &str) -> bool {
         self.under_root(nt_path).is_some()
     }
 
-    /// The folded remainder components of `nt_path` under the managed root, or
-    /// `None` if it is outside/malformed. Exposed so the overlay layer can build
-    /// overlay paths from the same normalized components the snapshot uses.
+    /// The folded remainder components of `nt_path` under whichever root it
+    /// matched, or `None` if it is outside/malformed. Exposed so the overlay
+    /// layer can build overlay paths from the same normalized components the
+    /// snapshot uses. Callers that need to know *which* root want
+    /// [`Self::resolve`].
     pub fn remainder(&self, nt_path: &str) -> Option<Vec<String>> {
-        self.under_root(nt_path)
+        self.under_root(nt_path).map(|(_, rest)| rest)
     }
 
     /// Decide how to handle an incoming NT open path.
@@ -393,7 +464,7 @@ impl RootMap {
     /// an OS-consulted answer is deliberately excluded. Also skipped, for
     /// *either* variant, while an [`UncachedScope`] is held on this thread —
     /// see its doc comment for the caller-side half of this same rule.
-    fn under_root(&self, nt_path: &str) -> Option<Vec<String>> {
+    fn under_root(&self, nt_path: &str) -> Option<RootHit> {
         let suppressed = cache_suppressed();
         if !suppressed {
             if let Some(cached) = self.cache.get(nt_path) {
@@ -506,26 +577,37 @@ impl RootMap {
         Resolution::OsConsulted(self.match_canonical(&canon2))
     }
 
-    /// Fold-compare an already-canonicalised path's components against the
-    /// managed root, returning the folded remainder components on a match.
-    fn match_canonical(&self, canon: &str) -> Option<Vec<String>> {
+    /// Fold-compare an already-canonicalised path's components against every
+    /// declared root, returning the first match's id and folded remainder.
+    ///
+    /// `self.roots` is sorted longest-first at construction, so "first match"
+    /// is "deepest match" — a nested root wins over the root it sits inside,
+    /// which is the only ordering that does not let a shallow root swallow a
+    /// deep one.
+    fn match_canonical(&self, canon: &str) -> Option<RootHit> {
         let comps: Vec<&str> =
             if canon.is_empty() { Vec::new() } else { canon.split('/').collect() };
-        if comps.len() < self.root.len() {
-            return None;
-        }
-        for (r, c) in self.root.iter().zip(comps.iter()) {
-            if fold(r) != fold(c) {
-                return None;
+        'roots: for root in &self.roots {
+            if comps.len() < root.comps.len() {
+                continue;
             }
+            for (r, c) in root.comps.iter().zip(comps.iter()) {
+                if fold(r) != fold(c) {
+                    continue 'roots;
+                }
+            }
+            return Some((
+                root.id,
+                comps[root.comps.len()..].iter().map(|c| fold(c)).collect(),
+            ));
         }
-        Some(comps[self.root.len()..].iter().map(|c| fold(c)).collect())
+        None
     }
 
     fn locate(&self, nt_path: &str, snap: &SnapshotReader) -> Located {
         match self.under_root(nt_path) {
             None => Located::Outside,
-            Some(folded) => {
+            Some((_, folded)) => {
                 let refs: Vec<&str> = folded.iter().map(String::as_str).collect();
                 Located::Resolved(snap.resolve(&refs))
             }
@@ -543,10 +625,10 @@ impl RootMap {
 enum Resolution {
     /// A pure function of the raw input string (and the session-frozen
     /// `VolumeMap`) — safe to cache indefinitely.
-    Deterministic(Option<Vec<String>>),
+    Deterministic(Option<RootHit>),
     /// Reached by asking the OS what the path currently names (8.3 short-name
     /// / junction resolution). Never cached.
-    OsConsulted(Option<Vec<String>>),
+    OsConsulted(Option<RootHit>),
 }
 
 /// Where an NT path lands relative to the managed root.
@@ -903,6 +985,120 @@ mod tests {
         let win32 = RootMap::new(r"C:\Games\Skyrim", VolumeMap::empty()).unwrap();
         assert_eq!(nt.root_components(), win32.root_components());
         assert_eq!(nt.root_components(), vec!["C:", "Games", "Skyrim"]);
+    }
+
+    /// Stage 2b task 5, step 1: the structural claim of the whole task. A
+    /// path under root 1 resolves to `(RootId(1), rel)`, a path under root 0
+    /// to `(RootId(0), rel)`, and a path under neither is outside. Before this
+    /// task `RootMap` held exactly one root and could answer only "inside" or
+    /// "outside", so the shim could not tell the director which root a path
+    /// belonged to.
+    #[test]
+    fn resolve_answers_with_the_matching_root_id_and_remainder() {
+        let map = RootMap::with_roots(
+            &[
+                (RootId(0), r"C:\Games\Skyrim"),
+                (RootId(1), r"C:\Users\me\Documents\My Games\Skyrim"),
+            ],
+            VolumeMap::empty(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            map.resolve(r"\??\C:\Games\Skyrim\Data\Foo.ESP"),
+            Some((RootId(0), vec!["data".to_string(), "foo.esp".to_string()]))
+        );
+        assert_eq!(
+            map.resolve(r"\??\C:\Users\me\Documents\My Games\Skyrim\Saves\Save1.ess"),
+            Some((RootId(1), vec!["saves".to_string(), "save1.ess".to_string()]))
+        );
+        assert_eq!(map.resolve(r"\??\C:\Windows\System32\kernel32.dll"), None);
+        // The same *relative* path under each root is a different answer —
+        // the collision the whole stage exists to make representable.
+        assert_eq!(
+            map.resolve(r"C:\Games\Skyrim\same.txt").unwrap().0,
+            RootId(0)
+        );
+        assert_eq!(
+            map.resolve(r"C:\Users\me\Documents\My Games\Skyrim\same.txt").unwrap().0,
+            RootId(1)
+        );
+    }
+
+    /// A root nested inside another must win, or the shallow one swallows
+    /// every path the deep one serves. Declared shallow-first here on purpose:
+    /// the ordering must come from `with_roots`' own sort, not from the
+    /// caller happening to declare them in a helpful order.
+    #[test]
+    fn a_nested_root_wins_over_the_root_it_sits_inside() {
+        let map = RootMap::with_roots(
+            &[
+                (RootId(0), r"C:\Users\me\Documents"),
+                (RootId(1), r"C:\Users\me\Documents\My Games\Skyrim"),
+            ],
+            VolumeMap::empty(),
+        )
+        .unwrap();
+        assert_eq!(
+            map.resolve(r"C:\Users\me\Documents\My Games\Skyrim\Saves\a.ess"),
+            Some((RootId(1), vec!["saves".to_string(), "a.ess".to_string()]))
+        );
+        assert_eq!(
+            map.resolve(r"C:\Users\me\Documents\notes.txt"),
+            Some((RootId(0), vec!["notes.txt".to_string()]))
+        );
+    }
+
+    /// Two declared paths may share one `RootId`: that is how the shim's
+    /// staged-launch directory is served as a second spelling of the game
+    /// root. Both must resolve, and both must answer with the *same* id, so a
+    /// request routed through either spelling reaches the same provider.
+    #[test]
+    fn two_paths_may_share_one_root_id_as_an_alias() {
+        let map = RootMap::with_roots(
+            &[
+                (RootId(0), r"C:\Games\Skyrim"),
+                (RootId(0), r"C:\tmp\vfs-stage-21728"),
+            ],
+            VolumeMap::empty(),
+        )
+        .unwrap();
+        assert_eq!(
+            map.resolve(r"C:\Games\Skyrim\Data\a.esm"),
+            Some((RootId(0), vec!["data".to_string(), "a.esm".to_string()]))
+        );
+        assert_eq!(
+            map.resolve(r"C:\tmp\vfs-stage-21728\Data\a.esm"),
+            Some((RootId(0), vec!["data".to_string(), "a.esm".to_string()]))
+        );
+    }
+
+    /// Canonicalisation is per-`RootMap`, not per-root: registering a second
+    /// root must not cost the first one its device-path/volume-GUID
+    /// resolution, and the second root must get the same treatment rather
+    /// than a string-prefix approximation of it. This is the acceptance
+    /// criterion "the escape matrix passes against every root, not just the
+    /// first", at the unit level where the canonicaliser actually lives.
+    #[test]
+    fn canonicalisation_applies_to_every_root_not_just_the_first() {
+        let mut volumes = VolumeMap::empty();
+        volumes.insert(r"\Device\HarddiskVolume3", 'C');
+        let map = RootMap::with_roots(
+            &[(RootId(0), r"C:\Games\Skyrim"), (RootId(1), r"C:\Docs\Skyrim")],
+            volumes,
+        )
+        .unwrap();
+        assert_eq!(
+            map.resolve(r"\Device\HarddiskVolume3\Games\Skyrim\Data\a.esp").map(|(r, _)| r),
+            Some(RootId(0))
+        );
+        assert_eq!(
+            map.resolve(r"\Device\HarddiskVolume3\Docs\Skyrim\Saves\a.ess").map(|(r, _)| r),
+            Some(RootId(1)),
+            "the second root must canonicalise exactly like the first"
+        );
+        // And the over-eager direction still fails closed for both.
+        assert!(map.resolve(r"\Device\HarddiskVolume3\Windows\System32\x.dll").is_none());
     }
 
     #[test]

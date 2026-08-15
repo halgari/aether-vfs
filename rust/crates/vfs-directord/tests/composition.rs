@@ -332,9 +332,8 @@ async fn stats_rpc_reports_open_counts_after_session_activity() {
             let kernel = live.session.kernel();
             let (st, payload) = vfs_director::ring_dispatch::dispatch_director(
                 kernel,
-                RootId::DEFAULT,
                 vfs_protocol::OP_OPEN,
-                &vfs_protocol::encode_open_req(vfs_director::OPEN_READ, "f.txt"),
+                &vfs_protocol::encode_open_req(0, vfs_director::OPEN_READ, "f.txt"),
                 0,
                 4096,
                 None,

@@ -227,10 +227,14 @@ fn ring_client_reads_are_byte_exact() {
         .unwrap_or(0);
     let root = dir.to_string_lossy().into_owned();
 
-    let client =
-        vfs_shim::fuse_client::FuseClient::connect(&section, &root, payload_cap, ring_bytes, arena_len)
-            .expect("client connect");
-    let opened = client.open("payload.bin").expect("ring open");
+    let roots = [(vfs_protocol::RootId::DEFAULT, root)];
+    let client = vfs_shim::fuse_client::FuseClient::connect(
+        &section, &roots, payload_cap, ring_bytes, arena_len,
+    )
+    .expect("client connect");
+    let opened = client
+        .open(vfs_protocol::RootId::DEFAULT, "payload.bin")
+        .expect("ring open");
     assert_eq!(opened.size as usize, data.len());
 
     // Whole file in one call: exercises chunking + the deep pipeline.

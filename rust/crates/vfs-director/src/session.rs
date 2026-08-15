@@ -62,13 +62,17 @@ pub struct Session {
     overlay: PathBuf,
     state_dir: PathBuf,
     ipc: Option<IpcServe>,
-    /// Session is single-root (`RootId::DEFAULT`) by design — multi-root
-    /// sessions go through `vfs-directord`'s `SessionRegistry`, which talks
-    /// to `Director` directly. This accumulates every `mount()` call so it
+    /// `mount()`'s own root is `RootId::DEFAULT` by design — `mount` is the
+    /// single-root convenience, and multi-root composition goes through
+    /// `Director::mount(RootId(n), …)` (what `vfs-directord`'s
+    /// `SessionRegistry` drives). This accumulates every `mount()` call so it
     /// can be recomposed into one `MountGraph` and handed to `Director`
     /// whole, since `Director` now holds exactly one provider per root
     /// rather than a mergeable list.
     mounts: Mutex<Vec<(String, Arc<dyn Provider>)>>,
+    /// Host directories for the session's roots **beyond root 0**, which
+    /// `virtual_root` names — see [`Session::declare_root`].
+    extra_roots: Vec<(u32, PathBuf)>,
 }
 
 impl Session {
@@ -81,6 +85,7 @@ impl Session {
             state_dir: tmp.join("state"),
             ipc: None,
             mounts: Mutex::new(Vec::new()),
+            extra_roots: Vec::new(),
         }
     }
 
@@ -102,6 +107,48 @@ impl Session {
 
     pub fn virtual_root(&self) -> &Path {
         &self.virtual_root
+    }
+
+    /// Declare a second (third, …) managed root: the host directory that
+    /// `RootId(id)` virtualizes. Root `0` is [`Session::set_root`] and cannot
+    /// be declared here.
+    ///
+    /// This is the *shim-facing* half of a multi-root session and it is
+    /// separate from mounting a provider on that root
+    /// (`kernel().mount(RootId(id), …)`) on purpose, because they answer
+    /// different questions: the mount says what root `n` serves, this says
+    /// which real filesystem location the injected process should recognise
+    /// *as* root `n`. Declare without mounting and the root serves nothing;
+    /// mount without declaring and the shim never classifies any path into
+    /// that root at all, so every path under it falls through to real disk —
+    /// silently, which is why this is not optional plumbing.
+    ///
+    /// Re-declaring an id replaces its path. Takes effect at the next
+    /// [`Session::serve`] or [`Session::launch`], which is what publishes it
+    /// into the environment the child inherits.
+    pub fn declare_root(&mut self, id: u32, path: impl Into<PathBuf>) {
+        let path = path.into();
+        match self.extra_roots.iter_mut().find(|(r, _)| *r == id) {
+            Some(slot) => slot.1 = path,
+            None => self.extra_roots.push((id, path)),
+        }
+    }
+
+    /// The roots declared beyond root 0, in declaration order. For
+    /// diagnostics and for tests that need to prove a config's `[[root]]`
+    /// table actually reached the session rather than being parsed and
+    /// dropped.
+    pub fn declared_roots(&self) -> &[(u32, PathBuf)] {
+        &self.extra_roots
+    }
+
+    /// The declared roots beyond root 0, as `apply_env_roots` wants them.
+    fn extra_roots_env(&self) -> Vec<(u32, String)> {
+        self.extra_roots
+            .iter()
+            .filter(|(id, _)| *id != 0)
+            .map(|(id, p)| (*id, p.to_string_lossy().into_owned()))
+            .collect()
     }
 
     pub fn state_dir(&self) -> &Path {
@@ -191,7 +238,7 @@ impl Session {
         let root_s = self.virtual_root.to_string_lossy().into_owned();
         let thin = self.state_dir.join("fuse.cfg");
         ipc.write_thin_config(&thin, &root_s)?;
-        ipc.apply_env(&root_s, &thin);
+        ipc.apply_env_roots(&root_s, &self.extra_roots_env(), &thin);
 
         // Minimal shim.cfg (FUSE path is env-driven). The snapshot must still be a
         // valid empty tree: Engine::build rejects zero-length snapshot bytes, which
@@ -264,7 +311,10 @@ impl Session {
             .map_err(|_| "launch env lock poisoned".to_string())?;
 
         let thin = self.state_dir.join("fuse.cfg");
-        ipc.apply_env(&root_s, &thin);
+        // Re-published here, not only in `serve`: the launch env lock is held
+        // from this point, and a root declared after `serve` (or by another
+        // session sharing this process's environment) must reach this child.
+        ipc.apply_env_roots(&root_s, &self.extra_roots_env(), &thin);
 
         let mut saved: Vec<(String, Option<String>)> = Vec::with_capacity(opts.env.len());
         for (k, v) in &opts.env {

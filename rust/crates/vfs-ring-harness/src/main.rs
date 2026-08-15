@@ -44,7 +44,7 @@ fn main() {
 
     // open + inline read /hello.txt
     let r = client
-        .submit(P::OP_OPEN, P::OPEN_READ, &P::encode_open_req(P::OPEN_READ, "/hello.txt"))
+        .submit(P::OP_OPEN, P::OPEN_READ, &P::encode_open_req(0, P::OPEN_READ, "/hello.txt"))
         .unwrap_or_else(|e| fail(&format!("open: {e:?}")));
     let op = P::decode_open_resp(&r.payload).unwrap_or_else(|| fail("open decode"));
     let rr = client
@@ -61,7 +61,7 @@ fn main() {
 
     // open + BULK read /big.bin (70000 bytes of 'X'); data lands in the arena
     let r = client
-        .submit(P::OP_OPEN, P::OPEN_READ, &P::encode_open_req(P::OPEN_READ, "/big.bin"))
+        .submit(P::OP_OPEN, P::OPEN_READ, &P::encode_open_req(0, P::OPEN_READ, "/big.bin"))
         .unwrap_or_else(|e| fail(&format!("open big: {e:?}")));
     let op = P::decode_open_resp(&r.payload).unwrap_or_else(|| fail("open big decode"));
     let rr = client

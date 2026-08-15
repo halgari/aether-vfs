@@ -7,6 +7,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use vfs_ipc::{Geom, RingClient};
+use vfs_redirect::{RootId, RootMap};
 use vfs_protocol::{
     decode_getattr_resp, decode_open_resp, decode_readdir_resp, decode_read_bulk_resp,
     decode_read_resp_into, decode_write_resp, encode_close_req, encode_mkdir_req, encode_open_req,
@@ -113,7 +114,8 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
             "VFS_VIRTUAL_DIR unset: the managed root has no default".to_string(),
         )
     })?;
-    let client = FuseClient::connect(&section, &root, payload_cap, ring_bytes, arena_len)
+    let roots = roots_from_env(&root);
+    let client = FuseClient::connect(&section, &roots, payload_cap, ring_bytes, arena_len)
         .map_err(FuseInitError::ConnectFailed)?;
     client.heartbeat().map_err(FuseInitError::ConnectFailed)?;
     let _ = FUSE.set(client);
@@ -171,14 +173,25 @@ pub struct FuseClient {
     mapping: SharedMapping,
     geom: Geom,
     payload_cap: u32,
-    root_lower: String,
+    /// Every managed root this session virtualizes, plus the staged-launch
+    /// directory as an alias for root 0 — and the *only* under-root predicate
+    /// the shim has.
+    ///
+    /// **This used to be a pair of lowercased strings** (`root_lower` plus an
+    /// optional `stage_root_lower`) tested with `strip_prefix`. That was the
+    /// second of two under-root predicates in this tree, and it disagreed with
+    /// the first: `RootMap` canonicalises (device paths, volume GUIDs,
+    /// `GLOBALROOT`, UNC admin shares, junction aliases, 8.3 short names) and
+    /// the string test did none of it, so five alternate spellings of an
+    /// in-root path were classified by `RootMap::decide` but never *routed* by
+    /// this client — and a name-based attribute query on one of them reached
+    /// real disk. Stage 2b task 5 replaced the strings with the real thing, so
+    /// there is now one predicate rather than two that can drift.
+    roots: RootMap,
     arena_len: usize,
     /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened —
     /// the ring still works, just with the old timer-tick latency.
     server_ev: HANDLE,
-    /// Staged-launch directory, treated as an alias for the virtual root so
-    /// executable-relative lookups resolve. See `vpath_under_root`.
-    stage_root_lower: Option<String>,
     /// Serializes ring claim/submit — not safe for concurrent clients on one ring.
     ring_lock: Mutex<()>,
 }
@@ -188,9 +201,12 @@ unsafe impl Send for FuseClient {}
 unsafe impl Sync for FuseClient {}
 
 impl FuseClient {
+    /// `roots` is `(id, path)` for every managed root, root 0 first. The
+    /// staged-launch directory (if any) is appended here as a second spelling
+    /// of root 0 — see [`FuseClient::vpath_under_root`].
     pub fn connect(
         section: &str,
-        root: &str,
+        roots: &[(RootId, String)],
         payload_cap: u32,
         ring_bytes: usize,
         arena_len: usize,
@@ -208,16 +224,47 @@ impl FuseClient {
             })
             .unwrap_or(core::ptr::null_mut());
 
+        // The staged launch directory is a second spelling of root 0, not a
+        // root of its own: a staged game resolves `Data\` relative to its own
+        // executable, so those opens must reach the same provider as the
+        // managed-root spelling. Expressed as an alias entry rather than as a
+        // separate prefix test, which is what it used to be.
+        let mut decls: Vec<(RootId, String)> = roots.to_vec();
+        if let Some(stage) = stage_root_from_env() {
+            decls.push((RootId::DEFAULT, stage));
+        }
+        if decls.is_empty() {
+            return Err("no managed root declared for the FUSE client".to_string());
+        }
+        // Resolved once, from the live OS, before any hook is installed
+        // (`bootstrap` calls `try_init_from_env` ahead of `install`), so the
+        // junction scan's own `CreateFileW` calls cannot re-enter this path.
+        // Scoped to *every* declared root, not just root 0 — see
+        // `resolve_volume_map_for`.
+        let scan: Vec<&str> = decls.iter().map(|(_, p)| p.as_str()).collect();
+        let volumes = vfs_redirect::resolve_volume_map_for(&scan);
+        let refs: Vec<(RootId, &str)> =
+            decls.iter().map(|(id, p)| (*id, p.as_str())).collect();
+        let roots = RootMap::with_roots(&refs, volumes)
+            .map_err(|e| format!("managed root is not a usable path: {e:?}"))?;
+
         Ok(FuseClient {
             mapping,
             geom,
             payload_cap,
-            root_lower: root.replace('/', "\\").to_ascii_lowercase(),
+            roots,
             arena_len,
             server_ev,
-            stage_root_lower: stage_root_from_env(),
             ring_lock: Mutex::new(()),
         })
+    }
+
+    /// Test-only constructor for the predicate alone: no ring, no OS volume
+    /// scan. `connect` needs a live shared section, which a unit test has no
+    /// business standing up just to ask whether a path is under a root.
+    #[cfg(test)]
+    fn roots_only(decls: &[(RootId, &str)]) -> RootMap {
+        RootMap::with_roots(decls, vfs_redirect::VolumeMap::empty()).unwrap()
     }
 
     fn client(&self) -> RingClient<'_, WakeServerSpinClient> {
@@ -242,11 +289,11 @@ impl FuseClient {
         Ok(())
     }
 
-    pub fn getattr(&self, vpath: &str) -> Result<AttrResp, i32> {
+    pub fn getattr(&self, root: RootId, vpath: &str) -> Result<AttrResp, i32> {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_GETATTR, 0, &encode_path_req(vpath))
+            .submit(OP_GETATTR, 0, &encode_path_req(root.0, vpath))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -254,11 +301,11 @@ impl FuseClient {
         decode_getattr_resp(&r.payload).ok_or(vfs_protocol::ST_BAD_REQUEST)
     }
 
-    pub fn readdir(&self, vpath: &str) -> Result<Vec<DirEntryWire>, i32> {
+    pub fn readdir(&self, root: RootId, vpath: &str) -> Result<Vec<DirEntryWire>, i32> {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_READDIR, 0, &encode_path_req(vpath))
+            .submit(OP_READDIR, 0, &encode_path_req(root.0, vpath))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -266,11 +313,11 @@ impl FuseClient {
         decode_readdir_resp(&r.payload).ok_or(vfs_protocol::ST_BAD_REQUEST)
     }
 
-    pub fn open(&self, vpath: &str) -> Result<OpenResp, i32> {
+    pub fn open(&self, root: RootId, vpath: &str) -> Result<OpenResp, i32> {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_OPEN, 0, &encode_open_req(OPEN_READ, vpath))
+            .submit(OP_OPEN, 0, &encode_open_req(root.0, OPEN_READ, vpath))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -283,11 +330,20 @@ impl FuseClient {
     /// create-disposition (see `hook::open_create_flags`) — folded in here
     /// rather than hardcoding `OPEN_WRITE` alone, which is what used to make
     /// every brand-new file report `ST_NOT_FOUND` regardless of disposition.
-    pub fn open_write(&self, vpath: &str, create_flags: u32) -> Result<OpenResp, i32> {
+    pub fn open_write(
+        &self,
+        root: RootId,
+        vpath: &str,
+        create_flags: u32,
+    ) -> Result<OpenResp, i32> {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_OPEN, 0, &encode_open_req(OPEN_WRITE | create_flags, vpath))
+            .submit(
+                OP_OPEN,
+                0,
+                &encode_open_req(root.0, OPEN_WRITE | create_flags, vpath),
+            )
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -471,11 +527,11 @@ impl FuseClient {
     }
 
     /// Delete (whiteout) a virtual path via the JVM overlay (`OP_DELETE`).
-    pub fn delete(&self, vpath: &str) -> Result<(), i32> {
+    pub fn delete(&self, root: RootId, vpath: &str) -> Result<(), i32> {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_DELETE, 0, &encode_path_req(vpath))
+            .submit(OP_DELETE, 0, &encode_path_req(root.0, vpath))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -484,11 +540,16 @@ impl FuseClient {
     }
 
     /// Rename a virtual path to another virtual path (`OP_RENAME`).
-    pub fn rename(&self, from: &str, to: &str) -> Result<(), i32> {
+    ///
+    /// One root for both sides: the director resolves `from` and `to` against
+    /// the same root, and a caller whose two paths land under *different*
+    /// roots must not route the rename here at all — see `hook.rs`'s
+    /// rename/delete arm, which declines rather than guessing.
+    pub fn rename(&self, root: RootId, from: &str, to: &str) -> Result<(), i32> {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_RENAME, 0, &encode_rename_req(from, to))
+            .submit(OP_RENAME, 0, &encode_rename_req(root.0, from, to))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -497,11 +558,11 @@ impl FuseClient {
     }
 
     /// Create a virtual directory via the JVM overlay (`OP_MKDIR`).
-    pub fn mkdir(&self, vpath: &str, mode: u32) -> Result<(), i32> {
+    pub fn mkdir(&self, root: RootId, vpath: &str, mode: u32) -> Result<(), i32> {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_MKDIR, 0, &encode_mkdir_req(mode, vpath))
+            .submit(OP_MKDIR, 0, &encode_mkdir_req(root.0, mode, vpath))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -534,27 +595,87 @@ impl FuseClient {
         Ok(())
     }
 
-    /// Map an absolute path into the virtual namespace.
+    /// Map an absolute path into the virtual namespace: **which root** it
+    /// belongs to, and its path relative to that root.
     ///
-    /// Two prefixes resolve, not one. The game is launched from a staged
-    /// directory holding only its PE closure, and it resolves `Data\` relative
-    /// to **its own executable**, not the working directory — measured
-    /// 2026-08-12, a new game asked for
-    /// `…\vfs-stage-21728\data\ccasvsse001-almsivi.esm` and friends. With only
-    /// the virtual root mapped those fell through to a directory containing six
-    /// files, so the plugin set came back empty and world load never completed
-    /// while the main menu, which resolves through the root, worked fine.
+    /// Several roots resolve, not one, and the staged launch directory is one
+    /// more spelling of root 0. The game is launched from a staged directory
+    /// holding only its PE closure, and it resolves `Data\` relative to **its
+    /// own executable**, not the working directory — measured 2026-08-12, a
+    /// new game asked for `…\vfs-stage-21728\data\ccasvsse001-almsivi.esm` and
+    /// friends. With only the virtual root mapped those fell through to a
+    /// directory containing six files, so the plugin set came back empty and
+    /// world load never completed while the main menu, which resolves through
+    /// the root, worked fine. It also fixes tools that resolve beside the
+    /// executable — SKSE looks for `Data\SKSE\Plugins\` there.
     ///
-    /// Treating the staging directory as an alias for the root puts both
-    /// spellings in the same namespace. It also fixes tools that resolve beside
-    /// the executable — SKSE looks for `Data\SKSE\Plugins\` there.
-    pub fn vpath_under_root(&self, path: &str) -> Option<String> {
-        if let Some(v) = vpath_under_root_norm(path, &self.root_lower) {
-            return Some(v);
+    /// This is now `RootMap`'s canonicalising answer rather than a lowercased
+    /// `strip_prefix`, so a device-path, volume-GUID, `GLOBALROOT`, UNC
+    /// admin-share, junction-alias or 8.3 short-name spelling of an in-root
+    /// path routes here exactly as `RootMap::decide` already classified it.
+    /// See the `roots` field for what that asymmetry cost.
+    /// An alternate-data-stream suffix (`f.esp:s`) is carried through into the
+    /// vpath, because `canonicalise` — correctly, for its own purpose —
+    /// discards it: `f.esp:s` and `f.esp` are spellings of the same *file*,
+    /// which is what a canonicaliser unifying spellings should say. But a
+    /// request for a named stream is not a request for the file's default
+    /// stream, and resolving one to the other would answer `f.esp:s` with
+    /// `f.esp`'s bytes. The string predicate this replaced kept the suffix by
+    /// accident (it never parsed the path at all); keeping it deliberately
+    /// preserves that behaviour, so a stream nothing serves still comes back
+    /// not-found. Verified by `vfs-fixture-escape`'s vector 11, which flipped
+    /// to `opened` the moment the suffix was dropped.
+    pub fn vpath_under_root(&self, path: &str) -> Option<(RootId, String)> {
+        let (_, stream) = vfs_redirect::split_stream_suffix(path);
+        let (root, comps) = self.roots.resolve(path)?;
+        let mut vpath = comps.join("/");
+        if let Some(stream) = stream {
+            vpath.push_str(&stream.to_ascii_lowercase());
         }
-        let alias = self.stage_root_lower.as_deref()?;
-        vpath_under_root_norm(path, alias)
+        Some((root, vpath))
     }
+}
+
+/// Parse [`vfs_env::VIRTUAL_ROOTS`] (`id=path;id=path…`) on top of
+/// [`vfs_env::VIRTUAL_DIR`] (root 0).
+///
+/// Root 0 is seeded from `VIRTUAL_DIR` first so a session that declares no
+/// extra roots — every session before stage 2b — is byte-for-byte the old
+/// single-root case. An entry whose id will not parse is skipped rather than
+/// failing the launch; an entry naming id 0 replaces `VIRTUAL_DIR`'s path,
+/// because a caller that spelled root 0 explicitly meant it.
+fn roots_from_env(virtual_dir: &str) -> Vec<(RootId, String)> {
+    merge_extra_roots(virtual_dir, vfs_env::text(vfs_env::VIRTUAL_ROOTS).as_deref())
+}
+
+/// The parsing half of [`roots_from_env`], split out so it can be tested
+/// without writing to the process environment — which is global mutable state
+/// every other test in this binary shares.
+fn merge_extra_roots(virtual_dir: &str, spec: Option<&str>) -> Vec<(RootId, String)> {
+    let mut out: Vec<(RootId, String)> = vec![(RootId::DEFAULT, virtual_dir.to_string())];
+    let Some(extra) = spec else {
+        return out;
+    };
+    for entry in extra.split(';') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((id, path)) = entry.split_once('=') else {
+            continue;
+        };
+        let (Ok(id), path) = (id.trim().parse::<u32>(), path.trim()) else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        match out.iter_mut().find(|(r, _)| r.0 == id) {
+            Some(slot) => slot.1 = path.to_string(),
+            None => out.push((RootId(id), path.to_string())),
+        }
+    }
+    out
 }
 
 /// Directory holding the staged launch image, derived from [`vfs_env::LAUNCH_IMAGE`].
@@ -588,37 +709,62 @@ pub fn normalize_path_for_root(p: &str) -> String {
         .to_ascii_lowercase()
 }
 
-pub fn vpath_under_root_norm(path: &str, root: &str) -> Option<String> {
-    let p = normalize_path_for_root(path);
-    let root = normalize_path_for_root(root);
-    let root = root.trim_end_matches('\\');
-    if p == root {
-        return Some(String::new());
-    }
-    let prefix = format!("{root}\\");
-    let rest = p.strip_prefix(&prefix)?;
-    Some(rest.replace('\\', "/"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The unified predicate, exercised the way `FuseClient::vpath_under_root`
+    /// exercises it (`RootMap::resolve` then join), without needing a live
+    /// ring. `vpath_under_root_norm` — the lowercased `strip_prefix` this
+    /// replaced — is gone; these are its cases, re-asserted against the
+    /// canonicalising predicate so nothing it used to answer regressed.
+    fn resolve(map: &RootMap, path: &str) -> Option<(RootId, String)> {
+        let (_, stream) = vfs_redirect::split_stream_suffix(path);
+        map.resolve(path).map(|(r, c)| {
+            let mut v = c.join("/");
+            if let Some(s) = stream {
+                v.push_str(&s.to_ascii_lowercase());
+            }
+            (r, v)
+        })
+    }
+
+    /// A named alternate data stream must not resolve to the file's default
+    /// stream. `canonicalise` discards the suffix — right for unifying
+    /// spellings of a file, wrong for building the vpath the director is
+    /// asked about — so the client re-attaches it. Without this,
+    /// `vfs-fixture-escape`'s vector 11 (read-only `OPEN_EXISTING` on a
+    /// stream nothing pre-creates) opens and gets the base file's bytes
+    /// instead of not-found.
+    #[test]
+    fn an_alternate_data_stream_keeps_its_suffix_in_the_vpath() {
+        let m = FuseClient::roots_only(&[(RootId::DEFAULT, r"C:\Games\Skyrim")]);
+        assert_eq!(
+            resolve(&m, r"\??\C:\Games\Skyrim\Data\a.esp:probe"),
+            Some((RootId::DEFAULT, "data/a.esp:probe".to_string()))
+        );
+        // The drive's own colon is not a stream separator.
+        assert_eq!(
+            resolve(&m, r"\??\C:\Games\Skyrim\Data\a.esp"),
+            Some((RootId::DEFAULT, "data/a.esp".to_string()))
+        );
+    }
+
     #[test]
     fn vpath_under_root_nt_device() {
+        let m = FuseClient::roots_only(&[(RootId::DEFAULT, r"C:\GameLayers\runtime")]);
         assert_eq!(
-            vpath_under_root_norm(r"\??\C:\GameLayers\runtime\Data\x.esp", r"C:\GameLayers\runtime")
-                .as_deref(),
-            Some("data/x.esp")
+            resolve(&m, r"\??\C:\GameLayers\runtime\Data\x.esp"),
+            Some((RootId::DEFAULT, "data/x.esp".to_string()))
         );
     }
 
     #[test]
     fn vpath_under_root_win32() {
+        let m = FuseClient::roots_only(&[(RootId::DEFAULT, r"C:\GameLayers\runtime")]);
         assert_eq!(
-            vpath_under_root_norm(r"C:\GameLayers\runtime\Data\a.esm", r"C:\GameLayers\runtime")
-                .as_deref(),
-            Some("data/a.esm")
+            resolve(&m, r"C:\GameLayers\runtime\Data\a.esm"),
+            Some((RootId::DEFAULT, "data/a.esm".to_string()))
         );
     }
 
@@ -629,38 +775,143 @@ mod tests {
     /// relative to its executable, not the working directory. With only the
     /// root mapped, those fell through to bare disk, the plugin set came back
     /// empty, and world load hung while the main menu worked.
+    ///
+    /// It is now an alias *entry* sharing root 0's id rather than a second
+    /// prefix test, so it must still resolve — and still answer with root 0,
+    /// which is what routes the request to the same provider.
     #[test]
     fn stage_dir_aliases_the_virtual_root() {
         let stage = r"C:\tmp\skyrim-data\stage\vfs-stage-21728";
+        let m = FuseClient::roots_only(&[
+            (RootId::DEFAULT, r"C:\GameLayers\runtime"),
+            (RootId::DEFAULT, stage),
+        ]);
         assert_eq!(
-            vpath_under_root_norm(
-                r"\??\c:\tmp\skyrim-data\stage\vfs-stage-21728\data\ccasvsse001-almsivi.esm",
-                stage
-            )
-            .as_deref(),
-            Some("data/ccasvsse001-almsivi.esm")
+            resolve(
+                &m,
+                r"\??\c:\tmp\skyrim-data\stage\vfs-stage-21728\data\ccasvsse001-almsivi.esm"
+            ),
+            Some((RootId::DEFAULT, "data/ccasvsse001-almsivi.esm".to_string()))
         );
         // The game probes the bare-root spelling as well as Data\.
         assert_eq!(
-            vpath_under_root_norm(
-                r"\??\c:\tmp\skyrim-data\stage\vfs-stage-21728\ccasvsse001-almsivi.esm",
-                stage
-            )
-            .as_deref(),
-            Some("ccasvsse001-almsivi.esm")
+            resolve(
+                &m,
+                r"\??\c:\tmp\skyrim-data\stage\vfs-stage-21728\ccasvsse001-almsivi.esm"
+            ),
+            Some((RootId::DEFAULT, "ccasvsse001-almsivi.esm".to_string()))
         );
         // A sibling staging directory must not match.
-        assert_eq!(
-            vpath_under_root_norm(r"\??\c:\tmp\skyrim-data\stage\other\data\x.esl", stage),
-            None
-        );
+        assert_eq!(resolve(&m, r"\??\c:\tmp\skyrim-data\stage\other\data\x.esl"), None);
     }
 
     #[test]
     fn vpath_under_root_rejects_outside() {
+        let m = FuseClient::roots_only(&[(RootId::DEFAULT, r"C:\GameLayers\runtime")]);
+        assert_eq!(resolve(&m, r"\??\C:\Windows\x.dll"), None);
+    }
+
+    /// Stage 2b task 5: the client predicate answers with a root id, and a
+    /// second root routes to itself rather than to root 0. Before this the
+    /// client held one root path and one alias, so a path under a second root
+    /// was simply "not ours" and fell through to real disk.
+    #[test]
+    fn a_second_root_routes_to_its_own_id() {
+        let m = FuseClient::roots_only(&[
+            (RootId(0), r"C:\Games\Skyrim"),
+            (RootId(1), r"C:\Users\me\Documents\My Games\Skyrim"),
+        ]);
         assert_eq!(
-            vpath_under_root_norm(r"\??\C:\Windows\x.dll", r"C:\GameLayers\runtime"),
-            None
+            resolve(&m, r"\??\C:\Games\Skyrim\Data\a.esm"),
+            Some((RootId(0), "data/a.esm".to_string()))
+        );
+        assert_eq!(
+            resolve(&m, r"\??\C:\Users\me\Documents\My Games\Skyrim\Saves\a.ess"),
+            Some((RootId(1), "saves/a.ess".to_string()))
+        );
+        assert_eq!(resolve(&m, r"\??\C:\Windows\x.dll"), None);
+    }
+
+    /// The predicate's own root spelling resolves to the empty remainder,
+    /// which every caller turns into `"."`. Both roots, not just the first.
+    #[test]
+    fn the_root_itself_resolves_to_an_empty_remainder() {
+        let m = FuseClient::roots_only(&[
+            (RootId(0), r"C:\Games\Skyrim"),
+            (RootId(1), r"C:\Docs\Skyrim"),
+        ]);
+        assert_eq!(resolve(&m, r"\??\C:\Games\Skyrim"), Some((RootId(0), String::new())));
+        assert_eq!(resolve(&m, r"\??\C:\Docs\Skyrim"), Some((RootId(1), String::new())));
+    }
+
+    /// **This is the unification, stated as a test.** The five alternate
+    /// spellings `RootMap` recognises and the old string predicate did not
+    /// must now route, not merely classify. A device-path spelling is the
+    /// cheapest of the five to build without touching the filesystem (the 8.3
+    /// and junction cases need real on-disk state and are covered in
+    /// `vfs-redirect`'s own tests), so it stands in for the family here.
+    ///
+    /// If the unification were reverted — the client going back to a
+    /// lowercased `strip_prefix` — this assertion fails: `strip_prefix` has no
+    /// device table and would answer `None`.
+    #[test]
+    fn the_client_predicate_recognises_the_spellings_only_rootmap_used_to() {
+        let mut volumes = vfs_redirect::VolumeMap::empty();
+        volumes.insert(r"\Device\HarddiskVolume3", 'C');
+        let m = RootMap::with_roots(
+            &[(RootId(0), r"C:\Games\Skyrim"), (RootId(1), r"C:\Docs\Skyrim")],
+            volumes,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(&m, r"\Device\HarddiskVolume3\Games\Skyrim\Data\a.esp"),
+            Some((RootId(0), "data/a.esp".to_string())),
+            "a device-path spelling of an in-root path must now route, not just classify"
+        );
+        assert_eq!(
+            resolve(&m, r"\Device\HarddiskVolume3\Docs\Skyrim\Saves\a.ess"),
+            Some((RootId(1), "saves/a.ess".to_string())),
+            "and for every root, not only the first"
+        );
+        // The over-eager direction stays closed: registering a device prefix
+        // must not swallow the rest of the volume.
+        assert_eq!(resolve(&m, r"\Device\HarddiskVolume3\Windows\System32\x.dll"), None);
+    }
+
+    /// `VFS_VIRTUAL_ROOTS` is additive on top of `VFS_VIRTUAL_DIR`. Exercised
+    /// through the pure half, not the process environment — that is global
+    /// mutable state every other test in this binary shares.
+    #[test]
+    fn extra_roots_parse_additively_over_root_zero() {
+        let game = r"C:\Games\Skyrim";
+        // Unset: exactly the single-root case every pre-stage-2b session had.
+        assert_eq!(
+            merge_extra_roots(game, None),
+            vec![(RootId::DEFAULT, game.to_string())]
+        );
+        // One extra root, plus tolerance for whitespace and a trailing `;`.
+        assert_eq!(
+            merge_extra_roots(game, Some(r" 1 = C:\Docs\Skyrim ; ")),
+            vec![
+                (RootId(0), game.to_string()),
+                (RootId(1), r"C:\Docs\Skyrim".to_string()),
+            ]
+        );
+        // An explicit root 0 replaces VFS_VIRTUAL_DIR rather than duplicating
+        // it — two entries for one id would be read as an alias, which is not
+        // what a caller respelling root 0 means.
+        assert_eq!(
+            merge_extra_roots(game, Some(r"0=C:\Other")),
+            vec![(RootId(0), r"C:\Other".to_string())]
+        );
+        // Malformed entries are skipped, not fatal, and never shift the roots
+        // that did parse.
+        assert_eq!(
+            merge_extra_roots(game, Some(r"nope;2=;=C:\x;3=C:\Three")),
+            vec![
+                (RootId(0), game.to_string()),
+                (RootId(3), r"C:\Three".to_string()),
+            ]
         );
     }
 }

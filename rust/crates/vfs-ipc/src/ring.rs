@@ -231,6 +231,31 @@ mod tests {
         assert_eq!(open(owned.seg()), Err(IpcError::Layout));
     }
 
+    /// Stage 2b task 5: the ring's *payload* layouts changed (every
+    /// path-carrying request gained a leading `root:u32`), and the injected
+    /// `vfs_shim_dll.dll` is known to go stale silently. A stale shim would
+    /// send the old shape into a current director, whose decoder would read
+    /// the first four bytes of the path as a root id and the rest as a
+    /// truncated path — a plausible-looking wrong answer, not a failure.
+    ///
+    /// The version field is the only thing standing between that and a loud
+    /// error, so it gets its own test rather than riding on
+    /// `open_rejects_bad_magic`: the magic is unchanged by a payload change,
+    /// so magic alone would let a stale shim straight through. `VERSION - 1`
+    /// is written here specifically because it is what a
+    /// one-generation-stale shim actually stamps.
+    #[test]
+    fn open_rejects_a_stale_wire_version() {
+        let (owned, _) = ring(2, 32);
+        assert!(open(owned.seg()).is_ok(), "the current version must open");
+        owned.seg().write_u32(RH_VERSION, VERSION - 1);
+        assert_eq!(
+            open(owned.seg()),
+            Err(IpcError::Layout),
+            "a ring stamped with the previous wire version must be refused, not misparsed"
+        );
+    }
+
     #[test]
     fn full_primitive_roundtrip() {
         let (owned, geom) = ring(2, 64);

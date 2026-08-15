@@ -66,12 +66,36 @@ pub struct ReadReq {
     pub len: u32,
 }
 
-pub fn encode_path_req(vpath: &str) -> Vec<u8> {
-    vpath.as_bytes().to_vec()
+/// Path-carrying request: `root:u32 | path_utf8…`. Used by GETATTR, READDIR
+/// and DELETE.
+///
+/// **Stage 2b task 5 widened this from a bare UTF-8 path.** A session
+/// virtualizes several roots, and a path alone cannot say which one it belongs
+/// to — the shim classifies an open as "root 1" and, before this, had no field
+/// in which to say so, leaving `dispatch_director` to assume `RootId::DEFAULT`
+/// for every request. The root rides ahead of the path rather than in a
+/// parallel opcode so there is one code path per operation, not two that can
+/// drift.
+///
+/// The layout is a contract with the injected DLL: a shim built against the
+/// old shape would have its first four path bytes read as a root id, which is
+/// plausible-looking garbage rather than a clean failure. `vfs_ipc::layout`'s
+/// `VERSION` was bumped to 2 in the same change so such a shim is rejected at
+/// ring open instead of misparsing every request.
+pub fn encode_path_req(root: u32, vpath: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(4 + vpath.len());
+    b.extend_from_slice(&root.to_le_bytes());
+    b.extend_from_slice(vpath.as_bytes());
+    b
 }
 
-pub fn decode_path_req(payload: &[u8]) -> Option<String> {
-    core::str::from_utf8(payload).ok().map(|s| s.to_string())
+pub fn decode_path_req(payload: &[u8]) -> Option<(u32, String)> {
+    if payload.len() < 4 {
+        return None;
+    }
+    let root = u32::from_le_bytes(payload[0..4].try_into().ok()?);
+    let path = core::str::from_utf8(&payload[4..]).ok()?.to_string();
+    Some((root, path))
 }
 
 pub fn encode_getattr_resp(r: &AttrResp) -> Vec<u8> {
@@ -133,21 +157,26 @@ pub fn decode_readdir_resp(p: &[u8]) -> Option<Vec<DirEntryWire>> {
     Some(out)
 }
 
-/// OPEN req: `flags:u32 | path_utf8…`
-pub fn encode_open_req(flags: u32, path: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(4 + path.len());
+/// OPEN req: `root:u32 | flags:u32 | path_utf8…`
+///
+/// See [`encode_path_req`] for why the root leads every path-carrying payload.
+pub fn encode_open_req(root: u32, flags: u32, path: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(8 + path.len());
+    b.extend_from_slice(&root.to_le_bytes());
     b.extend_from_slice(&flags.to_le_bytes());
     b.extend_from_slice(path.as_bytes());
     b
 }
 
-pub fn decode_open_req(p: &[u8]) -> Option<(u32, String)> {
-    if p.len() < 4 {
+/// Returns `(root, flags, path)`.
+pub fn decode_open_req(p: &[u8]) -> Option<(u32, u32, String)> {
+    if p.len() < 8 {
         return None;
     }
-    let flags = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    let path = core::str::from_utf8(&p[4..]).ok()?.to_string();
-    Some((flags, path))
+    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    let flags = u32::from_le_bytes(p[4..8].try_into().ok()?);
+    let path = core::str::from_utf8(&p[8..]).ok()?.to_string();
+    Some((root, flags, path))
 }
 
 /// OPEN resp: `fh:u64 | size:u64 | is_dir:u8 | pad[7]`
@@ -316,41 +345,52 @@ pub struct SetattrReq {
     pub size: u64,
 }
 
-/// MKDIR req: `mode:u32 | path_utf8…`
-pub fn encode_mkdir_req(mode: u32, path: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(4 + path.len());
+/// MKDIR req: `root:u32 | mode:u32 | path_utf8…`
+///
+/// See [`encode_path_req`] for why the root leads every path-carrying payload.
+pub fn encode_mkdir_req(root: u32, mode: u32, path: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(8 + path.len());
+    b.extend_from_slice(&root.to_le_bytes());
     b.extend_from_slice(&mode.to_le_bytes());
     b.extend_from_slice(path.as_bytes());
     b
 }
 
-pub fn decode_mkdir_req(p: &[u8]) -> Option<(u32, String)> {
-    if p.len() < 4 {
+/// Returns `(root, mode, path)`.
+pub fn decode_mkdir_req(p: &[u8]) -> Option<(u32, u32, String)> {
+    if p.len() < 8 {
         return None;
     }
-    let mode = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    let path = core::str::from_utf8(&p[4..]).ok()?.to_string();
-    Some((mode, path))
+    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    let mode = u32::from_le_bytes(p[4..8].try_into().ok()?);
+    let path = core::str::from_utf8(&p[8..]).ok()?.to_string();
+    Some((root, mode, path))
 }
 
-/// RENAME req: `from_len:u32 | from_utf8 | to_utf8`
-pub fn encode_rename_req(from: &str, to: &str) -> Vec<u8> {
-    let mut b = Vec::with_capacity(4 + from.len() + to.len());
+/// RENAME req: `root:u32 | from_len:u32 | from_utf8 | to_utf8`
+///
+/// One root, not two: `Director::rename` resolves both sides against a single
+/// root, and a cross-root rename has no meaning in the provider contract.
+pub fn encode_rename_req(root: u32, from: &str, to: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(8 + from.len() + to.len());
+    b.extend_from_slice(&root.to_le_bytes());
     b.extend_from_slice(&(from.len() as u32).to_le_bytes());
     b.extend_from_slice(from.as_bytes());
     b.extend_from_slice(to.as_bytes());
     b
 }
 
-pub fn decode_rename_req(p: &[u8]) -> Option<(String, String)> {
-    if p.len() < 4 {
+/// Returns `(root, from, to)`.
+pub fn decode_rename_req(p: &[u8]) -> Option<(u32, String, String)> {
+    if p.len() < 8 {
         return None;
     }
-    let from_len = u32::from_le_bytes(p[0..4].try_into().ok()?) as usize;
-    let end = 4usize.checked_add(from_len)?;
-    let from = core::str::from_utf8(p.get(4..end)?).ok()?.to_string();
+    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    let from_len = u32::from_le_bytes(p[4..8].try_into().ok()?) as usize;
+    let end = 8usize.checked_add(from_len)?;
+    let from = core::str::from_utf8(p.get(8..end)?).ok()?.to_string();
     let to = core::str::from_utf8(p.get(end..)?).ok()?.to_string();
-    Some((from, to))
+    Some((root, from, to))
 }
 
 /// SETATTR req: `fh:u64 | size:u64`
@@ -405,10 +445,59 @@ mod tests {
 
     #[test]
     fn open_req_roundtrip() {
-        let p = encode_open_req(OPEN_READ, "Data/Skyrim.esm");
-        let (f, path) = decode_open_req(&p).unwrap();
+        let p = encode_open_req(0, OPEN_READ, "Data/Skyrim.esm");
+        let (root, f, path) = decode_open_req(&p).unwrap();
+        assert_eq!(root, 0);
         assert_eq!(f, OPEN_READ);
         assert_eq!(path, "Data/Skyrim.esm");
+    }
+
+    /// Stage 2b task 5, step 1: the same relative path carried for two
+    /// different roots must produce two distinguishable payloads, and each
+    /// must decode back to its own root. Without this the shim can classify a
+    /// path as belonging to root 1 and has no field in which to say so.
+    #[test]
+    fn path_carrying_payloads_carry_the_root() {
+        let a = encode_path_req(0, "same.txt");
+        let b = encode_path_req(1, "same.txt");
+        assert_ne!(a, b, "two roots must not encode to identical bytes");
+        assert_eq!(decode_path_req(&a), Some((0, "same.txt".to_string())));
+        assert_eq!(decode_path_req(&b), Some((1, "same.txt".to_string())));
+
+        let o = encode_open_req(7, OPEN_READ, "same.txt");
+        assert_eq!(decode_open_req(&o), Some((7, OPEN_READ, "same.txt".to_string())));
+
+        let m = encode_mkdir_req(2, 493, "sub/dir");
+        assert_eq!(decode_mkdir_req(&m), Some((2, 493, "sub/dir".to_string())));
+
+        let r = encode_rename_req(3, "old.txt", "new.txt");
+        assert_eq!(
+            decode_rename_req(&r),
+            Some((3, "old.txt".to_string(), "new.txt".to_string()))
+        );
+    }
+
+    /// The exact byte layout, pinned. This is a contract with the injected
+    /// DLL: a shim built against the pre-task-5 shape (bare path / bare
+    /// `flags|path`) would have its first four path bytes decoded as a root
+    /// id. `vfs_ipc::layout::VERSION` was bumped to 2 in the same change so
+    /// that shim is rejected at ring open rather than silently misparsed —
+    /// see `vfs_ipc::ring::tests::open_rejects_a_stale_wire_version`.
+    #[test]
+    fn root_leads_the_wire_layout() {
+        assert_eq!(encode_path_req(1, "a"), vec![1, 0, 0, 0, b'a']);
+        assert_eq!(
+            encode_open_req(1, 2, "a"),
+            vec![1, 0, 0, 0, 2, 0, 0, 0, b'a']
+        );
+        assert_eq!(
+            encode_mkdir_req(1, 2, "a"),
+            vec![1, 0, 0, 0, 2, 0, 0, 0, b'a']
+        );
+        assert_eq!(
+            encode_rename_req(1, "a", "b"),
+            vec![1, 0, 0, 0, 1, 0, 0, 0, b'a', b'b']
+        );
     }
 
     #[test]
@@ -461,16 +550,16 @@ mod tests {
 
     #[test]
     fn mkdir_req_roundtrip() {
-        let p = encode_mkdir_req(493, "sub/dir");
-        assert_eq!(decode_mkdir_req(&p), Some((493, "sub/dir".to_string())));
+        let p = encode_mkdir_req(0, 493, "sub/dir");
+        assert_eq!(decode_mkdir_req(&p), Some((0, 493, "sub/dir".to_string())));
     }
 
     #[test]
     fn rename_req_roundtrip() {
-        let p = encode_rename_req("old.txt", "new.txt");
+        let p = encode_rename_req(0, "old.txt", "new.txt");
         assert_eq!(
             decode_rename_req(&p),
-            Some(("old.txt".to_string(), "new.txt".to_string()))
+            Some((0, "old.txt".to_string(), "new.txt".to_string()))
         );
     }
 
@@ -493,6 +582,13 @@ mod tests {
     #[test]
     fn short_buffers_decode_none() {
         assert!(decode_open_req(&[1, 2]).is_none());
+        // A payload carrying only the root and no flags is still short: the
+        // pre-task-5 `flags|path` shape decoded a 4-byte prefix, so a bare
+        // 4-byte buffer must not now look like a valid OPEN.
+        assert!(decode_open_req(&[0, 0, 0, 0]).is_none());
+        assert!(decode_path_req(&[1, 2]).is_none());
+        assert!(decode_mkdir_req(&[0, 0, 0, 0]).is_none());
+        assert!(decode_rename_req(&[0, 0, 0, 0]).is_none());
         assert!(decode_read_req(&[0u8; 10]).is_none());
         assert!(decode_read_resp(&[1, 0, 0]).is_none());
     }

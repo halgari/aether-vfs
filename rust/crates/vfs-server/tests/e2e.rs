@@ -51,22 +51,22 @@ fn client_queries_server_over_ring() {
         // Client (this thread): issue requests and check responses.
         let client = RingClient::new(seg, SpinNotifier).unwrap();
 
-        let resp = client.submit(OP_GETATTR, 0, &encode_path_req("data/a.esp")).unwrap();
+        let resp = client.submit(OP_GETATTR, 0, &encode_path_req(0, "data/a.esp")).unwrap();
         assert_eq!(resp.status, 0);
         let a = decode_getattr_resp(&resp.payload).unwrap();
         assert!(a.found && !a.is_dir && a.size == 10);
 
-        let resp = client.submit(OP_GETATTR, 0, &encode_path_req("nope")).unwrap();
+        let resp = client.submit(OP_GETATTR, 0, &encode_path_req(0, "nope")).unwrap();
         assert!(!decode_getattr_resp(&resp.payload).unwrap().found);
 
-        let resp = client.submit(OP_READDIR, 0, &encode_path_req("data")).unwrap();
+        let resp = client.submit(OP_READDIR, 0, &encode_path_req(0, "data")).unwrap();
         assert_eq!(resp.status, 0);
         let names: Vec<String> =
             decode_readdir_resp(&resp.payload).unwrap().into_iter().map(|e| e.name).collect();
         assert_eq!(names, vec!["a.esp", "b.esp"]);
 
         // readdir of a file → NOT_A_DIRECTORY
-        let resp = client.submit(OP_READDIR, 0, &encode_path_req("data/a.esp")).unwrap();
+        let resp = client.submit(OP_READDIR, 0, &encode_path_req(0, "data/a.esp")).unwrap();
         assert_eq!(resp.status, -2);
 
         let resp = client.submit(OP_HEARTBEAT, 0, &[]).unwrap();

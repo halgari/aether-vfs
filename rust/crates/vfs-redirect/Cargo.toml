@@ -5,6 +5,11 @@ edition = "2021"
 
 [dependencies]
 vfs-core = { path = "../vfs-core" }
+# `RootId` only — the vocabulary type a multi-root `RootMap` answers with, so
+# the shim's client predicate and the director's wire name the same roots by
+# the same type rather than by two parallel `u32`s. `vfs-provider` has no
+# dependencies of its own, so this adds no transitive weight.
+vfs-provider = { path = "../vfs-provider" }
 vfs-shared = { path = "../vfs-shared" }
 # Raw Win32 volume/path lookups (QueryDosDeviceW, GetVolumeNameForVolumeMountPointW,
 # GetLongPathNameW, GetFinalPathNameByHandleW) live in vfs-win, not here: this crate

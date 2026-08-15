@@ -57,6 +57,19 @@ use crate::canon::VolumeMap;
 /// why registering a `subst` alias here would be an active regression
 /// (hijacking an already-correct in-root path), not just a missed vector.
 pub fn resolve_volume_map(root: &str) -> VolumeMap {
+    resolve_volume_map_for(&[root])
+}
+
+/// [`resolve_volume_map`] for a session that virtualizes several roots.
+///
+/// The drive/volume-GUID/admin-share half is global and resolved once; only
+/// the junction scan is per-root, so each declared root contributes its own
+/// aliases to one shared table. Scoping the scan to root 0 alone — which is
+/// what calling the single-root form would amount to — would leave escape
+/// vector 7 (a junction inside a managed root) closed for the game directory
+/// and wide open for every other root, which is exactly the
+/// first-root-only asymmetry stage 2b exists to remove.
+pub fn resolve_volume_map_for(roots: &[&str]) -> VolumeMap {
     let mut map = VolumeMap::empty();
     for m in vfs_win::drive_mappings() {
         map.insert(&m.device_name, m.drive);
@@ -67,8 +80,10 @@ pub fn resolve_volume_map(root: &str) -> VolumeMap {
         }
         map.insert_alias(&admin_share_nt_key(m.drive), &format!("{}:", m.drive));
     }
-    for (location_nt, target_norm) in junction_aliases(root) {
-        map.insert_alias(&location_nt, &target_norm);
+    for root in roots {
+        for (location_nt, target_norm) in junction_aliases(root) {
+            map.insert_alias(&location_nt, &target_norm);
+        }
     }
     map
 }

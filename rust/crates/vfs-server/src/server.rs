@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn handle_delegates_to_dispatch() {
         let s = server();
-        let (st, p) = s.handle(OP_GETATTR, &encode_path_req("data/a.esp"));
+        let (st, p) = s.handle(OP_GETATTR, &encode_path_req(0, "data/a.esp"));
         assert_eq!(st, 0);
         assert!(decode_getattr_resp(&p).unwrap().found);
     }

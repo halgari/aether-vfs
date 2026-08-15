@@ -248,8 +248,8 @@ pub async fn apply_session_config(
     cfg: &vfs_control::SessionConfig,
 ) -> Result<(String, Option<i32>), String> {
     use vfs_control::pb::{
-        launch_event, source_spec, AddSourceReq, CreateSessionReq, DiskSource, HttpSource,
-        LaunchReq, RemoteSource, SourceSpec as PbSource, ZipSource,
+        launch_event, source_spec, AddSourceReq, CreateSessionReq, DeclareRootReq, DiskSource,
+        HttpSource, LaunchReq, RemoteSource, SourceSpec as PbSource, ZipSource,
     };
 
     cfg.validate_roots()?;
@@ -261,6 +261,29 @@ pub async fn apply_session_config(
         .map_err(|e| format!("CreateSession: {e}"))?
         .into_inner();
     let session_id = session.id.clone();
+
+    // Declare each root's host directory before any source is added, so the
+    // shim is told about every root the config names — not only about the
+    // providers behind them. Mounting a provider on root 1 while never
+    // declaring where root 1 *is* produces a session that looks configured
+    // and serves nothing under that root, which is the silent-partial shape
+    // this project keeps rediscovering.
+    //
+    // Root 0 is skipped deliberately: its host directory is the daemon's own
+    // `Session.root`, chosen at `CreateSession` and already published. A
+    // config's `[[root]] path` for id 0 is descriptive (which tree the author
+    // means) and cannot repoint the directory the daemon created — declaring
+    // it would be rejected by the daemon anyway.
+    for root in cfg.roots.iter().filter(|r| r.id != 0) {
+        client
+            .declare_root(DeclareRootReq {
+                session_id: session_id.clone(),
+                root: root.id,
+                path: root.path.clone(),
+            })
+            .await
+            .map_err(|e| format!("DeclareRoot {} ({}): {e}", root.id, root.name))?;
+    }
 
     // `AddSourceReq.layer` is the RPC's own precedence field, unrelated to
     // config's (now-removed) `SourceEntry.layer` — it orders sources *within

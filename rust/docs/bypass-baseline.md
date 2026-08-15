@@ -762,16 +762,18 @@ are configuration and ordering facts, not a missing code path:
    `RootMap::decide`'s `File` arm, which is the one source of `Redirect`/
    `Serve` that actually depends on `NotFound`'s sibling arms at all, never
    has anything to resolve to a `File` and never fires.
-2. `hook::try_fuse_create` (`crates/vfs-shim/src/hook.rs:1045`) already
-   serves or seals every under-root read that
-   `fuse_client::vpath_under_root` (the client's own string-prefix
-   predicate) recognises, before `decision_for`/`Engine::decide_open` ever
-   runs — a recognised read either comes back `Routed` (director served it)
-   or is sealed with `STATUS_OBJECT_NAME_NOT_FOUND` right there. Only a read
-   `vpath_under_root` fails to recognise (the five alternate spellings
-   `rust/docs/escape-matrix.md`'s "second, structural finding" describes) or
-   an open `try_fuse_create` explicitly falls through (the DRM exceptions,
-   the write fallback) ever reaches `decision_for` at all.
+2. `hook::try_fuse_create` already serves or seals every under-root read
+   that `fuse_client::vpath_under_root` recognises, before
+   `decision_for`/`Engine::decide_open` ever runs — a recognised read either
+   comes back `Routed` (director served it) or is sealed with
+   `STATUS_OBJECT_NAME_NOT_FOUND` right there. **Since stage 2b task 5 that
+   predicate is a `RootMap`**, the same canonicaliser
+   `RootMap::decide` uses, so the five alternate spellings
+   `rust/docs/escape-matrix.md`'s "second, structural finding" describes are
+   now recognised here too and no longer reach `decision_for`. What still
+   does: an open `try_fuse_create` explicitly falls through (the DRM
+   exceptions, the write fallback), and a path under no declared root at
+   all.
 3. Of the opens that do reach `decision_for`, `outcome_recorded` (the
    out-param `try_fuse_create` sets before returning `None` — see its own
    doc comment) diverts the ones that would otherwise classify as

@@ -10,7 +10,7 @@ use vfs_ipc::{DataArena, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
 use vfs_win::{EventNotifier, SharedMapping};
 
 use crate::director::Director;
-use crate::ops::RootId;
+
 use crate::ring_dispatch::dispatch_director;
 
 pub const DEFAULT_SLOT_COUNT: u32 = 32;
@@ -155,6 +155,22 @@ impl IpcServe {
     }
 
     pub fn apply_env(&self, virtual_root: &str, thin_cfg: &std::path::Path) {
+        self.apply_env_roots(virtual_root, &[], thin_cfg)
+    }
+
+    /// [`Self::apply_env`] for a session that virtualizes more than one root.
+    ///
+    /// `extra_roots` is `(id, path)` for every root **beyond root 0**, which
+    /// `virtual_root` names. The shim needs the full set because the root id
+    /// is what its ring requests now carry: a root it has never been told
+    /// about is one whose paths it classifies as belonging to no one and lets
+    /// fall through to real disk, silently.
+    pub fn apply_env_roots(
+        &self,
+        virtual_root: &str,
+        extra_roots: &[(u32, String)],
+        thin_cfg: &std::path::Path,
+    ) {
         // Process-global env is for the injected child (and single-session hosts).
         std::env::set_var(vfs_env::RING_SECTION, &self.section_name);
         std::env::set_var(vfs_env::RING_BYTES, self.map_bytes.to_string());
@@ -165,6 +181,20 @@ impl IpcServe {
         std::env::set_var(vfs_env::CLIENT_EV, &self.client_ev_name);
         std::env::set_var(vfs_env::FUSE_CFG, thin_cfg.to_string_lossy().as_ref());
         std::env::set_var(vfs_env::VIRTUAL_DIR, virtual_root);
+        if extra_roots.is_empty() {
+            // Cleared, not left alone: a previous single-session host in this
+            // process may have set it, and inheriting a stale second root is
+            // exactly the "declared root that is not there" failure this var
+            // exists to prevent.
+            std::env::remove_var(vfs_env::VIRTUAL_ROOTS);
+        } else {
+            let spec = extra_roots
+                .iter()
+                .map(|(id, path)| format!("{id}={path}"))
+                .collect::<Vec<_>>()
+                .join(";");
+            std::env::set_var(vfs_env::VIRTUAL_ROOTS, spec);
+        }
     }
 }
 
@@ -181,14 +211,12 @@ fn worker_loop<N: vfs_ipc::Notifier>(inner: &Inner, notifier: N) {
     );
     while !inner.stop.load(Ordering::Relaxed) {
         let handled = ring.serve_one(|req| {
-            // The shim is single-root until stage 2b task 5; the ring wire
-            // carries no root field to select otherwise (see the doc comment
-            // on `dispatch_director`), so every request from an injected
-            // child resolves against `RootId::DEFAULT`, unchanged from
-            // before this stage.
+            // Stage 2b task 5: the root travels in the payload, so this loop
+            // no longer pins every request from an injected child to
+            // `RootId::DEFAULT` — the shim says which root it meant and
+            // `dispatch_director` routes on it.
             dispatch_director(
                 &inner.kernel,
-                RootId::DEFAULT,
                 req.opcode,
                 &req.payload,
                 req.flags,

@@ -1,5 +1,5 @@
 {:magic 0x56464950
- :version 1
+ :version 2
  :content-hash 0xB0521729
  :opcodes {:getattr 1 :readdir 2 :open 3 :materialize 4 :read 5 :write 6 :setattr 7 :rename 8 :delete 9 :mkdir 10 :close 11 :register-process 12 :heartbeat 13 }
  :statuses {:ok 0 :not-found -1 :not-a-directory -2 :bad-request -3 :io-error -4 :is-dir -5 :bad-fh -6 :no-space -7 }

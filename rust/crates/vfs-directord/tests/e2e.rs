@@ -909,49 +909,35 @@ fn positive_expectation(vector: &str) -> Option<&'static str> {
     if vector == "5b" || is_reported_not_closed(vector) {
         return None;
     }
-    // Gate 3, Task 5 flip, covering vectors 1, 3, 4, 7 and 9 together (each
-    // was `Some("opened")` before, folded into the catch-all below): all five
-    // are recognised as under-root *only* by `RootMap::compute_under_root`'s
-    // canonicalisation (`vfs-redirect`'s device/volume-GUID/GLOBALROOT/UNC-
-    // admin-share/junction-alias tables) — never by
-    // `fuse_client::vpath_under_root`, the shim-side router that decides
-    // whether an open reaches the director *at all*. `vpath_under_root` does
-    // plain, case/separator-normalized *string* prefix matching against the
-    // literal root and the staging-directory alias; it has no device-prefix,
-    // volume-GUID, `GLOBALROOT`-unwrap, UNC-admin-share, or junction-alias
-    // resolution of its own. So for all five of these spellings,
-    // `try_fuse_create` gives up (`vpath_under_root` returns `None`) and falls
-    // through to `decision_for`/`RootMap` — the ONLY place any of gate 2's
-    // canonicalisation work is ever consulted. In a real, live session the
-    // shim's own embedded `Engine` snapshot is always the empty tree
-    // (`vfs-director::Session::serve`'s `shim.cfg` — the FUSE ring is the only
-    // real content path), so every path `RootMap` places under the root there
-    // resolves `SnapResolution::NotFound` regardless of whether the director
-    // genuinely has the content. Before this task, `NotFound` passed through,
-    // and each of these vectors' positive canary "opened" by reading the
-    // byte-identical real file physically on `session.root` — never through
-    // the director, for any of these five spellings. After this task removes
-    // that passthrough, all five seal: `not-found`.
+    // Stage 2b task 5 flip, covering vectors 1, 3, 4, 7 and 9 together: all
+    // five are back to the catch-all `Some("opened")` below, which is where
+    // they started before Gate 3 Task 5 moved them out.
     //
-    // This is a real, structural finding, not a predicted-in-advance edge:
-    // gate 2's alternate-spelling closures were classification-only (correct
-    // for the audit/counting exit criterion gate 2 was actually held to) —
-    // none of them ever made these spellings *reachable through the
-    // director*. This task's fix is what exposes that. Closing it fully would
-    // mean teaching `fuse_client::vpath_under_root` (or an equivalent
-    // mechanism) to recognise the same alternate spellings `RootMap` already
-    // does, so they route to the director like any ordinary path — out of
-    // this task's scope (`vfs-redirect/lib.rs`, `vfs-shim/hook.rs`), recorded
-    // here and in `rust/docs/escape-matrix.md` rather than silently absorbed.
-    // Not a concern for the real Skyrim launch this task also verifies: none
-    // of these five spellings is one the game (or SKSE, or Steam) constructs
-    // on its own — every one is an adversarial escape-matrix construction
-    // (an 8.3 short name, a raw device path, a volume-GUID path, a
-    // `GLOBALROOT`-wrapped device path, a UNC admin-share path, a junction one
-    // or two ancestor levels above root), not an ordinary access pattern.
-    if matches!(vector, "1" | "3" | "4" | "7" | "9") {
-        return Some("not-found");
-    }
+    // Why they were `not-found` in between: those five are recognised as
+    // under-root *only* by `RootMap::compute_under_root`'s canonicalisation
+    // (`vfs-redirect`'s device/volume-GUID/GLOBALROOT/UNC-admin-share/
+    // junction-alias tables), and `fuse_client::vpath_under_root` — the
+    // shim-side router deciding whether an open reaches the director at all —
+    // used to be a *second*, plain string-prefix predicate with none of those
+    // tables. So `try_fuse_create` gave up for all five spellings and fell
+    // through to `decision_for`/`RootMap`, which in a live session resolves
+    // against the shim's embedded empty-tree snapshot and answered
+    // `SnapResolution::NotFound` no matter what the director actually had.
+    // Gate 3 Task 5 sealed that `NotFound` (correctly), which is what turned
+    // these five from `opened`-via-real-disk into `not-found`.
+    //
+    // What changed: task 5 deleted the second predicate.
+    // `fuse_client::vpath_under_root` *is* a `RootMap` now, so these five
+    // spellings route to the director like any ordinary path, and the
+    // director genuinely has the positive canary's content — so they open
+    // through the director rather than by reading the byte-identical real
+    // file on `session.root`, which is the outcome gate 3 was reaching for.
+    //
+    // The `negative_expectation` side is unchanged and still `not-found` for
+    // all five: routing them to the director does not make a file no provider
+    // serves appear. Together those two are the containment claim — reachable
+    // when a provider has it, sealed when none does — for every spelling this
+    // fixture can build, not merely for the ordinary one.
     match vector {
         // A hardlink names the SAME bytes under a brand-new file name the
         // content-addressed provider has never heard of. FUSE-routing (the
@@ -1482,43 +1468,277 @@ async fn escape_matrix_positive_and_negative_canary() {
     }
 }
 
-/// Fix 2(b) from the final whole-branch review of Gate 3: `docs/escape-
-/// matrix.md` (Gate 3, Task 6 section) claimed containment held for
-/// metadata queries "by the same `RootMap::decide` mechanism... regardless
-/// of which hook asked." That claim is false. `qattr_hook`/`qfull_hook`/
-/// `qibn_hook` (`vfs-shim/src/hook.rs`) never reach `RootMap::decide` at
-/// all — they consult `fuse_path_attr`, which asks
-/// `fuse_client::vpath_under_root` (the *client's* own string-prefix
-/// predicate), then the overlay, then falls through to the real
-/// filesystem. `vpath_under_root` has none of `RootMap::compute_under_root`'s
-/// canonicalisation tables (no device-prefix, volume-GUID, `GLOBALROOT`-
-/// unwrap, UNC-admin-share, or junction-alias resolution) — the exact
-/// asymmetry `positive_expectation`'s own doc comment above documents for
-/// vectors 1/3/4/7/9's *open* path. This test proves the same asymmetry
-/// surfaces for attribute queries too, for one of those five spellings.
+/// Stage 2b exit criterion: **the escape matrix passes against every root,
+/// not just the first.**
 ///
-/// This is a real, currently-true gap, not a hypothetical: it launches
-/// `vfs-fixture-escape`'s opt-in `4m` vector (`GetFileAttributesW` against
-/// vector 4's own volume-GUID spelling — see that crate's module doc
-/// comment) under a real, composed session shaped like
-/// `escape_matrix_positive_and_negative_canary`'s own setup, against the
-/// negative canary (a real file on `session.root` that no provider knows
-/// about). The assertion is that the attribute query still succeeds
-/// (`found`) — i.e. still reaches real disk — even though the matching
-/// *read open* on the identical spelling (vector 4 itself) is sealed
-/// (`negative_expectation` above asserts `not-found` for it).
+/// `escape_matrix_positive_and_negative_canary` above proves containment for
+/// root 0 — the session's own root, the one the daemon creates and the one
+/// every path in this tree used to be measured against. That proves nothing
+/// about a second root, and the failure it would miss is not subtle: the
+/// canonicaliser could have a root-index assumption baked into it (matching
+/// only `roots[0]`, or resolving device/junction aliases against root 0's
+/// path alone) and root 0's matrix would stay green while every path under
+/// root 1 fell through to real disk, unclassified and uncounted.
 ///
-/// **What would flip this test, and what to do then**: if `found` ever
-/// changes to `not-found` here — because `vpath_under_root` (or an
-/// equivalent client-side predicate) learns to recognise this spelling, or
-/// because `qattr_hook`/`qfull_hook`/`qibn_hook` start routing through
-/// `decide` — this assertion should change to `not-found`, and this test's
-/// own doc comment plus `docs/escape-matrix.md`'s Fix 2 correction should be
-/// updated to say the gap has closed for that hook family, not deleted
-/// silently. A gap recorded only in prose can be quietly forgotten; this
-/// test exists so it cannot be.
+/// So this runs the same fixture, the same two canaries, and the same
+/// `positive_expectation`/`negative_expectation` tables against a target
+/// under **root 1**: a second real host directory, declared with
+/// `SessionRegistry::declare_root` and served by its own provider mounted at
+/// `RootId(1)` through the ordinary `AddSourceReq { root: 1 }` path.
+///
+/// It exercises the whole chain end to end and nothing about it is stubbed:
+/// the daemon publishes root 1 into `VFS_VIRTUAL_ROOTS`, the shim's
+/// `RootMap` holds both roots, `vpath_under_root` answers `RootId(1)`, the
+/// ring payload carries that 1, and `dispatch_director` routes on it. Any
+/// link missing turns the positive canary's ordinary spelling into
+/// `not-found`, which is what makes this worth its runtime rather than a
+/// duplicate of the root-0 run.
 #[tokio::test(flavor = "multi_thread")]
-async fn documents_metadata_gap_for_unrecognised_spellings() {
+async fn escape_matrix_holds_against_a_second_root() {
+    let _guard = LAUNCH_LOCK.lock().await;
+    ensure_inject_artifacts();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+    let registry = SessionRegistry::new();
+    // Cloned before the service takes it: `declare_root` has no RPC of its own
+    // (a root's *host path* comes from a config's `[[root]] path`, and
+    // `AddSourceReq` carries a root id and no path), so the test declares it
+    // the same way a config-driven daemon would. Everything else here — the
+    // session, the source on root 1, the launch — goes over gRPC.
+    let reg_handle = registry.clone();
+    let svc = DirectorService::new(registry);
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Root 1's own host directory — the "Documents\My Games\Skyrim" shape —
+    // and its own backing content dir, deliberately separate so the negative
+    // canary is a real file under root 1 that root 1's provider does not have.
+    let docs_root = tempfile::tempdir().expect("docs root tempdir");
+    let docs_content = tempfile::tempdir().expect("docs content tempdir");
+    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_log = stats_dir.path().join("shim-stats.log");
+    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_file = out_dir.path().join("escape-root1-out.tsv");
+
+    let fixture = locate_artifact("vfs-fixture-escape.exe");
+    let mut client = connect(&format!("{addr}")).await.expect("connect");
+
+    let session = client
+        .create_session(vfs_control::pb::CreateSessionReq {
+            name: "escape-matrix-root1".into(),
+        })
+        .await
+        .expect("CreateSession")
+        .into_inner();
+
+    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, SourceSpec as PbSource};
+
+    // Root 0 still gets a provider: a session whose game directory serves
+    // nothing is not the shape being tested, and leaving it unmounted would
+    // let a root-0 regression hide here.
+    let game_content = tempfile::tempdir().expect("game content tempdir");
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(PbSource {
+                kind: Some(source_spec::Kind::Disk(DiskSource {
+                    path: game_content.path().to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: "/".into(),
+            layer: 0,
+            root: 0,
+        })
+        .await
+        .expect("AddSource root 0");
+
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(PbSource {
+                kind: Some(source_spec::Kind::Disk(DiskSource {
+                    path: docs_content.path().to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: "/".into(),
+            layer: 0,
+            root: 1,
+        })
+        .await
+        .expect("AddSource root 1");
+
+    reg_handle
+        .declare_root(&session.id, 1, docs_root.path())
+        .expect("declare root 1");
+    assert!(
+        reg_handle.declare_root(&session.id, 0, docs_root.path()).is_err(),
+        "root 0 is the session's own root and must not be re-declarable"
+    );
+
+    let sub = PathBuf::from("Saves");
+    std::fs::create_dir_all(docs_root.path().join(&sub)).expect("mkdir under root 1");
+    std::fs::create_dir_all(docs_content.path().join(&sub)).expect("mkdir under root 1 content");
+
+    // Same two-canary construction as the root-0 matrix, one root over.
+    const POSITIVE_BASENAME: &str = "escape-positive-canary.esp";
+    const POSITIVE_BYTES: &[u8] = b"the-positive-canary-bytes";
+    let pos_rel = sub.join(POSITIVE_BASENAME);
+    std::fs::write(docs_root.path().join(&pos_rel), POSITIVE_BYTES).expect("positive (root 1)");
+    std::fs::write(docs_content.path().join(&pos_rel), POSITIVE_BYTES)
+        .expect("positive (root 1 content)");
+
+    const NEGATIVE_BASENAME: &str = "escape-negative-canary.bin";
+    let neg_rel = sub.join(NEGATIVE_BASENAME);
+    std::fs::write(docs_root.path().join(&neg_rel), b"the-negative-canary-bytes")
+        .expect("negative (root 1)");
+
+    // Vector 7's junction, created by this never-injected harness process for
+    // the same reason the root-0 matrix does it here — pointed at root 1's
+    // own directory, which is the part that would break if junction aliases
+    // were resolved against root 0's path alone.
+    let vector7_link =
+        std::env::temp_dir().join(format!("vfs-escape-junction-root1-{}", std::process::id()));
+    let _ = std::fs::remove_dir(&vector7_link);
+    let vector7_link_ready = std::process::Command::new("cmd")
+        .args([
+            "/C",
+            "mklink",
+            "/J",
+            &vector7_link.to_string_lossy(),
+            &docs_root.path().join(&sub).to_string_lossy(),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    let vector7_link_dir = vector7_link_ready.then(|| vector7_link.to_string_lossy().into_owned());
+    let ctx = EscapeFixtureCtx {
+        session_id: &session.id,
+        fixture: &fixture,
+        stats_log: &stats_log,
+        vector7_link_dir: vector7_link_dir.as_deref(),
+    };
+
+    let (pos_exit, pos_lines, _, _) = run_escape_fixture(
+        &mut client,
+        &ctx,
+        &docs_root.path().join(&pos_rel),
+        &out_file,
+        None,
+    )
+    .await;
+    assert_eq!(
+        pos_exit, 0,
+        "vfs-fixture-escape must exit 0 against root 1's positive canary. Lines: {pos_lines:?}"
+    );
+    for id in ALL_VECTOR_IDS {
+        assert!(
+            pos_lines.iter().any(|l| &l.vector == id),
+            "root 1 positive canary: vector {id} produced no line at all — a missing line must \
+             never be readable as a pass"
+        );
+    }
+    for line in &pos_lines {
+        let Some(want) = positive_expectation(&line.vector) else { continue };
+        if line.outcome.starts_with("unbuildable:") {
+            continue;
+        }
+        assert_eq!(
+            line.outcome, want,
+            "root 1 positive canary, vector {}: expected `{want}`, got `{}` (spelling: {:?}, \
+             note: {:?}). A blanket `not-found` here means root 1 never reached the director at \
+             all — the shim did not learn the root, or the ring did not carry it.",
+            line.vector, line.outcome, line.spelling, line.note
+        );
+    }
+
+    let (neg_exit, neg_lines, _, _) = run_escape_fixture(
+        &mut client,
+        &ctx,
+        &docs_root.path().join(&neg_rel),
+        &out_file,
+        None,
+    )
+    .await;
+    assert_eq!(
+        neg_exit, 0,
+        "vfs-fixture-escape must exit 0 against root 1's negative canary. Lines: {neg_lines:?}"
+    );
+    for line in &neg_lines {
+        let Some(want) = negative_expectation(&line.vector) else { continue };
+        if line.outcome.starts_with("unbuildable:") {
+            continue;
+        }
+        assert_eq!(
+            line.outcome, want,
+            "root 1 negative canary, vector {}: expected `{want}`, got `{}` (spelling: {:?}, \
+             note: {:?}). `opened` here means a real file under root 1 that no provider serves \
+             is still reachable — containment holds for root 0 and not for root 1.",
+            line.vector, line.outcome, line.spelling, line.note
+        );
+    }
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq {
+            session_id: session.id,
+        })
+        .await
+        .expect("teardown");
+
+    server.abort();
+    if vector7_link_ready {
+        let _ = std::fs::remove_dir(&vector7_link);
+    }
+}
+
+/// **The gap this test recorded is closed, and this is the flip.** It was
+/// `documents_metadata_gap_for_unrecognised_spellings`, and it asserted
+/// `found`.
+///
+/// What it recorded: Fix 2(b) from the final whole-branch review of Gate 3
+/// found `docs/escape-matrix.md`'s claim of containment for metadata queries
+/// "by the same `RootMap::decide` mechanism... regardless of which hook
+/// asked" to be false. `qattr_hook`/`qfull_hook`/`qibn_hook`
+/// (`vfs-shim/src/hook.rs`) never reach `RootMap::decide` at all — they
+/// consult `fuse_path_attr`, which asked `fuse_client::vpath_under_root`,
+/// the *client's own* string-prefix predicate. That predicate had none of
+/// `RootMap::compute_under_root`'s canonicalisation tables (no
+/// device-prefix, volume-GUID, `GLOBALROOT`-unwrap, UNC-admin-share, or
+/// junction-alias resolution), so five alternate spellings of an in-root
+/// path were classified by one predicate and never routed by the other —
+/// and a name-based attribute query on one of them reached real disk, even
+/// though the matching *read open* on the identical spelling (vector 4
+/// itself) was already sealed.
+///
+/// What changed: stage 2b task 5 **deleted the second predicate**.
+/// `FuseClient` now holds a real `RootMap` — several roots, plus the staged
+/// launch directory as an alias for root 0 — and `vpath_under_root` is that
+/// map's canonicalising `resolve`, so there is one predicate rather than two
+/// that can drift. The volume-GUID spelling this test builds is now
+/// recognised by the client, routed to the director, and — since the
+/// negative canary is a real file on `session.root` that no provider serves
+/// — answered `not-found` rather than handed to real disk.
+///
+/// Kept rather than deleted, and kept in its original shape, because it is
+/// the only end-to-end evidence that the unification reaches this hook
+/// family: it launches `vfs-fixture-escape`'s opt-in `4m` vector
+/// (`GetFileAttributesW` against vector 4's own volume-GUID spelling) under
+/// a real, composed session, against a real on-disk negative canary. Revert
+/// the unification and this assertion fails again, which is what makes it
+/// worth its runtime.
+///
+/// **If this ever reads `found` again**, the client predicate has lost its
+/// canonicalisation. Do not relax the assertion — find what stopped
+/// consulting `RootMap`.
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
     let _guard = LAUNCH_LOCK.lock().await;
     ensure_inject_artifacts();
 
@@ -1616,17 +1836,16 @@ async fn documents_metadata_gap_for_unrecognised_spellings() {
     }
 
     // The headline assertion, and the point of this test: a name-based
-    // attribute query on the negative canary, via a spelling
-    // `fuse_client::vpath_under_root` cannot recognise, still finds the real
-    // file on disk today. See this test's own doc comment for what to do if
-    // this ever flips.
+    // attribute query on the negative canary, via a spelling only
+    // `RootMap`'s canonicaliser ever recognised, is sealed now that the
+    // client predicate IS that canonicaliser.
     assert_eq!(
-        line.outcome, "found",
+        line.outcome, "not-found",
         "expected the metadata query on the negative canary (via vector 4's volume-GUID \
-         spelling: {:?}) to still reach real disk, documenting the current containment gap for \
-         qattr_hook/qfull_hook/qibn_hook — got `{}` instead (note: {:?}). If this now reads \
-         `not-found`, the gap has closed; update this assertion and `docs/escape-matrix.md`'s \
-         Fix 2 correction to say so rather than deleting this test.",
+         spelling: {:?}) to be sealed now that `fuse_client::vpath_under_root` is `RootMap`'s \
+         own canonicalising predicate rather than a string-prefix test — got `{}` instead \
+         (note: {:?}). `found` here means the client predicate lost its canonicalisation and \
+         the qattr_hook/qfull_hook/qibn_hook family is reaching real disk again.",
         line.spelling, line.outcome, line.note
     );
 
@@ -1682,6 +1901,117 @@ async fn apply_session_config_health_and_list() {
         .unwrap()
         .into_inner();
     assert!(list.sessions.iter().any(|s| s.id == id && s.name == "list-me"));
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
+        .await
+        .unwrap();
+    server.abort();
+}
+
+/// Stage 2b task 5: a config's `[[root]] path` reaches the live session, so
+/// the injected shim is told where each root *is* and not merely what it
+/// serves.
+///
+/// This is the half that has no other test: `AddSourceReq` carries a root id
+/// and no path, so before `DeclareRoot` existed a two-root config mounted
+/// both providers correctly and the shim learned about exactly one root —
+/// every path under the second falling through to real disk with nothing
+/// reporting it. `RootEntry.path` was parsed, asserted in unit tests, and
+/// read by no production code at all.
+///
+/// Asserted at the session, not at the RPC: the point is that the value
+/// arrives somewhere that `Session::launch` will publish, not that a message
+/// was sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_configs_declared_root_paths_reach_the_live_session() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let registry = SessionRegistry::new();
+    let reg_handle = registry.clone();
+    let svc = DirectorService::new(registry);
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut client = connect(&format!("{addr}")).await.unwrap();
+    let game = tempfile::tempdir().unwrap();
+    let docs = tempfile::tempdir().unwrap();
+    std::fs::write(game.path().join("a.txt"), b"g").unwrap();
+    std::fs::write(docs.path().join("a.txt"), b"d").unwrap();
+
+    let cfg = SessionConfig {
+        session: vfs_control::SessionMeta { name: Some("two-root-cfg".into()) },
+        roots: vec![
+            vfs_control::RootEntry {
+                id: 0,
+                name: "game".into(),
+                path: game.path().to_string_lossy().into_owned(),
+            },
+            vfs_control::RootEntry {
+                id: 1,
+                name: "docs".into(),
+                path: docs.path().to_string_lossy().into_owned(),
+            },
+        ],
+        sources: vec![
+            vfs_control::SourceEntry {
+                spec: vfs_control::SourceSpec::Disk {
+                    path: game.path().to_string_lossy().into_owned(),
+                },
+                mount: "/".into(),
+                root: 0,
+            },
+            vfs_control::SourceEntry {
+                spec: vfs_control::SourceSpec::Disk {
+                    path: docs.path().to_string_lossy().into_owned(),
+                },
+                mount: "/".into(),
+                root: 1,
+            },
+        ],
+        launch: None,
+        cache: None,
+    };
+    let (id, _) = apply_session_config(&mut client, &cfg).await.unwrap();
+
+    reg_handle
+        .with_session_mut(&id, |live| {
+            let declared = live.session.declared_roots();
+            assert_eq!(
+                declared.len(),
+                1,
+                "exactly root 1 should be declared — root 0 is the daemon's own \
+                 `Session.root` and a config cannot repoint it: {declared:?}"
+            );
+            assert_eq!(declared[0].0, 1);
+            assert_eq!(
+                declared[0].1,
+                docs.path(),
+                "root 1's declared host path is not the one the config named"
+            );
+            // Both providers are mounted too — declaring must not have
+            // replaced mounting, only joined it.
+            let kernel = live.session.kernel();
+            let read_root = |root: u32| -> Vec<u8> {
+                let mut buf = [0u8; 8];
+                let (fh, _, _) = kernel
+                    .open(vfs_protocol::RootId(root), "a.txt", vfs_director::OPEN_READ)
+                    .unwrap();
+                let n = kernel.read(fh, 0, &mut buf).unwrap();
+                kernel.close(fh).unwrap();
+                buf[..n].to_vec()
+            };
+            assert_eq!(read_root(0), b"g");
+            assert_eq!(read_root(1), b"d");
+            Ok(())
+        })
+        .unwrap();
 
     client
         .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
