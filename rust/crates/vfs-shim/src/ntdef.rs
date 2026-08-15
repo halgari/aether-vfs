@@ -239,7 +239,9 @@ pub type NtWriteFileFn = unsafe extern "system" fn(
 
 /// `STATUS_END_OF_FILE`.
 pub const STATUS_END_OF_FILE: NTSTATUS = 0xC000_0011u32 as i32;
-/// `STATUS_INVALID_FILE_FOR_SECTION` — e.g. SEC_IMAGE on a zip-window handle.
+/// `STATUS_INVALID_FILE_FOR_SECTION` — e.g. a section over a synthetic handle
+/// whose content cannot be mapped (a directory, an empty file, or a PE the
+/// director's bytes do not parse as an image).
 pub const STATUS_INVALID_FILE_FOR_SECTION: NTSTATUS = 0xC000_0124u32 as i32;
 /// `STATUS_INVALID_HANDLE`.
 pub const STATUS_INVALID_HANDLE: NTSTATUS = 0xC000_0008u32 as i32;
@@ -265,7 +267,7 @@ pub const FILE_CREATED: usize = 2;
 /// truncated in place by `FILE_OVERWRITE`/`FILE_OVERWRITE_IF`).
 pub const FILE_OVERWRITTEN: usize = 3;
 
-/// `SEC_IMAGE` — PE image mapping (not supported for zip-window handles).
+/// `SEC_IMAGE` — PE image mapping.
 pub const SEC_IMAGE: u32 = 0x0100_0000;
 
 /// `ntdll!NtCreateSection`.
@@ -311,20 +313,11 @@ pub const FILE_POSITION_INFORMATION: u32 = 14;
 pub const FILE_ALL_INFORMATION: u32 = 18;
 /// `FileNetworkOpenInformation` (class 34).
 pub const FILE_NETWORK_OPEN_INFORMATION: u32 = 34;
-/// `FileAttributeTagInformation` (class 35).
-pub const FILE_ATTRIBUTE_TAG_INFORMATION: u32 = 35;
 
 /// Layout-compatible with `FILE_INTERNAL_INFORMATION` (8 bytes).
 #[repr(C)]
 pub struct FileInternalInformation {
     pub index_number: i64,
-}
-
-/// Layout-compatible with `FILE_ATTRIBUTE_TAG_INFORMATION` (8 bytes).
-#[repr(C)]
-pub struct FileAttributeTagInformation {
-    pub file_attributes: u32,
-    pub reparse_tag: u32,
 }
 
 /// `ntdll!NtQueryVolumeInformationFile`.

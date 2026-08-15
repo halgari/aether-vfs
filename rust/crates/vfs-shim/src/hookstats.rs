@@ -667,16 +667,25 @@ fn render_readdirs(snap: &Snapshot) -> String {
 /// The shim's decision for an open under the managed root is not binary:
 /// besides being routed to the director, it can fall through to the real
 /// filesystem for several *different* reasons — a redirect that resolved to
-/// nothing, a legacy zipserve `Serve` decision, the generic pass-through
-/// default, a DRM host-exe exception, or the write-fallback path — or be
-/// denied outright. A single "fell through" counter cannot tell which of
-/// those happened, and that distinction is the entire point: gates 2-5 each
-/// remove exactly one of these classes, and only a counter that stays
-/// distinct per class can show that the gate which removed a class actually
-/// drove it to zero, without also masking a regression in a class that gate
-/// did not touch. `FellThroughRedirect`/`FellThroughServe` are gate 3's,
-/// `FellThroughPassthrough` is gates 2 and 3's, `FellThroughWriteFallback` is
-/// gate 4's, and `FellThroughDrmException` is gate 5's.
+/// nothing, the generic pass-through default, a DRM host-exe exception, or the
+/// write-fallback path — or be denied outright. A single "fell through" counter
+/// cannot tell which of those happened, and that distinction is the entire
+/// point: gates 2-5 each remove exactly one of these classes, and only a
+/// counter that stays distinct per class can show that the gate which removed a
+/// class actually drove it to zero, without also masking a regression in a
+/// class that gate did not touch. `FellThroughRedirect`/`FellThroughServe` are
+/// gate 3's, `FellThroughPassthrough` is gates 2 and 3's,
+/// `FellThroughWriteFallback` is gate 4's, and `FellThroughDrmException` is
+/// gate 5's.
+///
+/// **`FellThroughServe` can no longer be recorded.** Gate 4 task 7 deleted
+/// `Decision::Serve` and the in-shim zip-window server it fed, so nothing
+/// increments it. The variant is kept rather than removed because the
+/// discriminants index `OUTCOME_COUNTS` and the audit tables in
+/// `docs/bypass-baseline.md` are written against these positions; renumbering
+/// them to retire a counter that already read zero in every measured run would
+/// invalidate that record for no gain. Read a zero here as "route removed",
+/// not "route measured and unexercised".
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum OpenOutcome {

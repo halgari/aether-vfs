@@ -1,9 +1,11 @@
-//! Synthetic handles that store director FUSE file handles (no zip windows).
+//! Synthetic handles that store director FUSE file handles.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-/// Distinct from zipserve SYNTH_TAG (2^46): fuse handles use 2^47.
+/// Fuse *file* handles use 2^47. Distinct from `zipserve`'s synthetic *section*
+/// tag (2^45), the only other tag still in use — 2^46 belonged to the
+/// zip-window file handles gate 4 task 7 removed and is now unassigned.
 const FUSE_TAG: usize = 0x0000_8000_0000_0000;
 
 struct FuseOpen {

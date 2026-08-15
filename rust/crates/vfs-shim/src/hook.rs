@@ -139,7 +139,7 @@ use crate::engine::Engine;
 use crate::inject::{inject_child, re_suspend, self_dll_path};
 use crate::overlay::OverlayState;
 use crate::ntdef::{
-    FileAttributeTagInformation, FileBasicInformation, FileFsDeviceInformation,
+    FileBasicInformation, FileFsDeviceInformation,
     FileEndOfFileInformation, FileInternalInformation, FileNetworkOpenInformation,
     FilePositionInformation,
     FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateSectionFn, NtMapViewOfSectionFn,
@@ -148,7 +148,7 @@ use crate::ntdef::{
     NtQueryFullAttributesFileFn,
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
     NtWriteFileFn, NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFORMATION, FILE_ALL_INFORMATION,
+    FILE_ATTRIBUTE_NORMAL, FILE_ALL_INFORMATION,
     FILE_BASIC_INFORMATION, FILE_CREATED, FILE_DEVICE_DISK, FILE_DIRECTORY_FILE,
     FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION,
     FILE_DISPOSITION_INFORMATION_EX, FILE_END_OF_FILE_INFORMATION, FILE_FS_DEVICE_INFORMATION,
@@ -2229,10 +2229,6 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
         }
         return STATUS_SUCCESS;
     }
-    if crate::zipserve::is_synth(handle as isize) {
-        crate::zipserve::close(handle as isize);
-        return STATUS_SUCCESS;
-    }
     if crate::zipserve::is_synth_section(handle as isize) {
         // Releasing shim-owned VA waits for the last view (NT semantics).
         if let Some(window) = crate::zipserve::close_section(handle as isize) {
@@ -2393,19 +2389,6 @@ unsafe extern "system" fn setinfo_hook(
         // `hookstats::note_setinfo_noop`.
         crate::hookstats::note_setinfo_noop(class);
         return STATUS_SUCCESS;
-    }
-    if crate::zipserve::is_synth(handle as isize) {
-        if class == FILE_POSITION_INFORMATION
-            && !info.is_null()
-            && length as usize >= core::mem::size_of::<FilePositionInformation>()
-        {
-            let pos = (*(info as *const FilePositionInformation)).current_byte_offset;
-            if pos >= 0 {
-                crate::zipserve::set_position(handle as isize, pos as u64);
-            }
-            return STATUS_SUCCESS;
-        }
-        return STATUS_SUCCESS; // ignore other classes on synthetic handles
     }
     let is_delete = is_delete_request(info, length, class);
     let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);
@@ -2570,133 +2553,6 @@ unsafe fn fuse_query_information(
     }
 }
 
-/// Answer handle-based information queries for zip-window synthetic files.
-/// Covers the classes `GetFileInformationByHandle` / Rust `metadata` use.
-unsafe fn synth_query_information(
-    handle: HANDLE,
-    iosb: *mut c_void,
-    info: *mut c_void,
-    length: u32,
-    class: u32,
-) -> NTSTATUS {
-    let Some(len) = crate::zipserve::size(handle as isize) else {
-        return STATUS_INVALID_HANDLE;
-    };
-    let pos = crate::zipserve::position(handle as isize).unwrap_or(0);
-    if info.is_null() {
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    match class {
-        FILE_BASIC_INFORMATION => {
-            if (length as usize) < core::mem::size_of::<FileBasicInformation>() {
-                return STATUS_BUFFER_OVERFLOW;
-            }
-            let bi = info as *mut FileBasicInformation;
-            (*bi).creation_time = 0;
-            (*bi).last_access_time = 0;
-            (*bi).last_write_time = 0;
-            (*bi).change_time = 0;
-            (*bi).file_attributes = FILE_ATTRIBUTE_NORMAL;
-            (*bi)._reserved = 0;
-            synth_iosb_ok(iosb, core::mem::size_of::<FileBasicInformation>());
-            STATUS_SUCCESS
-        }
-        FILE_STANDARD_INFORMATION => {
-            if (length as usize) < core::mem::size_of::<FileStandardInformation>() {
-                return STATUS_BUFFER_OVERFLOW;
-            }
-            let si = info as *mut FileStandardInformation;
-            (*si).allocation_size = len as i64;
-            (*si).end_of_file = len as i64;
-            (*si).number_of_links = 1;
-            (*si).delete_pending = 0;
-            (*si).directory = 0;
-            (*si)._pad = 0;
-            synth_iosb_ok(iosb, core::mem::size_of::<FileStandardInformation>());
-            STATUS_SUCCESS
-        }
-        FILE_INTERNAL_INFORMATION => {
-            if (length as usize) < core::mem::size_of::<FileInternalInformation>() {
-                return STATUS_BUFFER_OVERFLOW;
-            }
-            // Stable fake index derived from the synthetic handle value.
-            (*(info as *mut FileInternalInformation)).index_number = handle as i64;
-            synth_iosb_ok(iosb, core::mem::size_of::<FileInternalInformation>());
-            STATUS_SUCCESS
-        }
-        FILE_POSITION_INFORMATION => {
-            if (length as usize) < core::mem::size_of::<FilePositionInformation>() {
-                return STATUS_BUFFER_OVERFLOW;
-            }
-            (*(info as *mut FilePositionInformation)).current_byte_offset = pos as i64;
-            synth_iosb_ok(iosb, core::mem::size_of::<FilePositionInformation>());
-            STATUS_SUCCESS
-        }
-        FILE_NETWORK_OPEN_INFORMATION => {
-            if (length as usize) < core::mem::size_of::<FileNetworkOpenInformation>() {
-                return STATUS_BUFFER_OVERFLOW;
-            }
-            let ni = info as *mut FileNetworkOpenInformation;
-            (*ni).creation_time = 0;
-            (*ni).last_access_time = 0;
-            (*ni).last_write_time = 0;
-            (*ni).change_time = 0;
-            (*ni).allocation_size = len as i64;
-            (*ni).end_of_file = len as i64;
-            (*ni).file_attributes = FILE_ATTRIBUTE_NORMAL;
-            (*ni)._reserved = 0;
-            synth_iosb_ok(iosb, core::mem::size_of::<FileNetworkOpenInformation>());
-            STATUS_SUCCESS
-        }
-        FILE_ATTRIBUTE_TAG_INFORMATION => {
-            if (length as usize) < core::mem::size_of::<FileAttributeTagInformation>() {
-                return STATUS_BUFFER_OVERFLOW;
-            }
-            let at = info as *mut FileAttributeTagInformation;
-            (*at).file_attributes = FILE_ATTRIBUTE_NORMAL;
-            (*at).reparse_tag = 0;
-            synth_iosb_ok(iosb, core::mem::size_of::<FileAttributeTagInformation>());
-            STATUS_SUCCESS
-        }
-        FILE_ALL_INFORMATION => {
-            // FILE_ALL_INFORMATION starts with BASIC + STANDARD + INTERNAL + EA +
-            // ACCESS + POSITION + MODE + ALIGNMENT + NAME. We fill the fixed
-            // header fields callers typically read (size / attributes) and leave
-            // the trailing name empty. Minimum size for the fixed prefix:
-            // Basic(40)+Standard(24)+Internal(8)+Ea(4)+Access(4)+Position(8)+Mode(4)+Align(4)+Name(4) = 100.
-            const PREFIX: usize = 100;
-            if (length as usize) < PREFIX {
-                return STATUS_BUFFER_OVERFLOW;
-            }
-            let p = info as *mut u8;
-            core::ptr::write_bytes(p, 0, PREFIX);
-            // Basic.FileAttributes @ offset 32
-            core::ptr::write_unaligned(p.add(32) as *mut u32, FILE_ATTRIBUTE_NORMAL);
-            // Standard.AllocationSize @ 40, EndOfFile @ 48
-            core::ptr::write_unaligned(p.add(40) as *mut i64, len as i64);
-            core::ptr::write_unaligned(p.add(48) as *mut i64, len as i64);
-            // Standard.NumberOfLinks @ 56 = 1
-            core::ptr::write_unaligned(p.add(56) as *mut u32, 1);
-            // Internal.IndexNumber @ 64
-            core::ptr::write_unaligned(p.add(64) as *mut i64, handle as i64);
-            // Position.CurrentByteOffset @ 80 (after Ea 4 + Access 4 = 8 from 72)
-            // Layout: Basic 40 | Std 24 | Int 8 | Ea 4 | Access 4 | Pos 8 | Mode 4 | Align 4 | Name…
-            // Pos at 40+24+8+4+4 = 80
-            core::ptr::write_unaligned(p.add(80) as *mut i64, pos as i64);
-            synth_iosb_ok(iosb, PREFIX);
-            STATUS_SUCCESS
-        }
-        // Unknown class on a synthetic handle: succeed as a soft no-op so
-        // unhooked callers do not treat us as a hard failure when the class is
-        // informational. Length-0 write keeps IoStatusBlock consistent.
-        _ => {
-            synth_iosb_ok(iosb, 0);
-            STATUS_SUCCESS
-        }
-    }
-}
-
 /// `NtQueryVolumeInformationFile` hook — `GetFileType` needs
 /// `FileFsDeviceInformation` on synthetic handles.
 unsafe extern "system" fn qvol_hook(
@@ -2710,9 +2566,7 @@ unsafe extern "system" fn qvol_hook(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if crate::fuse_synth::is_fuse_synth(handle as isize)
-        || crate::zipserve::is_synth(handle as isize)
-    {
+    if crate::fuse_synth::is_fuse_synth(handle as isize) {
         if class == FILE_FS_DEVICE_INFORMATION {
             if info.is_null() || (length as usize) < core::mem::size_of::<FileFsDeviceInformation>() {
                 return STATUS_BUFFER_OVERFLOW;
@@ -2753,9 +2607,6 @@ unsafe extern "system" fn qif_hook(
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
         return fuse_query_information(handle, iosb, info, length, class);
     }
-    if crate::zipserve::is_synth(handle as isize) {
-        return synth_query_information(handle, iosb, info, length, class);
-    }
     if class == FILE_NORMALIZED_NAME_INFORMATION && !info.is_null() {
         let vpath = match IDENTITY_TABLE.lock() {
             Ok(t) => t.get(&(handle as isize)).cloned(),
@@ -2779,9 +2630,6 @@ unsafe extern "system" fn qif_hook(
     tramp(handle, iosb, info, length, class)
 }
 
-/// `NtReadFile` hook. For synthetic (zip-window) handles, copy bytes from the
-/// mapped window; real handles pass straight through. `ByteOffset` of NULL or
-/// the "use current position" sentinel (-1/-2) means "current position".
 /// `NtWriteFile` hook. For synthetic (fuse) write handles, forward the game's
 /// buffer to the JVM overlay over the ring and complete the IRP; real handles
 /// pass straight through. `ByteOffset` NULL / negative sentinel = current pos.
@@ -2880,6 +2728,13 @@ unsafe extern "system" fn write_hook(
     )
 }
 
+/// `NtReadFile` hook. Synthetic (fuse) handles are answered from the director
+/// over the ring; real handles pass straight through. `ByteOffset` of NULL or
+/// the "use current position" sentinel (-1/-2) means "current position".
+///
+/// This doc comment used to describe a second synthetic case — copying bytes
+/// out of a mapped zip window — and used to sit, orphaned, above `write_hook`.
+/// Gate 4 task 7 deleted that case with the rest of the zip-window server.
 #[allow(clippy::too_many_arguments)]
 unsafe extern "system" fn read_hook(
     handle: HANDLE,
@@ -2966,48 +2821,6 @@ unsafe extern "system" fn read_hook(
             }
         }
         return STATUS_UNSUCCESSFUL;
-    }
-    if crate::zipserve::is_synth(handle as isize) {
-        // Resolve an explicit offset only if it is a real, non-sentinel value.
-        let explicit = if byte_offset.is_null() {
-            None
-        } else {
-            let v = core::ptr::read_unaligned(byte_offset);
-            if v < 0 {
-                None // FILE_USE_FILE_POINTER_POSITION and friends
-            } else {
-                Some(v as u64)
-            }
-        };
-        match crate::zipserve::read(handle as isize, length as usize, explicit) {
-            Some((bytes, _new_pos, at_eof)) => {
-                if !buffer.is_null() && !bytes.is_empty() {
-                    core::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        buffer as *mut u8,
-                        bytes.len(),
-                    );
-                }
-                let status = if at_eof { STATUS_END_OF_FILE } else { STATUS_SUCCESS };
-                if !iosb.is_null() {
-                    let p = iosb as *mut u8;
-                    core::ptr::write_unaligned(p as *mut u32, status as u32);
-                    core::ptr::write_unaligned(p.add(8) as *mut usize, bytes.len());
-                }
-                if !event.is_null() {
-                    windows_sys::Win32::System::Threading::SetEvent(event);
-                }
-                return status;
-            }
-            None => {
-                if !iosb.is_null() {
-                    let p = iosb as *mut u8;
-                    core::ptr::write_unaligned(p as *mut u32, STATUS_UNSUCCESSFUL as u32);
-                    core::ptr::write_unaligned(p.add(8) as *mut usize, 0usize);
-                }
-                return STATUS_UNSUCCESSFUL;
-            }
-        }
     }
     tramp(handle, event, apc, apc_ctx, iosb, buffer, length, byte_offset, key)
 }
@@ -3155,9 +2968,11 @@ unsafe fn fuse_create_section(
     }
 }
 
-/// `NtCreateSection` hook: data sections over synthetic zip-window file handles
-/// become synthetic section handles. `SEC_IMAGE` is rejected (PE images must be
-/// real on-disk files). Real handles pass through.
+/// `NtCreateSection` hook: a FUSE synthetic file handle becomes a synthetic
+/// section (lazy data section, or an eagerly mapped PE for `SEC_IMAGE`) via
+/// [`fuse_create_section`]. Every other handle passes through — including, as
+/// of gate 4 task 7, the zip-window synthetic file handles this hook used to
+/// also answer for, which no longer exist.
 unsafe extern "system" fn create_section_hook(
     section_handle: *mut HANDLE,
     access: u32,
@@ -3187,72 +3002,19 @@ unsafe extern "system" fn create_section_hook(
             file_handle,
         );
     }
-    if crate::zipserve::is_synth(file_handle as isize) {
-        // SEC_IMAGE: map PE from zip window into this process (no disk staging).
-        if alloc_attrs & SEC_IMAGE != 0 {
-            let Some(len) = crate::zipserve::size(file_handle as isize) else {
-                return STATUS_INVALID_HANDLE;
-            };
-            if len == 0 || len > 256 * 1024 * 1024 {
-                return STATUS_INVALID_FILE_FOR_SECTION;
-            }
-            let Some((bytes, _, _)) =
-                crate::zipserve::read(file_handle as isize, len as usize, Some(0))
-            else {
-                return STATUS_INVALID_HANDLE;
-            };
-            if !vfs_inject::pe_looks_like_image(&bytes) {
-                return STATUS_INVALID_FILE_FOR_SECTION;
-            }
-            match vfs_inject::map_image_from_pe_bytes_local(&bytes) {
-                Ok((base, size)) => {
-                    // Register as a synthetic section whose MapView returns `base`.
-                    match crate::zipserve::register_mapped_image(base as usize, size as u64) {
-                        Some(h) => {
-                            if !section_handle.is_null() {
-                                *section_handle = h as HANDLE;
-                            }
-                            return STATUS_SUCCESS;
-                        }
-                        None => return STATUS_INVALID_FILE_FOR_SECTION,
-                    }
-                }
-                Err(_) => return STATUS_INVALID_FILE_FOR_SECTION,
-            }
-        }
-        // Optional MaximumSize must not exceed the window length.
-        if let Some(len) = crate::zipserve::size(file_handle as isize) {
-            if !max_size.is_null() {
-                let want = core::ptr::read_unaligned(max_size);
-                if want > 0 && (want as u64) > len {
-                    return STATUS_SECTION_TOO_BIG;
-                }
-            }
-        }
-        match crate::zipserve::create_section(file_handle as isize) {
-            Some(h) => {
-                if !section_handle.is_null() {
-                    *section_handle = h as HANDLE;
-                }
-                STATUS_SUCCESS
-            }
-            None => STATUS_INVALID_HANDLE,
-        }
-    } else {
-        tramp(
-            section_handle,
-            access,
-            oa,
-            max_size,
-            page_prot,
-            alloc_attrs,
-            file_handle,
-        )
-    }
+    tramp(
+        section_handle,
+        access,
+        oa,
+        max_size,
+        page_prot,
+        alloc_attrs,
+        file_handle,
+    )
 }
 
 /// `NtMapViewOfSection` hook: synthetic sections return a pointer into the
-/// already-mapped zip window. Real sections pass through.
+/// region the shim already mapped for them. Real sections pass through.
 #[allow(clippy::too_many_arguments)]
 unsafe extern "system" fn map_view_hook(
     section: HANDLE,
@@ -3325,8 +3087,9 @@ unsafe extern "system" fn map_view_hook(
     }
 }
 
-/// `NtUnmapViewOfSection` hook: synthetic views are bookkeeping-only (the zip
-/// map stays for the process lifetime).
+/// `NtUnmapViewOfSection` hook: synthetic views are bookkeeping-only. Dropping
+/// the last reference to one does not tear the memory down here — the region
+/// belongs to whoever mapped it (see `lazy_section::on_section_closed`).
 unsafe extern "system" fn unmap_view_hook(process: HANDLE, base: *mut c_void) -> NTSTATUS {
     let tramp = match TRAMP_UNMAP_VIEW {
         Some(t) => t,
