@@ -70,6 +70,11 @@ pub struct Session {
     /// whole, since `Director` now holds exactly one provider per root
     /// rather than a mergeable list.
     mounts: Mutex<Vec<(String, Arc<dyn Provider>)>>,
+    /// The writable layer root 0's writes land in, if one is configured —
+    /// see [`Session::set_write_layer`]. Held separately from `mounts`
+    /// because it is not a sibling of them: it sits *above* the whole mount
+    /// graph as an overlay upper, which is what makes copy-on-write possible.
+    write_layer: Mutex<Option<Arc<dyn Provider>>>,
     /// Host directories for the session's roots **beyond root 0**, which
     /// `virtual_root` names — see [`Session::declare_root`].
     extra_roots: Vec<(u32, PathBuf)>,
@@ -85,6 +90,7 @@ impl Session {
             state_dir: tmp.join("state"),
             ipc: None,
             mounts: Mutex::new(Vec::new()),
+            write_layer: Mutex::new(None),
             extra_roots: Vec::new(),
         }
     }
@@ -177,15 +183,68 @@ impl Session {
     /// accumulated list into one `MountGraph` and replaces `RootId::DEFAULT`'s
     /// provider wholesale, since `Director` holds only one provider per root.
     pub fn mount(&self, prefix: &str, backend: Arc<dyn Provider>) -> Result<(), i32> {
-        let mut mounts = self.mounts.lock().map_err(|_| crate::ops::map_io_err())?;
-        mounts.push((prefix.to_string(), backend));
-        let graph = MountGraph::new(mounts.clone())?;
-        self.kernel.mount(RootId::DEFAULT, Arc::new(graph))
+        {
+            let mut mounts = self.mounts.lock().map_err(|_| crate::ops::map_io_err())?;
+            mounts.push((prefix.to_string(), backend));
+        }
+        self.recompose()
     }
 
-    /// Drop all mounts before rebuilding composition.
+    /// Declare the layer root 0's **writes** land in, composed as an
+    /// [`vfs_compose::OverlayProvider`] upper over everything [`Session::mount`]
+    /// has accumulated. Replaces any previously set write layer; takes effect
+    /// immediately and is re-applied by every later `mount`.
+    ///
+    /// **This is what makes copy-on-write work, and mounting the same
+    /// provider as an ordinary sibling layer does not.** A `MountGraph` (and
+    /// `LayeredProvider` likewise) can only *route* a write to whichever
+    /// mount is willing to take it; neither can seed the destination from a
+    /// lower layer first. So with the writable directory mounted as a sibling
+    /// above a read-only archive, an in-place edit of archive content — the
+    /// `fopen(..., "r+b")` / `CreateFile(OPEN_EXISTING, GENERIC_WRITE)` that
+    /// every mod tool does — finds no writable mount holding the file and
+    /// fails, either `ST_READ_ONLY` (the archive owns the path) or
+    /// `ST_NOT_FOUND` (nothing writable has it). Copy-on-write over read-only
+    /// layered content is the core function of a mod-manager VFS, so the
+    /// composition has to be an overlay, not a sibling.
+    ///
+    /// The upper must declare `Access::ReadWrite`; anything else is refused
+    /// here (`ST_BAD_REQUEST`) rather than at the first write.
+    pub fn set_write_layer(&self, upper: Arc<dyn Provider>) -> Result<(), i32> {
+        {
+            let mut slot = self.write_layer.lock().map_err(|_| crate::ops::map_io_err())?;
+            *slot = Some(upper);
+        }
+        self.recompose()
+    }
+
+    /// Rebuild root 0's single provider from the accumulated mounts plus the
+    /// optional write layer, and replace whatever `Director` currently serves
+    /// — it holds exactly one provider per root, so there is no incremental
+    /// mount to append to.
+    fn recompose(&self) -> Result<(), i32> {
+        let mounts = self.mounts.lock().map_err(|_| crate::ops::map_io_err())?.clone();
+        let graph: Arc<dyn Provider> = Arc::new(MountGraph::new(mounts)?);
+        let upper = self
+            .write_layer
+            .lock()
+            .map_err(|_| crate::ops::map_io_err())?
+            .clone();
+        let composed: Arc<dyn Provider> = match upper {
+            Some(upper) => Arc::new(
+                vfs_compose::OverlayProvider::from_arcs(graph, upper)
+                    .map_err(|_| crate::ops::bad_request())?,
+            ),
+            None => graph,
+        };
+        self.kernel.mount(RootId::DEFAULT, composed)
+    }
+
+    /// Drop all mounts before rebuilding composition. The write layer, if any,
+    /// is dropped with them — it is part of the same composition.
     pub fn clear_mounts(&self) -> Result<(), i32> {
         self.mounts.lock().map_err(|_| crate::ops::map_io_err())?.clear();
+        *self.write_layer.lock().map_err(|_| crate::ops::map_io_err())? = None;
         self.kernel.unmount(RootId::DEFAULT)
     }
 

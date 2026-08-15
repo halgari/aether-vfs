@@ -224,15 +224,39 @@ impl Provider for MountGraph {
                 continue;
             };
             if flags & OPEN_WRITE != 0 && m.backend.capabilities().access < Access::ReadWrite {
-                // Same discovery instrument `Director::open` records for a
-                // bare provider: without this, a graph containing *any*
-                // writable mount reports `ReadWrite` in aggregate
-                // (`capabilities()` takes the strongest child), so
-                // `Director`'s own coarse pre-check never fires and this was
-                // the only place left that could still see the rejection
-                // for this specific mount.
-                crate::io_stats::record_rejected_write(&path);
-                return Err(read_only());
+                // A read-only mount only refuses a write to a path it
+                // actually **holds**. Matching a mount's prefix is not the
+                // same as owning the path, and treating the two as equal is
+                // what made this loop asymmetric with its own read path: a
+                // read walks past a mount that answers not-found and keeps
+                // looking, while a write used to stop dead at the first
+                // prefix-matching read-only mount even when a writable mount
+                // further down was the one that actually serves the file.
+                // Since a mod-manager graph mounts nearly everything at the
+                // root prefix, that meant one read-only layer anywhere above
+                // a writable one revoked write access to every path it did
+                // not even serve. `LayeredProvider` — the other combinator
+                // for the same overlapping-path case — already routes a write
+                // to whichever child can take it rather than to whichever
+                // child is on top, so this is the two agreeing rather than a
+                // new policy.
+                //
+                // A `getattr` error is not proof of absence, so it fails
+                // closed: an unreadable mount is treated as holding the path
+                // and the write is refused, exactly as before this change.
+                let holds = !matches!(m.backend.getattr(VPath::new(p.root, &rel)), Ok(None));
+                if holds {
+                    // Same discovery instrument `Director::open` records for a
+                    // bare provider: without this, a graph containing *any*
+                    // writable mount reports `ReadWrite` in aggregate
+                    // (`capabilities()` takes the strongest child), so
+                    // `Director`'s own coarse pre-check never fires and this was
+                    // the only place left that could still see the rejection
+                    // for this specific mount.
+                    crate::io_stats::record_rejected_write(&path);
+                    return Err(read_only());
+                }
+                continue;
             }
             match m.backend.open(VPath::new(p.root, &rel), flags) {
                 Ok((bh, size, is_dir_flag)) => {
@@ -555,6 +579,75 @@ mod tests {
             rejected.iter().any(|(path, count)| path == "ro/f" && *count >= 1),
             "a write refused by one mount in a graph containing a writable \
              sibling must still be discoverable, got {rejected:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_read_only_mount_that_does_not_hold_the_path_does_not_block_a_lower_writable_mount() {
+        // Gate 4, Task 6. Both mounts sit at the *root* prefix — the shape a
+        // mod-manager graph actually has, where a read-only archive is
+        // layered over (or under) a writable directory rather than parked at
+        // a disjoint prefix. The read-only layer is registered last, so the
+        // reversed walk reaches it first, and it does **not** hold
+        // `only-on-disk.txt`.
+        //
+        // Before this change the walk stopped at that mount and answered
+        // `ST_READ_ONLY`, so a writable mount lower in the same graph could
+        // never be reached for any path the read-only layer happened not to
+        // serve. The `getattr` probe is what distinguishes "this mount owns
+        // the path and it is read-only" (still refused, see the test above)
+        // from "this mount merely covers the prefix" (keep looking).
+        let dir = std::env::temp_dir()
+            .join(format!("vfs-mg-ro-passthrough-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("only-on-disk.txt"), b"DISK").unwrap();
+        let g = graph(vec![
+            ("", Arc::new(crate::DiskProvider::new(&dir)) as Arc<dyn Provider>),
+            (
+                "",
+                Arc::new(vfs_compose::InlineProvider::from_files([(
+                    "only-in-archive.txt",
+                    b"ARCHIVE".as_slice(),
+                )])),
+            ),
+        ]);
+
+        // Deliberately no `reset_rejected_writes()` here: it is process-wide,
+        // and the sibling tests that assert a rejection *was* recorded run
+        // concurrently in this binary. The path names below are unique to
+        // this test, so a plain absence check needs no reset — and cannot
+        // wipe another test's entry out from under it.
+        let (h, size, _) = g
+            .open(VPath::at_default("only-on-disk.txt"), vfs_provider::OPEN_WRITE)
+            .expect(
+                "a read-only mount that does not hold this path must not refuse the write on \
+                 behalf of the writable mount that does",
+            );
+        assert_eq!(size, 4);
+        g.close(h).unwrap();
+        // The discovery instrument must stay quiet for a write that
+        // succeeded: a rejection recorded here would send the gate-4 workflow
+        // hunting for a provider that is already mounted.
+        let rejected = crate::io_stats::rejected_writes();
+        assert!(
+            !rejected.iter().any(|(path, _)| path == "only-on-disk.txt"),
+            "a write that the graph served must not be recorded as rejected, got {rejected:?}"
+        );
+
+        // The control: the read-only mount still refuses a write to a path it
+        // *does* hold, rather than falling past it onto the writable disk
+        // mount and silently creating a divergent copy there.
+        let err = g.open(VPath::at_default("only-in-archive.txt"), vfs_provider::OPEN_WRITE);
+        assert_eq!(
+            err,
+            Err(vfs_provider::ST_READ_ONLY),
+            "the read-only mount owns this path and must still refuse the write"
+        );
+        assert!(
+            !dir.join("only-in-archive.txt").exists(),
+            "the refused write leaked onto the writable mount's backing store"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

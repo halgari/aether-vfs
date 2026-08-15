@@ -235,21 +235,38 @@ fn run() -> Result<(), String> {
             .mount("", Arc::new(DiskProvider::new(m)))
             .map_err(|st| format!("mount mods status {st}"))?;
     }
-    // Mount the root-0 subdirectory the shim's local write overlay actually
-    // uses (`Session::overlay_layer_dir`), not `overrides` itself: the
-    // overlay is root-scoped on disk (gate 4, Task 2), so mounting the bare
-    // `overrides` directory here would show the director an empty layer
+    // The write layer — an overlay **upper** over everything mounted above,
+    // not one more sibling mount (gate 4, Task 6).
+    //
+    // It addresses the root-0 subdirectory the shim's local write overlay
+    // also uses (`Session::overlay_layer_dir`), not `overrides` itself: the
+    // overlay is root-scoped on disk (gate 4, Task 2), so pointing at the
+    // bare `overrides` directory here would show the director an empty layer
     // while every write the shim makes lands one level deeper, under
     // `overrides/root-0/` — a write→read-back round trip through the
     // director would silently see nothing back. `write_steam_appid` already
     // created this subdirectory (and seeded `steam_appid.txt` into it), so it
-    // exists by the time this mounts.
+    // exists by the time this is declared.
+    //
+    // **Why an upper and not a mount.** As a sibling mount this directory
+    // could only *receive* writes the graph routed to it; it could not seed
+    // one from the zip first. So an in-place edit of zip content
+    // (`fopen(..., "r+b")`) found no writable mount holding the file, reached
+    // the zip, and was refused `ST_READ_ONLY` — which the shim's write
+    // fall-through used to paper over by diverting the write into its own
+    // local overlay, and, once Task 5 sealed that, surfaced as a hard
+    // `STATUS_ACCESS_DENIED` to the game. Copy-on-write over read-only
+    // layered content is what a mod-manager VFS is *for*, so it belongs in
+    // the provider graph: `Session::set_write_layer` composes an
+    // `OverlayProvider` whose base is the whole mount graph and whose upper
+    // is this directory, and the director does the copy-up itself.
     let overrides_root0 = session.overlay_layer_dir(RootId::DEFAULT);
     session
-        .mount("", Arc::new(DiskProvider::new(&overrides_root0)))
-        .map_err(|st| format!("mount overrides status {st}"))?;
+        .set_write_layer(Arc::new(DiskProvider::new(&overrides_root0)))
+        .map_err(|st| format!("set write layer status {st}"))?;
     eprintln!(
-        "  composition: zip{} + overrides ({}; no Steam-disk mount; under-root sealed to director)",
+        "  composition: zip{} under a copy-on-write overlay whose upper is {} \
+(no Steam-disk mount; under-root sealed to director)",
         if mods_dir.is_some() { " + mods" } else { "" },
         overrides_root0.display()
     );
@@ -286,21 +303,56 @@ component match sees exactly what the game's own raw NT open spells)",
         );
     }
     // A single `DiskProvider` covering the whole of `profiles_target` is the
-    // right shape here (unlike the root-0 mistake a prior review flagged —
-    // `DiskProvider::new(root)` mounted at `/` alongside real content, which
-    // made *everything* trivially "route" for an uninteresting reason):
-    // this root has exactly one source, nothing layered above or below it,
-    // so one provider covering it is the whole composition, not a shortcut
-    // that hides a negative result. If the game's save never actually opens
+    // right shape for this root's *content* (unlike the root-0 mistake a
+    // prior review flagged — `DiskProvider::new(root)` mounted at `/`
+    // alongside real content, which made *everything* trivially "route" for
+    // an uninteresting reason): this root has exactly one content source, so
+    // one provider covering it is the whole composition, not a shortcut that
+    // hides a negative result. If the game's save never actually opens
     // anything under `my_games_docs`'s own spelling (e.g. because it
     // resolves the Documents folder differently on some other machine), this
     // root's counters read zero — a real negative, not something this
     // mount shape can paper over.
-    let root1_counters = Arc::new(CountingProvider::new(Arc::new(DiskProvider::new(&profiles_target))));
+    //
+    // **Root 1's shim-overlay layer is mounted too** (gate 4, Task 6). Until
+    // now `Session::mount`/`set_write_layer` composed a layer over the shim's
+    // write overlay for root 0 *only*, so anything the shim was forced to
+    // write locally under root 1 (`<overrides>/root-1/…`) was invisible to
+    // the director: written, then read back as missing. That is dormant while
+    // root 1's own provider is a `ReadWrite` `DiskProvider` — the director
+    // takes every root-1 write, so the shim never reaches its overlay — and
+    // goes live the moment root 1 becomes read-only. Mounting it here rather
+    // than leaving it for that day is the same reasoning `declare_root`
+    // carries: a layer that is missing fails silently.
+    //
+    // Composed with the shim's overlay as the **base** and the real profiles
+    // directory as the writable **upper**, which is the opposite arrangement
+    // from root 0 and deliberate: root 0's write layer and the shim's overlay
+    // are the same physical directory, so there is nothing to choose between;
+    // root 1's are different directories, and saves must keep landing in
+    // `profiles` (that is what the junction measurement is about). As the
+    // base, the shim's overlay is visible to reads and is copied up into
+    // `profiles` on first write, instead of diverting the save away from the
+    // directory this harness exists to observe.
+    let root1_shim_overlay = vfs_director::overlay_layer_dir(&overrides, RootId(1));
+    std::fs::create_dir_all(&root1_shim_overlay)
+        .map_err(|e| format!("mkdir {}: {e}", root1_shim_overlay.display()))?;
+    let root1_composed = vfs_compose::OverlayProvider::from_arcs(
+        Arc::new(DiskProvider::new(&root1_shim_overlay)),
+        Arc::new(DiskProvider::new(&profiles_target)),
+    )
+    .map_err(|e| format!("compose root1: {e}"))?;
+    // The counters wrap the whole composed root, not just its writable half,
+    // so `print_open_totals` still reports everything root 1 answers.
+    let root1_counters = Arc::new(CountingProvider::new(Arc::new(root1_composed)));
     session
         .kernel()
         .mount(RootId(1), Arc::clone(&root1_counters) as Arc<dyn Provider>)
         .map_err(|st| format!("mount root1 status {st}"))?;
+    eprintln!(
+        "  root 1 write overlay layer: {} (shim-local writes under root 1 stay visible to the director)",
+        root1_shim_overlay.display()
+    );
     session.declare_root(1, my_games_docs.clone());
 
     // Prove steam_appid is visible through the director (what the shim FUSE sees).
@@ -1249,9 +1301,11 @@ fn print_open_totals(root1: &CountingProvider) {
     );
     eprint!("{}", root1.report());
     eprintln!(
-        "  root 1's provider is unconditionally ReadWrite (DiskProvider), so a director-level \
-write rejection (the {rejected_total} count above) is expected to be entirely root 0's — root 1 \
-would only ever contribute an `open write err` above, never a rejected_writes entry"
+        "  root 1's provider is unconditionally ReadWrite (an OverlayProvider whose upper is a \
+DiskProvider), so a director-level write rejection (the {rejected_total} count above) is \
+expected to be entirely root 0's — root 1 would only ever contribute an `open write err` above, \
+never a rejected_writes entry. Root 0 is now copy-on-write too, so its own rejected_writes \
+should be near zero: a write refused by the read-only layers is copied up instead of refused"
     );
 }
 

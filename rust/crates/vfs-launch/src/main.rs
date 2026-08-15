@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use vfs_director::{Director, RootId, KIND_FILE, Session};
+use vfs_director::{Director, DiskProvider, RootId, KIND_FILE, Session};
 
 const DEFAULT_LAYERS: &str = r"C:	mp";
 const STEAM_APPID: &str = "489830"; // Skyrim Special Edition
@@ -322,6 +322,25 @@ fn main() {
         }
         eprintln!("  mounted backend {}", zip.display());
     }
+
+    // A copy-on-write layer over the zips (gate 4, Task 6). Without one, every
+    // mount here is read-only, so the director refuses every write under the
+    // root — including an in-place edit of zip content, which is the one
+    // write a modded game does most. Before Task 5 that refusal fell through
+    // to the shim's own local overlay, which the director cannot read back;
+    // now it is a hard failure at the NT boundary. The layer addresses the
+    // same root-scoped subdirectory the shim's overlay uses, so the two
+    // agree on one physical location for root 0's writes.
+    let write_layer = session.overlay_layer_dir(RootId::DEFAULT);
+    if let Err(e) = std::fs::create_dir_all(&write_layer) {
+        eprintln!("error: create write layer {}: {e}", write_layer.display());
+        std::process::exit(1);
+    }
+    if let Err(st) = session.set_write_layer(std::sync::Arc::new(DiskProvider::new(&write_layer))) {
+        eprintln!("error: set write layer status {st}");
+        std::process::exit(1);
+    }
+    eprintln!("  writes copy up into {}", write_layer.display());
 
     let pe_name = if args.use_skse {
         "skse64_loader.exe"

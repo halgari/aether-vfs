@@ -73,7 +73,20 @@ impl OverlayProvider {
     where
         U: Provider + 'static,
     {
-        let upper: Arc<dyn Provider> = Arc::new(upper);
+        Self::from_arcs(base, Arc::new(upper))
+    }
+
+    /// [`OverlayProvider::new`] for an upper the caller already holds behind
+    /// an `Arc` and needs to keep a handle to — the shape a host builds when
+    /// the same provider object is also read for diagnostics (see
+    /// `skyrim-live`'s root-1 `CountingProvider`). `new`'s type parameter
+    /// cannot express that: there is no `impl Provider for Arc<dyn Provider>`
+    /// in this workspace, so `new(base, arc)` would need `Arc<dyn Provider>`
+    /// to itself be a `Provider` and does not compile.
+    pub fn from_arcs(
+        base: Arc<dyn Provider>,
+        upper: Arc<dyn Provider>,
+    ) -> Result<Self, &'static str> {
         if upper.capabilities().access != Access::ReadWrite {
             return Err("OverlayProvider: upper must declare Access::ReadWrite");
         }

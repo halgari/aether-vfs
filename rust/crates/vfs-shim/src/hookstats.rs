@@ -160,6 +160,8 @@ struct Snapshot {
     copy_up_counts: [u64; COPYUP_N],
     copy_up_bytes: u64,
     copy_ups: HashMap<String, u64>,
+    overlay_fail_counts: [u64; OVERLAY_FAIL_N],
+    overlay_fails: HashMap<String, u64>,
 }
 
 fn snapshot() -> Snapshot {
@@ -211,6 +213,12 @@ fn snapshot() -> Snapshot {
         copy_up_counts: std::array::from_fn(|i| copy_up_count(ALL_COPY_UPS[i])),
         copy_up_bytes: COPYUP_BYTES.load(Ordering::Relaxed),
         copy_ups: COPYUPS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
+        overlay_fail_counts: std::array::from_fn(|i| overlay_fail_count(ALL_OVERLAY_FAILS[i])),
+        overlay_fails: OVERLAY_FAILS
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().cloned())
+            .unwrap_or_default(),
     }
 }
 
@@ -933,6 +941,128 @@ pub fn note_copy_up(outcome: CopyUp, root: u32, vpath: &str, bytes: u64) {
     }
 }
 
+/// A shim-local overlay filesystem mutation that did not happen.
+///
+/// The overlay's four mutating operations (`Overlay::ensure_parent`,
+/// `clear_whiteout`, `whiteout`, `rename`) all used to discard their
+/// `std::io::Result`. That is not the harmless "best-effort" it reads as, and
+/// `ensure_parent` is the clearest case: `Engine::decide_open` calls it and
+/// then answers `Decision::Redirect` with a target *inside* the directory it
+/// just failed to create. The game's own open then fails at the NT boundary,
+/// and nothing anywhere records why — not even the copy-up counters, since a
+/// truncating or creating write never runs copy-up at all. The other three
+/// fail just as quietly in the other direction: a whiteout that is not
+/// written leaves a deleted file visible, and a whiteout that is not cleared
+/// leaves a recreated file invisible.
+///
+/// **Only failures are counted here**, unlike [`CopyUp`], which counts its
+/// successes too. Copy-ups are a handful per session and "which file was
+/// seeded" is half the diagnosis; these run on every single overlay-bound
+/// write, delete and rename, so a per-path success tally would be volume with
+/// no reader. A zero section is the expected reading, and any line at all is
+/// a finding.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum OverlayFail {
+    /// `create_dir_all` for the overlay file's parent failed. The redirect
+    /// that follows points into a directory that does not exist.
+    EnsureParent = 0,
+    /// A whiteout marker could not be removed: the path stays hidden even
+    /// though it was just recreated.
+    ClearWhiteout = 1,
+    /// A whiteout marker could not be written: the deleted path stays
+    /// visible, backed by the snapshot/provider content beneath it.
+    Whiteout = 2,
+    /// The overlay-internal move failed: the rename's destination does not
+    /// hold the source's content.
+    Rename = 3,
+    /// Declined: shim-initiated I/O was already in flight on this thread, so
+    /// the mutation would have been re-decided by our own hooks rather than
+    /// reaching the real filesystem (see `hook::ShimIoGuard`).
+    DeclinedReentrant = 4,
+}
+
+const OVERLAY_FAIL_N: usize = 5;
+
+/// Every variant, for iteration in `render_overlay_fails` and the label test.
+pub const ALL_OVERLAY_FAILS: [OverlayFail; OVERLAY_FAIL_N] = [
+    OverlayFail::EnsureParent,
+    OverlayFail::ClearWhiteout,
+    OverlayFail::Whiteout,
+    OverlayFail::Rename,
+    OverlayFail::DeclinedReentrant,
+];
+
+impl OverlayFail {
+    /// Rendered label. Distinct across variants — see
+    /// `every_overlay_failure_renders_with_a_distinct_label`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            OverlayFail::EnsureParent => "FAILED: overlay mkdir",
+            OverlayFail::ClearWhiteout => "FAILED: clear whiteout",
+            OverlayFail::Whiteout => "FAILED: write whiteout",
+            OverlayFail::Rename => "FAILED: overlay rename",
+            OverlayFail::DeclinedReentrant => "declined: reentrant",
+        }
+    }
+}
+
+static OVERLAY_FAIL_COUNTS: [AtomicU64; OVERLAY_FAIL_N] =
+    [const { AtomicU64::new(0) }; OVERLAY_FAIL_N];
+/// `label` + root-qualified vpath, counted — the `STATS`/`COPYUPS` shape.
+static OVERLAY_FAILS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+const OVERLAY_FAILS_MAX: usize = 2000;
+
+/// Current value of one overlay-failure counter. `pub` for the same reason
+/// [`copy_up_count`] is: a test can assert a class stayed at zero, or moved,
+/// without reaching into the atomics.
+pub fn overlay_fail_count(fail: OverlayFail) -> u64 {
+    OVERLAY_FAIL_COUNTS[fail as usize].load(Ordering::Relaxed)
+}
+
+/// Record an overlay mutation that failed or was declined. Cheap no-op when
+/// disabled, like every counter here.
+pub fn note_overlay_fail(fail: OverlayFail, root: u32, vpath: &str) {
+    if !enabled() {
+        return;
+    }
+    OVERLAY_FAIL_COUNTS[fail as usize].fetch_add(1, Ordering::Relaxed);
+    let path = format!("root{root}/{}", vpath.to_ascii_lowercase());
+    // Also in the ordered trace: what the game did *next* after the overlay
+    // refused to move is the other half of explaining the open that failed.
+    note_trace("overlay", &path, fail.label());
+    let Ok(mut g) = OVERLAY_FAILS.lock() else { return };
+    let map = g.get_or_insert_with(HashMap::new);
+    let key = format!("{:<26} {path}", fail.label());
+    if let Some(c) = map.get_mut(&key) {
+        *c += 1;
+        return;
+    }
+    if map.len() < OVERLAY_FAILS_MAX {
+        map.insert(key, 1);
+    }
+}
+
+fn render_overlay_fails(snap: &Snapshot) -> String {
+    let total: u64 = snap.overlay_fail_counts.iter().sum();
+    if total == 0 {
+        return String::new();
+    }
+    let mut s = format!("\nshim-local overlay failures ({total}):\n");
+    for fail in ALL_OVERLAY_FAILS {
+        let c = snap.overlay_fail_counts[fail as usize];
+        if c != 0 {
+            s.push_str(&format!("  {:<32} {c:>8}\n", fail.label()));
+        }
+    }
+    let mut rows: Vec<(&String, &u64)> = snap.overlay_fails.iter().collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+    for (k, c) in rows {
+        s.push_str(&format!("    {c:>6}x  {k}\n"));
+    }
+    s
+}
+
 fn render_copy_ups(snap: &Snapshot) -> String {
     let total: u64 = snap.copy_up_counts.iter().sum();
     if total == 0 {
@@ -994,7 +1124,7 @@ pub fn start_reporter() {
             // independent — see `Snapshot`'s doc comment.
             let snap = snapshot();
             let body = format!(
-                "{}{}{}{}{}{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}{}{}{}{}{}",
                 render(&snap),
                 render_async(&snap),
                 render_fills(&snap),
@@ -1005,7 +1135,8 @@ pub fn start_reporter() {
                 render_passthrough(&snap),
                 render_setinfo_noop(&snap),
                 render_outcomes(&snap),
-                render_copy_ups(&snap)
+                render_copy_ups(&snap),
+                render_overlay_fails(&snap)
             );
             // Write via a temp + rename so a reader never sees a half file.
             let tmp = std::path::PathBuf::from(&path).with_extension("tmp");
@@ -1187,6 +1318,55 @@ mod tests {
         assert_eq!(render_copy_ups(&empty_snapshot()), "");
     }
 
+    #[test]
+    fn every_overlay_failure_renders_with_a_distinct_label() {
+        // Same argument as the copy-up labels: "the overlay directory could
+        // not be created" and "the whiteout marker could not be written" are
+        // different problems with different fixes, and a shared label folds
+        // them back into the single silent failure this counter replaces.
+        let mut labels: Vec<&str> = ALL_OVERLAY_FAILS.iter().map(|o| o.label()).collect();
+        let n = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), n, "overlay-failure labels must be distinct: {labels:?}");
+        assert_eq!(ALL_OVERLAY_FAILS.len(), OVERLAY_FAIL_N);
+        // `snapshot` indexes the counter array by position in
+        // `ALL_OVERLAY_FAILS`, so a variant listed out of order would report
+        // under a neighbour's label.
+        for (i, o) in ALL_OVERLAY_FAILS.into_iter().enumerate() {
+            assert_eq!(o as usize, i, "{o:?} is listed at position {i}");
+        }
+    }
+
+    #[test]
+    fn overlay_failure_rendering_names_the_operation_and_the_path() {
+        let mut counts = [0u64; OVERLAY_FAIL_N];
+        counts[OverlayFail::EnsureParent as usize] = 2;
+        let mut fails = HashMap::new();
+        fails.insert(
+            format!("{:<26} root0/data/x.ini", OverlayFail::EnsureParent.label()),
+            2,
+        );
+        let snap = Snapshot {
+            overlay_fail_counts: counts,
+            overlay_fails: fails,
+            ..empty_snapshot()
+        };
+        let s = render_overlay_fails(&snap);
+        assert!(s.contains("shim-local overlay failures (2)"), "{s}");
+        assert!(s.contains("FAILED: overlay mkdir"), "{s}");
+        // Naming the file is the point: "an overlay op failed" is what the
+        // discarded `io::Result` already told you, which is nothing.
+        assert!(s.contains("root0/data/x.ini"), "{s}");
+        // An outcome that did not happen must not appear at all.
+        assert!(!s.contains("write whiteout"), "{s}");
+    }
+
+    #[test]
+    fn no_overlay_failures_renders_nothing() {
+        assert_eq!(render_overlay_fails(&empty_snapshot()), "");
+    }
+
     /// A zeroed `Snapshot` for rendering tests, so one can be built without
     /// the process-wide counters (inert under test) and without every test
     /// listing all twenty-odd fields.
@@ -1220,6 +1400,8 @@ mod tests {
             copy_up_counts: [0; COPYUP_N],
             copy_up_bytes: 0,
             copy_ups: HashMap::new(),
+            overlay_fail_counts: [0; OVERLAY_FAIL_N],
+            overlay_fails: HashMap::new(),
         }
     }
 }

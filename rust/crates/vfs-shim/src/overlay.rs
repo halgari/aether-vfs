@@ -124,36 +124,64 @@ impl Overlay {
         OverlayState::Absent
     }
 
-    /// Ensure the parent directory of `root`'s overlay file for `comps` exists.
-    pub fn ensure_parent(&self, root: RootId, comps: &[String]) {
-        if let Some(parent) = self.file_path(root, comps).parent() {
-            let _ = std::fs::create_dir_all(parent);
+    /// Ensure the parent directory of `root`'s overlay file for `comps`
+    /// exists.
+    ///
+    /// **The result is not decoration.** This used to discard it, and the
+    /// discarded failure was worse than it looks: `Engine::decide_open` calls
+    /// this and then answers `Decision::Redirect` at a path inside the
+    /// directory that was *not* created, so the game's own open fails at the
+    /// NT boundary with nothing anywhere saying why — no copy-up runs for a
+    /// truncating/creating write, so not even the copy-up counters see it.
+    /// Every caller now reports it (`hookstats::OverlayFail`).
+    pub fn ensure_parent(&self, root: RootId, comps: &[String]) -> std::io::Result<()> {
+        match self.file_path(root, comps).parent() {
+            Some(parent) => std::fs::create_dir_all(parent),
+            None => Ok(()),
         }
     }
 
     /// Remove any whiteout marker hiding `root`'s `comps` (a path is being
-    /// recreated).
-    pub fn clear_whiteout(&self, root: RootId, comps: &[String]) {
-        let _ = std::fs::remove_file(self.whiteout_path(root, comps));
+    /// recreated). No marker is success — there was nothing to clear.
+    pub fn clear_whiteout(&self, root: RootId, comps: &[String]) -> std::io::Result<()> {
+        match std::fs::remove_file(self.whiteout_path(root, comps)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
     }
 
     /// Whiteout `root`'s `comps`: drop any overlay copy and lay down a marker
     /// so the path reads as deleted (hiding the snapshot backing / real file
     /// beneath).
-    pub fn whiteout(&self, root: RootId, comps: &[String]) {
-        self.ensure_parent(root, comps);
+    ///
+    /// Removing the overlay copy stays best-effort — there usually is none,
+    /// and its absence is the normal case, not a failure. Failing to write
+    /// the marker is not: the path stays *visible* afterward, which is a
+    /// deleted file that comes back.
+    pub fn whiteout(&self, root: RootId, comps: &[String]) -> std::io::Result<()> {
+        self.ensure_parent(root, comps)?;
         let _ = std::fs::remove_file(self.file_path(root, comps));
-        let _ = std::fs::write(self.whiteout_path(root, comps), b"");
+        std::fs::write(self.whiteout_path(root, comps), b"")
     }
 
     /// Move `from` to `to` within `root`'s overlay subtree and whiteout the
     /// source location. The caller ensures `from` is materialized in the
     /// overlay first.
-    pub fn rename(&self, root: RootId, from: &[String], to: &[String]) {
-        self.ensure_parent(root, to);
-        let _ = std::fs::rename(self.file_path(root, from), self.file_path(root, to));
-        self.clear_whiteout(root, to);
-        let _ = std::fs::write(self.whiteout_path(root, from), b"");
+    ///
+    /// A missing source is tolerated: copy-up is best-effort by design (see
+    /// `Engine::copy_up`), so a director that declined to hand over the
+    /// content leaves nothing at `from`, and the rename of an absent file is
+    /// the expected shape of that — already counted as a copy-up failure at
+    /// its own site. Anything else is reported.
+    pub fn rename(&self, root: RootId, from: &[String], to: &[String]) -> std::io::Result<()> {
+        self.ensure_parent(root, to)?;
+        match std::fs::rename(self.file_path(root, from), self.file_path(root, to)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        self.clear_whiteout(root, to)?;
+        std::fs::write(self.whiteout_path(root, from), b"")
     }
 
     /// Whether an overlay file exists for `root`'s `comps`.
@@ -220,10 +248,10 @@ mod tests {
         let ov = Overlay::new(dir.to_str().unwrap());
         let comps = vec!["data".to_string(), "foo.esp".to_string()];
 
-        ov.ensure_parent(RootId(0), &comps);
+        ov.ensure_parent(RootId(0), &comps).unwrap();
         std::fs::write(ov.file_path(RootId(0), &comps), b"AAAA").unwrap();
 
-        ov.ensure_parent(RootId(1), &comps);
+        ov.ensure_parent(RootId(1), &comps).unwrap();
         std::fs::write(ov.file_path(RootId(1), &comps), b"BBBB").unwrap();
 
         match ov.lookup(RootId(0), &comps) {
@@ -249,7 +277,7 @@ mod tests {
 
         // A whiteout under root 0 must not hide root 1's file at the same
         // relative path.
-        ov.whiteout(RootId(0), &comps);
+        ov.whiteout(RootId(0), &comps).unwrap();
         assert!(
             matches!(ov.lookup(RootId(0), &comps), OverlayState::Whiteout),
             "root 0 should read as whited-out"
@@ -287,9 +315,9 @@ mod tests {
         let comps = vec!["data".to_string(), "solo.esp".to_string()];
 
         // Root 0 only: root 1 never had anything at this path.
-        ov.ensure_parent(RootId(0), &comps);
+        ov.ensure_parent(RootId(0), &comps).unwrap();
         std::fs::write(ov.file_path(RootId(0), &comps), b"ROOT0-ONLY").unwrap();
-        ov.whiteout(RootId(0), &comps);
+        ov.whiteout(RootId(0), &comps).unwrap();
 
         assert!(
             matches!(ov.lookup(RootId(0), &comps), OverlayState::Whiteout),

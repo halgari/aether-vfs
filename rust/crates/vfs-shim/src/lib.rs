@@ -29,6 +29,6 @@ pub use hook::{install, install_late, HookGuard, InstallError};
 /// can assert that a bypass class it closed reads **zero** — see
 /// [`hookstats::outcome_count`]. A class nobody asserts on is a class that can
 /// quietly start (or stop) counting again.
-pub use hookstats::{outcome_count, OpenOutcome};
+pub use hookstats::{outcome_count, overlay_fail_count, OpenOutcome, OverlayFail};
 pub use overlay::overlay_layer_dir;
 pub use payload_abi::PayloadConfig;

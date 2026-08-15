@@ -22,6 +22,10 @@ vfs-env = { path = "../vfs-env" }
 vfs-core = { path = "../vfs-core" }
 vfs-protocol = { path = "../vfs-protocol" }
 vfs-provider = { path = "../vfs-provider" }
+# `OverlayProvider` only — `Session::set_write_layer` composes the writable
+# upper over the read-only mount graph here rather than leaving each host to
+# rebuild copy-on-write out of sibling mounts (which cannot express it).
+vfs-compose = { path = "../vfs-compose" }
 vfs-ipc = { path = "../vfs-ipc" }
 vfs-win = { path = "../vfs-win" }
 vfs-inject = { path = "../vfs-inject" }
@@ -39,7 +43,6 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 # Integrity tests compare the composed VFS against a native extract.
 vfs-zip = { path = "../vfs-zip" }
-vfs-compose = { path = "../vfs-compose" }
 vfs-shim = { path = "../vfs-shim" }
 # `unicode_case_fold_across_the_ring` builds its vpaths with the *same*
 # `RootMap` the shim uses, rather than lowercasing a string in the test — the

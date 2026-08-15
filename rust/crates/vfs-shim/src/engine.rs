@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use vfs_redirect::{classify_open, to_nt, Decision, DirItem, RootId, RootMap, VolumeMap};
 use vfs_shared::{LayoutError, SnapshotReader};
 
+use crate::hookstats::OverlayFail;
 use crate::overlay::{Overlay, OverlayState};
 
 thread_local! {
@@ -334,9 +335,21 @@ impl Engine {
             Some((r, c)) if !c.is_empty() => (r, c),
             _ => return Decision::PassThrough,
         };
-        ov.ensure_parent(root, &comps);
+        // Both of these used to be `let _ = …`. See [`Engine::overlay_fs`] for
+        // why the discarded results and the missing reentrancy guard were each
+        // a defect in their own right. The `Decision` below is deliberately
+        // unchanged on failure: a redirect into a directory that could not be
+        // created still fails with the honest `STATUS_OBJECT_PATH_NOT_FOUND`,
+        // and anything else here (`PassThrough`) would put the write on real
+        // disk *under a managed root*, which is the escape this gate closed.
+        // What was missing was any record that it happened.
+        self.overlay_fs(OverlayFail::EnsureParent, root, &comps, || {
+            ov.ensure_parent(root, &comps)
+        });
         // Recreating the path: drop any whiteout so it is visible again.
-        ov.clear_whiteout(root, &comps);
+        self.overlay_fs(OverlayFail::ClearWhiteout, root, &comps, || {
+            ov.clear_whiteout(root, &comps)
+        });
         // Copy-on-write: preserve existing content into the overlay before the
         // caller writes, unless it is truncating/replacing (no copy needed) or a
         // copy already exists.
@@ -346,6 +359,47 @@ impl Engine {
         }
         Decision::Redirect {
             target_nt: to_nt(&ov.file_path(root, &comps).to_string_lossy()),
+        }
+    }
+
+    /// Run one shim-local overlay filesystem mutation, guarded and counted.
+    /// Returns whether it happened.
+    ///
+    /// **The guard.** These run from inside `create_hook`/`setinfo_hook`,
+    /// where no reentrancy guard is held — `create_hook` only takes its
+    /// `in_hook_reenter` fast path for calls made *while* one is. So
+    /// `create_dir_all`, `remove_file`, `write` and `rename` below all issue
+    /// NT calls that our own detours then re-decide: `create_dir_all` in
+    /// particular issues a `FILE_DIRECTORY_FILE` create per component, which
+    /// `try_fuse_mkdir` will happily route into the director if the overlay
+    /// directory happens to sit under a managed root. The overlay is a real
+    /// directory and its mutations must reach the real filesystem, so this
+    /// holds [`crate::hook::ShimIoGuard`] across them — the same guard, for
+    /// the same reason, that `cow_seed` holds while it writes its
+    /// destination.
+    ///
+    /// **The counter.** Every one of these used to be `let _ = …`. A
+    /// discarded failure here is invisible from every other vantage point in
+    /// the shim: see [`crate::hookstats::OverlayFail`] for what each one
+    /// costs, and why a guard alone would have fixed only half the problem.
+    fn overlay_fs<F>(&self, fail: OverlayFail, root: RootId, comps: &[String], f: F) -> bool
+    where
+        F: FnOnce() -> std::io::Result<()>,
+    {
+        let Some(_io) = crate::hook::ShimIoGuard::enter() else {
+            crate::hookstats::note_overlay_fail(
+                OverlayFail::DeclinedReentrant,
+                root.0,
+                &comps.join("/"),
+            );
+            return false;
+        };
+        match f() {
+            Ok(()) => true,
+            Err(_) => {
+                crate::hookstats::note_overlay_fail(fail, root.0, &comps.join("/"));
+                false
+            }
         }
     }
 
@@ -512,7 +566,14 @@ impl Engine {
     pub fn whiteout(&self, nt_path: &str) -> bool {
         match (&self.overlay, self.resolve(nt_path)) {
             (Some(ov), Some((root, comps))) if !comps.is_empty() => {
-                ov.whiteout(root, &comps);
+                // `true` even when the marker could not be written: the
+                // caller reads `false` as "let the real delete proceed",
+                // which under a managed root is the escape, not a fallback.
+                // The failure is recorded instead — a whiteout that did not
+                // land means the deleted file is still visible.
+                self.overlay_fs(OverlayFail::Whiteout, root, &comps, || {
+                    ov.whiteout(root, &comps)
+                });
                 true
             }
             _ => false,
@@ -568,7 +629,9 @@ impl Engine {
             Some(hit) => hit,
             None => return RenameOutcome::Declined,
         };
-        ov.ensure_parent(from_root, &from);
+        self.overlay_fs(OverlayFail::EnsureParent, from_root, &from, || {
+            ov.ensure_parent(from_root, &from)
+        });
         if !ov.has_file(from_root, &from) {
             let dest = ov.file_path(from_root, &from);
             // Same policy as `decide_open`'s copy-up, through the same
@@ -580,7 +643,12 @@ impl Engine {
             // an under-root path must never get.
             self.copy_up(from_root, from_nt, &from, &dest);
         }
-        ov.rename(from_root, &from, &to);
+        // Still `Handled` if the move failed, for the same reason `whiteout`
+        // still answers `true`: `Declined` hands the rename to the real
+        // filesystem under a managed root. The failure is recorded instead.
+        self.overlay_fs(OverlayFail::Rename, from_root, &from, || {
+            ov.rename(from_root, &from, &to)
+        });
         RenameOutcome::Handled
     }
 

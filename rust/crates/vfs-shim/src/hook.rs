@@ -1024,6 +1024,32 @@ fn open_create_flags(disposition: u32) -> u32 {
     }
 }
 
+/// True for the dispositions where a write-flavoured open that turns out to
+/// name an existing **directory** is a legitimate directory open rather than
+/// a failed file create.
+///
+/// `is_write_open`'s `WRITE_ACCESS` includes `0x0002 | 0x0004`, which on a
+/// *directory* handle are `FILE_ADD_FILE` and `FILE_ADD_SUBDIRECTORY`, not
+/// `FILE_WRITE_DATA`/`FILE_APPEND_DATA`. The bits are identical and nothing
+/// in the mask distinguishes them, so every `FILE_FLAG_BACKUP_SEMANTICS` open
+/// asking for write access on a directory arrives as a write, gets routed to
+/// `Provider::open(OPEN_WRITE)`, and fails: `DiskProvider::open` opens
+/// read+write, which a directory refuses. Since gate 4's Task 5 that failure
+/// is no longer papered over by the fall-through — the caller now gets
+/// `STATUS_UNSUCCESSFUL` (`ERROR_GEN_FAILURE`) for an operation NTFS answers
+/// without complaint.
+///
+/// Only `FILE_OPEN` and `FILE_OPEN_IF` qualify. The other four
+/// (`SUPERSEDE`/`CREATE`/`OVERWRITE`/`OVERWRITE_IF`) all intend to create or
+/// replace, and NT answers those against an existing directory with a
+/// collision or `STATUS_FILE_IS_A_DIRECTORY` — handing back a directory
+/// handle there would turn a refused file create into a silent success.
+/// Directory *creates* never reach this at all: `try_fuse_mkdir` runs first
+/// and takes `FILE_DIRECTORY_FILE` with a creating disposition.
+fn dir_open_downgrades(disposition: u32) -> bool {
+    matches!(disposition, 1 | 3)
+}
+
 /// True for the three dispositions whose successful `IoStatusBlock`
 /// `Information` depends on whether the path already existed
 /// (`FILE_SUPERSEDE`/`FILE_OPEN_IF`/`FILE_OVERWRITE_IF`) — see
@@ -1199,11 +1225,27 @@ unsafe fn try_fuse_create(
         && disposition_needs_existence_probe(disposition)
         && matches!(client.getattr(root, vp), Ok(a) if a.found);
 
-    let opened = if write {
+    // Shadowed so a directory downgrade below can correct the
+    // `IoStatusBlock.Information` too: an existing directory opened through
+    // `FILE_OPEN`/`FILE_OPEN_IF` was *opened*, never created or overwritten.
+    let mut write = write;
+    let mut opened = if write {
         client.open_write(root, vp, create_flags)
     } else {
         client.open(root, vp)
     };
+    // A write-flavoured open of a directory is not a data write — see
+    // `dir_open_downgrades`. Re-issued as a read open, which is what produces
+    // the directory handle the caller actually asked for. Costs one extra
+    // GETATTR, and only on a write open the director already refused.
+    if write
+        && opened.is_err()
+        && dir_open_downgrades(disposition)
+        && matches!(client.getattr(root, vp), Ok(a) if a.found && a.is_dir)
+    {
+        opened = client.open(root, vp);
+        write = false;
+    }
     match opened {
         Ok(resp) => {
             // Record absolute path on the handle so later relative opens
@@ -3974,6 +4016,25 @@ mod tests {
             !is_write_open(GENERIC_READ, FILE_OPEN),
             "FILE_OPEN with only read access must not be a write open"
         );
+    }
+
+    /// Gate 4, Task 6. Only the two non-creating dispositions may hand back a
+    /// directory handle when a write-flavoured open turns out to name a
+    /// directory. Widening this to the creating four would turn "you cannot
+    /// create a file where a directory already is" — which NT answers with a
+    /// collision or `STATUS_FILE_IS_A_DIRECTORY` — into a silent success
+    /// handing the caller a directory handle it never asked for.
+    #[test]
+    fn only_non_creating_dispositions_downgrade_a_directory_open() {
+        assert!(dir_open_downgrades(1), "FILE_OPEN opens an existing directory");
+        assert!(dir_open_downgrades(3), "FILE_OPEN_IF opens an existing directory");
+        for disposition in [0u32, 2, 4, 5] {
+            assert!(
+                !dir_open_downgrades(disposition),
+                "disposition {disposition} intends to create or replace a file; a directory \
+                 handle is not an acceptable answer to it"
+            );
+        }
     }
 
     // --- Fix 7: per-disposition IoStatusBlock.Information.

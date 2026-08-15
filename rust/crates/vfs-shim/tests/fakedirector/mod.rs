@@ -145,6 +145,10 @@ pub struct Fake {
     /// Behind a `Mutex` because a WRITE mutates it and an OPEN with
     /// `OPEN_CREATE` adds to it — the ring server hands `handle` a `&self`.
     files: Mutex<HashMap<String, Entry>>,
+    /// Vpaths that resolve as **directories**. Fixed at construction: nothing
+    /// here creates one, because `try_fuse_mkdir` takes directory creates
+    /// before `try_fuse_create` ever sees them.
+    dirs: Vec<String>,
     handles: Mutex<HashMap<u64, String>>,
     next_fh: AtomicU64,
     writable: Vec<String>,
@@ -155,11 +159,32 @@ impl Fake {
     pub fn new() -> Fake {
         Fake {
             files: Mutex::new(HashMap::new()),
+            dirs: Vec::new(),
             handles: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             writable: Vec::new(),
             tally: Tally::default(),
         }
+    }
+
+    /// Add a directory to the provider graph.
+    ///
+    /// It answers a write open the way a real provider graph does, and that
+    /// is the point of having it: `DiskProvider::open` with `OPEN_WRITE`
+    /// runs `OpenOptions::new().read(true).write(true).open(dir)`, which a
+    /// directory refuses — so a writable mount answers `ST_IO_ERROR`, and a
+    /// read-only one answers `ST_READ_ONLY` before even trying. Neither is
+    /// something the caller asked for: on a *directory* handle the bits
+    /// `is_write_open` reads as write access are `FILE_ADD_FILE` /
+    /// `FILE_ADD_SUBDIRECTORY`, which every `FILE_FLAG_BACKUP_SEMANTICS`
+    /// directory open carries.
+    pub fn with_dir(mut self, vpath: &str) -> Fake {
+        self.dirs.push(vpath.to_string());
+        self
+    }
+
+    fn is_dir(&self, vpath: &str) -> bool {
+        self.dirs.iter().any(|d| d == vpath)
     }
 
     /// Declare a vpath prefix that a `ReadWrite` provider is mounted over: a
@@ -213,6 +238,17 @@ impl Fake {
                 let Some((_root, vpath)) = P::decode_path_req(payload) else {
                     return (P::ST_BAD_REQUEST, Vec::new());
                 };
+                if self.is_dir(&vpath) {
+                    return (
+                        P::ST_OK,
+                        P::encode_getattr_resp(&P::AttrResp {
+                            found: true,
+                            is_dir: true,
+                            size: 0,
+                            mtime: 0,
+                        }),
+                    );
+                }
                 let files = self.files.lock().unwrap();
                 let found = files.get(&vpath);
                 (
@@ -229,6 +265,28 @@ impl Fake {
                 let Some((_root, flags, vpath)) = P::decode_open_req(payload) else {
                     return (P::ST_BAD_REQUEST, Vec::new());
                 };
+                if self.is_dir(&vpath) {
+                    if flags & P::OPEN_WRITE != 0 {
+                        // Exactly what a real graph answers: read-only mount
+                        // refuses on access, writable mount tries to open the
+                        // directory read+write and fails. See `with_dir`.
+                        return (
+                            if self.is_writable(&vpath) {
+                                P::ST_IO_ERROR
+                            } else {
+                                P::ST_READ_ONLY
+                            },
+                            Vec::new(),
+                        );
+                    }
+                    let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
+                    Tally::bump(&self.tally.opened, &vpath);
+                    self.handles.lock().unwrap().insert(fh, vpath);
+                    return (
+                        P::ST_OK,
+                        P::encode_open_resp(&P::OpenResp { fh, size: 0, is_dir: true }),
+                    );
+                }
                 let mut files = self.files.lock().unwrap();
                 let exists = files.contains_key(&vpath);
                 if flags & P::OPEN_WRITE != 0 {
