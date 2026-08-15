@@ -718,6 +718,12 @@ fn seed_from_director(
     dest: &Path,
 ) -> (crate::hookstats::CopyUp, u64) {
     use crate::hookstats::CopyUp;
+    // The shim's own open, not the game's: no `OpenOutcome::Routed` was ever
+    // recorded for it, but the director counts it like any other arrival.
+    // Counted so the shim/director reconciliation stays an exact equality —
+    // see `hookstats::UNROUTED_DIRECTOR_OPENS`. Noted before the call so a
+    // refusal (which the director still counts, in `opens_err`) is included.
+    crate::hookstats::note_unrouted_director_open();
     let Ok(opened) = client.open(root, vpath) else {
         return (CopyUp::DirectorRefused, 0);
     };

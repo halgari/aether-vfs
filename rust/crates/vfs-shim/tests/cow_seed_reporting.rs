@@ -145,5 +145,25 @@ fn a_failed_copy_up_names_the_file_and_the_reason_in_the_stats_report() {
         "the report does not record the copy-up that succeeded.\n--- report ---\n{body}"
     );
 
+    // Both copy-ups above issued their own `OP_OPEN` at the director — the
+    // seeded one and the refused one alike — and neither carries an
+    // `OpenOutcome::Routed`. Uncounted, they are silent negative drift in
+    // `vfs-directord`'s `assert_reconciled`, which for four sessions has
+    // reported any drift as a live bypass. This is the guard that keeps that
+    // reconciliation an exact equality rather than a lie about a bypass.
+    assert!(
+        vfs_shim::unrouted_director_opens() >= 2,
+        "copy-up's own director opens are not being counted (got {}); \
+         `assert_reconciled` would read them as a bypass",
+        vfs_shim::unrouted_director_opens()
+    );
+    // Matched by `vfs-directord`'s `tests/support/mod.rs` as a literal — the
+    // reconciliation reads this row, so the row has to be in the report.
+    assert!(
+        body.contains("director-open: unrouted"),
+        "the outcomes section has no unrouted-director-open row, so the \
+         shim/director reconciliation cannot see these opens.\n--- report ---\n{body}"
+    );
+
     let _ = std::fs::remove_dir_all(&base);
 }

@@ -18,11 +18,37 @@
 //!   arrived over the ring, split into `opens_ok`/`opens_err`
 //!   (`io_stats::open_totals()`).
 //!
-//! The invariant: the shim's `routed` count equals the director's total
+//! The invariant: the shim's `routed` count, **plus the director opens the
+//! shim issued that no `Routed` accounts for**, equals the director's total
 //! arrived-open count, `opens_ok + opens_err`. Any drift means an open the
 //! shim believed it routed never arrived at the director — a bypass, by
 //! definition — or the reverse, an open the director served that the shim
 //! never accounted for.
+//!
+//! ## Why that second term exists (gate 4)
+//!
+//! Through gate 3 the invariant was the bare `routed == opens_ok + opens_err`,
+//! and four recorded sessions used it that way. Gate 4 introduced two places
+//! where the shim issues an `OP_OPEN` that is not a `Routed` decision, so the
+//! bare equality stopped holding for reasons that have nothing to do with a
+//! bypass:
+//!
+//! - **The directory downgrade** (`vfs_shim::hook`): a write-flavoured open of
+//!   a directory the director refuses is re-issued as a read open. One
+//!   `Routed`, two `OP_OPEN`s.
+//! - **Copy-up** (`vfs_shim::Engine::cow_seed` → `seed_from_director`): the
+//!   shim opens the file itself, to read its prior content into the overlay.
+//!   The game never made that open, so no outcome classifier ever saw it.
+//!
+//! Those are the only two — `client.open`/`client.open_write` have exactly
+//! three call sites in `vfs-shim`, and the third is the primary open that
+//! always carries its `Routed`.
+//!
+//! The shim counts both (`hookstats::note_unrouted_director_open`) and renders
+//! the total as one more row in the same outcomes section, so this stays an
+//! **equality** rather than becoming a tolerance. That matters: a tolerance
+//! wide enough to absorb these would also absorb a genuinely missing open,
+//! which is the entire thing the check exists to catch.
 //!
 //! ## A correction to this task's original interface, verified before
 //! ## committing to it
@@ -123,10 +149,14 @@ pub struct Reconciliation {
     /// interface; see the module doc's "correction" section for why the
     /// value itself must be the sum, not `opens_ok` alone.
     pub opens_ok: u64,
-    /// `routed as i64 - opens_ok as i64`. Always `0` on a `Reconciliation`
-    /// returned normally, since `assert_reconciled` panics on any other
-    /// value before returning — kept on the struct so a caller that wants
-    /// to log or display it does not need to recompute it.
+    /// `OP_OPEN`s the shim issued that carry no `Routed` — the directory
+    /// downgrade's re-issue and copy-up's own open. See the module doc.
+    /// Zero in every run recorded so far; nonzero is normal, not a warning.
+    pub unrouted_director_opens: u64,
+    /// `(routed + unrouted_director_opens) as i64 - opens_ok as i64`. Always
+    /// `0` on a `Reconciliation` returned normally, since `assert_reconciled`
+    /// panics on any other value before returning — kept on the struct so a
+    /// caller that wants to log or display it does not need to recompute it.
     pub drift: i64,
     /// Whether the report's "under-root open outcomes:" section header was
     /// found at all. Distinct from `fell_through.is_empty()`, which is
@@ -143,6 +173,14 @@ pub struct Reconciliation {
 /// `outcome_count(OpenOutcome::FellThroughWriteFallback)` API instead of by
 /// string.
 const WRITE_FALLBACK_LABEL: &str = "fell-through: write-fallback";
+
+/// `vfs_shim::hookstats::UNROUTED_OPEN_LABEL`'s value. Hand-copied for the
+/// same reason `WRITE_FALLBACK_LABEL` is: `vfs-directord` does not depend on
+/// `vfs-shim`. A rename there without one here does *not* fail silently the
+/// way a missing fall-through count would — it turns the reconciliation into
+/// a hard failure the moment either drift source fires, which is the safe
+/// direction for a copy to drift in.
+const UNROUTED_OPEN_LABEL: &str = "director-open: unrouted";
 
 impl Reconciliation {
     /// How many under-root write opens left the director's answer behind for
@@ -183,15 +221,30 @@ fn parse_outcome_summary_line(line: &str) -> Option<(String, u64)> {
     Some((label.trim().to_string(), count))
 }
 
-/// Parse the `routed` count and every fall-through/denied outcome out of a
-/// shim stats report's text. Returns `(0, {}, false)` for text with no
-/// outcomes section at all (including empty text), rather than erroring —
-/// see the module doc's "missing or partial report" note.
-fn parse_outcomes(text: &str) -> (u64, BTreeMap<String, u64>, bool) {
+/// Everything the outcomes section of a shim stats report says.
+struct Outcomes {
+    routed: u64,
+    unrouted_director_opens: u64,
+    fell_through: BTreeMap<String, u64>,
+    found: bool,
+}
+
+/// Parse the `routed` count, the unrouted-director-open count, and every
+/// fall-through/denied outcome out of a shim stats report's text. Returns an
+/// all-zero `Outcomes` with `found: false` for text with no outcomes section
+/// at all (including empty text), rather than erroring — see the module doc's
+/// "missing or partial report" note.
+///
+/// `routed` and `UNROUTED_OPEN_LABEL` are both lifted out of the row stream
+/// into their own fields rather than left in `fell_through`: neither is a
+/// fall-through, and callers that inspect `fell_through` (gate exit criteria,
+/// `write_fallback`) must not have to filter them out by name.
+fn parse_outcomes(text: &str) -> Outcomes {
     let mut routed = 0u64;
+    let mut unrouted_director_opens = 0u64;
     let mut fell_through = BTreeMap::new();
     let Some(idx) = text.find(OUTCOMES_HEADER) else {
-        return (routed, fell_through, false);
+        return Outcomes { routed, unrouted_director_opens, fell_through, found: false };
     };
     // The outcomes section is rendered last in the report
     // (`hookstats::start_reporter`'s concatenation order), so it runs to
@@ -203,11 +256,13 @@ fn parse_outcomes(text: &str) -> (u64, BTreeMap<String, u64>, bool) {
         };
         if label == "routed" {
             routed = count;
+        } else if label == UNROUTED_OPEN_LABEL {
+            unrouted_director_opens = count;
         } else {
             fell_through.insert(label, count);
         }
     }
-    (routed, fell_through, true)
+    Outcomes { routed, unrouted_director_opens, fell_through, found: true }
 }
 
 /// A nested per-path breakdown line under one outcome's summary row
@@ -349,11 +404,14 @@ fn parse_readdirs(text: &str) -> Vec<ReadDirRecord> {
     out
 }
 
-/// Reconcile the shim's `routed` under-root-open count (read from
-/// `shim_report`) against the director's total arrived-open count (supplied
-/// by the caller as `opens_ok`, which must be `opens_ok + opens_err` — see
-/// the module doc's "correction" section for why), and panic with a
-/// message naming the drift if they disagree.
+/// Reconcile the shim's own open accounting (read from `shim_report`) against
+/// the director's total arrived-open count (supplied by the caller as
+/// `opens_ok`, which must be `opens_ok + opens_err` — see the module doc's
+/// "correction" section for why), and panic with a message naming the drift
+/// if they disagree.
+///
+/// The shim side is `routed + unrouted_director_opens`, not `routed` alone —
+/// see the module doc's "why that second term exists".
 ///
 /// Does **not** assert anything about the fall-through counts beyond
 /// parsing them — see the module doc. Callers that want to confirm the
@@ -362,20 +420,41 @@ fn parse_readdirs(text: &str) -> Vec<ReadDirRecord> {
 /// `Reconciliation::outcomes_section_found`.
 pub fn assert_reconciled(shim_report: &Path, opens_ok: u64) -> Reconciliation {
     let text = std::fs::read_to_string(shim_report).unwrap_or_default();
-    let (routed, fell_through, outcomes_section_found) = parse_outcomes(&text);
-    let drift = routed as i64 - opens_ok as i64;
+    let o = parse_outcomes(&text);
+    let shim_total = o.routed + o.unrouted_director_opens;
+    let drift = shim_total as i64 - opens_ok as i64;
 
     assert_eq!(
         drift,
         0,
         "shim/director open-count reconciliation failed: shim report at \
-         {shim_report:?} parsed `routed` = {routed}, director arrived-open \
-         total (opens_ok + opens_err) = {opens_ok} (drift = {drift}). A \
-         nonzero drift means an open one side recorded never shows up on \
-         the other — a live bypass, not a measurement quirk. (Directory \
-         creates are explicitly out of scope for both counters and are not \
-         part of this comparison — see this module's doc comment. Report \
-         contents: {:?})",
+         {shim_report:?} parsed `routed` = {}, `{UNROUTED_OPEN_LABEL}` = {} \
+         (shim total {shim_total}); director arrived-open total (opens_ok + \
+         opens_err) = {opens_ok} (drift = {drift}).\n\
+         \n\
+         What a nonzero drift means: an open one side recorded does not show \
+         up on the other. That is usually a live bypass — but it is not \
+         *necessarily* one, and the following are known non-bypass sources \
+         to rule out first:\n\
+         \n\
+         1. A shim-issued `OP_OPEN` that carries no `Routed` and is not \
+            counted. Two exist today (the directory downgrade's re-issued \
+            read open, and copy-up's own open in `Engine::cow_seed`); both \
+            call `hookstats::note_unrouted_director_open`, which is what \
+            `{UNROUTED_OPEN_LABEL}` above reports. A *third* such site added \
+            without that call shows up here as negative drift and is a \
+            measurement gap, not an escape.\n\
+         2. A label rename in `vfs_shim::hookstats` that this module's \
+            hand-copied `UNROUTED_OPEN_LABEL` no longer matches — the count \
+            would then parse as a fall-through instead and read as 0 here.\n\
+         3. Directory creates, which are explicitly out of scope for both \
+            counters and are not part of this comparison at all — see this \
+            module's doc comment.\n\
+         \n\
+         Rule those out before concluding an open escaped. Report contents: \
+         {:?}",
+        o.routed,
+        o.unrouted_director_opens,
         if text.is_empty() {
             "<missing or empty — reporter thread may not have ticked before \
              the process exited>"
@@ -386,11 +465,12 @@ pub fn assert_reconciled(shim_report: &Path, opens_ok: u64) -> Reconciliation {
     );
 
     Reconciliation {
-        routed,
-        fell_through,
+        routed: o.routed,
+        fell_through: o.fell_through,
         opens_ok,
+        unrouted_director_opens: o.unrouted_director_opens,
         drift,
-        outcomes_section_found,
+        outcomes_section_found: o.found,
     }
 }
 
@@ -474,10 +554,78 @@ mod tests {
             render_summary_row("routed", 3),
             render_summary_row("fell-through: passthrough", 2),
         );
-        let (routed, fell_through, found) = parse_outcomes(&text);
-        assert_eq!(routed, 3);
-        assert_eq!(fell_through.get("fell-through: passthrough"), Some(&2));
-        assert!(found);
+        let o = parse_outcomes(&text);
+        assert_eq!(o.routed, 3);
+        assert_eq!(o.fell_through.get("fell-through: passthrough"), Some(&2));
+        assert_eq!(o.unrouted_director_opens, 0);
+        assert!(o.found);
+    }
+
+    /// The unrouted-open row must land in its own field, not in
+    /// `fell_through`: it is not a fall-through, and every caller that reads
+    /// that map treats each key as one bypass class.
+    #[test]
+    fn unrouted_director_opens_parse_out_of_the_fall_through_map() {
+        let text = format!(
+            "{OUTCOMES_HEADER}{}{}",
+            render_summary_row("routed", 5),
+            render_summary_row(UNROUTED_OPEN_LABEL, 2),
+        );
+        let o = parse_outcomes(&text);
+        assert_eq!(o.routed, 5);
+        assert_eq!(o.unrouted_director_opens, 2);
+        assert!(o.fell_through.is_empty(), "{:?}", o.fell_through);
+    }
+
+    /// The gate-4 invariant: the shim side of the comparison is
+    /// `routed + unrouted`, so a run with a directory downgrade or a copy-up
+    /// reconciles instead of reporting a phantom bypass.
+    #[test]
+    fn unrouted_director_opens_count_toward_the_directors_total() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = dir.path().join("shim-stats.log");
+        std::fs::write(
+            &report,
+            format!(
+                "{OUTCOMES_HEADER}{}{}",
+                render_summary_row("routed", 9),
+                render_summary_row(UNROUTED_OPEN_LABEL, 3),
+            ),
+        )
+        .unwrap();
+        // 9 routed + 3 shim-issued = 12 arrivals at the director.
+        let recon = assert_reconciled(&report, 12);
+        assert_eq!(recon.drift, 0);
+        assert_eq!(recon.unrouted_director_opens, 3);
+    }
+
+    /// …and it is still an equality, not a tolerance: one genuinely missing
+    /// open still fails, whatever the unrouted count is.
+    #[test]
+    fn an_unaccounted_open_still_fails_even_with_unrouted_opens_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = dir.path().join("shim-stats.log");
+        std::fs::write(
+            &report,
+            format!(
+                "{OUTCOMES_HEADER}{}{}",
+                render_summary_row("routed", 9),
+                render_summary_row(UNROUTED_OPEN_LABEL, 3),
+            ),
+        )
+        .unwrap();
+        let result = std::panic::catch_unwind(|| assert_reconciled(&report, 13));
+        let err = result.expect_err("one unaccounted arrival must still panic");
+        let msg = err
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| "<non-string panic payload>".into());
+        assert!(msg.contains("drift = -1"), "{msg}");
+        // The message must name the non-bypass sources rather than asserting
+        // a bypass outright — that claim was false from gate 4 onward.
+        assert!(msg.contains("not *necessarily* one"), "{msg}");
+        assert!(msg.contains("directory downgrade"), "{msg}");
+        assert!(msg.contains("cow_seed"), "{msg}");
     }
 
     #[test]
@@ -489,26 +637,28 @@ mod tests {
             render_summary_row("routed", 1),
             1,
         );
-        let (routed, fell_through, found) = parse_outcomes(&text);
-        assert_eq!(routed, 1);
-        assert!(fell_through.is_empty());
-        assert!(found);
+        let o = parse_outcomes(&text);
+        assert_eq!(o.routed, 1);
+        assert!(o.fell_through.is_empty());
+        assert!(o.found);
     }
 
     #[test]
     fn missing_section_parses_as_zero_not_an_error() {
-        let (routed, fell_through, found) = parse_outcomes("vfs-shim hook stats (pid 1)\n");
-        assert_eq!(routed, 0);
-        assert!(fell_through.is_empty());
-        assert!(!found);
+        let o = parse_outcomes("vfs-shim hook stats (pid 1)\n");
+        assert_eq!(o.routed, 0);
+        assert_eq!(o.unrouted_director_opens, 0);
+        assert!(o.fell_through.is_empty());
+        assert!(!o.found);
     }
 
     #[test]
     fn empty_text_parses_as_zero_not_an_error() {
-        let (routed, fell_through, found) = parse_outcomes("");
-        assert_eq!(routed, 0);
-        assert!(fell_through.is_empty());
-        assert!(!found);
+        let o = parse_outcomes("");
+        assert_eq!(o.routed, 0);
+        assert_eq!(o.unrouted_director_opens, 0);
+        assert!(o.fell_through.is_empty());
+        assert!(!o.found);
     }
 
     #[test]

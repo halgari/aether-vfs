@@ -157,6 +157,7 @@ struct Snapshot {
     readdirs: Vec<String>,
     outcome_counts: [u64; OUTCOME_N],
     outcome_paths: [HashMap<String, u64>; OUTCOME_N],
+    unrouted_director_opens: u64,
     copy_up_counts: [u64; COPYUP_N],
     copy_up_bytes: u64,
     copy_ups: HashMap<String, u64>,
@@ -210,6 +211,7 @@ fn snapshot() -> Snapshot {
         readdirs: READDIRS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
         outcome_counts,
         outcome_paths,
+        unrouted_director_opens: UNROUTED_DIRECTOR_OPENS.load(Ordering::Relaxed),
         copy_up_counts: std::array::from_fn(|i| copy_up_count(ALL_COPY_UPS[i])),
         copy_up_bytes: COPYUP_BYTES.load(Ordering::Relaxed),
         copy_ups: COPYUPS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
@@ -789,6 +791,59 @@ pub fn outcome_count(outcome: OpenOutcome) -> u64 {
     OUTCOME_COUNTS[outcome as usize].load(Ordering::Relaxed)
 }
 
+/// `OP_OPEN`s the shim issued that no [`OpenOutcome::Routed`] accounts for.
+///
+/// This exists to keep one specific invariant true. Four recorded sessions
+/// have used `routed == opens_ok + opens_err` (the director's own arrived-open
+/// total) as this project's health check, on the reading that any drift means
+/// an open one side saw and the other did not — a bypass. Gate 4 added two
+/// places where the shim asks the director to open something *without* that
+/// open being a `Routed` decision, which breaks the equality without any
+/// bypass existing:
+///
+///  - **The directory downgrade** (`hook.rs`): a write-flavoured open of a
+///    directory is re-issued as a read open, so one `Routed` produces two
+///    `OP_OPEN`s.
+///  - **Copy-up** (`Engine::cow_seed` → `seed_from_director`): the shim opens
+///    the file itself to read its prior content. That open is the shim's, not
+///    the game's, so nothing ever classified it as an outcome.
+///
+/// Counting them rather than tolerating them keeps the reconciliation exact:
+/// `routed + unrouted_director_opens == opens_ok + opens_err`, still an
+/// equality, so a real bypass of one open still fails it. A tolerance would
+/// have hidden exactly the thing the check is for.
+///
+/// Gated on `enabled()` like every other counter here, so it stays consistent
+/// with `routed` — both are absent together or present together.
+static UNROUTED_DIRECTOR_OPENS: AtomicU64 = AtomicU64::new(0);
+
+/// Rendered label for [`UNROUTED_DIRECTOR_OPENS`], inside the outcomes
+/// section so one parse of that section yields both halves of the
+/// reconciliation. Deliberately not an `OpenOutcome` variant: it does not
+/// classify a *game* open the way the others do, and giving it a discriminant
+/// would renumber `OUTCOME_COUNTS` against the audit tables in
+/// `docs/bypass-baseline.md`.
+///
+/// `vfs-directord`'s `tests/support/mod.rs` matches this string. A rename
+/// there without one here turns the reconciliation back into a silent
+/// inequality.
+pub const UNROUTED_OPEN_LABEL: &str = "director-open: unrouted";
+
+/// Record an `OP_OPEN` the shim issued on its own behalf, or a re-issue of one
+/// already counted as `Routed`. See [`UNROUTED_DIRECTOR_OPENS`].
+pub fn note_unrouted_director_open() {
+    if !enabled() {
+        return;
+    }
+    UNROUTED_DIRECTOR_OPENS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Current value of [`UNROUTED_DIRECTOR_OPENS`], for in-process tests that
+/// assert on it directly rather than through the rendered report.
+pub fn unrouted_director_opens() -> u64 {
+    UNROUTED_DIRECTOR_OPENS.load(Ordering::Relaxed)
+}
+
 /// Record which path an under-root open actually took. Cheap no-op when
 /// disabled, exactly like `note_passthrough`.
 ///
@@ -858,6 +913,15 @@ fn render_outcomes(snap: &Snapshot) -> String {
     let mut body = String::new();
     for outcome in ALL_OUTCOMES {
         body.push_str(&render_outcome(outcome, snap));
+    }
+    // Same row shape as an outcome so the section stays parseable by one
+    // rule, but not an outcome — see `UNROUTED_DIRECTOR_OPENS`. Omitted at
+    // zero, like every outcome row.
+    if snap.unrouted_director_opens > 0 {
+        body.push_str(&format!(
+            "  {UNROUTED_OPEN_LABEL:<32} {:>8}\n",
+            snap.unrouted_director_opens
+        ));
     }
     if body.is_empty() {
         return String::new();
@@ -1299,6 +1363,34 @@ mod tests {
         assert_eq!(format_outcome_paths(Vec::new()), "");
     }
 
+    /// The unrouted-open row must render inside the outcomes section, in the
+    /// same shape as an outcome row: `vfs-directord`'s `assert_reconciled`
+    /// parses that one section and needs both halves of the reconciliation
+    /// out of it. Its label must also not collide with any outcome's, or the
+    /// count would parse as a fall-through class instead.
+    #[test]
+    fn unrouted_director_opens_render_as_a_row_in_the_outcomes_section() {
+        let mut snap = empty_snapshot();
+        snap.outcome_counts[OpenOutcome::Routed as usize] = 9;
+        snap.unrouted_director_opens = 3;
+        let s = render_outcomes(&snap);
+        assert!(s.starts_with("\nunder-root open outcomes:\n"), "{s}");
+        assert!(s.contains(&format!("  {UNROUTED_OPEN_LABEL:<32} {:>8}\n", 3)), "{s}");
+        assert!(
+            !ALL_OUTCOMES.iter().any(|o| o.label() == UNROUTED_OPEN_LABEL),
+            "the unrouted-open label collides with an outcome label"
+        );
+    }
+
+    /// Zero is omitted, exactly like an outcome at zero — so a run with
+    /// neither drift source present renders the section it always did.
+    #[test]
+    fn no_unrouted_director_opens_renders_no_row() {
+        let mut snap = empty_snapshot();
+        snap.outcome_counts[OpenOutcome::Routed as usize] = 1;
+        assert!(!render_outcomes(&snap).contains(UNROUTED_OPEN_LABEL));
+    }
+
     #[test]
     fn every_copy_up_outcome_renders_with_a_distinct_label() {
         // The whole value of this counter is telling "the director does not
@@ -1446,6 +1538,7 @@ mod tests {
             fill_bytes: 0,
             fill_nanos: 0,
             fill_max_nanos: 0,
+            unrouted_director_opens: 0,
             setinfo_noop: HashMap::new(),
             passthrough: HashMap::new(),
             undecodable: HashMap::new(),

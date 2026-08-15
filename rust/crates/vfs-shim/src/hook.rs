@@ -1287,6 +1287,11 @@ unsafe fn try_fuse_create(
         && dir_open_downgrades(disposition)
         && matches!(client.getattr(root, vp), Ok(a) if a.found && a.is_dir)
     {
+        // Second `OP_OPEN` for one `Routed`: the caller records the outcome
+        // once for this open, but the director's own arrived-open counter
+        // sees two. Counted so the shim/director reconciliation stays an
+        // exact equality — see `hookstats::UNROUTED_DIRECTOR_OPENS`.
+        crate::hookstats::note_unrouted_director_open();
         opened = client.open(root, vp);
         write = false;
     }
