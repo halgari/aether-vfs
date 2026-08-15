@@ -16,6 +16,41 @@ struct Mount {
     backend: Arc<dyn Provider>,
 }
 
+/// If `mount_prefix` extends strictly below `path` (case-insensitively, on a
+/// full path-segment boundary), returns the single next path component —
+/// e.g. `path = "data"`, `mount_prefix = "data/a/b/c"` yields `"a"`, not
+/// `"a/b/c"`. Returns `None` for a root mount (nothing to surface as a
+/// child), for a mount at or above `path`, or for a mount on an unrelated
+/// path that merely shares a string prefix (`"data2"` does not match
+/// `"data"`).
+fn mount_child_name(path: &str, mount_prefix: &str) -> Option<String> {
+    let mount_prefix = mount_prefix.trim_matches('/');
+    if mount_prefix.is_empty() {
+        return None;
+    }
+    let rest = if path.is_empty() {
+        mount_prefix
+    } else {
+        let plen = path.len();
+        // `get` (not raw slicing) so a `plen` that doesn't land on a char
+        // boundary in `mount_prefix` returns `None` instead of panicking.
+        let head = mount_prefix.get(..plen)?;
+        if mount_prefix.as_bytes().get(plen) != Some(&b'/') {
+            return None;
+        }
+        if !head.eq_ignore_ascii_case(path) {
+            return None;
+        }
+        &mount_prefix[plen + 1..]
+    };
+    let name = rest.split('/').next()?;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
 struct OpenRec {
     backend: Arc<dyn Provider>,
     bh: Handle,
@@ -124,7 +159,26 @@ impl Director {
                 Err(e) => return Err(e),
             }
         }
-        if !saw_dir {
+        // A mount registered *below* the queried directory (e.g. `data/somemod`
+        // while listing `data`) is otherwise invisible to readdir: it can be
+        // opened by a known path but never discovered. Surface the mount's
+        // next path component as a synthetic directory entry, alongside
+        // whatever a provider already returned above. A provider-supplied
+        // entry for the same name always wins — `entry().or_insert_with`
+        // leaves it untouched — so a mount that shadows a real subdirectory
+        // does not clobber it with a placeholder.
+        let mut mount_derived = false;
+        for m in mounts.iter() {
+            let Some(name) = mount_child_name(&path, &m.prefix) else {
+                continue;
+            };
+            mount_derived = true;
+            map.entry(name.to_ascii_lowercase()).or_insert_with(|| DirEntry {
+                name,
+                stat: Stat { kind: KIND_DIR, size: 0, mtime: 0 },
+            });
+        }
+        if !saw_dir && !mount_derived {
             if not_dir {
                 return Err(not_a_dir());
             }
@@ -432,5 +486,84 @@ mod tests {
 
         assert_eq!(d.open("f", OPEN_WRITE), Err(vfs_provider::ST_READ_ONLY));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn readdir_surfaces_a_mount_registered_below_the_queried_directory() {
+        // A mount at "data/somemod" (no mount at "data" itself) must appear
+        // as a synthetic "somemod" entry when listing "data" — otherwise a
+        // non-root mount can be opened by a known path but never discovered.
+        let d = Director::new();
+        d.mount(
+            "data/somemod",
+            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+        )
+        .unwrap();
+
+        let entries = d.readdir("data").unwrap();
+        assert!(
+            entries.iter().any(|e| e.name == "somemod" && e.stat.kind == KIND_DIR),
+            "expected a synthetic 'somemod' dir entry, got {entries:?}"
+        );
+    }
+
+    #[test]
+    fn readdir_contributes_only_the_next_component_of_a_deeper_mount() {
+        // A mount several levels below the queried directory
+        // ("data/a/b/c") must contribute only "a", not "a/b/c".
+        let d = Director::new();
+        d.mount(
+            "data/a/b/c",
+            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+        )
+        .unwrap();
+
+        let entries = d.readdir("data").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "a");
+    }
+
+    #[test]
+    fn readdir_does_not_duplicate_a_name_a_provider_already_supplies() {
+        // The parent mount already serves a real "somemod" directory entry;
+        // the synthetic entry derived from the deeper mount must not
+        // shadow or duplicate it.
+        let d = Director::new();
+        d.mount(
+            "data",
+            Arc::new(vfs_compose::InlineProvider::from_files([(
+                "somemod/real.txt",
+                b"x".as_slice(),
+            )])),
+        )
+        .unwrap();
+        d.mount(
+            "data/somemod",
+            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"y".as_slice())])),
+        )
+        .unwrap();
+
+        let entries = d.readdir("data").unwrap();
+        let matches: Vec<_> = entries.iter().filter(|e| e.name == "somemod").collect();
+        assert_eq!(matches.len(), 1, "expected exactly one 'somemod' entry, got {entries:?}");
+    }
+
+    #[test]
+    fn mount_prefix_matching_is_case_insensitive() {
+        // A mount configured as "Data/SomeMod" (the spelling Mod Organizer
+        // style configs use) must still resolve a lookup for the
+        // lowercased vpath the shim always produces.
+        let d = Director::new();
+        d.mount(
+            "Data/SomeMod",
+            Arc::new(vfs_compose::InlineProvider::from_files([("f.txt", b"x".as_slice())])),
+        )
+        .unwrap();
+
+        assert!(d.getattr("data/somemod/f.txt").unwrap().is_some());
+        let (fh, size, is_dir_flag) = d.open("data/somemod/f.txt", OPEN_READ).unwrap();
+        assert!(!is_dir_flag);
+        assert_eq!(size, 1);
+        d.close(fh).unwrap();
     }
 }

@@ -838,13 +838,26 @@ directory; after, `Decision::Deny` seals it before any real open is ever
 attempted — the junction's transparency at the kernel level no longer matters,
 because the shim now refuses the open before the kernel ever sees it.
 
-**The required configuration cannot be "mount the staging directory as a
+**Update (stage 2b, task 1): both gaps below are now closed.**
+`vfs-director::path::strip_prefix` folds ASCII case on both sides at compare
+time, and `Director::readdir` now contributes the next path component of any
+mount registered below the queried directory as a synthetic directory entry.
+The section below is left as originally written, as the historical record of
+what gate 3 found and why its documented remedy did not work *at the time* —
+see `crates/vfs-directord/tests/composition.rs`'s
+`non_root_mount_matches_lowercase_open_and_is_discoverable_via_parent_readdir`
+(renamed from `..._but_not_parent_readdir`) for the test that now asserts the
+fixed behavior, including the original mixed-case spelling this section
+documents below.
+
+**The required configuration could not be "mount the staging directory as a
 provider" with the spelling this section used to give — that prescription
-does not work, and a reader who followed it would have lost a debugging
-session finding out.** Two independent problems, found by actually
+did not work as written, and a reader who followed it would have lost a
+debugging session finding out.** Two independent problems, found by actually
 constructing this rather than reasoning about it in the abstract
 (`crates/vfs-directord/tests/composition.rs`'s
-`non_root_mount_matches_lowercase_open_but_not_parent_readdir`):
+`non_root_mount_matches_lowercase_open_but_not_parent_readdir`, since renamed
+— see the update note above):
 
 1. **Case.** Mount prefixes are compared case-sensitively
    (`vfs-director::path::strip_prefix`; `vfs-directord::registry::add_source`,
@@ -871,43 +884,49 @@ constructing this rather than reasoning about it in the abstract
    test proves this half too: the mount's own file opens correctly, but
    `readdir("data")` never lists `somemod` as a child.
 
-**Two confirmed limitations, recorded here specifically so a later gate
-inherits them rather than rediscovering them:**
+**Two confirmed limitations, recorded here at the time specifically so a
+later gate would inherit them rather than rediscover them — both now closed
+by stage 2b task 1, per the update note above:**
 
-1. A non-root mount serves a known path only if spelled **all-lowercase**
+1. ~~A non-root mount serves a known path only if spelled **all-lowercase**
    (mount prefixes compare case-sensitively while shim vpaths are always
-   lowercased) — item 1 above.
-2. `Director::readdir` **never** lists a mount registered below the queried
+   lowercased) — item 1 above.~~ Fixed: `strip_prefix` now folds case at
+   compare time.
+2. ~~`Director::readdir` **never** lists a mount registered below the queried
    directory, so a non-root mount cannot be discovered by listing at all —
-   item 2 above.
+   item 2 above.~~ Fixed: `readdir` now contributes a synthetic entry for
+   the next path component of any deeper mount.
 
-**Flagging limitation 2 for stage 2b specifically.** Gate 3 (this gate) only
-hit this because the MO2 remedy needed a non-root mount to demonstrate; it is
-not gate 3's own concern otherwise. **Stage 2b is "real multi-root," and
-mounts are exactly the mechanism roots compose through** — an unenumerable
-mount is not a cosmetic gap for that stage, it is a problem stage 2b will hit
-directly the first time it composes more than one root and expects a listing
-of one to reflect the other. Recorded here, plainly, rather than left for
-stage 2b to rediscover by reproduction the way this gate had to.
+**Limitation 2 was flagged for stage 2b specifically, and this is the task
+that closed it.** Gate 3 (this gate) only hit this because the MO2 remedy
+needed a non-root mount to demonstrate; it was not gate 3's own concern
+otherwise. **Stage 2b is "real multi-root," and mounts are exactly the
+mechanism roots compose through** — an unenumerable mount would not have
+been a cosmetic gap for that stage; it was a problem stage 2b would have hit
+directly the first time it composed more than one root and expected a
+listing of one to reflect the other. Stage 2b task 1 fixed both, first,
+before any of stage 2b's multi-root composition work landed on top —
+recorded here as the account of why that ordering mattered, not left as an
+open item.
 
-**This is a genuine, confirmed gap in non-root mount support, not merely an
-undocumented spelling — say so plainly rather than paper over it.**
-`grep`-ing this project's entire tree turns up no non-root mount anywhere
-outside this task's own new test: every existing mount, in every test and in
-`skyrim-live.rs` itself, is registered at `"/"` (root, layered by priority).
-This section's own previous citation of
+**This was a genuine, confirmed gap in non-root mount support, not merely an
+undocumented spelling — said so plainly rather than papered over, and now
+fixed rather than merely documented.**
+At the time, `grep`-ing this project's entire tree turned up no non-root
+mount anywhere outside this task's own new test: every existing mount, in
+every test and in `skyrim-live.rs` itself, was registered at `"/"` (root,
+layered by priority). This section's own previous citation of
 `scenario_toml_two_disk_sources_fixture_writepath` as "the ordinary way this
 project composes mods" was wrong in the same direction — that test mounts
 both its sources at root, not at a non-root prefix. This project's actual,
-exercised mod-composition path is root-layering; non-root mounts have never
-been used by any session tooling here for anything, and until the readdir
-gap above is closed, they should be considered usable only for a consumer
-that opens an already-known relative path, not for directory-enumeration
-discovery — worth a later gate's explicit attention, not a settled feature.
-This must not be a surprise a user hits after the fact: any session tooling
-that lets a user point at an MO2-style mod-staging layout needs to mount
-that directory as a source with a lowercase spelling, and needs to know that
-doing so does not make the mod's files appear in a `Data` listing.
+exercised mod-composition path was root-layering; non-root mounts had not
+been used by any session tooling here for anything up to that point. As of
+stage 2b task 1, a non-root mount is discoverable via directory enumeration
+of its parent, not just openable by an already-known relative path — the
+caveat in this paragraph's earlier revision no longer applies. Any session
+tooling that lets a user point at an MO2-style mod-staging layout can mount
+that directory as a source in whatever case it's naturally spelled, and the
+mod's files will now appear in a `Data` listing too.
 
 ### A second, structural finding: gate 2's alternate-spelling closures were classification-only, never routing
 
