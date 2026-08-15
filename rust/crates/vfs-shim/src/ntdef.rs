@@ -249,6 +249,11 @@ pub const STATUS_INVALID_HANDLE: NTSTATUS = 0xC000_0008u32 as i32;
 pub const STATUS_OBJECT_NAME_COLLISION: NTSTATUS = 0xC000_0035u32 as i32;
 /// `STATUS_SECTION_TOO_BIG`.
 pub const STATUS_SECTION_TOO_BIG: NTSTATUS = 0xC000_0040u32 as i32;
+/// `STATUS_FILE_IS_A_DIRECTORY` — maps to `ERROR_ACCESS_DENIED` at the Win32
+/// layer, but NT callers that look at the status get the real reason. What a
+/// create or overwrite aimed at an existing *directory* must report, rather
+/// than the generic `STATUS_UNSUCCESSFUL` every other provider error gets.
+pub const STATUS_FILE_IS_A_DIRECTORY: NTSTATUS = 0xC000_00BAu32 as i32;
 /// `FILE_SUPERSEDED` disposition-information (an existing object was
 /// replaced by `FILE_SUPERSEDE`).
 pub const FILE_SUPERSEDED: usize = 0;

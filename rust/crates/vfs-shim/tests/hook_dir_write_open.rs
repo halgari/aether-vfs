@@ -17,9 +17,15 @@
 //! `ERROR_GEN_FAILURE` from a writable mount, `ERROR_ACCESS_DENIED` from a
 //! read-only one, for an operation NTFS answers without complaint.
 //!
-//! Both refusals are covered, because the fix must not be a patch for one
-//! provider's error code. Directory *creates* are not: `try_fuse_mkdir` takes
-//! those before `try_fuse_create` ever runs.
+//! All three refusals a real graph produces are covered, because the fix must
+//! not be a patch for one provider's error code: `ST_READ_ONLY`,
+//! `ST_IO_ERROR`, and — for `OPEN_ALWAYS`, which reaches the ring as
+//! `FILE_OPEN_IF` carrying `OPEN_CREATE` — the `ST_IS_DIR` that
+//! `OverlayProvider` now returns instead of letting a `DiskProvider` upper
+//! create a file named after the directory. `CREATE_ALWAYS` is the control:
+//! it genuinely asks to replace the path with a file, and must still fail.
+//! Directory *creates* never arrive here at all: `try_fuse_mkdir` takes those
+//! before `try_fuse_create` runs.
 //!
 //! Its own binary — the detours, `ENGINE` and the `FuseClient` are all
 //! process-global and resolve once.
@@ -34,6 +40,8 @@ const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const FILE_SHARE_ALL: u32 = 0x0000_0007;
 const OPEN_EXISTING: u32 = 3;
+const OPEN_ALWAYS: u32 = 4;
+const CREATE_ALWAYS: u32 = 2;
 const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const INVALID_HANDLE_VALUE: *mut c_void = usize::MAX as *mut c_void;
 
@@ -51,9 +59,10 @@ extern "system" {
     fn GetLastError() -> u32;
 }
 
-/// `CreateFileW` with backup semantics and write access — the shape under
-/// test. Returns `Ok(())` on success, `Err(win32_error)` otherwise.
-fn open_directory_for_write(path: &std::path::Path) -> Result<(), u32> {
+/// `CreateFileW` with backup semantics and write access at `disposition` —
+/// the shape under test. Returns `Ok(())` on success, `Err(win32_error)`
+/// otherwise.
+fn open_directory_for_write(path: &std::path::Path, disposition: u32) -> Result<(), u32> {
     let wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
@@ -65,7 +74,7 @@ fn open_directory_for_write(path: &std::path::Path) -> Result<(), u32> {
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_ALL,
             std::ptr::null_mut(),
-            OPEN_EXISTING,
+            disposition,
             FILE_FLAG_BACKUP_SEMANTICS,
             std::ptr::null_mut(),
         )
@@ -121,12 +130,25 @@ fn a_directory_under_a_managed_root_opens_with_write_access() {
         Engine::with_overlay(root.to_str().unwrap(), overlay.to_str().unwrap(), snapshot).unwrap();
     let hooks = install(engine).expect("install");
 
-    let read_only_dir = open_directory_for_write(&root.join("Data"));
-    let writable_dir = open_directory_for_write(&root.join("write").join("sub"));
+    let read_only_dir = open_directory_for_write(&root.join("Data"), OPEN_EXISTING);
+    let writable_dir = open_directory_for_write(&root.join("write").join("sub"), OPEN_EXISTING);
+    // `OPEN_ALWAYS` is the case the review flagged: it reaches the ring as
+    // `FILE_OPEN_IF` *carrying* `OPEN_CREATE`, so the provider graph is being
+    // asked to create. `OverlayProvider` refuses with `ST_IS_DIR` rather than
+    // letting a `DiskProvider` upper create a file named after the directory
+    // — and the downgrade has to turn that refusal back into the directory
+    // open the caller meant.
+    let open_always_dir = open_directory_for_write(&root.join("write").join("sub"), OPEN_ALWAYS);
+    // …but `CREATE_ALWAYS` (`FILE_OVERWRITE_IF`) genuinely means "replace
+    // whatever is here with a file", and NT refuses that against a directory.
+    // The downgrade must NOT rescue it, or a refused file create becomes a
+    // silent success handing back a directory handle.
+    let create_always_dir =
+        open_directory_for_write(&root.join("write").join("sub"), CREATE_ALWAYS);
     // The control: a path that genuinely is not there must still fail. Without
     // it, a downgrade that opened *everything* as a directory would pass the
-    // two assertions above.
-    let absent = open_directory_for_write(&root.join("no-such-dir"));
+    // assertions above.
+    let absent = open_directory_for_write(&root.join("no-such-dir"), OPEN_EXISTING);
 
     drop(hooks);
 
@@ -141,6 +163,19 @@ fn a_directory_under_a_managed_root_opens_with_write_access() {
         Ok(()),
         "a directory served by a writable mount must open too; ERROR_GEN_FAILURE (31) here \
          is the pre-fix answer — the writable provider tried to open the directory read+write"
+    );
+    assert_eq!(
+        open_always_dir,
+        Ok(()),
+        "`OPEN_ALWAYS` on an existing directory must open it. This is the case that used to \
+         make a `DiskProvider` write layer create a file named after the directory, which \
+         then shadowed it and broke the whole subtree's listing"
+    );
+    assert!(
+        create_always_dir.is_err(),
+        "`CREATE_ALWAYS` asks to replace the path with a file; against a directory NT refuses, \
+         and so must we — a directory handle here would be a silent success for a create that \
+         did not happen: {create_always_dir:?}"
     );
     assert!(
         absent.is_err(),

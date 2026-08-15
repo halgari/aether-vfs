@@ -267,14 +267,21 @@ impl Fake {
                 };
                 if self.is_dir(&vpath) {
                     if flags & P::OPEN_WRITE != 0 {
-                        // Exactly what a real graph answers: read-only mount
-                        // refuses on access, writable mount tries to open the
-                        // directory read+write and fails. See `with_dir`.
+                        // The three answers a real graph gives, and they are
+                        // genuinely different code paths — see `with_dir`:
+                        // a read-only mount refuses on access; an
+                        // `OverlayProvider` whose base holds the directory
+                        // refuses a *creating* open outright; a bare writable
+                        // `DiskProvider` tries `read(true).write(true)` on the
+                        // directory and fails. One downgrade has to cover all
+                        // three, or it is a patch for one error code.
                         return (
-                            if self.is_writable(&vpath) {
-                                P::ST_IO_ERROR
-                            } else {
+                            if !self.is_writable(&vpath) {
                                 P::ST_READ_ONLY
+                            } else if flags & P::OPEN_CREATE != 0 {
+                                P::ST_IS_DIR
+                            } else {
+                                P::ST_IO_ERROR
                             },
                             Vec::new(),
                         );

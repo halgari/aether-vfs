@@ -213,6 +213,17 @@ impl Overlay {
             let name = e.file_name().to_string_lossy().into_owned();
             if let Some(base) = is_whiteout(&name) {
                 map.remove(&fold(base));
+                // …and the marker's own name, which `merged` may already
+                // carry. Since gate 4 Task 6 a host mounts this very
+                // directory into the director's graph as a write layer (see
+                // `overlay_layer_dir`), so the director's own listing of it
+                // arrives here containing every marker as an ordinary file.
+                // The director uses a different marker convention
+                // (`vfs_compose::OverlayProvider`'s `.wh.<name>` prefix) and
+                // so has no reason to hide ours; dropping it here is what
+                // keeps a deletion tombstone from surfacing to the game as a
+                // real file called `<name>.__vfs_wh__`.
+                map.remove(&fold(&name));
                 continue;
             }
             let md = match e.metadata() {
@@ -293,6 +304,50 @@ mod tests {
             OverlayState::Whiteout => panic!("root 0's whiteout leaked into root 1's lookup"),
             OverlayState::Absent => panic!("root 1's overlay file went missing"),
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Gate 4, Task 6 review, minor 1. The shim and the director now share
+    /// one physical overlay directory but spell whiteouts differently — the
+    /// shim appends `.__vfs_wh__`, `vfs_compose::OverlayProvider` prefixes
+    /// `.wh.` — and neither hides the other's markers. The director's listing
+    /// of the shared directory therefore arrives at `apply_to_listing`
+    /// carrying our markers as ordinary files, and without this they reach
+    /// the game as phantom entries named `<file>.__vfs_wh__`.
+    #[test]
+    fn a_whiteout_marker_is_not_listed_as_a_file_when_it_arrives_in_the_merged_listing() {
+        let dir = std::env::temp_dir()
+            .join(format!("vfs-overlay-marker-listing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ov = Overlay::new(dir.to_str().unwrap());
+        let comps = vec!["data".to_string(), "gone.esp".to_string()];
+        ov.whiteout(RootId(0), &comps).unwrap();
+
+        // What the director hands back for `data/` once the same directory is
+        // mounted as its write layer: the deleted file (still in the read
+        // layers) *and* our marker, which the director has no reason to hide.
+        let marker = vfs_redirect::whiteout_marker("gone.esp");
+        let merged = vec![
+            DirItem { name: "gone.esp".into(), is_dir: false, size: 10, mtime: 0 },
+            DirItem { name: marker.clone(), is_dir: false, size: 0, mtime: 0 },
+            DirItem { name: "kept.esp".into(), is_dir: false, size: 20, mtime: 0 },
+        ];
+
+        let out = ov.apply_to_listing(RootId(0), &["data".to_string()], merged, None);
+        let names: Vec<&str> = out.iter().map(|i| i.name.as_str()).collect();
+        assert!(
+            !names.iter().any(|n| *n == marker),
+            "the tombstone surfaced to the caller as a real file: {names:?}"
+        );
+        assert!(
+            !names.contains(&"gone.esp"),
+            "the whiteout must still hide the file it names: {names:?}"
+        );
+        assert!(
+            names.contains(&"kept.esp"),
+            "unrelated entries must survive: {names:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -27,9 +27,9 @@ use std::sync::{Arc, Mutex};
 
 use vfs_core::fold;
 use vfs_provider::{
-    bad_fh, bad_request, map_io_err, not_found, not_supported, Access, Capabilities, DirEntry,
-    Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_READ,
-    OPEN_TRUNC, OPEN_WRITE,
+    bad_fh, bad_request, is_dir, map_io_err, not_a_dir, not_found, not_supported, Access,
+    Capabilities, DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE,
+    OPEN_CREATE, OPEN_READ, OPEN_TRUNC, OPEN_WRITE,
 };
 
 #[derive(Clone, Copy)]
@@ -47,6 +47,34 @@ pub struct OverlayProvider {
     /// Paths currently being copied up, so two concurrent writers to the same
     /// base-only path copy exactly once instead of racing.
     copying: Mutex<HashSet<String>>,
+    /// Which names each upper directory hides with a `.wh.` marker, keyed by
+    /// `(root, folded parent path)` and holding the *folded base names* the
+    /// markers refer to. A present entry means that directory has been
+    /// scanned; a missing one means it has not.
+    ///
+    /// **This exists for the read path, not the write path.** Every
+    /// `getattr`, `open` and `readdir` has to answer "is this path, or any
+    /// ancestor directory of it, whited out?", and the direct implementation
+    /// is one `upper.getattr` per ancestor — `depth + 1` filesystem
+    /// `metadata` calls on *every* read of *every* file. Under a game load
+    /// that is six figures of syscalls doing nothing, in a harness whose
+    /// other job is measuring load time.
+    ///
+    /// One `upper.readdir` of a directory answers the question for that
+    /// directory's whole contents at once, so the index costs one readdir per
+    /// distinct directory ever touched (first touch only; a directory absent
+    /// from the upper — the common case, since the upper is a write layer —
+    /// costs a single failed call) and zero filesystem calls per operation
+    /// afterwards.
+    ///
+    /// It is safe to cache because **this provider is the only writer of
+    /// `.wh.` markers in its own upper**: they are created only by
+    /// [`OverlayProvider::write_whiteout`] and removed only by
+    /// [`OverlayProvider::clear_whiteout`], both of which update the index in
+    /// the same step. A process outside this provider mutating the upper's
+    /// markers underneath us is already outside the contract — the upper is
+    /// the overlay's private store.
+    whiteouts: Mutex<HashMap<(u32, String), HashSet<String>>>,
 }
 
 /// Removes `path` from the in-flight set on drop, including on early return —
@@ -96,6 +124,7 @@ impl OverlayProvider {
             next: AtomicU64::new(1),
             opens: Mutex::new(HashMap::new()),
             copying: Mutex::new(HashSet::new()),
+            whiteouts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -135,9 +164,94 @@ impl OverlayProvider {
         }
     }
 
+    /// `(parent directory, name)` for `rel`; the parent of a top-level name
+    /// is the empty root path.
+    fn split_parent(rel: &str) -> (&str, &str) {
+        match rel.rsplit_once('/') {
+            Some((parent, name)) => (parent, name),
+            None => ("", rel),
+        }
+    }
+
+    /// Every name the upper's `dir` hides with a `.wh.` marker, folded. A
+    /// directory the upper does not have (or has as a file) hides nothing.
+    fn scan_whiteouts(&self, dir: VPath) -> Result<HashSet<String>, i32> {
+        let mut hidden = HashSet::new();
+        match self.upper.readdir(dir) {
+            Ok(entries) => {
+                for e in entries {
+                    if let Some(base) = e.name.strip_prefix(".wh.") {
+                        hidden.insert(fold(base));
+                    }
+                }
+            }
+            Err(e) if e == not_found() || e == not_a_dir() => {}
+            Err(e) => return Err(e),
+        }
+        Ok(hidden)
+    }
+
+    /// Answered from [`OverlayProvider::whiteouts`] — see that field for why
+    /// this is an index lookup rather than the `upper.getattr` per ancestor
+    /// it used to be.
+    ///
+    /// Folded on both sides, matching `readdir`'s own whiteout matching. On a
+    /// case-insensitive upper that is what the filesystem was doing anyway;
+    /// on a case-sensitive one it is the behaviour the rest of this file
+    /// already assumes.
     fn is_whiteout(&self, p: VPath) -> Result<bool, i32> {
-        let wh = self.whiteout_path(p.rel);
-        Ok(self.upper.getattr(VPath::new(p.root, &wh))?.is_some())
+        let (parent, name) = Self::split_parent(p.rel);
+        let key = (p.root.0, fold(parent));
+        let want = fold(name);
+        if let Some(hidden) = self.whiteouts.lock().map_err(|_| map_io_err())?.get(&key) {
+            return Ok(hidden.contains(&want));
+        }
+        // First look inside this directory. One readdir answers it for this
+        // path, all its siblings, and every later ancestor walk through it.
+        let hidden = self.scan_whiteouts(VPath::new(p.root, parent))?;
+        let hit = hidden.contains(&want);
+        self.whiteouts
+            .lock()
+            .map_err(|_| map_io_err())?
+            .insert(key, hidden);
+        Ok(hit)
+    }
+
+    /// Record that `p`'s marker now exists (`hidden`) or no longer does, in
+    /// whichever directory entry the index has already scanned. A directory
+    /// not yet scanned needs nothing: its first scan will see the marker's
+    /// real state on disk.
+    fn note_whiteout(&self, p: VPath, hidden: bool) {
+        let (parent, name) = Self::split_parent(p.rel);
+        let key = (p.root.0, fold(parent));
+        let Ok(mut g) = self.whiteouts.lock() else { return };
+        if let Some(set) = g.get_mut(&key) {
+            if hidden {
+                set.insert(fold(name));
+            } else {
+                set.remove(&fold(name));
+            }
+        }
+    }
+
+    /// Drop the scanned index for `p`'s directory when `p` itself names a
+    /// `.wh.` marker.
+    ///
+    /// The module docs reserve `.wh.*` inside the upper, but nothing stops a
+    /// caller *creating* such a name through this provider (a write, a mkdir,
+    /// a rename destination). Before the index that was self-correcting —
+    /// the next `is_whiteout` read the filesystem. Now the directory has to
+    /// be rescanned, or `readdir` (which scans the upper live) and
+    /// `getattr`/`open` (which read the index) would disagree about whether
+    /// the sibling it names is hidden.
+    fn invalidate_if_marker(&self, p: VPath) {
+        let (parent, name) = Self::split_parent(p.rel);
+        if !name.starts_with(".wh.") {
+            return;
+        }
+        if let Ok(mut g) = self.whiteouts.lock() {
+            g.remove(&(p.root.0, fold(parent)));
+        }
     }
 
     /// True if any ancestor directory of `p` (not `p` itself) has been
@@ -166,8 +280,15 @@ impl OverlayProvider {
     fn clear_whiteout(&self, p: VPath) -> Result<(), i32> {
         let wh = self.whiteout_path(p.rel);
         match self.upper.remove(VPath::new(p.root, &wh)) {
-            Ok(()) => Ok(()),
-            Err(e) if e == not_found() => Ok(()),
+            Ok(()) => {
+                self.note_whiteout(p, false);
+                Ok(())
+            }
+            Err(e) if e == not_found() => {
+                // Nothing was hiding it; the index must agree either way.
+                self.note_whiteout(p, false);
+                Ok(())
+            }
             Err(e) => Err(e),
         }
     }
@@ -178,7 +299,9 @@ impl OverlayProvider {
             VPath::new(p.root, &wh),
             OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC,
         )?;
-        self.upper.close(h)
+        self.upper.close(h)?;
+        self.note_whiteout(p, true);
+        Ok(())
     }
 
     /// Copy the whole base file at `p` into upper if it is not already there.
@@ -294,10 +417,31 @@ impl OverlayProvider {
                 // visible afterward.
                 self.clear_whiteout(p)?;
             } else {
+                // The base serves a **directory** at this path. Falling
+                // through to `upper.open(…, OPEN_CREATE)` below would create
+                // a *file* in the upper named after it — which then shadows
+                // the directory for every later lookup, and makes the whole
+                // subtree unlistable. That is reachable from an ordinary
+                // Windows call: `CreateFileW(dir, GENERIC_WRITE, OPEN_ALWAYS,
+                // FILE_FLAG_BACKUP_SEMANTICS)` sets no `FILE_DIRECTORY_FILE`,
+                // so nothing upstream recognises it as a directory open, and
+                // `FILE_OPEN_IF` arrives here carrying `OPEN_CREATE`.
+                //
+                // `copy_up_if_needed` already declines to copy a directory,
+                // but declining quietly is what let the create through.
+                // Refuse instead, with the status that says why — the shim
+                // turns it back into the directory open the caller wanted
+                // (`hook::dir_open_downgrades`), and a caller that really did
+                // mean "create a file here" gets NT's own answer for a file
+                // create over a directory.
+                if matches!(self.base.getattr(p)?, Some(st) if st.kind == KIND_DIR) {
+                    return Err(is_dir());
+                }
                 self.copy_up_if_needed(p)?;
             }
         }
         let (uh, size, is_dir) = self.upper.open(p, flags)?;
+        self.invalidate_if_marker(p);
         let h = self.track(Layer::Upper, uh)?;
         Ok((h, size, is_dir))
     }
@@ -343,15 +487,27 @@ impl Provider for OverlayProvider {
         // mod-deleted file stays visible.
         let mut map: HashMap<String, DirEntry> = HashMap::new();
         let mut upper_is_dir = false;
+        let mut base_is_dir = false;
+        // One side reporting "that is not a directory" is a fact about *that
+        // side*, not about the merged view. A file sitting in the upper where
+        // the base has a directory must cost the caller the upper's
+        // contribution, not the entire listing — for a game's `Data`
+        // directory the difference is "one stray file is invisible" versus
+        // "the game sees no content at all". `MountGraph::readdir` already
+        // tolerates it the same way; this used to propagate it and fail the
+        // whole call.
+        let mut not_dir = false;
 
         if !self.hidden_by_whiteout(p)? {
             match self.base.readdir(p) {
                 Ok(entries) => {
+                    base_is_dir = true;
                     for e in entries {
                         map.insert(fold(&e.name), e);
                     }
                 }
                 Err(e) if e == not_found() => {}
+                Err(e) if e == not_a_dir() => not_dir = true,
                 Err(e) => return Err(e),
             }
         }
@@ -373,11 +529,19 @@ impl Provider for OverlayProvider {
                 }
             }
             Err(e) if e == not_found() => {}
+            Err(e) if e == not_a_dir() => not_dir = true,
             Err(e) => return Err(e),
         }
 
-        if !upper_is_dir && !path.is_empty() && self.getattr(p)?.is_none() {
-            return Err(not_found());
+        if !upper_is_dir && !base_is_dir {
+            // Neither side is a directory here, and at least one said so
+            // outright. Now — and only now — that is the caller's answer.
+            if not_dir {
+                return Err(not_a_dir());
+            }
+            if !path.is_empty() && self.getattr(p)?.is_none() {
+                return Err(not_found());
+            }
         }
 
         let mut out: Vec<DirEntry> = map.into_values().collect();
@@ -807,6 +971,61 @@ pub(crate) mod tests {
         }
     }
 
+    /// Counts the calls an overlay makes into its **upper**, which is where
+    /// the whiteout bookkeeping lands. A correctness test cannot see the cost
+    /// of that bookkeeping at all — the answers are identical either way —
+    /// so this is the only thing that can hold the read path to a budget.
+    #[derive(Default)]
+    struct CountingUpper {
+        inner: MemUpper,
+        getattrs: AtomicU64,
+        readdirs: AtomicU64,
+    }
+
+    impl Provider for CountingUpper {
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            self.getattrs.fetch_add(1, Ordering::Relaxed);
+            self.inner.getattr(p)
+        }
+        fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+            self.readdirs.fetch_add(1, Ordering::Relaxed);
+            self.inner.readdir(p)
+        }
+        fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+            self.inner.open(p, flags)
+        }
+        fn close(&self, h: Handle) -> Result<(), i32> {
+            self.inner.close(h)
+        }
+        fn read_at(&self, h: Handle, o: u64, b: &mut [u8]) -> Result<usize, i32> {
+            self.inner.read_at(h, o, b)
+        }
+        fn write_at(&self, h: Handle, o: u64, b: &[u8]) -> Result<usize, i32> {
+            self.inner.write_at(h, o, b)
+        }
+        fn set_len(&self, h: Handle, len: u64) -> Result<(), i32> {
+            self.inner.set_len(h, len)
+        }
+        fn flush(&self, h: Handle) -> Result<(), i32> {
+            self.inner.flush(h)
+        }
+        fn mkdir(&self, p: VPath) -> Result<(), i32> {
+            self.inner.mkdir(p)
+        }
+        fn remove(&self, p: VPath) -> Result<(), i32> {
+            self.inner.remove(p)
+        }
+        fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
+            self.inner.rename(from, to)
+        }
+        fn set_attr(&self, p: VPath, a: SetAttr) -> Result<(), i32> {
+            self.inner.set_attr(p, a)
+        }
+    }
+
     /// A base whose `read_at` succeeds for the first chunk of a file and then
     /// fails every call after — used to prove that a copy-up which dies
     /// partway through a multi-chunk file leaves no trace in upper, rather
@@ -1030,6 +1249,132 @@ pub(crate) mod tests {
             counted.opens.load(Ordering::Relaxed),
             1,
             "copy-up opened the base more than once — the in-flight lock did not serialize the race"
+        );
+    }
+
+    /// Gate 4, Task 6 review. The whiteout check runs on **every** read, and
+    /// the obvious implementation costs one `upper.getattr` per ancestor —
+    /// so a five-deep asset path pays six filesystem calls to answer a
+    /// question whose answer is "no" for the entire session. At a game load's
+    /// volume that is six figures of syscalls, in a harness whose other job
+    /// is measuring load time.
+    ///
+    /// The budget asserted here is the whole point of the index: **one**
+    /// `upper.getattr` per warm `getattr` (the real content lookup, which was
+    /// always there), and **zero** `upper.readdir`. Correctness tests cannot
+    /// see this — the answers are the same either way.
+    #[test]
+    fn warm_reads_cost_one_upper_lookup_regardless_of_path_depth() {
+        use vfs_provider::{Provider, VPath};
+        let base = Arc::new(InlineProvider::from_files([
+            ("a/b/c/d/deep.txt", b"DEEP".as_slice()),
+            ("a/b/c/d/sibling.txt", b"SIB".as_slice()),
+            ("shallow.txt", b"TOP".as_slice()),
+        ]));
+        let upper = Arc::new(CountingUpper::default());
+        let ov = OverlayProvider::from_arcs(base, upper.clone()).unwrap();
+
+        let deep = VPath::at_default("a/b/c/d/deep.txt");
+        // Warm-up: this is where the per-directory scans happen, once.
+        assert!(ov.getattr(deep).unwrap().is_some());
+        let warm_getattrs = upper.getattrs.load(Ordering::Relaxed);
+        let warm_readdirs = upper.readdirs.load(Ordering::Relaxed);
+        assert!(
+            warm_readdirs <= 5,
+            "warm-up must scan at most one directory per path component \
+             (5 for a 5-deep path), got {warm_readdirs}"
+        );
+
+        // Now the steady state: repeat reads, plus a sibling and an unrelated
+        // shallow path, both of which reuse directories already scanned.
+        for _ in 0..20 {
+            assert!(ov.getattr(deep).unwrap().is_some());
+        }
+        assert!(ov
+            .getattr(VPath::at_default("a/b/c/d/sibling.txt"))
+            .unwrap()
+            .is_some());
+        assert!(ov.getattr(VPath::at_default("shallow.txt")).unwrap().is_some());
+        // A path that does not exist anywhere must not reopen the question
+        // either.
+        assert!(ov
+            .getattr(VPath::at_default("a/b/c/d/absent.txt"))
+            .unwrap()
+            .is_none());
+
+        assert_eq!(
+            upper.readdirs.load(Ordering::Relaxed),
+            warm_readdirs,
+            "a warm read must not touch the upper's directories at all; every call here \
+             walks directories the index already holds"
+        );
+        assert_eq!(
+            upper.getattrs.load(Ordering::Relaxed) - warm_getattrs,
+            23,
+            "each warm read must cost exactly one `upper.getattr` — the content lookup that \
+             was always there — and none for the whiteout walk. A number near 6x this is the \
+             per-ancestor `metadata` storm the index removes"
+        );
+    }
+
+    /// The index is only sound if it tracks the markers this provider writes.
+    /// A whiteout created *after* its directory was scanned must hide, and
+    /// clearing it must un-hide — otherwise the cache is a correctness bug
+    /// wearing a performance fix.
+    #[test]
+    fn a_whiteout_written_after_its_directory_was_scanned_still_hides() {
+        use vfs_provider::{Provider, VPath, OPEN_CREATE, OPEN_WRITE};
+        let base = Arc::new(InlineProvider::from_files([("dir/a.txt", b"BASE".as_slice())]));
+        let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
+        let f = VPath::at_default("dir/a.txt");
+
+        // Read first, so "dir" and the root are already scanned and cached as
+        // holding no markers.
+        assert!(ov.getattr(f).unwrap().is_some());
+        assert!(!ov.readdir(VPath::at_default("dir")).unwrap().is_empty());
+
+        ov.remove(f).expect("remove writes a whiteout");
+        assert!(
+            ov.getattr(f).unwrap().is_none(),
+            "a whiteout written after the directory was scanned did not hide the base file — \
+             the index went stale"
+        );
+
+        // …and clearing it puts the path back.
+        let (h, _, _) = ov.open(f, OPEN_WRITE | OPEN_CREATE).expect("recreate");
+        ov.close(h).unwrap();
+        assert!(
+            ov.getattr(f).unwrap().is_some(),
+            "clearing the whiteout did not remove it from the index"
+        );
+    }
+
+    /// A caller can create a file literally named `.wh.x` through this
+    /// provider. The module docs reserve the prefix, so that file *is* a
+    /// marker for `x` — and `readdir`, which scans the upper live, treats it
+    /// as one. The index has to agree, or the two views of the same directory
+    /// disagree about whether `x` is hidden.
+    #[test]
+    fn creating_a_marker_named_file_through_the_overlay_is_seen_by_the_index() {
+        use vfs_provider::{Provider, VPath, OPEN_CREATE, OPEN_WRITE};
+        let base = Arc::new(InlineProvider::from_files([("dir/x.txt", b"BASE".as_slice())]));
+        let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
+
+        // Scan "dir" while it holds no markers.
+        assert!(ov.getattr(VPath::at_default("dir/x.txt")).unwrap().is_some());
+
+        let (h, _, _) = ov
+            .open(VPath::at_default("dir/.wh.x.txt"), OPEN_WRITE | OPEN_CREATE)
+            .expect("create a file whose name happens to be a marker");
+        ov.close(h).unwrap();
+
+        let listed = ov.readdir(VPath::at_default("dir")).unwrap();
+        let listed_x = listed.iter().any(|e| e.name == "x.txt");
+        let stat_x = ov.getattr(VPath::at_default("dir/x.txt")).unwrap().is_some();
+        assert_eq!(
+            listed_x, stat_x,
+            "readdir and getattr disagree about whether `x.txt` is hidden: listed={listed_x}, \
+             stat={stat_x}. readdir scans the upper live and the index must match it."
         );
     }
 

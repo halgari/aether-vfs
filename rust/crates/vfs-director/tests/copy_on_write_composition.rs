@@ -262,6 +262,107 @@ fn reads_of_untouched_layered_content_are_unchanged_by_the_write_layer() {
     );
 }
 
+/// A write open of a path the read layers serve as a **directory** must not
+/// create a file over it in the write layer.
+///
+/// `CreateFileW(dir, GENERIC_WRITE, OPEN_ALWAYS, FILE_FLAG_BACKUP_SEMANTICS)`
+/// sets no `FILE_DIRECTORY_FILE`, so nothing upstream recognises it as a
+/// directory open; the disposition reaches the ring as `FILE_OPEN_IF`
+/// carrying `OPEN_CREATE`, and a `DiskProvider` upper will happily create a
+/// *file* named `data`. That file then shadows the directory — and, before
+/// the companion fix below, made the entire subtree unlistable.
+#[test]
+fn a_write_open_of_a_layered_directory_does_not_create_a_file_over_it() {
+    let l = layout("dircreate");
+    let s = Session::new();
+    mount_read_layers(&s, &l);
+    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides))).unwrap();
+
+    // `data` exists only implicitly, as the parent of the zip's `Data/x.esp`
+    // — the same way a real archive carries its directories.
+    let st = s.kernel().getattr(RootId::DEFAULT, "data").unwrap().unwrap();
+    assert_eq!(st.kind, vfs_director::KIND_DIR, "setup: `data` must resolve as a directory");
+
+    let err = s
+        .kernel()
+        .open(
+            RootId::DEFAULT,
+            "data",
+            OPEN_WRITE | vfs_protocol::OPEN_CREATE,
+        )
+        .expect_err("a create over a layered directory must be refused, not honoured");
+    assert_eq!(
+        err,
+        vfs_provider::ST_IS_DIR,
+        "the refusal must say *why* — the shim turns ST_IS_DIR back into the directory open \
+         the caller actually wanted, and any other status loses that"
+    );
+    assert!(
+        !l.overrides.join("data").exists(),
+        "a file named after the directory was created in the write layer; it shadows the \
+         directory for every later lookup"
+    );
+    // The directory is still a directory afterwards.
+    assert_eq!(
+        s.kernel().getattr(RootId::DEFAULT, "data").unwrap().unwrap().kind,
+        vfs_director::KIND_DIR
+    );
+}
+
+/// …and if such a file gets into the write layer by any other route, it must
+/// cost the caller that one entry — not the whole directory's contents.
+///
+/// `OverlayProvider::readdir` used to propagate the upper's `not_a_dir`,
+/// where `MountGraph` tolerated it. For a game's `Data` directory that is the
+/// difference between "one stray file is invisible" and "the game sees no
+/// content at all", which is what turns a narrow bug into a broad one.
+#[test]
+fn a_stray_file_in_the_write_layer_does_not_break_a_directorys_listing() {
+    let l = layout("straylisting");
+    // Planted directly on disk, deliberately bypassing the provider graph:
+    // the point is resilience to a write layer that is already in this state,
+    // whatever produced it.
+    std::fs::write(l.overrides.join("data"), b"a file where a directory belongs").unwrap();
+
+    let s = Session::new();
+    mount_read_layers(&s, &l);
+    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides))).unwrap();
+
+    let names: Vec<String> = s
+        .kernel()
+        .readdir(RootId::DEFAULT, "data")
+        .expect(
+            "a stray file in the write layer must not fail the whole listing — this is the \
+             difference between losing one entry and the game seeing no content at all",
+        )
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert!(
+        names.iter().any(|n| n.eq_ignore_ascii_case("x.esp")),
+        "the read layers' entries must survive the stray upper file, got {names:?}"
+    );
+    // The content underneath is still readable.
+    assert_eq!(read_whole(&s, ZIP_VPATH), ORIGINAL);
+}
+
+/// A path that is not a directory in *either* layer must still report itself
+/// as one — the resilience above must not turn every mistake into an empty
+/// listing.
+#[test]
+fn listing_a_plain_file_still_reports_not_a_directory() {
+    let l = layout("notadir");
+    let s = Session::new();
+    mount_read_layers(&s, &l);
+    s.set_write_layer(Arc::new(DiskProvider::new(&l.overrides))).unwrap();
+
+    let err = s
+        .kernel()
+        .readdir(RootId::DEFAULT, ZIP_VPATH)
+        .expect_err("listing a file is not a listing");
+    assert_eq!(err, vfs_provider::ST_NOT_A_DIRECTORY);
+}
+
 /// A write layer that is not writable is refused where it is declared, not at
 /// the first write — the same fail-fast `OverlayProvider::new` applies, routed
 /// through the `Session` API a host actually calls.

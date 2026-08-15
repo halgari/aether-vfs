@@ -157,7 +157,8 @@ use crate::ntdef::{
     FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX, FILE_STANDARD_INFORMATION, SEC_IMAGE,
     SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW,
     STATUS_END_OF_FILE, STATUS_INVALID_FILE_FOR_SECTION, STATUS_INVALID_HANDLE,
-    STATUS_NO_MORE_FILES, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND,
+    STATUS_FILE_IS_A_DIRECTORY, STATUS_NO_MORE_FILES, STATUS_OBJECT_NAME_COLLISION,
+    STATUS_OBJECT_NAME_NOT_FOUND,
     STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SECTION_TOO_BIG, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 
@@ -1366,6 +1367,14 @@ unsafe fn try_fuse_create(
         //   fact, not a fault, and `STATUS_ACCESS_DENIED` is what a real
         //   read-only filesystem answers — a status callers already have code
         //   for, unlike `STATUS_UNSUCCESSFUL`'s `ERROR_GEN_FAILURE`.
+        // - `ST_IS_DIR` means the path is a directory and the caller asked to
+        //   create or replace a file over it (`OverlayProvider::open_for_write`
+        //   refuses rather than letting a `DiskProvider` upper create a file
+        //   named after the directory). The two non-creating dispositions
+        //   never get here — `dir_open_downgrades` already turned them into
+        //   the directory open the caller meant — so what is left genuinely
+        //   is a file create aimed at a directory, and NT has a status that
+        //   says exactly that.
         // - Anything else (I/O error, bad request, a provider that broke) is a
         //   genuine failure: `STATUS_UNSUCCESSFUL`, matching the read-side
         //   `Err(_)` arm below, which likewise refuses to fall through.
@@ -1373,10 +1382,10 @@ unsafe fn try_fuse_create(
         // Note there is no `allow_disk_fallthrough` escape here, again matching
         // the read side: that switch relaxes "the director does not have this",
         // never "the director failed".
-        Err(st) if write => Some(if st == vfs_protocol::ST_READ_ONLY {
-            STATUS_ACCESS_DENIED
-        } else {
-            STATUS_UNSUCCESSFUL
+        Err(st) if write => Some(match st {
+            vfs_protocol::ST_READ_ONLY => STATUS_ACCESS_DENIED,
+            vfs_protocol::ST_IS_DIR => STATUS_FILE_IS_A_DIRECTORY,
+            _ => STATUS_UNSUCCESSFUL,
         }),
         Err(_) => {
             // Director down / I/O — do not fall through to the Steam tree.
