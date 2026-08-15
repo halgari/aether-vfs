@@ -319,7 +319,11 @@ fn rename_materialises_its_source_through_the_director_too() {
     let to = f.nt(&["Data", "renamed.esp"]);
     let dest = f.dest(&["data", "renamed.esp"]);
 
-    assert!(f.engine.rename(&from, &to), "the rename must be handled by the overlay");
+    assert_eq!(
+        f.engine.rename(&from, &to),
+        vfs_shim::RenameOutcome::Handled,
+        "the rename must be handled by the overlay"
+    );
 
     assert_eq!(
         std::fs::read(&dest).unwrap_or_default(),

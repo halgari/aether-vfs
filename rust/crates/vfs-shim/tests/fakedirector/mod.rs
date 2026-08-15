@@ -13,11 +13,20 @@
 //! does in production, so the code path under test is the production one; only
 //! the far side of the ring is a fake.
 //!
-//! It answers only what copy-up uses (HEARTBEAT, GETATTR, OPEN, READ, CLOSE)
-//! and deliberately gives a test control over *how* a READ is answered
+//! It answers what copy-up uses (HEARTBEAT, GETATTR, OPEN, READ, CLOSE) plus
+//! WRITE, and deliberately gives a test control over *how* a READ is answered
 //! ([`ReadStyle`]), because the read loop's correctness is mostly about what
 //! it does with awkward answers: a short read that is not EOF, a read that
 //! fails part-way, a file that turns out shorter than OPEN promised.
+//!
+//! **The write half** exists for gate 4's Task 5, which turns every director
+//! answer to a write open into the shim's answer to the caller. Testing that
+//! needs a provider graph that can say all four things a real one says to a
+//! write: *here you are* (a writable mount), *no such place* (`ST_NOT_FOUND`,
+//! nothing writable covers this path), *not allowed* (`ST_READ_ONLY`, served
+//! but by a read-only layer), and *already there* (`ST_EXISTS` for
+//! `OPEN_EXCL`). [`Fake::writable_under`] draws the line between the first two;
+//! anything served but outside a writable prefix answers the third.
 //!
 //! **Both transports.** A READ is answered inline (data in the ring payload)
 //! or in **bulk** (data written into the shared arena, ring carries only
@@ -97,6 +106,7 @@ pub struct Tally {
     closed: Mutex<HashMap<String, u64>>,
     reads: Mutex<HashMap<String, u64>>,
     bulk_reads: Mutex<HashMap<String, u64>>,
+    writes: Mutex<HashMap<String, u64>>,
 }
 
 impl Tally {
@@ -124,44 +134,67 @@ impl Tally {
     pub fn bulk_reads(&self, vpath: &str) -> u64 {
         Self::get(&self.bulk_reads, vpath)
     }
+    /// WRITE requests that reached the server for this file. Zero here with
+    /// bytes on disk somewhere means the write never crossed the ring.
+    pub fn writes(&self, vpath: &str) -> u64 {
+        Self::get(&self.writes, vpath)
+    }
 }
 
 pub struct Fake {
-    files: HashMap<String, Entry>,
+    /// Behind a `Mutex` because a WRITE mutates it and an OPEN with
+    /// `OPEN_CREATE` adds to it — the ring server hands `handle` a `&self`.
+    files: Mutex<HashMap<String, Entry>>,
     handles: Mutex<HashMap<u64, String>>,
     next_fh: AtomicU64,
-    refuse_writes: bool,
+    writable: Vec<String>,
     pub tally: Tally,
 }
 
 impl Fake {
     pub fn new() -> Fake {
         Fake {
-            files: HashMap::new(),
+            files: Mutex::new(HashMap::new()),
             handles: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
-            refuse_writes: false,
+            writable: Vec::new(),
             tally: Tally::default(),
         }
     }
 
-    /// Answer `OPEN_WRITE` with `ST_READ_ONLY`, the way a read-only provider
-    /// does. This is what puts the shim on its write-fallback path
-    /// (`try_fuse_create`'s "Director rejects OPEN_WRITE … fall through so
-    /// write/create under the root hits the overlay redirect path"), which is
-    /// the only route by which a hooked process reaches `Engine::cow_seed` at
-    /// all. A fake that accepted writes would serve the whole open through the
-    /// director and never exercise copy-up.
-    pub fn read_only(mut self) -> Fake {
-        self.refuse_writes = true;
+    /// Declare a vpath prefix that a `ReadWrite` provider is mounted over: a
+    /// create landing inside it is honoured, and writes to files inside it
+    /// stick. Outside every declared prefix the graph behaves read-only —
+    /// a served file answers `ST_READ_ONLY` to a write open and an unserved
+    /// one answers `ST_NOT_FOUND` to a create, which are the two distinct
+    /// refusals `Director::open` itself produces.
+    ///
+    /// With no prefix declared at all (the default) the whole graph is
+    /// read-only, which is the shape every pre-Task-5 fixture here wanted.
+    pub fn writable_under(mut self, prefix: &str) -> Fake {
+        self.writable.push(prefix.to_string());
         self
+    }
+
+    fn is_writable(&self, vpath: &str) -> bool {
+        self.writable.iter().any(|p| vpath.starts_with(p.as_str()))
     }
 
     /// Add a file to the provider graph. `vpath` is the folded, `/`-joined
     /// remainder the shim builds from the path (`Data\A.esp` -> `data/a.esp`).
     pub fn with(mut self, vpath: &str, bytes: Vec<u8>, style: ReadStyle) -> Fake {
-        self.files.insert(vpath.to_string(), Entry { bytes, style });
+        self.files
+            .get_mut()
+            .unwrap()
+            .insert(vpath.to_string(), Entry { bytes, style });
         self
+    }
+
+    /// The bytes the graph currently holds for `vpath` — what a WRITE that
+    /// crossed the ring actually left behind, readable by a test without
+    /// going back through the shim.
+    pub fn contents(&self, vpath: &str) -> Option<Vec<u8>> {
+        self.files.lock().unwrap().get(vpath).map(|e| e.bytes.clone())
     }
 
     /// `arena` is `(arena, slot)` for this request, mirroring
@@ -180,7 +213,8 @@ impl Fake {
                 let Some((_root, vpath)) = P::decode_path_req(payload) else {
                     return (P::ST_BAD_REQUEST, Vec::new());
                 };
-                let found = self.files.get(&vpath);
+                let files = self.files.lock().unwrap();
+                let found = files.get(&vpath);
                 (
                     P::ST_OK,
                     P::encode_getattr_resp(&P::AttrResp {
@@ -195,23 +229,66 @@ impl Fake {
                 let Some((_root, flags, vpath)) = P::decode_open_req(payload) else {
                     return (P::ST_BAD_REQUEST, Vec::new());
                 };
-                if self.refuse_writes && flags & P::OPEN_WRITE != 0 {
-                    return (P::ST_READ_ONLY, Vec::new());
+                let mut files = self.files.lock().unwrap();
+                let exists = files.contains_key(&vpath);
+                if flags & P::OPEN_WRITE != 0 {
+                    // Mirrors `Director::open` + `DiskProvider::open`: the
+                    // access check first (a read-only mount refuses the write
+                    // whether or not the file is there), then the disposition
+                    // bits.
+                    if !self.is_writable(&vpath) {
+                        return (
+                            if exists { P::ST_READ_ONLY } else { P::ST_NOT_FOUND },
+                            Vec::new(),
+                        );
+                    }
+                    if exists && flags & P::OPEN_EXCL != 0 {
+                        return (P::ST_EXISTS, Vec::new());
+                    }
+                    if !exists {
+                        if flags & P::OPEN_CREATE == 0 {
+                            return (P::ST_NOT_FOUND, Vec::new());
+                        }
+                        files.insert(
+                            vpath.clone(),
+                            Entry { bytes: Vec::new(), style: ReadStyle::Whole },
+                        );
+                    } else if flags & P::OPEN_TRUNC != 0 {
+                        files.get_mut(&vpath).expect("just checked").bytes.clear();
+                    }
                 }
-                let Some(e) = self.files.get(&vpath) else {
+                let Some(e) = files.get(&vpath) else {
                     return (P::ST_NOT_FOUND, Vec::new());
                 };
+                let size = e.bytes.len() as u64;
+                drop(files);
                 let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
                 Tally::bump(&self.tally.opened, &vpath);
                 self.handles.lock().unwrap().insert(fh, vpath);
                 (
                     P::ST_OK,
-                    P::encode_open_resp(&P::OpenResp {
-                        fh,
-                        size: e.bytes.len() as u64,
-                        is_dir: false,
-                    }),
+                    P::encode_open_resp(&P::OpenResp { fh, size, is_dir: false }),
                 )
+            }
+            P::OP_WRITE => {
+                let Some((req, data)) = P::decode_write_req(payload) else {
+                    return (P::ST_BAD_REQUEST, Vec::new());
+                };
+                let vpath = match self.handles.lock().unwrap().get(&req.fh) {
+                    Some(v) => v.clone(),
+                    None => return (P::ST_BAD_FH, Vec::new()),
+                };
+                Tally::bump(&self.tally.writes, &vpath);
+                let mut files = self.files.lock().unwrap();
+                let Some(e) = files.get_mut(&vpath) else {
+                    return (P::ST_NOT_FOUND, Vec::new());
+                };
+                let at = req.offset as usize;
+                if e.bytes.len() < at + data.len() {
+                    e.bytes.resize(at + data.len(), 0);
+                }
+                e.bytes[at..at + data.len()].copy_from_slice(&data);
+                (P::ST_OK, P::encode_write_resp(data.len() as u32))
             }
             P::OP_READ => {
                 let Some(req) = P::decode_read_req(payload) else {
@@ -222,7 +299,8 @@ impl Fake {
                     None => return (P::ST_BAD_REQUEST, Vec::new()),
                 };
                 Tally::bump(&self.tally.reads, &vpath);
-                let e = &self.files[&vpath];
+                let files = self.files.lock().unwrap();
+                let e = &files[&vpath];
                 let limit = match e.style {
                     ReadStyle::Error => return (P::ST_IO_ERROR, Vec::new()),
                     ReadStyle::Whole => e.bytes.len() as u64,

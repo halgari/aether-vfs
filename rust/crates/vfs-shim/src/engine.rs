@@ -87,6 +87,26 @@ pub enum EngineError {
     Snapshot(LayoutError),
 }
 
+/// What [`Engine::rename`] did, and — the reason this is not a `bool` — what
+/// the caller is allowed to do next.
+///
+/// The middle and last variants used to be the same `false`, which is how a
+/// cross-root rename ended up being carried out by the real filesystem. See
+/// [`Engine::rename`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameOutcome {
+    /// The overlay performed the move. Suppress the real rename and report
+    /// success.
+    Handled,
+    /// Not ours: no overlay is configured, or a side of the move does not
+    /// resolve cleanly under any managed root. The real rename may proceed.
+    Declined,
+    /// Both sides resolve under managed roots, but *different* ones. The
+    /// caller must fail the call — never trampoline, or the kernel moves the
+    /// file across the root boundary for real.
+    CrossRoot,
+}
+
 /// Owns the redirect policy, the snapshot it resolves against, and an optional
 /// write overlay consulted ahead of the snapshot.
 pub struct Engine {
@@ -500,33 +520,54 @@ impl Engine {
     }
 
     /// Rename `from_nt` to `to_nt` within the overlay: materialize the source if
-    /// needed, move it, and whiteout the old location. Returns whether it was
-    /// handled; `false` (no overlay, or either side not cleanly under root) means
-    /// the caller should let the real rename proceed.
+    /// needed, move it, and whiteout the old location.
     ///
-    /// A rename whose two sides land under *different* roots is declined
-    /// rather than guessed at, matching what `hook.rs` already does one layer
-    /// up when the FUSE client answers the same question (`Some((dst_root,
-    /// dstv)) if dst_root == root`): `Overlay::rename` moves within one
-    /// root's subtree, and there is no cross-root move in the provider
-    /// contract either. Picking one of the two ids would file the result
-    /// under a root that only half the operation named.
-    pub fn rename(&self, from_nt: &str, to_nt: &str) -> bool {
+    /// [`RenameOutcome::Declined`] (no overlay, or a side that is not cleanly
+    /// under any root) means the caller may let the real rename proceed.
+    /// [`RenameOutcome::CrossRoot`] does **not**: see below.
+    ///
+    /// A rename whose two sides land under *different* roots is refused rather
+    /// than guessed at, matching what `hook.rs` already does one layer up when
+    /// the FUSE client answers the same question (`Some((dst_root, dstv)) if
+    /// dst_root == root`): `Overlay::rename` moves within one root's subtree,
+    /// and there is no cross-root move in the provider contract either.
+    /// Picking one of the two ids would file the result under a root that only
+    /// half the operation named.
+    ///
+    /// **Refusing is not the same as declining, and this used to conflate
+    /// them** (gate 4, Task 5). Both answered `false`, and `setinfo_hook` reads
+    /// `false` as "let the real `NtSetInformationFile` run" — so a cross-root
+    /// rename of an overlay-captured file was performed by the kernel, which
+    /// physically moved it out of the overlay and onto real disk under the
+    /// destination root. The content escaped the VFS, and then read back as
+    /// missing, because that root seals every path the provider graph does not
+    /// serve. (Across volumes it instead surfaced as a bare
+    /// `STATUS_NOT_SAME_DEVICE`, an error the caller has no way to interpret
+    /// here.) The distinct variant is what lets the caller fail closed.
+    ///
+    /// The cross-root check deliberately runs **before** the overlay check: an
+    /// engine with no overlay has no capture to lose, but it has the same two
+    /// managed roots, and handing that move to the kernel is the same escape.
+    pub fn rename(&self, from_nt: &str, to_nt: &str) -> RenameOutcome {
+        let from_hit = self.resolve(from_nt).filter(|(_, c)| !c.is_empty());
+        let to_hit = self.resolve(to_nt).filter(|(_, c)| !c.is_empty());
+        if let (Some((from_root, _)), Some((to_root, _))) = (&from_hit, &to_hit) {
+            if from_root != to_root {
+                return RenameOutcome::CrossRoot;
+            }
+        }
         let ov = match &self.overlay {
             Some(o) => o,
-            None => return false,
+            None => return RenameOutcome::Declined,
         };
-        let (from_root, from) = match self.resolve(from_nt) {
-            Some((r, c)) if !c.is_empty() => (r, c),
-            _ => return false,
+        let (from_root, from) = match from_hit {
+            Some(hit) => hit,
+            None => return RenameOutcome::Declined,
         };
-        let (to_root, to) = match self.resolve(to_nt) {
-            Some((r, c)) if !c.is_empty() => (r, c),
-            _ => return false,
+        let (_, to) = match to_hit {
+            Some(hit) => hit,
+            None => return RenameOutcome::Declined,
         };
-        if from_root != to_root {
-            return false;
-        }
         ov.ensure_parent(from_root, &from);
         if !ov.has_file(from_root, &from) {
             let dest = ov.file_path(from_root, &from);
@@ -540,7 +581,7 @@ impl Engine {
             self.copy_up(from_root, from_nt, &from, &dest);
         }
         ov.rename(from_root, &from, &to);
-        true
+        RenameOutcome::Handled
     }
 
     /// Apply the shim-local write overlay (adds/overrides win, whiteouts
@@ -703,6 +744,55 @@ mod tests {
         let engine = Engine::new(r"\??\C:\Games\Skyrim", snapshot_bytes()).unwrap();
         assert!(engine.is_under_root(r"\??\C:\Games\Skyrim\Data\foo.esp"));
         assert!(!engine.is_under_root(r"\??\C:\Windows\notepad.exe"));
+    }
+
+    /// Gate 4, Task 5. A rename whose two sides land under *different* managed
+    /// roots is [`RenameOutcome::CrossRoot`], never `Declined` — the two used
+    /// to be the same `false`, and `setinfo_hook` reads a decline as
+    /// permission to run the real `NtSetInformationFile`, which physically
+    /// moves the file across the root boundary.
+    #[test]
+    fn a_cross_root_rename_is_refused_rather_than_declined() {
+        let base = std::env::temp_dir()
+            .join(format!("vfs-engine-xroot-{}", std::process::id()));
+        let root0 = base.join("root0");
+        let root1 = base.join("root1");
+        let overlay = base.join("overlay");
+        std::fs::create_dir_all(&root0).unwrap();
+        std::fs::create_dir_all(&root1).unwrap();
+        std::fs::create_dir_all(&overlay).unwrap();
+        let roots = [
+            (RootId::DEFAULT, root0.to_string_lossy().into_owned()),
+            (RootId(1), root1.to_string_lossy().into_owned()),
+        ];
+        let from = format!(r"\??\{}", root1.join("a.txt").display());
+        let to = format!(r"\??\{}", root0.join("b.txt").display());
+
+        let with_overlay = Engine::with_roots_and_overlay(
+            &roots,
+            &overlay.to_string_lossy(),
+            snapshot_bytes(),
+        )
+        .unwrap();
+        assert_eq!(with_overlay.rename(&from, &to), RenameOutcome::CrossRoot);
+
+        // And with no overlay at all: an engine with nothing to capture the
+        // move still must not hand it to the kernel, because the two roots are
+        // just as real. This is why the cross-root check runs *before* the
+        // overlay check rather than after it.
+        let no_overlay = Engine::with_roots(&roots, snapshot_bytes()).unwrap();
+        assert_eq!(
+            no_overlay.rename(&from, &to),
+            RenameOutcome::CrossRoot,
+            "with no overlay the cross-root check was skipped, so the real rename would run"
+        );
+
+        // The control: within one root it is still handled, so the assertions
+        // above are not just \"rename never works\".
+        let same_root = format!(r"\??\{}", root1.join("c.txt").display());
+        assert_eq!(with_overlay.rename(&from, &same_root), RenameOutcome::Handled);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// Gate 3, Task 5's Step 1: the failing test written first. A REAL file,

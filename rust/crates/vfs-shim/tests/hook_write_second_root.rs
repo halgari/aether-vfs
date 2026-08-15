@@ -79,7 +79,7 @@ fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
         snapshot,
     )
     .unwrap();
-    let _guard = install(engine).expect("install");
+    let guard = install(engine).expect("install");
 
     // --- Reads resolve against the root the path actually lies under ---
     assert_eq!(std::fs::read(root0.join("shared.txt")).unwrap(), b"ROOT0");
@@ -149,6 +149,56 @@ fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
         "the renamed file must live in root 1's overlay subtree"
     );
     assert!(!ovl0.join("renamed.txt").exists(), "rename crossed into root 0's subtree");
+
+    // --- A rename ACROSS roots fails, and moves nothing (gate 4, Task 5) ---
+    //
+    // The overlay has no cross-root move and neither does the provider
+    // contract, so `Engine::rename` refuses. It used to refuse by returning
+    // the same `false` it uses for "not ours", and `setinfo_hook` reads that
+    // as permission to run the real `NtSetInformationFile` — against a handle
+    // that, for an overlay-captured file, points at the *overlay copy*. The
+    // kernel then physically moved that copy onto real disk under root 0,
+    // where it reads back as missing because root 0 seals every path the
+    // provider graph does not serve. Same-volume it silently succeeded;
+    // cross-volume the game got a bare STATUS_NOT_SAME_DEVICE instead.
+    //
+    // `renamed.txt` is a live overlay capture with real bytes behind it, so
+    // this is that exact shape rather than a rename of something absent.
+    let escape_target = root0.join("escaped-across-roots.txt");
+    let result = std::fs::rename(root1.join("renamed.txt"), &escape_target);
+    // The detours have to come down before the filesystem can be inspected:
+    // `escape_target` is under root 0, so a hooked `exists()` asks the engine
+    // (which answers "no" for anything the VFS does not serve) rather than the
+    // filesystem — it would report the escaped file as absent and pass
+    // vacuously.
+    drop(guard);
+    // Asserted before the error itself, because this is the substantive
+    // claim: the bytes must still be where the VFS put them. A run that gets
+    // here with the file present has already lost the content, whatever
+    // status the call returned.
+    assert!(
+        !escape_target.exists(),
+        "the cross-root rename physically moved the overlay copy to {escape_target:?}, on \
+         real disk under root 0 — content that has now left the VFS and reads as missing"
+    );
+    assert!(
+        result.is_err(),
+        "a rename whose two sides land under different managed roots must fail rather than \
+         report a success it did not perform"
+    );
+    assert!(
+        !ovl0.join("escaped-across-roots.txt").exists(),
+        "the cross-root rename landed in root 0's overlay subtree — refusing must not mean \
+         picking one of the two roots"
+    );
+    // The source survives the refusal intact: a failed rename must not be a
+    // half-done one. Read through the overlay's own on-disk copy, since the
+    // detours (and with them the virtual spelling of this file) are down.
+    assert_eq!(
+        std::fs::read(ovl1.join("renamed.txt")).unwrap_or_default(),
+        b"NEW",
+        "the refused rename destroyed or moved its source out of root 1's overlay subtree"
+    );
 
     let _ = std::fs::remove_dir_all(&base);
 }

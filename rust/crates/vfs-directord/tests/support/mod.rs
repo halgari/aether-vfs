@@ -136,6 +136,28 @@ pub struct Reconciliation {
     pub outcomes_section_found: bool,
 }
 
+/// `vfs_shim::hookstats::OpenOutcome::FellThroughWriteFallback`'s rendered
+/// label. Must match that function; a rename there turns the assertion below
+/// into a silent zero, which is why the in-process counterpart
+/// (`vfs-shim`'s `write_seal` test) reads the counter through the typed
+/// `outcome_count(OpenOutcome::FellThroughWriteFallback)` API instead of by
+/// string.
+const WRITE_FALLBACK_LABEL: &str = "fell-through: write-fallback";
+
+impl Reconciliation {
+    /// How many under-root write opens left the director's answer behind for
+    /// the shim-local overlay (or real disk). **Gate 4's Task 5 closed that
+    /// path, so this must be zero.**
+    ///
+    /// Absent from the report and zero are the same thing here: the renderer
+    /// omits any outcome whose count is zero. That is why this is only half
+    /// the guard — `write_seal.rs` holds the other half, asserting the counter
+    /// still exists at all.
+    pub fn write_fallback(&self) -> u64 {
+        self.fell_through.get(WRITE_FALLBACK_LABEL).copied().unwrap_or(0)
+    }
+}
+
 const OUTCOMES_HEADER: &str = "under-root open outcomes:\n";
 
 /// A line inside the outcomes section that is itself one outcome's summary

@@ -18,6 +18,19 @@
 //! Its own binary: it turns instrumentation on for the whole process
 //! (`hookstats::enabled` is resolved once and cached), installs the
 //! process-global detours, and installs the process-global `FuseClient`.
+//!
+//! **Why the two fixtures are named after DRM exceptions** (gate 4, Task 5).
+//! Reaching copy-up needs a real open, under a managed root, that ends up in
+//! `Engine::decide_open`'s write branch. This used to be any write the
+//! director refused; that fall-through is now sealed and such a write is a
+//! hard NT failure instead. What is left, with a director attached, is the
+//! DRM/identity exception list in `try_fuse_create` (`steam_appid.txt`,
+//! `SkyrimSELauncher.exe`, `steam_api*`, `SkyrimSE.exe`): those return `None`
+//! before the ring is consulted, so the open still falls through to
+//! `decision_for`. They are therefore the last hook route into copy-up, which
+//! is a fact worth having a test depend on rather than a comment claim it.
+//! Gate 5 owns those exceptions; when it closes them this test will fail, and
+//! the right answer then is that copy-up has no live callers left.
 
 mod fakedirector;
 
@@ -58,14 +71,12 @@ fn a_failed_copy_up_names_the_file_and_the_reason_in_the_stats_report() {
         vfs_shared::bridge::flatten(&tree)
     };
 
-    // Read-only provider, so writes fall through to the shim-local overlay and
-    // reach copy-up (see `Fake::read_only`). `present.esp` is served;
-    // `absent.esp` is not, which is the failure this test is about.
+    // `steam_appid.txt` is served; `SkyrimSELauncher.exe` is not, which is the
+    // failure this test is about. Both names take the DRM exception, which is
+    // what puts these opens on the copy-up path at all (see the module doc).
     fakedirector::install(
         &root,
-        Fake::new()
-            .with("data/present.esp", PROVIDER.to_vec(), ReadStyle::Whole)
-            .read_only(),
+        Fake::new().with("steam_appid.txt", PROVIDER.to_vec(), ReadStyle::Whole),
         0,
     );
 
@@ -76,7 +87,7 @@ fn a_failed_copy_up_names_the_file_and_the_reason_in_the_stats_report() {
     // A copy-up that works...
     let ok = std::fs::OpenOptions::new()
         .append(true)
-        .open(root.join("Data").join("present.esp"));
+        .open(root.join("steam_appid.txt"));
     if let Ok(mut f) = ok {
         let _ = f.write_all(b"!");
     }
@@ -84,7 +95,7 @@ fn a_failed_copy_up_names_the_file_and_the_reason_in_the_stats_report() {
     // there is nothing to seed and the redirected open finds no overlay copy.
     let missing = std::fs::OpenOptions::new()
         .append(true)
-        .open(root.join("Data").join("absent.esp"));
+        .open(root.join("SkyrimSELauncher.exe"));
     assert!(
         missing.is_err(),
         "setup: a preserving open of a path nothing serves must fail — that failure with \
@@ -104,7 +115,7 @@ fn a_failed_copy_up_names_the_file_and_the_reason_in_the_stats_report() {
     let mut body = String::new();
     for _ in 0..500 {
         body = std::fs::read_to_string(&report).unwrap_or_default();
-        if body.contains("root0/data/absent.esp") {
+        if body.contains("root0/skyrimselauncher.exe") {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -123,14 +134,14 @@ fn a_failed_copy_up_names_the_file_and_the_reason_in_the_stats_report() {
     // And the file, because "something failed" is what the silent version
     // already told you.
     assert!(
-        body.contains("root0/data/absent.esp"),
+        body.contains("root0/skyrimselauncher.exe"),
         "the report does not name the file whose content went missing.\n--- report ---\n{body}"
     );
     // The success is recorded too: "did this one work?" is the other half of
     // explaining an empty file, and a report that only lists failures cannot
     // distinguish "never attempted" from "attempted and fine".
     assert!(
-        body.contains("root0/data/present.esp") && body.contains("seeded"),
+        body.contains("root0/steam_appid.txt") && body.contains("seeded"),
         "the report does not record the copy-up that succeeded.\n--- report ---\n{body}"
     );
 

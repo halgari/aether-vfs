@@ -12,6 +12,20 @@ pub const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as i32;
 /// so the real on-disk file appears absent.
 pub const STATUS_OBJECT_NAME_NOT_FOUND: NTSTATUS = 0xC000_0034u32 as i32;
 
+/// `STATUS_OBJECT_PATH_NOT_FOUND` — maps to Win32 `ERROR_PATH_NOT_FOUND` (3),
+/// as distinct from `STATUS_OBJECT_NAME_NOT_FOUND`'s `ERROR_FILE_NOT_FOUND`
+/// (2). NT returns it when the *container* of the named file cannot be
+/// resolved, which is exactly what a refused create under a managed root
+/// means: the leaf was supposed to be created, so what is missing is a
+/// location willing to hold it, not the name. See `try_fuse_create`.
+pub const STATUS_OBJECT_PATH_NOT_FOUND: NTSTATUS = 0xC000_003Au32 as i32;
+
+/// `STATUS_ACCESS_DENIED` — maps to `ERROR_ACCESS_DENIED`. The honest NT
+/// answer when the provider graph serves a path but no layer of it accepts
+/// writes (`ST_READ_ONLY`), which is what a real read-only filesystem
+/// returns for the same open.
+pub const STATUS_ACCESS_DENIED: NTSTATUS = 0xC000_0022u32 as i32;
+
 /// Layout-compatible with the NT `UNICODE_STRING`. `length`/`maximum_length`
 /// are in BYTES; the u16 count is `length / 2`.
 #[repr(C)]

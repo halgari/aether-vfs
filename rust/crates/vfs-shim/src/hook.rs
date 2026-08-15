@@ -155,10 +155,10 @@ use crate::ntdef::{
     FILE_INTERNAL_INFORMATION,
     FILE_NETWORK_OPEN_INFORMATION, FILE_NORMALIZED_NAME_INFORMATION, FILE_POSITION_INFORMATION,
     FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX, FILE_STANDARD_INFORMATION, SEC_IMAGE,
-    SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_END_OF_FILE,
-    STATUS_INVALID_FILE_FOR_SECTION, STATUS_INVALID_HANDLE, STATUS_NO_MORE_FILES,
-    STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SECTION_TOO_BIG,
-    STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW,
+    STATUS_END_OF_FILE, STATUS_INVALID_FILE_FOR_SECTION, STATUS_INVALID_HANDLE,
+    STATUS_NO_MORE_FILES, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND,
+    STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SECTION_TOO_BIG, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 
 /// Errors installing the hooks.
@@ -942,8 +942,11 @@ unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Option<String> 
 /// `FILE_CREATE`/`FILE_SUPERSEDE` in that respect), so a caller that asks
 /// for it with only read access must still route through the write path —
 /// otherwise a create-if-absent read open is treated as a plain read, which
-/// reports `ST_NOT_FOUND`/falls through to the overlay bypass instead of
-/// creating the file, on an absent path.
+/// reports `ST_NOT_FOUND` instead of creating the file, on an absent path.
+/// (Before gate 4's Task 5 that miss also *fell through* to the shim-local
+/// overlay, so the misclassification silently "worked"; now it is a sealed
+/// failure, which is the same reason getting this predicate right matters
+/// more, not less.)
 fn is_write_open(access: u32, disposition: u32) -> bool {
     const WRITE_ACCESS: u32 = 0x4000_0000 | 0x0002 | 0x0004; // GENERIC_WRITE|FILE_WRITE_DATA|FILE_APPEND_DATA
     (access & WRITE_ACCESS) != 0 || matches!(disposition, 0 | 2 | 3 | 4 | 5)
@@ -980,8 +983,11 @@ fn is_append_only(access: u32) -> bool {
 /// Map an NT create-disposition to the ring's `OPEN_CREATE`/`OPEN_EXCL`/
 /// `OPEN_TRUNC` bits (`OPEN_WRITE` itself is added by the caller). Forwarding
 /// this is what closes the gap Task 6 found: without it every brand-new file
-/// gets `ST_NOT_FOUND` from the director regardless of disposition, and the
-/// call falls through to the shim-local overlay redirect.
+/// gets `ST_NOT_FOUND` from the director regardless of disposition. That used
+/// to fall through to the shim-local overlay redirect and so merely misplace
+/// the bytes; since gate 4's Task 5 sealed that fall-through it would instead
+/// fail every create outright, so a mistake in this mapping is now a game that
+/// cannot write at all rather than one that writes to the wrong place.
 ///
 /// Verified against NT `CreateDisposition` semantics one value at a time
 /// (a prior draft of this mapping under-specified two of the six):
@@ -1165,8 +1171,11 @@ unsafe fn try_fuse_create(
         }
     }
 
-    // All other under-root *reads* go through the director (zip / composed).
-    // Writes may fall through for shim-local overlay redirect.
+    // Every other under-root open — read *and* write — goes through the
+    // director (zip / composed / writable layer), and every answer it gives,
+    // including the failures, is this function's answer too: since gate 4's
+    // Task 5 nothing below returns `None`, except behind the explicit
+    // `allow_disk_fallthrough` opt-out.
     // (Primary stack is expanded to 16 MiB by vfs-inject; open is a shallow ring op.)
     // Only the three "conditional" dispositions need to know whether the
     // path pre-existed to report the right `IoStatusBlock.Information` (see
@@ -1221,26 +1230,64 @@ unsafe fn try_fuse_create(
             director_open_trace(&path, resp.size);
             Some(STATUS_SUCCESS)
         }
-        // Not in director: seal under-root *reads* (no Steam-disk fallthrough).
-        // Writes fall through so overlay redirect / create still works.
-        // steam_appid.txt must live in the overrides mount (skyrim-live writes it).
+        // Not in director: seal the path, for reads and writes alike. The
+        // *only* way out of this arm without a status is the explicit
+        // `VFS_ALLOW_DISK_FALLTHROUGH` opt-out, which unseals the root
+        // wholesale (see `allow_disk_fallthrough`) and is off by default and
+        // cleared defensively by `skyrim-live`.
+        //
+        // **Gate 4, Task 5 — this is the write fall-through, closed.** A write
+        // used to return `None` here unconditionally, which sends
+        // `create_hook`/`open_hook` on to `decision_for` -> `Engine::decide_open`:
+        // an overlay redirect where one is configured, and a plain pass-through
+        // to the real filesystem *under the managed root* where one is not.
+        // Both spellings put content the provider graph never saw somewhere the
+        // director cannot account for; the pass-through one physically creates a
+        // file under a root whose whole contract is that the real filesystem
+        // beneath it is unreachable.
         Err(st) if st == vfs_protocol::ST_NOT_FOUND => {
-            if write {
-                // Same "write falls through to the shim-local overlay" case as
-                // the generic `Err(_) if write` arm below, just reached via a
-                // distinct director error (ST_NOT_FOUND rather than any other
-                // failure). Recorded here too, not just below — leaving this
-                // arm silent would undercount FellThroughWriteFallback for
-                // every create/write against a path the director does not
-                // have yet, which is the common case for a brand-new file.
-                crate::hookstats::note_open_outcome(
-                    crate::hookstats::OpenOutcome::FellThroughWriteFallback,
-                    &path,
-                );
-                *outcome_recorded = true;
+            if allow_disk_fallthrough() {
+                // The root is unsealed by operator opt-in. A write really does
+                // fall through here, so it is still recorded as one — this is
+                // the last site that can move `FellThroughWriteFallback` off
+                // zero, and a live report showing it non-zero now means
+                // exactly one thing: this switch is on. (Reads stay
+                // unrecorded here, as before: `decision_for` classifies them
+                // a few lines up the stack.)
+                if write {
+                    crate::hookstats::note_open_outcome(
+                        crate::hookstats::OpenOutcome::FellThroughWriteFallback,
+                        &path,
+                    );
+                    *outcome_recorded = true;
+                }
                 None
-            } else if allow_disk_fallthrough() {
-                None
+            } else if write {
+                // Two different failures wear `ST_NOT_FOUND` on a write open,
+                // and NT distinguishes them, so this must too:
+                //
+                // - The open asked to **create** (any of SUPERSEDE / CREATE /
+                //   OPEN_IF / OVERWRITE_IF set `OPEN_CREATE`) and the director
+                //   still said not-found: no writable provider is mounted
+                //   anywhere over this path. The name is not what is missing —
+                //   the caller was going to supply it — so this is
+                //   `STATUS_OBJECT_PATH_NOT_FOUND` (`ERROR_PATH_NOT_FOUND`),
+                //   the same answer NTFS gives for a create whose containing
+                //   directory does not exist.
+                // - The open did **not** ask to create (FILE_OPEN /
+                //   FILE_OVERWRITE with write access — "open the existing
+                //   file for writing"). Then the file itself is simply absent
+                //   and the honest answer is the ordinary
+                //   `STATUS_OBJECT_NAME_NOT_FOUND` (`ERROR_FILE_NOT_FOUND`) —
+                //   the same one the read seal below returns. Answering
+                //   PATH_NOT_FOUND here would mislead the very common
+                //   "open-for-write, and on ERROR_FILE_NOT_FOUND create it"
+                //   idiom into thinking the directory was gone.
+                Some(if create_flags & vfs_protocol::OPEN_CREATE != 0 {
+                    STATUS_OBJECT_PATH_NOT_FOUND
+                } else {
+                    STATUS_OBJECT_NAME_NOT_FOUND
+                })
             } else {
                 Some(STATUS_OBJECT_NAME_NOT_FOUND)
             }
@@ -1252,16 +1299,34 @@ unsafe fn try_fuse_create(
         // create silently "succeeding" against an existing file. Report the
         // real collision instead of falling through.
         Err(st) if st == vfs_protocol::ST_EXISTS => Some(STATUS_OBJECT_NAME_COLLISION),
-        // Director rejects OPEN_WRITE (overlay is shim-local). Fall through so
-        // write/create under the root hits the overlay redirect path.
-        Err(_) if write => {
-            crate::hookstats::note_open_outcome(
-                crate::hookstats::OpenOutcome::FellThroughWriteFallback,
-                &path,
-            );
-            *outcome_recorded = true;
-            None
-        }
+        // Any other director error on a write. **Gate 4, Task 5:** this used to
+        // return `None` — "the director rejects OPEN_WRITE, so let the write
+        // land in the shim-local overlay instead" — which is the second half of
+        // the fall-through this task closes.
+        //
+        // Deliberately *not* merged with the `ST_NOT_FOUND` arm above. That one
+        // is a path no provider serves; this one is a provider that served the
+        // path and then refused or failed the write, and the two want different
+        // answers at the NT boundary:
+        //
+        // - `ST_READ_ONLY` is the director's own policy status, meaning "no
+        //   `ReadWrite` provider serves this path" (`Director::open`, which
+        //   also records it for `vfs stats` discovery). That is a permission
+        //   fact, not a fault, and `STATUS_ACCESS_DENIED` is what a real
+        //   read-only filesystem answers — a status callers already have code
+        //   for, unlike `STATUS_UNSUCCESSFUL`'s `ERROR_GEN_FAILURE`.
+        // - Anything else (I/O error, bad request, a provider that broke) is a
+        //   genuine failure: `STATUS_UNSUCCESSFUL`, matching the read-side
+        //   `Err(_)` arm below, which likewise refuses to fall through.
+        //
+        // Note there is no `allow_disk_fallthrough` escape here, again matching
+        // the read side: that switch relaxes "the director does not have this",
+        // never "the director failed".
+        Err(st) if write => Some(if st == vfs_protocol::ST_READ_ONLY {
+            STATUS_ACCESS_DENIED
+        } else {
+            STATUS_UNSUCCESSFUL
+        }),
         Err(_) => {
             // Director down / I/O — do not fall through to the Steam tree.
             Some(STATUS_UNSUCCESSFUL)
@@ -2286,11 +2351,20 @@ unsafe extern "system" fn setinfo_hook(
                             .and_then(|t| c.vpath_under_root(&t))
                         {
                             // A rename whose target lands under a *different*
-                            // root is declined rather than guessed at: the
+                            // root is refused rather than guessed at: the
                             // wire carries one root for both sides, and the
-                            // provider contract has no cross-root move. It
-                            // falls through to the soft no-op below, the same
-                            // as an unresolvable target.
+                            // provider contract has no cross-root move.
+                            //
+                            // It does **not** fall through — an earlier
+                            // version of this comment claimed it did, and
+                            // `Engine::rename` was written to match that
+                            // description, which is how the engine-side
+                            // branch below ended up handing cross-root moves
+                            // to the real filesystem. What actually happens is
+                            // `ok = false` and `STATUS_UNSUCCESSFUL` twelve
+                            // lines down, the same as any other refused
+                            // delete/rename on a virtual handle. The engine
+                            // branch now fails closed the same way.
                             Some((dst_root, dstv)) if dst_root == root => {
                                 let dst = if dstv.is_empty() { ".".to_string() } else { dstv };
                                 c.rename(root, &src, &dst).is_ok()
@@ -2344,7 +2418,21 @@ unsafe extern "system" fn setinfo_hook(
                 engine.whiteout(&nt)
             } else {
                 match parse_rename_target(info, length) {
-                    Some(target) => engine.rename(&nt, &target),
+                    Some(target) => match engine.rename(&nt, &target) {
+                        crate::engine::RenameOutcome::Handled => true,
+                        // Both sides under managed roots, but different ones.
+                        // Trampolining here is what let the kernel physically
+                        // move an overlay-captured file out onto real disk
+                        // under the destination root — where it then reads
+                        // back as missing, because that root seals anything
+                        // the provider graph does not serve. Fail closed, with
+                        // the same status the FUSE-handle branch above already
+                        // returns for the identical case.
+                        crate::engine::RenameOutcome::CrossRoot => {
+                            return STATUS_UNSUCCESSFUL
+                        }
+                        crate::engine::RenameOutcome::Declined => false,
+                    },
                     None => false,
                 }
             };

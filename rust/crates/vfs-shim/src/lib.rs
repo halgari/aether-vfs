@@ -23,7 +23,12 @@ pub use bootstrap::{
     load_static_imports_from_config_path, static_imports_to_preinit, sync_bootstrap,
     BootstrapError, StaticImport,
 };
-pub use engine::{Engine, EngineError};
+pub use engine::{Engine, EngineError, RenameOutcome};
 pub use hook::{install, install_late, HookGuard, InstallError};
+/// The under-root open classifier's counters. Exported so a gate's own tests
+/// can assert that a bypass class it closed reads **zero** — see
+/// [`hookstats::outcome_count`]. A class nobody asserts on is a class that can
+/// quietly start (or stop) counting again.
+pub use hookstats::{outcome_count, OpenOutcome};
 pub use overlay::overlay_layer_dir;
 pub use payload_abi::PayloadConfig;

@@ -599,11 +599,23 @@ async fn scenario_toml_disk_source_fixture_writepath() {
          report at {stats_log:?}, got 0 (report contents: {:?})",
         std::fs::read_to_string(&stats_log)
     );
-    // Not a claim that fall-through is zero — it isn't yet, that's the
-    // entire point of measuring before removing it (gates 2-5 do the
-    // removing). Only that the section this test depends on genuinely
-    // exists and parsed, rather than the reconciliation above having passed
-    // vacuously on an empty/missing report.
+    // Gate 4, Task 5: for the *write-fallback* class this now IS a claim that
+    // fall-through is zero. Every write this fixture makes is answered by the
+    // director, and a write it would not answer is a hard NT failure rather
+    // than a diversion — so any count here is a bypass that came back. (The
+    // other fall-through classes are still nonzero by design; gates 5 and up
+    // own those.)
+    assert_eq!(
+        recon.write_fallback(),
+        0,
+        "under-root writes fell through to the shim-local overlay {} time(s) — the bypass \
+         this gate closes. Report: {:?}",
+        recon.write_fallback(),
+        std::fs::read_to_string(&stats_log)
+    );
+    // Only that the section this test depends on genuinely exists and parsed,
+    // rather than the reconciliation above having passed vacuously on an
+    // empty/missing report.
     assert!(
         recon.outcomes_section_found,
         "expected the shim report at {stats_log:?} to contain an \
@@ -832,6 +844,17 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
         recon.routed > 0,
         "expected at least one `routed` under-root open outcome in the shim \
          report at {stats_log:?}, got 0 (report contents: {:?})",
+        std::fs::read_to_string(&stats_log)
+    );
+    // Same claim as the single-source write-path test, over a
+    // `LayeredProvider`: no under-root write left the director's answer
+    // behind (gate 4, Task 5).
+    assert_eq!(
+        recon.write_fallback(),
+        0,
+        "under-root writes fell through to the shim-local overlay {} time(s) — the bypass \
+         this gate closes. Report: {:?}",
+        recon.write_fallback(),
         std::fs::read_to_string(&stats_log)
     );
     assert!(
