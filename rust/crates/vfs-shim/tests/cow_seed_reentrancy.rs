@@ -136,6 +136,20 @@ fn copy_up_writes_its_destination_without_re_entering_the_hooks() {
     let dest = vfs_shim::overlay_layer_dir(&overlay, vfs_redirect::RootId::DEFAULT)
         .join("data")
         .join("seedme.esp");
+    // The redirect must point at the file copy-up actually wrote. The hooked
+    // version of this test got that for free — it opened whatever `target_nt`
+    // named — and asserting `dest` alone would let the two drift apart
+    // silently: copy-up seeding one path while the game is sent to another is
+    // precisely the misrouting the guard under test exists to prevent, and it
+    // would still look like a pass here.
+    let vfs_redirect::Decision::Redirect { target_nt } = &decision else {
+        unreachable!("asserted above");
+    };
+    assert_eq!(
+        target_nt,
+        &vfs_redirect::to_nt(&dest.to_string_lossy()),
+        "the redirect target and the copy-up destination are different files"
+    );
     // The append the redirected open would have performed, done here directly:
     // it proves the materialised copy is a real, usable file at the redirect
     // target, not merely bytes somewhere.

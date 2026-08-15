@@ -1174,8 +1174,17 @@ unsafe fn try_fuse_create(
     // Every other under-root open — read *and* write — goes through the
     // director (zip / composed / writable layer), and every answer it gives,
     // including the failures, is this function's answer too: since gate 4's
-    // Task 5 nothing below returns `None`, except behind the explicit
+    // Task 5 no *decision* below returns `None`, except behind the explicit
     // `allow_disk_fallthrough` opt-out.
+    //
+    // One `None` below is not a decision: `open_fuse_at_ex(...)?` on the
+    // success path gives up its handle if the synth table's mutex is poisoned,
+    // which sends the caller to `decision_for` after the director has already
+    // opened the file — and leaks that `fh`, since nothing closes it. Rare
+    // (poisoning needs a panic while the table is held, and this crate builds
+    // with `panic = "abort"`), pre-dating this task, and not a live route; but
+    // it is a real hole in "the director's answer is the caller's answer", so
+    // do not read the paragraph above as more absolute than it is.
     // (Primary stack is expanded to 16 MiB by vfs-inject; open is a shallow ring op.)
     // Only the three "conditional" dispositions need to know whether the
     // path pre-existed to report the right `IoStatusBlock.Information` (see
