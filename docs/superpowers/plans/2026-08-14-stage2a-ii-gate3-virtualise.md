@@ -210,5 +210,5 @@ cargo clippy --all-targets -- -D warnings
 - [ ] `FellThroughRedirect`, `FellThroughServe`, `FellThroughPassthrough` are zero; the reconciliation invariant still holds.
 - [ ] Skyrim launches with the expected load order.
 - [ ] The Mod Organizer consequence is documented with its required configuration.
-- [ ] Workspace at or above 459; clippy clean; payload workspace builds.
+- [ ] Workspace at or above 451 — the baseline dropped from 459 when Task 3 removed 11 tests for the retired standalone mode; clippy clean; payload workspace builds.
 - [ ] **The write fall-through and the DRM exceptions still exist** — gates 4 and 5 own them.
