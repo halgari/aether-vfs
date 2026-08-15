@@ -175,9 +175,13 @@ fn relative_names_resolve_on_every_decoding_hook() {
     // `read_dir` enumerates via the handle-based directory hooks, which no
     // longer merge the snapshot in (Task 4 deleted `RootMap::merge_directory`),
     // so the mod-only file does not appear, flipped from "must include the
-    // virtual file". Since gate 4 task 8b they do not drain the real directory
-    // either — with no director this listing is the write overlay's own
-    // entries alone, which is where `real_marker.txt` physically lives.
+    // virtual file". Gate 4 task 8b, which deleted the real-directory drain
+    // from `serve_dir_query`, did not move this either: `Data` is
+    // overlay-backed, so the open is a `Decision::Redirect`, which never
+    // calls `tag_under_root` — the handle stays out of `DIR_TABLE` and this
+    // listing is an ordinary OS passthrough of `overlay/root-0/data`, which
+    // is where `real_marker.txt` physically lives. Verified by probe, not
+    // assumed; see `hook_enum_parity`'s module doc.
     let listed: Vec<String> = std::fs::read_dir(".")
         .expect("cwd-relative read_dir")
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

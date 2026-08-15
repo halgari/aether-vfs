@@ -23,16 +23,25 @@
 //! thing being proven: whatever the listing contains, both entry points must
 //! show it identically.
 //!
-//! Gate 4, Task 8b correction: this comment used to say a no-director listing
-//! "is exactly the real directory (plus any write-overlay entries)". That was
-//! true, and it was the bug — `serve_dir_query` drained the real directory
-//! behind the mount for any listing the director could not be asked about, so
-//! a real, unserved file under a managed root was listed by name. The drain
-//! is deleted; a no-director listing is now the write overlay's own entries
-//! and nothing else. The expectations below did not move, because the
-//! directory this test lists (`Data`, made overlay-backed by the Gate 3 Task 5
-//! note below) *is* the overlay's own physical directory, so the overlay
-//! answers with exactly what the drain used to return for it.
+//! Gate 4, Task 8b correction, in two parts. First: this comment used to say
+//! a no-director listing "is exactly the real directory (plus any
+//! write-overlay entries)", which was true and was the bug —
+//! `serve_dir_query` drained the real directory behind the mount for any
+//! listing the director could not be asked about, so a real, unserved file
+//! under a managed root would be listed by name. That drain is deleted.
+//!
+//! Second, and the reason the expectations below did not move: **this test
+//! never went through that code, and does not go through its replacement
+//! either.** `Data` is overlay-backed (see the Gate 3 Task 5 note above), so
+//! `Engine::decide` answers `Decision::Redirect`, and neither `Redirect` arm
+//! calls `tag_under_root` — the handle never enters `DIR_TABLE`, and
+//! `serve_dir_query` hands it straight to the OS on its untracked branch,
+//! against the overlay's own physical path (`overlay/root-0/data`). Measured
+//! with a probe in each branch, not inferred: zero hits on either under-root
+//! branch here. So what this file proves is entry-point parity for an
+//! ordinary passthrough listing, which is what it was always for; it is not
+//! coverage of the no-director enumeration branch, and an earlier draft of
+//! the task 8b notes wrongly claimed it was.
 //!
 //! Gate 3, Task 5 flip: `RootMap::decide` now denies (rather than passes
 //! through) any `Dir`/`NotFound` resolution, and this test's own enumerated
@@ -135,12 +144,13 @@ fn classic_and_ex_enumeration_agree() {
     );
 
     // Spell out what the listing must contain, so a result that is merely
-    // *consistently wrong* still fails. With no director, this is the write
-    // overlay's own entries: `real.txt` and `hidden.esp` (both physically in
-    // the overlay) show, and `added.esm` (mod-only, snapshot only) does not —
-    // see the module doc comment for why this flipped from the old merged-view
-    // expectations, and for why it did *not* move again when gate 4 task 8b
-    // deleted the real-directory drain.
+    // *consistently wrong* still fails. This is the overlay-backed `Data`
+    // directory as the OS sees it: `real.txt` and `hidden.esp` (both
+    // physically there) show, and `added.esm` (mod-only, snapshot only) does
+    // not — see the module doc comment for why this flipped from the old
+    // merged-view expectations, and for why gate 4 task 8b did not move it
+    // again (this open is a `Redirect`, so it never reaches the code 8b
+    // changed).
     assert!(
         via_classic.iter().any(|n| n == "real.txt"),
         "real.txt missing: {via_classic:?}"

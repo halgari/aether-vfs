@@ -1884,12 +1884,21 @@ async fn escape_matrix_positive_and_negative_canary() {
 /// `FuseClient::vpath_under_root` rather than `RootMap::decide`. For two
 /// gates `rust/docs/escape-matrix.md` claimed enumeration containment
 /// "follows directly from read-open containment rather than being a separate
-/// mechanism". It does not follow, and behind the argument sat a live branch
-/// that drained the real directory behind the mount and listed whatever was
-/// physically there. Nothing tested either branch: no fixture called
-/// `read_dir` under a session at all, the shim-level enumeration tests attach
-/// no director, and every director-level `readdir` test asserts presence or
-/// de-duplication, never absence.
+/// mechanism". It does not follow, and behind the argument sat a branch that
+/// drained the real directory behind the mount and listed whatever was
+/// physically there.
+///
+/// **That branch was latent, not live** — reachable only if a second,
+/// unrelated seal (gate 3 task 5's `NotFound` deny) regressed alongside a
+/// disagreement between the shim's two under-root predicates. Both are needed;
+/// see the mutation note below. This test's value is that enumeration no
+/// longer depends on another gate's invariant untested, not that it rescued a
+/// session from an active leak.
+///
+/// Nothing tested either branch: no fixture called `read_dir` under a session
+/// at all, the shim-level enumeration tests attach no director, and every
+/// director-level `readdir` test asserts presence or de-duplication, never
+/// absence.
 ///
 /// This test is the measurement that replaced the argument. It runs the
 /// escape fixture's `enum` vector under a real composed session — daemon,
@@ -1913,10 +1922,11 @@ async fn escape_matrix_positive_and_negative_canary() {
 /// `FuseClient::vpath_under_root` mutated to decline this directory and
 /// `RootMap::decide`'s `NotFound` arm reverted to the pre-gate-3
 /// `PassThrough` — the two states, both historically real in this tree, that
-/// together produce a live real-directory handle the client does not claim —
-/// the negative canary appears in the listing and this test fails on its
-/// absence assertion. See `task-8b-report.md` for both mutations and their
-/// output.
+/// together produce a real directory handle the client does not claim — the
+/// unserved canary appears in the listing and this test fails on its absence
+/// assertion. Neither mutation alone suffices, which is the measurement
+/// behind "latent, not live" above. See `task-8b-report.md` for both
+/// mutations and their output.
 #[tokio::test(flavor = "multi_thread")]
 async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file() {
     let _guard = LAUNCH_LOCK.lock().await;

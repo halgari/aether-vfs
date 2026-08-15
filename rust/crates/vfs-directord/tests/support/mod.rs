@@ -332,8 +332,12 @@ fn parse_readdirs(text: &str) -> Vec<ReadDirRecord> {
         let Some(rest) = rest.trim_start().strip_prefix("filter=") else { continue };
         // The filter field is left-padded to 16 and the directory follows it,
         // so the *first* run of whitespace after the filter token separates
-        // them. A directory path can contain spaces; a wildcard here cannot
-        // (it is one path component the caller passed to `FindFirstFileW`).
+        // them. This is genuinely ambiguous for a wildcard containing a space
+        // (`FindFirstFileW("my file*.esp")` is legal), which would split early
+        // and leave the tail on the front of `dir`. Not worth a delimiter
+        // change: the only caller matches `dir` with `ends_with`, so an
+        // over-long `dir` still matches, and the wildcards this project's
+        // fixtures produce are `*`.
         let Some((filter, dir)) = rest.split_once(char::is_whitespace) else { continue };
         out.push(ReadDirRecord {
             source: source.to_string(),
@@ -577,8 +581,12 @@ mod tests {
         assert!(!truncated);
     }
 
-    /// Mirrors `vfs_shim::hookstats::note_readdir`'s exact row shape, so this
-    /// parser fails loudly here if that format string ever drifts.
+    /// Hand-copied from `vfs_shim::hookstats::note_readdir`'s format string.
+    /// Being a copy, it cannot *detect* drift in `hookstats.rs` — both sides
+    /// would have to be edited for these tests to fail. What actually catches
+    /// a format change is the e2e test's `!ours.is_empty()` assertion, which
+    /// fails rather than passing vacuously when the parser stops matching.
+    /// These tests pin the parser's own behaviour against a known-good row.
     fn render_readdir_row(source: &str, count: u64, filter: &str, dir: &str) -> String {
         format!("  {source:<9} {count:>4} entries  filter={filter:<16} {dir}\n")
     }

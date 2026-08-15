@@ -3327,41 +3327,59 @@ unsafe fn serve_dir_query(
     //    this process created through gate 4's write path, which physically
     //    lives outside the root and which the director may not know about.
     //
-    // What may **not** appear is the real directory behind the mount.
-    // Until gate 4 task 8b this function had a third branch that drained
-    // exactly that (`drain_real` over the handle) whenever the client was
-    // absent or did not recognise the path, and put the overlay on top of it —
-    // so a real, unserved file under a managed root was listed. Reads,
+    // What may **not** appear is the real directory behind the mount. Until
+    // gate 4 task 8b this function had a third branch that drained exactly
+    // that (`drain_real` over the handle) whenever the client was absent or
+    // did not recognise the path, and put the overlay on top of it — so a
+    // real, unserved file under a managed root would be listed. Reads,
     // metadata and writes were each sealed and proven by the escape matrix;
     // enumeration was only ever *argued* to follow from read-open containment,
-    // and it does not follow: the two mechanisms have separate predicates and
-    // this one had no test at all. The drain is gone, along with `drain_real`,
-    // `drain_real_classic` and `parse_full_dir_info`, so containment here is
-    // structural rather than conditional — there is no longer any code that
-    // can read a real directory into a served listing.
+    // and it does not follow: separate predicates, and no test on either side.
     //
-    // The two ways of reaching case 2 are different failures and are recorded
-    // as such even though they answer the same way:
+    // **That drain was latent, not live** — say it here, not three paragraphs
+    // down, because "task 8b closed a real-disk leak" read alone is the wrong
+    // impression. `path_is_ours` is engine-OR-client while the client's
+    // `RootMap` is the engine's roots plus the staging alias, so "engine
+    // accepts, client declines" cannot arise; `RootMap::decide` denies
+    // `NotFound`/`Dir`/`Tombstone` before any tramp call; neither
+    // `Decision::Redirect` arm calls `tag_under_root`, so a redirected handle
+    // never enters `DIR_TABLE`; and a director-served directory is a
+    // `fuse_synth` handle the drain could not drain. Reaching the branch in a
+    // test took reverting gate 3 task 5 *as well* as forcing the predicate
+    // disagreement. The value of removing it is that enumeration no longer
+    // depends, silently and untested, on another gate's invariant.
+    //
+    // `drain_real`, `drain_real_classic` and `parse_full_dir_info` are deleted
+    // with it, so containment here is structural rather than conditional:
+    // no code remains that can read a real directory into a served listing.
+    //
+    // The two ways of reaching case 2 answer the same way and are counted
+    // separately, because they are different failures:
     //
     // - **No client at all.** Standalone mode is retired (see
     //   `fuse_client::FuseInitError`): bootstrap aborts the launch when the
-    //   ring cannot be attached, so an injected game process always has one.
-    //   Only this crate's own hook tests reach here, via `vfs_shim::install`
-    //   with no ring. Answering "the overlay, and nothing else" is what those
-    //   harnesses already observe, because the handle they hold *is* the
-    //   overlay's physical directory; and it is the only answer that does not
-    //   make "no director" mean "the real tree is visible", which is precisely
-    //   the un-virtualised launch the retirement of standalone mode exists to
-    //   make impossible.
+    //   ring cannot be attached, and `try_init_from_env` runs before the
+    //   engine is built and before any detour installs, so an injected process
+    //   always has a client by the time a hook can fire.
     // - **A client that does not recognise this directory.** The engine's root
-    //   notion accepted the path at open time and the client's did not. Both
-    //   are `RootMap`s over the same declared roots today (the client also
-    //   holds the staged-launch alias, making it a superset), so this should
-    //   be unreachable — but these two predicates *have* drifted apart before,
-    //   for five spellings at once, and the code comment this task inherited
-    //   says plainly that they "can differ". It gets its own counter rather
-    //   than a shared one, so the drift is visible as a number instead of as a
-    //   directory that mysteriously lists nothing.
+    //   notion accepted the path at open time and the client's did not — which
+    //   the superset argument above says cannot happen, but these two
+    //   predicates *have* drifted apart before, for five spellings at once,
+    //   and the comment on `path_is_ours` says plainly that they "can differ".
+    //   Its own counter (`contained`) so a future drift is a number in the
+    //   report rather than a directory that mysteriously lists nothing.
+    //
+    // **Nothing reaches either one today, including this crate's own tests.**
+    // An earlier draft claimed `hook_enum_parity`/`hook_relative_paths` did,
+    // since they install with no ring; they do not. Their `Data` is
+    // overlay-backed, so `Engine::decide` answers `Redirect`, which never
+    // tags the handle — those listings leave on the untracked branch above,
+    // against the overlay's own physical path. Measured with a probe in each
+    // branch, not argued: zero hits on both, in all three shim enumeration
+    // tests. So this arm and `Engine::overlay_listing`'s only call site are
+    // dead code. Keep both anyway: a branch that would otherwise fail *open*
+    // is exactly the one worth having fail closed, and the day it comes back
+    // to life is the day someone changes a predicate.
     //
     // The ring round trip and the overlay's own `read_dir` both call out, so
     // the lock must NOT be held here (NtClose also takes it).

@@ -80,19 +80,28 @@ about what still varies by class:** this matrix now establishes
 **read**.
 
 > **The paragraph above used to extend that claim to directory enumeration by
-> argument, and the argument was wrong. Gate 4 task 8b found a live
-> real-disk drain behind it.** The claim ran: `readdir`
-> (`NtQueryDirectoryFile(Ex)`) operates on a handle from an already-succeeded
-> open, that open went through `create_hook`/`open_hook` → `decision_for` →
-> `RootMap::decide`, so enumeration containment follows from read-open
-> containment rather than being a separate mechanism. It does not follow.
-> Enumeration has its own predicate (`FuseClient::vpath_under_root`, not
-> `RootMap::decide`) and had its own fall-through: `serve_dir_query`'s
-> no-director / client-does-not-recognise-this-directory branch drained the
-> real directory behind the mount and listed whatever was physically there,
-> for a handle whose *open* was entirely legitimate. Enumeration is now
-> closed by construction and proven by test — see "Gate 4, Task 8b:
-> enumeration" below.
+> argument. The argument was unsound, and behind it sat a real-disk drain —
+> latent, not live: reachable only if a second, unrelated seal regressed
+> too, and not reachable by a game as the tree stood.** Both halves of that
+> sentence matter and neither should be read without the other.
+>
+> The argument ran: `readdir` (`NtQueryDirectoryFile(Ex)`) operates on a
+> handle from an already-succeeded open, that open went through
+> `create_hook`/`open_hook` → `decision_for` → `RootMap::decide`, so
+> enumeration containment follows from read-open containment rather than
+> being a separate mechanism. It does not follow. Enumeration has its own
+> predicate (`FuseClient::vpath_under_root`, not `RootMap::decide`) and had
+> its own fall-through: `serve_dir_query`'s no-director /
+> client-does-not-recognise-this-directory branch drained the real directory
+> behind the mount and listed whatever was physically there, for a handle
+> whose *open* was entirely legitimate.
+>
+> What kept it off a live session was not the argument but gate 3 task 5:
+> the only real under-root directory handle comes from an open the client
+> does not route, and every such open is denied before a handle exists.
+> Enumeration is closed by construction now and proven by test, so it no
+> longer depends on that. See "Gate 4, Task 8b: enumeration" below for the
+> full reachability analysis and the mutations it took to reach the branch.
 
 **Correction: this did not extend to name-based metadata queries, and an
 earlier version of this document claimed it did by the same mechanism —
@@ -1258,7 +1267,14 @@ spellings. Enumeration was never proven — it was *argued*, in the two places
 this section's corrections above now point at, on the grounds that a listing
 runs on a handle whose open already went through `RootMap::decide`.
 
-**The argument is unsound and there was a live fall-through behind it.**
+**The argument is unsound, and behind it sat a real-disk drain — latent, not
+live.** Take both clauses together. The dispatch for this task described the
+fall-through as live and it is not, and a fix advertised as closing a live
+hole when it closed a latent one is this document's own recurring disease in
+mirror image. "Enumeration containment is now proven rather than argued" is
+the honest claim. "A game could have read unserved files out of a directory
+listing last week" is not.
+
 Enumeration does not consult `RootMap::decide` at all. `serve_dir_query`
 (`crates/vfs-shim/src/hook.rs`) asks `FuseClient::vpath_under_root`, a
 different predicate from the one that admitted the handle to the shim's
@@ -1266,9 +1282,27 @@ directory table (`path_is_ours`, which accepts either the engine's root notion
 or the client's). When the two disagreed, or when no client was installed, the
 function drained the real directory behind the mount — `drain_real` over the
 handle, in `FileFullDirectoryInformation` — and layered the shim-local write
-overlay on top. A real, unserved file physically under the managed root was
-listed by name. The open that produced the handle could be entirely
-legitimate, which is exactly why read-open containment does not imply this.
+overlay on top. A real, unserved file physically under the managed root would
+be listed by name, off a handle whose *open* was entirely legitimate, which is
+exactly why read-open containment does not imply this.
+
+**Why it did not fire.** Four independent facts, each verified rather than
+assumed. `path_is_ours` is engine-OR-client, and the client's `RootMap` is the
+engine's root list plus the staging alias — so "engine accepts, client
+declines", which the fallback requires, cannot arise. `RootMap::decide` maps
+`NotFound`/`Dir`/`Tombstone` to `Deny` before any trampoline call, so an open
+that could yield a real under-root directory handle fails first. Neither
+`Decision::Redirect` arm calls `tag_under_root`, so a redirected handle never
+enters the directory table at all. And a director-served directory yields a
+`fuse_synth` handle, which is not a kernel handle, so `drain_real`'s first
+call returned a negative status and the drain returned nothing.
+`FuseClient::try_init_from_env` runs before the engine is built and before any
+detour installs, closing the last window.
+
+The seal was gate 3 task 5's, not enumeration's own — which is the point.
+Enumeration was relying on another mechanism's invariant, unknowingly, with no
+test on either side of the dependency, while this document asserted the
+dependency was sound "by the reasoning above".
 
 Nothing tested either branch. No fixture called `read_dir` or
 `FindFirstFileW` under a session; every `read_dir` in `e2e.rs` and
@@ -1288,26 +1322,39 @@ shim-local write overlay's own entries. The real directory behind the mount
 may not.
 
 - **The client recognises the directory.** The director's `readdir` is the
-  whole answer, authoritative and unmerged. Unchanged.
-- **No client at all.** Answered from the write overlay alone. Standalone mode
-  was retired earlier in this programme — `bootstrap` aborts the launch when
-  the ring cannot be attached — so an injected game process always has a
-  client and only this project's own hook tests reach here. Those tests hold a
-  handle on the overlay's *own* physical directory, so the overlay answer is
-  byte-for-byte what the drain used to produce for them; nothing about their
-  coverage was weakened to close this. The alternative — keeping the drain
-  because "no director" is a test-only state — would make "no director" mean
-  "the real tree is visible", which is the un-virtualised launch the
-  retirement of standalone mode exists to prevent.
-- **A client that does not recognise this directory.** Same answer, different
-  counter. This is the branch the code's own comment says can happen in normal
-  operation, and it is the one that deserves to be loud rather than quiet: the
-  two predicates are both `RootMap`s over the same declared roots today (the
-  client's is a superset, holding the staged-launch alias besides), so a
-  listing landing here means they have drifted apart again — which this tree
-  has done before, for five spellings at once. It records as `contained`, so
-  the drift is a number in the report rather than a directory that
-  mysteriously lists nothing.
+  whole answer, authoritative and unmerged. Unchanged, and the only branch
+  anything reaches today.
+- **No client at all**, and **a client that does not recognise this
+  directory.** Both answer from the shim-local write overlay alone
+  (`overlay_listing` over an empty base) and neither drains real disk. They
+  are counted separately because they are different failures: "no director" is
+  a configuration state, while "the two under-root predicates disagree" is a
+  bug with a history in this tree, and the second deserves to be a number in
+  the report rather than a directory that mysteriously lists nothing.
+
+**Neither of those two is reachable today — by a game or by a test.** Stated
+plainly because an earlier draft of this section got it wrong in a way worth
+recording. The no-client case was said to be exercised by this project's own
+hook tests (`hook_enum_parity`, `hook_relative_paths`), on the grounds that
+they install the shim with no ring. They do, but they never reach this code:
+their `Data` is overlay-backed, so `Engine::decide` answers
+`Decision::Redirect`, and neither `Redirect` arm calls `tag_under_root` — the
+handle never enters `DIR_TABLE`, and `serve_dir_query` hands it to the OS on
+the untracked branch. Measured with a temporary probe in each branch rather
+than argued: **zero hits on either under-root branch across all three shim
+enumeration tests**, with `hook_enum_parity`'s own listing landing on the
+untracked branch against the redirected physical path `overlay\root-0\data`.
+So `ContainedNoDirector`, and with it `Engine::overlay_listing`'s only
+remaining call site, is dead code as the tree stands.
+
+That makes the conclusion stronger rather than weaker: no coverage was
+weakened by this change, because those tests' code path did not move at all.
+And the branch is still right to keep and right to answer this way. The
+alternative — keeping the drain on the grounds that only an unsupported
+configuration reaches it — would make "no director" mean "the real tree is
+visible", which is precisely the un-virtualised launch that retiring
+standalone mode exists to prevent. A branch nothing reaches, that fails
+closed, is the correct shape for one that would otherwise fail open.
 
 `drain_real`, `drain_real_classic` and `vfs-redirect`'s
 `parse_full_dir_info` are deleted along with the branch. Containment here is
@@ -1365,11 +1412,12 @@ under the managed root that the client does not claim.
 - **Unmutated.** Passes: `director, 1 entry`, the served canary present, the
   unserved canary absent.
 
-One thing the mutations establish that is worth stating on its own: **in the
-current tree the fall-through is not reachable in a live session.** Getting a
-real under-root directory handle requires an open the client does not route,
-and since gate 3 task 5 every such open is denied before a handle exists. It
-took reverting that seal *as well* to reach the branch. That does not make the
+**That it took two mutations is itself the measurement**, and it is why this
+section leads with "latent, not live" rather than burying it here. Neither
+mutation alone reaches the branch: declining the directory only gets an open
+that `RootMap::decide` denies, and reverting the deny only gets a handle the
+client still claims and routes. The fall-through needed both, and the second
+is a seal that belongs to a different gate entirely. That does not make the
 branch harmless — it was one predicate change away from live, behind a
-document that claimed it could not happen — but a reader should not take the
-fix as having closed a hole a game could have fallen into today.
+document asserting it could not happen — but no reader should take this fix
+as having closed a hole a game could have fallen into.
