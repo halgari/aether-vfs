@@ -464,3 +464,18 @@ gate 4 starts.
   (performance, not correctness), the read-write `memory` provider, and the
   write half of the gRPC `remote` provider. Stage 3 shrinks to those.
 - Hook-boundary `catch_unwind`, still unimplemented (see the Stage 1 spec).
+- **Alternate data streams in the write path** (found in gate 4, task 4).
+  `canonicalise` (`vfs-redirect/src/canon.rs:318`) strips a `:stream` suffix as
+  its literal first step, so `Overlay::file_path` never sees it. Consequence: a
+  preserving write to `f.esp:probe` is redirected to the overlay copy of
+  **`f.esp` itself** — cross-stream corruption of the base file's overlay
+  content. Gate 4 stopped copy-up from *seeding* base-file bytes into a stream
+  write (`Engine::copy_up` declines on a suffix), which fixes the content but
+  not the redirect target.
+  This is the write-side sibling of the read-side ADS bug gate 3 found and
+  fixed, where `f.esp:probe` was *answered* with `f.esp`'s bytes — so the
+  failure mode is known-real on this codebase, not hypothetical. It is
+  deferred rather than dismissed because closing it means giving the overlay a
+  stream dimension, which is design work, and because no game has been observed
+  issuing a preserving write to a named stream under a managed root. **If one
+  ever is, this becomes urgent.**
