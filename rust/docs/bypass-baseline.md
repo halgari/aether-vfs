@@ -1138,3 +1138,63 @@ processes, by three e2e scenarios including copy-up through a layered,
 cache-wrapped base, all with `write_fallback == 0` asserted from the shim's own
 report. What is missing is specifically *the game's own save*, and that gap is
 recorded here rather than papered over with the tests that do pass.
+
+### Follow-up: the `Skyrim.ccc` hypothesis, tested and disproven (2026-08-15)
+
+The AE modal was hypothesised to be gated on `Skyrim.ccc` — the idea being that
+if the manifest lists Creation Club content the image does not have, the game
+concludes AE content is undownloaded and prompts. The project's own record
+supports the general mechanism: an earlier session established that editing
+`Skyrim.ccc` stopped the "Enable Survival Mode?" first-run prompt firing, and
+noted that the file "gates content recognition/first-run scripting rather than
+raw plugin loading."
+
+**A real defect was found while testing it, and it is ours.** The curated
+override lived at `C:\tmp\skyrim-data\overrides\Skyrim.ccc` — the **old flat
+overlay path**. Gate 4 made the overlay root-aware and mounted
+`overrides/root-0` as the write layer, so that override silently stopped being
+served and the game was handed the zip's original 75-entry manifest again. This
+is exactly the migration break task 2's review predicted and this gate accepted
+with "empty the overlay directory on upgrade" as the remedy; the predicted
+consequence was "copy-on-write edits revert", and a curated content override
+reverting is that consequence in the wild. Restoring it under `root-0` fixed the
+serving: the shim log now shows `skyrim.ccc: open=1 size=1933`, and 1933 bytes
+is the 74-line override, not the zip's copy.
+
+**The hypothesis is nonetheless disproven, on two independent grounds:**
+
+1. With the override demonstrably served again, **the modal still appeared.**
+2. The timeline rules it out anyway: the 2026-08-14 session ran *before* the
+   root-aware overlay landed, so its flat override was still being served — and
+   that session showed the modal too.
+
+**What the test did find, and it matters more than the hypothesis:**
+
+```
+skyrim.ccc:      open=1   size=1933  read_ops=1  write_ops=0
+skyrimprefs.ini: open=450 size=4120  read_ops=0  write_ops=0
+root 1: open read ok=2013 err=1708  write ok=300 err=0
+        read_ops=0 read_bytes=0 | write_ops=0 write_bytes=0
+```
+
+**The game opens `SkyrimPrefs.ini` 450 times and never reads a byte of it
+through the director.** The counter is not blind — `skyrim.ccc` records
+`read_ops=1` immediately beside it. Root 1 shows 300 successful *write* opens
+with zero write ops.
+
+This retroactively explains the failed profile seed: `bEnablePlatform=0` and its
+companions were confirmed written into `profiles\SkyrimPrefs.ini` and confirmed
+in effect by the harness — but **no INI-based fix can work if the game never
+reads the file.** That attempt was doomed for a reason unrelated to the values
+chosen.
+
+Whether opens-without-bytes is a defect or benign (the game may open to probe,
+lock, or stat, and read its settings via a mapped section that the ring never
+sees) is **not established here**. It is the most concrete lead available for
+both the AE modal and for why root 1 carries 300 write opens and no writes, and
+it should be the first thing the next session investigates.
+
+**Corrected attribution:** an earlier note in this document reasoned that the
+modal correlated with root 1 being declared, at n=1 each way. That correlation
+is now n=2 versus n=1 and still unexplained — but it is *not* explained by the
+`Skyrim.ccc` override, which this run rules out directly.
