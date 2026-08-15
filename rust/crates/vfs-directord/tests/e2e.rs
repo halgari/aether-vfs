@@ -969,6 +969,41 @@ fn positive_expectation(vector: &str) -> Option<&'static str> {
     }
 }
 
+/// The negative canary's expected outcome for a **read** open, or `None` for
+/// a vector this check does not apply to strictly — the same two documented
+/// exceptions `positive_expectation` already carries:
+///
+/// - `"5b"`: not an alternate classification of the negative canary at all.
+///   `OBJECT_ATTRIBUTES.RootDirectory` pointing at an anonymous pipe fails
+///   the construction itself at the NT level (`error:ntstatus:...`,
+///   independent of which target is named), so there is no "reachable vs.
+///   not-found" question to assert here regardless of target.
+/// - `"13"`/`"14"` (`is_reported_not_closed`): per this gate's own scope
+///   note, neither vector gets a strict outcome assertion in either canary.
+///   `"14"` in particular spawns a child process with **no shim injected at
+///   all**, so its read reaches the real, physical negative-canary bytes on
+///   `session.root` directly — genuinely reachable, by construction, and not
+///   evidence about this gate either way (see that vector's own note in
+///   `rust/docs/escape-matrix.md`).
+///
+/// Every other buildable vector must now come back `not-found`: Gate 3 Task
+/// 5 stopped `RootMap::decide` passing `NotFound`/`Dir` through, and the
+/// director itself answers "no such name" for any spelling that reaches it
+/// with disk-fallthrough off — so a real, on-disk file under root that no
+/// provider serves is unreachable by a read, for every spelling this fixture
+/// can build, not merely classified into a counted bucket while still
+/// secretly readable. This is a stronger claim than `classification_marker`
+/// below checks, and the two are asserted separately in the test body — see
+/// this function's own call site for why classified-but-reachable is exactly
+/// the failure mode that made "classification, not containment" the matrix's
+/// standing caveat before this task.
+fn negative_expectation(vector: &str) -> Option<&'static str> {
+    if vector == "5b" || is_reported_not_closed(vector) {
+        return None;
+    }
+    Some("not-found")
+}
+
 /// The substring this test searches for in the shim's classified-paths set
 /// (see `support::classified_paths`) to decide whether a given vector's
 /// attempt was classified under-root, or `None` for a vector this check
@@ -1128,10 +1163,25 @@ async fn run_escape_fixture(
 ///   everything".
 /// - **Negative canary** (`escape-negative-canary.bin`, a real file
 ///   physically on the managed root that the `DiskProvider` never serves):
-///   every buildable spelling must be **classified** — appear in a counted
-///   outcome bucket in the shim's own hook-stats report — never merely
-///   *reachable*. See `rust/docs/escape-matrix.md` for why reachability is
-///   not asserted here and is not evidence of anything this gate changed.
+///   two properties are now asserted, not one.
+///   - **Classified** — every buildable spelling still appears in a counted
+///     outcome bucket in the shim's own hook-stats report, checked in
+///     isolation (`VFS_ESCAPE_ONLY_VECTOR`) to rule out riding on another
+///     vector's entry — this is the gate-2-era property, unchanged.
+///   - **Unreachable, Gate 3 Task 6's own addition**: every buildable
+///     spelling's **read** open must come back `not-found`. Before this
+///     gate, "classified" and "reachable" could both be true for the same
+///     vector at once (see `rust/docs/escape-matrix.md`'s "second, structural
+///     finding") — classification alone was never proof of containment.
+///     This is the assertion that closes that gap: a vector that is merely
+///     classified while still opening the real bytes now fails this test.
+///     Scoped to reads only — a **write** open still reaches the negative
+///     canary through `Engine::cow_seed`'s last-resort branch, which is gate
+///     4's to close, not asserted here. `5b` (undecodable handle-relative
+///     open) and the two reported-not-closed vectors (`13`, `14`) are exempt
+///     from this assertion for the same documented reasons the positive
+///     canary's own `positive_expectation` already exempts them — see
+///     `negative_expectation`'s doc comment.
 ///
 /// A stack-overflow crash was found and fixed while building this test (see
 /// `vfs_redirect`'s `OS_CONSULT_DEPTH` guard) — vector 1 (8.3 short name)
@@ -1327,6 +1377,34 @@ async fn escape_matrix_positive_and_negative_canary() {
          trusted against a truncated list, so this must never happen for a run this small. \
          Report: {stats_log:?}"
     );
+    // ---------------------------------------------------------------
+    // Gate 3, Task 6: the negative canary is now unreachable, not merely
+    // classified. Each `EscapeLine` is already tagged with its own vector,
+    // so — unlike the classification check below — this needs no isolated
+    // re-run to avoid riding on another vector's effect: `line.outcome` is
+    // this vector's own attempt's own result, from this combined run.
+    //
+    // This is the assertion this task adds, and it is strictly stronger than
+    // "classified": before Gate 3 Task 5, a spelling could be classified
+    // (land in a counted bucket) while still opening the real bytes on
+    // `session.root` (see "A second, structural finding" in
+    // `rust/docs/escape-matrix.md` — vectors 1/3/4/7/9 were exactly this).
+    // Scoped to reads only, per the brief: a write open still reaches this
+    // same file through `Engine::cow_seed`'s last-resort branch, gate 4's to
+    // close, not asserted here.
+    for line in &neg_lines {
+        let Some(want) = negative_expectation(&line.vector) else { continue };
+        if line.outcome.starts_with("unbuildable:") {
+            continue; // Never attempted at the OS level; nothing to seal.
+        }
+        assert_eq!(
+            line.outcome, want,
+            "negative canary vector {}: expected `{want}` — a real file on session.root that no \
+             provider serves must be unreachable by a read, for every buildable spelling, not \
+             merely classified while still readable — got `{}` (spelling: {:?}, note: {:?})",
+            line.vector, line.outcome, line.spelling, line.note
+        );
+    }
     // The combined run above shares one shim-stats report across all
     // nineteen attempts, and the report's classified-paths set is not keyed
     // by vector — several *different* spellings legitimately canonicalise

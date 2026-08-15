@@ -64,6 +64,46 @@ touched by this task and not fixed here; every "unreachable"/"sealed"/
 "closed" claim anywhere in this document is about **reads** unless it says
 otherwise.
 
+**Update, Gate 3, Task 6 — the concluding sentence two paragraphs up is now
+wrong for reads, and this is the correction.** "Classification, not
+containment, is what this matrix is evidence about" was accurate through
+Task 5, when the negative canary's read was still merely *documented* as
+sealed (in the "Update, Gate 3, Task 5" paragraph above) without the test
+itself asserting it. This task adds that assertion:
+`escape_matrix_positive_and_negative_canary`'s `negative_expectation`
+(`crates/vfs-directord/tests/e2e.rs`) now checks each buildable vector's own
+reported outcome — not the classified-paths set, a separate check kept
+alongside it, see below — and requires `not-found`, failing the test outright
+if any spelling still opens the real bytes. **Corrected statement, precise
+about what still varies by class:** this matrix now establishes
+**containment**, not merely classification, for the negative canary's
+**read** — and, by the same `RootMap::decide` mechanism, for **metadata
+queries and directory enumeration** too (attribute-query and `readdir`
+fall-through were routed to the director in Task 3, and `decide`'s deny
+applies uniformly to whatever reaches it, regardless of which hook asked).
+**Writes are the one class where classification, not containment, still
+applies** — gate 4's write fall-through (`Engine::cow_seed`, above) means a
+write open on the negative canary still succeeds against real bytes; that
+class is classified (it would show up in `FellThroughWriteFallback`) but not
+contained. Every "unreachable"/"sealed"/"closed" claim anywhere in this
+document remains a **reads-only** claim for that reason.
+
+One more finding this task's own construction of the new assertion surfaced,
+not predicted in advance: **vector 8 (hardlink) is no longer buildable at all
+against the negative canary**, reproduced identically across five separate
+runs. `std::fs::hard_link`'s underlying `CreateHardLinkW` needs a handle on
+the *source* file to create the link — the negative canary itself, which
+`RootMap::decide` now denies — so the hardlink can no longer even be
+constructed (`unbuildable:std::fs::hard_link failed: The system cannot find
+the file specified. (os error 2)`), where a session before Task 5 could
+build it (the source open passed through and succeeded). This is a further
+containment strengthening, not a regression: an operation that itself
+requires reading the sealed file is sealed too, one level earlier than the
+vector's own intended open. See the matrix row below and
+`negative_expectation`'s doc comment in `e2e.rs` for how this is handled
+(both the classification loop and the new unreachability loop skip
+`unbuildable:` lines, exactly as the positive canary does).
+
 **Classification signal.** `support::classified_paths` parses the shim's
 `VFS_SHIM_STATS_LOG` report and unions every path listed under any of the
 seven `under-root open outcomes` buckets. For the negative canary, each
@@ -83,6 +123,17 @@ machine/environment-dependent, not a fixed property of the vector.
 director or `RootMap::decide` — and was correctly sealed there, not that
 nothing happened; see each such row's own note, and "A second, structural
 finding" below for vectors 1/3/4/7/9 specifically.
+
+**Gate 3, Task 6: every `classified✓` row below now also means unreachable
+by a read.** `escape_matrix_positive_and_negative_canary`'s
+`negative_expectation` now asserts `not-found` for the negative canary's own
+reported outcome on every buildable vector, in addition to the pre-existing
+`classified✓` check — see "Update, Gate 3, Task 6" above for the reasoning
+and for why this is a strictly stronger property than classification alone.
+The only two exceptions, both `unbuildable` rather than `classified✓`/
+`not-found`, are vector 1 (unrelated attribute-query quirk, unchanged since
+gate 2 — see its own note) and vector 8 (hardlink construction itself now
+fails — a new Task 6 finding, see above and that row's own note).
 
 **Vectors 1, 3, 4, 7 and 9's positive canary flipped from `opened✓` to
 `not-found` in Gate 3, Task 5**, after this document was first written for
@@ -106,7 +157,7 @@ negative-canary `classified✓` result is unaffected — that was always a
 | 5b | Handle-relative open against a handle `GetFinalPathNameByHandleW` cannot resolve (an anonymous pipe) | `error:ntstatus:0xC0000033` | not classified (by design) | **Caveat, not a failure — see "Vector 5's caveat" below.** `path_of_tracked` cannot decode a path at all for this shape, so it lands in the shim's separate "undecodable" counter, never in `under-root open outcomes`. Documented, accepted edge of Task 4's fix, not asserted as pass/fail either way. |
 | 6 | CWD-relative (plain filename, cwd set to the parent dir) | opened✓ | classified✓ | |
 | 7 | Junction / reparse point | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | classified✓ | Negative-canary classification **closed for a junction within two ancestor levels of the managed root (this project's own session layout) — not junctions in general; see "Vectors 7 and 9 closed: session-start alias resolution" below for the residual.** Was a verified, open gate-2 gap; fixed by resolving such a junction into a `VolumeMap` alias once per session. **Positive canary separately flipped to `not-found` in Gate 3, Task 5** — closed classification never made this spelling reachable *through the director*; see "A second, structural finding" below. |
-| 8 | Hardlink (new filename, same underlying bytes) | `not-found` (not `opened` — see "Vector 8's exception" below) | classified✓ | Sealed by the content-addressed provider policy, not a classification failure — `RootMap`/the canonicaliser is never even consulted for this vector when FUSE-routing claims the path first. |
+| 8 | Hardlink (new filename, same underlying bytes) | `not-found` (not `opened` — see "Vector 8's exception" below) | `unbuildable:std::fs::hard_link failed: ... (os error 2)` (flip from `classified✓`, Gate 3 Task 6 — see above) | Positive canary: sealed by the content-addressed provider policy, not a classification failure — `RootMap`/the canonicaliser is never even consulted for this vector when FUSE-routing claims the path first. **Negative canary, Gate 3 Task 6 finding:** `CreateHardLinkW` needs a handle on the source (the negative canary itself) to create the link; `RootMap::decide` now denies that open, so the hardlink can no longer even be constructed — reproduced identically across five separate runs. Before Task 5 this was buildable (the source open passed through) and `classified✓`; the row above reflects current, post-Task-5 behaviour. |
 | 9 | UNC / `subst` / mapped drive (administrative loopback share, `\\localhost\C$\...`) | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | classified✓ | Negative-canary classification **closed — see "Vectors 7 and 9 closed: session-start alias resolution" below.** Was a verified, open gate-2 gap; fixed by registering the admin-share's real NT spelling as a session-start alias. **Positive canary separately flipped to `not-found` in Gate 3, Task 5** — same reason as vector 7; see "A second, structural finding" below. |
 | 10a | Case-flipped, `\\?\`-prefixed (verbatim) | opened✓ | classified✓ (`not-found`) | NTFS resolves case regardless of the `\\?\` prefix; standalone-`opened` behaviour, unaffected by session or gate 2. The e2e loop's negative-canary check skips only `unbuildable:` outcomes plus `5b`/`14` explicitly (see `classification_marker`/the skip check in `e2e.rs`) — `10a`'s outcome is neither, so it **is** asserted for the negative canary, and passes: the spelling lands in the shim's classified-paths set, correctly sealed (`not-found`) rather than left unclassified. |
 | 10b | Trailing dot, verbatim (`...\name.esp.`) | opened✓ (flip from standalone `not-found` — see "The 10/12 flip" below) | classified✓ | |
@@ -765,6 +816,25 @@ constructing this rather than reasoning about it in the abstract
    relative path to open — will not see it, correctly cased or not. The same
    test proves this half too: the mount's own file opens correctly, but
    `readdir("data")` never lists `somemod` as a child.
+
+**Two confirmed limitations, recorded here specifically so a later gate
+inherits them rather than rediscovering them:**
+
+1. A non-root mount serves a known path only if spelled **all-lowercase**
+   (mount prefixes compare case-sensitively while shim vpaths are always
+   lowercased) — item 1 above.
+2. `Director::readdir` **never** lists a mount registered below the queried
+   directory, so a non-root mount cannot be discovered by listing at all —
+   item 2 above.
+
+**Flagging limitation 2 for stage 2b specifically.** Gate 3 (this gate) only
+hit this because the MO2 remedy needed a non-root mount to demonstrate; it is
+not gate 3's own concern otherwise. **Stage 2b is "real multi-root," and
+mounts are exactly the mechanism roots compose through** — an unenumerable
+mount is not a cosmetic gap for that stage, it is a problem stage 2b will hit
+directly the first time it composes more than one root and expects a listing
+of one to reflect the other. Recorded here, plainly, rather than left for
+stage 2b to rediscover by reproduction the way this gate had to.
 
 **This is a genuine, confirmed gap in non-root mount support, not merely an
 undocumented spelling — say so plainly rather than paper over it.**
