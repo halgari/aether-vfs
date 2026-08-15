@@ -371,6 +371,7 @@ wait      = true
                 mount: entry.mount.clone(),
                 layer: layer as i32,
                 root: entry.root,
+                write_layer: entry.write_layer,
             })
             .await
             .expect("AddSource");
@@ -483,6 +484,7 @@ async fn scenario_toml_disk_source_fixture_writepath() {
             mount: "/".into(),
             layer: 0,
             root: 0,
+            write_layer: false,
         })
         .await
         .expect("AddSource");
@@ -723,6 +725,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
             mount: "/".into(),
             layer: 0,
             root: 0,
+            write_layer: false,
         })
         .await
         .expect("AddSource bottom");
@@ -738,6 +741,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
             mount: "/".into(),
             layer: 1,
             root: 0,
+            write_layer: false,
         })
         .await
         .expect("AddSource top");
@@ -1260,6 +1264,7 @@ async fn escape_matrix_positive_and_negative_canary() {
             mount: "/".into(),
             layer: 0,
             root: 0,
+            write_layer: false,
         })
         .await
         .expect("AddSource");
@@ -1579,6 +1584,7 @@ async fn escape_matrix_holds_against_a_second_root() {
             mount: "/".into(),
             layer: 0,
             root: 0,
+            write_layer: false,
         })
         .await
         .expect("AddSource root 0");
@@ -1594,6 +1600,7 @@ async fn escape_matrix_holds_against_a_second_root() {
             mount: "/".into(),
             layer: 0,
             root: 1,
+            write_layer: false,
         })
         .await
         .expect("AddSource root 1");
@@ -1814,6 +1821,7 @@ async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
             mount: "/".into(),
             layer: 0,
             root: 0,
+            write_layer: false,
         })
         .await
         .expect("AddSource");
@@ -1912,6 +1920,7 @@ async fn apply_session_config_health_and_list() {
             },
             mount: "/".into(),
             root: 0,
+            write_layer: false,
         }],
         launch: None,
         cache: None,
@@ -1989,6 +1998,7 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
                 },
                 mount: "/".into(),
                 root: 0,
+                write_layer: false,
             },
             vfs_control::SourceEntry {
                 spec: vfs_control::SourceSpec::Disk {
@@ -1996,6 +2006,7 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
                 },
                 mount: "/".into(),
                 root: 1,
+                write_layer: false,
             },
         ],
         launch: None,

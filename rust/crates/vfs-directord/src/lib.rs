@@ -230,6 +230,10 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
         spec,
         mount,
         root: 0,
+        // `--source` declares content. A write layer is a different fact
+        // about a session (where its writes land), so it gets its own flag
+        // rather than a magic suffix on this one — see `--write-layer`.
+        write_layer: false,
     })
 }
 
@@ -316,6 +320,7 @@ pub async fn apply_session_config(
                 mount: entry.mount.clone(),
                 layer: layer as i32,
                 root: entry.root,
+                write_layer: entry.write_layer,
             })
             .await
             .map_err(|e| format!("AddSource: {e}"))?;

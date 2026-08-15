@@ -85,6 +85,27 @@ impl Director for DirectorService {
             r.mount
         };
 
+        // A write layer is not a sibling source, so it does not go through
+        // `add_source` at all — it becomes the root's overlay upper, which is
+        // what makes an in-place edit of read-only content copy up instead of
+        // being refused. A sub-path mount cannot express that (the upper
+        // covers the whole root), and a read-only provider cannot be one, so
+        // both are rejected here rather than accepted into a session that
+        // then silently lacks copy-on-write.
+        if r.write_layer {
+            if !(mount == "/" || mount == "\\") {
+                return Err(Status::invalid_argument(format!(
+                    "write_layer source mounts at {mount:?}; a write layer is the root's \
+                     writable upper and cannot be scoped to a sub-path"
+                )));
+            }
+            let id = self
+                .registry
+                .set_write_layer(&r.session_id, r.root, backend)
+                .map_err(Status::invalid_argument)?;
+            return Ok(Response::new(SourceRef { id }));
+        }
+
         let id = self
             .registry
             .add_source(&r.session_id, r.root, &mount, r.layer, backend)

@@ -42,7 +42,11 @@ pub struct StageLaunchOpts<'a> {
 /// root are combined with [`stack_layers`] in declaration order (later wins),
 /// exactly the documented flat-`[[source]]`-list sugar — generalized here to
 /// however many roots the config declares rather than assuming there is only
-/// one.
+/// one. A source flagged `write_layer` is not one of those layers: it becomes
+/// the root's writable upper via [`vfs_director::compose_root`], the same
+/// composition [`SessionRegistry::set_write_layer`] performs on the live
+/// path, so a config built here and the same config applied to a running
+/// session cannot disagree about whether writes copy up.
 ///
 /// Validates the config first (see [`vfs_control::SessionConfig::validate_roots`]):
 /// a duplicate `[[root]]` id, or a source naming an undeclared root, is
@@ -60,17 +64,37 @@ pub fn build_provider_graph(
 ) -> Result<BTreeMap<RootId, Arc<dyn Provider>>, String> {
     cfg.validate_roots()?;
     let mut by_root: BTreeMap<u32, Vec<Arc<dyn Provider>>> = BTreeMap::new();
+    let mut write_layers: BTreeMap<u32, Arc<dyn Provider>> = BTreeMap::new();
     for entry in &cfg.sources {
         let backend = vfs_source::build_provider(&entry.spec).map_err(|e| e.to_string())?;
-        by_root.entry(entry.root).or_default().push(backend);
+        if entry.write_layer {
+            // `validate_roots` already refused a second one for this root.
+            write_layers.insert(entry.root, backend);
+        } else {
+            by_root.entry(entry.root).or_default().push(backend);
+        }
     }
     let mut graph = BTreeMap::new();
-    for (root, stack) in by_root {
-        let composed = stack_layers(stack).map_err(|e| e.to_string())?;
+    for root in by_root
+        .keys()
+        .chain(write_layers.keys())
+        .copied()
+        .collect::<std::collections::BTreeSet<u32>>()
+    {
+        let mounts = match by_root.remove(&root) {
+            Some(stack) => vec![(String::new(), stack_layers(stack).map_err(|e| e.to_string())?)],
+            None => Vec::new(),
+        };
+        let composed = vfs_director::compose_root(mounts, write_layers.remove(&root))
+            .map_err(|st| format!("compose root {root}: status {st}"))?;
         graph.insert(RootId(root), composed);
     }
     Ok(graph)
 }
+
+/// One root's sibling mounts, as [`vfs_director::Session::set_root_mounts`]
+/// takes them: `(mount prefix, provider)` in precedence order.
+type RootMounts = Vec<(String, Arc<dyn Provider>)>;
 
 /// Everything recorded for one declared root, so its composed provider can
 /// be rebuilt from scratch whenever a new source targeting it arrives.
@@ -81,6 +105,30 @@ struct RootBuild {
     /// Sources with a non-root mount prefix within this root (director path
     /// mounts), composed alongside the layered root via `MountGraph`.
     prefix_mounts: Vec<(String, Arc<dyn Provider>)>,
+}
+
+impl RootBuild {
+    /// This root's sibling mounts as [`vfs_director::Session::set_root_mounts`]
+    /// wants them: the root-mounted sources collapsed into one layered
+    /// provider at `""`, then each prefixed source at its own prefix.
+    ///
+    /// The layer stack is collapsed here rather than handed over as several
+    /// `""` mounts because the two compose differently on a shared path: a
+    /// `MountGraph` picks the last mount that *owns* the path, while
+    /// `stack_layers` merges the whole stack (directory listings union, later
+    /// layers win per entry) — which is what the flat `[[source]]` list means.
+    fn mounts(&self) -> Result<RootMounts, String> {
+        let mut mounts: RootMounts = Vec::new();
+        if !self.layers.is_empty() {
+            let stack: Vec<Arc<dyn Provider>> =
+                self.layers.iter().map(|(_, b)| Arc::clone(b)).collect();
+            mounts.push((String::new(), stack_layers(stack).map_err(|e| e.to_string())?));
+        }
+        for (pfx, be) in &self.prefix_mounts {
+            mounts.push((pfx.clone(), Arc::clone(be)));
+        }
+        Ok(mounts)
+    }
 }
 
 /// One live host session plus metadata returned on ListSessions.
@@ -208,6 +256,13 @@ impl SessionRegistry {
     /// caller that predates stage 2b — the CLI and every existing config).
     /// Rebuilds only `root`'s composed provider and re-mounts it at
     /// `RootId(root)` in the live `Director`; other roots are untouched.
+    ///
+    /// Sources added here are **siblings**: they compose into a layer stack /
+    /// mount graph, which can route a write to whichever source owns the path
+    /// but cannot seed a copy from a lower layer. Copy-on-write over
+    /// read-only content is [`Self::set_write_layer`], and the rebuild below
+    /// goes through `Session` precisely so the two compose instead of
+    /// clobbering each other.
     pub fn add_source(
         &self,
         session_id: &str,
@@ -238,30 +293,56 @@ impl SessionRegistry {
             } else {
                 build.prefix_mounts.push((mount.to_string(), cached));
             }
-            // Rebuild this root's composed provider from its recorded source
-            // list (layered root sources + non-root prefix mounts), then
-            // replace whatever `Director` currently serves for this root
-            // wholesale — `Director` holds exactly one provider per root, so
+            // Rebuild this root's sibling-mount list from its recorded source
+            // list (layered root sources + non-root prefix mounts) and hand
+            // the *list* to the session, which composes it — with this root's
+            // write layer, if it has one — and replaces what `Director`
+            // serves. `Director` holds exactly one provider per root, so
             // there is no incremental mount to append to.
-            let mut mounts: Vec<(String, Arc<dyn Provider>)> = Vec::new();
-            if !build.layers.is_empty() {
-                let stack: Vec<Arc<dyn Provider>> =
-                    build.layers.iter().map(|(_, b)| Arc::clone(b)).collect();
-                let composed = stack_layers(stack).map_err(|e| e.to_string())?;
-                mounts.push((String::new(), composed));
-            }
-            for (pfx, be) in &build.prefix_mounts {
-                mounts.push((pfx.clone(), Arc::clone(be)));
-            }
-            let graph = vfs_director::MountGraph::new(mounts)
-                .map_err(|st| format!("build provider graph for root {root}: status {st}"))?;
+            let mounts = build.mounts()?;
             live.session
-                .kernel()
-                .mount(RootId(root), Arc::new(graph))
+                .set_root_mounts(RootId(root), mounts)
                 .map_err(|st| format!("mount root {root} status {st}"))?;
             id
         };
         Ok(source_id)
+    }
+
+    /// Declare the writable layer `root`'s writes land in for `session_id` —
+    /// the gRPC/TOML surface's half of [`vfs_director::Session::set_write_layer_at`],
+    /// and the only way a daemon session gets **copy-on-write**.
+    ///
+    /// This is deliberately not [`Self::add_source`] with a flag on the
+    /// provider's own capabilities, because the two are different facts. A
+    /// source says *this content is part of the root*; a write layer says
+    /// *writes to the root land here, seeded from whatever the sources hold*.
+    /// A modded game has several writable sources (every mod directory on
+    /// disk is one) and exactly one place its writes belong — inferring the
+    /// write layer from "the topmost source that happens to be writable"
+    /// would scatter a game's saves and edited INIs into whichever mod folder
+    /// was declared last.
+    ///
+    /// Unlike a source, the layer is **not** wrapped in the block cache: it
+    /// is the one provider in the graph whose bytes change underneath the
+    /// director, and a cached read of a just-copied-up file would serve the
+    /// pre-write content.
+    ///
+    /// Order-independent with respect to `add_source`: whichever comes second
+    /// recomposes the root from both halves. Returns a source id, so a caller
+    /// can refer to the layer the same way it refers to a source.
+    pub fn set_write_layer(
+        &self,
+        session_id: &str,
+        root: u32,
+        upper: Arc<dyn Provider>,
+    ) -> Result<u64, String> {
+        self.with_session_mut(session_id, |live| {
+            let id = live.next_source_id();
+            live.session
+                .set_write_layer_at(RootId(root), upper)
+                .map_err(|st| format!("set write layer for root {root}: status {st}"))?;
+            Ok(id)
+        })
     }
 
     /// Declare the host directory a non-zero root virtualizes, so the
@@ -499,6 +580,60 @@ mod root_graph_tests {
         buf
     }
 
+    /// The config → graph route must agree with the live route about
+    /// copy-on-write, or the two drift again: a `write_layer = true` source
+    /// composes as the root's writable upper here too, so a graph built from
+    /// a config serves an in-place edit of read-only content instead of
+    /// refusing it.
+    #[test]
+    fn a_write_layer_source_composes_as_the_roots_writable_upper() {
+        let content = tempfile::tempdir().unwrap();
+        let overwrite = tempfile::tempdir().unwrap();
+        std::fs::write(content.path().join("x.esp"), b"ORIGINAL").unwrap();
+
+        let cfg = SessionConfig {
+            sources: vec![
+                SourceEntry {
+                    spec: SourceSpec::Disk {
+                        path: content.path().to_string_lossy().into_owned(),
+                    },
+                    mount: "/".into(),
+                    root: 0,
+                    write_layer: false,
+                },
+                SourceEntry {
+                    spec: SourceSpec::Disk {
+                        path: overwrite.path().to_string_lossy().into_owned(),
+                    },
+                    mount: "/".into(),
+                    root: 0,
+                    write_layer: true,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let graph = build_provider_graph(&cfg).expect("build provider graph");
+        let root0 = graph.get(&RootId(0)).unwrap();
+        let (h, size, _) = root0
+            .open(VPath::at_default("x.esp"), vfs_director::OPEN_WRITE)
+            .expect("the write layer must make an in-place edit copy up");
+        assert_eq!(size, 8, "the handle must open onto the copied-up content");
+        root0.write_at(h, 0, b"EDITED!!").unwrap();
+        root0.close(h).unwrap();
+
+        assert_eq!(
+            std::fs::read(overwrite.path().join("x.esp")).ok(),
+            Some(b"EDITED!!".to_vec()),
+            "the edit belongs in the write layer"
+        );
+        assert_eq!(
+            std::fs::read(content.path().join("x.esp")).unwrap(),
+            b"ORIGINAL",
+            "the source it copied from must be untouched"
+        );
+    }
+
     /// Stage 2b task 2, step 1: a config declaring two roots with one
     /// provider each parses, and the resulting graph resolves the same
     /// relative path to different bytes under each root.
@@ -566,6 +701,7 @@ root = 1
                     },
                     mount: "/".into(),
                     root: 0,
+                    write_layer: false,
                 },
                 SourceEntry {
                     spec: SourceSpec::Disk {
@@ -573,6 +709,7 @@ root = 1
                     },
                     mount: "/".into(),
                     root: 0,
+                    write_layer: false,
                 },
             ],
             ..Default::default()

@@ -75,6 +75,19 @@ message AddSourceReq {
   // control-plane RPC, not the ring wire the injected DLL speaks — new
   // fields are safe to add here; never renumber.
   uint32 root = 5;
+  // Make this source the root's **write layer** instead of one more sibling
+  // layer (gate 4). The write layer sits above the whole graph as an overlay
+  // upper, so a write to content only a read-only source holds is copied up
+  // into it rather than refused — the in-place edit (`fopen(…, "r+b")`) every
+  // mod tool and INI writer does. A sibling layer cannot express that: layer
+  // composition can route a write to a source that owns the path, but cannot
+  // seed a destination from a lower layer.
+  //
+  // The provider must declare ReadWrite (a `disk` source; a zip or a remote
+  // is rejected), it must mount at the root ("/"), and `layer` is ignored —
+  // the write layer is above every layer by construction. At most one per
+  // root; a second declaration replaces the first.
+  bool write_layer = 6;
 }
 message SourceRef {
   uint64 id = 1;

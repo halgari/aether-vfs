@@ -36,6 +36,15 @@
 //! path  = "C:/scratch/skyrim-docs"
 //! root  = 1
 //!
+//! # Where root 0's writes go. Without this the root is read-only content and
+//! # the director refuses an in-place edit of it (gate 4) — see
+//! # `SourceEntry::write_layer`.
+//! [[source]]
+//! type        = "disk"
+//! path        = "C:/mods/overwrite"
+//! root        = 0
+//! write_layer = true
+//!
 //! [launch]
 //! exec = "SkyrimSE.exe"
 //! ```
@@ -99,6 +108,19 @@ pub struct SourceEntry {
     /// every single-root config (no `[[root]]` table) has always used.
     #[serde(default)]
     pub root: u32,
+    /// `write_layer = true` makes this source the root's **writable layer**
+    /// rather than one more content layer: it sits above the whole graph, and
+    /// a write to content only a read-only source (an archive) holds is
+    /// copied up into it instead of being refused. Without one, every source
+    /// in a root composes as a sibling, and an in-place edit of archive
+    /// content — what a mod tool or an INI writer does — fails, because
+    /// layering can route a write but cannot seed a copy from a lower layer.
+    ///
+    /// Must be a writable source (`type = "disk"`), must mount at the root,
+    /// and at most one per root — see
+    /// [`SessionConfig::validate_roots`].
+    #[serde(default)]
+    pub write_layer: bool,
 }
 
 /// The `[launch]` block.
@@ -163,7 +185,32 @@ impl SessionConfig {
     /// A root declared with no source is not an error: it simply produces no
     /// provider for that root, which is a valid (if likely accidental)
     /// config.
+    ///
+    /// Also checks the `write_layer` flag, which is a per-root singleton
+    /// mounted at the root: two of them, or one at a sub-path, would leave a
+    /// declaration silently doing nothing (the second replacing the first, a
+    /// prefix being ignored) — and a session that believes it has copy-on-write
+    /// and does not is the failure this flag exists to prevent. Checked before
+    /// the flat-list early return, because the flat form can declare a write
+    /// layer too.
     pub fn validate_roots(&self) -> Result<(), String> {
+        let mut write_layer_roots = std::collections::HashSet::new();
+        for entry in self.sources.iter().filter(|e| e.write_layer) {
+            if !write_layer_roots.insert(entry.root) {
+                return Err(format!(
+                    "root {} declares more than one write_layer source",
+                    entry.root
+                ));
+            }
+            let mount = entry.mount.trim();
+            if !(mount.is_empty() || mount == "/" || mount == "\\") {
+                return Err(format!(
+                    "write_layer source for root {} mounts at {:?}; a write layer is the \
+                     root's writable upper and cannot be scoped to a sub-path",
+                    entry.root, entry.mount
+                ));
+            }
+        }
         if self.roots.is_empty() {
             return Ok(());
         }
@@ -288,6 +335,64 @@ root = 1
         assert_eq!(cfg.sources[1].root, 1);
     }
 
+    /// A source is content unless it says otherwise: every config written
+    /// before `write_layer` existed keeps meaning exactly what it meant, and
+    /// a config that wants copy-on-write says so on one source.
+    #[test]
+    fn write_layer_defaults_off_and_parses_where_declared() {
+        let toml = r#"
+[[source]]
+type = "zip"
+path = "C:/layers/base.zip"
+
+[[source]]
+type        = "disk"
+path        = "C:/mods/overwrite"
+write_layer = true
+"#;
+        let cfg: SessionConfig = toml::from_str(toml).unwrap();
+        assert!(!cfg.sources[0].write_layer, "an undeclared source is content");
+        assert!(cfg.sources[1].write_layer);
+        cfg.validate_roots().expect("one write layer on one root is valid");
+    }
+
+    /// Two write layers on one root would mean one of the two declarations
+    /// does nothing (the second replaces the first) — a session whose author
+    /// believes writes go somewhere they do not.
+    #[test]
+    fn validate_rejects_two_write_layers_on_one_root() {
+        let toml = r#"
+[[source]]
+type        = "disk"
+path        = "C:/a"
+write_layer = true
+
+[[source]]
+type        = "disk"
+path        = "C:/b"
+write_layer = true
+"#;
+        let cfg: SessionConfig = toml::from_str(toml).unwrap();
+        let err = cfg.validate_roots().unwrap_err();
+        assert!(err.contains("write_layer"), "{err}");
+    }
+
+    /// The write layer is the root's writable upper, which covers the whole
+    /// root; a `mount` prefix on it would be silently ignored.
+    #[test]
+    fn validate_rejects_a_write_layer_scoped_to_a_sub_path() {
+        let toml = r#"
+[[source]]
+type        = "disk"
+path        = "C:/a"
+mount       = "Data/SomeMod"
+write_layer = true
+"#;
+        let cfg: SessionConfig = toml::from_str(toml).unwrap();
+        let err = cfg.validate_roots().unwrap_err();
+        assert!(err.contains("Data/SomeMod"), "{err}");
+    }
+
     /// A config authored before `layer` was removed still parses: serde
     /// silently ignores unknown fields, so a stray `layer = N` left over
     /// from an old config is harmless rather than a parse error. This is
@@ -311,6 +416,7 @@ layer = 20
                 spec: SourceSpec::Disk { path: "C:/x".into() },
                 mount: "/".into(),
                 root: 7, // would be undeclared if any [[root]] existed
+                write_layer: false,
             }],
             ..Default::default()
         };
@@ -325,6 +431,7 @@ layer = 20
                 spec: SourceSpec::Disk { path: "C:/x".into() },
                 mount: "/".into(),
                 root: 1,
+                write_layer: false,
             }],
             ..Default::default()
         };
@@ -356,6 +463,7 @@ layer = 20
                 spec: SourceSpec::Disk { path: "C:/x".into() },
                 mount: "/".into(),
                 root: 0,
+                write_layer: false,
             }],
             ..Default::default()
         };

@@ -58,6 +58,11 @@ enum Command {
         /// flat `[[source]]` list.
         #[arg(long = "source")]
         sources: Vec<String>,
+        /// Directory the session's writes land in, copied up from whatever
+        /// the sources hold (gate 4). Without it every source composes as
+        /// read-only content and an in-place edit of it is refused.
+        #[arg(long = "write-layer")]
+        write_layer: Option<String>,
         #[arg(long)]
         exec: String,
         #[arg(long)]
@@ -147,6 +152,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 }
                 Command::Launch {
                     sources,
+                    write_layer,
                     exec,
                     args,
                     wait,
@@ -155,6 +161,14 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     let mut entries = Vec::new();
                     for s in &sources {
                         entries.push(parse_source_flag(s)?);
+                    }
+                    if let Some(path) = &write_layer {
+                        entries.push(vfs_control::SourceEntry {
+                            spec: vfs_control::SourceSpec::Disk { path: path.clone() },
+                            mount: "/".to_string(),
+                            root: 0,
+                            write_layer: true,
+                        });
                     }
                     let mut env_map = std::collections::BTreeMap::new();
                     for e in &env {

@@ -66,6 +66,16 @@ impl Director {
 
     /// Set (or replace) the single provider serving `root`. Composition of
     /// several sources into that one provider is the caller's job.
+    ///
+    /// **A host holding a [`crate::Session`] should not call this for a root
+    /// that session composes.** It *replaces* the root's provider, so a graph
+    /// built outside the session silently drops whatever the session's own
+    /// composition contributed — most damagingly the root's write layer, and
+    /// with it copy-on-write, which nothing but a write test notices (gate 4,
+    /// Task 6b). Go through `Session::mount` / `Session::set_root_mounts` /
+    /// `Session::set_write_layer_at` instead. Calling this directly is for a
+    /// provider the session does not track at all — e.g. `skyrim-live`'s
+    /// root 1, whose counters must wrap the *composed* provider.
     pub fn mount(&self, root: RootId, backend: Arc<dyn Provider>) -> Result<(), i32> {
         self.roots
             .lock()

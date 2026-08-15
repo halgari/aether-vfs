@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::director::Director;
 use crate::ipc::IpcServe;
 use crate::mount_graph::MountGraph;
-use crate::ops::{Provider, RootId, OPEN_READ};
+use crate::ops::{Access, Provider, RootId, OPEN_READ};
 
 /// Serializes process-global env mutation around [`Session::launch`].
 ///
@@ -49,6 +49,53 @@ impl Default for LaunchOpts {
     }
 }
 
+/// Build the single provider one root serves: its sibling mounts as a
+/// [`MountGraph`], with the writable layer (if any) composed **over** the
+/// whole graph as an [`vfs_compose::OverlayProvider`] upper.
+///
+/// The one place in the workspace that turns "these sources, that write
+/// layer" into a provider. Every surface funnels through it —
+/// [`Session::mount`], the daemon's `SessionRegistry`, and the config →
+/// graph builder — because the two halves compose in a way neither
+/// `MountGraph` nor `stack_layers` can express: an overlay upper is what
+/// makes a write to content only a read-only source holds **copy up** rather
+/// than fail. A surface that composes its own graph instead gets a session
+/// that reads correctly and cannot be written to, which is how the daemon
+/// surface lost copy-on-write while the harness kept it (gate 4, Task 6b).
+///
+/// `ST_BAD_REQUEST` if the upper is not `Access::ReadWrite`, or if a mount
+/// prefix does not normalize.
+pub fn compose_root(
+    mounts: Vec<(String, Arc<dyn Provider>)>,
+    write_layer: Option<Arc<dyn Provider>>,
+) -> Result<Arc<dyn Provider>, i32> {
+    let graph: Arc<dyn Provider> = Arc::new(MountGraph::new(mounts)?);
+    match write_layer {
+        Some(upper) => Ok(Arc::new(
+            vfs_compose::OverlayProvider::from_arcs(graph, upper)
+                .map_err(|_| crate::ops::bad_request())?,
+        )),
+        None => Ok(graph),
+    }
+}
+
+/// Everything one root composes into, before it becomes the single provider
+/// `Director` holds for that root.
+///
+/// The two halves are **not** interchangeable, and that distinction is the
+/// whole point of this type: `mounts` are siblings (a `MountGraph` routes a
+/// path to whichever of them owns it, later wins), while `write_layer` sits
+/// *above* all of them as an overlay upper, which is what makes copy-on-write
+/// possible — see [`Session::set_write_layer`].
+#[derive(Default, Clone)]
+struct RootComposition {
+    /// Every `(prefix, provider)` accumulated for this root, in registration
+    /// order (later wins on an overlapping path).
+    mounts: Vec<(String, Arc<dyn Provider>)>,
+    /// The writable upper this root's writes copy up into, if one is set.
+    write_layer: Option<Arc<dyn Provider>>,
+}
+
 /// Host entrypoint: one configured director + optional IPC + launch.
 ///
 /// Typical use:
@@ -62,19 +109,20 @@ pub struct Session {
     overlay: PathBuf,
     state_dir: PathBuf,
     ipc: Option<IpcServe>,
-    /// `mount()`'s own root is `RootId::DEFAULT` by design — `mount` is the
-    /// single-root convenience, and multi-root composition goes through
-    /// `Director::mount(RootId(n), …)` (what `vfs-directord`'s
-    /// `SessionRegistry` drives). This accumulates every `mount()` call so it
-    /// can be recomposed into one `MountGraph` and handed to `Director`
-    /// whole, since `Director` now holds exactly one provider per root
-    /// rather than a mergeable list.
-    mounts: Mutex<Vec<(String, Arc<dyn Provider>)>>,
-    /// The writable layer root 0's writes land in, if one is configured —
-    /// see [`Session::set_write_layer`]. Held separately from `mounts`
-    /// because it is not a sibling of them: it sits *above* the whole mount
-    /// graph as an overlay upper, which is what makes copy-on-write possible.
-    write_layer: Mutex<Option<Arc<dyn Provider>>>,
+    /// Per-root composition inputs, keyed by the raw `u32` a `RootId` wraps.
+    /// `Director` holds exactly one provider per root rather than a mergeable
+    /// list, so every change to a root's inputs recomposes that root whole
+    /// (see [`Session::recompose`]).
+    ///
+    /// **This is the one place a session's provider graph is composed**, for
+    /// every root and for every host: `Session::mount`'s single-root
+    /// convenience, and `vfs-directord`'s `SessionRegistry` (which drives the
+    /// multi-root gRPC/TOML surface) both land here. Composing anywhere else
+    /// — calling `kernel().mount` with a hand-built graph — silently drops
+    /// whatever the *other* half of the composition contributed, which is
+    /// exactly how the daemon surface lost copy-on-write while the harness
+    /// kept it (gate 4, Task 6b).
+    roots: Mutex<BTreeMap<u32, RootComposition>>,
     /// Host directories for the session's roots **beyond root 0**, which
     /// `virtual_root` names — see [`Session::declare_root`].
     extra_roots: Vec<(u32, PathBuf)>,
@@ -89,8 +137,7 @@ impl Session {
             overlay: tmp.join("overlay"),
             state_dir: tmp.join("state"),
             ipc: None,
-            mounts: Mutex::new(Vec::new()),
-            write_layer: Mutex::new(None),
+            roots: Mutex::new(BTreeMap::new()),
             extra_roots: Vec::new(),
         }
     }
@@ -182,12 +229,52 @@ impl Session {
     /// as `Director`'s own mount list used to. Each call recomposes the full
     /// accumulated list into one `MountGraph` and replaces `RootId::DEFAULT`'s
     /// provider wholesale, since `Director` holds only one provider per root.
+    ///
+    /// Root 0's convenience form of [`Session::mount_at`].
     pub fn mount(&self, prefix: &str, backend: Arc<dyn Provider>) -> Result<(), i32> {
+        self.mount_at(RootId::DEFAULT, prefix, backend)
+    }
+
+    /// [`Session::mount`] for a specific root. Appends one mount to `root`'s
+    /// accumulated list and recomposes that root; every other root is
+    /// untouched.
+    pub fn mount_at(
+        &self,
+        root: RootId,
+        prefix: &str,
+        backend: Arc<dyn Provider>,
+    ) -> Result<(), i32> {
         {
-            let mut mounts = self.mounts.lock().map_err(|_| crate::ops::map_io_err())?;
-            mounts.push((prefix.to_string(), backend));
+            let mut roots = self.roots.lock().map_err(|_| crate::ops::map_io_err())?;
+            roots
+                .entry(root.0)
+                .or_default()
+                .mounts
+                .push((prefix.to_string(), backend));
         }
-        self.recompose()
+        self.recompose(root)
+    }
+
+    /// Replace `root`'s **entire** sibling-mount list, keeping its write
+    /// layer, and recompose.
+    ///
+    /// For a host that keeps its own record of what a root serves and rebuilds
+    /// the list from scratch whenever it changes — `SessionRegistry`, which
+    /// re-derives a root's layer stack on every `add_source`. Such a host must
+    /// not compose the result itself and hand it to `kernel().mount`: doing so
+    /// replaces the root's provider with one that has no knowledge of the
+    /// write layer, silently removing copy-on-write. Going through here keeps
+    /// the two halves composed by the same code path [`Session::mount`] uses.
+    pub fn set_root_mounts(
+        &self,
+        root: RootId,
+        mounts: Vec<(String, Arc<dyn Provider>)>,
+    ) -> Result<(), i32> {
+        {
+            let mut roots = self.roots.lock().map_err(|_| crate::ops::map_io_err())?;
+            roots.entry(root.0).or_default().mounts = mounts;
+        }
+        self.recompose(root)
     }
 
     /// Declare the layer root 0's **writes** land in, composed as an
@@ -210,41 +297,55 @@ impl Session {
     ///
     /// The upper must declare `Access::ReadWrite`; anything else is refused
     /// here (`ST_BAD_REQUEST`) rather than at the first write.
+    ///
+    /// Root 0's convenience form of [`Session::set_write_layer_at`].
     pub fn set_write_layer(&self, upper: Arc<dyn Provider>) -> Result<(), i32> {
-        {
-            let mut slot = self.write_layer.lock().map_err(|_| crate::ops::map_io_err())?;
-            *slot = Some(upper);
-        }
-        self.recompose()
+        self.set_write_layer_at(RootId::DEFAULT, upper)
     }
 
-    /// Rebuild root 0's single provider from the accumulated mounts plus the
+    /// [`Session::set_write_layer`] for a specific root. Each root has its own
+    /// write layer: a session may copy up game-directory writes into one
+    /// location and a second root's writes into another, or give one root a
+    /// write layer and leave the rest read-only.
+    ///
+    /// The upper is validated **before** it is recorded, so a rejected layer
+    /// leaves the session exactly as it was rather than parking an unusable
+    /// provider that would make every later `mount` on this root fail too.
+    pub fn set_write_layer_at(&self, root: RootId, upper: Arc<dyn Provider>) -> Result<(), i32> {
+        if upper.capabilities().access != Access::ReadWrite {
+            return Err(crate::ops::bad_request());
+        }
+        {
+            let mut roots = self.roots.lock().map_err(|_| crate::ops::map_io_err())?;
+            roots.entry(root.0).or_default().write_layer = Some(upper);
+        }
+        self.recompose(root)
+    }
+
+    /// Rebuild `root`'s single provider from its accumulated mounts plus its
     /// optional write layer, and replace whatever `Director` currently serves
-    /// — it holds exactly one provider per root, so there is no incremental
-    /// mount to append to.
-    fn recompose(&self) -> Result<(), i32> {
-        let mounts = self.mounts.lock().map_err(|_| crate::ops::map_io_err())?.clone();
-        let graph: Arc<dyn Provider> = Arc::new(MountGraph::new(mounts)?);
-        let upper = self
-            .write_layer
+    /// for it — `Director` holds exactly one provider per root, so there is no
+    /// incremental mount to append to.
+    fn recompose(&self, root: RootId) -> Result<(), i32> {
+        let composition = self
+            .roots
             .lock()
             .map_err(|_| crate::ops::map_io_err())?
-            .clone();
-        let composed: Arc<dyn Provider> = match upper {
-            Some(upper) => Arc::new(
-                vfs_compose::OverlayProvider::from_arcs(graph, upper)
-                    .map_err(|_| crate::ops::bad_request())?,
-            ),
-            None => graph,
-        };
-        self.kernel.mount(RootId::DEFAULT, composed)
+            .get(&root.0)
+            .cloned()
+            .unwrap_or_default();
+        let composed = compose_root(composition.mounts, composition.write_layer)?;
+        self.kernel.mount(root, composed)
     }
 
-    /// Drop all mounts before rebuilding composition. The write layer, if any,
-    /// is dropped with them — it is part of the same composition.
+    /// Drop all of root 0's mounts before rebuilding composition. Its write
+    /// layer, if any, is dropped with them — it is part of the same
+    /// composition. Other roots are untouched.
     pub fn clear_mounts(&self) -> Result<(), i32> {
-        self.mounts.lock().map_err(|_| crate::ops::map_io_err())?.clear();
-        *self.write_layer.lock().map_err(|_| crate::ops::map_io_err())? = None;
+        self.roots
+            .lock()
+            .map_err(|_| crate::ops::map_io_err())?
+            .remove(&RootId::DEFAULT.0);
         self.kernel.unmount(RootId::DEFAULT)
     }
 

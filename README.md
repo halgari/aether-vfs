@@ -45,6 +45,7 @@ cargo build --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   
 .\target\debug\vfs.exe launch `
   --source disk:C:\content@/ `
   --source zip:C:\GameLayers\base.zip@/ `
+  --write-layer C:\content\overwrite `
   --exec C:\path\to\tool.exe --env KEY=VAL
 ```
 
@@ -58,6 +59,14 @@ name = "demo"
 type  = "disk"
 path  = "C:/content"
 mount = "/"
+
+# Where the session's writes go. A write to content a read-only source holds
+# (an archive) is copied up into this directory instead of being refused;
+# without one, every source is content and the root is effectively read-only.
+[[source]]
+type        = "disk"
+path        = "C:/content/overwrite"
+write_layer = true
 
 [launch]
 exec      = "C:/tools/my-probe.exe"

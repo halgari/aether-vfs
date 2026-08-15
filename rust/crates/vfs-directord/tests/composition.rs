@@ -263,6 +263,7 @@ async fn stats_rpc_reports_sessions_and_cache() {
             mount: "/".into(),
             layer: 0,
             root: 0,
+            write_layer: false,
         })
         .await
         .unwrap();
@@ -323,6 +324,7 @@ async fn stats_rpc_reports_open_counts_after_session_activity() {
             mount: "/".into(),
             layer: 0,
             root: 0,
+            write_layer: false,
         })
         .await
         .unwrap();
@@ -398,6 +400,7 @@ async fn add_zip_source_via_grpc() {
             mount: "/".into(),
             layer: 0,
             root: 0,
+            write_layer: false,
         })
         .await
         .expect("AddSource zip");
