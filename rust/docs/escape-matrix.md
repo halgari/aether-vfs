@@ -77,16 +77,70 @@ alongside it, see below — and requires `not-found`, failing the test outright
 if any spelling still opens the real bytes. **Corrected statement, precise
 about what still varies by class:** this matrix now establishes
 **containment**, not merely classification, for the negative canary's
-**read** — and, by the same `RootMap::decide` mechanism, for **metadata
-queries and directory enumeration** too (attribute-query and `readdir`
-fall-through were routed to the director in Task 3, and `decide`'s deny
-applies uniformly to whatever reaches it, regardless of which hook asked).
-**Writes are the one class where classification, not containment, still
+**read**, and for **directory enumeration** — `readdir`
+(`NtQueryDirectoryFile(Ex)`) operates on a handle obtained from an
+already-succeeded open, and that open went through the same `create_hook`/
+`open_hook` → `decision_for` → `RootMap::decide` path this section is
+about, so enumeration containment follows directly from read-open
+containment rather than being a separate mechanism this task had to close.
+
+**Correction: this does not extend to name-based metadata queries, and an
+earlier version of this document claimed it did by the same mechanism —
+that claim was false.** `qattr_hook`/`qfull_hook`/`qibn_hook`
+(`crates/vfs-shim/src/hook.rs:1969`, `2041`, `1897`) never call `decide` at
+all. Each asks `fuse_path_attr` (`hook.rs:1822-1831`), which consults
+`fuse_client::vpath_under_root` — the *client's* own string-prefix
+predicate, never `RootMap::compute_under_root` — then the shim-local write
+overlay, then falls through to the real filesystem if neither answers.
+Containment for a name-based attribute query therefore holds only for the
+spellings `vpath_under_root` itself recognises — the ordinary, unmangled
+ones — not for the five alternate spellings (vectors 1, 3, 4, 7, 9) this
+document's own "second, structural finding" (below) already documents as
+recognised only by `RootMap`'s canonicaliser, never by `vpath_under_root`.
+For those five, an attribute query on the negative canary still reaches the
+real, physical file today: `crates/vfs-directord/tests/e2e.rs`'s
+`documents_metadata_gap_for_unrecognised_spellings` proves this directly for
+vector 4 (an isolated `GetFileAttributesW` against the volume-GUID
+spelling), reporting `found` where the matching *read open* on the
+identical spelling reports `not-found`. Attribute queries are also not part
+of the `under-root open outcomes` accounting this matrix's own
+classification check parses at all (`qattr_hook` and friends call
+`hookstats::note_stat`, a separate counter, never `note_open_outcome`) —
+this gap is invisible to this document's classification signal, not merely
+uncontained by it.
+
+**This is the same asymmetry "second, structural finding" (below) already
+describes, surfacing exactly where that finding predicts it would, not a
+second, unrelated issue.** That finding's root cause is that
+`fuse_client::vpath_under_root` and `RootMap::compute_under_root` are two
+independent predicates recognising different spellings under-root — the
+finding traces the consequence for the *open* path (before Task 5, `NotFound`
+passed through for these five spellings; after, `RootMap::decide`'s `Deny`
+seals them, so opens are now contained). The metadata-query hooks route
+through `vpath_under_root` alone and have no fallback to `RootMap::decide`
+at all, so for them the same five spellings have nowhere to fall through
+*to* — they never engage canonicalisation and reach real disk directly, with
+no equivalent of Task 5's fix to close the gap even for reads. One root
+cause, two visible consequences: the open-path asymmetry Task 5 closed, and
+this metadata-query asymmetry, which nothing in this gate touches.
+
+**Do not fix the underlying asymmetry here.** Unifying `vpath_under_root`
+and `RootMap::compute_under_root` into one predicate both routers consult is
+real work with its own blast radius (see "second, structural finding"'s own
+"Not fixed here" paragraph below) — it deserves its own task, not a
+tail-end patch to this one. This section exists to correct the record and
+to pin the gap down with a test (above), not to close it.
+
+**Writes remain the other class where classification, not containment,
 applies** — gate 4's write fall-through (`Engine::cow_seed`, above) means a
 write open on the negative canary still succeeds against real bytes; that
 class is classified (it would show up in `FellThroughWriteFallback`) but not
 contained. Every "unreachable"/"sealed"/"closed" claim anywhere in this
-document remains a **reads-only** claim for that reason.
+document remains a **read-open-only** claim: it says nothing about
+directory-enumeration's own dependency on read-open containment being
+correct (which it is, by the reasoning above), and nothing about a
+name-based attribute query, which is a different hook family with no path
+to `decide` at all.
 
 One more finding this task's own construction of the new assertion surfaced,
 not predicted in advance: **vector 8 (hardlink) is no longer buildable at all

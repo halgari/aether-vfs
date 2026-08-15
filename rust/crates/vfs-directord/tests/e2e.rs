@@ -1474,6 +1474,163 @@ async fn escape_matrix_positive_and_negative_canary() {
     }
 }
 
+/// Fix 2(b) from the final whole-branch review of Gate 3: `docs/escape-
+/// matrix.md` (Gate 3, Task 6 section) claimed containment held for
+/// metadata queries "by the same `RootMap::decide` mechanism... regardless
+/// of which hook asked." That claim is false. `qattr_hook`/`qfull_hook`/
+/// `qibn_hook` (`vfs-shim/src/hook.rs`) never reach `RootMap::decide` at
+/// all — they consult `fuse_path_attr`, which asks
+/// `fuse_client::vpath_under_root` (the *client's* own string-prefix
+/// predicate), then the overlay, then falls through to the real
+/// filesystem. `vpath_under_root` has none of `RootMap::compute_under_root`'s
+/// canonicalisation tables (no device-prefix, volume-GUID, `GLOBALROOT`-
+/// unwrap, UNC-admin-share, or junction-alias resolution) — the exact
+/// asymmetry `positive_expectation`'s own doc comment above documents for
+/// vectors 1/3/4/7/9's *open* path. This test proves the same asymmetry
+/// surfaces for attribute queries too, for one of those five spellings.
+///
+/// This is a real, currently-true gap, not a hypothetical: it launches
+/// `vfs-fixture-escape`'s opt-in `4m` vector (`GetFileAttributesW` against
+/// vector 4's own volume-GUID spelling — see that crate's module doc
+/// comment) under a real, composed session shaped like
+/// `escape_matrix_positive_and_negative_canary`'s own setup, against the
+/// negative canary (a real file on `session.root` that no provider knows
+/// about). The assertion is that the attribute query still succeeds
+/// (`found`) — i.e. still reaches real disk — even though the matching
+/// *read open* on the identical spelling (vector 4 itself) is sealed
+/// (`negative_expectation` above asserts `not-found` for it).
+///
+/// **What would flip this test, and what to do then**: if `found` ever
+/// changes to `not-found` here — because `vpath_under_root` (or an
+/// equivalent client-side predicate) learns to recognise this spelling, or
+/// because `qattr_hook`/`qfull_hook`/`qibn_hook` start routing through
+/// `decide` — this assertion should change to `not-found`, and this test's
+/// own doc comment plus `docs/escape-matrix.md`'s Fix 2 correction should be
+/// updated to say the gap has closed for that hook family, not deleted
+/// silently. A gap recorded only in prose can be quietly forgotten; this
+/// test exists so it cannot be.
+#[tokio::test(flavor = "multi_thread")]
+async fn documents_metadata_gap_for_unrecognised_spellings() {
+    let _guard = LAUNCH_LOCK.lock().await;
+    ensure_inject_artifacts();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+    let registry = SessionRegistry::new();
+    let svc = DirectorService::new(registry);
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The DiskProvider's backing store — deliberately NOT session.root, same
+    // shape as the escape matrix test's own negative canary: a real file
+    // under the managed root that this provider genuinely does not have.
+    let content_dir = tempfile::tempdir().expect("tempdir");
+    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_log = stats_dir.path().join("shim-stats.log");
+    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_file = out_dir.path().join("metadata-gap-out.tsv");
+
+    let fixture = locate_artifact("vfs-fixture-escape.exe");
+    let mut client = connect(&format!("{addr}")).await.expect("connect");
+
+    let session = client
+        .create_session(vfs_control::pb::CreateSessionReq {
+            name: "metadata-gap".into(),
+        })
+        .await
+        .expect("CreateSession")
+        .into_inner();
+    assert!(!session.id.is_empty());
+    assert!(!session.root.is_empty());
+
+    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, SourceSpec as PbSource};
+
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(PbSource {
+                kind: Some(source_spec::Kind::Disk(DiskSource {
+                    path: content_dir.path().to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: "/".into(),
+            layer: 0,
+        })
+        .await
+        .expect("AddSource");
+
+    let root = PathBuf::from(&session.root);
+    let sub = PathBuf::from("Games").join("Skyrim").join("Data");
+    std::fs::create_dir_all(root.join(&sub)).expect("mkdir under session root");
+
+    // Negative canary: real bytes ONLY on session.root — identical
+    // construction to `escape_matrix_positive_and_negative_canary`'s own.
+    const NEGATIVE_BASENAME: &str = "escape-negative-canary.bin";
+    let neg_rel = sub.join(NEGATIVE_BASENAME);
+    std::fs::write(root.join(&neg_rel), b"the-negative-canary-bytes")
+        .expect("write negative canary");
+
+    let ctx = EscapeFixtureCtx {
+        session_id: &session.id,
+        fixture: &fixture,
+        stats_log: &stats_log,
+        vector7_link_dir: None,
+    };
+
+    let (exit, lines, _classified, _truncated) =
+        run_escape_fixture(&mut client, &ctx, &root.join(&neg_rel), &out_file, Some("4m")).await;
+
+    assert_eq!(
+        exit, 0,
+        "vfs-fixture-escape (isolated vector 4m) must exit 0. Lines captured: {lines:?}"
+    );
+    let line = lines
+        .iter()
+        .find(|l| l.vector == "4m")
+        .unwrap_or_else(|| panic!("vector 4m produced no line at all in {out_file:?}"));
+
+    if line.outcome.starts_with("unbuildable:") {
+        panic!(
+            "vector 4's own construction ({}) failed in this environment, so this test cannot \
+             exercise the metadata-gap claim here — see vector 4's own `unbuildable` reasons in \
+             `docs/escape-matrix.md`. This is an environment limitation, not evidence the gap is \
+             closed.",
+            line.outcome
+        );
+    }
+
+    // The headline assertion, and the point of this test: a name-based
+    // attribute query on the negative canary, via a spelling
+    // `fuse_client::vpath_under_root` cannot recognise, still finds the real
+    // file on disk today. See this test's own doc comment for what to do if
+    // this ever flips.
+    assert_eq!(
+        line.outcome, "found",
+        "expected the metadata query on the negative canary (via vector 4's volume-GUID \
+         spelling: {:?}) to still reach real disk, documenting the current containment gap for \
+         qattr_hook/qfull_hook/qibn_hook — got `{}` instead (note: {:?}). If this now reads \
+         `not-found`, the gap has closed; update this assertion and `docs/escape-matrix.md`'s \
+         Fix 2 correction to say so rather than deleting this test.",
+        line.spelling, line.outcome, line.note
+    );
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq {
+            session_id: session.id,
+        })
+        .await
+        .expect("teardown");
+
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn apply_session_config_health_and_list() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

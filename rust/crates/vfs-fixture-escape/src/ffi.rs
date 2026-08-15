@@ -22,6 +22,8 @@ pub const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 pub const ERROR_FILE_NOT_FOUND: u32 = 2;
 pub const ERROR_PATH_NOT_FOUND: u32 = 3;
 
+pub const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFF_FFFF;
+
 #[link(name = "kernel32")]
 extern "system" {
     pub fn CreateFileW(
@@ -47,6 +49,15 @@ extern "system" {
     ) -> i32;
 
     pub fn QueryDosDeviceW(lpDeviceName: *const u16, lpTargetPath: *mut u16, ucchMax: u32) -> u32;
+
+    /// Name-based attribute query — no handle, no `CreateFileW`. Windows
+    /// itself routes this to `NtQueryAttributesFile`/`NtQueryFullAttributesFile`
+    /// or (Windows 11) `NtQueryInformationByName`'s `FileStatBasicInformation`
+    /// class, exactly the hook family (`qattr_hook`/`qfull_hook`/`qibn_hook`,
+    /// `vfs-shim/src/hook.rs`) the metadata-gap test (vector `4m`, below)
+    /// exercises. Returns `INVALID_FILE_ATTRIBUTES` on failure; call
+    /// `GetLastError` for why.
+    pub fn GetFileAttributesW(lpFileName: *const u16) -> u32;
 
     pub fn GetVolumeNameForVolumeMountPointW(
         lpszVolumeMountPoint: *const u16,

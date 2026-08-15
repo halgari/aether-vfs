@@ -704,9 +704,9 @@ gate-1 baseline's own render used, not a parsing gap (confirmed directly:
 | Outcome | Gate-1 baseline | Task 5's own launch | **This run (Task 6)** | Gate that closes it |
 |---|---:|---:|---:|---|
 | Routed | 392 | 392 | **392** | — |
-| FellThroughRedirect | 0 | 0 | **0** | gate 3 — **closed this task**: `RootMap::decide` no longer passes `NotFound` through |
-| FellThroughServe | 0 | 0 | **0** | gate 3 — **closed this task**, same mechanism |
-| FellThroughPassthrough | 0 | 0 | **0** | gates 2-3 — **closed this task**: this is the exact class `RootMap::decide`'s `Deny` replaces |
+| FellThroughRedirect | 0 | 0 | **0** | gate 3 — reads zero in this configuration, not because the code path is gone; see the correction below for why and what gate 4 changes |
+| FellThroughServe | 0 | 0 | **0** | gate 3 — same correction as `FellThroughRedirect` above |
+| FellThroughPassthrough | 0 | 0 | **0** | gates 2-3 — the one of these three with a real claim to structural closure; see below for its own residual producers |
 | FellThroughDrmException | 16 (15× staged exe, 1× `steam_appid.txt`) | 16, identical breakdown | **16, identical breakdown** | gate 5 — the DRM filename exceptions in `hook.rs`, untouched by this task |
 | FellThroughWriteFallback | 0 (not exercised) | 0 (not exercised) | **0 (not exercised — no save attempted this run)** | gate 4 — `Engine::cow_seed`'s last-resort branch, untouched by this task |
 | Denied | 0 | 0 | **0** | n/a — not a fall-through class; see below for what this zero does and does not mean |
@@ -730,25 +730,102 @@ gate-1 baseline specified, and it now shows three of the five fall-through
 classes flipped from "not exercised, still an open question" (gate-1
 baseline's own framing) to "genuinely zero, by construction" — see below.
 
-### Why this run's zero is a stronger claim than the gate-1 baseline's zero
+### Correction: why `FellThroughRedirect`/`FellThroughServe` actually read zero here
 
-The gate-1 baseline was explicit that its own
-`FellThroughRedirect`/`FellThroughServe`/`FellThroughPassthrough` zeros were
-a **coverage gap, not evidence of closure** — nothing in that pre-gate-2
-codebase prevented those classes from firing, the baseline session simply
-never triggered them. That caution no longer applies to those same three
-classes here: after Task 5, `RootMap::decide` has no code path left that
-produces `Redirect`/`Serve` fall-through or the generic `Passthrough`
-fall-through for an under-root `NotFound`/`Dir` resolution — `Deny` is the
-only arm left besides `Located::Outside`'s pass-through (see
-`rust/docs/escape-matrix.md`'s "Gate 3, Task 5" section). So this run's zero
-for those three classes is a **structural** zero (the code cannot produce a
-non-zero count for them under the root, not merely "this session didn't ask
-the right question") — reinforced, not merely repeated, by the fact that the
+An earlier version of this section claimed these two were "closed this
+task" because "`RootMap::decide` no longer passes `NotFound` through." That
+explanation is wrong twice over, and the final whole-branch review of gate 3
+caught it before it could propagate into gate 4's own baseline.
+
+First, `RootMap::decide` still produces `Decision::Redirect` and
+`Decision::Serve` today, unmodified by Task 5 — they come from the `File`
+resolution arm (`crates/vfs-redirect/src/lib.rs:369-381`), not from the
+`NotFound`/`Dir` arm that arm's neighbour, which Task 5 changed. `Redirect`
+and `Serve` were never something the `NotFound` arm produced, so a change to
+that arm cannot be why either bucket reads zero.
+
+Second, and more consequential: `RootMap::decide` is not even the only
+producer either bucket has. `vfs-shim::Engine` — the shim-local wrapper
+`hook.rs`'s `decision_for` actually calls — produces `Decision::Redirect`
+itself, above and independent of `RootMap::decide`, for two cases: every
+overlay hit (`Engine::decide`, `crates/vfs-shim/src/engine.rs:193`) and
+every under-root write that reaches the overlay
+(`Engine::decide_open`, `engine.rs:234`). Both are live, ordinary code paths
+today, not something this or any other task removed.
+
+The real reasons these two read zero in every live session measured so far
+are configuration and ordering facts, not a missing code path:
+
+1. The shim's embedded snapshot in a live session is always the empty tree
+   (`vfs-director::Session::serve`, `crates/vfs-director/src/session.rs:184-186`)
+   — the FUSE ring to the director is the only real content path — so
+   `RootMap::decide`'s `File` arm, which is the one source of `Redirect`/
+   `Serve` that actually depends on `NotFound`'s sibling arms at all, never
+   has anything to resolve to a `File` and never fires.
+2. `hook::try_fuse_create` (`crates/vfs-shim/src/hook.rs:1045`) already
+   serves or seals every under-root read that
+   `fuse_client::vpath_under_root` (the client's own string-prefix
+   predicate) recognises, before `decision_for`/`Engine::decide_open` ever
+   runs — a recognised read either comes back `Routed` (director served it)
+   or is sealed with `STATUS_OBJECT_NAME_NOT_FOUND` right there. Only a read
+   `vpath_under_root` fails to recognise (the five alternate spellings
+   `rust/docs/escape-matrix.md`'s "second, structural finding" describes) or
+   an open `try_fuse_create` explicitly falls through (the DRM exceptions,
+   the write fallback) ever reaches `decision_for` at all.
+3. Of the opens that do reach `decision_for`, `outcome_recorded` (the
+   out-param `try_fuse_create` sets before returning `None` — see its own
+   doc comment) diverts the ones that would otherwise classify as
+   `FellThroughRedirect` back into the bucket `try_fuse_create` already
+   recorded: a DRM-exception open where the exception's own filename is
+   also present in the write overlay (`steam_appid.txt`, written there by
+   `skyrim-live` itself — see "Record a changed effect" below) computes
+   `Redirect` in `Engine::decide_open` but is counted as
+   `FellThroughDrmException`, not `FellThroughRedirect`, because
+   `note_decision_outcome` suppresses the second count when `already` is
+   set. The write-fallback case is the same shape: a write that falls
+   through to the overlay is counted as `FellThroughWriteFallback` even
+   though `Engine::decide_open`'s own answer for it is `Redirect`.
+
+These are facts about this run's configuration and about the order two
+different classifiers run in, not about `Redirect`/`Serve` having no
+producer left. The distinction matters concretely for gate 4: gate 4's own
+job is the write path, and the write path is one of `Redirect`'s two
+producers (item 2 above, via `Engine::decide_open`, line 234). A future
+baseline that still reads these two buckets as zero after gate 4 changes
+that producer needs this section's reasoning to know that the zero is still
+provisional, not to inherit "closed this task" as if the mechanism gate 3
+built were the reason.
+
+### `FellThroughPassthrough`: the one with a real claim to structural closure, and its own residuals
+
+`FellThroughPassthrough` is different from the other two, and does get the
+stronger claim: after Task 5, `RootMap::decide` has no code path left that
+produces the generic `Passthrough` fall-through for an under-root
+`NotFound`/`Dir` resolution — `Deny` is the only arm left besides
+`Located::Outside`'s pass-through (see `rust/docs/escape-matrix.md`'s "Gate
+3, Task 5" section). This run's zero for that class is close to a
+**structural** zero — reinforced, not merely repeated, by the fact that the
 matching unit/e2e tests (`real_on_disk_file_under_root_not_in_snapshot_is_denied`
 and friends, plus this task's own `negative_expectation` assertion) prove the
 same thing by direct construction rather than by absence of contrary
 evidence.
+
+"Close to" rather than "clean," though: `hook.rs`'s own accounting still has
+two residual producers of an under-root `FellThroughPassthrough`, neither
+touched by Task 5. `Engine::decide_open`'s write path answers
+`Decision::PassThrough` directly, bypassing `RootMap::decide` entirely, when
+there is no overlay configured at all (`engine.rs:215`) or when the
+computed remainder is empty or absent (`engine.rs:217`, `220`) — a
+configuration this project's own shipping launcher never hits (`skyrim-live`
+always configures an overlay), but not something the type system or gate 3
+rules out for a differently-configured session. And `Engine::map` itself
+answers `None` — which every caller, `decide_open` included, treats as
+"not under any managed root", i.e. `PassThrough` — while a re-entrant,
+same-thread call lands during the very first decision this engine ever
+makes, before that first call's own `RootMap` construction has finished
+(`engine.rs:155-165`, the `MapInitGuard` reentrancy guard). Both are real,
+narrow, documented edges, not evidence against this run's zero, but reason
+enough to say "close to structural" rather than "airtight."
 
 `FellThroughDrmException` and `FellThroughWriteFallback` do **not** get this
 upgrade — both remain genuine coverage questions, not structural
@@ -765,6 +842,45 @@ remains open until gate 5 addresses the ordering constraint the gate-1
 baseline already documented in detail (narrowing the exception's scope
 versus routing these opens through the ring without breaking
 `CreateProcess`/`SteamAPI_Init` ordering).
+
+### An unchanged code path with a changed effect, recorded here for gate 5
+
+The DRM-exception block itself (`hook.rs:1092-1130`) is untouched by this
+gate — same four filenames, same `return None` after recording
+`FellThroughDrmException`. What changed underneath it, silently, is what
+happens *next*: after `try_fuse_create` returns `None` for one of these
+opens, `create_hook`/`open_hook` still call `decision_for`
+(`Engine::decide_open`) unconditionally to decide how to actually service
+the open, and that answer is what gate 3 changed for an under-root path.
+
+Concretely, for a **read** open under the managed root with nothing in the
+overlay, `Engine::decide` now resolves `RootMap::decide` against the
+(live-session, always-empty) snapshot, gets `NotFound`, and returns `Deny`
+— where before this gate it returned `PassThrough` and the open reached the
+real file on disk underneath. `steam_appid.txt` is exactly this shape: it
+lives under the managed root, so its DRM-exception open is subject to this
+change. The one recorded open of it in this run's own outcome table still
+succeeds only because `skyrim-live` writes a copy into the write overlay
+(`crates/vfs-directord/src/bin/skyrim-live.rs:149`, `490-500`) — `Engine::
+decide`'s overlay check runs before `RootMap::decide` and finds it there,
+answering `Redirect` into the overlay copy instead of ever reaching the now-
+`Deny`ing snapshot path. The other 15 opens in this run (the staged EXE)
+are unaffected by this change for an unrelated reason: the staging directory
+is physically outside every managed root, so `RootMap::decide` never enters
+its `NotFound`/`Dir` arms for it at all — `Located::Outside`'s `PassThrough`
+still applies exactly as before.
+
+This is not a bypass and not something this task fixes — the constraint was
+already satisfied (`steam_appid.txt` was already written into the overlay
+before this gate started) and the DRM exceptions themselves are explicitly
+out of this gate's scope. It is recorded here because **gate 5 owns
+removing these exceptions**, and gate 5's implementer needs to know what
+they currently depend on to keep working: without the overlay copy, this
+gate's own `Deny` change would have silently broken `steam_appid.txt`'s DRM
+exception the moment it shipped, for a reason having nothing to do with the
+DRM handling itself. Any future change to where or whether `skyrim-live`
+seeds that overlay copy needs to account for this dependency, and gate 5's
+own redesign of these exceptions inherits it directly.
 
 **`Denied` reading zero here is exactly what `escape-matrix.md`'s "What the
 shipping config's own launch does and does not demonstrate" section
