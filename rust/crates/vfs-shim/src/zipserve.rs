@@ -348,6 +348,14 @@ pub fn unmap_view(base: usize) -> bool {
 
 /// Copy `[offset, offset+length)` of a container into `dest` (for COW overlay).
 /// Maps the container if needed. Returns false on any failure.
+///
+/// **Unreferenced since gate 4 task 4.** Its only caller was
+/// `Engine::cow_seed`'s `Decision::Serve` arm, which seeded copy-up straight
+/// out of a zip window without asking the director; copy-up now reads through
+/// the ring instead. Left standing (rather than deleted here) because gate 4
+/// task 7 removes `Decision::Serve`, `zipserve`, and this function together —
+/// this `allow` is the marker for that, not a reprieve.
+#[allow(dead_code)]
 pub fn copy_window_to_file(container_nt: &str, offset: u64, length: u64, dest: &std::path::Path) -> bool {
     let (base, file_size) = match ensure_mapped(container_nt) {
         Some(x) => x,

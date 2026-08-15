@@ -1,7 +1,8 @@
 //! The redirect engine: a `RootMap` plus the snapshot bytes it resolves against.
 
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::Path;
 use std::sync::OnceLock;
 
 use vfs_redirect::{classify_open, to_nt, Decision, DirItem, RootId, RootMap, VolumeMap};
@@ -68,10 +69,14 @@ impl Drop for MapInitGuard {
     }
 }
 
-/// Strip a `\??\` / `\\?\` device prefix, leaving a Win32 path (drive intact).
-fn strip_nt(p: &str) -> String {
-    p.strip_prefix(r"\??\").or_else(|| p.strip_prefix(r"\\?\")).unwrap_or(p).to_string()
-}
+/// Bytes pulled from the director per `FuseClient::read_fragmented` call
+/// during copy-up. Not the transfer unit: the client fragments this again to
+/// fit the ring's payload cap (or an arena bank), so one call here is already
+/// several round trips for anything sizeable. It only bounds how much of the
+/// file this crate holds in memory at once — a Skyrim BSA is gigabytes and
+/// must not be buffered whole. Heap, not stack: game threads reach this from
+/// inside a hook, and SkyrimSE's primary thread ships a 1 MiB PE stack.
+const SEED_CHUNK: usize = 256 * 1024;
 
 /// Errors constructing an [`Engine`].
 #[derive(Debug)]
@@ -317,64 +322,96 @@ impl Engine {
         // copy already exists.
         if intent.preserves && !ov.has_file(root, &comps) {
             let dest = ov.file_path(root, &comps);
-            if !self.cow_seed(root, nt_path, &dest) {
-                // Best-effort; write still goes to the overlay path.
-            }
+            // Best-effort by design, and the failure is not silent guesswork:
+            // a director that will not hand over the existing content leaves
+            // the overlay file to be created empty by the write itself, which
+            // is the same thing the path reads as (`Deny`/not-found). What it
+            // must never do is fall back to real disk under the root — see
+            // `cow_seed`.
+            let _ = self.cow_seed(root, &comps, &dest);
         }
         Decision::Redirect {
             target_nt: to_nt(&ov.file_path(root, &comps).to_string_lossy()),
         }
     }
 
-    /// Seed an overlay path with existing content (disk redirect, zip window, or
-    /// real file). Returns true when bytes were written to `dest`.
+    /// Materialise `(root, rel)`'s existing content at `dest` by reading it
+    /// **through the director**. Returns true when `dest` now holds the
+    /// director's bytes in full.
     ///
-    /// `root` is the root `nt_path` resolved under, and the snapshot is only
-    /// consulted for root 0 — same reason [`Engine::decide`] gates it there:
-    /// seeding root 1's copy-on-write file from root 0's snapshot entry for
-    /// the same relative path would bake another root's bytes into the file
-    /// the game is about to edit. Root ≥1 falls straight to the real-file
-    /// copy below, which is root-correct by construction (it copies the very
-    /// path being opened).
+    /// **This used to read the real filesystem.** It re-ran the snapshot-only
+    /// decision and copied from whatever that yielded — `std::fs::copy` off a
+    /// `Decision::Redirect` target, a zip window off a `Decision::Serve`, and
+    /// failing both, `std::fs::copy` off the raw NT path being opened. None of
+    /// those asked the director anything, so copy-up seeded from content under
+    /// a managed root that the invariant says is unreachable: a real file the
+    /// provider graph does not serve reads as not-found, and then a preserving
+    /// *write* to the same path copied it up anyway and handed the game its
+    /// bytes. `vfs-directord`'s escape matrix names this exact hole — its
+    /// negative-canary assertion is scoped to reads because the write open
+    /// still reached the canary "through `Engine::cow_seed`'s last-resort
+    /// branch". This is that branch, gone.
     ///
-    /// Worth knowing about that fallback rather than assuming it: inside an
-    /// injected process the `std::fs::copy` below is itself hooked, and its
-    /// source open is decided by `Engine::decide` like any other — so under a
-    /// managed root it only ever seeds from content the VFS already vouches
-    /// for. A bare real file under root 0 has been invisible since gate 3
-    /// sealed the root, and a bare real file under root ≥1 is sealed the same
-    /// way now, so in-process the fallback is reached but declines. Out of
-    /// process (unit tests, any non-injected caller) it copies as written.
-    /// That is the intended shape, not an accident: a preserving write to a
-    /// path the VFS says does not exist gets a fresh empty overlay file,
-    /// consistent with the not-found the same path reads as. Seeding it from
-    /// what the *director* holds is the write fall-through redesign, which is
-    /// a separate task.
-    fn cow_seed(&self, root: RootId, nt_path: &str, dest: &std::path::Path) -> bool {
-        if let (RootId::DEFAULT, Some(map), Ok(reader)) =
-            (root, self.map(), SnapshotReader::open(&self.snapshot))
-        {
-            match map.decide(nt_path, &reader) {
-                Decision::Redirect { target_nt } => {
-                    return std::fs::copy(strip_nt(&target_nt), dest).is_ok();
-                }
-                Decision::Serve {
-                    container_nt,
-                    offset,
-                    length,
-                } => {
-                    return crate::zipserve::copy_window_to_file(
-                        &container_nt,
-                        offset,
-                        length,
-                        dest,
-                    );
-                }
-                _ => {}
-            }
+    /// It also takes the resolved [`RootId`] and the folded remainder rather
+    /// than an NT path, so there is no second, private re-derivation of which
+    /// root a path belongs to: the id and components are the ones the caller
+    /// already resolved through [`Engine::resolve`], and the vpath handed to
+    /// the ring is `rel.join("/")` — the same shape
+    /// `FuseClient::vpath_under_root` builds.
+    ///
+    /// Three things this must get right, none of them incidental:
+    ///
+    /// - **The read spans many round trips.** The ring's payload cap is
+    ///   ~1 MiB and a bulk arena bank is capped at 1 MiB per RTT, against
+    ///   Skyrim assets measured in gigabytes. The loop below runs to the size
+    ///   the OPEN reported, and it re-reads at the new offset when a call
+    ///   comes back short — a short read is *not* proof of EOF
+    ///   (`read_fragmented` also returns short when one fragment in its own
+    ///   batch was partial). Only a zero-length read ends the loop, and
+    ///   because that case is treated as failure, the loop cannot spin: every
+    ///   iteration either advances `done` or returns.
+    /// - **A director error fails the copy-up.** No `std::fs::copy` fallback,
+    ///   not even on the error path — a fallback there would restore the
+    ///   escape at precisely the moment something had already gone wrong. A
+    ///   partially written `dest` is removed, so "false" means the same thing
+    ///   it always did: nothing was seeded, and the caller's write starts from
+    ///   an empty overlay file.
+    /// - **It cannot re-enter the hook that called it.** `decide_open` runs
+    ///   inside `create_hook`, so `File::create(dest)` below is an NT open
+    ///   made from inside a hook — and `dest` is a path the shim itself
+    ///   chose, which nothing says cannot be under a managed root. Without a
+    ///   guard that open re-enters `create_hook` -> `decide_open` -> here, and
+    ///   recurses until the stack is gone (this project has already lost a
+    ///   process to exactly that shape twice: `vfs_redirect`'s
+    ///   `OS_CONSULT_DEPTH` and this file's own `MAP_INIT_DEPTH`).
+    ///   [`crate::hook::ShimIoGuard`] is the crate's existing answer — the same
+    ///   counter `create_hook` tests on entry before trampolining straight to
+    ///   the real ntdll — held across the whole seed. Held rather than
+    ///   declined-on-conflict for the destination's sake: while it is up, our
+    ///   own writes reach the real filesystem instead of being re-decided.
+    fn cow_seed(&self, root: RootId, rel: &[String], dest: &Path) -> bool {
+        if rel.is_empty() {
+            return false;
         }
-        let real = PathBuf::from(strip_nt(nt_path));
-        real.exists() && std::fs::copy(&real, dest).is_ok()
+        // No director, no copy-up. The old code's answer here was to read the
+        // disk, which is the whole bug; a shim with no ring has no legitimate
+        // source for these bytes.
+        let Some(client) = crate::fuse_client::global() else {
+            return false;
+        };
+        // Already inside shim-initiated I/O on this thread: this call *is* the
+        // recursion the guard exists to stop, so decline rather than deepen it.
+        let Some(_io) = crate::hook::ShimIoGuard::enter() else {
+            return false;
+        };
+        if seed_from_director(client, root, &rel.join("/"), dest) {
+            return true;
+        }
+        // Failed part-way: a truncated seed is worse than none, because the
+        // game would edit it believing it whole. Leave the caller the empty
+        // overlay file it gets for any other unseedable path.
+        let _ = std::fs::remove_file(dest);
+        false
     }
 
     /// Whether `nt_path` lies under **any** declared root. `hook.rs`'s
@@ -438,7 +475,13 @@ impl Engine {
         ov.ensure_parent(from_root, &from);
         if !ov.has_file(from_root, &from) {
             let dest = ov.file_path(from_root, &from);
-            let _ = self.cow_seed(from_root, from_nt, &dest);
+            // Same contract as `decide_open`'s copy-up: a director that
+            // declines leaves nothing at `dest`, so the rename moves an
+            // absent/empty file rather than one seeded off real disk. The
+            // rename itself is still handled (`true`) — declining here would
+            // hand the operation back to the real filesystem, which is the
+            // one outcome an under-root path must never get.
+            let _ = self.cow_seed(from_root, &from, &dest);
         }
         ov.rename(from_root, &from, &to);
         true
@@ -470,6 +513,63 @@ impl Engine {
             _ => real.to_vec(),
         }
     }
+}
+
+/// OPEN → read-to-`dest` → CLOSE against the director. Split out of
+/// [`Engine::cow_seed`] so the handle is closed on every path out of the read
+/// loop, including the failing ones — a leaked `fh` is a provider-side file
+/// the director never releases.
+fn seed_from_director(
+    client: &crate::fuse_client::FuseClient,
+    root: RootId,
+    vpath: &str,
+    dest: &Path,
+) -> bool {
+    let Ok(opened) = client.open(root, vpath) else {
+        return false;
+    };
+    // A directory is not copy-up material; `File::create` on `dest` would
+    // otherwise leave a zero-length file standing in for one.
+    let ok = !opened.is_dir && write_director_file(client, opened.fh, opened.size, dest);
+    let _ = client.close(opened.fh);
+    ok
+}
+
+/// Stream `size` bytes of `fh` into a freshly created `dest`.
+///
+/// See [`Engine::cow_seed`] for why the loop is shaped this way: it reads to
+/// the size OPEN reported rather than trusting one call, treats a short read
+/// as "read again from the new offset" rather than as EOF, and treats a
+/// zero-length read (the director having less than it said) as a failure —
+/// which is also what makes the loop provably terminate.
+fn write_director_file(
+    client: &crate::fuse_client::FuseClient,
+    fh: u64,
+    size: u64,
+    dest: &Path,
+) -> bool {
+    let Ok(mut f) = std::fs::File::create(dest) else {
+        return false;
+    };
+    // A zero-byte file in the provider graph copies up as a zero-byte overlay
+    // file — the loop below simply does not run. The lower clamp bound only
+    // keeps the buffer allocation legal in that case.
+    let mut buf = vec![0u8; (size as usize).clamp(1, SEED_CHUNK)];
+    let mut done: u64 = 0;
+    while done < size {
+        let want = ((size - done) as usize).min(buf.len());
+        let Ok(n) = client.read_fragmented(fh, done, &mut buf[..want]) else {
+            return false;
+        };
+        if n == 0 {
+            return false;
+        }
+        if f.write_all(&buf[..n]).is_err() {
+            return false;
+        }
+        done += n as u64;
+    }
+    f.flush().is_ok()
 }
 
 #[cfg(test)]
@@ -885,20 +985,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Copy-on-write under root 1 seeds from root 1's own real file, never
-    /// from root 0's snapshot — the same cross-root confusion as
-    /// `a_read_under_a_second_root_is_not_answered_from_root_zeros_snapshot`,
-    /// but on the write path, where it would bake the wrong bytes into the
-    /// overlay copy the game then edits.
+    /// **The invariant, stated on the write path.** A real file physically on
+    /// disk under a managed root, that no provider serves, must not reach the
+    /// game through copy-up either.
     ///
-    /// No hooks are installed here, so `cow_seed`'s real-file copy runs
-    /// unmediated; inside an injected process that same copy is decided by
-    /// `decide` and declines for a path under a managed root (see
-    /// `cow_seed`'s doc comment). The claim this test pins is the one that
-    /// holds either way: whatever the seed comes from, it is never root 0's
-    /// snapshot entry for the same relative path.
+    /// This test asserted the exact opposite until gate 4 task 4: that the
+    /// overlay copy *was* seeded from root 1's own real file. That was the
+    /// best available answer while `cow_seed` had no way to ask the director
+    /// anything — it at least ruled out the worse failure of seeding root 1's
+    /// copy from root 0's snapshot entry for the same relative path — but it
+    /// pinned a hole open. `vfs-directord`'s escape matrix names the same one
+    /// from the other side: its negative canary is unreachable by a read, and
+    /// its "scoped to reads only" note exists because a *write* open still
+    /// reached the canary here.
+    ///
+    /// Two roots rather than one, because the cross-root claim is still worth
+    /// keeping: neither root's copy-up may seed from the other's snapshot
+    /// entry for the same relative path. With disk seeding gone, both roots
+    /// answer the same way — nothing is seeded at all without a director —
+    /// so the assertion is now that `dest` does not exist rather than that it
+    /// holds one root's bytes rather than the other's.
     #[test]
-    fn copy_on_write_under_a_second_root_seeds_from_that_root_s_real_file() {
+    fn copy_on_write_never_seeds_from_a_real_file_under_the_root() {
         use crate::overlay_layer_dir;
         use vfs_redirect::FILE_OPEN_IF;
         const WRITE: u32 = 0x4000_0000;
@@ -912,8 +1020,12 @@ mod tests {
         std::fs::create_dir_all(root1.join("Data")).unwrap();
         std::fs::create_dir_all(&overlay_dir).unwrap();
         // A real file under root 1 at the *same* relative path the snapshot
-        // publishes for root 0.
-        std::fs::write(root1.join("Data").join("foo.esp"), b"ROOT-1 REAL BYTES").unwrap();
+        // publishes for root 0 — and one under root 0 too, so neither root's
+        // answer can be the accident of there being nothing on disk to copy.
+        const R1: &[u8] = b"ROOT-1 REAL BYTES";
+        const R0: &[u8] = b"ROOT-0 REAL BYTES";
+        std::fs::write(root1.join("Data").join("foo.esp"), R1).unwrap();
+        std::fs::write(root0.join("Data").join("foo.esp"), R0).unwrap();
 
         let engine = Engine::with_roots_and_overlay(
             &[
@@ -925,16 +1037,41 @@ mod tests {
         )
         .unwrap();
 
-        let via_root1 = format!(r"\??\{}", root1.join("Data").join("foo.esp").to_string_lossy());
-        let d = engine.decide_open(&via_root1, WRITE, FILE_OPEN_IF);
-        let seeded = overlay_layer_dir(&overlay_dir, RootId(1)).join("data").join("foo.esp");
-        assert_eq!(d, Decision::Redirect { target_nt: to_nt(&seeded.to_string_lossy()) });
-        assert_eq!(
-            std::fs::read(&seeded).unwrap(),
-            b"ROOT-1 REAL BYTES",
-            "the overlay copy must be seeded from root 1's own file, not from \
-             root 0's snapshot entry for the same relative path"
-        );
+        for (root, dir, disk) in
+            [(RootId::DEFAULT, &root0, R0), (RootId(1), &root1, R1)]
+        {
+            let nt = format!(r"\??\{}", dir.join("Data").join("foo.esp").to_string_lossy());
+            let dest = overlay_layer_dir(&overlay_dir, root).join("data").join("foo.esp");
+            // The write is still captured by the overlay — that half is
+            // unchanged, and it is what keeps the write off real disk.
+            assert_eq!(
+                engine.decide_open(&nt, WRITE, FILE_OPEN_IF),
+                Decision::Redirect { target_nt: to_nt(&dest.to_string_lossy()) },
+                "root {root:?}: the write itself must still be redirected into the overlay"
+            );
+            // ...but nothing was copied up. The real file under the root is
+            // not a source the VFS may read from, on this path or any other.
+            assert!(
+                !dest.exists(),
+                "root {root:?}: copy-up seeded {dest:?} from somewhere with no director \
+                 connected — the only thing it could have read is the real file under \
+                 the managed root, which is exactly what must be unreachable"
+            );
+            // Stated as content too, so a future `dest` that exists for some
+            // other reason still cannot quietly hold the disk bytes.
+            assert_ne!(
+                std::fs::read(&dest).unwrap_or_default(),
+                disk,
+                "root {root:?}: the overlay copy holds the real on-disk file's bytes"
+            );
+            // And the snapshot is not a source either: root 0's published
+            // entry for this very vpath must not appear under root 1.
+            assert_ne!(
+                std::fs::read(&dest).unwrap_or_default(),
+                R0,
+                "root {root:?}: cross-root seed from root 0's snapshot entry"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&base);
     }

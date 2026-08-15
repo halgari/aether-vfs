@@ -1,5 +1,16 @@
-//! Single-test binary: writes go to the overlay (create + copy-on-write); the
-//! mod backing file is never mutated.
+//! Single-test binary: writes go to the overlay; the mod backing file is never
+//! mutated.
+//!
+//! **The copy-on-write half moved out from under this test in gate 4, task 4**
+//! and the name is kept only because several task reports track this test by
+//! it (it has a documented flakiness allowance under parallel contention).
+//! Copy-up now reads its content through the director, and this test installs
+//! hooks with no ring at all — so there is nothing here for a copy-up to read,
+//! and the assertions below say so. That is not a gap: it is the invariant.
+//! What copy-up used to do instead was `std::fs::copy` from the snapshot's
+//! backing file, and *that* is what this test used to prove.
+//! `cow_seed_reads_through_director.rs` holds the positive half — a real ring,
+//! a real `FuseClient`, and the provider's bytes landing in the overlay.
 use std::io::Write;
 use vfs_shim::{install, Engine};
 
@@ -70,19 +81,32 @@ fn writes_land_in_overlay_with_cow() {
         "landed in overlay"
     );
 
-    // --- Copy-on-write modify of a mod file ---
-    {
-        let mut f = std::fs::OpenOptions::new().append(true).open(root.join("mod.esp")).expect("open mod for append");
-        f.write_all(b"X").unwrap();
-    }
-    // Virtual read reflects the modification...
-    assert_eq!(std::fs::read(root.join("mod.esp")).unwrap(), b"ORIGX", "COW modification visible");
-    // ...the overlay holds the materialized+modified copy...
+    // --- A preserving write to a mod file, with no director connected ---
+    //
+    // `append(true)` without `create` is FILE_OPEN: the file must already
+    // exist. The write is redirected into the overlay, finds no copy there,
+    // and copy-up has nowhere to get one from — a ring is the only source it
+    // will accept and this engine has none. So the open fails not-found.
+    //
+    // It used to succeed, by copying `backing` off disk. The two assertions
+    // that follow are the ones with teeth: nothing was materialised, and the
+    // shared backing file is untouched. A future change that satisfies this
+    // open by reading the filesystem again would fail here.
+    let err = std::fs::OpenOptions::new()
+        .append(true)
+        .open(root.join("mod.esp"))
+        .expect_err("a preserving write must not be satisfied by copying the backing file");
     assert_eq!(
-        std::fs::read(overlay_root0.join("mod.esp")).unwrap(),
-        b"ORIGX",
-        "overlay has COW copy"
+        err.kind(),
+        std::io::ErrorKind::NotFound,
+        "expected not-found (nothing to copy up), got {err:?}"
     );
+    assert!(
+        !overlay_root0.join("mod.esp").exists(),
+        "copy-up materialised something with no director to read it from"
+    );
+    // The virtual read still resolves through the snapshot, unmodified...
+    assert_eq!(std::fs::read(root.join("mod.esp")).unwrap(), b"ORIG", "mod still readable");
     // ...and the shared mod backing is untouched.
     assert_eq!(std::fs::read(&backing).unwrap(), b"ORIG", "backing must not be mutated");
 

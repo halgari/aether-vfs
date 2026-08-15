@@ -34,6 +34,33 @@ fn in_hook_reenter() -> bool {
     HOOK_REENTER.with(|c| c.get() > 0)
 }
 
+/// RAII form of [`HOOK_REENTER`] for shim-initiated file I/O outside this
+/// module. `enter()` returns `None` when the guard is already held on this
+/// thread — the caller's signal that it is already running *inside* the shim's
+/// own I/O and must not start more.
+///
+/// The two in-module users (`install_panic_hook`, `drm_exe_trace`) call the
+/// raw begin/end pair; `Engine::cow_seed` needs the same protection from
+/// another module, and a guard that cannot be forgotten on an early return is
+/// the shape to hand out. While it is held, every NT file call this thread
+/// makes takes `create_hook`/`open_hook`'s `in_hook_reenter` fast path
+/// straight to the real ntdll — which is the point: copy-up writes its
+/// destination file while the hook that asked for the copy-up is still on the
+/// stack.
+pub(crate) struct ShimIoGuard(());
+
+impl ShimIoGuard {
+    pub(crate) fn enter() -> Option<Self> {
+        hook_reenter_begin().then_some(ShimIoGuard(()))
+    }
+}
+
+impl Drop for ShimIoGuard {
+    fn drop(&mut self) {
+        hook_reenter_end();
+    }
+}
+
 /// Opt-in only: when `VFS_ALLOW_DISK_FALLTHROUGH=1`, under-root FUSE NOT_FOUND
 /// may open the host path (legacy / debug). Default **off** — game content must
 /// come from the director (zip/overrides), never the Steam library tree.
