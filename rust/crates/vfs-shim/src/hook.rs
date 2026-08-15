@@ -839,18 +839,19 @@ unsafe fn record_path(file_handle: *mut HANDLE, path: Option<&str>, status: NTST
 
 /// Is this path one we are responsible for?
 ///
-/// There are two notions of "ours" and they are not the same. The engine
-/// knows *one* managed root — the shim's own local config names a single
-/// tree. The client knows every root the session declared, plus the staging
-/// directory as an alias for root 0 — and a staged game's working directory
-/// is that staging directory, so it reaches our content by that name.
-/// Anything that asks the narrower question silently disowns everything the
-/// engine has never heard of: the aliased half, and (since stage 2b) every
-/// root past the first.
+/// There are two notions of "ours" and they are still not quite the same.
+/// Both are `RootMap`s now, both canonicalise identically, and since gate 4
+/// Task 3 both are told about every root the session declared — `bootstrap.rs`
+/// builds the engine's list with the client's own `roots_from_env`. What is
+/// left is one deliberate difference: the client also declares the staging
+/// directory as an alias for root 0 (a staged game's working directory is
+/// that staging directory, so it reaches our content by that name), and the
+/// engine deliberately does not, because the DRM exceptions trampoline to
+/// real files in exactly that directory and need the engine to call it
+/// outside — see `bootstrap.rs` for the full argument.
 ///
-/// Both halves canonicalise the same way now — the client's predicate is a
-/// `RootMap` too — so what differs is only *how many roots* each was told
-/// about, not which spellings each recognises.
+/// So the narrow question still disowns the aliased half, and every caller
+/// must keep asking through here.
 ///
 /// Every caller must ask through here. When `tag_under_root` asked the narrow
 /// question, the enumeration of `<stage>\Data` went untracked and fell through

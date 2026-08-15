@@ -276,8 +276,10 @@ pub struct RootMap {
 }
 
 impl RootMap {
-    /// A single root, answering as [`RootId::DEFAULT`] — the shape every
-    /// single-root caller (notably `vfs-shim`'s `Engine`) still wants.
+    /// A single root, answering as [`RootId::DEFAULT`] — the shape tests and
+    /// one-root callers want. Both production callers (`vfs-shim`'s `Engine`
+    /// and its `FuseClient`) now declare every session root through
+    /// [`RootMap::with_roots`] instead.
     ///
     /// `root` may be NT (`\??\C:\Games\Skyrim`) or Win32 (`C:\Games\Skyrim`).
     /// `volumes` is the OS's current device-name/volume-GUID table, resolved

@@ -650,7 +650,12 @@ impl FuseClient {
 /// single-root case. An entry whose id will not parse is skipped rather than
 /// failing the launch; an entry naming id 0 replaces `VIRTUAL_DIR`'s path,
 /// because a caller that spelled root 0 explicitly meant it.
-fn roots_from_env(virtual_dir: &str) -> Vec<(RootId, String)> {
+///
+/// `pub(crate)` because `bootstrap.rs` builds the `Engine`'s root list with
+/// this same function: the engine and the client must agree on which roots
+/// exist, and the cheapest way to guarantee that is for there to be one
+/// parse rather than two.
+pub(crate) fn roots_from_env(virtual_dir: &str) -> Vec<(RootId, String)> {
     merge_extra_roots(virtual_dir, vfs_env::text(vfs_env::VIRTUAL_ROOTS).as_deref())
 }
 

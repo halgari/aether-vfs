@@ -47,9 +47,10 @@ pub enum OverlayState {
 /// This is the same collision the block cache had before this branch mixed
 /// `RootId` into `CachingProvider::file_id_for` (see
 /// `two_roots_same_path_size_and_mtime_do_not_collide` in `vfs-cache`) —
-/// fixed here one layer up, before `Engine` (still single-root; see the
-/// `SINGLE ROOT` notes in `engine.rs`) becomes multi-root and the collision
-/// would otherwise go live.
+/// fixed here one layer up, deliberately one task ahead of `Engine` becoming
+/// multi-root (gate 4, Task 3) — which is when the collision would otherwise
+/// have gone live, since `Engine` now resolves each path's own `RootId` and
+/// passes it to every call below.
 ///
 /// **Upgrade note, no migration provided:** before this change, an overlay
 /// directory had no root subdirectory at all — `<overlay_root>/data/x.ini`.
@@ -64,8 +65,8 @@ pub enum OverlayState {
 /// two callers that set a persistent overlay path are dev-harness binaries
 /// with no shipped users (`vfs-directord/src/bin/skyrim-live.rs`,
 /// `vfs-launch`), and a migrator would have to assume "everything at the old
-/// top level belongs to root 0" — exactly the assumption the next task
-/// (multi-root `Engine`) makes false.
+/// top level belongs to root 0" — exactly the assumption multi-root `Engine`
+/// (the very next task, now done) makes false.
 pub struct Overlay {
     root: PathBuf,
 }

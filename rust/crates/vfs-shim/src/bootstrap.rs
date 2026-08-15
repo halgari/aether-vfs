@@ -106,10 +106,33 @@ pub fn bootstrap_from_config_path_with_payload(
             return Err(BootstrapError::Fuse(msg));
         }
     }
+    // Every root the session declared, not just the one the config file names.
+    //
+    // The config wire format carries a single root and deliberately still
+    // does: the extra roots are published into the child's environment
+    // (`VFS_VIRTUAL_ROOTS`, written by `IpcServe::apply_env_roots`) and this
+    // is the *same* function the FUSE client parses them with, seeded from
+    // the same root-0 path. One parse, one declaration list — the two halves
+    // of the shim cannot end up disagreeing about which roots exist, which is
+    // exactly the drift stage 2b collapsed on the predicate side.
+    //
+    // Note what is deliberately NOT here: the staged-launch alias
+    // (`stage_root_from_env`) the client appends as a second spelling of root
+    // 0. The staged directory physically holds the game EXE and its import
+    // closure, and the DRM exceptions in `hook.rs::try_fuse_create`
+    // (`SkyrimSE.exe`, `steam_api*`, `steam_appid.txt`) work by returning
+    // `None` so the open trampolines to that real file — which requires this
+    // engine to answer `PassThrough`, i.e. to consider the staged directory
+    // outside its roots. Teaching it the alias would turn those opens into
+    // `Deny` (nothing under a managed root falls through since gate 3, and a
+    // director session's local snapshot is empty), and the game could not
+    // open its own image. Gate 5 owns the DRM exceptions; this stays as it is
+    // until then.
+    let roots = crate::fuse_client::roots_from_env(&root);
     let engine = if overlay.is_empty() {
-        Engine::new(&root, snapshot)
+        Engine::with_roots(&roots, snapshot)
     } else {
-        Engine::with_overlay(&root, &overlay, snapshot)
+        Engine::with_roots_and_overlay(&roots, &overlay, snapshot)
     }
     .map_err(BootstrapError::Engine)?;
 
