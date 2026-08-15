@@ -3,6 +3,13 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathError {
     EscapesRoot,
+    /// The path normalizes to the root itself (zero components) where a
+    /// non-root path was required — e.g. a declared managed root, which must
+    /// name a real subtree rather than "everything". See
+    /// `vfs_redirect::RootMap::with_capacity`, which is the caller that
+    /// matters: a root with zero components would match every path handed to
+    /// it, with the whole path left over as the remainder.
+    EmptyRoot,
 }
 
 /// Normalize a root-relative virtual path to canonical `/`-separated form.

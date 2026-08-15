@@ -316,11 +316,19 @@ impl RootMap {
         let mut parsed = Vec::with_capacity(roots.len());
         for (id, path) in roots {
             let norm = normalize_vpath(path)?;
-            let comps: Vec<String> = if norm.is_empty() {
-                Vec::new()
-            } else {
-                norm.split('/').map(str::to_string).collect()
-            };
+            // A root that normalizes to zero components would match *every*
+            // path in `match_canonical` (nothing left to fold-compare), with
+            // the whole path handed back as the remainder — silently sealing
+            // everything under this root rather than routing it. Fail
+            // closed at construction instead of at every lookup: reachable
+            // today via `VFS_VIRTUAL_DIR=""` (checked for unset, not empty,
+            // at `fuse_client.rs`'s env entry point) and newly plausible now
+            // that a second declared root can be malformed independently of
+            // the first.
+            if norm.is_empty() {
+                return Err(PathError::EmptyRoot);
+            }
+            let comps: Vec<String> = norm.split('/').map(str::to_string).collect();
             parsed.push(Root { id: *id, comps });
         }
         // Longest first — see the `roots` field doc. `sort_by` is stable, so
@@ -985,6 +993,35 @@ mod tests {
         let win32 = RootMap::new(r"C:\Games\Skyrim", VolumeMap::empty()).unwrap();
         assert_eq!(nt.root_components(), win32.root_components());
         assert_eq!(nt.root_components(), vec!["C:", "Games", "Skyrim"]);
+    }
+
+    /// A root that normalizes to zero components (`""`, `"."`, `"/"`, or an
+    /// NT/DOS prefix with nothing after it) must be rejected at construction,
+    /// not accepted and left to `match_canonical` — which, given zero
+    /// components to fold-compare, would match *every* path with the whole
+    /// path as the remainder. Reachable via `VFS_VIRTUAL_DIR=""` (the shim's
+    /// env entry point checks for unset, not empty) and, since stage 2b, via
+    /// a second declared root that is malformed independently of the first.
+    #[test]
+    fn an_empty_root_is_rejected_rather_than_matching_every_path() {
+        // `RootMap` has no `Debug` impl (it holds a lookup cache), so
+        // `unwrap_err` — which requires `T: Debug` — is not available here;
+        // match the `Result` directly instead.
+        fn assert_empty_root_err(r: Result<RootMap, PathError>) {
+            match r {
+                Err(PathError::EmptyRoot) => {}
+                Err(other) => panic!("expected PathError::EmptyRoot, got {other:?}"),
+                Ok(_) => panic!("expected an error, but the empty root was accepted"),
+            }
+        }
+        assert_empty_root_err(RootMap::new("", VolumeMap::empty()));
+        assert_empty_root_err(RootMap::new(".", VolumeMap::empty()));
+        assert_empty_root_err(RootMap::new("/", VolumeMap::empty()));
+        // A malformed second root must not silently swallow a valid first one.
+        assert_empty_root_err(RootMap::with_roots(
+            &[(RootId(0), r"C:\Games\Skyrim"), (RootId(1), "")],
+            VolumeMap::empty(),
+        ));
     }
 
     /// Stage 2b task 5, step 1: the structural claim of the whole task. A
