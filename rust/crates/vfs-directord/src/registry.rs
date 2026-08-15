@@ -44,14 +44,21 @@ pub struct StageLaunchOpts<'a> {
 /// however many roots the config declares rather than assuming there is only
 /// one.
 ///
+/// Validates the config first (see [`vfs_control::SessionConfig::validate_roots`]):
+/// a duplicate `[[root]]` id, or a source naming an undeclared root, is
+/// rejected here rather than silently producing a provider keyed by a number
+/// nothing documents.
+///
 /// This builds provider objects and does **not** mount anything into a live
-/// [`Session`]/`Director`: `Director` is not yet root-aware (that lands in
-/// stage 2b task 3, which also deletes its mount-merge). Until then, the
-/// returned providers are addressed directly via [`vfs_protocol::VPath`],
-/// not through a session's ring/IPC path.
+/// [`Session`]/`Director` — that is [`SessionRegistry::add_source`]'s job,
+/// called once per source over the RPC path (`apply_session_config`). The
+/// providers this function returns are used directly by its own tests,
+/// addressed via [`vfs_protocol::VPath`], not through a session's ring/IPC
+/// path.
 pub fn build_provider_graph(
     cfg: &vfs_control::SessionConfig,
 ) -> Result<BTreeMap<RootId, Arc<dyn Provider>>, String> {
+    cfg.validate_roots()?;
     let mut by_root: BTreeMap<u32, Vec<Arc<dyn Provider>>> = BTreeMap::new();
     for entry in &cfg.sources {
         let backend = vfs_source::build_provider(&entry.spec).map_err(|e| e.to_string())?;
@@ -65,6 +72,17 @@ pub fn build_provider_graph(
     Ok(graph)
 }
 
+/// Everything recorded for one declared root, so its composed provider can
+/// be rebuilt from scratch whenever a new source targeting it arrives.
+#[derive(Default)]
+struct RootBuild {
+    /// Root-mounted ("/") sources, bottom→top for rebuild via `stack_layers`.
+    layers: Vec<(i32, Arc<dyn Provider>)>,
+    /// Sources with a non-root mount prefix within this root (director path
+    /// mounts), composed alongside the layered root via `MountGraph`.
+    prefix_mounts: Vec<(String, Arc<dyn Provider>)>,
+}
+
 /// One live host session plus metadata returned on ListSessions.
 pub struct LiveSession {
     pub id: String,
@@ -73,10 +91,10 @@ pub struct LiveSession {
     pub session: Session,
     next_source_id: AtomicU64,
     next_stage_tag: AtomicU64,
-    /// Mounted backends bottom→top for rebuild (same mount "/" composition).
-    layers: Vec<(i32, Arc<dyn Provider>)>,
-    /// Sources with non-root mount prefixes (director path mounts).
-    prefix_mounts: Vec<(String, Arc<dyn Provider>)>,
+    /// Per-declared-root bookkeeping for rebuild. Keyed by the raw `u32` a
+    /// `SourceEntry`/`AddSourceReq` names — `RootId` wraps this only at the
+    /// `Director` boundary.
+    roots: HashMap<u32, RootBuild>,
     /// The most recent launch's staged directory, kept alive here so its
     /// `Drop` (directory removal) does not race the child it was staged for.
     /// Dropped (and thus cleaned up) when the session is torn down, or
@@ -175,8 +193,7 @@ impl SessionRegistry {
             session,
             next_source_id: AtomicU64::new(1),
             next_stage_tag: AtomicU64::new(1),
-            layers: Vec::new(),
-            prefix_mounts: Vec::new(),
+            roots: HashMap::new(),
             staged: None,
         };
 
@@ -187,9 +204,14 @@ impl SessionRegistry {
         Ok(summary)
     }
 
+    /// Add one source to `session_id`, targeting `root` (`0` for every
+    /// caller that predates stage 2b — the CLI and every existing config).
+    /// Rebuilds only `root`'s composed provider and re-mounts it at
+    /// `RootId(root)` in the live `Director`; other roots are untouched.
     pub fn add_source(
         &self,
         session_id: &str,
+        root: u32,
         mount: &str,
         layer: i32,
         backend: Arc<dyn Provider>,
@@ -208,30 +230,35 @@ impl SessionRegistry {
                 Arc::new(CachingProvider::new(backend, Arc::clone(&self.cache), id));
             let mount_norm = mount.trim();
             let is_root = mount_norm.is_empty() || mount_norm == "/" || mount_norm == "\\";
+            let build = live.roots.entry(root).or_default();
             if is_root {
-                live.layers.push((layer, cached));
+                build.layers.push((layer, cached));
                 // Stable order for equal layers: preserve insertion order.
-                live.layers.sort_by_key(|a| a.0);
+                build.layers.sort_by_key(|a| a.0);
             } else {
-                live.prefix_mounts.push((mount.to_string(), cached));
+                build.prefix_mounts.push((mount.to_string(), cached));
             }
-            // Rebuild mounts from the recorded source list (layered root + prefixes).
-            live.session
-                .clear_mounts()
-                .map_err(|st| format!("clear_mounts status {st}"))?;
-            let stack: Vec<Arc<dyn Provider>> =
-                live.layers.iter().map(|(_, b)| Arc::clone(b)).collect();
-            if !stack.is_empty() {
+            // Rebuild this root's composed provider from its recorded source
+            // list (layered root sources + non-root prefix mounts), then
+            // replace whatever `Director` currently serves for this root
+            // wholesale — `Director` holds exactly one provider per root, so
+            // there is no incremental mount to append to.
+            let mut mounts: Vec<(String, Arc<dyn Provider>)> = Vec::new();
+            if !build.layers.is_empty() {
+                let stack: Vec<Arc<dyn Provider>> =
+                    build.layers.iter().map(|(_, b)| Arc::clone(b)).collect();
                 let composed = stack_layers(stack).map_err(|e| e.to_string())?;
-                live.session
-                    .mount("", composed)
-                    .map_err(|st| format!("mount status {st}"))?;
+                mounts.push((String::new(), composed));
             }
-            for (pfx, be) in &live.prefix_mounts {
-                live.session
-                    .mount(pfx, Arc::clone(be))
-                    .map_err(|st| format!("mount {pfx} status {st}"))?;
+            for (pfx, be) in &build.prefix_mounts {
+                mounts.push((pfx.clone(), Arc::clone(be)));
             }
+            let graph = vfs_director::MountGraph::new(mounts)
+                .map_err(|st| format!("build provider graph for root {root}: status {st}"))?;
+            live.session
+                .kernel()
+                .mount(RootId(root), Arc::new(graph))
+                .map_err(|st| format!("mount root {root} status {st}"))?;
             id
         };
         Ok(source_id)
@@ -268,7 +295,9 @@ impl SessionRegistry {
             opts.fallback_dirs,
         )?;
         let disk: Arc<dyn Provider> = Arc::new(DiskProvider::new(staged.dir()));
-        self.add_source(session_id, "/", STAGING_LAYER, disk)?;
+        // Staging always concerns the launched image — root 0 (the game
+        // directory) in every session this registry builds today.
+        self.add_source(session_id, 0, "/", STAGING_LAYER, disk)?;
         Ok(staged)
     }
 
@@ -354,7 +383,11 @@ impl SessionRegistry {
         struct KernelSource(Arc<vfs_director::Director>);
         impl ImageSource for KernelSource {
             fn read(&self, vpath: &str) -> Option<Vec<u8>> {
-                let (fh, size, is_dir) = self.0.open(vpath, vfs_director::OPEN_READ).ok()?;
+                // Staging always concerns the launched image, which lives in
+                // the game-directory root — root 0 in every session this
+                // registry builds today.
+                let (fh, size, is_dir) =
+                    self.0.open(RootId::DEFAULT, vpath, vfs_director::OPEN_READ).ok()?;
                 if is_dir {
                     let _ = self.0.close(fh);
                     return None;

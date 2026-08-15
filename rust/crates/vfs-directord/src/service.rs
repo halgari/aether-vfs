@@ -73,7 +73,7 @@ impl Director for DirectorService {
 
         let id = self
             .registry
-            .add_source(&r.session_id, &mount, r.layer, backend)
+            .add_source(&r.session_id, r.root, &mount, r.layer, backend)
             .map_err(Status::not_found)?;
 
         Ok(Response::new(SourceRef { id }))

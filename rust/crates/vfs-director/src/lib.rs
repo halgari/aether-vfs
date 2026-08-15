@@ -18,6 +18,7 @@ pub mod director;
 pub mod disk;
 pub mod io_stats;
 pub mod ipc;
+pub mod mount_graph;
 pub mod ops;
 pub mod path;
 pub mod ring_dispatch;
@@ -28,7 +29,8 @@ pub mod stage;
 pub use director::Director;
 pub use disk::DiskProvider;
 pub use io_stats::{mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report};
-pub use ops::{Provider, Handle, DirEntry, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
+pub use mount_graph::MountGraph;
+pub use ops::{Provider, Handle, DirEntry, RootId, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
 pub use session::{LaunchOpts, Session};
 
 #[cfg(test)]
@@ -47,11 +49,11 @@ mod tests {
             f.write_all(b"hello-director").unwrap();
         }
         let d = Director::new();
-        d.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
-        let st = d.getattr("hello.txt").unwrap().unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(DiskProvider::new(&dir))).unwrap();
+        let st = d.getattr(RootId::DEFAULT, "hello.txt").unwrap().unwrap();
         assert_eq!(st.kind, KIND_FILE);
         assert_eq!(st.size, 14);
-        let (fh, size, is_dir) = d.open("hello.txt", OPEN_READ).unwrap();
+        let (fh, size, is_dir) = d.open(RootId::DEFAULT, "hello.txt", OPEN_READ).unwrap();
         assert!(!is_dir && size == 14);
         let mut buf = [0u8; 32];
         let n = d.read(fh, 0, &mut buf).unwrap();
@@ -73,15 +75,15 @@ mod tests {
     }
 
     #[test]
-    fn clear_mounts_drops_visibility() {
+    fn unmount_drops_visibility() {
         let dir = std::env::temp_dir().join(format!("vfs-clear-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("x.txt"), b"x").unwrap();
         let d = Director::new();
-        d.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
-        assert!(d.getattr("x.txt").unwrap().is_some());
-        d.clear_mounts().unwrap();
-        assert!(d.getattr("x.txt").unwrap().is_none());
+        d.mount(RootId::DEFAULT, Arc::new(DiskProvider::new(&dir))).unwrap();
+        assert!(d.getattr(RootId::DEFAULT, "x.txt").unwrap().is_some());
+        d.unmount(RootId::DEFAULT).unwrap();
+        assert!(d.getattr(RootId::DEFAULT, "x.txt").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

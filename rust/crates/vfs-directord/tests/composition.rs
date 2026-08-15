@@ -10,6 +10,7 @@ use vfs_control::pb::director_server::DirectorServer;
 use vfs_control::pb::{source_spec, AddSourceReq, CreateSessionReq, DiskSource, Empty, ZipSource};
 use vfs_control::SourceSpec;
 use vfs_directord::{connect, DirectorService, SessionRegistry};
+use vfs_director::RootId;
 use vfs_source::build_provider;
 
 fn write_stored_zip(dir: &Path, entry: &str, content: &[u8]) -> std::path::PathBuf {
@@ -87,8 +88,8 @@ fn registry_layered_disk_sources_top_wins() {
         path: mod_dir.path().to_string_lossy().into_owned(),
     })
     .unwrap();
-    reg.add_source(&summary.id, "/", 0, base_be).unwrap();
-    reg.add_source(&summary.id, "/", 10, mod_be).unwrap();
+    reg.add_source(&summary.id, 0, "/", 0,base_be).unwrap();
+    reg.add_source(&summary.id, 0, "/", 10,mod_be).unwrap();
 
     reg.with_session_mut(&summary.id, |live| {
         let shared = live.session.read_file("shared.txt").unwrap();
@@ -112,7 +113,7 @@ fn registry_zip_source_reads_entry() {
         path: zip.to_string_lossy().into_owned(),
     })
     .unwrap();
-    reg.add_source(&summary.id, "/", 0, be).unwrap();
+    reg.add_source(&summary.id, 0, "/", 0,be).unwrap();
     reg.with_session_mut(&summary.id, |live| {
         let got = live.session.read_file("Data/proof.dat").unwrap();
         assert_eq!(got, b"ZIP-BYTES");
@@ -139,7 +140,7 @@ fn registry_cache_hits_on_second_read() {
         path: dir.path().to_string_lossy().into_owned(),
     })
     .unwrap();
-    reg.add_source(&summary.id, "/", 0, be).unwrap();
+    reg.add_source(&summary.id, 0, "/", 0,be).unwrap();
     reg.with_session_mut(&summary.id, |live| {
         let a = live.session.read_file("blob.bin").unwrap();
         let b = live.session.read_file("blob.bin").unwrap();
@@ -190,11 +191,11 @@ fn non_root_mount_matches_lowercase_open_and_is_discoverable_via_parent_readdir(
         path: mod_dir.path().to_string_lossy().into_owned(),
     })
     .unwrap();
-    reg.add_source(&summary.id, "/", 0, root_be).unwrap();
+    reg.add_source(&summary.id, 0, "/", 0,root_be).unwrap();
     // Mixed case, deliberately — the original `escape-matrix.md`-documented
     // spelling. Case folding at compare time means this must match a
     // lowercased live open exactly as a lowercase-authored mount would.
-    reg.add_source(&summary.id, "Data/SomeMod", 10, mod_be).unwrap();
+    reg.add_source(&summary.id, 0, "Data/SomeMod", 10, mod_be).unwrap();
 
     reg.with_session_mut(&summary.id, |live| {
         // A direct open by a known relative path succeeds through the
@@ -204,7 +205,7 @@ fn non_root_mount_matches_lowercase_open_and_is_discoverable_via_parent_readdir(
         assert_eq!(bytes, b"MOD-BYTES");
 
         // The base content is still there and enumerable...
-        let base_entries = live.session.kernel().readdir("data").unwrap();
+        let base_entries = live.session.kernel().readdir(RootId::DEFAULT, "data").unwrap();
         assert!(
             base_entries.iter().any(|e| e.name.eq_ignore_ascii_case("Skyrim.esm")),
             "expected the real base content to still enumerate: {:?}",
@@ -261,6 +262,7 @@ async fn stats_rpc_reports_sessions_and_cache() {
             }),
             mount: "/".into(),
             layer: 0,
+            root: 0,
         })
         .await
         .unwrap();
@@ -320,6 +322,7 @@ async fn stats_rpc_reports_open_counts_after_session_activity() {
             }),
             mount: "/".into(),
             layer: 0,
+            root: 0,
         })
         .await
         .unwrap();
@@ -329,6 +332,7 @@ async fn stats_rpc_reports_open_counts_after_session_activity() {
             let kernel = live.session.kernel();
             let (st, payload) = vfs_director::ring_dispatch::dispatch_director(
                 kernel,
+                RootId::DEFAULT,
                 vfs_protocol::OP_OPEN,
                 &vfs_protocol::encode_open_req(vfs_director::OPEN_READ, "f.txt"),
                 0,
@@ -394,6 +398,7 @@ async fn add_zip_source_via_grpc() {
             }),
             mount: "/".into(),
             layer: 0,
+            root: 0,
         })
         .await
         .expect("AddSource zip");

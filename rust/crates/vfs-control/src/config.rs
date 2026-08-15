@@ -146,6 +146,45 @@ pub struct SessionConfig {
     pub cache: Option<CacheConfig>,
 }
 
+impl SessionConfig {
+    /// Validate the relationship between declared `[[root]]` entries and the
+    /// `root` each source names.
+    ///
+    /// A config with **no** `[[root]]` table is the flat-list-sugar case:
+    /// nothing is declared, so every source implicitly targets root `0` and
+    /// there is nothing to check against. Once `[[root]]` is present,
+    /// though, every source's `root` must name a declared id (including `0`
+    /// — declaring roots at all means declaring all of them), and declared
+    /// ids must be unique. Without this, a source naming an undeclared root
+    /// would silently produce a provider addressable by a number nothing
+    /// documents, and a duplicate `[[root]]` id would silently pick
+    /// whichever entry a `BTreeMap`/`HashMap` insert happened to keep.
+    ///
+    /// A root declared with no source is not an error: it simply produces no
+    /// provider for that root, which is a valid (if likely accidental)
+    /// config.
+    pub fn validate_roots(&self) -> Result<(), String> {
+        if self.roots.is_empty() {
+            return Ok(());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for r in &self.roots {
+            if !seen.insert(r.id) {
+                return Err(format!("duplicate [[root]] id {}", r.id));
+            }
+        }
+        for entry in &self.sources {
+            if !seen.contains(&entry.root) {
+                return Err(format!(
+                    "source targets root {} which no [[root]] entry declares",
+                    entry.root
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("read {0}: {1}")]
@@ -263,6 +302,64 @@ layer = 20
 "#;
         let cfg: SessionConfig = toml::from_str(toml).unwrap();
         assert_eq!(cfg.sources[0].root, 0);
+    }
+
+    #[test]
+    fn validate_roots_is_a_no_op_when_no_root_table_is_declared() {
+        let cfg = SessionConfig {
+            sources: vec![SourceEntry {
+                spec: SourceSpec::Disk { path: "C:/x".into() },
+                mount: "/".into(),
+                root: 7, // would be undeclared if any [[root]] existed
+            }],
+            ..Default::default()
+        };
+        assert!(cfg.validate_roots().is_ok());
+    }
+
+    #[test]
+    fn validate_roots_rejects_a_source_naming_an_undeclared_root() {
+        let cfg = SessionConfig {
+            roots: vec![RootEntry { id: 0, name: "game".into(), path: "C:/g".into() }],
+            sources: vec![SourceEntry {
+                spec: SourceSpec::Disk { path: "C:/x".into() },
+                mount: "/".into(),
+                root: 1,
+            }],
+            ..Default::default()
+        };
+        let err = cfg.validate_roots().unwrap_err();
+        assert!(err.contains('1'), "error should name the offending root: {err}");
+    }
+
+    #[test]
+    fn validate_roots_rejects_duplicate_root_ids() {
+        let cfg = SessionConfig {
+            roots: vec![
+                RootEntry { id: 0, name: "a".into(), path: "C:/a".into() },
+                RootEntry { id: 0, name: "b".into(), path: "C:/b".into() },
+            ],
+            ..Default::default()
+        };
+        let err = cfg.validate_roots().unwrap_err();
+        assert!(err.contains('0'), "error should name the duplicated id: {err}");
+    }
+
+    #[test]
+    fn validate_roots_accepts_a_root_declared_with_no_sources() {
+        let cfg = SessionConfig {
+            roots: vec![
+                RootEntry { id: 0, name: "game".into(), path: "C:/g".into() },
+                RootEntry { id: 1, name: "docs".into(), path: "C:/d".into() },
+            ],
+            sources: vec![SourceEntry {
+                spec: SourceSpec::Disk { path: "C:/x".into() },
+                mount: "/".into(),
+                root: 0,
+            }],
+            ..Default::default()
+        };
+        assert!(cfg.validate_roots().is_ok(), "root 1 has no source, which is allowed");
     }
 
     #[test]

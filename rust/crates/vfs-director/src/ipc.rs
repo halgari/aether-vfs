@@ -10,6 +10,7 @@ use vfs_ipc::{DataArena, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
 use vfs_win::{EventNotifier, SharedMapping};
 
 use crate::director::Director;
+use crate::ops::RootId;
 use crate::ring_dispatch::dispatch_director;
 
 pub const DEFAULT_SLOT_COUNT: u32 = 32;
@@ -180,8 +181,14 @@ fn worker_loop<N: vfs_ipc::Notifier>(inner: &Inner, notifier: N) {
     );
     while !inner.stop.load(Ordering::Relaxed) {
         let handled = ring.serve_one(|req| {
+            // The shim is single-root until stage 2b task 5; the ring wire
+            // carries no root field to select otherwise (see the doc comment
+            // on `dispatch_director`), so every request from an injected
+            // child resolves against `RootId::DEFAULT`, unchanged from
+            // before this stage.
             dispatch_director(
                 &inner.kernel,
+                RootId::DEFAULT,
                 req.opcode,
                 &req.payload,
                 req.flags,

@@ -370,6 +370,7 @@ wait      = true
                 }),
                 mount: entry.mount.clone(),
                 layer: layer as i32,
+                root: entry.root,
             })
             .await
             .expect("AddSource");
@@ -481,6 +482,7 @@ async fn scenario_toml_disk_source_fixture_writepath() {
             }),
             mount: "/".into(),
             layer: 0,
+            root: 0,
         })
         .await
         .expect("AddSource");
@@ -708,6 +710,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
             }),
             mount: "/".into(),
             layer: 0,
+            root: 0,
         })
         .await
         .expect("AddSource bottom");
@@ -722,6 +725,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
             }),
             mount: "/".into(),
             layer: 1,
+            root: 0,
         })
         .await
         .expect("AddSource top");
@@ -1246,6 +1250,7 @@ async fn escape_matrix_positive_and_negative_canary() {
             }),
             mount: "/".into(),
             layer: 0,
+            root: 0,
         })
         .await
         .expect("AddSource");
@@ -1565,6 +1570,7 @@ async fn documents_metadata_gap_for_unrecognised_spellings() {
             }),
             mount: "/".into(),
             layer: 0,
+            root: 0,
         })
         .await
         .expect("AddSource");

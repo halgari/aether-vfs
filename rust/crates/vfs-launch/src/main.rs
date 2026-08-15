@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use vfs_director::{Director, KIND_FILE, Session};
+use vfs_director::{Director, RootId, KIND_FILE, Session};
 
 const DEFAULT_LAYERS: &str = r"C:	mp";
 const STEAM_APPID: &str = "489830"; // Skyrim Special Edition
@@ -177,7 +177,7 @@ fn order_plugins(mut seen: std::collections::BTreeMap<String, String>) -> Vec<St
 /// Collect top-level `Data/*.{esm,esp,esl}` from the mounted director kernel.
 fn collect_plugins_from_kernel(kernel: &Director) -> Vec<String> {
     let mut seen = std::collections::BTreeMap::<String, String>::new();
-    let Ok(entries) = kernel.readdir("Data") else {
+    let Ok(entries) = kernel.readdir(RootId::DEFAULT, "Data") else {
         return Vec::new();
     };
     for e in entries {
@@ -244,7 +244,7 @@ fn find_pe_vpath(kernel: &Director, file_name: &str) -> Option<String> {
     let want = file_name.to_ascii_lowercase();
     // Common game roots first.
     for dir in ["", "Data"] {
-        let Ok(entries) = kernel.readdir(dir) else {
+        let Ok(entries) = kernel.readdir(RootId::DEFAULT, dir) else {
             continue;
         };
         for e in entries {
@@ -258,7 +258,7 @@ fn find_pe_vpath(kernel: &Director, file_name: &str) -> Option<String> {
         }
     }
     // Fallback: open by bare name (casefold backends).
-    if kernel.getattr(file_name).ok().flatten().is_some() {
+    if kernel.getattr(RootId::DEFAULT, file_name).ok().flatten().is_some() {
         return Some(file_name.to_string());
     }
     None
@@ -330,7 +330,7 @@ fn main() {
     };
     let pe_vpath = find_pe_vpath(session.kernel(), pe_name).unwrap_or_else(|| pe_name.to_string());
     if !args.probe {
-        match session.kernel().getattr(&pe_vpath) {
+        match session.kernel().getattr(RootId::DEFAULT, &pe_vpath) {
             Ok(Some(st)) if st.kind == KIND_FILE && st.size > 512 => {
                 eprintln!(
                     "  PE {pe_vpath} present in VFS ({} bytes) — staged at launch",

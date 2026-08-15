@@ -54,6 +54,11 @@ message AddSourceReq {
   SourceSpec source = 2;
   string mount = 3; // virtual prefix, e.g. "/"
   int32 layer = 4;  // precedence; higher wins on same path
+  // Which declared session root this source targets (stage 2b). Defaults to
+  // 0, the root every pre-2b client implicitly meant. This is the
+  // control-plane RPC, not the ring wire the injected DLL speaks — new
+  // fields are safe to add here; never renumber.
+  uint32 root = 5;
 }
 message SourceRef {
   uint64 id = 1;

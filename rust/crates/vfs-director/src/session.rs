@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use crate::director::Director;
 use crate::ipc::IpcServe;
-use crate::ops::{Provider, OPEN_READ};
+use crate::mount_graph::MountGraph;
+use crate::ops::{Provider, RootId, OPEN_READ};
 
 /// Serializes process-global env mutation around [`Session::launch`].
 ///
@@ -61,6 +62,13 @@ pub struct Session {
     overlay: PathBuf,
     state_dir: PathBuf,
     ipc: Option<IpcServe>,
+    /// Session is single-root (`RootId::DEFAULT`) by design — multi-root
+    /// sessions go through `vfs-directord`'s `SessionRegistry`, which talks
+    /// to `Director` directly. This accumulates every `mount()` call so it
+    /// can be recomposed into one `MountGraph` and handed to `Director`
+    /// whole, since `Director` now holds exactly one provider per root
+    /// rather than a mergeable list.
+    mounts: Mutex<Vec<(String, Arc<dyn Provider>)>>,
 }
 
 impl Session {
@@ -72,6 +80,7 @@ impl Session {
             overlay: tmp.join("overlay"),
             state_dir: tmp.join("state"),
             ipc: None,
+            mounts: Mutex::new(Vec::new()),
         }
     }
 
@@ -99,13 +108,21 @@ impl Session {
         &self.state_dir
     }
 
+    /// Accumulates: later mounts override earlier for the same path, exactly
+    /// as `Director`'s own mount list used to. Each call recomposes the full
+    /// accumulated list into one `MountGraph` and replaces `RootId::DEFAULT`'s
+    /// provider wholesale, since `Director` holds only one provider per root.
     pub fn mount(&self, prefix: &str, backend: Arc<dyn Provider>) -> Result<(), i32> {
-        self.kernel.mount(prefix, backend)
+        let mut mounts = self.mounts.lock().map_err(|_| crate::ops::map_io_err())?;
+        mounts.push((prefix.to_string(), backend));
+        let graph = MountGraph::new(mounts.clone())?;
+        self.kernel.mount(RootId::DEFAULT, Arc::new(graph))
     }
 
     /// Drop all mounts before rebuilding composition.
     pub fn clear_mounts(&self) -> Result<(), i32> {
-        self.kernel.clear_mounts()
+        self.mounts.lock().map_err(|_| crate::ops::map_io_err())?.clear();
+        self.kernel.unmount(RootId::DEFAULT)
     }
 
     /// Mount a Stored zip archive as a content backend (later mounts win on conflicts).
@@ -116,8 +133,7 @@ impl Session {
         let path = zip_path.as_ref();
         let be = vfs_zip::ZipProvider::open(path)
             .map_err(|e| format!("ZipProvider {}: {e:?}", path.display()))?;
-        self.kernel
-            .mount("", Arc::new(be))
+        self.mount("", Arc::new(be))
             .map_err(|st| format!("mount zip status {st}"))
     }
 
@@ -133,7 +149,7 @@ impl Session {
 
     /// Occasional host-side full-file read (not the primary API).
     pub fn read_file(&self, vpath: &str) -> Result<Vec<u8>, i32> {
-        let (fh, size, is_dir) = self.kernel.open(vpath, OPEN_READ)?;
+        let (fh, size, is_dir) = self.kernel.open(RootId::DEFAULT, vpath, OPEN_READ)?;
         if is_dir {
             let _ = self.kernel.close(fh);
             return Err(crate::ops::is_dir());

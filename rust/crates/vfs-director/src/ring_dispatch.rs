@@ -4,9 +4,9 @@ use vfs_protocol::{
     decode_close_req, decode_mkdir_req, decode_open_req, decode_path_req, decode_read_req,
     decode_rename_req, decode_setattr_req, decode_write_req, encode_getattr_resp,
     encode_open_resp, encode_read_resp, encode_read_resp_bulk, encode_readdir_resp,
-    encode_write_resp, AttrResp, DirEntryWire, OpenResp, FLAG_READ_BULK, OP_CLOSE, OP_DELETE,
-    OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN, OP_READ, OP_READDIR, OP_RENAME, OP_SETATTR,
-    OP_WRITE, ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
+    encode_write_resp, AttrResp, DirEntryWire, OpenResp, RootId, FLAG_READ_BULK, OP_CLOSE,
+    OP_DELETE, OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN, OP_READ, OP_READDIR, OP_RENAME,
+    OP_SETATTR, OP_WRITE, ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
 };
 use vfs_ipc::DataArena;
 
@@ -21,8 +21,19 @@ fn max_read_data(payload_cap: u32) -> usize {
 }
 
 /// Full OPEN/READ/CLOSE + meta against a director kernel.
+///
+/// `root` is a Rust-level parameter, not a wire field: the ring's opcode
+/// payloads (`decode_path_req`/`decode_open_req`/…) carry no root today —
+/// checked against `vfs-ipc`'s `SlotHeader` and every codec in
+/// `vfs-protocol/src/lib.rs`, none add one. The injected shim is
+/// single-root until stage 2b task 5 makes it multi-root, so the one
+/// production caller (`vfs-director/src/ipc.rs`'s worker loop) always
+/// passes `RootId::DEFAULT`, preserving today's wire and shim behavior
+/// unchanged. Tests may pass a different root to prove `Director` resolves
+/// per-root without needing the wire — or the shim — to change first.
 pub fn dispatch_director(
     director: &Director,
+    root: RootId,
     opcode: u32,
     payload: &[u8],
     flags: u32,
@@ -32,7 +43,7 @@ pub fn dispatch_director(
     match opcode {
         OP_GETATTR => match decode_path_req(payload) {
             Some(vp) => {
-                let resp = match director.getattr(&vp) {
+                let resp = match director.getattr(root, &vp) {
                     Ok(Some(s)) => {
                         io_stats::record_getattr(&vp, true, false);
                         AttrResp {
@@ -61,7 +72,7 @@ pub fn dispatch_director(
             None => (ST_BAD_REQUEST, Vec::new()),
         },
         OP_READDIR => match decode_path_req(payload) {
-            Some(vp) => match director.readdir(&vp) {
+            Some(vp) => match director.readdir(root, &vp) {
                 Ok(entries) => {
                     io_stats::record_readdir(&vp, true);
                     let wire: Vec<DirEntryWire> = entries
@@ -99,7 +110,7 @@ pub fn dispatch_director(
                 // `ST_READ_ONLY` when it can't. Gating here too would just
                 // duplicate that policy in a place that can't see it.
                 let flags = if oflags == 0 { OPEN_READ } else { oflags };
-                match director.open(&path, flags) {
+                match director.open(root, &path, flags) {
                     Ok((fh, size, is_dir)) => {
                         io_stats::record_open(&path, Some(fh), size, false);
                         (ST_OK, encode_open_resp(&OpenResp { fh, size, is_dir }))
@@ -198,21 +209,21 @@ pub fn dispatch_director(
             None => (ST_BAD_REQUEST, Vec::new()),
         },
         OP_RENAME => match decode_rename_req(payload) {
-            Some((from, to)) => match director.rename(&from, &to) {
+            Some((from, to)) => match director.rename(root, &from, &to) {
                 Ok(()) => (ST_OK, Vec::new()),
                 Err(st) => (st, Vec::new()),
             },
             None => (ST_BAD_REQUEST, Vec::new()),
         },
         OP_DELETE => match decode_path_req(payload) {
-            Some(path) => match director.remove(&path) {
+            Some(path) => match director.remove(root, &path) {
                 Ok(()) => (ST_OK, Vec::new()),
                 Err(st) => (st, Vec::new()),
             },
             None => (ST_BAD_REQUEST, Vec::new()),
         },
         OP_MKDIR => match decode_mkdir_req(payload) {
-            Some((_mode, path)) => match director.mkdir(&path) {
+            Some((_mode, path)) => match director.mkdir(root, &path) {
                 Ok(()) => (ST_OK, Vec::new()),
                 Err(st) => (st, Vec::new()),
             },
@@ -234,16 +245,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let d = Director::new();
-        d.mount("/", std::sync::Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, std::sync::Arc::new(crate::DiskProvider::new(&dir))).unwrap();
 
         let (st, payload) = dispatch_director(
-            &d, OP_OPEN, &encode_open_req(OPEN_WRITE | OPEN_CREATE, "w.txt"), 0, 4096, None);
+            &d, RootId::DEFAULT, OP_OPEN, &encode_open_req(OPEN_WRITE | OPEN_CREATE, "w.txt"), 0, 4096, None);
         assert_eq!(st, ST_OK, "open for write must succeed through dispatch");
         let fh = decode_open_resp(&payload).unwrap().fh;
 
         let req = WriteReq { fh, offset: 0, len: 5 };
         let (st, payload) = dispatch_director(
-            &d, OP_WRITE, &encode_write_req(&req, b"hello"), 0, 4096, None);
+            &d, RootId::DEFAULT, OP_WRITE, &encode_write_req(&req, b"hello"), 0, 4096, None);
         assert_eq!(st, ST_OK, "write must succeed through dispatch");
         assert_eq!(decode_write_resp(&payload).unwrap(), 5);
 
@@ -259,9 +270,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("gone.txt"), b"x").unwrap();
         let d = Director::new();
-        d.mount("/", std::sync::Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, std::sync::Arc::new(crate::DiskProvider::new(&dir))).unwrap();
 
-        let (st, _) = dispatch_director(&d, OP_DELETE, &encode_path_req("gone.txt"), 0, 4096, None);
+        let (st, _) = dispatch_director(
+            &d, RootId::DEFAULT, OP_DELETE, &encode_path_req("gone.txt"), 0, 4096, None);
         assert_eq!(st, ST_OK);
         assert!(!dir.join("gone.txt").exists(), "OP_DELETE did not remove the file");
         let _ = std::fs::remove_dir_all(&dir);
@@ -275,7 +287,7 @@ mod tests {
         // backend, so the director (not this dispatch arm) must be the one
         // to say so.
         d.mount(
-            "/",
+            RootId::DEFAULT,
             std::sync::Arc::new(vfs_compose::InlineProvider::from_files([(
                 "f",
                 b"x".as_slice(),
@@ -283,11 +295,64 @@ mod tests {
         )
         .unwrap();
 
-        let (st, _) =
-            dispatch_director(&d, OP_OPEN, &encode_open_req(OPEN_WRITE, "f"), 0, 4096, None);
+        let (st, _) = dispatch_director(
+            &d, RootId::DEFAULT, OP_OPEN, &encode_open_req(OPEN_WRITE, "f"), 0, 4096, None);
         assert_eq!(
             st, ST_READ_ONLY,
             "OP_OPEN with OPEN_WRITE against a read-only mount must surface ST_READ_ONLY, not a blanket ST_BAD_REQUEST"
         );
+    }
+
+    /// Stage 2b task 3, step 1: `[0, "a.txt"]` and `[1, "a.txt"]` resolve to
+    /// different content through the director, end to end via
+    /// `dispatch_director` — the ring-level counterpart to
+    /// `director::tests::two_roots_resolve_the_same_relative_path_independently`.
+    /// `root` is the Rust-level parameter this test exists to justify: the
+    /// wire bytes below (`encode_open_req`/`encode_read_req`) are identical
+    /// to every other test in this file and carry no root of their own.
+    #[test]
+    fn different_roots_resolve_the_same_path_to_different_content_via_dispatch() {
+        use vfs_protocol::{
+            decode_open_resp, decode_read_resp, encode_open_req, encode_read_req, ReadReq,
+            OP_OPEN, OP_READ, OPEN_READ, ST_OK,
+        };
+        let d = Director::new();
+        d.mount(
+            RootId(0),
+            std::sync::Arc::new(vfs_compose::InlineProvider::from_files([(
+                "a.txt",
+                b"ROOT-ZERO".as_slice(),
+            )])),
+        )
+        .unwrap();
+        d.mount(
+            RootId(1),
+            std::sync::Arc::new(vfs_compose::InlineProvider::from_files([(
+                "a.txt",
+                b"ROOT-ONE".as_slice(),
+            )])),
+        )
+        .unwrap();
+
+        let read_via = |root: RootId| -> Vec<u8> {
+            let (st, payload) = dispatch_director(
+                &d, root, OP_OPEN, &encode_open_req(OPEN_READ, "a.txt"), 0, 4096, None);
+            assert_eq!(st, ST_OK);
+            let fh = decode_open_resp(&payload).unwrap().fh;
+            let (st, payload) = dispatch_director(
+                &d,
+                root,
+                OP_READ,
+                &encode_read_req(&ReadReq { fh, offset: 0, len: 64 }),
+                0,
+                4096,
+                None,
+            );
+            assert_eq!(st, ST_OK);
+            decode_read_resp(&payload).unwrap()
+        };
+
+        assert_eq!(read_via(RootId(0)), b"ROOT-ZERO");
+        assert_eq!(read_via(RootId(1)), b"ROOT-ONE");
     }
 }

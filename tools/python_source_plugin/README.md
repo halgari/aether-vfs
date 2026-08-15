@@ -29,5 +29,5 @@ Then in a scenario:
 type = "remote"
 endpoint = "127.0.0.1:50051"
 mount = "/"
-layer = 0
+root = 0
 ```

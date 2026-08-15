@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use vfs_director::{DiskProvider, Session};
+use vfs_director::{DiskProvider, RootId, Session};
 
 /// Deterministic, position-dependent bytes: a fragmented or mis-ordered read
 /// shows up as a mismatch at a known offset rather than plausible-looking data.
@@ -41,7 +41,7 @@ fn reads_match_at_every_offset_and_size() {
     s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
     let k = s.kernel();
 
-    let (fh, size, _) = k.open("blob.bin", vfs_protocol::OPEN_READ).unwrap();
+    let (fh, size, _) = k.open(RootId::DEFAULT, "blob.bin", vfs_protocol::OPEN_READ).unwrap();
     assert_eq!(size as usize, data.len());
 
     for &chunk in &[1usize, 7, 4096, 65_535, 65_536, 65_537, 1 << 20] {
@@ -74,7 +74,7 @@ fn sequential_whole_file_read_is_byte_exact() {
     let s = Session::new();
     s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
     let k = s.kernel();
-    let (fh, size, _) = k.open("master.esm", vfs_protocol::OPEN_READ).unwrap();
+    let (fh, size, _) = k.open(RootId::DEFAULT, "master.esm", vfs_protocol::OPEN_READ).unwrap();
 
     let mut got = Vec::with_capacity(size as usize);
     let mut off = 0u64;
@@ -112,7 +112,7 @@ fn overlay_shadows_base_without_mixing() {
     s.mount("", Arc::new(DiskProvider::new(&over))).unwrap();
     let k = s.kernel();
 
-    let (fh, size, _) = k.open("shared.bin", vfs_protocol::OPEN_READ).unwrap();
+    let (fh, size, _) = k.open(RootId::DEFAULT, "shared.bin", vfs_protocol::OPEN_READ).unwrap();
     assert_eq!(size as usize, over_data.len(), "overlay size must win");
     let mut buf = vec![0u8; over_data.len()];
     let mut off = 0usize;
@@ -166,7 +166,7 @@ fn real_archive_matches_native_extract() {
             continue;
         }
         let want = std::fs::read(&disk).expect("read native");
-        let (fh, size, _) = k.open(name, vfs_protocol::OPEN_READ).expect("vfs open");
+        let (fh, size, _) = k.open(RootId::DEFAULT, name, vfs_protocol::OPEN_READ).expect("vfs open");
         assert_eq!(size as usize, want.len(), "{name}: size mismatch");
 
         let mut got = vec![0u8; want.len()];
@@ -282,12 +282,12 @@ fn absent_files_report_not_found_not_error() {
     let k = s.kernel();
 
     // getattr: absent must be Ok(None), i.e. "looked, not there".
-    match k.getattr("ccasvsse001-almsivi.esm") {
+    match k.getattr(RootId::DEFAULT, "ccasvsse001-almsivi.esm") {
         Ok(None) => {}
         Ok(Some(_)) => panic!("absent file reported as present"),
         Err(e) => panic!("absent getattr returned error {e} — must be Ok(None)"),
     }
-    match k.getattr("data/ccbgssse040-advobgobs.esl") {
+    match k.getattr(RootId::DEFAULT, "data/ccbgssse040-advobgobs.esl") {
         Ok(None) => {}
         Ok(Some(_)) => panic!("absent file reported as present"),
         Err(e) => panic!("absent getattr returned error {e} — must be Ok(None)"),
@@ -295,7 +295,7 @@ fn absent_files_report_not_found_not_error() {
 
     // open: must distinguish "not found" from "I/O error". Anything else makes
     // a caller treat a missing optional plugin as a storage failure.
-    match k.open("ccasvsse001-almsivi.esm", vfs_protocol::OPEN_READ) {
+    match k.open(RootId::DEFAULT, "ccasvsse001-almsivi.esm", vfs_protocol::OPEN_READ) {
         Ok(_) => panic!("absent file opened"),
         Err(st) => assert_eq!(
             st,
@@ -349,7 +349,7 @@ fn implicit_zip_directories_resolve_like_a_real_install() {
     // self-contained.
     let mut bad = Vec::new();
     for rel in ["Data", "Data/Video"] {
-        let via_vfs = match k.getattr(rel) {
+        let via_vfs = match k.getattr(RootId::DEFAULT, rel) {
             Ok(Some(st)) => st.kind == vfs_protocol::KIND_DIR,
             Ok(None) => false,
             Err(e) => {
@@ -364,7 +364,7 @@ fn implicit_zip_directories_resolve_like_a_real_install() {
         }
     }
     // A path with no entries at all must not masquerade as a directory.
-    match k.getattr("Data/NoSuchFolderHere") {
+    match k.getattr(RootId::DEFAULT, "Data/NoSuchFolderHere") {
         Ok(None) => {}
         Ok(Some(_)) => bad.push("Data/NoSuchFolderHere: absent path reported as present".into()),
         Err(e) => bad.push(format!("Data/NoSuchFolderHere: getattr error {e}")),
@@ -372,7 +372,7 @@ fn implicit_zip_directories_resolve_like_a_real_install() {
     let _ = native;
 
     // readdir of the game root must list Data at all.
-    match k.readdir("") {
+    match k.readdir(RootId::DEFAULT, "") {
         Ok(entries) => {
             let names: Vec<String> = entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
             eprintln!("  root readdir -> {} entries", names.len());
@@ -418,7 +418,7 @@ fn data_listing_includes_the_master_plugins() {
     let s = Session::new();
     s.mount("", Arc::new(stripped)).unwrap();
 
-    let entries = s.kernel().readdir("Data").expect("readdir Data");
+    let entries = s.kernel().readdir(RootId::DEFAULT, "Data").expect("readdir Data");
     let names: Vec<String> = entries.iter().map(|e| e.name.to_ascii_lowercase()).collect();
 
     for master in [

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use vfs_compose::SubdirProvider;
-use vfs_director::{DiskProvider, LaunchOpts, Provider, Session};
+use vfs_director::{DiskProvider, LaunchOpts, Provider, RootId, Session};
 use vfs_protocol::{VPath, KIND_DIR};
 use vfs_zip::ZipProvider;
 
@@ -38,7 +38,7 @@ struct KernelSource<'a>(&'a Session);
 impl vfs_director::stage::ImageSource for KernelSource<'_> {
     fn read(&self, vpath: &str) -> Option<Vec<u8>> {
         let k = self.0.kernel();
-        let (fh, size, _) = k.open(vpath, vfs_protocol::OPEN_READ).ok()?;
+        let (fh, size, _) = k.open(RootId::DEFAULT, vpath, vfs_protocol::OPEN_READ).ok()?;
         let mut buf = vec![0u8; size as usize];
         let mut off = 0usize;
         while off < buf.len() {
@@ -233,7 +233,7 @@ fn run() -> Result<(), String> {
     );
 
     // Prove steam_appid is visible through the director (what the shim FUSE sees).
-    match session.kernel().getattr("steam_appid.txt") {
+    match session.kernel().getattr(RootId::DEFAULT, "steam_appid.txt") {
         Ok(Some(st)) => eprintln!(
             "  VFS ok: steam_appid.txt (size={}) — RestartAppIfNecessary override live",
             st.size
@@ -246,12 +246,12 @@ fn run() -> Result<(), String> {
     for vpath in ["SkyrimSE.exe", "Data/Skyrim.esm"] {
         let st = session
             .kernel()
-            .getattr(vpath)
+            .getattr(RootId::DEFAULT, vpath)
             .map_err(|e| format!("getattr {vpath}: {e}"))?
             .ok_or_else(|| format!("VFS missing {vpath}"))?;
         let (fh, size, _) = session
             .kernel()
-            .open(vpath, vfs_protocol::OPEN_READ)
+            .open(RootId::DEFAULT, vpath, vfs_protocol::OPEN_READ)
             .map_err(|e| format!("open {vpath}: {e}"))?;
         let mut head = [0u8; 4];
         let n = session
@@ -1304,14 +1304,14 @@ mod staging_layer_tests {
 
         let st = session
             .kernel()
-            .getattr("X3DAudio1_7.dll")
+            .getattr(RootId::DEFAULT, "X3DAudio1_7.dll")
             .unwrap()
             .expect("a file physically in root must resolve through the provider graph");
         assert_eq!(st.kind, vfs_protocol::KIND_FILE);
         assert_eq!(st.size, "REDIST-BYTES".len() as u64);
         let (fh, size, is_dir) = session
             .kernel()
-            .open("X3DAudio1_7.dll", vfs_protocol::OPEN_READ)
+            .open(RootId::DEFAULT, "X3DAudio1_7.dll", vfs_protocol::OPEN_READ)
             .expect("open must succeed through the provider graph");
         assert!(!is_dir);
         let mut buf = vec![0u8; size as usize];
@@ -1366,7 +1366,7 @@ mod staging_layer_tests {
         mount_low_priority_disk_layers(&session, &root, &staged_dir).unwrap();
 
         assert!(
-            session.kernel().getattr("SkyrimSE.exe").unwrap().is_none(),
+            session.kernel().getattr(RootId::DEFAULT, "SkyrimSE.exe").unwrap().is_none(),
             "must not be visible before staging happens"
         );
 
@@ -1375,7 +1375,7 @@ mod staging_layer_tests {
 
         let st = session
             .kernel()
-            .getattr("SkyrimSE.exe")
+            .getattr(RootId::DEFAULT, "SkyrimSE.exe")
             .unwrap()
             .expect("staged file must resolve through the provider graph once written");
         assert_eq!(st.size, "STAGED-EXE-BYTES".len() as u64);

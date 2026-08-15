@@ -203,6 +203,20 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     if path.is_empty() {
         return Err(format!("empty path in source flag: {s:?}"));
     }
+    // The old syntax was `TYPE:PATH@MOUNT#LAYER`; `#LAYER` was removed when
+    // `layer` left the config (precedence is now flag order). `rsplit_once('@')`
+    // has no idea that suffix is gone, so a leftover `#20` from a command
+    // line nobody updated silently becomes part of `mount` instead of being
+    // stripped — the source then mounts at a mangled, unreachable prefix
+    // (`registry.rs`'s `is_root` check sees `"/#20"`, not `"/"`) and the
+    // session starts cleanly while serving nothing where the caller expected
+    // root content. Reject it loudly instead.
+    if let Some((_, suffix)) = mount.split_once('#') {
+        return Err(format!(
+            "source flag {s:?}: the '#{suffix}' layer suffix no longer exists \
+             (precedence is now --source flag order) — use TYPE:PATH@MOUNT"
+        ));
+    }
 
     let spec = match ty.as_str() {
         "disk" => vfs_control::SourceSpec::Disk { path },
@@ -220,6 +234,15 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
 }
 
 /// Drive CreateSession → AddSource* → optional Launch from a [`SessionConfig`].
+///
+/// Every source is sent, not only root 0's: `AddSourceReq` carries a `root`
+/// field (stage 2b), and `Director` now holds one provider per root, so
+/// there is no longer a reason to drop anything here. A config declaring
+/// roots or sources inconsistently (an undeclared root, a duplicate
+/// `[[root]]` id) is rejected up front by
+/// [`vfs_control::SessionConfig::validate_roots`] rather than silently
+/// serving whatever subset of itself happens to be addressable — the same
+/// failure shape the old root-0-only filter had.
 pub async fn apply_session_config(
     client: &mut DirectorClient<Channel>,
     cfg: &vfs_control::SessionConfig,
@@ -228,6 +251,8 @@ pub async fn apply_session_config(
         launch_event, source_spec, AddSourceReq, CreateSessionReq, DiskSource, HttpSource,
         LaunchReq, RemoteSource, SourceSpec as PbSource, ZipSource,
     };
+
+    cfg.validate_roots()?;
 
     let name = cfg.session.name.clone().unwrap_or_default();
     let session = client
@@ -238,17 +263,13 @@ pub async fn apply_session_config(
     let session_id = session.id.clone();
 
     // `AddSourceReq.layer` is the RPC's own precedence field, unrelated to
-    // config's (now-removed) `SourceEntry.layer` — it still orders the single
-    // root this RPC path knows how to serve. Declaration order is precedence
-    // (the flat-list sugar's rule), so the position in `cfg.sources` becomes
-    // the numeric layer directly, with no re-sort.
-    //
-    // Only root-0 sources are applied here: `Director` is not yet root-aware
-    // (stage 2b task 3 threads `RootId` through it), so a config's other
-    // roots parse but are not actionable over this RPC path yet. Silently
-    // mounting a non-zero-root source into the one root this daemon actually
-    // serves today would be wrong, not merely incomplete.
-    for (layer, entry) in cfg.sources.iter().enumerate().filter(|(_, e)| e.root == 0) {
+    // config's (now-removed) `SourceEntry.layer` — it orders sources *within
+    // their own root* (declaration order is the flat-list sugar's rule), so
+    // the position in `cfg.sources` becomes the numeric layer directly, with
+    // no re-sort. Layer numbers are not compared across roots, so two
+    // sources targeting different roots sharing a `layer` value is not a
+    // conflict.
+    for (layer, entry) in cfg.sources.iter().enumerate() {
         let kind = match &entry.spec {
             vfs_control::SourceSpec::Disk { path } => {
                 source_spec::Kind::Disk(DiskSource { path: path.clone() })
@@ -271,6 +292,7 @@ pub async fn apply_session_config(
                 source: Some(PbSource { kind: Some(kind) }),
                 mount: entry.mount.clone(),
                 layer: layer as i32,
+                root: entry.root,
             })
             .await
             .map_err(|e| format!("AddSource: {e}"))?;
@@ -354,5 +376,22 @@ mod tests {
     #[test]
     fn parse_source_flag_rejects_unknown_type() {
         assert!(parse_source_flag("blob:C:/x").is_err());
+    }
+
+    /// The pre-2b syntax was `TYPE:PATH@MOUNT#LAYER`. Task 2 dropped `layer`
+    /// from config but `parse_source_flag`'s `rsplit_once('@')` has no idea
+    /// the `#LAYER` suffix is gone, so a stale command line's `#20` used to
+    /// become part of `mount` silently — `registry::add_source`'s `is_root`
+    /// check then sees `"/#20"`, not `"/"`, and the source mounts at an
+    /// unreachable prefix instead of the root the caller intended, with the
+    /// session starting cleanly and serving nothing where expected. This
+    /// must be a loud parse error instead.
+    #[test]
+    fn parse_source_flag_rejects_the_removed_layer_suffix() {
+        let err = parse_source_flag(r#"disk:C:\mods\SkyUI@/#20"#).unwrap_err();
+        assert!(
+            err.contains('#') && err.contains("layer"),
+            "error should name the removed '#LAYER' syntax: {err}"
+        );
     }
 }

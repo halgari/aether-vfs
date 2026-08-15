@@ -11,7 +11,7 @@ use std::path::Path;
 
 use vfs_control::SourceSpec;
 use vfs_director::stage::ImageSource;
-use vfs_director::{LaunchOpts, KIND_FILE};
+use vfs_director::{LaunchOpts, RootId, KIND_FILE};
 use vfs_directord::SessionRegistry;
 use vfs_source::build_provider;
 
@@ -53,7 +53,7 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
         path: content_dir.path().to_string_lossy().into_owned(),
     })
     .unwrap();
-    reg.add_source(&summary.id, "/", 0, content_be).unwrap();
+    reg.add_source(&summary.id, 0, "/", 0, content_be).unwrap();
 
     // Baseline: the launcher (`skse64_loader.exe`) is not part of the game
     // archive at all, and nothing has staged it yet, so the provider graph
@@ -62,7 +62,7 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
         assert!(
             live.session
                 .kernel()
-                .getattr("skse64_loader.exe")
+                .getattr(RootId::DEFAULT, "skse64_loader.exe")
                 .unwrap()
                 .is_none(),
             "must not be visible before staging"
@@ -106,14 +106,14 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
         let st = live
             .session
             .kernel()
-            .getattr("skse64_loader.exe")
+            .getattr(RootId::DEFAULT, "skse64_loader.exe")
             .unwrap()
             .expect("staged loader must resolve through the provider graph, not passthrough");
         assert_eq!(st.kind, KIND_FILE);
         let (fh, size, is_dir) = live
             .session
             .kernel()
-            .open("skse64_loader.exe", vfs_director::OPEN_READ)
+            .open(RootId::DEFAULT, "skse64_loader.exe", vfs_director::OPEN_READ)
             .expect("open must succeed through the provider graph");
         assert!(!is_dir);
         assert_eq!(size, st.size);
@@ -126,7 +126,7 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
         // alone. Confirm the staged loader — reachable only via staging, per
         // the comment above — actually enumerates through the provider
         // graph, not merely answers `getattr`/`open` individually.
-        let listed = live.session.kernel().readdir("").unwrap();
+        let listed = live.session.kernel().readdir(RootId::DEFAULT, "").unwrap();
         assert!(
             listed.iter().any(|e| e.name == "skse64_loader.exe"),
             "staged loader did not enumerate through the provider graph: {:?}",
@@ -139,7 +139,7 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
     // The spawn target: content already serves `SkyrimSE.exe` at the same
     // path the staging provider now also covers. Real content must win.
     reg.with_session_mut(&summary.id, |live| {
-        assert!(live.session.kernel().getattr("SkyrimSE.exe").unwrap().is_some());
+        assert!(live.session.kernel().getattr(RootId::DEFAULT, "SkyrimSE.exe").unwrap().is_some());
         let bytes = live.session.read_file("SkyrimSE.exe").unwrap();
         assert_eq!(
             bytes,
@@ -187,7 +187,7 @@ fn production_launch_stages_a_relative_image_before_create_process() {
         path: content_dir.path().to_string_lossy().into_owned(),
     })
     .unwrap();
-    reg.add_source(&summary.id, "/", 0, content_be).unwrap();
+    reg.add_source(&summary.id, 0, "/", 0, content_be).unwrap();
 
     // `image` is a *relative* vpath — the production shape (`--exec
     // SkyrimSE.exe`, `[launch] exec = "..."`), not an already-staged disk
@@ -213,7 +213,7 @@ fn production_launch_stages_a_relative_image_before_create_process() {
         let st = live
             .session
             .kernel()
-            .getattr("game.exe")
+            .getattr(RootId::DEFAULT, "game.exe")
             .unwrap()
             .expect(
                 "launch() must stage the relative image through the provider graph — \
@@ -223,7 +223,7 @@ fn production_launch_stages_a_relative_image_before_create_process() {
         let (fh, size, is_dir) = live
             .session
             .kernel()
-            .open("game.exe", vfs_director::OPEN_READ)
+            .open(RootId::DEFAULT, "game.exe", vfs_director::OPEN_READ)
             .expect("open must succeed through the provider graph after launch() staged it");
         assert!(!is_dir);
         assert_eq!(size, st.size);
@@ -264,7 +264,7 @@ fn production_launch_leaves_an_absolute_image_untouched() {
     // mounted — still knows nothing about this path. Confirms staging was
     // correctly skipped rather than silently failing to serve it.
     reg.with_session_mut(&summary.id, |live| {
-        assert!(live.session.kernel().getattr("already-staged.exe").unwrap().is_none());
+        assert!(live.session.kernel().getattr(RootId::DEFAULT, "already-staged.exe").unwrap().is_none());
         Ok(())
     })
     .unwrap();
