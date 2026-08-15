@@ -363,7 +363,9 @@ SSE enablement files under `%LOCALAPPDATA%\Skyrim Special Edition\` (`Plugins.tx
 
 ## 10. Crate architecture (after consolidation)
 
-Workspace root uses `panic = "abort"` for the no_std payload.
+Workspace root uses `panic = "unwind"`. Only `vfs-payload` — `no_std`, custom
+panic handler, and excluded from the workspace for exactly this reason — uses
+`panic = "abort"`. `vfs-protocol/tests/unwind.rs` asserts both manifests.
 
 ### 10.1 Product path
 

@@ -1144,9 +1144,10 @@ fn render_copy_ups(snap: &Snapshot) -> String {
 ///
 /// The 250ms default assumes a session lasting well past that — true for
 /// every real launch, but not for a millisecond-scale e2e fixture: nothing
-/// flushes on exit (the workspace builds with `panic = "abort"` and there is
-/// no `DLL_PROCESS_DETACH` hook for this), so a process that exits before its
-/// first tick produces no report file at all, not even a partial one.
+/// flushes on exit (no `DLL_PROCESS_DETACH` hook and no atexit flush for
+/// this — and an aborting shim panic would skip either one anyway), so a
+/// process that exits before its first tick produces no report file at all,
+/// not even a partial one.
 /// `VFS_SHIM_STATS_INTERVAL_MS` (see `vfs_env::SHIM_STATS_INTERVAL_MS`)
 /// overrides the interval for exactly that case — a short-lived test child
 /// can opt into a fast tick for just itself; unset, every existing caller

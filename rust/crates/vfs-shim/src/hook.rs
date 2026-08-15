@@ -274,14 +274,26 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
 
 /// Record shim panics before they take the game down.
 ///
-/// The workspace builds with `panic = "abort"`, and Rust's abort on MSVC is
-/// `__fastfail(FAST_FAIL_FATAL_APP_EXIT)` — which surfaces as process exit code
-/// **0xC0000409**. Without this hook every shim panic is an unattributable
-/// `STATUS_STACK_BUFFER_OVERRUN`, indistinguishable from a genuine stack-cookie
-/// or CFG failure in the game, and the only way to localise one is to bisect
-/// (see the 0xC0000409 hunt behind commit 5f8f2eb).
+/// The exit code this hook exists to attribute is **0xC0000409**
+/// (`FAST_FAIL_FATAL_APP_EXIT`) — but not for the reason this comment used to
+/// give. It claimed the workspace builds with `panic = "abort"`; `rust/Cargo.toml`
+/// sets `panic = "unwind"` for both profiles, deliberately. A shim panic still
+/// ends the process anyway, because every hook is `extern "system"` and rustc
+/// plants a forced abort wherever an unwind would cross that boundary.
+/// Measured rather than assumed: a panic inside an `extern "system"` fn built
+/// with `panic = "unwind"` prints `thread caused non-unwinding panic.
+/// aborting.` and exits 0xC0000409.
 ///
-/// `set_hook` still runs under `panic = "abort"`, so the message survives.
+/// Without this hook that exit is an unattributable
+/// `STATUS_STACK_BUFFER_OVERRUN`, indistinguishable from a genuine
+/// stack-cookie or CFG failure in the game, and the only way to localise one
+/// is to bisect (see the 0xC0000409 hunt behind commit 5f8f2eb).
+///
+/// `set_hook`'s hook runs at panic time, before any unwinding begins, so the
+/// message survives the abort that follows. One consequence of unwind that
+/// `panic = "abort"` did not have: this hook also fires for panics that never
+/// reach an `extern` boundary — a panic on the stats reporter thread kills
+/// only that thread — so a logged message no longer implies the process died.
 /// Writes to `VFS_SHIM_PANIC_LOG`, else `<state dir>/shim-panic.log`, else a
 /// fixed fallback — a panic here must never be silent for want of a path.
 fn install_panic_hook() {
@@ -1213,11 +1225,36 @@ unsafe fn try_fuse_create(
     // One `None` below is not a decision: `open_fuse_at_ex(...)?` on the
     // success path gives up its handle if the synth table's mutex is poisoned,
     // which sends the caller to `decision_for` after the director has already
-    // opened the file — and leaks that `fh`, since nothing closes it. Rare
-    // (poisoning needs a panic while the table is held, and this crate builds
-    // with `panic = "abort"`), pre-dating this task, and not a live route; but
-    // it is a real hole in "the director's answer is the caller's answer", so
-    // do not read the paragraph above as more absolute than it is.
+    // opened the file — and leaks that `fh`, since nothing closes it. It
+    // pre-dates this task, and it is a real hole in "the director's answer is
+    // the caller's answer", so do not read the paragraph above as more
+    // absolute than it is.
+    //
+    // It is still not a live route — but not for the reason this comment used
+    // to give. It claimed the crate builds with `panic = "abort"`; it does
+    // not. `rust/Cargo.toml` sets `panic = "unwind"` for both profiles,
+    // deliberately, so "a panic cannot unwind here" is simply false and
+    // nothing about poisoning is ruled out by the profile. Two independent
+    // reasons rule it out instead:
+    //
+    //  1. Nothing inside those critical sections can unwind. `fuse_synth`
+    //     holds `TABLE`/`NEXT` across `usize` arithmetic, `BTreeMap`
+    //     insert/get/get_mut/remove keyed by `usize`, and `String`
+    //     clone/drop — no `unwrap`, no slice indexing, no caller-supplied
+    //     closure, no `Ord` or `Drop` impl that can panic. Allocation failure
+    //     aborts rather than unwinding. Poisoning requires a panic to unwind
+    //     *out of a held guard*, and there is no panic here to unwind.
+    //  2. Even granting one, every production path into this code arrives
+    //     through an `unsafe extern "system"` hook, and rustc's forced
+    //     abort-on-unwind at a non-`-unwind` `extern` boundary tears the
+    //     process down while that unwind is still in flight. The guard's drop
+    //     would set the poison flag on the way out, but no later call would
+    //     be alive to observe it.
+    //
+    // Reason 1 is the one to re-check if `fuse_synth` ever grows a fallible
+    // or reentrant operation under those locks; reason 2 holds only for the
+    // injected process, not for in-process tests that drive these paths
+    // directly.
     // (Primary stack is expanded to 16 MiB by vfs-inject; open is a shallow ring op.)
     // Only the three "conditional" dispositions need to know whether the
     // path pre-existed to report the right `IoStatusBlock.Information` (see

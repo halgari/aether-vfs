@@ -62,7 +62,9 @@ cargo run -p vfs-directord -- up --config scenario.toml
 
 ## Workspace
 
-Rust 2021 Cargo workspace. `panic = "abort"` is workspace-wide for the `no_std` early payload.
+Rust 2021 Cargo workspace, `panic = "unwind"` throughout. The `no_std` early
+payload (`vfs-payload`) needs `panic = "abort"`, so it is excluded from the
+workspace and carries its own profile; `vfs-protocol/tests/unwind.rs` pins both.
 
 | Crate | Role |
 |-------|------|
