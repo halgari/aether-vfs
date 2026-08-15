@@ -1042,3 +1042,99 @@ Had the stale DLL been launched, it would have spoken wire VERSION 1 to a
 VERSION 2 director. Stage 2b's version bump (`vfs-ipc/layout.rs`, rejected at
 `ring.rs` open) would have failed the attach loudly rather than misparsing a
 root-prefixed payload as a path — the guard behaving as designed.
+
+## Gate 4: the write-path session (2026-08-15) — criterion 6 NOT met
+
+Gate 4 closed the shim's write fall-through, moved copy-on-write server-side,
+and surfaced director-side write counters. This session was meant to be its
+acceptance evidence: a real save, routed, with a zero fall-through. **It did not
+produce one, and this section says so rather than presenting what it did produce
+as if it answered the question.**
+
+### What happened
+
+`tools\gamectl.ps1 -Action launch`. All pre-launch checks green: profile seed
+applied, composition reported as `zip under a copy-on-write overlay whose upper
+is …\overrides\root-0`, root 1 resolved and cross-checked against the configured
+profiles directory, root 1's write overlay layer declared.
+
+The Anniversary Edition "Thanks for buying / DOWNLOAD" modal appeared again and
+held the main menu, exactly as in the previous stage's session. **The content fix
+attempted for it failed.** `bEnablePlatform=0` (plus `bFreebiesSeen`,
+`bUpsellOwned`, `bCheckForMissingContentOnStartup`) was seeded into
+`profiles\SkyrimPrefs.ini` and confirmed in effect by the harness — and the box
+appeared anyway. Two premises behind that attempt were also wrong and are
+corrected here: the profiles directory is **never** re-seeded (only
+`C:\tmp\skyrim-runtime` is wiped), and `bFreebiesSeen`/`bUpsellOwned` were
+**already** set during the previous failing session, so they demonstrably do not
+suppress this box.
+
+The console — gate 1's documented known-good path, which the modal does not
+block — opened normally, and `coc riverwood` was issued. The game then **exited
+during the world load**. The failure signature matches what gate 1 recorded for
+this image: dozens of missing Creation Club plugins and assets
+(`ccbgssse*.esl`, `lodsettings/*.lod`, `textures/**`), i.e. content the zip does
+not contain, not a VFS refusal.
+
+### Results
+
+```
+under-root open outcomes:
+  routed                               4431   (at exit)
+  fell-through: drm-exception            16   (gate 5's, expected)
+  (no other class present)
+
+directory enumerations by source:
+  director      10 listing(s),  225 entries
+  contained      0 listing(s),    0 entries
+
+vfs-io opens: ok=2408 err=2023 (reconciliation target ok+err=4431)
+root 0 (implied): open ok=68  err=315   write_ops=0 write_bytes=0
+root 1: getattr ok=303 nf=0 err=0 | open read ok=2040 err=1708 write ok=300 err=0
+        read_ops=4 read_bytes=2,482,241 | write_ops=0 write_bytes=0
+
+vfs-io writes: ops=0 bytes=0
+READ THIS AS: no write reached the director at all.
+```
+
+**Reconciliation is exact:** 2408 + 2023 = 4431 = the shim's `routed`.
+
+### What this session does and does not establish
+
+**Does:**
+- **Enumeration is director-served.** `director 10 / contained 0` — the first
+  live reading of the `ReadDirSource` instrument gate 4 added. No listing under a
+  managed root was answered without the director.
+- **Containment holds for reads and metadata**, with no fall-through class
+  present except the four DRM filename exceptions gate 5 owns.
+- **The byte counters work.** At the menu, root 1 showed `read_ops=0`, which
+  looked like it might be an instrument blind spot; by exit it read
+  `read_ops=4 read_bytes=2,482,241`. The zero was real, not blind.
+
+**Does not:**
+- **No write reached the director.** `ops=0`, so `FellThroughWriteFallback` being
+  absent from this run means nothing, and the harness says so in its own output.
+  This is the same trap the previous stage fell into; the difference is only that
+  the instrument now refuses to let the number be misread.
+- **Criterion 6 is unmet.** "Skyrim launches, shows the expected load order, and
+  writes its INI and save through the director" — the launch and the load order
+  hold; the INI write and the save do not, because gameplay was never reached.
+
+### What would close it
+
+Two blockers, in order. Neither is a VFS defect on current evidence.
+
+1. **The AE modal.** Unresolved. The one variable that tracks it across the two
+   sessions that hit it is root 1 being declared (n=1 each way), but Steam being
+   in offline mode is at least as plausible, and nothing has been tested against
+   that. A control run with `VFS_SKYRIM_NO_PROFILE_SEED=1`, and one with root 1
+   undeclared, would separate the two.
+2. **The image is missing its Creation Club content**, which is what ended this
+   session and what ended one of gate 1's. Until the zip carries it (or the load
+   order excludes it), `coc` into the world is unreliable regardless of the VFS.
+
+**The write path itself is not unevidenced** — it is covered live, in injected
+processes, by three e2e scenarios including copy-up through a layered,
+cache-wrapped base, all with `write_fallback == 0` asserted from the shim's own
+report. What is missing is specifically *the game's own save*, and that gap is
+recorded here rather than papered over with the tests that do pass.
