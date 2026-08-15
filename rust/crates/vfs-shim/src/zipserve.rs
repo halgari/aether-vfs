@@ -152,6 +152,13 @@ fn ensure_mapped(container_nt: &str) -> Option<(usize, u64)> {
 }
 
 /// Register a synthetic open over `[offset, offset+length)` of `container_nt`.
+///
+/// **Unreferenced since `Decision::Serve` went** — the two `hook.rs` arms that
+/// called it were its only callers. Marked rather than deleted here purely to
+/// keep this commit warning-clean; the very next commit removes it with the
+/// rest of the zip-window half. Same marker, same meaning, as the one on
+/// `copy_window_to_file` below.
+#[allow(dead_code)]
 pub fn open_synth(container_nt: &str, offset: u64, length: u64) -> Option<isize> {
     let (base, file_size) = ensure_mapped(container_nt)?;
     let end = offset.checked_add(length)?;

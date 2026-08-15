@@ -446,7 +446,8 @@ impl Engine {
     ///
     /// **This used to read the real filesystem.** It re-ran the snapshot-only
     /// decision and copied from whatever that yielded — `std::fs::copy` off a
-    /// `Decision::Redirect` target, a zip window off a `Decision::Serve`, and
+    /// `Decision::Redirect` target, a zip window off the since-removed
+    /// `Decision::Serve`, and
     /// failing both, `std::fs::copy` off the raw NT path being opened. None of
     /// those asked the director anything, so copy-up seeded from content under
     /// a managed root that the invariant says is unreachable: a real file the

@@ -707,7 +707,7 @@ fn decision_for(path: Option<&str>, access: u32, disposition: u32) -> Option<Dec
     Some(engine.decide_open(path, access, disposition))
 }
 
-/// Record a `decision_for` fallthrough outcome (`Redirect`/`Serve`/`Deny`),
+/// Record a `decision_for` fallthrough outcome (`Redirect`/`Deny`),
 /// unless `already` is set — meaning `try_fuse_create` already classified this
 /// same physical open (DRM exception / write fallback) before returning
 /// `None`. Both `create_hook` and `open_hook` call `decision_for`
@@ -1668,37 +1668,6 @@ unsafe extern "system" fn create_hook(
             record_path(file_handle, path, status);
             status
         }
-        Some(Decision::Serve { container_nt, offset, length }) => {
-            note_decision_outcome(
-                path,
-                outcome_recorded,
-                crate::hookstats::OpenOutcome::FellThroughServe,
-            );
-            // Legacy Serve path: only if FUSE client is not active.
-            if crate::fuse_client::global().is_some() {
-                return STATUS_OBJECT_NAME_NOT_FOUND;
-            }
-            match crate::zipserve::open_synth(&container_nt, offset, length) {
-                Some(h) => {
-                    if !file_handle.is_null() {
-                        *file_handle = h as HANDLE;
-                    }
-                    if !iosb.is_null() {
-                        let p = iosb as *mut u8;
-                        core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-                        core::ptr::write_unaligned(
-                            p.add(8) as *mut usize,
-                            crate::ntdef::FILE_OPENED,
-                        );
-                    }
-                    STATUS_SUCCESS
-                }
-                // Mapping failed: fall back to the real open (likely NOT_FOUND).
-                None => tramp(
-                    file_handle, access, oa, iosb, alloc, attrs, share, disp, opts, ea, ealen,
-                ),
-            }
-        }
         Some(Decision::Deny) => {
             note_decision_outcome(path, outcome_recorded, crate::hookstats::OpenOutcome::Denied);
             STATUS_OBJECT_NAME_NOT_FOUND
@@ -1922,33 +1891,6 @@ unsafe extern "system" fn open_hook(
             record_identity(file_handle, path, status);
             record_path(file_handle, path, status);
             status
-        }
-        Some(Decision::Serve { container_nt, offset, length }) => {
-            note_decision_outcome(
-                path,
-                outcome_recorded,
-                crate::hookstats::OpenOutcome::FellThroughServe,
-            );
-            if crate::fuse_client::global().is_some() {
-                return STATUS_OBJECT_NAME_NOT_FOUND;
-            }
-            match crate::zipserve::open_synth(&container_nt, offset, length) {
-                Some(h) => {
-                    if !file_handle.is_null() {
-                        *file_handle = h as HANDLE;
-                    }
-                    if !iosb.is_null() {
-                        let p = iosb as *mut u8;
-                        core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-                        core::ptr::write_unaligned(
-                            p.add(8) as *mut usize,
-                            crate::ntdef::FILE_OPENED,
-                        );
-                    }
-                    STATUS_SUCCESS
-                }
-                None => tramp(file_handle, access, oa, iosb, share, opts),
-            }
         }
         Some(Decision::Deny) => {
             note_decision_outcome(path, outcome_recorded, crate::hookstats::OpenOutcome::Denied);

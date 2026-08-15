@@ -412,8 +412,9 @@ impl RootMap {
     ///
     /// Everything *under* the root is decided here now, with no real-
     /// filesystem escape hatch (gate 3's own reason for existing): a
-    /// virtualized file still redirects/serves as before, and a tombstone
-    /// still denies — those two are unchanged. What changes is the other two
+    /// virtualized file backed by a real disk path still redirects as before,
+    /// and a tombstone still denies — those two are unchanged. What changes is
+    /// the other two
     /// arms, which used to fail open:
     ///
     /// - `NotFound` (a real, on-disk file/directory under the root that no
@@ -448,13 +449,20 @@ impl RootMap {
     /// passthrough this removes) and the configuration that restores it.
     pub fn decide(&self, nt_path: &str, snap: &SnapshotReader) -> Decision {
         match self.locate(nt_path, snap) {
-            Located::Resolved(SnapResolution::File { source, size, .. }) => {
+            Located::Resolved(SnapResolution::File { source, .. }) => {
                 match vfs_core::decode(&source) {
-                    vfs_core::Source::ZipWindow { offset, container } => Decision::Serve {
-                        container_nt: render_nt(container),
-                        offset,
-                        length: size,
-                    },
+                    // Nothing in the shim can serve a zip window any more (gate
+                    // 4 task 7 removed the in-process zip-window server along
+                    // with `Decision::Serve`). Zip-backed content is the
+                    // director's to serve over the ring, which runs *before*
+                    // this snapshot-only fallback is ever consulted; reaching
+                    // here with one means the director did not classify the
+                    // open, and there is no way to produce its bytes locally.
+                    // Denying matches what the shim already did — both
+                    // `Decision::Serve` arms in `hook.rs` returned
+                    // STATUS_OBJECT_NAME_NOT_FOUND whenever the FUSE client was
+                    // installed, which bootstrap guarantees.
+                    vfs_core::Source::ZipWindow { .. } => Decision::Deny,
                     vfs_core::Source::Disk(bytes) => {
                         Decision::Redirect { target_nt: render_nt(bytes) }
                     }
@@ -689,13 +697,10 @@ pub enum Decision {
     PassThrough,
     /// Reissue the open against this NT path (the mod backing file).
     Redirect { target_nt: String },
-    /// The path is tombstoned (mod-deleted); the hook must return
-    /// STATUS_OBJECT_NAME_NOT_FOUND rather than open or pass through.
+    /// The path is tombstoned (mod-deleted), unserveable, or not known to the
+    /// provider graph; the hook must return STATUS_OBJECT_NAME_NOT_FOUND
+    /// rather than open or pass through.
     Deny,
-    /// Serve the file's bytes from a window inside a container (zip) file.
-    /// The shim opens `container_nt`, maps it, and returns a synthetic handle
-    /// covering `[offset, offset + length)`.
-    Serve { container_nt: String, offset: u64, length: u64 },
 }
 
 /// The directory-info `FILE_INFORMATION_CLASS` values the shim marshals.
@@ -1548,8 +1553,13 @@ mod tests {
         assert_eq!(r.remainder(r"\??\C:\Windows"), None);
     }
 
+    /// Was `decide_serves_a_zip_window_source`, asserting `Decision::Serve`.
+    /// Gate 4 task 7 deleted that variant with the in-shim zip-window server it
+    /// fed; the same input must now deny, which is byte-for-byte the status the
+    /// hook already returned (`STATUS_OBJECT_NAME_NOT_FOUND`) on that arm
+    /// whenever the FUSE client was installed.
     #[test]
-    fn decide_serves_a_zip_window_source() {
+    fn decide_denies_a_zip_window_source() {
         use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId, SourceId};
         let src = SourceId::new(vfs_core::encode_zip_window(
             0x1_0000_0010,
@@ -1571,11 +1581,7 @@ mod tests {
         let map = RootMap::new(r"\??\C:\Games\Skyrim", VolumeMap::empty()).unwrap();
         assert_eq!(
             map.decide(r"\??\C:\Games\Skyrim\Data\big.bsa", &reader),
-            Decision::Serve {
-                container_nt: r"\??\C:\GameLayers\base.zip".to_string(),
-                offset: 0x1_0000_0010,
-                length: 4242,
-            }
+            Decision::Deny
         );
     }
 
