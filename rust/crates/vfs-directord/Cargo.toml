@@ -26,6 +26,10 @@ vfs-compose = { path = "../vfs-compose" }
 vfs-cache = { path = "../vfs-cache" }
 vfs-zip = { path = "../vfs-zip" }
 vfs-protocol = { path = "../vfs-protocol" }
+# GetFinalPathNameByHandleW, for resolving the second (Documents\My Games)
+# root's junction to its real target in `skyrim-live` — see that binary's
+# `resolve_second_root_target`.
+vfs-win = { path = "../vfs-win" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14"

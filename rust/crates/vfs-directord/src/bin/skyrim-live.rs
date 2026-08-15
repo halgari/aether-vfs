@@ -10,13 +10,24 @@
 //! - `VFS_SKYRIM_DATA`    = `C:\tmp\skyrim-data`  (saves/, profiles/, overrides/)
 //! - `VFS_SKYRIM_ROOT`    = `C:\tmp\skyrim-runtime` (empty managed virtual root)
 //! - `VFS_SKYRIM_LAUNCH`  = `SkyrimSE.exe`, or `skse64_loader.exe` to go via SKSE
+//!
+//! **Two managed roots** (stage 2b task 6): root 0 is the game directory
+//! above; root 1 is `Documents\My Games\Skyrim Special Edition` — the
+//! junction `setup_my_games_junctions` points at `profiles`, declared here so
+//! the gate-1 baseline's headline open question (does the game's save route
+//! through the director, or does it still bypass every counter through that
+//! junction?) can actually be measured instead of assumed. See
+//! `resolve_second_root_target`'s doc comment for the junction-resolution
+//! detail and `print_open_totals`/`CountingProvider` for the per-root
+//! counters this adds.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use vfs_compose::SubdirProvider;
-use vfs_director::{DiskProvider, LaunchOpts, Provider, RootId, Session};
-use vfs_protocol::{VPath, KIND_DIR};
+use vfs_director::{DiskProvider, LaunchOpts, Provider, RootId, Session, OPEN_WRITE};
+use vfs_protocol::{Capabilities, DirEntry, Handle, SetAttr, Stat, VPath, KIND_DIR};
 use vfs_zip::ZipProvider;
 
 fn env_path(key: &str, default: &str) -> PathBuf {
@@ -130,7 +141,7 @@ fn run() -> Result<(), String> {
     stage_dx_redist(&root, &data.join("dx-redist"))?;
 
     // ── remap My Games saves + profile/ini area ────────────────────────────
-    setup_my_games_junctions(&profiles, &saves)?;
+    let my_games_docs = setup_my_games_junctions(&profiles, &saves)?;
     setup_localappdata_junction(&profiles)?;
 
     // DRM path: talk to the *already-running* Steam client only.
@@ -231,6 +242,55 @@ fn run() -> Result<(), String> {
         "  composition: zip{} + overrides (no Steam-disk mount; under-root sealed to director)",
         if mods_dir.is_some() { " + mods" } else { "" }
     );
+
+    // ── second managed root: Documents\My Games\Skyrim Special Edition ─────
+    // Gate 1's baseline found the game's own save invisible to every
+    // counter: it travels through the junction `setup_my_games_junctions`
+    // just created (`my_games_docs` -> `profiles`), which sits outside root
+    // 0 (`root`) entirely, so neither the shim's classifier nor the
+    // director's reconciliation ever saw it as anything but "outside-root".
+    // Declaring it as root 1 is this task's whole question: does the save
+    // now route through the director, or does it still bypass? Either
+    // answer is the deliverable — see `resolve_second_root_target`'s doc
+    // comment for why the path handed to `declare_root` (the junction's own
+    // spelling) and the path backing this root's provider (its resolved
+    // target) are deliberately different strings, not an oversight.
+    let profiles_target = resolve_second_root_target(&my_games_docs)?;
+    eprintln!(
+        "  root 1:    {}  (Documents\\My Games junction; declared as-is so the shim's literal-\
+component match sees exactly what the game's own raw NT open spells)",
+        my_games_docs.display()
+    );
+    eprintln!(
+        "  root 1 resolves via GetFinalPathNameByHandleW → {}",
+        profiles_target.display()
+    );
+    if resolved_target_matches(&profiles_target, &profiles) {
+        eprintln!("  root 1 resolution OK: matches the configured profiles dir ({})", profiles.display());
+    } else {
+        eprintln!(
+            "  WARNING: root 1's resolved target does not match the configured profiles dir \
+({}) — verify the junction (`mklink /J` output above) before trusting this run's root-1 numbers",
+            profiles.display()
+        );
+    }
+    // A single `DiskProvider` covering the whole of `profiles_target` is the
+    // right shape here (unlike the root-0 mistake a prior review flagged —
+    // `DiskProvider::new(root)` mounted at `/` alongside real content, which
+    // made *everything* trivially "route" for an uninteresting reason):
+    // this root has exactly one source, nothing layered above or below it,
+    // so one provider covering it is the whole composition, not a shortcut
+    // that hides a negative result. If the game's save never actually opens
+    // anything under `my_games_docs`'s own spelling (e.g. because it
+    // resolves the Documents folder differently on some other machine), this
+    // root's counters read zero — a real negative, not something this
+    // mount shape can paper over.
+    let root1_counters = Arc::new(CountingProvider::new(Arc::new(DiskProvider::new(&profiles_target))));
+    session
+        .kernel()
+        .mount(RootId(1), Arc::clone(&root1_counters) as Arc<dyn Provider>)
+        .map_err(|st| format!("mount root1 status {st}"))?;
+    session.declare_root(1, my_games_docs.clone());
 
     // Prove steam_appid is visible through the director (what the shim FUSE sees).
     match session.kernel().getattr(RootId::DEFAULT, "steam_appid.txt") {
@@ -386,7 +446,7 @@ fn run() -> Result<(), String> {
     } else if wait {
         eprintln!("game exited with code {code}");
         eprint!("{}", vfs_director::io_stats_report(40));
-        print_open_totals();
+        print_open_totals(&root1_counters);
         session.stop_serve();
     } else {
         eprintln!("game launched (detached). Keep this process alive for IPC — Ctrl+C to stop.");
@@ -408,7 +468,7 @@ fn run() -> Result<(), String> {
             // Every 10s: full top-path I/O report.
             if ticks.is_multiple_of(2) {
                 eprint!("{}", vfs_director::io_stats_report(25));
-                print_open_totals();
+                print_open_totals(&root1_counters);
             }
             if ticks.is_multiple_of(6) {
                 eprintln!(
@@ -419,7 +479,7 @@ fn run() -> Result<(), String> {
             if !alive && ticks >= 3 {
                 eprintln!("  game process not found — final I/O dump:");
                 eprint!("{}", vfs_director::io_stats_report(40));
-                print_open_totals();
+                print_open_totals(&root1_counters);
                 session.stop_serve();
                 break;
             }
@@ -458,6 +518,223 @@ fn mount_low_priority_disk_layers(
         .mount("", Arc::new(DiskProvider::new(staged_dir_path)))
         .map_err(|st| format!("mount staging-disk status {st}"))?;
     Ok(())
+}
+
+/// Resolve `docs` (the `Documents\My Games\Skyrim Special Edition` junction
+/// `setup_my_games_junctions` just created) to the real directory it
+/// currently points at, via `GetFinalPathNameByHandleW`
+/// (`vfs_win::final_path_for_open`) — the same authoritative, OS-consulted
+/// resolution `vfs-redirect` itself uses for a junction/8.3/subst spelling,
+/// rather than trusting that `profiles` (this project's own configured
+/// target) is necessarily still what the junction resolves to.
+///
+/// **Deliberately not used for `declare_root`.** `Session::declare_root`'s
+/// path is matched *literally*, component-by-component, against whatever a
+/// real NT open spells (`RootMap::match_canonical`) — it is never itself
+/// resolved through a junction (see `vfs-redirect`'s
+/// `root_itself_being_a_reparse_point_is_never_aliased`, which proves a
+/// declared root's own path is excluded from the junction-alias scan on
+/// purpose). The gate-1 baseline's own captured log shows the game's raw
+/// save open spelled exactly as the junction's own path
+/// (`\??\c:\users\...\documents\my games\skyrim special edition\saves\...`),
+/// never the resolved target — so declaring root 1 with the *resolved*
+/// path here would build a `RootMap` entry the shim's literal match can
+/// never satisfy, silently leaving the save exactly as invisible as before.
+/// What resolution *is* for: the **provider** backing root 1 needs a real
+/// directory, and asking the OS once, explicitly and verifiably, is more
+/// honest than assuming `profiles` is still correct or relying a second time
+/// on the disk layer's own transparent junction-following.
+fn resolve_second_root_target(docs: &Path) -> Result<PathBuf, String> {
+    let raw = docs.to_string_lossy().into_owned();
+    let resolved = vfs_win::final_path_for_open(&raw).ok_or_else(|| {
+        format!(
+            "could not resolve {} via GetFinalPathNameByHandleW (does the junction exist yet?)",
+            docs.display()
+        )
+    })?;
+    // `GetFinalPathNameByHandleW`'s default form is VOLUME_NAME_DOS
+    // (`\\?\`-prefixed) — strip it for an ordinary Win32 path, the same
+    // convention `Session::launch`'s own `strip_verbatim` already applies to
+    // this exact API's output shape.
+    let stripped = resolved.strip_prefix(r"\\?\").unwrap_or(&resolved);
+    Ok(PathBuf::from(stripped))
+}
+
+/// Whether `resolved` (root 1's OS-resolved real location) is the same
+/// directory as `expected` (this process's own configured `profiles` dir),
+/// canonicalising both first so a trailing separator or an alternate-but-
+/// equivalent spelling does not read as a mismatch.
+fn resolved_target_matches(resolved: &Path, expected: &Path) -> bool {
+    let a = std::fs::canonicalize(resolved).unwrap_or_else(|_| resolved.to_path_buf());
+    let b = std::fs::canonicalize(expected).unwrap_or_else(|_| expected.to_path_buf());
+    a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+/// Wraps another provider, tallying getattr/open/read/write traffic
+/// locally, so `skyrim-live` can print a genuinely root-scoped count even
+/// though `vfs_director::io_stats` (what `print_open_totals` already prints)
+/// has no root dimension at all. Mounted only at `RootId(1)` — root 0's own
+/// provider is left completely untouched, so this adds observability
+/// without risking any change to root 0's existing, already-measured
+/// behaviour.
+struct CountingProvider {
+    inner: Arc<dyn Provider>,
+    getattr_ok: AtomicU64,
+    getattr_notfound: AtomicU64,
+    getattr_err: AtomicU64,
+    open_read_ok: AtomicU64,
+    open_read_err: AtomicU64,
+    open_write_ok: AtomicU64,
+    open_write_err: AtomicU64,
+    reads: AtomicU64,
+    read_bytes: AtomicU64,
+    writes: AtomicU64,
+    write_bytes: AtomicU64,
+}
+
+impl CountingProvider {
+    fn new(inner: Arc<dyn Provider>) -> Self {
+        CountingProvider {
+            inner,
+            getattr_ok: AtomicU64::new(0),
+            getattr_notfound: AtomicU64::new(0),
+            getattr_err: AtomicU64::new(0),
+            open_read_ok: AtomicU64::new(0),
+            open_read_err: AtomicU64::new(0),
+            open_write_ok: AtomicU64::new(0),
+            open_write_err: AtomicU64::new(0),
+            reads: AtomicU64::new(0),
+            read_bytes: AtomicU64::new(0),
+            writes: AtomicU64::new(0),
+            write_bytes: AtomicU64::new(0),
+        }
+    }
+
+    /// `(ok, err)` across *both* read and write opens — the same shape
+    /// `vfs_director::io_stats::open_totals()` reports globally, so
+    /// `print_open_totals` can subtract this from the global pair to get
+    /// root 0's implied share.
+    fn open_totals(&self) -> (u64, u64) {
+        let ord = Ordering::Relaxed;
+        (
+            self.open_read_ok.load(ord) + self.open_write_ok.load(ord),
+            self.open_read_err.load(ord) + self.open_write_err.load(ord),
+        )
+    }
+
+    /// Human-readable, self-contained root-1 section for `print_open_totals`.
+    fn report(&self) -> String {
+        let ord = Ordering::Relaxed;
+        format!(
+            "  root 1: getattr ok={} notfound={} err={} | open read ok={} err={} write ok={} err={} \
+| read_ops={} read_bytes={} | write_ops={} write_bytes={}\n",
+            self.getattr_ok.load(ord),
+            self.getattr_notfound.load(ord),
+            self.getattr_err.load(ord),
+            self.open_read_ok.load(ord),
+            self.open_read_err.load(ord),
+            self.open_write_ok.load(ord),
+            self.open_write_err.load(ord),
+            self.reads.load(ord),
+            self.read_bytes.load(ord),
+            self.writes.load(ord),
+            self.write_bytes.load(ord),
+        )
+    }
+}
+
+impl Provider for CountingProvider {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        let r = self.inner.getattr(p);
+        let ord = Ordering::Relaxed;
+        match &r {
+            Ok(Some(_)) => {
+                self.getattr_ok.fetch_add(1, ord);
+            }
+            Ok(None) => {
+                self.getattr_notfound.fetch_add(1, ord);
+            }
+            Err(_) => {
+                self.getattr_err.fetch_add(1, ord);
+            }
+        }
+        r
+    }
+
+    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+        self.inner.readdir(p)
+    }
+
+    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+        let is_write = flags & OPEN_WRITE != 0;
+        let r = self.inner.open(p, flags);
+        let ord = Ordering::Relaxed;
+        match (r.is_ok(), is_write) {
+            (true, false) => {
+                self.open_read_ok.fetch_add(1, ord);
+            }
+            (false, false) => {
+                self.open_read_err.fetch_add(1, ord);
+            }
+            (true, true) => {
+                self.open_write_ok.fetch_add(1, ord);
+            }
+            (false, true) => {
+                self.open_write_err.fetch_add(1, ord);
+            }
+        }
+        r
+    }
+
+    fn close(&self, h: Handle) -> Result<(), i32> {
+        self.inner.close(h)
+    }
+
+    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        let r = self.inner.read_at(h, offset, buf);
+        if let Ok(n) = r {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.read_bytes.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        r
+    }
+
+    fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
+        let r = self.inner.write_at(h, offset, buf);
+        if let Ok(n) = r {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            self.write_bytes.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        r
+    }
+
+    fn set_len(&self, h: Handle, len: u64) -> Result<(), i32> {
+        self.inner.set_len(h, len)
+    }
+
+    fn flush(&self, h: Handle) -> Result<(), i32> {
+        self.inner.flush(h)
+    }
+
+    fn mkdir(&self, p: VPath) -> Result<(), i32> {
+        self.inner.mkdir(p)
+    }
+
+    fn remove(&self, p: VPath) -> Result<(), i32> {
+        self.inner.remove(p)
+    }
+
+    fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
+        self.inner.rename(from, to)
+    }
+
+    fn set_attr(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
+        self.inner.set_attr(p, attr)
+    }
 }
 
 /// If the zip has a single top-level directory, return its name.
@@ -914,14 +1191,37 @@ fn is_safe_to_wipe(root: &Path) -> bool {
 /// for a live game run; this prints the same `io_stats::open_totals()` /
 /// `rejected_writes()` the gRPC `stats` RPC exposes for the daemon case.
 /// Purely additive stderr output — no I/O routing decision reads this.
-fn print_open_totals() {
+///
+/// **Per-root breakdown, to the extent this process can see one.**
+/// `vfs_director::io_stats` has no root dimension at all —
+/// `ring_dispatch.rs` calls `record_open`/`record_getattr`/etc. with a bare
+/// vpath, never a `RootId`, so `open_totals()` and `rejected_writes()` below
+/// are sums across *every* mounted root, root 1 included. `root1` is this
+/// process's own local tally (see `CountingProvider`), wrapping exactly the
+/// provider mounted at `RootId(1)` — root 0's own provider is left
+/// untouched, so root 0's contribution is reported here only as "global
+/// minus root 1", not measured directly. That is the honest limit of what
+/// this task can report without changing `vfs-director` itself.
+fn print_open_totals(root1: &CountingProvider) {
     let (ok, err) = vfs_director::io_stats::open_totals();
     let rejected = vfs_director::io_stats::rejected_writes();
     let rejected_total: u64 = rejected.iter().map(|(_, c)| *c).sum();
     eprintln!(
-        "  vfs-io opens: ok={ok} err={err} (reconciliation target ok+err={}) rejected_writes={} distinct path(s), {rejected_total} total",
+        "  vfs-io opens: ok={ok} err={err} (reconciliation target ok+err={}) rejected_writes={} distinct path(s), {rejected_total} total (both roots combined — see per-root breakdown below)",
         ok + err,
         rejected.len()
+    );
+    let (root1_open_ok, root1_open_err) = root1.open_totals();
+    eprintln!(
+        "  root 0 (implied = combined − root 1): open ok={} err={}",
+        ok.saturating_sub(root1_open_ok),
+        err.saturating_sub(root1_open_err)
+    );
+    eprint!("{}", root1.report());
+    eprintln!(
+        "  root 1's provider is unconditionally ReadWrite (DiskProvider), so a director-level \
+write rejection (the {rejected_total} count above) is expected to be entirely root 0's — root 1 \
+would only ever contribute an `open write err` above, never a rejected_writes entry"
     );
 }
 
@@ -1028,7 +1328,11 @@ fn wipe_files(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn setup_my_games_junctions(profiles: &Path, saves: &Path) -> Result<(), String> {
+/// Returns the `Documents\My Games\Skyrim Special Edition` path (the
+/// junction this function creates, pointing at `profiles`) so `run` can
+/// declare it as the second managed root without re-deriving `%USERPROFILE%`
+/// a second time and risking drift between the two computations.
+fn setup_my_games_junctions(profiles: &Path, saves: &Path) -> Result<PathBuf, String> {
     let docs = std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .ok_or_else(|| "USERPROFILE unset".to_string())?
@@ -1092,7 +1396,7 @@ fn setup_my_games_junctions(profiles: &Path, saves: &Path) -> Result<(), String>
         profiles_saves.display(),
         saves.display()
     );
-    Ok(())
+    Ok(docs)
 }
 
 fn setup_localappdata_junction(profiles: &Path) -> Result<(), String> {
