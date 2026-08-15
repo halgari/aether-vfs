@@ -1024,8 +1024,40 @@ not this synthetic matrix — see the task report for that outcome.
 - `cargo test --workspace`: see the task report for the exact count and any
   further named flips found while finishing this task.
 - `cargo clippy --all-targets -- -D warnings`: see the task report.
-- Still present and unmodified: `Decision::Redirect`, `Decision::Serve`, the
+- Still present and unmodified **as of that task** (see the gate 4 note below):
+  `Decision::Redirect`, `Decision::Serve`, the
   legacy `zipserve` path, the DRM filename exceptions, and the write
   fall-through (`try_fuse_create` still calls `client.open_write` even with a
   director live, and the director still rejects writes, so writes still reach
   `decide_open` — gate 4's job, not touched here).
+
+## Gate 4 note: what the section above no longer describes
+
+The "Verification (Task 5)" list above is a record of what was true when that
+task ran, not of the tree today. Gate 4 changed three of those items:
+
+- **`Decision::Serve` is deleted.** It had been unreachable in production since
+  the FUSE client became mandatory — both its arms early-returned whenever the
+  client was installed, which bootstrap always does.
+- **The zip-window half of `zipserve` is deleted** (`open_synth`, `ZIP_MAPS`,
+  `copy_window_to_file`, and the `is_synth` handle-lifecycle checks, which were
+  provably constant-false once `open_synth` went). The **synthetic-section**
+  half — `register_mapped_image`, `map_view`, `close_section` and friends — is
+  **retained**: it backs `fuse_create_section`'s `SEC_IMAGE` path and all of
+  `lazy_section.rs`, and is live machinery.
+- **The write fall-through is closed.** A write to a path under a managed root
+  that the director cannot serve now fails with an NT status and creates no
+  file on the real filesystem.
+
+`Decision::Redirect` and `Decision::Deny` **survive**, and the reason is worth
+recording because it is gate 5's dependency: the four DRM/identity filename
+exceptions return `None` before the ring is consulted, so a write to
+`steam_appid.txt` still reaches the overlay-redirect branch. Removing those
+exceptions is what finally allows the enum to collapse.
+
+**One counter changed meaning, not just value.** The old `Decision::Serve` arms
+recorded `FellThroughServe` *before* their FUSE early-return, so that class was
+incrementable in production. Traffic that would have landed there now records
+as `Denied`. Measured runs showed zero either way, so no recorded figure moves —
+but this is a **merge**, not a drive-to-zero, and the rows below reading
+"still unexercised" should be read as "no longer reachable" from gate 4 onward.
