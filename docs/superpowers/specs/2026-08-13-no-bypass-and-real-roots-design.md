@@ -58,6 +58,13 @@ implements `write_at`. The shim's fall-through at `hook.rs:797` — "Writes may
 fall through for shim-local overlay redirect" — is load-bearing until something
 else can serve them.
 
+> **Stale as of 2026-08-14 — kept for the reasoning, not the facts.** The
+> paragraph above describes the code *before* stage 2a-i, which is what forced
+> the dependency and is why writes were pulled into 2a. All three claims are now
+> false: `Director::open` accepts `OPEN_WRITE`, `ring_dispatch` dispatches all
+> five write opcodes, and every combinator plus `DiskProvider` implements the
+> write trait methods. See the correction under §4.
+
 So **2a absorbs the write path** from what was Stage 3. Closing the
 fall-through without a replacement would mean the game cannot write its INIs,
 logs, or saves.
@@ -208,9 +215,38 @@ enumerated against and tested exhaustively; five cannot.
 | `Decision::Redirect` / `Serve` / `Deny` | Deleted. The enum collapses to under-root or not. |
 | `AttrDecision`, `query_attributes`, `merge_directory` | Deleted — metadata routes. |
 | `vfs-redirect` snapshot-consuming logic | Deleted (~1,000 lines). `RootMap` survives and becomes multi-root in 2b. |
-| `vfs-shim`'s `zipserve` legacy synthetic path | Deleted — the FUSE synthetic-handle path supersedes it. |
+| `vfs-shim`'s `zipserve` **zip-window serving** half | Deleted — the FUSE synthetic-handle path supersedes it. |
+| `vfs-shim`'s `zipserve` **synthetic-section** half | **Retained.** See the correction below. |
 | DRM filename exceptions (`hook.rs:751-795`) | Deleted. See §6. |
 | `vfs-shared` snapshot / seqlock / builder | **Retained.** Removing the shim as a consumer is in scope; retiring the crate is not — see below. |
+
+**Correction (2026-08-14, from the gate 4 survey): `zipserve` is not one thing.**
+An earlier version of this table said "delete `zipserve`". That is wrong and
+would have torn out live machinery. The file carries two unrelated
+responsibilities:
+
+- **Zip-window serving** — `open_synth`, `ensure_mapped` / `map_container`,
+  `ZIP_MAPS` / `SynthFile`, `read` / `size` / `position` / `set_position` /
+  `close`, `copy_window_to_file`. This half is genuinely superseded, and its
+  only remaining callers are `Engine::cow_seed` and the already-dead
+  `Decision::Serve` arms. **Delete this half in gate 4.**
+- **Synthetic-section bookkeeping for live PE image mapping** —
+  `SynthSection`, `register_mapped_image`, `create_section`, `map_view`,
+  `unmap_view`, `close_section`, `has_view_in`, `is_synth_view`. This half
+  backs `fuse_create_section`'s `SEC_IMAGE` path and all of `lazy_section.rs`,
+  which is the demand-paged image machinery still in active use. **Retain it.**
+
+The `is_synth`-family checks threaded through the ordinary handle-lifecycle
+hooks (close, seek/tell, read) are not zip-specific and must not be deleted
+blindly once `open_synth` stops being called.
+
+**Correction (2026-08-14): §3's "the director cannot serve a write today" is
+stale.** It described the code before stage 2a-i. All five write opcodes
+(`OP_WRITE`, `OP_SETATTR`, `OP_RENAME`, `OP_DELETE`, `OP_MKDIR`) are dispatched
+in `ring_dispatch.rs`, every combinator and `DiskProvider` implements the write
+trait methods, and `Director` exposes its own write facade. Gate 4's job is
+therefore **not** building write support — it is closing the shim's
+fall-through so that support is the only path.
 
 **Why `vfs-shared` stays.** `vfs-server` and `xtask-descriptor` still consume
 it. `vfs-server` is not the product path, but its own docs record that it is the
