@@ -120,7 +120,8 @@ pub fn bootstrap_from_config_path_with_payload(
     // (`stage_root_from_env`) the client appends as a second spelling of root
     // 0. The staged directory physically holds the game EXE and its import
     // closure, and the DRM exceptions in `hook.rs::try_fuse_create`
-    // (`SkyrimSE.exe`, `steam_api*`, `steam_appid.txt`) work by returning
+    // (`SkyrimSE.exe`, `SkyrimSELauncher.exe`, `steam_api*`, `steam_appid.txt`
+    // — all four; the launcher was missing from this list) work by returning
     // `None` so the open trampolines to that real file — which requires this
     // engine to answer `PassThrough`, i.e. to consider the staged directory
     // outside its roots. Teaching it the alias would turn those opens into

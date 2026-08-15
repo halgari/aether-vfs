@@ -1,8 +1,15 @@
 //! Acceptance exerciser. Run *injected* against a managed VFS root, it drives
 //! every read-path feature through real Win32/CRT/std calls and writes a report
 //! (`check=PASS` / `check=FAIL: detail` per line) to argv[2], exiting 0 iff all
-//! checks pass. The host test (`tests/acceptance.rs`) builds the matching disk
-//! layout + snapshot and asserts every line is PASS.
+//! checks pass.
+//!
+//! **No host test drives this.** This comment named `tests/acceptance.rs` as
+//! the harness that builds the matching disk layout + snapshot and asserts
+//! every line is PASS; there is no such file, in this crate or anywhere in
+//! the workspace, so nothing runs these checks automatically and nothing
+//! fails when one of them goes stale. Treat it as a manual exerciser, and see
+//! `enum_merge` below for a check that is already known to be stale for
+//! exactly that reason.
 //!
 //! Expected layout under the root (argv[1]); backing files live outside it:
 //!   mod_added.txt   virtual file  -> "MOD-ADDED-BYTES"      (not on disk)

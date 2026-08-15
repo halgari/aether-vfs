@@ -1075,12 +1075,20 @@ pub fn note_copy_up(outcome: CopyUp, root: u32, vpath: &str, bytes: u64) {
 /// written leaves a deleted file visible, and a whiteout that is not cleared
 /// leaves a recreated file invisible.
 ///
-/// **Only failures are counted here**, unlike [`CopyUp`], which counts its
-/// successes too. Copy-ups are a handful per session and "which file was
-/// seeded" is half the diagnosis; these run on every single overlay-bound
-/// write, delete and rename, so a per-path success tally would be volume with
-/// no reader. A zero section is the expected reading, and any line at all is
-/// a finding.
+/// **Only failures are counted *per path* here**, unlike [`CopyUp`], which
+/// names the file for its successes too. Copy-ups are a handful per session
+/// and "which file was seeded" is half the diagnosis; these run on every
+/// single overlay-bound write, delete and rename, so a per-path success tally
+/// would be volume with no reader.
+///
+/// Successes still get a **bare count** ([`OverlayFail::Succeeded`]), and that
+/// is not a hedge — without it an absent section is ambiguous between "no
+/// overlay operation happened at all" and "they all happened and were fine",
+/// which are very different readings of a live run. That is the same
+/// ambiguity [`CopyUp`] deliberately fixed one enum over by counting
+/// `Seeded`, and this enum went a whole gate without it. With the count, an
+/// absent section means the first and a `succeeded` row means the second; any
+/// *other* line is still a finding.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum OverlayFail {
@@ -1100,9 +1108,14 @@ pub enum OverlayFail {
     /// the mutation would have been re-decided by our own hooks rather than
     /// reaching the real filesystem (see `hook::ShimIoGuard`).
     DeclinedReentrant = 4,
+    /// The mutation happened. Counted only — no path, no trace entry — so an
+    /// absent section can be read as "no overlay mutations at all" rather
+    /// than being ambiguous with "all of them worked". Last discriminant so
+    /// the four failure classes keep their positions.
+    Succeeded = 5,
 }
 
-const OVERLAY_FAIL_N: usize = 5;
+const OVERLAY_FAIL_N: usize = 6;
 
 /// Every variant, for iteration in `render_overlay_fails` and the label test.
 pub const ALL_OVERLAY_FAILS: [OverlayFail; OVERLAY_FAIL_N] = [
@@ -1111,6 +1124,7 @@ pub const ALL_OVERLAY_FAILS: [OverlayFail; OVERLAY_FAIL_N] = [
     OverlayFail::Whiteout,
     OverlayFail::Rename,
     OverlayFail::DeclinedReentrant,
+    OverlayFail::Succeeded,
 ];
 
 impl OverlayFail {
@@ -1123,6 +1137,7 @@ impl OverlayFail {
             OverlayFail::Whiteout => "FAILED: write whiteout",
             OverlayFail::Rename => "FAILED: overlay rename",
             OverlayFail::DeclinedReentrant => "declined: reentrant",
+            OverlayFail::Succeeded => "succeeded",
         }
     }
 }
@@ -1142,10 +1157,23 @@ pub fn overlay_fail_count(fail: OverlayFail) -> u64 {
 
 /// Record an overlay mutation that failed or was declined. Cheap no-op when
 /// disabled, like every counter here.
+/// Record an overlay mutation that worked. Count only — see
+/// [`OverlayFail::Succeeded`] for why there is no path and no trace entry.
+pub fn note_overlay_ok() {
+    if !enabled() {
+        return;
+    }
+    OVERLAY_FAIL_COUNTS[OverlayFail::Succeeded as usize].fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn note_overlay_fail(fail: OverlayFail, root: u32, vpath: &str) {
     if !enabled() {
         return;
     }
+    debug_assert!(
+        fail != OverlayFail::Succeeded,
+        "use note_overlay_ok; Succeeded carries no path and no trace entry"
+    );
     OVERLAY_FAIL_COUNTS[fail as usize].fetch_add(1, Ordering::Relaxed);
     let path = format!("root{root}/{}", vpath.to_ascii_lowercase());
     // Also in the ordered trace: what the game did *next* after the overlay
@@ -1163,9 +1191,15 @@ pub fn note_overlay_fail(fail: OverlayFail, root: u32, vpath: &str) {
     }
 }
 
+/// The header still counts **failures only** — that is the number a reader is
+/// looking for — but the section renders whenever any overlay mutation
+/// happened at all, so a run with nothing but successes prints a `succeeded`
+/// row instead of nothing. See [`OverlayFail::Succeeded`] for why the
+/// difference matters.
 fn render_overlay_fails(snap: &Snapshot) -> String {
-    let total: u64 = snap.overlay_fail_counts.iter().sum();
-    if total == 0 {
+    let succeeded = snap.overlay_fail_counts[OverlayFail::Succeeded as usize];
+    let total: u64 = snap.overlay_fail_counts.iter().sum::<u64>() - succeeded;
+    if total == 0 && succeeded == 0 {
         return String::new();
     }
     let mut s = format!("\nshim-local overlay failures ({total}):\n");
@@ -1485,6 +1519,23 @@ mod tests {
         for (i, o) in ALL_OVERLAY_FAILS.into_iter().enumerate() {
             assert_eq!(o as usize, i, "{o:?} is listed at position {i}");
         }
+    }
+
+    /// The ambiguity `Succeeded` exists to remove: before it, an absent
+    /// section meant either "no overlay mutation happened" or "they all
+    /// worked", and a reader could not tell which.
+    #[test]
+    fn overlay_successes_render_so_an_absent_section_means_nothing_happened() {
+        let mut counts = [0u64; OVERLAY_FAIL_N];
+        counts[OverlayFail::Succeeded as usize] = 4;
+        let snap = Snapshot { overlay_fail_counts: counts, ..empty_snapshot() };
+        let s = render_overlay_fails(&snap);
+        assert!(s.contains("succeeded"), "{s}");
+        // The header counts failures, not operations — that is the number a
+        // reader is scanning for, and four successes are not four failures.
+        assert!(s.contains("shim-local overlay failures (0)"), "{s}");
+        // …and with genuinely nothing recorded, still nothing at all.
+        assert_eq!(render_overlay_fails(&empty_snapshot()), "");
     }
 
     #[test]

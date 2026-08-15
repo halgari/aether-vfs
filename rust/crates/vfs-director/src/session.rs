@@ -375,6 +375,15 @@ impl Session {
     /// layer together — and stop serving it. Also the way to hand a root back
     /// so something else can mount it directly (see [`Session::mount_at`]'s
     /// ownership check).
+    ///
+    /// **No production caller, and neither has [`Session::clear_mounts`].**
+    /// The only non-test reference to either is `clear_mounts` delegating
+    /// here. Kept deliberately, not overlooked: `Session` is this crate's
+    /// public composition API, `mount_at`'s ownership check documents this as
+    /// the way out of it, and "stop serving a root" is not something a host
+    /// should have to reach past the API to do. Do not read the absence of
+    /// callers as evidence the operation is unnecessary — read it as this
+    /// project not yet having a host that tears a root down mid-session.
     pub fn clear_root(&self, root: RootId) -> Result<(), i32> {
         self.roots
             .lock()

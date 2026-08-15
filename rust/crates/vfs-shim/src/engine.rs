@@ -407,7 +407,10 @@ impl Engine {
             return false;
         };
         match f() {
-            Ok(()) => true,
+            Ok(()) => {
+                crate::hookstats::note_overlay_ok();
+                true
+            }
             Err(_) => {
                 crate::hookstats::note_overlay_fail(fail, root.0, &comps.join("/"));
                 false

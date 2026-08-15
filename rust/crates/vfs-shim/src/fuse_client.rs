@@ -29,33 +29,21 @@ pub fn global() -> Option<&'static FuseClient> {
     FUSE.get()
 }
 
-/// Why running on the large-stack worker failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LargeStackError {
-    /// The worker thread could not be created.
-    Spawn,
-    /// The closure panicked on the worker.
-    Panicked,
-}
-
-/// Run FUSE ring I/O on a **large stack** worker.
-///
-/// SkyrimSE's primary thread ships with a 1 MiB PE stack. Pipelined ring
-/// submit + bulk arena copies there regularly hit `0xC0000409` / stack overflow.
-/// Callers on game threads must use this for open/read/getattr paths.
-pub fn on_large_stack<T, F>(f: F) -> Result<T, LargeStackError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
-{
-    std::thread::Builder::new()
-        .name("vfs-fuse-io".into())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(f)
-        .map_err(|_| LargeStackError::Spawn)?
-        .join()
-        .map_err(|_| LargeStackError::Panicked)
-}
+// `pub enum LargeStackError` and `pub fn on_large_stack` used to sit here: a
+// helper that ran ring I/O on an 8 MiB worker thread, because SkyrimSE's
+// primary thread ships with a 1 MiB PE stack and pipelined submit + bulk arena
+// copies overflowed it (`0xC0000409`). Its doc said “callers on game threads
+// must use this for open/read/getattr paths” — and it had **zero callers**,
+// workspace-wide, which made that sentence a standing instruction to use
+// machinery nobody uses.
+//
+// The stack problem is real and is solved elsewhere: `vfs-inject` expands the
+// primary stack to 16 MiB before the game runs (see the note in `hook.rs` on
+// try_fuse_create), so ring ops run on the calling thread by design. The
+// helper is also not free to reintroduce casually: it would serialise every
+// op behind a thread spawn+join, and the worker would not inherit the
+// caller's `ShimIoGuard`, so its own I/O would be re-decided by our hooks.
+// Deleted rather than left standing as an instruction nothing follows.
 
 /// Why [`try_init_from_env`] did not leave a live [`FuseClient`] installed.
 ///
