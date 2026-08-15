@@ -213,16 +213,42 @@ impl Overlay {
             let name = e.file_name().to_string_lossy().into_owned();
             if let Some(base) = is_whiteout(&name) {
                 map.remove(&fold(base));
-                // …and the marker's own name, which `merged` may already
-                // carry. Since gate 4 Task 6 a host mounts this very
-                // directory into the director's graph as a write layer (see
-                // `overlay_layer_dir`), so the director's own listing of it
-                // arrives here containing every marker as an ordinary file.
-                // The director uses a different marker convention
-                // (`vfs_compose::OverlayProvider`'s `.wh.<name>` prefix) and
-                // so has no reason to hide ours; dropping it here is what
-                // keeps a deletion tombstone from surfacing to the game as a
-                // real file called `<name>.__vfs_wh__`.
+                // …and the marker's own name, which `merged` may carry. Since
+                // gate 4 Task 6 a host mounts this very directory into the
+                // director's graph as a write layer (see `overlay_layer_dir`),
+                // and the director uses a different marker convention
+                // (`vfs_compose::OverlayProvider`'s `.wh.<name>` prefix), so
+                // it has no reason to hide ours: a listing that includes them
+                // would otherwise show the game a real file called
+                // `<name>.__vfs_wh__`.
+                //
+                // **Neither of these two lines can fire in production today,
+                // and the Task 6 review that added the second one did not say
+                // so.** Both act on `merged`, and `merged` is empty on every
+                // production path: `Engine::overlay_listing` is the only
+                // caller, `hook.rs`'s `ContainedNoDirector` arm is *its* only
+                // caller, and that arm passes `&[]` — its whole purpose is an
+                // overlay-only listing with no base to layer onto. That arm is
+                // additionally dead by measurement (see its own comment for
+                // why it is kept: it is fail-closed insurance against the two
+                // root predicates drifting apart, which they have before).
+                //
+                // Kept rather than deleted, because this is a general overlay
+                // function and this is the right behaviour for any merged
+                // listing it is ever handed — and because deleting "the
+                // mitigation" alone is incoherent: the pre-Task-6 line above
+                // is dead for the identical reason, so removal would have to
+                // take the whole merged-listing path and the fail-closed hook
+                // arm with it.
+                //
+                // **Where the phantom marker actually surfaces is elsewhere,
+                // and is not fixed here.** The live enumeration path is
+                // `hook.rs`'s director branch (`client.readdir`), which never
+                // calls this function. A shim whiteout written on the
+                // DRM-exception route therefore does show the game a
+                // `<file>.__vfs_wh__` entry and does not hide the file it
+                // names. That route is gate 5's; recorded rather than
+                // silently patched here.
                 map.remove(&fold(&name));
                 continue;
             }
@@ -308,15 +334,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Gate 4, Task 6 review, minor 1. The shim and the director now share
-    /// one physical overlay directory but spell whiteouts differently — the
-    /// shim appends `.__vfs_wh__`, `vfs_compose::OverlayProvider` prefixes
-    /// `.wh.` — and neither hides the other's markers. The director's listing
-    /// of the shared directory therefore arrives at `apply_to_listing`
-    /// carrying our markers as ordinary files, and without this they reach
-    /// the game as phantom entries named `<file>.__vfs_wh__`.
+    /// Gate 4, Task 6 review, minor 1. The shim and the director share one
+    /// physical overlay directory but spell whiteouts differently — the shim
+    /// appends `.__vfs_wh__`, `vfs_compose::OverlayProvider` prefixes `.wh.` —
+    /// and neither hides the other's markers.
+    ///
+    /// **This test constructs a `merged` listing that no production caller
+    /// produces**, and the version of this comment written with the mitigation
+    /// said the opposite: that the director's listing of the shared directory
+    /// "therefore arrives at `apply_to_listing`". It does not, twice over.
+    /// `Engine::overlay_listing` is `apply_to_listing`'s only caller,
+    /// `hook.rs`'s `ContainedNoDirector` arm is its only caller, and that arm
+    /// passes an empty base — so `merged` is always `[]` in production, even
+    /// before accounting for that arm being dead by measurement. The live
+    /// enumeration path is the director branch, which never reaches here.
+    ///
+    /// So this is a **unit test of `apply_to_listing`'s contract**, not
+    /// evidence of a live behaviour, and it is worth keeping only as that:
+    /// the fail-closed hook arm is deliberately retained against predicate
+    /// drift, and if it revives with a non-empty base this is the assertion
+    /// that says what the function must then do. It is *not* evidence that a
+    /// shim whiteout is hidden from the game today — on the live director
+    /// path it is not, which is recorded at the call site and belongs to
+    /// gate 5.
     #[test]
-    fn a_whiteout_marker_is_not_listed_as_a_file_when_it_arrives_in_the_merged_listing() {
+    fn a_whiteout_marker_is_dropped_from_a_merged_listing_that_carries_it() {
         let dir = std::env::temp_dir()
             .join(format!("vfs-overlay-marker-listing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

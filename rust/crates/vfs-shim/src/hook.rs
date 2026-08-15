@@ -3423,6 +3423,14 @@ unsafe fn serve_dir_query(
     // is exactly the one worth having fail closed, and the day it comes back
     // to life is the day someone changes a predicate.
     //
+    // One consequence worth stating, because a reviewer read the other way
+    // round: this arm calls `overlay_listing` with an **empty base**, so
+    // `Overlay::apply_to_listing`'s handling of a `merged` listing — both the
+    // whiteout removal and Task 6's marker-hiding addition — is unreachable
+    // from production even if this arm revives with today's call shape. The
+    // phantom-marker problem that mitigation describes lives on the *director*
+    // branch below, unfixed; see the note there.
+    //
     // The ring round trip and the overlay's own `read_dir` both call out, so
     // the lock must NOT be held here (NtClose also takes it).
     let rebuilt = if need_build {
@@ -3453,6 +3461,18 @@ unsafe fn serve_dir_query(
                     }
                     Err(_) => Vec::new(),
                 };
+                // KNOWN GAP, gate 5's: this branch does not filter the shim's
+                // own whiteout markers. The director mounts the shim overlay
+                // directory as a write layer (`overlay_layer_dir`) and spells
+                // whiteouts `.wh.<name>`, not `<name>.__vfs_wh__`, so it has
+                // no reason to hide ours — they come back as ordinary files.
+                // A shim whiteout therefore shows the game a phantom
+                // `<file>.__vfs_wh__` entry and does not hide the file it
+                // names. `Overlay::apply_to_listing` has the mitigation for
+                // this, but it is not on this path and cannot be reached from
+                // it; see the long note there. Latent because `Engine::
+                // whiteout` is only reached for a non-synth handle, i.e. the
+                // DRM/identity exception route, which gate 5 owns.
                 Some((items, crate::hookstats::ReadDirSource::Director))
             }
             None => {
