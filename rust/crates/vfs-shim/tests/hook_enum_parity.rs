@@ -33,10 +33,11 @@
 //! fix as `hook_relative_paths.rs`: give the engine a write overlay and make
 //! `Data` overlay-backed, so `Engine::overlay_state`'s `Present` answer (
 //! checked *before* `RootMap::decide`) lets the open through. The real,
-//! physical directory this lands on is `overlay/data`, not `root/Data` — so
-//! the real-vs-tombstoned marker files live there now — but the virtual path
-//! tracked for the open (and so what the snapshot/overlay-listing logic
-//! reasons about) is still `root\Data`, unaffected.
+//! physical directory this lands on is `overlay/root-0/data` (Task 2, gate 4:
+//! the overlay's on-disk layout is root-scoped, see `Overlay::root_dir`), not
+//! `root/Data` — so the real-vs-tombstoned marker files live there now — but
+//! the virtual path tracked for the open (and so what the snapshot/overlay-
+//! listing logic reasons about) is still `root\Data`, unaffected.
 
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
@@ -56,7 +57,12 @@ fn classic_and_ex_enumeration_agree() {
     std::fs::create_dir_all(&backing).unwrap();
     // `Data` is overlay-backed (see the module doc comment for why): the real,
     // physical directory a `Data` open actually lands on.
-    let overlay_data = overlay.join("data");
+    //
+    // Task 2 (gate 4): the overlay's on-disk layout is root-scoped (see
+    // `Overlay::root_dir`) so two roots serving the same relative path can't
+    // collide. `Engine` only ever resolves under `RootId::DEFAULT` (root 0)
+    // today, so `data` must physically live under `overlay/root-0`.
+    let overlay_data = overlay.join("root-0").join("data");
     std::fs::create_dir_all(&overlay_data).unwrap();
 
     // A real file, a VFS-only file, and a real file hidden by a tombstone: the

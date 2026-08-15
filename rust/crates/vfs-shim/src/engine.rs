@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use vfs_redirect::{classify_open, to_nt, Decision, DirItem, RootMap, VolumeMap};
+use vfs_redirect::{classify_open, to_nt, Decision, DirItem, RootId, RootMap, VolumeMap};
 use vfs_shared::{LayoutError, SnapshotReader};
 
 use crate::overlay::{Overlay, OverlayState};
@@ -194,7 +194,10 @@ impl Engine {
     pub(crate) fn overlay_state(&self, nt_path: &str) -> Option<OverlayState> {
         let ov = self.overlay.as_ref()?;
         let comps = self.map()?.remainder(nt_path)?;
-        Some(ov.lookup(&comps))
+        // SINGLE ROOT: `Engine`'s `RootMap` only ever declares `RootId::DEFAULT`
+        // (see the `SINGLE ROOT` notes on `build`/`map`), so this is the only
+        // root `Overlay::lookup` is ever asked about today.
+        Some(ov.lookup(RootId::DEFAULT, &comps))
     }
 
     /// Decide how to handle an incoming NT open path. Overlay-first, then
@@ -233,19 +236,23 @@ impl Engine {
             Some(c) if !c.is_empty() => c,
             _ => return Decision::PassThrough,
         };
-        ov.ensure_parent(&comps);
+        // SINGLE ROOT: see `overlay_state`'s note — `RootId::DEFAULT` is the
+        // only root this engine ever resolves `comps` under today.
+        ov.ensure_parent(RootId::DEFAULT, &comps);
         // Recreating the path: drop any whiteout so it is visible again.
-        ov.clear_whiteout(&comps);
+        ov.clear_whiteout(RootId::DEFAULT, &comps);
         // Copy-on-write: preserve existing content into the overlay before the
         // caller writes, unless it is truncating/replacing (no copy needed) or a
         // copy already exists.
-        if intent.preserves && !ov.has_file(&comps) {
-            let dest = ov.file_path(&comps);
+        if intent.preserves && !ov.has_file(RootId::DEFAULT, &comps) {
+            let dest = ov.file_path(RootId::DEFAULT, &comps);
             if !self.cow_seed(nt_path, &dest) {
                 // Best-effort; write still goes to the overlay path.
             }
         }
-        Decision::Redirect { target_nt: to_nt(&ov.file_path(&comps).to_string_lossy()) }
+        Decision::Redirect {
+            target_nt: to_nt(&ov.file_path(RootId::DEFAULT, &comps).to_string_lossy()),
+        }
     }
 
     /// Seed an overlay path with existing content (disk redirect, zip window, or
@@ -292,7 +299,8 @@ impl Engine {
         let Some(map) = self.map() else { return false };
         match (&self.overlay, map.remainder(nt_path)) {
             (Some(ov), Some(comps)) if !comps.is_empty() => {
-                ov.whiteout(&comps);
+                // SINGLE ROOT: see `overlay_state`'s note.
+                ov.whiteout(RootId::DEFAULT, &comps);
                 true
             }
             _ => false,
@@ -317,12 +325,13 @@ impl Engine {
             Some(c) if !c.is_empty() => c,
             _ => return false,
         };
-        ov.ensure_parent(&from);
-        if !ov.has_file(&from) {
-            let dest = ov.file_path(&from);
+        // SINGLE ROOT: see `overlay_state`'s note.
+        ov.ensure_parent(RootId::DEFAULT, &from);
+        if !ov.has_file(RootId::DEFAULT, &from) {
+            let dest = ov.file_path(RootId::DEFAULT, &from);
             let _ = self.cow_seed(from_nt, &dest);
         }
-        ov.rename(&from, &to);
+        ov.rename(RootId::DEFAULT, &from, &to);
         true
     }
 
@@ -346,7 +355,10 @@ impl Engine {
         wildcard: Option<&str>,
     ) -> Vec<DirItem> {
         match (&self.overlay, self.map().and_then(|m| m.remainder(dir_nt_path))) {
-            (Some(ov), Some(comps)) => ov.apply_to_listing(&comps, real.to_vec(), wildcard),
+            // SINGLE ROOT: see `overlay_state`'s note.
+            (Some(ov), Some(comps)) => {
+                ov.apply_to_listing(RootId::DEFAULT, &comps, real.to_vec(), wildcard)
+            }
             _ => real.to_vec(),
         }
     }
@@ -521,8 +533,10 @@ mod tests {
     fn overlay_listing_adds_overlay_children() {
         use vfs_redirect::DirItem;
         let dir = std::env::temp_dir().join(format!("vfs-ovl-listing-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("data")).unwrap();
-        std::fs::write(dir.join("data").join("overlaid.txt"), b"x").unwrap();
+        // Root-scoped on-disk layout (see `Overlay::root_dir`): `Engine` only
+        // ever resolves under `RootId::DEFAULT` (root 0) today.
+        std::fs::create_dir_all(dir.join("root-0").join("data")).unwrap();
+        std::fs::write(dir.join("root-0").join("data").join("overlaid.txt"), b"x").unwrap();
         let engine = overlay_engine(&dir);
         let real = vec![DirItem { name: "real.txt".into(), is_dir: false, size: 1, mtime: 0 }];
         let listed = engine.overlay_listing(r"\??\C:\Games\Skyrim\Data", &real, None);
@@ -548,9 +562,11 @@ mod tests {
     #[test]
     fn overlay_file_wins_over_snapshot() {
         let dir = std::env::temp_dir().join(format!("vfs-ovl-win-{}", std::process::id()));
-        // Overlay copy of data/foo.esp (folded components on disk).
-        std::fs::create_dir_all(dir.join("data")).unwrap();
-        std::fs::write(dir.join("data").join("foo.esp"), b"overlaid").unwrap();
+        // Overlay copy of data/foo.esp (folded components on disk), under
+        // root 0's subdirectory (see `Overlay::root_dir`) — `Engine` only
+        // ever resolves under `RootId::DEFAULT` today.
+        std::fs::create_dir_all(dir.join("root-0").join("data")).unwrap();
+        std::fs::write(dir.join("root-0").join("data").join("foo.esp"), b"overlaid").unwrap();
         let engine = overlay_engine(&dir);
         let d = engine.decide(r"\??\C:\Games\Skyrim\Data\foo.esp");
         match d {
@@ -567,9 +583,11 @@ mod tests {
     fn overlay_whiteout_hides_snapshot_file() {
         use crate::overlay::OverlayState;
         let dir = std::env::temp_dir().join(format!("vfs-ovl-wh-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("data")).unwrap();
+        // Root 0's subdirectory (see `Overlay::root_dir`) — `Engine` only ever
+        // resolves under `RootId::DEFAULT` today.
+        std::fs::create_dir_all(dir.join("root-0").join("data")).unwrap();
         // Whiteout marker for data/foo.esp.
-        std::fs::write(dir.join("data").join("foo.esp.__vfs_wh__"), b"").unwrap();
+        std::fs::write(dir.join("root-0").join("data").join("foo.esp.__vfs_wh__"), b"").unwrap();
         let engine = overlay_engine(&dir);
         assert_eq!(engine.decide(r"\??\C:\Games\Skyrim\Data\foo.esp"), Decision::Deny);
         // `AttrDecision`/`Engine::query_attributes` are gone (Task 4); the

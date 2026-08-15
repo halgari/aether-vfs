@@ -21,7 +21,15 @@ fn writes_land_in_overlay_with_cow() {
     // the VFS has to be one the VFS already accounts for -- seeded straight
     // into the overlay, as if left over from an earlier session, rather than
     // written directly onto the real root directory.
-    std::fs::write(overlay.join("to_delete.txt"), b"DELETE-ME").unwrap();
+    //
+    // Task 2 (gate 4): the overlay's on-disk layout is now root-scoped (see
+    // `Overlay::root_dir`) so two roots serving the same relative path can't
+    // collide. `Engine` only ever resolves under `RootId::DEFAULT` (root 0)
+    // today, so that is the subdirectory a seeded file must land in to be
+    // seen.
+    let overlay_root0 = overlay.join("root-0");
+    std::fs::create_dir_all(&overlay_root0).unwrap();
+    std::fs::write(overlay_root0.join("to_delete.txt"), b"DELETE-ME").unwrap();
 
     // A mod (virtual) file backed on disk, mapped by the snapshot.
     let backing = mods.join("mod_backing.esp");
@@ -56,7 +64,11 @@ fn writes_land_in_overlay_with_cow() {
     assert_eq!(std::fs::read(&newfile).unwrap(), b"NEW", "new file readable via VFS");
     // ...and physically it lives in the overlay, not the real root (the overlay
     // path is outside the managed root, so this read is un-virtualized).
-    assert_eq!(std::fs::read(overlay.join("created.txt")).unwrap(), b"NEW", "landed in overlay");
+    assert_eq!(
+        std::fs::read(overlay_root0.join("created.txt")).unwrap(),
+        b"NEW",
+        "landed in overlay"
+    );
 
     // --- Copy-on-write modify of a mod file ---
     {
@@ -66,7 +78,11 @@ fn writes_land_in_overlay_with_cow() {
     // Virtual read reflects the modification...
     assert_eq!(std::fs::read(root.join("mod.esp")).unwrap(), b"ORIGX", "COW modification visible");
     // ...the overlay holds the materialized+modified copy...
-    assert_eq!(std::fs::read(overlay.join("mod.esp")).unwrap(), b"ORIGX", "overlay has COW copy");
+    assert_eq!(
+        std::fs::read(overlay_root0.join("mod.esp")).unwrap(),
+        b"ORIGX",
+        "overlay has COW copy"
+    );
     // ...and the shared mod backing is untouched.
     assert_eq!(std::fs::read(&backing).unwrap(), b"ORIG", "backing must not be mutated");
 
@@ -76,7 +92,10 @@ fn writes_land_in_overlay_with_cow() {
     // The path now reads as gone through the VFS...
     assert!(std::fs::read(root.join("to_delete.txt")).is_err(), "deleted file hidden");
     // ...via a whiteout marker in the overlay...
-    assert!(overlay.join("to_delete.txt.__vfs_wh__").exists(), "whiteout marker written");
+    assert!(
+        overlay_root0.join("to_delete.txt.__vfs_wh__").exists(),
+        "whiteout marker written"
+    );
     // ...and deleting a mod file leaves the backing intact.
     std::fs::remove_file(root.join("mod.esp")).expect("delete mod");
     assert!(std::fs::read(root.join("mod.esp")).is_err(), "deleted mod hidden");

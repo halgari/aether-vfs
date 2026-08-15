@@ -44,12 +44,13 @@
 //! `Data` an overlay-backed directory (`Engine::overlay_state` is checked
 //! *before* `RootMap::decide`, so an overlay `Present` entry for `Data`
 //! bypasses the new `Dir` denial entirely) -- the real, physical directory
-//! CWD/handle opens land on is `overlay/data`, not `root/Data`, but the
-//! virtual path tracked for it (and so every relative open resolved against
-//! it) is still `root\Data`, unaffected. The root directory itself still
-//! cannot be opened bare (an overlay `Present` lookup refuses an empty
-//! remainder by construction — see `Overlay::lookup`), so this test anchors
-//! on `Data`, one level in, instead.
+//! CWD/handle opens land on is `overlay/root-0/data` (Task 2, gate 4: the
+//! overlay's on-disk layout is root-scoped, see `Overlay::root_dir`), not
+//! `root/Data`, but the virtual path tracked for it (and so every relative
+//! open resolved against it) is still `root\Data`, unaffected. The root
+//! directory itself still cannot be opened bare (an overlay `Present` lookup
+//! refuses an empty remainder by construction — see `Overlay::lookup`), so
+//! this test anchors on `Data`, one level in, instead.
 //!
 //! Every relative name below dropped its old `Data\` prefix when the anchor
 //! moved from bare root to `Data` (single-component `"added.esm"` instead of
@@ -89,8 +90,12 @@ fn relative_names_resolve_on_every_decoding_hook() {
     // in the overlay reports `STATUS_NO_MORE_FILES` on the very first scan,
     // same as a genuinely-empty real directory would once dot-entries are
     // stripped; that is orthogonal to what this test checks.
-    std::fs::create_dir_all(overlay.join("data")).unwrap();
-    std::fs::write(overlay.join("data").join("real_marker.txt"), b"m").unwrap();
+    // Task 2 (gate 4): the overlay's on-disk layout is root-scoped (see
+    // `Overlay::root_dir`) so two roots serving the same relative path can't
+    // collide. `Engine` only ever resolves under `RootId::DEFAULT` (root 0)
+    // today, so `data` must physically live under `overlay/root-0`.
+    std::fs::create_dir_all(overlay.join("root-0").join("data")).unwrap();
+    std::fs::write(overlay.join("root-0").join("data").join("real_marker.txt"), b"m").unwrap();
     std::fs::create_dir_all(&backing).unwrap();
     let backing_file = backing.join("added.esm");
     std::fs::write(&backing_file, PAYLOAD).unwrap();
