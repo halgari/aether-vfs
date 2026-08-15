@@ -75,6 +75,25 @@
 //! before the rest are attempted, because a fixture that dies partway
 //! through tells you nothing about the vectors after it.
 //!
+//! **Vector `4m`: metadata-only variant of vector 4, opt-in only, not part of
+//! the fourteen-vector matrix above.** Built to prove/document a gap the
+//! final whole-branch review of Gate 3 found in `docs/escape-matrix.md`'s own
+//! claim of metadata containment: `qattr_hook`/`qfull_hook`/`qibn_hook`
+//! (`vfs-shim/src/hook.rs`) never call `RootMap::decide` at all. They consult
+//! `fuse_path_attr`, which asks `fuse_client::vpath_under_root` — the
+//! client's own string-prefix predicate, not the canonicaliser this whole
+//! matrix is about — before falling through to the real filesystem. `4m`
+//! reuses vector 4's own spelling (a volume-GUID path) but calls
+//! `GetFileAttributesW` instead of `CreateFileW`, so it exercises that hook
+//! family directly rather than the open path vectors 1-14 already cover.
+//! Never runs as part of the default (`VFS_ESCAPE_ONLY_VECTOR` unset) matrix
+//! — it is dispatched only when that variable is set to exactly `"4m"`, so it
+//! cannot change any existing matrix run's line count or output. See
+//! `vector4_metadata_query`'s own doc comment and
+//! `crates/vfs-directord/tests/e2e.rs`'s
+//! `documents_metadata_gap_for_unrecognised_spellings` for the test that
+//! uses it.
+//!
 //! **`VFS_ESCAPE_ONLY_VECTOR`**: when set to one of the vector ids above,
 //! every *other* vector is skipped entirely — not merely omitted from the
 //! output, but never constructed or attempted, so the shim's own hook-stats
@@ -192,6 +211,26 @@ fn win32_outcome(result: Result<ffi::Handle, u32>) -> String {
             "not-found".to_string()
         }
         Err(code) => format!("error:win32:{code}"),
+    }
+}
+
+/// Outcome of a name-based attribute query (`GetFileAttributesW`), used only
+/// by vector `4m` (see the module doc comment). `"found"` — deliberately
+/// distinct from `"opened"` above — means the query succeeded, i.e. the OS
+/// reported real attributes for this spelling, without ever opening a
+/// handle. `"not-found"` and `"error:win32:<code>"` mirror `win32_outcome`'s
+/// own vocabulary for the same failure shapes.
+fn attr_outcome(spelling: &str) -> String {
+    // SAFETY: FFI. `spelling` is encoded to a NUL-terminated UTF-16 buffer
+    // immediately before the call; no other pointer is dereferenced.
+    let attrs = unsafe { ffi::GetFileAttributesW(ffi::wide(spelling).as_ptr()) };
+    if attrs != ffi::INVALID_FILE_ATTRIBUTES {
+        "found".to_string()
+    } else {
+        match last_error() {
+            ffi::ERROR_FILE_NOT_FOUND | ffi::ERROR_PATH_NOT_FOUND => "not-found".to_string(),
+            code => format!("error:win32:{code}"),
+        }
     }
 }
 
@@ -363,6 +402,41 @@ fn vector4_volume_guid(abs: &str) -> Line {
             let spelling = format!("{}{}", guid.trim_end_matches('\\'), rest);
             let outcome = win32_outcome(ffi::create_file_read(&ffi::wide(&spelling)));
             Line::new("4", spelling, outcome, "")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Vector 4m: metadata-only variant of vector 4 — see the module doc comment
+// ("Vector `4m`") for why this exists and why it is opt-in only. Reuses
+// vector 4's own spelling construction verbatim; the only difference is the
+// Win32 call made against it (`GetFileAttributesW`, not `CreateFileW`).
+// ---------------------------------------------------------------------
+fn vector4_metadata_query(abs: &str) -> Line {
+    let Some((drive, rest)) = split_drive(abs) else {
+        return unbuildable("4m", abs, "target path has no drive letter to resolve a volume GUID for");
+    };
+    match ffi::volume_guid_for_drive(drive) {
+        None => unbuildable(
+            "4m",
+            abs,
+            format!("GetVolumeNameForVolumeMountPointW({drive}:\\) failed: win32:{}", last_error()),
+        ),
+        Some(guid) => {
+            let spelling = format!("{}{}", guid.trim_end_matches('\\'), rest);
+            let outcome = attr_outcome(&spelling);
+            Line::new(
+                "4m",
+                spelling,
+                outcome,
+                "metadata-only variant of vector 4 (GetFileAttributesW, not CreateFileW): proves \
+                 whether a name-based attribute query on this spelling still reaches real disk, \
+                 independent of Gate 3 Task 6's open-path (RootMap::decide) fix — qattr_hook/ \
+                 qfull_hook/qibn_hook consult fuse_client::vpath_under_root, not RootMap, so this \
+                 spelling's recognition-only-by-canonicaliser gap (see vector 4's own note) applies \
+                 here too, for a different reason (a different router never having the spelling \
+                 taught to it at all, not merely a passthrough that used to compensate for it)",
+            )
         }
     }
 }
@@ -916,6 +990,13 @@ fn main() {
     }
     if wanted("4") {
         lines.push(guarded("4", || vector4_volume_guid(&abs)));
+    }
+    // Opt-in only, deliberately NOT gated by `wanted()`: `4m` must never run
+    // as part of the default (`VFS_ESCAPE_ONLY_VECTOR` unset) matrix, so it
+    // can never change an existing run's line count or output. See the
+    // module doc comment ("Vector `4m`") for why it exists.
+    if only_vector.as_deref() == Some("4m") {
+        lines.push(guarded("4m", || vector4_metadata_query(&abs)));
     }
     if wanted("5") {
         lines.push(guarded("5", || vector5_handle_relative(&abs)));

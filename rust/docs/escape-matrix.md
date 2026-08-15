@@ -37,16 +37,126 @@ spelling is **classified** — it lands in a counted bucket of the shim's own
 labels, or `denied`) — rather than being invisible to every counter
 (`outside-root`).
 
-**Does not establish:** that the negative canary is unreachable. It is
-still reachable, for two independent, already-known reasons this gate does
-not touch: (1) the passthrough fall-through this gate's own scope note
-requires to stay (`NotFound`-under-root → passthrough; gate 3 owns removing
-it), and (2) the shim's read-seal policy (`ST_NOT_FOUND` from the director
-→ `STATUS_OBJECT_NAME_NOT_FOUND`, unless `VFS_ALLOW_DISK_FALLTHROUGH` is
-set, which it is not here) blocks some spellings' *read* while still
-correctly *classifying* them. A "classified" row below is not a "blocked"
-row and must not be read as one. **Classification, not containment, is
-what this matrix is evidence about.**
+**Does not establish:** that the negative canary is unreachable **by a
+read**. At the time this paragraph was written (gate 2), it was still
+reachable for two independent reasons this gate did not touch: (1) the
+passthrough fall-through this gate's own scope note required to stay
+(`NotFound`-under-root → passthrough; gate 3 owned removing it), and (2) the
+shim's read-seal policy (`ST_NOT_FOUND` from the director →
+`STATUS_OBJECT_NAME_NOT_FOUND`, unless `VFS_ALLOW_DISK_FALLTHROUGH` is set,
+which it is not here) blocks some spellings' *read* while still correctly
+*classifying* them. A "classified" row below is not a "blocked" row and
+must not be read as one. **Classification, not containment, is what this
+matrix is evidence about.**
+
+**Update, Gate 3, Task 5.** Reason (1) above is now closed for reads:
+`RootMap::decide` no longer passes `NotFound`/`Dir` through, so every
+buildable vector's negative-canary *read* is now sealed — see "Gate 3, Task
+5" below. This does **not** make the negative canary unreachable outright.
+A **write** open (`FILE_OPEN`/`FILE_OPEN_IF` against the negative canary,
+which physically exists on `session.root`) still reaches it: `Engine::
+cow_seed`'s last-resort branch (`crates/vfs-shim/src/engine.rs`, ~line 260)
+copies real on-disk bytes into the overlay whenever neither `Redirect` nor
+`Serve` applies — which now includes `Deny`, exactly as it included
+`PassThrough` before this task — so the negative canary becomes readable
+through the overlay once opened for write. That is gate 4's write path, not
+touched by this task and not fixed here; every "unreachable"/"sealed"/
+"closed" claim anywhere in this document is about **reads** unless it says
+otherwise.
+
+**Update, Gate 3, Task 6 — the concluding sentence two paragraphs up is now
+wrong for reads, and this is the correction.** "Classification, not
+containment, is what this matrix is evidence about" was accurate through
+Task 5, when the negative canary's read was still merely *documented* as
+sealed (in the "Update, Gate 3, Task 5" paragraph above) without the test
+itself asserting it. This task adds that assertion:
+`escape_matrix_positive_and_negative_canary`'s `negative_expectation`
+(`crates/vfs-directord/tests/e2e.rs`) now checks each buildable vector's own
+reported outcome — not the classified-paths set, a separate check kept
+alongside it, see below — and requires `not-found`, failing the test outright
+if any spelling still opens the real bytes. **Corrected statement, precise
+about what still varies by class:** this matrix now establishes
+**containment**, not merely classification, for the negative canary's
+**read**, and for **directory enumeration** — `readdir`
+(`NtQueryDirectoryFile(Ex)`) operates on a handle obtained from an
+already-succeeded open, and that open went through the same `create_hook`/
+`open_hook` → `decision_for` → `RootMap::decide` path this section is
+about, so enumeration containment follows directly from read-open
+containment rather than being a separate mechanism this task had to close.
+
+**Correction: this does not extend to name-based metadata queries, and an
+earlier version of this document claimed it did by the same mechanism —
+that claim was false.** `qattr_hook`/`qfull_hook`/`qibn_hook`
+(`crates/vfs-shim/src/hook.rs:1969`, `2041`, `1897`) never call `decide` at
+all. Each asks `fuse_path_attr` (`hook.rs:1822-1831`), which consults
+`fuse_client::vpath_under_root` — the *client's* own string-prefix
+predicate, never `RootMap::compute_under_root` — then the shim-local write
+overlay, then falls through to the real filesystem if neither answers.
+Containment for a name-based attribute query therefore holds only for the
+spellings `vpath_under_root` itself recognises — the ordinary, unmangled
+ones — not for the five alternate spellings (vectors 1, 3, 4, 7, 9) this
+document's own "second, structural finding" (below) already documents as
+recognised only by `RootMap`'s canonicaliser, never by `vpath_under_root`.
+For those five, an attribute query on the negative canary still reaches the
+real, physical file today: `crates/vfs-directord/tests/e2e.rs`'s
+`documents_metadata_gap_for_unrecognised_spellings` proves this directly for
+vector 4 (an isolated `GetFileAttributesW` against the volume-GUID
+spelling), reporting `found` where the matching *read open* on the
+identical spelling reports `not-found`. Attribute queries are also not part
+of the `under-root open outcomes` accounting this matrix's own
+classification check parses at all (`qattr_hook` and friends call
+`hookstats::note_stat`, a separate counter, never `note_open_outcome`) —
+this gap is invisible to this document's classification signal, not merely
+uncontained by it.
+
+**This is the same asymmetry "second, structural finding" (below) already
+describes, surfacing exactly where that finding predicts it would, not a
+second, unrelated issue.** That finding's root cause is that
+`fuse_client::vpath_under_root` and `RootMap::compute_under_root` are two
+independent predicates recognising different spellings under-root — the
+finding traces the consequence for the *open* path (before Task 5, `NotFound`
+passed through for these five spellings; after, `RootMap::decide`'s `Deny`
+seals them, so opens are now contained). The metadata-query hooks route
+through `vpath_under_root` alone and have no fallback to `RootMap::decide`
+at all, so for them the same five spellings have nowhere to fall through
+*to* — they never engage canonicalisation and reach real disk directly, with
+no equivalent of Task 5's fix to close the gap even for reads. One root
+cause, two visible consequences: the open-path asymmetry Task 5 closed, and
+this metadata-query asymmetry, which nothing in this gate touches.
+
+**Do not fix the underlying asymmetry here.** Unifying `vpath_under_root`
+and `RootMap::compute_under_root` into one predicate both routers consult is
+real work with its own blast radius (see "second, structural finding"'s own
+"Not fixed here" paragraph below) — it deserves its own task, not a
+tail-end patch to this one. This section exists to correct the record and
+to pin the gap down with a test (above), not to close it.
+
+**Writes remain the other class where classification, not containment,
+applies** — gate 4's write fall-through (`Engine::cow_seed`, above) means a
+write open on the negative canary still succeeds against real bytes; that
+class is classified (it would show up in `FellThroughWriteFallback`) but not
+contained. Every "unreachable"/"sealed"/"closed" claim anywhere in this
+document remains a **read-open-only** claim: it says nothing about
+directory-enumeration's own dependency on read-open containment being
+correct (which it is, by the reasoning above), and nothing about a
+name-based attribute query, which is a different hook family with no path
+to `decide` at all.
+
+One more finding this task's own construction of the new assertion surfaced,
+not predicted in advance: **vector 8 (hardlink) is no longer buildable at all
+against the negative canary**, reproduced identically across five separate
+runs. `std::fs::hard_link`'s underlying `CreateHardLinkW` needs a handle on
+the *source* file to create the link — the negative canary itself, which
+`RootMap::decide` now denies — so the hardlink can no longer even be
+constructed (`unbuildable:std::fs::hard_link failed: The system cannot find
+the file specified. (os error 2)`), where a session before Task 5 could
+build it (the source open passed through and succeeded). This is a further
+containment strengthening, not a regression: an operation that itself
+requires reading the sealed file is sealed too, one level earlier than the
+vector's own intended open. See the matrix row below and
+`negative_expectation`'s doc comment in `e2e.rs` for how this is handled
+(both the classification loop and the new unreachability loop skip
+`unbuildable:` lines, exactly as the positive canary does).
 
 **Classification signal.** `support::classified_paths` parses the shim's
 `VFS_SHIM_STATS_LOG` report and unions every path listed under any of the
@@ -63,19 +173,46 @@ set is not trustworthy for this.
 `classified✓` = present in the isolated classified-paths set (negative
 canary only). `unbuildable` rows carry the fixture's own reason and are
 machine/environment-dependent, not a fixed property of the vector.
+`not-found` (positive canary) means the open reached a real decision — the
+director or `RootMap::decide` — and was correctly sealed there, not that
+nothing happened; see each such row's own note, and "A second, structural
+finding" below for vectors 1/3/4/7/9 specifically.
+
+**Gate 3, Task 6: every `classified✓` row below now also means unreachable
+by a read.** `escape_matrix_positive_and_negative_canary`'s
+`negative_expectation` now asserts `not-found` for the negative canary's own
+reported outcome on every buildable vector, in addition to the pre-existing
+`classified✓` check — see "Update, Gate 3, Task 6" above for the reasoning
+and for why this is a strictly stronger property than classification alone.
+The only two exceptions, both `unbuildable` rather than `classified✓`/
+`not-found`, are vector 1 (unrelated attribute-query quirk, unchanged since
+gate 2 — see its own note) and vector 8 (hardlink construction itself now
+fails — a new Task 6 finding, see above and that row's own note).
+
+**Vectors 1, 3, 4, 7 and 9's positive canary flipped from `opened✓` to
+`not-found` in Gate 3, Task 5**, after this document was first written for
+gate 2 — rows below reflect the current, post-Task-5 behaviour, not the
+gate-2-era one. See "A second, structural finding: gate 2's alternate-
+spelling closures were classification-only, never routing" for the full
+mechanism: all five are recognised as under-root only by `RootMap`'s own
+canonicaliser, never by the shim's `vpath_under_root` string matcher, so
+once `RootMap::decide` stopped passing `NotFound` through (this task's
+change), these five now seal instead of reaching the director. Their
+negative-canary `classified✓` result is unaffected — that was always a
+`RootMap`-only property.
 
 | # | Vector | Positive canary | Negative canary | Note |
 |---|---|---|---|---|
-| 1 | 8.3 short name (`GetShortPathNameW` + open) | opened✓ | `unbuildable: GetShortPathNameW failed: win32:2` | See "Vector 1's negative-canary unbuildable reason" below — a real quirk of attribute-query fall-through, not a canonicaliser defect. Buildable on this machine for the positive canary because the target genuinely exists there. |
+| 1 | 8.3 short name (`GetShortPathNameW` + open) | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | `unbuildable: GetShortPathNameW failed: win32:2` | See "Vector 1's negative-canary unbuildable reason" below for the negative-canary column — a real quirk of attribute-query fall-through, not a canonicaliser defect. Positive canary: recognised under-root only by `RootMap`'s canonicaliser (never by `vpath_under_root`), so it now hits `RootMap::decide`'s `NotFound` deny instead of the director; see "A second, structural finding" below. |
 | 2 | Extended-length prefix (`\\?\C:\...`) | opened✓ | classified✓ | |
-| 3 | NT device path (`\\?\GLOBALROOT\Device\HarddiskVolumeN\...`) | opened✓ | classified✓ | **Found broken, then fixed — see "A real bypass found and fixed" below.** Was invisible to every counter before the fix in this same task. |
-| 4 | Volume-GUID path (`\\?\Volume{guid}\...`) | opened✓ | classified✓ | |
+| 3 | NT device path (`\\?\GLOBALROOT\Device\HarddiskVolumeN\...`) | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | classified✓ | **Found broken, then fixed — see "A real bypass found and fixed" below** (that fix is about the negative canary's classification, still intact). **Positive canary flipped to `not-found` in Gate 3, Task 5** — recognised under-root only by `RootMap`'s canonicaliser, never by `vpath_under_root`; see "A second, structural finding" below. |
+| 4 | Volume-GUID path (`\\?\Volume{guid}\...`) | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | classified✓ | Same mechanism as vector 3/1/7/9 — see "A second, structural finding" below. |
 | 5 | Handle-relative open (`OBJECT_ATTRIBUTES.RootDirectory` = a real directory handle) | opened✓ | classified✓ | |
 | 5b | Handle-relative open against a handle `GetFinalPathNameByHandleW` cannot resolve (an anonymous pipe) | `error:ntstatus:0xC0000033` | not classified (by design) | **Caveat, not a failure — see "Vector 5's caveat" below.** `path_of_tracked` cannot decode a path at all for this shape, so it lands in the shim's separate "undecodable" counter, never in `under-root open outcomes`. Documented, accepted edge of Task 4's fix, not asserted as pass/fail either way. |
 | 6 | CWD-relative (plain filename, cwd set to the parent dir) | opened✓ | classified✓ | |
-| 7 | Junction / reparse point | opened✓ | classified✓ | **Closed for a junction within two ancestor levels of the managed root (this project's own session layout) — not junctions in general; see "Vectors 7 and 9 closed: session-start alias resolution" below for the residual.** Was a verified, open gate-2 gap; fixed by resolving such a junction into a `VolumeMap` alias once per session. |
-| 8 | Hardlink (new filename, same underlying bytes) | `not-found` (not `opened` — see "Vector 8's exception" below) | classified✓ | Sealed by the content-addressed provider policy, not a classification failure — `RootMap`/the canonicaliser is never even consulted for this vector when FUSE-routing claims the path first. |
-| 9 | UNC / `subst` / mapped drive (administrative loopback share, `\\localhost\C$\...`) | opened✓ | classified✓ | **Closed — see "Vectors 7 and 9 closed: session-start alias resolution" below.** Was a verified, open gate-2 gap; fixed by registering the admin-share's real NT spelling as a session-start alias. |
+| 7 | Junction / reparse point | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | classified✓ | Negative-canary classification **closed for a junction within two ancestor levels of the managed root (this project's own session layout) — not junctions in general; see "Vectors 7 and 9 closed: session-start alias resolution" below for the residual.** Was a verified, open gate-2 gap; fixed by resolving such a junction into a `VolumeMap` alias once per session. **Positive canary separately flipped to `not-found` in Gate 3, Task 5** — closed classification never made this spelling reachable *through the director*; see "A second, structural finding" below. |
+| 8 | Hardlink (new filename, same underlying bytes) | `not-found` (not `opened` — see "Vector 8's exception" below) | `unbuildable:std::fs::hard_link failed: ... (os error 2)` (flip from `classified✓`, Gate 3 Task 6 — see above) | Positive canary: sealed by the content-addressed provider policy, not a classification failure — `RootMap`/the canonicaliser is never even consulted for this vector when FUSE-routing claims the path first. **Negative canary, Gate 3 Task 6 finding:** `CreateHardLinkW` needs a handle on the source (the negative canary itself) to create the link; `RootMap::decide` now denies that open, so the hardlink can no longer even be constructed — reproduced identically across five separate runs. Before Task 5 this was buildable (the source open passed through) and `classified✓`; the row above reflects current, post-Task-5 behaviour. |
+| 9 | UNC / `subst` / mapped drive (administrative loopback share, `\\localhost\C$\...`) | `not-found` (flip from `opened✓`, Gate 3 Task 5 — see above) | classified✓ | Negative-canary classification **closed — see "Vectors 7 and 9 closed: session-start alias resolution" below.** Was a verified, open gate-2 gap; fixed by registering the admin-share's real NT spelling as a session-start alias. **Positive canary separately flipped to `not-found` in Gate 3, Task 5** — same reason as vector 7; see "A second, structural finding" below. |
 | 10a | Case-flipped, `\\?\`-prefixed (verbatim) | opened✓ | classified✓ (`not-found`) | NTFS resolves case regardless of the `\\?\` prefix; standalone-`opened` behaviour, unaffected by session or gate 2. The e2e loop's negative-canary check skips only `unbuildable:` outcomes plus `5b`/`14` explicitly (see `classification_marker`/the skip check in `e2e.rs`) — `10a`'s outcome is neither, so it **is** asserted for the negative canary, and passes: the spelling lands in the shim's classified-paths set, correctly sealed (`not-found`) rather than left unclassified. |
 | 10b | Trailing dot, verbatim (`...\name.esp.`) | opened✓ (flip from standalone `not-found` — see "The 10/12 flip" below) | classified✓ | |
 | 10c | Trailing space, verbatim (`...\name.esp `) | opened✓ (flip) | classified✓ | |
@@ -627,3 +764,226 @@ tolerance.
   resolving such junctions into the content model itself, not just relying
   on disk fallthrough) rather than discover it after passthrough removal
   ships.
+
+## Gate 3, Task 5: the root becomes fully virtual — what actually happened
+
+`vfs-redirect::RootMap::decide` no longer passes a `NotFound` or `Dir`
+resolution through to the real filesystem; both deny
+(`STATUS_OBJECT_NAME_NOT_FOUND`), matching the tombstone arm. `Located::Outside`
+is the only remaining `PassThrough`. See that function's own doc comment
+(`crates/vfs-redirect/src/lib.rs`) for why `Dir` denies rather than serving —
+this pure, snapshot-only function has no ring connection and cannot itself
+hand back a director-served directory handle; that handle comes from
+`vfs-shim::hook::try_fuse_create`'s live path, unaffected by this change and
+already correct for every directory the provider graph actually knows about.
+
+**Scope: reads only.** This closes the *read* path — a write open
+(`FILE_OPEN`/`FILE_OPEN_IF` against a file that already exists) is a separate
+mechanism (`Engine::decide_open`/`cow_seed`) that still seeds the overlay
+from real on-disk bytes when neither `Redirect` nor `Serve` applies, which
+after this task includes `Deny` exactly as it included `PassThrough` before.
+That write-path residual is unchanged by this task and is gate 4's to close,
+not gate 3's — see "What this matrix does and does not establish" above for
+the full reasoning. Every claim of "unreachable", "sealed", or "closed"
+anywhere in this document is about reads unless stated otherwise.
+
+### What the shipping config's own launch does and does not demonstrate
+
+**This is the most consequential correction in this section, stated up
+front rather than as a footnote.**
+`crates/vfs-directord/src/bin/skyrim-live.rs`'s `mount_low_priority_disk_layers` (~lines 449-461) mounts
+`DiskProvider::new(root)` at `/` — the managed root's own physical directory,
+mounted as a provider over itself. Layered above it in `run()` (~lines
+202-229): the zip-packaged game content, an optional mods directory, and the
+write overlay (`overrides`) — each *also* mounted at `/`. This is the
+sanctioned, correct way this project exposes a real, on-disk tree: content
+still only ever reaches the game through the director (the FUSE ring, never
+a raw kernel passthrough), which is the actual guarantee this design
+preserves.
+
+But it has a direct consequence for what the real launch can prove: **for
+the shipping config, there is no real on-disk file under the managed root
+that no provider knows about** — every physical file is either the zip's own
+content or a reflection of something the launcher wrote directly onto
+`root`, which the root-disk mount then serves right back as its own content.
+That is exactly the condition `RootMap::decide`'s new `NotFound`/`Dir` deny
+exists to seal, and the shipping config structurally never produces it. So
+this task's own deny is barely reachable in a real session — the report's
+own stats confirm it (zero entries under any `denied` bucket for the whole
+launch, menu through world load through shutdown). **The successful Skyrim
+launch is real, valuable non-regression evidence — proof this task did not
+break ordinary play — but it is not evidence that the virtual-root property
+holds:** the sealing behaviour this task adds, and the MO2 junction breakage
+that follows from it, are both properties of what happens to a real file
+that is *not* mounted as a provider, and the shipping config's own mount
+stack never leaves anything in that state. The property this task actually
+adds is demonstrated by the tests, not the launch:
+`vfs-redirect::real_on_disk_file_under_root_with_no_snapshot_entry_is_denied`,
+`vfs-shim::engine::tests::real_on_disk_file_under_root_not_in_snapshot_is_denied`,
+and `vfs-shim::engine::tests::mo2_style_junction_inside_root_pointing_to_external_staging_is_sealed`
+each construct, directly, the orphaned-content shape the live launch's own
+layering never produces.
+
+### The Mod Organizer consequence, confirmed by reproduction
+
+The prediction above is correct, and verified directly rather than assumed:
+`vfs-shim::engine::tests::mo2_style_junction_inside_root_pointing_to_external_staging_is_sealed`
+builds a real junction (`mklink /J`) inside a real managed root pointing at a
+real, external staging directory holding real bytes, confirms `std::fs::read`
+through the junction genuinely returns those bytes (proving the junction is
+real and transparent — exactly the mechanism the old passthrough relied on),
+and then confirms `Engine::decide` now denies the identical path. Before this
+task, `Decision::PassThrough` let that read reach the real, junctioned
+directory; after, `Decision::Deny` seals it before any real open is ever
+attempted — the junction's transparency at the kernel level no longer matters,
+because the shim now refuses the open before the kernel ever sees it.
+
+**The required configuration cannot be "mount the staging directory as a
+provider" with the spelling this section used to give — that prescription
+does not work, and a reader who followed it would have lost a debugging
+session finding out.** Two independent problems, found by actually
+constructing this rather than reasoning about it in the abstract
+(`crates/vfs-directord/tests/composition.rs`'s
+`non_root_mount_matches_lowercase_open_but_not_parent_readdir`):
+
+1. **Case.** Mount prefixes are compared case-sensitively
+   (`vfs-director::path::strip_prefix`; `vfs-directord::registry::add_source`,
+   ~line 184, stores the mount string exactly as given), but every vpath the
+   shim ever sends over the ring is already lowercased
+   (`vfs-shim::fuse_client::normalize_path_for_root`) before
+   `vpath_under_root` even sees it. This section's previous example,
+   `mount = "Data/SomeMod"`, can therefore never match a live open — a
+   mixed-case prefix is compared against an always-lowercase path and never
+   equal. The corrected, working spelling is **all-lowercase**:
+   `mount = "data/somemod"` for a junction that used to sit at
+   `root\Data\SomeMod`, `layer` above the base game content so it wins on any
+   name collision. With that spelling, a direct, known-relative-path open
+   through the mount does succeed — confirmed by the test above, not assumed.
+2. **Directory enumeration does not follow.** Even with the case fixed,
+   `Director::readdir` (`crates/vfs-director/src/director.rs`, ~lines
+   103-140) only asks a mount for entries when that mount's own registered
+   prefix is at-or-above the queried path; a mount rooted *below* the query
+   (`data/somemod`, queried via `readdir("data")`) never contributes a
+   synthetic entry for itself to that listing. So a consumer that discovers
+   `SomeMod` by *listing* `Data` — a mod manager's own browser, a tool that
+   scans `Data` for subfolders, anything that does not already know the exact
+   relative path to open — will not see it, correctly cased or not. The same
+   test proves this half too: the mount's own file opens correctly, but
+   `readdir("data")` never lists `somemod` as a child.
+
+**Two confirmed limitations, recorded here specifically so a later gate
+inherits them rather than rediscovering them:**
+
+1. A non-root mount serves a known path only if spelled **all-lowercase**
+   (mount prefixes compare case-sensitively while shim vpaths are always
+   lowercased) — item 1 above.
+2. `Director::readdir` **never** lists a mount registered below the queried
+   directory, so a non-root mount cannot be discovered by listing at all —
+   item 2 above.
+
+**Flagging limitation 2 for stage 2b specifically.** Gate 3 (this gate) only
+hit this because the MO2 remedy needed a non-root mount to demonstrate; it is
+not gate 3's own concern otherwise. **Stage 2b is "real multi-root," and
+mounts are exactly the mechanism roots compose through** — an unenumerable
+mount is not a cosmetic gap for that stage, it is a problem stage 2b will hit
+directly the first time it composes more than one root and expects a listing
+of one to reflect the other. Recorded here, plainly, rather than left for
+stage 2b to rediscover by reproduction the way this gate had to.
+
+**This is a genuine, confirmed gap in non-root mount support, not merely an
+undocumented spelling — say so plainly rather than paper over it.**
+`grep`-ing this project's entire tree turns up no non-root mount anywhere
+outside this task's own new test: every existing mount, in every test and in
+`skyrim-live.rs` itself, is registered at `"/"` (root, layered by priority).
+This section's own previous citation of
+`scenario_toml_two_disk_sources_fixture_writepath` as "the ordinary way this
+project composes mods" was wrong in the same direction — that test mounts
+both its sources at root, not at a non-root prefix. This project's actual,
+exercised mod-composition path is root-layering; non-root mounts have never
+been used by any session tooling here for anything, and until the readdir
+gap above is closed, they should be considered usable only for a consumer
+that opens an already-known relative path, not for directory-enumeration
+discovery — worth a later gate's explicit attention, not a settled feature.
+This must not be a surprise a user hits after the fact: any session tooling
+that lets a user point at an MO2-style mod-staging layout needs to mount
+that directory as a source with a lowercase spelling, and needs to know that
+doing so does not make the mod's files appear in a `Data` listing.
+
+### A second, structural finding: gate 2's alternate-spelling closures were classification-only, never routing
+
+Running the full suite after the `RootMap::decide` fix surfaced five more
+flips in the escape-matrix e2e's positive canary (vectors 1, 3, 4, 7 and 9 —
+8.3 short name, NT device path, volume-GUID path, junction, and UNC admin
+share), each going from `opened` to `not-found`. All five share one root
+cause, and it is more consequential than any single vector: **all five are
+recognised as under-root only by `RootMap::compute_under_root`'s
+canonicalisation — never by `vfs-shim::fuse_client::vpath_under_root`, the
+router that actually decides whether an open reaches the director at all.**
+`vpath_under_root` does plain, case/separator-normalized string prefix
+matching against the literal root and the staging-directory alias; it has no
+device-prefix table, no volume-GUID table, no `GLOBALROOT` unwrap, no UNC
+admin-share alias, and no junction-alias resolution — all of that lives
+solely in `vfs-redirect`'s `VolumeMap`/`canon.rs`/`volumes.rs`, consulted only
+from `RootMap::compute_under_root`, which `decision_for` reaches *after*
+`try_fuse_create` has already given up on routing to the director.
+
+In a real, live session the shim's own embedded `Engine` snapshot is always
+the empty tree (`vfs-director::Session::serve`'s `shim.cfg` — the FUSE ring
+to the director is the only real content path in a live session; see that
+function's own comment). So for any of these five spellings, `RootMap` places
+the path under the root correctly (that part of gate 2's fix still works
+exactly as documented above), but the snapshot behind it is empty —
+`SnapResolution::NotFound`, unconditionally, regardless of what the director's
+real provider graph actually has. Before this task, `NotFound` passed
+through, and each of these vectors "opened" by reading the byte-identical
+real file physically on `session.root` — **never through the director, for
+any of these five spellings, in any session that has ever existed.** Gate 2's
+own exit criterion was classification (a counted outcome bucket), which these
+five vectors correctly satisfy; none of them were ever evidence that the
+director actually served that spelling. This task's fix is what exposes the
+distinction: removing the passthrough that was quietly compensating for it
+turns "correctly classified, secretly still reaching disk" into "correctly
+classified, now also sealed" — for content that, had it been requested via an
+*ordinary* spelling, the director would have served correctly (the positive
+canary's content is real and mounted; only these five specific spellings
+never reach it).
+
+**Not fixed here, and stated plainly why.** Closing this fully would mean
+teaching `fuse_client::vpath_under_root` (or an equivalent mechanism reachable
+before `try_fuse_create` gives up) to recognise the same alternate spellings
+`RootMap` already does, so a director-backed session serves them exactly like
+any ordinary path. That is a change to `vfs-shim::fuse_client`, not to
+`vfs-redirect/src/lib.rs` or the `try_fuse_create`/`create_hook`/`open_hook`
+decision wiring in `vfs-shim/src/hook.rs` — outside this task's stated file
+scope, and a large enough change (duplicating or sharing `VolumeMap`
+resolution across two independent routers) to deserve its own task rather
+than a scope-creeping fix folded into this one. Recorded here as a real,
+confirmed limitation for exactly that reason, not glossed over: the escape
+matrix's own five affected vectors (`positive_expectation` in
+`crates/vfs-directord/tests/e2e.rs`) now assert `not-found`, each with the
+reasoning above, rather than silently accepting a weaker positive-canary
+check to hide the flip.
+
+**Why this does not threaten the real Skyrim launch this task also
+verifies.** None of these five spellings is one a real game process, SKSE, or
+Steam constructs on its own — every one is an adversarial escape-matrix
+construction (an 8.3 short name of a deep ancestor directory, a raw NT device
+path, a volume-GUID path, a `GLOBALROOT`-wrapped device path, a UNC
+administrative-share path, a junction one or two ancestor levels above the
+managed root). Ordinary game file access — plain drive-letter paths,
+CWD-relative paths, handle-relative opens — routes through
+`fuse_client::vpath_under_root` exactly as before and is unaffected (vectors
+2, 5, 6, 10a, 12a-c all still `opened✓`, unchanged by this task). The real
+launch via `tools/gamectl.ps1` is the actual arbiter for ordinary operation,
+not this synthetic matrix — see the task report for that outcome.
+
+### Verification (Task 5)
+
+- `cargo test --workspace`: see the task report for the exact count and any
+  further named flips found while finishing this task.
+- `cargo clippy --all-targets -- -D warnings`: see the task report.
+- Still present and unmodified: `Decision::Redirect`, `Decision::Serve`, the
+  legacy `zipserve` path, the DRM filename exceptions, and the write
+  fall-through (`try_fuse_create` still calls `client.open_write` even with a
+  director live, and the director still rejects writes, so writes still reach
+  `decide_open` — gate 4's job, not touched here).

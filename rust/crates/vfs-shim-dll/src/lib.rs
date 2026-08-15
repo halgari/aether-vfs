@@ -43,7 +43,17 @@ fn bootstrap() {
         Ok(guard) => {
             core::mem::forget(guard);
             if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
-                let _ = std::fs::write(&ready, b"ready");
+                let _ = std::fs::write(&ready, vfs_env::READY_OK);
+            }
+        }
+        // A director was configured and FUSE failed to attach — same
+        // failure-spelling protocol as the dual-layer `sync_bootstrap` path,
+        // so any launcher polling the ready file sees the same signal
+        // regardless of which bootstrap path ran.
+        Err(vfs_shim::BootstrapError::Fuse(msg)) => {
+            log_boot(&format!("FUSE init failed: {msg}"));
+            if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
+                let _ = std::fs::write(&ready, format!("{}{msg}", vfs_env::READY_FUSE_FAILED_PREFIX));
             }
         }
         Err(e) => {

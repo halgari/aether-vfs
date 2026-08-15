@@ -902,6 +902,49 @@ fn positive_expectation(vector: &str) -> Option<&'static str> {
     if vector == "5b" || is_reported_not_closed(vector) {
         return None;
     }
+    // Gate 3, Task 5 flip, covering vectors 1, 3, 4, 7 and 9 together (each
+    // was `Some("opened")` before, folded into the catch-all below): all five
+    // are recognised as under-root *only* by `RootMap::compute_under_root`'s
+    // canonicalisation (`vfs-redirect`'s device/volume-GUID/GLOBALROOT/UNC-
+    // admin-share/junction-alias tables) — never by
+    // `fuse_client::vpath_under_root`, the shim-side router that decides
+    // whether an open reaches the director *at all*. `vpath_under_root` does
+    // plain, case/separator-normalized *string* prefix matching against the
+    // literal root and the staging-directory alias; it has no device-prefix,
+    // volume-GUID, `GLOBALROOT`-unwrap, UNC-admin-share, or junction-alias
+    // resolution of its own. So for all five of these spellings,
+    // `try_fuse_create` gives up (`vpath_under_root` returns `None`) and falls
+    // through to `decision_for`/`RootMap` — the ONLY place any of gate 2's
+    // canonicalisation work is ever consulted. In a real, live session the
+    // shim's own embedded `Engine` snapshot is always the empty tree
+    // (`vfs-director::Session::serve`'s `shim.cfg` — the FUSE ring is the only
+    // real content path), so every path `RootMap` places under the root there
+    // resolves `SnapResolution::NotFound` regardless of whether the director
+    // genuinely has the content. Before this task, `NotFound` passed through,
+    // and each of these vectors' positive canary "opened" by reading the
+    // byte-identical real file physically on `session.root` — never through
+    // the director, for any of these five spellings. After this task removes
+    // that passthrough, all five seal: `not-found`.
+    //
+    // This is a real, structural finding, not a predicted-in-advance edge:
+    // gate 2's alternate-spelling closures were classification-only (correct
+    // for the audit/counting exit criterion gate 2 was actually held to) —
+    // none of them ever made these spellings *reachable through the
+    // director*. This task's fix is what exposes that. Closing it fully would
+    // mean teaching `fuse_client::vpath_under_root` (or an equivalent
+    // mechanism) to recognise the same alternate spellings `RootMap` already
+    // does, so they route to the director like any ordinary path — out of
+    // this task's scope (`vfs-redirect/lib.rs`, `vfs-shim/hook.rs`), recorded
+    // here and in `rust/docs/escape-matrix.md` rather than silently absorbed.
+    // Not a concern for the real Skyrim launch this task also verifies: none
+    // of these five spellings is one the game (or SKSE, or Steam) constructs
+    // on its own — every one is an adversarial escape-matrix construction
+    // (an 8.3 short name, a raw device path, a volume-GUID path, a
+    // `GLOBALROOT`-wrapped device path, a UNC admin-share path, a junction one
+    // or two ancestor levels above root), not an ordinary access pattern.
+    if matches!(vector, "1" | "3" | "4" | "7" | "9") {
+        return Some("not-found");
+    }
     match vector {
         // A hardlink names the SAME bytes under a brand-new file name the
         // content-addressed provider has never heard of. FUSE-routing (the
@@ -924,6 +967,41 @@ fn positive_expectation(vector: &str) -> Option<&'static str> {
         "11" => Some("not-found"),
         _ => Some("opened"),
     }
+}
+
+/// The negative canary's expected outcome for a **read** open, or `None` for
+/// a vector this check does not apply to strictly — the same two documented
+/// exceptions `positive_expectation` already carries:
+///
+/// - `"5b"`: not an alternate classification of the negative canary at all.
+///   `OBJECT_ATTRIBUTES.RootDirectory` pointing at an anonymous pipe fails
+///   the construction itself at the NT level (`error:ntstatus:...`,
+///   independent of which target is named), so there is no "reachable vs.
+///   not-found" question to assert here regardless of target.
+/// - `"13"`/`"14"` (`is_reported_not_closed`): per this gate's own scope
+///   note, neither vector gets a strict outcome assertion in either canary.
+///   `"14"` in particular spawns a child process with **no shim injected at
+///   all**, so its read reaches the real, physical negative-canary bytes on
+///   `session.root` directly — genuinely reachable, by construction, and not
+///   evidence about this gate either way (see that vector's own note in
+///   `rust/docs/escape-matrix.md`).
+///
+/// Every other buildable vector must now come back `not-found`: Gate 3 Task
+/// 5 stopped `RootMap::decide` passing `NotFound`/`Dir` through, and the
+/// director itself answers "no such name" for any spelling that reaches it
+/// with disk-fallthrough off — so a real, on-disk file under root that no
+/// provider serves is unreachable by a read, for every spelling this fixture
+/// can build, not merely classified into a counted bucket while still
+/// secretly readable. This is a stronger claim than `classification_marker`
+/// below checks, and the two are asserted separately in the test body — see
+/// this function's own call site for why classified-but-reachable is exactly
+/// the failure mode that made "classification, not containment" the matrix's
+/// standing caveat before this task.
+fn negative_expectation(vector: &str) -> Option<&'static str> {
+    if vector == "5b" || is_reported_not_closed(vector) {
+        return None;
+    }
+    Some("not-found")
 }
 
 /// The substring this test searches for in the shim's classified-paths set
@@ -1085,10 +1163,25 @@ async fn run_escape_fixture(
 ///   everything".
 /// - **Negative canary** (`escape-negative-canary.bin`, a real file
 ///   physically on the managed root that the `DiskProvider` never serves):
-///   every buildable spelling must be **classified** — appear in a counted
-///   outcome bucket in the shim's own hook-stats report — never merely
-///   *reachable*. See `rust/docs/escape-matrix.md` for why reachability is
-///   not asserted here and is not evidence of anything this gate changed.
+///   two properties are now asserted, not one.
+///   - **Classified** — every buildable spelling still appears in a counted
+///     outcome bucket in the shim's own hook-stats report, checked in
+///     isolation (`VFS_ESCAPE_ONLY_VECTOR`) to rule out riding on another
+///     vector's entry — this is the gate-2-era property, unchanged.
+///   - **Unreachable, Gate 3 Task 6's own addition**: every buildable
+///     spelling's **read** open must come back `not-found`. Before this
+///     gate, "classified" and "reachable" could both be true for the same
+///     vector at once (see `rust/docs/escape-matrix.md`'s "second, structural
+///     finding") — classification alone was never proof of containment.
+///     This is the assertion that closes that gap: a vector that is merely
+///     classified while still opening the real bytes now fails this test.
+///     Scoped to reads only — a **write** open still reaches the negative
+///     canary through `Engine::cow_seed`'s last-resort branch, which is gate
+///     4's to close, not asserted here. `5b` (undecodable handle-relative
+///     open) and the two reported-not-closed vectors (`13`, `14`) are exempt
+///     from this assertion for the same documented reasons the positive
+///     canary's own `positive_expectation` already exempts them — see
+///     `negative_expectation`'s doc comment.
 ///
 /// A stack-overflow crash was found and fixed while building this test (see
 /// `vfs_redirect`'s `OS_CONSULT_DEPTH` guard) — vector 1 (8.3 short name)
@@ -1284,6 +1377,34 @@ async fn escape_matrix_positive_and_negative_canary() {
          trusted against a truncated list, so this must never happen for a run this small. \
          Report: {stats_log:?}"
     );
+    // ---------------------------------------------------------------
+    // Gate 3, Task 6: the negative canary is now unreachable, not merely
+    // classified. Each `EscapeLine` is already tagged with its own vector,
+    // so — unlike the classification check below — this needs no isolated
+    // re-run to avoid riding on another vector's effect: `line.outcome` is
+    // this vector's own attempt's own result, from this combined run.
+    //
+    // This is the assertion this task adds, and it is strictly stronger than
+    // "classified": before Gate 3 Task 5, a spelling could be classified
+    // (land in a counted bucket) while still opening the real bytes on
+    // `session.root` (see "A second, structural finding" in
+    // `rust/docs/escape-matrix.md` — vectors 1/3/4/7/9 were exactly this).
+    // Scoped to reads only, per the brief: a write open still reaches this
+    // same file through `Engine::cow_seed`'s last-resort branch, gate 4's to
+    // close, not asserted here.
+    for line in &neg_lines {
+        let Some(want) = negative_expectation(&line.vector) else { continue };
+        if line.outcome.starts_with("unbuildable:") {
+            continue; // Never attempted at the OS level; nothing to seal.
+        }
+        assert_eq!(
+            line.outcome, want,
+            "negative canary vector {}: expected `{want}` — a real file on session.root that no \
+             provider serves must be unreachable by a read, for every buildable spelling, not \
+             merely classified while still readable — got `{}` (spelling: {:?}, note: {:?})",
+            line.vector, line.outcome, line.spelling, line.note
+        );
+    }
     // The combined run above shares one shim-stats report across all
     // nineteen attempts, and the report's classified-paths set is not keyed
     // by vector — several *different* spellings legitimately canonicalise
@@ -1351,6 +1472,163 @@ async fn escape_matrix_positive_and_negative_canary() {
     if vector7_link_ready {
         let _ = std::fs::remove_dir(&vector7_link);
     }
+}
+
+/// Fix 2(b) from the final whole-branch review of Gate 3: `docs/escape-
+/// matrix.md` (Gate 3, Task 6 section) claimed containment held for
+/// metadata queries "by the same `RootMap::decide` mechanism... regardless
+/// of which hook asked." That claim is false. `qattr_hook`/`qfull_hook`/
+/// `qibn_hook` (`vfs-shim/src/hook.rs`) never reach `RootMap::decide` at
+/// all — they consult `fuse_path_attr`, which asks
+/// `fuse_client::vpath_under_root` (the *client's* own string-prefix
+/// predicate), then the overlay, then falls through to the real
+/// filesystem. `vpath_under_root` has none of `RootMap::compute_under_root`'s
+/// canonicalisation tables (no device-prefix, volume-GUID, `GLOBALROOT`-
+/// unwrap, UNC-admin-share, or junction-alias resolution) — the exact
+/// asymmetry `positive_expectation`'s own doc comment above documents for
+/// vectors 1/3/4/7/9's *open* path. This test proves the same asymmetry
+/// surfaces for attribute queries too, for one of those five spellings.
+///
+/// This is a real, currently-true gap, not a hypothetical: it launches
+/// `vfs-fixture-escape`'s opt-in `4m` vector (`GetFileAttributesW` against
+/// vector 4's own volume-GUID spelling — see that crate's module doc
+/// comment) under a real, composed session shaped like
+/// `escape_matrix_positive_and_negative_canary`'s own setup, against the
+/// negative canary (a real file on `session.root` that no provider knows
+/// about). The assertion is that the attribute query still succeeds
+/// (`found`) — i.e. still reaches real disk — even though the matching
+/// *read open* on the identical spelling (vector 4 itself) is sealed
+/// (`negative_expectation` above asserts `not-found` for it).
+///
+/// **What would flip this test, and what to do then**: if `found` ever
+/// changes to `not-found` here — because `vpath_under_root` (or an
+/// equivalent client-side predicate) learns to recognise this spelling, or
+/// because `qattr_hook`/`qfull_hook`/`qibn_hook` start routing through
+/// `decide` — this assertion should change to `not-found`, and this test's
+/// own doc comment plus `docs/escape-matrix.md`'s Fix 2 correction should be
+/// updated to say the gap has closed for that hook family, not deleted
+/// silently. A gap recorded only in prose can be quietly forgotten; this
+/// test exists so it cannot be.
+#[tokio::test(flavor = "multi_thread")]
+async fn documents_metadata_gap_for_unrecognised_spellings() {
+    let _guard = LAUNCH_LOCK.lock().await;
+    ensure_inject_artifacts();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+    let registry = SessionRegistry::new();
+    let svc = DirectorService::new(registry);
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The DiskProvider's backing store — deliberately NOT session.root, same
+    // shape as the escape matrix test's own negative canary: a real file
+    // under the managed root that this provider genuinely does not have.
+    let content_dir = tempfile::tempdir().expect("tempdir");
+    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_log = stats_dir.path().join("shim-stats.log");
+    let out_dir = tempfile::tempdir().expect("out tempdir");
+    let out_file = out_dir.path().join("metadata-gap-out.tsv");
+
+    let fixture = locate_artifact("vfs-fixture-escape.exe");
+    let mut client = connect(&format!("{addr}")).await.expect("connect");
+
+    let session = client
+        .create_session(vfs_control::pb::CreateSessionReq {
+            name: "metadata-gap".into(),
+        })
+        .await
+        .expect("CreateSession")
+        .into_inner();
+    assert!(!session.id.is_empty());
+    assert!(!session.root.is_empty());
+
+    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, SourceSpec as PbSource};
+
+    client
+        .add_source(AddSourceReq {
+            session_id: session.id.clone(),
+            source: Some(PbSource {
+                kind: Some(source_spec::Kind::Disk(DiskSource {
+                    path: content_dir.path().to_string_lossy().into_owned(),
+                })),
+            }),
+            mount: "/".into(),
+            layer: 0,
+        })
+        .await
+        .expect("AddSource");
+
+    let root = PathBuf::from(&session.root);
+    let sub = PathBuf::from("Games").join("Skyrim").join("Data");
+    std::fs::create_dir_all(root.join(&sub)).expect("mkdir under session root");
+
+    // Negative canary: real bytes ONLY on session.root — identical
+    // construction to `escape_matrix_positive_and_negative_canary`'s own.
+    const NEGATIVE_BASENAME: &str = "escape-negative-canary.bin";
+    let neg_rel = sub.join(NEGATIVE_BASENAME);
+    std::fs::write(root.join(&neg_rel), b"the-negative-canary-bytes")
+        .expect("write negative canary");
+
+    let ctx = EscapeFixtureCtx {
+        session_id: &session.id,
+        fixture: &fixture,
+        stats_log: &stats_log,
+        vector7_link_dir: None,
+    };
+
+    let (exit, lines, _classified, _truncated) =
+        run_escape_fixture(&mut client, &ctx, &root.join(&neg_rel), &out_file, Some("4m")).await;
+
+    assert_eq!(
+        exit, 0,
+        "vfs-fixture-escape (isolated vector 4m) must exit 0. Lines captured: {lines:?}"
+    );
+    let line = lines
+        .iter()
+        .find(|l| l.vector == "4m")
+        .unwrap_or_else(|| panic!("vector 4m produced no line at all in {out_file:?}"));
+
+    if line.outcome.starts_with("unbuildable:") {
+        panic!(
+            "vector 4's own construction ({}) failed in this environment, so this test cannot \
+             exercise the metadata-gap claim here — see vector 4's own `unbuildable` reasons in \
+             `docs/escape-matrix.md`. This is an environment limitation, not evidence the gap is \
+             closed.",
+            line.outcome
+        );
+    }
+
+    // The headline assertion, and the point of this test: a name-based
+    // attribute query on the negative canary, via a spelling
+    // `fuse_client::vpath_under_root` cannot recognise, still finds the real
+    // file on disk today. See this test's own doc comment for what to do if
+    // this ever flips.
+    assert_eq!(
+        line.outcome, "found",
+        "expected the metadata query on the negative canary (via vector 4's volume-GUID \
+         spelling: {:?}) to still reach real disk, documenting the current containment gap for \
+         qattr_hook/qfull_hook/qibn_hook — got `{}` instead (note: {:?}). If this now reads \
+         `not-found`, the gap has closed; update this assertion and `docs/escape-matrix.md`'s \
+         Fix 2 correction to say so rather than deleting this test.",
+        line.spelling, line.outcome, line.note
+    );
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq {
+            session_id: session.id,
+        })
+        .await
+        .expect("teardown");
+
+    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]

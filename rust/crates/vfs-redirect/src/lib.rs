@@ -7,12 +7,12 @@ mod canon;
 mod volumes;
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
-use vfs_core::{fold, normalize_vpath, wildcard_match, PathError};
-use vfs_shared::{NodeKind, SnapResolution, SnapshotReader};
+use vfs_core::{fold, normalize_vpath, PathError};
+use vfs_shared::{SnapResolution, SnapshotReader};
 
 pub use canon::{canonicalise, VolumeMap};
 pub use volumes::{expand_short_name, resolve_volume_map};
@@ -324,8 +324,47 @@ impl RootMap {
 
     /// Decide how to handle an incoming NT open path.
     ///
-    /// Fail-safe: any path that is malformed, outside the root, or does not
-    /// positively resolve to a virtualized file yields `PassThrough`.
+    /// Fail-safe only for paths this crate has no business deciding for at
+    /// all: `Located::Outside` (malformed, escaping, or genuinely outside the
+    /// managed root) still yields `PassThrough` — nothing here ever touches
+    /// traffic that never named the managed root in the first place.
+    ///
+    /// Everything *under* the root is decided here now, with no real-
+    /// filesystem escape hatch (gate 3's own reason for existing): a
+    /// virtualized file still redirects/serves as before, and a tombstone
+    /// still denies — those two are unchanged. What changes is the other two
+    /// arms, which used to fail open:
+    ///
+    /// - `NotFound` (a real, on-disk file/directory under the root that no
+    ///   provider serves) now denies too, rather than falling through to
+    ///   whatever is physically on disk. This is the change the whole gate
+    ///   exists for: before, a real file the provider graph had never heard
+    ///   of still opened, because "not virtualized" fell all the way through
+    ///   to the real filesystem underneath the mount. After, the provider
+    ///   graph is the sole authority for what exists under the root — if it
+    ///   does not know about a path, that path does not exist, full stop.
+    /// - `Dir` (a directory node the snapshot genuinely has — i.e. the
+    ///   provider graph considers it real) also denies *here*, which sounds
+    ///   backwards for something the brief calls "director-served" until the
+    ///   two-path structure is spelled out: this pure, snapshot-only
+    ///   function has no ring, no FUSE client, no way to literally open
+    ///   anything — it cannot serve a directory handle itself under any
+    ///   circumstances, virtualized or not. The actual "director-served
+    ///   handle" for a real virtual directory comes from
+    ///   `vfs-shim::hook::try_fuse_create`'s live round-trip to the director,
+    ///   which runs *before* this function is ever consulted and succeeds
+    ///   for every directory the provider graph actually knows about. This
+    ///   fallback is reached only when that live path did not classify the
+    ///   open at all (no director, or the FUSE client's own root notion
+    ///   disagreed with this crate's) — and in that situation there is no
+    ///   live director connection here to serve the directory from, so
+    ///   failing closed is the only safe answer, not a regression from some
+    ///   case that used to work through this function.
+    ///
+    /// See `rust/docs/escape-matrix.md` for the concrete, predicted
+    /// consequence of the `NotFound` half of this change (an MO2-style
+    /// junction inside the managed root, previously reachable only via the
+    /// passthrough this removes) and the configuration that restores it.
     pub fn decide(&self, nt_path: &str, snap: &SnapshotReader) -> Decision {
         match self.locate(nt_path, snap) {
             Located::Resolved(SnapResolution::File { source, size, .. }) => {
@@ -340,26 +379,10 @@ impl RootMap {
                     }
                 }
             }
-            Located::Resolved(SnapResolution::Tombstone) => Decision::Deny,
-            Located::Resolved(SnapResolution::Dir)
-            | Located::Resolved(SnapResolution::NotFound)
-            | Located::Outside => Decision::PassThrough,
-        }
-    }
-
-    /// Answer a path-based attribute query against the snapshot.
-    pub fn query_attributes(&self, nt_path: &str, snap: &SnapshotReader) -> AttrDecision {
-        match self.locate(nt_path, snap) {
-            Located::Resolved(SnapResolution::File { size, mtime, .. }) => {
-                AttrDecision::Attributes { is_dir: false, size, mtime }
-            }
-            Located::Resolved(SnapResolution::Dir) => {
-                AttrDecision::Attributes { is_dir: true, size: 0, mtime: 0 }
-            }
-            Located::Resolved(SnapResolution::Tombstone) => AttrDecision::Deny,
-            Located::Resolved(SnapResolution::NotFound) | Located::Outside => {
-                AttrDecision::PassThrough
-            }
+            Located::Resolved(SnapResolution::Tombstone)
+            | Located::Resolved(SnapResolution::Dir)
+            | Located::Resolved(SnapResolution::NotFound) => Decision::Deny,
+            Located::Outside => Decision::PassThrough,
         }
     }
 
@@ -508,50 +531,6 @@ impl RootMap {
             }
         }
     }
-
-    /// Merge a directory's real on-disk `real` entries with the snapshot's
-    /// virtual children: overrides win, tombstones are hidden, `wildcard` filters
-    /// the display names, output is case-insensitively ordered by folded name.
-    pub fn merge_directory(
-        &self,
-        dir_nt_path: &str,
-        snap: &SnapshotReader,
-        real: &[DirItem],
-        wildcard: Option<&str>,
-    ) -> Vec<DirItem> {
-        let mut map: BTreeMap<String, DirItem> = BTreeMap::new();
-        for e in real {
-            map.insert(fold(&e.name), e.clone());
-        }
-        if let Some(folded) = self.under_root(dir_nt_path) {
-            let refs: Vec<&str> = folded.iter().map(String::as_str).collect();
-            if let Ok(virt) = snap.readdir(&refs) {
-                for v in virt {
-                    let key = fold(&v.name);
-                    match v.kind {
-                        NodeKind::Tombstone => {
-                            map.remove(&key);
-                        }
-                        NodeKind::Dir => {
-                            map.insert(key, DirItem { name: v.name, is_dir: true, size: 0, mtime: 0 });
-                        }
-                        NodeKind::File => {
-                            map.insert(
-                                key,
-                                DirItem { name: v.name, is_dir: false, size: v.size, mtime: v.mtime },
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        map.into_values()
-            .filter(|e| match wildcard {
-                Some(p) => wildcard_match(p, &e.name),
-                None => true,
-            })
-            .collect()
-    }
 }
 
 /// The outcome of [`RootMap::compute_under_root`], tagged by whether it
@@ -625,17 +604,6 @@ pub enum Decision {
     /// The shim opens `container_nt`, maps it, and returns a synthetic handle
     /// covering `[offset, offset + length)`.
     Serve { container_nt: String, offset: u64, length: u64 },
-}
-
-/// The outcome of a path-based attribute query (NtQueryAttributesFile).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttrDecision {
-    /// Let the original query proceed unchanged.
-    PassThrough,
-    /// Answer from the snapshot with these attributes.
-    Attributes { is_dir: bool, size: u64, mtime: i64 },
-    /// Tombstoned: return not-found rather than reveal a hidden real file.
-    Deny,
 }
 
 /// The directory-info `FILE_INFORMATION_CLASS` values the shim marshals.
@@ -1015,20 +983,73 @@ mod tests {
         assert_eq!(d, Decision::PassThrough);
     }
 
+    /// Gate 3, Task 5 flip (was `passes_through_under_root_but_not_virtualized`,
+    /// asserting `Decision::PassThrough`): a real file under the root that no
+    /// provider serves is now denied, not passed through to the real
+    /// filesystem — this is the negative canary's own logic-level shape (see
+    /// `real_on_disk_file_under_root_not_in_snapshot_is_denied` in
+    /// `vfs-shim::engine` for the same fact proven against an actual on-disk
+    /// file) and the change the whole gate exists for.
     #[test]
-    fn passes_through_under_root_but_not_virtualized() {
+    fn denies_under_root_but_not_virtualized() {
         let bytes = snapshot_bytes();
         let snap = SnapshotReader::open(&bytes).unwrap();
         let d = root().decide(r"\??\C:\Games\Skyrim\Data\notmod.esp", &snap);
-        assert_eq!(d, Decision::PassThrough);
+        assert_eq!(d, Decision::Deny);
     }
 
+    /// Gate 3, Task 5 flip (was `passes_through_a_virtual_directory`,
+    /// asserting `Decision::PassThrough`): this pure, snapshot-only function
+    /// cannot itself hand back a director-served handle for a `Dir`
+    /// resolution (see `decide`'s own doc comment for why), so it must not
+    /// fail open to the real filesystem either — it now denies, matching the
+    /// `NotFound` arm. The actual director-served handle for a real virtual
+    /// directory comes from `vfs-shim::hook::try_fuse_create`'s live path,
+    /// which this crate has no way to reach and which this test cannot
+    /// exercise (no ring here).
     #[test]
-    fn passes_through_a_virtual_directory() {
+    fn denies_a_virtual_directory_this_pure_function_cannot_itself_serve() {
         let bytes = snapshot_bytes();
         let snap = SnapshotReader::open(&bytes).unwrap();
         let d = root().decide(r"\??\C:\Games\Skyrim\Data", &snap);
-        assert_eq!(d, Decision::PassThrough);
+        assert_eq!(d, Decision::Deny);
+    }
+
+    /// Step 1's failing-test-first negative canary, at this crate's own
+    /// level: a REAL file physically on disk, under a real root directory,
+    /// that the snapshot never mentions at all (not even as a `Dir` node --
+    /// nothing above it in the tree references it). Before this task's fix
+    /// this returned `PassThrough`, and a caller trampolining on that verdict
+    /// would open the real bytes below. `RootMap::decide` never touches the
+    /// real filesystem itself (this is exactly why a synthetic file is
+    /// enough here, and a real on-disk one is only needed one layer up, at
+    /// `vfs-shim::engine`, to prove the acceptance-level claim) -- but
+    /// building the real file and root here anyway keeps this test honest
+    /// about what "under the managed root" means physically, not just as a
+    /// string.
+    #[test]
+    fn real_on_disk_file_under_root_with_no_snapshot_entry_is_denied() {
+        let base = std::env::temp_dir()
+            .join(format!("vfs-redirect-negcanary-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("Data")).unwrap();
+        std::fs::write(base.join("Data").join("negative-canary.bin"), b"real bytes on disk")
+            .unwrap();
+
+        let map = RootMap::new(&base.to_string_lossy(), VolumeMap::empty()).unwrap();
+        // A snapshot that knows about a completely unrelated file, so `Data`
+        // itself is not even a `Dir` node -- the lookup for
+        // `data/negative-canary.bin` fails at the very first component and
+        // resolves to `SnapResolution::NotFound`.
+        let bytes = snapshot_bytes();
+        let snap = SnapshotReader::open(&bytes).unwrap();
+        let raw = format!(r"{}\Data\negative-canary.bin", base.to_string_lossy());
+        assert_eq!(
+            map.decide(&raw, &snap),
+            Decision::Deny,
+            "a real, on-disk file under the root with no provider must be denied"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -1084,161 +1105,6 @@ mod tests {
             root().decide(r"\??\C:\Games\Skyrim\Data\deleted.esp", &snap),
             Decision::Deny
         );
-    }
-
-    #[test]
-    fn attrs_of_a_virtual_file() {
-        let bytes = snapshot_bytes();
-        let snap = SnapshotReader::open(&bytes).unwrap();
-        assert_eq!(
-            root().query_attributes(r"\??\C:\Games\Skyrim\Data\foo.esp", &snap),
-            AttrDecision::Attributes { is_dir: false, size: 10, mtime: 1 }
-        );
-    }
-
-    #[test]
-    fn attrs_of_a_virtual_directory() {
-        let bytes = snapshot_bytes();
-        let snap = SnapshotReader::open(&bytes).unwrap();
-        assert_eq!(
-            root().query_attributes(r"\??\C:\Games\Skyrim\Data", &snap),
-            AttrDecision::Attributes { is_dir: true, size: 0, mtime: 0 }
-        );
-    }
-
-    #[test]
-    fn attrs_of_a_tombstone_deny() {
-        let bytes = snapshot_bytes();
-        let snap = SnapshotReader::open(&bytes).unwrap();
-        assert_eq!(
-            root().query_attributes(r"\??\C:\Games\Skyrim\Data\deleted.esp", &snap),
-            AttrDecision::Deny
-        );
-    }
-
-    #[test]
-    fn attrs_under_root_not_virtualized_passes_through() {
-        let bytes = snapshot_bytes();
-        let snap = SnapshotReader::open(&bytes).unwrap();
-        assert_eq!(
-            root().query_attributes(r"\??\C:\Games\Skyrim\Data\real.esp", &snap),
-            AttrDecision::PassThrough
-        );
-    }
-
-    #[test]
-    fn attrs_outside_root_passes_through() {
-        let bytes = snapshot_bytes();
-        let snap = SnapshotReader::open(&bytes).unwrap();
-        assert_eq!(
-            root().query_attributes(r"\??\C:\Windows\notepad.exe", &snap),
-            AttrDecision::PassThrough
-        );
-    }
-
-    #[test]
-    fn attrs_are_case_insensitive() {
-        let bytes = snapshot_bytes();
-        let snap = SnapshotReader::open(&bytes).unwrap();
-        assert_eq!(
-            root().query_attributes(r"\??\c:\games\SKYRIM\DATA\Foo.ESP", &snap),
-            AttrDecision::Attributes { is_dir: false, size: 10, mtime: 1 }
-        );
-    }
-
-    // data/ has: Mod.esp (add), Shared.esp (override, size 99), AddedDir (dir),
-    // Deleted.esp (tombstone).
-    fn merge_snapshot() -> Vec<u8> {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        let mk = |vpath: &str, kind: EntryKind, size: u64| InputEntry {
-            vpath: vpath.into(),
-            kind,
-            source: r"D:\Mods\X\f".into(),
-            size,
-            mtime: 7,
-        };
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![
-                mk("data/Mod.esp", EntryKind::File, 5),
-                mk("data/Shared.esp", EntryKind::File, 99),
-                mk("data/AddedDir", EntryKind::Dir, 0),
-                mk("data/Deleted.esp", EntryKind::Tombstone, 0),
-            ],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    }
-
-    fn item(name: &str, is_dir: bool, size: u64) -> DirItem {
-        DirItem { name: name.into(), is_dir, size, mtime: 0 }
-    }
-
-    fn names(v: &[DirItem]) -> Vec<String> {
-        v.iter().map(|e| e.name.clone()).collect()
-    }
-
-    const DATA_NT: &str = r"\??\C:\Games\Skyrim\Data";
-
-    #[test]
-    fn merge_overrides_adds_and_hides_tombstones() {
-        let bytes = merge_snapshot();
-        let snap = SnapshotReader::open(&bytes).unwrap();
-        let real = vec![
-            item("Shared.esp", false, 1), // overridden by virtual (size 99)
-            item("Deleted.esp", false, 1), // tombstoned away
-            item("RealOnly.txt", false, 7), // survives
-        ];
-        let merged = root().merge_directory(DATA_NT, &snap, &real, None);
-        // Case-insensitive folded order: addeddir, mod.esp, realonly.txt, shared.esp
-        assert_eq!(names(&merged), vec!["AddedDir", "Mod.esp", "RealOnly.txt", "Shared.esp"]);
-        let shared = merged.iter().find(|e| e.name == "Shared.esp").unwrap();
-        assert_eq!(shared.size, 99); // mod wins
-        let added = merged.iter().find(|e| e.name == "AddedDir").unwrap();
-        assert!(added.is_dir);
-        assert!(!merged.iter().any(|e| e.name == "Deleted.esp"));
-    }
-
-    #[test]
-    fn merge_is_case_insensitive_override() {
-        let bytes = merge_snapshot();
-        let snap = SnapshotReader::open(&bytes).unwrap();
-        let real = vec![item("SHARED.ESP", false, 1)];
-        let merged = root().merge_directory(DATA_NT, &snap, &real, None);
-        // One entry, display name from the virtual (mod) side.
-        let shared: Vec<&DirItem> = merged.iter().filter(|e| e.name.eq_ignore_ascii_case("shared.esp")).collect();
-        assert_eq!(shared.len(), 1);
-        assert_eq!(shared[0].name, "Shared.esp");
-        assert_eq!(shared[0].size, 99);
-    }
-
-    #[test]
-    fn merge_wildcard_filters_output() {
-        let bytes = merge_snapshot();
-        let snap = SnapshotReader::open(&bytes).unwrap();
-        let real = vec![item("RealOnly.txt", false, 7)];
-        let merged = root().merge_directory(DATA_NT, &snap, &real, Some("*.esp"));
-        // AddedDir and RealOnly.txt filtered out; only *.esp remain.
-        assert_eq!(names(&merged), vec!["Mod.esp", "Shared.esp"]);
-    }
-
-    #[test]
-    fn merge_out_of_root_returns_filtered_real() {
-        let bytes = merge_snapshot();
-        let snap = SnapshotReader::open(&bytes).unwrap();
-        let real = vec![item("a.dll", false, 1), item("b.exe", false, 2)];
-        let merged = root().merge_directory(r"\??\C:\Windows\System32", &snap, &real, Some("*.dll"));
-        assert_eq!(names(&merged), vec!["a.dll"]);
-    }
-
-    #[test]
-    fn merge_real_only_dir_not_in_snapshot() {
-        let bytes = merge_snapshot();
-        let snap = SnapshotReader::open(&bytes).unwrap();
-        // `data/sub` is under root but not in the snapshot -> no overlay.
-        let real = vec![item("z.txt", false, 1), item("a.txt", false, 2)];
-        let merged = root().merge_directory(r"\??\C:\Games\Skyrim\Data\sub", &snap, &real, None);
-        assert_eq!(names(&merged), vec!["a.txt", "z.txt"]); // ordered, no overlay
     }
 
     #[test]

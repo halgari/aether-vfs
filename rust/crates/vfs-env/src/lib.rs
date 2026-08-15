@@ -94,6 +94,29 @@ pub const PAYLOAD_PATH: &str = "VFS_PAYLOAD_PATH";
 pub const PAYLOAD_CFG_FILE: &str = "VFS_PAYLOAD_CFG_FILE";
 /// Set when the launch uses the dual-layer (pre-init payload + full shim) path.
 pub const DUAL_LAYER: &str = "VFS_DUAL_LAYER";
+/// Test-only: force `vfs_shim::fuse_client::try_init_from_env` to report a
+/// connect failure, regardless of ring configuration. Exists to exercise a
+/// director-launched process's abort path without a director that is
+/// actually broken.
+pub const TEST_FUSE_INIT_FAIL: &str = "VFS_TEST_FUSE_INIT_FAIL";
+
+// ─── shim-ready handshake payload ────────────────────────────────────────────
+// Not `VFS_*` switch names — these are the two contents [`SHIM_READY`] can
+// hold once written. The file's mere existence used to be the whole protocol:
+// the launcher polled for the path and released the process the moment it
+// appeared. That could not distinguish "hooks are live and virtualising" from
+// "hooks are live but the FUSE client never attached" — exactly the silent,
+// total bypass this pair of constants exists to close. The launcher now reads
+// the content and refuses to release the process on the failure spelling.
+
+/// Written when hooks are live and, if a director was configured, its FUSE
+/// client attached. The launcher may release the process.
+pub const READY_OK: &str = "ready";
+/// Prefix of the content written when a director *was* configured (a ring
+/// section was named) but the FUSE client failed to attach — followed by a
+/// short reason. Releasing the process past this point means every path it
+/// opens falls straight through to the real filesystem, unnoticed.
+pub const READY_FUSE_FAILED_PREFIX: &str = "fuse-failed:";
 
 // ─── behaviour switches (booleans) ───────────────────────────────────────────
 
@@ -245,6 +268,7 @@ pub const ALL: &[Var] = &[
     Var { name: PAYLOAD_PATH, kind: Kind::Handshake, default: "resolved beside the shim" },
     Var { name: PAYLOAD_CFG_FILE, kind: Kind::Handshake, default: "none" },
     Var { name: DUAL_LAYER, kind: Kind::Handshake, default: "unset" },
+    Var { name: TEST_FUSE_INIT_FAIL, kind: Kind::Fixture, default: "false (FUSE inits normally)" },
     Var { name: ALLOW_DISK_FALLTHROUGH, kind: Kind::Behaviour, default: "false (root stays sealed)" },
     Var { name: DISK_ONLY_ROOT, kind: Kind::Behaviour, default: "false" },
     Var { name: KEEP_HOST_STEAM_API, kind: Kind::Behaviour, default: "true in the shim, false in vfs-inject" },

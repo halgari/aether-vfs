@@ -56,11 +56,42 @@ where
         .map_err(|_| LargeStackError::Panicked)
 }
 
-pub fn try_init_from_env() -> Result<(), String> {
+/// Why [`try_init_from_env`] did not leave a live [`FuseClient`] installed.
+///
+/// Both variants are fatal to the caller (`bootstrap.rs` aborts the launch on
+/// either). Standalone shim launches — no ring named at all, the local
+/// `Engine` snapshot governing composition alone — used to be treated as a
+/// legitimate deployment, and plenty of this crate's own tests used to run
+/// exactly that way. That mode is retired: it is precisely the one in which a
+/// game runs completely un-virtualised while looking like a normal launch —
+/// the bypass this type exists to make impossible to ignore. The two cases
+/// are still kept distinct because their messages differ (a name for one, a
+/// connection failure reason for the other), not because either is safe to
+/// swallow.
+#[derive(Debug)]
+pub enum FuseInitError {
+    /// No ring was named (`VFS_RING_SECTION` unset). The process was not
+    /// launched to talk to a director — no longer a supported deployment.
+    NotConfigured,
+    /// A ring was named but the client could not attach, or the post-connect
+    /// heartbeat failed. The caller intended virtualisation and it silently
+    /// did not happen — this must reach whoever launched the process.
+    ConnectFailed(String),
+}
+
+pub fn try_init_from_env() -> Result<(), FuseInitError> {
     if FUSE.get().is_some() {
         return Ok(());
     }
-    let section = vfs_env::text(vfs_env::RING_SECTION).ok_or("VFS_RING_SECTION unset")?;
+    // Test-only escape hatch (see the constant's doc comment in `vfs-env`): lets
+    // the launch-abort path be exercised without standing up a director that is
+    // actually broken.
+    if vfs_env::opt_in(vfs_env::TEST_FUSE_INIT_FAIL) {
+        return Err(FuseInitError::ConnectFailed(
+            format!("forced failure via {}", vfs_env::TEST_FUSE_INIT_FAIL),
+        ));
+    }
+    let section = vfs_env::text(vfs_env::RING_SECTION).ok_or(FuseInitError::NotConfigured)?;
     let ring_bytes: usize = vfs_env::text(vfs_env::RING_BYTES)
         .and_then(|s| s.parse().ok())
         .unwrap_or(2 * 1024 * 1024);
@@ -74,10 +105,17 @@ pub fn try_init_from_env() -> Result<(), String> {
     // there is no sensible guess. The default it used to carry pointed at a
     // layout that no longer exists, so an unset root connected the client to a
     // path nothing matched — surfacing much later as content simply missing.
-    let root = vfs_env::text(vfs_env::VIRTUAL_DIR)
-        .ok_or("VFS_VIRTUAL_DIR unset: the managed root has no default")?;
-    let client = FuseClient::connect(&section, &root, payload_cap, ring_bytes, arena_len)?;
-    client.heartbeat()?;
+    //
+    // Reachable only once `section` above is `Some` — i.e. a director launch
+    // was intended — so this is a `ConnectFailed`, not `NotConfigured`.
+    let root = vfs_env::text(vfs_env::VIRTUAL_DIR).ok_or_else(|| {
+        FuseInitError::ConnectFailed(
+            "VFS_VIRTUAL_DIR unset: the managed root has no default".to_string(),
+        )
+    })?;
+    let client = FuseClient::connect(&section, &root, payload_cap, ring_bytes, arena_len)
+        .map_err(FuseInitError::ConnectFailed)?;
+    client.heartbeat().map_err(FuseInitError::ConnectFailed)?;
     let _ = FUSE.set(client);
     Ok(())
 }
