@@ -276,6 +276,36 @@ Also decide the fate of the two unwired fixtures, `vfs-fixture-writeset` and `vf
 
 ---
 
+### Task 8b: Enumeration containment
+
+**Files:** `crates/vfs-shim/src/hook.rs`, `crates/vfs-fixture-escape/src/main.rs`, `crates/vfs-directord/tests/e2e.rs`, `rust/docs/escape-matrix.md`
+
+**Interfaces:** A directory listing under a managed root never reveals a real, unserved file.
+
+**Added after Task 8's review, which found this is a real fall-through and not merely a missing test.**
+
+`serve_dir_query` (`hook.rs:3421-3434`) has two live branches. When the FUSE client recognises the directory (`:3397-3420`), the director's `readdir` is authoritative and unmerged — containment holds. But with **no client, or when the client's `path_is_ours` notion does not recognise the directory**, it falls back to `drain_real(handle)` plus the local write overlay, and **a real unserved file under the managed root appears in the listing**. The code's own comment at `:3385-3389` records that the director's and the engine's root notions "can differ" — which is exactly when this fires.
+
+**So the evidence document is wrong.** `escape-matrix.md:74-86` and `:129-138` claim enumeration containment *by argument*: "enumeration containment follows directly from read-open containment rather than being a separate mechanism." That is unsound. A handle whose open legitimately succeeded — overlay-backed, say — can still be drained from real disk. Enumeration is a separate mechanism with its own fall-through, and it must be closed and proven, not argued.
+
+**Nothing currently tests either branch.** No fixture calls `read_dir`/`FindFirstFileW`; every `read_dir` in `e2e.rs` and `write_seal.rs` runs in the uninjected harness against physical disk. The shim-level enumeration tests attach no director, and the fake director implements no `OP_READDIR`. Director-level `readdir` tests are all positive-presence or de-duplication — none asserts an unserved real file is **absent**. `hookstats::note_readdir`'s `served: bool` is recorded and asserted on nowhere.
+
+- [ ] **Step 1: Write the failing test**
+
+One injected fixture step doing `read_dir` on the served directory under a live session, with an e2e assertion that the provider-served name **appears** and the physically-present unserved canary **does not**. This covers the client-recognised branch and fails loudly if the fallback branch is taken.
+
+- [ ] **Step 2: Run to verify it fails** against the fallback branch specifically — force the path where the client does not recognise the directory, so the test is proven able to catch the hole rather than merely passing on the good branch.
+
+- [ ] **Step 3: Close the fall-through.** A listing under a managed root must not drain real disk. Decide what the no-client branch should do now that standalone mode is retired, and say why.
+
+- [ ] **Step 4: Assert on `served`.** The `served: bool` already recorded by `note_readdir` is the instrument that distinguishes "director answered" from "real disk answered". Nothing asserts it. Make the e2e assertion use it, so a future regression to the fallback is visible in the counters rather than only in the bytes.
+
+- [ ] **Step 5: Correct `escape-matrix.md`** — replace the by-argument claim with the test result. Do not leave an argument standing where a test now exists.
+
+- [ ] **Step 6: Commit**
+
+---
+
 ### Task 9: A live session that writes its INI and its save
 
 **Files:** `crates/vfs-directord/src/bin/skyrim-live.rs`, `tools/gamectl.ps1`, `rust/docs/bypass-baseline.md`
@@ -323,6 +353,7 @@ cargo clippy --all-targets -- -D warnings
 - [ ] **An in-place edit of read-only layered content works on the daemon surface, not only in the `skyrim-live` harness** (Task 6b). Copy-on-write over read-only content is the core function of this VFS; harness-only is not shipped.
 - [ ] `Decision::Redirect`/`Serve`/`Deny` are deleted; `zipserve`'s zip-window half is deleted and its synthetic-section half still compiles and passes `lazy_section` tests.
 - [ ] The canary matrix is green for **write** access, 14 spellings × 2 canaries, with unbuildable vectors reported as unbuildable.
+- [ ] **Enumeration containment is proven by test, not by argument** (Task 8b): a listing under a managed root never reveals a real unserved file, on both branches of `serve_dir_query`, with `note_readdir`'s `served` flag asserted.
 - [ ] Whether the game's save routes through the director is recorded either way, with routed-write counts that make a zero fall-through meaningful.
 - [ ] Workspace at or above 499; clippy clean; payload workspace builds.
 - [ ] **The four DRM filename exceptions still exist** — gate 5 owns them.
