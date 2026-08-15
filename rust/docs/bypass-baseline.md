@@ -966,16 +966,26 @@ root 1: getattr ok=301 notfound=0 err=0
 **Reconciliation is exact:** 2375 + 2018 = 4393 = the shim's `routed`. The
 invariant is `routed == opens_ok + opens_err`, not `opens_ok` alone.
 
-**The headline answer: the My Games root now routes.** Every path that gate 1
-recorded under `outside-root` is now under `routed`. There is no `outside-root`
-class in this run at all. The only fall-through is the four DRM filename
-exceptions, which gate 5 owns and which are expected to be non-zero until then.
+**The headline answer: the My Games root now routes.** There is no
+`outside-root` class in this run at all — every path the shim saw under the
+junction was routed. The only fall-through is the four DRM filename exceptions,
+which gate 5 owns and which are expected to be non-zero until then.
+
+Stated precisely, because the imprecise version is tempting: this run does
+**not** show gate 1's specific `outside-root` entries moving to `routed`. Those
+entries were `saves\deepsession1.ess` and `saves\deepsession1.ess.tmp`, and
+neither occurred here — no save was written (see below). What this run shows is
+that the *category* is gone: the profile files and the `saves\` directory
+itself, all under the same junction that produced gate 1's `outside-root`
+tags, now route. The save file specifically remains unobserved.
 
 **Writes to root 1 route at open time:** 300 successful write-opens, 0 errors,
-0 rejections. `rejected_writes=0` is the honest reading here rather than a
-silent instrument: root 1's provider is unconditionally `ReadWrite`, so it can
-never contribute a director-level rejection — a root-1 write failure would
-appear as `open write err`, which is 0.
+0 rejections. `rejected_writes=0` is honest rather than a masked instrument,
+but note it is a *combined* count across both roots, not root 1's alone. Root
+1's provider is unconditionally `ReadWrite`, so root 1 can never contribute a
+director-level rejection — a root-1 write failure would appear as `open write
+err`, which is 0. The 0 therefore says nothing was rejected anywhere; it does
+not isolate root 1.
 
 ### What this run did NOT establish
 
