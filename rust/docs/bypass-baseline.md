@@ -1198,3 +1198,94 @@ it should be the first thing the next session investigates.
 modal correlated with root 1 being declared, at n=1 each way. That correlation
 is now n=2 versus n=1 and still unexplained — but it is *not* explained by the
 `Skyrim.ccc` override, which this run rules out directly.
+
+## Gate 4 criterion 6: MET (2026-08-15, after the `NtLockFile` fix)
+
+The session recorded above could not reach gameplay, and this document said so.
+The cause turned out to be a defect, not the environment — and closing it made
+the acceptance run trivial.
+
+### The defect
+
+**`NtLockFile` was never hooked.** Skyrim loads its INI settings through the
+Windows profile APIs (`GetPrivateProfileStringW` and family). Those reach our
+hooks and open the file through the director correctly — then call `NtLockFile`
+on the handle they were given. That handle is synthetic, not a kernel object, so
+the real kernel returned `STATUS_INVALID_HANDLE` and the profile API abandoned
+the read and returned the caller's default. Captured directly by patching
+KERNELBASE's ntdll import thunks:
+
+```
+uninjected: NtOpenFile → NtLockFile → NtQueryInformationFile → NtReadFile → NtUnlockFile → NtClose
+injected:   NtOpenFile(OK) → NtLockFile(0xC0000008) → NtClose
+```
+
+So the game received **no INI data at all** — not stale, not real-disk. Proven
+by serving `sTest=VIRTUAL` while a real file carrying `sTest=DISK` sat at the
+same under-root path: the API returned neither, only its own default. Writes
+failed identically one operation earlier, which is what the previous session's
+300 write-opens with zero write ops actually were.
+
+Fixed by hooking `NtLockFile`, `NtUnlockFile` and `NtFlushBuffersFile` to answer
+synthetic handles locally. **Not** by hooking the profile APIs — they were never
+violating the invariant; the unhooked lock was.
+
+### What the fix changed, measured
+
+| | Before | After |
+|---|---|---|
+| `skyrim.ini` | `open=1858 read_ops=0` | `open=1858 read_ops=1858`, 3.29 MiB |
+| `skyrimprefs.ini` | `open=450 read_ops=0` | `open=150 read_ops=150`, 0.59 MiB |
+| Root 1 reads | `read_ops=0 read_bytes=0` | `read_ops=2012 read_bytes=6,554,263` |
+| AE modal | blocked the menu every launch | **gone** |
+| Game window | 2591x1631 (defaults) | 1224x959 (from the prefs it can now read) |
+
+The prefs open count *falling* from 450 to 150 is the profile API succeeding on
+first attempt instead of retrying. The window resizing is the game applying a
+resolution out of a file it had never once read successfully.
+
+The AE modal was a **downstream symptom**: unable to read `bFreebiesSeen` or any
+other key, the game re-prompted every launch. Two earlier attempts to suppress it
+— a seeded `bEnablePlatform=0`, and restoring the curated `Skyrim.ccc` override —
+failed for the same reason, and this document's earlier correlation of the modal
+with "root 1 being declared" was real but not causal: declaring root 1
+virtualized `My Games`, which routed the INIs onto synthetic handles.
+
+### The acceptance run
+
+Console → `coc riverwood` → `save gate4save` → `qqq`. Reached the world, saved,
+quit cleanly.
+
+```
+under-root open outcomes:
+  routed                               4145
+        1858x  …\my games\skyrim special edition\skyrim.ini
+         150x  …\my games\skyrim special edition\skyrimprefs.ini
+           7x  …\my games\skyrim special edition\saves\
+           5x  …\my games\skyrim special edition\saves\gate4save.ess.tmp
+  fell-through: drm-exception            16     ← gate 5's, and the only class present
+
+directory enumerations by source:
+  director      12 listing(s),  273 entries
+  contained      0
+
+vfs-io opens:  ok=2121 err=2024 (reconciliation target ok+err=4145)
+vfs-io writes: ops=3 bytes=2488141 (2.37 MiB)
+root 1: read_ops=2012 read_bytes=6,554,263 | write_ops=3 write_bytes=2,488,141
+```
+
+**Reconciliation exact:** 2121 + 2024 = 4145 = the shim's `routed`.
+
+**The save routed, byte for byte.** `gate4save.ess` on disk is **2,488,141
+bytes**; the director recorded `write_bytes=2,488,141`. Every byte of the game's
+own save went through the director.
+
+**`FellThroughWriteFallback` is zero, and this time that means something.**
+Zero-count classes are not printed, so its absence is the zero — and it sits
+beside `ops=3`, which is the condition that makes it meaningful. The
+`READ THIS AS: no write reached the director` guard, which prints only when
+`ops == 0`, is absent. This is the pairing the previous session could not
+produce and explicitly refused to claim.
+
+**Criterion 6 — "Skyrim launches, shows the expected load order, and writes its
+INI and save through the director" — is met.**
