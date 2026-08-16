@@ -1108,7 +1108,7 @@ removing those exceptions would collapse the enum.
 **Corrected 2026-08-15 (gate 5): that was wrong, and it was measured wrong.**
 Gate 5 closed all four exceptions and the variants stayed live, because
 `try_fuse_create` has a **fourth** `None` exit nobody had accounted for — the
-`ST_NOT_FOUND` arm under `allow_disk_fallthrough()` (`hook.rs:1303`). Driven
+`ST_NOT_FOUND` arm under `allow_disk_fallthrough()` (`hook.rs:1307-1308`). Driven
 through real detours against a real ring, an unserved under-root read produces
 `denied=1` (so `Deny` is live) and `decide_open`'s write branch runs copy-up and
 returns `Redirect`.
@@ -1119,9 +1119,15 @@ does not collapse until someone decides *that* opt-out should go, which is a
 separate decision from the DRM exceptions and was never gate 5's to make.
 
 One nuance found while establishing this: the switch does more than its doc
-claims. In a director session the snapshot is empty, so an under-root **read**
-resolves to `Deny` either way — the same status as the seal. What it actually
-still changes is the **write** path.
+claims. In a director session the snapshot is a *valid empty tree*
+(`session.rs:493`), so `SnapshotReader::open` succeeds and an under-root **read**
+lands on `Deny` either way — the same status as the seal. What it still changes
+is the **write** path, **and reads of whatever those writes put in the overlay**:
+`Engine::decide` consults `overlay_state` *before* the snapshot
+(`engine.rs:314-320`), so once a fall-through write has materialised an overlay
+copy, a later read of that path returns `Redirect` to the copy rather than the
+seal. Reads do change, derivatively — an earlier version of this paragraph said
+they did not.
 
 **One counter changed meaning, not just value.** The old `Decision::Serve` arms
 recorded `FellThroughServe` *before* their FUSE early-return, so that class was
