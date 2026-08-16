@@ -1101,11 +1101,27 @@ task ran, not of the tree today. Gate 4 changed three of those items:
   that the director cannot serve now fails with an NT status and creates no
   file on the real filesystem.
 
-`Decision::Redirect` and `Decision::Deny` **survive**, and the reason is worth
-recording because it is gate 5's dependency: the four DRM/identity filename
-exceptions return `None` before the ring is consulted, so a write to
-`steam_appid.txt` still reaches the overlay-redirect branch. Removing those
-exceptions is what finally allows the enum to collapse.
+`Decision::Redirect` and `Decision::Deny` **survive**. Gate 4 recorded that the
+four DRM/identity filename exceptions were what kept them alive, and that
+removing those exceptions would collapse the enum.
+
+**Corrected 2026-08-15 (gate 5): that was wrong, and it was measured wrong.**
+Gate 5 closed all four exceptions and the variants stayed live, because
+`try_fuse_create` has a **fourth** `None` exit nobody had accounted for — the
+`ST_NOT_FOUND` arm under `allow_disk_fallthrough()` (`hook.rs:1303`). Driven
+through real detours against a real ring, an unserved under-root read produces
+`denied=1` (so `Deny` is live) and `decide_open`'s write branch runs copy-up and
+returns `Redirect`.
+
+That switch is registered, documented in `architecture.md`, relied on by this
+document for stray detection, and was kept deliberately by gate 4 — so the enum
+does not collapse until someone decides *that* opt-out should go, which is a
+separate decision from the DRM exceptions and was never gate 5's to make.
+
+One nuance found while establishing this: the switch does more than its doc
+claims. In a director session the snapshot is empty, so an under-root **read**
+resolves to `Deny` either way — the same status as the seal. What it actually
+still changes is the **write** path.
 
 **One counter changed meaning, not just value.** The old `Decision::Serve` arms
 recorded `FellThroughServe` *before* their FUSE early-return, so that class was
