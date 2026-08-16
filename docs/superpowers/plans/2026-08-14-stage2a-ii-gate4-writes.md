@@ -354,6 +354,6 @@ cargo clippy --all-targets -- -D warnings
 - [ ] `Decision::Redirect`/`Serve`/`Deny` are deleted; `zipserve`'s zip-window half is deleted and its synthetic-section half still compiles and passes `lazy_section` tests.
 - [ ] The canary matrix is green for **write** access, 14 spellings × 2 canaries, with unbuildable vectors reported as unbuildable.
 - [ ] **Enumeration containment is proven by test, not by argument** (Task 8b): a listing under a managed root never reveals a real unserved file, on both branches of `serve_dir_query`, with `note_readdir`'s `served` flag asserted.
-- [ ] Whether the game's save routes through the director is recorded either way, with routed-write counts that make a zero fall-through meaningful.
+- [x] **MET (2026-08-15).** The game's own save routed: `ops=3 bytes=2,488,141`, byte-identical to `gate4save.ess` on disk, with **no** `write-fallback` class present and reconciliation exact (`2121+2024=4145`). Required first fixing an unhooked `NtLockFile`, which had been silently killing every INI read the game made — see `bypass-baseline.md`.
 - [ ] Workspace at or above 499; clippy clean; payload workspace builds.
 - [ ] **The four DRM filename exceptions still exist** — gate 5 owns them.
