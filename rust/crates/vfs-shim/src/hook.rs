@@ -718,8 +718,9 @@ fn decision_for(path: Option<&str>, access: u32, disposition: u32) -> Option<Dec
 
 /// Record a `decision_for` fallthrough outcome (`Redirect`/`Deny`),
 /// unless `already` is set — meaning `try_fuse_create` already classified this
-/// same physical open (DRM exception / write fallback) before returning
-/// `None`. Both `create_hook` and `open_hook` call `decision_for`
+/// same physical open (the write fallback, and only that: the DRM exception
+/// was the other classifier here until gate 5 Task 4 deleted it) before
+/// returning `None`. Both `create_hook` and `open_hook` call `decision_for`
 /// unconditionally whenever `try_fuse_create` returns `None`, regardless of
 /// *why* it returned `None`, so without this guard an open already recorded
 /// there would be counted a second time here.
@@ -1138,7 +1139,9 @@ unsafe fn try_fuse_create(
     create_flags: u32,
     append_only: bool,
     // Set to `true` when this call already recorded an `OpenOutcome` for the
-    // physical open (DRM exception / write fallback) before returning `None`.
+    // physical open before returning `None`. Exactly one site does that now —
+    // the write fallback behind `allow_disk_fallthrough`; the DRM exception
+    // was the other, and gate 5 Task 4 deleted it.
     // Both callers (`create_hook`/`open_hook`) still unconditionally call
     // `decision_for` afterward for the actual routing decision, and without
     // this out-param that second classification would double-count the same
@@ -1640,10 +1643,11 @@ unsafe extern "system" fn create_hook(
         // are hiding anywhere, it is here.
         None => crate::hookstats::note_undecodable(oa_name_only(oa).as_deref()),
     }
-    // Set by `try_fuse_create` when it already recorded an outcome (DRM
-    // exception / write fallback) for this open before returning `None` — see
-    // `note_decision_outcome` below for why that must suppress the
-    // `decision_for`-based recording that always runs next.
+    // Set by `try_fuse_create` when it already recorded an outcome (the write
+    // fallback — the DRM exception was the other one and is gone) for this
+    // open before returning `None` — see `note_decision_outcome` below for why
+    // that must suppress the `decision_for`-based recording that always runs
+    // next.
     let mut outcome_recorded = false;
     if let Some(st) = try_fuse_create(
         file_handle,
@@ -1873,10 +1877,10 @@ unsafe extern "system" fn open_hook(
         Some(p) => crate::hookstats::note_passthrough(p),
         None => crate::hookstats::note_undecodable(oa_name_only(oa).as_deref()),
     }
-    // Set by `try_fuse_create` when it already recorded an outcome (DRM
-    // exception / write fallback) for this open before returning `None` — see
-    // `note_decision_outcome` for why that must suppress the
-    // `decision_for`-based recording that always runs next.
+    // Set by `try_fuse_create` when it already recorded an outcome (the write
+    // fallback — the DRM exception was the other one and is gone) for this
+    // open before returning `None` — see `note_decision_outcome` for why that
+    // must suppress the `decision_for`-based recording that always runs next.
     let mut outcome_recorded = false;
     // NtOpenFile has no disposition — it always opens existing (FILE_OPEN). Pass
     // FILE_OPEN (1), NOT 0: 0 is FILE_SUPERSEDE, which is in is_write_open's

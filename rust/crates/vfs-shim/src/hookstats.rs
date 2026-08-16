@@ -786,7 +786,7 @@ fn render_readdirs(snap: &Snapshot) -> String {
 /// class actually drove it to zero, without also masking a regression in a
 /// class that gate did not touch. `FellThroughRedirect`/`FellThroughServe` are
 /// gate 3's, `FellThroughPassthrough` is gates 2 and 3's,
-/// `FellThroughWriteFallback` is gate 4's, and `FellThroughDrmException` is
+/// `FellThroughWriteFallback` is gate 4's, and `FellThroughDrmException` was
 /// gate 5's.
 ///
 /// **`FellThroughServe` can no longer be recorded.** Gate 4 task 7 deleted
@@ -797,6 +797,17 @@ fn render_readdirs(snap: &Snapshot) -> String {
 /// them to retire a counter that already read zero in every measured run would
 /// invalidate that record for no gain. Read a zero here as "route removed",
 /// not "route measured and unexercised".
+///
+/// **`FellThroughDrmException` can no longer be recorded either, and is in
+/// exactly the same state.** Gate 5 task 4 deleted the four filename
+/// exceptions in `try_fuse_create` that were its only increment site, so a
+/// zero here also means "route removed", not "route measured and unexercised".
+/// The distinction is what the acceptance evidence turns on: a reader who takes
+/// this zero for a measured-and-clean run would be crediting the counter with
+/// proving something no counter can prove about a code path that no longer
+/// exists. What the retained variant *does* buy is the other direction — it
+/// cannot silently start counting again without a report saying so, and the
+/// shim/director reconciliation asserts on it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum OpenOutcome {
