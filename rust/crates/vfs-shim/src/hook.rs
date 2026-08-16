@@ -2371,10 +2371,9 @@ unsafe extern "system" fn delete_hook(oa: *const ObjectAttributes) -> NTSTATUS {
     if let Some(client) = crate::fuse_client::global() {
         if let Some((root, vpath)) = client.vpath_under_root(path) {
             let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
-            return if client.delete(root, vp).is_ok() {
-                STATUS_SUCCESS
-            } else {
-                STATUS_UNSUCCESSFUL
+            return match client.delete(root, vp) {
+                Ok(()) => STATUS_SUCCESS,
+                Err(st) => delete_status_for(st),
             };
         }
     }
@@ -2394,6 +2393,36 @@ unsafe extern "system" fn delete_hook(oa: *const ObjectAttributes) -> NTSTATUS {
         return tramp_delete_abs(tramp, oa, path);
     }
     tramp(oa)
+}
+
+/// The NT status for a director `OP_DELETE` refusal.
+///
+/// **Flattening every refusal to `STATUS_UNSUCCESSFUL` is not neutral.** That
+/// maps to `ERROR_GEN_FAILURE`, and the delete-then-create idiom — the single
+/// most common thing callers do with a delete — treats only
+/// `ERROR_FILE_NOT_FOUND` as benign and gives up on anything else. So a delete
+/// of a path the director simply does not have would stop callers that a real
+/// filesystem lets straight through. The open path already distinguishes these
+/// (`try_fuse_create`'s `Err` arms); this is the same mapping for the same
+/// reason, kept as one function so the two cannot drift:
+///
+/// - `ST_NOT_FOUND` -> `STATUS_OBJECT_NAME_NOT_FOUND` (`ERROR_FILE_NOT_FOUND`).
+///   Nothing to delete is not a failure to delete.
+/// - `ST_READ_ONLY` -> `STATUS_ACCESS_DENIED`. The director's own policy status
+///   for "no `ReadWrite` provider serves this path", and `ERROR_ACCESS_DENIED`
+///   is what a real read-only filesystem answers a `DeleteFileW`.
+/// - `ST_IS_DIR` -> `STATUS_FILE_IS_A_DIRECTORY`, which `RtlNtStatusToDosError`
+///   folds to `ERROR_ACCESS_DENIED` — exactly what `DeleteFileW` returns when
+///   the name is a directory.
+/// - Anything else (I/O error, a provider that broke) is a genuine failure and
+///   keeps `STATUS_UNSUCCESSFUL`.
+fn delete_status_for(st: i32) -> NTSTATUS {
+    match st {
+        vfs_protocol::ST_NOT_FOUND => STATUS_OBJECT_NAME_NOT_FOUND,
+        vfs_protocol::ST_READ_ONLY => STATUS_ACCESS_DENIED,
+        vfs_protocol::ST_IS_DIR => STATUS_FILE_IS_A_DIRECTORY,
+        _ => STATUS_UNSUCCESSFUL,
+    }
 }
 
 /// `NtDeleteFile` via the trampoline with an absolute NT path and a **null**
@@ -2441,6 +2470,52 @@ unsafe fn is_delete_request(info: *mut c_void, length: u32, class: u32) -> bool 
         }
 }
 
+/// The NT path a handle-based delete/rename should act on, and whether finding
+/// it required consulting the OS about the handle's *current* target (the same
+/// provenance bit [`DecodedPath`] carries, for the same reason: a
+/// `RootMap`-backed answer computed from it must not be cached under it).
+///
+/// **The third source is what closes an escape.** `PATH_TABLE` is populated by
+/// `record_path`, which runs only on an open *this shim intercepted*. A handle
+/// inherited across `CreateProcess`, duplicated in from another process, or
+/// opened before injection is in no table of ours — and `setinfo_hook`'s
+/// non-synthetic branch used to read that miss as "nothing to do" and hand the
+/// call to the real `NtSetInformationFile`. For a **delete** that unlinked the
+/// real file under a managed root, which is the same breach `delete_hook`
+/// exists to prevent, arriving by a different door. There is no cheap
+/// backstop for it either: a `PATH_TABLE` miss leaves no path at all, so there
+/// is nothing to apply `path_is_ours` to until one is recovered.
+///
+/// So ask the OS, exactly as `parent_dir_of_handle`'s case 4 already does for
+/// `OBJECT_ATTRIBUTES.RootDirectory` — `GetFinalPathNameByHandleW` needs no
+/// reopen, since the caller is handing us a handle it currently holds. The two
+/// cheap sources are tried first and neither costs a syscall:
+///
+/// 1. `PATH_TABLE` — an intercepted open whose path was under a managed root.
+/// 2. `HANDLE_PATHS` — every other intercepted open. A handle here but not in
+///    (1) is one `record_path` declined, i.e. outside every root, so this
+///    answers the common "delete a file that is none of our business" case
+///    without touching the OS.
+/// 3. `GetFinalPathNameByHandleW`. Only reached for a handle the shim never saw
+///    opened, and only on a delete/rename set-info, which is rare — this is not
+///    a per-call cost on any hot path.
+///
+/// # Safety
+/// `handle` must be the live handle of an in-flight `NtSetInformationFile` this
+/// process is making, which is what `final_path_for_handle` requires. This
+/// neither closes it nor takes ownership of it.
+unsafe fn setinfo_source_path(handle: HANDLE) -> Option<(String, bool)> {
+    if let Ok(t) = PATH_TABLE.lock() {
+        if let Some(p) = t.get(&(handle as isize)) {
+            return Some((p.clone(), false));
+        }
+    }
+    if let Some(p) = path_of_handle(handle) {
+        return Some((p, false));
+    }
+    vfs_win::final_path_for_handle(handle).map(|p| (p, true))
+}
+
 /// Write a successful (Information = 0) IoStatusBlock for a set-info we handled
 /// and suppressed from the real filesystem.
 unsafe fn setinfo_ok_iosb(iosb: *mut c_void) {
@@ -2458,11 +2533,21 @@ unsafe fn setinfo_ok_iosb(iosb: *mut c_void) {
 /// suppresses the real operation, so the mod backing / real file is preserved
 /// but the path reads as gone/moved.
 ///
-/// Both of those are keyed on the **source** handle. One thing is decided on
-/// the *target* instead, and has to be: a rename whose destination lands under
-/// a managed root is refused even when the source is outside every one of them
-/// and no arm above ever looked at it (gate 5, Task 5 — see the comment at that
-/// check). Everything else passes through.
+/// Two things sit on top of that, both from gate 5's Task 5, and each has its
+/// own comment at the check itself:
+///
+/// - **The source is resolved even when no table knows the handle**
+///   (`setinfo_source_path`). A `PATH_TABLE` miss used to mean "not ours", and
+///   for an inherited or pre-injection handle on an under-root path that sent
+///   a delete to the real file.
+/// - **A refusal keyed on the *target*, not the source.** A rename whose
+///   destination lands under a managed root is refused even when the source is
+///   outside every one of them and no source-keyed arm ever looked at it.
+///
+/// Between them the rule is one sentence: a rename either has both sides under
+/// the same root, and is routed, or it touches no root at all, and passes
+/// through. Everything else is refused, and a delete of an under-root path that
+/// nothing here absorbed is refused with it rather than reaching the kernel.
 /// `FileCompletionInformation` — binds a handle to an I/O completion port.
 const FILE_COMPLETION_INFORMATION: u32 = 30;
 
@@ -2577,10 +2662,20 @@ unsafe extern "system" fn setinfo_hook(
     let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);
 
     if is_delete || is_rename {
-        let nt = match PATH_TABLE.lock() {
-            Ok(t) => t.get(&(handle as isize)).cloned(),
-            Err(_) => None,
-        };
+        // Not just `PATH_TABLE`: a handle the shim never saw opened has no
+        // entry there, and reading that miss as "not ours" is what let a
+        // delete on an inherited or pre-injection under-root handle reach the
+        // real file. See `setinfo_source_path`.
+        let source = setinfo_source_path(handle);
+        // Held for every `RootMap`-backed question asked with an OS-consulted
+        // source path below (`Engine::whiteout`/`rename`, `path_is_ours`) —
+        // that string is a fact about the handle's target right now, not a
+        // pure function of its own bytes. See `vfs_redirect::UncachedScope`.
+        let _uncached_guard = source
+            .as_ref()
+            .is_some_and(|(_, os_consulted)| *os_consulted)
+            .then(vfs_redirect::UncachedScope::enter);
+        let nt = source.map(|(p, _)| p);
         if let (Some(nt), Some(engine)) = (nt, ENGINE.get()) {
             let handled = if is_delete {
                 engine.whiteout(&nt)
@@ -2608,6 +2703,37 @@ unsafe extern "system" fn setinfo_hook(
                 // Suppress the real delete/rename; report success to the caller.
                 setinfo_ok_iosb(iosb);
                 return STATUS_SUCCESS;
+            }
+            // **The source is under a managed root and nothing above absorbed
+            // the operation.** `tramp` below would hand it to the kernel,
+            // which acts on the real file — and this arm is reached by three
+            // routes that all end that way:
+            //
+            //  - A **delete** that `Engine::whiteout` declined (no overlay
+            //    configured, or a path resolving with an empty remainder).
+            //    The path-based `delete_hook` has had a `path_is_ours`
+            //    backstop for exactly this since it was written; leaving its
+            //    sibling fail-open is the same divergence, and the next reader
+            //    would have had two deletes to copy from and no way to tell
+            //    which was right.
+            //  - A **rename out** of a managed root to a target outside every
+            //    one of them. `Engine::rename` answers `Declined` (its `to`
+            //    side resolves nowhere) and the kernel then performs the move,
+            //    which *unlinks a real file under a managed root*. That the
+            //    destination is legitimately outside does not make the source
+            //    side any less of a breach, and it is the same one the
+            //    target-keyed check below closes in the other direction.
+            //  - A **rename whose target cannot be parsed at all**
+            //    (`parse_rename_target` -> `None`, e.g. a target named against
+            //    a directory handle we cannot resolve). An operation on an
+            //    under-root path whose other half we cannot even read is the
+            //    last thing that should be forwarded blind.
+            //
+            // The rule this leaves is one sentence: a rename either has both
+            // sides under the same root, and is routed, or it does not touch a
+            // root at all, and is trampolined. Everything between is refused.
+            if path_is_ours(&nt) {
+                return STATUS_ACCESS_DENIED;
             }
         }
         // **A rename whose *target* lands under a managed root** (gate 5,

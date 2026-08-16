@@ -199,6 +199,61 @@ pub fn nt_open_abs(path: &str, access: u32) -> (i32, *mut c_void) {
     (st, h)
 }
 
+pub const FILE_DISPOSITION_INFORMATION: u32 = 13;
+pub const FILE_LIST_DIRECTORY: u32 = 0x0001;
+
+/// Open an absolute path as a **directory** (`FILE_DIRECTORY_FILE`), which is
+/// what a caller holding a directory handle to name children against has.
+pub fn nt_open_dir_abs(path: &str, access: u32) -> (i32, *mut c_void) {
+    const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
+    let Some(p) = ntdll_proc("NtOpenFile") else { return (-1, core::ptr::null_mut()) };
+    let f: NtOpenFileFn = unsafe { core::mem::transmute(p) };
+    let n = abs_name(path);
+    let mut h: *mut c_void = core::ptr::null_mut();
+    let mut iosb = [0u8; 16];
+    let st = unsafe {
+        f(
+            &mut h,
+            access | SYNCHRONIZE,
+            &n.oa,
+            iosb.as_mut_ptr() as *mut c_void,
+            FILE_SHARE_ALL,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_DIRECTORY_FILE,
+        )
+    };
+    (st, h)
+}
+
+/// `NtDeleteFile` naming `rel` beneath the directory handle `dir` — the
+/// handle-relative `OBJECT_ATTRIBUTES` shape. Win32 decides on its own whether
+/// to build one, so a test that wants it certain has to build it here.
+pub fn nt_delete_relative(dir: *mut c_void, rel: &str) -> i32 {
+    let Some(p) = ntdll_proc("NtDeleteFile") else { return -1 };
+    let f: NtDeleteFileFn = unsafe { core::mem::transmute(p) };
+    let n = rel_name(dir, rel);
+    unsafe { f(&n.oa) }
+}
+
+/// The handle-based delete: `NtSetInformationFile` with
+/// `FILE_DISPOSITION_INFORMATION { DeleteFile = TRUE }`. The unlink itself
+/// happens when the last handle closes, so a caller must close before looking
+/// at the filesystem.
+pub fn nt_set_disposition_delete(h: *mut c_void) -> i32 {
+    let Some(p) = ntdll_proc("NtSetInformationFile") else { return -1 };
+    let f: NtSetInformationFileFn = unsafe { core::mem::transmute(p) };
+    let mut info = [1u8; 1];
+    let mut iosb = [0u8; 16];
+    unsafe {
+        f(
+            h,
+            iosb.as_mut_ptr() as *mut c_void,
+            info.as_mut_ptr() as *mut c_void,
+            1,
+            FILE_DISPOSITION_INFORMATION,
+        )
+    }
+}
+
 /// `NtSetInformationFile` with a `FILE_RENAME_INFORMATION`(`_EX`) naming an
 /// absolute target (`RootDirectory` NULL), which is what `MoveFileExW` builds.
 ///

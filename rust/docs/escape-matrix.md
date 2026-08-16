@@ -1554,3 +1554,64 @@ for being a *distinct* assertion, not merely a failure:
 | the `Engine::whiteout` arm | *"the whiteout handled it"* — `0xC0000022` instead of success, and no whiteout marker |
 | the `path_is_ours` backstop | the root-directory delete returned `0x0` from the kernel |
 | the rename destination check | the imported file exists on real disk under the root |
+
+### Review round 2: three more, all in `setinfo_hook`'s non-synthetic branch
+
+The two above were closed first; reviewing them turned up three siblings that
+end the same way — `tramp`, and the kernel acting on the real file. All three
+are reachable only with no director attached, which is the shape a session gets
+when the `FuseClient` fails to attach (`READY_FUSE_FAILED_PREFIX` exists because
+that session is still released).
+
+- **A handle the shim never saw opened.** `record_path` populates `PATH_TABLE`
+  only from an intercepted open, so a handle inherited across `CreateProcess`,
+  duplicated in, or opened before injection is in no table of ours — and that
+  miss was read as "not ours". For a delete, the kernel then unlinked the real
+  file under the root. There is no cheap backstop available: a miss leaves no
+  path to apply `path_is_ours` to. `setinfo_source_path` now recovers one, from
+  `PATH_TABLE`, then `HANDLE_PATHS`, then `GetFinalPathNameByHandleW` — the same
+  OS consult `parent_dir_of_handle`'s case 4 already makes for a relative
+  `OBJECT_ATTRIBUTES`, with the same `UncachedScope` obligation. Measured: the
+  overlay now absorbs it exactly as it does a handle the shim did see, so this
+  one is *routed*, not merely refused.
+- **A rename out of a managed root** to a target outside every root.
+  `Engine::rename` answers `Declined` (its `to` side resolves nowhere) and the
+  kernel performed the move, unlinking a real file under the root. This was
+  reported after round 1 as a policy question about exports; that was wrong, and
+  the fixture says so — reverting the fix leaves the real source file gone.
+- **A delete the overlay declines** — the managed root itself, which resolves
+  with an empty remainder. `delete_hook` had a `path_is_ours` backstop for this
+  from the start; its handle-based sibling did not. Isolating that one site (by
+  narrowing the refusal to renames) leaves the kernel answering the root-directory
+  delete `STATUS_DIRECTORY_NOT_EMPTY` — it refused only because the directory
+  happened to have contents.
+
+A single `path_is_ours(source)` refusal after the existing arms closes the last
+two, and it is what makes the branch's rule statable in one sentence.
+
+**The director's refusals are also no longer flattened.** `delete_hook` mapped
+every `OP_DELETE` error to `STATUS_UNSUCCESSFUL` — `ERROR_GEN_FAILURE`. The
+delete-then-create idiom treats only `ERROR_FILE_NOT_FOUND` as benign, so a
+delete of a path the director does not have would stop callers a real filesystem
+lets straight through. `delete_status_for` now maps `ST_NOT_FOUND`,
+`ST_READ_ONLY` and `ST_IS_DIR` the way the open path already does.
+
+`tramp_delete_abs` is no longer unexercised: a relative name that climbs out of
+the root through a FUSE-synthetic directory handle
+(`..\..\outside-escape.txt`) resolves genuinely outside every root and must be
+trampolined, which is only reachable through the absolute rebuild. The kernel
+answers `STATUS_OBJECT_NAME_INVALID` — it does not collapse `..` in an NT path,
+which Win32 would have done before calling it — and removing the rebuild turns
+that into `STATUS_INVALID_HANDLE`, so the status discriminates the two. The
+FUSE-synthetic and real-directory-handle decodes are covered alongside it.
+
+Test: `handle_ops_out_of_root_sealed.rs` for the three, with the extra cases in
+`nt_delete_file_sealed.rs`. Mutation table for round 2:
+
+| reverted | failing assertion |
+| --- | --- |
+| the `final_path_for_handle` fallback | the real under-root file was unlinked |
+| the `path_is_ours(source)` refusal | the real file was moved out of the root by the kernel |
+| the same, narrowed to renames only | the root-directory delete returned `0xC0000101` |
+| `delete_status_for` | the absent path answered `0xC0000001` instead of `ERROR_FILE_NOT_FOUND` |
+| `tramp_delete_abs`'s call site | the `..` escape returned `0xC0000008` (synthetic handle passed to the kernel) |
