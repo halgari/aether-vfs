@@ -102,7 +102,7 @@ use crate::ntdef::{
     FileEndOfFileInformation, FileInternalInformation, FileNetworkOpenInformation,
     FilePositionInformation,
     FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateSectionFn,
-    NtFlushBuffersFileFn, NtLockFileFn, NtMapViewOfSectionFn,
+    NtDeleteFileFn, NtFlushBuffersFileFn, NtLockFileFn, NtMapViewOfSectionFn,
     NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryDirectoryFileFn,
     NtQueryInformationByNameFn, NtUnlockFileFn,
     NtQueryFullAttributesFileFn,
@@ -140,6 +140,7 @@ static mut TRAMP_OPEN: Option<NtOpenFileFn> = None;
 static mut TRAMP_QDIREX: Option<NtQueryDirectoryFileExFn> = None;
 static mut TRAMP_QDIR: Option<NtQueryDirectoryFileFn> = None;
 static mut TRAMP_QIBN: Option<NtQueryInformationByNameFn> = None;
+static mut TRAMP_DELETE: Option<NtDeleteFileFn> = None;
 static mut TRAMP_CLOSE: Option<NtCloseFn> = None;
 static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
 static mut TRAMP_SETINFO: Option<NtSetInformationFileFn> = None;
@@ -395,6 +396,14 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     TRAMP_QDIR = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileFn>(
         d_qdir.trampoline() as *const (),
     ));
+    // The path-based delete. It is not optional and not a nicety: it takes no
+    // handle, so an unhooked call resolves the `OBJECT_ATTRIBUTES` path itself
+    // and deletes the file that is really there, under a managed root or not.
+    // See `delete_hook`.
+    let d_delete = make_detour(ntdll, c"NtDeleteFile", delete_hook as *const ())?;
+    TRAMP_DELETE = Some(core::mem::transmute::<*const (), NtDeleteFileFn>(
+        d_delete.trampoline() as *const (),
+    ));
     let d_close = make_detour(ntdll, c"NtClose", close_hook as *const ())?;
     TRAMP_CLOSE = Some(core::mem::transmute::<*const (), NtCloseFn>(
         d_close.trampoline() as *const (),
@@ -462,6 +471,7 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
 
     d_qdirex.enable().map_err(|_| InstallError::Detour)?;
     d_qdir.enable().map_err(|_| InstallError::Detour)?;
+    d_delete.enable().map_err(|_| InstallError::Detour)?;
     d_close.enable().map_err(|_| InstallError::Detour)?;
     d_qif.enable().map_err(|_| InstallError::Detour)?;
     d_setinfo.enable().map_err(|_| InstallError::Detour)?;
@@ -477,8 +487,8 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     // Every enabled detour must be kept alive here: dropping one silently
     // un-patches it, which reads exactly like "the process never calls this".
     detours.extend([
-        d_qdirex, d_qdir, d_close, d_qif, d_setinfo, d_read, d_write, d_csec, d_map, d_unmap,
-        d_qvol, d_lock, d_unlock, d_flush,
+        d_qdirex, d_qdir, d_delete, d_close, d_qif, d_setinfo, d_read, d_write, d_csec, d_map,
+        d_unmap, d_qvol, d_lock, d_unlock, d_flush,
     ]);
 
     // Best-effort child-process propagation + virtual image path spoof.
@@ -2284,6 +2294,135 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
     tramp(handle)
 }
 
+/// `NtDeleteFile` hook — the **path-based** delete (gate 5, Task 5).
+///
+/// **This was the one unhooked NT API that reached real disk.** The others on
+/// this project's list all take a handle, so leaving one unhooked fails safely:
+/// under a managed root the caller is holding a synthetic handle, the kernel
+/// does not own it, and the call comes back `STATUS_INVALID_HANDLE`. This one
+/// takes only an `OBJECT_ATTRIBUTES`. There is no handle to be wrong about, so
+/// an unhooked call resolves the path itself and unlinks the real file sitting
+/// under the root — which is the exact thing the root's contract says is
+/// unreachable.
+///
+/// **The decision is made on the path, like `create_hook`/`open_hook`, and by
+/// the same machinery.** `path_of_tracked` decodes the `OBJECT_ATTRIBUTES`
+/// (including a handle-relative name, and including the FUSE-synthetic
+/// `RootDirectory` a virtual directory handle produces), and the three
+/// questions asked of that path below are the three the open hooks already ask,
+/// in the same order:
+///
+/// 1. `FuseClient::vpath_under_root` — the director's own notion of the root.
+///    If it claims the path, the director's answer is the caller's answer, both
+///    ways: `OP_DELETE` accepted is `STATUS_SUCCESS`, `OP_DELETE` refused is a
+///    failure the caller sees. It never continues to the kernel from here, for
+///    the same reason `try_fuse_create` does not: a refusal that falls through
+///    is not a refusal.
+/// 2. `Engine::whiteout` — the shim-local overlay, which is what
+///    `setinfo_hook`'s non-synthetic branch already does for a *handle*-based
+///    delete of the same path. Live when the director is absent (a `FuseClient`
+///    that failed to attach still leaves an `Engine` with every declared root
+///    and its overlay), and having both delete routes answer through the same
+///    call is the point — two predicates that disagree about one path is the
+///    failure mode this project has paid for twice.
+/// 3. `path_is_ours` — the backstop. `Engine::whiteout` answers `false` for a
+///    path it resolves with an *empty* remainder (the root directory itself)
+///    and for an engine with no overlay at all, and `false` there must not mean
+///    "let the kernel have it". Under a managed root that is the escape, not a
+///    fallback, so it fails closed with `STATUS_ACCESS_DENIED` — distinct from
+///    the director's own `STATUS_UNSUCCESSFUL` refusal above, because these are
+///    different answers: one is "the graph said no", the other is "nothing here
+///    is willing to answer, and the real file is not on offer".
+///
+/// Outside every root the call is trampolined unchanged, which is most of them
+/// — a hook with an opinion about every delete in the process would break the
+/// rest of it.
+unsafe extern "system" fn delete_hook(oa: *const ObjectAttributes) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::DeleteFile);
+    let tramp = match TRAMP_DELETE {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    // Shim-initiated I/O (overlay writes, the panic log, copy-up) must reach
+    // the real ntdll, exactly as in `create_hook`/`open_hook`.
+    if in_hook_reenter() {
+        return tramp(oa);
+    }
+    // Decode once, and hold the `UncachedScope` for as long as this call
+    // decides with the result — `vpath_under_root`, `whiteout` and
+    // `path_is_ours` are all `RootMap`-backed and cached the same way
+    // `decision_for` is. See `parent_dir_of_handle`'s case 4 and
+    // `DecodedPath`'s doc comment.
+    let decoded = path_of_tracked(oa);
+    let _uncached_guard =
+        decoded.as_ref().is_some_and(|d| d.os_consulted).then(vfs_redirect::UncachedScope::enter);
+    let Some(path) = decoded.as_ref().map(|d| d.path.as_str()) else {
+        // An undecodable delete is an undecodable open by another name: it
+        // bypasses every decision we would have made. Recorded rather than
+        // silently trampolined, so it shows up in the same place.
+        crate::hookstats::note_undecodable(oa_name_only(oa).as_deref());
+        return tramp(oa);
+    };
+
+    if let Some(client) = crate::fuse_client::global() {
+        if let Some((root, vpath)) = client.vpath_under_root(path) {
+            let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+            return if client.delete(root, vp).is_ok() {
+                STATUS_SUCCESS
+            } else {
+                STATUS_UNSUCCESSFUL
+            };
+        }
+    }
+    if let Some(engine) = ENGINE.get() {
+        if engine.whiteout(path) {
+            return STATUS_SUCCESS;
+        }
+    }
+    if path_is_ours(path) {
+        return STATUS_ACCESS_DENIED;
+    }
+    // Outside every root. A FUSE-synthetic `RootDirectory` is invalid to the
+    // kernel even here, so rebuild the OA absolute rather than hand the
+    // synthetic handle over — the same narrow disagreement case
+    // `tramp_create_abs` documents.
+    if fuse_root_directory(oa) {
+        return tramp_delete_abs(tramp, oa, path);
+    }
+    tramp(oa)
+}
+
+/// `NtDeleteFile` via the trampoline with an absolute NT path and a **null**
+/// `RootDirectory`. The `NtDeleteFile` counterpart of [`tramp_create_abs`];
+/// see that function for when a synthetic root reaches a fall-through at all.
+unsafe fn tramp_delete_abs(
+    tramp: NtDeleteFileFn,
+    oa: *const ObjectAttributes,
+    abs_path: &str,
+) -> NTSTATUS {
+    let nt = to_nt_path(abs_path);
+    let mut wbuf: Vec<u16> = nt.encode_utf16().collect();
+    wbuf.push(0);
+    let byte_len = ((wbuf.len() - 1) * 2) as u16;
+    let new_us = UnicodeString {
+        length: byte_len,
+        maximum_length: byte_len + 2,
+        buffer: wbuf.as_mut_ptr(),
+    };
+    let oa_ref = &*oa;
+    let new_oa = ObjectAttributes {
+        length: oa_ref.length,
+        root_directory: core::ptr::null_mut(),
+        object_name: &new_us,
+        attributes: oa_ref.attributes,
+        security_descriptor: oa_ref.security_descriptor,
+        security_qos: oa_ref.security_qos,
+    };
+    let status = tramp(&new_oa);
+    drop(wbuf);
+    status
+}
+
 /// True when this `NtSetInformationFile` call requests a delete (either
 /// disposition class with the delete flag/boolean set).
 unsafe fn is_delete_request(info: *mut c_void, length: u32, class: u32) -> bool {
@@ -2313,7 +2452,13 @@ unsafe fn setinfo_ok_iosb(iosb: *mut c_void) {
 /// overlay over the ring. For legacy local-overlay handles it converts a delete
 /// or rename of a tracked under-root handle into an overlay whiteout/rename and
 /// suppresses the real operation, so the mod backing / real file is preserved
-/// but the path reads as gone/moved. Everything else passes through.
+/// but the path reads as gone/moved.
+///
+/// Both of those are keyed on the **source** handle. One thing is decided on
+/// the *target* instead, and has to be: a rename whose destination lands under
+/// a managed root is refused even when the source is outside every one of them
+/// and no arm above ever looked at it (gate 5, Task 5 — see the comment at that
+/// check). Everything else passes through.
 /// `FileCompletionInformation` — binds a handle to an I/O completion port.
 const FILE_COMPLETION_INFORMATION: u32 = 30;
 
@@ -2459,6 +2604,42 @@ unsafe extern "system" fn setinfo_hook(
                 // Suppress the real delete/rename; report success to the caller.
                 setinfo_ok_iosb(iosb);
                 return STATUS_SUCCESS;
+            }
+        }
+        // **A rename whose *target* lands under a managed root** (gate 5,
+        // Task 5). Everything above is keyed on the *source*, and for a source
+        // outside every root none of it runs: `record_path` inserts into
+        // `PATH_TABLE` only when `path_is_ours(path)`, so an outside handle is
+        // never recorded, the engine arm above is skipped, and `tramp` below
+        // performed the move — physically creating a file under the
+        // destination root, where it then read back as missing because that
+        // root seals every path the provider graph does not serve.
+        //
+        // The destination is what decides containment. Content crossing *into*
+        // the VFS by a route the director never saw is the same failure as
+        // content crossing out of it, and the source being legitimately
+        // outside does not make the target's root any less managed.
+        //
+        // Refused rather than routed, and there is no third option available:
+        // `OP_RENAME` carries **one** root and two vpaths under it (see
+        // `FuseClient::rename`), so the provider contract has no operation for
+        // an import from outside. `STATUS_ACCESS_DENIED` rather than the
+        // `STATUS_UNSUCCESSFUL` the cross-root arm above returns, because it is
+        // a different answer: cross-root is "the graph cannot express this
+        // move", this is "the destination will not accept content by this
+        // route at all".
+        //
+        // NOTE: `parse_rename_target` discards `parent_dir_of_handle`'s
+        // OS-consulted provenance bit, so a target named against a directory
+        // handle the shim never saw opened reaches `path_is_ours` here without
+        // an `UncachedScope`. That is the known gap `parse_rename_target`
+        // already records for `engine.rename`, not a new one — it is listed
+        // there rather than fixed here so both callers are fixed at once.
+        if is_rename {
+            if let Some(target) = parse_rename_target(info, length) {
+                if path_is_ours(&target) {
+                    return STATUS_ACCESS_DENIED;
+                }
             }
         }
     }

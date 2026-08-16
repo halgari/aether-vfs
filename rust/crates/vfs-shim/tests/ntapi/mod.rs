@@ -82,6 +82,12 @@ type NtQueryInformationByNameFn = unsafe extern "system" fn(
     u32,
     u32,
 ) -> i32;
+/// `NtDeleteFile` takes an `OBJECT_ATTRIBUTES` and nothing else — no handle, no
+/// access mask, no disposition. There is no Win32 wrapper that reaches it, so a
+/// test that wants to exercise the path-based delete has to call it directly.
+type NtDeleteFileFn = unsafe extern "system" fn(*const ObjectAttributes) -> i32;
+type NtSetInformationFileFn =
+    unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_void, u32, u32) -> i32;
 
 fn ntdll_proc(name: &str) -> Option<*const c_void> {
     use windows_sys::Win32::Foundation::HMODULE;
@@ -120,6 +126,106 @@ pub fn rel_name(dir: *mut c_void, rel: &str) -> RelName {
         security_qos: core::ptr::null_mut(),
     };
     RelName { _wide: wide, _us: us, oa }
+}
+
+/// Builds an `OBJECT_ATTRIBUTES` naming an absolute path with a **null**
+/// `RootDirectory` — the shape `NtDeleteFile` is reached with in practice, and
+/// the one that leaves the path itself as the only thing the call can be
+/// decided on.
+pub struct AbsName {
+    _wide: Vec<u16>,
+    _us: Box<UnicodeString>,
+    pub oa: ObjectAttributes,
+}
+
+/// `\??\`-prefix a Win32 path; pass an NT path through unchanged.
+pub fn to_nt(path: &str) -> String {
+    if path.starts_with(r"\??\") || path.starts_with(r"\Device\") {
+        path.to_string()
+    } else {
+        format!(r"\??\{path}")
+    }
+}
+
+pub fn abs_name(path: &str) -> AbsName {
+    let mut wide: Vec<u16> = to_nt(path).encode_utf16().collect();
+    let bytes = (wide.len() * 2) as u16;
+    let us = Box::new(UnicodeString {
+        length: bytes,
+        maximum_length: bytes,
+        buffer: wide.as_mut_ptr(),
+    });
+    let oa = ObjectAttributes {
+        length: core::mem::size_of::<ObjectAttributes>() as u32,
+        root_directory: core::ptr::null_mut(),
+        object_name: &*us as *const UnicodeString,
+        attributes: OBJ_CASE_INSENSITIVE,
+        security_descriptor: core::ptr::null_mut(),
+        security_qos: core::ptr::null_mut(),
+    };
+    AbsName { _wide: wide, _us: us, oa }
+}
+
+/// `NtDeleteFile` against an absolute path. Returns the raw `NTSTATUS`.
+pub fn nt_delete_file(path: &str) -> i32 {
+    let Some(p) = ntdll_proc("NtDeleteFile") else { return -1 };
+    let f: NtDeleteFileFn = unsafe { core::mem::transmute(p) };
+    let n = abs_name(path);
+    unsafe { f(&n.oa) }
+}
+
+pub const DELETE: u32 = 0x0001_0000;
+pub const FILE_RENAME_INFORMATION: u32 = 10;
+pub const FILE_RENAME_INFORMATION_EX: u32 = 65;
+
+/// Open an absolute path with an explicit access mask (`DELETE` for the rename
+/// below, which is what `MoveFileExW` itself asks for).
+pub fn nt_open_abs(path: &str, access: u32) -> (i32, *mut c_void) {
+    let Some(p) = ntdll_proc("NtOpenFile") else { return (-1, core::ptr::null_mut()) };
+    let f: NtOpenFileFn = unsafe { core::mem::transmute(p) };
+    let n = abs_name(path);
+    let mut h: *mut c_void = core::ptr::null_mut();
+    let mut iosb = [0u8; 16];
+    let st = unsafe {
+        f(
+            &mut h,
+            access | SYNCHRONIZE,
+            &n.oa,
+            iosb.as_mut_ptr() as *mut c_void,
+            FILE_SHARE_ALL,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+        )
+    };
+    (st, h)
+}
+
+/// `NtSetInformationFile` with a `FILE_RENAME_INFORMATION`(`_EX`) naming an
+/// absolute target (`RootDirectory` NULL), which is what `MoveFileExW` builds.
+///
+/// Layout, and it must match `hook.rs::parse_rename_target` exactly:
+/// `ReplaceIfExists`/`Flags` at 0, `RootDirectory` at 8, `FileNameLength` at
+/// 16, `FileName` at 20.
+pub fn nt_rename(h: *mut c_void, target: &str, class: u32) -> i32 {
+    let Some(p) = ntdll_proc("NtSetInformationFile") else { return -1 };
+    let f: NtSetInformationFileFn = unsafe { core::mem::transmute(p) };
+    let wide: Vec<u16> = to_nt(target).encode_utf16().collect();
+    let namelen = wide.len() * 2;
+    let mut buf = vec![0u8; 20 + namelen];
+    buf[0] = 1; // ReplaceIfExists / FILE_RENAME_REPLACE_IF_EXISTS
+    buf[16..20].copy_from_slice(&(namelen as u32).to_le_bytes());
+    for (i, u) in wide.iter().enumerate() {
+        buf[20 + i * 2..22 + i * 2].copy_from_slice(&u.to_le_bytes());
+    }
+    let mut iosb = [0u8; 16];
+    unsafe {
+        f(
+            h,
+            iosb.as_mut_ptr() as *mut c_void,
+            buf.as_mut_ptr() as *mut c_void,
+            buf.len() as u32,
+            class,
+        )
+    }
 }
 
 const GENERIC_READ: u32 = 0x8000_0000;

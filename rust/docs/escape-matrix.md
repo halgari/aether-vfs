@@ -1466,3 +1466,91 @@ is a seal that belongs to a different gate entirely. That does not make the
 branch harmless — it was one predicate change away from live, behind a
 document asserting it could not happen — but no reader should take this fix
 as having closed a hole a game could have fallen into.
+
+## Gate 5, Task 5: the two escapes the gate inherited
+
+Both are *operations*, not opens, and neither was reachable by anything the
+read and write matrices above measure. The first reached real disk.
+
+### `NtDeleteFile` was unhooked, and it is path-based
+
+Every other unhooked NT API on this project's list takes a handle. Under a
+managed root the caller is holding a synthetic handle, so leaving one of those
+unhooked fails safely: the kernel does not own the handle and the call comes
+back `STATUS_INVALID_HANDLE` (the `ERROR_INVALID_HANDLE` signature the e2e
+suite already recognises). `NtDeleteFile` takes only an `OBJECT_ATTRIBUTES`.
+There is no handle to be wrong about, so an unhooked call resolved the path
+itself, against the real filesystem, and unlinked the real file under the root.
+
+It is now hooked (`hook.rs::delete_hook`), and it decides on the path with the
+same machinery `create_hook`/`open_hook` use rather than a second predicate:
+`path_of_tracked` to decode, then `FuseClient::vpath_under_root` -> `OP_DELETE`,
+then `Engine::whiteout`, then `path_is_ours` as a fail-closed backstop. Outside
+every root it trampolines unchanged.
+
+Measured, against the pre-hook code, in a fixture where the bytes on disk and
+the bytes at the director differ per path:
+
+- `data/served.esp` — pre-hook the **real file was unlinked** and the
+  director's copy was untouched. Now the director's copy is gone, the real file
+  still holds its host bytes, and the fake counts exactly one `OP_DELETE`.
+- `data/unserved.bin` — real file on disk, not served by the director. Pre-hook
+  it was unlinked. Now the delete fails and the file stays: the director's
+  not-found is the caller's not-found, deletes included.
+- The managed **root directory itself** resolves under a root with an empty
+  remainder, which `Engine::whiteout` declines. Removing the `path_is_ours`
+  backstop and re-running showed the kernel answering that delete
+  `STATUS_SUCCESS` — the decline would have handed the root directory itself to
+  the OS. That branch is not decoration.
+- A file outside every root is still really deleted. A hook with an opinion
+  about every `NtDeleteFile` in the process would pass every assertion above.
+
+Tests: `nt_delete_file_sealed.rs` (director present) and
+`nt_delete_file_no_director.rs` (the `FuseClient`-failed-to-attach shape, where
+the overlay whiteout is what absorbs the delete — the same call `setinfo_hook`
+already makes for a *handle*-based delete of the same path).
+
+### A rename whose target lands under a managed root, from a source outside it
+
+Three predicates lined up:
+
+1. `record_path` inserts into `PATH_TABLE` only when `path_is_ours(path)`, so a
+   handle on a file outside every root is never recorded.
+2. `setinfo_hook`'s non-synthetic branch consults `Engine::rename` only for a
+   handle that *is* in `PATH_TABLE`.
+3. `Engine::rename` answers `CrossRoot` only when **both** sides resolve under
+   managed roots.
+
+So the engine was never asked, and `tramp` performed the move. Confirmed by
+running the fix out and inspecting the fixture directory: all three drivers —
+`std::fs::rename` (i.e. `MoveFileExW`), `FILE_RENAME_INFORMATION` and
+`FILE_RENAME_INFORMATION_EX` — physically created their file under the
+destination root, and the source directory was left **empty**. The file both
+entered a tree the director cannot account for and left the one place the
+caller could still find it.
+
+The destination is what decides containment. `setinfo_hook` now parses the
+rename target whenever the class says rename, and refuses with
+`STATUS_ACCESS_DENIED` if `path_is_ours` claims it — regardless of where the
+source lives, and after the existing source-keyed arms have had their chance,
+so a legitimate within-root rename is unaffected. Refused rather than routed
+because there is no third option: `OP_RENAME` carries one root and two vpaths
+under it, so the provider contract has no import-from-outside.
+
+Test: `rename_into_root_sealed.rs`, which asserts the destination is absent
+from **both** real disk and the director's own table, that each source is still
+at its original path with its own bytes, and only then that the status was a
+failure.
+
+### Verification by mutation
+
+Each changed site was reverted individually and the resulting failure checked
+for being a *distinct* assertion, not merely a failure:
+
+| reverted | failing assertion |
+| --- | --- |
+| `d_delete.enable()` | the real file under the root was deleted (both delete binaries) |
+| the `vpath_under_root`/`OP_DELETE` arm | *"the director accepted the delete, so the caller must see success"* — still contained by the backstop, no longer answered |
+| the `Engine::whiteout` arm | *"the whiteout handled it"* — `0xC0000022` instead of success, and no whiteout marker |
+| the `path_is_ours` backstop | the root-directory delete returned `0x0` from the kernel |
+| the rename destination check | the imported file exists on real disk under the root |

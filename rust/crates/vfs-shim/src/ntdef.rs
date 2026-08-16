@@ -156,6 +156,17 @@ pub type NtOpenFileFn = unsafe extern "system" fn(
     u32,         // OpenOptions
 ) -> NTSTATUS;
 
+/// `ntdll!NtDeleteFile` — the **path-based** delete.
+///
+/// The signature is the whole point: an `OBJECT_ATTRIBUTES` and nothing else.
+/// No handle, no access mask, no disposition. Every other delete route the
+/// shim sees (`NtSetInformationFile` with either disposition class) arrives on
+/// a handle the shim watched being opened, so leaving one of *those* unhooked
+/// fails safely — a synthetic handle is not a kernel object and the call comes
+/// back `STATUS_INVALID_HANDLE`. This one resolves the path itself, against
+/// the real filesystem, so leaving it unhooked does not fail at all.
+pub type NtDeleteFileFn = unsafe extern "system" fn(*const ObjectAttributes) -> NTSTATUS;
+
 /// `ntdll!NtClose`.
 pub type NtCloseFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
 

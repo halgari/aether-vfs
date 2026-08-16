@@ -14,7 +14,11 @@
 //! the far side of the ring is a fake.
 //!
 //! It answers what copy-up uses (HEARTBEAT, GETATTR, OPEN, READ, CLOSE) plus
-//! WRITE, and deliberately gives a test control over *how* a READ is answered
+//! WRITE, DELETE and RENAME — the last two for gate 5's Task 5, where the
+//! question is whether a path-based delete or a rename into the root is
+//! *answered here* or performed on the real filesystem, and only a fake that
+//! can be observed answering can tell those apart. It deliberately gives a
+//! test control over *how* a READ is answered
 //! ([`ReadStyle`]), because the read loop's correctness is mostly about what
 //! it does with awkward answers: a short read that is not EOF, a read that
 //! fails part-way, a file that turns out shorter than OPEN promised.
@@ -107,6 +111,8 @@ pub struct Tally {
     reads: Mutex<HashMap<String, u64>>,
     bulk_reads: Mutex<HashMap<String, u64>>,
     writes: Mutex<HashMap<String, u64>>,
+    deletes: Mutex<HashMap<String, u64>>,
+    renames: Mutex<HashMap<String, u64>>,
 }
 
 impl Tally {
@@ -138,6 +144,16 @@ impl Tally {
     /// bytes on disk somewhere means the write never crossed the ring.
     pub fn writes(&self, vpath: &str) -> u64 {
         Self::get(&self.writes, vpath)
+    }
+    /// DELETE requests that reached the server for this vpath. A zero here
+    /// with the real file gone means the delete went to the filesystem.
+    pub fn deletes(&self, vpath: &str) -> u64 {
+        Self::get(&self.deletes, vpath)
+    }
+    /// RENAME requests that reached the server, counted against the *source*
+    /// vpath.
+    pub fn renames(&self, vpath: &str) -> u64 {
+        Self::get(&self.renames, vpath)
     }
 }
 
@@ -397,6 +413,43 @@ impl Fake {
                     }
                 }
                 (P::ST_OK, P::encode_read_resp(src))
+            }
+            // OP_DELETE / OP_RENAME mirror what a real overlay-backed graph
+            // does, refusal codes included: a vpath nothing serves is
+            // `ST_NOT_FOUND` and a vpath outside every writable mount is
+            // `ST_READ_ONLY`. Answering `ST_OK` unconditionally would make a
+            // sealed-path test pass for the wrong reason — the shim would look
+            // like it had routed a delete the graph would in fact have refused.
+            P::OP_DELETE => {
+                let Some((_root, vpath)) = P::decode_path_req(payload) else {
+                    return (P::ST_BAD_REQUEST, Vec::new());
+                };
+                Tally::bump(&self.tally.deletes, &vpath);
+                let mut files = self.files.lock().unwrap();
+                if !files.contains_key(&vpath) {
+                    return (P::ST_NOT_FOUND, Vec::new());
+                }
+                if !self.is_writable(&vpath) {
+                    return (P::ST_READ_ONLY, Vec::new());
+                }
+                files.remove(&vpath);
+                (P::ST_OK, Vec::new())
+            }
+            P::OP_RENAME => {
+                let Some((_root, from, to)) = P::decode_rename_req(payload) else {
+                    return (P::ST_BAD_REQUEST, Vec::new());
+                };
+                Tally::bump(&self.tally.renames, &from);
+                let mut files = self.files.lock().unwrap();
+                if !files.contains_key(&from) {
+                    return (P::ST_NOT_FOUND, Vec::new());
+                }
+                if !self.is_writable(&from) || !self.is_writable(&to) {
+                    return (P::ST_READ_ONLY, Vec::new());
+                }
+                let e = files.remove(&from).expect("just checked");
+                files.insert(to, e);
+                (P::ST_OK, Vec::new())
             }
             P::OP_CLOSE => {
                 if let Some(fh) = P::decode_close_req(payload) {
