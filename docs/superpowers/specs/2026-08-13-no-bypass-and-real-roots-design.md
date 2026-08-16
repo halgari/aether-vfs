@@ -391,6 +391,48 @@ exceptions closed, implementation stops and reports the `drm_exe_trace` output
 and the diagnosis. A bypass is not quietly reintroduced to make the gate green,
 and the stage is not declared done with a game that does not launch.
 
+### Corrections (2026-08-15, from the gate 5 survey)
+
+Three of this section's premises no longer hold as written. They are corrected
+here rather than rewritten, because the reasoning above is still why the gate
+exists.
+
+**a. The contingency depends on a tool that cannot currently produce evidence.**
+`drm_exe_trace` (`hook.rs:1472-1499`) is wired correctly and is enabled by
+`VFS_DRM_EXE_LOG` — but it instruments only opens that pass through
+`try_fuse_create`, and a launch-to-menu **never opens `SkyrimSE.exe` on that
+path** (measured 2026-08-12; no trace file in either mode). The on-disk exe is
+consumed by `CreateProcess` and Steam's own path association, both outside the
+hook. So the stop-and-report contingency has no instrument behind it. **Gate 5
+must make the tracer able to observe the failure before it relies on it** —
+otherwise "stop and report the trace" produces an empty file.
+
+**b. "Fix FUSE-relative `OBJECT_ATTRIBUTES` resolution" may already be done.**
+That resolution is implemented, not absent: `tramp_create_abs`
+(`hook.rs:1798-1836`) builds a *fresh absolute* `OBJECT_ATTRIBUTES` with a null
+`RootDirectory` and never hands a synthetic handle to the kernel, and
+`path_of_tracked` → `parent_dir_of_handle` case 1 (`hook.rs:616-625`) resolves a
+synthetic `RootDirectory` via `PATH_TABLE`. The `STATUS_OBJECT_NAME_NOT_FOUND`
+path is explicitly guarded at `hook.rs:1749-1762` and now fires only if the path
+decode itself fails.
+
+So the blocker this section names may have been removed by later work. **Gate 5's
+first act should be to test whether the exceptions can simply be closed today**,
+before building anything to enable it. If they can, most of this section's plan
+is unnecessary.
+
+**c. Mounting the Steam host tree conflicts with a later, deliberate decision.**
+This section prescribes mounting that tree as a `disk`-provider root.
+`skyrim-live.rs:222-224` records the opposite decision and its reason: *"Do not
+mount the Steam library DiskProvider — that let the game load masters/BSAs/DLLs
+from the host install and violated the VFS contract."*
+
+Both cannot stand. A **narrow** mount — the specific files, via a subdir or
+router provider — satisfies this section's intent without reintroducing the
+contract violation, and is the reading gate 5 should take unless it finds
+otherwise. Mounting the whole library to close a four-filename exception would
+trade a small hole for a large one.
+
 ## 7. Decomposition
 
 ### Stage 2a — No bypass
