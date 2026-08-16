@@ -2,7 +2,7 @@
 //! whiteout markers. Read resolution consults it before the snapshot. Pure `std`
 //! filesystem access — no `unsafe`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -26,6 +26,71 @@ use vfs_redirect::{is_whiteout, whiteout_marker, DirItem, RootId};
 /// itself for exactly this reason.
 pub fn overlay_layer_dir(overlay_root: &Path, root: RootId) -> PathBuf {
     overlay_root.join(format!("root-{}", root.0))
+}
+
+/// Remove this crate's whiteout markers from a directory listing, and with
+/// each one the name it hides.
+///
+/// **This is the live fix for gate 5's phantom marker, and it belongs on the
+/// listing rather than on the overlay directory.** The shim spells a whiteout
+/// `<name>.__vfs_wh__` ([`vfs_redirect::WHITEOUT_SUFFIX`]);
+/// `vfs_compose::OverlayProvider` spells it `.wh.<name>`. Since gate 4 Task 6
+/// those two conventions share one physical directory — a host mounts
+/// [`overlay_layer_dir`] as the director's write layer, which is the same
+/// directory [`Overlay`] writes into — and the director has no reason to hide
+/// a spelling it does not use. So `client.readdir` hands the shim its own
+/// markers back as ordinary zero-byte files, and before this function the
+/// listing branch passed them straight to the game: a phantom
+/// `<file>.__vfs_wh__` entry *and* the file it was supposed to hide, still
+/// listed. Both halves, from one marker.
+///
+/// ## Why not simply teach the shim to spell whiteouts `.wh.<name>`
+///
+/// It is the tidier-looking fix and it is the wrong one, for a reason in
+/// `vfs_compose::OverlayProvider`'s own source. That provider answers
+/// `is_whiteout` from a **cached per-directory index**, and the field's doc
+/// comment states the licence for caching outright: *"this provider is the
+/// only writer of `.wh.` markers in its own upper … A process outside this
+/// provider mutating the upper's markers underneath us is already outside the
+/// contract."* Making the shim a second writer of `.wh.` into that same upper
+/// breaks exactly that. The result would not be one convention; it would be
+/// one convention with two writers and a stale cache — `readdir` rescans the
+/// upper live and would hide the file, while `getattr`/`open` read the index
+/// and would keep serving it. A listing and an open disagreeing about whether
+/// a file exists is a subtler defect than the one being fixed.
+///
+/// It would also change an on-disk spelling, and every marker in an existing
+/// overlay would stop being recognised by [`Overlay::lookup`] as well —
+/// deleted files silently reappearing. This crate has shipped that shape of
+/// migration once already (see the upgrade note on [`Overlay`]) and it cost a
+/// live session and two wrong hypotheses to diagnose.
+///
+/// ## Ordering constraint at the call site
+///
+/// Callers must apply this **before** any wildcard filter. `*.esp` does not
+/// match `gone.esp.__vfs_wh__`, so filtering first drops the marker on its own
+/// and leaves `gone.esp` listed — the hiding half silently lost for exactly
+/// the queries a game makes most.
+///
+/// Pure and in-memory: the marker names are already in the listing, so nothing
+/// here touches the filesystem, and enumeration pays one pass over entries it
+/// was going to copy anyway.
+pub fn strip_whiteout_markers(items: Vec<DirItem>) -> Vec<DirItem> {
+    // Two passes, because a marker may sort after the name it hides. A set
+    // rather than a scan of a `Vec`: a mod that removes a few hundred files
+    // from one directory is an ordinary thing to do, and that is the case
+    // where the quadratic version would show up.
+    let hidden: HashSet<String> = items
+        .iter()
+        .filter_map(|i| is_whiteout(&i.name).map(fold))
+        .collect();
+    if hidden.is_empty() {
+        return items;
+    }
+    items
+        .into_iter()
+        .filter(|i| !hidden.contains(&fold(&i.name)) && is_whiteout(&i.name).is_none())
+        .collect()
 }
 
 /// What the overlay says about a path.
@@ -192,6 +257,9 @@ impl Overlay {
     /// Overlay `root`'s directory overlay entries onto a snapshot+real
     /// `merged` listing: whiteout markers remove names, overlay files
     /// add/override (wildcard-filtered), result stays folded-ordered.
+    ///
+    /// The marker handling itself lives in [`strip_whiteout_markers`], which
+    /// the live director listing branch calls too — see that function.
     pub fn apply_to_listing(
         &self,
         root: RootId,
@@ -205,53 +273,21 @@ impl Overlay {
             Err(_) => return merged, // no overlay dir here -> nothing to apply
         };
         let mut map: BTreeMap<String, DirItem> = BTreeMap::new();
-        for it in merged {
+        // Markers the *incoming listing* carries are the shared concern with
+        // the director branch, so they are handled in one place for both.
+        for it in strip_whiteout_markers(merged) {
             map.insert(fold(&it.name), it);
         }
         let mut adds: Vec<DirItem> = Vec::new();
         for e in read.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if let Some(base) = is_whiteout(&name) {
+                // A marker this overlay holds physically but that `merged`
+                // does not carry — the case `strip_whiteout_markers` cannot
+                // see, and the reason this scan is still here. It arises
+                // whenever the overlay directory is *not* also a layer of
+                // whatever produced `merged`.
                 map.remove(&fold(base));
-                // …and the marker's own name, which `merged` may carry. Since
-                // gate 4 Task 6 a host mounts this very directory into the
-                // director's graph as a write layer (see `overlay_layer_dir`),
-                // and the director uses a different marker convention
-                // (`vfs_compose::OverlayProvider`'s `.wh.<name>` prefix), so
-                // it has no reason to hide ours: a listing that includes them
-                // would otherwise show the game a real file called
-                // `<name>.__vfs_wh__`.
-                //
-                // **Neither of these two lines can fire in production today,
-                // and the Task 6 review that added the second one did not say
-                // so.** Both act on `merged`, and `merged` is empty on every
-                // production path: `Engine::overlay_listing` is the only
-                // caller, `hook.rs`'s `ContainedNoDirector` arm is *its* only
-                // caller, and that arm passes `&[]` — its whole purpose is an
-                // overlay-only listing with no base to layer onto. That arm is
-                // additionally dead by measurement (see its own comment for
-                // why it is kept: it is fail-closed insurance against the two
-                // root predicates drifting apart, which they have before).
-                //
-                // Kept rather than deleted, because this is a general overlay
-                // function and this is the right behaviour for any merged
-                // listing it is ever handed — and because deleting "the
-                // mitigation" alone is incoherent: the pre-Task-6 line above
-                // is dead for the identical reason, so removal would have to
-                // take the whole merged-listing path and the fail-closed hook
-                // arm with it.
-                //
-                // **Where the phantom marker actually surfaces is elsewhere,
-                // and is not fixed here.** The live enumeration path is
-                // `hook.rs`'s director branch (`client.readdir`), which never
-                // calls this function. A shim whiteout therefore does show
-                // the game a `<file>.__vfs_wh__` entry and does not hide the
-                // file it names. This used to name the DRM-exception route as
-                // how such a whiteout gets written; gate 5 Task 4 deleted that
-                // route, and the remaining one is the `allow_disk_fallthrough`
-                // opt-out. Task 7 owns the fix and should re-derive the
-                // reachability rather than inherit this claim.
-                map.remove(&fold(&name));
                 continue;
             }
             let md = match e.metadata() {
@@ -355,10 +391,19 @@ mod tests {
     /// evidence of a live behaviour, and it is worth keeping only as that:
     /// the fail-closed hook arm is deliberately retained against predicate
     /// drift, and if it revives with a non-empty base this is the assertion
-    /// that says what the function must then do. It is *not* evidence that a
-    /// shim whiteout is hidden from the game today — on the live director
-    /// path it is not, which is recorded at the call site and belongs to
-    /// gate 5.
+    /// that says what the function must then do.
+    ///
+    /// **Gate 5, Task 7 update.** The final paragraph used to end "It is
+    /// *not* evidence that a shim whiteout is hidden from the game today — on
+    /// the live director path it is not." That is no longer true of
+    /// enumeration: `serve_dir_query`'s director branch now calls
+    /// [`strip_whiteout_markers`], which is the same function this test's
+    /// subject delegates its marker handling to. This test is still not the
+    /// evidence for that — `tests/shim_whiteout_not_phantom.rs` drives the
+    /// live branch through a real ring and is — but the two no longer
+    /// describe different behaviours. It *remains* true that a marker does
+    /// not hide its target from an `open`; see `strip_whiteout_markers` and
+    /// the note at the director branch.
     #[test]
     fn a_whiteout_marker_is_dropped_from_a_merged_listing_that_carries_it() {
         let dir = std::env::temp_dir()

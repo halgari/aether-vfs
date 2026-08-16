@@ -3903,11 +3903,20 @@ unsafe fn serve_dir_query(
     //
     // One consequence worth stating, because a reviewer read the other way
     // round: this arm calls `overlay_listing` with an **empty base**, so
-    // `Overlay::apply_to_listing`'s handling of a `merged` listing — both the
-    // whiteout removal and Task 6's marker-hiding addition — is unreachable
-    // from production even if this arm revives with today's call shape. The
-    // phantom-marker problem that mitigation describes lives on the *director*
-    // branch below, unfixed; see the note there.
+    // `Overlay::apply_to_listing`'s handling of a `merged` listing is
+    // unreachable from production even if this arm revives with today's call
+    // shape.
+    //
+    // **Gate 5, Task 7 changed what that costs.** It used to mean the only
+    // implementation of marker-hiding sat behind two dead callers while the
+    // live director branch below went without. The filtering now lives in
+    // `overlay::strip_whiteout_markers`, which that branch calls directly and
+    // `apply_to_listing` also calls — so the dead pair is kept for the
+    // fail-closed reason above and no longer holds a second, divergent copy
+    // of anything that matters. What is left dead in `apply_to_listing` is
+    // its *physical* overlay-directory scan, which answers a case the live
+    // branch does not have (a marker on disk that the incoming listing does
+    // not carry).
     //
     // The ring round trip and the overlay's own `read_dir` both call out, so
     // the lock must NOT be held here (NtClose also takes it).
@@ -3920,7 +3929,7 @@ unsafe fn serve_dir_query(
                 let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
                 let items = match client.readdir(root, vp) {
                     Ok(entries) => {
-                        let mut items: Vec<DirItem> = entries
+                        let items: Vec<DirItem> = entries
                             .into_iter()
                             .map(|e| DirItem {
                                 name: e.name,
@@ -3929,6 +3938,21 @@ unsafe fn serve_dir_query(
                                 mtime: e.mtime,
                             })
                             .collect();
+                        // **Gate 5, Task 7 — the phantom whiteout marker,
+                        // closed.** This branch used to hand the director's
+                        // answer to the game verbatim, and the director's
+                        // answer carries the shim's own markers: it mounts the
+                        // shim overlay directory as its write layer
+                        // (`overlay_layer_dir`) and spells whiteouts
+                        // `.wh.<name>`, not `<name>.__vfs_wh__`, so ours come
+                        // back as ordinary files. That showed the game a
+                        // phantom `<file>.__vfs_wh__` entry *and* left the
+                        // file it names listed.
+                        //
+                        // **Before the wildcard filter, not after** — see
+                        // `strip_whiteout_markers`, which also records why the
+                        // fix is here rather than in a shared spelling.
+                        let mut items = crate::overlay::strip_whiteout_markers(items);
                         if let Some(ref w) = wildcard {
                             items.retain(|i| {
                                 vfs_core::wildcard_match(w, &i.name)
@@ -3939,25 +3963,28 @@ unsafe fn serve_dir_query(
                     }
                     Err(_) => Vec::new(),
                 };
-                // KNOWN GAP, gate 5's: this branch does not filter the shim's
-                // own whiteout markers. The director mounts the shim overlay
-                // directory as a write layer (`overlay_layer_dir`) and spells
-                // whiteouts `.wh.<name>`, not `<name>.__vfs_wh__`, so it has
-                // no reason to hide ours — they come back as ordinary files.
-                // A shim whiteout therefore shows the game a phantom
-                // `<file>.__vfs_wh__` entry and does not hide the file it
-                // names. `Overlay::apply_to_listing` has the mitigation for
-                // this, but it is not on this path and cannot be reached from
-                // it; see the long note there.
+                // Two things this does **not** fix, both re-derived for this
+                // task rather than inherited from the note that used to sit
+                // here (which blamed a route gate 5 Task 4 had already
+                // deleted):
                 //
-                // Still latent, but the old reason is stale: this used to say
-                // `Engine::whiteout` is reached only via the DRM/identity
-                // exception route, and gate 5 Task 4 deleted that route. The
-                // condition is now the more general one — `whiteout` needs a
-                // non-synthetic under-root handle in `PATH_TABLE`, which since
-                // Task 4 only the `allow_disk_fallthrough` opt-out can produce.
-                // Task 7 owns the fix; it should re-derive this rather than
-                // inherit the claim.
+                // 1. **Enumeration only.** A marker still does not hide its
+                //    target from an `open` through the director:
+                //    `OverlayProvider::hidden_by_whiteout` looks for its own
+                //    `.wh.` spelling, and there is no per-open hook here that
+                //    could ask without a `stat` on every read.
+                // 2. **New markers can still be minted under a live
+                //    director.** `delete_hook` asks the client before
+                //    `Engine::whiteout`, so a path-based delete routes; but
+                //    `setinfo_hook`'s engine branch asks the engine *only*, so
+                //    a handle-based delete on a non-synthetic under-root
+                //    handle (inherited, pre-injection, or
+                //    `allow_disk_fallthrough`) writes a shim-spelled marker
+                //    into the director's own upper without the director ever
+                //    hearing about the delete. That is a divergence between
+                //    the two delete routes, not a listing defect, and it is
+                //    recorded in gate 5's Task 7/8 report rather than changed
+                //    at the end of a gate.
                 Some((items, crate::hookstats::ReadDirSource::Director))
             }
             None => {

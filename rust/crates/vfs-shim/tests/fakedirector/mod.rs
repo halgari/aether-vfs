@@ -277,6 +277,59 @@ impl Fake {
                     }),
                 )
             }
+            // The immediate children of `vpath`, exactly as a composed
+            // provider graph reports them — **including any name the graph
+            // happens to hold that the shim would rather not see.**
+            //
+            // That last clause is the whole reason this opcode is here (gate
+            // 5, Task 7). Live, the director's write layer is an
+            // `OverlayProvider` whose *upper* is the very directory the shim's
+            // local overlay writes into (`overlay_layer_dir`), and the two
+            // spell whiteouts differently — `.wh.<name>` there,
+            // `<name>.__vfs_wh__` here. So a shim-written marker is, to the
+            // director, an ordinary zero-byte file, and it comes back in this
+            // listing like any other. A fake that filtered it would be
+            // fictional in exactly the way the defect lives in.
+            P::OP_READDIR => {
+                let Some((_root, vpath)) = P::decode_path_req(payload) else {
+                    return (P::ST_BAD_REQUEST, Vec::new());
+                };
+                // `FuseClient::readdir` sends "." for the root itself.
+                let prefix = match vpath.as_str() {
+                    "." | "" => String::new(),
+                    v => format!("{v}/"),
+                };
+                let mut out: Vec<P::DirEntryWire> = Vec::new();
+                let mut seen: Vec<String> = Vec::new();
+                let push = |name: &str, is_dir: bool, size: u64, seen: &mut Vec<String>| {
+                    if seen.iter().any(|s| s == name) {
+                        return None;
+                    }
+                    seen.push(name.to_string());
+                    Some(P::DirEntryWire { name: name.to_string(), is_dir, size, mtime: 0 })
+                };
+                for d in &self.dirs {
+                    if let Some(rest) = d.strip_prefix(&prefix) {
+                        if !rest.is_empty() && !rest.contains('/') {
+                            if let Some(e) = push(rest, true, 0, &mut seen) {
+                                out.push(e);
+                            }
+                        }
+                    }
+                }
+                for (p, e) in self.files.lock().unwrap().iter() {
+                    if let Some(rest) = p.strip_prefix(&prefix) {
+                        if rest.is_empty() || rest.contains('/') {
+                            continue;
+                        }
+                        if let Some(w) = push(rest, false, e.bytes.len() as u64, &mut seen) {
+                            out.push(w);
+                        }
+                    }
+                }
+                out.sort_by(|a, b| a.name.cmp(&b.name));
+                (P::ST_OK, P::encode_readdir_resp(&out))
+            }
             P::OP_OPEN => {
                 let Some((_root, flags, vpath)) = P::decode_open_req(payload) else {
                     return (P::ST_BAD_REQUEST, Vec::new());

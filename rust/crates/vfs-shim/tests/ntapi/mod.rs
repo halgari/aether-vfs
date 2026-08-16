@@ -439,7 +439,27 @@ type NtQueryDirectoryFileFn = unsafe extern "system" fn(
 /// must return the same view, so this exists to be compared against the `Ex`
 /// form that `std::fs::read_dir` uses.
 pub fn nt_enum_classic(dir: *mut c_void) -> Vec<String> {
+    nt_enum_classic_filtered(dir, None)
+}
+
+/// [`nt_enum_classic`] with an NT search wildcard in `FileName` — the
+/// `FindFirstFileW("…\\*.esp")` shape, which is how a game asks for plugins and
+/// which the shim's `wildcard_of` decodes.
+///
+/// Worth its own entry point because the filter is applied *by the shim*, and
+/// the order it runs in relative to the shim's other listing work is
+/// observable: a name the wildcard rejects is one the shim's later stages never
+/// see.
+pub fn nt_enum_classic_filtered(dir: *mut c_void, wildcard: Option<&str>) -> Vec<String> {
     const FILE_DIRECTORY_INFORMATION: u32 = 1;
+    let mut wide: Vec<u16> = wildcard.unwrap_or("").encode_utf16().collect();
+    let us = UnicodeString {
+        length: (wide.len() * 2) as u16,
+        maximum_length: (wide.len() * 2) as u16,
+        buffer: wide.as_mut_ptr(),
+    };
+    let name_ptr: *const UnicodeString =
+        if wildcard.is_some() { &us } else { core::ptr::null() };
     let Some(p) = ntdll_proc("NtQueryDirectoryFile") else { return Vec::new() };
     let f: NtQueryDirectoryFileFn = unsafe { core::mem::transmute(p) };
     let mut out = Vec::new();
@@ -458,7 +478,7 @@ pub fn nt_enum_classic(dir: *mut c_void) -> Vec<String> {
                 buf.len() as u32,
                 FILE_DIRECTORY_INFORMATION,
                 0,
-                core::ptr::null(),
+                name_ptr,
                 restart,
             )
         };
