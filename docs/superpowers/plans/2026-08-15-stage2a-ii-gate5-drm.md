@@ -58,45 +58,13 @@ State: does anything break with the exceptions closed, and if so, is the failure
 
 ---
 
-### Task 2: Make the tracer able to see the failure
+### Tasks 2 and 3: RESOLVED BY TASK 1 — do not execute
 
-**Files:** `crates/vfs-shim/src/hook.rs`
+**Task 2 (widen `drm_exe_trace`) is folded into Task 9.** The tracer exists to diagnose a live failure. Task 1 showed the exceptions close cleanly at the shim level — 28/28 injected e2e including the escape matrix — so the contingency is now unlikely to fire. If the live run *does* fail, Task 9 widens the tracer then, as diagnosis rather than speculative preparation. Note Task 1's correction: closing the exceptions may make the tracer start seeing `SkyrimSE.exe` opens on its own, since staged-dir opens now reach the director.
 
-**Interfaces:** `drm_exe_trace` observes every open of the four names, wherever it occurs, not only those reaching `try_fuse_create`.
+**Task 3 (narrow mount) is unnecessary. The four files are already reachable.** Task 1 established it: `skyrim-live.rs:587-599` already mounts both the runtime root and `staged_dir_path` as root-0 disk layers, and `write_steam_appid` (`:867`) places `steam_appid.txt` in the overlay. Nothing needs mounting, and the conflict with `skyrim-live.rs:222-224`'s deliberate refusal to mount the Steam library never has to be resolved — we are not mounting it.
 
-The spec's contingency — "stop and report the `drm_exe_trace` output" — currently produces an **empty file**, because a launch-to-menu never opens `SkyrimSE.exe` through the hook the tracer sits behind. A stop condition with no instrument is not a stop condition.
-
-Widen it: trace all four names, at whatever hook actually sees them, and record the route taken (director vs host), the OA shape (fuse-relative vs absolute), and the resulting status. Extend to `NtOpenFile` and section-creation paths if that is where the opens actually land.
-
-- [ ] **Step 1: Establish where these opens actually enter the shim.** Instrument broadly and temporarily if needed; report what you find before choosing where the tracer belongs.
-
-- [ ] **Step 2: Implement**, and verify the tracer produces non-empty output for a case you can drive from a test — not only from a live game.
-
-- [ ] **Step 3: Commit**
-
----
-
-### Task 3: Serve the four filenames from a narrow mount
-
-**Files:** `crates/vfs-directord/src/bin/skyrim-live.rs`, possibly `crates/vfs-compose/`
-
-**Interfaces:** The four host files resolve through the director from real bytes, without the host tree being generally reachable.
-
-**Do this only if Task 1 shows it is needed.** If closing the exceptions works without any new mount, skip it and say so.
-
-**The spec and a later decision conflict here, and the later one wins on scope.** §6 says mount the Steam host tree as a `disk`-provider root. `skyrim-live.rs:222-224` says: *"Do not mount the Steam library DiskProvider — that let the game load masters/BSAs/DLLs from the host install and violated the VFS contract."* Mounting the whole library to close a four-filename hole trades a small escape for a large one.
-
-Mount **narrowly** — the specific files, via a subdir or router provider, or individual file mounts. The multi-root machinery already exists (`[[root]]` table, `VFS_VIRTUAL_ROOTS`, `Session::mount`) and root 1 already demonstrates the pattern.
-
-- [ ] **Step 1: Write the failing test** — each of the four names resolves through the director and returns the host's real bytes, while a sibling file in the same host directory is **not** reachable. That second assertion is what makes it narrow rather than a re-mount.
-
-- [ ] **Step 2: Run to verify it fails**
-
-- [ ] **Step 3: Implement**
-
-- [ ] **Step 4: Verify** the existing `skyrim-live.rs:373-380` runtime self-check for `steam_appid.txt` still passes, or is superseded deliberately.
-
-- [ ] **Step 5: Commit**
+**Why the spec's blocker evaporated, recorded because it is the useful part.** FUSE-relative `OBJECT_ATTRIBUTES` resolution is needed only to keep the exceptions *open*: `tramp_create_abs` exists precisely because an excepted open must reach the kernel carrying an OA whose root is a handle the kernel never issued. With the exceptions closed, `try_fuse_create` returns a synthetic handle or seals the path — the kernel is never called and the original OA is never passed on. The `STATUS_OBJECT_NAME_NOT_FOUND` the spec blames sits on the PassThrough arm, **which is the exception's own arm**. The blocker was self-inflicted by the thing being removed.
 
 ---
 
@@ -238,7 +206,7 @@ cargo clippy --all-targets -- -D warnings
 ## Gate 5 Exit Criteria
 
 - [ ] No filename-based early return remains in `try_fuse_create`; `keep_host_steam_api` and `fuse_skyrim_exe` are gone.
-- [ ] The four names resolve through the director, and a sibling file in the same host directory does **not** — the mount is narrow, not a re-mount of the Steam library.
+- [ ] The four names resolve through the director from the existing root-0 layers (no new mount — Task 1 established they are already reachable), and the Steam library remains unmounted.
 - [ ] `FellThroughDrmException` is still wired and reads **zero** in a live session.
 - [ ] `NtDeleteFile` is hooked; a delete under a managed root does not reach the real file.
 - [ ] A rename from outside into a managed root fails rather than landing.
