@@ -151,6 +151,12 @@ pub const KEEP_HOST_STEAM_API: &str = "VFS_KEEP_HOST_STEAM_API";
 pub const CHILD_CWD_ROOT: &str = "VFS_CHILD_CWD_ROOT";
 /// Serve the game EXE itself through the director instead of trampolining.
 pub const FUSE_SKYRIM_EXE: &str = "VFS_FUSE_SKYRIM_EXE";
+/// **Temporary (gate 5, task 1 probe).** Close all four DRM/identity
+/// exceptions at once, so `steam_appid.txt`, `SkyrimSELauncher.exe`,
+/// `steam_api{,64}.dll` and `SkyrimSE.exe` route through the director like
+/// every other under-root path. Overrides `KEEP_HOST_STEAM_API` and
+/// `FUSE_SKYRIM_EXE` in the shim. Delete when the gate decides their fate.
+pub const CLOSE_DRM_EXCEPTIONS: &str = "VFS_CLOSE_DRM_EXCEPTIONS";
 /// Refuse `SEC_IMAGE` sections on VFS-backed handles.
 pub const REJECT_FUSE_SECTION: &str = "VFS_REJECT_FUSE_SECTION";
 /// Refuse data sections on VFS-backed handles (narrower than the above).
@@ -331,6 +337,11 @@ pub const ALL: &[Var] = &[
     Var { name: KEEP_HOST_STEAM_API, kind: Kind::Behaviour, default: "true in the shim, false in vfs-inject" },
     Var { name: CHILD_CWD_ROOT, kind: Kind::Behaviour, default: "true" },
     Var { name: FUSE_SKYRIM_EXE, kind: Kind::Behaviour, default: "false" },
+    Var {
+        name: CLOSE_DRM_EXCEPTIONS,
+        kind: Kind::Behaviour,
+        default: "false (the four DRM/identity exceptions stay open)",
+    },
     Var { name: REJECT_FUSE_SECTION, kind: Kind::Behaviour, default: "false" },
     Var { name: REJECT_FUSE_DATA_SECTION, kind: Kind::Behaviour, default: "false" },
     Var { name: LAZY_NO_VEH, kind: Kind::Behaviour, default: "false (VEH installed)" },

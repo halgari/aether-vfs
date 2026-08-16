@@ -81,7 +81,21 @@ fn allow_disk_fallthrough() -> bool {
 /// without setting the variable must keep seeing the host copy.
 fn keep_host_steam_api() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| vfs_env::opt_out(vfs_env::KEEP_HOST_STEAM_API))
+    *FLAG.get_or_init(|| !close_drm_exceptions() && vfs_env::opt_out(vfs_env::KEEP_HOST_STEAM_API))
+}
+
+/// **Temporary (gate 5, task 1 probe).** `VFS_CLOSE_DRM_EXCEPTIONS=1` closes
+/// all four DRM/identity exceptions at once, so `steam_appid.txt`,
+/// `SkyrimSELauncher.exe`, `steam_api{,64}.dll` and `SkyrimSE.exe` route
+/// through the director like every other under-root path.
+///
+/// Exists so the exceptions can be *measured* closed without deleting the code
+/// that implements them; it overrides `keep_host_steam_api` and
+/// `fuse_skyrim_exe`, which already invert two of the four on their own.
+/// Delete this switch once the gate decides whether the exceptions stay.
+fn close_drm_exceptions() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| vfs_env::opt_in(vfs_env::CLOSE_DRM_EXCEPTIONS))
 }
 
 /// Whether a child process we inject starts with its working directory set to
@@ -121,7 +135,7 @@ fn child_cwd_root() -> bool {
 /// launcher stay excepted.
 fn fuse_skyrim_exe() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| vfs_env::opt_in(vfs_env::FUSE_SKYRIM_EXE))
+    *FLAG.get_or_init(|| close_drm_exceptions() || vfs_env::opt_in(vfs_env::FUSE_SKYRIM_EXE))
 }
 
 use retour::RawDetour;
@@ -1197,8 +1211,13 @@ unsafe fn try_fuse_create(
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("");
-        if base.eq_ignore_ascii_case("steam_appid.txt")
-            || base.eq_ignore_ascii_case("SkyrimSELauncher.exe")
+        // Temporary (gate 5, task 1 probe): `close_drm_exceptions()` makes
+        // these two respond to the same switch as the other two, which were
+        // already flag-gated. Fold back into an unconditional test — or delete
+        // the branch — once the gate decides.
+        if (base.eq_ignore_ascii_case("steam_appid.txt")
+            || base.eq_ignore_ascii_case("SkyrimSELauncher.exe"))
+            && !close_drm_exceptions()
         {
             crate::hookstats::note_open_outcome(
                 crate::hookstats::OpenOutcome::FellThroughDrmException,
