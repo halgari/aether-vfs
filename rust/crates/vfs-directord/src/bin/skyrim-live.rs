@@ -166,11 +166,14 @@ fn run() -> Result<(), String> {
     ensure_steam_running()?;
     ensure_steam_logged_on()?;
     eprintln!("  steam: AppId env cleared; steam_appid.txt=489830; client must stay running");
-    // `VFS_KEEP_HOST_STEAM_API` used to be force-set here so the shim would
-    // except `steam_api*.dll` to the host install. Gate 5, Task 4 closed that
-    // exception and deleted the variable: `steam_api*` now comes from the
+    // The keep-host-steam-api switch used to be force-set here so the shim
+    // would except `steam_api*.dll` to the host install. Gate 5, Task 4 closed
+    // that exception and deleted the variable: `steam_api*` now comes from the
     // director like everything else under the root, which the root-0 disk
     // layers below (the runtime root and the staged launch dir) both carry.
+    // (Spelled in prose rather than as the literal name on purpose —
+    // `vfs-env`'s drift test scans these sources for unregistered `VFS_*`
+    // names, and a retired one in a comment reads to it as a live use.)
     std::env::remove_var(vfs_env::ALLOW_DISK_FALLTHROUGH);
     std::env::remove_var(vfs_env::DISK_ONLY_ROOT);
     if let Some(p) = vfs_env::raw(vfs_env::DIRECTOR_OPEN_LOG) {

@@ -118,17 +118,24 @@ pub fn bootstrap_from_config_path_with_payload(
     //
     // Note what is deliberately NOT here: the staged-launch alias
     // (`stage_root_from_env`) the client appends as a second spelling of root
-    // 0. The staged directory physically holds the game EXE and its import
-    // closure, and the DRM exceptions in `hook.rs::try_fuse_create`
-    // (`SkyrimSE.exe`, `SkyrimSELauncher.exe`, `steam_api*`, `steam_appid.txt`
-    // — all four; the launcher was missing from this list) work by returning
-    // `None` so the open trampolines to that real file — which requires this
-    // engine to answer `PassThrough`, i.e. to consider the staged directory
-    // outside its roots. Teaching it the alias would turn those opens into
-    // `Deny` (nothing under a managed root falls through since gate 3, and a
-    // director session's local snapshot is empty), and the game could not
-    // open its own image. Gate 5 owns the DRM exceptions; this stays as it is
-    // until then.
+    // 0.
+    //
+    // **The original reason is gone.** The staged directory physically holds
+    // the game EXE and its import closure, and the four DRM exceptions in
+    // `hook.rs::try_fuse_create` worked by returning `None` so the open
+    // trampolined to that real file — which required this engine to answer
+    // `PassThrough`, i.e. to consider the staged directory outside its roots.
+    // Gate 5's Task 4 deleted those exceptions, so nothing depends on that
+    // answer any more: a staged-directory open is now answered by the FUSE
+    // client, which does know the alias, long before the engine is consulted.
+    //
+    // The omission stays anyway, for a different and now load-bearing reason:
+    // it makes the client's declared root set a strict **superset** of the
+    // engine's. That is what rules out "under an engine root but outside every
+    // client root", the one shape in which `try_fuse_create` would decline a
+    // path the engine then treats as managed — see `hook.rs::path_is_ours` and
+    // `serve_dir_query`'s `ContainedNoDirector` arm, both of which are dead
+    // only because that shape cannot arise.
     let roots = crate::fuse_client::roots_from_env(&root);
     let engine = if overlay.is_empty() {
         Engine::with_roots(&roots, snapshot)

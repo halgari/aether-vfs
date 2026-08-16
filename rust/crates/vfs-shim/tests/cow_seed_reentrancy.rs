@@ -26,21 +26,31 @@
 //! the whole reason it is written this way.
 //!
 //! **Why `decide_open` is called directly rather than through an open**
-//! (gate 4, Task 5). This test used to reach copy-up the way a game did:
-//! a write open the director refused fell through to `Engine::decide_open`.
-//! That fall-through is now sealed — a director-refused write is a hard NT
-//! failure and never reaches the engine — so with a director attached the only
-//! remaining hook route into copy-up is a DRM/identity exception
-//! (`steam_appid.txt` and friends, which return `None` from `try_fuse_create`
-//! before the ring is consulted; `cow_seed_reporting` uses exactly that). It
-//! cannot be used *here*, because this test's whole point is an overlay
-//! **under** the managed root: the overlay copy of a DRM-named file is itself
-//! DRM-named, so every probe of it takes the exception too, is never sealed by
-//! the director, and resolves to a one-level-deeper overlay path — unbounded
-//! recursion, reproduced as a stack overflow while writing this. (Not a defect
-//! introduced here, and not live today — `skyrim-live` puts its overlay beside
-//! the root, not inside it — but worth knowing before gate 5 touches those
-//! exceptions.)
+//! (gate 4, Task 5; revised by gate 5, Task 6). This test used to reach copy-up
+//! the way a game did: a write open the director refused fell through to
+//! `Engine::decide_open`. That fall-through is sealed — a director-refused
+//! write is a hard NT failure and never reaches the engine.
+//!
+//! When this was written, the only remaining hook route into copy-up was a
+//! DRM/identity exception, and it could not be used *here*: this test's whole
+//! point is an overlay **under** the managed root, and the overlay copy of a
+//! DRM-named file is itself DRM-named, so every probe of it took the exception
+//! too, was never sealed by the director, and resolved one overlay level
+//! deeper — unbounded recursion, reproduced as a stack overflow while writing
+//! this.
+//!
+//! Gate 5's Task 4 deleted those exceptions, which removes that hazard: the
+//! probe is now an ordinary under-root open and the director seals it.
+//! `drm_overlay_recursion_gone.rs` pins exactly that, and confirms it the hard
+//! way — restoring the exception makes it die with `STATUS_STACK_OVERFLOW`.
+//!
+//! The direct call stays regardless, for a reason that outlived the
+//! exceptions: the one hook route into copy-up now is
+//! `VFS_ALLOW_DISK_FALLTHROUGH=1` (see `cow_seed_reporting`), and on that route
+//! copy-up can only ever *fail* — the arm is entered because the director
+//! answered not-found for that exact path, and copy-up then asks the same
+//! director for it. A seeding copy-up, which is what this test needs, is
+//! reachable only through the `Engine` API.
 //!
 //! So the *entry* is a direct call and everything that matters stays intact:
 //! the detours are installed, so copy-up's `File::create` is still an NT open

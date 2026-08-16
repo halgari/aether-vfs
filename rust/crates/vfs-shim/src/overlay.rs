@@ -244,11 +244,13 @@ impl Overlay {
                 // **Where the phantom marker actually surfaces is elsewhere,
                 // and is not fixed here.** The live enumeration path is
                 // `hook.rs`'s director branch (`client.readdir`), which never
-                // calls this function. A shim whiteout written on the
-                // DRM-exception route therefore does show the game a
-                // `<file>.__vfs_wh__` entry and does not hide the file it
-                // names. That route is gate 5's; recorded rather than
-                // silently patched here.
+                // calls this function. A shim whiteout therefore does show
+                // the game a `<file>.__vfs_wh__` entry and does not hide the
+                // file it names. This used to name the DRM-exception route as
+                // how such a whiteout gets written; gate 5 Task 4 deleted that
+                // route, and the remaining one is the `allow_disk_fallthrough`
+                // opt-out. Task 7 owns the fix and should re-derive the
+                // reachability rather than inherit this claim.
                 map.remove(&fold(&name));
                 continue;
             }

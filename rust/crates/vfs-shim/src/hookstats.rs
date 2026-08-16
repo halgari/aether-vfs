@@ -1011,13 +1011,25 @@ fn render_passthrough(snap: &Snapshot) -> String {
 /// redirected open). Nothing says the content went missing, and nothing says
 /// why.
 ///
-/// Which outcome that open is counted as changed with gate 4's Task 5. This
-/// comment used to say `FellThroughWriteFallback`, and that is no longer the
-/// live answer: since Task 5 the only route that reaches copy-up in a normal
-/// session is a DRM/identity filename exception (`hook.rs`'s `steam_appid.txt`
-/// / launcher / `steam_api*` branch), which records
-/// `FellThroughDrmException`. `FellThroughWriteFallback` is now only
-/// reachable behind the `allow_disk_fallthrough` opt-out, off by default.
+/// Which outcome that open is counted as has changed twice. Gate 4's Task 5
+/// made it `FellThroughDrmException`, because the DRM/identity filename
+/// exceptions were then the only route that reached copy-up in a normal
+/// session. Gate 5's Task 4 deleted those exceptions, so that answer is stale
+/// too. **The live answer is `FellThroughWriteFallback` again**, and it is
+/// reachable only behind the `allow_disk_fallthrough` opt-out, off by default:
+/// that switch is now the sole route from an NT open into copy-up (measured,
+/// gate 5 Task 6).
+///
+/// **And on that route copy-up can only ever fail.** The arm is entered
+/// precisely because the director answered `ST_NOT_FOUND` for that exact
+/// `(root, vpath)`; copy-up then asks the same director for the same path and
+/// gets the same answer. `Engine::rename`'s copy-up cannot seed either: a
+/// non-synthetic under-root handle reaches it only by the same fall-through, or
+/// off the `Decision::Redirect` arm — and there the overlay copy already
+/// exists, so `has_file` short-circuits before copy-up is called. A copy-up
+/// that actually *seeds* is therefore reachable only by calling the `Engine`
+/// API directly, which is what `cow_seed_reads_through_director` and
+/// `cow_seed_reentrancy` do.
 ///
 /// That matters more here than the counter's size suggests. This gate's
 /// defects have all been invisible to a green test suite and visible only in a

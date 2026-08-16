@@ -873,9 +873,14 @@ unsafe fn record_path(file_handle: *mut HANDLE, path: Option<&str>, status: NTST
 /// left is one deliberate difference: the client also declares the staging
 /// directory as an alias for root 0 (a staged game's working directory is
 /// that staging directory, so it reaches our content by that name), and the
-/// engine deliberately does not, because the DRM exceptions trampoline to
-/// real files in exactly that directory and need the engine to call it
-/// outside — see `bootstrap.rs` for the full argument.
+/// engine deliberately does not. **The reason for that asymmetry was the DRM
+/// exceptions, which gate 5 Task 4 deleted** — they trampolined to real files
+/// in exactly that directory and needed the engine to call it outside. The
+/// omission is now inert rather than load-bearing: staged-directory opens are
+/// answered by the client before the engine is consulted at all. It is kept
+/// because the client's root set being a superset of the engine's is what makes
+/// "under an engine root but outside every client root" impossible, which
+/// several arms rely on — see `bootstrap.rs` for the full argument.
 ///
 /// So the narrow question still disowns the aliased half, and every caller
 /// must keep asking through here.
@@ -1695,8 +1700,10 @@ unsafe extern "system" fn create_hook(
             if is_passthrough {
                 note_passthrough_outcome(path, outcome_recorded);
             }
-            // Never pass a FUSE RootDirectory to the kernel (invalid handle).
-            // DRM host exceptions resolve via path_of → absolute tramp instead.
+            // Never pass a FUSE RootDirectory to the kernel (invalid handle):
+            // rebuild an absolute OA from the decoded path instead. The DRM
+            // exceptions were this arm's reason to exist and are gone (gate 5,
+            // Task 4); see `tramp_create_abs` for what still reaches it.
             if fuse_root_directory(oa) {
                 if let Some(path) = path {
                     let status = tramp_create_abs(
@@ -3623,9 +3630,16 @@ unsafe fn serve_dir_query(
                 // `<file>.__vfs_wh__` entry and does not hide the file it
                 // names. `Overlay::apply_to_listing` has the mitigation for
                 // this, but it is not on this path and cannot be reached from
-                // it; see the long note there. Latent because `Engine::
-                // whiteout` is only reached for a non-synth handle, i.e. the
-                // DRM/identity exception route, which gate 5 owns.
+                // it; see the long note there.
+                //
+                // Still latent, but the old reason is stale: this used to say
+                // `Engine::whiteout` is reached only via the DRM/identity
+                // exception route, and gate 5 Task 4 deleted that route. The
+                // condition is now the more general one — `whiteout` needs a
+                // non-synthetic under-root handle in `PATH_TABLE`, which since
+                // Task 4 only the `allow_disk_fallthrough` opt-out can produce.
+                // Task 7 owns the fix; it should re-derive this rather than
+                // inherit the claim.
                 Some((items, crate::hookstats::ReadDirSource::Director))
             }
             None => {

@@ -18,15 +18,26 @@
 //! `hookstats::enabled` resolves once per process, and the detours and
 //! `FuseClient` are process-global.
 //!
-//! **Why the fixture is named after a DRM exception.** Reaching
-//! `Engine::decide_open`'s write branch with a director attached needs an open
-//! that `try_fuse_create` declines *before* consulting the ring, and since
-//! gate 4's Task 5 the DRM/identity exception list (`steam_appid.txt`,
-//! `SkyrimSELauncher.exe`, `steam_api*`, `SkyrimSE.exe` — matched on the file
-//! name alone, at any depth) is the only such route left. Gate 5 owns those
-//! exceptions; when it removes them, this test and `cow_seed_reporting.rs`
-//! both lose their route in, and that is the signal that the shim-local
-//! overlay write path has no live callers at all.
+//! **How this reaches `Engine::decide_open`'s write branch** (rewritten by
+//! gate 5, Task 6). Reaching it with a director attached needs an open that
+//! `try_fuse_create` declines *before* answering from the ring. Until Task 4
+//! that was the DRM/identity exception list (`steam_appid.txt` and friends,
+//! matched on basename at any depth), and this fixture was named after one of
+//! them for exactly that reason.
+//!
+//! Task 4 deleted those exceptions. The prediction attached to them — that
+//! their removal would leave the shim-local overlay write path with no live
+//! callers at all — turned out to be **wrong**, and Task 6 established the
+//! correct answer by measurement: `VFS_ALLOW_DISK_FALLTHROUGH=1` still sends an
+//! under-root `ST_NOT_FOUND` to `decision_for`, and that is now the sole route
+//! from an NT open into this branch. It is an opt-out, off by default and
+//! cleared defensively by `skyrim-live`, but it is a supported one that the
+//! escape matrix relies on for real-disk stray detection — so the write path is
+//! live machinery, not dead code, and this test is re-pointed at the route
+//! rather than deleted.
+//!
+//! The filename is now an ordinary one, because the name no longer selects the
+//! route: the switch does.
 
 mod fakedirector;
 
@@ -45,7 +56,7 @@ fn an_overlay_directory_that_cannot_be_created_names_itself_in_the_stats_report(
 
     // The failure, arranged physically: the overlay's `root-0/data`
     // subdirectory — the parent `ensure_parent` must create for a write to
-    // `<root>\Data\steam_appid.txt` — is occupied by a *file*, so
+    // `<root>\Data\mod.esp` — is occupied by a *file*, so
     // `create_dir_all` cannot succeed. A directory that is unwritable for any
     // ordinary reason (permissions, a full volume, a name collision like this
     // one) produces the same discarded error.
@@ -55,6 +66,9 @@ fn an_overlay_directory_that_cannot_be_created_names_itself_in_the_stats_report(
 
     std::env::set_var(vfs_env::SHIM_STATS_LOG, &report);
     std::env::set_var(vfs_env::SHIM_STATS_INTERVAL_MS, "10");
+    // The route in — see the module doc. Read once and cached, so it has to be
+    // set before the first hooked open.
+    std::env::set_var(vfs_env::ALLOW_DISK_FALLTHROUGH, "1");
 
     let snapshot = {
         use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
@@ -89,7 +103,7 @@ fn an_overlay_directory_that_cannot_be_created_names_itself_in_the_stats_report(
     let created = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(root.join("Data").join("steam_appid.txt"));
+        .open(root.join("Data").join("mod.esp"));
     let after = overlay_fail_count(OverlayFail::EnsureParent);
 
     drop(hooks);
@@ -126,7 +140,7 @@ fn an_overlay_directory_that_cannot_be_created_names_itself_in_the_stats_report(
         "the report does not say *which* overlay operation failed.\n--- report ---\n{body}"
     );
     assert!(
-        body.contains("root0/data/steam_appid.txt"),
+        body.contains("root0/data/mod.esp"),
         "the report does not name the file whose write went nowhere.\n--- report ---\n{body}"
     );
     // The copy-up section must stay out of it: this write does not preserve,
