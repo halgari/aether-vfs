@@ -261,6 +261,24 @@ pub const ESCAPE_ACCESS: &str = "VFS_ESCAPE_ACCESS";
 /// had in place before the game process started.
 pub const ESCAPE_VECTOR7_LINK_DIR: &str = "VFS_ESCAPE_VECTOR7_LINK_DIR";
 
+/// The INI file `vfs-fixture-prefs` drives the Windows profile APIs against —
+/// `GetPrivateProfileStringW` and friends, the way Skyrim loads
+/// `SkyrimPrefs.ini`. Separate from [`FIXTURE_PATH`] because this fixture uses
+/// both a subject path and an output path, and one name cannot be both.
+pub const FIXTURE_INI_PATH: &str = "VFS_FIXTURE_INI_PATH";
+/// Where `vfs-fixture-prefs` writes its tab-separated results. Must be
+/// **outside** every managed root: writing them is not part of what is under
+/// test. Unset, results go to stdout.
+pub const FIXTURE_INI_OUT: &str = "VFS_FIXTURE_INI_OUT";
+/// Set, `vfs-fixture-prefs` calls `WritePrivateProfileStringW` with this value
+/// before reading, exercising the write half of the profile API. Unset, the
+/// fixture only reads.
+pub const FIXTURE_INI_WRITE: &str = "VFS_FIXTURE_INI_WRITE";
+/// The INI section `vfs-fixture-prefs` reads/writes.
+pub const FIXTURE_INI_SECTION: &str = "VFS_FIXTURE_INI_SECTION";
+/// The INI key `vfs-fixture-prefs` reads/writes.
+pub const FIXTURE_INI_KEY: &str = "VFS_FIXTURE_INI_KEY";
+
 /// What a switch is for, so the surface can be listed and reviewed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -351,6 +369,11 @@ pub const ALL: &[Var] = &[
         kind: Kind::Fixture,
         default: "unset (vector 7 constructs its own junction)",
     },
+    Var { name: FIXTURE_INI_PATH, kind: Kind::Fixture, default: "none (required)" },
+    Var { name: FIXTURE_INI_OUT, kind: Kind::Fixture, default: "unset (results go to stdout)" },
+    Var { name: FIXTURE_INI_WRITE, kind: Kind::Fixture, default: "unset (read-only run)" },
+    Var { name: FIXTURE_INI_SECTION, kind: Kind::Fixture, default: "Display" },
+    Var { name: FIXTURE_INI_KEY, kind: Kind::Fixture, default: "sTest" },
 ];
 
 /// Is `name` a known switch?

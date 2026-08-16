@@ -33,9 +33,14 @@ pub enum Hook {
     MapView = 10,
     QDir = 11,
     QByName = 12,
+    SetInfo = 13,
+    QVol = 14,
+    Lock = 15,
+    Unlock = 16,
+    FlushBuffers = 17,
 }
 
-const N: usize = 13;
+const N: usize = 18;
 
 const NAMES: [&str; N] = [
     "NtCreateFile",
@@ -51,6 +56,11 @@ const NAMES: [&str; N] = [
     "NtMapViewOfSection",
     "NtQueryDirectoryFile",
     "NtQueryInformationByName",
+    "NtSetInformationFile",
+    "NtQueryVolumeInformationFile",
+    "NtLockFile",
+    "NtUnlockFile",
+    "NtFlushBuffersFile",
 ];
 
 static CALLS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
@@ -150,6 +160,7 @@ struct Snapshot {
     fill_nanos: u64,
     fill_max_nanos: u64,
     setinfo_noop: HashMap<u32, u64>,
+    synth_locks: HashMap<String, u64>,
     passthrough: HashMap<String, u64>,
     undecodable: HashMap<String, u64>,
     trace: Vec<String>,
@@ -163,6 +174,13 @@ struct Snapshot {
     copy_ups: HashMap<String, u64>,
     overlay_fail_counts: [u64; OVERLAY_FAIL_N],
     overlay_fails: HashMap<String, u64>,
+}
+
+/// Clone the contents of one of this module's `Mutex<Option<T>>` accumulators,
+/// treating "poisoned" and "never initialised" alike as empty. Every field of
+/// [`Snapshot`] that is not a plain atomic is read through this.
+fn accumulated<T: Clone + Default>(m: &Mutex<Option<T>>) -> T {
+    m.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default()
 }
 
 fn snapshot() -> Snapshot {
@@ -182,8 +200,7 @@ fn snapshot() -> Snapshot {
     let mut outcome_paths: [HashMap<String, u64>; OUTCOME_N] = std::array::from_fn(|_| HashMap::new());
     for (i, outcome) in ALL_OUTCOMES.into_iter().enumerate() {
         outcome_counts[i] = outcome_count(outcome);
-        outcome_paths[i] =
-            OUTCOME_PATHS[i].lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default();
+        outcome_paths[i] = accumulated(&OUTCOME_PATHS[i]);
     }
     Snapshot {
         calls,
@@ -203,24 +220,21 @@ fn snapshot() -> Snapshot {
         fill_bytes: FILL_BYTES.load(Ordering::Relaxed),
         fill_nanos: FILL_NANOS.load(Ordering::Relaxed),
         fill_max_nanos: FILL_MAX_NANOS.load(Ordering::Relaxed),
-        setinfo_noop: SETINFO_NOOP.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
-        passthrough: PATHS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
-        undecodable: UNDECODABLE.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
-        trace: TRACE.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
-        stats: STATS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
-        readdirs: READDIRS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
+        setinfo_noop: accumulated(&SETINFO_NOOP),
+        synth_locks: accumulated(&SYNTH_LOCKS),
+        passthrough: accumulated(&PATHS),
+        undecodable: accumulated(&UNDECODABLE),
+        trace: accumulated(&TRACE),
+        stats: accumulated(&STATS),
+        readdirs: accumulated(&READDIRS),
         outcome_counts,
         outcome_paths,
         unrouted_director_opens: UNROUTED_DIRECTOR_OPENS.load(Ordering::Relaxed),
         copy_up_counts: std::array::from_fn(|i| copy_up_count(ALL_COPY_UPS[i])),
         copy_up_bytes: COPYUP_BYTES.load(Ordering::Relaxed),
-        copy_ups: COPYUPS.lock().ok().and_then(|g| g.as_ref().cloned()).unwrap_or_default(),
+        copy_ups: accumulated(&COPYUPS),
         overlay_fail_counts: std::array::from_fn(|i| overlay_fail_count(ALL_OVERLAY_FAILS[i])),
-        overlay_fails: OVERLAY_FAILS
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().cloned())
-            .unwrap_or_default(),
+        overlay_fails: accumulated(&OVERLAY_FAILS),
     }
 }
 
@@ -424,6 +438,60 @@ fn render_setinfo_noop(snap: &Snapshot) -> String {
     );
     for (class, count) in rows {
         s.push_str(&format!("  {count:>6}x  class={class}\n"));
+    }
+    s
+}
+
+/// Byte-range locks (and flushes) granted on synthetic handles without any
+/// lock actually being taken — see `hook::lock_hook` for why that is the
+/// chosen answer rather than an oversight.
+///
+/// This counter is the visibility half of that choice. A no-op lock is safe
+/// exactly while one process at a time touches a given file in a session; the
+/// moment that stops being true, the resulting corruption has no other
+/// symptom — both writers succeed, both believe they were serialised, and
+/// nothing in any log says a lock was involved. Keyed by operation + path so
+/// "who is locking what, and is anyone locking the same thing" is answerable
+/// from a report rather than from a debugger.
+static SYNTH_LOCKS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+const SYNTH_LOCKS_MAX: usize = 2000;
+
+pub fn note_synthetic_lock(op: &str, path: Option<&str>) {
+    if !enabled() {
+        return;
+    }
+    let Ok(mut g) = SYNTH_LOCKS.lock() else { return };
+    let map = g.get_or_insert_with(HashMap::new);
+    let key = format!(
+        "{:<16} {}",
+        op,
+        path.unwrap_or("<untracked handle>").to_ascii_lowercase()
+    );
+    if let Some(c) = map.get_mut(&key) {
+        *c += 1;
+        return;
+    }
+    if map.len() < SYNTH_LOCKS_MAX {
+        map.insert(key, 1);
+    }
+}
+
+fn render_synth_locks(snap: &Snapshot) -> String {
+    let map = &snap.synth_locks;
+    if map.is_empty() {
+        return String::new();
+    }
+    let total: u64 = map.values().sum();
+    let mut rows: Vec<(&String, &u64)> = map.iter().collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+    let mut s = format!(
+        "\nsynthetic byte-range locks/flushes answered locally ({total}, {} distinct):\n  \
+         NOTE: no lock is actually held — see hook::lock_hook. Safe only while one process\n  \
+         at a time touches each of these paths.\n",
+        rows.len()
+    );
+    for (k, c) in rows {
+        s.push_str(&format!("  {c:>6}x  {k}\n"));
     }
     s
 }
@@ -1243,17 +1311,11 @@ fn render_copy_ups(snap: &Snapshot) -> String {
     s
 }
 
-/// Start a thread that rewrites the report periodically.
-///
-/// A snapshot rather than an exit dump: a game that is killed, or one still
-/// running at the benchmark's window mark, would never produce an exit report.
+/// How often the reporter thread rewrites the report.
 ///
 /// The 250ms default assumes a session lasting well past that — true for
-/// every real launch, but not for a millisecond-scale e2e fixture: nothing
-/// flushes on exit (no `DLL_PROCESS_DETACH` hook and no atexit flush for
-/// this — and an aborting shim panic would skip either one anyway), so a
-/// process that exits before its first tick produces no report file at all,
-/// not even a partial one.
+/// every real launch, but not for a millisecond-scale e2e fixture, which can
+/// exit before the first tick ever fires.
 /// `VFS_SHIM_STATS_INTERVAL_MS` (see `vfs_env::SHIM_STATS_INTERVAL_MS`)
 /// overrides the interval for exactly that case — a short-lived test child
 /// can opt into a fast tick for just itself; unset, every existing caller
@@ -1262,10 +1324,84 @@ fn report_interval() -> std::time::Duration {
     std::time::Duration::from_millis(vfs_env::parsed_or(vfs_env::SHIM_STATS_INTERVAL_MS, 250))
 }
 
+/// When the process started this module, so the banner can say how much of the
+/// run a periodic snapshot actually covers.
+static START: OnceLock<Instant> = OnceLock::new();
+
+/// The line every report opens with, naming *what this report is*.
+///
+/// **Every report is a snapshot. There is no exit report**, and a reader has
+/// to know that: an absent row means "this had not happened by t+N", which is
+/// not the same claim as "this never happened". The 2026-08-14 prefs
+/// investigation lost time to exactly that ambiguity — a missing `NtReadFile`
+/// row that the director's own counters contradicted.
+///
+/// An exit flush was the obvious fix and was **built, measured, and removed**.
+/// From `DLL_PROCESS_DETACH` — the only place a DLL can act on process exit —
+/// every other thread is already terminated, and one killed mid-`std::fs::write`
+/// leaves a lock (the CRT heap's, among others) that the flush then waits on
+/// forever, inside the loader lock. Measured 2026-08-15 on the `vfs-directord`
+/// e2e suite: with the flush, the suite wedged on 2 of 2 runs, each leaving an
+/// unreapable fixture process holding the shim DLL's image lock; without it,
+/// the same suite finished in 3 seconds. Reading counters with `try_lock` does
+/// not save it, because rendering has to allocate.
+///
+/// So the banner is the answer instead: a short-lived process that needs its
+/// tail in the report must outlive one tick (see `report_interval` and
+/// `vfs-fixture-prefs`/`vfs-fixture-escape`'s end-of-run waits), and this line
+/// says how much of the run the numbers below actually cover.
+fn banner() -> String {
+    let elapsed = START.get().map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0);
+    format!(
+        "SNAPSHOT at t+{elapsed:.3}s — process still running, no exit report exists. An absent \
+         row means \"not by t+{elapsed:.3}s\", which is weaker than \"never\".\n"
+    )
+}
+
+/// Render one complete report from a single snapshot.
+///
+/// One snapshot feeds every section, so a report can never show two sections
+/// disagreeing about counters that only look independent — see `Snapshot`.
+fn render_report() -> String {
+    let snap = snapshot();
+    format!(
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        banner(),
+        render(&snap),
+        render_async(&snap),
+        render_fills(&snap),
+        render_stats(&snap),
+        render_trace(&snap),
+        render_undecodable(&snap),
+        render_readdirs(&snap),
+        render_passthrough(&snap),
+        render_setinfo_noop(&snap),
+        render_synth_locks(&snap),
+        render_outcomes(&snap),
+        render_copy_ups(&snap),
+        render_overlay_fails(&snap)
+    )
+}
+
+/// Write `body` to the report path via a temp + rename, so a reader never sees
+/// a half file.
+fn write_report(path: &std::ffi::OsStr, body: &str) {
+    let tmp = std::path::PathBuf::from(path).with_extension("tmp");
+    if std::fs::write(&tmp, body.as_bytes()).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// Start a thread that rewrites the report periodically.
+///
+/// This is the only writer of the report file: there is no exit dump, and
+/// [`banner`] explains at length why not. A process that ends before the first
+/// tick therefore leaves no report at all.
 pub fn start_reporter() {
     if !enabled() || REPORTER.swap(true, Ordering::SeqCst) {
         return;
     }
+    let _ = START.set(Instant::now());
     let Some(path) = vfs_env::raw(vfs_env::SHIM_STATS_LOG) else {
         return;
     };
@@ -1274,30 +1410,7 @@ pub fn start_reporter() {
         .name("vfs-shim-stats".into())
         .spawn(move || loop {
             std::thread::sleep(interval);
-            // One snapshot feeds every section below, so a report can never
-            // show two sections disagreeing about counters that only look
-            // independent — see `Snapshot`'s doc comment.
-            let snap = snapshot();
-            let body = format!(
-                "{}{}{}{}{}{}{}{}{}{}{}{}",
-                render(&snap),
-                render_async(&snap),
-                render_fills(&snap),
-                render_stats(&snap),
-                render_trace(&snap),
-                render_undecodable(&snap),
-                render_readdirs(&snap),
-                render_passthrough(&snap),
-                render_setinfo_noop(&snap),
-                render_outcomes(&snap),
-                render_copy_ups(&snap),
-                render_overlay_fails(&snap)
-            );
-            // Write via a temp + rename so a reader never sees a half file.
-            let tmp = std::path::PathBuf::from(&path).with_extension("tmp");
-            if std::fs::write(&tmp, body.as_bytes()).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
+            write_report(&path, &render_report());
         });
 }
 
@@ -1356,8 +1469,52 @@ mod tests {
         assert_eq!(NAMES.len(), N);
         // The last variant must index the last name, or a hook silently
         // reports under a neighbour's label.
-        assert_eq!(Hook::QByName as usize, N - 1);
+        assert_eq!(Hook::FlushBuffers as usize, N - 1);
+        // Spot-check the middle of the table too: appending variants without
+        // appending names in the same order is the failure this guards, and
+        // only the *last* index is caught by the check above.
+        assert_eq!(NAMES[Hook::SetInfo as usize], "NtSetInformationFile");
+        assert_eq!(NAMES[Hook::Lock as usize], "NtLockFile");
         assert!(NAMES.iter().all(|n| !n.is_empty()));
+    }
+
+    /// The synthetic-lock section must carry its warning, not just its counts.
+    /// The counts alone would read as ordinary activity; the section exists to
+    /// say that each of those grants is a lock nobody actually holds, and a
+    /// reader who does not know that cannot act on the numbers.
+    #[test]
+    fn synthetic_lock_section_names_the_path_and_says_the_lock_is_not_real() {
+        // The key is built exactly as `note_synthetic_lock` builds it, rather
+        // than the counter being driven: it is a no-op under test
+        // (`VFS_SHIM_STATS_LOG` is unset, the same convention
+        // `outcome_counters_are_free_when_disabled` relies on), so going
+        // through it would render an empty section and assert nothing.
+        let mut snap = empty_snapshot();
+        snap.synth_locks.insert(
+            format!("{:<16} {}", "lock-exclusive", r"\??\c:\root\skyrimprefs.ini"),
+            3,
+        );
+        let s = render_synth_locks(&snap);
+        assert!(s.contains("skyrimprefs.ini"), "{s}");
+        assert!(s.contains("3x"), "{s}");
+        assert!(s.contains("lock-exclusive"), "{s}");
+        assert!(s.contains("no lock is actually held"), "{s}");
+    }
+
+    #[test]
+    fn empty_synthetic_lock_section_renders_nothing() {
+        assert_eq!(render_synth_locks(&empty_snapshot()), "");
+    }
+
+    /// The banner must say both things a reader needs: that this is a
+    /// point-in-time snapshot, and *which* point. Dropping either turns an
+    /// absent row back into the ambiguity the banner exists to remove.
+    #[test]
+    fn banner_marks_the_report_as_a_snapshot_and_dates_it() {
+        let b = banner();
+        assert!(b.starts_with("SNAPSHOT at t+"), "{b}");
+        assert!(b.contains("no exit report exists"), "{b}");
+        assert!(b.ends_with('\n'), "{b:?}");
     }
 
     #[test]
@@ -1591,6 +1748,7 @@ mod tests {
             fill_max_nanos: 0,
             unrouted_director_opens: 0,
             setinfo_noop: HashMap::new(),
+            synth_locks: HashMap::new(),
             passthrough: HashMap::new(),
             undecodable: HashMap::new(),
             trace: Vec::new(),

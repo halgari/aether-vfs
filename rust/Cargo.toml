@@ -24,6 +24,7 @@ members = [
   "crates/vfs-fixture-read",
   "crates/vfs-fixture-writepath",
   "crates/vfs-fixture-escape",
+  "crates/vfs-fixture-prefs",
   "crates/vfs-fixture-vproxy",
   "crates/vfs-fixture-staticimp",
   "crates/vfs-ring-harness",

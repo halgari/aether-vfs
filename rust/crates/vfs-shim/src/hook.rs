@@ -142,9 +142,10 @@ use crate::ntdef::{
     FileBasicInformation, FileFsDeviceInformation,
     FileEndOfFileInformation, FileInternalInformation, FileNetworkOpenInformation,
     FilePositionInformation,
-    FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateSectionFn, NtMapViewOfSectionFn,
+    FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateSectionFn,
+    NtFlushBuffersFileFn, NtLockFileFn, NtMapViewOfSectionFn,
     NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryDirectoryFileFn,
-    NtQueryInformationByNameFn,
+    NtQueryInformationByNameFn, NtUnlockFileFn,
     NtQueryFullAttributesFileFn,
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
     NtWriteFileFn, NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
@@ -189,6 +190,9 @@ static mut TRAMP_CREATE_SECTION: Option<NtCreateSectionFn> = None;
 static mut TRAMP_MAP_VIEW: Option<NtMapViewOfSectionFn> = None;
 static mut TRAMP_UNMAP_VIEW: Option<NtUnmapViewOfSectionFn> = None;
 static mut TRAMP_QVOL: Option<NtQueryVolumeInformationFileFn> = None;
+static mut TRAMP_LOCK: Option<NtLockFileFn> = None;
+static mut TRAMP_UNLOCK: Option<NtUnlockFileFn> = None;
+static mut TRAMP_FLUSH: Option<NtFlushBuffersFileFn> = None;
 static mut TRAMP_CPIW: Option<CreateProcessInternalWFn> = None;
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
@@ -469,6 +473,21 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     TRAMP_QVOL = Some(core::mem::transmute::<*const (), NtQueryVolumeInformationFileFn>(
         d_qvol.trampoline() as *const (),
     ));
+    // The lock/flush trio. Without these a synthetic handle is not merely
+    // missing a feature — the *next* call after a successful open fails, and
+    // the caller abandons the file entirely. See `lock_hook`.
+    let d_lock = make_detour(ntdll, c"NtLockFile", lock_hook as *const ())?;
+    TRAMP_LOCK = Some(core::mem::transmute::<*const (), NtLockFileFn>(
+        d_lock.trampoline() as *const (),
+    ));
+    let d_unlock = make_detour(ntdll, c"NtUnlockFile", unlock_hook as *const ())?;
+    TRAMP_UNLOCK = Some(core::mem::transmute::<*const (), NtUnlockFileFn>(
+        d_unlock.trampoline() as *const (),
+    ));
+    let d_flush = make_detour(ntdll, c"NtFlushBuffersFile", flush_hook as *const ())?;
+    TRAMP_FLUSH = Some(core::mem::transmute::<*const (), NtFlushBuffersFileFn>(
+        d_flush.trampoline() as *const (),
+    ));
 
     // Present since Win10 1709. Optional so an older host still installs.
     if let Ok(d_qibn) = make_detour(ntdll, c"NtQueryInformationByName", qibn_hook as *const ()) {
@@ -493,11 +512,14 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     d_map.enable().map_err(|_| InstallError::Detour)?;
     d_unmap.enable().map_err(|_| InstallError::Detour)?;
     d_qvol.enable().map_err(|_| InstallError::Detour)?;
+    d_lock.enable().map_err(|_| InstallError::Detour)?;
+    d_unlock.enable().map_err(|_| InstallError::Detour)?;
+    d_flush.enable().map_err(|_| InstallError::Detour)?;
     // Every enabled detour must be kept alive here: dropping one silently
     // un-patches it, which reads exactly like "the process never calls this".
     detours.extend([
         d_qdirex, d_qdir, d_close, d_qif, d_setinfo, d_read, d_write, d_csec, d_map, d_unmap,
-        d_qvol,
+        d_qvol, d_lock, d_unlock, d_flush,
     ]);
 
     // Best-effort child-process propagation + virtual image path spoof.
@@ -2339,6 +2361,7 @@ unsafe extern "system" fn setinfo_hook(
     length: u32,
     class: u32,
 ) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetInfo);
     let tramp = match TRAMP_SETINFO {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -2610,6 +2633,7 @@ unsafe extern "system" fn qvol_hook(
     length: u32,
     class: u32,
 ) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QVol);
     let tramp = match TRAMP_QVOL {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -2633,6 +2657,130 @@ unsafe extern "system" fn qvol_hook(
         return STATUS_SUCCESS;
     }
     tramp(handle, iosb, info, length, class)
+}
+
+/// The NT path a synthetic handle was opened as, for the lock counters.
+/// `None` for a handle no under-root open recorded.
+fn synth_path(handle: HANDLE) -> Option<String> {
+    match PATH_TABLE.lock() {
+        Ok(t) => t.get(&(handle as isize)).cloned(),
+        Err(_) => None,
+    }
+}
+
+/// `NtLockFile` hook — grants byte-range locks on synthetic handles locally.
+///
+/// **Why this exists.** A synthetic handle is a tagged value in `fuse_synth`'s
+/// table, not a kernel file object, so any NT call without a detour hands that
+/// value to the real kernel and gets `STATUS_INVALID_HANDLE` back. Measured
+/// 2026-08-14: `GetPrivateProfileStringW` — how Skyrim loads `SkyrimPrefs.ini`
+/// — issues `NtOpenFile → NtLockFile → NtQueryInformationFile → NtReadFile →
+/// NtUnlockFile → NtClose`, and with `NtLockFile` unhooked the sequence
+/// stopped dead at step 2. The API then returned the *caller's default* for
+/// every key, so the game received no INI data at all — not stale data, not
+/// real-disk data. `WritePrivateProfileStringW` failed the same way one
+/// operation earlier. Neither showed up as a read or write at the director;
+/// both showed up as an open and nothing else.
+///
+/// **The deliberate semantic gap.** This grants a lock that does not exist.
+/// Nothing is recorded, nothing conflicts, and two callers asking for the same
+/// exclusive byte range both get `STATUS_SUCCESS`. That is chosen, not
+/// overlooked:
+///
+/// - Inside a sealed managed root the director is the only route to the bytes,
+///   and there is no cross-process byte-range locking anywhere in the design
+///   today — so there is no lock table for a real answer to consult.
+/// - Refusing instead (`STATUS_LOCK_NOT_GRANTED`) would leave the profile APIs
+///   exactly as broken as an unhooked call did; it swaps a wrong status for a
+///   different wrong status.
+/// - The failure mode a no-op lock permits — two processes in one session
+///   contending for a file and neither being held off — is a data race we do
+///   not have a mechanism to prevent at any layer. When we do, this is where
+///   it goes.
+///
+/// `hookstats::note_synthetic_lock` counts every grant by path, so if that
+/// contention ever becomes real it is visible in the report rather than
+/// silent.
+///
+/// **Completion.** Answered synchronously: `STATUS_SUCCESS`, a completed
+/// `IO_STATUS_BLOCK`, and `SetEvent` if the caller supplied one — the same
+/// shape `read_hook` uses, including its one limitation, that we do not run
+/// the caller's APC (see `hookstats`'s async section). `FailImmediately` needs
+/// no branch: `false` means the caller is willing to block for the lock, and
+/// an immediate grant satisfies that strictly better than waiting.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "system" fn lock_hook(
+    handle: HANDLE,
+    event: HANDLE,
+    apc: *const c_void,
+    apc_ctx: *const c_void,
+    iosb: *mut c_void,
+    byte_offset: *const i64,
+    length: *const i64,
+    key: u32,
+    fail_immediately: u8,
+    exclusive: u8,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Lock);
+    let tramp = match TRAMP_LOCK {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        crate::hookstats::note_synthetic_lock(
+            if exclusive != 0 { "lock-exclusive" } else { "lock-shared" },
+            synth_path(handle).as_deref(),
+        );
+        synth_iosb_ok(iosb, 0);
+        if !event.is_null() {
+            windows_sys::Win32::System::Threading::SetEvent(event);
+        }
+        return STATUS_SUCCESS;
+    }
+    tramp(handle, event, apc, apc_ctx, iosb, byte_offset, length, key, fail_immediately, exclusive)
+}
+
+/// `NtUnlockFile` hook — the release half of [`lock_hook`], and success for
+/// the same reason: a lock that was never recorded cannot fail to be released.
+unsafe extern "system" fn unlock_hook(
+    handle: HANDLE,
+    iosb: *mut c_void,
+    byte_offset: *const i64,
+    length: *const i64,
+    key: u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Unlock);
+    let tramp = match TRAMP_UNLOCK {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        crate::hookstats::note_synthetic_lock("unlock", synth_path(handle).as_deref());
+        synth_iosb_ok(iosb, 0);
+        return STATUS_SUCCESS;
+    }
+    tramp(handle, iosb, byte_offset, length, key)
+}
+
+/// `NtFlushBuffersFile` hook. Success on a synthetic handle: the director owns
+/// durability for everything behind one, and there is no user-mode buffer here
+/// to push — `write_hook` forwards each write over the ring as it happens.
+///
+/// Unlike the lock pair this is not a lie about state, but it is still weaker
+/// than what the caller asked for: it promises the bytes are durable, and what
+/// it can actually guarantee is that they reached the director.
+unsafe extern "system" fn flush_hook(handle: HANDLE, iosb: *mut c_void) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::FlushBuffers);
+    let tramp = match TRAMP_FLUSH {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        crate::hookstats::note_synthetic_lock("flush", synth_path(handle).as_deref());
+        synth_iosb_ok(iosb, 0);
+        return STATUS_SUCCESS;
+    }
+    tramp(handle, iosb)
 }
 
 /// `NtQueryInformationFile` hook. Spoofs only `FileNormalizedNameInformation`

@@ -15,6 +15,13 @@ const DLL_PROCESS_ATTACH: u32 = 1;
 /// Standard DLL entry point. Always spawns bootstrap off the loader lock.
 /// Dual-layer uses `VFS_PAYLOAD_CFG_FILE` so bootstrap can `install_late`.
 /// (windows-sys 0.61 dropped the `BOOL` alias; the ABI return is a plain `i32`.)
+///
+/// Deliberately does **nothing** on `DLL_PROCESS_DETACH`. Flushing a final
+/// hook-stats report from there was built and measured on 2026-08-15, and it
+/// wedged injected processes at exit — every other thread is already
+/// terminated by then, and one killed mid-write leaves a lock the flush waits
+/// on forever inside the loader lock. See `vfs_shim::hookstats::banner` for
+/// the measurement and for what the reports say instead.
 #[no_mangle]
 pub extern "system" fn DllMain(_dll: HINSTANCE, reason: u32, _reserved: *mut c_void) -> i32 {
     if reason == DLL_PROCESS_ATTACH {

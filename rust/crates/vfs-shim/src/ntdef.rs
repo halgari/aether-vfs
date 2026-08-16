@@ -320,6 +320,43 @@ pub struct FileInternalInformation {
     pub index_number: i64,
 }
 
+/// `ntdll!NtLockFile` — byte-range lock acquisition, and the call that made
+/// the Windows profile APIs unusable under a managed root until it was
+/// hooked (see `hook::lock_hook`).
+///
+/// `ByteOffset` and `Length` are `PLARGE_INTEGER`s; `FailImmediately` and
+/// `ExclusiveLock` are `BOOLEAN`s (one byte each, not `BOOL`) — passing them
+/// as `u32` would misalign `ExclusiveLock` and, worse, silently: the register
+/// the callee reads would hold whatever the caller left there.
+pub type NtLockFileFn = unsafe extern "system" fn(
+    HANDLE,        // FileHandle
+    HANDLE,        // Event
+    *const c_void, // ApcRoutine
+    *const c_void, // ApcContext
+    *mut c_void,   // IoStatusBlock
+    *const i64,    // ByteOffset (LARGE_INTEGER)
+    *const i64,    // Length (LARGE_INTEGER)
+    u32,           // Key
+    u8,            // FailImmediately (BOOLEAN)
+    u8,            // ExclusiveLock (BOOLEAN)
+) -> NTSTATUS;
+
+/// `ntdll!NtUnlockFile` — the release half of [`NtLockFileFn`]. Always
+/// synchronous: no `Event`, no APC.
+pub type NtUnlockFileFn = unsafe extern "system" fn(
+    HANDLE,      // FileHandle
+    *mut c_void, // IoStatusBlock
+    *const i64,  // ByteOffset (LARGE_INTEGER)
+    *const i64,  // Length (LARGE_INTEGER)
+    u32,         // Key
+) -> NTSTATUS;
+
+/// `ntdll!NtFlushBuffersFile` — what `FlushFileBuffers` becomes.
+pub type NtFlushBuffersFileFn = unsafe extern "system" fn(
+    HANDLE,      // FileHandle
+    *mut c_void, // IoStatusBlock
+) -> NTSTATUS;
+
 /// `ntdll!NtQueryVolumeInformationFile`.
 pub type NtQueryVolumeInformationFileFn = unsafe extern "system" fn(
     HANDLE,      // FileHandle
