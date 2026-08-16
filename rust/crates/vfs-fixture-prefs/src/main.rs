@@ -33,6 +33,8 @@
 //! lockfile<TAB>ok|fail<TAB><lasterror>
 //! unlockfile<TAB>ok|fail<TAB><lasterror>
 //! flushbuffers<TAB>ok|fail<TAB><lasterror>
+//! lockfileex<TAB>ok|fail<TAB><lasterror>
+//! {lock,unlock,flushbuffers}file-{closed,invalid}<TAB>ok|fail<TAB><lasterror>
 //! ```
 //!
 //! The five lines after the reads are the investigation's "primitive ladder":
@@ -123,6 +125,32 @@ extern "system" {
         nNumberOfBytesToUnlockHigh: u32,
     ) -> i32;
     fn FlushFileBuffers(hFile: *mut core::ffi::c_void) -> i32;
+    fn LockFileEx(
+        hFile: *mut core::ffi::c_void,
+        dwFlags: u32,
+        dwReserved: u32,
+        nNumberOfBytesToLockLow: u32,
+        nNumberOfBytesToLockHigh: u32,
+        lpOverlapped: *mut Overlapped,
+    ) -> i32;
+    fn CreateEventW(
+        lpEventAttributes: *mut core::ffi::c_void,
+        bManualReset: i32,
+        bInitialState: i32,
+        lpName: *const u16,
+    ) -> *mut core::ffi::c_void;
+}
+
+/// Layout-compatible with Win32 `OVERLAPPED`. Only `hEvent` matters here: it
+/// is what `LockFileEx` hands `NtLockFile` as its `Event`, which is the
+/// completion shape the shim classifies (and the one it must signal).
+#[repr(C)]
+struct Overlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    h_event: *mut core::ffi::c_void,
 }
 
 const GENERIC_READ: u32 = 0x8000_0000;
@@ -137,6 +165,9 @@ const INVALID_SET_FILE_POINTER: u32 = 0xFFFF_FFFF;
 /// nonzero length does — a zero-length lock is a degenerate case Windows can
 /// answer without ever reaching the file object.
 const LOCK_LEN: u32 = 64 * 1024;
+const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x2;
+const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x1;
+const INVALID_HANDLE: *mut core::ffi::c_void = -1isize as *mut core::ffi::c_void;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -257,7 +288,72 @@ fn primitive_ladder(path: &str, out: &mut String) {
         let err = GetLastError();
         out.push_str(&format!("flushbuffers\t{}\t{err}\n", if ok != 0 { "ok" } else { "fail" }));
 
+        // An *asynchronous-shaped* lock: `LockFileEx` hands the OVERLAPPED's
+        // event down to `NtLockFile` as its `Event`. This is the caller shape
+        // that can hang on a synthetic handle if the completion is never
+        // delivered, so the shim has to both signal the event and classify the
+        // call — see `hook::lock_hook`. A plain `LockFile` cannot exercise it:
+        // it passes a null event and reads as an ordinary synchronous grant.
+        let event = CreateEventW(std::ptr::null_mut(), 1, 0, std::ptr::null());
+        let mut ov = Overlapped {
+            internal: 0,
+            internal_high: 0,
+            offset: 0,
+            offset_high: 0,
+            h_event: event,
+        };
+        SetLastError(0);
+        let ok = LockFileEx(
+            handle,
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            LOCK_LEN,
+            0,
+            &mut ov,
+        );
+        let err = GetLastError();
+        out.push_str(&format!("lockfileex\t{}\t{err}\n", if ok != 0 { "ok" } else { "fail" }));
+        if ok != 0 {
+            SetLastError(0);
+            UnlockFile(handle, 0, 0, LOCK_LEN, 0);
+        }
+        if !event.is_null() {
+            CloseHandle(event);
+        }
+
         CloseHandle(handle);
+
+        // ── the same three calls on handles that must NOT be answered ──
+        //
+        // A synthetic handle is tagged by one bit, and `INVALID_HANDLE_VALUE`
+        // (-1) has every bit set — so a shim that answers on the tag alone
+        // reports a lock successfully taken on a handle nobody owns, and the
+        // same for a handle that was closed a moment ago. Both must fail, and
+        // they are separate vectors because a stale handle and a never-valid
+        // one reach the check by different routes.
+        for (label, h) in [("closed", handle), ("invalid", INVALID_HANDLE)] {
+            SetLastError(0);
+            let ok = LockFile(h, 0, 0, LOCK_LEN, 0);
+            let err = GetLastError();
+            out.push_str(&format!(
+                "lockfile-{label}\t{}\t{err}\n",
+                if ok != 0 { "ok" } else { "fail" }
+            ));
+            SetLastError(0);
+            let ok = UnlockFile(h, 0, 0, LOCK_LEN, 0);
+            let err = GetLastError();
+            out.push_str(&format!(
+                "unlockfile-{label}\t{}\t{err}\n",
+                if ok != 0 { "ok" } else { "fail" }
+            ));
+            SetLastError(0);
+            let ok = FlushFileBuffers(h);
+            let err = GetLastError();
+            out.push_str(&format!(
+                "flushbuffers-{label}\t{}\t{err}\n",
+                if ok != 0 { "ok" } else { "fail" }
+            ));
+        }
     }
 }
 

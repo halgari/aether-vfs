@@ -2659,6 +2659,23 @@ unsafe extern "system" fn qvol_hook(
     tramp(handle, iosb, info, length, class)
 }
 
+/// Whether `handle` is a synthetic handle **that is currently open**.
+///
+/// `is_fuse_synth` alone is a bit-47 tag test, and that is not the same
+/// question. `INVALID_HANDLE_VALUE` is `-1` — every bit set, including bit 47
+/// — so it passes the tag test, and so does any synthetic handle that has
+/// already been closed or was never issued. Answering `STATUS_SUCCESS` for
+/// those turns a caller's error into a silent one: a lock on a handle whose
+/// open actually failed would appear to be held.
+///
+/// Every other synthetic branch in this file resolves the handle before acting
+/// (`read_hook`, `fuse_query_information`), which is why this exists rather
+/// than the bare tag test the lock trio first shipped with.
+fn open_synth(handle: HANDLE) -> bool {
+    crate::fuse_synth::is_fuse_synth(handle as isize)
+        && crate::fuse_synth::lookup(handle as isize).is_some()
+}
+
 /// The NT path a synthetic handle was opened as, for the lock counters.
 /// `None` for a handle no under-root open recorded.
 fn synth_path(handle: HANDLE) -> Option<String> {
@@ -2693,19 +2710,36 @@ fn synth_path(handle: HANDLE) -> Option<String> {
 /// - Refusing instead (`STATUS_LOCK_NOT_GRANTED`) would leave the profile APIs
 ///   exactly as broken as an unhooked call did; it swaps a wrong status for a
 ///   different wrong status.
-/// - The failure mode a no-op lock permits — two processes in one session
-///   contending for a file and neither being held off — is a data race we do
-///   not have a mechanism to prevent at any layer. When we do, this is where
-///   it goes.
 ///
-/// `hookstats::note_synthetic_lock` counts every grant by path, so if that
-/// contention ever becomes real it is visible in the report rather than
-/// silent.
+/// **Do not read that as "there is only one writer".** There is not, by
+/// design: `cpiw_hook` propagates injection into child processes, so a
+/// launcher and a game — or a game and a mod manager's helper — are routinely
+/// in one session. And the API that exposed this bug is the worst case for a
+/// fake lock: `WritePrivateProfileString` is a read-modify-write, and the lock
+/// it takes here is exactly what stops two of those from losing each other's
+/// updates. Two injected writers on one INI will both be granted the same
+/// exclusive range and one update will disappear.
+///
+/// That is a real hole, not a theoretical one; it is accepted because the
+/// alternative on offer was every INI staying unreadable, not because it is
+/// harmless. Closing it needs a byte-range table in the director — the only
+/// component both processes share. Until then
+/// `hookstats::note_synthetic_lock` counts every grant by path, so the
+/// contention shows up in a report instead of only in corrupted settings.
+///
+/// **Which handles this answers.** Only ones [`open_synth`] resolves. The
+/// bit-47 tag test alone would also catch `INVALID_HANDLE_VALUE` and any
+/// closed or never-issued synthetic handle, and answering `STATUS_SUCCESS` for
+/// those would report a lock held on a file the caller never opened.
 ///
 /// **Completion.** Answered synchronously: `STATUS_SUCCESS`, a completed
 /// `IO_STATUS_BLOCK`, and `SetEvent` if the caller supplied one — the same
 /// shape `read_hook` uses, including its one limitation, that we do not run
-/// the caller's APC (see `hookstats`'s async section). `FailImmediately` needs
+/// the caller's APC. That limitation is counted rather than assumed away:
+/// `note_read_completion` classifies every synthetic lock by the completion
+/// its caller expected, so an APC-supplied lock — the shape that would wait
+/// forever on a callback we never make — shows up in the report's async
+/// section instead of passing for an ordinary grant. `FailImmediately` needs
 /// no branch: `false` means the caller is willing to block for the lock, and
 /// an immediate grant satisfies that strictly better than waiting.
 #[allow(clippy::too_many_arguments)]
@@ -2727,6 +2761,15 @@ unsafe extern "system" fn lock_hook(
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        if !open_synth(handle) {
+            return STATUS_INVALID_HANDLE;
+        }
+        // Classified the same way `read_hook`/`write_hook` classify theirs: an
+        // APC-supplied lock is a completion we accept and never deliver, and
+        // that is the one caller shape here that can actually hang. Counting
+        // it is what makes it visible in the async section instead of looking
+        // like an ordinary synchronous grant.
+        crate::hookstats::note_read_completion(!apc.is_null(), !event.is_null());
         crate::hookstats::note_synthetic_lock(
             if exclusive != 0 { "lock-exclusive" } else { "lock-shared" },
             synth_path(handle).as_deref(),
@@ -2755,6 +2798,9 @@ unsafe extern "system" fn unlock_hook(
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        if !open_synth(handle) {
+            return STATUS_INVALID_HANDLE;
+        }
         crate::hookstats::note_synthetic_lock("unlock", synth_path(handle).as_deref());
         synth_iosb_ok(iosb, 0);
         return STATUS_SUCCESS;
@@ -2776,6 +2822,9 @@ unsafe extern "system" fn flush_hook(handle: HANDLE, iosb: *mut c_void) -> NTSTA
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        if !open_synth(handle) {
+            return STATUS_INVALID_HANDLE;
+        }
         crate::hookstats::note_synthetic_lock("flush", synth_path(handle).as_deref());
         synth_iosb_ok(iosb, 0);
         return STATUS_SUCCESS;

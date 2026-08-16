@@ -2251,10 +2251,12 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
         stats_log.to_string_lossy().into_owned(),
     );
     // Fast tick, same reason as the escape matrix's identical override: this
-    // fixture's whole run is far under the reporter's 250ms default. The
-    // final exit flush would produce a report either way, but a periodic
-    // snapshot landing first is what makes the "FINAL" assertion below
-    // meaningful rather than vacuously true of the only write there was.
+    // fixture's whole run is far under the reporter's 250ms default, and the
+    // periodic reporter is the *only* writer of the report — nothing flushes
+    // one at process exit (`vfs_shim::hookstats::banner` records why an exit
+    // flush was built, measured, and removed). Paired with the fixture's own
+    // end-of-run wait, which is what guarantees a tick lands after its last
+    // call rather than merely somewhere during the run.
     env.insert("VFS_SHIM_STATS_INTERVAL_MS".to_string(), "5".to_string());
 
     let mut stream = client
@@ -2325,7 +2327,18 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
     // to survive. The profile read above stops at the first failure, so
     // without these `NtUnlockFile` and `NtFlushBuffersFile` would have no
     // coverage at all — the read never gets far enough to reach them.
-    for op in ["open", "getfiletype", "setfilepointer", "lockfile", "unlockfile", "flushbuffers"] {
+    for op in [
+        "open",
+        "getfiletype",
+        "setfilepointer",
+        "lockfile",
+        "unlockfile",
+        "flushbuffers",
+        // `LockFileEx` with an OVERLAPPED event — the asynchronous-shaped
+        // lock. A plain `LockFile` passes a null event, so only this one
+        // exercises the completion the shim has to signal.
+        "lockfileex",
+    ] {
         let line = lines
             .iter()
             .find(|l| l.op == op)
@@ -2337,6 +2350,33 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
              rejected outright — and the caller's next move is usually to abandon the file, \
              not to retry. Lines: {lines:?}",
             line.lasterror
+        );
+    }
+
+    // The other half of the same question: which handles must **not** be
+    // answered. A synthetic handle is marked by a single tag bit, and
+    // `INVALID_HANDLE_VALUE` (-1) has every bit set — so a hook that decides on
+    // the tag alone reports a lock taken on a handle nobody owns, and the same
+    // for one closed a moment earlier. Both are worse than an error: they
+    // convert a caller's failed open into a lock it believes it holds.
+    for op in [
+        "lockfile-closed",
+        "unlockfile-closed",
+        "flushbuffers-closed",
+        "lockfile-invalid",
+        "unlockfile-invalid",
+        "flushbuffers-invalid",
+    ] {
+        let line = lines
+            .iter()
+            .find(|l| l.op == op)
+            .unwrap_or_else(|| panic!("no `{op}` line from the fixture: {lines:?}"));
+        assert_eq!(
+            line.value, "fail",
+            "`{op}` succeeded. The handle is either closed or was never valid, so the only \
+             correct answer is failure — a synthetic-handle branch that keys off the tag bit \
+             without resolving the handle grants locks on handles that do not exist. \
+             Lines: {lines:?}"
         );
     }
 
@@ -2422,6 +2462,35 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
         section.contains("prefs.ini"),
         "the synthetic-lock section does not name the file that was locked, so it cannot answer \
          \"is anyone else locking this\" — the one question it exists for. Section:\n{section}"
+    );
+
+    // Completion shape. The shim signals a caller's event but never runs a
+    // caller's APC, so a caller that waits on one hangs — and the async
+    // section is the only place that shape is visible. `lock_hook` has to
+    // classify its calls the way `read_hook`/`write_hook` classify theirs or
+    // an APC-supplied lock is neither delivered nor counted.
+    //
+    // Attributable: every other synthetic-handle operation this fixture makes
+    // is fully synchronous (null event), so the `with event` count can only
+    // have come from the `LockFileEx` above.
+    let with_event = report
+        .lines()
+        .find_map(|l| {
+            let rest = l.trim().strip_prefix("reads:")?;
+            let (_, after_apc) = rest.split_once('/')?;
+            after_apc.trim().strip_suffix(" with event").or_else(|| {
+                after_apc.split_once(" with event").map(|(n, _)| n)
+            })
+        })
+        .and_then(|n| n.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| {
+            panic!("could not read the async section's completion counts. Report:\n{report}")
+        });
+    assert!(
+        with_event >= 1,
+        "the async section counts no event-completed operations, though the fixture's \
+         `LockFileEx` supplied one and reported success. An unclassified lock is one the \
+         report cannot show waiting on a completion we never deliver. Report:\n{report}"
     );
 
     client
