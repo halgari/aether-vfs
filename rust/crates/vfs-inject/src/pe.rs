@@ -86,15 +86,11 @@ pub fn is_system_import_dll(name: &str) -> bool {
         )
 }
 
-/// Whether `steam_api*.dll` stays the host copy rather than being served from
-/// the VFS.
-///
-/// Unset means **false** here and **true** in `vfs-shim`, which is deliberate:
-/// the shim's exception predates the switch, so a launch that never sets it
-/// must keep seeing the host copy. Both read the same name from `vfs-env`.
-pub fn keep_host_steam_api() -> bool {
-    vfs_env::present(vfs_env::KEEP_HOST_STEAM_API) && vfs_env::opt_out(vfs_env::KEEP_HOST_STEAM_API)
-}
+// `keep_host_steam_api` lived here, re-exported from `lib.rs`, and had no
+// callers anywhere in the workspace — so the warning it carried about needing
+// to agree with `vfs-shim`'s same-named function, and the deliberately opposite
+// defaults that warning justified, protected nothing. Deleted by gate 5, Task 4
+// with the shim-side exception it was supposed to mirror.
 
 pub fn map_image_from_pe_bytes_local(pe: &[u8]) -> Result<(*mut c_void, usize), &'static str> {
     use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE};

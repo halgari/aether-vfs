@@ -69,35 +69,6 @@ fn allow_disk_fallthrough() -> bool {
     *FLAG.get_or_init(|| vfs_env::opt_in(vfs_env::ALLOW_DISK_FALLTHROUGH))
 }
 
-/// Whether `steam_api*.dll` stays the host-install copy (excepted from the
-/// director) rather than being served from the zip.
-///
-/// Must agree with `vfs_inject::keep_host_steam_api`: the two decide the same
-/// question from opposite sides, and a disagreement leaves the module resolved
-/// from one source and expected from the other.
-///
-/// Unset defaults to **true** here (unlike vfs-inject, which defaults false):
-/// this exception used to be unconditional, so anything launching the shim
-/// without setting the variable must keep seeing the host copy.
-fn keep_host_steam_api() -> bool {
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| !close_drm_exceptions() && vfs_env::opt_out(vfs_env::KEEP_HOST_STEAM_API))
-}
-
-/// **Temporary (gate 5, task 1 probe).** `VFS_CLOSE_DRM_EXCEPTIONS=1` closes
-/// all four DRM/identity exceptions at once, so `steam_appid.txt`,
-/// `SkyrimSELauncher.exe`, `steam_api{,64}.dll` and `SkyrimSE.exe` route
-/// through the director like every other under-root path.
-///
-/// Exists so the exceptions can be *measured* closed without deleting the code
-/// that implements them; it overrides `keep_host_steam_api` and
-/// `fuse_skyrim_exe`, which already invert two of the four on their own.
-/// Delete this switch once the gate decides whether the exceptions stay.
-fn close_drm_exceptions() -> bool {
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| vfs_env::opt_in(vfs_env::CLOSE_DRM_EXCEPTIONS))
-}
-
 /// Whether a child process we inject starts with its working directory set to
 /// the virtual root. Default **on**; `VFS_CHILD_CWD_ROOT=0` disables.
 ///
@@ -110,32 +81,6 @@ fn close_drm_exceptions() -> bool {
 fn child_cwd_root() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| vfs_env::opt_out(vfs_env::CHILD_CWD_ROOT))
-}
-
-/// Experiment switch: when `VFS_FUSE_SKYRIM_EXE=1`, serve `SkyrimSE.exe`
-/// through the director instead of excepting it to the host install.
-///
-/// **Measured 2026-08-12** (launch → main menu, `VFS_DRM_EXE_LOG` set): the
-/// game process never opens `SkyrimSE.exe` through `try_fuse_create` at all —
-/// the trace file was not created in either mode, and both runs reached the
-/// menu with DRM satisfied and no "Steam Error". So this exception is inert on
-/// the startup path and is *not* what fixes the historical symptom.
-///
-/// What actually needs the on-disk exe is outside this hook: `CreateProcess`
-/// of the host image, and Steam's own path association (the client is a
-/// separate, un-injected process, so our hooks cannot affect what it reads).
-/// That association is what `ensure_canonical_skyrim_installdirs` addresses.
-///
-/// Kept default-**off** rather than deleted: the trace only covers startup, and
-/// the recorded explanation for the original failure was wrong ("Steam hashes
-/// the on-disk PE" — it does not; the whole loaded image was once rewritten in
-/// memory and DRM still passed), so the real trigger may lie on a path not yet
-/// exercised.
-/// Only `SkyrimSE.exe` is affected; steam_api*, steam_appid.txt and the
-/// launcher stay excepted.
-fn fuse_skyrim_exe() -> bool {
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| close_drm_exceptions() || vfs_env::opt_in(vfs_env::FUSE_SKYRIM_EXE))
 }
 
 use retour::RawDetour;
@@ -1191,73 +1136,41 @@ unsafe fn try_fuse_create(
     // Directory open of root: empty vpath → "."
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
 
-    // DRM / identity exceptions (host Steam tree only — not Data/* content):
-    // - steam_api*: SEC_IMAGE + client IPC
-    // - steam_appid.txt: SteamAPI_Init / RestartAppIfNecessary
-    // - SkyrimSE.exe / SkyrimSELauncher.exe: identity. Steam associates a
-    //   process with an app by its *image path* vs the appmanifest installdir,
-    //   and re-opens that path for version info / icon. Serving it through FUSE
-    //   was observed to produce "Steam Error"; the cause is an open that fails
-    //   to resolve (see tramp_create_abs and STATUS_OBJECT_NAME_NOT_FOUND on
-    //   FUSE-relative OA), not an integrity check.
+    // **Gate 5, Task 4 — the DRM/identity exceptions, closed.** Four basenames
+    // (`steam_appid.txt`, `SkyrimSELauncher.exe`, `steam_api{,64}.dll`,
+    // `SkyrimSE.exe`) used to be matched here, case-insensitively at any depth,
+    // and returned `None` *before the ring was consulted* — sending the open on
+    // to `decision_for`, which either redirected it at a real disk path or
+    // passed it straight through to the real filesystem under the managed root.
+    // That was the last route by which a path under a managed root reached
+    // something other than the director.
     //
-    //   Steam does NOT compare the in-memory image against the on-disk PE.
-    //   Measured while the launch still hollowed: the whole loaded image was
-    //   overwritten with zip PE bytes at a relocated base and DRM verified
-    //   fine. Do not "fix" anything here on the theory that the mapped image
-    //   must match disk.
-    {
-        let base = std::path::Path::new(&path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        // Temporary (gate 5, task 1 probe): `close_drm_exceptions()` makes
-        // these two respond to the same switch as the other two, which were
-        // already flag-gated. Fold back into an unconditional test — or delete
-        // the branch — once the gate decides.
-        if (base.eq_ignore_ascii_case("steam_appid.txt")
-            || base.eq_ignore_ascii_case("SkyrimSELauncher.exe"))
-            && !close_drm_exceptions()
-        {
-            crate::hookstats::note_open_outcome(
-                crate::hookstats::OpenOutcome::FellThroughDrmException,
-                &path,
-            );
-            *outcome_recorded = true;
-            return None; // tramp → the staged image's own directory
-        }
-        // steam_api* follows the same policy vfs-inject uses: when no copy is
-        // staged beside the image, trampling to disk would just fail, so serve
-        // it from the director instead.
-        if (base.eq_ignore_ascii_case("steam_api64.dll")
-            || base.eq_ignore_ascii_case("steam_api.dll"))
-            && keep_host_steam_api()
-        {
-            crate::hookstats::note_open_outcome(
-                crate::hookstats::OpenOutcome::FellThroughDrmException,
-                &path,
-            );
-            *outcome_recorded = true;
-            return None;
-        }
-        // SkyrimSE.exe is excepted the same way by default, but is the one we
-        // are still trying to explain — trace every open so the log shows who
-        // asks for it and how (FUSE-relative OA vs absolute).
-        if base.eq_ignore_ascii_case("SkyrimSE.exe") {
-            let via_director = fuse_skyrim_exe();
-            drm_exe_trace(&path, fuse_root_directory(oa), write, via_director);
-            if !via_director {
-                crate::hookstats::note_open_outcome(
-                    crate::hookstats::OpenOutcome::FellThroughDrmException,
-                    &path,
-                );
-                *outcome_recorded = true;
-                return None;
-            }
-        }
-    }
+    // The reason recorded for keeping them was "serving `SkyrimSE.exe` through
+    // FUSE produced a Steam Error, caused by an open that fails to resolve
+    // (FUSE-relative `OBJECT_ATTRIBUTES` reaching the kernel)". That reason was
+    // self-cancelling: the unresolvable OA only ever arose on the *excepted*
+    // arm, which is the one that has to hand the kernel an OA whose root is a
+    // synthetic handle (see `tramp_create_abs`). With the exception gone the
+    // kernel is never called for these names at all — the open either gets a
+    // synthetic handle from the director or is sealed.
+    //
+    // Two things the deleted comment got right and are worth keeping: Steam
+    // does **not** compare the in-memory image against the on-disk PE (measured
+    // — the whole loaded image was once overwritten with zip PE bytes at a
+    // relocated base and DRM still verified), and what actually needs the
+    // on-disk exe is outside this hook: `CreateProcess` of the host image, and
+    // Steam's own path association from a separate, un-injected process.
+    //
+    // `OpenOutcome::FellThroughDrmException` is deliberately kept in the enum
+    // and in the report reading **zero**: a removed counter cannot prove the
+    // class stayed closed, and the shim/director reconciliation asserts on it.
+    //
+    // The tracer stays wired for the live acceptance run — it is off unless
+    // `VFS_DRM_EXE_LOG` names a file, and it now sees the opens it never could
+    // before, since these names finally arrive here.
+    drm_exe_trace(&path, fuse_root_directory(oa), write);
 
-    // Every other under-root open — read *and* write — goes through the
+    // Every under-root open — read *and* write — goes through the
     // director (zip / composed / writable layer), and every answer it gives,
     // including the failures, is this function's answer too: since gate 4's
     // Task 5 no *decision* below returns `None`, except behind the explicit
@@ -1483,23 +1396,40 @@ unsafe fn try_fuse_create(
     }
 }
 
-/// Trace every `SkyrimSE.exe` open so the DRM exception can be explained rather
-/// than assumed. Set `VFS_DRM_EXE_LOG` to a file path.
+/// Trace every under-root `SkyrimSE.exe` open. Off unless `VFS_DRM_EXE_LOG`
+/// names a file.
 ///
 /// `rel` marks a FUSE-relative OA (RootDirectory is a synthetic handle), which
-/// is the shape that previously failed with `STATUS_OBJECT_NAME_NOT_FOUND`.
-fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool, via_director: bool) {
-    let Some(path) = vfs_env::path(vfs_env::DRM_EXE_LOG) else {
+/// is the shape the deleted exception blamed for `STATUS_OBJECT_NAME_NOT_FOUND`
+/// — a shape that can no longer arise for this name, since the open is now
+/// answered here rather than handed back to the kernel.
+///
+/// **Called on every under-root open**, so the enabled-check comes first and is
+/// cached: the basename test is not free, and this is the hottest path in the
+/// shim. Caching means a `VFS_DRM_EXE_LOG` set *after* the first open of the
+/// process does not take effect; a diagnostic switch read once at startup is
+/// the same contract every other switch in this file has.
+///
+/// The `route=` field the old format carried is gone: there is one route now.
+fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool) {
+    static LOG: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    let Some(path) = LOG.get_or_init(|| vfs_env::path(vfs_env::DRM_EXE_LOG)).as_ref() else {
         return;
     };
+    if !std::path::Path::new(nt_or_win_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|b| b.eq_ignore_ascii_case("SkyrimSE.exe"))
+    {
+        return;
+    }
     let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
     let line = format!(
-        "{}\tskyrimse-exe\troute={}\toa={}\taccess={}\t{}\n",
+        "{}\tskyrimse-exe\toa={}\taccess={}\t{}\n",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
-        if via_director { "director" } else { "host" },
         if rel { "fuse-relative" } else { "absolute" },
         if write { "write" } else { "read" },
         p
@@ -1511,7 +1441,7 @@ fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool, via_director: boo
         let _ = std::fs::create_dir_all(parent);
     }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(line.as_bytes());
     }
     hook_reenter_end();
@@ -1809,10 +1739,17 @@ fn to_nt_path(path: &str) -> String {
 
 /// Open via trampoline with an absolute NT path and **null** RootDirectory.
 ///
-/// Required when the original OA had a FUSE synthetic RootDirectory (invalid
-/// to the kernel) but we intentionally fall through to the host install —
-/// DRM exceptions (`steam_api*`, `steam_appid.txt`, `SkyrimSE.exe`).
-/// Arity mirrors `NtCreateFile` exactly; it is not ours to reduce.
+/// Required when the original OA had a FUSE synthetic RootDirectory, which is
+/// invalid to the kernel, but the open is nonetheless falling through to it.
+///
+/// **The four DRM exceptions used to be the reason this existed** and are gone
+/// (gate 5, Task 4). What is left is the narrow disagreement case: a synthetic
+/// `RootDirectory` whose `PATH_TABLE` entry resolves to a path that
+/// `FuseClient::vpath_under_root` does *not* place under any root, so
+/// `try_fuse_create` declined it. That is a genuine inconsistency between the
+/// two root notions rather than a policy, and passing the synthetic handle to
+/// the kernel would fail with a misleading status, so the absolute rebuild
+/// stays. Arity mirrors `NtCreateFile` exactly; it is not ours to reduce.
 #[allow(clippy::too_many_arguments)]
 unsafe fn tramp_create_abs(
     tramp: NtCreateFileFn,

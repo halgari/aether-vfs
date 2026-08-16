@@ -166,14 +166,11 @@ fn run() -> Result<(), String> {
     ensure_steam_running()?;
     ensure_steam_logged_on()?;
     eprintln!("  steam: AppId env cleared; steam_appid.txt=489830; client must stay running");
-    // Keep host steam_api64 for DRM IPC only. All other game content must come
-    // from the zip via the director — never open the Steam library tree.
-    //
-    // Default on, but honour an explicit setting. `VFS_KEEP_HOST_STEAM_API=0`
-    // serves steam_api* from the zip instead.
-    if !vfs_env::present(vfs_env::KEEP_HOST_STEAM_API) {
-        std::env::set_var(vfs_env::KEEP_HOST_STEAM_API, "1");
-    }
+    // `VFS_KEEP_HOST_STEAM_API` used to be force-set here so the shim would
+    // except `steam_api*.dll` to the host install. Gate 5, Task 4 closed that
+    // exception and deleted the variable: `steam_api*` now comes from the
+    // director like everything else under the root, which the root-0 disk
+    // layers below (the runtime root and the staged launch dir) both carry.
     std::env::remove_var(vfs_env::ALLOW_DISK_FALLTHROUGH);
     std::env::remove_var(vfs_env::DISK_ONLY_ROOT);
     if let Some(p) = vfs_env::raw(vfs_env::DIRECTOR_OPEN_LOG) {

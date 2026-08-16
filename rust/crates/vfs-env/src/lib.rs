@@ -144,19 +144,13 @@ pub const READY_FUSE_FAILED_PREFIX: &str = "fuse-failed:";
 pub const ALLOW_DISK_FALLTHROUGH: &str = "VFS_ALLOW_DISK_FALLTHROUGH";
 /// Serve the managed root from real disk only, bypassing the director.
 pub const DISK_ONLY_ROOT: &str = "VFS_DISK_ONLY_ROOT";
-/// Keep the host's `steam_api*.dll` rather than serving it from the VFS.
-/// Must agree between `vfs-shim` and `vfs-inject`; they read the same name here.
-pub const KEEP_HOST_STEAM_API: &str = "VFS_KEEP_HOST_STEAM_API";
+// `VFS_KEEP_HOST_STEAM_API`, `VFS_FUSE_SKYRIM_EXE` and the temporary
+// `VFS_CLOSE_DRM_EXCEPTIONS` probe switch were deleted by gate 5, Task 4 along
+// with the four DRM/identity exceptions they configured. Nothing under a
+// managed root reaches the host tree any more, so there is nothing left for
+// them to select between.
 /// Start managed children in the virtual root rather than the launcher's cwd.
 pub const CHILD_CWD_ROOT: &str = "VFS_CHILD_CWD_ROOT";
-/// Serve the game EXE itself through the director instead of trampolining.
-pub const FUSE_SKYRIM_EXE: &str = "VFS_FUSE_SKYRIM_EXE";
-/// **Temporary (gate 5, task 1 probe).** Close all four DRM/identity
-/// exceptions at once, so `steam_appid.txt`, `SkyrimSELauncher.exe`,
-/// `steam_api{,64}.dll` and `SkyrimSE.exe` route through the director like
-/// every other under-root path. Overrides `KEEP_HOST_STEAM_API` and
-/// `FUSE_SKYRIM_EXE` in the shim. Delete when the gate decides their fate.
-pub const CLOSE_DRM_EXCEPTIONS: &str = "VFS_CLOSE_DRM_EXCEPTIONS";
 /// Refuse `SEC_IMAGE` sections on VFS-backed handles.
 pub const REJECT_FUSE_SECTION: &str = "VFS_REJECT_FUSE_SECTION";
 /// Refuse data sections on VFS-backed handles (narrower than the above).
@@ -334,14 +328,7 @@ pub const ALL: &[Var] = &[
     Var { name: TEST_FUSE_INIT_FAIL, kind: Kind::Fixture, default: "false (FUSE inits normally)" },
     Var { name: ALLOW_DISK_FALLTHROUGH, kind: Kind::Behaviour, default: "false (root stays sealed)" },
     Var { name: DISK_ONLY_ROOT, kind: Kind::Behaviour, default: "false" },
-    Var { name: KEEP_HOST_STEAM_API, kind: Kind::Behaviour, default: "true in the shim, false in vfs-inject" },
     Var { name: CHILD_CWD_ROOT, kind: Kind::Behaviour, default: "true" },
-    Var { name: FUSE_SKYRIM_EXE, kind: Kind::Behaviour, default: "false" },
-    Var {
-        name: CLOSE_DRM_EXCEPTIONS,
-        kind: Kind::Behaviour,
-        default: "false (the four DRM/identity exceptions stay open)",
-    },
     Var { name: REJECT_FUSE_SECTION, kind: Kind::Behaviour, default: "false" },
     Var { name: REJECT_FUSE_DATA_SECTION, kind: Kind::Behaviour, default: "false" },
     Var { name: LAZY_NO_VEH, kind: Kind::Behaviour, default: "false (VEH installed)" },

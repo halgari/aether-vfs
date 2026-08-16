@@ -17,9 +17,7 @@ mod payload_cfg;
 mod static_imports;
 mod stub;
 
-pub use pe::{
-    is_system_import_dll, keep_host_steam_api, map_image_from_pe_bytes_local, pe_looks_like_image,
-};
+pub use pe::{is_system_import_dll, map_image_from_pe_bytes_local, pe_looks_like_image};
 
 /// Static-import DLL names declared by a raw PE file image.
 ///
