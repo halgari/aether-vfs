@@ -1289,3 +1289,98 @@ produce and explicitly refused to claim.
 
 **Criterion 6 — "Skyrim launches, shows the expected load order, and writes its
 INI and save through the director" — is met.**
+
+## Gate 5: the invariant holds without exception (2026-08-15)
+
+Stage 2a's goal, from the design spec: *for any path P and any process in the
+session, if P resolves under a managed root, every NT operation on P is answered
+by the director.* This session is the first in which that is true with **no
+exceptions of any kind**.
+
+### What was closed
+
+The four host-tree filename exceptions — `steam_appid.txt`,
+`SkyrimSELauncher.exe`, `steam_api{,64}.dll`, `SkyrimSE.exe` — matched on
+basename at any depth, returning `None` from `try_fuse_create` before the ring
+was consulted. Both env switches (`VFS_KEEP_HOST_STEAM_API`,
+`VFS_FUSE_SKYRIM_EXE`) are gone, verified absent from the shipped release DLL.
+
+Alongside them, two escapes that reached real disk: **`NtDeleteFile`** (unhooked
+and path-based, so it deleted the real file), and **rename across a root
+boundary in either direction** — into a root from outside physically created a
+file there, and out of a root physically unlinked one.
+
+### The spec's hypothesis was right, and its prescribed fix was unnecessary
+
+§6 predicted that serving these files through the director would reproduce a
+"Steam Error", blamed an unresolved open rather than an integrity check, and
+prescribed building FUSE-relative `OBJECT_ATTRIBUTES` resolution to enable it.
+
+The hypothesis held — the game launches. The prescription did not survive
+contact: **that resolution exists only to keep the exceptions open.**
+`tramp_create_abs` is there because an excepted open must reach the kernel
+carrying an OA whose root is a handle the kernel never issued. With the
+exceptions closed the kernel is never called and the OA is never passed on. The
+`STATUS_OBJECT_NAME_NOT_FOUND` the spec blamed sits on the PassThrough arm —
+the exception's own arm. The blocker was self-inflicted by the thing being
+removed, and a probe established that before any enablement was built.
+
+The spec also prescribed mounting the Steam host tree as a `disk` root, which
+would have contradicted `skyrim-live.rs:222`'s deliberate refusal to do so. It
+was never needed: all four names were already reachable through the existing
+root-0 layers.
+
+### The run
+
+Launch → `coc riverwood` → `save gate5save` → `qqq`. Reached gameplay, saved,
+quit cleanly. No Steam Error, no Anniversary Edition modal.
+
+```
+under-root open outcomes:
+  routed                               4163
+        1858x  …\my games\skyrim special edition\skyrim.ini
+         150x  …\my games\skyrim special edition\skyrimprefs.ini
+          15x  …\stage\vfs-stage-16888\skyrimse.exe        ← was drm-exception
+           7x  …\my games\skyrim special edition\saves\
+           5x  …\saves\gate5save.ess.tmp
+  (no fall-through class appears at all)
+
+directory enumerations by source:
+  director      12 listing(s),  280 entries
+  contained      0
+
+vfs-io opens:  ok=2139 err=2024 (reconciliation target ok+err=4163)
+vfs-io writes: ops=3 bytes=2459865 (2.35 MiB)
+root 1: read_ops=2016 read_bytes=9,042,404 | write_ops=3 write_bytes=2,459,865
+```
+
+**Every fall-through class is zero.** Zero-count classes are not printed, so the
+absence of `fell-through: drm-exception` *is* the zero — it read **16** in gate
+4, and those same 15 `skyrimse.exe` opens plus 1 `steam_appid.txt` now appear
+under `routed`.
+
+**Reconciliation exact:** 2139 + 2024 = 4163 = the shim's `routed`.
+
+**The save routed byte-for-byte:** `gate5save.ess` is 2,459,865 bytes on disk;
+the director recorded `write_bytes=2,459,865`.
+
+### What this gate did not close
+
+**The `DllMain` shutdown stall is unfixed, and the fix direction was disproved
+rather than skipped.** A stoppable reporter joined from an `NtTerminateProcess`
+detour was built and measured: **16 of 20 runs still hung**, with a breadcrumb
+from the hook's first line never appearing — **the process wedges before it
+reaches `NtTerminateProcess`**, so a fix hung off process termination is dead
+code. It was reverted rather than shipped. A reliable trigger now exists (16/20
+against unmodified HEAD), and the next step is named: resolve the hung frames
+against the test binary's PDB to name the blocking lock. Until it has a name, no
+fix can be aimed.
+
+Also open, recorded rather than lost: `setinfo_hook`'s engine branch never asks
+the client, so a handle-based delete on a non-synthetic under-root handle still
+mints a shim-spelled whiteout marker in the director's own upper;
+`parse_rename_target` discards the OS-consulted provenance bit on the target
+side; and `Decision::Redirect`/`Deny` survive — **not** because of these
+exceptions, as gate 4 recorded, but because of the `allow_disk_fallthrough`
+opt-out, which gate 4 kept deliberately and which this document relies on for
+stray detection.
