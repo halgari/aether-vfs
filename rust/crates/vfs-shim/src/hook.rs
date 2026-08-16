@@ -2488,8 +2488,15 @@ unsafe fn is_delete_request(info: *mut c_void, length: u32, class: u32) -> bool 
 ///
 /// So ask the OS, exactly as `parent_dir_of_handle`'s case 4 already does for
 /// `OBJECT_ATTRIBUTES.RootDirectory` — `GetFinalPathNameByHandleW` needs no
-/// reopen, since the caller is handing us a handle it currently holds. The two
-/// cheap sources are tried first and neither costs a syscall:
+/// reopen, since the caller is handing us a handle it currently holds.
+///
+/// **The order is correctness, not only cost.** `PATH_TABLE` holds the path the
+/// caller *named*, and for a handle that came off `create_hook`'s
+/// `Decision::Redirect` arm that is the virtual path while the handle itself
+/// targets the overlay copy. Asking the OS first would hand back the overlay
+/// file's own location, which resolves under no managed root, so the whiteout
+/// would be skipped and the operation would go to the kernel — reintroducing the
+/// escape from the other end. The recorded name wins wherever there is one:
 ///
 /// 1. `PATH_TABLE` — an intercepted open whose path was under a managed root.
 /// 2. `HANDLE_PATHS` — every other intercepted open. A handle here but not in
