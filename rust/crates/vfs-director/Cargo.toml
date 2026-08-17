@@ -3,16 +3,14 @@ name = "vfs-director"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Userspace FUSE host: mount backends, serve IPC, launch process with remapped I/O"
+description = "Director kernel: one provider per root, ring server, staging. The embeddable API is vfs-embed."
 
 [lib]
 name = "vfs_director"
 path = "src/lib.rs"
 
-[features]
-default = ["zip"]
-## Convenience `Session::mount_zip` (pulls vfs-zip).
-zip = ["dep:vfs-zip"]
+# No `zip` feature: it existed only for `Session::mount_zip`, and `Session`
+# now lives in `vfs-embed`, which carries the feature instead.
 
 [dependencies]
 vfs-env = { path = "../vfs-env" }
@@ -22,15 +20,14 @@ vfs-env = { path = "../vfs-env" }
 vfs-core = { path = "../vfs-core" }
 vfs-protocol = { path = "../vfs-protocol" }
 vfs-provider = { path = "../vfs-provider" }
-# `OverlayProvider` only — `Session::set_write_layer` composes the writable
-# upper over the read-only mount graph here rather than leaving each host to
-# rebuild copy-on-write out of sibling mounts (which cannot express it).
+# `InlineProvider` in this crate's own tests; the composition that builds a
+# root's writable upper out of `OverlayProvider` moved to `vfs-embed` with
+# `Session`.
 vfs-compose = { path = "../vfs-compose" }
 vfs-ipc = { path = "../vfs-ipc" }
 vfs-win = { path = "../vfs-win" }
 vfs-inject = { path = "../vfs-inject" }
 vfs-shim = { path = "../vfs-shim" }
-vfs-zip = { path = "../vfs-zip", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Window + process enumeration for the load benchmark (crates/vfs-director/src/bench.rs).

@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use vfs_director::{DiskProvider, LaunchOpts, Session};
+use vfs_embed::{DiskProvider, LaunchOpts, Session};
 
 fn profile_dir() -> std::path::PathBuf {
     let exe = std::env::current_exe().expect("current_exe");

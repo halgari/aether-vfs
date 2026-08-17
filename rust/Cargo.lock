@@ -1548,10 +1548,26 @@ dependencies = [
  "vfs-compose",
  "vfs-control",
  "vfs-director",
+ "vfs-embed",
  "vfs-env",
  "vfs-protocol",
  "vfs-source",
  "vfs-win",
+ "vfs-zip",
+]
+
+[[package]]
+name = "vfs-embed"
+version = "0.1.0"
+dependencies = [
+ "vfs-cache",
+ "vfs-compose",
+ "vfs-director",
+ "vfs-env",
+ "vfs-inject",
+ "vfs-protocol",
+ "vfs-provider",
+ "vfs-shim",
  "vfs-zip",
 ]
 
@@ -1607,7 +1623,7 @@ name = "vfs-launch"
 version = "0.1.0"
 dependencies = [
  "vfs-core",
- "vfs-director",
+ "vfs-embed",
  "vfs-ipc",
  "vfs-protocol",
  "vfs-server",

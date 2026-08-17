@@ -88,11 +88,12 @@ Any language can implement `vfs-source/proto/source.proto` (`Source` service).
 |-------|--------|
 | Control gRPC + config schema | `vfs-control` |
 | Daemon + `vfs` CLI | `vfs-directord` |
+| Embeddable API: session lifecycle, roots, composition, launch | `vfs-embed` |
 | Provider contract, capabilities, conformance suite | `vfs-provider` |
 | Provider builders, gRPC SourceService | `vfs-source` |
 | Layered / router / overlay (read) | `vfs-compose` |
 | Block cache (RAM + disk) | `vfs-cache` |
-| FUSE kernel + Session launch | `vfs-director` |
+| Director kernel + ring server + staging | `vfs-director` |
 | Inject / shim / payload | `vfs-inject`, `vfs-shim`, `vfs-payload` |
 
 Docs: [rust/docs/](rust/docs/), design

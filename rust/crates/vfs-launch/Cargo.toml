@@ -17,8 +17,9 @@ name = "vfs-fuse-bench"
 path = "src/bin/vfs-fuse-bench.rs"
 
 [dependencies]
-# Main binary: Session host. Transitive: inject/shim/ipc via vfs-director.
-vfs-director = { path = "../vfs-director" }
+# Main binary: a `Session` host, so it goes through the embeddable API rather
+# than the kernel. Transitive: director/inject/shim/ipc via vfs-embed.
+vfs-embed = { path = "../vfs-embed" }
 # Fuse-bench still uses legacy tree Server + protocol codecs.
 vfs-core = { path = "../vfs-core" }
 vfs-zip = { path = "../vfs-zip" }

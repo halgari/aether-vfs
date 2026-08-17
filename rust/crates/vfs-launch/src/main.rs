@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use vfs_director::{Director, DiskProvider, RootId, KIND_FILE, Session};
+use vfs_embed::{Director, DiskProvider, RootId, KIND_FILE, Session};
 
 const DEFAULT_LAYERS: &str = r"C:	mp";
 const STEAM_APPID: &str = "489830"; // Skyrim Special Edition
@@ -437,7 +437,7 @@ fn main() {
         if detach { "detach" } else { "wait" }
     );
 
-    let exit = session.launch(&vfs_director::LaunchOpts {
+    let exit = session.launch(&vfs_embed::LaunchOpts {
         image: pe_vpath,
         args: vec![],
         wait: args.wait,

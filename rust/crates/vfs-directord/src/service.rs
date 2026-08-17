@@ -15,7 +15,7 @@ use vfs_control::pb::{
     TeardownReq,
 };
 use vfs_control::SourceSpec;
-use vfs_director::LaunchOpts;
+use vfs_embed::LaunchOpts;
 use vfs_source::build_provider;
 
 use crate::registry::SessionRegistry;

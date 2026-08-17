@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use vfs_director::{DiskProvider, RootId, Session};
+use vfs_embed::{DiskProvider, RootId, Session};
 
 /// Deterministic, position-dependent bytes: a fragmented or mis-ordered read
 /// shows up as a mismatch at a known offset rather than plausible-looking data.

@@ -28,7 +28,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use vfs_director::{DiskProvider, RootId, Session, OPEN_READ, OPEN_WRITE};
+use vfs_embed::{DiskProvider, RootId, Session, OPEN_READ, OPEN_WRITE};
 
 /// The zip-only file every test here edits, spelled as a real archive spells
 /// it (`Data/…`) while every lookup uses the folded vpath the shim sends.
@@ -281,7 +281,7 @@ fn a_write_open_of_a_layered_directory_does_not_create_a_file_over_it() {
     // `data` exists only implicitly, as the parent of the zip's `Data/x.esp`
     // — the same way a real archive carries its directories.
     let st = s.kernel().getattr(RootId::DEFAULT, "data").unwrap().unwrap();
-    assert_eq!(st.kind, vfs_director::KIND_DIR, "setup: `data` must resolve as a directory");
+    assert_eq!(st.kind, vfs_embed::KIND_DIR, "setup: `data` must resolve as a directory");
 
     let err = s
         .kernel()
@@ -305,7 +305,7 @@ fn a_write_open_of_a_layered_directory_does_not_create_a_file_over_it() {
     // The directory is still a directory afterwards.
     assert_eq!(
         s.kernel().getattr(RootId::DEFAULT, "data").unwrap().unwrap().kind,
-        vfs_director::KIND_DIR
+        vfs_embed::KIND_DIR
     );
 }
 

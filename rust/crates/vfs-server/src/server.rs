@@ -14,7 +14,8 @@ use crate::handler::{dispatch, dispatch_full, dispatch_with_table};
 use crate::open_table::OpenTable;
 
 /// Legacy server: vfs-core tree + open-file table.
-/// Prefer [`vfs_director::Session`] for new hosts (director kernel + launch).
+/// Prefer `vfs_embed::Session` for new hosts (the embeddable API over the
+/// director kernel: roots, composition, serve, launch).
 pub struct Server {
     tree: VfsTree,
     table: OpenTable,

@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use vfs_compose::SubdirProvider;
-use vfs_director::{DiskProvider, LaunchOpts, Provider, RootId, Session, OPEN_WRITE};
+use vfs_embed::{DiskProvider, LaunchOpts, Provider, RootId, Session, OPEN_WRITE};
 use vfs_protocol::{Capabilities, DirEntry, Handle, SetAttr, Stat, VPath, KIND_DIR};
 use vfs_zip::ZipProvider;
 
@@ -336,7 +336,7 @@ component match sees exactly what the game's own raw NT open spells)",
     // `profiles` on first write, instead of diverting the save away from the
     // directory this harness exists to observe.
     //
-    // Composed by [`vfs_director::compose_root`] — the same function
+    // Composed by [`vfs_embed::compose_root`] — the same function
     // `Session::recompose` and the daemon's `SessionRegistry` use — rather
     // than by assembling an `OverlayProvider` here. It cannot go through
     // `Session` itself (the counters have to wrap the *composed* provider and
@@ -349,7 +349,7 @@ component match sees exactly what the game's own raw NT open spells)",
     let root1_shim_overlay = vfs_director::overlay_layer_dir(&overrides, RootId(1));
     std::fs::create_dir_all(&root1_shim_overlay)
         .map_err(|e| format!("mkdir {}: {e}", root1_shim_overlay.display()))?;
-    let root1_composed = vfs_director::compose_root(
+    let root1_composed = vfs_embed::compose_root(
         vec![(
             String::new(),
             Arc::new(DiskProvider::new(&root1_shim_overlay)) as Arc<dyn Provider>,

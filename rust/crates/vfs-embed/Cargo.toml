@@ -1,0 +1,43 @@
+[package]
+name = "vfs-embed"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Public embeddable API: session lifecycle, roots, composition, launch"
+
+[lib]
+name = "vfs_embed"
+path = "src/lib.rs"
+
+[features]
+default = ["zip"]
+## Convenience `Session::mount_zip` (pulls vfs-zip). Moved here with `Session`
+## itself; `vfs-director` no longer has a `zip` feature.
+zip = ["dep:vfs-zip"]
+
+[dependencies]
+# The kernel this API is a seam over: `Director`, its ring/IPC server, the
+# disk leaf, and the staging helpers. A host never names this crate.
+vfs-director = { path = "../vfs-director" }
+# The provider contract itself. Re-exported wholesale, because a host that
+# writes a provider needs every one of these names and must not have to
+# discover which internal crate they live in.
+vfs-provider = { path = "../vfs-provider" }
+# Combinator primitives (spec §6). `OverlayProvider` is load-bearing here —
+# `compose_root` builds a root's writable upper out of it — and the rest are
+# re-exported so a host composes a graph without a second dependency.
+vfs-compose = { path = "../vfs-compose" }
+# The `cached` primitive, re-exported for the same reason: a slow
+# host-authored provider is expected to be wrapped in one (spec §8b).
+vfs-cache = { path = "../vfs-cache" }
+vfs-env = { path = "../vfs-env" }
+vfs-inject = { path = "../vfs-inject" }
+vfs-shim = { path = "../vfs-shim" }
+vfs-zip = { path = "../vfs-zip", optional = true }
+
+[dev-dependencies]
+vfs-zip = { path = "../vfs-zip" }
+vfs-shim = { path = "../vfs-shim" }
+# Ring wire codecs, for the tests that drive a served session over the ring
+# the way the injected shim does.
+vfs-protocol = { path = "../vfs-protocol" }

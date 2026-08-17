@@ -11,7 +11,7 @@ use std::path::Path;
 
 use vfs_control::SourceSpec;
 use vfs_director::stage::ImageSource;
-use vfs_director::{LaunchOpts, RootId, KIND_FILE};
+use vfs_embed::{LaunchOpts, RootId, KIND_FILE};
 use vfs_directord::SessionRegistry;
 use vfs_source::build_provider;
 

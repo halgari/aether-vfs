@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::director::Director;
-use crate::ipc::IpcServe;
-use crate::mount_graph::MountGraph;
-use crate::ops::{Access, Provider, RootId, OPEN_READ};
+use vfs_director::ipc::IpcServe;
+use vfs_director::{Director, MountGraph};
+use vfs_provider::{
+    bad_request, exists, map_io_err, Access, Provider, RootId, OPEN_READ,
+};
 
 /// Serializes process-global env mutation around [`Session::launch`].
 ///
@@ -73,7 +74,7 @@ pub fn compose_root(
     match write_layer {
         Some(upper) => Ok(Arc::new(
             vfs_compose::OverlayProvider::from_arcs(graph, upper)
-                .map_err(|_| crate::ops::bad_request())?,
+                .map_err(|_| bad_request())?,
         )),
         None => Ok(graph),
     }
@@ -245,7 +246,7 @@ impl Session {
         backend: Arc<dyn Provider>,
     ) -> Result<(), i32> {
         {
-            let mut roots = self.roots.lock().map_err(|_| crate::ops::map_io_err())?;
+            let mut roots = self.roots.lock().map_err(|_| map_io_err())?;
             self.claim(&mut roots, root)?
                 .mounts
                 .push((prefix.to_string(), backend));
@@ -273,7 +274,7 @@ impl Session {
         root: RootId,
     ) -> Result<&'m mut RootComposition, i32> {
         if !roots.contains_key(&root.0) && self.kernel.serves(root)? {
-            return Err(crate::ops::exists());
+            return Err(exists());
         }
         Ok(roots.entry(root.0).or_default())
     }
@@ -294,7 +295,7 @@ impl Session {
         mounts: Vec<(String, Arc<dyn Provider>)>,
     ) -> Result<(), i32> {
         {
-            let mut roots = self.roots.lock().map_err(|_| crate::ops::map_io_err())?;
+            let mut roots = self.roots.lock().map_err(|_| map_io_err())?;
             self.claim(&mut roots, root)?.mounts = mounts;
         }
         self.recompose(root)
@@ -336,10 +337,10 @@ impl Session {
     /// provider that would make every later `mount` on this root fail too.
     pub fn set_write_layer_at(&self, root: RootId, upper: Arc<dyn Provider>) -> Result<(), i32> {
         if upper.capabilities().access != Access::ReadWrite {
-            return Err(crate::ops::bad_request());
+            return Err(bad_request());
         }
         {
-            let mut roots = self.roots.lock().map_err(|_| crate::ops::map_io_err())?;
+            let mut roots = self.roots.lock().map_err(|_| map_io_err())?;
             self.claim(&mut roots, root)?.write_layer = Some(upper);
         }
         self.recompose(root)
@@ -353,7 +354,7 @@ impl Session {
         let composition = self
             .roots
             .lock()
-            .map_err(|_| crate::ops::map_io_err())?
+            .map_err(|_| map_io_err())?
             .get(&root.0)
             .cloned()
             .unwrap_or_default();
@@ -387,7 +388,7 @@ impl Session {
     pub fn clear_root(&self, root: RootId) -> Result<(), i32> {
         self.roots
             .lock()
-            .map_err(|_| crate::ops::map_io_err())?
+            .map_err(|_| map_io_err())?
             .remove(&root.0);
         self.kernel.unmount(root)
     }
@@ -441,12 +442,27 @@ impl Session {
         self.ipc.as_ref()
     }
 
+    /// Every write this host has refused because no `ReadWrite` provider
+    /// served that path, as `(path, count)` — spec §7's discovery workflow:
+    /// launch, ask what was rejected, add an overlay for those subtrees.
+    ///
+    /// **Process-wide, despite being a method.** `vfs_director::io_stats`
+    /// keeps one global table with no session or root dimension, so with two
+    /// live sessions in one host each reports the other's rejections. Left
+    /// that way deliberately rather than faked per-session: the counters are
+    /// recorded deep in the director's open path, and giving them a session
+    /// dimension is a change to that path, not to this accessor. See the
+    /// free-function form, [`crate::rejected_writes`].
+    pub fn rejected_writes(&self) -> Vec<(String, u64)> {
+        vfs_director::io_stats::rejected_writes()
+    }
+
     /// Occasional host-side full-file read (not the primary API).
     pub fn read_file(&self, vpath: &str) -> Result<Vec<u8>, i32> {
         let (fh, size, is_dir) = self.kernel.open(RootId::DEFAULT, vpath, OPEN_READ)?;
         if is_dir {
             let _ = self.kernel.close(fh);
-            return Err(crate::ops::is_dir());
+            return Err(vfs_provider::is_dir());
         }
         let mut buf = vec![0u8; size as usize];
         let mut off = 0usize;
@@ -679,8 +695,8 @@ fn locate_shim_payload(opts: &LaunchOpts) -> Result<(String, String), String> {
 #[cfg(test)]
 mod root_ownership_tests {
     use super::*;
-    use crate::disk::DiskProvider;
-    use crate::ops::ST_EXISTS;
+    use vfs_director::DiskProvider;
+    use vfs_provider::ST_EXISTS;
 
     fn dir(tag: &str, file: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("vfs-own-{}-{tag}", std::process::id()));
@@ -791,7 +807,7 @@ mod root_ownership_tests {
             "the write layer must survive a later set_root_mounts"
         );
         assert!(
-            s.kernel().open(RootId(2), "first.txt", crate::ops::OPEN_WRITE).is_ok(),
+            s.kernel().open(RootId(2), "first.txt", vfs_provider::OPEN_WRITE).is_ok(),
             "with a write layer, an in-place edit of the read side must copy up"
         );
 

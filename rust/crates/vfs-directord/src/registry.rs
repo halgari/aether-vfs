@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use vfs_cache::{BlockCache, CacheConfig, CachingProvider};
 use vfs_compose::stack_layers;
 use vfs_director::stage::{ImageSource, StagedDir};
-use vfs_director::{DiskProvider, LaunchOpts, Provider, Session};
+use vfs_embed::{DiskProvider, LaunchOpts, Provider, RootSources, Session};
 use vfs_protocol::RootId;
 
 /// Layer for the disk provider mounted over a staged launch directory (see
@@ -38,12 +38,22 @@ pub struct StageLaunchOpts<'a> {
 /// serves — the config → provider-graph half of stage 2b's "one provider per
 /// root" (design spec §6).
 ///
+/// **Stays in the daemon on purpose.** This is the adapter from *this host's*
+/// config format — `vfs-control`'s TOML/proto `SessionConfig` — onto the
+/// embeddable API, and a host that composes its graph from code has no use
+/// for it (spec §6: "config is a serialization of the graph, not the other
+/// way round"). Moving it into `vfs-embed` would put `vfs-control`'s tonic /
+/// prost / `protoc` build chain into the crate a language binding links,
+/// buying that binding nothing. What *is* reusable — the rule below — lives
+/// in `vfs-embed` already, as [`vfs_embed::RootSources`] and
+/// [`vfs_embed::compose_root`].
+///
 /// A source with no explicit `root` defaults to root `0`; sources sharing a
 /// root are combined with [`stack_layers`] in declaration order (later wins),
 /// exactly the documented flat-`[[source]]`-list sugar — generalized here to
 /// however many roots the config declares rather than assuming there is only
 /// one. A source flagged `write_layer` is not one of those layers: it becomes
-/// the root's writable upper via [`vfs_director::compose_root`], the same
+/// the root's writable upper via [`vfs_embed::compose_root`], the same
 /// composition [`SessionRegistry::set_write_layer`] performs on the live
 /// path, so a config built here and the same config applied to a running
 /// session cannot disagree about whether writes copy up.
@@ -85,50 +95,11 @@ pub fn build_provider_graph(
             Some(stack) => vec![(String::new(), stack_layers(stack).map_err(|e| e.to_string())?)],
             None => Vec::new(),
         };
-        let composed = vfs_director::compose_root(mounts, write_layers.remove(&root))
+        let composed = vfs_embed::compose_root(mounts, write_layers.remove(&root))
             .map_err(|st| format!("compose root {root}: status {st}"))?;
         graph.insert(RootId(root), composed);
     }
     Ok(graph)
-}
-
-/// One root's sibling mounts, as [`vfs_director::Session::set_root_mounts`]
-/// takes them: `(mount prefix, provider)` in precedence order.
-type RootMounts = Vec<(String, Arc<dyn Provider>)>;
-
-/// Everything recorded for one declared root, so its composed provider can
-/// be rebuilt from scratch whenever a new source targeting it arrives.
-#[derive(Default)]
-struct RootBuild {
-    /// Root-mounted ("/") sources, bottom→top for rebuild via `stack_layers`.
-    layers: Vec<(i32, Arc<dyn Provider>)>,
-    /// Sources with a non-root mount prefix within this root (director path
-    /// mounts), composed alongside the layered root via `MountGraph`.
-    prefix_mounts: Vec<(String, Arc<dyn Provider>)>,
-}
-
-impl RootBuild {
-    /// This root's sibling mounts as [`vfs_director::Session::set_root_mounts`]
-    /// wants them: the root-mounted sources collapsed into one layered
-    /// provider at `""`, then each prefixed source at its own prefix.
-    ///
-    /// The layer stack is collapsed here rather than handed over as several
-    /// `""` mounts because the two compose differently on a shared path: a
-    /// `MountGraph` picks the last mount that *owns* the path, while
-    /// `stack_layers` merges the whole stack (directory listings union, later
-    /// layers win per entry) — which is what the flat `[[source]]` list means.
-    fn mounts(&self) -> Result<RootMounts, String> {
-        let mut mounts: RootMounts = Vec::new();
-        if !self.layers.is_empty() {
-            let stack: Vec<Arc<dyn Provider>> =
-                self.layers.iter().map(|(_, b)| Arc::clone(b)).collect();
-            mounts.push((String::new(), stack_layers(stack).map_err(|e| e.to_string())?));
-        }
-        for (pfx, be) in &self.prefix_mounts {
-            mounts.push((pfx.clone(), Arc::clone(be)));
-        }
-        Ok(mounts)
-    }
 }
 
 /// Clear whatever a previous run left at a session's base directory, so the
@@ -153,8 +124,10 @@ pub struct LiveSession {
     next_stage_tag: AtomicU64,
     /// Per-declared-root bookkeeping for rebuild. Keyed by the raw `u32` a
     /// `SourceEntry`/`AddSourceReq` names — `RootId` wraps this only at the
-    /// `Director` boundary.
-    roots: HashMap<u32, RootBuild>,
+    /// `Director` boundary. The accumulate-and-recompose rule itself is
+    /// [`vfs_embed::RootSources`]; what is daemon-specific is only *which*
+    /// session it belongs to.
+    roots: HashMap<u32, RootSources>,
     /// The most recent launch's staged directory, kept alive here so its
     /// `Drop` (directory removal) does not race the child it was staged for.
     /// Dropped (and thus cleaned up) when the session is torn down, or
@@ -352,16 +325,8 @@ impl SessionRegistry {
             // Wrap with process-wide block cache.
             let cached: Arc<dyn Provider> =
                 Arc::new(CachingProvider::new(backend, Arc::clone(&self.cache), id));
-            let mount_norm = mount.trim();
-            let is_root = mount_norm.is_empty() || mount_norm == "/" || mount_norm == "\\";
             let build = live.roots.entry(root).or_default();
-            if is_root {
-                build.layers.push((layer, cached));
-                // Stable order for equal layers: preserve insertion order.
-                build.layers.sort_by_key(|a| a.0);
-            } else {
-                build.prefix_mounts.push((mount.to_string(), cached));
-            }
+            build.add(mount, layer, cached);
             // Rebuild this root's sibling-mount list from its recorded source
             // list (layered root sources + non-root prefix mounts) and hand
             // the *list* to the session, which composes it — with this root's
@@ -378,7 +343,7 @@ impl SessionRegistry {
     }
 
     /// Declare the writable layer `root`'s writes land in for `session_id` —
-    /// the gRPC/TOML surface's half of [`vfs_director::Session::set_write_layer_at`],
+    /// the gRPC/TOML surface's half of [`vfs_embed::Session::set_write_layer_at`],
     /// and the only way a daemon session gets **copy-on-write**.
     ///
     /// This is deliberately not [`Self::add_source`] with a flag on the
@@ -559,14 +524,14 @@ impl SessionRegistry {
         /// for [`vfs_director::stage`]. Mirrors `skyrim-live.rs`'s
         /// `KernelSource` — kept private here since `stage.rs` deliberately
         /// stays independent of how content is served.
-        struct KernelSource(Arc<vfs_director::Director>);
+        struct KernelSource(Arc<vfs_embed::Director>);
         impl ImageSource for KernelSource {
             fn read(&self, vpath: &str) -> Option<Vec<u8>> {
                 // Staging always concerns the launched image, which lives in
                 // the game-directory root — root 0 in every session this
                 // registry builds today.
                 let (fh, size, is_dir) =
-                    self.0.open(RootId::DEFAULT, vpath, vfs_director::OPEN_READ).ok()?;
+                    self.0.open(RootId::DEFAULT, vpath, vfs_embed::OPEN_READ).ok()?;
                 if is_dir {
                     let _ = self.0.close(fh);
                     return None;
@@ -636,7 +601,7 @@ pub struct SessionSummary {
 mod root_graph_tests {
     use super::*;
     use vfs_control::{SessionConfig, SourceEntry, SourceSpec};
-    use vfs_director::OPEN_READ;
+    use vfs_embed::OPEN_READ;
     use vfs_protocol::VPath;
 
     fn read_whole(p: &Arc<dyn Provider>, root: RootId, rel: &str) -> Vec<u8> {
@@ -732,7 +697,7 @@ mod root_graph_tests {
         let graph = build_provider_graph(&cfg).expect("build provider graph");
         let root0 = graph.get(&RootId(0)).unwrap();
         let (h, size, _) = root0
-            .open(VPath::at_default("x.esp"), vfs_director::OPEN_WRITE)
+            .open(VPath::at_default("x.esp"), vfs_embed::OPEN_WRITE)
             .expect("the write layer must make an in-place edit copy up");
         assert_eq!(size, 8, "the handle must open onto the copied-up content");
         root0.write_at(h, 0, b"EDITED!!").unwrap();
