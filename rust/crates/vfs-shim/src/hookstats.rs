@@ -168,6 +168,8 @@ struct Snapshot {
     trace: Vec<String>,
     stats: HashMap<String, u64>,
     readdirs: Vec<String>,
+    readdir_calls: u64,
+    readdirs_dropped: u64,
     outcome_counts: [u64; OUTCOME_N],
     outcome_paths: [HashMap<String, u64>; OUTCOME_N],
     unrouted_director_opens: u64,
@@ -231,6 +233,8 @@ fn snapshot() -> Snapshot {
         trace: accumulated(&TRACE),
         stats: accumulated(&STATS),
         readdirs: accumulated(&READDIRS),
+        readdir_calls: READDIR_CALLS.load(Ordering::Relaxed),
+        readdirs_dropped: READDIRS_DROPPED.load(Ordering::Relaxed),
         outcome_counts,
         outcome_paths,
         unrouted_director_opens: UNROUTED_DIRECTOR_OPENS.load(Ordering::Relaxed),
@@ -785,6 +789,15 @@ fn render_stats(snap: &Snapshot) -> String {
 /// whole launch), so every one is recorded rather than counted.
 static READDIRS: Mutex<Option<Vec<String>>> = Mutex::new(None);
 const READDIRS_MAX: usize = 300;
+/// Every `note_readdir` call, including those whose row duplicates one the
+/// table already holds. A caller pumps `NtQueryDirectoryFile` once per batch
+/// (once per entry, for a single-entry buffer), so this counts calls while
+/// `READDIRS` holds distinct rows — see `note_readdir`.
+static READDIR_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Distinct rows refused because the table stood at `READDIRS_MAX`. Rendered
+/// whenever nonzero: a table that quietly stopped recording reads exactly like
+/// a complete one, which is the whole failure mode `note_readdir` describes.
+static READDIRS_DROPPED: AtomicU64 = AtomicU64::new(0);
 
 /// Which mechanism produced a directory listing.
 ///
@@ -830,18 +843,43 @@ pub fn note_readdir(dir: &str, wildcard: Option<&str>, count: usize, source: Rea
     if !enabled() {
         return;
     }
-    let Ok(mut g) = READDIRS.lock() else { return };
-    let v = g.get_or_insert_with(Vec::new);
-    if v.len() >= READDIRS_MAX {
-        return;
-    }
-    v.push(format!(
+    READDIR_CALLS.fetch_add(1, Ordering::Relaxed);
+    let row = format!(
         "{:<9} {:>4} entries  filter={:<16} {}",
         source.label(),
         count,
         wildcard.unwrap_or("*"),
         dir.to_ascii_lowercase()
-    ));
+    );
+    let Ok(mut g) = READDIRS.lock() else { return };
+    let v = g.get_or_insert_with(Vec::new);
+    // **Distinct rows, not one per call.** A caller enumerates a directory
+    // through repeated `NtQueryDirectoryFile` calls on the same handle, so a
+    // single `read_dir` of an N-entry directory reaches here N-ish times. The
+    // untracked-handle branch in `serve_dir_query` records `count: 0` for
+    // every one of them, which makes those rows byte-identical — so one
+    // listing of a fat directory used to push hundreds of duplicates, hit
+    // `READDIRS_MAX`, and silently discard every *later* row.
+    //
+    // Not hypothetical: one enumeration of a developer `%TEMP%` holding ~12k
+    // entries filled all 300 rows, so the director-served listing that
+    // `vfs-directord`'s e2e test
+    // `directory_enumeration_under_a_managed_root_hides_an_unserved_real_file`
+    // asserts on was never recorded. The listing itself was correct; only the
+    // evidence was gone, and the test failed on its own vacuity guard — on
+    // that machine, while passing anywhere `%TEMP%` happened to be small.
+    //
+    // Bounding the table by distinct directories rather than by call volume
+    // removes that coupling. `READDIR_CALLS` keeps what the duplicates were
+    // worth: how many times the enumeration was pumped.
+    if v.iter().any(|r| r == &row) {
+        return;
+    }
+    if v.len() >= READDIRS_MAX {
+        READDIRS_DROPPED.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    v.push(row);
 }
 
 fn render_readdirs(snap: &Snapshot) -> String {
@@ -849,7 +887,24 @@ fn render_readdirs(snap: &Snapshot) -> String {
     if v.is_empty() {
         return String::new();
     }
-    let mut s = format!("\ndirectory enumerations ({}):\n", v.len());
+    // The header count is *distinct rows* — `note_readdir` collapses
+    // duplicates — and `of N calls` is what those duplicates were worth.
+    // `dropped` prints whenever it is nonzero, because the failure this
+    // guards against was a table that had quietly stopped recording.
+    // `vfs-directord`'s `support::readdir_records` finds this section by the
+    // text up to `(` and then skips the header line, so extra fields are safe
+    // to add here.
+    let dropped = snap.readdirs_dropped;
+    let mut s = format!(
+        "\ndirectory enumerations ({} distinct of {} calls{}):\n",
+        v.len(),
+        snap.readdir_calls,
+        if dropped > 0 {
+            format!("; {dropped} dropped at cap {READDIRS_MAX} — rows are missing")
+        } else {
+            String::new()
+        }
+    );
     for line in v {
         s.push_str(&format!("  {line}\n"));
     }
@@ -1945,6 +2000,8 @@ mod tests {
             trace: Vec::new(),
             stats: HashMap::new(),
             readdirs: Vec::new(),
+            readdir_calls: 0,
+            readdirs_dropped: 0,
             outcome_counts: [0; OUTCOME_N],
             outcome_paths: std::array::from_fn(|_| HashMap::new()),
             copy_up_counts: [0; COPYUP_N],
