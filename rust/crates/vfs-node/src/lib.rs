@@ -375,6 +375,17 @@ pub struct DirEntryInfo {
     pub mtime: f64,
 }
 
+/// What `session.getattr()` reports for a path the graph serves. `kind` is one
+/// of `kinds()`; `f64` throughout for the same reason [`RejectedWrite::count`]
+/// is — a `BigInt` would make the ordinary `size > 0` comparison against a plain
+/// number throw.
+#[napi(object)]
+pub struct StatInfo {
+    pub kind: u32,
+    pub size: f64,
+    pub mtime: f64,
+}
+
 /// One refused write, as `session.rejectedWrites()` reports it.
 #[napi(object)]
 pub struct RejectedWrite {
@@ -718,11 +729,11 @@ impl Session {
     #[napi(catch_unwind)]
     pub fn readdir(&self, vpath: String, root: Option<u32>) -> Result<Vec<DirEntryInfo>> {
         jsprovider::clear_diagnosis();
+        let root = RootId(root.unwrap_or(0));
         let entries = self
             .get()?
-            .kernel()
-            .readdir(RootId(root.unwrap_or(0)), &vpath)
-            .map_err(|st| status_err(&format!("readdir({vpath:?})"), st))?;
+            .readdir(root, &vpath)
+            .map_err(|st| status_err(&format!("readdir({vpath:?}, root {})", root.0), st))?;
         Ok(entries
             .into_iter()
             .map(|e| DirEntryInfo {
@@ -732,6 +743,32 @@ impl Session {
                 mtime: e.stat.mtime as f64,
             })
             .collect())
+    }
+
+    /// Stat one path in a root's graph, host-side. `null` — not a throw — is
+    /// "the graph does not serve it".
+    ///
+    /// The cheapest answer to the question this project keeps having to ask:
+    /// *does my graph actually serve the path I think it does?* A mistyped mount
+    /// prefix or an undeclared root produces a session that serves nothing and
+    /// reports nothing, and this is one call rather than a `readFile` inside a
+    /// `try`.
+    ///
+    /// Drives the graph on the calling thread, so the deadlock guard applies
+    /// exactly as it does to `readFile` and `readdir`.
+    #[napi(catch_unwind)]
+    pub fn getattr(&self, vpath: String, root: Option<u32>) -> Result<Option<StatInfo>> {
+        jsprovider::clear_diagnosis();
+        let root = RootId(root.unwrap_or(0));
+        let stat = self
+            .get()?
+            .getattr(root, &vpath)
+            .map_err(|st| status_err(&format!("getattr({vpath:?}, root {})", root.0), st))?;
+        Ok(stat.map(|s| StatInfo {
+            kind: u32::from(s.kind),
+            size: s.size as f64,
+            mtime: s.mtime as f64,
+        }))
     }
 
     /// Point this session at a specific shim (and optionally payload) DLL, for

@@ -358,3 +358,80 @@ fn no_engine_crate_is_named_here() {
         );
     }
 }
+
+/// The same assertion from the other side: **no host in this workspace may reach
+/// past the seam.**
+///
+/// `Session::kernel()` is a public escape hatch, and it stayed public on purpose
+/// — the staging redesign and this crate's own tests need it, and `skyrim-live`
+/// (stage 5's problem) is a legitimate direct kernel user until it moves. But a
+/// *host* using it is the evidence spec §4 warns about, in this crate's own
+/// words: "if a host has to reach past this crate, the fix belongs here rather
+/// than in the host".
+///
+/// Both hosts checked here were reaching past it, for the same two calls, until
+/// `Session::readdir` and `Session::getattr` existed: the Node binding for
+/// `readdir`, and `vfs-launch` four times for `readdir` and `getattr` — the
+/// second one while its module header claimed to be a plain host over the embed
+/// API. Two hosts needing the identical thing is the definition of a gap in the
+/// seam, and it took adding a third host to notice.
+///
+/// The daemon has its own, stronger version of this check
+/// (`daemon_names_only_the_embed_api`, which forbids naming any engine crate at
+/// all). This one is narrower on purpose: these two hosts genuinely name
+/// `vfs_embed` types only, so the single thing left to forbid is the hatch.
+///
+/// **Files are read off each host's `src/` recursively**, so a new module cannot
+/// be added outside the check — the same derivation the shim's containment guard
+/// uses, and for the same reason: the hand-written version of that guard had a
+/// hole and was believed anyway.
+#[test]
+fn no_host_in_this_workspace_reaches_past_the_seam() {
+    // Assembled so that naming it here does not trip the scan if this file is
+    // ever moved into one of the directories below.
+    let hatch = concat!(".kernel", "()");
+
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/");
+    // The hosts. The daemon is absent because it has a stricter guard of its
+    // own; `vfs-payload` and the engine crates are not hosts.
+    let hosts = ["vfs-node", "vfs-launch"];
+
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+            .flatten()
+        {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    let mut checked = 0usize;
+    for host in hosts {
+        let src = crates.join(host).join("src");
+        assert!(src.is_dir(), "{} is not a directory", src.display());
+        let mut files = Vec::new();
+        walk(&src, &mut files);
+        assert!(!files.is_empty(), "no sources found under {}", src.display());
+        for path in files {
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            checked += 1;
+            assert!(
+                !text.contains(hatch),
+                "{host}/src/{} calls `{hatch}` — a host must reach the graph through \
+                 `Session`. If `Session` cannot express it, add it to vfs-embed (that is \
+                 where `readdir` and `getattr` came from) rather than opening the hatch \
+                 here; whatever this host needed, the Python binding needs next.",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+    assert!(checked >= 5, "only {checked} host sources were read");
+}

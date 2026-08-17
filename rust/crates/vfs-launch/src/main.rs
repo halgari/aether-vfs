@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use vfs_embed::{Director, DiskProvider, RootId, KIND_FILE, Session};
+use vfs_embed::{DiskProvider, RootId, Session, KIND_FILE};
 
 /// Default layer directory.
 ///
@@ -196,9 +196,9 @@ fn order_plugins(mut seen: std::collections::BTreeMap<String, String>) -> Vec<St
 }
 
 /// Collect top-level `Data/*.{esm,esp,esl}` from the mounted director kernel.
-fn collect_plugins_from_kernel(kernel: &Director) -> Vec<String> {
+fn collect_plugins_from_graph(session: &Session) -> Vec<String> {
     let mut seen = std::collections::BTreeMap::<String, String>::new();
-    let Ok(entries) = kernel.readdir(RootId::DEFAULT, "Data") else {
+    let Ok(entries) = session.readdir(RootId::DEFAULT, "Data") else {
         return Vec::new();
     };
     for e in entries {
@@ -261,11 +261,11 @@ fn ensure_plugins_enabled(plugins: &[String]) -> Result<(), String> {
 }
 
 /// Find PE by basename under the VFS (any directory), case-insensitive.
-fn find_pe_vpath(kernel: &Director, file_name: &str) -> Option<String> {
+fn find_pe_vpath(session: &Session, file_name: &str) -> Option<String> {
     let want = file_name.to_ascii_lowercase();
     // Common game roots first.
     for dir in ["", "Data"] {
-        let Ok(entries) = kernel.readdir(RootId::DEFAULT, dir) else {
+        let Ok(entries) = session.readdir(RootId::DEFAULT, dir) else {
             continue;
         };
         for e in entries {
@@ -279,7 +279,7 @@ fn find_pe_vpath(kernel: &Director, file_name: &str) -> Option<String> {
         }
     }
     // Fallback: open by bare name (casefold backends).
-    if kernel.getattr(RootId::DEFAULT, file_name).ok().flatten().is_some() {
+    if session.getattr(RootId::DEFAULT, file_name).ok().flatten().is_some() {
         return Some(file_name.to_string());
     }
     None
@@ -368,9 +368,9 @@ fn main() {
     } else {
         "SkyrimSE.exe"
     };
-    let pe_vpath = find_pe_vpath(session.kernel(), pe_name).unwrap_or_else(|| pe_name.to_string());
+    let pe_vpath = find_pe_vpath(&session, pe_name).unwrap_or_else(|| pe_name.to_string());
     if !args.probe {
-        match session.kernel().getattr(RootId::DEFAULT, &pe_vpath) {
+        match session.getattr(RootId::DEFAULT, &pe_vpath) {
             Ok(Some(st)) if st.kind == KIND_FILE && st.size > 512 => {
                 eprintln!(
                     "  PE {pe_vpath} present in VFS ({} bytes) — will be staged to disk \
@@ -385,7 +385,7 @@ fn main() {
         }
     }
 
-    let plugins = collect_plugins_from_kernel(session.kernel());
+    let plugins = collect_plugins_from_graph(&session);
     if let Err(e) = ensure_plugins_enabled(&plugins) {
         eprintln!("warning: plugins enablement failed: {e}");
     }
@@ -465,7 +465,7 @@ fn main() {
     // companion image is how; without this the loader starts and then dies
     // looking for a game that only exists in the zips.
     let stage_also = if args.use_skse {
-        vec![find_pe_vpath(session.kernel(), "SkyrimSE.exe")
+        vec![find_pe_vpath(&session, "SkyrimSE.exe")
             .unwrap_or_else(|| "SkyrimSE.exe".to_string())]
     } else {
         vec![]

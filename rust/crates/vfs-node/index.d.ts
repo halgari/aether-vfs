@@ -327,6 +327,29 @@ export interface RootInfo {
   path: string;
 }
 
+/**
+ * One entry from `session.readdir()`.
+ *
+ * `kind` is a number from {@link KIND} (`KIND_FILE`, `KIND_DIR`,
+ * `KIND_TOMBSTONE`) — not the string a *provider* may return from its own
+ * `getattr`. The director resolves that before it gets here.
+ */
+export interface DirEntryInfo {
+  name: string;
+  kind: number;
+  size: number;
+  /** Unix epoch seconds, or 0 if the provider does not track it. */
+  mtime: number;
+}
+
+/** What `session.getattr()` reports for a path the graph serves. */
+export interface StatInfo {
+  /** A number from {@link KIND}. */
+  kind: number;
+  size: number;
+  mtime: number;
+}
+
 /** One refused write, as `session.rejectedWrites()` reports it. */
 export interface RejectedWrite {
   path: string;
@@ -451,6 +474,35 @@ export class Session {
    * the working round trip and the silent wrong answer.
    */
   readFile(vpath: string, root?: number): Buffer;
+
+  /**
+   * List a directory in a root's graph, host-side; `root` defaults to 0.
+   *
+   * Not a convenience — it is the only way to check two of spec §6's rules from
+   * a host. `layered` **unions** its children's listings with top-wins per name,
+   * while `router`'s listing is **single-dispatch** rather than the union §6
+   * specifies: a file served by a route is readable by name and invisible to a
+   * listing of its own directory. Those are indistinguishable without this, and
+   * the second is a silent wrong answer.
+   *
+   * Drives the graph on the calling thread, so the deadlock guard applies here
+   * exactly as it does to `readFile`.
+   */
+  readdir(vpath: string, root?: number): DirEntryInfo[];
+
+  /**
+   * Stat one path in a root's graph, host-side; `root` defaults to 0. `null` —
+   * not a throw — means the graph does not serve it.
+   *
+   * The cheapest answer to *does my graph serve the path I think it does?* A
+   * mistyped mount prefix or an undeclared root gives a session that serves
+   * nothing and reports nothing; this is one call instead of a `readFile` in a
+   * `try`.
+   *
+   * Same case-folding caveat as {@link Session.readFile}: nothing folds a
+   * host-supplied path.
+   */
+  getattr(vpath: string, root?: number): StatInfo | null;
 
   /**
    * Point this session at a specific shim (and optionally payload) DLL, for a

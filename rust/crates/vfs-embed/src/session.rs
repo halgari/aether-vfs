@@ -11,7 +11,7 @@ use vfs_director::ipc::IpcServe;
 use vfs_director::stage::{stage_launch_with, ImageSource, StagedDir};
 use vfs_director::{Director, DiskProvider, MountGraph};
 use vfs_provider::{
-    bad_request, exists, map_io_err, Access, Provider, RootId, OPEN_READ,
+    bad_request, exists, map_io_err, Access, DirEntry, Provider, RootId, Stat, OPEN_READ,
 };
 
 /// Serializes **every** process-global env mutation this crate performs —
@@ -802,6 +802,43 @@ impl Session {
         let _ = self.kernel.close(fh);
         buf.truncate(off);
         Ok(buf)
+    }
+
+    /// List a directory in `root`'s graph, host-side.
+    ///
+    /// The companion to [`Session::read_file_at`], and the reason it is here
+    /// rather than in each host is that **every host was reaching past the seam
+    /// for it**: the Node binding called `session.kernel().readdir(...)` and
+    /// `vfs-launch` called `session.kernel()` four times for exactly these two
+    /// questions. This crate's own doc says "if a host has to reach past this
+    /// crate, the fix belongs here" — so it does.
+    ///
+    /// It is not a convenience. Two of spec §6's rules are statements about
+    /// `readdir` and nothing else can check them from a host: `layered`
+    /// **unions** its children's listings with top-wins per name, while
+    /// `router`'s listing is **single-dispatch** rather than the union §6
+    /// specifies, so a file served by a route is readable by name and absent
+    /// from its own directory. A host that cannot list its graph cannot tell
+    /// those apart, and the second is a silent wrong answer.
+    ///
+    /// Drives the graph on the calling thread, like `read_file_at`. For a host
+    /// whose provider is serviced by that same thread's event loop that is what
+    /// trips the binding's deadlock guard — deliberately, because the failure is
+    /// then reported instead of hanging.
+    pub fn readdir(&self, root: RootId, vpath: &str) -> Result<Vec<DirEntry>, i32> {
+        self.kernel.readdir(root, vpath)
+    }
+
+    /// Stat one path in `root`'s graph, host-side. `Ok(None)` is "the graph does
+    /// not serve it", which is not an error.
+    ///
+    /// Same reason as [`Session::readdir`]: it was reached for through
+    /// `kernel()` by two hosts. It is the cheapest way to answer the question
+    /// this project keeps needing answered — *does my graph actually serve the
+    /// path I think it does* — without opening anything, and `vfs-launch` uses
+    /// it for precisely that before it stages a launch image.
+    pub fn getattr(&self, root: RootId, vpath: &str) -> Result<Option<Stat>, i32> {
+        self.kernel.getattr(root, vpath)
     }
 
     /// Start the control ring + workers so an injected child can remap I/O.
