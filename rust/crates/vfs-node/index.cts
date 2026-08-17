@@ -669,10 +669,18 @@ export function registerProvider(obj: ProviderObject, options?: ProviderOptions)
  * already parked on it is woken. The registry entry stays, because a handle is
  * process-global by design. Idempotent from here on: a second call for a handle
  * already released is not an error a host should have to guard against.
+ *
+ * **A non-integer handle is refused, not rounded.** This wrapper used to pass a
+ * number straight through while every other one took it through `handleOf`, and
+ * that asymmetry was destructive here rather than merely inconsistent: handles are
+ * process-global integers, Rust coerces the argument, so `releaseProvider(1.7)`
+ * released handle `1` and `releaseProvider(NaN)` released handle `0` — someone
+ * else's live provider, silently. Nothing reported it, because releasing a live
+ * handle is a legitimate operation; the victim only found out when a later call
+ * failed with a released-loop status.
  */
 export function releaseProvider(handle: number | Provider): void {
-  const n =
-    typeof handle === 'number' ? handle : handleOf(handle, 'releaseProvider(provider)');
+  const n = handleOf(handle, 'releaseProvider(handle)');
   unreleased.delete(n);
   return native.releaseProvider(n);
 }
@@ -725,6 +733,19 @@ function handleOf(p: unknown, what: string): number {
   if (p !== null && typeof p === 'object') {
     const h = (p as { handle?: unknown }).handle;
     if (typeof h === 'number') return h;
+  }
+  // A number that failed the test above gets its own message. The generic one
+  // below ends in "got number", which reads as a type complaint to a caller who
+  // did pass a number and leaves the actual problem — the *value* — unnamed. This
+  // is the only class of argument here that Rust would otherwise coerce into a
+  // different valid handle rather than reject.
+  if (typeof p === 'number') {
+    throw new TypeError(
+      `aethervfs: ${what} needs a provider handle: a non-negative integer. Got ${p}. ` +
+        'A handle is an index into a process-global registry, so a fractional, NaN, ' +
+        'infinite or negative value is not an approximation of the handle you meant — ' +
+        'coerced, it names a different live provider.'
+    );
   }
   throw new TypeError(
     `aethervfs: ${what} needs a Provider (or its numeric handle); got ${describe(p)}. ` +
@@ -1003,6 +1024,7 @@ export function providerWorker(spec: ProviderWorkerSpec): Promise<ProviderWorker
       },
     });
     let settled = false;
+    let live: ProviderWorker | null = null;
     const fail = (e: Error): void => {
       if (settled) return;
       settled = true;
@@ -1011,7 +1033,39 @@ export function providerWorker(spec: ProviderWorkerSpec): Promise<ProviderWorker
         () => reject(e)
       );
     };
-    worker.once('error', fail);
+    // `on`, not `once`, and it does something in both states.
+    //
+    // A worker that dies *after* this promise settles has nowhere to report: the
+    // promise is spent, so there is nothing to reject, and this listener is the
+    // only `'error'` handler on the worker — so node's "unhandled 'error' event"
+    // path, which would at least be loud, never runs either. The early return that
+    // used to be the whole post-settle branch therefore swallowed the death
+    // completely. The provider is gone and every later call on its handle fails
+    // with a released-loop status, so the host needs to hear about the cause and
+    // this warning is the only place it can.
+    worker.on('error', (e: Error) => {
+      if (!settled) {
+        fail(e);
+        return;
+      }
+      const detail = e instanceof Error && e.stack ? e.stack : String(e);
+      process.emitWarning(
+        live === null
+          ? // The registration already failed and `providerWorker()` rejected with
+            // the first error, so that death is reported. This is a *second* one
+            // arriving while the worker was being torn down.
+            `aethervfs: the provider worker for ${spec.module} raised again while it was ` +
+              `being torn down after a failed registration: ${detail}\n` +
+              'The rejection from providerWorker() carries the original failure; this is ' +
+              'the follow-on, reported rather than dropped.'
+          : `aethervfs: the provider worker for ${spec.module} (handle ${live.handle}) raised ` +
+              `after registering, and its loop is gone: ${detail}\n` +
+              'Calls on that handle now fail with a status naming the released loop. This ' +
+              'warning is the only report of it — the promise that would have rejected had ' +
+              'already resolved by the time the worker died.',
+        'AetherVfsProviderWorkerError'
+      );
+    });
     worker.once('exit', (code: number) => {
       if (!settled) {
         fail(new Error(`aethervfs: provider worker exited (code ${code}) before registering`));
@@ -1028,7 +1082,8 @@ export function providerWorker(spec: ProviderWorkerSpec): Promise<ProviderWorker
         return;
       }
       settled = true;
-      resolve(new ProviderWorker(worker, m.handle as number));
+      live = new ProviderWorker(worker, m.handle as number);
+      resolve(live);
     });
   });
 }
@@ -1038,12 +1093,42 @@ export class ProviderWorker {
   readonly worker: Worker;
   readonly handle: number;
   readonly provider: Provider;
-  private _closed = false;
+
+  /** Resolved once the worker's thread is gone, however it went. */
+  private readonly _exit: Promise<void>;
+  private _exited = false;
+  /** The in-flight `close()`, so a second call awaits it rather than racing it. */
+  private _closing: Promise<void> | null = null;
 
   constructor(worker: Worker, handle: number) {
     this.worker = worker;
     this.handle = handle;
     this.provider = native.Provider.fromHandle(handle);
+
+    // **Subscribed here, not in `close()`.** `'exit'` is emitted exactly once, so a
+    // listener registered after the fact waits for an event that can never come
+    // again — which is what made `close()` hang forever on an already-exited
+    // worker. Registering in the constructor is safe because node dispatches
+    // worker events on the parent loop: the worker cannot have exited between
+    // `new Worker(...)` and this line, which run in the same synchronous turn.
+    this._exit = new Promise<void>((resolve) => {
+      worker.once('exit', () => {
+        this._exited = true;
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Is the worker's thread gone?
+   *
+   * `_exited` is the `'exit'` event *this object* saw. `threadId === -1` is node's
+   * state for a thread that has ended, and it covers the case the listener cannot:
+   * a worker wrapped after it had already exited, whose one `'exit'` event was
+   * spent before this object existed.
+   */
+  private get hasExited(): boolean {
+    return this._exited || this.worker.threadId === -1;
   }
 
   /** Counters for this provider — see `Provider.stats()`. */
@@ -1059,20 +1144,61 @@ export class ProviderWorker {
    * naming the released loop rather than hanging. Without it the worker never
    * exits — a live threadsafe function keeps its loop alive, which is the whole
    * reason the worker stays up while the session runs.
+   *
+   * **This always settles**, whatever state the worker is in — already exited,
+   * terminated, or dead from an uncaught throw. It is the teardown `await using`
+   * invokes, so a `close()` that hangs is indistinguishable from the leak it
+   * exists to prevent and takes the host's whole teardown with it. Idempotent, and
+   * safe to call concurrently: every caller awaits the same shutdown.
    */
   async close(): Promise<void> {
-    if (this._closed) return;
-    this._closed = true;
-    const exited = new Promise<void>((r) => {
-      this.worker.once('exit', () => r());
+    // Memoized rather than flag-guarded. A bare `if (this._closed) return` handed
+    // the second caller an already-resolved promise, so it was told teardown was
+    // done while the worker was still coming down.
+    this._closing ??= this.shutdown();
+    await this._closing;
+  }
+
+  private async shutdown(): Promise<void> {
+    // Nothing to release and nothing to wait for. Without this, the wait below
+    // would depend on an `'exit'` that has already been emitted.
+    if (this.hasExited) return;
+
+    // Guarded because the result is memoized: a throw here would reject the
+    // promise every present *and future* `close()` awaits, turning one bad send
+    // into permanently unusable teardown. Node makes `postMessage` to a worker
+    // that has gone a no-op rather than an error, so this is a belt for a race —
+    // the thread ending between the check above and this line — and the backstop
+    // below is what settles the wait if the release never lands.
+    try {
+      this.worker.postMessage({ type: 'release' });
+    } catch {
+      /* the worker is gone or its port is closed; the backstop covers it */
+    }
+
+    let timer: NodeJS.Timeout | undefined;
+    // The backstop terminates a worker that ignored the message — and, unlike
+    // before, *also settles this promise when it does*. `terminate()` resolving is
+    // itself proof the thread is gone, so this holds even if `_exit` were somehow
+    // never to fire, which is the last way `close()` could hang.
+    const backstop = new Promise<void>((resolve) => {
+      const t = setTimeout(() => {
+        this.worker.terminate().then(
+          () => resolve(),
+          () => resolve()
+        );
+      }, 2000);
+      // Node keeps the process alive for a pending timer; this one is only a
+      // backstop for a worker that ignored the message.
+      t.unref?.();
+      timer = t;
     });
-    this.worker.postMessage({ type: 'release' });
-    const timer = setTimeout(() => void this.worker.terminate(), 2000);
-    // Node keeps the process alive for a pending timer; this one is only a
-    // backstop for a worker that ignored the message.
-    timer.unref?.();
-    await exited;
-    clearTimeout(timer);
+
+    try {
+      await Promise.race([this._exit, backstop]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
