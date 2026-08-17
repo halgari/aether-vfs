@@ -248,6 +248,9 @@ session.
 | 1 | 8.3 short name (`GetShortPathNameW` + open) | opened✓ (restored, stage 2b Task 5 — see above) | `unbuildable: GetShortPathNameW failed: win32:2` | See "Vector 1's negative-canary unbuildable reason" below for the negative-canary column — a real quirk of attribute-query fall-through, not a canonicaliser defect. Positive canary: was recognised under-root only by `RootMap`'s canonicaliser and so never routed; since the two predicates were unified it reaches the director like any ordinary spelling. See "A second, structural finding" below. |
 | 2 | Extended-length prefix (`\\?\C:\...`) | opened✓ | classified✓ | |
 | 3 | NT device path (`\\?\GLOBALROOT\Device\HarddiskVolumeN\...`) | opened✓ (restored, stage 2b Task 5) | classified✓ | **Found broken, then fixed — see "A real bypass found and fixed" below** (that fix is about the negative canary's classification, still intact). **Positive canary flipped to `not-found` in Gate 3 Task 5 and back to `opened✓` in stage 2b Task 5**, once the client predicate became the same canonicaliser; see "A second, structural finding" below. |
+| 3b | `\\?\GLOBALROOT\GLOBAL??\C:\...` (drive-letter behind a GLOBALROOT wrapper) | opened✓ | classified✓ | **Added 2026-08-17 after this spelling was found to be a live bypass — see "The colon-bearing siblings of vector 3's fix" below.** Reverting `canon.rs` makes this row fail as *expected `not-found`, got `opened`*, which is what makes it non-vacuous. |
+| 3c | `\\?\GLOBALROOT\??\C:\...` | opened✓ | classified✓ | Added 2026-08-17, same finding as 3b. |
+| 3d | `\\?\Global\C:\...` (`Global` is a real DosDevices symlink to `\GLOBAL??`) | opened✓ | classified✓ | Added 2026-08-17. **Not in the original report — found by probing while fixing 3b/3c**, which is the only reason it is covered. |
 | 4 | Volume-GUID path (`\\?\Volume{guid}\...`) | opened✓ (restored, stage 2b Task 5) | classified✓ | Same mechanism as vector 3/1/7/9 — see "A second, structural finding" below. This is also the spelling the metadata-query gap was pinned on; it closed with the same change. |
 | 5 | Handle-relative open (`OBJECT_ATTRIBUTES.RootDirectory` = a real directory handle) | opened✓ | classified✓ | |
 | 5b | Handle-relative open against a handle `GetFinalPathNameByHandleW` cannot resolve (an anonymous pipe) | `error:ntstatus:0xC0000033` | not classified (by design) | **Caveat, not a failure — see "Vector 5's caveat" below.** `path_of_tracked` cannot decode a path at all for this shape, so it lands in the shim's separate "undecodable" counter, never in `under-root open outcomes`. Documented, accepted edge of Task 4's fix, not asserted as pass/fail either way. |
@@ -270,6 +273,55 @@ buildable on this machine except vector 1's negative-canary line, which is
 `unbuildable` for a reason specific to this run's attribute-query
 fall-through (see below), not to 8.3 name generation being disabled (it is
 enabled here — the positive canary's vector 1 built and opened normally).
+
+## The colon-bearing siblings of vector 3's fix (found 2026-08-17)
+
+**This matrix passed for two days while three live bypasses stood, and the reason
+is worth more than the bug.** Vector 3's fix below handled
+`\??\GLOBALROOT\Device\HarddiskVolumeN\...` — a **colon-free** spelling. Three
+sibling spellings put a *drive letter* behind the same wrapper, and all three
+classified as outside every root:
+
+```
+\??\GLOBALROOT\GLOBAL??\C:\<root>\Data\a.esp     -> canonicalised to "GLOBAL??/C"
+\??\GLOBALROOT\??\C:\<root>\Data\a.esp           -> canonicalised to "C"
+\GLOBAL??\C:\<root>\Data\a.esp                   -> canonicalised to "GLOBAL??/C"
+```
+
+Confirmed live, not inferred: an `NtCreateFile` probe on each returned
+`STATUS_SUCCESS` against a real file the director never saw.
+
+**Two causes.** The stream-suffix strip treated the **drive colon as an alternate
+data stream separator** whenever the NT prefix was followed by a non-drive token
+— which is why each path collapsed to a stub. And `\GLOBAL??` was absent from the
+recognised prefix list entirely.
+
+**Why vector 3 did not catch its own siblings.** It tests the one GLOBALROOT
+spelling that contains no colon. The bug was *in the colon handling*. A vector
+that exercises the wrapper but not the character the parser mishandles cannot
+fail. This is the same shape as several other findings from the 2026-08-17 review
+— a check that passes because it never touches the thing that breaks — and it is
+the reason 3b/3c/3d assert **both** directions and are validated by reverting the
+fix rather than by passing.
+
+**The fix closes the class, not the three instances.** Stream detection is now
+scoped to the final path component (a stream is a leaf), with the drive-letter
+colon skipped inside it; prefix handling is a bounded token loop over
+`?`/`??`/`GLOBAL??`/`Global`/`GLOBALROOT`, so arbitrary nesting resolves. The loop
+deliberately **over-accepts** — `\??\GLOBALROOT\GLOBALROOT\...` is stripped here
+though the object manager rejects it — because over-accepting means "answered by
+the director", which is the fail-closed direction.
+
+**Two siblings remain open, measured `STATUS_SUCCESS`, and are not fixed:**
+
+- `\??\UNC\127.0.0.1\C$\...` — only the `localhost` hostname is aliased. This is
+  vector 9's documented scope gap, now with a concrete reachable spelling.
+- `\Device\Mup\localhost\C$\...` — the MUP device reached **without** the
+  `\??\UNC` symlink. The same trick as vector 3's, one namespace lower.
+  **This was named nowhere in this project before 2026-08-17.**
+
+Neither is a regression; both were reachable before this work and remain so.
+They are recorded here rather than silently carried.
 
 ## A real bypass found and fixed: vector 3's `GLOBALROOT` wrapper
 

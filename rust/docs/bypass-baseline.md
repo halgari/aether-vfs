@@ -1290,12 +1290,58 @@ produce and explicitly refused to claim.
 **Criterion 6 — "Skyrim launches, shows the expected load order, and writes its
 INI and save through the director" — is met.**
 
-## Gate 5: the invariant holds without exception (2026-08-15)
+## Gate 5: the behavioural exceptions are closed (2026-08-15)
+
+> **Retracted and rescoped 2026-08-17.** This section was titled "the invariant
+> holds without exception" and claimed the run was the first in which stage 2a's
+> goal was true with "no exceptions of any kind". **That claim was false when
+> written.** A branch review on 2026-08-17 found three NT object-manager
+> spellings of an under-root path that classified as *outside every root*, so the
+> shim trampolined the original `OBJECT_ATTRIBUTES` and the kernel opened the
+> real file. Verified live with an `NtCreateFile` probe returning
+> `STATUS_SUCCESS`, not merely by reading the classifier:
+>
+> ```
+> \??\GLOBALROOT\GLOBAL??\C:\<root>\Data\a.esp
+> \??\GLOBALROOT\??\C:\<root>\Data\a.esp
+> \GLOBAL??\C:\<root>\Data\a.esp
+> ```
+>
+> **Why this document did not catch it, which matters more than the bug.** The
+> escape matrix *did* carry a GLOBALROOT vector — vector 3 — but it tested the
+> **colon-free** `GLOBALROOT\Device\HarddiskVolumeN\...` spelling. The defect was
+> in colon-bearing spellings: the stream-suffix strip cut the drive colon as an
+> alternate-data-stream separator whenever the NT prefix was followed by a
+> non-drive token, truncating the path to a stub like `GLOBAL??/C`. So the matrix
+> passed by testing the neighbouring case, and a live Skyrim session could not
+> contradict it because no game emits these spellings. **A green matrix and a
+> clean game run were both true, and neither bore on the claim.**
+>
+> The three spellings are now closed (`vfs-redirect/src/canon.rs`: stream
+> detection scoped to the final path component, prefix stripping as a bounded
+> token loop over `?`/`??`/`GLOBAL??`/`Global`/`GLOBALROOT`), and the matrix gains
+> vectors `3b`/`3c`/`3d`. Reverting the fix makes vector 3b fail with *"expected
+> not-found … got opened"*, so the new vectors are not vacuous.
+> `\??\Global\C:\...` was found reachable by probing during that work and is
+> covered too.
+>
+> **Two sibling spellings remain open and are not fixed:**
+> `\??\UNC\127.0.0.1\C$\...` (only the `localhost` hostname is aliased — the
+> known vector-9 scope gap) and `\Device\Mup\localhost\C$\...` (the MUP device
+> reached without the `\??\UNC` symlink), both measured `STATUS_SUCCESS`. The
+> second was named nowhere in this project before 2026-08-17.
+>
+> **So the invariant does not currently hold without exception, and this document
+> must not be cited as evidence that it does.** What the gate-5 run below does
+> establish is narrower and still worth having: the four DRM filename exceptions
+> and the two behavioural escapes are closed, every under-root fall-through
+> counter read zero, and the routed save was byte-exact.
 
 Stage 2a's goal, from the design spec: *for any path P and any process in the
 session, if P resolves under a managed root, every NT operation on P is answered
-by the director.* This session is the first in which that is true with **no
-exceptions of any kind**.
+by the director.* This session closed the last of the **behavioural** exceptions
+— the deliberate filename carve-outs and the two escapes that reached real disk.
+Spelling-level bypasses were still open at this point, per the retraction above.
 
 ### What was closed
 
