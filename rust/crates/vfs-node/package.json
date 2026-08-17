@@ -1,0 +1,31 @@
+{
+  "name": "aethervfs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows virtual filesystem: compose a process's view of the disk from pluggable providers",
+  "license": "UNLICENSED",
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "index.cjs",
+    "index.d.ts",
+    "aethervfs.node",
+    "vfs_shim_dll.dll",
+    "vfs_payload.dll"
+  ],
+  "scripts": {
+    "build": "node scripts/build.cjs",
+    "build:release": "node scripts/build.cjs --release",
+    "demo": "node examples/vertical-slice.cjs",
+    "test": "node scripts/build.cjs && node examples/vertical-slice.cjs"
+  }
+}

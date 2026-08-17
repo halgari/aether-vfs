@@ -17,6 +17,20 @@ members = [
   "crates/vfs-server",
   "crates/vfs-director",
   "crates/vfs-embed",
+  # The `aethervfs` N-API addon. A workspace member, not its own workspace, so
+  # `cargo clippy --all-targets -- -D warnings` covers it: it depends on
+  # `vfs-embed`, whose surface changes every task, and a binding outside the
+  # workspace gates would rot silently until someone tried to ship it. Its
+  # Rust build needs no Node — napi-sys resolves `napi_*` from the host process
+  # at runtime — so membership costs the gates nothing.
+  #
+  # Two target-filter consequences, both deliberate: `cargo build --workspace
+  # --tests` does **not** build the cdylib (`--tests` filters it, same as
+  # `vfs-shim-dll`), so the addon needs an unfiltered `cargo build -p vfs-node`;
+  # and `[lib] test = false` in its manifest keeps `cargo test --workspace` from
+  # running a harness that cannot reach a single N-API function. See that
+  # manifest for why.
+  "crates/vfs-node",
   "crates/vfs-shim",
   "crates/vfs-shim-dll",
   "crates/vfs-win",

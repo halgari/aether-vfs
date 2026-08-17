@@ -1,0 +1,39 @@
+[package]
+name = "vfs-node"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "N-API addon behind the `aethervfs` npm package: a Node host over vfs-embed"
+
+[lib]
+# The cdylib's file name *is* the addon's name once `scripts/build.cjs` renames
+# `aethervfs.dll` to `aethervfs.node`, so the lib is named for the package
+# rather than for the crate. Nothing else in the workspace is called
+# `aethervfs`, so there is no lib-name collision.
+name = "aethervfs"
+crate-type = ["cdylib"]
+# **Deliberate, and the reason matters.** `cargo test` on a napi cdylib does
+# link and run — but the harness is a plain exe, not Node, so napi-sys's
+# runtime symbol resolution fails and every run prints ~40 lines of
+# "Load Node-API [napi_*] from host runtime failed: GetProcAddress failed"
+# before reporting `0 passed`. That noise would land in every
+# `cargo test --workspace` run in exchange for a harness that cannot call a
+# single N-API function. The binding's tests are `npm test`, which runs under a
+# real Node. `--lib` clippy coverage is unaffected by this flag.
+test = false
+
+[dependencies]
+# The only vfs crate a host is supposed to name (spec §4). Task 5 measured this
+# exact pairing at 56 crates and no tonic/prost/protoc/tokio/hyper; keeping the
+# binding's dependency list to this one line is what preserves that.
+vfs-embed = { path = "../vfs-embed" }
+# `napi4` is the threadsafe-function feature. Not used by this task — nothing
+# here calls into JS — but it is the feature the task-5 spike measured and it
+# adds no crates to the graph (napi's defaults are `["napi3", "compat-mode"]`
+# and tokio arrives only via `async`/`tokio_rt`/`full`, none of which are on).
+# Declared now so task 7 does not have to churn the manifest.
+napi = { version = "2", features = ["napi4"] }
+napi-derive = "2"
+
+[build-dependencies]
+napi-build = "2"

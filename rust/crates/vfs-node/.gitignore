@@ -1,0 +1,13 @@
+# Build output installed here by `scripts/build.cjs`. Committing a 2.5 MB addon
+# and two DLLs would put binaries in the repo and guarantee a stale one is
+# eventually loaded; `package.json`'s `files` list is what ships them.
+aethervfs.node
+vfs_shim_dll.dll
+vfs_payload.dll
+
+# The stand-in executable the demo launches. Built, not authored.
+fixtures/
+
+# No npm dependencies today, so there is nothing to lock — but if one is ever
+# added, node_modules must not be committed.
+node_modules/
