@@ -342,7 +342,7 @@ Everything in tasks 1-4 and 9 is shared. What Python adds is `PyProvider`, the G
 - [ ] A JS-authored provider serves a real session through the director, including an `async` method whose promise resolves late.
 - [ ] No JS throw or rejection can abort the host process; `VfsError` maps to `ST_*`, everything else to `ST_IO_ERROR` with the stack logged.
 - [ ] A never-settling promise is **counted**, not silently hung.
-- [ ] A provider call originating on the host's main thread is refused rather than deadlocking.
+- [ ] **A provider call serviced by the loop that is blocked waiting for it** is refused rather than deadlocking. *(Reworded 2026-08-17: the original said "originating on the host's main thread", which the task-5 spike disproved — main-thread-to-worker is safe and must be served, while worker-to-its-own-loop deadlocks. See spec §8c. The criterion as first written would have failed a correct implementation.)*
 - [ ] A `ReadWrite` provider missing `writeAt` is refused at construction, not at first write.
 - [ ] **A JS-authored provider passes the same `assert_conformance` suite Rust providers do** — the stage gate.
 - [ ] Every element of the example except the provider itself is a Rust primitive.
