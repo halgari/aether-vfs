@@ -573,6 +573,19 @@ describes hard errors and warnings at mount time; none existed. The `SeqRead`
 hard error now lives in `vfs_embed::Session::mount_at`. The rest of the table is
 still unimplemented and should be treated as design intent rather than behaviour.
 
+**§8's read-back is a session call, not a provider call** (2026-08-17, from
+running §8's example end to end). The example's last line is
+`inis.read("Skyrim.ini")` — a read issued against a provider object. Nothing in
+the workspace offers that, and the shape is worse than it looks: `inis` is a
+handle to an `Arc<dyn Provider>` with no root, no mount prefix and no graph
+around it, so reading through it would answer a *different* question from the one
+the game's writes went through. The reachable form is
+`session.read_file_at(root, vpath)`, which reads the same composed graph the
+child did — added for this, because `read_file` hardcoded root 0 while `readdir`
+already took a root, and §8 mounts the INIs on **root 1**. So a host could list a
+second root's graph and never read a byte out of it. Read §8's last line as
+`session.read_file_at(1, "skyrim.ini")`, folded key included (§6b above).
+
 ## 8b. The Node binding — and why it comes first (decided 2026-08-16)
 
 **Reordering.** §8's Python binding is still wanted and its content mostly

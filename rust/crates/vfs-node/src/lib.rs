@@ -671,21 +671,29 @@ impl Session {
         Ok(self.get()?.is_serving())
     }
 
-    /// Read a whole file out of root 0's graph, host-side. Not the primary
-    /// path — the child's reads go over the ring — but it is how a host proves
-    /// its graph serves what it thinks it does without launching anything.
+    /// Read a whole file out of a root's graph, host-side (root 0 by default).
+    /// Not the primary path — the child's reads go over the ring — but it is how
+    /// a host proves its graph serves what it thinks it does without launching
+    /// anything, and how it reads back what a launched child wrote into a
+    /// `memory()` provider.
+    ///
+    /// The `root` argument is spec §8's last line: that example mounts the INI
+    /// provider on **root 1** and finishes by reading the game's own writes back
+    /// out of it. `readdir` already took a root, so without this a host could
+    /// list a second root and never read a byte out of it.
     ///
     /// **It drives the graph on the calling thread**, so it is also the call
     /// that trips the deadlock guard when a host mounts a provider serviced by
     /// the very loop it is calling from. That is deliberate: the failure is
     /// reported here, immediately and with an explanation, instead of hanging.
     #[napi]
-    pub fn read_file(&self, vpath: String) -> Result<Buffer> {
+    pub fn read_file(&self, vpath: String, root: Option<u32>) -> Result<Buffer> {
         jsprovider::clear_diagnosis();
+        let root = RootId(root.unwrap_or(0));
         self.get()?
-            .read_file(&vpath)
+            .read_file_at(root, &vpath)
             .map(Buffer::from)
-            .map_err(|st| status_err(&format!("readFile({vpath:?})"), st))
+            .map_err(|st| status_err(&format!("readFile({vpath:?}, root {})", root.0), st))
     }
 
     /// List a directory in the graph, host-side.

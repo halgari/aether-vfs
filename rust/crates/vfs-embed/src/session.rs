@@ -759,8 +759,25 @@ impl Session {
     }
 
     /// Occasional host-side full-file read (not the primary API).
+    ///
+    /// Root 0's convenience form of [`Session::read_file_at`].
     pub fn read_file(&self, vpath: &str) -> Result<Vec<u8>, i32> {
-        let (fh, size, is_dir) = self.kernel.open(RootId::DEFAULT, vpath, OPEN_READ)?;
+        self.read_file_at(RootId::DEFAULT, vpath)
+    }
+
+    /// Occasional host-side full-file read out of `root`'s graph.
+    ///
+    /// This takes a root because the spec's own example needs one: §8 mounts the
+    /// INI provider on **root 1** and finishes by reading back what the game
+    /// wrote to it. Until this existed, `read_file` hardcoded
+    /// [`RootId::DEFAULT`] while [`Director::readdir`] already took a root, so a
+    /// host could *list* a second root's graph and never read a byte out of it —
+    /// the round trip that `memory()` exists for was reachable only by launching
+    /// something and having the child copy the file out to real disk.
+    ///
+    /// [`Director::readdir`]: vfs_director::Director::readdir
+    pub fn read_file_at(&self, root: RootId, vpath: &str) -> Result<Vec<u8>, i32> {
+        let (fh, size, is_dir) = self.kernel.open(root, vpath, OPEN_READ)?;
         if is_dir {
             let _ = self.kernel.close(fh);
             return Err(vfs_provider::is_dir());

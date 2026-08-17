@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use vfs_embed::{
     rejected_writes, reset_rejected_writes, DiskProvider, InlineProvider, LaunchOpts, RootId,
-    RootSources, Session, OPEN_READ, OPEN_WRITE,
+    RootSources, Session, OPEN_WRITE,
 };
 
 /// A scratch directory holding one file, unique per test line.
@@ -27,21 +27,17 @@ fn dir(tag: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
     p
 }
 
+/// A whole-file read out of any root's graph.
+///
+/// This used to be a hand-rolled open/read/close loop against
+/// `session.kernel()`, for one reason: `Session::read_file` hardcoded root 0, so
+/// the only host-side way to read the second root a *two*-root session exists to
+/// test was to bypass the accessor. `Session::read_file_at` is that gap closed,
+/// and this helper now exists only to unwrap and keep the assertions short.
 fn read_whole(session: &Session, root: RootId, rel: &str) -> Vec<u8> {
-    let kernel = session.kernel();
-    let (fh, size, is_dir) = kernel.open(root, rel, OPEN_READ).expect("open for read");
-    assert!(!is_dir, "{rel} must be a file");
-    let mut buf = vec![0u8; size as usize];
-    let mut off = 0usize;
-    while off < buf.len() {
-        match kernel.read(fh, off as u64, &mut buf[off..]).unwrap() {
-            0 => break,
-            n => off += n,
-        }
-    }
-    kernel.close(fh).unwrap();
-    buf.truncate(off);
-    buf
+    session
+        .read_file_at(root, rel)
+        .unwrap_or_else(|st| panic!("read_file_at({root:?}, {rel}) status {st}"))
 }
 
 /// Everything a host does, in the order it does it: declare roots, compose a
@@ -148,8 +144,34 @@ fn a_two_root_session_composes_writes_and_reads_back_through_vfs_embed_alone() {
         "root 1's write must not land in root 0's write layer"
     );
 
-    // The host-side convenience read, on root 0.
+    // The host-side convenience reads. `read_file` is root 0 and
+    // `read_file_at` is any root, and the pair is checked together here for a
+    // specific reason. A `read_file_at` that ignored its argument *is* caught
+    // above — it was, when mutated — but only because root 0 happens to hold no
+    // `Skyrim.ini` at that point, so the read fails with `ST_NOT_FOUND` rather
+    // than answering the wrong file. That is an accident of the fixture. Reading
+    // the **same relative name** out of both roots and requiring different bytes
+    // is the check that does not depend on it.
     assert_eq!(session.read_file("shared.txt").unwrap(), b"MOD-WINS");
+    // `DiskProvider` reads live, so root 0 gains a file of the same name
+    // without recomposing anything.
+    std::fs::write(mods.join("Skyrim.ini"), b"ROOT-0-INI!").unwrap();
+    assert_eq!(session.read_file("Skyrim.ini").unwrap(), b"ROOT-0-INI!");
+    assert_eq!(
+        session.read_file_at(RootId(1), "Skyrim.ini").unwrap(),
+        b"EDITED-INI!!",
+        "the root argument selects the graph, and root 0 has its own file of this name"
+    );
+    assert_eq!(
+        session.read_file_at(RootId::DEFAULT, "Skyrim.ini").unwrap(),
+        session.read_file("Skyrim.ini").unwrap(),
+        "read_file is read_file_at(DEFAULT, ..) and nothing else"
+    );
+    // An unmounted root answers rather than panicking or reading root 0.
+    assert!(
+        session.read_file_at(RootId(9), "Skyrim.ini").is_err(),
+        "a root with no graph must fail, not fall back to root 0"
+    );
 
     session.stop_serve();
     assert!(!session.is_serving());

@@ -400,8 +400,21 @@ export class Session {
   serve(): void;
   isServing(): boolean;
 
-  /** Read a whole file out of root 0's graph, host-side. */
-  readFile(vpath: string): Buffer;
+  /**
+   * Read a whole file out of a root's graph, host-side; `root` defaults to 0.
+   *
+   * This is how a host reads back what a launched child wrote into a
+   * `memory()` provider — spec §8's last line, which mounts the INIs on root 1.
+   *
+   * **A path given here is not case-folded.** The shim folds every vpath
+   * component before it crosses the ring, so a child's write to `Skyrim.ini`
+   * reaches the provider as `skyrim.ini`; a host-side read does not fold, and
+   * `memory()` is case-sensitive. Until spec §6's `casefold` primitive exists, a
+   * host that wants to read a child's writes back out of `memory()` must fold
+   * its own keys — see `examples/spec-8-example.cts`, which demonstrates both
+   * the working round trip and the silent wrong answer.
+   */
+  readFile(vpath: string, root?: number): Buffer;
 
   /**
    * Point this session at a specific shim (and optionally payload) DLL, for a
