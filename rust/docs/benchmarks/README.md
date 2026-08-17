@@ -26,7 +26,7 @@ cargo run -p vfs-launch --bin vfs-fuse-bench --release -- --zip
 
 The block-cache figures were produced by `spike-node/cache-cost`, a throwaway
 harness **that has been deleted** (its own workspace, compiled by nothing, and
-superseded by the tests below). What holds those numbers now is CI:
+superseded by the tests below). What holds those numbers now is these two tests:
 
 ```powershell
 cargo test -p vfs-cache --release --test hit_copy_cost --test hit_scaling_cost
@@ -34,4 +34,17 @@ cargo test -p vfs-cache --release --test hit_copy_cost --test hit_scaling_cost
 
 `hit_copy_cost` is deterministic and allocation-counted; `hit_scaling_cost`
 measures wall-clock ratios and documents its own thresholds and known limits.
-Both run on every push. Prefer **release** builds. SpinNotifier in-process numbers understate production event-wake latency.
+
+**Corrected 2026-08-17:** this section previously said CI runs the command above
+on every push. Both tests do run on every push, but **in debug — `--release`
+appears nowhere in `.github/workflows/ci.yml`.** That matters unevenly:
+`hit_copy_cost` counts allocations and is build-independent, so it is a real gate
+either way; `hit_scaling_cost` measures wall-clock ratios in a debug build on a
+4-vCPU runner, which is a much weaker gate than the release run its thresholds
+were chosen against. Prefer **release** when running these by hand.
+
+Note also the correction at the top of
+[block-cache-hit-cost.md](./block-cache-hit-cost.md): that file's `after MiB/s`
+column is unreliable and its old "110x" headline should not be cited.
+
+SpinNotifier in-process numbers understate production event-wake latency.

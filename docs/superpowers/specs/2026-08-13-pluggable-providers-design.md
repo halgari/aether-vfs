@@ -346,8 +346,12 @@ dispatch `readdir` to a single child:
 - `readdir`: union across the default plus every route that could contribute to
   that directory.
 
-This asymmetry is specified in the contract and has dedicated conformance cases
-rather than being left to each implementation's judgment.
+This asymmetry is specified in the contract, but **it is specified only — as of
+2026-08-17 nothing verifies it.** `RouterProvider::readdir` is single-dispatch,
+not a union, and both router conformance runs pass empty route lists, so no test
+exercises the case the asymmetry describes. `vfs-embed/src/session.rs` records
+the gap. Treat the `readdir` union as design intent awaiting implementation, not
+as behaviour a host can rely on.
 
 ### Registry
 
@@ -701,24 +705,47 @@ is what makes `cached` an optimisation rather than a necessity, and it is the
 difference between a host that degrades under its own UI work and one that does
 not.
 
-### `cached` at the default block size is actively harmful
+### `cached` at the default block size was actively harmful
 
-4 KiB sequential through `cached` with the default 1 MiB block measures
-**24 MiB/s** — sixty times slower than the raw boundary. The cause is not the
-FFI boundary at all: `vfs-cache/src/store.rs:120` **clones the whole block on
-every hit**, so a 4 KiB read memcpys 1 MiB. A pure-Rust harness with no Node
-anywhere measures 25.3 MiB/s against the bridge's 24.5 — **the cache is ~70×
-more expensive than the boundary it exists to protect.**
+**Corrected 2026-08-17. Everything in this subsection is a historical finding.
+The three defects below are FIXED, and its configuration recommendation was
+withdrawn by re-measurement. Read it as a record of what was found, not as a
+description of the current cache or as guidance.**
 
-Two further defects in the same function: an O(n) LRU scan per hit
-(`store.rs:116-118`), and one process-wide mutex (`store.rs:59`) — cached
-throughput is flat at 24→26 MiB/s from one to eight threads while p50 grows
-linearly, 155 → 1139 µs.
+As measured by the Node spike: 4 KiB sequential through `cached` with the
+default 1 MiB block ran at **24 MiB/s** — sixty times slower than the raw
+boundary. The cause was not the FFI boundary at all. Three defects, all in the
+hot path:
 
-**A 64 KiB block is the best configuration measured (1094 MiB/s.)** No existing
-test catches any of this: they assert correctness, and correctness is intact.
-Recorded as a defect in its own right, not as Node's problem — every cached read
-in every session pays it today.
+1. A cache hit **cloned the whole block**, so a 4 KiB read memcpy'd 1 MiB. A
+   pure-Rust harness with no Node anywhere measured 25.3 MiB/s against the
+   bridge's 24.5 — the cache was more expensive than the boundary it exists to
+   protect.
+2. An **O(n) LRU scan per hit**.
+3. **One process-wide mutex** — cached throughput flat at 24→26 MiB/s from one
+   to eight threads while p50 grew linearly, 155 → 1139 µs.
+
+All three are fixed: hits deliver `Arc<[u8]>` rather than a clone, eviction is
+CLOCK with a reference bit, and the store is a sharded `RwLock`. Two cost tests
+now gate them — `vfs-cache/tests/hit_copy_cost.rs` and `hit_scaling_cost.rs`.
+The `store.rs` line numbers this subsection originally cited now point at
+unrelated code; they have been removed rather than renumbered, because the code
+they described no longer exists.
+
+**No speedup multiplier is quoted here on purpose.** The figures in
+`rust/docs/benchmarks/block-cache-hit-cost.md` were found on 2026-08-17 to
+contradict each other and to disagree with direct measurement on the same host,
+so the improvement is real but its size is not currently established. Do not
+cite a multiplier from that document until it has been re-measured.
+
+**The 64 KiB block recommendation is withdrawn.** The sweep that produced it was
+measuring the clone, so it selected the block size that minimised the cost of
+the bug rather than the best size for the workload.
+`vfs-cache/src/lib.rs` keeps `DEFAULT_BLOCK_SIZE` at 1 MiB.
+
+The original entry noted that no existing test caught any of this — they
+asserted correctness, and correctness was intact. That remains the useful
+lesson: a suite can be complete on correctness and blind to cost.
 
 ### Consequences for the API shape
 
@@ -909,13 +936,17 @@ Named so they are decisions rather than omissions:
   is a later project.
 - Per-path append cursors.
 - Linux hosting.
-- Hook-boundary `catch_unwind`. §9 predicted that `panic = "unwind"` would let
-  the shim's hook entry points wrap their bodies in `catch_unwind` and convert
-  a panic into an error status instead of taking down the host process. That
-  wrapping was never implemented. The practical effect of `panic = "unwind"`
-  today is the opposite of a safety net: a panic inside a hooked NT syscall
-  now unwinds through live Rust stack frames — running `Drop` impls — in a
-  real game process before it reaches the `extern "system"` boundary and
-  aborts there, whereas under the old `panic = "abort"` it aborted immediately
-  at the panic site. Until hook entry points actually call `catch_unwind`, a
-  hook panic unwinds further than it used to.
+- ~~Hook-boundary `catch_unwind`.~~ **Implemented 2026-08-17; no longer
+  deferred.** §9's prediction was carried out: `vfs-shim/src/hook.rs` defines
+  `contain_panic`, and the `hook_entry_points!` macro routes every
+  `extern "system"` detour through it, converting a panic into
+  `STATUS_HOOK_PANICKED` rather than unwinding into the game. A structural test,
+  `no_extern_hook_bypasses_the_panic_containment_macro`, asserts no hook escapes
+  the macro.
+  Two caveats, both tracked as follow-ups rather than reasons to call this
+  deferred: that structural guard has known holes (its marker match is
+  whitespace-sensitive, it scans only `extern "system"`, and it walks 2 of the 9
+  crates linked into the DLL), and containment covers `#[napi]`/hook entry
+  points but not every `extern "C"` frame in the tree — several are panic-*free*
+  today rather than panic-*guarded*. The original prediction stands; the
+  enforcement around it is not yet airtight.

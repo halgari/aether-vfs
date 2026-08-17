@@ -478,12 +478,16 @@ and it would triple the surface the canary suite must cover.
 
 ## 8b. A prerequisite gate 4 must not start without
 
-The director's `ops_write` and `total_write_bytes` counters exist in code but
-are **printed by no report**, so there is currently no way to observe under-root
-write activity short of grepping raw shim logs. Gate 4's entire job is driving
-write fall-through to zero; it cannot begin without a readable number for the
-writes that *did* route. Surface both counters alongside the open counts before
-gate 4 starts.
+**Closed 2026-08-17 — this gate was met before gate 4 ran.** `vfs-director`'s
+`io_stats` now prints `ops_write` and `total_write_bytes` alongside the open
+counts, covered by `write_ops_and_bytes_are_surfaced`, and
+`rust/docs/bypass-baseline.md` records the closure.
+
+The original requirement, kept for the record: the counters existed in code but
+were printed by no report, so under-root write activity could not be observed
+short of grepping raw shim logs. Gate 4's whole job was driving write
+fall-through to zero, and it could not begin without a readable number for the
+writes that *did* route.
 
 ## 9. Stage 2b acceptance criteria
 
@@ -502,10 +506,15 @@ gate 4 starts.
 - **What remains of the old Stage 3.** 2a absorbs the parts the invariant
   needs: write opcodes, `DiskProvider` writes, `overlay` copy-up, append
   cursors, `ST_READ_ONLY`. What is *not* absorbed and stays deferred:
-  `dry_run_writes` and the rejected-write discovery workflow, `FLAG_WRITE_BULK`
-  (performance, not correctness), the read-write `memory` provider, and the
-  write half of the gRPC `remote` provider. Stage 3 shrinks to those.
-- Hook-boundary `catch_unwind`, still unimplemented (see the Stage 1 spec).
+  `FLAG_WRITE_BULK` (performance, not correctness) and the write half of the
+  gRPC `remote` provider. Stage 3 shrinks to those.
+  **Corrected 2026-08-17:** this list previously also named the read-write
+  `memory` provider and the rejected-write discovery workflow as deferred. Both
+  landed — `vfs-compose/src/memory.rs` writes, and `vfs-embed/src/session.rs`
+  exposes `rejected_writes`.
+- ~~Hook-boundary `catch_unwind`, still unimplemented.~~ **Implemented
+  2026-08-17** via `contain_panic` and the `hook_entry_points!` macro; see the
+  Stage 1 spec's §13 entry for what is and is not covered.
 - **Alternate data streams in the write path** (found in gate 4, task 4).
   `canonicalise` (`vfs-redirect/src/canon.rs:318`) strips a `:stream` suffix as
   its literal first step, so `Overlay::file_path` never sees it. Consequence: a

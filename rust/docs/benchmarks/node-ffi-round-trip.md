@@ -31,14 +31,24 @@ condvar until JS calls back. 2026-08-17. Three agreeing runs plus a fourth.
 | Same, with a full event-loop turn in between | +0.8 µs |
 | Tail (max observed) | 130–400 µs |
 | Cold worker wake | 31–47 µs |
-| For scale: ring `READ` of 4 KiB, p50 (recorded elsewhere) | 9.7 µs |
+| For scale: ring `READ` of 4 KiB, p50 — see the correction below | 6.70 µs |
 
 **The headline is the comparison, not the number.** A JavaScript provider adds
-roughly **20%** to a 4 KiB read, not an order of magnitude — which is what made a
+roughly **30%** to a 4 KiB read, not an order of magnitude — which is what made a
 host-language provider a reasonable thing to build at all.
 
-Two more findings from the same harness, both since confirmed by things that do
-still exist:
+> **Corrected 2026-08-17.** The comparison row above previously read 9.7 µs with
+> no source named, and the overhead was stated as "roughly 20%". That 9.7 µs is
+> the superseded "After A1–A5" column of `a-optimizations-delta.md`; the current
+> recorded ring figure is **6.70 µs** (`fuse-rpc-latest.md`). Against the correct
+> baseline the JS provider's overhead is ~30%, not ~20%. The conclusion is
+> unchanged — well under an order of magnitude — but the number was flattering
+> and its source was untraceable, which is how it stayed wrong.
+
+Two more findings from the same harness. **Both are unverified today:** the
+harness that measured them is gone, and while the code implements their
+*recommendation* (`providerWorker()`), nothing measures the effects themselves.
+Read them as the reasoning behind the API shape, not as current figures.
 
 * **Concurrency scales with event loops and only with event loops.** Eight
   director threads against one worker loop gave p50 17.8 µs ≈ 8 × 2.2 µs, exactly
@@ -55,7 +65,9 @@ It was its own cargo workspace, listed in neither `rust/`'s `members` nor its
 dependency on `vfs-embed`, the crate whose surface changed in every task of stage
 4. Its `spike.node` output was gitignored, so a fresh clone could not run the
 benchmark even by hand. Its `cache-cost` binary is superseded by
-`vfs-cache/tests/hit_scaling_cost.rs` and `hit_copy_cost.rs`, which CI runs.
+`vfs-cache/tests/hit_scaling_cost.rs` and `hit_copy_cost.rs` — which CI runs, but
+in **debug**, not the release configuration these figures came from. See the
+correction in [block-cache-hit-cost.md](./block-cache-hit-cost.md).
 
 See [block-cache-hit-cost.md](./block-cache-hit-cost.md) for the defect it found
 and the fix, and the stage 4 task reports under `.superpowers/sdd/` for the full
