@@ -132,6 +132,11 @@ impl Director for DirectorService {
             shim_dll: None,
             payload_dll: None,
             env: r.env.into_iter().collect::<BTreeMap<_, _>>(),
+            // `LaunchReq` carries no launcher/spawn-target chain and no
+            // redistributable fallback dirs: a generic RPC launch has no
+            // game-specific knowledge to put there. A caller that needs
+            // either stages before launching.
+            ..Default::default()
         };
 
         let registry = self.registry.clone();

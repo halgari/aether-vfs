@@ -252,18 +252,18 @@ fn declaring_root_zero_repoints_the_managed_root_instead_of_being_discarded() {
     assert_eq!(session.declared_roots(), [(1u32, docs.clone())]);
 }
 
-/// A relative `LaunchOpts.image` is resolved **on real disk** under the
-/// managed root — not through the provider graph. For the daemon that is
-/// invisible, because it stages the image out of the graph and rewrites
-/// `image` to the staged absolute path before it ever gets here. For any other
-/// host it is the first wall: the managed root of a fully virtualized session
-/// is deliberately empty, so `launch("SkyrimSE.exe")` finds nothing.
+/// A relative `LaunchOpts.image` is resolved on real disk under the managed
+/// root, then — Task 4b — as a vpath in the provider graph, which is staged
+/// out. Both halves of that are proven end to end in `launch_vfs_content.rs`,
+/// including a process that actually runs from bytes only the graph held.
 ///
-/// The gap itself is real and still open (staging lives in `vfs-directord`).
-/// What must not happen is losing it in a bare `CreateProcess` failure, so the
-/// refusal names the cause and distinguishes the two ways to arrive at it.
+/// What is asserted here is the **diagnosis**, which is what a host meets when
+/// it gets this wrong. The three outcomes have to stay distinguishable: an
+/// image the graph serves but the stager cannot use, a name nothing serves at
+/// all, and no name given. Collapsing any two of them sends a host chasing the
+/// wrong thing.
 #[test]
-fn launching_vfs_content_by_vpath_is_refused_with_the_reason() {
+fn launching_a_relative_image_reports_which_of_the_three_ways_it_failed() {
     let content = dir("launch-content", &[("game.exe", b"MZ-not-really")]);
     let base = dir("launch-session", &[]);
 
@@ -276,20 +276,25 @@ fn launching_vfs_content_by_vpath_is_refused_with_the_reason() {
         .expect("mount content");
     session.serve().expect("serve");
 
+    // The graph serves `game.exe`, so `launch` routes it to staging rather
+    // than to `CreateProcess` — and the stager is what refuses it, because
+    // those bytes are not a PE image. That the *stager* is the one complaining
+    // is the evidence that the graph route was taken at all.
     let err = session
         .launch(&LaunchOpts {
             image: "game.exe".into(),
             wait: true,
             ..Default::default()
         })
-        .expect_err("an image only the graph holds cannot be CreateProcess'd");
+        .expect_err("bytes that are not a PE image cannot be staged");
     assert!(
-        err.contains("game.exe") && err.contains("staged"),
-        "the refusal must name the image and say staging is what is missing: {err}"
+        err.contains("game.exe") && err.contains("not a PE"),
+        "an image the graph holds must reach the stager, and the stager's own \
+         complaint must survive: {err}"
     );
 
-    // The other arrival: nothing has that path at all. Different diagnosis,
-    // and saying "stage it" there would send a host chasing the wrong thing.
+    // Nothing has that path at all — neither disk nor graph, so there is not
+    // even anything to stage.
     let err = session
         .launch(&LaunchOpts {
             image: "nowhere.exe".into(),
@@ -298,8 +303,8 @@ fn launching_vfs_content_by_vpath_is_refused_with_the_reason() {
         })
         .expect_err("a name nothing serves cannot launch either");
     assert!(
-        err.contains("nowhere.exe") && !err.contains("staged"),
-        "a path nothing serves is a different failure from an unstaged one: {err}"
+        err.contains("nowhere.exe") && err.contains("nothing to stage"),
+        "a path nothing serves is a different failure from an unstageable one: {err}"
     );
 
     // And the default is no longer a plausible-looking game exe that would

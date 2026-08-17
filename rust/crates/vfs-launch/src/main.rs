@@ -2,22 +2,33 @@
 //!
 //! Host workflow: discover zips → `Session` mount → serve IPC → launch (I/O remapped).
 //!
-//! **The launch image is not staged here, despite what this file used to say.**
-//! It hands `Session::launch` the PE's *vpath*, and `Session::launch` resolves
-//! a relative image on real disk under the managed root — so this works only
-//! when `--root` is a directory that already holds the exe, and not with the
-//! default root (`<layers>/runtime`, created empty and payload-wiped). Reading
-//! the image out of the provider graph, writing it plus its PE import closure
-//! to disk and mounting that back under the real content is
-//! `vfs-directord`'s `SessionRegistry::launch`; it has never been wired into
-//! this tool. `Session::launch` now says so by name instead of failing in
-//! `CreateProcess`.
+//! **The launch image is staged from the VFS**, which since Task 4b is true
+//! rather than aspirational. This tool hands `Session::launch` the PE's
+//! *vpath*; the default `--root` (`<layers>/runtime`) is a directory this tool
+//! creates and payload-wipes, so nothing is on disk there, and `Session::launch`
+//! resolves the name through the provider graph, writes the image plus its PE
+//! import closure out to `<state>/stage`, mounts that back *underneath* the zip
+//! layers and launches it. For the SKSE loader the game it spawns is staged
+//! beside it (`LaunchOpts::stage_also`), because the child's own
+//! `CreateProcess` needs a real image just as much as the first one did.
+//!
+//! Before that this file's default invocation could not work at all: it
+//! claimed staging, nothing staged, and the relative image resolved into the
+//! empty directory the tool had just wiped.
 
 use std::path::{Path, PathBuf};
 
 use vfs_embed::{Director, DiskProvider, RootId, KIND_FILE, Session};
 
-const DEFAULT_LAYERS: &str = r"C:	mp";
+/// Default layer directory.
+///
+/// This was `r"C:<TAB>mp"` from e604fd5 until Task 4b — a raw string holding a
+/// literal tab where `C:\tmp` was meant, so `--layers`' default named a path
+/// that cannot exist and `discover_layers` failed before anything else ran.
+/// A second, independent reason this tool's default invocation could not work,
+/// unrelated to staging and invisible in review because a raw string renders a
+/// tab as whitespace.
+const DEFAULT_LAYERS: &str = r"C:\tmp";
 const STEAM_APPID: &str = "489830"; // Skyrim Special Edition
 
 fn usage() -> ! {
@@ -362,8 +373,8 @@ fn main() {
         match session.kernel().getattr(RootId::DEFAULT, &pe_vpath) {
             Ok(Some(st)) if st.kind == KIND_FILE && st.size > 512 => {
                 eprintln!(
-                    "  PE {pe_vpath} present in VFS ({} bytes) — must also be on disk \
-                     under the managed root; see this file's header on staging",
+                    "  PE {pe_vpath} present in VFS ({} bytes) — will be staged to disk \
+                     with its import closure at launch",
                     st.size
                 );
             }
@@ -444,14 +455,28 @@ fn main() {
     let detach = !args.wait;
     eprintln!("launching {pe_vpath} under {} …", args.root.display());
     eprintln!(
-        "  mode: {} + remapped I/O (image read from disk, NOT staged from the VFS)",
+        "  mode: {} + remapped I/O (image staged from the VFS with its import closure)",
         if detach { "detach" } else { "wait" }
     );
+
+    // The SKSE loader spawns the game itself, and that spawn is an ordinary
+    // `CreateProcess` nothing of ours intercepts — so `SkyrimSE.exe` has to be
+    // a real file beside the loader before the loader runs. Staging it as a
+    // companion image is how; without this the loader starts and then dies
+    // looking for a game that only exists in the zips.
+    let stage_also = if args.use_skse {
+        vec![find_pe_vpath(session.kernel(), "SkyrimSE.exe")
+            .unwrap_or_else(|| "SkyrimSE.exe".to_string())]
+    } else {
+        vec![]
+    };
 
     let exit = session.launch(&vfs_embed::LaunchOpts {
         image: pe_vpath,
         args: vec![],
         wait: args.wait,
+        stage_also,
+        stage_fallback_dirs: vec![],
         shim_dll: None,
         payload_dll: None,
         env: Default::default(),
@@ -467,6 +492,12 @@ fn main() {
             } else {
                 eprintln!("game exited with code {code}");
                 session.stop_serve();
+                // `process::exit` runs no destructors, so the session — and
+                // with it the `StagedDir` whose `Drop` removes the staging
+                // directory — would never be dropped. The child has exited
+                // (`wait: true`), so the image is no longer mapped and the
+                // directory can go now.
+                drop(session);
                 std::process::exit(code);
             }
         }

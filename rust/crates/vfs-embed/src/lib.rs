@@ -28,13 +28,12 @@
 //!     .map_err(|st| format!("write layer: status {st}"))?;
 //!
 //! session.serve()?;
-//! // Absolute, and it must already be on disk: `CreateProcess` reads the
-//! // image before any hook of ours exists in the child, so an exe that only
-//! // the provider graph holds has to be staged out first. See
-//! // [`Session::launch`] — a relative name is resolved on real disk under the
-//! // managed root, never through the graph.
+//! // A relative image is looked for on real disk under the managed root and
+//! // then as a vpath in the graph. The second case — an exe that is content,
+//! // in a managed root that is deliberately empty — is staged out with its PE
+//! // import closure and launched from there; see [`Session::launch`].
 //! session.launch(&LaunchOpts {
-//!     image: r"C:\game\SkyrimSE.exe".into(),
+//!     image: "SkyrimSE.exe".into(),
 //!     ..Default::default()
 //! })?;
 //! # Ok(())
@@ -65,21 +64,26 @@
 //! learns about its sources one at a time (a config being applied, an RPC
 //! stream, a UI) and must rebuild a root's mount list from scratch each time.
 //!
+//! ## Launching content
+//!
+//! A managed root is normally **empty on disk** — the game is in the graph.
+//! `CreateProcess` cannot create a process from bytes, and the Windows loader
+//! resolves the image's static imports before any hook of ours exists in the
+//! child, so [`Session::launch`] writes a graph-resolved image and its PE
+//! import closure out to `state_dir/stage` and launches that. The staging
+//! directory is mounted back into the graph so the same file still answers at
+//! its vpath, and **below** everything the host mounted, so a point-in-time
+//! staged copy can never shadow curated content. The session holds the staged
+//! directory alive for the child's lifetime.
+//!
+//! A host does not have to know any of that: `launch("SkyrimSE.exe")` is
+//! enough. [`Session::stage_launch`] is the same sequence exposed, for seeding
+//! staging from something other than this session's graph.
+//!
 //! ## What a host still has to build for itself
 //!
 //! Written down because the alternative is each new binding rediscovering it.
 //!
-//! * **Launching an image that is VFS content.** [`Session::launch`] takes a
-//!   path on disk; `CreateProcess` reads the image before any hook of ours
-//!   exists in the child. An exe that only the provider graph holds must be
-//!   staged out with its PE import closure, and the staging directory mounted
-//!   back into the graph *underneath* the real content so the same bytes stay
-//!   answerable at their vpath. [`stage`] does the writing; the whole sequence
-//!   exists once, in `vfs-directord`'s `SessionRegistry::launch`, and moving it
-//!   here needs `Session` to own per-root source bookkeeping (so the staged
-//!   mount survives a later rebuild) and the resulting `StagedDir` (so its
-//!   cleanup cannot race the child). `Session::launch` refuses the case by
-//!   name rather than letting it end in `CreateProcess`.
 //! * **Locate its own `vfs_shim_dll.dll` / `vfs_payload.dll`.** Left unset,
 //!   [`LaunchOpts::shim_dll`] searches next to `std::env::current_exe()`,
 //!   which for a Node addon is `node.exe` and for a Python extension is
@@ -110,7 +114,7 @@
 mod session;
 mod sources;
 
-pub use session::{compose_root, LaunchOpts, Session};
+pub use session::{compose_root, LaunchOpts, Session, StageOpts};
 pub use sources::{RootMounts, RootSources};
 
 // ---------------------------------------------------------------------------

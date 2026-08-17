@@ -11,7 +11,7 @@ use std::path::Path;
 
 use vfs_control::SourceSpec;
 use vfs_director::stage::ImageSource;
-use vfs_embed::{LaunchOpts, RootId, KIND_FILE};
+use vfs_embed::{LaunchOpts, RootId, StageOpts, KIND_FILE};
 use vfs_directord::SessionRegistry;
 use vfs_source::build_provider;
 
@@ -80,22 +80,24 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
     m.insert("SkyrimSE.exe".to_string(), bare_pe(b"STAGED-COPY"));
     let source = FakeSource(m);
 
-    let stage_root = tempfile::tempdir().unwrap();
+    // Task 4b moved this sequence into `vfs_embed::Session`, so the daemon
+    // drives it through the session rather than owning a second copy — the
+    // staging directory, the `StagedDir`'s lifetime and the below-everything
+    // mount are all the session's now.
     let also = ["SkyrimSE.exe"];
-    let staged = reg
-        .stage_launch(
-            &summary.id,
-            &source,
-            &vfs_directord::StageLaunchOpts {
-                exe_vpath: "skse64_loader.exe",
-                also: &also,
-                stage_root: stage_root.path(),
-                tag: "t1",
-                fallback_dirs: &[],
-            },
-        )
+    let staged_exe = reg
+        .with_session_mut(&summary.id, |live| {
+            live.session.stage_launch(
+                &source,
+                &StageOpts {
+                    exe_vpath: "skse64_loader.exe",
+                    also: &also,
+                    fallback_dirs: &[],
+                },
+            )
+        })
         .expect("stage_launch");
-    assert!(staged.exe().is_file(), "CreateProcess still needs a real on-disk image");
+    assert!(staged_exe.is_file(), "CreateProcess still needs a real on-disk image");
 
     // The launcher: reachable ONLY via staging — no content provider ever
     // served it. This is exactly what would go invisible once the
@@ -149,15 +151,18 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
         Ok(())
     })
     .unwrap();
-
-    drop(staged);
 }
 
 /// GAP 1 closed: `SessionRegistry::launch` — the exact function
 /// `DirectorService::launch` calls, i.e. the real `vfs launch --exec` /
-/// scenario-TOML production path — must stage a relative launch image
-/// itself and serve it through the provider graph, not merely offer a
-/// `stage_launch` capability nothing calls.
+/// scenario-TOML production path — must stage a relative launch image and
+/// serve it through the provider graph, with the caller doing nothing but
+/// naming the vpath.
+///
+/// Since Task 4b the daemon no longer implements that itself; it delegates to
+/// `vfs_embed::Session::launch`. This test is deliberately unchanged in what
+/// it drives and asserts, because "the daemon still does the same thing" is
+/// precisely the claim a relocation has to keep making.
 ///
 /// The staged bytes here are not a runnable Windows image (same minimal
 /// `bare_pe` as above), so `Session::launch`'s later `CreateProcess`/shim
@@ -191,9 +196,9 @@ fn production_launch_stages_a_relative_image_before_create_process() {
 
     // `image` is a *relative* vpath — the production shape (`--exec
     // SkyrimSE.exe`, `[launch] exec = "..."`), not an already-staged disk
-    // path. `Session::launch` alone cannot do anything useful with that: it
-    // would join it onto `virtual_root` and hand a nonexistent real path to
-    // `CreateProcess`. `SessionRegistry::launch` must stage it first.
+    // path. The session's root is empty on disk, so the only way this can
+    // reach `CreateProcess` at all is for the launch path to stage it out of
+    // the graph first.
     let err = reg
         .launch(
             &summary.id,

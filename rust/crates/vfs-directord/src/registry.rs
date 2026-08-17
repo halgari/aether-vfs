@@ -12,34 +12,10 @@ use std::sync::{Arc, Mutex};
 // composition primitives below are re-exports from `vfs-embed`'s own catalog,
 // not a second route to the same crates. `daemon_names_only_the_embed_api`
 // (bottom of this file) keeps it that way.
-use vfs_embed::stage::{ImageSource, StagedDir};
 use vfs_embed::{
-    stack_layers, BlockCache, CacheConfig, CachingProvider, DiskProvider, LaunchOpts, Provider,
-    RootId, RootSources, Session,
+    stack_layers, BlockCache, CacheConfig, CachingProvider, LaunchOpts, Provider, RootId,
+    RootSources, Session,
 };
-
-/// Layer for the disk provider mounted over a staged launch directory (see
-/// [`SessionRegistry::stage_launch`]).
-///
-/// Staging exists only so `CreateProcess`/the loader can find a real image
-/// before the shim does; the bytes it writes are a point-in-time copy of
-/// whatever the provider graph already said. Mounting it at the lowest
-/// possible layer means a real, curated content or mod layer always wins on
-/// a shared path — the staged copy only answers for paths nothing else
-/// serves (e.g. a launcher's runtime DLL, or an import-closure DLL pulled
-/// from a fallback dir rather than the VFS).
-const STAGING_LAYER: i32 = i32::MIN;
-
-/// Arguments for [`SessionRegistry::stage_launch`], bundled to stay under
-/// clippy's argument-count limit — see [`vfs_embed::stage::stage_launch_with`]
-/// for what each field means.
-pub struct StageLaunchOpts<'a> {
-    pub exe_vpath: &'a str,
-    pub also: &'a [&'a str],
-    pub stage_root: &'a Path,
-    pub tag: &'a str,
-    pub fallback_dirs: &'a [PathBuf],
-}
 
 /// Build the composed provider each root in a [`vfs_control::SessionConfig`]
 /// serves — the config → provider-graph half of stage 2b's "one provider per
@@ -128,27 +104,22 @@ pub struct LiveSession {
     pub root: PathBuf,
     pub session: Session,
     next_source_id: AtomicU64,
-    next_stage_tag: AtomicU64,
     /// Per-declared-root bookkeeping for rebuild. Keyed by the raw `u32` a
     /// `SourceEntry`/`AddSourceReq` names — `RootId` wraps this only at the
     /// `Director` boundary. The accumulate-and-recompose rule itself is
     /// [`vfs_embed::RootSources`]; what is daemon-specific is only *which*
     /// session it belongs to.
+    ///
+    /// Staging is **not** in here. It used to be — one more source at
+    /// `i32::MIN` — and it is now the session's own, because it is not a
+    /// source this host declared but a consequence of launching (Task 4b; see
+    /// [`vfs_embed::Session::stage_launch`]).
     roots: HashMap<u32, RootSources>,
-    /// The most recent launch's staged directory, kept alive here so its
-    /// `Drop` (directory removal) does not race the child it was staged for.
-    /// Dropped (and thus cleaned up) when the session is torn down, or
-    /// replaced on the next relaunch. See [`SessionRegistry::launch`].
-    staged: Option<StagedDir>,
 }
 
 impl LiveSession {
     pub fn next_source_id(&self) -> u64 {
         self.next_source_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn next_stage_tag(&self) -> u64 {
-        self.next_stage_tag.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Say, per root, whether that root can copy up — at **launch**, the
@@ -289,9 +260,7 @@ impl SessionRegistry {
             root,
             session,
             next_source_id: AtomicU64::new(1),
-            next_stage_tag: AtomicU64::new(1),
             roots: HashMap::new(),
-            staged: None,
         };
 
         self.inner
@@ -409,43 +378,6 @@ impl SessionRegistry {
         })
     }
 
-    /// Stage a launch image (plus import closure / companion images) onto
-    /// real disk, then mount the staging directory into the session's own
-    /// provider graph so every staged path resolves there too — not only
-    /// via disk passthrough.
-    ///
-    /// `session.launch()` still needs `staged.exe()`'s literal on-disk path
-    /// for `CreateProcess` (Windows cannot create a process from bytes), so
-    /// staging to disk stays mandatory. What changes here is that the *same*
-    /// files also become resolvable through `getattr`/`open` at their
-    /// under-root vpath (e.g. `SkyrimSE.exe`), which is what a later,
-    /// hook-mediated open of that same path — a launcher spawning its target
-    /// by relative name beneath the managed root, say — needs once the root
-    /// is fully virtual and disk passthrough is gone.
-    ///
-    /// Mounted at [`STAGING_LAYER`] (via [`Self::add_source`]) so real game
-    /// content always wins over the staged copy on a shared path.
-    pub fn stage_launch(
-        &self,
-        session_id: &str,
-        source: &dyn ImageSource,
-        opts: &StageLaunchOpts,
-    ) -> Result<StagedDir, String> {
-        let staged = vfs_embed::stage::stage_launch_with(
-            source,
-            opts.exe_vpath,
-            opts.also,
-            opts.stage_root,
-            opts.tag,
-            opts.fallback_dirs,
-        )?;
-        let disk: Arc<dyn Provider> = Arc::new(DiskProvider::new(staged.dir()));
-        // Staging always concerns the launched image — root 0 (the game
-        // directory) in every session this registry builds today.
-        self.add_source(session_id, 0, "/", STAGING_LAYER, disk)?;
-        Ok(staged)
-    }
-
     pub fn with_session_mut<R>(
         &self,
         id: &str,
@@ -492,19 +424,21 @@ impl SessionRegistry {
     /// the same path `vfs launch --exec` and scenario-TOML `[launch] exec =`
     /// drive). `opts.image` here names a VFS vpath, not an already-staged
     /// disk path — same as any other content path a client asks the director
-    /// about. Stage it (and mount the staging directory into the provider
-    /// graph) before handing the resulting real, on-disk path to
-    /// `Session::launch`, so the same file is answerable through
-    /// `getattr`/`open` afterward too, not only reachable via the literal
-    /// path `CreateProcess` used.
+    /// about.
     ///
-    /// An absolute `opts.image` — an already-staged path (as
-    /// `skyrim-live.rs` builds and passes directly to `Session::launch`,
-    /// bypassing the registry), or a test-fixture binary that was never VFS
-    /// content — is left untouched, mirroring `Session::launch`'s own
-    /// absolute/relative split.
+    /// Staging that vpath out to disk, mounting the staging directory back
+    /// under the curated graph and keeping it alive for the child **used to
+    /// live here** and is now [`vfs_embed::Session::launch`]'s, where the Node
+    /// and Python bindings can reach it too (Task 4b). This method adds only
+    /// what is this host's: the per-root write-layer report, at the one moment
+    /// it is both true and actionable.
+    ///
+    /// An absolute `opts.image` — an already-staged path (as `skyrim-live.rs`
+    /// builds and passes directly to `Session::launch`, bypassing the
+    /// registry), or a test-fixture binary that was never VFS content — is
+    /// launched as given; that split is `Session::launch`'s and no longer
+    /// re-implemented here.
     pub fn launch(&self, id: &str, opts: LaunchOpts) -> Result<i32, String> {
-        let opts = self.stage_relative_launch_image(id, opts)?;
         self.with_session_mut(id, |live| {
             // The composition is final here and about to be written through
             // by a real process — the one moment where "this root cannot copy
@@ -512,88 +446,6 @@ impl SessionRegistry {
             live.report_write_layers();
             live.session.launch(&opts)
         })
-    }
-
-    /// See [`Self::launch`]. Split out so the staging step (fallible, does
-    /// file IO, and briefly re-enters the registry lock via
-    /// [`Self::stage_launch`]) stays separate from the single
-    /// `with_session_mut` call that performs the actual launch.
-    fn stage_relative_launch_image(
-        &self,
-        id: &str,
-        opts: LaunchOpts,
-    ) -> Result<LaunchOpts, String> {
-        if Path::new(&opts.image).is_absolute() {
-            return Ok(opts);
-        }
-
-        /// Reads whole files out of a session's own composed provider graph,
-        /// for [`vfs_embed::stage`]. Mirrors `skyrim-live.rs`'s
-        /// `KernelSource` — kept private here since `stage.rs` deliberately
-        /// stays independent of how content is served.
-        struct KernelSource(Arc<vfs_embed::Director>);
-        impl ImageSource for KernelSource {
-            fn read(&self, vpath: &str) -> Option<Vec<u8>> {
-                // Staging always concerns the launched image, which lives in
-                // the game-directory root — root 0 in every session this
-                // registry builds today.
-                let (fh, size, is_dir) =
-                    self.0.open(RootId::DEFAULT, vpath, vfs_embed::OPEN_READ).ok()?;
-                if is_dir {
-                    let _ = self.0.close(fh);
-                    return None;
-                }
-                let mut buf = vec![0u8; size as usize];
-                let mut off = 0usize;
-                while off < buf.len() {
-                    match self.0.read(fh, off as u64, &mut buf[off..]) {
-                        Ok(0) => break,
-                        Ok(n) => off += n,
-                        Err(_) => {
-                            let _ = self.0.close(fh);
-                            return None;
-                        }
-                    }
-                }
-                let _ = self.0.close(fh);
-                buf.truncate(off);
-                Some(buf)
-            }
-        }
-
-        let (kernel, stage_root, tag) = self.with_session_mut(id, |live| {
-            Ok((
-                Arc::clone(live.session.kernel()),
-                live.session.state_dir().join("stage"),
-                live.next_stage_tag(),
-            ))
-        })?;
-
-        let source = KernelSource(kernel);
-        let staged = self.stage_launch(
-            id,
-            &source,
-            &StageLaunchOpts {
-                exe_vpath: &opts.image,
-                // Generic registry launches carry no game-specific knowledge
-                // of launcher/spawn-target chains or redistributable fallback
-                // dirs (that lives in game-specific tooling, e.g.
-                // `skyrim-live.rs`); a caller that needs either can call
-                // `stage_launch` directly before `launch`.
-                also: &[],
-                stage_root: &stage_root,
-                tag: &tag.to_string(),
-                fallback_dirs: &[],
-            },
-        )?;
-
-        let mut opts = opts;
-        opts.image = staged.exe().to_string_lossy().into_owned();
-        self.with_session_mut(id, |live| {
-            live.staged = Some(staged);
-            Ok(())
-        })?;
-        Ok(opts)
     }
 }
 
@@ -689,6 +541,7 @@ fn daemon_names_only_the_embed_api() {
 mod root_graph_tests {
     use super::*;
     use vfs_control::{SessionConfig, SourceEntry, SourceSpec};
+    use vfs_embed::DiskProvider;
     use vfs_embed::OPEN_READ;
     use vfs_embed::VPath;
 

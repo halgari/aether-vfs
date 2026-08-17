@@ -480,12 +480,16 @@ component match sees exactly what the game's own raw NT open spells)",
 
     let wait = vfs_env::opt_in(vfs_env::WAIT);
     let code = session.launch(&LaunchOpts {
+        // Already an absolute path into this harness's own staging directory
+        // (`stage_launch_with` above), so `Session::launch`'s staging step is
+        // not reached — the `stage_*` fields would have nothing to do.
         image: host.clone(),
         args: vec![],
         wait,
         shim_dll: None,
         payload_dll: None,
         env: Default::default(),
+        ..Default::default()
     })?;
 
     timeline.mark("launched");

@@ -15,7 +15,7 @@ use tonic::transport::Server;
 use vfs_control::pb::director_client::DirectorClient;
 
 pub use discovery::{default_discovery_path, read_discovery, write_discovery, Discovery};
-pub use registry::{SessionRegistry, StageLaunchOpts};
+pub use registry::SessionRegistry;
 pub use service::DirectorService;
 
 /// Bind address used when the caller does not pin one (ephemeral port).

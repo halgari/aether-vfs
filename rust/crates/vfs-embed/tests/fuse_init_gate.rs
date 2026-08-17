@@ -138,6 +138,7 @@ fn launch_returns_err_when_fuse_client_fails_to_attach() {
         shim_dll: None,
         payload_dll: None,
         env,
+        ..Default::default()
     };
 
     let result = s.launch(&opts);

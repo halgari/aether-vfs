@@ -3,11 +3,13 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use vfs_director::ipc::IpcServe;
-use vfs_director::{Director, MountGraph};
+use vfs_director::stage::{stage_launch_with, ImageSource, StagedDir};
+use vfs_director::{Director, DiskProvider, MountGraph};
 use vfs_provider::{
     bad_request, exists, map_io_err, Access, Provider, RootId, OPEN_READ,
 };
@@ -33,20 +35,37 @@ static LAUNCH_ENV_LOCK: Mutex<()> = Mutex::new(());
 /// Options for [`Session::launch`].
 #[derive(Clone, Debug)]
 pub struct LaunchOpts {
-    /// Path to the image to launch. **Absolute** in every real host: Windows
-    /// creates a process from a file on disk, so whatever is launched must
-    /// already exist there.
+    /// Path to the image to launch.
     ///
-    /// A relative name is joined onto the managed root and looked up **on real
-    /// disk** — it is *not* resolved through the provider graph. That works for
-    /// a host whose root is a real game directory (fixtures, `vfs-launch`) and
-    /// fails for a host whose root is deliberately empty and whose exe is VFS
-    /// content. See [`Session::launch`] for what to do instead; the error it
-    /// returns says the same thing at the moment it bites.
+    /// An **absolute** path is launched as given — it is a real file and no
+    /// lookup of ours applies to it.
+    ///
+    /// A **relative** name is resolved in two steps: first joined onto the
+    /// managed root and looked for on real disk (a host whose root is a real
+    /// game directory), and failing that looked up as a vpath in root 0's
+    /// **provider graph**, in which case [`Session::launch`] stages it — see
+    /// there. A name neither holds is refused by name rather than handed to
+    /// `CreateProcess`.
     pub image: String,
     pub args: Vec<String>,
     /// Wait for process exit (false = detach; session must stay alive).
     pub wait: bool,
+    /// Extra images to stage beside a graph-resolved `image`, by vpath, each
+    /// with its own PE import closure. Ignored when nothing is staged.
+    ///
+    /// A launcher that spawns the real game (SKSE's `skse64_loader.exe` starts
+    /// `SkyrimSE.exe`) needs its target on disk beside it: the child's own
+    /// `CreateProcess` needs a real image just as much as the first one did,
+    /// and nothing intercepts it. Naming it here is how a host says so.
+    pub stage_also: Vec<String>,
+    /// Real-disk directories searched for imports the provider graph does not
+    /// carry. Ignored when nothing is staged.
+    ///
+    /// Redistributables (`d3dx9_42.dll` and friends) are static imports of the
+    /// game but ship with a runtime rather than in the game archive, so
+    /// without a fallback the loader fails them during process init — before
+    /// any hook of ours exists to help.
+    pub stage_fallback_dirs: Vec<PathBuf>,
     /// Absolute paths to `vfs_shim_dll.dll` and `vfs_payload.dll`.
     ///
     /// Left `None`, they are searched for **next to `std::env::current_exe()`**
@@ -83,10 +102,60 @@ impl Default for LaunchOpts {
             image: String::new(),
             args: Vec::new(),
             wait: true,
+            stage_also: Vec::new(),
+            stage_fallback_dirs: Vec::new(),
             shim_dll: None,
             payload_dll: None,
             env: BTreeMap::new(),
         }
+    }
+}
+
+/// What [`Session::stage_launch`] writes to disk, beyond the image itself.
+///
+/// The staging *directory* and its tag are deliberately not here: they are the
+/// session's (`state_dir/stage`, one tag per staged launch), because the
+/// session is also what has to hold the resulting [`StagedDir`] alive and mount
+/// it back into the graph. A caller choosing its own directory could hand the
+/// same one to two sessions.
+pub struct StageOpts<'a> {
+    /// The image's vpath in root 0's provider graph.
+    pub exe_vpath: &'a str,
+    /// Additional images to stage into the same directory, each with its own
+    /// import closure — see [`LaunchOpts::stage_also`].
+    pub also: &'a [&'a str],
+    /// Real-disk fallbacks for imports the graph does not carry — see
+    /// [`LaunchOpts::stage_fallback_dirs`].
+    pub fallback_dirs: &'a [PathBuf],
+}
+
+/// Reads whole files out of a session's own composed graph, for
+/// [`vfs_director::stage`]. Root 0: staging always concerns the launched
+/// image, which lives in the game-directory root.
+struct KernelSource(Arc<Director>);
+
+impl ImageSource for KernelSource {
+    fn read(&self, vpath: &str) -> Option<Vec<u8>> {
+        let (fh, size, is_dir) = self.0.open(RootId::DEFAULT, vpath, OPEN_READ).ok()?;
+        if is_dir {
+            let _ = self.0.close(fh);
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let mut off = 0usize;
+        while off < buf.len() {
+            match self.0.read(fh, off as u64, &mut buf[off..]) {
+                Ok(0) => break,
+                Ok(n) => off += n,
+                Err(_) => {
+                    let _ = self.0.close(fh);
+                    return None;
+                }
+            }
+        }
+        let _ = self.0.close(fh);
+        buf.truncate(off);
+        Some(buf)
     }
 }
 
@@ -130,6 +199,27 @@ pub fn compose_root(
 /// possible — see [`Session::set_write_layer`].
 #[derive(Default, Clone)]
 struct RootComposition {
+    /// The staged launch directory, if this root has one — see
+    /// [`Session::stage_launch`].
+    ///
+    /// **A separate slot, composed below `mounts`, and that is the whole
+    /// point of it.** Staging is a point-in-time copy of what the graph
+    /// already said, written out only because `CreateProcess` needs a real
+    /// file; it must lose to curated content on every path both serve, and it
+    /// must survive a host rebuilding `mounts` wholesale via
+    /// [`Session::set_root_mounts`]. Keeping it out of `mounts` is what buys
+    /// both: [`Session::recompose`] always puts it first in the `MountGraph`,
+    /// and a `MountGraph` resolves by walking its mounts in **reverse**, so
+    /// first means last-tried means lowest precedence.
+    ///
+    /// The daemon expressed the same rule as `STAGING_LAYER = i32::MIN` inside
+    /// a `stack_layers` stack, where ascending layer order makes the first
+    /// entry the bottom. The two orderings are opposite, which is exactly why
+    /// this is a named slot rather than "just mount it and rely on ordering":
+    /// relocating that code as a plain `mount_at` inverts it, and the symptom
+    /// — a stale staged copy shadowing curated content — is a silent wrong
+    /// answer, not a failure.
+    staging: Option<Arc<dyn Provider>>,
     /// Every `(prefix, provider)` accumulated for this root, in registration
     /// order (later wins on an overlapping path).
     mounts: Vec<(String, Arc<dyn Provider>)>,
@@ -167,6 +257,14 @@ pub struct Session {
     /// Host directories for the session's roots **beyond root 0**, which
     /// `virtual_root` names — see [`Session::declare_root`].
     extra_roots: Vec<(u32, PathBuf)>,
+    /// The most recent staged launch directory, held here because
+    /// [`StagedDir`]'s `Drop` removes the directory and Windows keeps the
+    /// image file mapped for as long as the child runs. Dropped with the
+    /// session, or replaced by the next staged launch.
+    staged: Mutex<Option<StagedDir>>,
+    /// Distinguishes concurrent/successive staging directories within one
+    /// session, the way the daemon's per-session counter did.
+    next_stage_tag: AtomicU64,
 }
 
 impl Session {
@@ -199,6 +297,8 @@ impl Session {
             ipc: None,
             roots: Mutex::new(BTreeMap::new()),
             extra_roots: Vec::new(),
+            staged: Mutex::new(None),
+            next_stage_tag: AtomicU64::new(1),
         }
     }
 
@@ -470,8 +570,81 @@ impl Session {
             .get(&root.0)
             .cloned()
             .unwrap_or_default();
-        let composed = compose_root(composition.mounts, composition.write_layer)?;
+        // Staging **first**, and this line is the whole precedence guarantee:
+        // a `MountGraph` resolves by walking its mounts in reverse, so the
+        // first entry is the last one tried and therefore the one that only
+        // answers for paths nothing else serves. Appending it instead — the
+        // shape `mount_at` would produce — inverts that and lets a
+        // point-in-time staged copy shadow curated content. See
+        // [`RootComposition::staging`].
+        let mut mounts: Vec<(String, Arc<dyn Provider>)> =
+            Vec::with_capacity(composition.mounts.len() + 1);
+        mounts.extend(composition.staging.map(|p| (String::new(), p)));
+        mounts.extend(composition.mounts);
+        let composed = compose_root(mounts, composition.write_layer)?;
         self.kernel.mount(root, composed)
+    }
+
+    /// Stage `opts.exe_vpath` out of this session's provider graph onto real
+    /// disk, with its PE import closure, and mount the staging directory back
+    /// into the graph **underneath** everything else. Returns the staged
+    /// image's absolute path — what `CreateProcess` needs.
+    ///
+    /// [`Session::launch`] calls this for you when a relative image is graph
+    /// content; call it directly only when you need to seed staging from
+    /// something that is *not* this session's graph, or to stage extra images
+    /// before a launch.
+    ///
+    /// Three things happen that a host would otherwise have to know to do:
+    ///
+    /// * The bytes land in `state_dir/stage`, under a per-launch tag, and the
+    ///   resulting [`StagedDir`] is **held by the session** — its `Drop`
+    ///   removes the directory, and Windows keeps the image mapped for as long
+    ///   as the child runs, so a host-held handle is a race waiting to be lost.
+    /// * The staging directory is mounted back, so the same file is answerable
+    ///   through `getattr`/`open` at its vpath afterwards and not merely
+    ///   reachable by the literal path `CreateProcess` used. Once the managed
+    ///   root is fully virtual, a real file under it that no provider serves is
+    ///   invisible.
+    /// * It is mounted **below** the host's own mounts. See
+    ///   [`RootComposition::staging`] — a staged copy outranking curated
+    ///   content is a silent wrong answer on exactly the paths staging touches.
+    ///
+    /// Staging again replaces the previous directory (and deletes it), the same
+    /// way a relaunch did in the daemon.
+    pub fn stage_launch(
+        &self,
+        source: &dyn ImageSource,
+        opts: &StageOpts,
+    ) -> Result<PathBuf, String> {
+        let tag = self.next_stage_tag.fetch_add(1, Ordering::Relaxed);
+        let staged = stage_launch_with(
+            source,
+            opts.exe_vpath,
+            opts.also,
+            &self.state_dir.join("stage"),
+            &tag.to_string(),
+            opts.fallback_dirs,
+        )?;
+        let disk: Arc<dyn Provider> = Arc::new(DiskProvider::new(staged.dir()));
+        {
+            let mut roots = self
+                .roots
+                .lock()
+                .map_err(|_| "session roots lock poisoned".to_string())?;
+            self.claim(&mut roots, RootId::DEFAULT)
+                .map_err(|st| format!("mount staging: status {st}"))?
+                .staging = Some(disk);
+        }
+        self.recompose(RootId::DEFAULT)
+            .map_err(|st| format!("mount staging: status {st}"))?;
+
+        let exe = staged.exe().to_path_buf();
+        *self
+            .staged
+            .lock()
+            .map_err(|_| "staged-dir lock poisoned".to_string())? = Some(staged);
+        Ok(exe)
     }
 
     /// Drop all of root 0's mounts before rebuilding composition. Its write
@@ -644,25 +817,34 @@ impl Session {
     ///
     /// Requires [`serve`] first. On `wait: false`, keep this `Session` alive.
     ///
-    /// An absolute `image` is launched directly; a relative one is joined onto
-    /// the virtual root and must exist **on real disk** there.
+    /// ## How `image` is resolved
+    ///
+    /// Absolute: launched as given.
+    ///
+    /// Relative: joined onto the virtual root and launched from there if a
+    /// real file exists (a host whose root is a real game directory —
+    /// fixtures, a vanilla install). Otherwise looked up as a **vpath in root
+    /// 0's provider graph**, and if the graph holds it, staged — see below.
+    /// Neither: refused by name, because `CreateProcess` would only fail
+    /// later and less clearly.
     ///
     /// ## Launching an image that is VFS content
     ///
     /// `CreateProcess` reads the image off the filesystem before any hook of
-    /// ours is installed in the child, so this method cannot launch bytes that
-    /// only the provider graph holds. If the exe is content — a game staged
-    /// out of archives into an empty managed root — it has to be written to
-    /// disk first, along with its PE import closure, and (so the same bytes
-    /// stay answerable at their vpath afterwards) mounted back into the graph
-    /// underneath the real content. [`crate::stage`] does the writing;
-    /// `vfs-directord`'s `SessionRegistry::launch` does the whole sequence and
-    /// is the only implementation of it today. **It is the largest thing a
-    /// non-daemon host still has to build for itself.**
+    /// ours is installed in the child, and the Windows loader resolves its
+    /// static imports in the same window. So an exe that only the provider
+    /// graph holds — a game served out of archives into a deliberately empty
+    /// managed root — is written to disk first, with its PE import closure,
+    /// and the staging directory is mounted back into the graph *underneath*
+    /// the curated content so the same bytes stay answerable at their vpath.
+    /// [`Session::stage_launch`] is that sequence and this method calls it;
+    /// [`LaunchOpts::stage_also`] and [`LaunchOpts::stage_fallback_dirs`] are
+    /// its two knobs.
     ///
-    /// Rather than let that end in a bare `CreateProcess` failure, a relative
-    /// image the disk does not hold is refused here, and the message says
-    /// whether the graph holds it (i.e. whether staging is what is missing).
+    /// The staged directory is held by the session (`CreateProcess` keeps the
+    /// image mapped for the child's lifetime), so a detached launch
+    /// (`wait: false`) requires the session to outlive the child — which it
+    /// already did for the ring.
     ///
     /// ## Process-global environment
     ///
@@ -698,35 +880,40 @@ impl Session {
         let target = if image_path.is_absolute() {
             image_path.to_path_buf()
         } else {
-            self.virtual_root.join(&opts.image)
-        };
-        if !image_path.is_absolute() && !target.is_file() {
-            let in_graph = self
+            let on_disk = self.virtual_root.join(&opts.image);
+            if on_disk.is_file() {
+                on_disk
+            } else if self
                 .kernel
                 .getattr(RootId::DEFAULT, &opts.image)
                 .ok()
                 .flatten()
-                .is_some();
-            return Err(if in_graph {
-                format!(
-                    "launch: {:?} is served by this session's provider graph but does not exist \
-                     on disk at {} — CreateProcess reads the image before the shim is in the \
-                     child, so VFS content must be staged to disk (with its PE import closure) \
-                     and launched by that absolute path. See `vfs_embed::stage` and \
-                     `Session::launch`'s docs.",
-                    opts.image,
-                    target.display()
+                .is_some()
+            {
+                // VFS content. Write it (and its import closure) out, mount
+                // the staging directory back under the curated graph, and
+                // launch the real file that produces.
+                let also: Vec<&str> = opts.stage_also.iter().map(String::as_str).collect();
+                self.stage_launch(
+                    &KernelSource(Arc::clone(&self.kernel)),
+                    &StageOpts {
+                        exe_vpath: &opts.image,
+                        also: &also,
+                        fallback_dirs: &opts.stage_fallback_dirs,
+                    },
                 )
+                .map_err(|e| format!("launch: staging {:?}: {e}", opts.image))?
             } else {
-                format!(
-                    "launch: {:?} resolves to {}, which does not exist — a relative \
-                     LaunchOpts.image is looked up on real disk under the managed root, not \
-                     through the provider graph",
+                return Err(format!(
+                    "launch: {:?} resolves to {}, which does not exist — and this session's \
+                     provider graph does not serve it either, so there is nothing to stage. A \
+                     relative LaunchOpts.image must be a real file under the managed root or a \
+                     vpath root 0 serves.",
                     opts.image,
-                    target.display()
-                )
-            });
-        }
+                    on_disk.display()
+                ));
+            }
+        };
         let config_path = self.state_dir.join("shim.cfg");
         let ready_path = self.state_dir.join("ready.flag");
         let _ = std::fs::remove_file(&ready_path);
