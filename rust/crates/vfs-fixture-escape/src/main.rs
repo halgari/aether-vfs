@@ -72,8 +72,17 @@
 //! hiccup into a false containment failure. Aimed at a sibling it shows
 //! exactly what it always showed and costs the caller nothing.
 //!
-//! `<vector-id>` is `1`..`14` matching the design doc's table, with two
+//! `<vector-id>` is `1`..`14` matching the design doc's table, with three
 //! expansions:
+//!
+//! - Vector 3 additionally emits `3b`, `3c` and `3d`: the object-manager
+//!   spellings that reach the target through its **drive letter** rather than
+//!   through a device name. Vector 3 itself only ever built the colon-free
+//!   `GLOBALROOT\Device\HarddiskVolumeN\...` form, and that gap was load
+//!   bearing — the colon-bearing spellings were misclassified as outside every
+//!   managed root (their drive colon was taken for an alternate-data-stream
+//!   separator and the path cut there) while the OS resolved them to the real
+//!   file behind the mount. See those three functions' own comments.
 //!
 //! - Vector 5 (handle-relative open) additionally emits `5b`: the same
 //!   mechanism against a root handle (an anonymous pipe) that
@@ -603,6 +612,96 @@ fn vector3_device_path(abs: &str) -> Line {
             Line::new("3", spelling, outcome, "")
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// Vectors 3b/3c/3d: the object-manager spellings that reach the target
+// through a *drive letter* rather than through a device name.
+//
+// Vector 3 above wraps `GLOBALROOT` around `\Device\HarddiskVolumeN` — a
+// spelling with no colon in it anywhere. That single colon-free form was the
+// whole of this family's coverage, and it hid a defect in the shim's
+// canonicaliser that only the colon-bearing forms expose: the drive-letter
+// colon in `\??\GLOBALROOT\GLOBAL??\C:\...` sits several components past any
+// prefix a fixed-length prefix table recognises, and was being taken for an
+// alternate-data-stream separator. The path was cut there, leaving a stub
+// (`GLOBAL??/C`) that matched no managed root, so `create_hook` trampolined
+// the original OBJECT_ATTRIBUTES and the kernel opened the real file behind
+// the mount. Reachable and unclassified at once — the failure mode this
+// matrix exists to make impossible to reintroduce quietly.
+//
+// All three are built `\\?\`-prefixed, which is what makes them reach
+// `NtCreateFile` as the raw object-manager spelling: Win32 passes a verbatim
+// path through untouched, rewriting only the `\\?\` marker itself to `\??\`.
+// Each was confirmed to open a real file through a direct `NtCreateFile`
+// call (`STATUS_SUCCESS`) before being added, so a `not-found` here is
+// evidence about the shim, never about the spelling being fictional. That
+// also fixes the standalone expectation: with no session, these open the real
+// target exactly like vector 2's `\\?\` form, so `opened` is correct
+// standalone; under a session they must be answered by the director.
+// ---------------------------------------------------------------------
+
+/// The shared construction: `\\?\<wrapper>\<drive>:<rest>`, i.e. the target's
+/// own drive-letter path reached through `wrapper`, an object-manager route
+/// that ends up back inside the DosDevices directory the drive letter lives in.
+fn object_manager_drive_spelling(
+    vector: &'static str,
+    abs: &str,
+    wrapper: &str,
+    note: &'static str,
+) -> Line {
+    let Some((drive, rest)) = split_drive(abs) else {
+        return unbuildable(
+            vector,
+            abs,
+            "target path has no drive letter to reach through the object manager",
+        );
+    };
+    let spelling = format!(r"\\?\{wrapper}\{drive}:{rest}");
+    let outcome = attempt(vector, &spelling);
+    Line::new(vector, spelling, outcome, note)
+}
+
+/// `GLOBALROOT` back to the object-manager root, then into the *global*
+/// DosDevices directory by its own name.
+fn vector3b_globalroot_global_dosdevices(abs: &str) -> Line {
+    object_manager_drive_spelling(
+        "3b",
+        abs,
+        r"GLOBALROOT\GLOBAL??",
+        "object-manager spelling reaching the drive letter through \\GLOBAL?? behind GLOBALROOT; \
+         `opened` is the correct standalone result (this is a working object name, verified with \
+         a direct NtCreateFile call), and under a session it must be answered by the director -- \
+         this is the spelling whose drive colon the canonicaliser used to mistake for a stream \
+         separator, truncating the path to a stub that matched no root",
+    )
+}
+
+/// The same route, but into the per-session DosDevices directory (`\??`) —
+/// a distinct object directory from `\GLOBAL??`, reached the same way.
+fn vector3c_globalroot_dosdevices(abs: &str) -> Line {
+    object_manager_drive_spelling(
+        "3c",
+        abs,
+        r"GLOBALROOT\??",
+        "as 3b, but through the per-session DosDevices directory (\\??) rather than the global \
+         one; a separate object directory reached by the same route, and separately uncovered \
+         before this vector existed",
+    )
+}
+
+/// `Global`, the symlink *inside* DosDevices that points at `\GLOBAL??` — one
+/// hop shorter than 3b and with no `GLOBALROOT` in it at all.
+fn vector3d_global_symlink(abs: &str) -> Line {
+    object_manager_drive_spelling(
+        "3d",
+        abs,
+        "Global",
+        "the `Global` symlink inside DosDevices, which points at \\GLOBAL?? -- the same \
+         destination as 3b with no GLOBALROOT hop, so a canonicaliser that special-cased \
+         GLOBALROOT alone would miss it. Found by enumerating siblings of the three spellings \
+         3b/3c cover, and confirmed to open the real file with a direct NtCreateFile call",
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -1328,6 +1427,15 @@ fn main() {
     }
     if wanted("3") {
         lines.push(guarded("3", || vector3_device_path(&abs)));
+    }
+    if wanted("3b") {
+        lines.push(guarded("3b", || vector3b_globalroot_global_dosdevices(&abs)));
+    }
+    if wanted("3c") {
+        lines.push(guarded("3c", || vector3c_globalroot_dosdevices(&abs)));
+    }
+    if wanted("3d") {
+        lines.push(guarded("3d", || vector3d_global_symlink(&abs)));
     }
     if wanted("4") {
         lines.push(guarded("4", || vector4_volume_guid(&abs)));

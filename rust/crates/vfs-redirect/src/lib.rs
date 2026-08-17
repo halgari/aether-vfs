@@ -1832,4 +1832,152 @@ mod tests {
 
         std::fs::remove_dir_all(&base).ok();
     }
+
+    // -- The object-manager spelling matrix ------------------------------
+    //
+    // `rust/docs/escape-matrix.md`'s vector 3 covers exactly one
+    // object-manager spelling: the colon-free `GLOBALROOT\Device\HarddiskVolumeN`
+    // form. Every *colon-bearing* spelling — the ones that reach a drive
+    // letter through a namespace token instead of a device name — went
+    // uncovered, and all three of them classified as outside every root while
+    // the OS resolved them to the file under it, so `create_hook`
+    // trampolined the original OBJECT_ATTRIBUTES and the kernel opened the
+    // real file. The vectors below are that gap, closed as a table so adding
+    // the next spelling is one line rather than a new test.
+    //
+    // Each entry is a template. `{VOL}` is not used; the volume spelling is
+    // written out in the template itself, and `{REST}` is substituted with a
+    // drive-relative tail — twice, once with a tail under the managed root
+    // and once with a tail outside it, so every vector is checked in **both**
+    // directions. Only asserting the under-root direction would pass for a
+    // canonicaliser that had simply started calling everything under-root,
+    // which is the worse of the two failure modes (it makes the VFS
+    // intercept traffic that was never ours).
+    //
+    // Every spelling here was verified against the real object manager with a
+    // direct `NtCreateFile` call (see this task's report): all of them return
+    // `STATUS_SUCCESS` for a real file, i.e. each one genuinely reaches the
+    // file and is therefore a genuine bypass when misclassified.
+    const NT_SPELLING_VECTORS: &[(&str, &str)] = &[
+        ("win32-plain", r"C:{REST}"),
+        ("dosdevices", r"\??\C:{REST}"),
+        // The three that were broken.
+        ("globalroot-global-dosdevices", r"\??\GLOBALROOT\GLOBAL??\C:{REST}"),
+        ("globalroot-dosdevices", r"\??\GLOBALROOT\??\C:{REST}"),
+        ("global-dosdevices-bare", r"\GLOBAL??\C:{REST}"),
+        // The `Global` symlink to `\GLOBAL??`, and nested combinations. Found
+        // while enumerating siblings, not reported to this task.
+        ("global-symlink", r"\??\Global\C:{REST}"),
+        ("global-dosdevices-global-symlink", r"\GLOBAL??\Global\C:{REST}"),
+        ("global-symlink-globalroot-global", r"\??\Global\GLOBALROOT\GLOBAL??\C:{REST}"),
+        ("global-dosdevices-globalroot-global", r"\GLOBAL??\GLOBALROOT\GLOBAL??\C:{REST}"),
+        // Case: NT object-manager names are case-insensitive.
+        ("globalroot-global-lowercase", r"\??\globalroot\global??\c:{REST}"),
+        // Device spellings: vector 3's own colon-free form, its bare
+        // equivalent, and the same behind the other DosDevices spelling.
+        ("device-bare", r"\Device\HarddiskVolume3{REST}"),
+        ("globalroot-device", r"\??\GLOBALROOT\Device\HarddiskVolume3{REST}"),
+        ("global-dosdevices-globalroot-device", r"\GLOBAL??\GLOBALROOT\Device\HarddiskVolume3{REST}"),
+        // Volume GUID, in the `\??\`-keyed spelling a real open presents, and
+        // behind the wrapper that used to hide it from `VolumeMap::resolve`.
+        ("volume-guid", r"\??\Volume{12345678-1234-1234-1234-123456789abc}{REST}"),
+        (
+            "globalroot-global-volume-guid",
+            r"\??\GLOBALROOT\GLOBAL??\Volume{12345678-1234-1234-1234-123456789abc}{REST}",
+        ),
+        // The administrative UNC share, likewise.
+        ("unc-admin-share", r"\??\UNC\localhost\C${REST}"),
+        ("global-dosdevices-unc-admin-share", r"\GLOBAL??\UNC\localhost\C${REST}"),
+    ];
+
+    /// The session-frozen alias table these vectors resolve against, keyed
+    /// exactly the way `resolve_volume_map` keys the real one (`\??\`-prefixed
+    /// volume GUID and admin share — see `volumes::win32_guid_to_nt`), so a
+    /// vector cannot pass here on a spelling production would never register.
+    fn matrix_volumes() -> VolumeMap {
+        let mut v = VolumeMap::empty();
+        v.insert(r"\Device\HarddiskVolume3", 'C');
+        v.insert(r"\??\Volume{12345678-1234-1234-1234-123456789abc}", 'C');
+        v.insert_alias(r"\??\UNC\localhost\C$", "C:");
+        v
+    }
+
+    /// **The governing invariant, per spelling.** Every NT object-manager
+    /// spelling of a path under a managed root resolves to that root with the
+    /// same remainder — so the director answers it, and `create_hook` never
+    /// trampolines the open to the real file underneath the mount.
+    #[test]
+    fn every_nt_spelling_of_an_under_root_path_resolves_under_the_root() {
+        let map = RootMap::new(r"C:\Games\Skyrim", matrix_volumes()).unwrap();
+        let want: Vec<String> = vec!["data".into(), "a.esp".into()];
+        for (id, template) in NT_SPELLING_VECTORS {
+            let raw = template.replace("{REST}", r"\Games\Skyrim\Data\a.esp");
+            assert_eq!(
+                map.resolve(&raw),
+                Some((RootId::DEFAULT, want.clone())),
+                "vector {id}: spelling {raw} did not resolve under the managed root — the real \
+                 file underneath the mount is reachable through it (canonicalised to {:?})",
+                canonicalise(&raw, &matrix_volumes())
+            );
+        }
+    }
+
+    /// The other direction of the same table, and the reason the table is
+    /// checked twice: a canonicaliser that "fixed" the vectors above by
+    /// pulling everything under the root would break legitimate traffic
+    /// instead of leaking it. Every spelling, with a tail that is genuinely
+    /// outside the root, must stay outside.
+    #[test]
+    fn no_nt_spelling_pulls_an_out_of_root_path_inside() {
+        let map = RootMap::new(r"C:\Games\Skyrim", matrix_volumes()).unwrap();
+        for (id, template) in NT_SPELLING_VECTORS {
+            let raw = template.replace("{REST}", r"\Windows\System32\kernel32.dll");
+            assert!(
+                !map.contains(&raw),
+                "vector {id}: spelling {raw} was pulled inside the managed root, which it is not \
+                 under (canonicalised to {:?})",
+                canonicalise(&raw, &matrix_volumes())
+            );
+        }
+    }
+
+    /// The fail-closed rule the wrapper spellings must not erode: a device
+    /// that is not in the session's table is never guessed into a drive, no
+    /// matter how many namespace tokens are stacked in front of it. Volume 9
+    /// is deliberately absent from `matrix_volumes`.
+    #[test]
+    fn an_unmapped_device_stays_outside_behind_every_wrapper() {
+        let map = RootMap::new(r"C:\Games\Skyrim", matrix_volumes()).unwrap();
+        for raw in [
+            r"\Device\HarddiskVolume9\Games\Skyrim\Data\a.esp",
+            r"\??\GLOBALROOT\Device\HarddiskVolume9\Games\Skyrim\Data\a.esp",
+            r"\GLOBAL??\GLOBALROOT\Device\HarddiskVolume9\Games\Skyrim\Data\a.esp",
+            r"\??\GLOBALROOT\GLOBAL??\Volume{ffffffff-ffff-ffff-ffff-ffffffffffff}\Games\Skyrim\Data\a.esp",
+        ] {
+            assert!(
+                !map.contains(raw),
+                "an unmapped volume was guessed into the managed root's drive: {raw}"
+            );
+        }
+    }
+
+    /// The specific corruption behind the defect, asserted on its own so a
+    /// regression names its own cause rather than only its consequence: the
+    /// drive-letter colon in `...\GLOBAL??\C:\...` is not an alternate-data-
+    /// stream separator, and cutting there left the stub `GLOBAL??/C` — a path
+    /// matching no root, so the open trampolined to real disk.
+    #[test]
+    fn a_drive_colon_behind_a_namespace_token_is_not_a_stream_separator() {
+        let raw = r"\??\GLOBALROOT\GLOBAL??\C:\Games\Skyrim\Data\a.esp";
+        let got = canonicalise(raw, &matrix_volumes()).unwrap();
+        assert_eq!(
+            got.to_ascii_lowercase(),
+            "c:/games/skyrim/data/a.esp",
+            "the path was truncated at the drive colon: {got}"
+        );
+        // The stream suffix on the same spelling is still stripped — the fix
+        // narrowed where a stream may be found, it did not stop finding one.
+        let with_stream = format!("{raw}:evil");
+        assert_eq!(canonicalise(&with_stream, &matrix_volumes()).unwrap(), got);
+    }
 }

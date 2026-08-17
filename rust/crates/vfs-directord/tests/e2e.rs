@@ -1270,9 +1270,16 @@ fn parse_escape_lines(text: &str) -> Vec<EscapeLine> {
 /// assert every expected line actually showed up (a vector silently
 /// missing from the output would otherwise read as "nothing to check"
 /// rather than the fixture-contract violation it would be).
+/// `3b`/`3c`/`3d` are the object-manager spellings that reach the target
+/// through its drive letter (`\??\GLOBALROOT\GLOBAL??\C:\...` and two
+/// siblings) rather than through a device name, which is all vector `3` ever
+/// built. Every assertion in this file applies to them through the same
+/// catch-all expectation tables as the rest — they are ordinary vectors, not
+/// caveats — and each was verified to fail here when the canonicaliser fix
+/// they cover is reverted.
 const ALL_VECTOR_IDS: &[&str] = &[
-    "1", "2", "3", "4", "5", "5b", "6", "7", "8", "9", "10a", "10b", "10c", "11", "12a", "12b",
-    "12c", "13", "14",
+    "1", "2", "3", "3b", "3c", "3d", "4", "5", "5b", "6", "7", "8", "9", "10a", "10b", "10c", "11",
+    "12a", "12b", "12c", "13", "14",
 ];
 
 /// This gate's own scope note (`docs/superpowers/plans/...`): vectors 13
@@ -1493,7 +1500,7 @@ async fn run_escape_fixture(
     if write_access {
         env.insert("VFS_ESCAPE_ACCESS".to_string(), "write".to_string());
     }
-    // Fast tick: this whole run (nineteen lines plus a couple of helper
+    // Fast tick: this whole run (twenty-two lines plus a couple of helper
     // process spawns) finishes in well under the reporter's 250ms default,
     // so a short override is what makes the classification snapshot land at
     // all — same reasoning as the write-path e2e tests' identical override.
@@ -1779,8 +1786,9 @@ async fn escape_matrix_positive_and_negative_canary() {
     }
     assert!(
         !neg_truncated,
-        "the shim report's per-outcome path list was truncated (more than 20 distinct paths in \
-         one outcome bucket) — this test's per-vector classification search below cannot be \
+        "the shim report's per-outcome path list was truncated (more distinct paths in one \
+         outcome bucket than `hookstats::OUTCOME_PATHS_SHOWN`) — this test's per-vector \
+         classification search below cannot be \
          trusted against a truncated list, so this must never happen for a run this small. \
          Report: {stats_log:?}"
     );
@@ -1814,7 +1822,7 @@ async fn escape_matrix_positive_and_negative_canary() {
         );
     }
     // The combined run above shares one shim-stats report across all
-    // nineteen attempts, and the report's classified-paths set is not keyed
+    // twenty-two attempts, and the report's classified-paths set is not keyed
     // by vector — several *different* spellings legitimately canonicalise
     // to the identical recorded path (that collapsing is the whole point of
     // the canonicaliser), so "some entry contains this vector's marker" in
@@ -2816,7 +2824,7 @@ fn make_escape_junction(tag: &str, target: &Path) -> (PathBuf, Option<String>) {
 ///    disposition, and a stream is a create no directory listing shows).
 ///
 /// See `assert_no_escaped_real_files` for the rest of what stops those
-/// absences being vacuous: the writability probe below, the nineteen asserted
+/// absences being vacuous: the writability probe below, the twenty-two asserted
 /// outcome lines, and the standalone run of this same fixture that *does*
 /// produce the artefacts 3 and 4 forbid.
 ///
@@ -3100,7 +3108,7 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
 /// - the caller proved that directory physically writable, by creating and
 ///   deleting a probe file in it before the run, so a create here genuinely
 ///   could have succeeded;
-/// - the fixture reported an attempted spelling for all nineteen lines, each
+/// - the fixture reported an attempted spelling for all twenty-two lines, each
 ///   naming a path in this directory, and the caller asserted on every one of
 ///   them;
 /// - and the same fixture in the same write mode, run standalone against an
