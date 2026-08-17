@@ -176,6 +176,8 @@ struct Snapshot {
     copy_ups: HashMap<String, u64>,
     overlay_fail_counts: [u64; OVERLAY_FAIL_N],
     overlay_fails: HashMap<String, u64>,
+    hook_panics_total: u64,
+    hook_panics: HashMap<&'static str, u64>,
 }
 
 /// Clone the contents of one of this module's `Mutex<Option<T>>` accumulators,
@@ -237,7 +239,88 @@ fn snapshot() -> Snapshot {
         copy_ups: accumulated(&COPYUPS),
         overlay_fail_counts: std::array::from_fn(|i| overlay_fail_count(ALL_OVERLAY_FAILS[i])),
         overlay_fails: accumulated(&OVERLAY_FAILS),
+        hook_panics_total: hook_panics_total(),
+        hook_panics: accumulated(&HOOK_PANICS),
     }
+}
+
+/// Hook invocations whose body panicked and was contained at the
+/// `extern "system"` boundary rather than taking the process down.
+///
+/// **These are the one set of counters here that are not gated on
+/// [`enabled`].** Everything else in this module is sampling instrumentation
+/// with a per-call cost, off by default so an uninstrumented run pays nothing.
+/// A caught panic is not a sample: it happens zero times in a healthy process,
+/// costs one relaxed `fetch_add` when it does, and is a bug that already
+/// happened. Gating it would mean the *default* configuration — the one a live
+/// session runs under — is the one that cannot tell you a hook faulted, which
+/// is the exact failure mode `hook::contain_panic` exists to stop being silent.
+///
+/// Two channels carry a caught panic, and they answer different questions.
+/// `hook::install_panic_hook`'s log gets the message, location and thread at
+/// panic time and is the *only* record when stats are off. This pair is the
+/// aggregate: how many, and in which entry point — which is what says whether
+/// a session hit one fault or is faulting on every read.
+///
+/// Keyed by the NT export name rather than by [`Hook`] so the
+/// `CreateProcessInternalW` detour (a `kernelbase` export, and a `BOOL` return
+/// rather than an `NTSTATUS`) can be counted alongside the ntdll hooks without
+/// giving it a [`Hook`] discriminant it does not otherwise need. The total is a
+/// separate atomic so a poisoned map still cannot hide that *something*
+/// panicked.
+static HOOK_PANICS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static HOOK_PANICS: Mutex<Option<HashMap<&'static str, u64>>> = Mutex::new(None);
+
+/// Record a panic caught at a hook's `extern "system"` boundary. `name` is the
+/// hooked export, e.g. `"NtCreateFile"`.
+pub fn note_hook_panic(name: &'static str) {
+    HOOK_PANICS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    let Ok(mut g) = HOOK_PANICS.lock() else { return };
+    *g.get_or_insert_with(HashMap::new).entry(name).or_insert(0) += 1;
+}
+
+/// How many hook panics have been caught process-wide. Zero in a healthy run;
+/// any other value is a bug that already happened.
+pub fn hook_panics_total() -> u64 {
+    HOOK_PANICS_TOTAL.load(Ordering::Relaxed)
+}
+
+/// How many were caught in one named entry point. `pub` for the same reason
+/// [`outcome_count`] is: a test can pin a class at zero, or watch it move.
+pub fn hook_panic_count(name: &str) -> u64 {
+    HOOK_PANICS
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(name).copied()))
+        .unwrap_or(0)
+}
+
+/// Caught panics, rendered **first** in the report rather than with the other
+/// outcome tables at the bottom.
+///
+/// Position is the point. The sections below this one describe a shim that is
+/// working — which paths were opened, which were routed, how long each hook
+/// took. A caught panic invalidates that reading for whichever call hit it: the
+/// hook returned `STATUS_UNSUCCESSFUL` without doing its job, and the game saw
+/// a file operation fail for a reason nothing else in the report explains. A
+/// reader who scrolls past a `TOTAL` line and a thousand path rows before
+/// reaching it has already formed the wrong conclusion.
+fn render_hook_panics(snap: &Snapshot) -> String {
+    let total = snap.hook_panics_total;
+    if total == 0 {
+        return String::new();
+    }
+    let mut rows: Vec<(&&'static str, &u64)> = snap.hook_panics.iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let mut s = format!(
+        "CAUGHT PANICS: {total} hook invocation(s) panicked and were contained. Each one is a \
+         bug, and each returned a failure status to the game instead of doing its job — see the \
+         shim panic log (VFS_SHIM_PANIC_LOG) for messages and locations.\n"
+    );
+    for (name, c) in rows {
+        s.push_str(&format!("  {name:<32} {c:>8}\n"));
+    }
+    s
 }
 
 /// Counters as a human-readable table, as of `snap`.
@@ -1390,8 +1473,9 @@ fn banner() -> String {
 fn render_report() -> String {
     let snap = snapshot();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         banner(),
+        render_hook_panics(&snap),
         render(&snap),
         render_async(&snap),
         render_fills(&snap),
@@ -1749,6 +1833,77 @@ mod tests {
         assert_eq!(render_overlay_fails(&empty_snapshot()), "");
     }
 
+    /// The one counter in this module that must work with instrumentation
+    /// **off**. `VFS_SHIM_STATS_LOG` is unset under test, which is exactly the
+    /// configuration a live session runs in, and it is the configuration in
+    /// which a silently-caught panic would be least recoverable. Every other
+    /// counter here is deliberately inert in this state — see
+    /// `disabled_timer_records_nothing`, which asserts the opposite for
+    /// `Timed` — so this test is what keeps the two apart.
+    #[test]
+    fn hook_panics_are_counted_even_though_instrumentation_is_disabled() {
+        assert!(!enabled(), "test process must have stats off for this to mean anything");
+        // A name no other test uses, because the counters are process-wide and
+        // the unit tests share one process.
+        let name = "NtCountedWhileDisabled";
+        let before_total = hook_panics_total();
+        assert_eq!(hook_panic_count(name), 0);
+        note_hook_panic(name);
+        assert_eq!(hook_panic_count(name), 1);
+        note_hook_panic(name);
+        assert_eq!(hook_panic_count(name), 2);
+        // Other tests may be panicking their own hooks concurrently, so the
+        // total is only ever asserted as a lower bound.
+        assert!(hook_panics_total() >= before_total + 2);
+    }
+
+    /// A caught panic must say what the number means rather than just
+    /// printing it — a bare count reads as ordinary activity.
+    #[test]
+    fn the_panic_section_names_each_faulting_hook_and_says_it_is_a_bug() {
+        let mut snap = empty_snapshot();
+        snap.hook_panics_total = 4;
+        snap.hook_panics.insert("NtReadFile", 3);
+        snap.hook_panics.insert("NtCreateFile", 1);
+        let s = render_hook_panics(&snap);
+        assert!(s.starts_with("CAUGHT PANICS: 4 "), "{s}");
+        assert!(s.contains("is a bug"), "{s}");
+        // The log is the only place the message and location survive; a count
+        // with no pointer to it is a dead end.
+        assert!(s.contains("VFS_SHIM_PANIC_LOG"), "{s}");
+        let rows: Vec<&str> = s.lines().skip(1).collect();
+        // Busiest first, so the hook that is faulting every call outranks the
+        // one that faulted once.
+        assert!(rows[0].contains("NtReadFile") && rows[0].contains('3'), "{s}");
+        assert!(rows[1].contains("NtCreateFile"), "{s}");
+    }
+
+    #[test]
+    fn a_clean_run_renders_no_panic_section() {
+        assert_eq!(render_hook_panics(&empty_snapshot()), "");
+    }
+
+    /// Ordering, in the real report rather than in one section's own string.
+    /// A caught panic invalidates the reading of everything below it — that
+    /// hook returned a failure status without doing its job — so it cannot sit
+    /// under a `TOTAL` line and a thousand path rows where a reader reaches it
+    /// only after forming the wrong conclusion.
+    ///
+    /// This works because [`note_hook_panic`] is ungated: the counter it feeds
+    /// is live in this test process even though `enabled()` is false, which is
+    /// the whole point of it being the one ungated counter here.
+    #[test]
+    fn a_caught_panic_leads_the_rendered_report() {
+        note_hook_panic("NtOrderingProbe");
+        let r = render_report();
+        let panics = r.find("CAUGHT PANICS").unwrap_or_else(|| panic!("no panic section:\n{r}"));
+        let table = r.find("vfs-shim hook stats").unwrap_or_else(|| panic!("no table:\n{r}"));
+        assert!(panics < table, "the panic section rendered below the hook table:\n{r}");
+        // Below the banner, though: a reader has to know the report is a
+        // snapshot before reading any number in it.
+        assert!(r.starts_with("SNAPSHOT at"), "{r}");
+    }
+
     /// A zeroed `Snapshot` for rendering tests, so one can be built without
     /// the process-wide counters (inert under test) and without every test
     /// listing all twenty-odd fields.
@@ -1786,6 +1941,8 @@ mod tests {
             copy_ups: HashMap::new(),
             overlay_fail_counts: [0; OVERLAY_FAIL_N],
             overlay_fails: HashMap::new(),
+            hook_panics_total: 0,
+            hook_panics: HashMap::new(),
         }
     }
 }

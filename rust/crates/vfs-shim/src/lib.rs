@@ -30,7 +30,8 @@ pub use hook::{install, install_late, HookGuard, InstallError};
 /// [`hookstats::outcome_count`]. A class nobody asserts on is a class that can
 /// quietly start (or stop) counting again.
 pub use hookstats::{
-    outcome_count, overlay_fail_count, unrouted_director_opens, OpenOutcome, OverlayFail,
+    hook_panic_count, hook_panics_total, outcome_count, overlay_fail_count,
+    unrouted_director_opens, OpenOutcome, OverlayFail,
 };
 pub use overlay::overlay_layer_dir;
 pub use payload_abi::PayloadConfig;

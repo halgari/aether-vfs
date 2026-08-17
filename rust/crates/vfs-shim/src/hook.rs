@@ -12,53 +12,374 @@ thread_local! {
     static HOOK_REENTER: Cell<u32> = const { Cell::new(0) };
 }
 
-fn hook_reenter_begin() -> bool {
-    HOOK_REENTER.with(|c| {
-        let d = c.get();
-        if d > 0 {
-            return false;
-        }
-        c.set(d + 1);
-        true
-    })
-}
-
-fn hook_reenter_end() {
-    HOOK_REENTER.with(|c| {
-        let d = c.get();
-        c.set(d.saturating_sub(1));
-    });
-}
-
 fn in_hook_reenter() -> bool {
     HOOK_REENTER.with(|c| c.get() > 0)
 }
 
-/// RAII form of [`HOOK_REENTER`] for shim-initiated file I/O outside this
-/// module. `enter()` returns `None` when the guard is already held on this
-/// thread — the caller's signal that it is already running *inside* the shim's
-/// own I/O and must not start more.
+/// RAII form of [`HOOK_REENTER`] for shim-initiated file I/O. `enter()` returns
+/// `None` when the guard is already held on this thread — the caller's signal
+/// that it is already running *inside* the shim's own I/O and must not start
+/// more. While it is held, every NT file call this thread makes takes
+/// `create_hook`/`open_hook`'s `in_hook_reenter` fast path straight to the real
+/// ntdll — which is the point: copy-up writes its destination file while the
+/// hook that asked for the copy-up is still on the stack.
 ///
-/// The two in-module users (`install_panic_hook`, `drm_exe_trace`) call the
-/// raw begin/end pair; `Engine::cow_seed` needs the same protection from
-/// another module, and a guard that cannot be forgotten on an early return is
-/// the shape to hand out. While it is held, every NT file call this thread
-/// makes takes `create_hook`/`open_hook`'s `in_hook_reenter` fast path
-/// straight to the real ntdll — which is the point: copy-up writes its
-/// destination file while the hook that asked for the copy-up is still on the
-/// stack.
+/// **This is the only way to raise the counter, and that is deliberate rather
+/// than tidy.** There used to be a `hook_reenter_begin`/`hook_reenter_end`
+/// pair as well, and three in-module callers used it raw: `install_panic_hook`,
+/// `drm_exe_trace` and `director_open_trace`. Each of those does file I/O
+/// between the two calls, and a panic anywhere in that span skipped the `end`.
+/// That failure is permanent and completely silent: the counter stays at 1 for
+/// the life of the thread, so every later hook call from it takes the
+/// `in_hook_reenter` fast path to real ntdll, and the process quietly stops
+/// being virtualized on that thread while every counter keeps reporting
+/// ordinary activity. Now that `hook::contain_panic` catches panics instead of
+/// letting them abort the process, that "later" actually exists — so the pair
+/// is gone and the counter can only be raised by a value whose `Drop` lowers
+/// it, unwinding included.
 pub(crate) struct ShimIoGuard(());
 
 impl ShimIoGuard {
     pub(crate) fn enter() -> Option<Self> {
-        hook_reenter_begin().then_some(ShimIoGuard(()))
+        HOOK_REENTER.with(|c| {
+            let d = c.get();
+            if d > 0 {
+                return None;
+            }
+            c.set(d + 1);
+            Some(ShimIoGuard(()))
+        })
     }
 }
 
 impl Drop for ShimIoGuard {
     fn drop(&mut self) {
-        hook_reenter_end();
+        HOOK_REENTER.with(|c| c.set(c.get().saturating_sub(1)));
     }
+}
+
+/// What every hook returns when [`contain_panic`] catches a panic in its body.
+///
+/// **The choice that matters is that it is a failure**, with the NTSTATUS
+/// severity bits set, so no caller can mistake it for a completed operation. A
+/// hook that panicked half way through has written nothing to the caller's
+/// output buffer and stored nothing in its `*mut HANDLE`; answering
+/// `STATUS_SUCCESS` would hand the game an uninitialised handle value and a
+/// buffer of stack garbage to parse, which is materially worse than the abort
+/// this replaces — a crash at least stops at the fault.
+///
+/// It is `STATUS_UNSUCCESSFUL` and not something more specific for the opposite
+/// reason. A panic means the shim does not know what happened, and every
+/// *specific* status is a claim it is not entitled to make: returning
+/// `STATUS_OBJECT_NAME_NOT_FOUND` tells the game the file does not exist, and
+/// Skyrim will happily bake that into a load order and carry on without the
+/// plugin; `STATUS_ACCESS_DENIED` invites a retry loop; `STATUS_NO_MORE_FILES`
+/// from an enumeration hook silently truncates a directory listing. Generic
+/// failure is the only answer that says "this operation did not happen" without
+/// also asserting why.
+///
+/// It is uniform across all twenty ntdll entry points because a panic is the
+/// same event in each of them, and because a per-hook table of "best" statuses
+/// would be twenty more chances to pick one that a caller treats as benign.
+/// `cpiw_hook` is the one exception and is not an exception to the principle:
+/// `CreateProcessInternalW` returns a Win32 `BOOL`, where this constant's bit
+/// pattern is *non-zero* and therefore reads as success. It returns `FALSE`
+/// instead — see the `on_panic` expression in the `hook_entry_points!` list.
+///
+/// Note that several hooks already return this same status when their
+/// trampoline is missing, so the value alone does not distinguish a panic from
+/// that. The distinguishing record is `hookstats::note_hook_panic` plus the
+/// shim panic log, both of which a panic writes and a missing trampoline does
+/// not.
+const STATUS_HOOK_PANICKED: NTSTATUS = STATUS_UNSUCCESSFUL;
+
+/// Run one hook body with its panic contained at the `extern "system"`
+/// boundary, and report `on_panic`'s value to the caller if it faults.
+///
+/// **What this changes, and what it does not.** Measured on this toolchain
+/// (2026-08-16, `rustc` with `panic = "unwind"`): a panic inside an
+/// `extern "system"` fn runs the `Drop` impls of every Rust frame below the
+/// boundary, in order, and *then* hits rustc's forced
+/// `core::panicking::panic_cannot_unwind` and takes the process down with
+/// `0xC0000409`. Adding this wrapper does not change which destructors run —
+/// the same unwind runs the same ones — it changes only where the unwind stops
+/// and what happens there. The unwind never reached the game's frames before
+/// (the forced abort is at *our* boundary, not theirs) and still does not; what
+/// the game gets now is a returned status instead of a dead process.
+///
+/// That the inner destructors run is a requirement here, not a tolerated cost:
+/// [`ShimIoGuard`]'s `Drop` is what releases this thread's reentrancy counter,
+/// and a panic that skipped it would leave every later hook call on that thread
+/// falling through to real ntdll — a silent un-virtualization far harder to
+/// diagnose than a crash.
+///
+/// # `AssertUnwindSafe`
+///
+/// Every hook body captures raw pointers from the NT call and touches process
+/// statics, so none of these closures is `UnwindSafe` and the assertion is
+/// unavoidable. It is also true here, for a reason narrower than the general
+/// case: `UnwindSafe` guards against *observing* state that a caught unwind
+/// left half-updated, and this function observes nothing. On the `Err` arm it
+/// reads nothing out of the closure, touches none of the captured pointers, and
+/// returns a constant. Every process-wide table this crate shares between hooks
+/// (`DIR_TABLE`, `IDENTITY_TABLE`, `PATH_TABLE`, `HANDLE_PATHS`, and
+/// `hookstats`' accumulators) is behind a `std::sync::Mutex`, which poisons on
+/// a panic taken while held, and every lock site in this crate already treats
+/// `Err` as "no entry". So a later call cannot read a torn value out of one; it
+/// reads nothing, which is the same thing it does on any other lock failure.
+///
+/// The honest consequence of that, which the abort did not have because there
+/// was no "later": a panic taken while one of those tables is locked poisons it
+/// for the rest of the process, and the handle tracking it backs degrades to
+/// permanently empty. That is a real loss of fidelity and it is why the caught
+/// panic is counted loudly rather than swallowed.
+fn contain_panic<R>(
+    name: &'static str,
+    body: impl FnOnce() -> R,
+    on_panic: impl FnOnce() -> R,
+) -> R {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(v) => v,
+        Err(_) => {
+            // The panic's message, location and thread were already written by
+            // `install_panic_hook`, which runs before any unwinding. This adds
+            // the aggregate the log cannot give: how many, and where.
+            crate::hookstats::note_hook_panic(name);
+            on_panic()
+        }
+    }
+}
+
+/// Generates the `extern "system"` entry point for each detour: a wrapper that
+/// runs the real body inside [`contain_panic`].
+///
+/// Every hook goes through this one macro rather than each wrapping its own
+/// body, so "does this entry point contain its panics" cannot be answered
+/// differently for different hooks — and so a hook added later cannot quietly
+/// skip it. `no_extern_hook_bypasses_the_panic_containment_macro` in this
+/// module's tests enforces that by scanning the source: this macro must be the
+/// only place in `hook.rs` that defines an `extern "system"` function.
+macro_rules! hook_entry_points {
+    ($(
+        $(#[$attr:meta])*
+        fn $wrapper:ident = $body:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty
+            as $name:literal, on_panic $fallback:expr;
+    )*) => {$(
+        #[doc = concat!(
+            "Panic-contained `extern \"system\"` entry point for `", $name,
+            "`. The body is [`", stringify!($body), "`]; this wrapper exists so a \
+             panic in it returns a failure status instead of aborting the game — \
+             see [`contain_panic`]."
+        )]
+        $(#[$attr])*
+        #[allow(clippy::too_many_arguments)]
+        unsafe extern "system" fn $wrapper($($arg: $ty),*) -> $ret {
+            contain_panic($name, || unsafe { $body($($arg),*) }, || $fallback)
+        }
+    )*};
+}
+
+hook_entry_points! {
+    fn create_hook = create_hook_body(
+        file_handle: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        iosb: *mut c_void,
+        alloc: *const i64,
+        attrs: u32,
+        share: u32,
+        disp: u32,
+        opts: u32,
+        ea: *const c_void,
+        ealen: u32,
+    ) -> NTSTATUS as "NtCreateFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn open_hook = open_hook_body(
+        file_handle: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        iosb: *mut c_void,
+        share: u32,
+        opts: u32,
+    ) -> NTSTATUS as "NtOpenFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn qibn_hook = qibn_hook_body(
+        oa: *const ObjectAttributes,
+        iosb: *mut c_void,
+        info: *mut c_void,
+        length: u32,
+        class_raw: u32,
+    ) -> NTSTATUS as "NtQueryInformationByName", on_panic STATUS_HOOK_PANICKED;
+
+    fn qattr_hook = qattr_hook_body(
+        oa: *const ObjectAttributes,
+        info: *mut FileBasicInformation,
+    ) -> NTSTATUS as "NtQueryAttributesFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn qfull_hook = qfull_hook_body(
+        oa: *const ObjectAttributes,
+        info: *mut FileNetworkOpenInformation,
+    ) -> NTSTATUS as "NtQueryFullAttributesFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn close_hook = close_hook_body(handle: HANDLE) -> NTSTATUS
+        as "NtClose", on_panic STATUS_HOOK_PANICKED;
+
+    fn delete_hook = delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS
+        as "NtDeleteFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn qif_hook = qif_hook_body(
+        handle: HANDLE,
+        iosb: *mut c_void,
+        info: *mut c_void,
+        length: u32,
+        class: u32,
+    ) -> NTSTATUS as "NtQueryInformationFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn setinfo_hook = setinfo_hook_body(
+        handle: HANDLE,
+        iosb: *mut c_void,
+        info: *mut c_void,
+        length: u32,
+        class: u32,
+    ) -> NTSTATUS as "NtSetInformationFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn qvol_hook = qvol_hook_body(
+        handle: HANDLE,
+        iosb: *mut c_void,
+        info: *mut c_void,
+        length: u32,
+        class: u32,
+    ) -> NTSTATUS as "NtQueryVolumeInformationFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn lock_hook = lock_hook_body(
+        handle: HANDLE,
+        event: HANDLE,
+        apc: *const c_void,
+        apc_ctx: *const c_void,
+        iosb: *mut c_void,
+        byte_offset: *const i64,
+        length: *const i64,
+        key: u32,
+        fail_immediately: u8,
+        exclusive: u8,
+    ) -> NTSTATUS as "NtLockFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn unlock_hook = unlock_hook_body(
+        handle: HANDLE,
+        iosb: *mut c_void,
+        byte_offset: *const i64,
+        length: *const i64,
+        key: u32,
+    ) -> NTSTATUS as "NtUnlockFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn flush_hook = flush_hook_body(handle: HANDLE, iosb: *mut c_void) -> NTSTATUS
+        as "NtFlushBuffersFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn write_hook = write_hook_body(
+        handle: HANDLE,
+        event: HANDLE,
+        apc: *const c_void,
+        apc_ctx: *const c_void,
+        iosb: *mut c_void,
+        buffer: *mut c_void,
+        length: u32,
+        byte_offset: *const i64,
+        key: *const u32,
+    ) -> NTSTATUS as "NtWriteFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn read_hook = read_hook_body(
+        handle: HANDLE,
+        event: HANDLE,
+        apc: *const c_void,
+        apc_ctx: *const c_void,
+        iosb: *mut c_void,
+        buffer: *mut c_void,
+        length: u32,
+        byte_offset: *const i64,
+        key: *const u32,
+    ) -> NTSTATUS as "NtReadFile", on_panic STATUS_HOOK_PANICKED;
+
+    fn create_section_hook = create_section_hook_body(
+        section_handle: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        max_size: *mut i64,
+        page_prot: u32,
+        alloc_attrs: u32,
+        file_handle: HANDLE,
+    ) -> NTSTATUS as "NtCreateSection", on_panic STATUS_HOOK_PANICKED;
+
+    fn map_view_hook = map_view_hook_body(
+        section: HANDLE,
+        process: HANDLE,
+        base_address: *mut *mut c_void,
+        zero_bits: usize,
+        commit_size: usize,
+        section_offset: *mut i64,
+        view_size: *mut usize,
+        inherit: u32,
+        alloc_type: u32,
+        protect: u32,
+    ) -> NTSTATUS as "NtMapViewOfSection", on_panic STATUS_HOOK_PANICKED;
+
+    fn unmap_view_hook = unmap_view_hook_body(process: HANDLE, base: *mut c_void) -> NTSTATUS
+        as "NtUnmapViewOfSection", on_panic STATUS_HOOK_PANICKED;
+
+    fn qdirex_hook = qdirex_hook_body(
+        handle: HANDLE,
+        event: HANDLE,
+        apc: *const c_void,
+        apc_ctx: *const c_void,
+        iosb: *mut c_void,
+        info: *mut c_void,
+        length: u32,
+        class_raw: u32,
+        flags: u32,
+        file_name: *const UnicodeString,
+    ) -> NTSTATUS as "NtQueryDirectoryFileEx", on_panic STATUS_HOOK_PANICKED;
+
+    fn qdir_hook = qdir_hook_body(
+        handle: HANDLE,
+        event: HANDLE,
+        apc: *const c_void,
+        apc_ctx: *const c_void,
+        iosb: *mut c_void,
+        info: *mut c_void,
+        length: u32,
+        class_raw: u32,
+        single: u8,
+        file_name: *const UnicodeString,
+        restart: u8,
+    ) -> NTSTATUS as "NtQueryDirectoryFile", on_panic STATUS_HOOK_PANICKED;
+
+    /// The one entry point here that is **not** an ntdll `NTSTATUS` call, and
+    /// the one place a uniform `STATUS_UNSUCCESSFUL` would be actively
+    /// dangerous. `CreateProcessInternalW` returns a Win32 `BOOL`, in which
+    /// `STATUS_UNSUCCESSFUL`'s bit pattern is non-zero and therefore reads as
+    /// **success** — the caller would then go on to use a `PROCESS_INFORMATION`
+    /// nothing ever filled in, and close or wait on two garbage handles. `FALSE`
+    /// is the failure value in this ABI, and `SetLastError` is part of the
+    /// contract: a `BOOL`-returning Win32 function that fails without setting it
+    /// leaves the caller reporting whatever error some unrelated earlier call
+    /// happened to leave behind.
+    fn cpiw_hook = cpiw_hook_body(
+        token: HANDLE,
+        app: *const u16,
+        cmd: *mut u16,
+        proc_attr: *const c_void,
+        thread_attr: *const c_void,
+        inherit: i32,
+        flags: u32,
+        env: *const c_void,
+        cur_dir: *const u16,
+        si: *const STARTUPINFOW,
+        pi: *mut PROCESS_INFORMATION,
+        ptok: *mut HANDLE,
+    ) -> i32 as "CreateProcessInternalW", on_panic {
+        // SAFETY: plain TLS write in the current process; no pointers involved.
+        unsafe { windows_sys::Win32::Foundation::SetLastError(ERROR_INTERNAL_ERROR) };
+        0
+    };
 }
 
 /// Opt-in only: when `VFS_ALLOW_DISK_FALLTHROUGH=1`, under-root FUSE NOT_FOUND
@@ -88,7 +409,7 @@ use vfs_redirect::{
     nt_to_volume_relative, write_dir_info, write_file_name_info,
     Decision, DirInfoClass, DirItem, DirStatus,
 };
-use windows_sys::Win32::Foundation::{HANDLE, HMODULE, NTSTATUS};
+use windows_sys::Win32::Foundation::{ERROR_INTERNAL_ERROR, HANDLE, HMODULE, NTSTATUS};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows_sys::Win32::System::Threading::{
     ResumeThread, CREATE_SUSPENDED, PROCESS_INFORMATION, STARTUPINFOW,
@@ -236,28 +557,45 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
     unsafe { install_all_detours(true) }
 }
 
-/// Record shim panics before they take the game down.
+/// Record shim panics — which no longer take the game down, and that is the
+/// change that matters most about this comment.
 ///
-/// The exit code this hook exists to attribute is **0xC0000409**
-/// (`FAST_FAIL_FATAL_APP_EXIT`) — but not for the reason this comment used to
-/// give. It claimed the workspace builds with `panic = "abort"`; `rust/Cargo.toml`
-/// sets `panic = "unwind"` for both profiles, deliberately. A shim panic still
-/// ends the process anyway, because every hook is `extern "system"` and rustc
-/// plants a forced abort wherever an unwind would cross that boundary.
-/// Measured rather than assumed: a panic inside an `extern "system"` fn built
-/// with `panic = "unwind"` prints `thread caused non-unwinding panic.
-/// aborting.` and exits 0xC0000409.
+/// **A panic in a hook used to end the process, and does not any more.** The
+/// history is worth keeping because two successive versions of this comment
+/// were wrong about why. The first claimed the workspace builds with
+/// `panic = "abort"`; it does not — `rust/Cargo.toml` sets `panic = "unwind"`
+/// for both profiles, deliberately, so a future binding can turn a panic into
+/// a host-language exception. The second, correct as far as it went, was that
+/// the process died anyway because every hook is `extern "system"` and rustc
+/// plants a forced abort wherever an unwind would cross that boundary:
+/// measured, a panic inside such a function printed `thread caused
+/// non-unwinding panic. aborting.` and exited **0xC0000409**
+/// (`FAST_FAIL_FATAL_APP_EXIT`). That is no longer what happens, because
+/// [`contain_panic`] now catches at each boundary and returns
+/// [`STATUS_HOOK_PANICKED`] instead. The old behaviour is still one edit away
+/// and reproducible on demand — deleting the `catch_unwind` makes
+/// `a_panicking_hook_returns_a_failure_status_instead_of_aborting` kill the
+/// *test process* with exactly that code.
 ///
-/// Without this hook that exit is an unattributable
+/// So this hook's job changed from "attribute the crash" to "be the only
+/// record there was a fault at all". It matters more now, not less: a
+/// contained panic is invisible from outside the process — the game gets a
+/// failed file operation and carries on — and this log is the only place the
+/// message, location and thread survive. (`hookstats`' caught-panic counters
+/// are the aggregate, but they only reach a reader if `VFS_SHIM_STATS_LOG` is
+/// set.) The 0xC0000409 attribution still matters for the panics that *do*
+/// abort — a panic inside this hook, or in code the containment does not
+/// cover — where the exit is otherwise an unattributable
 /// `STATUS_STACK_BUFFER_OVERRUN`, indistinguishable from a genuine
-/// stack-cookie or CFG failure in the game, and the only way to localise one
-/// is to bisect (see the 0xC0000409 hunt behind commit 5f8f2eb).
+/// stack-cookie or CFG failure in the game, and localisable only by bisecting
+/// (see the 0xC0000409 hunt behind commit 5f8f2eb).
 ///
 /// `set_hook`'s hook runs at panic time, before any unwinding begins, so the
-/// message survives the abort that follows. One consequence of unwind that
-/// `panic = "abort"` did not have: this hook also fires for panics that never
-/// reach an `extern` boundary — a panic on the stats reporter thread kills
-/// only that thread — so a logged message no longer implies the process died.
+/// message is written whether the unwind is later caught or aborts. A logged
+/// message therefore does **not** imply the process died, and now for two
+/// reasons rather than one: a panic on the stats reporter thread kills only
+/// that thread and never reaches an `extern` boundary at all, and a panic in a
+/// hook is caught at that boundary and answered with a status.
 /// Writes to `VFS_SHIM_PANIC_LOG`, else `<state dir>/shim-panic.log`, else a
 /// fixed fallback — a panic here must never be silent for want of a path.
 fn install_panic_hook() {
@@ -284,7 +622,7 @@ fn install_panic_hook() {
             );
             // Guard the write: this file I/O re-enters our own NtCreateFile
             // hooks, and a panic raised *inside* a hook would otherwise recurse.
-            if hook_reenter_begin() {
+            if let Some(_io) = ShimIoGuard::enter() {
                 if let Some(parent) = std::path::Path::new(&path).parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -295,7 +633,6 @@ fn install_panic_hook() {
                     let _ = f.write_all(line.as_bytes());
                     let _ = f.flush();
                 }
-                hook_reenter_end();
             }
             // Best-effort stderr too; harmless when the child has no console.
             eprintln!("vfs-shim PANIC {line}");
@@ -1452,9 +1789,9 @@ fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool) {
         if write { "write" } else { "read" },
         p
     );
-    if !hook_reenter_begin() {
+    let Some(_io) = ShimIoGuard::enter() else {
         return;
-    }
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -1462,7 +1799,6 @@ fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(line.as_bytes());
     }
-    hook_reenter_end();
 }
 
 /// Optional proof that opens went through the director (not host disk).
@@ -1493,9 +1829,9 @@ fn director_open_trace(nt_or_win_path: &str, size: u64) {
         size,
         p
     );
-    if !hook_reenter_begin() {
+    let Some(_io) = ShimIoGuard::enter() else {
         return;
-    }
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -1507,7 +1843,6 @@ fn director_open_trace(nt_or_win_path: &str, size: u64) {
     {
         let _ = f.write_all(line.as_bytes());
     }
-    hook_reenter_end();
 }
 
 /// Create a virtual directory under the managed root via the ring (`OP_MKDIR`),
@@ -1591,7 +1926,12 @@ unsafe fn try_fuse_mkdir(
     }
 }
 
-unsafe extern "system" fn create_hook(
+/// Arity mirrors `NtCreateFile` exactly; it is not ours to reduce. (Clippy
+/// exempts `extern` fns from this lint and this body is no longer one — the
+/// `extern "system"` entry point is `create_hook`, generated by
+/// `hook_entry_points!`.)
+#[allow(clippy::too_many_arguments)]
+unsafe fn create_hook_body(
     file_handle: *mut HANDLE,
     access: u32,
     oa: *const ObjectAttributes,
@@ -1850,7 +2190,7 @@ unsafe fn tramp_open_abs(
 /// `NtOpenFile` hook. Mirrors `create_hook` (redirect / deny / pass-through +
 /// dir tagging) for the open path that Rust `std` and many Win32 callers use to
 /// open existing files and directories.
-unsafe extern "system" fn open_hook(
+unsafe fn open_hook_body(
     file_handle: *mut HANDLE,
     access: u32,
     oa: *const ObjectAttributes,
@@ -2043,7 +2383,7 @@ unsafe fn fill_by_name(
     Some(need)
 }
 
-unsafe extern "system" fn qibn_hook(
+unsafe fn qibn_hook_body(
     oa: *const ObjectAttributes,
     iosb: *mut c_void,
     info: *mut c_void,
@@ -2115,7 +2455,7 @@ unsafe extern "system" fn qibn_hook(
     tramp(oa, iosb, info, length, class_raw)
 }
 
-unsafe extern "system" fn qattr_hook(
+unsafe fn qattr_hook_body(
     oa: *const ObjectAttributes,
     info: *mut FileBasicInformation,
 ) -> NTSTATUS {
@@ -2187,7 +2527,7 @@ unsafe extern "system" fn qattr_hook(
     tramp(oa, info)
 }
 
-unsafe extern "system" fn qfull_hook(
+unsafe fn qfull_hook_body(
     oa: *const ObjectAttributes,
     info: *mut FileNetworkOpenInformation,
 ) -> NTSTATUS {
@@ -2262,7 +2602,7 @@ unsafe extern "system" fn qfull_hook(
 
 /// Reclaim any tracking for a closing handle before the OS (possibly) reuses
 /// its value.
-unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
+unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Close);
     let tramp = match TRAMP_CLOSE {
         Some(t) => t,
@@ -2341,7 +2681,7 @@ unsafe extern "system" fn close_hook(handle: HANDLE) -> NTSTATUS {
 /// Outside every root the call is trampolined unchanged, which is most of them
 /// — a hook with an opinion about every delete in the process would break the
 /// rest of it.
-unsafe extern "system" fn delete_hook(oa: *const ObjectAttributes) -> NTSTATUS {
+unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::DeleteFile);
     let tramp = match TRAMP_DELETE {
         Some(t) => t,
@@ -2558,7 +2898,7 @@ unsafe fn setinfo_ok_iosb(iosb: *mut c_void) {
 /// `FileCompletionInformation` — binds a handle to an I/O completion port.
 const FILE_COMPLETION_INFORMATION: u32 = 30;
 
-unsafe extern "system" fn setinfo_hook(
+unsafe fn setinfo_hook_body(
     handle: HANDLE,
     iosb: *mut c_void,
     info: *mut c_void,
@@ -2907,7 +3247,7 @@ unsafe fn fuse_query_information(
 
 /// `NtQueryVolumeInformationFile` hook — `GetFileType` needs
 /// `FileFsDeviceInformation` on synthetic handles.
-unsafe extern "system" fn qvol_hook(
+unsafe fn qvol_hook_body(
     handle: HANDLE,
     iosb: *mut c_void,
     info: *mut c_void,
@@ -3024,7 +3364,7 @@ fn synth_path(handle: HANDLE) -> Option<String> {
 /// no branch: `false` means the caller is willing to block for the lock, and
 /// an immediate grant satisfies that strictly better than waiting.
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn lock_hook(
+unsafe fn lock_hook_body(
     handle: HANDLE,
     event: HANDLE,
     apc: *const c_void,
@@ -3066,7 +3406,7 @@ unsafe extern "system" fn lock_hook(
 
 /// `NtUnlockFile` hook — the release half of [`lock_hook`], and success for
 /// the same reason: a lock that was never recorded cannot fail to be released.
-unsafe extern "system" fn unlock_hook(
+unsafe fn unlock_hook_body(
     handle: HANDLE,
     iosb: *mut c_void,
     byte_offset: *const i64,
@@ -3096,7 +3436,7 @@ unsafe extern "system" fn unlock_hook(
 /// Unlike the lock pair this is not a lie about state, but it is still weaker
 /// than what the caller asked for: it promises the bytes are durable, and what
 /// it can actually guarantee is that they reached the director.
-unsafe extern "system" fn flush_hook(handle: HANDLE, iosb: *mut c_void) -> NTSTATUS {
+unsafe fn flush_hook_body(handle: HANDLE, iosb: *mut c_void) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::FlushBuffers);
     let tramp = match TRAMP_FLUSH {
         Some(t) => t,
@@ -3118,7 +3458,7 @@ unsafe extern "system" fn flush_hook(handle: HANDLE, iosb: *mut c_void) -> NTSTA
 /// `GetFinalPathNameByHandleW` reports where the mod file appears to live.
 /// Class 9 and everything else pass through (spoofing class 9 breaks
 /// `GetFinalPathNameByHandleW`).
-unsafe extern "system" fn qif_hook(
+unsafe fn qif_hook_body(
     handle: HANDLE,
     iosb: *mut c_void,
     info: *mut c_void,
@@ -3160,7 +3500,7 @@ unsafe extern "system" fn qif_hook(
 /// buffer to the JVM overlay over the ring and complete the IRP; real handles
 /// pass straight through. `ByteOffset` NULL / negative sentinel = current pos.
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn write_hook(
+unsafe fn write_hook_body(
     handle: HANDLE,
     event: HANDLE,
     apc: *const c_void,
@@ -3262,7 +3602,7 @@ unsafe extern "system" fn write_hook(
 /// out of a mapped zip window — and used to sit, orphaned, above `write_hook`.
 /// Gate 4 task 7 deleted that case with the rest of the zip-window server.
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn read_hook(
+unsafe fn read_hook_body(
     handle: HANDLE,
     event: HANDLE,
     apc: *const c_void,
@@ -3499,7 +3839,7 @@ unsafe fn fuse_create_section(
 /// [`fuse_create_section`]. Every other handle passes through — including, as
 /// of gate 4 task 7, the zip-window synthetic file handles this hook used to
 /// also answer for, which no longer exist.
-unsafe extern "system" fn create_section_hook(
+unsafe fn create_section_hook_body(
     section_handle: *mut HANDLE,
     access: u32,
     oa: *const ObjectAttributes,
@@ -3542,7 +3882,7 @@ unsafe extern "system" fn create_section_hook(
 /// `NtMapViewOfSection` hook: synthetic sections return a pointer into the
 /// region the shim already mapped for them. Real sections pass through.
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn map_view_hook(
+unsafe fn map_view_hook_body(
     section: HANDLE,
     process: HANDLE,
     base_address: *mut *mut c_void,
@@ -3616,7 +3956,7 @@ unsafe extern "system" fn map_view_hook(
 /// `NtUnmapViewOfSection` hook: synthetic views are bookkeeping-only. Dropping
 /// the last reference to one does not tear the memory down here — the region
 /// belongs to whoever mapped it (see `lazy_section::on_section_closed`).
-unsafe extern "system" fn unmap_view_hook(process: HANDLE, base: *mut c_void) -> NTSTATUS {
+unsafe fn unmap_view_hook_body(process: HANDLE, base: *mut c_void) -> NTSTATUS {
     let tramp = match TRAMP_UNMAP_VIEW {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
@@ -3639,7 +3979,7 @@ unsafe extern "system" fn unmap_view_hook(process: HANDLE, base: *mut c_void) ->
 /// caller asked for a suspended child). Best-effort — a failed inject or timeout
 /// still resumes the child (unvirtualized rather than hung).
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn cpiw_hook(
+unsafe fn cpiw_hook_body(
     token: HANDLE,
     app: *const u16,
     cmd: *mut u16,
@@ -3718,7 +4058,7 @@ unsafe fn wildcard_of(file_name: *const UnicodeString) -> Option<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn qdirex_hook(
+unsafe fn qdirex_hook_body(
     handle: HANDLE,
     event: HANDLE,
     apc: *const c_void,
@@ -3750,7 +4090,7 @@ unsafe extern "system" fn qdirex_hook(
 
 /// The classic entry point. Same body, different argument shape.
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn qdir_hook(
+unsafe fn qdir_hook_body(
     handle: HANDLE,
     event: HANDLE,
     apc: *const c_void,
@@ -4354,5 +4694,241 @@ mod tests {
         for d in [1u32, 2, 4] {
             assert!(!disposition_needs_existence_probe(d), "disposition {d}");
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Panic containment at the `extern "system"` boundary.
+    //
+    // These drive test-only bodies registered through the *same*
+    // `hook_entry_points!` macro every real detour uses, so what they exercise
+    // is the generated wrapper and `contain_panic`, not a hand-written
+    // stand-in. `no_extern_hook_bypasses_the_panic_containment_macro` is the
+    // other half: it pins that no real hook can be defined any other way.
+    //
+    // A real hook cannot be made to panic from a unit test — every one of them
+    // reaches its interesting code only through a live trampoline into ntdll,
+    // and a trampoline is itself `extern "system"`, so a panic planted there
+    // would abort at *its* boundary before ever reaching ours.
+    // ---------------------------------------------------------------------
+
+    use std::thread::LocalKey;
+
+    thread_local! {
+        /// Set by a frame standing in for the game code below the detour.
+        static CALLER_FRAME_DROPPED: Cell<bool> = const { Cell::new(false) };
+        /// Set by a frame *inside* the hook body, above the catch.
+        static HOOK_FRAME_DROPPED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    struct DropFlag(&'static LocalKey<Cell<bool>>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.with(|c| c.set(true));
+        }
+    }
+
+    unsafe fn panicking_hook_body(reached: *mut u32) -> NTSTATUS {
+        let _frame = DropFlag(&HOOK_FRAME_DROPPED);
+        if !reached.is_null() {
+            *reached = 1;
+        }
+        panic!("deliberate test panic inside a hook body");
+    }
+
+    unsafe fn counted_panicking_hook_body() -> NTSTATUS {
+        panic!("deliberate test panic, counted by name");
+    }
+
+    /// Panics with the thread's reentrancy guard held, which is the case
+    /// requirement 2 is about: [`ShimIoGuard`] is the only thing that lowers
+    /// `HOOK_REENTER` again.
+    unsafe fn guarded_panicking_hook_body() -> NTSTATUS {
+        let Some(_io) = ShimIoGuard::enter() else {
+            return STATUS_ACCESS_DENIED;
+        };
+        panic!("deliberate test panic with shim I/O in flight");
+    }
+
+    /// Reports what a *real* hook's first branch would see: `in_hook_reenter`
+    /// decides between serving the call and handing it to real ntdll.
+    unsafe fn reentrancy_probe_body() -> NTSTATUS {
+        if in_hook_reenter() {
+            STATUS_ACCESS_DENIED
+        } else {
+            STATUS_SUCCESS
+        }
+    }
+
+    unsafe fn panicking_bool_hook_body() -> i32 {
+        panic!("deliberate test panic in a BOOL-returning hook");
+    }
+
+    hook_entry_points! {
+        fn panicking_hook = panicking_hook_body(reached: *mut u32) -> NTSTATUS
+            as "NtTestPanic", on_panic STATUS_HOOK_PANICKED;
+
+        fn counted_panicking_hook = counted_panicking_hook_body() -> NTSTATUS
+            as "NtTestCounted", on_panic STATUS_HOOK_PANICKED;
+
+        fn guarded_panicking_hook = guarded_panicking_hook_body() -> NTSTATUS
+            as "NtTestPanicUnderShimIo", on_panic STATUS_HOOK_PANICKED;
+
+        fn reentrancy_probe = reentrancy_probe_body() -> NTSTATUS
+            as "NtTestReentrancyProbe", on_panic STATUS_HOOK_PANICKED;
+
+        fn panicking_bool_hook = panicking_bool_hook_body() -> i32
+            as "TestPanicBool", on_panic {
+            unsafe { windows_sys::Win32::Foundation::SetLastError(ERROR_INTERNAL_ERROR) };
+            0
+        };
+    }
+
+    /// The caller gets a status back at all — and it is a *failure* status.
+    /// Both halves matter: without the first the process is gone, and without
+    /// the second the game reads an output buffer the panicking body never
+    /// filled in.
+    #[test]
+    fn a_panicking_hook_returns_a_failure_status_instead_of_aborting() {
+        let mut reached = 0u32;
+        let st = unsafe { panicking_hook(&mut reached) };
+        assert_eq!(reached, 1, "the body must have run far enough to panic");
+        assert_eq!(st, STATUS_UNSUCCESSFUL);
+        assert!(st < 0, "NTSTATUS {st:#x} has no severity bits — a caller reads it as success");
+    }
+
+    /// The unwind stops at the `extern "system"` boundary and does not run the
+    /// caller's destructors on its way out.
+    ///
+    /// The caller's frame here stands in for the game's. Measured 2026-08-16,
+    /// an uncontained panic did not unwind into it either — rustc's forced
+    /// `panic_cannot_unwind` sits at *our* boundary, so the game's frames were
+    /// never at risk and the process simply died instead. What this pins is
+    /// that adding the catch did not move the boundary outwards: the frame
+    /// below the hook is untouched when the hook returns, and drops normally
+    /// afterwards like any other.
+    ///
+    /// The second assertion is the deliberate other side of it. The hook's own
+    /// frame **is** unwound, and must be: that is the mechanism releasing
+    /// `ShimIoGuard`, and a containment that skipped it would trade a crash for
+    /// a thread that silently stops being virtualized.
+    #[test]
+    fn a_panicking_hook_does_not_run_its_callers_destructors() {
+        CALLER_FRAME_DROPPED.with(|c| c.set(false));
+        HOOK_FRAME_DROPPED.with(|c| c.set(false));
+        {
+            let _caller = DropFlag(&CALLER_FRAME_DROPPED);
+            let mut reached = 0u32;
+            let st = unsafe { panicking_hook(&mut reached) };
+            assert_eq!(st, STATUS_UNSUCCESSFUL);
+            assert!(
+                !CALLER_FRAME_DROPPED.with(Cell::get),
+                "the unwind escaped the hook and ran a caller frame's Drop"
+            );
+            assert!(
+                HOOK_FRAME_DROPPED.with(Cell::get),
+                "the hook body's own frame was not unwound — nothing would release ShimIoGuard"
+            );
+        }
+        assert!(
+            CALLER_FRAME_DROPPED.with(Cell::get),
+            "the caller frame must still drop normally once it goes out of scope"
+        );
+    }
+
+    /// After a caught panic the thread is still usable. A panic taken while the
+    /// reentrancy guard was held used to be unrecoverable in the worst possible
+    /// way — `HOOK_REENTER` stuck at 1 means every later hook call on that
+    /// thread takes the fast path to real ntdll, so the process quietly stops
+    /// being virtualized while every counter keeps reporting ordinary activity.
+    #[test]
+    fn a_caught_panic_leaves_no_reentrancy_state_held() {
+        assert!(!in_hook_reenter(), "test thread started inside the guard");
+        assert_eq!(unsafe { reentrancy_probe() }, STATUS_SUCCESS);
+
+        assert_eq!(unsafe { guarded_panicking_hook() }, STATUS_UNSUCCESSFUL);
+
+        assert!(!in_hook_reenter(), "HOOK_REENTER stayed raised after the panic");
+        assert_eq!(
+            unsafe { reentrancy_probe() },
+            STATUS_SUCCESS,
+            "the next call on this thread took the reentrant fast path to real ntdll"
+        );
+        assert!(
+            ShimIoGuard::enter().is_some(),
+            "no further shim-initiated I/O could be started on this thread"
+        );
+    }
+
+    /// A caught panic is a bug that just happened; it has to be countable.
+    #[test]
+    fn every_caught_panic_is_counted_under_its_own_entry_point() {
+        let before_total = crate::hookstats::hook_panics_total();
+        assert_eq!(crate::hookstats::hook_panic_count("NtTestCounted"), 0);
+        assert_eq!(unsafe { counted_panicking_hook() }, STATUS_UNSUCCESSFUL);
+        assert_eq!(
+            crate::hookstats::hook_panic_count("NtTestCounted"),
+            1,
+            "the panic was not attributed to the entry point it happened in"
+        );
+        // Other panic tests may run concurrently, so the total is a lower bound.
+        assert!(crate::hookstats::hook_panics_total() > before_total);
+    }
+
+    /// `CreateProcessInternalW` returns a Win32 `BOOL`, and the uniform
+    /// `STATUS_UNSUCCESSFUL` is non-zero in that ABI — i.e. `TRUE`. A caller
+    /// told the process was created goes on to use a `PROCESS_INFORMATION`
+    /// nothing filled in.
+    #[test]
+    fn a_panicking_bool_hook_reports_false_rather_than_a_status() {
+        assert_ne!(STATUS_HOOK_PANICKED, 0, "the trap this test exists for is gone");
+        let r = unsafe { panicking_bool_hook() };
+        assert_eq!(r, 0, "a BOOL-returning hook must fail with FALSE");
+        assert_eq!(
+            unsafe { windows_sys::Win32::Foundation::GetLastError() },
+            ERROR_INTERNAL_ERROR,
+            "a failing BOOL Win32 function must set the last error, not leave a stale one"
+        );
+    }
+
+    /// Structural: `hook_entry_points!` must be the only place in this file
+    /// that defines an `extern "system"` function.
+    ///
+    /// Requirement 1 of this task is that *every* entry point contains its own
+    /// panic, and the behaviour tests above can only ever demonstrate that for
+    /// the hooks they drive. This is what makes the claim total, and what stops
+    /// hook number twenty-two from being written the old way — which would
+    /// compile, install, and abort the game exactly as before, with nothing in
+    /// any test to say so.
+    #[test]
+    fn no_extern_hook_bypasses_the_panic_containment_macro() {
+        const MARKER: &str = "extern \"system\" fn ";
+        let src = include_str!("hook.rs");
+        let mut defined: Vec<&str> = Vec::new();
+        for (i, _) in src.match_indices(MARKER) {
+            let rest = &src[i + MARKER.len()..];
+            let end = rest
+                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+                .unwrap_or(rest.len());
+            // A zero-length name is prose or a bare fn-pointer type, not a
+            // definition (`fn(` in a type alias has no space before the paren).
+            if end > 0 {
+                defined.push(&rest[..end]);
+            }
+        }
+        assert_eq!(
+            defined,
+            vec!["$wrapper"],
+            "an `extern \"system\" fn` is defined outside hook_entry_points!; it will abort \
+             the game process on a panic instead of returning a status"
+        );
+        // And nothing may register a raw body as a detour: the bodies are not
+        // `extern "system"`, so installing one is both an ABI error and a way
+        // around the containment. Spelled with `concat!` so this needle does
+        // not appear verbatim in the file it is searching.
+        assert!(
+            !src.contains(concat!("_hook_body", " as *const ()")),
+            "a hook body was installed as a detour, bypassing its wrapper"
+        );
     }
 }
