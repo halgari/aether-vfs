@@ -198,7 +198,7 @@ impl Task for ConformanceTask {
 /// Resolves to a [`ConformanceReport`]; **rejects** with the failing case's
 /// message. Composed providers work too, which is how spec §10's own example —
 /// `assert_conformance(seekable(seq_fixture()))` — is written from a host.
-#[napi(js_name = "assertConformance", ts_return_type = "Promise<ConformanceReport>")]
+#[napi(js_name = "assertConformance", ts_return_type = "Promise<ConformanceReport>", catch_unwind)]
 pub fn assert_conformance(provider: u32) -> AsyncTask<ConformanceTask> {
     AsyncTask::new(ConformanceTask { handle: provider })
 }
@@ -217,7 +217,7 @@ pub struct FixtureFile {
 /// place that cannot be kept in step with the first. `FIXTURE_FILES` grows a
 /// file one day and a hard-coded provider fails with "readdir of the root listed
 /// …" and no clue why.
-#[napi(js_name = "conformanceFixture")]
+#[napi(js_name = "conformanceFixture", catch_unwind)]
 pub fn conformance_fixture() -> Vec<FixtureFile> {
     FIXTURE_FILES
         .iter()
@@ -235,7 +235,7 @@ pub fn conformance_fixture() -> Vec<FixtureFile> {
 /// behaviour and worth repeating here: a leftover file from a previous run would
 /// show up in `readdir` of the root and fail the suite for a reason that has
 /// nothing to do with the provider.
-#[napi(js_name = "writeConformanceFixture")]
+#[napi(js_name = "writeConformanceFixture", catch_unwind)]
 pub fn write_conformance_fixture(dir: String) -> Result<()> {
     let p = std::path::PathBuf::from(&dir);
     if let Some(parent) = p.parent() {

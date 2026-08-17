@@ -170,14 +170,22 @@ pub struct MemoryFile {
 /// A read-write in-memory file tree (spec §6's `memory` primitive).
 ///
 /// The round trip is the reason it exists, and it is spec §8's own example: a
-/// host hands in `{'Skyrim.ini': bytes}`, the game writes the file, and the host
+/// host hands in `{'skyrim.ini': bytes}`, the game writes the file, and the host
 /// reads back what the game wrote — with nothing touching disk. Reading it back
 /// goes through the graph (`session.readFile`), because a `Provider` handle is
 /// an integer and not an object with its own file API.
 ///
+/// **Fold the keys.** The shim folds every vpath component before it crosses the
+/// ring and this provider is case-sensitive by design, so a host that seeds
+/// `Skyrim.ini` and a child that writes `Skyrim.ini` end up with **two** files —
+/// with no error from the child, from `rejectedWrites()`, or from disk. Spec
+/// §6b's `casefold` primitive is the fix and does not exist yet;
+/// `examples/spec-8-example.cts` demonstrates the working round trip and the
+/// silent wrong answer side by side.
+///
 /// Declares `Access::ReadWrite`, so it can serve as an `overlay` upper or a
 /// `router` target for exactly the paths a host wants writable.
-#[napi]
+#[napi(catch_unwind)]
 pub fn memory(files: Option<Vec<MemoryFile>>) -> Result<Provider> {
     let p = MemoryProvider::from_files(
         files
@@ -204,7 +212,7 @@ pub fn memory(files: Option<Vec<MemoryFile>>) -> Result<Provider> {
 /// `disk()` is `ReadWrite`, so a graph built from `disk` alone can never refuse
 /// a write; §7's whole workflow was undemonstrable from a host until this
 /// existed.
-#[napi]
+#[napi(catch_unwind)]
 pub fn readonly(provider: u32) -> Result<Provider> {
     let inner = lookup_provider(provider)?;
     compose(
@@ -225,7 +233,7 @@ pub fn readonly(provider: u32) -> Result<Provider> {
 /// Wrapping an already-positional provider is a no-op passthrough rather than an
 /// error, so a host applying the recommended wrapping uniformly pays nothing
 /// where it is unnecessary.
-#[napi]
+#[napi(catch_unwind)]
 pub fn seekable(provider: u32) -> Result<Provider> {
     let inner = lookup_provider(provider)?;
     compose(
@@ -264,7 +272,7 @@ pub struct CacheOptions {
 /// Each call gets its own `BlockCache`, keyed by the wrapped provider's handle,
 /// and `provider.cacheStats()` reports its hits and misses — otherwise "I added
 /// a cache" is an act of faith rather than a measurement.
-#[napi]
+#[napi(catch_unwind)]
 pub fn cached(provider: u32, options: Option<CacheOptions>) -> Result<Provider> {
     let inner = lookup_provider(provider)?;
     let o = options.unwrap_or(CacheOptions {
@@ -322,7 +330,7 @@ pub fn cached(provider: u32, options: Option<CacheOptions>) -> Result<Provider> 
 /// to whichever child declares `ReadWrite`, so a stack containing one writable
 /// child can serve a write. `immutable`, `slow` and `preferredBlock` combine
 /// conservatively.
-#[napi]
+#[napi(catch_unwind)]
 pub fn layered(providers: Vec<u32>) -> Result<Provider> {
     if providers.len() < 2 {
         return Err(Error::from_reason(format!(
@@ -351,7 +359,7 @@ pub fn layered(providers: Vec<u32>) -> Result<Provider> {
 /// rather than touching `base`.
 ///
 /// `upper` must declare `ReadWrite` — checked here, not at the first write.
-#[napi]
+#[napi(catch_unwind)]
 pub fn overlay(base: u32, upper: u32) -> Result<Provider> {
     let base_p = lookup_provider(base)?;
     let upper_p = lookup_provider(upper)?;
@@ -394,7 +402,7 @@ pub struct RouteSpec {
 /// directory to find its INIs will not see one supplied by a `'*.ini'` route.
 /// Until that is fixed, put such a file in the default provider (or in an
 /// `overlay` upper) if anything enumerates it.
-#[napi]
+#[napi(catch_unwind)]
 pub fn router(routes: Vec<RouteSpec>, default_provider: u32) -> Result<Provider> {
     let def = lookup_provider(default_provider)?;
     let mut kids = vec![default_provider];

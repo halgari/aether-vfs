@@ -134,7 +134,7 @@ fn op_name(op: u32) -> &'static str {
 /// about which number means `readAt` would produce a provider that answers the
 /// wrong question, which is exactly the class of failure this project keeps
 /// finding.
-#[napi(js_name = "providerOps")]
+#[napi(js_name = "providerOps", catch_unwind)]
 pub fn provider_ops() -> HashMap<String, u32> {
     OPS.iter().map(|(o, n)| ((*n).to_string(), *o)).collect()
 }
@@ -142,7 +142,7 @@ pub fn provider_ops() -> HashMap<String, u32> {
 /// The `OPEN_*` flag bits an `open(root, path, flags)` call receives. A JS
 /// provider that means to support creation has to test `flags & OPEN_CREATE`,
 /// and guessing the bit values is not something a host should have to do.
-#[napi(js_name = "openFlags")]
+#[napi(js_name = "openFlags", catch_unwind)]
 pub fn open_flags() -> HashMap<String, u32> {
     [
         ("OPEN_READ", vfs_embed::OPEN_READ),
@@ -159,7 +159,7 @@ pub fn open_flags() -> HashMap<String, u32> {
 
 /// The `KIND_*` constants a `getattr`/`readdir` result uses, from the same place
 /// Rust reads them.
-#[napi(js_name = "kinds")]
+#[napi(js_name = "kinds", catch_unwind)]
 pub fn kinds() -> HashMap<String, u32> {
     [
         ("KIND_FILE", KIND_FILE as u32),
@@ -594,7 +594,7 @@ fn forget_call(call_id: u64) {
 
 /// Hand a provider call's result back. Called on the provider's own JS thread by
 /// the dispatcher in `index.cjs`; a `callId` with no waiter is dropped.
-#[napi(js_name = "completeCall")]
+#[napi(js_name = "completeCall", catch_unwind)]
 pub fn complete_call(call_id: f64, result: CallResult) -> Result<()> {
     let call = match calls().lock() {
         Ok(g) => g.get(&(call_id as u64)).map(Arc::clone),
@@ -1025,7 +1025,7 @@ fn validate_methods(caps: Capabilities, methods: u32) -> Result<()> {
 /// wraps *that* to put the whole thing on a dedicated worker loop, which task 5
 /// measured as the only configuration immune to a busy main loop (1449 vs
 /// 3.8 MiB/s).
-#[napi(js_name = "registerProvider")]
+#[napi(js_name = "registerProvider", catch_unwind)]
 pub fn register_provider(
     obj: JsObject,
     dispatch: JsFunction,
@@ -1103,7 +1103,7 @@ pub fn register_provider(
 /// wrapper object by design (see [`crate::intern_provider`]) — so a later
 /// `Provider.fromHandle` still resolves, and reports `released: true` from
 /// `stats()`.
-#[napi(js_name = "releaseProvider")]
+#[napi(js_name = "releaseProvider", catch_unwind)]
 pub fn release_provider(handle: u32) -> Result<()> {
     let Some(b) = bridge_by_handle(handle) else {
         return Err(Error::from_reason(format!(
@@ -1220,7 +1220,7 @@ pub(crate) fn stats_for(handle: u32) -> Option<ProviderStats> {
 /// How many provider calls are outstanding across the whole process. A number
 /// that never returns to zero after a quiet moment is the signature of a
 /// provider that does not settle.
-#[napi(js_name = "outstandingProviderCalls")]
+#[napi(js_name = "outstandingProviderCalls", catch_unwind)]
 pub fn outstanding_provider_calls() -> f64 {
     calls().lock().map(|g| g.len()).unwrap_or(0) as f64
 }

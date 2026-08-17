@@ -227,14 +227,14 @@ impl Provider {
 #[napi]
 impl Provider {
     /// Rebuild a wrapper from a handle, validating that the handle exists.
-    #[napi(factory)]
+    #[napi(factory, catch_unwind)]
     pub fn from_handle(handle: u32) -> Result<Self> {
         lookup_provider(handle)?;
         Ok(Provider { handle })
     }
 
     /// The process-global integer this wrapper stands for.
-    #[napi(getter)]
+    #[napi(getter, catch_unwind)]
     pub fn handle(&self) -> u32 {
         self.handle
     }
@@ -247,7 +247,7 @@ impl Provider {
     /// settled, `abandonedCalls` for one given up on, `hostErrors` for a throw
     /// that became `ST_IO_ERROR`, and `selfCallRefusals` for a call the deadlock
     /// guard refused.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn stats(&self) -> Option<jsprovider::ProviderStats> {
         jsprovider::stats_for(self.handle)
     }
@@ -261,7 +261,7 @@ impl Provider {
     /// `false`, `overlay(ro, rw).access` is `'readwrite'`. Declared, not probed
     /// — a provider that lies here is caught by `assertConformance`, not by
     /// this call.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn capabilities(&self) -> Result<primitives::ProviderCapabilities> {
         primitives::capabilities_of(self.handle)
     }
@@ -270,14 +270,14 @@ impl Provider {
     /// `'readonly'`, `'seekable'`, `'cached'`, `'layered'`, `'overlay'`,
     /// `'router'`. Diagnostics — a composed graph is a tree of integers, and
     /// this is what makes one printable.
-    #[napi(getter)]
+    #[napi(getter, catch_unwind)]
     pub fn kind(&self) -> Option<String> {
         primitives::kind_of(self.handle).map(|k| k.to_string())
     }
 
     /// The handles this provider was composed from, in argument order. Empty
     /// for a leaf.
-    #[napi(getter)]
+    #[napi(getter, catch_unwind)]
     pub fn children(&self) -> Vec<u32> {
         primitives::children(self.handle)
     }
@@ -291,7 +291,7 @@ impl Provider {
     /// `releaseProvider(composed.handle)` correctly refuses, and this is how a
     /// host finds what to call it with instead. For a bare JS provider it is
     /// `[this.handle]`; for a graph of Rust primitives it is `[]`.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn js_leaves(&self) -> Vec<u32> {
         primitives::js_leaves(self.handle)
     }
@@ -299,7 +299,7 @@ impl Provider {
     /// Block-cache counters, for a handle `cached()` produced; `null` for
     /// anything else. Without this, "I put a cache in the graph" is not
     /// something a host can verify.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn cache_stats(&self) -> Option<primitives::ProviderCacheStats> {
         primitives::cache_stats_for(self.handle)
     }
@@ -313,7 +313,7 @@ impl Provider {
 /// nothing and reports no error at all — the exact failure shape this project
 /// keeps getting bitten by. A host wanting a fresh directory (a write layer,
 /// say) creates it first; that is one line of JS and it is explicit.
-#[napi]
+#[napi(catch_unwind)]
 pub fn disk(path: String) -> Result<Provider> {
     let p = PathBuf::from(&path);
     if !p.is_dir() {
@@ -336,7 +336,7 @@ static PACKAGE_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// `__dirname`; it is where `vfs_shim_dll.dll` and `vfs_payload.dll` are looked
 /// for. Rust cannot work this out for itself without asking Windows for the
 /// module handle of its own code, and `current_exe()` gives `node.exe`.
-#[napi]
+#[napi(catch_unwind)]
 pub fn set_package_dir(dir: String) {
     if let Ok(mut g) = PACKAGE_DIR.lock() {
         *g = Some(PathBuf::from(dir));
@@ -344,7 +344,7 @@ pub fn set_package_dir(dir: String) {
 }
 
 /// The directory [`set_package_dir`] recorded, if any.
-#[napi]
+#[napi(catch_unwind)]
 pub fn package_dir() -> Option<String> {
     PACKAGE_DIR
         .lock()
@@ -424,7 +424,14 @@ pub struct LaunchOptions {
     pub stage_also: Option<Vec<String>>,
     /// Real-disk directories searched for imports the graph does not carry.
     pub stage_fallback_dirs: Option<Vec<String>>,
-    /// Extra environment variables for the child only.
+    /// Extra environment variables for the child — **set process-wide for the
+    /// duration of the launch**, not only on the child.
+    ///
+    /// `CreateProcessW` gets a null environment block, so inheritance is the
+    /// mechanism: [`vfs_embed::Session::launch`] `set_var`s each one here,
+    /// launches, and restores. A process lock serializes that against this
+    /// library's other env writes and cannot serialize a *host's* threads —
+    /// which a Node process always has. See `index.d.ts` for the full caveat.
     pub env: Option<HashMap<String, String>>,
 }
 
@@ -495,7 +502,7 @@ impl Session {
     /// real bypass dismissed as leftovers. `pid` plus a per-process counter
     /// makes the path this session's alone, so clearing it cannot destroy
     /// anything a caller put there.
-    #[napi(constructor)]
+    #[napi(constructor, catch_unwind)]
     pub fn new(name: String) -> Result<Self> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -533,25 +540,25 @@ impl Session {
             .ok_or_else(|| Error::from_reason("session is closed"))
     }
 
-    #[napi(getter)]
+    #[napi(getter, catch_unwind)]
     pub fn name(&self) -> String {
         self.name.clone()
     }
 
     /// The directory tree holding this session's root, overlay and state.
-    #[napi(getter)]
+    #[napi(getter, catch_unwind)]
     pub fn base_dir(&self) -> String {
         self.base.to_string_lossy().into_owned()
     }
 
     /// Root 0's managed directory — what the injected child recognises *as*
     /// the virtual root.
-    #[napi(getter)]
+    #[napi(getter, catch_unwind)]
     pub fn virtual_root(&self) -> Result<String> {
         Ok(self.get()?.virtual_root().to_string_lossy().into_owned())
     }
 
-    #[napi(getter)]
+    #[napi(getter, catch_unwind)]
     pub fn state_dir(&self) -> Result<String> {
         Ok(self.get()?.state_dir().to_string_lossy().into_owned())
     }
@@ -559,7 +566,7 @@ impl Session {
     /// Where root `root`'s shim-local overlay writes actually land on disk.
     /// Root-scoped, so this is *not* `baseDir/overlay` — a host mounting its
     /// own read layer over the overlay must use exactly this path.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn overlay_layer_dir(&self, root: u32) -> Result<String> {
         Ok(self
             .get()?
@@ -581,7 +588,7 @@ impl Session {
     /// serves. Declare without mounting and the root serves nothing; mount
     /// without declaring and the child never classifies any path into that
     /// root, so every path under it falls through to real disk — silently.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn add_root(&mut self, id: u32, name: String, path: String) -> Result<()> {
         self.get_mut()?.declare_root(id, &path);
         let record = RootInfo {
@@ -597,7 +604,7 @@ impl Session {
     }
 
     /// The roots this session has declared, in declaration order.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn roots(&self) -> Vec<RootInfo> {
         self.roots
             .iter()
@@ -627,7 +634,7 @@ impl Session {
     ///   Advisory, not fatal, exactly as §6 specifies — and exact rather than
     ///   heuristic, because `cached()` clears `slow`, so the flag surviving to
     ///   here *means* no cache is above this provider.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn mount(&self, root: u32, provider: &Provider, prefix: Option<String>) -> Result<()> {
         let backend = lookup_provider(provider.handle)?;
         let caps = backend.capabilities();
@@ -661,12 +668,12 @@ impl Session {
 
     /// Start the ring and its workers so an injected child can remap I/O.
     /// Idempotent. [`Session::launch`] calls this if it has not happened.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn serve(&mut self) -> Result<()> {
         self.get_mut()?.serve().map_err(Error::from_reason)
     }
 
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn is_serving(&self) -> Result<bool> {
         Ok(self.get()?.is_serving())
     }
@@ -686,7 +693,7 @@ impl Session {
     /// that trips the deadlock guard when a host mounts a provider serviced by
     /// the very loop it is calling from. That is deliberate: the failure is
     /// reported here, immediately and with an explanation, instead of hanging.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn read_file(&self, vpath: String, root: Option<u32>) -> Result<Buffer> {
         jsprovider::clear_diagnosis();
         let root = RootId(root.unwrap_or(0));
@@ -708,7 +715,7 @@ impl Session {
     ///
     /// Drives the graph on the calling thread, exactly as `readFile` does, so
     /// the deadlock guard applies here too.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn readdir(&self, vpath: String, root: Option<u32>) -> Result<Vec<DirEntryInfo>> {
         jsprovider::clear_diagnosis();
         let entries = self
@@ -731,7 +738,7 @@ impl Session {
     /// a host running against a dev build rather than the packaged DLLs. Takes
     /// precedence over the package directory; a per-launch `shimDll` still
     /// wins over this.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn set_shim_dlls(&mut self, shim_dll: String, payload_dll: Option<String>) {
         self.shim_dll = Some(shim_dll);
         self.payload_dll = payload_dll;
@@ -741,7 +748,7 @@ impl Session {
     /// with every location it searched if they cannot be found — which is the
     /// whole reason this exists as a separate call: a host can check before it
     /// launches a game rather than after.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn shim_info(&self) -> Result<ShimInfo> {
         let (shim, payload) = self.resolve_dlls(None, None)?;
         let stat = |p: &str| -> (f64, f64) {
@@ -884,7 +891,7 @@ impl Session {
     /// JS thread for the child's lifetime. That is fine for a script and wrong
     /// for an Electron main process, which should call it from a worker. An
     /// `AsyncTask` form belongs with the threading work, not here.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn launch(&mut self, exe: String, options: Option<LaunchOptions>) -> Result<i32> {
         // Resolving a relative image looks it up as a vpath in root 0's graph on
         // *this* thread, so launch can trip the deadlock guard exactly as
@@ -937,7 +944,7 @@ impl Session {
     /// **Process-wide, not per session.** The director keeps one global table
     /// with no session or root dimension, so two live sessions in one host
     /// report each other's rejections.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn rejected_writes(&self) -> Result<Vec<RejectedWrite>> {
         self.get()?;
         Ok(vfs_embed::rejected_writes()
@@ -951,7 +958,7 @@ impl Session {
 
     /// Clear rejected-write tracking. Process-wide, same caveat as
     /// [`Session::rejected_writes`] — useful before a probe.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn reset_rejected_writes(&self) -> Result<()> {
         self.get()?;
         vfs_embed::reset_rejected_writes();
@@ -961,7 +968,7 @@ impl Session {
     /// Opens that reached the director, as `[succeeded, failed]`. Compared
     /// against the shim's own classification, this answers "did anything under
     /// the managed root get served by real disk behind my back". Process-wide.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn open_totals(&self) -> Result<Vec<f64>> {
         self.get()?;
         let (ok, failed) = vfs_embed::open_totals();
@@ -979,7 +986,7 @@ impl Session {
     /// empty afterwards" is a check this project runs on a finished session. A
     /// host that wants them gone removes `baseDir` itself; deleting a caller's
     /// directories from a teardown call is not this binding's decision.
-    #[napi]
+    #[napi(catch_unwind)]
     pub fn close(&mut self) -> Result<()> {
         if let Some(mut inner) = self.inner.take() {
             inner.stop_serve();
@@ -1001,7 +1008,7 @@ impl Drop for Session {
 
 /// The `ST_*` status codes, as an object, so a JS caller can compare against a
 /// name instead of a magic number.
-#[napi]
+#[napi(catch_unwind)]
 pub fn status_codes() -> HashMap<String, i32> {
     [
         ("ST_OK", vfs_embed::ST_OK),
@@ -1023,7 +1030,44 @@ pub fn status_codes() -> HashMap<String, i32> {
 
 /// Sanity check for `require('aethervfs')`: the addon is loaded and the Rust
 /// side is answering. Deliberately does nothing else.
-#[napi]
+#[napi(catch_unwind)]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// **Panic on purpose, so the containment can be demonstrated instead of
+/// asserted.** `test/panic.test.cjs` is its only caller.
+///
+/// Every `#[napi]` function in this crate carries `catch_unwind`, because
+/// napi-derive emits `std::panic::catch_unwind` around a generated entry point
+/// only when asked to (see
+/// `tests/napi_entry_points_contain_panics.rs`, which is what makes that
+/// total). Without it a panic anywhere under a `#[napi]` function unwinds out of
+/// an `extern "C"` frame and `abort()`s the Node process — every session,
+/// worker and provider in it, not just the failing call.
+///
+/// A structural check cannot show that the generated `catch_unwind` *works*: it
+/// can only show the flag is present. And there is nothing else in this crate to
+/// point at, precisely because the discipline holds — no `unwrap`, no `expect`
+/// on a reachable path. So the demonstration needs a reachable panic, and this
+/// is it: three shapes, because `catch_unwind`'s payload downcast has an arm for
+/// each and a host should see a message either way.
+///
+/// It is safe to ship. It panics only when called by name with one of these
+/// three arguments, and what it proves — that a Rust panic arrives in
+/// JavaScript as a catchable exception — is a property a host wants to be able
+/// to check in its own process, on its own build, rather than trust.
+#[napi(js_name = "panicForTest", catch_unwind)]
+pub fn panic_for_test(kind: Option<String>) -> Result<String> {
+    match kind.as_deref().unwrap_or("string") {
+        // `panic!("{}", x)` — the payload downcasts to `String`.
+        "string" => panic!("aethervfs: deliberate panic from panicForTest('string')"),
+        // A `&'static str` payload, which is a different downcast arm.
+        "str" => std::panic::panic_any("aethervfs: deliberate &str panic"),
+        // Neither — the arm that produces napi's `"panic from Rust code: …"`.
+        "other" => std::panic::panic_any(42i32),
+        other => Err(Error::from_reason(format!(
+            "panicForTest({other:?}): expected 'string', 'str' or 'other'"
+        ))),
+    }
 }
