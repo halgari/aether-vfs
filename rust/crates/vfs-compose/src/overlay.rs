@@ -905,14 +905,33 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        /// Refuses a directory that still holds something, with `ST_IS_DIR`.
+        ///
+        /// This fixture used to drop the `dirs` entry and answer `Ok(())` with
+        /// the children untouched, which is the same silent no-op
+        /// `MemoryProvider` had — and `OverlayProvider::remove` propagates its
+        /// upper's answer verbatim, so the overlay inherited it. The shared
+        /// conformance suite's non-empty-directory case is what surfaced it.
         fn remove(&self, p: VPath) -> Result<(), i32> {
-            let had_file = self.files.lock().unwrap().remove(p.rel).is_some();
-            let had_dir = self.dirs.lock().unwrap().remove(p.rel);
-            if had_file || had_dir {
-                Ok(())
-            } else {
-                Err(not_found())
+            let mut files = self.files.lock().unwrap();
+            let mut dirs = self.dirs.lock().unwrap();
+            if files.remove(p.rel).is_some() {
+                return Ok(());
             }
+            let prefix = if p.rel.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", p.rel)
+            };
+            if files.keys().any(|k| k.starts_with(&prefix))
+                || dirs.iter().any(|d| d.starts_with(&prefix))
+            {
+                return Err(vfs_provider::is_dir());
+            }
+            if dirs.remove(p.rel) {
+                return Ok(());
+            }
+            Err(not_found())
         }
 
         fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
