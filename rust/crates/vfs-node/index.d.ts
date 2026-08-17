@@ -8,11 +8,18 @@
 // `Session.readdir` and `Session.getattr` were missing from here entirely, and a
 // type checker cannot notice a declaration that does not exist.
 //
-// **Node version.** `package.json` says `>=22.6` and that is about the
-// *package*, not the addon: every script and two test files are `.cts`, which
-// `node --test` runs by type-stripping, and that landed in 22.6. Loading the
-// addon itself — `require('aethervfs')`, N-API 8 — works on 18. If this package
-// is ever consumed without its scripts, that is the number to relax to.
+// **Node version.** `package.json` says `>=24`, and that number is about the
+// *package*, not the addon. Three floors, lowest first:
+//
+//   * **18** — load and use the addon. `require('aethervfs')` is N-API 8.
+//   * **22.6** — run the two `.cts` test files directly under `node --test`,
+//     which needs type stripping.
+//   * **24** — the `using` declarations in `test/dispose.test.cjs` (Explicit
+//     Resource Management syntax). The disposables themselves work anywhere
+//     `Symbol.dispose` exists; only writing `using` needs the syntax.
+//
+// `engines` is the highest, because it describes this package as it stands, with
+// its own scripts and tests. A consumer that only loads the addon can relax it.
 //
 // `@napi-rs/cli` generates this file from the `#[napi]` attributes, and using it
 // would mean an npm dependency — a network install — in the build path of a
@@ -84,6 +91,18 @@ export class Provider {
    * else. Without it, "I put a cache in the graph" is not verifiable.
    */
   cacheStats(): ProviderCacheStats | null;
+  /**
+   * `using p = registerProvider(obj)` — releases every JS provider reachable
+   * through this handle when the block ends.
+   *
+   * Deliberately defined on every `Provider` and not only on a bare
+   * registration: it disposes {@link Provider.jsLeaves}, which is exactly the
+   * list `releaseProvider` has to be called on, so it also does the right thing
+   * for `cached(seekable(myProvider))` — where `releaseProvider(composed.handle)`
+   * correctly refuses and a host has to know to look for the leaves. A graph of
+   * Rust primitives has no leaves and disposing it does nothing.
+   */
+  [Symbol.dispose](): void;
 }
 
 /** A provider's declared capabilities. */
@@ -277,9 +296,14 @@ export interface ConformanceReport {
    */
   cases: string[];
   /**
-   * Provider calls that crossed the bridge during the run; `null` for a Rust
-   * provider. **This is the number that says the suite did work** — a JS
-   * provider that passed with `0` was skipped, not tested.
+   * Provider calls that crossed the bridge during the run. **This is the number
+   * that says the suite did work** — a JS provider that passed with `0` was
+   * skipped, not tested.
+   *
+   * **Absent** for a Rust provider, which has no bridge — so it reads as
+   * `undefined`, not `null`, exactly as this file's header says an optional
+   * *field* does. (An optional *return* is `null`; the two directions differ and
+   * `providerCalls === null` is a check that never matches.)
    */
   providerCalls?: number;
   durationMs: number;
@@ -466,6 +490,18 @@ export class Session {
   /**
    * Mount `provider` on root `root`, optionally under `prefix` within it.
    * Accumulates; later mounts win on a path both serve.
+   *
+   * **It can throw**, so it is not pure bookkeeping. Spec §6's mount-time flag
+   * table is enforced here:
+   *
+   *  * a **`seqread`** provider is a hard error, naming `seekable()` as the fix.
+   *    The director reads with `read_at(handle, offset, buf)`, which a
+   *    forward-only provider answers `ST_NOT_SUPPORTED` to — so accepting the
+   *    mount would mean every read failing later, inside an injected process;
+   *  * a **`slow`** provider with no cache above it gets a warning on stderr
+   *    naming the handle. Advisory, exactly as §6 specifies, and exact rather
+   *    than heuristic because `cached()` clears the flag — the flag surviving to
+   *    here *means* nothing is caching it.
    */
   mount(root: number, provider: Provider, prefix?: string): void;
 
@@ -560,6 +596,9 @@ export class Session {
    * left in place for inspection.
    */
   close(): void;
+
+  /** `using s = new Session('x')` — `close()` on scope exit. Idempotent. */
+  [Symbol.dispose](): void;
 }
 
 /** Record the directory the addon was loaded from. `index.cjs` calls this with `__dirname`. */
@@ -751,16 +790,38 @@ export interface ProviderStats {
  * never settle, because the loop cannot run the callback while parked. The guard
  * refuses that with an explanation rather than hanging, but the way to not need
  * it is `providerWorker()`.
+ *
+ * ## `releaseProvider` is mandatory, not hygiene
+ *
+ * A live threadsafe function holds a ref on the loop that services it — which is
+ * precisely what keeps the provider callable, and therefore what stops that loop
+ * from ever draining. **A handle that is never released is a thread that never
+ * exits**: a worker stays up forever, and on the main thread the process hangs.
+ *
+ * There is no diagnostic for it, because the symptom *is* the absence of one —
+ * nothing that runs "on the way out" ever runs. So:
+ *
+ * ```ts
+ * using p = registerProvider(obj);        // released when the block ends
+ * ```
+ *
+ * is the shape to write ({@link Provider}`[Symbol.dispose]`, Node 22.6+), and any
+ * exit that *does* happen — a `process.exit()`, a worker finishing — emits an
+ * `AetherVfsProviderLeak` warning naming the handles. For a composed graph the
+ * handles to release are `provider.jsLeaves()`, not the composed handle;
+ * `releaseProvider(composed.handle)` correctly refuses.
  */
 export function registerProvider(obj: ProviderObject, options?: ProviderOptions): Provider;
 
 /**
- * Release a JS provider's event loop, so the worker holding it can exit. Calls
- * afterwards fail with a status naming the released loop; a director thread
+ * Release a JS provider's event loop, so the thread holding it can exit — see
+ * {@link registerProvider} for why this is mandatory.
+ *
+ * Calls afterwards fail with a status naming the released loop; a director thread
  * already parked on it is woken. The registry entry stays, because a handle is
- * process-global by design.
+ * process-global by design. Calling it twice is not an error.
  */
-export function releaseProvider(handle: number): void;
+export function releaseProvider(handle: number | Provider): void;
 
 /** Provider calls outstanding across the whole process. */
 export function outstandingProviderCalls(): number;
@@ -796,6 +857,15 @@ export class ProviderWorker {
   stats(): ProviderStats | null;
   /** Release the loop and stop the worker. Without it the worker never exits. */
   close(): Promise<void>;
+  /**
+   * `await using w = await providerWorker({...})` — released and stopped when the
+   * block ends, however it ends.
+   *
+   * The one teardown in this API whose omission neither throws nor logs nor fails
+   * a test: it hangs the process, because the thing that would report it is the
+   * loop draining. Node 22.6+ makes it structural.
+   */
+  [Symbol.asyncDispose](): Promise<void>;
 }
 
 /**

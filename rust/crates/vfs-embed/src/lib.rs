@@ -115,6 +115,10 @@ mod session;
 mod sources;
 
 pub use session::{compose_root, LaunchOpts, Session, StageOpts};
+// `RootMounts` stays for the same reason `CacheStats` does below: it is
+// `RootSources::mounts()`'s return type and `Session::set_root_mounts`'s
+// argument type, so a host writing either signature needs the name. It has no
+// *direct* consumer, which is a different thing from being unreachable.
 pub use sources::{RootMounts, RootSources};
 
 // ---------------------------------------------------------------------------
@@ -146,12 +150,20 @@ pub use vfs_provider::{assert_conformance, write_fixture_tree, FIXTURE_FILES};
 // Leaves and combinators (spec §6's primitive catalog). A host composes a
 // graph out of these and its own providers; it writes none of them.
 // ---------------------------------------------------------------------------
-pub use vfs_cache::{BlockCache, CacheConfig, CacheStats, CachingProvider, DEFAULT_BLOCK_SIZE};
+// `CacheStats` is on this list because `BlockCache::stats()` returns it and that
+// method is re-exported — a host able to call a method but not to name what it
+// returns is the seam leaking by omission. `DEFAULT_BLOCK_SIZE` and `MountGraph`
+// were on it and are gone: neither appears in any re-exported signature, no
+// consumer in or out of the workspace named either, and `Session`'s own
+// composition already owns the `MountGraph` decision (a host hands mounts to
+// `mount_at`/`set_root_mounts` and never builds one). Re-exporting a type nothing
+// can reach is not neutral: it advertises a supported surface.
+pub use vfs_cache::{BlockCache, CacheConfig, CacheStats, CachingProvider};
 pub use vfs_compose::{
     stack_layers, InlineProvider, LayeredProvider, MemoryProvider, OverlayProvider, ReadOnlyProvider,
     Route, RouterProvider, SeekableProvider, SubdirProvider,
 };
-pub use vfs_director::{DiskProvider, MountGraph};
+pub use vfs_director::DiskProvider;
 #[cfg(feature = "zip")]
 pub use vfs_zip::ZipProvider;
 

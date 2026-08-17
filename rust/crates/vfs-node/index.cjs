@@ -363,6 +363,52 @@ function makeDispatch(obj) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Release accounting.
+//
+// `releaseProvider` is **mandatory, not hygiene**: a live threadsafe function
+// holds a ref on the loop that services it, which is exactly what keeps the
+// provider callable — and therefore what stops the loop from ever draining. A
+// leaked handle is a process that never exits.
+//
+// The failure has no natural diagnostic, because the symptom *is* the absence of
+// one: the loop never drains, so nothing that runs "on the way out" ever runs.
+// The two things that can be done are done here — make release structural
+// (`Symbol.dispose` / `Symbol.asyncDispose`, so `using` cannot forget), and name
+// the leak on any exit that does happen, which covers every host that calls
+// `process.exit()` or lets a worker finish.
+// ---------------------------------------------------------------------------
+
+/** Handles from `registerProvider` on this thread that have not been released. */
+const unreleased = new Set();
+let exitHookInstalled = false;
+
+function noteRegistered(handle) {
+  unreleased.add(handle);
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.on('exit', () => {
+    if (unreleased.size === 0) return;
+    // **Written straight to stderr, not through `process.emitWarning`.** That
+    // function defers to `process.nextTick`, and no tick ever runs after `exit`
+    // begins — so the warning would be composed and then dropped, which is
+    // exactly the kind of silent nothing this whole message exists to break.
+    // The `(node:pid) Name: ` shape is copied from node's own warning format so
+    // it reads like one.
+    process.stderr.write(
+      `(node:${process.pid}) AetherVfsProviderLeak: ` +
+        `aethervfs: ${unreleased.size} JS provider(s) were never released ` +
+        `(handle${unreleased.size === 1 ? '' : 's'} ${[...unreleased].join(', ')}). ` +
+        'A live provider holds a ref on the loop that services it, so this thread ' +
+        'would not have exited on its own — if this process needed a process.exit() ' +
+        'or a terminate() to finish, that is why. Call releaseProvider(handle), or ' +
+        'use `using p = registerProvider(...)` / `await using w = await ' +
+        'providerWorker(...)`, which release on scope exit. For a composed graph the ' +
+        'handles to release are `provider.jsLeaves()`, not the composed handle.\n'
+    );
+  });
+}
+
 /**
  * Mount a JS object as a provider. Returns a `Provider` whose `handle` is a
  * process-global integer.
@@ -372,6 +418,10 @@ function makeDispatch(obj) {
  * mounting this provider. `providerWorker()` is the recommended way to get that
  * right; this is the primitive underneath it, for a host already running on the
  * loop it wants (and for the deadlock guard's own tests).
+ *
+ * **`releaseProvider(provider.handle)` is mandatory.** See the note above; the
+ * returned object is also a `using`-compatible disposable, which is the way not
+ * to have to remember.
  */
 function registerProvider(obj, options) {
   if (obj === null || typeof obj !== 'object') {
@@ -379,8 +429,46 @@ function registerProvider(obj, options) {
       `aethervfs: registerProvider(obj) needs an object with provider methods; got ${describe(obj)}`
     );
   }
-  return native.registerProvider(obj, makeDispatch(obj), options ?? {});
+  const p = native.registerProvider(obj, makeDispatch(obj), options ?? {});
+  noteRegistered(p.handle);
+  return p;
 }
+
+/**
+ * Release a JS provider's event loop. Idempotent from here on: a second call for
+ * a handle already released is not an error a host should have to guard against.
+ */
+function releaseProvider(handle) {
+  const n = typeof handle === 'number' ? handle : handleOf(handle, 'releaseProvider(provider)');
+  unreleased.delete(n);
+  return native.releaseProvider(n);
+}
+
+// `using p = registerProvider(obj)` — release becomes structural rather than
+// remembered. Defined on `Provider` rather than only on the bare registration
+// result so that it works on a *composed* handle too: `jsLeaves()` is exactly
+// "the JS providers reachable through this composition", which is the list
+// `releaseProvider` has to be called on and the trap a host otherwise walks into
+// (`releaseProvider(cached(seekable(p)).handle)` correctly refuses).
+//
+// A graph of Rust primitives has no leaves and disposing it does nothing, which
+// is why this can be unconditional.
+native.Provider.prototype[Symbol.dispose] = function dispose() {
+  for (const leaf of this.jsLeaves()) {
+    try {
+      releaseProvider(leaf);
+    } catch {
+      /* already released, or never JS-backed; disposal is not where that is reported */
+    }
+  }
+};
+
+// `using s = new Session('x')` — `close()` is what removes the staged launch
+// directory and stops the ring, so it is the deterministic teardown and worth
+// making structural. Idempotent on the Rust side.
+native.Session.prototype[Symbol.dispose] = function dispose() {
+  this.close();
+};
 
 // ---------------------------------------------------------------------------
 // Spec §6's primitive catalog.
@@ -622,12 +710,28 @@ class ProviderWorker {
     await exited;
     clearTimeout(timer);
   }
+
+  /**
+   * `await using w = await providerWorker({...})` — the worker is released and
+   * stopped when the block ends, however it ends.
+   *
+   * This is the one place in the API where forgetting the teardown does not
+   * throw, log, or fail a test: it hangs the process with no diagnostic, because
+   * the thing that would report it is the loop draining. Node 22.6+ can make it
+   * structural, so it is made structural.
+   */
+  async [Symbol.asyncDispose]() {
+    await this.close();
+  }
 }
 
 module.exports = {
   ...native,
   VfsError,
   registerProvider,
+  // Shadows the native export: this one keeps the leak accounting in step and is
+  // idempotent for a handle already released.
+  releaseProvider,
   providerWorker,
   ProviderWorker,
   statusName,

@@ -52,10 +52,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
-          # `.cts` test files are run directly by `node --test`, which needs
-          # type-stripping — Node 22.6+. `package.json`'s `engines` says the
-          # same; keep the two in step.
-          node-version: '22'
+          # Three floors, and this is the highest of them — `package.json`'s
+          # `engines` says the same number, so keep the two in step:
+          #   18    load the addon (N-API 8)
+          #   22.6  run `.cts` directly under `node --test` (type stripping)
+          #   24    the `using` declarations in `test/dispose.test.cjs`
+          #         (Explicit Resource Management syntax)
+          node-version: '24'
       # `scripts/build.cjs` is the only correct way to build this package: four
       # unfiltered cargo invocations (the addon cdylib, the shim cdylib, the
       # separate-workspace payload, and the probe exe) followed by four copies
@@ -65,12 +68,12 @@ jobs:
         run: node scripts/build.cjs
         working-directory: rust/crates/vfs-node
       # `index.d.ts` is hand-written (no `@napi-rs/cli`, no npm dependency), and
-      # a hand-written .d.ts with no compiler behind it is how the two doc
-      # defects this job exists downstream of got in. `tsc` ships with no
-      # network install here because there is no `tsc` — `node --experimental-
-      # strip-types` cannot type-check, so what is checked instead is that every
-      # declaration parses and that the runtime exports and the declared ones
-      # agree. See `scripts/check-types.cjs`.
+      # nothing was checking it for drift — `Session.readdir` and
+      # `Session.getattr` were missing from it entirely. This is not `tsc`: it
+      # compares the declared surface against the addon's real exports in both
+      # directions, which is the drift class a hand-written file suffers and the
+      # one a type checker cannot see (nothing references a declaration that does
+      # not exist). See `scripts/check-types.cjs` for why `tsc` is not wired up.
       - name: Check index.d.ts against the addon's real exports
         run: node scripts/check-types.cjs
         working-directory: rust/crates/vfs-node
@@ -85,7 +88,7 @@ jobs:
       # started passing would mean the hole closed without anyone noticing, and
       # `node --test` does not fail the run for it either way.
       - name: JS suites
-        run: node --test test/provider.test.cjs test/panic.test.cjs test/primitives.test.cts test/conformance.test.cts
+        run: node --test test/provider.test.cjs test/panic.test.cjs test/dispose.test.cjs test/primitives.test.cts test/conformance.test.cts
         working-directory: rust/crates/vfs-node
 
   rust-linux-portable:

@@ -519,7 +519,7 @@ impl Session {
     pub fn set_root_mounts(
         &self,
         root: RootId,
-        mounts: Vec<(String, Arc<dyn Provider>)>,
+        mounts: crate::RootMounts,
     ) -> Result<(), i32> {
         {
             let mut roots = self.roots.lock().map_err(|_| map_io_err())?;

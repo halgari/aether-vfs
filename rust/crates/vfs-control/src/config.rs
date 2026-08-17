@@ -78,6 +78,23 @@ pub enum SourceSpec {
     /// supplying real bytes constructs `vfs_compose::MemoryProvider` directly
     /// instead of going through config — see that type's doc for why it
     /// lives in `vfs-compose` rather than here.
+    ///
+    /// **The daemon refuses it, and this is where to find that out rather than
+    /// at `vfs up --config`.** `source.proto` has no `Kind::Memory`, so the gRPC
+    /// control plane has no wire shape for an inline name→bytes map, and
+    /// `vfs-directord`'s `SourceSpec` → proto conversion returns an error naming
+    /// this variant. Reachable via `vfs_source::build_provider` (in-process) and
+    /// as `vfs_embed::MemoryProvider` from any embedding host — which is where
+    /// the Node binding's `memory()` primitive comes from.
+    ///
+    /// It stays on this enum rather than being removed because the enum is
+    /// `vfs-control`'s *config format*, which is broader than what the daemon's
+    /// RPC surface carries today, and because `vfs_source::build_provider`
+    /// really does build it. Wiring it end to end is a proto change: add
+    /// `MemorySource { map<string, bytes> files }` to `source.proto`, regenerate
+    /// (`bin/regen-protocol`), and handle it in `add_source`. Nobody has needed
+    /// it over the wire — the hosts that want an in-memory provider compose one
+    /// in code — so it is stated, not built.
     Memory { files: BTreeMap<String, String> },
 }
 
