@@ -530,6 +530,49 @@ Stale shim DLLs have silently produced wrong results before, so the binding
 and checked — rather than trusting whatever sits next to the module. Editable
 installs point at the dev build output.
 
+## 6b. Corrections to §6's catalog (2026-08-17, from the Node binding)
+
+Exposing §6's primitives from a host language tested §6's central claim — that a
+host composes Rust primitives and writes only the leaf. Three corrections.
+
+**`readonly` and `seekable` were not primitives.** Both existed only as
+`Capabilities` helpers (`read_only_clamp()`, `seekable()`) with unit tests and no
+provider behind either. There was nothing to expose. Implementing them inside a
+binding would have produced primitives the *next* binding must write again and
+`vfs.exe` cannot reach — the opposite of what §6 claims. They are now
+`vfs_compose::ReadOnlyProvider` and `vfs_compose::SeekableProvider`, both
+conformance-clean. The `readonly` case is worth noting: its conformance run is
+over a **writable** fixture, so the clamp is what makes the suite exercise the
+read cases instead of the write ones.
+
+**`casefold` is missing, and its absence silently corrupts §8's own example.**
+
+The shim folds every vpath component before it crosses the ring.
+`MemoryProvider` is case-sensitive by design (§10 says so). With no `casefold`
+primitive between them, an injected child's write to `Skyrim.ini` lands **beside**
+a host's seeded `Skyrim.ini`, as `skyrim.ini` — and nothing reports it. Not the
+child, not `rejected_writes()`, not the filesystem. So:
+
+```
+inis = memory({"Skyrim.ini": ini_bytes})
+...
+inis.read("Skyrim.ini")   // returns what the HOST seeded, not what the game wrote
+```
+
+**§8's flagship example fails on its own filename**, and returns plausible data
+while doing it. Isolated across five experiments (new versus existing paths,
+`disk` versus `memory`, long lower-case names to rule out 8.3 shortening) and
+recorded as a `todo` test asserting the behaviour a host is entitled to.
+
+Until `casefold` exists, a host using `memory()` for anything a child writes back
+must fold its own keys. **This is the highest-value gap left in the catalog** —
+it is not a missing convenience, it is a correctness hole with no diagnostic.
+
+**§6's mount-time flag table was unimplemented workspace-wide.** The table
+describes hard errors and warnings at mount time; none existed. The `SeqRead`
+hard error now lives in `vfs_embed::Session::mount_at`. The rest of the table is
+still unimplemented and should be treated as design intent rather than behaviour.
+
 ## 8b. The Node binding — and why it comes first (decided 2026-08-16)
 
 **Reordering.** §8's Python binding is still wanted and its content mostly
