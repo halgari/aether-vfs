@@ -47,11 +47,30 @@ impl CachingProvider {
         // through `weakest`, propagated by `cached()` — and then ignored by the
         // only component it was addressed to. A source that states its natural
         // unit (a zip's chunk, a remote's frame) now gets it.
-        let block_size = inner
+        let hinted = inner
             .capabilities()
             .preferred_block
             .map(|b| u64::from(b).clamp(MIN_PREFERRED_BLOCK, MAX_PREFERRED_BLOCK))
             .unwrap_or_else(|| cache.block_size());
+        // A block the cache cannot hold is worse than a smaller one that it can.
+        // `BlockCache::put` drops any block larger than one shard's budget, so
+        // choosing such a size turns the cache off: every read fetches a whole
+        // block from the source, the insert is discarded, and the next read does
+        // it again. Nothing errors and nothing slows down visibly — the leaf just
+        // gets 20 MiB of requests for five 4 KiB reads.
+        //
+        // The mismatch is structural, not hypothetical: shard geometry comes from
+        // `CacheConfig::block_size` while this size comes from the *source's*
+        // `preferred_block`, and the two are set by different people. So ask the
+        // cache what it can actually hold and stay inside it. Shrinking the block
+        // costs read amplification the source would have preferred; exceeding it
+        // costs the entire cache.
+        let block_size = match cache.max_cacheable_block() {
+            // Zero is `ram_budget: 0` — the RAM tier is off by request and the
+            // disk tier has no such limit, so there is nothing to clamp to.
+            0 => hinted,
+            cap => hinted.min(cap),
+        };
         Self {
             inner,
             cache,
@@ -63,7 +82,8 @@ impl CachingProvider {
     }
 
     /// The block size in use, after applying the inner provider's declared
-    /// `preferred_block` and the sanity clamp.
+    /// `preferred_block`, the sanity clamp, and the cache's largest cacheable
+    /// block.
     pub fn block_size(&self) -> u64 {
         self.block_size
     }
@@ -223,12 +243,21 @@ impl Provider for CachingProvider {
             (r.inner, r.file_id)
         };
         let n = self.inner.write_at(inner_h, offset, buf)?;
-        // Drop every block cached under this handle's file identity: serving
-        // a stale block after a write is the same bug class as refusing the
-        // write outright, just quieter. `BlockCache` only invalidates whole
-        // files today (no partial-range primitive), so this is coarser than
-        // strictly necessary, but it is correct and it is what exists.
-        self.cache.invalidate_file(self.source_id, file_id);
+        // Drop every block cached under this handle's file identity, in every
+        // tier: serving a stale block after a write is the same bug class as
+        // refusing the write outright, just quieter. `BlockCache` only
+        // invalidates whole files today (no partial-range primitive), so this is
+        // coarser than strictly necessary.
+        //
+        // The comment that used to stand here said this path "is correct". It was
+        // not, and the claim outlived the check: `invalidate_file` built its key
+        // list from the RAM map, so a block already evicted to a `.blk` file was
+        // not touched, and the read below this write handed back the pre-write
+        // bytes. Both tiers are enumerated now — and this asks whether that
+        // succeeded instead of assuming it.
+        let inv = self.cache.invalidate_file(self.source_id, file_id);
+        // The bytes are at the leaf whatever the cache managed to do, so the size
+        // bookkeeping is unconditional and happens before any early return.
         if n > 0 {
             if let Ok(mut g) = self.opens.lock() {
                 if let Some(r) = g.get_mut(&h) {
@@ -238,6 +267,15 @@ impl Provider for CachingProvider {
                     }
                 }
             }
+        }
+        if !inv.is_complete() {
+            // The write landed but the cache may still be able to serve pre-write
+            // bytes for this file, and this call is the last moment anyone knows
+            // that. Returning `Ok(n)` here is how the corruption becomes
+            // invisible; an I/O error on a write is a failure every caller already
+            // has a path for. `write_at` is positional, so the honest response —
+            // retrying the same bytes at the same offset — is idempotent.
+            return Err(map_io_err());
         }
         Ok(n)
     }
@@ -252,11 +290,17 @@ impl Provider for CachingProvider {
         // Blocks at and beyond the new length are stale (truncated), and a
         // grow zero-fills range that was never cached — drop the whole file
         // rather than reason about which blocks survive a shrink-then-grow.
-        self.cache.invalidate_file(self.source_id, file_id);
+        let inv = self.cache.invalidate_file(self.source_id, file_id);
         if let Ok(mut g) = self.opens.lock() {
             if let Some(r) = g.get_mut(&h) {
                 r.size = len;
             }
+        }
+        if !inv.is_complete() {
+            // Same trade as `write_at`: the length change is done, but a block the
+            // cache could not drop can still be served, so the caller hears about
+            // it. `set_len` is idempotent, so a retry is safe.
+            return Err(map_io_err());
         }
         Ok(())
     }
@@ -290,7 +334,7 @@ impl Provider for CachingProvider {
 mod tests {
     use super::*;
     use crate::store::CacheConfig;
-    use vfs_provider::{RootId, KIND_FILE, OPEN_READ};
+    use vfs_provider::{RootId, KIND_FILE, OPEN_READ, OPEN_WRITE};
 
     #[test]
     fn caching_provider_over_the_fixture_tree_passes_conformance() {
@@ -556,6 +600,280 @@ mod tests {
         assert_eq!(mk(512), MIN_PREFERRED_BLOCK);
         assert_eq!(mk(u32::MAX), MAX_PREFERRED_BLOCK, "absurdly large is clamped down");
         assert_eq!(mk(65536), 65536, "a sane hint is honoured exactly");
+    }
+
+    /// **The silently-disabled cache, from outside.** A `preferred_block` bigger
+    /// than one shard's budget used to be fetched, refused by every `put`, and
+    /// re-fetched on the next read — with no error, no counter and no log line.
+    /// The configuration is the measured one: a 4 KiB `block_size` over a 64 MiB
+    /// budget gives 64 shards of 1 MiB each, and the source asks for 4 MiB.
+    ///
+    /// This asserts the effect on the leaf rather than the getter, because the
+    /// symptom was never a wrong number in the cache — it was 20 MiB of reads
+    /// leaving the process to satisfy 20 KiB of requests.
+    #[test]
+    fn a_preferred_block_larger_than_the_cache_can_hold_still_caches() {
+        let hinted = Arc::new(HintingProvider {
+            hint: Some(4 << 20),
+            size: 8 << 20,
+            bytes_requested: AtomicU64::new(0),
+        });
+        let cache = Arc::new(BlockCache::new(CacheConfig {
+            block_size: 4096,
+            ram_budget: 64 * 1024 * 1024,
+            disk_dir: None,
+        }));
+        assert_eq!(
+            cache.max_cacheable_block(),
+            1 << 20,
+            "64 MiB across 64 shards — the premise of this test"
+        );
+        let p = CachingProvider::new(hinted.clone(), cache.clone(), 1);
+        assert!(
+            p.block_size() <= cache.max_cacheable_block(),
+            "chose a {} byte block for a cache whose largest cacheable block is {}",
+            p.block_size(),
+            cache.max_cacheable_block()
+        );
+
+        let (h, _, _) = p.open(VPath::at_default("f"), OPEN_READ).unwrap();
+        let mut buf = [0u8; 4096];
+        for i in 0..5u64 {
+            assert_eq!(p.read_at(h, i * 4096, &mut buf).unwrap(), 4096);
+        }
+        let pulled = hinted.bytes_requested.load(Ordering::Relaxed);
+        assert!(
+            pulled <= p.block_size(),
+            "five 4 KiB reads from inside one block pulled {pulled} bytes from the \
+             leaf, against a {} byte block. Every `put` was refused for exceeding \
+             the shard budget, so the cache held nothing and each read re-fetched a \
+             whole block — 20 MiB measured on exactly this configuration.",
+            p.block_size()
+        );
+        let s = cache.stats();
+        assert_eq!(
+            s.oversized_rejects, 0,
+            "the cache refused a block it was handed, so it is not caching"
+        );
+        assert!(s.hits >= 4, "reads 2 through 5 are inside block 0 and must hit");
+        p.close(h).unwrap();
+    }
+
+    /// A private directory per test. Two disk-tier tests sharing one would delete
+    /// each other's `.blk` files and the failure would read as a cache bug.
+    fn disk_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("vfs-cache-p{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn blk_names(dir: &std::path::Path) -> Vec<String> {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut v: Vec<String> = rd
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".blk"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Writable in-memory leaf holding one file, `f`.
+    ///
+    /// `mtime` is fixed and the tests below overwrite bytes without changing the
+    /// length, so `file_id_for` yields the *same* cache identity before and after
+    /// the write. That is deliberate: the cache has to invalidate, not be rescued
+    /// by its key changing underneath it. It is also the ordinary case — an
+    /// in-place same-size write, or any write inside one mtime tick.
+    struct RwLeaf {
+        body: Mutex<Vec<u8>>,
+    }
+
+    impl RwLeaf {
+        fn new(len: usize, fill: u8) -> Arc<Self> {
+            Arc::new(RwLeaf {
+                body: Mutex::new(vec![fill; len]),
+            })
+        }
+        fn head(&self, n: usize) -> Vec<u8> {
+            self.body.lock().unwrap()[..n].to_vec()
+        }
+    }
+
+    impl Provider for RwLeaf {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                access: vfs_provider::Access::ReadWrite,
+                immutable: false,
+                slow: true,
+                preferred_block: None,
+            }
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            if p.rel != "f" {
+                return Ok(None);
+            }
+            Ok(Some(Stat {
+                kind: KIND_FILE,
+                size: self.body.lock().unwrap().len() as u64,
+                mtime: 11,
+            }))
+        }
+        fn readdir(&self, _: VPath) -> Result<Vec<DirEntry>, i32> {
+            Ok(vec![])
+        }
+        fn open(&self, p: VPath, _: u32) -> Result<(Handle, u64, bool), i32> {
+            if p.rel != "f" {
+                return Err(vfs_provider::not_found());
+            }
+            Ok((1, self.body.lock().unwrap().len() as u64, false))
+        }
+        fn read_at(&self, _: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+            let body = self.body.lock().unwrap();
+            let start = (offset as usize).min(body.len());
+            let n = buf.len().min(body.len() - start);
+            buf[..n].copy_from_slice(&body[start..start + n]);
+            Ok(n)
+        }
+        fn write_at(&self, _: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
+            let mut body = self.body.lock().unwrap();
+            let start = offset as usize;
+            if start + buf.len() > body.len() {
+                body.resize(start + buf.len(), 0);
+            }
+            body[start..start + buf.len()].copy_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn close(&self, _: Handle) -> Result<(), i32> {
+            Ok(())
+        }
+    }
+
+    /// Populate the cache by reading the whole file through `p`, and return what
+    /// came back. Leaves the early blocks evicted from RAM but still present on
+    /// disk, which is the state the two tests below are about.
+    fn read_whole(p: &CachingProvider, h: Handle, len: usize) -> Vec<u8> {
+        let mut out = vec![0u8; len];
+        assert_eq!(p.read_at(h, 0, &mut out).unwrap(), len);
+        out
+    }
+
+    /// **The corruption, end to end through `CachingProvider`.**
+    ///
+    /// A block that eviction moved out of RAM is still servable from its `.blk`
+    /// file. Invalidation used to build its key list from the RAM map, which by
+    /// definition no longer contains that key, so the `.blk` survived a write and
+    /// `get` re-served it: `write_at` returned success and the very next read of
+    /// the same range through the same handle handed back the pre-write bytes.
+    ///
+    /// Nothing here is contrived. The block size is small so the test is fast; the
+    /// budget holds two blocks so eviction is deterministic; the write is a
+    /// same-size overwrite, which is the common case and keeps the file identity
+    /// stable so the stale key is the one looked up.
+    #[test]
+    fn a_write_invalidates_a_block_eviction_pushed_to_the_disk_tier() {
+        const LEN: usize = 640;
+        let dir = disk_dir("write-invalidation");
+        let leaf = RwLeaf::new(LEN, b'A');
+        let cache = Arc::new(BlockCache::new(CacheConfig {
+            block_size: 64,
+            ram_budget: 128, // exactly two blocks
+            disk_dir: Some(dir.clone()),
+        }));
+        let p = CachingProvider::new(leaf.clone(), cache.clone(), 1);
+        let (h, size, _) = p
+            .open(VPath::at_default("f"), OPEN_READ | OPEN_WRITE)
+            .unwrap();
+        assert_eq!(size, LEN as u64);
+        assert_eq!(p.block_size(), 64);
+
+        // Read the file through: all ten blocks are written to the disk tier and
+        // all but the last two are evicted from RAM.
+        assert_eq!(read_whole(&p, h, LEN), vec![b'A'; LEN]);
+        assert!(
+            cache.stats().ram_evicts > 0,
+            "the fixture never evicted, so this test is not about eviction"
+        );
+        assert_eq!(
+            blk_names(&dir).len(),
+            10,
+            "the disk tier should hold every block: {:?}",
+            blk_names(&dir)
+        );
+
+        assert_eq!(p.write_at(h, 0, &[b'B'; 64]).unwrap(), 64);
+        assert_eq!(
+            blk_names(&dir),
+            Vec::<String>::new(),
+            "a write left .blk files behind for the file it wrote: {:?}. \
+             Invalidation enumerated the RAM map, so blocks eviction had already \
+             moved to disk were never named.",
+            blk_names(&dir)
+        );
+
+        let mut after = [0u8; 64];
+        assert_eq!(p.read_at(h, 0, &mut after).unwrap(), 64);
+        // Guard the claim before making it: the leaf really did take the write, so
+        // a stale read here is the cache's doing and not a lost write.
+        assert_eq!(leaf.head(64), vec![b'B'; 64], "the leaf never took the write");
+        assert_eq!(
+            &after[..],
+            &[b'B'; 64][..],
+            "read-after-write returned pre-write bytes: block 0 had been evicted \
+             to disk, invalidation missed it, and `get` re-served the .blk file"
+        );
+        p.close(h).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The adjacent failure mode: a write that lands while invalidation only
+    /// partly succeeds. The caller has to learn, because this call is the last
+    /// moment anyone knows the cache may still answer with pre-write bytes.
+    ///
+    /// A directory standing where a `.blk` file belongs is unremovable by
+    /// `remove_file` — a faithful stand-in for a locked file or a revoked ACL
+    /// without needing either. It also does not require knowing the file identity
+    /// the cache hashed: the `.blk` file is picked out of the directory listing.
+    #[test]
+    fn a_write_whose_invalidation_cannot_finish_reports_an_error() {
+        const LEN: usize = 640;
+        let dir = disk_dir("write-invalidation-fails");
+        let leaf = RwLeaf::new(LEN, b'A');
+        let cache = Arc::new(BlockCache::new(CacheConfig {
+            block_size: 64,
+            ram_budget: 128,
+            disk_dir: Some(dir.clone()),
+        }));
+        let p = CachingProvider::new(leaf.clone(), cache.clone(), 1);
+        let (h, _, _) = p
+            .open(VPath::at_default("f"), OPEN_READ | OPEN_WRITE)
+            .unwrap();
+        read_whole(&p, h, LEN);
+        let victim = blk_names(&dir)
+            .into_iter()
+            .next()
+            .expect("the disk tier should be populated");
+        std::fs::remove_file(dir.join(&victim)).unwrap();
+        std::fs::create_dir(dir.join(&victim)).unwrap();
+
+        let err = p.write_at(h, 0, &[b'B'; 64]).unwrap_err();
+        assert_eq!(
+            err,
+            map_io_err(),
+            "a write whose invalidation failed reported success"
+        );
+        assert!(
+            cache.stats().invalidate_failures >= 1,
+            "the failure is not visible in the stats either"
+        );
+        // The bytes did land. The error is about the cache, not the write, which is
+        // why the caller's correct response — repeating the same positional write —
+        // is idempotent.
+        assert_eq!(leaf.head(64), vec![b'B'; 64]);
+        p.close(h).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Serves the same relative path under two roots with identical size and
