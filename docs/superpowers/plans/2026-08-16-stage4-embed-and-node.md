@@ -133,6 +133,32 @@ print(inis.read("Skyrim.ini"))     # what the game actually wrote
 
 ---
 
+### Task 4b: Launch an image that is VFS content
+
+**Files:** `crates/vfs-embed/src/session.rs`, `crates/vfs-directord/src/registry.rs`, `crates/vfs-launch/src/main.rs`
+
+**Interfaces:** `Session::launch` accepts an image that exists only in the provider graph, stages it with its PE import closure, mounts staging back, and launches it — without the caller owning that sequence.
+
+**Added after Task 3, which established this as the top item on the embeddable API's gap list.** A Node host calling `launch("SkyrimSE.exe")` fails today: `Session::launch` resolves a relative image on **real disk**, and a managed root is deliberately empty. The capability exists exactly once, in `SessionRegistry::launch`, and is unreachable from `vfs-embed`.
+
+It is also already broken in a shipped host. `vfs-launch` passes a graph-discovered vpath straight to `Session::launch` while its module header claimed *"the launch image is staged from the VFS"* — nothing stages it, and its default `--root` is a directory it creates and payload-wipes, **so its default invocation cannot work.** Task 3 corrected the claims; this task is what makes them true.
+
+**The trap that deferred it, and the thing you must not do.** The daemon mounts staging at `STAGING_LAYER = i32::MIN` *inside* `RootSources`, where `stack_layers` folds later entries as the **upper** — so `i32::MIN` is the bottom and loses. `Session::mount_at` appends to a `MountGraph` whose lookup iterates `.rev()`, so **later wins**. Relocating naively inverts precedence and lets a point-in-time staged copy silently shadow curated content, on exactly the paths staging touches. Both halves of that were verified in review; treat them as established.
+
+Task 3 costed the correct fix: `Session` owns per-root `RootSources` and the `StagedDir`. That subsumes two further gap items — block-cache wrapping with its write-layer exemption, and source-id allocation.
+
+- [ ] **Step 1: Write the failing test** — a session whose managed root is empty on disk, an image present only in the provider graph, launched successfully. Plus the precedence assertion: **a staged copy must not shadow a curated file of the same path.** That second test is the one protecting against the trap, so write it first and make sure it can fail.
+
+- [ ] **Step 2: Run to verify they fail**
+
+- [ ] **Step 3: Implement**
+
+- [ ] **Step 4: Verify** — the e2e suite drives the daemon's existing staging path and is the regression net. `vfs-launch`'s default invocation should now work; say whether you made it so or left it.
+
+- [ ] **Step 5: Commit**
+
+---
+
 ### Task 5: The Node threading spike — measure before committing the shape
 
 **Files:** a throwaway crate or example; nothing permanent unless it earns its place.
