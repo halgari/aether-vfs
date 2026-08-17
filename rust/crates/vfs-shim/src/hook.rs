@@ -133,7 +133,17 @@ const STATUS_HOOK_PANICKED: NTSTATUS = STATUS_UNSUCCESSFUL;
 /// for the rest of the process, and the handle tracking it backs degrades to
 /// permanently empty. That is a real loss of fidelity and it is why the caught
 /// panic is counted loudly rather than swallowed.
-fn contain_panic<R>(
+///
+/// # Visibility
+///
+/// `pub` because the shim's `extern "system"` surface is not confined to this
+/// crate: `vfs-shim-dll` owns `DllMain` and `vfs_shim_sync_bootstrap`, which are
+/// entry points Windows and the OEP stub call, and which must contain their
+/// panics for the same reason and by the same route. One containment function for
+/// the whole injected DLL is what lets
+/// `no_extern_hook_bypasses_the_panic_containment_macro` check both crates
+/// against a single marker.
+pub fn contain_panic<R>(
     name: &'static str,
     body: impl FnOnce() -> R,
     on_panic: impl FnOnce() -> R,
@@ -4891,43 +4901,153 @@ mod tests {
         );
     }
 
-    /// Structural: `hook_entry_points!` must be the only place in this file
-    /// that defines an `extern "system"` function.
+    /// Structural: **every** `extern "system"` function in the injected DLL must
+    /// contain its own panic, by calling [`contain_panic`] in its body.
     ///
-    /// Requirement 1 of this task is that *every* entry point contains its own
-    /// panic, and the behaviour tests above can only ever demonstrate that for
-    /// the hooks they drive. This is what makes the claim total, and what stops
-    /// hook number twenty-two from being written the old way — which would
-    /// compile, install, and abort the game exactly as before, with nothing in
-    /// any test to say so.
+    /// Requirement 1 of task 1 is that *every* entry point contains its panic,
+    /// and the behaviour tests above can only ever demonstrate that for the hooks
+    /// they drive. This is what makes the claim total, and what stops hook number
+    /// twenty-two from being written the old way — which would compile, install,
+    /// and abort the game exactly as before, with nothing in any test to say so.
+    ///
+    /// ## Its first version had a hole, and the hole was real
+    ///
+    /// The check used to be `include_str!("hook.rs")` and an assertion that the
+    /// only definition found was the macro's `$wrapper`. That is a *hand-written
+    /// file list of one*, and it missed `lazy_section.rs`'s `veh_handler` — an
+    /// uncontained `extern "system"` entry point which additionally carried a raw
+    /// `IN_VEH.set(true)` / `set(false)` pair, the exact latch defect task 1
+    /// removed everywhere else. It went unseen through the whole of stage 4
+    /// *because the guard was believed*.
+    ///
+    /// So the enumeration is derived, not written:
+    ///
+    ///  * the **directories** are the two crates that compose the injected DLL —
+    ///    this one and `vfs-shim-dll`. `vfs-payload` is deliberately absent: it is
+    ///    `#![no_std]` with `panic = "abort"` and its own workspace, so it has no
+    ///    unwind to contain and could not call this function if it wanted to;
+    ///  * the **files** are read off those directories recursively at test time,
+    ///    so a new module cannot be added outside the check;
+    ///  * the **rule** is per-definition rather than a name list, so a new entry
+    ///    point is checked the moment it is written and no allowlist has to be
+    ///    edited to admit a legitimate one.
     #[test]
     fn no_extern_hook_bypasses_the_panic_containment_macro() {
         const MARKER: &str = "extern \"system\" fn ";
-        let src = include_str!("hook.rs");
-        let mut defined: Vec<&str> = Vec::new();
-        for (i, _) in src.match_indices(MARKER) {
-            let rest = &src[i + MARKER.len()..];
-            let end = rest
-                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
-                .unwrap_or(rest.len());
-            // A zero-length name is prose or a bare fn-pointer type, not a
-            // definition (`fn(` in a type alias has no space before the paren).
-            if end > 0 {
-                defined.push(&rest[..end]);
+        // Spelled with `concat!` so the needle does not appear verbatim in the
+        // files it is searching (this file is one of them).
+        let containment = concat!("contain", "_panic");
+
+        let this_crate = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dirs = [
+            this_crate.join("src"),
+            this_crate
+                .parent()
+                .expect("crates/")
+                .join("vfs-shim-dll")
+                .join("src"),
+        ];
+
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
             }
         }
-        assert_eq!(
-            defined,
-            vec!["$wrapper"],
-            "an `extern \"system\" fn` is defined outside hook_entry_points!; it will abort \
-             the game process on a panic instead of returning a status"
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        for d in &dirs {
+            assert!(d.is_dir(), "{} is not a directory", d.display());
+            walk(d, &mut files);
+        }
+        files.sort();
+        // A broken enumeration must fail loudly rather than pass vacuously.
+        assert!(
+            files.iter().any(|p| p.ends_with("hook.rs"))
+                && files.iter().any(|p| p.ends_with("lazy_section.rs"))
+                && files.len() >= 14,
+            "the enumeration must have found both crates' sources — got {files:?}"
         );
+
+        /// From the byte after `fn NAME`, the text of the function's body,
+        /// found by matching braces from the first `{`. Naive about braces in
+        /// strings and comments, which is sound in the conservative direction:
+        /// a mismatch makes the body *longer*, never shorter, and the check
+        /// only ever asks whether a needle is present.
+        fn body_after(src: &str, from: usize) -> &str {
+            let Some(open) = src[from..].find('{').map(|i| from + i) else {
+                return "";
+            };
+            let bytes = src.as_bytes();
+            let mut depth = 0usize;
+            for i in open..bytes.len() {
+                match bytes[i] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return &src[open..=i];
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            &src[open..]
+        }
+
+        let mut checked = 0usize;
+        for path in &files {
+            let src = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let rel = path
+                .strip_prefix(this_crate.parent().expect("crates/"))
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for (i, _) in src.match_indices(MARKER) {
+                let rest = &src[i + MARKER.len()..];
+                let end = rest
+                    .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+                    .unwrap_or(rest.len());
+                // A zero-length name is prose or a bare fn-pointer type, not a
+                // definition (`fn(` in a type alias has no space before the
+                // paren).
+                if end == 0 {
+                    continue;
+                }
+                let name = &rest[..end];
+                let body = body_after(rest, end);
+                checked += 1;
+                assert!(
+                    body.contains(containment),
+                    "{rel}: `extern \"system\" fn {name}` does not call `{containment}` in \
+                     its body, so a panic in it unwinds out of an `extern` frame and \
+                     aborts the game process (0xC0000409) instead of returning a failure. \
+                     Wrap the body: `contain_panic(\"{name}\", || …, || <failure value>)`, \
+                     the same containment all twenty ntdll detours use. If it is an ntdll \
+                     detour, add it to `hook_entry_points!` and get the wrapper for free."
+                );
+            }
+        }
+        // 20 detours + 2 test hooks in this file's `hook_entry_points!` are all
+        // one generated `$wrapper`, so the count is small on purpose: the macro,
+        // `veh_handler`, `DllMain`, `vfs_shim_sync_bootstrap`.
+        assert!(
+            checked >= 4,
+            "only {checked} `extern \"system\"` definitions were examined; the scan is \
+             not finding them"
+        );
+
         // And nothing may register a raw body as a detour: the bodies are not
         // `extern "system"`, so installing one is both an ABI error and a way
-        // around the containment. Spelled with `concat!` so this needle does
-        // not appear verbatim in the file it is searching.
+        // around the containment.
         assert!(
-            !src.contains(concat!("_hook_body", " as *const ()")),
+            !include_str!("hook.rs").contains(concat!("_hook_body", " as *const ()")),
             "a hook body was installed as a detour, bypassing its wrapper"
         );
     }

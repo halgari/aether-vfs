@@ -25,6 +25,16 @@ pub use bootstrap::{
 };
 pub use engine::{Engine, EngineError, RenameOutcome};
 pub use hook::{install, install_late, HookGuard, InstallError};
+/// Run one `extern "system"` entry point's body with its panic contained.
+///
+/// Exported for `vfs-shim-dll`, which owns the injected DLL's two other
+/// `extern "system"` entry points (`DllMain` and `vfs_shim_sync_bootstrap`). An
+/// unwind out of any `extern` frame is an immediate `abort()` of the *game*
+/// process, so "every entry point of the shim contains its panic" is a property
+/// of the DLL rather than of this crate — and it is checked as one, across both
+/// crates' sources, by
+/// `no_extern_hook_bypasses_the_panic_containment_macro`.
+pub use hook::contain_panic;
 /// The under-root open classifier's counters. Exported so a gate's own tests
 /// can assert that a bypass class it closed reads **zero** — see
 /// [`hookstats::outcome_count`]. A class nobody asserts on is a class that can

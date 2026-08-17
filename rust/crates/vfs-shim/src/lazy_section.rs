@@ -326,11 +326,69 @@ pub unsafe fn ensure_range(base: usize, offset: usize, len: usize) -> bool {
     true
 }
 
+/// Raises [`IN_VEH`] for as long as it is alive, and lowers it on `Drop`.
+///
+/// **Raising the flag without holding one of these is deliberately not
+/// expressible** — the same shape `ShimIoGuard` has in [`crate::hook`], for the
+/// same reason. The pair of raw `set(true)`/`set(false)` calls this replaces was
+/// the exact defect task 1 removed from every ntdll hook: a panic (or any early
+/// return added later) between them leaves `IN_VEH` latched at `true`, and
+/// `veh_handler`'s first check then declines **every** later fault on that
+/// thread. Demand paging silently stops for the thread's whole life, the game
+/// takes the access violation itself, and nothing in the shim reports anything.
+struct VehGuard;
+
+impl VehGuard {
+    /// `None` if this thread is already inside the handler — the re-entrancy
+    /// check and the flag-raise are one operation, so they cannot disagree.
+    fn enter() -> Option<VehGuard> {
+        if IN_VEH.with(|c| c.get()) {
+            return None;
+        }
+        IN_VEH.with(|c| c.set(true));
+        Some(VehGuard)
+    }
+}
+
+impl Drop for VehGuard {
+    fn drop(&mut self) {
+        IN_VEH.with(|c| c.set(false));
+    }
+}
+
+/// The vectored exception handler: an `extern "system"` entry point Windows
+/// calls, and therefore one that must contain its own panic.
+///
+/// It is not an ntdll detour, so `hook_entry_points!` does not generate it — and
+/// that is exactly why it was missed. Task 1's structural guard read
+/// `include_str!("hook.rs")` and nothing else, so this file was outside the check
+/// for the whole of stage 4 while holding an uncontained entry point. The guard
+/// now derives its file set from `src/`; see
+/// `no_extern_hook_bypasses_the_panic_containment_macro` in [`crate::hook`].
+///
+/// `EXCEPTION_CONTINUE_SEARCH` is the right answer on a panic for the same
+/// reason `STATUS_UNSUCCESSFUL` is right for a hook: it says "not mine" and lets
+/// the next handler — ultimately the game's own — see the fault, rather than
+/// claiming a page was filled that was not. `EXCEPTION_CONTINUE_EXECUTION` after
+/// a panic would resume the faulting instruction on a page that is still
+/// `PAGE_NOACCESS`, i.e. an infinite fault loop.
 unsafe extern "system" fn veh_handler(info: *mut EXCEPTION_POINTERS) -> i32 {
+    crate::hook::contain_panic(
+        "VehHandler",
+        || unsafe { veh_handler_body(info) },
+        || EXCEPTION_CONTINUE_SEARCH,
+    )
+}
+
+unsafe fn veh_handler_body(info: *mut EXCEPTION_POINTERS) -> i32 {
     if info.is_null() {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    // Re-entrancy and worker faults are not ours to service.
+    // Re-entrancy and worker faults are not ours to service, and this rejection
+    // has to happen **before** `is_lazy_base` — that call takes `REGIONS`, which
+    // a re-entrant fault may already be holding one level down, and
+    // `std::sync::Mutex` is not reentrant. `VehGuard::enter` re-checks the same
+    // flag at the raise; this read is the cheap early reject, not the guard.
     if IN_VEH.with(|c| c.get()) || IS_FILL_WORKER.with(|c| c.get()) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
@@ -349,10 +407,10 @@ unsafe extern "system" fn veh_handler(info: *mut EXCEPTION_POINTERS) -> i32 {
     if !is_lazy_base(fault_addr) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
-    IN_VEH.with(|c| c.set(true));
-    let ok = fill_chunk_at(fault_addr);
-    IN_VEH.with(|c| c.set(false));
-    if ok {
+    let Some(_veh) = VehGuard::enter() else {
+        return EXCEPTION_CONTINUE_SEARCH;
+    };
+    if fill_chunk_at(fault_addr) {
         EXCEPTION_CONTINUE_EXECUTION
     } else {
         EXCEPTION_CONTINUE_SEARCH
@@ -648,5 +706,53 @@ mod tests {
         // A const assertion — the value is known at compile time, so a runtime
         // `assert!` would never have been able to fail.
         const _: () = assert!(MAX_LAZY > 8 * 1024 * 1024 * 1024);
+    }
+
+    /// A panic taken while the VEH's re-entrancy flag is raised must lower it.
+    ///
+    /// This is the latch the raw `IN_VEH.set(true)` / `set(false)` pair could
+    /// not survive, and the symptom is the worst shape this project keeps
+    /// finding: `IN_VEH` stuck at `true` makes `veh_handler` decline **every**
+    /// later fault on that thread, so demand paging silently stops for the
+    /// thread's whole life and the game takes the access violation itself. No
+    /// counter moves and nothing is logged.
+    ///
+    /// `IN_VEH` is a thread-local, so this needs no lock: it runs on the test's
+    /// own thread and cannot be observed by a sibling.
+    #[test]
+    fn a_panic_inside_the_veh_does_not_latch_the_reentrancy_flag() {
+        assert!(!IN_VEH.with(|c| c.get()), "test thread started inside the VEH");
+
+        let outcome = std::panic::catch_unwind(|| {
+            let _veh = VehGuard::enter().expect("the flag was already raised");
+            assert!(IN_VEH.with(|c| c.get()), "entering did not raise the flag");
+            panic!("a fill-path panic");
+        });
+        assert!(outcome.is_err(), "the panic did not happen");
+
+        assert!(
+            !IN_VEH.with(|c| c.get()),
+            "IN_VEH stayed raised after a panic — demand paging is now silently off for \
+             this thread for the rest of its life"
+        );
+        // And the flag is genuinely re-acquirable, which is the property the
+        // handler needs on its next fault.
+        assert!(
+            VehGuard::enter().is_some(),
+            "no further fault on this thread could be serviced"
+        );
+    }
+
+    /// Raising the flag is only expressible by acquiring the guard, so a
+    /// re-entrant acquisition is refused rather than nesting — and the refusal
+    /// is what `veh_handler_body` turns into `EXCEPTION_CONTINUE_SEARCH`.
+    #[test]
+    fn the_veh_guard_refuses_reentry_and_releases_on_drop() {
+        assert!(!IN_VEH.with(|c| c.get()));
+        {
+            let _outer = VehGuard::enter().expect("first entry");
+            assert!(VehGuard::enter().is_none(), "a re-entrant fault was accepted");
+        }
+        assert!(!IN_VEH.with(|c| c.get()), "the guard did not release on drop");
     }
 }

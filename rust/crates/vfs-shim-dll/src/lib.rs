@@ -22,20 +22,67 @@ const DLL_PROCESS_ATTACH: u32 = 1;
 /// terminated by then, and one killed mid-write leaves a lock the flush waits
 /// on forever inside the loader lock. See `vfs_shim::hookstats::banner` for
 /// the measurement and for what the reports say instead.
+///
+/// ## Panic containment
+///
+/// This is an `extern "system"` entry point, so an unwind out of it is an
+/// immediate `abort()` of the game — inside the loader lock, which is the worst
+/// place in the process to die. `vfs_shim::contain_panic` is the same wrapper all
+/// twenty ntdll detours use.
+///
+/// **On a panic it returns `TRUE` and leaves a breadcrumb**, rather than `FALSE`.
+/// `FALSE` fails the `LoadLibrary` and looks like "the shim did not load", which
+/// is indistinguishable from a dozen ordinary causes. The only thing this
+/// function does is spawn `bootstrap`, so a panic here means bootstrap never
+/// started and the ready file is never written — which
+/// `vfs_inject::run_target_with_shim` already handles as `InjectError::Timeout`,
+/// after which it releases (classic path) or terminates the child. So the
+/// existing handshake reports it; returning `TRUE` just avoids replacing a
+/// diagnosable timeout with a loader failure.
 #[no_mangle]
 pub extern "system" fn DllMain(_dll: HINSTANCE, reason: u32, _reserved: *mut c_void) -> i32 {
-    if reason == DLL_PROCESS_ATTACH {
-        std::thread::spawn(bootstrap);
-    }
-    TRUE
+    vfs_shim::contain_panic(
+        "DllMain",
+        || {
+            if reason == DLL_PROCESS_ATTACH {
+                std::thread::spawn(bootstrap);
+            }
+            TRUE
+        },
+        || {
+            log_boot("DllMain panicked — bootstrap was not spawned, so this process is NOT virtualized");
+            TRUE
+        },
+    )
 }
 
 /// Synchronous bootstrap for dual-layer OEP late-entry.
 /// `payload_cfg` is the early payload Config address (or null for full install).
+///
+/// Returns 0 on success and non-zero on failure — `1` no config, `2` bootstrap
+/// failed, `3` FUSE init failed, and [`SYNC_BOOTSTRAP_PANICKED`] for a contained
+/// panic. The OEP stub reads this, so the panic has a value to report and does
+/// not need to invent an encoding.
 #[no_mangle]
 pub extern "system" fn vfs_shim_sync_bootstrap(payload_cfg: *mut c_void) -> u32 {
-    vfs_shim::sync_bootstrap(payload_cfg)
+    vfs_shim::contain_panic(
+        "vfs_shim_sync_bootstrap",
+        || vfs_shim::sync_bootstrap(payload_cfg),
+        || {
+            log_boot("vfs_shim_sync_bootstrap panicked — hooks are NOT installed");
+            SYNC_BOOTSTRAP_PANICKED
+        },
+    )
 }
+
+/// What [`vfs_shim_sync_bootstrap`] returns when its body panicked.
+///
+/// A distinct code rather than reusing `2` ("bootstrap failed"): the two want
+/// different responses. `2` is a configured failure the shim understood; this is
+/// a bug, and the hook-panic counters plus the boot log are where it is recorded.
+/// Non-zero is what matters to the caller either way — it must never be 0, which
+/// would tell the stub that hooks are live when nothing is installed.
+pub const SYNC_BOOTSTRAP_PANICKED: u32 = 4;
 
 /// Classic async bootstrap (loader-lock safe: runs off DllMain).
 fn bootstrap() {
