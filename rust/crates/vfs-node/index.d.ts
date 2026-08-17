@@ -6,6 +6,21 @@
 // copies. The surface is small enough that the trade is not worth it yet. If it
 // grows, generate it; a drifting hand-written .d.ts is worse than a dependency.
 
+// ---------------------------------------------------------------------------
+// **How an absent optional reads in JavaScript**, because the two directions
+// differ and getting it wrong produces a check that silently never matches.
+//
+//  * A **return value** of Rust `Option<T>` arrives as `null`
+//    (`provider.stats()`, `provider.cacheStats()`, `provider.kind`).
+//  * An **object field** of `Option<T>` has its key **omitted**, so it reads as
+//    `undefined` (`ProviderStats.callTimeoutMs`, `ConformanceReport.providerCalls`,
+//    `ProviderCapabilities.preferredBlock`).
+//
+// Optional *fields* below are therefore written `name?: T` and optional
+// *returns* `T | null`. `x === null` on a field will not match; task 7 lost time
+// to exactly that with `callTimeoutMs`.
+// ---------------------------------------------------------------------------
+
 /** An opaque handle to a provider living in Rust. */
 export class Provider {
   /**
@@ -67,7 +82,7 @@ export interface ProviderCapabilities {
    * clears it, which is what makes `mount`'s warning exact rather than a guess.
    */
   slow: boolean;
-  preferredBlock: number | null;
+  preferredBlock?: number;
 }
 
 /** Block-cache counters, as `provider.cacheStats()` reports them. */
@@ -213,6 +228,82 @@ export function router(
   routes: Record<string, ProviderLike> | Array<[string, ProviderLike]> | Array<{ pattern: string; provider: ProviderLike }>,
   defaultProvider: ProviderLike
 ): Provider;
+
+// ---------------------------------------------------------------------------
+// The conformance gate.
+// ---------------------------------------------------------------------------
+
+/** What a passing conformance run reports. */
+export interface ConformanceReport {
+  handle: number;
+  /** The provider's `kind`, as `provider.kind` reports it. */
+  kind?: string;
+  /** What the provider declared, and therefore which cases it was held to. */
+  access: 'seqread' | 'read' | 'readwrite';
+  immutable: boolean;
+  slow: boolean;
+  preferredBlock?: number;
+  /**
+   * The case groups that ran: `'common'`, then `'sequential'` or `'positional'`,
+   * plus `'writable'` for a `readwrite` provider.
+   */
+  cases: string[];
+  /**
+   * Provider calls that crossed the bridge during the run; `null` for a Rust
+   * provider. **This is the number that says the suite did work** — a JS
+   * provider that passed with `0` was skipped, not tested.
+   */
+  providerCalls?: number;
+  durationMs: number;
+}
+
+/**
+ * Run the workspace's conformance suite against a provider — **stage 4's gate.**
+ *
+ * Not a TypeScript reimplementation: this calls
+ * `vfs_provider::assert_conformance`, the same function `DiskProvider`,
+ * `MemoryProvider`, `LayeredProvider` and every other provider in the workspace
+ * is held to in its own Rust tests. Cases are selected by the provider's
+ * *declared* capabilities, so a `seqread` provider faces the sequential cases
+ * (including "a positional read must be refused") and a `readwrite` one faces the
+ * write cases as well.
+ *
+ * The provider must serve the reference tree — {@link conformanceFixture} hands
+ * it over, so a host holds no second copy of the contract.
+ *
+ * Composed providers work, which is how spec §10's own example reads from a host:
+ * `await assertConformance(seekable(myStreamingProvider))`.
+ *
+ * **Rejects** with the failing case's message; the panic's file and line go to
+ * stderr.
+ *
+ * The suite runs on a libuv pool thread, never on a JS loop, so this works for a
+ * provider registered on the calling loop as well as one in a worker — `await` is
+ * what leaves the servicing loop free to run the callbacks. Do not block the loop
+ * while awaiting it.
+ */
+export function assertConformance(provider: ProviderLike): Promise<ConformanceReport>;
+
+/** One file of the reference tree a conformance-tested provider must serve. */
+export interface FixtureFile {
+  path: string;
+  bytes: Buffer;
+}
+
+/**
+ * The reference tree, from the same constant Rust reads. Hard-coding it in
+ * JavaScript would put a second copy of the contract somewhere nothing keeps in
+ * step with the first.
+ */
+export function conformanceFixture(): FixtureFile[];
+
+/**
+ * Write the reference tree into a real directory, for
+ * `assertConformance(disk(dir))`. **Clears `dir` first** — a leftover file would
+ * show up in `readdir` of the root and fail the suite for a reason unrelated to
+ * the provider.
+ */
+export function writeConformanceFixture(dir: string): void;
 
 /** One declared root, as `session.roots()` reports it. */
 export interface RootInfo {
@@ -486,13 +577,13 @@ export interface ProviderStats {
   access: 'read' | 'readwrite' | 'seqread';
   immutable: boolean;
   slow: boolean;
-  preferredBlock: number | null;
+  preferredBlock?: number;
   /** The methods the object was found to have at registration. */
   methods: string[];
   /** The event loop that services this provider, as the deadlock guard names it. */
   ownerThread: string;
   released: boolean;
-  callTimeoutMs: number | null;
+  callTimeoutMs?: number;
   stallWarnMs: number;
   calls: number;
   settledCalls: number;
@@ -508,8 +599,8 @@ export interface ProviderStats {
   selfCallRefusals: number;
   /** Calls that could not be queued — a released or dead loop. */
   dispatchFailures: number;
-  lastHostError: string | null;
-  lastDiagnostic: string | null;
+  lastHostError?: string;
+  lastDiagnostic?: string;
 }
 
 /**

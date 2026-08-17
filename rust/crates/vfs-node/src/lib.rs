@@ -62,6 +62,13 @@
 //! primitive the Python binding then has to write again; `readonly` and
 //! `seekable` did not exist in Rust before this task and were added to
 //! `vfs-compose` rather than here for exactly that reason.
+//!
+//! ## The conformance gate
+//!
+//! [`conformance`] runs the workspace's own suite against a provider handle, so a
+//! JavaScript-authored provider is held to the identical contract a Rust one is.
+//! Same reasoning as above from the other direction: the suite is not
+//! reimplemented here, it is called.
 
 // No `unsafe` anywhere in the binding. The one place task 5's spike needed it —
 // memcpying a JS `Buffer` into a parked director thread's destination pointer —
@@ -83,6 +90,7 @@
 // anyway (see `Cargo.toml` for why).
 #![cfg_attr(test, allow(dead_code))]
 
+mod conformance;
 mod jsprovider;
 mod primitives;
 

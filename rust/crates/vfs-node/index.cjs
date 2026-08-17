@@ -490,6 +490,21 @@ function router(routes, defaultProvider) {
   );
 }
 
+/**
+ * Run the workspace's conformance suite against a provider — stage 4's gate.
+ *
+ * Not a TypeScript reimplementation: this calls
+ * `vfs_provider::assert_conformance`, the same function every Rust provider is
+ * held to. Resolves to a report, rejects with the failing case's message.
+ *
+ * The suite runs on a libuv pool thread, so `await` works for a provider on this
+ * loop as well as one in a worker — awaiting is what leaves the servicing loop
+ * free to run the callbacks. Do not block the loop while awaiting it.
+ */
+function assertConformance(provider) {
+  return native.assertConformance(handleOf(provider, 'assertConformance(provider)'));
+}
+
 // ---------------------------------------------------------------------------
 // The recommended shape: a provider on its own worker loop.
 // ---------------------------------------------------------------------------
@@ -622,6 +637,7 @@ module.exports = {
   layered,
   overlay,
   router,
+  assertConformance,
   /** `{ ST_OK: 0, ST_NOT_FOUND: -2, ... }`, read once from Rust. */
   STATUS,
   /** `{ getattr: 1, readdir: 2, ... }` — the op integers, for diagnostics. */

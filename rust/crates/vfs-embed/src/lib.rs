@@ -131,6 +131,18 @@ pub use vfs_provider::{
 };
 
 // ---------------------------------------------------------------------------
+// The conformance suite. Re-exported because spec §10's requirement is that a
+// host-authored provider is held to *this* suite — "one conformance suite, run
+// against every provider in every language" — and a binding that had to name
+// `vfs_provider` to reach it would be reaching past the seam this crate exists
+// to be. `write_fixture_tree` comes along because a disk-backed provider needs
+// the reference tree on real disk to be conformance-testable at all, and
+// `FIXTURE_FILES` because a host-language provider has to serve exactly that
+// tree and must not hold a second, drifting copy of it.
+// ---------------------------------------------------------------------------
+pub use vfs_provider::{assert_conformance, write_fixture_tree, FIXTURE_FILES};
+
+// ---------------------------------------------------------------------------
 // Leaves and combinators (spec §6's primitive catalog). A host composes a
 // graph out of these and its own providers; it writes none of them.
 // ---------------------------------------------------------------------------
