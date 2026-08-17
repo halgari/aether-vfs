@@ -125,11 +125,25 @@ export type ProviderLike = Provider | ProviderWorker | number;
  * A read-write in-memory file tree (spec §6's `memory`).
  *
  * ```ts
- * const inis = memory({ 'Skyrim.ini': iniBytes });
+ * // Seed it folded. The shim folds every vpath component before it crosses the
+ * // ring, so the game's write to `Skyrim.ini` reaches this provider as
+ * // `skyrim.ini` — and `memory()` is case-sensitive by design.
+ * const inis = memory({ 'skyrim.ini': iniBytes });
  * session.mount(1, router({ '*.ini': inis }, base));
  * // ... the game writes Skyrim.ini ...
- * session.readFile('Skyrim.ini');   // what the game wrote, never on disk
+ * session.readFile('skyrim.ini', 1);   // folded name, and the root it is mounted on
  * ```
+ *
+ * **Both arguments of that last line are load-bearing**, and getting either
+ * wrong returns plausible bytes rather than an error:
+ *
+ *  * the **name must be folded**, because a host-side read does not fold and
+ *    this provider is case-sensitive — see {@link Session.readFile} and spec
+ *    §6b. `session.readFile('Skyrim.ini', 1)` reads the *host's* seed, or
+ *    nothing, while the game's write sits beside it under the folded name;
+ *  * the **root must be the one it was mounted on**. `root` defaults to `0`, so
+ *    omitting it on a provider mounted on root 1 reads a different graph
+ *    entirely.
  *
  * Declares `readwrite`, so it also works as an `overlay` upper.
  */
@@ -352,7 +366,29 @@ export interface LaunchOptions {
   stageAlso?: string[];
   /** Real-disk directories searched for imports the provider graph does not carry. */
   stageFallbackDirs?: string[];
-  /** Extra environment variables for the child only. */
+  /**
+   * Extra environment variables for the child.
+   *
+   * **They are set on *this* process, not only on the child.** `CreateProcessW`
+   * is called with a null environment block, which is what makes the child
+   * inherit them — so `vfs_embed::Session::launch` writes each one with
+   * `std::env::set_var`, launches, and then restores the previous value. A
+   * process-wide lock serializes that against every other env write this
+   * library performs, so two sessions cannot interleave.
+   *
+   * **The lock cannot protect a host's own threads.** `std::env::set_var` in a
+   * multi-threaded process races anything else reading the environment (it is
+   * `unsafe` in Rust 2024 for exactly this reason), and a Node process is
+   * multi-threaded by construction. So: while a `launch` with `env` is in
+   * flight, no other thread in this process may read or write the environment —
+   * including any library that does so for you. Leave `env` unset and the
+   * hazard is narrower but not gone: the ring's own `VFS_*` variables are
+   * published the same way.
+   *
+   * The fix is to build the child's environment block explicitly and hand it to
+   * `CreateProcessW`; it is costed and not built. Until then this is a
+   * documented hazard rather than a safe API.
+   */
   env?: Record<string, string>;
 }
 

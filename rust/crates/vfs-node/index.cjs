@@ -424,10 +424,13 @@ function toMemoryFiles(files) {
 /**
  * A read-write in-memory file tree (spec §6's `memory`).
  *
- * `memory({ 'Skyrim.ini': iniBytes })`. Nothing touches disk, and it declares
+ * `memory({ 'skyrim.ini': iniBytes })`. Nothing touches disk, and it declares
  * `ReadWrite`, so it works as an `overlay` upper or as the target of a `router`
  * route for exactly the paths a host wants writable. Read back what was written
- * through the graph — `session.readFile(vpath)`.
+ * through the graph — `session.readFile(vpath, root)`, with the **folded** name
+ * and the root this provider is mounted on. Keys are case-sensitive and the shim
+ * folds every vpath before it crosses the ring, so an unfolded key gives a
+ * silently wrong answer rather than an error; see `index.d.ts` and spec §6b.
  */
 function memory(files) {
   return native.memory(toMemoryFiles(files));

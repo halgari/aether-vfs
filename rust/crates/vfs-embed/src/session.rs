@@ -83,9 +83,17 @@ pub struct LaunchOpts {
     /// nothing pointing at why the search looked where it did.
     pub shim_dll: Option<String>,
     pub payload_dll: Option<String>,
-    /// Extra environment variables for the child only. Applied under a process
-    /// lock around launch and restored afterward so they do not leak into the
-    /// host / other sessions.
+    /// Extra environment variables for the child.
+    ///
+    /// **Not child-only.** `CreateProcessW` is called with a null environment
+    /// block — inheritance *is* the mechanism — so [`Session::launch`] writes
+    /// each one into **this process's** environment with `std::env::set_var`,
+    /// launches, and restores the previous value. [`LAUNCH_ENV_LOCK`] serializes
+    /// that against every other env write this crate performs, so two sessions
+    /// cannot interleave; it cannot serialize a host's *own* threads, and
+    /// `set_var` in a multi-threaded process races anything else reading the
+    /// environment. See [`Session::launch`]'s "Process-global environment"
+    /// section for the costed fix.
     pub env: BTreeMap<String, String>,
 }
 
