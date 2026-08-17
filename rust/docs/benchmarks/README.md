@@ -12,6 +12,7 @@ Numbers for the director FUSE control ring (shared-memory RPC) and related delta
 | [phase12-game-buffer-delta.md](./phase12-game-buffer-delta.md) | Into-game-buffer path notes (bulk preferred) |
 | [load-debug-vs-release.md](./load-debug-vs-release.md) | Real game load: time-to-window, debug vs release |
 | [hollow-removal.md](./hollow-removal.md) | Launch cost with and without process hollowing |
+| [block-cache-hit-cost.md](./block-cache-hit-cost.md) | `vfs-cache` hit path: 110x at the default block size, and why the sweep flattened |
 
 Architecture context: [../architecture.md](../architecture.md) §5.
 
@@ -20,6 +21,13 @@ Architecture context: [../architecture.md](../architecture.md) §5.
 ```powershell
 cargo run -p vfs-launch --bin vfs-fuse-bench --release
 cargo run -p vfs-launch --bin vfs-fuse-bench --release -- --zip
+```
+
+The block-cache figures come from a separate harness in its own workspace:
+
+```powershell
+cd spike-node
+cargo run -p cache-cost --release
 ```
 
 Prefer **release** builds. SpinNotifier in-process numbers understate production event-wake latency.

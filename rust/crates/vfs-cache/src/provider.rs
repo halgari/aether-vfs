@@ -9,7 +9,7 @@ use vfs_provider::{
     VPath,
 };
 
-use crate::store::{BlockCache, BlockKey};
+use crate::store::{Block, BlockCache, BlockKey};
 
 struct OpenRec {
     inner: Handle,
@@ -18,24 +18,54 @@ struct OpenRec {
     is_dir: bool,
 }
 
+/// Smallest and largest block size a declared `preferred_block` can select.
+/// Below 4 KiB a block is smaller than a page and the per-block bookkeeping
+/// starts to dominate; above 4 MiB one miss reads more than any plausible
+/// request needs and the RAM budget holds too few blocks to be an LRU at all.
+const MIN_PREFERRED_BLOCK: u64 = 4 * 1024;
+const MAX_PREFERRED_BLOCK: u64 = 4 * 1024 * 1024;
+
 /// Caching facade over an inner provider. `source_id` namespaces cache keys.
 pub struct CachingProvider {
     inner: Arc<dyn Provider>,
     cache: Arc<BlockCache>,
     source_id: u64,
+    /// This provider's block size. Per-provider rather than per-cache because
+    /// `preferred_block` is a property of the source, while one `BlockCache` is
+    /// shared by every source in the process. Mixing block sizes in one cache is
+    /// sound: `source_id` namespaces the keys, so two providers can never
+    /// disagree about what `block_index` means for the same key.
+    block_size: u64,
     next: AtomicU64,
     opens: Mutex<HashMap<u64, OpenRec>>,
 }
 
 impl CachingProvider {
     pub fn new(inner: Arc<dyn Provider>, cache: Arc<BlockCache>, source_id: u64) -> Self {
+        // `Capabilities::preferred_block` is documented as "block-size hint for
+        // `cached`" and was, until this point, declared by providers, threaded
+        // through `weakest`, propagated by `cached()` — and then ignored by the
+        // only component it was addressed to. A source that states its natural
+        // unit (a zip's chunk, a remote's frame) now gets it.
+        let block_size = inner
+            .capabilities()
+            .preferred_block
+            .map(|b| u64::from(b).clamp(MIN_PREFERRED_BLOCK, MAX_PREFERRED_BLOCK))
+            .unwrap_or_else(|| cache.block_size());
         Self {
             inner,
             cache,
             source_id,
+            block_size,
             next: AtomicU64::new(1),
             opens: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The block size in use, after applying the inner provider's declared
+    /// `preferred_block` and the sanity clamp.
+    pub fn block_size(&self) -> u64 {
+        self.block_size
     }
 
     /// Stable-enough for immutable sources within one root: path hash mixed
@@ -126,7 +156,7 @@ impl Provider for CachingProvider {
         }
         let end = (offset + buf.len() as u64).min(rec.size);
         let mut written = 0usize;
-        let bs = self.cache.block_size();
+        let bs = self.block_size;
         let mut off = offset;
         while off < end {
             let block_index = off / bs;
@@ -136,7 +166,12 @@ impl Provider for CachingProvider {
                 file_id: rec.file_id,
                 block_index,
             };
-            let block = if let Some(b) = self.cache.get(&key) {
+            // On a hit this is a refcount bump: the copy below moves only the
+            // bytes this read actually asked for, and it happens with the
+            // cache's lock already released. Before, `get` handed back a clone
+            // of the whole block, so a 4 KiB read through a 1 MiB block memcpy'd
+            // 1 MiB and discarded all but 4 KiB of it.
+            let block: Block = if let Some(b) = self.cache.get(&key) {
                 b
             } else {
                 let block_start = block_index * bs;
@@ -153,7 +188,10 @@ impl Provider for CachingProvider {
                     filled += n;
                 }
                 raw.truncate(filled);
-                self.cache.put(key, raw.clone());
+                // One copy on the miss path (`Vec` -> `Arc<[u8]>`), which is the
+                // same single copy the old `put(raw.clone())` paid.
+                let raw: Block = raw.into();
+                self.cache.put(key, Block::clone(&raw));
                 raw
             };
             if block_off >= block.len() {
@@ -401,6 +439,123 @@ mod tests {
         assert!(!caps.slow, "a cached provider is no longer slow");
         assert_eq!(caps.access, Access::Read, "access passes through");
         assert_eq!(caps.preferred_block, Some(1 << 20), "the block hint survives");
+    }
+
+    /// Declares `preferred_block` and counts the bytes the cache asks it for.
+    struct HintingProvider {
+        hint: Option<u32>,
+        size: u64,
+        bytes_requested: AtomicU64,
+    }
+
+    impl Provider for HintingProvider {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                immutable: true,
+                slow: true,
+                preferred_block: self.hint,
+                ..Capabilities::read_only()
+            }
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            if p.rel == "f" {
+                Ok(Some(Stat {
+                    kind: KIND_FILE,
+                    size: self.size,
+                    mtime: 5,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+        fn readdir(&self, _: VPath) -> Result<Vec<DirEntry>, i32> {
+            Ok(vec![])
+        }
+        fn open(&self, _p: VPath, _: u32) -> Result<(Handle, u64, bool), i32> {
+            Ok((1, self.size, false))
+        }
+        fn read_at(&self, _: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+            let n = buf.len().min((self.size - offset.min(self.size)) as usize);
+            self.bytes_requested.fetch_add(n as u64, Ordering::Relaxed);
+            buf[..n].fill(0xC3);
+            Ok(n)
+        }
+        fn close(&self, _: Handle) -> Result<(), i32> {
+            Ok(())
+        }
+    }
+
+    /// `preferred_block` was declared by providers, combined by
+    /// `Capabilities::weakest`, propagated by `cached()` — and then ignored by
+    /// the one component it was addressed to. It now selects the block size, and
+    /// this asserts the *effect* (how much the source is asked for), not just
+    /// the getter, because a getter that agrees while the fetch path still uses
+    /// the cache-wide size is precisely the kind of test this project distrusts.
+    #[test]
+    fn a_declared_preferred_block_sizes_the_fetch() {
+        let hinted = Arc::new(HintingProvider {
+            hint: Some(4096),
+            size: 64 * 1024,
+            bytes_requested: AtomicU64::new(0),
+        });
+        // Cache default is 1 MiB; the provider asks for 4 KiB.
+        let cache = Arc::new(BlockCache::new(CacheConfig::default()));
+        let p = CachingProvider::new(hinted.clone(), cache, 1);
+        assert_eq!(p.block_size(), 4096);
+        let (h, _, _) = p.open(VPath::at_default("f"), OPEN_READ).unwrap();
+        let mut buf = [0u8; 4096];
+        assert_eq!(p.read_at(h, 0, &mut buf).unwrap(), 4096);
+        assert_eq!(
+            hinted.bytes_requested.load(Ordering::Relaxed),
+            4096,
+            "one 4 KiB read should fetch one 4 KiB block, not a cache-sized one"
+        );
+        p.close(h).unwrap();
+    }
+
+    #[test]
+    fn without_a_hint_the_cache_wide_block_size_is_used() {
+        let plain = Arc::new(HintingProvider {
+            hint: None,
+            size: 64 * 1024,
+            bytes_requested: AtomicU64::new(0),
+        });
+        let cache = Arc::new(BlockCache::new(CacheConfig {
+            block_size: 16 * 1024,
+            ram_budget: 1 << 20,
+            disk_dir: None,
+        }));
+        let p = CachingProvider::new(plain.clone(), cache, 1);
+        assert_eq!(p.block_size(), 16 * 1024);
+        let (h, _, _) = p.open(VPath::at_default("f"), OPEN_READ).unwrap();
+        let mut buf = [0u8; 4096];
+        assert_eq!(p.read_at(h, 0, &mut buf).unwrap(), 4096);
+        assert_eq!(
+            plain.bytes_requested.load(Ordering::Relaxed),
+            16 * 1024,
+            "with no hint the fetch is one cache-configured block"
+        );
+        p.close(h).unwrap();
+    }
+
+    /// A hint is a hint, not an instruction: an absurd one is clamped rather
+    /// than honoured. A 1-byte block would make the per-block bookkeeping the
+    /// entire cost; a 1 GiB one would let a single miss read a gigabyte.
+    #[test]
+    fn an_out_of_range_preferred_block_is_clamped() {
+        let mk = |hint| {
+            let inner = Arc::new(HintingProvider {
+                hint: Some(hint),
+                size: 1 << 20,
+                bytes_requested: AtomicU64::new(0),
+            });
+            let cache = Arc::new(BlockCache::new(CacheConfig::default()));
+            CachingProvider::new(inner, cache, 1).block_size()
+        };
+        assert_eq!(mk(1), MIN_PREFERRED_BLOCK, "absurdly small is clamped up");
+        assert_eq!(mk(512), MIN_PREFERRED_BLOCK);
+        assert_eq!(mk(u32::MAX), MAX_PREFERRED_BLOCK, "absurdly large is clamped down");
+        assert_eq!(mk(65536), 65536, "a sane hint is honoured exactly");
     }
 
     /// Serves the same relative path under two roots with identical size and
