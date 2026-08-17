@@ -18,8 +18,8 @@ crate-type = ["cdylib"]
 # "Load Node-API [napi_*] from host runtime failed: GetProcAddress failed"
 # before reporting `0 passed`. That noise would land in every
 # `cargo test --workspace` run in exchange for a harness that cannot call a
-# single N-API function. The binding's tests are `npm test`, which runs under a
-# real Node. `--lib` clippy coverage is unaffected by this flag.
+# single N-API function. The binding's tests are `pnpm test`, which runs vitest
+# under a real Node. `--lib` clippy coverage is unaffected by this flag.
 test = false
 
 [dependencies]
