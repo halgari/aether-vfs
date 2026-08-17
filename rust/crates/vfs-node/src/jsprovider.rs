@@ -1184,14 +1184,6 @@ pub struct ProviderStats {
     pub last_diagnostic: Option<String>,
 }
 
-fn access_name(a: Access) -> &'static str {
-    match a {
-        Access::SeqRead => "seqread",
-        Access::Read => "read",
-        Access::ReadWrite => "readwrite",
-    }
-}
-
 /// `None` when `handle` is not a JS-backed provider — `disk()` and the Rust
 /// primitives have no bridge and nothing to report.
 pub(crate) fn stats_for(handle: u32) -> Option<ProviderStats> {
@@ -1199,7 +1191,7 @@ pub(crate) fn stats_for(handle: u32) -> Option<ProviderStats> {
     let s = &b.stats;
     Some(ProviderStats {
         handle,
-        access: access_name(b.caps.access).to_string(),
+        access: crate::primitives::access_name(b.caps.access).to_string(),
         immutable: b.caps.immutable,
         slow: b.caps.slow,
         preferred_block: b.caps.preferred_block,
