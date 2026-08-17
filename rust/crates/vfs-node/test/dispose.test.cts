@@ -109,6 +109,36 @@ test('releaseProvider is idempotent and accepts a Provider as well as a handle',
   assert.strictEqual(p.stats()!.released, true);
 });
 
+// **A handle is an index, so a near-miss is a different live provider.**
+//
+// Every other wrapper in `index.cts` takes its argument through `handleOf`, which
+// requires a non-negative integer. `releaseProvider` did not, and it is the one
+// where skipping the check is destructive rather than merely wrong: Rust coerces
+// the number, so `releaseProvider(1.7)` released handle **1** and
+// `releaseProvider(NaN)` released handle **0** — a live provider belonging to
+// something else, with no error anywhere and no way to notice until a later call
+// on it fails with a released-loop status.
+test('releaseProvider refuses a non-integer handle instead of releasing its neighbour', () => {
+  const keep = vfs.registerProvider(stubProvider());
+  try {
+    for (const bad of [keep.handle + 0.7, NaN, Infinity, -1, -0.5]) {
+      assert.throws(
+        () => vfs.releaseProvider(bad),
+        /non-negative integer/,
+        `releaseProvider(${bad}) was accepted`
+      );
+      assert.strictEqual(
+        keep.stats()!.released,
+        false,
+        `releaseProvider(${bad}) released handle ${keep.handle}, which nobody asked it to touch`
+      );
+    }
+  } finally {
+    vfs.releaseProvider(keep.handle);
+  }
+  assert.strictEqual(keep.stats()!.released, true, 'the valid release stopped working');
+});
+
 test('a leaked provider is named on exit, in a child so the warning can be observed', () => {
   const { spawnSync }: typeof import('node:child_process') = require('node:child_process');
   const pkg = path.resolve(__dirname, '..');

@@ -669,10 +669,18 @@ export function registerProvider(obj: ProviderObject, options?: ProviderOptions)
  * already parked on it is woken. The registry entry stays, because a handle is
  * process-global by design. Idempotent from here on: a second call for a handle
  * already released is not an error a host should have to guard against.
+ *
+ * **A non-integer handle is refused, not rounded.** This wrapper used to pass a
+ * number straight through while every other one took it through `handleOf`, and
+ * that asymmetry was destructive here rather than merely inconsistent: handles are
+ * process-global integers, Rust coerces the argument, so `releaseProvider(1.7)`
+ * released handle `1` and `releaseProvider(NaN)` released handle `0` — someone
+ * else's live provider, silently. Nothing reported it, because releasing a live
+ * handle is a legitimate operation; the victim only found out when a later call
+ * failed with a released-loop status.
  */
 export function releaseProvider(handle: number | Provider): void {
-  const n =
-    typeof handle === 'number' ? handle : handleOf(handle, 'releaseProvider(provider)');
+  const n = handleOf(handle, 'releaseProvider(handle)');
   unreleased.delete(n);
   return native.releaseProvider(n);
 }
@@ -725,6 +733,19 @@ function handleOf(p: unknown, what: string): number {
   if (p !== null && typeof p === 'object') {
     const h = (p as { handle?: unknown }).handle;
     if (typeof h === 'number') return h;
+  }
+  // A number that failed the test above gets its own message. The generic one
+  // below ends in "got number", which reads as a type complaint to a caller who
+  // did pass a number and leaves the actual problem — the *value* — unnamed. This
+  // is the only class of argument here that Rust would otherwise coerce into a
+  // different valid handle rather than reject.
+  if (typeof p === 'number') {
+    throw new TypeError(
+      `aethervfs: ${what} needs a provider handle: a non-negative integer. Got ${p}. ` +
+        'A handle is an index into a process-global registry, so a fractional, NaN, ' +
+        'infinite or negative value is not an approximation of the handle you meant — ' +
+        'coerced, it names a different live provider.'
+    );
   }
   throw new TypeError(
     `aethervfs: ${what} needs a Provider (or its numeric handle); got ${describe(p)}. ` +
