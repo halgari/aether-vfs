@@ -13,7 +13,9 @@ Numbers for the director FUSE control ring (shared-memory RPC) and related delta
 | [load-debug-vs-release.md](./load-debug-vs-release.md) | Real game load: time-to-window, debug vs release |
 | [hollow-removal.md](./hollow-removal.md) | Launch cost with and without process hollowing |
 | [block-cache-hit-cost.md](./block-cache-hit-cost.md) | `vfs-cache` hit path: 110x at the default block size, and why the sweep flattened |
-| [node-ffi-round-trip.md](./node-ffi-round-trip.md) | Node ↔ Rust provider round trip: 1.7–2.0 µs. **Historical** — the harness is gone |
+| [node-ffi-round-trip.md](./node-ffi-round-trip.md) | Node ↔ Rust provider round trip: 1.7–2.0 µs. **Historical** — the harness is gone, but see the two below |
+| [node-binding-surface.md](./node-binding-surface.md) | The `aethervfs` binding's performance surface, held by `pnpm bench` as a tiered gate. Includes a live `main → worker` crossing figure (22.3 µs against a recorded 47 µs) |
+| [node-typescript-js-layer.md](./node-typescript-js-layer.md) | Did the TypeScript migration cost anything? No — 3.9 ns on a forwarded property read, and 1.00–1.02x on everything that crosses into Rust |
 
 Architecture context: [../architecture.md](../architecture.md) §5.
 
@@ -48,3 +50,22 @@ Note also the correction at the top of
 column is unreliable and its old "110x" headline should not be cited.
 
 SpinNotifier in-process numbers understate production event-wake latency.
+
+## The Node binding
+
+Its numbers are held the same way — by a gate rather than by a document — and the
+tier split above is exactly where its three tiers came from:
+
+```powershell
+cd rust/crates/vfs-node
+pnpm bench        # the durable gate: builds release, then measures and asserts
+pnpm bench:ab     # a one-shot: the emitted JS layer against the hand-written one
+```
+
+Two things it does that the correction above argues for. It **builds release
+itself** rather than hoping, and it then **refuses to run** unless
+`aethervfs.node` is byte-identical (sha256) to `target/release/aethervfs.dll` —
+so it cannot silently report debug numbers the way `hit_scaling_cost` does in CI.
+That guard is not theoretical: it fired on its first real run, having caught a
+concurrent `pnpm test` rebuilding debug over the release addon three seconds
+after it was installed.

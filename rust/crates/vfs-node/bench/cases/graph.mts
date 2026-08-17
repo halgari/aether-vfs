@@ -65,8 +65,8 @@ export function run(): void {
 
   measure('getattr    memory()', () => sink(memSession.getattr('small.bin')?.size));
   measure('getattr    disk()', () => sink(diskSession.getattr('small.bin')?.size));
-  measure('readFile   memory()            64 B', () => sink(memSession.readFile('small.bin').length));
-  const diskRead = measure('readFile   disk()              64 B', () => sink(diskSession.readFile('small.bin').length));
+  const memRead = measure('readFile   memory()            64 B  [gated]', () => sink(memSession.readFile('small.bin').length));
+  const diskRead = measure('readFile   disk()              64 B  [recorded, not gated]', () => sink(diskSession.readFile('small.bin').length));
   measure('readFile   layered(mem, mem)   64 B', () => sink(layeredSession.readFile('small.bin').length));
   measure('readFile   router(*.bin -> mem) 64 B', () => sink(routerSession.readFile('small.bin').length));
   const cachedRead = measure('readFile   cached(disk)        64 B', () => sink(cachedSession.readFile('small.bin').length));
@@ -106,12 +106,20 @@ export function run(): void {
     'the cache exists to remove I/O; if it costs more than the NTFS read it replaces at this size, ' +
       'the block-cache hit path has regressed — see docs/benchmarks/block-cache-hit-cost.md'
   );
+  // **Gate on memory(), record disk().** The disk numbers above are dominated by
+  // NTFS open/close — ~345 µs for 64 bytes on this machine, against 1.7 µs for the
+  // same read out of `memory()`. That is the filesystem and the virus scanner, not
+  // this binding, and a ceiling over it would be a ceiling over whatever runner CI
+  // happens to schedule. `memory()` exercises the identical wrapper, N-API and
+  // composition path with the I/O removed, so it is the honest subject for an
+  // absolute assertion.
   assertAtMostNs(
-    'a host-side 64-byte read through a Rust graph stays in the tens of microseconds',
-    diskRead.nsPerOp,
-    500_000,
-    'the same ceiling and the same reasoning as provider.test.cts: the regression worth catching is ' +
-      'milliseconds, which would mean the path stopped being a call and started being a queue'
+    'a host-side 64-byte read through a Rust graph stays in the low microseconds',
+    memRead.nsPerOp,
+    100_000,
+    'measured at ~1.7 µs, so the ceiling is ~60x rather than snug: the regression worth catching ' +
+      'is the path becoming a queue instead of a call, which is a change of milliseconds, not of ' +
+      'microseconds'
   );
 
   for (const s of sessions) {

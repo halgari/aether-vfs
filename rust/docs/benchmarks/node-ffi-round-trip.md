@@ -11,10 +11,24 @@ and regression-tested in `vfs-cache/tests/`, and the addon itself supersedes the
 bench harness. What could not be re-derived from anything that remains is the
 **bare round-trip number**, so it is written down here.
 
-Nothing in the tree reproduces these. Treat them as a recorded observation with a
-named date and machine, not as a benchmark to re-run. The closest live figure is
-in `vfs-node/test/provider.test.cts`, which reports microseconds per `readFile`
-through a JS provider — a whole-call number, not a boundary-crossing one.
+Treat them as a recorded observation with a named date and machine, not as a
+benchmark to re-run.
+
+**Partly superseded, 2026-08-17.** This file used to say "nothing in the tree
+reproduces these", and that is no longer true of the configuration a host
+actually uses. `pnpm bench` measures the `main → worker` crossing live, by
+difference against a Rust leaf and divided by a crossing count read from
+`provider.stats().calls` — **22.3 µs**, against the **47 µs** recorded below for
+that same configuration. See
+[node-binding-surface.md](./node-binding-surface.md).
+
+**Do not compare that 22.3 µs against the 1.7–2.0 µs headline below.** They are
+different configurations, and conflating them makes the live path look ten times
+worse than it is: the headline is a *director thread* parked on a condvar with a
+hot loop, while `main → worker` is a cross-thread wake from the main thread. The
+comparable row is "main → worker, 47 µs" in `jsprovider.rs`. What still has no
+live reproduction is the director-thread number itself, and the concurrency and
+busy-loop findings at the bottom of this file.
 
 ## Host and date
 

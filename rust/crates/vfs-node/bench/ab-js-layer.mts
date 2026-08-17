@@ -223,7 +223,26 @@ function main(): number {
     fs.rmSync(s.baseDir, { recursive: true, force: true });
   }
   fs.rmSync(scratch, { recursive: true, force: true });
-  fs.rmSync(dir, { recursive: true, force: true });
+
+  // The staged baseline directory holds a **copy of `aethervfs.node`, and it is
+  // mapped into this process** — the old layer loaded it. Windows will not delete
+  // a loaded DLL, so this is `EPERM` every time, not intermittently. It is the
+  // same family as the leaked-mapping trap the examples guard against with
+  // `taskkill /F /T`, and there is no way around it from inside the process that
+  // did the loading: the copy is what makes the comparison possible.
+  //
+  // So it is reported rather than swallowed, and rather than crashing the run
+  // after every number has already been produced — which is what it did the first
+  // time, taking the checks section with it.
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    process.stdout.write(
+      `\nnote: could not remove ${dir}\n` +
+        '      Its copy of `aethervfs.node` is mapped into this process, and Windows does not\n' +
+        '      delete a loaded DLL. Temp cleanup gets it; nothing here depends on it going now.\n'
+    );
+  }
 
   process.stdout.write(`\n(sink ${drainSink()})\n`);
   return verdict();

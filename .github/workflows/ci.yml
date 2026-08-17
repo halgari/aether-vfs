@@ -127,6 +127,24 @@ jobs:
       - name: JS suites (vitest)
         run: pnpm exec vitest run
         working-directory: rust/crates/vfs-node
+      # The performance gate. Its own step rather than part of `pnpm test`,
+      # because that chain is already build + typecheck + drift + three
+      # injected-process examples + vitest, and timing assertions get noisier the
+      # longer and more contended the run.
+      #
+      # It builds **release** itself and then refuses to run unless
+      # `aethervfs.node` is byte-identical to `target/release` — so unlike the
+      # `vfs-cache` cost tests, it cannot quietly report debug numbers (see the
+      # correction in rust/docs/benchmarks/README.md).
+      #
+      # Assertions are tiered so a 4-vCPU runner cannot flake them: tier 1 is
+      # deterministic counters (crossing counts, cache hits) and load cannot move
+      # it; tiers 2 and 3 are ratios and absolute ceilings with multiples of
+      # headroom, never snug against an observed number. If a tier-3 ceiling ever
+      # does flake here, raise it and say why — do not delete the step.
+      - name: Benchmarks (performance gate)
+        run: pnpm bench
+        working-directory: rust/crates/vfs-node
 
   rust-linux-portable:
     runs-on: ubuntu-latest
