@@ -177,6 +177,44 @@ Build the smallest thing that answers it: a director worker thread calling a tri
 
 ---
 
+### Task 5b: The block cache costs more than the boundary it protects
+
+**Files:** `crates/vfs-cache/src/store.rs`, `crates/vfs-cache/src/provider.rs`, and wherever the default block size is chosen
+
+**Interfaces:** A cache hit does not copy the whole block. Eviction is not O(n) per hit. Concurrent readers are not serialised on one global lock.
+
+**Found by the Node spike, and it has nothing to do with Node.** A pure-Rust harness with no Node anywhere measures **25.3 MiB/s** against the bridge's 24.5 — so the boundary is not the cost. Three defects, all in the hot path, all measured:
+
+1. **`store.rs:120` clones the entire block on every hit.** A 4 KiB read through a 1 MiB block memcpys **1 MiB**. This is the big one: 4 KiB sequential is **24 MiB/s cached** against ~1370–1510 MiB/s raw — **sixty times slower**, and the cache is roughly **70× more expensive than the FFI boundary it exists to protect**.
+2. **`store.rs:116-118` scans the LRU O(n) on every hit.**
+3. **`store.rs:59` is one process-wide mutex.** Cached throughput is flat at 24→26 MiB/s from one to eight threads while p50 grows linearly, **155 → 1139 µs**. It does not scale at all.
+
+**The default block size is also wrong for the workload.** 1 MiB is the default; **64 KiB measured best at 1094 MiB/s** for 4 KiB reads. But that is one read size — think about whether the answer is a better default, a size derived from `preferred_block`, or something adaptive, and argue it rather than hard-coding the number that happened to win one benchmark.
+
+**Correctness is intact and must stay that way.** The existing tests assert correctness, they pass, and none of them catches any of this — they simply never measured cost. So this is a task where the *existing* suite is not your safety net for the thing you are changing, and you need to add one.
+
+**Do not lose the property the cache exists for.** It is what makes a `slow` provider viable — an immutable, high-latency source read repeatedly. The fix must keep hits cheap for that case while not punishing small reads.
+
+- [ ] **Step 1: Write the failing test — a cost assertion, not a correctness one**
+
+Something that fails today and passes after: bytes copied per hit, or syscalls, or a wall-clock ratio against an uncached read of the same size. A ratio is more robust than an absolute on a shared machine. **Make it fail first**, and be explicit about what it measures, because a flaky perf test that gets muted is worse than no test.
+
+- [ ] **Step 2: Run to verify it fails**
+
+- [ ] **Step 3: Fix the copy.** A hit should deliver only the requested range. Whether that is `Arc<[u8]>`, a read-into-caller's-buffer signature, or something else is your call — say why.
+
+- [ ] **Step 4: Fix eviction and the lock.** O(1) eviction, and concurrency that actually scales. Sharding by key is the obvious approach; if you choose differently, argue it.
+
+- [ ] **Step 5: Re-measure with the spike's own harness** (`cache-cost`, committed in `1f4afae`) so the numbers are comparable to the ones that found this. Report before and after.
+
+- [ ] **Step 6: Verify** the full suite, and that `vfs-cache`'s correctness tests still pass unchanged — if you had to change one, say which and why.
+
+- [ ] **Step 7: Record the improvement** in `rust/docs/benchmarks/`. The project has recorded figures there and a standing rule against regressing them; an improvement of this size should be written down where the next person compares against it.
+
+- [ ] **Step 8: Commit**
+
+---
+
 ### Task 6: The `aethervfs` Node package skeleton
 
 **Files:** Create `bindings/node/` (or `crates/vfs-node/` — your call, say why); `package.json`; napi-rs config
