@@ -1,9 +1,26 @@
-# Build output installed here by `scripts/build.cjs`. Committing a 2.5 MB addon
+# Build output installed here by `scripts/build.mts`. Committing a 2.5 MB addon
 # and two DLLs would put binaries in the repo and guarantee a stale one is
 # eventually loaded; `package.json`'s `files` list is what ships them.
 aethervfs.node
 vfs_shim_dll.dll
 vfs_payload.dll
+
+# `tsc -p tsconfig.build.json` output, as of the TypeScript migration. The
+# sources are `index.cts`, `native.cts` and `provider-host.cts`, and they sit
+# beside their outputs — which works only because `.cts` and `.cjs` are different
+# extensions, and which keeps `__dirname` meaning the same directory in both.
+#
+# **`index.d.cts` is in here on purpose.** A hand-written `index.d.ts` used to be
+# committed beside a hand-written `index.cjs`; the whole point of task 2 is that
+# the declaration is emitted, and a committed copy of a build output is how it
+# starts drifting again. `package.json`'s `files` list is what ships it.
+index.cjs
+index.d.cts
+native.cjs
+native.d.cts
+provider-host.cjs
+provider-host.d.cts
+*.tsbuildinfo
 
 # The stand-in executable the demo launches. Built, not authored.
 fixtures/

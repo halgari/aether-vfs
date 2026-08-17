@@ -78,10 +78,16 @@ pub struct ConformanceReport {
     /// The case groups that ran: `'common'`, then `'sequential'` or
     /// `'positional'`, plus `'writable'` for a `readwrite` provider.
     pub cases: Vec<String>,
-    /// Provider calls that crossed the bridge during the run; `null` for a Rust
-    /// provider, which has no bridge. **This is the number that says the suite
-    /// did work**: a JS provider that passed with `providerCalls: 0` was not
-    /// tested, it was skipped.
+    /// Provider calls that crossed the bridge during the run. **This is the
+    /// number that says the suite did work**: a JS provider that passed with
+    /// `providerCalls: 0` was not tested, it was skipped.
+    ///
+    /// For a Rust provider, which has no bridge, the key is **absent** — so JS
+    /// reads it as `undefined`, not `null`. This is a `#[napi(object)]` *field*,
+    /// and napi-derive omits a `None` field rather than setting it to null; only
+    /// an `Option<T>` *return* (`Provider::stats`, `Provider::cache_stats`,
+    /// `Session::getattr`) arrives as `null`. `providerCalls === null` is a check
+    /// that never matches, and this comment said `null` until task 2 measured it.
     pub provider_calls: Option<f64>,
     pub duration_ms: f64,
 }

@@ -27,7 +27,7 @@
 // Written in TypeScript, run by Node's own type stripping. See the header of
 // `primitives.test.cts` for what that does and does not buy.
 
-import type { Provider, ProviderWorker } from '../index.js';
+import type { Provider, ProviderWorker } from '../index.cjs';
 
 const test = require('node:test') as typeof import('node:test');
 const assert = require('node:assert') as typeof import('node:assert');
@@ -58,7 +58,7 @@ interface Ctx {
 
 // Mirrors the exported `ConformanceReport`. Optional fields are `?:` and not
 // `| null` because napi-rs omits an object key for a Rust `None` — see the note
-// in `index.d.ts`.
+// on `ConformanceReport.providerCalls` in `native.cts`.
 interface ConformanceReport {
   handle: number;
   kind?: string;

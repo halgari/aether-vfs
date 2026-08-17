@@ -5,7 +5,7 @@
   "description": "Windows virtual filesystem: compose a process's view of the disk from pluggable providers",
   "license": "UNLICENSED",
   "main": "index.cjs",
-  "types": "index.d.ts",
+  "types": "index.d.cts",
   "engines": {
     "node": ">=24"
   },
@@ -17,23 +17,26 @@
   ],
   "files": [
     "index.cjs",
-    "index.d.ts",
+    "index.d.cts",
+    "native.cjs",
+    "native.d.cts",
     "provider-host.cjs",
     "aethervfs.node",
     "vfs_shim_dll.dll",
     "vfs_payload.dll"
   ],
   "scripts": {
-    "build": "node scripts/build.cjs",
-    "build:release": "node scripts/build.cjs --release",
+    "build:js": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/build.mts",
+    "build:release": "tsc -p tsconfig.build.json && node scripts/build.mts --release",
     "demo": "node examples/vertical-slice.cjs",
     "demo:provider": "node examples/js-provider.cjs",
     "demo:spec8": "node examples/spec-8-example.cts",
-    "check:types": "node scripts/check-types.cjs",
+    "check:types": "node scripts/check-types.mts",
     "typecheck": "tsc --noEmit",
     "test:unit": "vitest run",
     "test:watch": "vitest",
-    "test": "node scripts/build.cjs && node scripts/check-types.cjs && tsc --noEmit && node examples/vertical-slice.cjs && node examples/js-provider.cjs && node examples/spec-8-example.cts && vitest run"
+    "test": "tsc -p tsconfig.build.json && node scripts/build.mts && node scripts/check-types.mts && tsc --noEmit && node examples/vertical-slice.cjs && node examples/js-provider.cjs && node examples/spec-8-example.cts && vitest run"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

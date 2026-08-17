@@ -6,7 +6,7 @@ publish = false
 description = "N-API addon behind the `aethervfs` npm package: a Node host over vfs-embed"
 
 [lib]
-# The cdylib's file name *is* the addon's name once `scripts/build.cjs` renames
+# The cdylib's file name *is* the addon's name once `scripts/build.mts` renames
 # `aethervfs.dll` to `aethervfs.node`, so the lib is named for the package
 # rather than for the crate. Nothing else in the workspace is called
 # `aethervfs`, so there is no lib-name collision.

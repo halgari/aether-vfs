@@ -1,0 +1,33 @@
+{
+  // The emit half of the migration: `index.cts`, `native.cts` and
+  // `provider-host.cts` in, `index.cjs`, `index.d.cts`, `native.cjs`,
+  // `native.d.cts` and `provider-host.cjs` out, all beside their sources.
+  //
+  // **`index.d.cts` is a build output.** That is the point of task 2. Before it,
+  // an 878-line `index.d.ts` was maintained beside a 757-line `index.cjs` and the
+  // two had to agree by discipline; they did not. `native.cts` is the one
+  // declaration still written rather than derived, because it describes a Rust
+  // binary — see its header, and `scripts/check-types.mts` for what watches it.
+  //
+  // Separate from `tsconfig.json` for two reasons: that one has `noEmit` and a
+  // wider `include` (the `.mts` scripts node runs directly, and the vitest
+  // harness), and mixing "what to typecheck" with "what to compile" in one file
+  // means either emitting the harness or not checking it.
+  //
+  // `outDir` is deliberately absent. The sources sit beside their outputs, which
+  // works only because `.cts` and `.cjs` are different extensions — and it keeps
+  // `__dirname` meaning the same directory in the source and in the emitted file,
+  // which matters: `index.cts` hands `__dirname` to Rust as the place to look for
+  // the shim DLLs, and `native.cts` looks for `aethervfs.node` there.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    // Nothing generates these and shipping them would put source paths in the
+    // tarball.
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["index.cts", "native.cts", "provider-host.cts"],
+  "exclude": ["node_modules", "fixtures"]
+}

@@ -63,7 +63,7 @@
 // against and would catch a mistake under a checker the host runs. They are not
 // themselves a gate.
 
-import type { Provider, ProviderWorker, RejectedWrite, RootInfo } from '../index.js';
+import type { Provider, ProviderWorker, RejectedWrite, RootInfo } from '../index.cjs';
 
 const assert = require('node:assert') as typeof import('node:assert');
 const { spawn, spawnSync } = require('node:child_process') as typeof import('node:child_process');
@@ -73,7 +73,7 @@ const path = require('node:path') as typeof import('node:path');
 
 // `require('aethervfs')` when the package is installed, the in-tree entry
 // otherwise. Both go through `index.cjs`, so both are the same load.
-let mod: typeof import('../index.js');
+let mod: typeof import('../index.cjs');
 try {
   mod = require('aethervfs');
 } catch (e) {

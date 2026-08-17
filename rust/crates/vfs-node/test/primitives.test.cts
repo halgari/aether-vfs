@@ -24,15 +24,17 @@
 // CommonJS and Node's type stripping does not rewrite module syntax: `require`
 // with annotations is TypeScript that runs, `import x from` in a CJS file is not.
 //
-// **The types are erased, not checked.** There is no `tsc` in this package's
-// toolchain and adding one means a network install in the build path of a
-// package whose build is otherwise four cargo calls and four file copies — the
-// same trade task 6 refused for generating `index.d.ts`. So the annotations
-// here document the surface a host codes against and would catch a mistake
-// under a checker a host runs; they are not themselves a gate. Said plainly
-// because "written in TypeScript" is easy to read as "typechecked".
+// **The types are erased, not checked — in this file, for now.** `tsc` is in the
+// package's toolchain as of the TypeScript migration and `tsc --noEmit` is a
+// gate, but `tsconfig.json`'s `include` deliberately does not reach `test/**`
+// yet: the `require(...) as typeof import(...)` idiom above produces 134 × TS2775
+// on `assert.ok`, because an assertion function needs an explicit type
+// *annotation* on the name it is called on and a cast is not one. Task 3 replaces
+// the idiom with a real `import` and widens the gate. Until then the annotations
+// here document the surface a host codes against; they are not themselves a gate.
+// Said plainly because "written in TypeScript" is easy to read as "typechecked".
 
-import type { Provider, ProviderCapabilities, ProviderWorker, RejectedWrite } from '../index.js';
+import type { Provider, ProviderCapabilities, ProviderWorker, RejectedWrite } from '../index.cjs';
 
 const test = require('node:test') as typeof import('node:test');
 const assert = require('node:assert') as typeof import('node:assert');

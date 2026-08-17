@@ -111,9 +111,13 @@ conformance suite via `assertConformance()`, not to a reimplementation of it.
 
 ```powershell
 cd rust\crates\vfs-node
-npm run build      # four cargo builds + four copies; no npm dependencies
-npm test           # examples, JS suites, and the .d.ts drift check
+pnpm install --frozen-lockfile   # devDependencies only: typescript, vitest, @types/node
+pnpm build                       # tsc, then four cargo builds + four copies
+pnpm test                        # build, drift check, tsc --noEmit, examples, vitest
 ```
+
+The **published package still has no runtime dependency** — the three above are
+devDependencies, and a consumer install pulls exactly one package.
 
 ```js
 const { Session, disk, layered, readonly, providerWorker } = require('aethervfs');
@@ -129,7 +133,11 @@ s.close();
 A provider is serviced by the event loop that registered it, and a blocking call
 issued *on* that loop can never settle — so `providerWorker()` is the recommended
 shape, and the alternative is refused with an explanation rather than hanging.
-`index.d.ts` carries the full API.
+`index.d.cts` carries the full API, and it is a build output: `index.cts` is the
+source, and `tsc` emits the declaration from the code that implements it.
+`native.cts` is the one declaration still written by hand, because it describes
+the Rust addon and `@napi-rs/cli` — the thing that could generate it — would be a
+network dependency in the build path.
 
 ### Out-of-process source plugin
 

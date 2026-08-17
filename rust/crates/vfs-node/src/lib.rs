@@ -38,7 +38,7 @@
 //! the user installed Node** — nowhere near the shipped DLLs. So the binding
 //! resolves them itself, from the directory the addon was loaded out of, which
 //! `index.cjs` hands over as `__dirname` at load time (see [`set_package_dir`]).
-//! `scripts/build.cjs` is what puts `vfs_shim_dll.dll` and `vfs_payload.dll`
+//! `scripts/build.mts` is what puts `vfs_shim_dll.dll` and `vfs_payload.dll`
 //! in that directory, and `package.json`'s `files` list is what ships them.
 //!
 //! Left to guess, the symptom is "`vfs_shim_dll.dll` not found" from a package
@@ -442,7 +442,8 @@ pub struct LaunchOptions {
     /// mechanism: [`vfs_embed::Session::launch`] `set_var`s each one here,
     /// launches, and restores. A process lock serializes that against this
     /// library's other env writes and cannot serialize a *host's* threads —
-    /// which a Node process always has. See `index.d.ts` for the full caveat.
+    /// which a Node process always has. See `LaunchOptions.env` in `native.cts`
+    /// for the full caveat.
     pub env: Option<HashMap<String, String>>,
 }
 
@@ -859,7 +860,7 @@ impl Session {
                 "vfs_shim_dll.dll not found. Tried: {}. An addon cannot discover \
                  it — vfs-embed's own fallback searches next to \
                  std::env::current_exe(), which here is node.exe. Run \
-                 `npm run build` in the package directory to put the DLLs \
+                 `pnpm build` in the package directory to put the DLLs \
                  beside the addon, pass `shimDll` to launch(), or call \
                  session.setShimDlls(...).{}",
                 if tried.is_empty() {
@@ -897,7 +898,7 @@ impl Session {
             Error::from_reason(format!(
                 "vfs_payload.dll not found. Tried: {}. It is built from a \
                  separate cargo workspace (crates/vfs-payload, panic = \"abort\") \
-                 and `npm run build` builds it; a plain \
+                 and `pnpm build` builds it; a plain \
                  `cargo build --workspace` does not.",
                 payload_tried.join(", ")
             ))

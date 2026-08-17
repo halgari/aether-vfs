@@ -1,14 +1,14 @@
 {
-  // Task 1 of the TypeScript migration stands the harness up *before* anything is
-  // converted, so this config's job today is narrow: typecheck the TypeScript
-  // that is already meant to be typechecked — the hand-written `index.d.ts` and
-  // the vitest harness — and give `tsc` a home for tasks 2 and 3 to grow into.
+  // The typecheck gate. `tsconfig.build.json` is the one that emits; this one
+  // has `noEmit` and a wider `include`, so `tsc --noEmit` covers the files that
+  // are typechecked but never compiled — the two `.mts` scripts node runs
+  // through its own type stripping, and the vitest harness.
   //
-  // ## Why `include` is not the whole tree yet
+  // ## What `include` covers, and what it does not yet
   //
-  // `pnpm typecheck` over `test/**/*.cts` and `examples/**/*.cts` reports **135
-  // errors**, and they are not findings — they are the shape of the code being
-  // migrated away from:
+  // Task 2 converted the package's own implementation, so `include` grew from
+  // three files to eight. It is still **not** pointed at `test/**/*.cts` or
+  // `examples/**/*.cts`, where it reports 135 errors that are not findings:
   //
   //   * **134 x TS2775** "Assertions require every name in the call target to be
   //     declared with an explicit type annotation." Every one comes from
@@ -28,9 +28,12 @@
   // to hide it. **Task 3 widens this to `test/**` and `examples/**`** once those
   // files are converted, and that widening is the check that the conversion landed.
   "compilerOptions": {
-    // `nodenext` is what understands `.cts`/`.mts` and the rule that a `.js`
-    // specifier resolves through a `.d.ts` — `import type … from '../index.js'`
-    // finds `index.d.ts`, and there is no `index.js`.
+    // `nodenext` is what understands `.cts`/`.mts` and their emit: a `.cts` is
+    // CommonJS and compiles to `index.cjs` + `index.d.cts`, which is exactly the
+    // pair `package.json`'s `main` and `types` name. An `.mts` is ESM, which is
+    // what node's type stripping needs to run a script file directly — a `.cts`
+    // with `import` statements is a syntax error at runtime, verified rather than
+    // assumed.
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "target": "es2023",
@@ -43,14 +46,23 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
 
-    // The `.cjs` half of the tree is untyped on purpose until tasks 2 and 3.
+    // The remaining `.cjs` files — the test helpers and the examples — are
+    // untyped on purpose until task 3.
     "allowJs": false,
     "checkJs": false,
 
-    // Nothing here emits yet; `pnpm build` is still four cargo calls and four file
-    // copies. Task 2 turns this off, when `index.d.ts` becomes a build output.
     "noEmit": true
   },
-  "include": ["index.d.ts", "vitest.config.ts", "vitest-setup.ts"],
-  "exclude": ["node_modules", "fixtures"]
+  "include": [
+    "index.cts",
+    "native.cts",
+    "provider-host.cts",
+    "scripts/build.mts",
+    "scripts/check-types.mts",
+    "vitest.config.ts",
+    "vitest-setup.ts"
+  ],
+  // The build outputs. Excluded so a stale `index.d.cts` in the tree can never be
+  // typechecked in place of the source it was emitted from.
+  "exclude": ["node_modules", "fixtures", "**/*.d.cts", "**/*.cjs"]
 }

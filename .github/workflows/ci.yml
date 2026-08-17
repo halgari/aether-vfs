@@ -59,23 +59,48 @@ jobs:
           #   24    the `using` declarations in `test/dispose.test.cjs`
           #         (Explicit Resource Management syntax)
           node-version: '24'
-      # `scripts/build.cjs` is the only correct way to build this package: four
-      # unfiltered cargo invocations (the addon cdylib, the shim cdylib, the
+      # The package gained **devDependencies** in the TypeScript migration —
+      # typescript, @types/node, vitest — and still no runtime dependency. The
+      # install is needed before the build, because the build now begins with
+      # `tsc`. `--frozen-lockfile` is what makes `pnpm-lock.yaml` load-bearing:
+      # a lockfile nobody freezes is a lockfile that drifts.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - name: Install (frozen lockfile, dev dependencies only exist here)
+        run: pnpm install --frozen-lockfile
+        working-directory: rust/crates/vfs-node
+      # `pnpm build` is the only correct way to build this package: `tsc -p
+      # tsconfig.build.json` (the JavaScript layer and its declaration), then
+      # four unfiltered cargo invocations (the addon cdylib, the shim cdylib, the
       # separate-workspace payload, and the probe exe) followed by four copies
       # into the package directory. It also prints each artifact's size and
       # mtime, which is how a stale DLL gets noticed.
-      - name: Build the addon and its DLLs
-        run: node scripts/build.cjs
+      #
+      # It has to run before anything below: `index.cjs` and `index.d.cts` are
+      # build outputs as of task 2 and are not in the repository.
+      - name: Build the JavaScript layer, the addon and its DLLs
+        run: pnpm build
         working-directory: rust/crates/vfs-node
-      # `index.d.ts` is hand-written (no `@napi-rs/cli`, no npm dependency), and
-      # nothing was checking it for drift — `Session.readdir` and
-      # `Session.getattr` were missing from it entirely. This is not `tsc`: it
-      # compares the declared surface against the addon's real exports in both
-      # directions, which is the drift class a hand-written file suffers and the
-      # one a type checker cannot see (nothing references a declaration that does
-      # not exist). See `scripts/check-types.cjs` for why `tsc` is not wired up.
-      - name: Check index.d.ts against the addon's real exports
-        run: node scripts/check-types.cjs
+      # `index.d.cts` is emitted, but `native.cts` — the addon's own `#[napi]`
+      # surface — is still hand-written, because the thing that could generate it
+      # (`@napi-rs/cli`) is a network dependency in the build path. Nothing else
+      # checks it: a `#[napi]` export renamed, added or dropped on the Rust side
+      # is invisible to `tsc`. This is the check that sees it, and it is the same
+      # class of defect as `Session.readdir` and `Session.getattr` having been
+      # missing from the declaration entirely — which no type checker can notice,
+      # because nothing references what does not exist. `tsc --noEmit` below is a
+      # separate gate that complements it.
+      - name: Check the declaration against the addon's real exports
+        run: node scripts/check-types.mts
+        working-directory: rust/crates/vfs-node
+      # Typechecks the package's own TypeScript. `tsconfig.json`'s `include` does
+      # not reach `test/**` or `examples/**` yet — the `require(...) as typeof
+      # import(...)` idiom there produces 134 × TS2775 on `assert.ok`. Task 3
+      # converts them and widens it, and that widening is the check that the
+      # conversion landed.
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
         working-directory: rust/crates/vfs-node
       # The examples are tests: each one asserts its way through a full session,
       # and `spec-8-example.cts` machine-checks spec §8's provider graph rather
