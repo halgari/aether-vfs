@@ -50,7 +50,7 @@
 //   * **18** — load and use the addon. `require('aethervfs')` is N-API 8.
 //   * **22.6** — run the `.cts` sources and test files directly under node's
 //     type stripping.
-//   * **24** — the `using` declarations in `test/dispose.test.cjs` (Explicit
+//   * **24** — the `using` declarations in `test/dispose.test.cts` (Explicit
 //     Resource Management syntax). The disposables themselves work anywhere
 //     `Symbol.dispose` exists; only writing `using` needs the syntax.
 //
@@ -627,7 +627,7 @@ export const version: () => string = fn('version');
  * Every `#[napi]` function in the addon carries `catch_unwind`, because
  * napi-derive emits the containment only when asked; that is enforced
  * structurally by `tests/napi_entry_points_contain_panics.rs`, and demonstrated
- * by `test/panic.test.cjs`, whose only tool is this function. A structural check
+ * by `test/panic.test.cts`, whose only tool is this function. A structural check
  * cannot show the generated containment *works*.
  *
  * `kind` selects the panic payload shape — `'string'` (default), `'str'`, or

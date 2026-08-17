@@ -1,5 +1,3 @@
-'use strict';
-
 // **A Rust panic must arrive in JavaScript as an exception, not as a dead
 // process.**
 //
@@ -14,27 +12,27 @@
 // would `abort()` — exit code `0xC0000409` / `STATUS_STACK_BUFFER_OVERRUN`, the
 // signature of rustc's forced `panic_cannot_unwind` — and an in-process
 // `assert.throws` cannot observe its own process dying. The child's exit code is
-// what distinguishes "threw" from "aborted"; `node --test` reporting a failure
+// what distinguishes "threw" from "aborted"; a runner reporting a failure
 // requires a live reporter.
 //
 // Mutation-checked (2026-08-17): with `catch_unwind` removed from
 // `panicForTest`'s attribute and the addon rebuilt, the child exits **3221226505
-// = 0xC0000409** and `node --test` reports the whole file as one failure with
+// = 0xC0000409** and the runner reports the whole file as one failure with
 // zero tests run, because the harness process itself died. Restoring the flag
 // returns all six to green. So this file cannot pass for a reason other than the
 // containment working.
 
-const assert = require('node:assert');
-const { test } = require('node:test');
-const { spawnSync } = require('node:child_process');
-const path = require('node:path');
+import { test } from 'vitest';
+import assert from 'node:assert';
+import { spawnSync } from 'node:child_process';
+import path from 'node:path';
 
-const vfs = require('..');
+const vfs: typeof import('../index.cjs') = require('..');
 
 const PKG = path.resolve(__dirname, '..');
 
 /** Run `expr` in a fresh node process; report how it ended. */
-function inChild(expr) {
+function inChild(expr: string): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync(
     process.execPath,
     ['-e', `const vfs = require(${JSON.stringify(PKG)});\n${expr}`],
@@ -54,7 +52,7 @@ test('the panic canary exists — this file cannot pass by having nothing to cal
 test('a panic in a #[napi] function surfaces as a JS exception', () => {
   assert.throws(
     () => vfs.panicForTest('string'),
-    (e) => {
+    (e: unknown) => {
       assert.ok(e instanceof Error, `expected an Error, got ${typeof e}`);
       assert.match(e.message, /deliberate panic from panicForTest/);
       return true;
@@ -65,12 +63,13 @@ test('a panic in a #[napi] function surfaces as a JS exception', () => {
 });
 
 test('every panic payload shape becomes a message, not an abort', () => {
-  for (const [kind, pattern] of [
+  const payloads: Array<['string' | 'str' | 'other', RegExp]> = [
     ['string', /deliberate panic from panicForTest/],
     ['str', /deliberate &str panic/],
     // Neither `String` nor `&str`: napi's own fallback rendering.
     ['other', /panic from Rust code/],
-  ]) {
+  ];
+  for (const [kind, pattern] of payloads) {
     assert.throws(() => vfs.panicForTest(kind), pattern, `payload shape ${kind}`);
   }
   assert.strictEqual(typeof vfs.version(), 'string');
@@ -87,7 +86,7 @@ test('a panic does not abort the process — measured on a child, not asserted h
     7,
     `expected the child to catch and exit 7; it exited ${caught.status}. ` +
       'A status near 3221225477 (0xC0000409) is the forced-unwind abort — i.e. the ' +
-      "containment is gone. stdout=" + JSON.stringify(caught.stdout) +
+      'containment is gone. stdout=' + JSON.stringify(caught.stdout) +
       ' stderr=' + JSON.stringify(caught.stderr.slice(-400))
   );
   assert.match(caught.stdout, /^CAUGHT:/);
@@ -107,5 +106,11 @@ test('the process is usable after an uncaught panic-turned-exception', () => {
 });
 
 test('a bad argument is an ordinary error, so the canary is not a panic-only door', () => {
-  assert.throws(() => vfs.panicForTest('nonsense'), /expected 'string', 'str' or 'other'/);
+  // The cast is the finding, not a workaround: `panicForTest` is declared
+  // `(kind?: 'string' | 'str' | 'other')`, so a TypeScript host cannot reach this
+  // branch by accident. The runtime check still has to exist — for a JavaScript
+  // host, and for a string that arrives from outside the type system — and this
+  // is what proves it does.
+  const panicForTest = vfs.panicForTest as (kind: string) => never;
+  assert.throws(() => panicForTest('nonsense'), /expected 'string', 'str' or 'other'/);
 });

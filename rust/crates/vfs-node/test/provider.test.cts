@@ -1,6 +1,3 @@
-#!/usr/bin/env node
-'use strict';
-
 // Task 7: a JavaScript object as a first-class provider.
 //
 // Seven properties, one test each, and every one of them is a property spec §8b
@@ -19,23 +16,39 @@
 //   7. the deadlock guard: a call serviced by the loop blocked waiting for it is
 //      refused with a diagnosable error, from a worker as well as from main.
 //
-// Run: `node --test test/` in the package directory, or this file directly.
+// Run: `pnpm test:unit` in the package directory, or `pnpm exec vitest run
+// test/provider.test.cts` for this file alone.
 //
 // The stderr lines about provider throws, stalls and refusals are the *point* —
 // they are the "logged" half of rules 3 and 4 — so they are not suppressed.
+//
+// ## `import` here, `require` in the fixtures
+//
+// Test files are transformed by vite before vitest runs them, so real `import`
+// statements work — and a real `import` is what makes `assert.ok` an assertion
+// function to TypeScript, which `require(...) as typeof import('node:assert')`
+// never was (TS2775, 134 of them across this tree before task 3). The provider
+// fixtures beside this file are loaded by **node** instead, both here and inside
+// a provider worker, so they keep `require` with a type annotation — see the
+// header of `providers.cts`.
 
-const test = require('node:test');
-const assert = require('node:assert');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const { Worker } = require('node:worker_threads');
+import { test } from 'vitest';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { Worker } from 'node:worker_threads';
 
-const aether = require(path.join(__dirname, '..', 'index.cjs'));
+import { teardown, type TestTeardown } from './teardown.cts';
+import type { Provider, ProviderOptions, ProviderStats, ProviderWorker } from '../index.cjs';
+import type { MakeOptions, MakeProvider, TestProvider } from './providers.cts';
+import type { SelfCallResult } from './self-call-worker.cts';
+
+const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const { Session, disk, registerProvider, providerWorker, releaseProvider, VfsError } = aether;
 
-const make = require(path.join(__dirname, 'providers.cjs'));
-const FIXTURE = require.resolve(path.join(__dirname, 'providers.cjs'));
+const make: MakeProvider = require(path.join(__dirname, 'providers.cts'));
+const FIXTURE: string = require.resolve(path.join(__dirname, 'providers.cts'));
 
 const probeExe = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
 
@@ -46,13 +59,13 @@ const probeExe = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
 // catching.
 // ---------------------------------------------------------------------------
 
-function scratch(t, name) {
+function scratch(t: TestTeardown, name: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `aethervfs-t7-${name}-`));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
 
-function newSession(t, name) {
+function newSession(t: TestTeardown, name: string) {
   const s = new Session(`t7-${name}`);
   t.after(() => {
     try {
@@ -66,7 +79,11 @@ function newSession(t, name) {
 }
 
 /** A provider on its own worker loop, released when the test ends. */
-async function workerProvider(t, options, providerOptions) {
+async function workerProvider(
+  t: TestTeardown,
+  options: MakeOptions,
+  providerOptions?: ProviderOptions
+): Promise<ProviderWorker> {
   const pw = await providerWorker({
     module: FIXTURE,
     options,
@@ -77,19 +94,19 @@ async function workerProvider(t, options, providerOptions) {
 }
 
 /** A provider serviced by *this* loop, released when the test ends. */
-function mainLoopProvider(t, options) {
+function mainLoopProvider(t: TestTeardown, options: MakeOptions): Provider {
   const p = registerProvider(make(options));
   t.after(() => releaseProvider(p.handle));
   return p;
 }
 
-function emptyRoot(t, name) {
+function emptyRoot(t: TestTeardown, name: string): string {
   const dir = path.join(scratch(t, name), 'game-root');
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-function show(label, stats) {
+function show(label: string, stats: ProviderStats): void {
   const keep = [
     'calls',
     'settledCalls',
@@ -99,7 +116,7 @@ function show(label, stats) {
     'abandonedCalls',
     'selfCallRefusals',
     'dispatchFailures',
-  ];
+  ] as const;
   const shown = Object.fromEntries(keep.filter((k) => stats[k] !== 0).map((k) => [k, stats[k]]));
   console.log(`    ${label}: ${JSON.stringify(shown)}`);
 }
@@ -108,7 +125,8 @@ function show(label, stats) {
 // 1. Bytes through the director.
 // ---------------------------------------------------------------------------
 
-test('1. a JS provider serves bytes through the director, host-side and over the ring', async (t) => {
+test('1. a JS provider serves bytes through the director, host-side and over the ring', async () => {
+  const t = teardown();
   const root = emptyRoot(t, 'bytes');
   const content = path.join(path.dirname(root), 'content');
   const out = path.join(path.dirname(root), 'out.bin');
@@ -132,7 +150,7 @@ test('1. a JS provider serves bytes through the director, host-side and over the
   // A path the JS provider does not have must still be not-found, not empty.
   assert.throws(() => s.readFile('absent.txt'), /ST_NOT_FOUND/);
 
-  const afterHost = pw.stats();
+  const afterHost = pw.stats()!;
   assert.ok(afterHost.calls > 0, 'the bridge was actually crossed');
   assert.strictEqual(afterHost.calls, afterHost.settledCalls);
   assert.strictEqual(afterHost.hostErrors, 0);
@@ -153,7 +171,7 @@ test('1. a JS provider serves bytes through the director, host-side and over the
   );
   assert.deepStrictEqual(fs.readdirSync(root), [], 'nothing was extracted into the managed root');
 
-  const afterRing = pw.stats();
+  const afterRing = pw.stats()!;
   assert.ok(afterRing.calls > afterHost.calls, 'the child’s reads crossed the bridge too');
   assert.strictEqual(afterRing.hostErrors, 0);
   assert.strictEqual(afterRing.selfCallRefusals, 0, 'main → worker is legal and must not be refused');
@@ -167,7 +185,8 @@ test('1. a JS provider serves bytes through the director, host-side and over the
 // 2. A promise that resolves late.
 // ---------------------------------------------------------------------------
 
-test('2. an async provider whose promise resolves late parks the caller and then answers', async (t) => {
+test('2. an async provider whose promise resolves late parks the caller and then answers', async () => {
+  const t = teardown();
   const root = emptyRoot(t, 'async');
   const pw = await workerProvider(t, { kind: 'async', delayMs: 150 });
 
@@ -185,7 +204,7 @@ test('2. an async provider whose promise resolves late parks the caller and then
   assert.ok(ms >= 140, `readFile parked for the promise (waited ${ms.toFixed(1)} ms)`);
   console.log(`    readFile('late.txt') waited ${ms.toFixed(1)} ms for a 150 ms promise`);
 
-  const st = pw.stats();
+  const st = pw.stats()!;
   assert.strictEqual(st.hostErrors, 0);
   assert.strictEqual(st.abandonedCalls, 0);
   assert.strictEqual(st.stalledCalls, 0, 'a 150 ms promise is not a stall at the 5 s default');
@@ -196,7 +215,8 @@ test('2. an async provider whose promise resolves late parks the caller and then
 // 3. VfsError → ST_*.
 // ---------------------------------------------------------------------------
 
-test('3. VfsError maps to the status it names, and an undefined code is clamped', async (t) => {
+test('3. VfsError maps to the status it names, and an undefined code is clamped', async () => {
+  const t = teardown();
   const root = emptyRoot(t, 'errors');
   const pw = await workerProvider(t, { kind: 'errors' });
 
@@ -216,7 +236,7 @@ test('3. VfsError maps to the status it names, and an undefined code is clamped'
   // come back as "worked, returned nothing".
   assert.throws(() => s.readFile('okerror.txt'), /ST_IO_ERROR/);
 
-  const st = pw.stats();
+  const st = pw.stats()!;
   assert.strictEqual(st.hostErrors, 0, 'a VfsError is not a host error');
   assert.ok(st.vfsErrors >= 4, `deliberate statuses are counted (${st.vfsErrors})`);
   show('error provider', st);
@@ -229,7 +249,8 @@ test('3. VfsError maps to the status it names, and an undefined code is clamped'
 // 4. A plain throw.
 // ---------------------------------------------------------------------------
 
-test('4. a plain throw becomes ST_IO_ERROR with the stack logged, and the process survives', async (t) => {
+test('4. a plain throw becomes ST_IO_ERROR with the stack logged, and the process survives', async () => {
+  const t = teardown();
   const root = emptyRoot(t, 'throw');
   const pw = await workerProvider(t, { kind: 'errors' });
 
@@ -238,41 +259,42 @@ test('4. a plain throw becomes ST_IO_ERROR with the stack logged, and the proces
   s.mount(0, pw.provider);
 
   assert.throws(() => s.readFile('boom.txt'), /ST_IO_ERROR/);
-  let st = pw.stats();
+  let st = pw.stats()!;
   assert.strictEqual(st.hostErrors, 1);
-  assert.match(st.lastHostError, /boom — a plain throw from a JS provider/);
+  assert.match(st.lastHostError!, /boom — a plain throw from a JS provider/);
   // It is a stack, not just a message: the frame names the file it was thrown in.
-  assert.match(st.lastHostError, /providers\.cjs/);
-  assert.match(st.lastHostError, /\n\s+at /);
+  assert.match(st.lastHostError!, /providers\.cts/);
+  assert.match(st.lastHostError!, /\n\s+at /);
   console.log(`    lastHostError first two lines:`);
-  for (const line of st.lastHostError.split('\n').slice(0, 2)) console.log(`      ${line.trim()}`);
+  for (const line of st.lastHostError!.split('\n').slice(0, 2)) console.log(`      ${line.trim()}`);
 
   // A rejection is the same path.
   assert.throws(() => s.readFile('rejected.txt'), /ST_IO_ERROR/);
-  st = pw.stats();
+  st = pw.stats()!;
   assert.strictEqual(st.hostErrors, 2);
-  assert.match(st.lastHostError, /rejected — a promise that says no/);
+  assert.match(st.lastHostError!, /rejected — a promise that says no/);
 
   // A result that is not bytes at all: the throw comes from the dispatcher's own
   // coercion, not from the host, and has to be caught in the same place — an
   // exception escaping a threadsafe-function callback ends the *process* rather
   // than the call. That this test keeps running is the assertion.
   assert.throws(() => s.readFile('badshape.txt'), /ST_IO_ERROR/);
-  st = pw.stats();
+  st = pw.stats()!;
   assert.strictEqual(st.hostErrors, 3);
-  assert.match(st.lastHostError, /must return a Buffer, a typed array or a string; got number/);
+  assert.match(st.lastHostError!, /must return a Buffer, a typed array or a string; got number/);
 
   // The process survived all three, and so did the provider.
   assert.strictEqual(s.readFile('ok.txt').toString(), 'ok');
   assert.strictEqual(aether.outstandingProviderCalls(), 0, 'no call was left dangling');
-  show('after two uncaught host failures', pw.stats());
+  show('after two uncaught host failures', pw.stats()!);
 });
 
 // ---------------------------------------------------------------------------
 // 5. A promise that never settles.
 // ---------------------------------------------------------------------------
 
-test('5. a never-settling promise is counted, and with callTimeoutMs it releases the thread', async (t) => {
+test('5. a never-settling promise is counted, and with callTimeoutMs it releases the thread', async () => {
+  const t = teardown();
   const root = emptyRoot(t, 'never');
   // `stallWarnMs` is what counts the hang; `callTimeoutMs` is what lets a test
   // observe the counter instead of inheriting the contract's default, which is
@@ -288,13 +310,13 @@ test('5. a never-settling promise is counted, and with callTimeoutMs it releases
   assert.throws(() => s.readFile('never.txt'), /ST_IO_ERROR|never settl|abandoned/);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
 
-  const st = pw.stats();
+  const st = pw.stats()!;
   assert.strictEqual(st.abandonedCalls, 1, 'the abandoned call is counted');
   assert.ok(st.stalledCalls >= 1, 'the stall is counted before the timeout, and separately');
-  assert.match(st.lastDiagnostic, /abandoned `readAt`/);
+  assert.match(st.lastDiagnostic!, /abandoned `readAt`/);
   assert.ok(ms >= 380 && ms < 3000, `it waited the configured timeout, not forever (${ms.toFixed(0)} ms)`);
   console.log(`    readFile('never.txt') gave up after ${ms.toFixed(0)} ms`);
-  console.log(`    lastDiagnostic: ${st.lastDiagnostic.split('.')[0]}.`);
+  console.log(`    lastDiagnostic: ${st.lastDiagnostic!.split('.')[0]}.`);
   show('never-settling provider', st);
 
   // The lost call is one call. The session, the provider and the process are all
@@ -304,7 +326,8 @@ test('5. a never-settling promise is counted, and with callTimeoutMs it releases
   assert.strictEqual(aether.outstandingProviderCalls(), 0);
 });
 
-test('5b. a slow-but-settling call is counted as a stall without being abandoned', async (t) => {
+test('5b. a slow-but-settling call is counted as a stall without being abandoned', async () => {
+  const t = teardown();
   const root = emptyRoot(t, 'slow');
   // No callTimeoutMs: this is the *default* contract — wait as long as the host
   // takes. The stall counter is what makes that diagnosable rather than silent.
@@ -315,13 +338,13 @@ test('5b. a slow-but-settling call is counted as a stall without being abandoned
   s.mount(0, pw.provider);
 
   assert.strictEqual(s.readFile('slow.txt').toString(), 'eventually');
-  const st = pw.stats();
+  const st = pw.stats()!;
   // napi-rs renders a `None` as `undefined`, so `== null` rather than `=== null`.
   assert.ok(st.callTimeoutMs == null, 'the default is to wait, not to abandon');
   assert.ok(st.stalledCalls >= 1, 'the slow call was counted');
   assert.strictEqual(st.abandonedCalls, 0, 'and not abandoned');
   assert.strictEqual(st.settledCalls, st.calls);
-  assert.match(st.lastDiagnostic, /has not settled `readAt`/);
+  assert.match(st.lastDiagnostic!, /has not settled `readAt`/);
   show('slow-but-settling provider', st);
 });
 
@@ -329,12 +352,13 @@ test('5b. a slow-but-settling call is counted as a stall without being abandoned
 // 6. Registration-time validation.
 // ---------------------------------------------------------------------------
 
-test('6. a ReadWrite object with no writeAt is refused at construction, and no session starts', async (t) => {
+test('6. a ReadWrite object with no writeAt is refused at construction, and no session starts', async () => {
+  const t = teardown();
   const root = emptyRoot(t, 'validate');
 
   // Written the way a host would write it, so what the test proves is that the
   // *session never starts* — not merely that a constructor threw.
-  let session = null;
+  let session: ReturnType<typeof newSession> | null = null;
   assert.throws(
     () => {
       const provider = registerProvider(make({ kind: 'readWriteWithoutWriteAt' }));
@@ -343,7 +367,7 @@ test('6. a ReadWrite object with no writeAt is refused at construction, and no s
       session.mount(0, provider);
       session.serve();
     },
-    (e) => {
+    (e: Error) => {
       assert.match(e.message, /must implement writeAt/);
       assert.match(e.message, /ReadWrite/);
       assert.match(e.message, /registration-time validation/);
@@ -359,13 +383,16 @@ test('6. a ReadWrite object with no writeAt is refused at construction, and no s
     /must implement readNext/
   );
 
-  // Missing a core method is the same defect with a different name.
-  const noOpen = make({ kind: 'bytes' });
-  delete noOpen.open;
+  // Missing a core method is the same defect with a different name. TypeScript
+  // would refuse to *write* this object — `open` is required on `ProviderObject`,
+  // so `delete` needs the cast — and that is the point: the runtime check is what
+  // a JavaScript host and a dynamically assembled object still depend on.
+  const noOpen: TestProvider = make({ kind: 'bytes' });
+  delete (noOpen as Partial<TestProvider>).open;
   assert.throws(() => registerProvider(noOpen), /must implement open/);
 
   // Contradictory capabilities are refused in the same place.
-  const rwImmutable = make({ kind: 'readWrite' });
+  const rwImmutable: TestProvider = make({ kind: 'readWrite' });
   rwImmutable.capabilities = { access: 'readwrite', immutable: true };
   assert.throws(() => registerProvider(rwImmutable), /cannot be immutable/);
 
@@ -378,8 +405,8 @@ test('6. a ReadWrite object with no writeAt is refused at construction, and no s
   fs.writeFileSync(out, 'written-into-javascript');
 
   const pw = await workerProvider(t, { kind: 'readWrite' });
-  assert.strictEqual(pw.stats().access, 'readwrite');
-  assert.ok(pw.stats().methods.includes('writeAt'));
+  assert.strictEqual(pw.stats()!.access, 'readwrite');
+  assert.ok(pw.stats()!.methods.includes('writeAt'));
 
   const s = newSession(t, 'validate-ok');
   s.addRoot(0, 'game', root);
@@ -398,14 +425,15 @@ test('6. a ReadWrite object with no writeAt is refused at construction, and no s
     "the child's write was served by the JS provider's writeAt"
   );
   assert.deepStrictEqual(fs.readdirSync(root), [], 'and did not land on real disk under the root');
-  show('read-write provider after a child write', pw.stats());
+  show('read-write provider after a child write', pw.stats()!);
 });
 
 // ---------------------------------------------------------------------------
 // 7. The deadlock guard.
 // ---------------------------------------------------------------------------
 
-test('7. a call serviced by the loop that is blocked waiting for it is refused, not hung', async (t) => {
+test('7. a call serviced by the loop that is blocked waiting for it is refused, not hung', async () => {
+  const t = teardown();
   const root = emptyRoot(t, 'guard');
 
   // Registered on *this* loop, then driven from this loop. Task 5 measured this
@@ -418,7 +446,7 @@ test('7. a call serviced by the loop that is blocked waiting for it is refused, 
   const t0 = process.hrtime.bigint();
   assert.throws(
     () => s.readFile('js-served.txt'),
-    (e) => {
+    (e: Error) => {
       assert.match(e.message, /would deadlock/);
       assert.match(e.message, /serviced by ThreadId/);
       assert.match(e.message, /same thread/);
@@ -430,10 +458,10 @@ test('7. a call serviced by the loop that is blocked waiting for it is refused, 
   assert.ok(ms < 500, `refused immediately rather than hung (${ms.toFixed(1)} ms)`);
   console.log(`    refusal took ${ms.toFixed(2)} ms (task 5 measured this configuration at 2014 ms timeout, never settling)`);
 
-  const st = p.stats();
+  const st = p.stats()!;
   assert.strictEqual(st.selfCallRefusals, 1);
   assert.strictEqual(st.calls, 0, 'nothing was queued — the guard runs before the tsfn call');
-  assert.match(st.lastDiagnostic, /must never be issued on the loop that services/);
+  assert.match(st.lastDiagnostic!, /must never be issued on the loop that services/);
   show('main-loop provider after a self-call', st);
 
   // `launch` resolves a relative image through the same graph on the same
@@ -444,8 +472,8 @@ test('7. a call serviced by the loop that is blocked waiting for it is refused, 
   // worker calling into its *own* loop is not the main thread and deadlocks all
   // the same.
   const workerRoot = emptyRoot(t, 'guard-worker');
-  const result = await new Promise((resolve, reject) => {
-    const w = new Worker(path.join(__dirname, 'self-call-worker.cjs'), {
+  const result = await new Promise<SelfCallResult>((resolve, reject) => {
+    const w = new Worker(path.join(__dirname, 'self-call-worker.cts'), {
       workerData: { gameRoot: workerRoot },
     });
     w.once('message', resolve);
@@ -453,10 +481,30 @@ test('7. a call serviced by the loop that is blocked waiting for it is refused, 
   });
   assert.strictEqual(result.setupError, undefined, result.setupError);
   assert.strictEqual(result.threw, true, 'worker A → worker A’s own loop must be refused too');
-  assert.match(result.message, /would deadlock/);
-  assert.ok(result.elapsedMs < 500, `and refused immediately (${result.elapsedMs} ms)`);
-  assert.strictEqual(result.stats.selfCallRefusals, 1);
+  assert.match(result.message!, /would deadlock/);
+  assert.ok(result.elapsedMs! < 500, `and refused immediately (${result.elapsedMs} ms)`);
+  assert.strictEqual(result.stats!.selfCallRefusals, 1);
   console.log(`    worker → its own loop refused in ${result.elapsedMs} ms (${result.ownerThread})`);
+
+  // **The two assertions below were added by the vitest migration (task 3), and
+  // they are the only additions in this conversion.** Everything above is the
+  // node:test suite unchanged. They exist because task 1 measured that the guard
+  // keys on the thread `registerProvider` ran on, and that under `pool:
+  // 'threads'` that thread drifts run to run while the suite still reports
+  // 36/36 — i.e. this test could pass while no longer testing loop identity.
+  // These two make that a red test instead of a silent pass: the refusal must
+  // name the *worker's own* thread, and that thread must not be the one the
+  // main-loop provider above is bound to.
+  assert.ok(
+    result.message!.includes(`serviced by ${result.ownerThread}`),
+    `the refusal must name the worker's own loop (${result.ownerThread}), not another: ${result.message}`
+  );
+  assert.notStrictEqual(
+    result.ownerThread,
+    st.ownerThread,
+    'a worker provider and a main-loop provider must be on different loops, or this ' +
+      'test is not the worker half of the rule'
+  );
 
   // And the control that makes the guard mean loop identity rather than "no
   // calls from the main thread": the same session pattern with the provider on a
@@ -467,7 +515,7 @@ test('7. a call serviced by the loop that is blocked waiting for it is refused, 
   s2.addRoot(0, 'game', okRoot);
   s2.mount(0, pw.provider);
   assert.strictEqual(s2.readFile('js-served.txt').toString(), 'bytes-from-javascript');
-  assert.strictEqual(pw.stats().selfCallRefusals, 0);
+  assert.strictEqual(pw.stats()!.selfCallRefusals, 0);
   console.log('    main → worker on the same call path: served, 0 refusals');
 });
 
@@ -491,7 +539,8 @@ test('7. a call serviced by the loop that is blocked waiting for it is refused, 
 // A JS provider is not the expensive part of a read.
 // ---------------------------------------------------------------------------
 
-test('a readFile through a JS provider stays in the tens of microseconds', async (t) => {
+test('a readFile through a JS provider stays in the tens of microseconds', async () => {
+  const t = teardown();
   const dir = scratch(t, 'cost');
   const rustRoot = path.join(dir, 'rust-root');
   const jsRoot = path.join(dir, 'js-root');
@@ -510,16 +559,16 @@ test('a readFile through a JS provider stays in the tens of microseconds', async
   js.mount(0, pw.provider);
 
   const iterations = 4000;
-  const time = (session) => {
+  const time = (session: ReturnType<typeof newSession>): number => {
     for (let i = 0; i < 200; i++) session.readFile('small.bin'); // warm
     const t0 = process.hrtime.bigint();
     for (let i = 0; i < iterations; i++) session.readFile('small.bin');
     return Number(process.hrtime.bigint() - t0) / 1e6;
   };
 
-  const before = pw.stats().calls;
+  const before = pw.stats()!.calls;
   const jsMs = time(js);
-  const crossings = pw.stats().calls - before;
+  const crossings = pw.stats()!.calls - before;
   const rustMs = time(rust);
 
   const usPerReadFileJs = (jsMs * 1000) / iterations;

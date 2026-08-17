@@ -13,7 +13,7 @@ bench harness. What could not be re-derived from anything that remains is the
 
 Nothing in the tree reproduces these. Treat them as a recorded observation with a
 named date and machine, not as a benchmark to re-run. The closest live figure is
-in `vfs-node/test/provider.test.cjs`, which reports microseconds per `readFile`
+in `vfs-node/test/provider.test.cts`, which reports microseconds per `readFile`
 through a JS provider — a whole-call number, not a boundary-crossing one.
 
 ## Host and date

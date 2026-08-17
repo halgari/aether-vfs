@@ -2,21 +2,31 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   // Vite's esbuild transform filter is `/\.(m?ts|[jt]sx)$/` — `.ts`, `.mts`,
-  // `.jsx`, `.tsx`, and **not** `.cts`. Two of the five suites are `.cts`
-  // (`primitives`, `conformance`), so without this they reach rollup as plain
-  // JavaScript and die on their first `import type` with
+  // `.jsx`, `.tsx`, and **not** `.cts`. **All five suites are `.cts`** as of
+  // task 3 (two were when this was written), so without this they reach rollup as
+  // plain JavaScript and die on their first `import type` with
   // `Parse failure: Expected ',', got '{'`. Widening the filter is the whole fix;
   // esbuild's `.cts` loader itself is already correct.
+  //
+  // It is load-bearing for one thing beyond syntax: `test/dispose.test.cts` uses
+  // real `using` declarations, and esbuild is what lowers them now that the file
+  // is TypeScript rather than the `.cjs` node ran natively. The tests there assert
+  // that the dispose actually happened, including out of a `throw`, so a broken
+  // lowering fails rather than passes quietly.
   esbuild: {
     include: [/\.[cm]?ts$/, /\.[jt]sx$/],
   },
 
   test: {
-    include: ['test/**/*.test.{cjs,cts}'],
-
-    // Maps `require('node:test')` onto vitest so the suites run unconverted.
-    // See the file for why this is a `Module._load` patch and not an alias.
-    setupFiles: ['./vitest-setup.ts'],
+    // Every suite is `.cts` as of task 3, and the glob is narrowed to match on
+    // purpose: `tsconfig.json` cannot typecheck a `.cjs` file (`allowJs` is off,
+    // and every `.cjs` in this package is a build output), so a suite added as
+    // `.cjs` would run untypechecked. Keeping the two sets identical means a file
+    // is either both run and checked, or neither. There is no `setupFiles` any
+    // more — task 1's `vitest-setup.ts` mapped `require('node:test')` onto vitest
+    // so the suites could run unconverted, and task 3 converted them and deleted
+    // it.
+    include: ['test/**/*.test.cts'],
 
     // ---------------------------------------------------------------------
     // POOL: forks, one process per test file. Do not change this to `threads`.

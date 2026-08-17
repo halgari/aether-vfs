@@ -29,14 +29,14 @@
     "build:js": "tsc -p tsconfig.build.json",
     "build": "tsc -p tsconfig.build.json && node scripts/build.mts",
     "build:release": "tsc -p tsconfig.build.json && node scripts/build.mts --release",
-    "demo": "node examples/vertical-slice.cjs",
-    "demo:provider": "node examples/js-provider.cjs",
+    "demo": "node examples/vertical-slice.cts",
+    "demo:provider": "node examples/js-provider.cts",
     "demo:spec8": "node examples/spec-8-example.cts",
     "check:types": "node scripts/check-types.mts",
     "typecheck": "tsc --noEmit",
     "test:unit": "vitest run",
     "test:watch": "vitest",
-    "test": "tsc -p tsconfig.build.json && node scripts/build.mts && node scripts/check-types.mts && tsc --noEmit && node examples/vertical-slice.cjs && node examples/js-provider.cjs && node examples/spec-8-example.cts && vitest run"
+    "test": "tsc -p tsconfig.build.json && node scripts/build.mts && node scripts/check-types.mts && tsc --noEmit && node examples/vertical-slice.cts && node examples/js-provider.cts && node examples/spec-8-example.cts && vitest run"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

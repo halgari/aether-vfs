@@ -169,7 +169,7 @@ fn every_napi_function_carries_catch_unwind() {
 }
 
 /// The canary has to exist for `panic_surfaces_as_a_js_exception` in
-/// `test/panic.test.cjs` to have anything to call, and that JS test is the only
+/// `test/panic.test.cts` to have anything to call, and that JS test is the only
 /// place the containment is demonstrated rather than asserted structurally. A
 /// silently deleted canary would leave the JS test skipping.
 #[test]
@@ -182,7 +182,7 @@ fn the_panic_canary_is_still_exported_and_contained() {
         canary.len(),
         1,
         "`panicForTest` is the only reachable panic in this crate and the only thing \
-         `test/panic.test.cjs` can use to prove a panic becomes a JS exception. Removing it \
+         `test/panic.test.cts` can use to prove a panic becomes a JS exception. Removing it \
          makes that test unable to fail."
     );
     assert!(

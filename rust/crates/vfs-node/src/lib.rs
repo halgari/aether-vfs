@@ -1074,7 +1074,7 @@ pub fn version() -> String {
 }
 
 /// **Panic on purpose, so the containment can be demonstrated instead of
-/// asserted.** `test/panic.test.cjs` is its only caller.
+/// asserted.** `test/panic.test.cts` is its only caller.
 ///
 /// Every `#[napi]` function in this crate carries `catch_unwind`, because
 /// napi-derive emits `std::panic::catch_unwind` around a generated entry point

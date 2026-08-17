@@ -1,5 +1,3 @@
-'use strict';
-
 // The one thing a host writes.
 //
 // Spec §6's claim is that a host language contributes **novel data sources** and
@@ -22,14 +20,38 @@
 //
 // `fetches` counts `readNext` calls, so a test can prove the cache above it is
 // actually absorbing reads rather than merely being present.
+//
+// `require` and not `import`, and an annotation rather than a cast: see the
+// header of `providers.cts`. This module is resolved and loaded **inside a
+// provider worker**, by node, so its module syntax has to survive type stripping.
 
-const path = require('path');
+import type { ProviderDirEntry, ProviderObject } from '../index.cjs';
 
-const aether = require(path.join(__dirname, '..', 'index.cjs'));
+const path: typeof import('node:path') = require('path');
+
+const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const { VfsError } = aether;
 
+/** Options `makeCdn()` understands. */
+export interface CdnOptions {
+  depot?: string;
+  preferredBlock?: number;
+}
+
+/** A `readNext` cursor, plus the counters a worker-local debugger would want. */
+interface CdnCounters {
+  opens: number;
+  fetches: number;
+  bytesFetched: number;
+}
+
+/** The provider this module builds, with its worker-local counters attached. */
+export interface CdnProvider extends ProviderObject {
+  $counters: CdnCounters;
+}
+
 /** The depot's contents. Recognisable bytes, so a mis-seek is visible. */
-function depotFiles(depot) {
+function depotFiles(depot: string): Map<string, Buffer> {
   return new Map([
     ['vanilla/data.bin', Buffer.from(Array.from({ length: 4096 }, (_, i) => i % 251))],
     ['vanilla/readme.txt', Buffer.from(`depot ${depot}: fetched over a pretend network`)],
@@ -39,12 +61,12 @@ function depotFiles(depot) {
   ]);
 }
 
-module.exports = function makeCdn({ depot = '489830', preferredBlock = 65536 } = {}) {
+function makeCdn({ depot = '489830', preferredBlock = 65536 }: CdnOptions = {}): CdnProvider {
   const files = depotFiles(depot);
   /** handle → { path, cursor } — a forward-only cursor, which is the whole point. */
-  const open = new Map();
+  const open = new Map<number, { path: string; cursor: number }>();
   let nextHandle = 1;
-  const counters = { opens: 0, fetches: 0, bytesFetched: 0 };
+  const counters: CdnCounters = { opens: 0, fetches: 0, bytesFetched: 0 };
 
   return {
     capabilities: {
@@ -62,7 +84,7 @@ module.exports = function makeCdn({ depot = '489830', preferredBlock = 65536 } =
 
     readdir(root, p) {
       const prefix = p === '' ? '' : `${p}/`;
-      const seen = new Map();
+      const seen = new Map<string, ProviderDirEntry>();
       for (const [name, body] of files) {
         if (!name.startsWith(prefix)) continue;
         const rest = name.slice(prefix.length);
@@ -97,7 +119,7 @@ module.exports = function makeCdn({ depot = '489830', preferredBlock = 65536 } =
     readNext(h, len) {
       const rec = open.get(h);
       if (rec === undefined) throw new VfsError('ST_BAD_FH');
-      const body = files.get(rec.path);
+      const body = files.get(rec.path)!;
       const chunk = body.subarray(rec.cursor, rec.cursor + len);
       rec.cursor += chunk.length;
       counters.fetches += 1;
@@ -111,4 +133,9 @@ module.exports = function makeCdn({ depot = '489830', preferredBlock = 65536 } =
     // instead; this is here for a host debugging inside the worker.
     $counters: counters,
   };
-};
+}
+
+/** What `require()`ing this module gives back — see `providers.cts`'s note. */
+export type MakeCdn = typeof makeCdn;
+
+module.exports = makeCdn;

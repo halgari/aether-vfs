@@ -1,11 +1,9 @@
-#!/usr/bin/env node
-
 // Task 8: spec §6's primitive catalog, composed from TypeScript.
 //
 // The claim under test is §6's own, quoted in the brief: *"Everything except
 // [the host provider] is a Rust primitive. That is the test of whether §6
 // succeeded."* So there is exactly one JavaScript provider in this file — a
-// forward-only, slow, immutable "CDN" (`test/cdn-provider.cjs`) — and every
+// forward-only, slow, immutable "CDN" (`test/cdn-provider.cts`) — and every
 // other node in every graph below is a Rust type reached through the addon.
 //
 // Written as spec §8's composition, translated from its Python:
@@ -16,33 +14,33 @@
 //   session.mount(1, router({"*.ini": inis},
 //                           default=overlay(disk(docs), upper=disk(scratch))))
 //
-// ## Why this file is TypeScript, and what that does and does not buy
+// ## Why this file is TypeScript, and what that now buys
 //
-// It is real TypeScript — interfaces, annotations, `import type` — run directly
-// by `node --test`, which strips types natively (Node 22.6+; unflagged since
-// 23.6, and this is v24). `.cts` rather than `.ts` because the package is
-// CommonJS and Node's type stripping does not rewrite module syntax: `require`
-// with annotations is TypeScript that runs, `import x from` in a CJS file is not.
+// It is real TypeScript — interfaces, annotations, `import` — run by vitest,
+// which transforms it through vite's esbuild. `.cts` rather than `.ts` because
+// the package is CommonJS and the fixture modules beside this file are loaded by
+// **node**, whose type stripping does not rewrite module syntax.
 //
-// **The types are erased, not checked — in this file, for now.** `tsc` is in the
-// package's toolchain as of the TypeScript migration and `tsc --noEmit` is a
-// gate, but `tsconfig.json`'s `include` deliberately does not reach `test/**`
-// yet: the `require(...) as typeof import(...)` idiom above produces 134 × TS2775
-// on `assert.ok`, because an assertion function needs an explicit type
-// *annotation* on the name it is called on and a cast is not one. Task 3 replaces
-// the idiom with a real `import` and widens the gate. Until then the annotations
-// here document the surface a host codes against; they are not themselves a gate.
-// Said plainly because "written in TypeScript" is easy to read as "typechecked".
+// **The types are checked, as of task 3.** They were not before: `tsconfig.json`'s
+// `include` stopped short of `test/**` because
+// `require('node:assert') as typeof import('node:assert')` produced 134 × TS2775
+// — an assertion function needs an explicit type *annotation* on the name it is
+// called on, and a cast is not one. A real `import` erases every one of them, the
+// `include` now covers this directory, and `tsc --noEmit` is a step in
+// `pnpm test`. So the annotations here are a gate and not only documentation —
+// which is worth saying plainly, because for two tasks they were the latter and
+// the header said so.
 
+import { test } from 'vitest';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+import { teardown, type TestTeardown } from './teardown.cts';
 import type { Provider, ProviderCapabilities, ProviderWorker, RejectedWrite } from '../index.cjs';
 
-const test = require('node:test') as typeof import('node:test');
-const assert = require('node:assert') as typeof import('node:assert');
-const fs = require('node:fs') as typeof import('node:fs');
-const os = require('node:os') as typeof import('node:os');
-const path = require('node:path') as typeof import('node:path');
-
-const aether = require(path.join(__dirname, '..', 'index.cjs'));
+const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const {
   Session,
   disk,
@@ -58,7 +56,7 @@ const {
   KIND,
 } = aether;
 
-const CDN_MODULE: string = require.resolve(path.join(__dirname, 'cdn-provider.cjs'));
+const CDN_MODULE: string = require.resolve(path.join(__dirname, 'cdn-provider.cts'));
 const PROBE: string = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
 
 // ---------------------------------------------------------------------------
@@ -66,11 +64,7 @@ const PROBE: string = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
 // per test, both removed afterwards.
 // ---------------------------------------------------------------------------
 
-interface Ctx {
-  after(fn: () => unknown): void;
-}
-
-function scratch(t: Ctx, name: string): string {
+function scratch(t: TestTeardown, name: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `aethervfs-t8-${name}-`));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
@@ -87,7 +81,7 @@ function dirWith(root: string, name: string, files: Record<string, string>): str
   return dir;
 }
 
-function newSession(t: Ctx, name: string) {
+function newSession(t: TestTeardown, name: string) {
   const s = new Session(`t8-${name}`);
   t.after(() => {
     try {
@@ -101,7 +95,7 @@ function newSession(t: Ctx, name: string) {
 }
 
 /** The one JS-authored provider in this file, on its own worker loop. */
-async function cdn(t: Ctx, options: Record<string, unknown> = {}): Promise<ProviderWorker> {
+async function cdn(t: TestTeardown, options: Record<string, unknown> = {}): Promise<ProviderWorker> {
   const pw: ProviderWorker = await providerWorker({ module: CDN_MODULE, options });
   t.after(() => pw.close());
   return pw;
@@ -119,7 +113,8 @@ function names(entries: Array<{ name: string }>): string[] {
 // 1. Spec §8's composition, host-side, through every primitive at once.
 // ---------------------------------------------------------------------------
 
-test("1. spec §8's graph composes from Rust primitives over one JS leaf", async (t) => {
+test("1. spec §8's graph composes from Rust primitives over one JS leaf", async () => {
+  const t = teardown();
   const scr = scratch(t, 'compose');
   const mods = dirWith(scr, 'SkyUI', {
     'shared.txt': 'from-the-mod',
@@ -245,7 +240,8 @@ test("1. spec §8's graph composes from Rust primitives over one JS leaf", async
 // 2. router + memory + overlay — the other half of the spec's graph.
 // ---------------------------------------------------------------------------
 
-test('2. router dispatches by glob to a memory provider over an overlay default', async (t) => {
+test('2. router dispatches by glob to a memory provider over an overlay default', async () => {
+  const t = teardown();
   const scr = scratch(t, 'router');
   const docs = dirWith(scr, 'docs', {
     'prefs.txt': 'on-real-disk',
@@ -310,7 +306,8 @@ test('2. router dispatches by glob to a memory provider over an overlay default'
 // 3. Spec §7's rejected-write discovery, which needs `readonly` to exist.
 // ---------------------------------------------------------------------------
 
-test('3. a write refused by a readonly layer appears in rejectedWrites()', async (t) => {
+test('3. a write refused by a readonly layer appears in rejectedWrites()', async () => {
+  const t = teardown();
   const scr = scratch(t, 'rejected');
   const vanilla = dirWith(scr, 'vanilla', { 'vanilla.ini': '[General]\nuGridsToLoad=5\n' });
   const content = dirWith(scr, 'content', {});
@@ -387,7 +384,8 @@ test('3. a write refused by a readonly layer appears in rejectedWrites()', async
 // 4. Composition must not lose the handle a host has to release.
 // ---------------------------------------------------------------------------
 
-test('4. a composed graph still knows which handle has a loop to release', async (t) => {
+test('4. a composed graph still knows which handle has a loop to release', async () => {
+  const t = teardown();
   const pw = await cdn(t);
   const composed: Provider = cached(readonly(seekable(pw.provider)));
 
@@ -424,7 +422,8 @@ test('4. a composed graph still knows which handle has a loop to release', async
 // 5. §6's capability recomputation table, every row, from JavaScript.
 // ---------------------------------------------------------------------------
 
-test('5. every capability recomputation rule in §6 holds', async (t) => {
+test('5. every capability recomputation rule in §6 holds', async () => {
+  const t = teardown();
   const scr = scratch(t, 'caps');
   const d: Provider = disk(dirWith(scr, 'd', { 'x.txt': 'x' }));
   const m: Provider = memory({ 'y.txt': 'y' });
@@ -506,7 +505,7 @@ test('5. every capability recomputation rule in §6 holds', async (t) => {
 // ---------------------------------------------------------------------------
 
 /** The shared setup for the two halves below: a seeded `memory()` under a prefix. */
-function memoryRoundTrip(t: Ctx, name: string) {
+function memoryRoundTrip(t: TestTeardown, name: string) {
   const scr = scratch(t, name);
   const content = dirWith(scr, 'content', {});
   fs.copyFileSync(PROBE, path.join(content, 'probe.exe'));
@@ -522,7 +521,8 @@ function memoryRoundTrip(t: Ctx, name: string) {
   return { s, root, src, inis };
 }
 
-test('6. the game writes an INI into memory() and the host reads back what it wrote', async (t) => {
+test('6. the game writes an INI into memory() and the host reads back what it wrote', async () => {
+  const t = teardown();
   // **Every vpath here is lower-case, and that is not a style choice.** The shim
   // folds each vpath component with `vfs_core::fold` before it crosses the ring,
   // and `MemoryProvider` keys a plain `HashMap` on the exact string it is given.
@@ -580,29 +580,56 @@ test('6. the game writes an INI into memory() and the host reads back what it wr
 // dedupes listings by folded name.
 //
 // `casefold(p)` is spec §6's ninth primitive and the fix; it does not exist in
-// Rust, so this is not something the binding can compose its way out of. Left as
-// `todo`: the assertion states the behaviour a host is entitled to, so a fix
-// turns it green for the right reason, while a passing test asserting today's
-// behaviour would freeze the bug in place.
-test(
+// Rust, so this is not something the binding can compose its way out of. The
+// assertion states the behaviour a host is entitled to, so a fix turns it green
+// for the right reason, while a passing test asserting today's behaviour would
+// freeze the bug in place.
+//
+// ## `test.fails`, and the two things not to do to it
+//
+// This was `{ todo: … }` under node:test. In vitest it is **`test.fails`, never
+// `skip` and never `todo`** — a skip deletes exactly the evidence this test
+// exists to preserve and leaves a green name behind. `test.fails` is also a
+// *stricter* contract than node's `todo`: node tolerates a todo that passes,
+// while `test.fails` goes red with `Expected test to fail` the day `casefold`
+// lands. That is the direction to be strict in.
+//
+// **Do not add a `throw` to the wrapper below for the "it started passing" case.**
+// Task 1 did, and it silently defeated the whole mechanism: a throw inside a
+// `.fails` body is precisely what `.fails` is looking for, so a passing todo
+// reported green. Verified then by a two-todo probe. The `catch` here only logs
+// and rethrows, because vitest prints nothing for a `.fails` test that duly
+// failed and the failing assertion is the entire point of this one.
+test.fails(
   '6b. a capitalised path in memory() (known-failing — §6 casefold does not exist)',
-  { todo: 'the shim folds the vpath; memory() is case-sensitive; the write lands beside the seed' },
-  async (t) => {
-    const { s, root, src } = memoryRoundTrip(t, 'memory-fold');
-    // Seed under a capitalised name, exactly as spec §8's example does.
-    s.mount(0, memory({ 'Skyrim.ini': '[General]\nuGridsToLoad=5\n' }), 'caps');
-    const code: number = s.launch('probe.exe', {
-      args: [src, path.join(root, 'caps', 'Skyrim.ini')],
-      wait: true,
-    });
-    assert.strictEqual(code, 0, 'the child believes it wrote');
-    assert.deepStrictEqual(s.rejectedWrites(), [], 'and nothing refused it');
-    // The evidence, printed whether the assertion below holds or not.
-    console.log(`    readdir('caps') = ${JSON.stringify(names(s.readdir('caps')))}`);
-    assert.match(
-      s.readFile('caps/Skyrim.ini').toString(),
-      /uGridsToLoad=7/,
-      'the host must read back what the game wrote, under the name it seeded'
-    );
+  async () => {
+    const t = teardown();
+    const why =
+      'the shim folds the vpath; memory() is case-sensitive; the write lands beside the seed';
+    try {
+      const { s, root, src } = memoryRoundTrip(t, 'memory-fold');
+      // Seed under a capitalised name, exactly as spec §8's example does.
+      s.mount(0, memory({ 'Skyrim.ini': '[General]\nuGridsToLoad=5\n' }), 'caps');
+      const code: number = s.launch('probe.exe', {
+        args: [src, path.join(root, 'caps', 'Skyrim.ini')],
+        wait: true,
+      });
+      assert.strictEqual(code, 0, 'the child believes it wrote');
+      assert.deepStrictEqual(s.rejectedWrites(), [], 'and nothing refused it');
+      // The evidence, printed whether the assertion below holds or not.
+      console.log(`    readdir('caps') = ${JSON.stringify(names(s.readdir('caps')))}`);
+      assert.match(
+        s.readFile('caps/Skyrim.ini').toString(),
+        /uGridsToLoad=7/,
+        'the host must read back what the game wrote, under the name it seeded'
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(
+        `    known-failing (node:test todo -> test.fails): ${why}\n` +
+          `    the assertion still fails, as intended: ${message}`
+      );
+      throw err;
+    }
   }
 );

@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 // Task 9: stage 4's gate — a host-authored provider passes conformance.
 //
 // Not *a* conformance suite. **The** one: `vfs_provider::assert_conformance`, the
@@ -24,18 +22,20 @@
 //      both with the failing case named, and both after registration has
 //      accepted them, which is where conformance earns its place.
 //
-// Written in TypeScript, run by Node's own type stripping. See the header of
-// `primitives.test.cts` for what that does and does not buy.
+// Written in TypeScript and typechecked as of task 3. See the header of
+// `primitives.test.cts` for what changed and why the annotations are now a gate.
 
-import type { Provider, ProviderWorker } from '../index.cjs';
+import { test } from 'vitest';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-const test = require('node:test') as typeof import('node:test');
-const assert = require('node:assert') as typeof import('node:assert');
-const fs = require('node:fs') as typeof import('node:fs');
-const os = require('node:os') as typeof import('node:os');
-const path = require('node:path') as typeof import('node:path');
+import { teardown, type TestTeardown } from './teardown.cts';
+import type { ConformanceReport, Provider, ProviderWorker } from '../index.cjs';
+import type { ConformanceMake } from './conformance-providers.cts';
 
-const aether = require(path.join(__dirname, '..', 'index.cjs'));
+const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const {
   assertConformance,
   conformanceFixture,
@@ -49,36 +49,24 @@ const {
   providerWorker,
 } = aether;
 
-const FIXTURE_MODULE: string = require.resolve(path.join(__dirname, 'conformance-providers.cjs'));
-const make = require(FIXTURE_MODULE);
+const FIXTURE_MODULE: string = require.resolve(path.join(__dirname, 'conformance-providers.cts'));
+const make: ConformanceMake = require(FIXTURE_MODULE);
 
-interface Ctx {
-  after(fn: () => unknown): void;
-}
+// `ConformanceReport` used to be re-declared here by hand, with a note that it
+// "mirrors the exported" one. It is imported now: the declaration is emitted as
+// of task 2, so a hand-written mirror is a second copy of a contract that nothing
+// keeps in step — the defect class this migration exists to remove. Its optional
+// fields are `?:` and not `| null` because napi-rs omits an object key for a Rust
+// `None`, which is why test 3 below asserts `undefined` rather than `null`.
 
-// Mirrors the exported `ConformanceReport`. Optional fields are `?:` and not
-// `| null` because napi-rs omits an object key for a Rust `None` — see the note
-// on `ConformanceReport.providerCalls` in `native.cts`.
-interface ConformanceReport {
-  handle: number;
-  kind?: string;
-  access: 'seqread' | 'read' | 'readwrite';
-  immutable: boolean;
-  slow: boolean;
-  preferredBlock?: number;
-  cases: string[];
-  providerCalls?: number;
-  durationMs: number;
-}
-
-function scratch(t: Ctx, name: string): string {
+function scratch(t: TestTeardown, name: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `aethervfs-t9-${name}-`));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
 
 /** A provider serviced by *this* loop, released when the test ends. */
-function onMainLoop(t: Ctx, kind: string): Provider {
+function onMainLoop(t: TestTeardown, kind: string): Provider {
   const p: Provider = registerProvider(make({ kind }));
   t.after(() => releaseProvider(p.handle));
   return p;
@@ -95,7 +83,8 @@ function show(label: string, r: ConformanceReport): void {
 // 1 & 2. The honest provider, on both kinds of loop.
 // ---------------------------------------------------------------------------
 
-test('1. a minimal JS provider passes the real conformance suite at seqread', async (t) => {
+test('1. a minimal JS provider passes the real conformance suite at seqread', async () => {
+  const t = teardown();
   const p = onMainLoop(t, 'sequential');
 
   // Registered on *this* loop and driven from it — the configuration task 7's
@@ -125,7 +114,8 @@ test('1. a minimal JS provider passes the real conformance suite at seqread', as
   show('minimal seqread provider on the main loop', report);
 });
 
-test('2. the same provider passes when it lives on a worker loop', async (t) => {
+test('2. the same provider passes when it lives on a worker loop', async () => {
+  const t = teardown();
   const pw: ProviderWorker = await providerWorker({
     module: FIXTURE_MODULE,
     options: { kind: 'sequential' },
@@ -149,7 +139,8 @@ test('2. the same provider passes when it lives on a worker loop', async (t) => 
 // 3. Spec §10's own example: a combinator over a host-authored leaf.
 // ---------------------------------------------------------------------------
 
-test('3. seekable() over the JS provider passes the *positional* suite', async (t) => {
+test('3. seekable() over the JS provider passes the *positional* suite', async () => {
+  const t = teardown();
   const p = onMainLoop(t, 'sequential');
 
   // `assert_conformance(seekable(seq_fixture()))` — spec §10 writes it in Rust
@@ -180,7 +171,8 @@ test('3. seekable() over the JS provider passes the *positional* suite', async (
 // 4 & 5. The liars. A runner that passes everything is not a runner.
 // ---------------------------------------------------------------------------
 
-test('4. a provider that declares readwrite and discards writes fails', async (t) => {
+test('4. a provider that declares readwrite and discards writes fails', async () => {
+  const t = teardown();
   // Registration accepts it, and that is the point: task 7 already refuses
   // `readwrite` with no `writeAt`, so the lie has to be one construction cannot
   // see. This provider has every write method, returns the right byte count, and
@@ -206,7 +198,8 @@ test('4. a provider that declares readwrite and discards writes fails', async (t
   assert.ok(p.stats()!.calls > 25, `the suite got well into the run (${p.stats()!.calls} calls)`);
 });
 
-test('5. a provider that declares positional reads but ignores the offset fails', async (t) => {
+test('5. a provider that declares positional reads but ignores the offset fails', async () => {
+  const t = teardown();
   const p = onMainLoop(t, 'ignoresOffset');
   assert.strictEqual(p.capabilities().access, 'read');
   assert.ok(p.stats()!.methods.includes('readAt'), 'readAt is present, so construction passed');
@@ -229,7 +222,8 @@ test('5. a provider that declares positional reads but ignores the offset fails'
 //    everything would pass tests 4 and 5 and look like a working gate.
 // ---------------------------------------------------------------------------
 
-test('6. the runner passes Rust providers too, including composed ones', async (t) => {
+test('6. the runner passes Rust providers too, including composed ones', async () => {
+  const t = teardown();
   const dir = path.join(scratch(t, 'fixture'), 'tree');
   writeConformanceFixture(dir);
 

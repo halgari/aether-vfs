@@ -23,6 +23,13 @@
   "compilerOptions": {
     "noEmit": false,
     "declaration": true,
+    // Off here, on in `tsconfig.json`. This config emits, and a `.cts` import
+    // specifier is one `tsc` cannot rewrite for the emitted file; `test/` and
+    // `examples/` are never emitted, so there the `.cts` specifier is the real
+    // runtime one. Nothing in the three sources below imports a `.cts` path, so
+    // this is a guard rather than a workaround: it keeps the emitting config from
+    // inheriting a permission it must not have.
+    "allowImportingTsExtensions": false,
     // Nothing generates these and shipping them would put source paths in the
     // tarball.
     "declarationMap": false,

@@ -55,8 +55,10 @@ jobs:
           # Three floors, and this is the highest of them — `package.json`'s
           # `engines` says the same number, so keep the two in step:
           #   18    load the addon (N-API 8)
-          #   22.6  run `.cts` directly under `node --test` (type stripping)
-          #   24    the `using` declarations in `test/dispose.test.cjs`
+          #   22.6  run a `.cts` file directly (type stripping) — which is how the
+          #         examples, the provider fixtures and the worker entry point are
+          #         loaded, all of them `.cts` as of task 3
+          #   24    the `using` declarations in `test/dispose.test.cts`
           #         (Explicit Resource Management syntax)
           node-version: '24'
       # The package gained **devDependencies** in the TypeScript migration —
@@ -94,26 +96,36 @@ jobs:
       - name: Check the declaration against the addon's real exports
         run: node scripts/check-types.mts
         working-directory: rust/crates/vfs-node
-      # Typechecks the package's own TypeScript. `tsconfig.json`'s `include` does
-      # not reach `test/**` or `examples/**` yet — the `require(...) as typeof
-      # import(...)` idiom there produces 134 × TS2775 on `assert.ok`. Task 3
-      # converts them and widens it, and that widening is the check that the
-      # conversion landed.
+      # Typechecks **the whole package**, `test/**` and `examples/**` included as
+      # of task 3. Until then `include` stopped at the package's own sources,
+      # because `require(...) as typeof import(...)` in the suites produced
+      # 134 × TS2775 on `assert.ok` — a cast is not the explicit annotation an
+      # assertion function needs. The conversion replaced the idiom and widened the
+      # scope, and this step going green over the wider scope is the check that it
+      # landed.
       - name: Typecheck
         run: pnpm exec tsc --noEmit
         working-directory: rust/crates/vfs-node
       # The examples are tests: each one asserts its way through a full session,
       # and `spec-8-example.cts` machine-checks spec §8's provider graph rather
-      # than describing it.
+      # than describing it. All three are `.cts`, run directly by node.
       - name: Examples (vertical slice, JS provider, spec §8)
-        run: node examples/vertical-slice.cjs && node examples/js-provider.cjs && node examples/spec-8-example.cts
+        run: node examples/vertical-slice.cts && node examples/js-provider.cts && node examples/spec-8-example.cts
         working-directory: rust/crates/vfs-node
-      # One `todo` is expected and must stay failing: it pins spec §6b's
-      # `casefold` hole, which is the first item of the next stage. A `todo` that
-      # started passing would mean the hole closed without anyone noticing, and
-      # `node --test` does not fail the run for it either way.
-      - name: JS suites
-        run: node --test test/provider.test.cjs test/panic.test.cjs test/dispose.test.cjs test/primitives.test.cts test/conformance.test.cts
+      # vitest, not `node --test`: task 3 converted the five suites to vitest's own
+      # API and deleted the `node:test` shim that had been mapping one onto the
+      # other. `vitest.config.ts` pins `pool: 'forks'`, which is what keeps the
+      # deadlock guard's owning-thread comparison meaning what it meant under
+      # `node --test`.
+      #
+      # One test is a **`test.fails`** and must stay failing: `primitives.test.cts`'s
+      # "6b. a capitalised path in memory()" pins spec §6b's `casefold` hole, which
+      # is the first item of the next stage. `test.fails` is stricter than the
+      # `node --test` `todo` it replaced — node tolerated a todo that passed, while
+      # this turns the run **red** the day the hole closes, so it cannot close
+      # without anyone noticing.
+      - name: JS suites (vitest)
+        run: pnpm exec vitest run
         working-directory: rust/crates/vfs-node
 
   rust-linux-portable:

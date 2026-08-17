@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-'use strict';
 
 // The task-6 vertical slice: `require('aethervfs')` through napi-rs and
 // `vfs-embed` to a real injected process, with Rust primitives only.
@@ -16,10 +15,18 @@
 // those bytes to argv[2]. Its output file is what proves the child's read went
 // through the ring to the graph rather than to a real file, because there is no
 // real file: `hello.txt` has no on-disk existence under the managed root.
+//
+// `require` with a type annotation, not `import`: node runs this file directly
+// and strips the annotations, but it does not rewrite module syntax. The
+// annotation rather than an `as` cast is what makes `assert.ok` an assertion
+// function to TypeScript (TS2775) — see `tsconfig.json`.
 
-const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
+import type { Provider } from '../index.cjs';
+
+const assert: typeof import('node:assert') = require('assert');
+const fs: typeof import('node:fs') = require('fs');
+const os: typeof import('node:os') = require('os');
+const path: typeof import('node:path') = require('path');
 
 // `require('aethervfs')` if this file is somehow resolved from outside the
 // package, and the in-tree path otherwise — which is the normal case, because
@@ -29,26 +36,30 @@ const path = require('path');
 // consumer can require the package **by name** is a separate claim and needs a
 // script outside the package to make it; there is one in the task-6 report.
 let entry = 'aethervfs';
-let mod;
+let mod: typeof import('../index.cjs');
 try {
   mod = require('aethervfs');
 } catch (e) {
-  if (e.code !== 'MODULE_NOT_FOUND') throw e;
+  if ((e as NodeJS.ErrnoException).code !== 'MODULE_NOT_FOUND') throw e;
   entry = '.. (in-tree, as expected for an in-package example)';
   mod = require('..');
 }
-const { Session, Provider, disk, version, packageDir } = mod;
+const { Session, Provider: ProviderClass, disk, version, packageDir } = mod;
 
 const probeExe = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
 if (!fs.existsSync(probeExe)) {
-  throw new Error(`${probeExe} is missing — run \`npm run build\` first`);
+  throw new Error(`${probeExe} is missing — run \`pnpm build\` first`);
 }
 
-function step(n, what) {
+function step(n: number, what: string): void {
   process.stdout.write(`\n[${n}] ${what}\n`);
 }
 
-function listing(dir) {
+// `Array<string | Buffer>` and not `string[]`: `readdirSync(dir, { recursive:
+// true })` with no encoding resolves to `string[] | Buffer[]`, and every caller
+// here already goes through `String(e)`. Narrowing it by passing an encoding
+// would change the call rather than describe it.
+function listing(dir: string): Array<string | Buffer> {
   try {
     return fs.readdirSync(dir, { recursive: true });
   } catch {
@@ -65,7 +76,7 @@ console.log(`    packageDir            ${packageDir()}`);
 
 // A scratch tree for everything this script creates. Not the session's own
 // directories — those are the session's business and it names them itself.
-const scratch = fs.mkdtempSync(path.join(require('os').tmpdir(), 'aethervfs-slice-'));
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'aethervfs-slice-'));
 const contentDir = path.join(scratch, 'content'); // what the graph serves
 const docsDir = path.join(scratch, 'docs'); // a second root's content
 const gameRoot = path.join(scratch, 'game-root'); // the managed root: stays EMPTY
@@ -95,8 +106,8 @@ assert.strictEqual(session.roots().length, 2);
 assert.strictEqual(session.virtualRoot, gameRoot, 'addRoot(0, ...) must repoint the managed root');
 
 step(3, 'disk(path) → session.mount(root, provider)');
-const content = disk(contentDir);
-const docs = disk(docsDir);
+const content: Provider = disk(contentDir);
+const docs: Provider = disk(docsDir);
 console.log(`    disk(${path.basename(contentDir)}) handle   ${content.handle}`);
 console.log(`    disk(${path.basename(docsDir)}) handle      ${docs.handle}`);
 session.mount(0, content);
@@ -104,7 +115,7 @@ session.mount(1, docs);
 
 // The handle is the value and the object is only a wrapper: a worker that has
 // the integer can rebuild a usable Provider without the object crossing.
-const rebuilt = Provider.fromHandle(content.handle);
+const rebuilt = ProviderClass.fromHandle(content.handle);
 assert.strictEqual(rebuilt.handle, content.handle);
 session.mount(0, rebuilt); // idempotent: same provider, mounted again
 console.log('    Provider.fromHandle round-trips, so a handle can cross an isolate');
@@ -172,7 +183,11 @@ console.log(`    staged into           ${staged}`);
 console.log(`      ${JSON.stringify(listing(staged))}`);
 assert.ok(listing(staged).some((e) => String(e).endsWith('probe.exe')), 'the image was staged');
 
-const [opensOk, opensFailed] = session.openTotals();
+// `openTotals()` is a `Vec<u64>` on the Rust side and therefore a `number[]` in
+// the declaration, so the pair has to be named rather than destructured blind —
+// `noUncheckedIndexedAccess` is right that an array index can be missing, and the
+// tuple shape is the addon's contract rather than the type's.
+const [opensOk, opensFailed] = session.openTotals() as [number, number];
 console.log(`    opens at the director  ${opensOk} served, ${opensFailed} failed`);
 assert.ok(opensOk > 0, 'the child must have reached the director');
 

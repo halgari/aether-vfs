@@ -1,5 +1,3 @@
-'use strict';
-
 // The providers task 9's conformance tests run: one honest, two that lie.
 //
 // **The reference tree comes from Rust**, via `conformanceFixture()`. Hard-coding
@@ -20,32 +18,52 @@
 // with no `writeAt`, `seqread` with no `readNext`). What is left is the class only
 // running the suite can catch: a provider whose methods are all present and whose
 // behaviour does not match what it declared.
+//
+// `require` and not `import`, and an annotation rather than a cast: see the header
+// of `providers.cts`. This module is resolved and loaded by node — on the main
+// loop by the test file, and inside a worker by `providerWorker({ module })`.
 
-const path = require('path');
+import type { ProviderDirEntry, ProviderObject, ProviderStat } from '../index.cjs';
 
-const aether = require(path.join(__dirname, '..', 'index.cjs'));
+const path: typeof import('node:path') = require('path');
+
+const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const { VfsError, OPEN, conformanceFixture } = aether;
 
+// `OPEN` is a `Record<string, number>` read from Rust, so each lookup is
+// `number | undefined` under `noUncheckedIndexedAccess`. Named once here.
+const OPEN_CREATE: number = OPEN.OPEN_CREATE!;
+const OPEN_TRUNC: number = OPEN.OPEN_TRUNC!;
+const OPEN_EXCL: number = OPEN.OPEN_EXCL!;
+
+/** Options `make()` understands. */
+export interface ConformanceMakeOptions {
+  kind?: string;
+}
+
 /** `Map<vpath, Buffer>` of the reference tree, from Rust. */
-function referenceTree() {
+function referenceTree(): Map<string, Buffer> {
   return new Map(conformanceFixture().map((f) => [f.path, Buffer.from(f.bytes)]));
 }
+
+/** The three metadata methods every provider below shares. */
+type TreeBase = Pick<ProviderObject, 'getattr' | 'readdir'>;
 
 /**
  * The parts every provider below shares: the tree, its directories, and the
  * three metadata methods. Written once so the *differences* between the honest
  * provider and the liars are the only thing left in each factory.
  */
-function treeBase(files) {
+function treeBase(files: Map<string, Buffer>): TreeBase {
   /** Every directory the tree implies, including the root. */
-  const dirs = new Set(['']);
+  const dirs = new Set<string>(['']);
   for (const p of files.keys()) {
     const parts = p.split('/');
     for (let i = 1; i < parts.length; i += 1) dirs.add(parts.slice(0, i).join('/'));
   }
 
   return {
-    getattr(root, p) {
+    getattr(root, p): ProviderStat | null {
       if (dirs.has(p)) return { kind: 'dir', size: 0 };
       const b = files.get(p);
       // `null` is "this provider does not have that path", which the contract
@@ -53,10 +71,10 @@ function treeBase(files) {
       return b === undefined ? null : { kind: 'file', size: b.length, mtime: 0 };
     },
 
-    readdir(root, p) {
+    readdir(root, p): ProviderDirEntry[] {
       if (!dirs.has(p)) throw new VfsError('ST_NOT_FOUND', `not a directory: ${p}`);
       const prefix = p === '' ? '' : `${p}/`;
-      const out = new Map();
+      const out = new Map<string, ProviderDirEntry>();
       for (const [name, body] of files) {
         if (!name.startsWith(prefix)) continue;
         const rest = name.slice(prefix.length);
@@ -77,9 +95,9 @@ function treeBase(files) {
  * **The honest one.** A minimal `seqread` provider: forward-only reads, no
  * positional ones, and nothing else.
  */
-function sequentialProvider() {
+function sequentialProvider(): ProviderObject {
   const files = referenceTree();
-  const open = new Map();
+  const open = new Map<number, { path: string; cursor: number }>();
   let next = 1;
 
   return {
@@ -105,7 +123,7 @@ function sequentialProvider() {
     readNext(h, len) {
       const rec = open.get(h);
       if (rec === undefined) throw new VfsError('ST_BAD_FH');
-      const body = files.get(rec.path);
+      const body = files.get(rec.path)!;
       const chunk = body.subarray(rec.cursor, rec.cursor + len);
       rec.cursor += chunk.length;
       return chunk;
@@ -127,27 +145,27 @@ function sequentialProvider() {
  * This is the same lie `vfs_provider::RwMemFixture::discarding_writes` tells to
  * prove the *Rust* suite catches it, told in JavaScript.
  */
-function discardingWriteProvider() {
+function discardingWriteProvider(): ProviderObject {
   const files = referenceTree();
-  const open = new Map();
+  const open = new Map<number, string>();
   let next = 1;
 
-  const provider = {
+  const provider: ProviderObject = {
     capabilities: { access: 'readwrite', immutable: false, slow: false },
     ...treeBase(files),
 
     open(root, p, flags) {
       let b = files.get(p);
-      if ((flags & OPEN.OPEN_EXCL) !== 0 && b !== undefined) {
+      if ((flags & OPEN_EXCL) !== 0 && b !== undefined) {
         throw new VfsError('ST_BAD_REQUEST', 'exists');
       }
-      if ((flags & OPEN.OPEN_CREATE) !== 0 && b === undefined) {
+      if ((flags & OPEN_CREATE) !== 0 && b === undefined) {
         b = Buffer.alloc(0);
         files.set(p, b);
       } else if (b === undefined) {
         throw new VfsError('ST_NOT_FOUND', `no such path ${p}`);
       }
-      if ((flags & OPEN.OPEN_TRUNC) !== 0) {
+      if ((flags & OPEN_TRUNC) !== 0) {
         b = Buffer.alloc(0);
         files.set(p, b);
       }
@@ -163,7 +181,7 @@ function discardingWriteProvider() {
     readAt(h, offset, len) {
       const p = open.get(h);
       if (p === undefined) throw new VfsError('ST_BAD_FH');
-      return files.get(p).subarray(offset, offset + len);
+      return files.get(p)!.subarray(offset, offset + len);
     },
 
     writeAt(h, offset, data) {
@@ -180,7 +198,7 @@ function discardingWriteProvider() {
     },
 
     setLen(h, len) {
-      const p = open.get(h);
+      const p = open.get(h)!;
       const old = files.get(p) ?? Buffer.alloc(0);
       const next2 = Buffer.alloc(Number(len));
       old.copy(next2, 0, 0, Math.min(old.length, next2.length));
@@ -221,9 +239,9 @@ function discardingWriteProvider() {
  * has been read to the end — which returns zero bytes from a cursor already at
  * EOF. That case exists in the suite for exactly this provider.
  */
-function ignoresOffsetProvider() {
+function ignoresOffsetProvider(): ProviderObject {
   const files = referenceTree();
-  const open = new Map();
+  const open = new Map<number, { path: string; cursor: number }>();
   let next = 1;
 
   return {
@@ -245,7 +263,7 @@ function ignoresOffsetProvider() {
     readAt(h, offset, len) {
       const rec = open.get(h);
       if (rec === undefined) throw new VfsError('ST_BAD_FH');
-      const body = files.get(rec.path);
+      const body = files.get(rec.path)!;
       // `offset` is right there in the signature and deliberately unused.
       const chunk = body.subarray(rec.cursor, rec.cursor + len);
       rec.cursor += chunk.length;
@@ -254,21 +272,27 @@ function ignoresOffsetProvider() {
   };
 }
 
-const KINDS = {
+// Typed as taking `options` even though none of the three factories reads it, so
+// the call below stays `factory(options)` — exactly what the JavaScript did.
+const KINDS: Record<string, (options: ConformanceMakeOptions) => ProviderObject> = {
   sequential: sequentialProvider,
   discardingWrites: discardingWriteProvider,
   ignoresOffset: ignoresOffsetProvider,
 };
 
-module.exports = function make(options = {}) {
+function make(options: ConformanceMakeOptions = {}): ProviderObject {
   const kind = options.kind ?? 'sequential';
   const factory = KINDS[kind];
   if (!factory) {
     throw new Error(
-      `test/conformance-providers.cjs: no kind ${JSON.stringify(kind)}; have ${Object.keys(KINDS).join(', ')}`
+      `test/conformance-providers.cts: no kind ${JSON.stringify(kind)}; have ${Object.keys(KINDS).join(', ')}`
     );
   }
   return factory(options);
-};
+}
 
+/** What `require()`ing this module gives back — see `providers.cts`'s note. */
+export type ConformanceMake = typeof make & { KINDS: typeof KINDS };
+
+module.exports = make;
 module.exports.KINDS = KINDS;

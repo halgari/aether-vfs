@@ -2,31 +2,26 @@
   // The typecheck gate. `tsconfig.build.json` is the one that emits; this one
   // has `noEmit` and a wider `include`, so `tsc --noEmit` covers the files that
   // are typechecked but never compiled — the two `.mts` scripts node runs
-  // through its own type stripping, and the vitest harness.
+  // through its own type stripping, the vitest config, the test suites and the
+  // examples.
   //
-  // ## What `include` covers, and what it does not yet
+  // ## `include` now covers the whole package, and that is the gate
   //
-  // Task 2 converted the package's own implementation, so `include` grew from
-  // three files to eight. It is still **not** pointed at `test/**/*.cts` or
-  // `examples/**/*.cts`, where it reports 135 errors that are not findings:
+  // Task 1 scoped this to three files and recorded why: pointed at `test/**` and
+  // `examples/**` it reported **135 errors**, 134 of them one TS2775 —
+  // *"Assertions require every name in the call target to be declared with an
+  // explicit type annotation"* — every one from
+  // `const assert = require('node:assert') as typeof import('node:assert')`. A
+  // cast is not an annotation, and an assertion function needs an annotation on
+  // the name it is called on. The 135th was a cosmetic TS2322 in
+  // `spec-8-example.cts`.
   //
-  //   * **134 x TS2775** "Assertions require every name in the call target to be
-  //     declared with an explicit type annotation." Every one comes from
-  //     `const assert = require('node:assert') as typeof import('node:assert')`.
-  //     `assert.ok` is an assertion function, and TypeScript requires the *name*
-  //     it is called on to carry an explicit type annotation — an `as` cast is not
-  //     one. The suites use that idiom because they run under node's type
-  //     stripping in CommonJS, where `import` would not survive. Task 3 replaces
-  //     it with a real `import`, and all 134 go away without a single assertion
-  //     changing.
-  //   * **1 x TS2322** at `examples/spec-8-example.cts:113` — an arrow annotated
-  //     `: void` whose concise body returns `process.stdout.write`'s `boolean`.
-  //     Cosmetic; the code is correct. Checked, because a lone error among 134 of
-  //     one kind is where a real bug would hide.
-  //
-  // Widening `include` now would mean committing a red gate or loosening `strict`
-  // to hide it. **Task 3 widens this to `test/**` and `examples/**`** once those
-  // files are converted, and that widening is the check that the conversion landed.
+  // Task 3 converted both directories and this `include` grew to cover them, which
+  // is the check that the conversion landed. The suites are `import`ed by vitest
+  // and use real `import` statements; the files node loads directly — the examples,
+  // the provider fixtures and the worker entry point — keep `require` with a type
+  // **annotation**, because node's type stripping erases annotations but does not
+  // rewrite module syntax. Both forms satisfy TS2775; only the cast did not.
   "compilerOptions": {
     // `nodenext` is what understands `.cts`/`.mts` and their emit: a `.cts` is
     // CommonJS and compiles to `index.cjs` + `index.d.cts`, which is exactly the
@@ -46,8 +41,15 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
 
-    // The remaining `.cjs` files — the test helpers and the examples — are
-    // untyped on purpose until task 3.
+    // Nothing under `test/` or `examples/` is ever compiled: node and vitest read
+    // the `.cts` sources directly, so `./teardown.cts` **is** the runtime
+    // specifier and not a stand-in for an emitted `.cjs`. `tsconfig.build.json`
+    // turns this back off, because that config emits and there a `.cts`
+    // specifier would be one `tsc` could not rewrite.
+    "allowImportingTsExtensions": true,
+
+    // No JavaScript is typechecked, because none is authored any more: every
+    // `.cjs` in this package is a build output.
     "allowJs": false,
     "checkJs": false,
 
@@ -60,7 +62,8 @@
     "scripts/build.mts",
     "scripts/check-types.mts",
     "vitest.config.ts",
-    "vitest-setup.ts"
+    "test/**/*.cts",
+    "examples/**/*.cts"
   ],
   // The build outputs. Excluded so a stale `index.d.cts` in the tree can never be
   // typechecked in place of the source it was emitted from.

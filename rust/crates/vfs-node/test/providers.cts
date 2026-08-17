@@ -1,5 +1,3 @@
-'use strict';
-
 // The providers the task-7 tests mount. One module with a factory, because
 // `providerWorker({ module })` resolves a **module path inside the worker** — the
 // constraint spec §8c records, since isolates share no JS objects — and one
@@ -10,14 +8,80 @@
 // function is required directly by the test file for the cases that must be
 // serviced by the main loop (the deadlock guard), so every provider here is
 // exercised on both kinds of loop.
+//
+// ## `require`, not `import`, and the annotation instead of a cast
+//
+// This module is loaded by **node**: by the test file through
+// `require(path.join(__dirname, 'providers.cts'))`, and inside a provider worker
+// through the module path `providerWorker({ module })` resolves there. Node's
+// type stripping erases annotations but does **not** rewrite module syntax, so an
+// `import` statement in a `.cts` file is a runtime `SyntaxError` — measured in
+// task 2, not assumed. What did change in task 3 is the *shape* of the typing:
+// `require(...) as typeof import(...)` became a type **annotation**, because a
+// cast is not one and TypeScript needs an annotation before it will treat
+// `assert.ok` as an assertion function (TS2775). The suites that call `assert`
+// are the reason; annotating every `require` keeps one idiom across the tree.
 
-const path = require('path');
+import type {
+  ProviderDirEntry,
+  ProviderObject,
+  ProviderStat,
+} from '../index.cjs';
 
-const aether = require(path.join(__dirname, '..', 'index.cjs'));
+const path: typeof import('node:path') = require('path');
+
+const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const { VfsError, OPEN } = aether;
 
-/** Sleep as a promise, so `async` provider methods are genuinely late. */
-const after = (ms, value) => new Promise((r) => setTimeout(() => r(value), ms));
+// `OPEN` is a `Record<string, number>` read from Rust at load, so under
+// `noUncheckedIndexedAccess` every lookup is `number | undefined`. Naming the two
+// bits this fixture uses once keeps the `&` expressions below readable.
+const OPEN_CREATE: number = OPEN.OPEN_CREATE!;
+const OPEN_TRUNC: number = OPEN.OPEN_TRUNC!;
+
+/** Anything the fixture accepts as file content. */
+type Bytes = string | Buffer | Uint8Array;
+
+/**
+ * A per-path override for `readAt`.
+ *
+ * The return type is `unknown` on purpose: one hook (`badshape.txt`) returns a
+ * number, which is not bytes at all, and that is the case task 7's rule 4 exists
+ * to prove the dispatcher catches. A hook typed as returning bytes could not
+ * express it.
+ */
+type Hook = (offset: number, len: number) => unknown;
+
+interface MemoryProviderOptions {
+  access?: 'read' | 'readwrite' | 'seqread';
+  hooks?: Record<string, Hook>;
+  writable?: boolean;
+}
+
+/** Options `make()` understands. `kind` selects a factory from `KINDS`. */
+export interface MakeOptions {
+  kind?: string;
+  delayMs?: number;
+}
+
+/**
+ * A provider this fixture builds.
+ *
+ * `$content` is not part of the provider contract — it is how a test reads back
+ * what an injected child wrote, from inside the isolate that holds the bytes.
+ */
+export interface TestProvider extends ProviderObject {
+  $content?: Map<string, Buffer>;
+}
+
+// Sleep as a promise, so `async` provider methods are genuinely late.
+//
+// A declaration rather than the arrow this was, because `<T>(…) =>` in a `.cts`
+// file is TS7060: the extension reserves that syntax, and `<T,>` is the
+// alternative. A named function is the readable half of that choice.
+function after<T>(ms: number, value: T): Promise<T> {
+  return new Promise((r) => setTimeout(() => r(value), ms));
+}
 
 /**
  * A read-only provider over an object of `{ name: string|Buffer }`.
@@ -26,14 +90,17 @@ const after = (ms, value) => new Promise((r) => setTimeout(() => r(value), ms));
  * the boring 90% of a provider is written once: a hook is called instead of the
  * ordinary `readAt` and may return bytes, return a promise, or throw.
  */
-function memoryProvider(files, { access = 'read', hooks = {}, writable = false } = {}) {
-  const content = new Map(
+function memoryProvider(
+  files: Record<string, Bytes>,
+  { access = 'read', hooks = {}, writable = false }: MemoryProviderOptions = {}
+): TestProvider {
+  const content = new Map<string, Buffer>(
     Object.entries(files).map(([k, v]) => [k, Buffer.isBuffer(v) ? v : Buffer.from(String(v))])
   );
-  const open = new Map();
+  const open = new Map<number, string>();
   let nextHandle = 1;
 
-  const provider = {
+  const provider: TestProvider = {
     capabilities: {
       access,
       // A `ReadWrite` provider may not declare `immutable` — `Capabilities::validate`
@@ -45,26 +112,26 @@ function memoryProvider(files, { access = 'read', hooks = {}, writable = false }
       preferredBlock: 65536,
     },
 
-    getattr(root, p) {
+    getattr(root, p): ProviderStat | null {
       if (p === '') return { kind: 'dir', size: 0 };
       const b = content.get(p);
       if (b === undefined) return null;
       return { kind: 'file', size: b.length, mtime: 0 };
     },
 
-    readdir(root, p) {
+    readdir(root, p): ProviderDirEntry[] {
       if (p !== '') return [];
-      return [...content].map(([name, b]) => ({ name, kind: 'file', size: b.length }));
+      return [...content].map(([name, b]): ProviderDirEntry => ({ name, kind: 'file', size: b.length }));
     },
 
     open(root, p, flags) {
       let b = content.get(p);
       if (b === undefined) {
-        const creating = writable && (flags & OPEN.OPEN_CREATE) !== 0;
+        const creating = writable && (flags & OPEN_CREATE) !== 0;
         if (!creating) throw new VfsError('ST_NOT_FOUND', `no such path ${JSON.stringify(p)}`);
         b = Buffer.alloc(0);
         content.set(p, b);
-      } else if (writable && (flags & OPEN.OPEN_TRUNC) !== 0) {
+      } else if (writable && (flags & OPEN_TRUNC) !== 0) {
         b = Buffer.alloc(0);
         content.set(p, b);
       }
@@ -81,8 +148,12 @@ function memoryProvider(files, { access = 'read', hooks = {}, writable = false }
       const p = open.get(h);
       if (p === undefined) throw new VfsError('ST_BAD_FH');
       const hook = hooks[p];
-      if (hook) return hook(offset, len);
-      return content.get(p).subarray(offset, offset + len);
+      // The cast is the type system agreeing with the test: `badshape.txt`'s hook
+      // returns a number, TypeScript would have refused to write it, and what is
+      // under test is the **runtime** coercion in `index.cts` that turns it into
+      // `ST_IO_ERROR` instead of killing the process.
+      if (hook) return hook(offset, len) as Uint8Array;
+      return content.get(p)!.subarray(offset, offset + len);
     },
   };
 
@@ -98,8 +169,12 @@ function memoryProvider(files, { access = 'read', hooks = {}, writable = false }
       content.set(p, next);
       return data.length;
     };
+    // The `!`s are the faithful translation of the JavaScript, which did not
+    // check the handle here either: `setLen` is only ever reached through an
+    // `open` this provider issued. Guarding it would change runtime behaviour,
+    // which a conversion is not for.
     provider.setLen = (h, len) => {
-      const p = open.get(h);
+      const p = open.get(h)!;
       const old = content.get(p) ?? Buffer.alloc(0);
       const next = Buffer.alloc(Number(len));
       old.copy(next, 0, 0, Math.min(old.length, next.length));
@@ -113,7 +188,9 @@ function memoryProvider(files, { access = 'read', hooks = {}, writable = false }
   return provider;
 }
 
-const KINDS = {
+type ProviderFactory = (options: MakeOptions) => TestProvider;
+
+const KINDS: Record<string, ProviderFactory> = {
   /** Plain, synchronous, read-only. The baseline: bytes through the director. */
   bytes: () =>
     memoryProvider({
@@ -154,12 +231,12 @@ const KINDS = {
             throw new VfsError('ST_READ_ONLY', 'this source is read-only');
           },
           'nospace.txt': () => {
-            throw new VfsError(aether.STATUS.ST_NO_SPACE);
+            throw new VfsError(aether.STATUS.ST_NO_SPACE!);
           },
           // A status the workspace does not define. Rust must clamp it rather
           // than let a host inject an arbitrary code into the director.
           'bogus.txt': () => {
-            const e = new Error('a status nobody defined');
+            const e = new Error('a status nobody defined') as Error & { vfsStatus?: number };
             e.vfsStatus = 12345;
             throw e;
           },
@@ -179,8 +256,7 @@ const KINDS = {
             throw new Error('boom — a plain throw from a JS provider');
           },
           // The same, arriving as a rejection rather than a throw.
-          'rejected.txt': () =>
-            Promise.reject(new Error('rejected — a promise that says no')),
+          'rejected.txt': () => Promise.reject(new Error('rejected — a promise that says no')),
         },
       }
     ),
@@ -191,7 +267,6 @@ const KINDS = {
       { 'never.txt': 'x', 'ok.txt': 'ok' },
       {
         hooks: {
-          // eslint-disable-next-line no-empty-function
           'never.txt': () => new Promise(() => {}),
         },
       }
@@ -218,16 +293,31 @@ const KINDS = {
   seqReadWithoutReadNext: () => memoryProvider({ 'a.txt': 'a' }, { access: 'seqread' }),
 };
 
-module.exports = function make(options = {}) {
+function make(options: MakeOptions = {}): TestProvider {
   const kind = options.kind ?? 'bytes';
   const factory = KINDS[kind];
   if (!factory) {
     throw new Error(
-      `test/providers.cjs: no provider kind ${JSON.stringify(kind)}; have ${Object.keys(KINDS).join(', ')}`
+      `test/providers.cts: no provider kind ${JSON.stringify(kind)}; have ${Object.keys(KINDS).join(', ')}`
     );
   }
   return factory(options);
+}
+
+/**
+ * What `require()`ing this module gives back.
+ *
+ * `module.exports = make` is the shape the provider worker's
+ * `mod.provider ?? mod.default ?? mod` picks up, and it is not something
+ * TypeScript can describe as an export — `export =` is not erasable syntax, so
+ * node's type stripping refuses it. So the runtime shape is asserted here as a
+ * type, and the two consumers annotate their `require` with it.
+ */
+export type MakeProvider = typeof make & {
+  KINDS: typeof KINDS;
+  memoryProvider: typeof memoryProvider;
 };
 
+module.exports = make;
 module.exports.KINDS = KINDS;
 module.exports.memoryProvider = memoryProvider;

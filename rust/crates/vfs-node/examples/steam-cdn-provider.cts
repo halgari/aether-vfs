@@ -1,5 +1,3 @@
-'use strict';
-
 // **The only thing a host writes.** Spec §8's example is one class and eight
 // combinators, and §6's claim is that the class is the host's whole
 // contribution:
@@ -26,6 +24,10 @@
 // crosses is a process-global integer (§8c). Being a factory also means the
 // object is built on the loop its methods will run on.
 //
+// `require` and not `import`, and an annotation rather than a cast: node loads
+// this file inside a provider worker, and its type stripping erases annotations
+// without rewriting module syntax.
+//
 // ## Why the lookups fold, and why that is a finding rather than a detail
 //
 // The shim folds every vpath component with `vfs_core::fold` before it crosses
@@ -43,27 +45,49 @@
 // `memory()` is the case a host *cannot* fix this way, because it is a Rust
 // primitive — see `spec-8-example.cts`, step 8.
 
-const fs = require('fs');
-const path = require('path');
+import type { ProviderDirEntry, ProviderObject } from '../index.cjs';
 
-const { VfsError } = require(path.join(__dirname, '..', 'index.cjs'));
+const fs: typeof import('node:fs') = require('fs');
+const path: typeof import('node:path') = require('path');
+
+const { VfsError }: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
+
+/** Options `steamCdn()` understands. */
+export interface SteamCdnOptions {
+  depot?: string;
+  latencyMs?: number;
+  preferredBlock?: number;
+  /** The bytes the depot serves as `SkyrimSE.exe`. The stand-in for stage 5. */
+  exeSource?: string;
+}
+
+interface CdnCounters {
+  opens: number;
+  fetches: number;
+  bytesFetched: number;
+}
+
+/** The provider this module builds, with its worker-local counters attached. */
+export interface SteamCdnProvider extends ProviderObject {
+  $counters: CdnCounters;
+}
 
 /** A "fetch" that takes a while, so `slow` and `async` are not decorative. */
-const fetchLatency = (ms) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : null);
+const fetchLatency = (ms: number): Promise<void> | null =>
+  ms > 0 ? new Promise((r) => setTimeout(r, ms)) : null;
 
-module.exports = function steamCdn({
+function steamCdn({
   depot = '489830',
   latencyMs = 1,
   preferredBlock = 65536,
-  /** The bytes the depot serves as `SkyrimSE.exe`. The stand-in for stage 5. */
   exeSource,
-} = {}) {
+}: SteamCdnOptions = {}): SteamCdnProvider {
   /** vpath → bytes, exactly as the depot holds them (mixed case included). */
-  const catalog = new Map([
+  const catalog = new Map<string, Buffer>([
     // The game executable. `launch('SkyrimSE.exe')` resolves this through the
     // graph, stages it out with its PE import closure, and runs that copy —
     // so the image the process runs comes out of a JavaScript function.
-    ['SkyrimSE.exe', fs.readFileSync(exeSource)],
+    ['SkyrimSE.exe', fs.readFileSync(exeSource!)],
     // The vanilla INI a mod layer above this one overrides, so `layered` has
     // something to actually win at.
     ['Data/Skyrim.ini', Buffer.from('[General]\nuGridsToLoad=5\n; from the depot\n')],
@@ -76,15 +100,18 @@ module.exports = function steamCdn({
   ]);
 
   /** Folded vpath → the key the catalog actually holds. See the header. */
-  const folded = new Map([...catalog.keys()].map((k) => [k.toLowerCase(), k]));
-  const dirs = new Set(['', 'data']);
+  const folded = new Map<string, string>([...catalog.keys()].map((k) => [k.toLowerCase(), k]));
+  const dirs = new Set<string>(['', 'data']);
 
   /** handle → { key, cursor } — one forward-only cursor, which is the point. */
-  const open = new Map();
+  const open = new Map<number, { bytes: Buffer; cursor: number }>();
   let nextHandle = 1;
-  const counters = { opens: 0, fetches: 0, bytesFetched: 0 };
+  const counters: CdnCounters = { opens: 0, fetches: 0, bytesFetched: 0 };
 
-  const find = (p) => catalog.get(folded.get(p.toLowerCase()));
+  const find = (p: string): Buffer | undefined => {
+    const key = folded.get(p.toLowerCase());
+    return key === undefined ? undefined : catalog.get(key);
+  };
 
   return {
     capabilities: { access: 'seqread', immutable: true, slow: true, preferredBlock },
@@ -97,7 +124,7 @@ module.exports = function steamCdn({
 
     readdir(root, p) {
       const prefix = p === '' ? '' : `${p.toLowerCase()}/`;
-      const seen = new Map();
+      const seen = new Map<string, ProviderDirEntry>();
       for (const [key, body] of catalog) {
         const lower = key.toLowerCase();
         if (!lower.startsWith(prefix)) continue;
@@ -147,4 +174,9 @@ module.exports = function steamCdn({
     /** Worker-local; the main thread counts crossings with `provider.stats()`. */
     $counters: counters,
   };
-};
+}
+
+/** What `require()`ing this module gives back. See `test/providers.cts`'s note. */
+export type SteamCdn = typeof steamCdn;
+
+module.exports = steamCdn;

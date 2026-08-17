@@ -1,5 +1,3 @@
-'use strict';
-
 // **`using` makes release structural instead of remembered.**
 //
 // `releaseProvider` is the one teardown in this API whose omission has no
@@ -9,17 +7,27 @@
 // disposables are worth having and why they are tested with the real `using`
 // syntax rather than by calling `[Symbol.dispose]()` by hand: what matters is
 // that the language invokes them, including on the throwing path.
+//
+// **The `using` declarations below are now transformed rather than native.** Under
+// `node --test` this file was `.cjs` and node's own Explicit Resource Management
+// implementation ran it; as a `.cts` under vitest, vite's esbuild lowers `using`
+// to `__addDisposableResource`/`__disposeResources`. That is a real change of
+// mechanism, and it is checked by the only thing that could check it — these
+// tests, which assert that the dispose actually happened, including out of a
+// `throw`. A broken lowering fails them rather than passing quietly.
 
-const assert = require('node:assert');
-const { test } = require('node:test');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
+import { test } from 'vitest';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-const vfs = require('..');
+import type { ProviderObject, Session } from '../index.cjs';
+
+const vfs: typeof import('../index.cjs') = require('..');
 
 /** A minimal conforming read-only provider; nothing here is under test. */
-function stubProvider() {
+function stubProvider(): ProviderObject {
   return {
     capabilities: { access: 'read' },
     getattr: () => null,
@@ -33,32 +41,32 @@ function stubProvider() {
 }
 
 test('using releases a JS provider at the end of the block', () => {
-  let handle;
+  let handle: number | undefined;
   {
     using p = vfs.registerProvider(stubProvider());
     handle = p.handle;
-    assert.strictEqual(p.stats().released, false, 'released before the block ended');
+    assert.strictEqual(p.stats()!.released, false, 'released before the block ended');
   }
-  const after = vfs.Provider.fromHandle(handle).stats();
+  const after = vfs.Provider.fromHandle(handle!).stats()!;
   assert.strictEqual(after.released, true, '`using` did not release the provider');
 });
 
 test('using releases even when the block throws — the case a finally is forgotten in', () => {
-  let handle;
+  let handle: number | undefined;
   assert.throws(() => {
     using p = vfs.registerProvider(stubProvider());
     handle = p.handle;
     throw new Error('boom');
   }, /boom/);
   assert.strictEqual(
-    vfs.Provider.fromHandle(handle).stats().released,
+    vfs.Provider.fromHandle(handle!).stats()!.released,
     true,
     'a throw skipped the release'
   );
 });
 
 test('disposing a composed handle releases its JS leaves, not the wrapper', () => {
-  let leaf;
+  let leaf: number | undefined;
   {
     const inner = vfs.registerProvider(stubProvider());
     leaf = inner.handle;
@@ -69,7 +77,7 @@ test('disposing a composed handle releases its JS leaves, not the wrapper', () =
     assert.deepStrictEqual(composed.jsLeaves(), [leaf]);
   }
   assert.strictEqual(
-    vfs.Provider.fromHandle(leaf).stats().released,
+    vfs.Provider.fromHandle(leaf!).stats()!.released,
     true,
     'disposing the composition did not release the JS leaf underneath it'
   );
@@ -84,25 +92,25 @@ test('disposing a graph of Rust primitives is a no-op rather than an error', () 
 });
 
 test('using closes a Session at the end of the block', () => {
-  let s;
+  let s: Session | undefined;
   {
     using session = new vfs.Session('dispose-session');
     s = session;
     assert.strictEqual(session.isServing(), false);
   }
   // A closed session throws on every accessor that needs the Rust side.
-  assert.throws(() => s.isServing(), /closed/);
+  assert.throws(() => s!.isServing(), /closed/);
 });
 
 test('releaseProvider is idempotent and accepts a Provider as well as a handle', () => {
   const p = vfs.registerProvider(stubProvider());
   vfs.releaseProvider(p);
   vfs.releaseProvider(p.handle);
-  assert.strictEqual(p.stats().released, true);
+  assert.strictEqual(p.stats()!.released, true);
 });
 
 test('a leaked provider is named on exit, in a child so the warning can be observed', () => {
-  const { spawnSync } = require('node:child_process');
+  const { spawnSync }: typeof import('node:child_process') = require('node:child_process');
   const pkg = path.resolve(__dirname, '..');
   const r = spawnSync(
     process.execPath,

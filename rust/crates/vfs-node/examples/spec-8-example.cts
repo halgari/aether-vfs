@@ -53,23 +53,31 @@
 //  * step 8 does it exactly as §8 spells it and **demonstrates the silent wrong
 //    answer**, printing both entries side by side.
 //
-// ## TypeScript, and what that is worth here
+// ## TypeScript, and what that is now worth here
 //
 // Real TypeScript — annotations, `import type` — run directly by `node`, which
 // strips types natively (Node 22.6+, unflagged since 23.6; this is v24). `.cts`
 // because the package is CommonJS and type stripping does not rewrite module
-// syntax. **The types are erased, not checked**: there is no `tsc` in this
-// package's toolchain, so the annotations document the surface a host codes
-// against and would catch a mistake under a checker the host runs. They are not
-// themselves a gate.
+// syntax, which is also why every builtin below is a `require` with a type
+// **annotation** rather than an `import`.
+//
+// **The types are checked, as of task 3.** They were not before, and this file
+// said so. Two things changed. The annotation replaced
+// `require('node:assert') as typeof import('node:assert')`, because a cast is not
+// an annotation and TypeScript will not treat `assert.ok` as an assertion
+// function without one — 134 × TS2775 across this tree, all of them that idiom.
+// And the `mod as any` that used to sit under the destructuring below is gone, so
+// the graph this file builds is now checked against the emitted declaration
+// instead of being `any` from the first line. `tsconfig.json`'s `include` covers
+// `examples/**` and `tsc --noEmit` is a step in `pnpm test`.
 
-import type { Provider, ProviderWorker, RejectedWrite, RootInfo } from '../index.cjs';
+import type { Provider, ProviderWorker, RejectedWrite } from '../index.cjs';
 
-const assert = require('node:assert') as typeof import('node:assert');
-const { spawn, spawnSync } = require('node:child_process') as typeof import('node:child_process');
-const fs = require('node:fs') as typeof import('node:fs');
-const os = require('node:os') as typeof import('node:os');
-const path = require('node:path') as typeof import('node:path');
+const assert: typeof import('node:assert') = require('node:assert');
+const { spawn, spawnSync }: typeof import('node:child_process') = require('node:child_process');
+const fs: typeof import('node:fs') = require('node:fs');
+const os: typeof import('node:os') = require('node:os');
+const path: typeof import('node:path') = require('node:path');
 
 // `require('aethervfs')` when the package is installed, the in-tree entry
 // otherwise. Both go through `index.cjs`, so both are the same load.
@@ -93,11 +101,11 @@ const {
   router,
   providerWorker,
   version,
-} = mod as any;
+} = mod;
 
 const PROBE = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
 if (!fs.existsSync(PROBE)) {
-  throw new Error(`${PROBE} is missing — run \`npm run build\` first`);
+  throw new Error(`${PROBE} is missing — run \`pnpm build\` first`);
 }
 
 // Held at module scope so the failure path can release them too. That is not
@@ -110,7 +118,13 @@ if (!fs.existsSync(PROBE)) {
 let openWorker: ProviderWorker | undefined;
 let openSession: { close(): void } | undefined;
 
-const step = (n: string, what: string): void => process.stdout.write(`\n[${n}] ${what}\n`);
+// A block body, not a concise one: `process.stdout.write` returns a `boolean`,
+// and `(): void => expr` is TS2322 rather than the void-returning-function
+// exemption. That was the 135th of the 135 errors task 1 counted over this
+// directory, and the only one that was not the `assert` cast.
+const step = (n: string, what: string): void => {
+  process.stdout.write(`\n[${n}] ${what}\n`);
+};
 const show = (...parts: unknown[]): void => console.log('   ', ...parts);
 
 /** Print a provider graph as a tree, and return every `kind` in it. */
@@ -162,7 +176,7 @@ async function main(): Promise<void> {
   // is safe *because* this provider is not serviced by that loop: the rule is
   // loop identity, not thread role.
   const cdn: ProviderWorker = await providerWorker({
-    module: require.resolve('./steam-cdn-provider.cjs'),
+    module: require.resolve('./steam-cdn-provider.cts'),
     options: { depot: '489830', latencyMs: 1, exeSource: PROBE },
   });
   openWorker = cdn;
@@ -184,7 +198,7 @@ async function main(): Promise<void> {
   openSession = session;
   session.addRoot(0, 'game', dirs.gameRoot);
   session.addRoot(1, 'docs', dirs.docsRoot);
-  console.table(session.roots() as RootInfo[]);
+  console.table(session.roots());
   assert.strictEqual(session.virtualRoot, dirs.gameRoot, 'addRoot(0) repoints the managed root');
 
   // base = cached(seekable(SteamCdn(...)), ram=..., disk=...)
@@ -347,7 +361,10 @@ async function main(): Promise<void> {
     exeBytes,
     'the whole image came through readNext in another isolate'
   );
-  const [opensOk, opensFailed] = session.openTotals();
+  // `openTotals()` is a `Vec<u64>` in Rust and therefore `number[]` in the
+  // declaration; the two-element shape is the addon's contract rather than the
+  // type's, so the tuple is named here rather than trusted by index.
+  const [opensOk, opensFailed] = session.openTotals() as [number, number];
   show(`opens at the director  ${opensOk} served, ${opensFailed} failed`);
   assert.ok(opensOk > 0, 'the child must have reached the director');
   const staged = fs.readdirSync(path.join(session.stateDir, 'stage'), { recursive: true });
@@ -425,7 +442,7 @@ async function main(): Promise<void> {
   // INI served by a route is readable by name and invisible to enumeration —
   // stated here because a game that enumerates its Documents folder to find its
   // INIs will not see one.
-  const listed = (session.readdir('', 1) as Array<{ name: string }>).map((e) => e.name).sort();
+  const listed = session.readdir('', 1).map((e) => e.name).sort();
   show(`readdir('', root 1)  ${JSON.stringify(listed)}   (no *.ini — §6 gap, task 8's finding)`);
 
   // -------------------------------------------------------------------------
@@ -438,7 +455,7 @@ async function main(): Promise<void> {
   fs.writeFileSync(
     leakProbe,
     `const p = require(${JSON.stringify(path.join(__dirname, '..', 'index.cjs'))});\n` +
-      `p.providerWorker({ module: ${JSON.stringify(require.resolve('./steam-cdn-provider.cjs'))},\n` +
+      `p.providerWorker({ module: ${JSON.stringify(require.resolve('./steam-cdn-provider.cts'))},\n` +
       `                   options: { exeSource: ${JSON.stringify(PROBE)} } })\n` +
       `  .then(async (w) => { if (process.argv[2] === 'release') await w.close(); });\n`
   );
