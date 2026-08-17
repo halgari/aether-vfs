@@ -479,8 +479,11 @@ test('7. a call serviced by the loop that is blocked waiting for it is refused, 
 // **What this number is not.** A `readFile` is open + read + close through the
 // whole director stack, so dividing its wall time by three crossings attributes
 // the director's own work to the boundary. It is an *upper bound* on the crossing
-// cost and is not comparable to task 5's 1.7–2.0 µs bare round trip; that spike
-// (`spike-node/`) remains the instrument for measuring the boundary itself.
+// cost and is not comparable to task 5’s 1.7–2.0 µs bare round trip, which is
+// recorded in docs/benchmarks/node-ffi-round-trip.md. The harness that produced
+// it (`spike-node/`) has been deleted, so nothing in the tree measures the bare
+// crossing any more — this upper bound is what is left, and it is enough for the
+// only regression that would change the design.
 //
 // The `disk()` row is here for scale rather than as a baseline to subtract:
 // reading the same 64 bytes off NTFS is not the same leaf work as slicing a

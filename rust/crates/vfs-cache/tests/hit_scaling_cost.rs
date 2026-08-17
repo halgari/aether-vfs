@@ -14,7 +14,8 @@
 //! both sides of every ratio together.
 //!
 //! **The thresholds sit an order of magnitude away from both outcomes.** As
-//! measured on the machine that found these defects (`spike-node/cache-cost`):
+//! measured on the machine that found these defects (`spike-node/cache-cost`, a
+//! throwaway harness since deleted — see docs/benchmarks/block-cache-hit-cost.md):
 //! the residency ratio was **34x** before the fix and ~**1x** after, and the
 //! thread ratio was **0.7x** before (throughput *fell* with more threads) and
 //! ~**3x** after. The gates below are 4x and 1.8x. Nothing needs to be re-tuned

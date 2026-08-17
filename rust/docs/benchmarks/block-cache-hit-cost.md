@@ -23,15 +23,19 @@ AMD Ryzen 9 8945HS, 16 logical CPUs, Windows 11 26200. Release builds. Harness:
 `spike-node/cache-cost` — a plain Rust binary, no Node, no N-API, whose leaf
 provider memcpys from an owned `Vec`. 64 MiB swept per configuration.
 
-Run it with:
+**That harness has been deleted.** It lived in its own cargo workspace that
+nothing in `rust/` compiled, held a path dependency on the most-churned crate of
+stage 4, and produced a gitignored artifact — so a fresh clone could not run it
+even by hand. The figures below are kept as the recorded before/after; what
+*enforces* them is CI:
 
 ```powershell
-cd spike-node
-cargo run -p cache-cost --release
+cargo test -p vfs-cache --release --test hit_copy_cost --test hit_scaling_cost
 ```
 
-Figures below are from single runs that agreed with repeats to within a few
-percent, except the 8-thread row, which is noted inline.
+Those two are the standing rule stated above, and they run on every push. Figures
+below are from single runs that agreed with repeats to within a few percent,
+except the 8-thread row, which is noted inline.
 
 ---
 
