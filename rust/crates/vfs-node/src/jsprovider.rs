@@ -1086,6 +1086,7 @@ pub fn register_provider(
     let handle = crate::intern_provider(Arc::new(JsProvider {
         bridge: Arc::clone(&bridge),
     }))?;
+    crate::primitives::note_leaf(handle, "js");
     bridge.provider_handle.store(handle, Ordering::Relaxed);
     bridges()
         .write()

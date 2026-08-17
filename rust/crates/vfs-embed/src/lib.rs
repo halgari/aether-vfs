@@ -136,8 +136,8 @@ pub use vfs_provider::{
 // ---------------------------------------------------------------------------
 pub use vfs_cache::{BlockCache, CacheConfig, CacheStats, CachingProvider, DEFAULT_BLOCK_SIZE};
 pub use vfs_compose::{
-    stack_layers, InlineProvider, LayeredProvider, MemoryProvider, OverlayProvider, Route,
-    RouterProvider, SubdirProvider,
+    stack_layers, InlineProvider, LayeredProvider, MemoryProvider, OverlayProvider, ReadOnlyProvider,
+    Route, RouterProvider, SeekableProvider, SubdirProvider,
 };
 pub use vfs_director::{DiskProvider, MountGraph};
 #[cfg(feature = "zip")]
@@ -198,6 +198,7 @@ pub fn open_totals() -> (u64, u64) {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use vfs_provider::{OPEN_WRITE, ST_BAD_REQUEST, ST_READ_ONLY};
 
     #[test]
     fn session_read_file_helper() {
@@ -208,6 +209,66 @@ mod tests {
         s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
         let got = s.read_file("a.bin").unwrap();
         assert_eq!(got, b"xyz");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Spec §6's hard error, and the positive control beside it: the *same*
+    /// provider mounts once `seekable` is around it. Without the second half
+    /// this test would also pass if `mount_at` refused everything.
+    #[test]
+    fn a_sequential_provider_is_refused_until_it_is_wrapped_in_seekable() {
+        let seq: Arc<dyn Provider> = Arc::new(vfs_provider::conformance::SeqFixture::new());
+        assert_eq!(seq.capabilities().access, Access::SeqRead);
+
+        let s = Session::new();
+        assert_eq!(
+            s.mount("", Arc::clone(&seq)),
+            Err(ST_BAD_REQUEST),
+            "a SeqRead provider must not mount — every read through it would fail"
+        );
+
+        let wrapped: Arc<dyn Provider> = Arc::new(SeekableProvider::new(seq));
+        assert_eq!(wrapped.capabilities().access, Access::Read);
+        s.mount("", wrapped).expect("seekable(seq) mounts");
+        assert_eq!(s.read_file("a.txt").unwrap(), b"hello");
+    }
+
+    /// `readonly` is what makes spec §7's discovery workflow reachable at all:
+    /// `DiskProvider` is `ReadWrite`, so a graph built from `disk` alone can
+    /// never refuse a write and `rejected_writes()` can never be non-empty.
+    /// `rejected_writes()` is process-global with no session dimension, so a
+    /// test asserting on it takes a lock rather than assuming test order — the
+    /// convention stated at `VA_LOCK` in `vfs-shim::lazy_section`. Nothing else
+    /// in this binary touches the table today; the lock is here so that stays
+    /// true when something does.
+    static REJECTED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_write_refused_by_a_readonly_layer_is_recorded_for_discovery() {
+        let _rej = REJECTED_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("vfs-ro-rej-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("vanilla.ini"), b"[General]").unwrap();
+
+        let s = Session::new();
+        s.mount("", Arc::new(ReadOnlyProvider::new(Arc::new(DiskProvider::new(&dir)))))
+            .unwrap();
+
+        reset_rejected_writes();
+        // The director's own pre-check: the root's provider declares Read, so an
+        // OPEN_WRITE is refused before it reaches the provider — and recorded.
+        assert_eq!(
+            s.kernel().open(RootId(0), "vanilla.ini", OPEN_WRITE),
+            Err(ST_READ_ONLY)
+        );
+        let rejected = rejected_writes();
+        assert!(
+            rejected.iter().any(|(p, n)| p == "vanilla.ini" && *n >= 1),
+            "the refused write must be discoverable by path; got {rejected:?}"
+        );
+        // The file on disk is untouched: the refusal is not a silent success.
+        assert_eq!(std::fs::read(dir.join("vanilla.ini")).unwrap(), b"[General]");
+        reset_rejected_writes();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

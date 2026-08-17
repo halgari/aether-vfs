@@ -135,6 +135,23 @@ function toKind(k, what) {
   return named;
 }
 
+/**
+ * `undefined`, not `null`, for an absent `mtime` — and that is a correctness
+ * requirement rather than a style choice.
+ *
+ * napi-derive decodes an `Option<f64>` field of an `#[napi(object)]` with
+ * `JsObject::get`, which returns `None` only when the property is **absent** and
+ * otherwise converts the value to `f64`. A present `null` therefore fails with
+ * "Failed to convert napi value Null into rust type `f64`", and it fails *inside
+ * `completeCall`* — so the call never settles, one director thread parks
+ * forever, and the symptom is a hang five seconds after a stall warning rather
+ * than an error naming the field. `undefined` and an omitted key both decode to
+ * `None`. See the `settle` fallback for the second half of this fix.
+ */
+function optionalNumber(v) {
+  return v === undefined || v === null ? undefined : Number(v);
+}
+
 function toStat(v, what) {
   if (v === null || typeof v !== 'object') {
     throw new TypeError(
@@ -146,7 +163,7 @@ function toStat(v, what) {
   return {
     kind: toKind(kind, what),
     size: Number(src.size ?? 0),
-    mtime: src.mtime === undefined || src.mtime === null ? null : Number(src.mtime),
+    mtime: optionalNumber(src.mtime),
   };
 }
 
@@ -287,12 +304,27 @@ function makeDispatch(obj) {
     const settle = (result) => {
       try {
         native.completeCall(req.callId, result);
+        return;
       } catch (e) {
-        // The only way here is a bug in this file or a released bridge. Report
-        // it where it can be seen and leave the call to be counted as a stall.
+        // A bug in this file, a released bridge, or a payload Rust could not
+        // decode. Leaving the call outstanding was the old behaviour and it is
+        // the worst one available: the director thread parks forever and the
+        // host sees a stall warning five seconds later with no mention of the
+        // field that failed. So report it *and* settle the call as a failure,
+        // with a payload that has nothing optional in it to decode.
         process.emitWarning(
           `aethervfs: completeCall(${req.callId}) failed: ${e && e.stack ? e.stack : e}`
         );
+        try {
+          native.completeCall(req.callId, {
+            status: STATUS.ST_IO_ERROR,
+            threw: true,
+            hostError: `aethervfs: the provider's result for \`${req.op}\` could not cross the ` +
+              `boundary: ${e && e.message ? e.message : e}`,
+          });
+        } catch {
+          /* nothing left to try; the call is counted as a stall */
+        }
       }
     };
     try {
@@ -348,6 +380,114 @@ function registerProvider(obj, options) {
     );
   }
   return native.registerProvider(obj, makeDispatch(obj), options ?? {});
+}
+
+// ---------------------------------------------------------------------------
+// Spec §6's primitive catalog.
+//
+// The Rust side of each of these takes a **handle** (a process-global integer),
+// not a `Provider` object, because that is the only thing that means the same in
+// two isolates — a graph composed on the main thread out of a provider
+// registered in a worker is the arrangement task 7 made mandatory for a
+// JS-authored leaf. These wrappers are what let a host write `readonly(base)`
+// instead of `readonly(base.handle)`, accept a bare number just as happily, and
+// turn the two collection-shaped primitives (`layered`, `router`) into the
+// signatures spec §8 writes them with.
+// ---------------------------------------------------------------------------
+
+/** A `Provider`, a `ProviderWorker`, or a raw handle → the handle. */
+function handleOf(p, what) {
+  if (typeof p === 'number' && Number.isInteger(p) && p >= 0) return p;
+  if (p !== null && typeof p === 'object' && typeof p.handle === 'number') return p.handle;
+  throw new TypeError(
+    `aethervfs: ${what} needs a Provider (or its numeric handle); got ${describe(p)}. ` +
+      'Every primitive returns one, and `providerWorker()` exposes `.provider`.'
+  );
+}
+
+/** `{ 'a.ini': bytes }` or `[{ path, bytes }]` → what Rust's `memory()` takes. */
+function toMemoryFiles(files) {
+  if (files === undefined || files === null) return [];
+  const list = Array.isArray(files)
+    ? files.map((f) => [f.path, f.bytes])
+    : Object.entries(files);
+  return list.map(([p, bytes]) => {
+    if (typeof p !== 'string' || p.length === 0) {
+      throw new TypeError(
+        `aethervfs: memory() keys must be non-empty vpaths; got ${describe(p)}`
+      );
+    }
+    return { path: p, bytes: toBuffer(bytes, `memory()['${p}']`) };
+  });
+}
+
+/**
+ * A read-write in-memory file tree (spec §6's `memory`).
+ *
+ * `memory({ 'Skyrim.ini': iniBytes })`. Nothing touches disk, and it declares
+ * `ReadWrite`, so it works as an `overlay` upper or as the target of a `router`
+ * route for exactly the paths a host wants writable. Read back what was written
+ * through the graph — `session.readFile(vpath)`.
+ */
+function memory(files) {
+  return native.memory(toMemoryFiles(files));
+}
+
+/** Demote a provider to read-only (spec §6's `readonly`). */
+function readonly(provider) {
+  return native.readonly(handleOf(provider, 'readonly(provider)'));
+}
+
+/** Positional reads over a forward-only provider (spec §6's `seekable`). */
+function seekable(provider) {
+  return native.seekable(handleOf(provider, 'seekable(provider)'));
+}
+
+/** A block cache in front of a provider (spec §6's `cached`). */
+function cached(provider, options) {
+  return native.cached(handleOf(provider, 'cached(provider)'), options ?? {});
+}
+
+/**
+ * Stack providers so a **later** argument wins (spec §6's `layered`).
+ *
+ * `layered(readonly(base), disk(mods))` — the mod wins over the vanilla file,
+ * which is the only ordering a mod manager can have. Accepts a spread or a
+ * single array, because a host building the list programmatically has an array.
+ */
+function layered(...providers) {
+  const list = providers.length === 1 && Array.isArray(providers[0]) ? providers[0] : providers;
+  return native.layered(list.map((p, i) => handleOf(p, `layered() argument ${i}`)));
+}
+
+/** Copy-up writes and whiteouts over a base (spec §6's `overlay`). */
+function overlay(base, upper) {
+  return native.overlay(handleOf(base, 'overlay(base, …)'), handleOf(upper, 'overlay(…, upper)'));
+}
+
+/**
+ * Dispatch by glob, falling back to `defaultProvider` (spec §6's `router`).
+ *
+ * `router({ '*.ini': inis }, overlay(disk(docs), disk(scratch)))`. Routes may be
+ * an object — insertion order is match order, which JS guarantees for string
+ * keys — or an array of `[pattern, provider]` pairs when a pattern would be a
+ * duplicate key.
+ *
+ * `readdir` is single-dispatch, not the union spec §6 specifies: a file served
+ * by a route is readable by name and **invisible to a directory listing**. See
+ * the Rust doc comment on `router` for what to do about it.
+ */
+function router(routes, defaultProvider) {
+  const entries = Array.isArray(routes)
+    ? routes.map((r) => (Array.isArray(r) ? r : [r.pattern, r.provider]))
+    : Object.entries(routes ?? {});
+  return native.router(
+    entries.map(([pattern, provider]) => ({
+      pattern: String(pattern),
+      provider: handleOf(provider, `router() route ${JSON.stringify(pattern)}`),
+    })),
+    handleOf(defaultProvider, 'router(routes, defaultProvider)')
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +613,15 @@ module.exports = {
   providerWorker,
   ProviderWorker,
   statusName,
+  // Spec §6's catalog. These deliberately shadow the native exports of the same
+  // name, which take integer handles; a host passes providers.
+  memory,
+  readonly,
+  seekable,
+  cached,
+  layered,
+  overlay,
+  router,
   /** `{ ST_OK: 0, ST_NOT_FOUND: -2, ... }`, read once from Rust. */
   STATUS,
   /** `{ getattr: 1, readdir: 2, ... }` — the op integers, for diagnostics. */

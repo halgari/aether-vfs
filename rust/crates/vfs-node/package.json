@@ -28,7 +28,7 @@
     "build:release": "node scripts/build.cjs --release",
     "demo": "node examples/vertical-slice.cjs",
     "demo:provider": "node examples/js-provider.cjs",
-    "test:unit": "node --test test/provider.test.cjs",
-    "test": "node scripts/build.cjs && node examples/vertical-slice.cjs && node examples/js-provider.cjs && node --test test/provider.test.cjs"
+    "test:unit": "node --test test/provider.test.cjs test/primitives.test.cts",
+    "test": "node scripts/build.cjs && node examples/vertical-slice.cjs && node examples/js-provider.cjs && node --test test/provider.test.cjs test/primitives.test.cts"
   }
 }

@@ -24,6 +24,68 @@ export class Provider {
    * one, which has no bridge and nothing to report.
    */
   stats(): ProviderStats | null;
+  /**
+   * What this provider **declares** it can do — the same `Capabilities` the
+   * director reads before it issues a call. This is how spec §6's capability
+   * recomputation rules become checkable from a host.
+   */
+  capabilities(): ProviderCapabilities;
+  /**
+   * Which primitive made this handle: `'disk'`, `'memory'`, `'js'`,
+   * `'readonly'`, `'seekable'`, `'cached'`, `'layered'`, `'overlay'`,
+   * `'router'`.
+   */
+  get kind(): string | null;
+  /** The handles this provider was composed from, in argument order. */
+  get children(): number[];
+  /**
+   * Every JS-authored provider reachable through this composition — **the list
+   * `releaseProvider` has to be called on.**
+   *
+   * A live threadsafe function keeps its loop alive, so a worker never exits
+   * until its provider is released; wrapping that provider in
+   * `cached(seekable(...))` produces new handles, none of which is the one to
+   * release. `releaseProvider(composed.handle)` correctly refuses, and this is
+   * how to find what to call it with instead. `[]` for a graph of Rust
+   * primitives.
+   */
+  jsLeaves(): number[];
+  /**
+   * Block-cache counters for a handle `cached()` produced; `null` for anything
+   * else. Without it, "I put a cache in the graph" is not verifiable.
+   */
+  cacheStats(): ProviderCacheStats | null;
+}
+
+/** A provider's declared capabilities. */
+export interface ProviderCapabilities {
+  access: 'seqread' | 'read' | 'readwrite';
+  /** Content never changes for the provider's lifetime. */
+  immutable: boolean;
+  /**
+   * Reads are expensive and this provider should sit behind `cached`. `cached()`
+   * clears it, which is what makes `mount`'s warning exact rather than a guess.
+   */
+  slow: boolean;
+  preferredBlock: number | null;
+}
+
+/** Block-cache counters, as `provider.cacheStats()` reports them. */
+export interface ProviderCacheStats {
+  hits: number;
+  misses: number;
+  ramEvicts: number;
+  diskHits: number;
+  diskWrites: number;
+  bytesFromCache: number;
+  bytesFromSource: number;
+  ramBytes: number;
+  ramBlocks: number;
+  /**
+   * The block size actually in use, after the wrapped provider's
+   * `preferredBlock` and the [4 KiB, 4 MiB] clamp.
+   */
+  blockSize: number;
 }
 
 /**
@@ -34,6 +96,123 @@ export class Provider {
  * would produce a session that silently serves nothing.
  */
 export function disk(path: string): Provider;
+
+// ---------------------------------------------------------------------------
+// Spec §6's primitive catalog. Everything here is a Rust type; a host writes
+// none of them and composes all of them. `Provider | number` everywhere, because
+// what actually crosses an isolate boundary is the integer.
+// ---------------------------------------------------------------------------
+
+/** Anything a primitive accepts where a provider is wanted. */
+export type ProviderLike = Provider | ProviderWorker | number;
+
+/**
+ * A read-write in-memory file tree (spec §6's `memory`).
+ *
+ * ```ts
+ * const inis = memory({ 'Skyrim.ini': iniBytes });
+ * session.mount(1, router({ '*.ini': inis }, base));
+ * // ... the game writes Skyrim.ini ...
+ * session.readFile('Skyrim.ini');   // what the game wrote, never on disk
+ * ```
+ *
+ * Declares `readwrite`, so it also works as an `overlay` upper.
+ */
+export function memory(
+  files?: Record<string, Buffer | Uint8Array | string> | Array<{ path: string; bytes: Buffer | Uint8Array | string }>
+): Provider;
+
+/**
+ * Demote a provider to read-only (spec §6's `readonly`).
+ *
+ * The declaration becomes `read` — which is what the director consults, and
+ * therefore what makes a refused write land in `session.rejectedWrites()` for
+ * spec §7's discovery workflow — and every mutating call is refused with
+ * `ST_READ_ONLY`.
+ *
+ * **This is the only way to get a non-empty `rejectedWrites()`.** `disk()` is
+ * `readwrite`, so a graph built from `disk` alone can never refuse a write.
+ */
+export function readonly(provider: ProviderLike): Provider;
+
+/**
+ * Give a forward-only provider positional reads (spec §6's `seekable`):
+ * `seqread` becomes `read`.
+ *
+ * A `seqread` provider that is not wrapped in this **cannot be mounted** —
+ * `session.mount` refuses it, because the director reads with
+ * `read_at(handle, offset, buf)` and a forward-only source has no answer for
+ * one. Wrapping an already-positional provider is a no-op passthrough.
+ */
+export function seekable(provider: ProviderLike): Provider;
+
+/** Options for {@link cached}. */
+export interface CacheOptions {
+  /** RAM budget for block payloads, in bytes. Default 64 MiB. */
+  ramBytes?: number;
+  /**
+   * Block size in bytes. Default 1 MiB, and **overridden** by the wrapped
+   * provider's own `preferredBlock` when it declares one (clamped to
+   * [4 KiB, 4 MiB]) — a source that states its natural unit knows better than
+   * its caller.
+   */
+  blockSize?: number;
+  /**
+   * Directory for the on-disk block tier. Unset means RAM only. Only worth
+   * setting for a provider declaring **both** `immutable` and `slow`.
+   */
+  diskDir?: string;
+}
+
+/**
+ * A block cache in front of a provider (spec §6's `cached`). Access passes
+ * through and `slow` is cleared. `provider.cacheStats()` reports its hits.
+ */
+export function cached(provider: ProviderLike, options?: CacheOptions): Provider;
+
+/**
+ * Stack providers so a **later** argument wins on a shared path (spec §6's
+ * `layered`); `readdir` unions with the same rule per name.
+ *
+ * ```ts
+ * layered(readonly(base), disk(modsDir))   // the mod wins over the vanilla file
+ * ```
+ *
+ * Access is the *strongest* child's, not the weakest: every write routes to
+ * whichever child declares `readwrite`. Accepts a spread or one array.
+ */
+export function layered(...providers: ProviderLike[]): Provider;
+export function layered(providers: ProviderLike[]): Provider;
+
+/**
+ * Copy-up writes and whiteouts over a base (spec §6's `overlay`).
+ *
+ * Reports `readwrite` whatever `base` declares: a write to a path only `base`
+ * holds copies the whole file into `upper` first, so an in-place edit of
+ * read-only content succeeds instead of being refused. `upper` must declare
+ * `readwrite` — checked here, not at the first write.
+ */
+export function overlay(base: ProviderLike, upper: ProviderLike): Provider;
+
+/**
+ * Dispatch by glob, falling back to `defaultProvider` (spec §6's `router`).
+ *
+ * ```ts
+ * router({ '*.ini': inis }, overlay(disk(docs), disk(scratch)))
+ * ```
+ *
+ * First matching route wins; an object's insertion order is the match order.
+ * `*` does not cross a `/`, so `'*.ini'` matches `Skyrim.ini` and not
+ * `sub/Skyrim.ini` — use `'**\/*.ini'` for a subtree.
+ *
+ * **`readdir` is single-dispatch, not the union spec §6 specifies.** A file
+ * served by a route is readable by name and invisible to a directory listing;
+ * put it in the default provider if anything enumerates it.
+ */
+export function router(
+  routes: Record<string, ProviderLike> | Array<[string, ProviderLike]> | Array<{ pattern: string; provider: ProviderLike }>,
+  defaultProvider: ProviderLike
+): Provider;
 
 /** One declared root, as `session.roots()` reports it. */
 export interface RootInfo {

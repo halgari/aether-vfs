@@ -442,12 +442,28 @@ impl Session {
     /// [`Session::mount`] for a specific root. Appends one mount to `root`'s
     /// accumulated list and recomposes that root; every other root is
     /// untouched.
+    ///
+    /// **`ST_BAD_REQUEST` for a provider declaring `Access::SeqRead`.** Spec
+    /// §6's flag table calls this a hard error and it is one: the director's
+    /// read path is `read_at(handle, offset, buf)`, which a forward-only
+    /// provider answers `ST_NOT_SUPPORTED` to. Mounting one produces a session
+    /// that composes cleanly, serves `getattr` and `readdir` correctly, and
+    /// fails every actual read — inside an injected process, where the symptom
+    /// is a game that will not load and the cause is nowhere near it.
+    /// [`crate::SeekableProvider`] is what a caller wraps it in, and it is a
+    /// Rust primitive precisely so no host has to solve this for itself.
+    ///
+    /// Checked here rather than in each host: the binding that has a friendly
+    /// message for it is not the only surface that can reach `mount_at`.
     pub fn mount_at(
         &self,
         root: RootId,
         prefix: &str,
         backend: Arc<dyn Provider>,
     ) -> Result<(), i32> {
+        if backend.capabilities().access == vfs_provider::Access::SeqRead {
+            return Err(bad_request());
+        }
         {
             let mut roots = self.roots.lock().map_err(|_| map_io_err())?;
             self.claim(&mut roots, root)?

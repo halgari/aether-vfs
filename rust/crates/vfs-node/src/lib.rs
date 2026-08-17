@@ -52,6 +52,16 @@
 //! documented. Read its module docs before touching the bridge — in particular
 //! the deadlock guard, which compares the calling thread against the *loop that
 //! services the provider*, not against "is this the main thread".
+//!
+//! ## The primitive catalog
+//!
+//! [`primitives`] is spec §6's catalog — `memory`, `readonly`, `seekable`,
+//! `cached`, `layered`, `overlay`, `router` — every one a Rust type this module
+//! only hands out. §6's claim is that a host writes its own data source and
+//! composes the rest, so a primitive implemented *in the binding* would be a
+//! primitive the Python binding then has to write again; `readonly` and
+//! `seekable` did not exist in Rust before this task and were added to
+//! `vfs-compose` rather than here for exactly that reason.
 
 // No `unsafe` anywhere in the binding. The one place task 5's spike needed it —
 // memcpying a JS `Buffer` into a parked director thread's destination pointer —
@@ -74,6 +84,7 @@
 #![cfg_attr(test, allow(dead_code))]
 
 mod jsprovider;
+mod primitives;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -84,7 +95,7 @@ use napi::bindgen_prelude::Buffer;
 use napi::{Error, Result};
 use napi_derive::napi;
 
-use vfs_embed::{DiskProvider, LaunchOpts, Provider as VfsProvider, RootId};
+use vfs_embed::{LaunchOpts, Provider as VfsProvider, RootId};
 
 // ---------------------------------------------------------------------------
 // Status codes → JS errors.
@@ -175,7 +186,7 @@ pub(crate) fn intern_provider(p: Arc<dyn VfsProvider>) -> Result<u32> {
     Ok((g.len() - 1) as u32)
 }
 
-fn lookup_provider(handle: u32) -> Result<Arc<dyn VfsProvider>> {
+pub(crate) fn lookup_provider(handle: u32) -> Result<Arc<dyn VfsProvider>> {
     let g = providers()
         .read()
         .map_err(|_| Error::from_reason("provider registry poisoned"))?;
@@ -232,6 +243,58 @@ impl Provider {
     pub fn stats(&self) -> Option<jsprovider::ProviderStats> {
         jsprovider::stats_for(self.handle)
     }
+
+    /// What this provider **declares** it can do — the same `Capabilities` the
+    /// director reads before it issues a single call.
+    ///
+    /// This is how spec §6's capability-recomputation rules become checkable
+    /// from a host rather than by reading Rust: `readonly(rw).access` is
+    /// `'read'`, `seekable(seq).access` is `'read'`, `cached(slow).slow` is
+    /// `false`, `overlay(ro, rw).access` is `'readwrite'`. Declared, not probed
+    /// — a provider that lies here is caught by `assertConformance`, not by
+    /// this call.
+    #[napi]
+    pub fn capabilities(&self) -> Result<primitives::ProviderCapabilities> {
+        primitives::capabilities_of(self.handle)
+    }
+
+    /// Which primitive made this handle: `'disk'`, `'memory'`, `'js'`,
+    /// `'readonly'`, `'seekable'`, `'cached'`, `'layered'`, `'overlay'`,
+    /// `'router'`. Diagnostics — a composed graph is a tree of integers, and
+    /// this is what makes one printable.
+    #[napi(getter)]
+    pub fn kind(&self) -> Option<String> {
+        primitives::kind_of(self.handle).map(|k| k.to_string())
+    }
+
+    /// The handles this provider was composed from, in argument order. Empty
+    /// for a leaf.
+    #[napi(getter)]
+    pub fn children(&self) -> Vec<u32> {
+        primitives::children(self.handle)
+    }
+    /// Every JS-authored provider reachable through this composition.
+    ///
+    /// **This is the list `releaseProvider` has to be called on**, and the
+    /// reason it exists is a trap task 7 left behind: a live threadsafe function
+    /// keeps its loop alive, so a worker never exits until its provider is
+    /// released — and wrapping that provider in `cached(seekable(...))` produces
+    /// new handles, none of which is the one that has to be released.
+    /// `releaseProvider(composed.handle)` correctly refuses, and this is how a
+    /// host finds what to call it with instead. For a bare JS provider it is
+    /// `[this.handle]`; for a graph of Rust primitives it is `[]`.
+    #[napi]
+    pub fn js_leaves(&self) -> Vec<u32> {
+        primitives::js_leaves(self.handle)
+    }
+
+    /// Block-cache counters, for a handle `cached()` produced; `null` for
+    /// anything else. Without this, "I put a cache in the graph" is not
+    /// something a host can verify.
+    #[napi]
+    pub fn cache_stats(&self) -> Option<primitives::ProviderCacheStats> {
+        primitives::cache_stats_for(self.handle)
+    }
 }
 
 /// A read-write provider over a real directory (spec §6's `disk` primitive).
@@ -252,9 +315,7 @@ pub fn disk(path: String) -> Result<Provider> {
              an error, so it is refused here instead."
         )));
     }
-    Ok(Provider {
-        handle: intern_provider(Arc::new(DiskProvider::new(&p)))?,
-    })
+    primitives::disk_provider(&p)
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +356,15 @@ pub struct RootInfo {
     /// director addresses roots by id.
     pub name: String,
     pub path: String,
+}
+
+/// One entry from `session.readdir()`. `kind` is one of `kinds()`.
+#[napi(object)]
+pub struct DirEntryInfo {
+    pub name: String,
+    pub kind: u32,
+    pub size: f64,
+    pub mtime: f64,
 }
 
 /// One refused write, as `session.rejectedWrites()` reports it.
@@ -536,9 +606,46 @@ impl Session {
     /// Accumulates: later mounts win on a path both serve. Each call
     /// recomposes that root whole, because the director holds exactly one
     /// provider per root.
+    ///
+    /// ## Two checks from spec §6's "flags advise; they do not mutate the graph"
+    ///
+    /// * A **`SeqRead`** provider is refused. §6 calls this a hard error, and it
+    ///   is: the director reads with `read_at(handle, offset, buf)`, which a
+    ///   forward-only provider answers `ST_NOT_SUPPORTED` to — so the mount
+    ///   would succeed and every read through it would fail. `seekable()` is the
+    ///   fix and the message says so. `vfs_embed::Session::mount_at` refuses it
+    ///   too, for every host; this is only where the sentence gets written.
+    /// * A **`slow`** provider with nothing caching it gets a warning naming it.
+    ///   Advisory, not fatal, exactly as §6 specifies — and exact rather than
+    ///   heuristic, because `cached()` clears `slow`, so the flag surviving to
+    ///   here *means* no cache is above this provider.
     #[napi]
     pub fn mount(&self, root: u32, provider: &Provider, prefix: Option<String>) -> Result<()> {
         let backend = lookup_provider(provider.handle)?;
+        let caps = backend.capabilities();
+        if caps.access == vfs_embed::Access::SeqRead {
+            return Err(Error::from_reason(format!(
+                "mount: provider {} declares seqread access, which cannot be \
+                 mounted. The director issues positional reads (read_at), and a \
+                 forward-only provider answers ST_NOT_SUPPORTED to every one of \
+                 them — so the mount would succeed and every read would fail, \
+                 inside an injected process. Wrap it: seekable(provider). \
+                 (spec §6, \"SeqRead provider not wrapped in seekable — hard \
+                 error\")",
+                provider.handle
+            )));
+        }
+        if caps.slow {
+            eprintln!(
+                "aethervfs: mounting provider {} on root {root}, which declares \
+                 slow=true and has no cache above it — `cached()` clears the flag, \
+                 so this is exact and not a guess. Every read reaches the source. \
+                 Wrap it: cached(provider, {{ ramBytes }}). (spec §6, \"slow \
+                 provider with no cached above it — warning at mount time, naming \
+                 the provider\")",
+                provider.handle
+            );
+        }
         self.get()?
             .mount_at(RootId(root), prefix.as_deref().unwrap_or(""), backend)
             .map_err(|st| status_err("mount", st))
@@ -571,6 +678,37 @@ impl Session {
             .read_file(&vpath)
             .map(Buffer::from)
             .map_err(|st| status_err(&format!("readFile({vpath:?})"), st))
+    }
+
+    /// List a directory in the graph, host-side.
+    ///
+    /// The companion to [`Session::read_file`], and it exists because two of
+    /// spec §6's rules are statements about `readdir` and nothing else can check
+    /// them from a host: `layered` **unions** its children's listings with
+    /// top-wins per name, and `router`'s listing is **single-dispatch** rather
+    /// than the union §6 specifies — so a file served by a route is readable by
+    /// name and absent from its own directory. A host that cannot list its graph
+    /// cannot tell those apart, and the second one is a silent wrong answer.
+    ///
+    /// Drives the graph on the calling thread, exactly as `readFile` does, so
+    /// the deadlock guard applies here too.
+    #[napi]
+    pub fn readdir(&self, vpath: String, root: Option<u32>) -> Result<Vec<DirEntryInfo>> {
+        jsprovider::clear_diagnosis();
+        let entries = self
+            .get()?
+            .kernel()
+            .readdir(RootId(root.unwrap_or(0)), &vpath)
+            .map_err(|st| status_err(&format!("readdir({vpath:?})"), st))?;
+        Ok(entries
+            .into_iter()
+            .map(|e| DirEntryInfo {
+                name: e.name,
+                kind: u32::from(e.stat.kind),
+                size: e.stat.size as f64,
+                mtime: e.stat.mtime as f64,
+            })
+            .collect())
     }
 
     /// Point this session at a specific shim (and optionally payload) DLL, for

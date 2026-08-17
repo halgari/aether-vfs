@@ -8,14 +8,18 @@ mod inline;
 mod layered;
 mod memory;
 mod overlay;
+mod readonly;
 mod router;
+mod seekable;
 mod subdir;
 
 pub use inline::InlineProvider;
 pub use layered::LayeredProvider;
 pub use memory::MemoryProvider;
 pub use overlay::OverlayProvider;
+pub use readonly::ReadOnlyProvider;
 pub use router::{Route, RouterProvider};
+pub use seekable::SeekableProvider;
 pub use subdir::SubdirProvider;
 
 use std::sync::Arc;
