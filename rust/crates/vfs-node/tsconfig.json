@@ -1,0 +1,56 @@
+{
+  // Task 1 of the TypeScript migration stands the harness up *before* anything is
+  // converted, so this config's job today is narrow: typecheck the TypeScript
+  // that is already meant to be typechecked — the hand-written `index.d.ts` and
+  // the vitest harness — and give `tsc` a home for tasks 2 and 3 to grow into.
+  //
+  // ## Why `include` is not the whole tree yet
+  //
+  // `pnpm typecheck` over `test/**/*.cts` and `examples/**/*.cts` reports **135
+  // errors**, and they are not findings — they are the shape of the code being
+  // migrated away from:
+  //
+  //   * **134 x TS2775** "Assertions require every name in the call target to be
+  //     declared with an explicit type annotation." Every one comes from
+  //     `const assert = require('node:assert') as typeof import('node:assert')`.
+  //     `assert.ok` is an assertion function, and TypeScript requires the *name*
+  //     it is called on to carry an explicit type annotation — an `as` cast is not
+  //     one. The suites use that idiom because they run under node's type
+  //     stripping in CommonJS, where `import` would not survive. Task 3 replaces
+  //     it with a real `import`, and all 134 go away without a single assertion
+  //     changing.
+  //   * **1 x TS2322** at `examples/spec-8-example.cts:113` — an arrow annotated
+  //     `: void` whose concise body returns `process.stdout.write`'s `boolean`.
+  //     Cosmetic; the code is correct. Checked, because a lone error among 134 of
+  //     one kind is where a real bug would hide.
+  //
+  // Widening `include` now would mean committing a red gate or loosening `strict`
+  // to hide it. **Task 3 widens this to `test/**` and `examples/**`** once those
+  // files are converted, and that widening is the check that the conversion landed.
+  "compilerOptions": {
+    // `nodenext` is what understands `.cts`/`.mts` and the rule that a `.js`
+    // specifier resolves through a `.d.ts` — `import type … from '../index.js'`
+    // finds `index.d.ts`, and there is no `index.js`.
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2023",
+    "lib": ["es2023"],
+    "types": ["node"],
+
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+
+    // The `.cjs` half of the tree is untyped on purpose until tasks 2 and 3.
+    "allowJs": false,
+    "checkJs": false,
+
+    // Nothing here emits yet; `pnpm build` is still four cargo calls and four file
+    // copies. Task 2 turns this off, when `index.d.ts` becomes a build output.
+    "noEmit": true
+  },
+  "include": ["index.d.ts", "vitest.config.ts", "vitest-setup.ts"],
+  "exclude": ["node_modules", "fixtures"]
+}

@@ -8,6 +8,8 @@ vfs_payload.dll
 # The stand-in executable the demo launches. Built, not authored.
 fixtures/
 
-# No npm dependencies today, so there is nothing to lock — but if one is ever
-# added, node_modules must not be committed.
+# The package has npm **devDependencies** as of the TypeScript migration —
+# vitest, typescript and @types/node — and no runtime dependencies, which is the
+# part that was always deliberate. `pnpm-lock.yaml` is committed (it is the point
+# of `--frozen-lockfile` in CI); `node_modules/` is not.
 node_modules/

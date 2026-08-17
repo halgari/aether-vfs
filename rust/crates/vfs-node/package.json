@@ -30,7 +30,14 @@
     "demo:provider": "node examples/js-provider.cjs",
     "demo:spec8": "node examples/spec-8-example.cts",
     "check:types": "node scripts/check-types.cjs",
-    "test:unit": "node --test test/provider.test.cjs test/panic.test.cjs test/dispose.test.cjs test/primitives.test.cts test/conformance.test.cts",
-    "test": "node scripts/build.cjs && node scripts/check-types.cjs && node examples/vertical-slice.cjs && node examples/js-provider.cjs && node examples/spec-8-example.cts && node --test test/provider.test.cjs test/panic.test.cjs test/dispose.test.cjs test/primitives.test.cts test/conformance.test.cts"
+    "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run",
+    "test:watch": "vitest",
+    "test": "node scripts/build.cjs && node scripts/check-types.cjs && tsc --noEmit && node examples/vertical-slice.cjs && node examples/js-provider.cjs && node examples/spec-8-example.cts && vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
   }
 }

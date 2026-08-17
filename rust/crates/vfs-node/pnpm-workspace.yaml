@@ -1,0 +1,16 @@
+# pnpm 11 reads its settings from here, not from a `pnpm` field in package.json
+# (it warns about and ignores that field). This file exists for one setting.
+#
+# esbuild's postinstall is the only lifecycle script in the dependency tree, and
+# pnpm blocks lifecycle scripts by default — a good default, but an undecided one
+# makes `pnpm install` exit non-zero, which then makes every `pnpm exec` and
+# `pnpm test` fail on its up-to-date check before vitest is ever reached. So the
+# script has to be either allowed or explicitly denied. Allowed is the honest
+# answer: vite's TypeScript transform *is* esbuild. The script copies the
+# platform binary out of the `@esbuild/win32-x64` optional dependency pnpm has
+# already installed and integrity-checked; it downloads nothing.
+#
+# Anything else that later asks to run a build script fails loudly here rather
+# than being waved through, which is the point of the allowlist.
+allowBuilds:
+  esbuild: true
