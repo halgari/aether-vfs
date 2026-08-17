@@ -1,7 +1,17 @@
 //! Launch Skyrim (via SKSE) with game/mod content served from Stored ZIP layers.
 //!
 //! Host workflow: discover zips → `Session` mount → serve IPC → launch (I/O remapped).
-//! No full-layer parse for PE preload; the launch image is staged from the VFS.
+//!
+//! **The launch image is not staged here, despite what this file used to say.**
+//! It hands `Session::launch` the PE's *vpath*, and `Session::launch` resolves
+//! a relative image on real disk under the managed root — so this works only
+//! when `--root` is a directory that already holds the exe, and not with the
+//! default root (`<layers>/runtime`, created empty and payload-wiped). Reading
+//! the image out of the provider graph, writing it plus its PE import closure
+//! to disk and mounting that back under the real content is
+//! `vfs-directord`'s `SessionRegistry::launch`; it has never been wired into
+//! this tool. `Session::launch` now says so by name instead of failing in
+//! `CreateProcess`.
 
 use std::path::{Path, PathBuf};
 
@@ -352,7 +362,7 @@ fn main() {
         match session.kernel().getattr(RootId::DEFAULT, &pe_vpath) {
             Ok(Some(st)) if st.kind == KIND_FILE && st.size > 512 => {
                 eprintln!(
-                    "  PE {pe_vpath} present in VFS ({} bytes) — staged at launch",
+                    "  PE {pe_vpath} present in VFS ({} bytes) — must also be on disk                      under the managed root; see this file's header on staging",
                     st.size
                 );
             }
@@ -433,7 +443,7 @@ fn main() {
     let detach = !args.wait;
     eprintln!("launching {pe_vpath} under {} …", args.root.display());
     eprintln!(
-        "  mode: {} + staged from VFS + remapped I/O",
+        "  mode: {} + remapped I/O (image read from disk, NOT staged from the VFS)",
         if detach { "detach" } else { "wait" }
     );
 

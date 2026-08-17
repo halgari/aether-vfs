@@ -28,8 +28,13 @@
 //!     .map_err(|st| format!("write layer: status {st}"))?;
 //!
 //! session.serve()?;
+//! // Absolute, and it must already be on disk: `CreateProcess` reads the
+//! // image before any hook of ours exists in the child, so an exe that only
+//! // the provider graph holds has to be staged out first. See
+//! // [`Session::launch`] — a relative name is resolved on real disk under the
+//! // managed root, never through the graph.
 //! session.launch(&LaunchOpts {
-//!     image: "SkyrimSE.exe".into(),
+//!     image: r"C:\game\SkyrimSE.exe".into(),
 //!     ..Default::default()
 //! })?;
 //! # Ok(())
@@ -59,6 +64,32 @@
 //! [`RootSources`] is the incremental form of the same rule, for a host that
 //! learns about its sources one at a time (a config being applied, an RPC
 //! stream, a UI) and must rebuild a root's mount list from scratch each time.
+//!
+//! ## What a host still has to build for itself
+//!
+//! Written down because the alternative is each new binding rediscovering it.
+//!
+//! * **Launching an image that is VFS content.** [`Session::launch`] takes a
+//!   path on disk; `CreateProcess` reads the image before any hook of ours
+//!   exists in the child. An exe that only the provider graph holds must be
+//!   staged out with its PE import closure, and the staging directory mounted
+//!   back into the graph *underneath* the real content so the same bytes stay
+//!   answerable at their vpath. [`stage`] does the writing; the whole sequence
+//!   exists once, in `vfs-directord`'s `SessionRegistry::launch`, and moving it
+//!   here needs `Session` to own per-root source bookkeeping (so the staged
+//!   mount survives a later rebuild) and the resulting `StagedDir` (so its
+//!   cleanup cannot race the child). `Session::launch` refuses the case by
+//!   name rather than letting it end in `CreateProcess`.
+//! * **A `CachingProvider` per source, and never over the write layer** — see
+//!   [`Session::set_write_layer_at`] for why the exemption is not optional.
+//! * **Session directories that do not inherit a previous run's litter** — see
+//!   [`Session::set_overlay`].
+//! * **Building a provider from a name** (`"disk"`, `"zip"`, `"remote"`)
+//!   rather than calling its constructor. `vfs-source` does that and reaches
+//!   the gRPC `remote` provider, which is not in the catalog below; it also
+//!   pulls tonic, prost and a vendored `protoc`, which is why it is not a
+//!   dependency here. Spec §6's `register_provider` is the intended answer and
+//!   does not exist yet.
 
 #![deny(unsafe_code)]
 
@@ -126,6 +157,23 @@ pub fn rejected_writes() -> Vec<(String, u64)> {
 /// [`rejected_writes`]: useful before a probe, and used by tests.
 pub fn reset_rejected_writes() {
     vfs_director::io_stats::reset_rejected_writes()
+}
+
+/// Opens that reached the director, as `(succeeded, failed)`.
+///
+/// The director-side half of the open reconciliation this project measures
+/// with: the injected shim classifies every under-root open by which path it
+/// took, and these are the ones that actually arrived here. A host comparing
+/// the two numbers is asking "did anything under the managed root get served
+/// by real disk behind my back", which is the question a VFS has to be able to
+/// answer about itself. `vfs-directord` reports it on its `Stats` RPC; it is
+/// here because a host without a control plane needs the same number and had
+/// to name the kernel crate to get it.
+///
+/// **Process-wide**, with the same caveat as [`rejected_writes`]: no session or
+/// root dimension.
+pub fn open_totals() -> (u64, u64) {
+    vfs_director::io_stats::open_totals()
 }
 
 #[cfg(test)]

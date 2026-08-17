@@ -15,7 +15,7 @@ use vfs_control::pb::{
     TeardownReq,
 };
 use vfs_control::SourceSpec;
-use vfs_embed::LaunchOpts;
+use vfs_embed::{open_totals, rejected_writes, LaunchOpts};
 use vfs_source::build_provider;
 
 use crate::registry::SessionRegistry;
@@ -193,10 +193,10 @@ impl Director for DirectorService {
         // Director-side half of the shim/director open-count reconciliation
         // (aether-vfs measurement gate): the shim classifies every under-root
         // open by which path it took; these are the opens that actually
-        // arrived here. `io_stats` is process-wide, not per-session, same as
-        // the cache metrics above.
-        let (opens_ok, opens_err) = vfs_director::io_stats::open_totals();
-        let rejected_writes = vfs_director::io_stats::rejected_writes()
+        // arrived here. Both counters are process-wide, not per-session, same
+        // as the cache metrics above — see `vfs_embed::open_totals`.
+        let (opens_ok, opens_err) = open_totals();
+        let rejected_writes = rejected_writes()
             .into_iter()
             .map(|(path, count)| RejectedWrite { path, count })
             .collect();

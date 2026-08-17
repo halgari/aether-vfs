@@ -5,11 +5,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use vfs_cache::{BlockCache, CacheConfig, CachingProvider};
-use vfs_compose::stack_layers;
-use vfs_director::stage::{ImageSource, StagedDir};
-use vfs_embed::{DiskProvider, LaunchOpts, Provider, RootSources, Session};
-use vfs_protocol::RootId;
+// Only `vfs_embed`, for everything about a session, its graph and its launch:
+// this daemon is a *host* over the embeddable API (design spec §8, "one
+// session-lifecycle implementation, two callers"), and a host that reaches
+// into the engine is evidence the seam is in the wrong place. The cache and
+// composition primitives below are re-exports from `vfs-embed`'s own catalog,
+// not a second route to the same crates. `daemon_names_only_the_embed_api`
+// (bottom of this file) keeps it that way.
+use vfs_embed::stage::{ImageSource, StagedDir};
+use vfs_embed::{
+    stack_layers, BlockCache, CacheConfig, CachingProvider, DiskProvider, LaunchOpts, Provider,
+    RootId, RootSources, Session,
+};
 
 /// Layer for the disk provider mounted over a staged launch directory (see
 /// [`SessionRegistry::stage_launch`]).
@@ -24,7 +31,7 @@ use vfs_protocol::RootId;
 const STAGING_LAYER: i32 = i32::MIN;
 
 /// Arguments for [`SessionRegistry::stage_launch`], bundled to stay under
-/// clippy's argument-count limit — see [`vfs_director::stage::stage_launch_with`]
+/// clippy's argument-count limit — see [`vfs_embed::stage::stage_launch_with`]
 /// for what each field means.
 pub struct StageLaunchOpts<'a> {
     pub exe_vpath: &'a str,
@@ -67,7 +74,7 @@ pub struct StageLaunchOpts<'a> {
 /// [`Session`]/`Director` — that is [`SessionRegistry::add_source`]'s job,
 /// called once per source over the RPC path (`apply_session_config`). The
 /// providers this function returns are used directly by its own tests,
-/// addressed via [`vfs_protocol::VPath`], not through a session's ring/IPC
+/// addressed via [`vfs_embed::VPath`], not through a session's ring/IPC
 /// path.
 pub fn build_provider_graph(
     cfg: &vfs_control::SessionConfig,
@@ -424,7 +431,7 @@ impl SessionRegistry {
         source: &dyn ImageSource,
         opts: &StageLaunchOpts,
     ) -> Result<StagedDir, String> {
-        let staged = vfs_director::stage::stage_launch_with(
+        let staged = vfs_embed::stage::stage_launch_with(
             source,
             opts.exe_vpath,
             opts.also,
@@ -521,7 +528,7 @@ impl SessionRegistry {
         }
 
         /// Reads whole files out of a session's own composed provider graph,
-        /// for [`vfs_director::stage`]. Mirrors `skyrim-live.rs`'s
+        /// for [`vfs_embed::stage`]. Mirrors `skyrim-live.rs`'s
         /// `KernelSource` — kept private here since `stage.rs` deliberately
         /// stays independent of how content is served.
         struct KernelSource(Arc<vfs_embed::Director>);
@@ -597,12 +604,62 @@ pub struct SessionSummary {
     pub root: PathBuf,
 }
 
+/// Spec §8: "one session-lifecycle implementation, two callers." This is the
+/// first caller, and an API that only its author calls has not been shown to
+/// be an API — so the claim is asserted rather than described.
+///
+/// Every engine crate below is fully re-exported by `vfs-embed`; naming one
+/// directly is not a compile error and never will be (they are still real
+/// dependencies of this crate, because `skyrim-live.rs` — stage 5's problem —
+/// lives in it). So the only way "the daemon goes through the embed API" stays
+/// true is to read the source text back, exactly as
+/// `vfs-embed/tests/embed_api.rs` does from the other side of the seam.
+///
+/// `vfs-control` and `vfs-source` are deliberately **not** on the list. They
+/// are this host's config format and its `SourceSpec` → provider factory —
+/// properties of *this* host, kept out of `vfs-embed` on purpose so a language
+/// binding does not link tonic, prost and a vendored `protoc`.
+///
+/// If this test fails, the fix is almost never to add a needle exception. It
+/// is either to route the call through `vfs_embed`, or — if `vfs_embed` cannot
+/// express it — to add it there, because whatever the daemon just needed the
+/// Node and Python bindings will need next.
+#[cfg(test)]
+#[test]
+fn daemon_names_only_the_embed_api() {
+    // Assembled at compile time so that spelling them here does not trip the
+    // check when this file is one of the ones being read.
+    let needles = [
+        concat!("vfs_", "director", "::"),
+        concat!("vfs_", "cache", "::"),
+        concat!("vfs_", "compose", "::"),
+        concat!("vfs_", "protocol", "::"),
+        concat!("vfs_", "provider", "::"),
+        concat!("vfs_", "zip", "::"),
+    ];
+    for (name, src) in [
+        ("registry.rs", include_str!("registry.rs")),
+        ("service.rs", include_str!("service.rs")),
+        ("lib.rs", include_str!("lib.rs")),
+        ("main.rs", include_str!("main.rs")),
+    ] {
+        for needle in needles {
+            assert!(
+                !src.contains(needle),
+                "vfs-directord/src/{name} names `{needle}` — the daemon is a host over \
+                 vfs-embed and must reach the engine only through it. Route it through \
+                 `vfs_embed`, or add the missing piece to vfs-embed; do not widen this list."
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod root_graph_tests {
     use super::*;
     use vfs_control::{SessionConfig, SourceEntry, SourceSpec};
     use vfs_embed::OPEN_READ;
-    use vfs_protocol::VPath;
+    use vfs_embed::VPath;
 
     fn read_whole(p: &Arc<dyn Provider>, root: RootId, rel: &str) -> Vec<u8> {
         let (h, size, is_dir) = p.open(VPath::new(root, rel), OPEN_READ).unwrap();

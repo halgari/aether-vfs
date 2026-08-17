@@ -22,8 +22,16 @@ static LAUNCH_ENV_LOCK: Mutex<()> = Mutex::new(());
 /// Options for [`Session::launch`].
 #[derive(Clone, Debug)]
 pub struct LaunchOpts {
-    /// Absolute path to the image to launch — normally the staged EXE. A
-    /// relative name resolves under the managed root (fixtures / tools).
+    /// Path to the image to launch. **Absolute** in every real host: Windows
+    /// creates a process from a file on disk, so whatever is launched must
+    /// already exist there.
+    ///
+    /// A relative name is joined onto the managed root and looked up **on real
+    /// disk** — it is *not* resolved through the provider graph. That works for
+    /// a host whose root is a real game directory (fixtures, `vfs-launch`) and
+    /// fails for a host whose root is deliberately empty and whose exe is VFS
+    /// content. See [`Session::launch`] for what to do instead; the error it
+    /// returns says the same thing at the moment it bites.
     pub image: String,
     pub args: Vec<String>,
     /// Wait for process exit (false = detach; session must stay alive).
@@ -40,7 +48,14 @@ pub struct LaunchOpts {
 impl Default for LaunchOpts {
     fn default() -> Self {
         LaunchOpts {
-            image: "SkyrimSE.exe".into(),
+            // Deliberately empty rather than a plausible-looking game exe.
+            // This used to default to `"SkyrimSE.exe"`, which is both
+            // scenario-specific in a general API and the exact relative-image
+            // case that cannot work (see the field's doc): a host that wrote
+            // `..Default::default()` and forgot `image` got a launch attempt
+            // for a file nobody named. `launch` refuses an empty image by
+            // name instead.
+            image: String::new(),
             args: Vec::new(),
             wait: true,
             shim_dll: None,
@@ -151,6 +166,21 @@ impl Session {
         self.virtual_root = path.into();
     }
 
+    /// Where the injected shim's local write overlay lands on disk.
+    ///
+    /// [`Session::serve`] creates this directory; it does **not** empty it,
+    /// and nothing removes it when the process that owned it dies. A host that
+    /// derives the path from anything repeatable — a pid, a counter that
+    /// restarts at zero, a fixed name — will eventually hand a new session a
+    /// previous run's overlay.
+    ///
+    /// That is not housekeeping. "The overlay is empty afterwards" is how this
+    /// project detects a write that bypassed the director, so inherited
+    /// content fails that check with nothing having actually fallen through —
+    /// and, worse in the other direction, a real bypass gets dismissed as
+    /// leftovers. `vfs-directord`'s `SessionRegistry::create` clears its base
+    /// directory before every session for exactly this reason. A host picking
+    /// its own directories inherits the hazard along with the choice.
     pub fn set_overlay(&mut self, path: impl Into<PathBuf>) {
         self.overlay = path.into();
     }
@@ -180,9 +210,8 @@ impl Session {
         vfs_shim::overlay_layer_dir(&self.overlay, root)
     }
 
-    /// Declare a second (third, …) managed root: the host directory that
-    /// `RootId(id)` virtualizes. Root `0` is [`Session::set_root`] and cannot
-    /// be declared here.
+    /// Declare a managed root: the host directory that `RootId(id)`
+    /// virtualizes.
     ///
     /// This is the *shim-facing* half of a multi-root session and it is
     /// separate from mounting a provider on that root
@@ -194,11 +223,31 @@ impl Session {
     /// that root at all, so every path under it falls through to real disk —
     /// silently, which is why this is not optional plumbing.
     ///
+    /// **Root 0 is [`Session::set_root`]**, and declaring it here does exactly
+    /// that rather than being recorded separately. Root 0's host directory is
+    /// `virtual_root` — there is no second place to keep it — so a host that
+    /// walks its roots and declares all of them, id 0 included, gets the
+    /// meaning it asked for. It previously did not: the call was accepted,
+    /// stored in [`Session::declared_roots`], and then dropped on the way to
+    /// the environment the child inherits, so root 0 silently stayed wherever
+    /// `set_root` had left it. Accepting-then-discarding is the one behaviour
+    /// that cannot be right, and a fallible signature would force every host
+    /// to special-case the id that needs it least.
+    ///
+    /// (A *daemon* session is a different matter: there root 0 is a directory
+    /// the daemon created and already published to its client, so
+    /// `SessionRegistry::declare_root` refuses id 0 above this layer. That is
+    /// a policy of that host, not of embedding.)
+    ///
     /// Re-declaring an id replaces its path. Takes effect at the next
     /// [`Session::serve`] or [`Session::launch`], which is what publishes it
     /// into the environment the child inherits.
     pub fn declare_root(&mut self, id: u32, path: impl Into<PathBuf>) {
         let path = path.into();
+        if id == 0 {
+            self.virtual_root = path;
+            return;
+        }
         match self.extra_roots.iter_mut().find(|(r, _)| *r == id) {
             Some(slot) => slot.1 = path,
             None => self.extra_roots.push((id, path)),
@@ -214,10 +263,20 @@ impl Session {
     }
 
     /// The declared roots beyond root 0, as `apply_env_roots` wants them.
+    ///
+    /// No `id != 0` filter: [`Session::declare_root`] routes id 0 to
+    /// `virtual_root`, which `apply_env_roots` is handed separately, so
+    /// nothing here can be root 0. The filter that used to live here was the
+    /// mechanism by which a `declare_root(0, …)` was silently discarded —
+    /// dropping it keeps the invariant in one place, where it is enforced
+    /// rather than compensated for.
     fn extra_roots_env(&self) -> Vec<(u32, String)> {
+        debug_assert!(
+            !self.extra_roots.iter().any(|(id, _)| *id == 0),
+            "root 0 belongs in virtual_root, not extra_roots"
+        );
         self.extra_roots
             .iter()
-            .filter(|(id, _)| *id != 0)
             .map(|(id, p)| (*id, p.to_string_lossy().into_owned()))
             .collect()
     }
@@ -335,6 +394,15 @@ impl Session {
     /// The upper is validated **before** it is recorded, so a rejected layer
     /// leaves the session exactly as it was rather than parking an unusable
     /// provider that would make every later `mount` on this root fail too.
+    ///
+    /// **Never wrap the upper in a [`crate::CachingProvider`].** A host is
+    /// expected to put slow sources behind the block cache (spec §8b) and it
+    /// is natural to do that uniformly, in one loop, over everything it
+    /// mounts. The write layer is the one provider in the graph whose bytes
+    /// change underneath the director: a cached read of a file that was just
+    /// copied up serves the pre-write content, and the symptom is a game
+    /// reading back its own edit as the original. `vfs-directord` caches every
+    /// source and exempts the layer here for that reason.
     pub fn set_write_layer_at(&self, root: RootId, upper: Arc<dyn Provider>) -> Result<(), i32> {
         if upper.capabilities().access != Access::ReadWrite {
             return Err(bad_request());
@@ -521,13 +589,34 @@ impl Session {
     ///
     /// Requires [`serve`] first. On `wait: false`, keep this `Session` alive.
     ///
-    /// An absolute `image` is launched directly; a relative one resolves under
-    /// the virtual root.
+    /// An absolute `image` is launched directly; a relative one is joined onto
+    /// the virtual root and must exist **on real disk** there.
+    ///
+    /// ## Launching an image that is VFS content
+    ///
+    /// `CreateProcess` reads the image off the filesystem before any hook of
+    /// ours is installed in the child, so this method cannot launch bytes that
+    /// only the provider graph holds. If the exe is content — a game staged
+    /// out of archives into an empty managed root — it has to be written to
+    /// disk first, along with its PE import closure, and (so the same bytes
+    /// stay answerable at their vpath afterwards) mounted back into the graph
+    /// underneath the real content. [`crate::stage`] does the writing;
+    /// `vfs-directord`'s `SessionRegistry::launch` does the whole sequence and
+    /// is the only implementation of it today. **It is the largest thing a
+    /// non-daemon host still has to build for itself.**
+    ///
+    /// Rather than let that end in a bare `CreateProcess` failure, a relative
+    /// image the disk does not hold is refused here, and the message says
+    /// whether the graph holds it (i.e. whether staging is what is missing).
     pub fn launch(&self, opts: &LaunchOpts) -> Result<i32, String> {
         let ipc = self
             .ipc
             .as_ref()
             .ok_or_else(|| "serve() before launch()".to_string())?;
+
+        if opts.image.trim().is_empty() {
+            return Err("LaunchOpts.image is empty — name the image to launch".to_string());
+        }
 
         let root_s = self.virtual_root.to_string_lossy().into_owned();
         let image_path = Path::new(&opts.image);
@@ -536,6 +625,33 @@ impl Session {
         } else {
             self.virtual_root.join(&opts.image)
         };
+        if !image_path.is_absolute() && !target.is_file() {
+            let in_graph = self
+                .kernel
+                .getattr(RootId::DEFAULT, &opts.image)
+                .ok()
+                .flatten()
+                .is_some();
+            return Err(if in_graph {
+                format!(
+                    "launch: {:?} is served by this session's provider graph but does not exist \
+                     on disk at {} — CreateProcess reads the image before the shim is in the \
+                     child, so VFS content must be staged to disk (with its PE import closure) \
+                     and launched by that absolute path. See `vfs_embed::stage` and \
+                     `Session::launch`'s docs.",
+                    opts.image,
+                    target.display()
+                )
+            } else {
+                format!(
+                    "launch: {:?} resolves to {}, which does not exist — a relative \
+                     LaunchOpts.image is looked up on real disk under the managed root, not \
+                     through the provider graph",
+                    opts.image,
+                    target.display()
+                )
+            });
+        }
         let config_path = self.state_dir.join("shim.cfg");
         let ready_path = self.state_dir.join("ready.flag");
         let _ = std::fs::remove_file(&ready_path);

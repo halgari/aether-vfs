@@ -219,6 +219,99 @@ fn launch_opts_are_constructible_from_this_crate() {
     assert!(opts.env.is_empty());
 }
 
+/// Declaring root 0 must **do** something.
+///
+/// It used to be accepted, recorded in `declared_roots()`, and then dropped on
+/// the way to the environment the child inherits — the one outcome that cannot
+/// be right, and invisible to a host that had every reason to believe the call
+/// took. Root 0's host directory is the managed root, so that is where the
+/// declaration goes; a host walking its roots and declaring all of them gets
+/// what it asked for rather than a silent no-op on the first one.
+#[test]
+fn declaring_root_zero_repoints_the_managed_root_instead_of_being_discarded() {
+    let game = dir("declare0-game", &[]);
+    let docs = dir("declare0-docs", &[]);
+
+    let mut session = Session::new();
+    session.declare_root(0, &game);
+    assert_eq!(
+        session.virtual_root(),
+        game.as_path(),
+        "root 0 is the managed root; declaring it must move the managed root"
+    );
+    assert!(
+        session.declared_roots().is_empty(),
+        "root 0 has one home, not two — it must not also sit in the extra-roots list, \
+         which is the list that gets published to the child"
+    );
+
+    // Re-declaring replaces, and the other roots are unaffected either way.
+    session.declare_root(1, &docs);
+    session.declare_root(0, docs.join("elsewhere"));
+    assert_eq!(session.virtual_root(), docs.join("elsewhere").as_path());
+    assert_eq!(session.declared_roots(), [(1u32, docs.clone())]);
+}
+
+/// A relative `LaunchOpts.image` is resolved **on real disk** under the
+/// managed root — not through the provider graph. For the daemon that is
+/// invisible, because it stages the image out of the graph and rewrites
+/// `image` to the staged absolute path before it ever gets here. For any other
+/// host it is the first wall: the managed root of a fully virtualized session
+/// is deliberately empty, so `launch("SkyrimSE.exe")` finds nothing.
+///
+/// The gap itself is real and still open (staging lives in `vfs-directord`).
+/// What must not happen is losing it in a bare `CreateProcess` failure, so the
+/// refusal names the cause and distinguishes the two ways to arrive at it.
+#[test]
+fn launching_vfs_content_by_vpath_is_refused_with_the_reason() {
+    let content = dir("launch-content", &[("game.exe", b"MZ-not-really")]);
+    let base = dir("launch-session", &[]);
+
+    let mut session = Session::new();
+    session.set_root(base.join("root"));
+    session.set_overlay(base.join("overlay"));
+    session.set_state_dir(base.join("state"));
+    session
+        .mount("", Arc::new(DiskProvider::new(&content)))
+        .expect("mount content");
+    session.serve().expect("serve");
+
+    let err = session
+        .launch(&LaunchOpts {
+            image: "game.exe".into(),
+            wait: true,
+            ..Default::default()
+        })
+        .expect_err("an image only the graph holds cannot be CreateProcess'd");
+    assert!(
+        err.contains("game.exe") && err.contains("staged"),
+        "the refusal must name the image and say staging is what is missing: {err}"
+    );
+
+    // The other arrival: nothing has that path at all. Different diagnosis,
+    // and saying "stage it" there would send a host chasing the wrong thing.
+    let err = session
+        .launch(&LaunchOpts {
+            image: "nowhere.exe".into(),
+            wait: true,
+            ..Default::default()
+        })
+        .expect_err("a name nothing serves cannot launch either");
+    assert!(
+        err.contains("nowhere.exe") && !err.contains("staged"),
+        "a path nothing serves is a different failure from an unstaged one: {err}"
+    );
+
+    // And the default is no longer a plausible-looking game exe that would
+    // have taken this same doomed path without anyone naming it.
+    let err = session
+        .launch(&LaunchOpts::default())
+        .expect_err("a default-constructed LaunchOpts names no image");
+    assert!(err.contains("image is empty"), "{err}");
+
+    session.stop_serve();
+}
+
 /// The assertion this whole file exists to make, made literal.
 ///
 /// Everything above compiles against `vfs_embed` only — but "I did not import
