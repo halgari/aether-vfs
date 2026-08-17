@@ -391,18 +391,36 @@ impl Provider for RwMemFixture {
         Ok(())
     }
 
+    /// Refuses a directory that still holds something, with `ST_IS_DIR`.
+    ///
+    /// This is the fixture the suite tests *itself* against, and it had the
+    /// exact silent no-op the new non-empty-directory case exists to catch: it
+    /// dropped the `dirs` entry, answered `Ok(())`, and left the children in
+    /// `extra` — where `getattr` still found them. Adding the case turned this
+    /// red in seven places at once (`layered`, `router`, `subdir`, `seekable`
+    /// and both `overlay` conformance tests), every one of them a *correct*
+    /// wrapper faithfully forwarding a broken leaf's answer.
     fn remove(&self, p: VPath) -> Result<(), i32> {
-        let had_file = self.extra.lock().map_err(|_| map_io_err())?.remove(p.rel).is_some();
+        let mut extra = self.extra.lock().map_err(|_| map_io_err())?;
         let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
+        if extra.remove(p.rel).is_some() {
+            return Ok(());
+        }
+        let prefix = if p.rel.is_empty() { String::new() } else { format!("{}/", p.rel) };
+        // The read-only `base` tree counts as children too: `sub` is not empty
+        // just because nothing has been written into it.
+        if extra.keys().any(|k| k.starts_with(&prefix))
+            || self.base.files.keys().any(|k| k.starts_with(&prefix))
+            || dirs.iter().any(|d| d.starts_with(&prefix))
+        {
+            return Err(crate::is_dir());
+        }
         let before = dirs.len();
         dirs.retain(|d| d != p.rel);
-        let had_dir = dirs.len() != before;
-        drop(dirs);
-        if had_file || had_dir {
-            Ok(())
-        } else {
-            Err(not_found())
+        if dirs.len() != before {
+            return Ok(());
         }
+        Err(not_found())
     }
 
     fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
@@ -754,6 +772,8 @@ fn assert_writable(p: &Arc<dyn Provider>) {
     p.remove(d).expect("remove dir");
     assert!(p.getattr(d).expect("getattr removed dir").is_none(), "remove did not delete the dir");
 
+    assert_directory_ops_are_not_silent_no_ops(p);
+
     // set_attr accepts an mtime without error.
     let keep = VPath::at_default("w_attr.txt");
     let (h, _, _) = p.open(keep, OPEN_WRITE | OPEN_CREATE).expect("open create");
@@ -779,6 +799,139 @@ fn assert_writable(p: &Arc<dyn Provider>) {
         let got = read_all(p, h, st.size);
         p.close(h).expect("close");
         assert_eq!(got, *body, "write cases altered {rel}'s content");
+    }
+}
+
+/// `remove` and `rename` on a directory that is **not empty**.
+///
+/// Part of [`assert_writable`], so it runs only for `Access::ReadWrite` — a
+/// read-only provider is never asked to remove anything, and `immutable` cannot
+/// co-occur with `ReadWrite` ([`Capabilities::validate`] rejects the pair), so
+/// no immutable provider reaches here either.
+///
+/// The suite covered only the easy halves — remove of an *empty* directory,
+/// rename of a *file* — and two providers were quietly doing nothing in the
+/// cases it skipped: `remove("sub")` and `rename("sub", "sub2")` each returned
+/// `Ok(())` while the tree was completely unchanged.
+///
+/// **The status is deliberately not asserted, the observable outcome is.**
+/// Providers legitimately disagree on the code: `DiskProvider` inherits whatever
+/// `std::fs::remove_dir` gives (`ST_IO_ERROR`), `MemoryProvider` reports
+/// `ST_IS_DIR`. Pinning one number here would fail a provider that is behaving
+/// correctly. What no provider may do is claim success without having done the
+/// work, so each case accepts an error *or* a completed operation and checks the
+/// tree agrees with the answer.
+fn assert_directory_ops_are_not_silent_no_ops(p: &Arc<dyn Provider>) {
+    use crate::{OPEN_CREATE, OPEN_WRITE};
+
+    /// Make `dir` with one file in it, and confirm both are really there — a
+    /// provider that could not hold the child would otherwise pass the cases
+    /// below vacuously.
+    fn seed_dir(p: &Arc<dyn Provider>, dir: &str, body: &[u8]) {
+        let child = format!("{dir}/child.txt");
+        p.mkdir(VPath::at_default(dir))
+            .unwrap_or_else(|e| panic!("mkdir({dir}) failed with status {e}"));
+        let (h, _, _) = p
+            .open(VPath::at_default(&child), OPEN_WRITE | OPEN_CREATE)
+            .unwrap_or_else(|e| panic!("create {child} failed with status {e}"));
+        p.write_at(h, 0, body).unwrap_or_else(|e| panic!("write {child} failed with status {e}"));
+        p.flush(h).expect("flush");
+        p.close(h).expect("close");
+        assert!(
+            p.getattr(VPath::at_default(&child)).expect("getattr child").is_some(),
+            "{child} is missing right after being created — the non-empty-directory \
+             cases below would pass vacuously"
+        );
+        let st = p
+            .getattr(VPath::at_default(dir))
+            .expect("getattr dir")
+            .unwrap_or_else(|| panic!("{dir} is missing right after mkdir"));
+        assert_eq!(st.kind, KIND_DIR, "{dir} should be a directory");
+    }
+
+    let exists = |rel: &str| -> bool {
+        p.getattr(VPath::at_default(rel))
+            .unwrap_or_else(|e| panic!("getattr({rel}) failed with status {e}"))
+            .is_some()
+    };
+
+    // --- remove on a non-empty directory.
+    seed_dir(p, "w_full", b"child");
+    match p.remove(VPath::at_default("w_full")) {
+        Err(_) => {
+            // Refused, so nothing may have moved.
+            assert!(
+                exists("w_full/child.txt"),
+                "remove of a non-empty directory failed but took the child with it"
+            );
+            assert!(
+                exists("w_full"),
+                "remove of a non-empty directory failed but the directory is gone — \
+                 the failure and the effect disagree"
+            );
+        }
+        Ok(()) => {
+            // Accepted, so it must actually have removed the subtree. A
+            // provider that recurses is unusual but not wrong; one that
+            // reports success and leaves the tree standing is the defect.
+            assert!(
+                !exists("w_full/child.txt"),
+                "remove of a non-empty directory reported success while w_full/child.txt \
+                 survived — a silent no-op. Refuse it instead (ST_IS_DIR, or whatever \
+                 the backing store gives) or delete the subtree for real"
+            );
+            assert!(
+                !exists("w_full"),
+                "remove of a non-empty directory reported success while w_full itself \
+                 still resolves"
+            );
+        }
+    }
+
+    // --- rename of a non-empty directory. Fresh names: whichever way the case
+    // above went, this one starts from a known tree.
+    seed_dir(p, "w_ren", b"moved");
+    match p.rename(VPath::at_default("w_ren"), VPath::at_default("w_ren2")) {
+        Err(_) => {
+            assert!(
+                exists("w_ren") && exists("w_ren/child.txt"),
+                "directory rename failed but disturbed the source anyway"
+            );
+            assert!(
+                !exists("w_ren2/child.txt"),
+                "directory rename failed but left content at the destination"
+            );
+        }
+        Ok(()) => {
+            assert!(
+                !exists("w_ren/child.txt"),
+                "directory rename reported success while w_ren/child.txt is still at its \
+                 old path — a silent no-op. Move the subtree, or refuse the rename"
+            );
+            assert!(
+                !exists("w_ren"),
+                "directory rename reported success while the old directory name still \
+                 resolves"
+            );
+            let moved = VPath::at_default("w_ren2/child.txt");
+            let st = p
+                .getattr(moved)
+                .expect("getattr moved child")
+                .expect("directory rename succeeded but the child is not under the new name");
+            assert_eq!(st.size, 5, "directory rename changed the child's size");
+            let (h, size, _) = p.open(moved, crate::OPEN_READ).expect("open moved child");
+            let got = read_all(p, h, size);
+            p.close(h).expect("close");
+            assert_eq!(got, b"moved", "directory rename corrupted the child's content");
+        }
+    }
+
+    // Tidy up whichever names survived. Children first: a provider that
+    // (correctly) refuses to remove a non-empty directory needs the file gone
+    // before the directory will go.
+    for dir in ["w_full", "w_ren", "w_ren2"] {
+        let _ = p.remove(VPath::at_default(&format!("{dir}/child.txt")));
+        let _ = p.remove(VPath::at_default(dir));
     }
 }
 

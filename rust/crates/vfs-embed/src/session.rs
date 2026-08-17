@@ -181,12 +181,20 @@ impl ImageSource for KernelSource {
 /// that reads correctly and cannot be written to, which is how the daemon
 /// surface lost copy-on-write while the harness kept it (gate 4, Task 6b).
 ///
-/// `ST_BAD_REQUEST` if the upper is not `Access::ReadWrite`, or if a mount
-/// prefix does not normalize.
+/// `ST_BAD_REQUEST` if the upper is not `Access::ReadWrite`, if any mount
+/// declares `Access::SeqRead` (see [`reject_sequential`]), or if a mount prefix
+/// does not normalize.
 pub fn compose_root(
     mounts: Vec<(String, Arc<dyn Provider>)>,
     write_layer: Option<Arc<dyn Provider>>,
 ) -> Result<Arc<dyn Provider>, i32> {
+    // The funnel's own copy of the gate. `Session::mount_at` and
+    // `Session::set_root_mounts` both check before they record, so they never
+    // reach here with one; this catches the **third** route, which does not go
+    // through `Session` at all: `compose_root` is public and re-exported, and
+    // both `vfs-directord`'s `SessionRegistry::compose` and `skyrim-live` call
+    // it directly and hand the result to `Director::mount`.
+    reject_sequential(mounts.iter().map(|(_, p)| p))?;
     let graph: Arc<dyn Provider> = Arc::new(MountGraph::new(mounts)?);
     match write_layer {
         Some(upper) => Ok(Arc::new(
@@ -195,6 +203,34 @@ pub fn compose_root(
         )),
         None => Ok(graph),
     }
+}
+
+/// Refuse any provider declaring `Access::SeqRead`, with `ST_BAD_REQUEST`.
+///
+/// Spec §6's mount-time flag table calls an unwrapped `SeqRead` provider a
+/// **hard error**, and it is one: the director's read path is
+/// `read_at(handle, offset, buf)`, which a forward-only provider answers
+/// `ST_NOT_SUPPORTED` to. Such a mount composes cleanly and serves `getattr` and
+/// `readdir` correctly, then fails every actual read — inside an injected
+/// process, where the symptom is a game that will not load and the cause is
+/// nowhere near it. [`crate::SeekableProvider`] is what a caller wraps it in.
+///
+/// **One function because there is more than one way in, and the check has to
+/// mean the same thing through all of them.** It previously lived inline in
+/// `Session::mount_at` only, so `Session::set_root_mounts` accepted what
+/// `mount_at` refused — and `set_root_mounts` is the path
+/// `vfs-directord`'s `SessionRegistry::add_source` takes for *every* source, so
+/// the daemon had no gate at all. Callers: [`Session::mount_at`],
+/// [`Session::set_root_mounts`], and [`compose_root`].
+fn reject_sequential<'a>(
+    providers: impl IntoIterator<Item = &'a Arc<dyn Provider>>,
+) -> Result<(), i32> {
+    for p in providers {
+        if p.capabilities().access == vfs_provider::Access::SeqRead {
+            return Err(bad_request());
+        }
+    }
+    Ok(())
 }
 
 /// Everything one root composes into, before it becomes the single provider
@@ -451,15 +487,9 @@ impl Session {
     /// accumulated list and recomposes that root; every other root is
     /// untouched.
     ///
-    /// **`ST_BAD_REQUEST` for a provider declaring `Access::SeqRead`.** Spec
-    /// §6's flag table calls this a hard error and it is one: the director's
-    /// read path is `read_at(handle, offset, buf)`, which a forward-only
-    /// provider answers `ST_NOT_SUPPORTED` to. Mounting one produces a session
-    /// that composes cleanly, serves `getattr` and `readdir` correctly, and
-    /// fails every actual read — inside an injected process, where the symptom
-    /// is a game that will not load and the cause is nowhere near it.
-    /// [`crate::SeekableProvider`] is what a caller wraps it in, and it is a
-    /// Rust primitive precisely so no host has to solve this for itself.
+    /// **`ST_BAD_REQUEST` for a provider declaring `Access::SeqRead`** — see
+    /// [`reject_sequential`], which is the same gate
+    /// [`Session::set_root_mounts`] and [`compose_root`] apply.
     ///
     /// Checked here rather than in each host: the binding that has a friendly
     /// message for it is not the only surface that can reach `mount_at`.
@@ -469,9 +499,7 @@ impl Session {
         prefix: &str,
         backend: Arc<dyn Provider>,
     ) -> Result<(), i32> {
-        if backend.capabilities().access == vfs_provider::Access::SeqRead {
-            return Err(bad_request());
-        }
+        reject_sequential([&backend])?;
         {
             let mut roots = self.roots.lock().map_err(|_| map_io_err())?;
             self.claim(&mut roots, root)?
@@ -516,11 +544,22 @@ impl Session {
     /// replaces the root's provider with one that has no knowledge of the
     /// write layer, silently removing copy-on-write. Going through here keeps
     /// the two halves composed by the same code path [`Session::mount`] uses.
+    ///
+    /// **`ST_BAD_REQUEST` for any mount declaring `Access::SeqRead`**, the same
+    /// gate [`Session::mount_at`] applies — see [`reject_sequential`] for why
+    /// the two agreeing is not cosmetic.
+    ///
+    /// Validated **before** the list is recorded, for the reason
+    /// [`Session::set_write_layer_at`] gives: a rejected call must leave the
+    /// session exactly as it was. Recording first and letting
+    /// [`Session::recompose`] refuse would park a list that cannot compose,
+    /// making every later `mount_at` on this root fail too.
     pub fn set_root_mounts(
         &self,
         root: RootId,
         mounts: crate::RootMounts,
     ) -> Result<(), i32> {
+        reject_sequential(mounts.iter().map(|(_, p)| p))?;
         {
             let mut roots = self.roots.lock().map_err(|_| map_io_err())?;
             self.claim(&mut roots, root)?.mounts = mounts;

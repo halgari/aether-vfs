@@ -257,6 +257,51 @@ mod tests {
         assert_eq!(s.read_file("a.txt").unwrap(), b"hello");
     }
 
+    /// The same hard error through the **other** mount entry point.
+    ///
+    /// `mount_at` checked this and `set_root_mounts` did not, so the gate did
+    /// not exist for the surface that actually matters: `vfs-directord`'s
+    /// `SessionRegistry::add_source` rebuilds a root's list and installs it with
+    /// `set_root_mounts` on *every* source, so in the daemon a `SeqRead`
+    /// provider mounted cleanly and failed every read instead. Two entry points,
+    /// one contract.
+    #[test]
+    fn set_root_mounts_refuses_a_sequential_provider_too() {
+        let seq: Arc<dyn Provider> = Arc::new(vfs_provider::conformance::SeqFixture::new());
+        let s = Session::new();
+        assert_eq!(
+            s.set_root_mounts(RootId(0), vec![(String::new(), Arc::clone(&seq))]),
+            Err(ST_BAD_REQUEST),
+            "set_root_mounts must refuse what mount_at refuses"
+        );
+        // Refused *before* it was recorded, so the root is still usable — the
+        // rejected list must not be parked where every later mount inherits it.
+        let wrapped: Arc<dyn Provider> = Arc::new(SeekableProvider::new(Arc::clone(&seq)));
+        s.set_root_mounts(RootId(0), vec![(String::new(), wrapped)])
+            .expect("seekable(seq) installs through set_root_mounts");
+        assert_eq!(s.read_file("a.txt").unwrap(), b"hello");
+    }
+
+    /// The third route into a root's provider, and the reason the check lives in
+    /// `compose_root` as well as in the two `Session` methods: `compose_root` is
+    /// public, and `skyrim-live` and `SessionRegistry::compose` both call it
+    /// directly and hand the result to `Director::mount`, never touching
+    /// `mount_at` or `set_root_mounts`.
+    #[test]
+    fn compose_root_refuses_a_sequential_mount() {
+        let seq: Arc<dyn Provider> = Arc::new(vfs_provider::conformance::SeqFixture::new());
+        assert_eq!(
+            compose_root(vec![(String::new(), Arc::clone(&seq))], None).err(),
+            Some(ST_BAD_REQUEST),
+            "composing a SeqRead mount must be refused at the funnel too"
+        );
+        let wrapped: Arc<dyn Provider> = Arc::new(SeekableProvider::new(seq));
+        assert!(
+            compose_root(vec![(String::new(), wrapped)], None).is_ok(),
+            "seekable(seq) must still compose"
+        );
+    }
+
     /// `readonly` is what makes spec §7's discovery workflow reachable at all:
     /// `DiskProvider` is `ReadWrite`, so a graph built from `disk` alone can
     /// never refuse a write and `rejected_writes()` can never be non-empty.

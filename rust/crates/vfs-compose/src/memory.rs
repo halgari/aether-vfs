@@ -40,12 +40,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use vfs_provider::{
-    bad_fh, bad_request, map_io_err, not_a_dir, not_found, Access, Capabilities, DirEntry, Handle,
-    Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC,
+    bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, Access, Capabilities,
+    DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_EXCL,
+    OPEN_TRUNC,
 };
 
 fn normalize(path: &str) -> String {
     path.replace('\\', "/").trim_matches('/').to_string()
+}
+
+/// The `"path/"` string a child key must start with, or `""` for the provider
+/// root (whose children carry no prefix at all). The same convention `readdir`
+/// uses, kept in one place so "what lives under this directory" cannot mean two
+/// different things in two methods.
+fn child_prefix(path: &str) -> String {
+    if path.is_empty() {
+        String::new()
+    } else {
+        format!("{path}/")
+    }
 }
 
 /// Directory-ness of `path` given the current files and explicitly-created
@@ -255,37 +268,119 @@ impl Provider for MemoryProvider {
         Ok(())
     }
 
+    /// Remove one file, or one **empty** directory.
+    ///
+    /// `ST_IS_DIR` for a directory that still holds anything, which is the
+    /// POSIX-shaped answer this provider can actually deliver. It previously
+    /// dropped the `dirs` entry and returned `Ok(())`, which changed nothing a
+    /// caller could observe: the children remained, and because a child's path
+    /// *implies* its parent ([`stat_of`]), `getattr` went on reporting the
+    /// directory too. Reporting success for an operation that did nothing is
+    /// worse than refusing it — a host has no way to notice.
+    ///
+    /// `ST_IS_DIR` rather than a new `ST_NOT_EMPTY`: the shim already translates
+    /// it (`delete_status_for`, `vfs-shim/src/hook.rs`) to
+    /// `STATUS_FILE_IS_A_DIRECTORY`, which `RtlNtStatusToDosError` folds to the
+    /// `ERROR_ACCESS_DENIED` a real `DeleteFileW` returns for a directory. A
+    /// status appended at `-11` would land in that function's catch-all and cross
+    /// the process boundary as `STATUS_UNSUCCESSFUL` instead — strictly less
+    /// information, for a new number every host would have to learn.
     fn remove(&self, p: VPath) -> Result<(), i32> {
         let path = normalize(p.rel);
-        let had_file = self.files.lock().map_err(|_| map_io_err())?.remove(&path).is_some();
-        let had_dir = self.dirs.lock().map_err(|_| map_io_err())?.remove(&path);
-        if had_file || had_dir {
-            Ok(())
-        } else {
-            Err(not_found())
+        // files before dirs, the order every method here takes them in.
+        let mut files = self.files.lock().map_err(|_| map_io_err())?;
+        let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
+
+        if files.remove(&path).is_some() {
+            return Ok(());
         }
+        let prefix = child_prefix(&path);
+        if files.keys().any(|k| k.starts_with(&prefix)) || dirs.iter().any(|d| d.starts_with(&prefix))
+        {
+            return Err(is_dir());
+        }
+        if dirs.remove(&path) {
+            return Ok(());
+        }
+        Err(not_found())
     }
 
+    /// Rename a file, or a directory **with everything under it**.
+    ///
+    /// The directory case used to move only the `dirs` entry and report
+    /// `Ok(())`, so a rename of a directory holding files moved nothing at all —
+    /// and left the old name still resolving, since the unmoved children imply
+    /// it. Every key under the subtree is rewritten now.
+    ///
+    /// Two refusals guard the rewrite, because both alternatives are silent
+    /// corruption rather than an error:
+    ///
+    /// * `ST_EXISTS` if a directory rename's destination already holds
+    ///   something. There is no correct way to combine two subtrees here —
+    ///   merging them invents content at paths the caller never wrote, and
+    ///   clobbering discards content it never asked to delete.
+    /// * `ST_BAD_REQUEST` for a move of a directory into its own subtree
+    ///   (`sub` → `sub/inner`), which POSIX answers `EINVAL`. The rewrite would
+    ///   otherwise re-parent the subtree beneath itself.
+    ///
+    /// A **file** rename still overwrites its destination, unchanged: that is
+    /// `rename(2)`'s behaviour and the director and overlay depend on it.
     fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
         if from.root != to.root {
             return Err(bad_request());
         }
         let from_p = normalize(from.rel);
         let to_p = normalize(to.rel);
+        if from_p == to_p {
+            return Ok(());
+        }
 
         let mut files = self.files.lock().map_err(|_| map_io_err())?;
+        let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
+
         if let Some(body) = files.remove(&from_p) {
             files.insert(to_p, body);
             return Ok(());
         }
-        drop(files);
 
-        let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
-        if dirs.remove(&from_p) {
-            dirs.insert(to_p);
-            return Ok(());
+        let from_prefix = child_prefix(&from_p);
+        let moving: Vec<String> = files
+            .keys()
+            .filter(|k| k.starts_with(&from_prefix))
+            .cloned()
+            .collect();
+        let moving_dirs: Vec<String> = dirs
+            .iter()
+            .filter(|d| **d == from_p || d.starts_with(&from_prefix))
+            .cloned()
+            .collect();
+        if moving.is_empty() && moving_dirs.is_empty() {
+            return Err(not_found());
         }
-        Err(not_found())
+        if to_p.starts_with(&from_prefix) {
+            return Err(bad_request());
+        }
+        if stat_of(&files, &dirs, &to_p).is_some() {
+            return Err(exists());
+        }
+
+        let to_prefix = child_prefix(&to_p);
+        let rewrite = |old: &str| -> String {
+            match old.strip_prefix(&from_prefix) {
+                Some(rest) => format!("{to_prefix}{rest}"),
+                // The directory's own `dirs` entry, which has no child suffix.
+                None => to_p.clone(),
+            }
+        };
+        for old in moving {
+            let body = files.remove(&old).unwrap_or_default();
+            files.insert(rewrite(&old), body);
+        }
+        for old in moving_dirs {
+            dirs.remove(&old);
+            dirs.insert(rewrite(&old));
+        }
+        Ok(())
     }
 
     fn set_attr(&self, _p: VPath, _attr: SetAttr) -> Result<(), i32> {
@@ -308,6 +403,101 @@ mod tests {
             Arc::new(MemoryProvider::from_files(vfs_provider::FIXTURE_FILES.iter().copied()));
         assert_eq!(p.capabilities().access, Access::ReadWrite);
         vfs_provider::assert_conformance(p);
+    }
+
+    /// `remove` used to drop the `dirs` entry for a directory that still held
+    /// files and report `Ok(())`, leaving `getattr` still calling it a directory
+    /// (the children imply it) and the children still readable. A caller that
+    /// checks the status learns nothing; one that does not is working from a
+    /// false belief about the tree.
+    #[test]
+    fn removing_a_non_empty_directory_is_refused_and_changes_nothing() {
+        let p = MemoryProvider::from_files([("sub/b.txt", b"world!".as_slice())]);
+        // The `mkdir` matters: it is the explicit `dirs` entry that the old
+        // `remove` deleted, and deleting it is what made the call look like it
+        // had done something. Without it the old code already answered
+        // ST_NOT_FOUND, so a test that skips the `mkdir` is not a regression
+        // test for this defect.
+        p.mkdir(VPath::at_default("sub")).unwrap();
+        assert_eq!(
+            p.remove(VPath::at_default("sub")),
+            Err(vfs_provider::ST_IS_DIR),
+            "remove of a non-empty directory must fail, not silently do nothing"
+        );
+        assert_eq!(
+            p.getattr(VPath::at_default("sub/b.txt")).unwrap().map(|s| s.size),
+            Some(6),
+            "the refused remove must leave the child alone"
+        );
+        // An empty directory still goes away: the refusal is about children,
+        // not about being a directory.
+        p.mkdir(VPath::at_default("empty")).unwrap();
+        p.remove(VPath::at_default("empty")).expect("an empty directory removes");
+        assert!(p.getattr(VPath::at_default("empty")).unwrap().is_none());
+    }
+
+    /// `rename` used to move only the `dirs` entry, so renaming a directory that
+    /// held files reported `Ok(())` while every file stayed at its old path —
+    /// and since the old paths still imply the old directory, even the rename of
+    /// the *name* was invisible. Now it moves the subtree.
+    #[test]
+    fn renaming_a_directory_moves_its_whole_subtree() {
+        let p = MemoryProvider::from_files([
+            ("sub/b.txt", b"world!".as_slice()),
+            ("sub/deep/c.txt", b"deeper".as_slice()),
+        ]);
+        // As above: the explicit `dirs` entry is the one the old code moved on
+        // its own while leaving every file behind.
+        p.mkdir(VPath::at_default("sub")).unwrap();
+        p.mkdir(VPath::at_default("sub/hollow")).unwrap();
+
+        p.rename(VPath::at_default("sub"), VPath::at_default("sub2"))
+            .expect("directory rename");
+
+        assert!(
+            p.getattr(VPath::at_default("sub")).unwrap().is_none(),
+            "rename left the whole old subtree behind"
+        );
+        assert!(p.getattr(VPath::at_default("sub/b.txt")).unwrap().is_none());
+        assert_eq!(
+            p.getattr(VPath::at_default("sub2/b.txt")).unwrap().map(|s| s.size),
+            Some(6)
+        );
+        assert_eq!(
+            p.getattr(VPath::at_default("sub2/deep/c.txt")).unwrap().map(|s| s.size),
+            Some(6)
+        );
+        assert_eq!(
+            p.getattr(VPath::at_default("sub2/hollow")).unwrap().map(|s| s.kind),
+            Some(KIND_DIR),
+            "an explicitly-created empty child directory must move too"
+        );
+    }
+
+    /// A rename onto a path something already holds must not merge two subtrees
+    /// or silently discard the destination.
+    #[test]
+    fn renaming_a_directory_onto_an_occupied_path_is_refused() {
+        let p = MemoryProvider::from_files([
+            ("sub/b.txt", b"world!".as_slice()),
+            ("other/keep.txt", b"kept".as_slice()),
+        ]);
+        p.mkdir(VPath::at_default("sub")).unwrap();
+        assert_eq!(
+            p.rename(VPath::at_default("sub"), VPath::at_default("other")),
+            Err(vfs_provider::ST_EXISTS),
+            "rename onto an occupied path must be refused"
+        );
+        assert_eq!(
+            p.getattr(VPath::at_default("other/keep.txt")).unwrap().map(|s| s.size),
+            Some(4),
+            "the refused rename must leave the destination alone"
+        );
+        assert_eq!(
+            p.getattr(VPath::at_default("sub/b.txt")).unwrap().map(|s| s.size),
+            Some(6),
+            "the refused rename must leave the source alone"
+        );
     }
 
     /// The host-facing shape the design spec's `vfs.memory({...})` promises:
