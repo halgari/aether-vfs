@@ -564,9 +564,22 @@ while doing it. Isolated across five experiments (new versus existing paths,
 `disk` versus `memory`, long lower-case names to rule out 8.3 shortening) and
 recorded as a `todo` test asserting the behaviour a host is entitled to.
 
-Until `casefold` exists, a host using `memory()` for anything a child writes back
-must fold its own keys. **This is the highest-value gap left in the catalog** —
-it is not a missing convenience, it is a correctness hole with no diagnostic.
+**Amended 2026-08-17 after the end-to-end example: the cost is wider than
+`memory()`.** A host-authored provider must fold **its own lookups** too —
+mutation-verified, and without it an injected child reads zero bytes and still
+exits 0. So until `casefold` exists, *every host provider in every binding*
+reimplements folding, and `memory()` is the one case a host cannot fix that way.
+**This is the highest-value gap left in the catalog** — not a missing
+convenience, but a correctness hole with no diagnostic.
+
+**One further gap the example found: `read_file` had no root parameter.**
+`Session::read_file` hardcoded `RootId::DEFAULT` while `readdir` already took a
+root, so §8's own last line — reading back from root 1 — was unreachable. The
+seam now has `read_file_at(root, vpath)`. Evidence it was a real gap rather than
+a nicety: the `vfs-embed` seam test carried a hand-rolled open/read/close loop
+against `session.kernel()` for exactly this reason. Note also that §8's
+`inis.read(...)` is the wrong *shape*, not merely missing — a host reads through
+the session, not by holding a provider object and querying it.
 
 **§6's mount-time flag table was unimplemented workspace-wide.** The table
 describes hard errors and warnings at mount time; none existed. The `SeqRead`
