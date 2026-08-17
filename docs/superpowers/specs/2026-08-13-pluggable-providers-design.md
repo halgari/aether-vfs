@@ -558,10 +558,13 @@ explicitly, after which Python is a straightforward second implementation.
 
 This is binding on every host, not only Node:
 
-1. **Provider calls originate only on director worker threads.** Never on the
-   host's main thread. A host-thread call that reaches a host provider deadlocks
-   on Node and merely serialises on Python — so it is forbidden outright rather
-   than left to each binding to survive.
+1. **A provider call must not be serviced by the loop that is blocked waiting
+   for it.** *(Corrected 2026-08-17 by measurement — see §8c. An earlier version
+   of this rule said "provider calls originate only on director worker threads,
+   never the host's main thread", which names the wrong invariant: it
+   over-restricts, because main-thread-to-worker is safe, and under-restricts,
+   because a provider living in a worker deadlocks on a synchronous call from
+   that same worker.)* The invariant is **loop identity**, not thread role.
 2. **The host's provider call may block the calling director thread** for as long
    as the host scheduler takes. That is what `slow` is for, and why `cached` in
    front of a host provider is the expected deployment rather than an
@@ -599,6 +602,77 @@ Whether an event-loop round trip per read is viable at real read volumes, or
 whether a JS provider is only usable behind `cached`. This is measurable on a
 spike and should be measured before the binding's shape is fixed — the answer
 changes whether `cached` is a recommendation or a requirement.
+
+## 8c. Measured: the Node boundary, and a cache defect it exposed
+
+A spike on 2026-08-17 (Node v24.19.0, N-API 10, Ryzen 9 8945HS; three agreeing
+runs plus a fourth) settled the question §8b left open. **Two of §8b's
+expectations were wrong, both in the same direction — the boundary is cheaper
+than assumed and the mitigation was the problem.**
+
+### The boundary is cheap
+
+- **Round trip 1.7–2.0 µs p50.** The recorded ring READ for 4 KiB is 9.7 µs, so a
+  host provider adds roughly **20 % to a 4 KiB read** — not an order of
+  magnitude. A `Promise` costs ~0.2 µs over a synchronous return; a full loop
+  turn ~0.8 µs. The tail is real and worth knowing: max 130–400 µs, and a cold
+  worker wake is 31–47 µs.
+- **4 KiB sequential, no cache:** ~1370–1510 MiB/s on the main loop, 1604 on a
+  single worker, **8983–10353 across eight workers**. These are boundary
+  ceilings — the JS provider does no work.
+- **Concurrency scales with loops and only with loops.** Eight director threads
+  against one loop give p50 17.8 µs ≈ 8 × 2.2 µs: exactly serialised. One to
+  four loops is 7.7×.
+- **A busy main loop is catastrophic; a worker loop is immune.** Under ~1 ms of
+  work per turn, main-loop servicing falls 1507 → 3.8 MiB/s (**370×**). A
+  worker-serviced provider is unaffected (1449 MiB/s, p50 still 2.0 µs).
+
+**So the guidance is: service host providers on a dedicated worker loop.** That
+is what makes `cached` an optimisation rather than a necessity, and it is the
+difference between a host that degrades under its own UI work and one that does
+not.
+
+### `cached` at the default block size is actively harmful
+
+4 KiB sequential through `cached` with the default 1 MiB block measures
+**24 MiB/s** — sixty times slower than the raw boundary. The cause is not the
+FFI boundary at all: `vfs-cache/src/store.rs:120` **clones the whole block on
+every hit**, so a 4 KiB read memcpys 1 MiB. A pure-Rust harness with no Node
+anywhere measures 25.3 MiB/s against the bridge's 24.5 — **the cache is ~70×
+more expensive than the boundary it exists to protect.**
+
+Two further defects in the same function: an O(n) LRU scan per hit
+(`store.rs:116-118`), and one process-wide mutex (`store.rs:59`) — cached
+throughput is flat at 24→26 MiB/s from one to eight threads while p50 grows
+linearly, 155 → 1139 µs.
+
+**A 64 KiB block is the best configuration measured (1094 MiB/s.)** No existing
+test catches any of this: they assert correctness, and correctness is intact.
+Recorded as a defect in its own right, not as Node's problem — every cached read
+in every session pays it today.
+
+### Consequences for the API shape
+
+A `ThreadsafeFunction` reference must travel through a Rust static, so **a bridge
+handle is a process-global integer, not a JS object.** Registration is therefore
+necessarily *a module path resolved inside the worker*, not an object instance
+handed across — isolates share no JS objects. §8's Python sketch
+(`session.mount(0, SteamCdn(...))`) does not translate directly to Node, and the
+Node API should not pretend otherwise.
+
+Confirmed while establishing that: napi-rs is context-aware **by construction**
+(it exports `napi_register_module_v1`), the addon loads in nine Workers, and Rust
+statics *are* shared across isolates — a freshly registered worker observed the
+process-wide bridge count.
+
+### The zero-copy door is open
+
+§8 declines a writable `memoryview` for Python, on the grounds that it makes
+every provider harder to write. For Node the mechanism is better than expected:
+`SharedArrayBuffer` backing stores have identical addresses across isolates, and
+a bare Rust thread wrote 65536/65536 bytes visible from either side. §8's
+*reasoning* for declining is unaffected — this only records that the mechanism is
+not the obstacle.
 
 ## 9. The `panic = "abort"` conflict
 
