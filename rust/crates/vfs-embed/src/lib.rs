@@ -132,8 +132,8 @@ pub use vfs_provider::{
 // ---------------------------------------------------------------------------
 pub use vfs_cache::{BlockCache, CacheConfig, CacheStats, CachingProvider, DEFAULT_BLOCK_SIZE};
 pub use vfs_compose::{
-    stack_layers, InlineProvider, LayeredProvider, OverlayProvider, Route, RouterProvider,
-    SubdirProvider,
+    stack_layers, InlineProvider, LayeredProvider, MemoryProvider, OverlayProvider, Route,
+    RouterProvider, SubdirProvider,
 };
 pub use vfs_director::{DiskProvider, MountGraph};
 #[cfg(feature = "zip")]

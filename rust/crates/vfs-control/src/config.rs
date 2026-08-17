@@ -70,6 +70,15 @@ pub enum SourceSpec {
     Zip { path: String },
     Http { url: String },
     Remote { endpoint: String },
+    /// An in-memory name→content map (`vfs_compose::MemoryProvider`).
+    ///
+    /// Content is UTF-8 text, not arbitrary bytes: this variant exists so a
+    /// scenario file can declare one (an INI, say) without a host writing
+    /// Rust, and TOML/JSON have no ergonomic way to spell binary. A host
+    /// supplying real bytes constructs `vfs_compose::MemoryProvider` directly
+    /// instead of going through config — see that type's doc for why it
+    /// lives in `vfs-compose` rather than here.
+    Memory { files: BTreeMap<String, String> },
 }
 
 fn default_mount() -> String {
@@ -211,15 +220,21 @@ impl SessionConfig {
                     entry.root, entry.mount
                 ));
             }
-            // `disk` is the only writable source kind: a zip is read-only, and
-            // the `remote` wire has no write ops at all (it clamps to
-            // `Access::Read`), so either one is refused when the session
-            // composes. Say so here, where the author can see which line is
-            // wrong, rather than as a status code out of `AddSource`.
+            // `disk` is the only source kind accepted as a write layer. A zip
+            // is read-only and the `remote` wire has no write ops at all (it
+            // clamps to `Access::Read`), so either is refused for being
+            // unwritable. `memory` is writable too but is deliberately not
+            // accepted here: a write layer's whole point is a copy-up
+            // destination that survives independently of the graph it sits
+            // over, and a host that wants a writable in-memory root mounts a
+            // `MemoryProvider` as an ordinary sibling instead (it needs no
+            // copy-up — it is already `Access::ReadWrite`). Say so here,
+            // where the author can see which line is wrong, rather than as a
+            // status code out of `AddSource`.
             if !matches!(entry.spec, SourceSpec::Disk { .. }) {
                 return Err(format!(
-                    "write_layer source for root {} is {:?}; only a disk source is writable, \
-                     so nothing else can be a write layer",
+                    "write_layer source for root {} is {:?}; only a disk source may serve as a \
+                     write layer",
                     entry.root, entry.spec
                 ));
             }

@@ -56,6 +56,13 @@ pub fn build_provider(spec: &SourceSpec) -> Result<Arc<dyn Provider>, BuildError
                 .map_err(BuildError::Open)?;
             Ok(Arc::new(p))
         }
+        SourceSpec::Memory { files } => {
+            let entries: Vec<(String, Vec<u8>)> = files
+                .iter()
+                .map(|(name, content)| (name.clone(), content.as_bytes().to_vec()))
+                .collect();
+            Ok(Arc::new(vfs_compose::MemoryProvider::from_files(entries)))
+        }
     }
 }
 
@@ -132,6 +139,19 @@ mod tests {
 
         server.abort();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn builds_memory_provider_reachable_from_config() {
+        use std::collections::BTreeMap;
+        let mut files = BTreeMap::new();
+        files.insert("Skyrim.ini".to_string(), "hi".to_string());
+        let p = build_provider(&SourceSpec::Memory { files }).unwrap();
+        let st = p
+            .getattr(vfs_provider::VPath::at_default("Skyrim.ini"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(st.size, 2);
     }
 
     #[test]

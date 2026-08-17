@@ -6,12 +6,14 @@
 mod glob;
 mod inline;
 mod layered;
+mod memory;
 mod overlay;
 mod router;
 mod subdir;
 
 pub use inline::InlineProvider;
 pub use layered::LayeredProvider;
+pub use memory::MemoryProvider;
 pub use overlay::OverlayProvider;
 pub use router::{Route, RouterProvider};
 pub use subdir::SubdirProvider;

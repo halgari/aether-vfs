@@ -18,6 +18,10 @@ vfs-provider = { path = "../vfs-provider" }
 vfs-director = { path = "../vfs-director" }
 vfs-zip = { path = "../vfs-zip" }
 vfs-control = { path = "../vfs-control" }
+# `MemoryProvider` for `SourceSpec::Memory`. Not a new dependency edge for the
+# workspace as a whole — `vfs-director` already depends on it — just the first
+# time this crate itself needs a `vfs-compose` type by name.
+vfs-compose = { path = "../vfs-compose" }
 tonic = "0.14"
 tonic-prost = "0.14"
 prost = "0.14"

@@ -331,6 +331,19 @@ pub async fn apply_session_config(
                     endpoint: endpoint.clone(),
                 })
             }
+            // No `source.proto` `Kind::Memory` exists yet — the daemon's
+            // gRPC control plane has no wire shape for an inline name→bytes
+            // map. `vfs_source::build_provider` and `vfs_embed::MemoryProvider`
+            // serve this locally; wiring it over gRPC is a proto change, not
+            // this task's scope.
+            vfs_control::SourceSpec::Memory { .. } => {
+                return Err(format!(
+                    "source at root {}: a `memory` source has no gRPC wire representation yet \
+                     — the directord control plane cannot carry it. Build it locally instead, \
+                     via `vfs_source::build_provider` or `vfs_embed::MemoryProvider`.",
+                    entry.root
+                ));
+            }
         };
         client
             .add_source(AddSourceReq {
