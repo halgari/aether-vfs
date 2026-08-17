@@ -27,11 +27,13 @@ test = false
 # exact pairing at 56 crates and no tonic/prost/protoc/tokio/hyper; keeping the
 # binding's dependency list to this one line is what preserves that.
 vfs-embed = { path = "../vfs-embed" }
-# `napi4` is the threadsafe-function feature. Not used by this task — nothing
-# here calls into JS — but it is the feature the task-5 spike measured and it
-# adds no crates to the graph (napi's defaults are `["napi3", "compat-mode"]`
-# and tokio arrives only via `async`/`tokio_rt`/`full`, none of which are on).
-# Declared now so task 7 does not have to churn the manifest.
+# `napi4` is the threadsafe-function feature, and `src/jsprovider.rs` is what
+# needs it: a JS-authored provider is a `ThreadsafeFunction` a director thread
+# calls and blocks on. It adds no crates to the graph — napi's defaults are
+# `["napi3", "compat-mode"]`, and tokio arrives only via `async`/`tokio_rt`/`full`,
+# **none of which may be enabled**. Those exist to provide
+# `ThreadsafeFunction::call_async`, and the blocking round trip this binding uses
+# (task 5 measured it at 1.7–2.0 µs) does not need it.
 napi = { version = "2", features = ["napi4"] }
 napi-derive = "2"
 

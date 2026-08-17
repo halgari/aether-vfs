@@ -19,6 +19,11 @@ export class Provider {
   static fromHandle(handle: number): Provider;
   /** The process-global integer this wrapper stands for. */
   get handle(): number;
+  /**
+   * Counters and configuration for a JS-authored provider; `null` for a Rust
+   * one, which has no bridge and nothing to report.
+   */
+  stats(): ProviderStats | null;
 }
 
 /**
@@ -179,3 +184,215 @@ export function packageDir(): string | null;
 export function statusCodes(): Record<string, number>;
 /** The addon's version. A loaded-and-answering check for `require('aethervfs')`. */
 export function version(): string;
+
+// ===========================================================================
+// JS-authored providers — spec §8b, as corrected by measurement in §8c.
+// ===========================================================================
+
+/** `{ ST_OK: 0, ST_NOT_FOUND: -2, ... }`, read once from Rust at load. */
+export const STATUS: Record<string, number>;
+/** `{ getattr: 1, readdir: 2, ... }` — the op integers a `CallRequest` carries. */
+export const OP: Record<string, number>;
+/** `{ KIND_FILE: 1, KIND_DIR: 2, KIND_TOMBSTONE: 3 }`. */
+export const KIND: Record<string, number>;
+/** `{ OPEN_READ, OPEN_WRITE, OPEN_CREATE, OPEN_TRUNC, OPEN_APPEND, OPEN_EXCL }`. */
+export const OPEN: Record<string, number>;
+
+/** The `ST_*` name for a status, or `"status <n>"` if it is not one. */
+export function statusName(code: number): string;
+
+/**
+ * Fail a provider call with a specific `ST_*` status.
+ *
+ * Anything else thrown or rejected from a provider method becomes
+ * `ST_IO_ERROR`, with the stack logged and counted — spec §8b rule 3. A
+ * `VfsError` whose code is not a status this workspace defines (or is `ST_OK`)
+ * is clamped to `ST_IO_ERROR` on the Rust side, so a host cannot invent a code.
+ */
+export class VfsError extends Error {
+  constructor(code: number | string, message?: string);
+  /** The `ST_*` number. */
+  readonly code: number;
+  /** The same number, duck-typed so it survives crossing a realm. */
+  readonly vfsStatus: number;
+}
+
+/** What a provider's `getattr` may return. `null` means "not here". */
+export interface ProviderStat {
+  /** `'file' | 'dir' | 'tombstone'`, or a number from `KIND`. */
+  kind?: 'file' | 'dir' | 'tombstone' | number;
+  /** Shorthand for `kind: 'dir'`. */
+  isDir?: boolean;
+  size?: number;
+  mtime?: number | null;
+}
+
+export interface ProviderDirEntry extends ProviderStat {
+  name: string;
+}
+
+export interface ProviderOpenResult {
+  /** Opaque to the director; only ever handed back to this provider. */
+  handle: number;
+  size?: number;
+  isDir?: boolean;
+}
+
+/**
+ * What a JS provider looks like.
+ *
+ * Every method may be `async` — the calling director thread parks until the
+ * promise settles, for as long as that takes. `capabilities` is read **once, at
+ * registration**, and the methods present at that moment are the ones that will
+ * ever be called: a missing optional method answers `ST_NOT_SUPPORTED` without a
+ * round trip, exactly as a Rust provider's trait defaults do.
+ *
+ * The five methods a read-only provider must have are `getattr`, `readdir`,
+ * `open`, `close` and `readAt` (or `readNext` for `seqread`). Declaring
+ * `readwrite` additionally requires `writeAt`, and `registerProvider` refuses the
+ * object at construction if it is missing.
+ */
+export interface ProviderObject {
+  capabilities?: {
+    /** Default `'read'`. `'seqread'` must be wrapped in `seekable`. */
+    access?: 'read' | 'readwrite' | 'seqread';
+    /** Content never changes. Illegal together with `'readwrite'`. */
+    immutable?: boolean;
+    /** Reads are expensive; this provider wants a cache in front. */
+    slow?: boolean;
+    /** Block-size hint for `cached`. §8c measured 64 KiB as the best tested. */
+    preferredBlock?: number;
+  };
+
+  getattr(root: number, path: string): ProviderStat | null | Promise<ProviderStat | null>;
+  readdir(root: number, path: string): ProviderDirEntry[] | Promise<ProviderDirEntry[]>;
+  /** `flags` carries the `OPEN_*` bits. Throw `VfsError('ST_NOT_FOUND')` for an absent path. */
+  open(root: number, path: string, flags: number): ProviderOpenResult | Promise<ProviderOpenResult>;
+  close(handle: number): void | Promise<void>;
+
+  /** Positional read. A short read is legal anywhere, not only at EOF. */
+  readAt?(handle: number, offset: number, length: number): Uint8Array | string | Promise<Uint8Array | string>;
+  /** Forward-only read, for `access: 'seqread'`. */
+  readNext?(handle: number, length: number): Uint8Array | string | Promise<Uint8Array | string>;
+  /** Must return the number of bytes written; returning nothing is refused rather than guessed. */
+  writeAt?(handle: number, offset: number, data: Buffer): number | Promise<number>;
+  setLen?(handle: number, length: number): void | Promise<void>;
+  flush?(handle: number): void | Promise<void>;
+  mkdir?(root: number, path: string): void | Promise<void>;
+  remove?(root: number, path: string): void | Promise<void>;
+  rename?(fromRoot: number, fromPath: string, toRoot: number, toPath: string): void | Promise<void>;
+  setAttr?(
+    root: number,
+    path: string,
+    attr: { mtime: number | null; size: number | null }
+  ): void | Promise<void>;
+}
+
+export interface ProviderOptions {
+  /**
+   * Abandon a call that has not settled after this long: the director thread is
+   * released with `ST_IO_ERROR` and `abandonedCalls` counts it.
+   *
+   * Unset is the default and is the contract: a provider that never settles
+   * hangs *one director thread*, not the session. The hang is still diagnosable
+   * without this — `stallWarnMs` counts and logs it.
+   */
+  callTimeoutMs?: number;
+  /** Count and log a call still outstanding after this long. Default 5000. */
+  stallWarnMs?: number;
+}
+
+export interface ProviderStats {
+  handle: number;
+  access: 'read' | 'readwrite' | 'seqread';
+  immutable: boolean;
+  slow: boolean;
+  preferredBlock: number | null;
+  /** The methods the object was found to have at registration. */
+  methods: string[];
+  /** The event loop that services this provider, as the deadlock guard names it. */
+  ownerThread: string;
+  released: boolean;
+  callTimeoutMs: number | null;
+  stallWarnMs: number;
+  calls: number;
+  settledCalls: number;
+  /** Calls that came back as a deliberate status. */
+  vfsErrors: number;
+  /** Calls where the host threw something that was not a `VfsError`. */
+  hostErrors: number;
+  /** Calls still outstanding when `stallWarnMs` passed — where a hang is counted. */
+  stalledCalls: number;
+  /** Calls given up on because `callTimeoutMs` expired. */
+  abandonedCalls: number;
+  /** Calls the deadlock guard refused. */
+  selfCallRefusals: number;
+  /** Calls that could not be queued — a released or dead loop. */
+  dispatchFailures: number;
+  lastHostError: string | null;
+  lastDiagnostic: string | null;
+}
+
+/**
+ * Mount a JS object as a provider, serviced by the **calling** thread's event
+ * loop.
+ *
+ * That loop is the one thread that may not drive a session mounting this
+ * provider: a blocking provider call issued on the loop that services it can
+ * never settle, because the loop cannot run the callback while parked. The guard
+ * refuses that with an explanation rather than hanging, but the way to not need
+ * it is `providerWorker()`.
+ */
+export function registerProvider(obj: ProviderObject, options?: ProviderOptions): Provider;
+
+/**
+ * Release a JS provider's event loop, so the worker holding it can exit. Calls
+ * afterwards fail with a status naming the released loop; a director thread
+ * already parked on it is woken. The registry entry stays, because a handle is
+ * process-global by design.
+ */
+export function releaseProvider(handle: number): void;
+
+/** Provider calls outstanding across the whole process. */
+export function outstandingProviderCalls(): number;
+
+/** The op integers, keyed by JS method name. */
+export function providerOps(): Record<string, number>;
+export function kinds(): Record<string, number>;
+export function openFlags(): Record<string, number>;
+
+export interface ProviderWorkerSpec {
+  /**
+   * **Absolute path** to a CommonJS module — not an object. Isolates share no JS
+   * objects, so a provider instance cannot be handed across one; what crosses is
+   * the integer handle. Use `require.resolve()`.
+   *
+   * The module may export the provider directly, or a factory called with
+   * `options` — a factory is preferable, because it constructs the provider on
+   * the loop its methods will run on.
+   */
+  module: string;
+  /** Named export to use instead of `provider` / `default` / the module itself. */
+  export?: string;
+  /** Passed to the factory, structured-cloned into the worker. */
+  options?: unknown;
+  provider?: ProviderOptions;
+}
+
+/** A provider running on its own worker loop. */
+export class ProviderWorker {
+  readonly worker: import('worker_threads').Worker;
+  readonly handle: number;
+  readonly provider: Provider;
+  stats(): ProviderStats | null;
+  /** Release the loop and stop the worker. Without it the worker never exits. */
+  close(): Promise<void>;
+}
+
+/**
+ * Load a provider module in a dedicated worker and register it there — the
+ * recommended shape, and the only configuration §8c measured as immune to a busy
+ * main loop (1449 MiB/s against 3.8 for a main-loop provider under ~1 ms of work
+ * per turn). Concurrency scales with worker count and only with worker count.
+ */
+export function providerWorker(spec: ProviderWorkerSpec): Promise<ProviderWorker>;

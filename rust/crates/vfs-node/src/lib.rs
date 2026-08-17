@@ -44,6 +44,36 @@
 //! Left to guess, the symptom is "`vfs_shim_dll.dll` not found" from a package
 //! that contains it, so [`Session::resolve_dlls`] names every location it tried
 //! instead.
+//!
+//! ## JS-authored providers
+//!
+//! [`jsprovider`] is the rest of the story: a JavaScript object mounted as an
+//! `Arc<dyn Provider>`, with spec §8b's threading contract enforced rather than
+//! documented. Read its module docs before touching the bridge — in particular
+//! the deadlock guard, which compares the calling thread against the *loop that
+//! services the provider*, not against "is this the main thread".
+
+// No `unsafe` anywhere in the binding. The one place task 5's spike needed it —
+// memcpying a JS `Buffer` into a parked director thread's destination pointer —
+// is done through an owned `Vec` here instead, for one extra memcpy of at most
+// the read size. See `jsprovider`'s module docs for why that trade is not close.
+#![deny(unsafe_code)]
+// `--all-targets` checks the lib once more under `cfg(test)`, and napi-derive
+// gates its `#[ctor]` module registrations on `not(test)`
+// (`napi-derive-backend/src/codegen/fn.rs:669`). So in that configuration every
+// `#[napi]` export loses its only caller, and everything reachable only from a
+// private module — `jsprovider` — becomes unreachable with it. Crate-root `pub`
+// items are exempt because they are the public API; items inside a private
+// module are not, which is why this appears the moment the bridge moves into its
+// own module and did not before.
+//
+// Nothing is lost by allowing it: dead-code analysis still runs in the ordinary
+// configuration, where the ctors exist and genuinely unreachable code is still
+// an error, and `[lib] test = false` means no test is ever *run* under `cfg(test)`
+// anyway (see `Cargo.toml` for why).
+#![cfg_attr(test, allow(dead_code))]
+
+mod jsprovider;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -60,10 +90,15 @@ use vfs_embed::{DiskProvider, LaunchOpts, Provider as VfsProvider, RootId};
 // Status codes → JS errors.
 // ---------------------------------------------------------------------------
 
+/// What [`status_name`] answers for a status the workspace does not define.
+/// `jsprovider` compares against it to decide whether a host-supplied status is
+/// real, so the two must be the same string.
+pub(crate) const UNKNOWN_STATUS: &str = "unknown status";
+
 /// The `ST_*` name for a status, so a thrown error says `ST_READ_ONLY` rather
 /// than `status -13`. A bare number sends a JS developer into Rust source to
 /// find out what went wrong.
-fn status_name(status: i32) -> &'static str {
+pub(crate) fn status_name(status: i32) -> &'static str {
     match status {
         vfs_embed::ST_OK => "ST_OK",
         vfs_embed::ST_NOT_FOUND => "ST_NOT_FOUND",
@@ -76,15 +111,35 @@ fn status_name(status: i32) -> &'static str {
         vfs_embed::ST_EXISTS => "ST_EXISTS",
         vfs_embed::ST_NO_SPACE => "ST_NO_SPACE",
         vfs_embed::ST_BAD_REQUEST => "ST_BAD_REQUEST",
-        _ => "unknown status",
+        _ => UNKNOWN_STATUS,
     }
 }
 
+/// Turn a status into something a JS developer can act on.
+///
+/// **A JS provider's failures reach here as a bare `ST_IO_ERROR`**, because that
+/// is all `Provider` can carry. When the failing call happened *on this very
+/// thread* — which is exactly the deadlock guard's case, since the guard fires
+/// on the thread that would have hung — the bridge left a full explanation in a
+/// thread-local, and it is worth far more than the status name. Every status →
+/// error conversion in this file goes through here, so every entry point gets
+/// that for free.
 fn status_err(what: &str, status: i32) -> Error {
-    Error::from_reason(format!(
-        "{what}: {} (status {status})",
-        status_name(status)
-    ))
+    match jsprovider::take_diagnosis() {
+        Some(d) => Error::from_reason(format!("{what}: {d}")),
+        None => Error::from_reason(format!(
+            "{what}: {} (status {status})",
+            status_name(status)
+        )),
+    }
+}
+
+/// The same, for the `Result<_, String>` surfaces `vfs-embed` exposes.
+fn reason_err(what: &str, reason: String) -> Error {
+    match jsprovider::take_diagnosis() {
+        Some(d) => Error::from_reason(format!("{what}: {reason} — {d}")),
+        None => Error::from_reason(reason),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +164,10 @@ fn providers() -> &'static RwLock<Vec<Arc<dyn VfsProvider>>> {
 /// tens of entries; if a host ever creates them in a loop this needs an
 /// explicit `release(handle)`, which is a real API decision and not a fix to
 /// smuggle in here.
-fn register_provider(p: Arc<dyn VfsProvider>) -> Result<u32> {
+///
+/// `releaseProvider` (see [`jsprovider`]) releases a JS provider's *event loop*,
+/// which is a different thing and does not free this entry.
+pub(crate) fn intern_provider(p: Arc<dyn VfsProvider>) -> Result<u32> {
     let mut g = providers()
         .write()
         .map_err(|_| Error::from_reason("provider registry poisoned"))?;
@@ -139,6 +197,14 @@ pub struct Provider {
     handle: u32,
 }
 
+impl Provider {
+    /// Wrap an already-interned handle. For [`jsprovider::register_provider`],
+    /// which interns its own provider.
+    pub(crate) fn wrap(handle: u32) -> Self {
+        Provider { handle }
+    }
+}
+
 #[napi]
 impl Provider {
     /// Rebuild a wrapper from a handle, validating that the handle exists.
@@ -152,6 +218,19 @@ impl Provider {
     #[napi(getter)]
     pub fn handle(&self) -> u32 {
         self.handle
+    }
+
+    /// Counters and configuration for a JS-authored provider; `null` for a Rust
+    /// one, which has no bridge and nothing to report.
+    ///
+    /// This is where the failures spec §8b asks to be *counted* rather than
+    /// merely survived actually land: `stalledCalls` for a call that has not
+    /// settled, `abandonedCalls` for one given up on, `hostErrors` for a throw
+    /// that became `ST_IO_ERROR`, and `selfCallRefusals` for a call the deadlock
+    /// guard refused.
+    #[napi]
+    pub fn stats(&self) -> Option<jsprovider::ProviderStats> {
+        jsprovider::stats_for(self.handle)
     }
 }
 
@@ -174,7 +253,7 @@ pub fn disk(path: String) -> Result<Provider> {
         )));
     }
     Ok(Provider {
-        handle: register_provider(Arc::new(DiskProvider::new(&p)))?,
+        handle: intern_provider(Arc::new(DiskProvider::new(&p)))?,
     })
 }
 
@@ -480,8 +559,14 @@ impl Session {
     /// Read a whole file out of root 0's graph, host-side. Not the primary
     /// path — the child's reads go over the ring — but it is how a host proves
     /// its graph serves what it thinks it does without launching anything.
+    ///
+    /// **It drives the graph on the calling thread**, so it is also the call
+    /// that trips the deadlock guard when a host mounts a provider serviced by
+    /// the very loop it is calling from. That is deliberate: the failure is
+    /// reported here, immediately and with an explanation, instead of hanging.
     #[napi]
     pub fn read_file(&self, vpath: String) -> Result<Buffer> {
+        jsprovider::clear_diagnosis();
         self.get()?
             .read_file(&vpath)
             .map(Buffer::from)
@@ -647,6 +732,10 @@ impl Session {
     /// `AsyncTask` form belongs with the threading work, not here.
     #[napi]
     pub fn launch(&mut self, exe: String, options: Option<LaunchOptions>) -> Result<i32> {
+        // Resolving a relative image looks it up as a vpath in root 0's graph on
+        // *this* thread, so launch can trip the deadlock guard exactly as
+        // `readFile` can. Same treatment.
+        jsprovider::clear_diagnosis();
         if !self.get()?.is_serving() {
             self.serve()?;
         }
@@ -681,7 +770,9 @@ impl Session {
                 .into_iter()
                 .collect::<BTreeMap<String, String>>(),
         };
-        self.get()?.launch(&opts).map_err(Error::from_reason)
+        self.get()?
+            .launch(&opts)
+            .map_err(|e| reason_err("launch", e))
     }
 
     /// Every write refused because no read-write provider served that path.
