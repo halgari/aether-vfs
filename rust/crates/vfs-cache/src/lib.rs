@@ -13,7 +13,7 @@ mod provider;
 mod store;
 
 pub use provider::CachingProvider;
-pub use store::{Block, BlockCache, BlockKey, CacheConfig, CacheStats};
+pub use store::{Block, BlockCache, BlockKey, CacheConfig, CacheStats, Invalidation};
 
 /// Default block size: 1 MiB. Used only when the wrapped provider declares no
 /// `preferred_block` — a source that states its natural unit gets that instead
