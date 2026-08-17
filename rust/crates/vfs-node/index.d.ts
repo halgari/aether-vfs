@@ -1,5 +1,19 @@
 // Hand-written, deliberately.
 //
+// Checked by `scripts/check-types.cjs` (`npm run check:types`, and a CI step),
+// which compares this file's declared surface against the addon's real exports
+// in both directions. That is not a type check — see that script's header for
+// why `tsc` is not wired up and what it would and would not have caught — but it
+// is what stops the drift a hand-written declaration file actually suffers:
+// `Session.readdir` and `Session.getattr` were missing from here entirely, and a
+// type checker cannot notice a declaration that does not exist.
+//
+// **Node version.** `package.json` says `>=22.6` and that is about the
+// *package*, not the addon: every script and two test files are `.cts`, which
+// `node --test` runs by type-stripping, and that landed in 22.6. Loading the
+// addon itself — `require('aethervfs')`, N-API 8 — works on 18. If this package
+// is ever consumed without its scripts, that is the number to relax to.
+//
 // `@napi-rs/cli` generates this file from the `#[napi]` attributes, and using it
 // would mean an npm dependency — a network install — in the build path of a
 // package whose whole build is otherwise four `cargo` calls and four file
@@ -550,6 +564,30 @@ export class Session {
 
 /** Record the directory the addon was loaded from. `index.cjs` calls this with `__dirname`. */
 export function setPackageDir(dir: string): void;
+/**
+ * **Panic on purpose.** Exists so a host can confirm in its own process that a
+ * Rust panic arrives here as a catchable exception rather than killing Node.
+ *
+ * Every `#[napi]` function in the addon carries `catch_unwind`, because
+ * napi-derive emits the containment only when asked; that is enforced
+ * structurally by `tests/napi_entry_points_contain_panics.rs`, and demonstrated
+ * by `test/panic.test.cjs`, whose only tool is this function. A structural check
+ * cannot show the generated containment *works*.
+ *
+ * `kind` selects the panic payload shape — `'string'` (default), `'str'`, or
+ * `'other'` — because `catch_unwind`'s downcast has an arm for each. Anything
+ * else is an ordinary rejected argument, not a panic.
+ *
+ * @throws the panic message, as an `Error`.
+ */
+export function panicForTest(kind?: 'string' | 'str' | 'other'): never;
+/**
+ * **Internal.** How a provider call is settled: `index.cjs`'s dispatcher calls
+ * this with the call id and the result, and it wakes the parked director thread.
+ * Declared because it is exported, not because a host should call it — a host
+ * writes a `ProviderObject` and lets the dispatcher do this.
+ */
+export function completeCall(callId: number, result: unknown): void;
 export function packageDir(): string | null;
 /** The `ST_*` status codes, so a caller can compare against a name. */
 export function statusCodes(): Record<string, number>;

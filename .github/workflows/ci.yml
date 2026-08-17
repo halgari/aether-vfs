@@ -8,6 +8,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # The gate this project actually enforces by hand, made automatic. It was
+      # absent while `cargo clippy --all-targets -- -D warnings` was a standing
+      # requirement in every task brief — i.e. the standard was upheld only by
+      # whoever remembered to type it. `--all-targets` matters: it is what covers
+      # tests, benches and the `vfs-node` cdylib.
+      - name: Clippy (workspace, all targets, warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: rust
       - name: Build daemon + inject artifacts
         # Ensure shim/payload/fixtures sit next to the test profile so the
         # daemon e2e can inject them without a nested cargo build. The fixture
@@ -25,6 +35,58 @@ jobs:
       - name: Rust tests (full engine — includes Windows-only crates)
         run: cargo test
         working-directory: rust
+
+  # The `aethervfs` addon and its JavaScript suites — stage 4's gate.
+  #
+  # Nothing here was covered before. `cargo build --workspace --tests` filters
+  # cdylibs, so the addon's own Rust was never built by CI; `[lib] test = false`
+  # keeps `cargo test` away from it; and ~2,500 lines of JS tests plus the
+  # conformance gate itself were verified only by a human typing `npm test`. A
+  # gate nobody runs is not a gate, and this repository has already had CI
+  # silently disabled once by a deletion sweep that covered source and not
+  # workflows.
+  node-addon-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          # `.cts` test files are run directly by `node --test`, which needs
+          # type-stripping — Node 22.6+. `package.json`'s `engines` says the
+          # same; keep the two in step.
+          node-version: '22'
+      # `scripts/build.cjs` is the only correct way to build this package: four
+      # unfiltered cargo invocations (the addon cdylib, the shim cdylib, the
+      # separate-workspace payload, and the probe exe) followed by four copies
+      # into the package directory. It also prints each artifact's size and
+      # mtime, which is how a stale DLL gets noticed.
+      - name: Build the addon and its DLLs
+        run: node scripts/build.cjs
+        working-directory: rust/crates/vfs-node
+      # `index.d.ts` is hand-written (no `@napi-rs/cli`, no npm dependency), and
+      # a hand-written .d.ts with no compiler behind it is how the two doc
+      # defects this job exists downstream of got in. `tsc` ships with no
+      # network install here because there is no `tsc` — `node --experimental-
+      # strip-types` cannot type-check, so what is checked instead is that every
+      # declaration parses and that the runtime exports and the declared ones
+      # agree. See `scripts/check-types.cjs`.
+      - name: Check index.d.ts against the addon's real exports
+        run: node scripts/check-types.cjs
+        working-directory: rust/crates/vfs-node
+      # The examples are tests: each one asserts its way through a full session,
+      # and `spec-8-example.cts` machine-checks spec §8's provider graph rather
+      # than describing it.
+      - name: Examples (vertical slice, JS provider, spec §8)
+        run: node examples/vertical-slice.cjs && node examples/js-provider.cjs && node examples/spec-8-example.cts
+        working-directory: rust/crates/vfs-node
+      # One `todo` is expected and must stay failing: it pins spec §6b's
+      # `casefold` hole, which is the first item of the next stage. A `todo` that
+      # started passing would mean the hole closed without anyone noticing, and
+      # `node --test` does not fail the run for it either way.
+      - name: JS suites
+        run: node --test test/provider.test.cjs test/panic.test.cjs test/primitives.test.cts test/conformance.test.cts
+        working-directory: rust/crates/vfs-node
 
   rust-linux-portable:
     runs-on: ubuntu-latest
