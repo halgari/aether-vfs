@@ -1,12 +1,12 @@
-# Stage 4: `vfs-embed` and the Python Binding — Implementation Plan
+# Stage 4: `vfs-embed` and the Node Binding — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make this a library a host language embeds, not an application that happens to have a CLI. A Python program declares roots, composes providers out of Rust primitives, supplies its *own* provider written in Python, launches a game, and reads back what the game wrote — with the director running in the Python process.
+**Goal:** Make this a library a host language embeds, not an application that happens to have a CLI. A TypeScript program declares roots, composes providers out of Rust primitives, supplies its *own* provider written in JavaScript, launches a process, and reads back what it wrote — with the director running in the Node process. Python follows in 4b, against the contract Node forces.
 
-**Architecture:** Extract the session lifecycle that currently lives split across `vfs_director::Session` and `vfs_directord::SessionRegistry` into a public `vfs-embed` crate. Prove the seam by re-pointing the existing `vfs` CLI at it — one implementation, two callers — before adding a third caller in Python via PyO3.
+**Architecture:** Extract the session lifecycle that currently lives split across `vfs_director::Session` and `vfs_directord::SessionRegistry` into a public `vfs-embed` crate. Prove the seam by re-pointing the existing `vfs` CLI at it — one implementation, two callers — before adding a third caller in Node via napi-rs.
 
-**Tech Stack:** Rust 2021, PyO3 + maturin (abi3 wheel), Windows NT API, shared-memory ring IPC, gRPC control plane.
+**Tech Stack:** Rust 2021, napi-rs (N-API), Node/TypeScript, Windows NT API, shared-memory ring IPC, gRPC control plane.
 
 ## Global Constraints
 
@@ -133,82 +133,81 @@ print(inis.read("Skyrim.ini"))     # what the game actually wrote
 
 ---
 
-### Task 5: The `aethervfs` package skeleton
+### Task 5: The Node threading spike — measure before committing the shape
 
-**Files:** Create `crates/vfs-python/` (or `bindings/python/` — your call, say why); `pyproject.toml`; maturin config
+**Files:** a throwaway crate or example; nothing permanent unless it earns its place.
 
-**Interfaces:** `import aethervfs` works; `vfs.Session(name)`, `session.add_root(id, name, path)`, `session.mount(root, provider)`, `session.launch(exe)`, `session.rejected_writes()`.
+**Interfaces:** none. This produces numbers and a go/no-go on the boundary shape.
 
-Spec §8: *"Package `aethervfs`, built with maturin and PyO3 as an abi3 wheel so one Windows wheel covers Python 3.8+."*
+Spec §8b names one thing as unresolved: **whether an event-loop round trip per read is viable at real read volumes, or whether a JS provider is only usable behind `cached`.** The answer changes whether `cached` is a recommendation or a requirement, and it is cheap to measure now and expensive to discover in stage 5.
 
-Build the skeleton with **Rust primitives only** — no Python-authored providers yet. `vfs.disk(path)` mounted at a root, launched, torn down. That is a complete vertical slice through PyO3, maturin, and `vfs-embed`, and it will surface the packaging problems before they are entangled with GIL questions.
+Build the smallest thing that answers it: a director worker thread calling a trivial JS provider through an N-API threadsafe function, blocking until the promise settles.
 
-**State the toolchain requirement explicitly in the report:** what must be installed to build the wheel, and whether it is present on this machine.
+- [ ] **Step 1: Measure** the per-call round-trip cost, and the throughput of a sequential read workload through a JS provider — with and without `cached` in front.
 
-- [ ] **Step 1: Skeleton + build**, then a Python script that creates a session, mounts `vfs.disk`, and tears down cleanly.
+- [ ] **Step 2: Prove the deadlock is real and the contract prevents it.** Spec §8b forbids provider calls originating on the host's main thread. Demonstrate what happens when that rule is broken, so the guard in Task 7 is aimed at something observed rather than feared.
 
-- [ ] **Step 2: Verify** the wheel builds and imports.
+- [ ] **Step 3: Report** the numbers and a recommendation. If `cached` turns out to be mandatory rather than advisory, say so — that is a finding about the design, and §8b should be corrected to state it.
+
+---
+
+### Task 6: The `aethervfs` Node package skeleton
+
+**Files:** Create `bindings/node/` (or `crates/vfs-node/` — your call, say why); `package.json`; napi-rs config
+
+**Interfaces:** `require('aethervfs')` works; `new Session(name)`, `session.addRoot(id, name, path)`, `session.mount(root, provider)`, `session.launch(exe)`, `session.rejectedWrites()`.
+
+**Rust primitives only** — no JS-authored providers yet. `disk(path)` mounted at a root, launched, torn down. A complete vertical slice through napi-rs and `vfs-embed`, surfacing the packaging problems before they tangle with the threading ones.
+
+Use **N-API via napi-rs**, not raw V8 bindings — ABI stability across Node versions is the whole point, and it is what makes Electron a later packaging question rather than a rewrite.
+
+**State the toolchain requirement in the report:** what must be installed to build and load the addon, and whether it is present on this machine.
+
+- [ ] **Step 1: Skeleton + build**, then a Node script that creates a session, mounts `disk`, and tears down cleanly.
+
+- [ ] **Step 2: Verify** the addon builds and loads under plain Node.
 
 - [ ] **Step 3: Commit**
 
 ---
 
-### Task 6: `PyProvider` — a Python class as a first-class provider
+### Task 7: `NodeProvider` — a JS object as a first-class provider
 
-**Files:** `crates/vfs-python/`
+**Files:** the Node binding crate
 
-**Interfaces:** A Python class deriving `vfs.Provider` becomes an `Arc<dyn Provider>` the director can mount anywhere a Rust provider goes.
+**Interfaces:** A JS object implementing the provider methods becomes an `Arc<dyn Provider>` the director mounts anywhere a Rust provider goes.
 
-This is the stage's centre. The spec is unusually specific, and every clause is a requirement:
+This is the stage's centre, and spec §8b's threading contract is the specification:
 
-- **GIL discipline.** `PyProvider` acquires the GIL per call. Rust-side blocking (ring waits, disk I/O) runs under `allow_threads` **so the GIL is never held across a wait.** A Python provider serialises every director thread that reaches it — that is why `slow` exists.
-- **Errors.** `vfs.VfsError(code)` maps to `ST_*`. Any other exception becomes `ST_IO_ERROR` with its traceback logged. **No exception crosses the FFI boundary uncaught.**
-- **Registration-time validation.** The binding inspects the class at construction. Declaring `ReadWrite` without defining `write_at` is an error *there*, with the session never starting.
-- **Data transfer.** `read_at`/`read_next` return `bytes`; Rust copies. A writable `memoryview` is explicitly deferred.
+1. **Provider calls originate only on director worker threads**, never the host's main thread. Task 5 will have demonstrated the deadlock; enforce against it rather than documenting it.
+2. **The call may block the calling director thread** for as long as the host takes. `async` methods returning a `Promise` are expected and supported — the director thread parks until it settles.
+3. **No throw or rejection crosses the boundary uncaught.** `VfsError(code)` maps to `ST_*`; anything else becomes `ST_IO_ERROR` with the stack logged.
+4. **A provider that never settles** hangs one director thread, not the session — and that is a diagnosable failure that should be **counted**, not merely survived.
+5. **Registration-time validation:** declaring `ReadWrite` without a `writeAt` is an error at construction, with the session never starting.
 
-- [ ] **Step 1: Write the failing tests** — a Python provider serving bytes through the director; a Python provider raising `VfsError` mapping to the right `ST_*`; a Python provider raising `ValueError` becoming `ST_IO_ERROR` with the traceback logged and **the process surviving**; a `ReadWrite` class missing `write_at` refused at construction.
+- [ ] **Step 1: Write the failing tests** — a JS provider serving bytes through the director; an `async` provider whose promise resolves late; `VfsError` mapping to the right `ST_*`; a plain throw becoming `ST_IO_ERROR` with the stack logged and **the process surviving**; a never-settling promise counted rather than silently hanging; a `ReadWrite` object missing `writeAt` refused at construction.
 
 - [ ] **Step 2: Run to verify they fail**
 
 - [ ] **Step 3: Implement**
 
-- [ ] **Step 4: Verify** no exception path can abort the host. Task 1's `catch_unwind` covers the shim; this is the same discipline at the binding boundary, and it is the reason the workspace uses `unwind` at all.
+- [ ] **Step 4: Verify** no host exception path can abort the process.
 
 - [ ] **Step 5: Commit**
 
 ---
 
-### Task 7: Expose the primitives
+### Task 8: Expose the primitives to JavaScript
 
-**Files:** `crates/vfs-python/`
+**Files:** the Node binding crate
 
-**Interfaces:** `vfs.disk`, `vfs.memory`, `vfs.readonly`, `vfs.seekable`, `vfs.cached`, `vfs.layered`, `vfs.overlay`, `vfs.router`.
+**Interfaces:** `disk`, `memory`, `readonly`, `seekable`, `cached`, `layered`, `overlay`, `router`.
 
-Spec §8, on its own example: *"Everything except `SteamCdn` is a Rust primitive. That is the test of whether §6 succeeded."*
+Spec §8's test, which applies unchanged to Node: *"Everything except [the host provider] is a Rust primitive. That is the test of whether §6 succeeded."*
 
-If a primitive turns out to be awkward to expose, that is a finding about §6's design, not a Python problem — **report it rather than papering over it in the binding.**
+If a primitive is awkward to expose, that is a finding about §6's design — **report it rather than papering over it in the binding.**
 
-- [ ] **Step 1: Write the failing test** — the spec's own composition, built from Python: `cached(seekable(...))`, `layered(readonly(base), disk(...))`, `router({"*.ini": memory}, default=overlay(disk, upper=disk))`.
-
-- [ ] **Step 2: Implement**
-
-- [ ] **Step 3: Commit**
-
----
-
-### Task 8: The Python conformance runner
-
-**Files:** `crates/vfs-python/`, plus a Python test module
-
-**Interfaces:** A Python-authored provider can be run against the same `assert_conformance` suite Rust providers face.
-
-This is stage 4's gate: *"Python-authored provider passes conformance."*
-
-`assert_conformance` takes `Arc<dyn Provider>` in-process (`conformance.rs:448`). Task 6's `PyProvider` is the adapter that makes a Python object satisfy it. Expose a `vfs.assert_conformance(provider)` that runs the **real** suite — not a reimplementation of it in Python.
-
-A second suite would drift from the first, and the whole point is that a Python provider is held to the identical contract.
-
-- [ ] **Step 1: Write the failing test** — a deliberately minimal Python provider passing conformance at `SeqRead`, and a Python provider that *lies* about its capabilities failing it.
+- [ ] **Step 1: Write the failing test** — the spec's composition, built from TypeScript: `cached(seekable(...))`, `layered(readonly(base), disk(...))`, `router` with a memory provider for `*.ini` and an `overlay` default.
 
 - [ ] **Step 2: Implement**
 
@@ -216,15 +215,33 @@ A second suite would drift from the first, and the whole point is that a Python 
 
 ---
 
-### Task 9: The spec's example, end to end
+### Task 9: The Node conformance runner
 
-**Files:** a Python example/test
+**Files:** the Node binding crate, plus a TypeScript test module
+
+**Interfaces:** A JS-authored provider runs against the same `assert_conformance` suite Rust providers face.
+
+This is stage 4's gate, restated for Node: **a host-authored provider passes conformance.**
+
+`assert_conformance` takes `Arc<dyn Provider>` in-process (`conformance.rs:448`). Task 7's `NodeProvider` is the adapter. Expose `assertConformance(provider)` running the **real** suite — not a reimplementation in TypeScript. A second suite would drift, and the point is that a host provider is held to the identical contract.
+
+- [ ] **Step 1: Write the failing test** — a minimal JS provider passing conformance at `SeqRead`, and a JS provider that *lies* about its capabilities failing it.
+
+- [ ] **Step 2: Implement**
+
+- [ ] **Step 3: Commit**
+
+---
+
+### Task 10: The example, end to end
+
+**Files:** a TypeScript example/test
 
 **Interfaces:** None. This is the acceptance evidence.
 
-Run the §8 example as close to verbatim as the environment allows: a Python-authored provider, Rust primitives composed from Python, two roots, a launch, and `inis.read("Skyrim.ini")` showing what the game actually wrote.
+Run spec §8's example translated to TypeScript: a JS-authored provider, Rust primitives composed from JS, two roots, a launch, and reading back what the process actually wrote.
 
-**If the real Skyrim launch is out of scope here, say so and run everything else** — stage 5 owns the full game port. What must work now is the whole chain with a stand-in executable.
+**The real Skyrim launch is stage 5's.** What must work now is the whole chain with a stand-in executable.
 
 - [ ] **Step 1: Run it**, and record what worked and what did not.
 
@@ -242,16 +259,27 @@ cargo clippy --all-targets -- -D warnings
 
 ---
 
+### Deferred to stage 4b: the Python binding
+
+Spec §8 stands as written and is still wanted — `aethervfs` on PyPI, PyO3, maturin, abi3 wheel. It moves **after** Node for the reason in §8b: the GIL forgives a boundary shape that Node's event loop does not, so the stricter runtime defines the contract and Python implements against a settled one.
+
+Everything in tasks 1-4 and 9 is shared. What Python adds is `PyProvider`, the GIL discipline (`allow_threads` so the GIL is never held across a wait), and the packaging.
+
+---
+
 ## Stage 4 Exit Criteria
 
 - [ ] Every `extern "system"` hook contains its own panic, and a caught panic does not run destructors through game frames.
 - [ ] `vfs-embed` exists and a host can run a full session through it without naming `vfs_director` or `vfs_directord` types.
 - [ ] The `vfs` CLI runs on `vfs-embed` with no CLI-visible change — one implementation, two callers.
 - [ ] A `memory` provider exists, passes `assert_conformance` as `ReadWrite`, and is readable from the host after a session.
-- [ ] `import aethervfs` works from a maturin-built abi3 wheel.
-- [ ] A Python-authored provider serves a real session through the director.
-- [ ] No Python exception can abort the host process; `VfsError` maps to `ST_*`, everything else to `ST_IO_ERROR` with the traceback logged.
-- [ ] A `ReadWrite` provider missing `write_at` is refused at construction, not at first write.
-- [ ] **A Python-authored provider passes the same `assert_conformance` suite Rust providers do** — the stage gate.
-- [ ] Every element of the spec's §8 example except the provider itself is a Rust primitive.
+- [ ] The per-call event-loop round-trip cost is **measured**, and whether `cached` is mandatory or advisory is stated on evidence.
+- [ ] `require('aethervfs')` works from a napi-rs addon under plain Node.
+- [ ] A JS-authored provider serves a real session through the director, including an `async` method whose promise resolves late.
+- [ ] No JS throw or rejection can abort the host process; `VfsError` maps to `ST_*`, everything else to `ST_IO_ERROR` with the stack logged.
+- [ ] A never-settling promise is **counted**, not silently hung.
+- [ ] A provider call originating on the host's main thread is refused rather than deadlocking.
+- [ ] A `ReadWrite` provider missing `writeAt` is refused at construction, not at first write.
+- [ ] **A JS-authored provider passes the same `assert_conformance` suite Rust providers do** — the stage gate.
+- [ ] Every element of the example except the provider itself is a Rust primitive.
 - [ ] Workspace at or above 591; clippy clean; payload workspace builds.
