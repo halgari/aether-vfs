@@ -530,6 +530,76 @@ Stale shim DLLs have silently produced wrong results before, so the binding
 and checked — rather than trusting whatever sits next to the module. Editable
 installs point at the dev build output.
 
+## 8b. The Node binding — and why it comes first (decided 2026-08-16)
+
+**Reordering.** §8's Python binding is still wanted and its content mostly
+carries over, but **Node/TypeScript is now the first binding built.** The long-term
+host is an Electron application's Node backend; plain Node is the near-term target
+and Electron is treated as a later packaging concern.
+
+**The reason for the order is threading, not preference.** PyO3 and N-API are not
+the same shape of problem, and the stricter one should define the contract:
+
+- **Python.** A director worker thread acquires the GIL, calls the provider,
+  releases it. Blocking is fine, reentrancy is survivable, and `PyProvider` can
+  implement the synchronous `Provider` trait almost directly.
+- **Node.** JavaScript runs on a single event-loop thread. A director worker
+  thread cannot call it directly; it schedules through an N-API threadsafe
+  function and blocks until the loop resolves the call. So a synchronous
+  `Provider::read_at` becomes **a block on a foreign scheduler**, and if a call
+  ever originates *from* the JS thread into Rust and back into JS, it
+  **deadlocks**.
+
+Building Python first would let the boundary harden around assumptions the GIL
+forgives and Node does not. Building Node first forces the contract to be stated
+explicitly, after which Python is a straightforward second implementation.
+
+### The threading contract
+
+This is binding on every host, not only Node:
+
+1. **Provider calls originate only on director worker threads.** Never on the
+   host's main thread. A host-thread call that reaches a host provider deadlocks
+   on Node and merely serialises on Python — so it is forbidden outright rather
+   than left to each binding to survive.
+2. **The host's provider call may block the calling director thread** for as long
+   as the host scheduler takes. That is what `slow` is for, and why `cached` in
+   front of a host provider is the expected deployment rather than an
+   optimisation.
+3. **No host exception or rejected promise crosses the FFI boundary uncaught.**
+
+### Package and ABI
+
+`napi-rs`, targeting **N-API** rather than raw V8 — ABI-stable across Node
+versions and across Electron's bundled runtime, the direct analogue of choosing
+an abi3 wheel for Python. Prebuilt binaries per platform; Electron compatibility
+is verified when there is a real Electron host to test against, not designed for
+speculatively.
+
+### Data transfer and errors
+
+`readAt`/`readNext` return a `Buffer`/`Uint8Array`; Rust copies out of it, the
+same trade §8 makes for `bytes`. A `VfsError(code)` maps to `ST_*`; any other
+throw or rejection becomes `ST_IO_ERROR` with the stack logged.
+
+An `async` provider method returning a `Promise` is expected and supported — the
+director thread parks until it settles. A provider that never settles hangs that
+one director thread, not the session; that is a diagnosable failure and should be
+counted, not merely survived.
+
+### Registration-time validation
+
+Identical in intent to §8: the binding inspects the object when it is
+constructed, and declaring `ReadWrite` without a `writeAt` is an error there,
+with the session never starting.
+
+### What is unresolved and must be measured, not assumed
+
+Whether an event-loop round trip per read is viable at real read volumes, or
+whether a JS provider is only usable behind `cached`. This is measurable on a
+spike and should be measured before the binding's shape is fixed — the answer
+changes whether `cached` is a recommendation or a requirement.
+
 ## 9. The `panic = "abort"` conflict
 
 The workspace sets `panic = "abort"` for both profiles (`rust/Cargo.toml`),
