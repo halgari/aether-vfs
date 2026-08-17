@@ -369,8 +369,22 @@ pub fn reset() {
 mod tests {
     use super::*;
 
+    /// The counters behind `state()` are process-global with no test
+    /// dimension, and `reset()` zeroes all of them. Any test that resets is
+    /// therefore mutually exclusive with any test that reads a *delta*
+    /// across two snapshots: a reset landing between the two reads makes the
+    /// delta negative or zero. Tests here take this lock rather than assuming
+    /// test order — the convention stated at `VA_LOCK` in
+    /// `vfs-shim::lazy_section`.
+    ///
+    /// Concurrent *increments* from other modules' tests (`ring_dispatch`
+    /// drives real opens through these same counters) are harmless to a
+    /// delta and deliberately not serialized; only `reset()` is destructive.
+    static STATS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn records_open_read_and_surfaces_failures() {
+        let _stats = STATS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         record_open("Data/Skyrim.esm", Some(1), 249_753_412, false);
         record_read(1, 1_048_576, false);
@@ -406,9 +420,15 @@ mod tests {
     /// binary runs its `#[test]` fns concurrently, and several of them
     /// (`ring_dispatch`'s dispatch tests in particular) drive real opens
     /// through the same process-wide counters. A hard reset here would race
-    /// those threads; a delta does not.
+    /// those threads; a delta tolerates their increments.
+    ///
+    /// A delta is not sufficient on its own, though, and claiming so is what
+    /// made this test flaky (~1.7% of runs, always `0 -> 0`): a sibling
+    /// test's `reset()` landing between the two `open_totals()` reads zeroes
+    /// the increment this asserts on. Hence `STATS_LOCK`.
     #[test]
     fn open_totals_counts_ok_and_err_separately() {
+        let _stats = STATS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (before_ok, before_err) = open_totals();
         record_open("open-totals-probe-ok.dat", Some(u64::MAX - 7), 7, false);
         record_open("open-totals-probe-err.dat", None, 0, true);
@@ -429,11 +449,14 @@ mod tests {
     /// "writes routed" from "no writes happened" (the ambiguity that made
     /// stage 2b's `FellThroughWriteFallback=0` uninformative). Uses a
     /// `totals()` delta for the same concurrency reason as
-    /// `open_totals_counts_ok_and_err_separately`; the per-path assertion
-    /// keys on a path unique to this test so concurrently-running tests
-    /// can't touch its counts.
+    /// `open_totals_counts_ok_and_err_separately`, and takes the same lock
+    /// for the same reason — a concurrent `reset()` would not merely skew the
+    /// delta here, it would drop the per-path line the tail of this test
+    /// requires. The per-path assertion keys on a path unique to this test so
+    /// concurrently-running tests can't touch its counts.
     #[test]
     fn write_ops_and_bytes_are_surfaced() {
+        let _stats = STATS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let before = totals();
         record_open("write-ops-probe.dat", Some(u64::MAX - 42), 0, false);
         record_write(u64::MAX - 42, 1_048_576, false);
