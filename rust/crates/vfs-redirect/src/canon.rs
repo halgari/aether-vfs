@@ -17,9 +17,83 @@
 
 use vfs_core::{fold, normalize_vpath, PathError};
 
-/// NT/DOS long-path prefixes `normalize_vpath` also recognises, in both
-/// slash forms.
-const NT_PREFIXES: [&str; 4] = [r"\??\", r"\\?\", "/??/", "//?/"];
+/// The object-manager tokens that name a *namespace* rather than a file, one
+/// path component each. A leading run of these — in any order, any number of
+/// times — names the same object as the path with the run removed, so
+/// stripping is iterative (see [`strip_all_nt_prefixes`]) rather than a fixed
+/// list of whole prefixes.
+///
+/// - `??` — the DosDevices object directory, as a real NT open spells it
+///   (`\??\C:\...`).
+/// - `GLOBAL??` — the *global* DosDevices directory that `\??` is a
+///   per-session view of. `\GLOBAL??\C:\...` and `\??\C:\...` name the same
+///   object; its absence here was half of the defect this list replaces.
+/// - `Global` — the symlink, inside DosDevices, to `\GLOBAL??`, so
+///   `\??\Global\C:\...` is another spelling of the same file again. Found
+///   while enumerating siblings for this fix rather than reported: a direct
+///   `NtCreateFile` probe of `\??\Global\C:\Windows\win.ini` and of
+///   `\??\Global\GLOBALROOT\GLOBAL??\C:\Windows\win.ini` both returned
+///   `STATUS_SUCCESS`.
+/// - `?` — what Win32's verbatim marker `\\?\` reduces to once its separators
+///   are set aside. Kept for the paths this crate is *handed* in that form
+///   (`vfs_win::final_path_for_open` returns `VOLUME_NAME_DOS`,
+///   `\\?\`-prefixed); a literal `\\?\...` presented to `NtCreateFile` is not
+///   a working object name at all — measured: `STATUS_OBJECT_NAME_INVALID`,
+///   because the object root has no empty-named entry — which is why it is
+///   [`Namespace::Elsewhere`] rather than a DosDevices spelling, so a
+///   `\??\`-keyed alias still does not match it. See
+///   `unc_admin_share_alias_does_not_match_the_win32_spelling`.
+/// - `GLOBALROOT` — the symlink, *inside* DosDevices, back to the object
+///   manager's own root, so `\??\GLOBALROOT\Device\HarddiskVolume3\...` names
+///   exactly what `\Device\HarddiskVolume3\...` does. It nests: a
+///   `GLOBALROOT` can be followed by another object-directory token and
+///   another `GLOBALROOT`, which is why nothing here assumes a bounded shape.
+///
+/// This list accepts a **superset** of what the object manager itself
+/// resolves: `\??\GLOBALROOT\GLOBALROOT\...` and `\??\GLOBAL??\...` are both
+/// stripped here but were measured to fail with `STATUS_OBJECT_PATH_NOT_FOUND`
+/// (`GLOBALROOT` exists only *inside* a DosDevices directory, `GLOBAL??` only
+/// at the object root). That asymmetry is deliberate and one-directional: a
+/// spelling this list over-accepts gets classified as under-root and answered
+/// by the director, which for an unopenable name means a not-found the OS was
+/// going to give anyway. Under-accepting is the direction that reaches real
+/// disk, and that is the failure this list exists to prevent.
+const NAMESPACE_TOKENS: [(&str, Namespace); 5] = [
+    ("?", Namespace::Elsewhere),
+    ("??", Namespace::DosDevicesCanonical),
+    ("GLOBAL??", Namespace::DosDevicesAliased),
+    ("Global", Namespace::DosDevicesAliased),
+    ("GLOBALROOT", Namespace::Elsewhere),
+];
+
+/// Where stripping a [`NAMESPACE_TOKENS`] entry leaves the path standing —
+/// which decides whether the component now at the front can be looked up in
+/// the [`VolumeMap`] under a *different* spelling than the one the caller
+/// wrote. See [`resolve_aliases_and_strip_prefixes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Namespace {
+    /// Inside the DosDevices directory, spelled the way every `VolumeMap` key
+    /// is keyed (`\??\`). Nothing to re-spell: the string still carries that
+    /// exact prefix, so the lookup already happened against it.
+    DosDevicesCanonical,
+    /// Inside the same directory under one of its *other* names (`\GLOBAL??`,
+    /// `Global`). The entry that follows is the entry `\??\<entry>` names, so a
+    /// failed bare lookup is worth retrying with the prefix re-spelled.
+    DosDevicesAliased,
+    /// Anywhere else — the object-manager root (behind `GLOBALROOT`), or
+    /// Win32's verbatim marker (`?`), which is not an object directory at all.
+    Elsewhere,
+}
+
+/// How many resolve-or-strip steps [`resolve_aliases_and_strip_prefixes`] will
+/// take before giving up. Stripping a token strictly shortens the path, but
+/// substituting an alias may lengthen it (a junction's target can be longer
+/// than its location), so a pathological alias table could otherwise cycle
+/// forever. Generous next to the deepest real shape (`\??\GLOBALROOT\GLOBAL??\`
+/// is three tokens plus one substitution) and bounded either way: an
+/// exhausted budget leaves the path partly resolved, which classifies as
+/// outside — the same fail-closed direction as an unmapped device.
+const MAX_PREFIX_STEPS: usize = 16;
 
 /// A table from a raw NT-presented path prefix to the text that replaces it —
 /// a drive letter (`C:`) for a device/volume-GUID prefix, or an arbitrary
@@ -31,7 +105,7 @@ const NT_PREFIXES: [&str; 4] = [r"\??\", r"\\?\", "/??/", "//?/"];
 ///
 /// One representation serves both needs: a device prefix is just an alias
 /// whose replacement happens to be two bytes long (`X:`), so
-/// `resolve_device_prefix`'s `format!("{replacement}{rest}")` already does
+/// [`resolve_alias`]'s `format!("{replacement}{rest}")` already does
 /// the right thing for a multi-component replacement (a junction's real
 /// target path) with no special-casing.
 #[derive(Debug, Clone, Default)]
@@ -105,40 +179,61 @@ impl VolumeMap {
     }
 }
 
-/// Strip every leading recognised NT/DOS prefix, looping in case more than
-/// one layer is stacked. `normalize_vpath` strips only one layer (a single
-/// pass, `break`s after the first match), which is fine for its own callers
-/// but not safe for us to rely on here: after we peel a prefix ourselves for
-/// other reasons (see `nt_prefix_len` and `resolve_device_prefix`), a second
-/// leftover layer would otherwise reach the final `normalize_vpath` call as
-/// an ordinary-looking component (`?` or `??`) and get folded into the
-/// canonical path as if it were a real directory name.
+/// Strip one leading namespace component — any run of separators followed by
+/// a [`NAMESPACE_TOKENS`] entry, ending at a component boundary — returning
+/// what follows (its own leading separator intact, so the result is still an
+/// absolute-looking path the next step can match against) and whether that
+/// token left us inside the DosDevices object directory.
+///
+/// Requires at least one leading separator, so a *file* whose name happens to
+/// match a token cannot be eaten: only a path rooted in the object-manager
+/// namespace can begin `\GLOBALROOT\...`. `None` when the path does not begin
+/// with such a component. Always shortens the path when it returns `Some`,
+/// which is what makes the loop below terminate.
+///
+/// Matched with `eq_ignore_ascii_case` rather than `fold`: every token is
+/// ASCII, so the two agree on which strings match, and this runs on every open
+/// while `fold` allocates a `String` per comparison.
+fn strip_one_namespace_token(s: &str) -> Option<(&str, Namespace)> {
+    let body = s.trim_start_matches(['\\', '/']);
+    if body.len() == s.len() {
+        return None; // No leading separator: not a namespace-rooted path.
+    }
+    let end = body.find(['\\', '/']).unwrap_or(body.len());
+    let (token, rest) = body.split_at(end);
+    NAMESPACE_TOKENS
+        .iter()
+        .find(|(t, _)| t.eq_ignore_ascii_case(token))
+        .map(|(_, namespace)| (rest, *namespace))
+}
+
+/// Strip every leading namespace component, however many are stacked and in
+/// whatever order — see [`NAMESPACE_TOKENS`]. Idempotent by construction: it
+/// loops until nothing more matches, so `\??\GLOBALROOT\GLOBAL??\C:\...`
+/// comes out as `C:\...` exactly like the plain `\??\C:\...` does.
+///
+/// `normalize_vpath` strips only one layer (a single pass, `break`s after the
+/// first match), which is fine for its own callers but not safe to rely on
+/// here: a leftover layer would reach the final `normalize_vpath` call as an
+/// ordinary-looking component (`?`, `??`, `GLOBAL??`, `GLOBALROOT`) and get
+/// folded into the canonical path as if it were a real directory name — a
+/// path that then matches no root and is answered by the real filesystem.
+///
+/// Leading separators are dropped along with the tokens, so a drive letter
+/// ends up at the very start. That is load-bearing rather than cosmetic:
+/// `canonicalise`'s drive-root `..` clamping only engages when the first
+/// component *is* the drive, and a stray `\` in front of it (which is what
+/// stripping `\GLOBAL??\` from `\GLOBAL??\C:\..\..\Windows` leaves behind)
+/// would silently route the path to `normalize_vpath`'s own component-popping
+/// instead, which pops the drive letter away too.
 fn strip_all_nt_prefixes(s: &str) -> &str {
     let mut s = s;
-    while let Some(p) = NT_PREFIXES.iter().find(|p| s.starts_with(**p)) {
-        s = &s[p.len()..];
+    while let Some((rest, _)) = strip_one_namespace_token(s) {
+        s = rest;
     }
-    s
+    s.trim_start_matches(['\\', '/'])
 }
 
-/// The byte length of every leading recognised NT/DOS prefix, stacked or
-/// not. Used only to find where a drive letter or device name starts for
-/// the alternate-data-stream check below; a naive single-layer measurement
-/// would stop after the outer prefix and mistake a nested prefix's own
-/// drive colon for a stream separator, truncating (not just failing to
-/// unify) the rest of the path.
-fn nt_prefix_len(s: &str) -> usize {
-    s.len() - strip_all_nt_prefixes(s).len()
-}
-
-/// Split off a trailing alternate-data-stream suffix (`:stream` or
-/// `:stream:$DATA`), returning the path before it. Must run before any
-/// drive-letter or device-prefix inspection: a colon inside a stream name
-/// would otherwise look like (or be confused with) a drive-letter colon.
-///
-/// A drive-letter colon (`C:`) — right after any NT/DOS prefix that is
-/// present — is not itself a stream separator; the first colon *after* it
-/// is.
 /// [`strip_stream_suffix`] as a split: the path before any alternate-data-
 /// stream suffix, and the suffix itself (**including** its leading colon),
 /// or `None` when there is no stream.
@@ -159,86 +254,120 @@ pub fn split_stream_suffix(raw: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Split off a trailing alternate-data-stream suffix (`:stream` or
+/// `:stream:$DATA`), returning the path before it. Runs before any
+/// drive-letter or namespace inspection: a colon inside a stream name would
+/// otherwise look like a drive-letter colon.
+///
+/// **Only the final component is searched.** A stream is a leaf — `dir:s\file`
+/// names nothing, because there is nothing to traverse *through* a stream — so
+/// a colon in any earlier component is not a stream separator, and cutting
+/// there does not shorten a path, it destroys it. This is not hypothetical: it
+/// is exactly how `\??\GLOBALROOT\GLOBAL??\C:\<root>\Data\a.esp` used to
+/// canonicalise to `GLOBAL??/C`. The old rule measured a fixed set of whole
+/// prefixes, found no drive letter behind the one it recognised (`GLOBALROOT`
+/// is not `C:`), and so treated the drive colon several components later as
+/// the stream separator — leaving a stub that matched no root, so the open
+/// trampolined to the real file. Scoping the search to the final component
+/// makes that class of mistake unreachable regardless of which prefix forms
+/// are recognised.
+///
+/// Within that final component a *drive-letter* colon is still not a stream
+/// separator; the first colon after it is. That case is real: `C:foo` (drive-
+/// relative, one component, no separator at all) must survive intact for
+/// [`is_drive_relative`] to refuse it, rather than being truncated to a
+/// harmless-looking bare `C`.
 fn strip_stream_suffix(raw: &str) -> &str {
-    let prefix_len = nt_prefix_len(raw);
-    let rest = &raw[prefix_len..];
-    let rest_bytes = rest.as_bytes();
-    let has_drive_colon =
-        rest_bytes.len() >= 2 && rest_bytes[0].is_ascii_alphabetic() && rest_bytes[1] == b':';
-    let search_from = prefix_len + if has_drive_colon { 2 } else { 0 };
+    let comp_start = raw.rfind(['\\', '/']).map_or(0, |i| i + 1);
+    let comp = &raw.as_bytes()[comp_start..];
+    let has_drive_colon = comp.len() >= 2 && comp[0].is_ascii_alphabetic() && comp[1] == b':';
+    let search_from = comp_start + if has_drive_colon { 2 } else { 0 };
     match raw[search_from..].find(':') {
         Some(rel) => &raw[..search_from + rel],
         None => raw,
     }
 }
 
-/// Resolve a leading `\Device\...` or `\\?\Volume{...}` prefix to its drive
-/// letter via `volumes`. Paths with no such prefix, or with a prefix not
-/// present in `volumes`, are returned unchanged — an unmapped device must
-/// never be guessed into a drive.
-fn resolve_device_prefix(path: &str, volumes: &VolumeMap) -> String {
-    match volumes.resolve(path) {
-        Some((replacement, matched_len)) => format!("{replacement}{}", &path[matched_len..]),
-        None => path.to_string(),
-    }
+/// Substitute a registered device / volume-GUID / junction / UNC-share alias
+/// if `path` starts with one, else `None`. An unregistered device prefix must
+/// never be guessed into a drive, so "no match" means "leave it alone", not
+/// "pick something".
+fn resolve_alias(path: &str, volumes: &VolumeMap) -> Option<String> {
+    volumes
+        .resolve(path)
+        .map(|(replacement, matched_len)| format!("{replacement}{}", &path[matched_len..]))
 }
 
-/// `GLOBALROOT` is a real, well-known symlink *inside* the `\??\`
-/// (DosDevices) object directory that points straight at the object
-/// manager's own root (`\`) — so `\??\GLOBALROOT\Device\HarddiskVolume3\...`
-/// (what Windows presents to `NtCreateFile` for a
-/// `\\?\GLOBALROOT\Device\HarddiskVolume3\...` Win32 open, the trick that
-/// reaches a device name without going through an ordinary `\??\`
-/// (DosDevices) symlink at all — see `vfs-fixture-escape`'s vector 3) names
-/// *exactly* the same object as the bare `\Device\HarddiskVolume3\...` form.
+/// Peel the whole object-manager wrapper off `path`: at each step, substitute
+/// a registered alias if one matches, otherwise strip one namespace token, and
+/// repeat until neither applies. The result is a drive-rooted (`C:\...`) or
+/// unrecognised-but-prefix-free path.
 ///
-/// Left unstripped, `resolve_device_prefix`'s `VolumeMap` lookup — which
-/// only ever matches a registered prefix *at the very start* of the string —
-/// would never see the `\Device\...`/`\\?\Volume{...}` text at all, because
-/// the literal `GLOBALROOT` token sits in front of it. The whole spelling
-/// would then canonicalise as an unrecognised, non-drive-rooted path:
-/// `RootMap::under_root` would answer "outside" for a path the OS itself
-/// resolves identically to the un-wrapped form — invisible to every
-/// counter, exactly the failure mode this gate exists to close. Found by
-/// reproduction (Task 6's session-based matrix), not asserted in advance:
-/// the OS-level open still succeeds either way (`tramp` doesn't care what
-/// `RootMap` thinks), so nothing about *reachability* ever signalled this
-/// gap — only classification did.
+/// **Alias substitution is tried before stripping**, at every step, because
+/// every [`VolumeMap`] key is registered *with* the prefix a real NT open
+/// presents (`\??\Volume{guid}`, `\??\UNC\localhost\C$`, `\??\C:\...\junction`)
+/// — stripping first would leave nothing for those keys to match.
 ///
-/// Returns the text after `GLOBALROOT` (starting with the following
-/// separator, so the caller can feed it straight back into
-/// `resolve_device_prefix`), or `None` if `path` has no such wrapper.
-fn strip_globalroot_wrapper(path: &str) -> Option<&str> {
-    const TOKEN: &str = "GLOBALROOT";
-    for prefix in NT_PREFIXES {
-        let Some(rest) = path.strip_prefix(prefix) else { continue };
-        let Some(candidate) = rest.get(..TOKEN.len()) else { continue };
-        if fold(candidate) != fold(TOKEN) {
+/// **Both are looped**, because either can expose the other. A device name can
+/// hide behind a namespace token (`\??\GLOBALROOT\Device\HarddiskVolume3\...`
+/// is the same object as `\Device\HarddiskVolume3\...`: `GLOBALROOT` is a real
+/// symlink, inside DosDevices, to the object manager's own root, and a
+/// `VolumeMap` lookup only ever matches at the very start of the string, so it
+/// never sees the device name with the token sitting in front of it). Equally,
+/// a namespace token can sit behind an alias substitution. Neither nests to a
+/// bounded depth, so neither is handled as a special case of the other.
+///
+/// **`\??`-re-spelling for a lookup, from an *aliased* DosDevices spelling
+/// only.** A path that reached an entry of the DosDevices directory through
+/// one of that directory's other names (`\GLOBAL??\...`, `\??\Global\...`,
+/// either of them behind a `GLOBALROOT`) names the same entry as
+/// `\??\<entry>`, so when the bare lookup fails the entry is looked up in that
+/// one canonical spelling too — otherwise `\GLOBAL??\UNC\localhost\C$\...`
+/// (measured: opens the real file, `STATUS_SUCCESS`) resolves no alias at all
+/// while `\??\UNC\localhost\C$\...` resolves one. Two spellings do *not* get
+/// this retry, each for its own reason:
+///
+/// - [`Namespace::DosDevicesCanonical`] (`??`) — the string it leaves behind is
+///   the one the caller already spelled, so the retry would repeat the lookup
+///   that just missed. This is the common case (every ordinary NT open is
+///   `\??\C:\...`), so skipping it keeps the hot path at one lookup.
+/// - [`Namespace::Elsewhere`] — for `GLOBALROOT` there is genuinely no
+///   DosDevices entry at the front (the object root's own entries follow, e.g.
+///   `\Device\...`), and for Win32's verbatim `?` marker the contract is that a
+///   `\??\`-keyed alias must not match it at all, because a literal
+///   `\\?\UNC\...` presented to `NtCreateFile` resolves to nothing — see
+///   `unc_admin_share_alias_does_not_match_the_win32_spelling`.
+fn resolve_aliases_and_strip_prefixes(path: &str, volumes: &VolumeMap) -> String {
+    let mut cur = path.to_string();
+    // Set when the token stripped last left the path standing on a DosDevices
+    // entry spelled some way other than `\??\` — the one case worth a second,
+    // re-spelled lookup.
+    let mut respell_as_dosdevices = false;
+    for _ in 0..MAX_PREFIX_STEPS {
+        if let Some(next) = resolve_alias(&cur, volumes) {
+            cur = next;
+            respell_as_dosdevices = false;
             continue;
         }
-        let after = &rest[TOKEN.len()..];
-        if after.is_empty() || after.starts_with(['\\', '/']) {
-            return Some(after);
+        if respell_as_dosdevices {
+            if let Some(next) = resolve_alias(&format!(r"\??{cur}"), volumes) {
+                cur = next;
+                respell_as_dosdevices = false;
+                continue;
+            }
+        }
+        match strip_one_namespace_token(&cur) {
+            Some((rest, namespace)) => {
+                cur = rest.to_string();
+                respell_as_dosdevices = namespace == Namespace::DosDevicesAliased;
+            }
+            None => break,
         }
     }
-    None
-}
-
-/// [`resolve_device_prefix`], additionally trying a `GLOBALROOT`-wrapped
-/// spelling if the bare form does not match. The bare form is tried first
-/// and wins outright when it matches, so an ordinary (unwrapped) device or
-/// volume-GUID path resolves exactly as it always did — this is a pure
-/// fallback for the wrapped shape, never a second, competing way to resolve
-/// the common case.
-fn resolve_device_prefix_with_globalroot(path: &str, volumes: &VolumeMap) -> String {
-    let bare = resolve_device_prefix(path, volumes);
-    if bare != path {
-        return bare;
-    }
-    match strip_globalroot_wrapper(path) {
-        Some(unwrapped) => resolve_device_prefix(unwrapped, volumes),
-        None => bare,
-    }
+    // Leading separators go with the tokens — see `strip_all_nt_prefixes`,
+    // whose own trailing trim this mirrors (and which still runs after this,
+    // for the prefix an alias's *replacement* text may itself carry).
+    cur.trim_start_matches(['\\', '/']).to_string()
 }
 
 /// Strip trailing dots and spaces from each path component, the way Win32
@@ -272,9 +401,10 @@ fn is_drive_relative(s: &str) -> bool {
 
 /// Whether a `/`-joined path's leading segment is a bare drive component
 /// (`C:`, exactly two bytes). Produced only by a genuine absolute Win32 form
-/// or by `resolve_device_prefix`'s replacement — never left over from a
-/// generic NT/DOS prefix — so seeing this shape reliably means "there is a
-/// drive root here to protect from `..`".
+/// or by an alias's replacement text — never left over from a namespace
+/// prefix, which [`resolve_aliases_and_strip_prefixes`] removes along with the
+/// separators that followed it — so seeing this shape reliably means "there is
+/// a drive root here to protect from `..`".
 fn is_drive_component(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
@@ -304,8 +434,11 @@ fn clamp_dotdot(remainder: &str) -> String {
 }
 
 /// Canonicalise one NT open path to a single form: strip any alternate-data-
-/// stream suffix, resolve a device or volume-GUID prefix to its drive letter
-/// via `volumes`, strip every stacked NT/DOS prefix layer, refuse a
+/// stream suffix, then alternately resolve a device / volume-GUID / junction /
+/// UNC-share alias via `volumes` and strip a leading object-manager namespace
+/// token until neither applies (see [`resolve_aliases_and_strip_prefixes`] —
+/// this is what makes every spelling of the DosDevices directory, stacked to
+/// any depth, come out the same), refuse a
 /// drive-relative (`C:foo`) spelling, strip trailing per-component
 /// dots/spaces, clamp `..` at a drive boundary if one is present, then hand
 /// the result to [`normalize_vpath`] for separator folding and any remaining
@@ -317,7 +450,11 @@ fn clamp_dotdot(remainder: &str) -> String {
 /// the real file on disk.
 pub fn canonicalise(raw: &str, volumes: &VolumeMap) -> Result<String, PathError> {
     let no_stream = strip_stream_suffix(raw);
-    let resolved = resolve_device_prefix_with_globalroot(no_stream, volumes);
+    let resolved = resolve_aliases_and_strip_prefixes(no_stream, volumes);
+    // An alias's replacement text is fed back through the same pipeline as if
+    // the caller had spelled it (see `VolumeMap::insert_alias`), and may itself
+    // carry a prefix; the loop above already strips what it produces, so this
+    // is belt-and-braces on the last substitution rather than a second policy.
     let unprefixed = strip_all_nt_prefixes(&resolved);
     if is_drive_relative(unprefixed) {
         return Err(PathError::EscapesRoot);
@@ -351,6 +488,19 @@ mod tests {
             r"C:\Games\Skyrim\Data\a.esp",
             r"\??\C:\Games\Skyrim\Data\a.esp",
             r"\\?\C:\Games\Skyrim\Data\a.esp",
+            // Every object-manager spelling that reaches the drive letter
+            // through a namespace token rather than a device name. These are
+            // the spellings the stream-suffix rule used to truncate at the
+            // drive colon (`\??\GLOBALROOT\GLOBAL??\C:\...` came out as
+            // `GLOBAL??/C`), so they matched no root and the open reached real
+            // disk. See `RootMap`'s own `NT_SPELLING_VECTORS` table for the
+            // classification half.
+            r"\GLOBAL??\C:\Games\Skyrim\Data\a.esp",
+            r"\??\GLOBALROOT\GLOBAL??\C:\Games\Skyrim\Data\a.esp",
+            r"\??\GLOBALROOT\??\C:\Games\Skyrim\Data\a.esp",
+            r"\??\Global\C:\Games\Skyrim\Data\a.esp",
+            r"\GLOBAL??\GLOBALROOT\GLOBAL??\C:\Games\Skyrim\Data\a.esp",
+            r"\??\globalroot\global??\c:\games\skyrim\data\a.esp",
             r"\Device\HarddiskVolume3\Games\Skyrim\Data\a.esp",
             r"\\?\Volume{12345678-1234-1234-1234-123456789abc}\Games\Skyrim\Data\a.esp",
             r"C:\Games\Skyrim\Data\.\a.esp",
@@ -529,13 +679,42 @@ mod tests {
         );
     }
 
-    /// An ordinary drive-letter path (no `GLOBALROOT` anywhere) must resolve
-    /// exactly as before — the fallback must never engage for the common
-    /// case, only for a spelling the bare match already failed on.
+    /// An ordinary drive-letter path (no namespace token anywhere) must
+    /// resolve exactly as before — the resolve-or-strip loop must never
+    /// disturb the common case, only the spellings that carry a wrapper.
     #[test]
     fn globalroot_fallback_does_not_disturb_an_ordinary_path() {
         let got = canonicalise(r"C:\Games\Skyrim\Data\a.esp", &vols()).unwrap();
         assert_eq!(got.to_ascii_lowercase(), "c:/games/skyrim/data/a.esp");
+    }
+
+    /// An entry of the DosDevices directory reached through a *different*
+    /// spelling of that directory is still the same entry, so an alias keyed
+    /// with the one prefix a real open presents (`\??\...`, what
+    /// `resolve_volume_map` registers) must still be found — otherwise
+    /// `\GLOBAL??\UNC\localhost\C$\...`, measured to open the real file with
+    /// `STATUS_SUCCESS`, resolves no alias at all and lands outside every
+    /// root. Both halves matter: the volume-GUID key and the admin-share
+    /// alias are the two `\??\`-keyed entries production registers.
+    #[test]
+    fn a_dosdevices_entry_resolves_through_any_spelling_of_that_directory() {
+        let mut v = VolumeMap::empty();
+        v.insert(r"\??\Volume{12345678-1234-1234-1234-123456789abc}", 'C');
+        v.insert_alias(r"\??\UNC\localhost\C$", "C:");
+        for raw in [
+            r"\??\Volume{12345678-1234-1234-1234-123456789abc}\Games\Skyrim\Data\a.esp",
+            r"\GLOBAL??\Volume{12345678-1234-1234-1234-123456789abc}\Games\Skyrim\Data\a.esp",
+            r"\??\GLOBALROOT\GLOBAL??\Volume{12345678-1234-1234-1234-123456789abc}\Games\Skyrim\Data\a.esp",
+            r"\??\UNC\localhost\C$\Games\Skyrim\Data\a.esp",
+            r"\GLOBAL??\UNC\localhost\C$\Games\Skyrim\Data\a.esp",
+            r"\??\Global\UNC\localhost\C$\Games\Skyrim\Data\a.esp",
+        ] {
+            assert_eq!(
+                canonicalise(raw, &v).unwrap().to_ascii_lowercase(),
+                "c:/games/skyrim/data/a.esp",
+                "a `\\??\\`-keyed alias was not found behind another spelling of DosDevices: {raw}"
+            );
+        }
     }
 
     /// Vector 7 (junction): `insert_alias` with a *multi-component* absolute

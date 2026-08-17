@@ -99,8 +99,9 @@ pub fn resolve_volume_map_for(roots: &[&str]) -> VolumeMap {
 /// multiple-UNC-provider device). `\\localhost\C$\Games` therefore names
 /// *exactly* the same object as `C:\Games`, the same shape of aliasing this
 /// map already resolves for a bare device prefix or a `GLOBALROOT`-wrapped
-/// one — see `canon::strip_globalroot_wrapper`'s doc comment for the
-/// sibling case, and this project's own history of a volume-GUID key built
+/// one — see `canon::NAMESPACE_TOKENS`' doc comment for the sibling cases
+/// (`\GLOBAL??\UNC\localhost\C$\...` is a working spelling of this same
+/// share), and this project's own history of a volume-GUID key built
 /// with the wrong (`\\?\`) prefix spelling matching nothing and failing
 /// *closed*, which is the trap this key's `\??\` spelling avoids.
 ///
@@ -112,6 +113,17 @@ pub fn resolve_volume_map_for(roots: &[&str]) -> VolumeMap {
 /// that could ever resolve to "this machine" is unbounded, for marginal
 /// benefit over the one spelling escape-matrix vector 9 actually exercises.
 /// A documented gap, not an oversight — see `docs/escape-matrix.md`.
+///
+/// **Two spellings in that gap were measured, not assumed, while closing the
+/// object-manager prefix spellings** (`canon::NAMESPACE_TOKENS`), and both
+/// return `STATUS_SUCCESS` from a direct `NtCreateFile` against a real file:
+/// `\??\UNC\127.0.0.1\C$\...` (the loopback-address hostname form named
+/// above) and `\Device\Mup\localhost\C$\...` (the MUP *device* the `\??\UNC`
+/// symlink points at, reached without going through that symlink at all —
+/// the exact shape of the `GLOBALROOT` trick, one namespace down). Neither is
+/// registered here, so both still classify as outside every root. The second
+/// was not previously named anywhere; it is recorded here so the gap is one
+/// someone chose rather than one nobody noticed.
 fn admin_share_nt_key(drive: char) -> String {
     format!(r"\??\UNC\localhost\{drive}$")
 }
@@ -326,9 +338,11 @@ fn is_component_prefix(root: &str, candidate: &str) -> bool {
 /// a real open of `\\?\Volume{guid}\...` is rewritten by Windows to
 /// `\??\Volume{guid}\...` before it ever reaches the NT layer the shim
 /// hooks. `canon::canonicalise` consults `VolumeMap::resolve` on the raw
-/// open path *before* it strips any NT/DOS prefix layer itself (see
-/// `canon::canonicalise`'s body: `resolve_device_prefix` runs ahead of
-/// `strip_all_nt_prefixes`), so the map is always queried with whatever
+/// open path *before* it strips any namespace prefix itself (see
+/// `canon::resolve_aliases_and_strip_prefixes`, which resolves before it
+/// strips at every step, and re-spells an entry reached through another
+/// spelling of DosDevices — `\GLOBAL??\Volume{guid}\...` — as `\??\` for the
+/// lookup rather than keying the map twice), so the map is always queried with whatever
 /// prefix the caller actually spelled — `\??\`, never `\\?\`, for a real
 /// open. A map keyed with the Win32 spelling would never match a real path
 /// and this whole vector would silently do nothing: not a bypass (canon

@@ -946,7 +946,18 @@ const OUTCOME_PATHS_MAX: usize = 4000;
 /// How many of the busiest paths to print per outcome. Smaller than
 /// `PATHS_SHOWN`: this table prints one such list per outcome, so it must
 /// stay skimmable rather than repeat the full passthrough dump seven times.
-const OUTCOME_PATHS_SHOWN: usize = 20;
+///
+/// **Not purely cosmetic**: `vfs-directord`'s escape matrix locates each
+/// vector's own attempt in this list and asserts the list did not truncate
+/// (`... and N more`) for a run that small, because a per-vector search
+/// against a truncated list proves nothing. Raised from 20 when the matrix
+/// grew the three object-manager spellings vector 3 never covered
+/// (`3b`/`3c`/`3d`) and the write matrix's busiest bucket — one distinct raw
+/// spelling per vector, plus the handful of incidental opens every launch
+/// makes — crossed the old cap. Widen it again rather than shrinking the
+/// matrix if that happens next time: the cap exists for skimmability, the
+/// matrix's coverage does not bend to it.
+const OUTCOME_PATHS_SHOWN: usize = 40;
 
 /// Current value of one outcome's counter. `pub` (not `#[cfg(test)]`) so a
 /// future gate's own tests can assert a class went to zero without reaching
