@@ -624,11 +624,21 @@ pub struct SessionSummary {
 /// is either to route the call through `vfs_embed`, or — if `vfs_embed` cannot
 /// express it — to add it there, because whatever the daemon just needed the
 /// Node and Python bindings will need next.
+///
+/// **The file list is read off the filesystem, not written down here.** A
+/// hand-written list was the first version of this test and it already had a
+/// hole: it named four files and `src/` has five, so `discovery.rs` — a
+/// `pub mod` of this crate — was never checked. It happened to be clean. A
+/// guard with a silent hole is worse than no guard, because it is *believed*,
+/// so the enumeration has to be one a new module cannot be added outside of.
 #[cfg(test)]
 #[test]
 fn daemon_names_only_the_embed_api() {
     // Assembled at compile time so that spelling them here does not trip the
-    // check when this file is one of the ones being read.
+    // check when this file is one of the ones being read. Everything below the
+    // seam belongs on this list, not only the crates that happen to hold
+    // providers: the shim, the injector, the ring and the Win32 wrappers are
+    // all engine, and naming any of them is the same mistake.
     let needles = [
         concat!("vfs_", "director", "::"),
         concat!("vfs_", "cache", "::"),
@@ -636,13 +646,34 @@ fn daemon_names_only_the_embed_api() {
         concat!("vfs_", "protocol", "::"),
         concat!("vfs_", "provider", "::"),
         concat!("vfs_", "zip", "::"),
+        concat!("vfs_", "shim", "::"),
+        concat!("vfs_", "inject", "::"),
+        concat!("vfs_", "ipc", "::"),
+        concat!("vfs_", "core", "::"),
+        concat!("vfs_", "win", "::"),
     ];
-    for (name, src) in [
-        ("registry.rs", include_str!("registry.rs")),
-        ("service.rs", include_str!("service.rs")),
-        ("lib.rs", include_str!("lib.rs")),
-        ("main.rs", include_str!("main.rs")),
-    ] {
+
+    // `src/*.rs` — every module of the daemon library plus the `vfs` binary.
+    // `src/bin/` is deliberately not descended into: `skyrim-live.rs` is a
+    // scenario harness that stage 5 removes from this crate, and it is a
+    // legitimate direct kernel user until then.
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&src_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", src_dir.display()))
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .collect();
+    files.sort();
+    assert!(
+        files.iter().any(|p| p.ends_with("registry.rs")) && files.len() >= 5,
+        "the enumeration must have found the daemon's sources — got {files:?}"
+    );
+
+    for path in files {
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         for needle in needles {
             assert!(
                 !src.contains(needle),

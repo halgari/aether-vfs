@@ -12,11 +12,22 @@ use vfs_provider::{
     bad_request, exists, map_io_err, Access, Provider, RootId, OPEN_READ,
 };
 
-/// Serializes process-global env mutation around [`Session::launch`].
+/// Serializes **every** process-global env mutation this crate performs —
+/// [`Session::serve`]'s as well as [`Session::launch`]'s.
 ///
-/// `CreateProcessW` inherits the parent's environment (null env block), and
-/// `IpcServe::apply_env` / `run_target_with_shim` both set process-wide `VFS_*`
-/// vars. A multi-session daemon must not interleave two launches.
+/// `CreateProcessW` inherits the parent's environment (null env block), so the
+/// child's ring coordinates travel as process-wide `VFS_*` vars that
+/// `IpcServe::apply_env_roots` and `run_target_with_shim` both write. Two
+/// sessions interleaving there hand a child the other one's ring.
+///
+/// The lock is not only about interleaving. `std::env::set_var` is **unsound
+/// in a multi-threaded process** — it mutates a global the C runtime may be
+/// reading concurrently, which is why Rust 2024 marks it `unsafe` — and the
+/// hosts this crate exists for are multi-threaded by construction: a Node
+/// addon has libuv's threadpool and V8 alongside it, an Electron main process
+/// more still. Serializing our own writers is the floor, not the fix; the fix
+/// is to stop touching process env at all and hand `CreateProcessW` an
+/// explicit environment block built for the child (see [`Session::launch`]).
 static LAUNCH_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Options for [`Session::launch`].
@@ -36,7 +47,21 @@ pub struct LaunchOpts {
     pub args: Vec<String>,
     /// Wait for process exit (false = detach; session must stay alive).
     pub wait: bool,
-    /// Optional override paths for shim/payload DLLs (else search near this exe).
+    /// Absolute paths to `vfs_shim_dll.dll` and `vfs_payload.dll`.
+    ///
+    /// Left `None`, they are searched for **next to `std::env::current_exe()`**
+    /// — and that is only the right answer when the host process *is* one of
+    /// this workspace's binaries. For a language binding it is not: inside a
+    /// Node addon `current_exe()` is `node.exe`, wherever the user's Node
+    /// happens to be installed, and inside a Python extension it is
+    /// `python.exe`. The DLLs live beside the addon, which nothing here can
+    /// find from the executable.
+    ///
+    /// **So for any embedding host these are mandatory, not optional.** A
+    /// binding should resolve them from its own module path (Node:
+    /// `__dirname`) and set both. The symptom otherwise is
+    /// "`vfs_shim_dll.dll` not found" from a host that shipped the DLL, with
+    /// nothing pointing at why the search looked where it did.
     pub shim_dll: Option<String>,
     pub payload_dll: Option<String>,
     /// Extra environment variables for the child only. Applied under a process
@@ -145,8 +170,27 @@ pub struct Session {
 }
 
 impl Session {
+    /// A session with default `root`/`overlay`/`state` directories under
+    /// `%TEMP%`, which a host normally replaces via
+    /// [`Session::set_root`] / [`Session::set_overlay`] /
+    /// [`Session::set_state_dir`].
+    ///
+    /// The defaults are unique per session **and cleared on the way in**, for
+    /// the reason spelled out on [`Session::set_overlay`]: every component of
+    /// a temp name repeats across runs (the OS recycles pids; the counter
+    /// below restarts at zero in each process) and nothing deletes a session's
+    /// directory when its owner dies, so an inherited `overlay/root-0` breaks
+    /// the "the overlay is empty afterwards" check this project uses to detect
+    /// a write that bypassed the director. Warning hosts about that while
+    /// shipping a default that has it would be advice this crate does not take
+    /// itself. The path is this session's alone, so clearing it cannot destroy
+    /// anything a caller put there — it has had no chance to.
     pub fn new() -> Self {
-        let tmp = std::env::temp_dir().join(format!("vfs-session-{}", std::process::id()));
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = std::env::temp_dir()
+            .join(format!("vfs-session-{}-{seq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
         Session {
             kernel: Arc::new(Director::new()),
             virtual_root: tmp.join("root"),
@@ -569,7 +613,18 @@ impl Session {
         let root_s = self.virtual_root.to_string_lossy().into_owned();
         let thin = self.state_dir.join("fuse.cfg");
         ipc.write_thin_config(&thin, &root_s)?;
-        ipc.apply_env_roots(&root_s, &self.extra_roots_env(), &thin);
+        // Under the same lock `launch` holds. `apply_env_roots` writes ten
+        // process-global `VFS_*` vars; doing that outside the lock let a
+        // second session's `serve` land between this one's `serve` and its
+        // `launch` and repoint the ring the child would inherit — and, in a
+        // multi-threaded host, race any other thread reading the environment.
+        // See [`LAUNCH_ENV_LOCK`].
+        {
+            let _guard = LAUNCH_ENV_LOCK
+                .lock()
+                .map_err(|_| "launch env lock poisoned".to_string())?;
+            ipc.apply_env_roots(&root_s, &self.extra_roots_env(), &thin);
+        }
 
         // Minimal shim.cfg (FUSE path is env-driven). The snapshot must still be a
         // valid empty tree: Engine::build rejects zero-length snapshot bytes, which
@@ -608,6 +663,26 @@ impl Session {
     /// Rather than let that end in a bare `CreateProcess` failure, a relative
     /// image the disk does not hold is refused here, and the message says
     /// whether the graph holds it (i.e. whether staging is what is missing).
+    ///
+    /// ## Process-global environment
+    ///
+    /// The child receives its ring coordinates by **inheriting** them:
+    /// `CreateProcessW` is called with a null environment block, so this
+    /// method and [`Session::serve`] set process-wide `VFS_*` variables and
+    /// `opts.env` entries, then restore them. [`LAUNCH_ENV_LOCK`] serializes
+    /// that, which is enough for two sessions in one host and **not** enough
+    /// for a host with unrelated threads: `std::env::set_var` races anything
+    /// else reading the environment, and a Node or Python binding always has
+    /// such threads.
+    ///
+    /// Removing the hazard means never writing process env: build the child's
+    /// environment block explicitly and pass it to `CreateProcessW`. That is a
+    /// change to `vfs_inject::RunConfig` (which owns the `CreateProcessW`
+    /// call) plus a caller-supplied set of variables instead of
+    /// `IpcServe::apply_env_roots`'s global writes; the shim side reads the
+    /// same names out of the child's own environment either way, so it does
+    /// not move. Worth doing before a second host depends on the current
+    /// shape.
     pub fn launch(&self, opts: &LaunchOpts) -> Result<i32, String> {
         let ipc = self
             .ipc

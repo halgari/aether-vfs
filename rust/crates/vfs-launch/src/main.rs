@@ -362,7 +362,8 @@ fn main() {
         match session.kernel().getattr(RootId::DEFAULT, &pe_vpath) {
             Ok(Some(st)) if st.kind == KIND_FILE && st.size > 512 => {
                 eprintln!(
-                    "  PE {pe_vpath} present in VFS ({} bytes) — must also be on disk                      under the managed root; see this file's header on staging",
+                    "  PE {pe_vpath} present in VFS ({} bytes) — must also be on disk \
+                     under the managed root; see this file's header on staging",
                     st.size
                 );
             }

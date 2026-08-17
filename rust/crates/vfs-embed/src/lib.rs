@@ -80,10 +80,24 @@
 //!   mount survives a later rebuild) and the resulting `StagedDir` (so its
 //!   cleanup cannot race the child). `Session::launch` refuses the case by
 //!   name rather than letting it end in `CreateProcess`.
+//! * **Locate its own `vfs_shim_dll.dll` / `vfs_payload.dll`.** Left unset,
+//!   [`LaunchOpts::shim_dll`] searches next to `std::env::current_exe()`,
+//!   which for a Node addon is `node.exe` and for a Python extension is
+//!   `python.exe` — neither anywhere near the shipped DLLs. A binding must
+//!   resolve both from its own module path and set them; they are effectively
+//!   mandatory outside this workspace's own binaries.
+//! * **Keep its threads away from `std::env`.** The child inherits its ring
+//!   coordinates, so [`Session::serve`] and [`Session::launch`] write
+//!   process-global `VFS_*` variables under a lock. The lock orders *our*
+//!   writers and cannot order a host's: `std::env::set_var` is unsound in a
+//!   multi-threaded process, and a Node or Python host is multi-threaded by
+//!   construction. See [`Session::launch`] for what removing the hazard takes.
 //! * **A `CachingProvider` per source, and never over the write layer** — see
 //!   [`Session::set_write_layer_at`] for why the exemption is not optional.
 //! * **Session directories that do not inherit a previous run's litter** — see
-//!   [`Session::set_overlay`].
+//!   [`Session::set_overlay`]. [`Session::new`]'s own defaults handle this for
+//!   themselves; a host that calls `set_root`/`set_overlay`/`set_state_dir`
+//!   takes it on.
 //! * **Building a provider from a name** (`"disk"`, `"zip"`, `"remote"`)
 //!   rather than calling its constructor. `vfs-source` does that and reaches
 //!   the gRPC `remote` provider, which is not in the catalog below; it also

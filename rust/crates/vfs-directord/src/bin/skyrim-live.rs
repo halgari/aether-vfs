@@ -346,7 +346,7 @@ component match sees exactly what the game's own raw NT open spells)",
     // shared path. What `compose_root` returns here differs from the previous
     // hand-built overlay only by a transparent single-mount `MountGraph`
     // around the base.
-    let root1_shim_overlay = vfs_director::overlay_layer_dir(&overrides, RootId(1));
+    let root1_shim_overlay = vfs_embed::overlay_layer_dir(&overrides, RootId(1));
     std::fs::create_dir_all(&root1_shim_overlay)
         .map_err(|e| format!("mkdir {}: {e}", root1_shim_overlay.display()))?;
     let root1_composed = vfs_embed::compose_root(
@@ -873,7 +873,7 @@ fn write_steam_appid(root: &Path, overrides: &Path) -> Result<(), String> {
     // at the same root-scoped subdirectory `Engine`'s local overlay (and the
     // director's own mounted layer over it, see `overlay_layer_dir`'s doc
     // comment) both resolve against.
-    let overlay_dir = vfs_director::overlay_layer_dir(overrides, RootId::DEFAULT);
+    let overlay_dir = vfs_embed::overlay_layer_dir(overrides, RootId::DEFAULT);
     std::fs::create_dir_all(&overlay_dir)
         .map_err(|e| format!("mkdir {}: {e}", overlay_dir.display()))?;
     let in_overlay = overlay_dir.join("steam_appid.txt");

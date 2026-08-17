@@ -36,8 +36,11 @@ vfs-shim = { path = "../vfs-shim" }
 vfs-zip = { path = "../vfs-zip", optional = true }
 
 [dev-dependencies]
+# `vfs-zip` is optional above (the `zip` feature); tests use `ZipProvider`
+# whether or not that feature is on, so it is unconditional here. `vfs-shim`
+# is NOT repeated — it is a plain dependency above and a duplicate entry only
+# looks like the two serve different purposes.
 vfs-zip = { path = "../vfs-zip" }
-vfs-shim = { path = "../vfs-shim" }
 # Ring wire codecs, for the tests that drive a served session over the ring
 # the way the injected shim does.
 vfs-protocol = { path = "../vfs-protocol" }
