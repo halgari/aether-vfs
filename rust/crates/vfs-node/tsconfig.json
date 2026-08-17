@@ -62,6 +62,7 @@
     "scripts/build.mts",
     "scripts/check-types.mts",
     "vitest.config.ts",
+    "bench/**/*.mts",
     "test/**/*.cts",
     "examples/**/*.cts"
   ],

@@ -34,6 +34,8 @@
     "demo:spec8": "node examples/spec-8-example.cts",
     "check:types": "node scripts/check-types.mts",
     "typecheck": "tsc --noEmit",
+    "bench": "tsc -p tsconfig.build.json && node scripts/build.mts --release && node bench/run.mts",
+    "bench:ab": "tsc -p tsconfig.build.json && node scripts/build.mts --release && node bench/ab-js-layer.mts",
     "test:unit": "vitest run",
     "test:watch": "vitest",
     "test": "tsc -p tsconfig.build.json && node scripts/build.mts && node scripts/check-types.mts && tsc --noEmit && node examples/vertical-slice.cts && node examples/js-provider.cts && node examples/spec-8-example.cts && vitest run"
