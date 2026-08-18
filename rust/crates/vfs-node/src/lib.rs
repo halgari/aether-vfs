@@ -678,6 +678,38 @@ impl Session {
             .map_err(|st| status_err("mount", st))
     }
 
+    /// Declare `provider` the writable **upper** for root `root` (default 0):
+    /// reads fall through to everything mounted, and a write copies the file up
+    /// into this provider first.
+    ///
+    /// **This is not one more `mount`, and substituting one does not work.** A
+    /// sibling mount can only receive writes the graph already routed to it, so
+    /// an in-place edit of read-only content (`fopen(path, "r+b")` against a
+    /// file the zip holds) finds no writable mount holding that file, reaches
+    /// the archive, and is refused. Copy-on-write over read-only layers is what
+    /// a mod-manager VFS is for, so it belongs in the graph: this composes an
+    /// overlay whose base is the whole mount graph and whose upper is
+    /// `provider`, and the director performs the copy-up.
+    ///
+    /// **Point it at `overlayLayerDir(root)`, not at that directory's parent.**
+    /// The shim's own local overlay is root-scoped on disk, so a write layer
+    /// declared one level up shows the director an empty layer while everything
+    /// the shim writes locally lands under `<overlay>/root-N/` — a write
+    /// followed by a read-back then silently sees nothing. `overlayLayerDir` is
+    /// the path that agrees with the shim.
+    ///
+    /// Without a write layer a session still serves reads, and writes that no
+    /// mounted read-write provider covers land in `rejectedWrites()`. That is a
+    /// legitimate read-only configuration, which is why this is optional and why
+    /// the daemon warns rather than refuses.
+    #[napi(catch_unwind)]
+    pub fn set_write_layer(&self, provider: &Provider, root: Option<u32>) -> Result<()> {
+        let upper = lookup_provider(provider.handle)?;
+        self.get()?
+            .set_write_layer_at(RootId(root.unwrap_or(0)), upper)
+            .map_err(|st| status_err("setWriteLayer", st))
+    }
+
     /// Start the ring and its workers so an injected child can remap I/O.
     /// Idempotent. [`Session::launch`] calls this if it has not happened.
     #[napi(catch_unwind)]

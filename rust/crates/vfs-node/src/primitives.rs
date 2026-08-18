@@ -54,7 +54,7 @@ use napi_derive::napi;
 use vfs_embed::{
     Access, BlockCache, CacheConfig, CachingProvider, DiskProvider, LayeredProvider, MemoryProvider,
     OverlayProvider, Provider as VfsProvider, ReadOnlyProvider, Route, RouterProvider,
-    SeekableProvider,
+    SeekableProvider, SubdirProvider, ZipProvider,
 };
 
 use crate::{intern_provider, lookup_provider, Provider};
@@ -241,6 +241,73 @@ pub fn seekable(provider: u32) -> Result<Provider> {
         "seekable",
         vec![provider],
     )
+}
+
+/// Re-root a provider at one of its own subdirectories (spec §6's `subdir`).
+///
+/// Every path in and out has `prefix` prepended before it reaches the inner
+/// provider, so `subdir(p, "Skyrim Special Edition")` makes
+/// `Skyrim Special Edition/SkyrimSE.exe` answer to `SkyrimSE.exe`.
+///
+/// **Not the inverse of `mount`'s `prefix`, and the difference is the whole
+/// point.** `mount(root, p, "Data")` moves a provider *down*, so what it serves
+/// appears under `Data/`. This moves the view *up*, discarding a level the
+/// source has and the graph should not. Only the second can flatten an archive
+/// whose contents sit inside a single top-level folder — the ordinary shape of a
+/// zipped game directory, and one that cannot be mounted usefully without this:
+/// the game's own image is `SkyrimSE.exe` at the root, so a launch resolves
+/// nothing while the bytes sit one level down.
+///
+/// A `prefix` naming nothing the inner provider serves is **not** an error here.
+/// It cannot be: a provider is free to answer a path that did not exist when the
+/// graph was built (a disk directory created later, a remote source), so
+/// refusing at construction time would reject legitimate graphs. The cost is
+/// that a mistyped prefix produces a provider that serves nothing, which is why
+/// `session.getattr(...)` exists — one call to confirm the graph serves the path
+/// you believe it does.
+#[napi(catch_unwind)]
+pub fn subdir(provider: u32, prefix: String) -> Result<Provider> {
+    let inner = lookup_provider(provider)?;
+    compose(
+        Arc::new(SubdirProvider::new(inner, prefix)),
+        "subdir",
+        vec![provider],
+    )
+}
+
+/// A read-only provider over a **Stored** zip archive (spec §6's `zip`).
+///
+/// Serves entries straight out of the archive at their stored offsets: no
+/// extraction, no temporary copy, and no 16 GB of disk to hold a second copy of
+/// a game directory. That is the property the Rust `skyrim-live` harness is
+/// built on, and it was unavailable from Node until this existed — a host could
+/// only point `disk()` at an already-extracted tree.
+///
+/// **Opening parses the whole central directory, once, eagerly.** On a large
+/// archive that is slow enough to look like a hang (tens of seconds for ~16 GB),
+/// so a caller with a progress indicator should say what it is waiting for. It
+/// is also why a host should open an archive once and keep the provider: two
+/// calls pay the parse twice.
+///
+/// **Stored, not Deflate.** The provider answers positional reads by handing
+/// back bytes at an offset inside the archive, which a compressed entry has no
+/// meaningful answer for. An archive of deflated entries opens and then fails
+/// per-entry rather than here, because whether any given entry is Stored is not
+/// known until it is read.
+#[napi(catch_unwind)]
+pub fn zip(path: String) -> Result<Provider> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(Error::from_reason(format!(
+            "zip({path:?}): not an existing file. Refused here rather than at              first read, for the reason disk() refuses a missing directory: a              backend that answers ST_NOT_FOUND for everything produces a              session that serves nothing and reports no error at all."
+        )));
+    }
+    let be = ZipProvider::open(&p).map_err(|e| {
+        Error::from_reason(format!(
+            "zip({path:?}): {e:?}. The central directory could not be read, so              no entry in this archive is reachable."
+        ))
+    })?;
+    compose(Arc::new(be), "zip", Vec::new())
 }
 
 /// Options for [`cached`]. Every field is optional; the defaults are

@@ -225,6 +225,21 @@ export interface ProviderCacheStats {
  */
 export const disk: (path: string) => Provider = fn('disk');
 
+/**
+ * A read-only provider over a **Stored** zip archive (spec §6's `zip`).
+ *
+ * Serves entries at their stored offsets — no extraction and no second copy of
+ * the archive's contents on disk. Throws if `path` is not a file, or if the
+ * central directory cannot be read.
+ *
+ * Opening parses the entire central directory eagerly, which on a multi-gigabyte
+ * archive takes long enough to look like a hang. Open once and keep the
+ * provider.
+ *
+ * Not shadowed in `index.cts`: it takes a path, so there is no handle to widen.
+ */
+export const zip: (path: string) => Provider = fn('zip');
+
 // ---------------------------------------------------------------------------
 // Spec §6's primitive catalog, as Rust exports it: **integer handles**, because
 // a handle is the only thing that means the same in two isolates. `index.cts`
@@ -247,6 +262,9 @@ export const readonly: (provider: number) => Provider = fn('readonly');
 
 /** The handle-taking `seekable`. `index.cts` shadows it. */
 export const seekable: (provider: number) => Provider = fn('seekable');
+
+/** The handle-taking `subdir`. `index.cts` shadows it. */
+export const subdir: (provider: number, prefix: string) => Provider = fn('subdir');
 
 /** Options for `cached`. */
 export interface CacheOptions {
@@ -492,6 +510,23 @@ export interface Session {
    * exposes the object as `.provider`.
    */
   mount(root: number, provider: Provider, prefix?: string): void;
+
+  /**
+   * Declare `provider` the writable **upper** for `root` (default 0): reads fall
+   * through to the mount graph, and a write copies the file up into `provider`
+   * first.
+   *
+   * Not interchangeable with a `mount`. A sibling mount can only receive writes
+   * the graph already routed to it, so an in-place edit of read-only content
+   * reaches the read-only source and is refused; an upper is copied up into
+   * instead.
+   *
+   * Point it at `overlayLayerDir(root)`. The shim's local overlay is
+   * root-scoped, so a layer declared at that directory's parent shows the
+   * director an empty layer while the shim writes one level deeper — a write
+   * then reads back as missing.
+   */
+  setWriteLayer(provider: Provider, root?: number): void;
 
   /** Start the ring so an injected child can remap I/O. Idempotent; `launch` calls it. */
   serve(): void;

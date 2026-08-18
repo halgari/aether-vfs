@@ -840,6 +840,26 @@ export function seekable(provider: ProviderLike): Provider {
 }
 
 /**
+ * Re-root a provider at one of its own subdirectories (spec §6's `subdir`):
+ *
+ * ```js
+ * // A zipped game directory whose contents sit inside one top-level folder.
+ * s.mount(0, subdir(zip(archive), 'Skyrim Special Edition'));
+ * ```
+ *
+ * The opposite direction from `mount`'s `prefix`, which moves a provider *down*
+ * so its content appears beneath that name. This moves the view *up*, discarding
+ * a level the source has — the only one of the two that can flatten an archive
+ * so the image at its root is reachable as `SkyrimSE.exe`.
+ *
+ * A prefix that names nothing is not an error: a provider may serve paths that
+ * did not exist when the graph was built. Confirm with `session.getattr(...)`.
+ */
+export function subdir(provider: ProviderLike, prefix: string): Provider {
+  return native.subdir(handleOf(provider, 'subdir(provider)'), prefix);
+}
+
+/**
  * A block cache in front of a provider (spec §6's `cached`). Access passes
  * through and `slow` is cleared. `provider.cacheStats()` reports its hits.
  */

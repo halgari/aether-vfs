@@ -146,6 +146,7 @@ const SHADOWED = [
   'memory',
   'readonly',
   'seekable',
+  'subdir',
   'cached',
   'layered',
   'overlay',
