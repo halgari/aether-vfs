@@ -32,6 +32,7 @@
     "demo": "node examples/vertical-slice.cts",
     "demo:provider": "node examples/js-provider.cts",
     "demo:spec8": "node examples/spec-8-example.cts",
+  "demo:skyrim": "node examples/skyrim-live.cts",
     "check:types": "node scripts/check-types.mts",
     "typecheck": "tsc --noEmit",
     "bench": "tsc -p tsconfig.build.json && node scripts/build.mts --release && node bench/run.mts",
