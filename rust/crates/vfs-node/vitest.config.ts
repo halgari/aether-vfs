@@ -2,7 +2,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   // Vite's esbuild transform filter is `/\.(m?ts|[jt]sx)$/` — `.ts`, `.mts`,
-  // `.jsx`, `.tsx`, and **not** `.cts`. **All six suites are `.mts`** as of the
+  // `.jsx`, `.tsx`, and **not** `.cts`. **All seven suites are `.mts`** as of the
   // ESM migration's task 2 (they were `.cts` before that), so without this filter
   // widened they would reach rollup as plain JavaScript and die on their first
   // `import type` with

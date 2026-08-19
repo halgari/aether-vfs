@@ -7,7 +7,7 @@
 // network npm install into the build path of a package whose build is four
 // `cargo` calls and four file copies. That trade is still refused, so the
 // declaration below is maintained by hand and checked by
-// `scripts/check-types.cts` against the addon's real exports.
+// `scripts/check-types.mts` against the addon's real exports.
 //
 // The difference from before the TypeScript migration is *how much* is
 // hand-written. `index.d.ts` used to declare the whole package — the addon and

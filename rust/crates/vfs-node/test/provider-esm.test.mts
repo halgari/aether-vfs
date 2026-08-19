@@ -21,6 +21,7 @@
 
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
 import { providerWorker } from '../index.mjs';
@@ -84,6 +85,18 @@ describe('ESM provider entries', () => {
     },
     5000
   );
+
+  it('rejects a file:// URL as spec.module, instead of the TypeError the worker would otherwise throw', () => {
+    // `import.meta.resolve()` returns a `file://` URL, not an absolute path —
+    // the doc comment used to recommend it anyway, which meant following the
+    // advice produced exactly the TypeError below. This pins that a `file://`
+    // URL is rejected here, synchronously, with a message that does not send a
+    // caller back to the broken advice.
+    const fileUrl = pathToFileURL(fixture('esm-default.mts')).href;
+    expect(fileUrl.startsWith('file://')).toBe(true);
+    expect(() => providerWorker({ module: fileUrl })).toThrow(TypeError);
+    expect(() => providerWorker({ module: fileUrl })).toThrow(/absolute path/);
+  });
 });
 
 describe('release arriving while the module is still loading', () => {

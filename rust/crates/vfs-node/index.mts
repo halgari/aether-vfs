@@ -30,7 +30,7 @@
 // 280 lines further down. Emitting the declaration removes the class of defect
 // where the two disagree about a *signature*. It does not remove the class where
 // they disagree about *prose*, and both of those defects were prose — which is
-// why `scripts/check-types.cts` still exists and why the doc comments below are
+// why `scripts/check-types.mts` still exists and why the doc comments below are
 // written where the code is, not in a second file.
 //
 // `native.mts` holds the addon's own surface. That one is still asserted rather
@@ -63,7 +63,7 @@ import type {
 // The forward is deliberately a `export *` and not a list: a `#[napi]` export
 // added on the Rust side reaches a host without an edit here. What it does *not*
 // do is declare itself — `native.mts` has to name it before TypeScript can see
-// it, and `scripts/check-types.cts` is what notices when it has not.
+// it, and `scripts/check-types.mts` is what notices when it has not.
 export * from './native.mjs';
 
 native.setPackageDir(import.meta.dirname);
@@ -980,14 +980,19 @@ export interface ProviderWorkerSpec {
    * **Absolute path** to an ESM module — not an object. Isolates share no JS
    * objects, so a provider instance cannot be handed across one; what crosses is
    * the integer handle, which `mount()` accepts from any thread. Use
-   * `import.meta.resolve()`.
+   * `path.join(import.meta.dirname, 'provider.mts')`, as every fixture, test,
+   * example and bench case in this repo does. If you need to resolve a bare
+   * specifier instead, wrap it —
+   * `fileURLToPath(import.meta.resolve('./provider.mts'))` — because
+   * `import.meta.resolve()` alone returns a `file://` URL, and this rejects
+   * anything that is not an absolute filesystem path.
    *
    * The module may export the provider directly, or a factory called with
    * `options` — a factory is preferable, because it constructs the provider on
    * the loop its methods will run on.
    */
   module: string;
-  /** Named export to use instead of `provider` / `default` / the module itself. */
+  /** Named export to use instead of `provider` / `default`. */
   export?: string;
   /** Passed to the factory, structured-cloned into the worker. */
   options?: unknown;
@@ -1020,14 +1025,16 @@ export function providerWorker(spec: ProviderWorkerSpec): Promise<ProviderWorker
   if (s === null || typeof s !== 'object' || typeof (s as ProviderWorkerSpec).module !== 'string') {
     throw new TypeError(
       'aethervfs: providerWorker({ module, options?, export?, provider? }) needs ' +
-        '`module`: an absolute path to the provider module. Use import.meta.resolve().'
+        '`module`: an absolute path to the provider module. Use ' +
+        "path.join(import.meta.dirname, 'provider.mts')."
     );
   }
   if (!path.isAbsolute(spec.module)) {
     throw new TypeError(
       `aethervfs: providerWorker module ${JSON.stringify(spec.module)} must be an ` +
         'absolute path — the worker resolves it, and its idea of "here" is not ' +
-        "the caller's. Use import.meta.resolve()."
+        "the caller's. Use path.join(import.meta.dirname, 'provider.mts'); " +
+        'import.meta.resolve() alone returns a file:// URL, which is rejected here.'
     );
   }
 

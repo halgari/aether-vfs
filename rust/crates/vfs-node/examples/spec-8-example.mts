@@ -511,7 +511,7 @@ async function main(): Promise<void> {
  *
  * `spawnSync(..., { timeout })` was the obvious way to write this and it is the
  * wrong one: its timeout sends `SIGTERM`, and a leaked child that survives it
- * keeps `aethervfs.node` mapped — after which the next `scripts/build.cjs`
+ * keeps `aethervfs.node` mapped — after which the next `scripts/build.mts`
  * fails to copy the addon with `EBUSY`, which is precisely the family of trap
  * this project has been bitten by before (a stale native artifact that reports
  * success). So the kill is `taskkill /F /T`, by pid, and this waits for the
