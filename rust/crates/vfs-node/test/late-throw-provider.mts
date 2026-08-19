@@ -6,17 +6,13 @@
 // returned early in exactly this case and nothing reported the death anywhere —
 // no rejection, no unhandled `'error'` event, nothing on stderr.
 //
-// `require` and a type annotation rather than `import`, for the reason recorded in
-// the header of `providers.cts`: this module is loaded by **node** (inside a
-// provider worker), and node's type stripping erases annotations without
-// rewriting module syntax, so an `import` statement in a `.cts` file is a runtime
-// `SyntaxError`.
+// ESM, as of task 3: this module is loaded by **node** (inside a provider
+// worker) via `await import(pathToFileURL(data.module).href)`, so it is a real
+// `import` — see the header of `providers.mts`.
 
 import type { ProviderObject } from '../index.mjs';
 
-const path: typeof import('node:path') = require('path');
-
-const aether: typeof import('../index.mjs') = require(path.join(__dirname, '..', 'index.mjs'));
+import * as aether from '../index.mjs';
 
 /** How long after registering to die. Short, but after the `{ ok: true }` reply. */
 interface LateThrowOptions {
@@ -44,7 +40,4 @@ function make({ afterMs = 100 }: LateThrowOptions = {}): ProviderObject {
   };
 }
 
-/** What `require()`ing this module gives back — see `providers.cts`. */
-export type MakeLateThrow = typeof make;
-
-module.exports = make;
+export default make;

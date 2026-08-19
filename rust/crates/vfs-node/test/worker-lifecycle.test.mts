@@ -43,8 +43,8 @@ import path from 'node:path';
 import type { ProviderWorker } from '../index.mjs';
 import * as vfs from '../index.mjs';
 
-const FIXTURE: string = path.join(import.meta.dirname, 'providers.cts');
-const LATE_THROW: string = path.join(import.meta.dirname, 'late-throw-provider.cts');
+const FIXTURE: string = path.join(import.meta.dirname, 'providers.mts');
+const LATE_THROW: string = path.join(import.meta.dirname, 'late-throw-provider.mts');
 
 /** A provider on its own worker loop. Nothing about the provider is under test. */
 function worker(): Promise<ProviderWorker> {

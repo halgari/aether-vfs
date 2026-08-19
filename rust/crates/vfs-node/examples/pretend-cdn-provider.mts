@@ -7,19 +7,14 @@
 // provider instance cannot be handed across one (spec §8c). Being a factory also
 // means the object is constructed on the loop its methods will run on.
 //
-// `require` and not `import`, and an annotation rather than a cast: this file is
-// loaded by **node** — inside a provider worker, and directly by
-// `js-provider.mts` for its deadlock-guard step. Node's type stripping erases
-// annotations but does not rewrite module syntax, so an `import` statement here
-// would be a runtime `SyntaxError`. The annotation is what a cast is not: an
-// explicit type annotation, which is what TypeScript requires before it will
-// treat `assert.ok` as an assertion function (TS2775).
+// ESM, as of task 3: this file is loaded by **node** — inside a provider worker
+// via `await import(pathToFileURL(data.module).href)`, and directly by
+// `js-provider.mts` for its deadlock-guard step, via an ordinary static
+// `import`. There is no `require` left in this file.
 
 import type { ProviderDirEntry, ProviderObject } from '../index.mjs';
 
-const path: typeof import('node:path') = require('path');
-
-const { VfsError }: typeof import('../index.mjs') = require(path.join(__dirname, '..', 'index.mjs'));
+import { VfsError } from '../index.mjs';
 
 /** Options `pretendCdn()` understands. */
 export interface PretendCdnOptions {
@@ -88,7 +83,4 @@ function pretendCdn({ depot = '489830', latencyMs = 5 }: PretendCdnOptions = {})
   };
 }
 
-/** What `require()`ing this module gives back. See `test/providers.cts`'s note. */
-export type PretendCdn = typeof pretendCdn;
-
-module.exports = pretendCdn;
+export default pretendCdn;

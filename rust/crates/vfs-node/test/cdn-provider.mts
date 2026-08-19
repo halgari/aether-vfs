@@ -21,15 +21,15 @@
 // `fetches` counts `readNext` calls, so a test can prove the cache above it is
 // actually absorbing reads rather than merely being present.
 //
-// `require` and not `import`, and an annotation rather than a cast: see the
-// header of `providers.cts`. This module is resolved and loaded **inside a
-// provider worker**, by node, so its module syntax has to survive type stripping.
+// ESM, as of task 3: this module is loaded **inside a provider worker** by
+// `await import(pathToFileURL(data.module).href)`, so it is a real `import`
+// rather than the `require` + type-annotation workaround `.cts` needed. See the
+// header of `providers.mts`.
 
 import type { ProviderDirEntry, ProviderObject } from '../index.mjs';
 
-const path: typeof import('node:path') = require('path');
+import * as aether from '../index.mjs';
 
-const aether: typeof import('../index.mjs') = require(path.join(__dirname, '..', 'index.mjs'));
 const { VfsError } = aether;
 
 /** Options `makeCdn()` understands. */
@@ -135,7 +135,4 @@ function makeCdn({ depot = '489830', preferredBlock = 65536 }: CdnOptions = {}):
   };
 }
 
-/** What `require()`ing this module gives back — see `providers.cts`'s note. */
-export type MakeCdn = typeof makeCdn;
-
-module.exports = makeCdn;
+export default makeCdn;

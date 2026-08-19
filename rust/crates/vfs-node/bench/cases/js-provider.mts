@@ -38,7 +38,7 @@ import {
 type Vfs = typeof import('../../index.mjs');
 
 /** The task-7 fixture: `bytes` serves `small.bin` as 64 bytes of 0xab. */
-const FIXTURE = path.join(PKG_DIR, 'test', 'providers.cts');
+const FIXTURE = path.join(PKG_DIR, 'test', 'providers.mts');
 
 export async function run(): Promise<void> {
   const vfs = benchRequire(path.join(PKG_DIR, 'index.mjs')) as Vfs;

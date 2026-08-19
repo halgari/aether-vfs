@@ -977,10 +977,10 @@ export function assertConformance(provider: ProviderLike): Promise<ConformanceRe
 
 export interface ProviderWorkerSpec {
   /**
-   * **Absolute path** to a CommonJS module — not an object. Isolates share no JS
+   * **Absolute path** to an ESM module — not an object. Isolates share no JS
    * objects, so a provider instance cannot be handed across one; what crosses is
    * the integer handle, which `mount()` accepts from any thread. Use
-   * `require.resolve()`.
+   * `import.meta.resolve()`.
    *
    * The module may export the provider directly, or a factory called with
    * `options` — a factory is preferable, because it constructs the provider on
@@ -1000,7 +1000,7 @@ export interface ProviderWorkerSpec {
  * main loop (1449 MiB/s against 3.8 for a main-loop provider under ~1 ms of work
  * per turn). Concurrency scales with worker count and only with worker count.
  *
- * `spec.module` is an **absolute path** to a CommonJS module — not an object.
+ * `spec.module` is an **absolute path** to an ESM module — not an object.
  * That is not an ergonomic preference, it is the constraint spec §8c records:
  * isolates share no JS objects, so a provider instance cannot be handed across
  * one. What crosses is the integer handle, which `mount()` accepts from any
@@ -1020,14 +1020,14 @@ export function providerWorker(spec: ProviderWorkerSpec): Promise<ProviderWorker
   if (s === null || typeof s !== 'object' || typeof (s as ProviderWorkerSpec).module !== 'string') {
     throw new TypeError(
       'aethervfs: providerWorker({ module, options?, export?, provider? }) needs ' +
-        '`module`: an absolute path to the provider module. Use require.resolve().'
+        '`module`: an absolute path to the provider module. Use import.meta.resolve().'
     );
   }
   if (!path.isAbsolute(spec.module)) {
     throw new TypeError(
       `aethervfs: providerWorker module ${JSON.stringify(spec.module)} must be an ` +
         'absolute path — the worker resolves it, and its idea of "here" is not ' +
-        "the caller's. Use require.resolve()."
+        "the caller's. Use import.meta.resolve()."
     );
   }
 

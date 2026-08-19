@@ -11,7 +11,7 @@
 // Compiled to `provider-host.mjs`, which is the path `index.mts` hands to
 // `new Worker(...)` and the name in `package.json`'s `files`.
 
-import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { parentPort, workerData } from 'node:worker_threads';
 
 // `./index.mjs` and not the package name: this file *is* in the package, and
@@ -21,14 +21,6 @@ import { parentPort, workerData } from 'node:worker_threads';
 import * as aether from './index.mjs';
 import type { ProviderObject } from './index.mjs';
 import type { ProviderOptions } from './native.mjs';
-
-// This file is ESM, so `require(data.module)` needs a `require` of its own —
-// there is no global one. This is deliberately temporary: task 3 replaces this
-// whole load with `await import(pathToFileURL(data.module).href)`, at which
-// point provider entries stop being required as CommonJS. Leaving `require`
-// here for now keeps this commit a pure format change, with no semantic change
-// to how a provider module is loaded.
-const require = createRequire(import.meta.url);
 
 /** What `providerWorker()` puts in `workerData`. */
 interface HostData {
@@ -54,27 +46,58 @@ const port = parentPort;
 const data = workerData as HostData;
 
 let handle: number | null = null;
+let releaseRequested = false;
+
+// Registered *before* the load below, and not after it: once loading is
+// `await`ed, a `release` arriving mid-load has to hit a listener. The old
+// ordering — register after a synchronous load — was safe only because there
+// was no `await` for a message to arrive during. `handle === null` here no
+// longer means "nothing to do"; it means "record it, the loader releases on
+// completion" (see `releaseRequested` below), because dropping it would leave
+// this worker's threadsafe function held forever with nothing to say why.
+port.on('message', (msg: unknown) => {
+  const m = msg as { type?: unknown } | null;
+  if (!m || m.type !== 'release') return;
+  if (handle === null) {
+    // The load has not finished. Record it; the loader releases on completion.
+    releaseRequested = true;
+    return;
+  }
+  // Releasing the threadsafe function is what lets this loop drain and the
+  // worker exit; while it is held, the loop stays alive on purpose, because that
+  // is what keeps the provider available for the session's lifetime.
+  aether.releaseProvider(handle);
+  port.close();
+});
 
 try {
-  const mod = require(data.module) as Record<string, unknown>;
-  // Three accepted shapes, in order: a named export, a default/`provider`
-  // export, or the module itself. A function is called with `options` and is
-  // expected to return the provider — a factory, so the provider is constructed
-  // on this loop, where its methods will run.
-  const picked = (
-    data.export ? mod[data.export] : (mod.provider ?? mod.default ?? mod)
-  ) as Picked | undefined | null;
+  const mod = (await import(pathToFileURL(data.module).href)) as Record<string, unknown>;
+
+  // Two accepted shapes: the export named by `spec.export`, else `provider`,
+  // else `default`. A function is called with `options` and returns the
+  // provider — a factory, so it is constructed on this loop, where its
+  // methods will run.
+  const picked = (data.export ? mod[data.export] : (mod.provider ?? mod.default)) as
+    | Picked
+    | undefined
+    | null;
+
   if (picked === undefined || picked === null) {
     throw new Error(
       data.export
-        ? `module has no export named ${JSON.stringify(data.export)}`
-        : 'module exported nothing usable as a provider or provider factory'
+        ? `module has no export named ${JSON.stringify(data.export)}; it exports: ${Object.keys(mod).join(', ') || '(nothing)'}`
+        : `module exported nothing usable as a provider or provider factory; it exports: ${Object.keys(mod).join(', ') || '(nothing)'}`
     );
   }
+
   const obj = typeof picked === 'function' ? picked(data.options) : picked;
   const provider = aether.registerProvider(obj, data.providerOptions);
   handle = provider.handle;
   port.postMessage({ ok: true, handle });
+  if (releaseRequested) {
+    aether.releaseProvider(handle);
+    port.close();
+  }
 } catch (e) {
   port.postMessage({
     ok: false,
@@ -83,13 +106,3 @@ try {
   });
   port.close();
 }
-
-port.on('message', (msg: unknown) => {
-  const m = msg as { type?: unknown } | null;
-  if (!m || m.type !== 'release' || handle === null) return;
-  // Releasing the threadsafe function is what lets this loop drain and the
-  // worker exit; while it is held, the loop stays alive on purpose, because that
-  // is what keeps the provider available for the session's lifetime.
-  aether.releaseProvider(handle);
-  port.close();
-});

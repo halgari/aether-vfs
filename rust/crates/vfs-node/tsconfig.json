@@ -19,14 +19,16 @@
   // Task 3 (of that earlier migration) converted both directories and this
   // `include` grew to cover them, which is the check that the conversion landed.
   //
-  // The ESM migration's task 2 narrowed who still needs the `require` workaround.
-  // Suites and most examples are now `.mts`, run by vitest or by node's own type
-  // stripping, and use real `import` statements. Only the files a *provider
-  // worker* `require()`s — the provider-entry fixtures (`test/providers.cts` and
-  // friends) and the worker entry point they are loaded alongside
-  // (`test/self-call-worker.cts`) — stay `.cts` and keep `require` with a type
-  // **annotation**, because node's type stripping erases annotations but does not
-  // rewrite module syntax. Both forms satisfy TS2775; only the cast did not.
+  // The ESM migration's task 2 narrowed who still needed the `require` workaround
+  // to the files a *provider worker* `require()`d — the provider-entry fixtures
+  // (`test/providers.cts` and friends) and the worker entry point they were
+  // loaded alongside (`test/self-call-worker.cts`). Task 3 finished the job:
+  // `provider-host.mts` loads a provider entry with `await import(...)` now, so
+  // every one of those fixtures converted to `.mts` too, and there is no `.cts`
+  // left in this package at all. `include` below no longer needs a `.cts` glob
+  // for that reason — it never was a decision to typecheck CommonJS, only a
+  // consequence of the fixtures being CommonJS while `require()` was how a
+  // provider worker could load anything.
   "compilerOptions": {
     // `nodenext` is what understands `.cts`/`.mts` and their emit: a `.cts` is
     // CommonJS and compiles to a `.cjs` + `.d.cts` pair, while an `.mts` is ESM
@@ -70,16 +72,12 @@
     "vitest.config.ts",
     "bench/**/*.mts",
     "test/**/*.mts",
-    "test/**/*.cts",
-    "examples/**/*.mts",
-    "examples/**/*.cts"
+    "examples/**/*.mts"
   ],
   // The build outputs. Excluded so a stale `index.d.mts` in the tree can never be
-  // typechecked in place of the source it was emitted from. The `test/**/*.cts`
-  // and `examples/**/*.cts` globs are still needed: the provider-entry fixtures
-  // (`test/providers.cts` and friends — see their own headers, and
-  // `examples/pretend-cdn-provider.cts` / `steam-cdn-provider.cts`) stay
-  // CommonJS on purpose, because they are `require()`d inside a worker by
-  // `provider-host.mjs`, and Task 3 is what converts that load to `import()`.
+  // typechecked in place of the source it was emitted from. `**/*.d.cts` and
+  // `.cjs` are kept here even though nothing in the package emits them any more
+  // — they are cheap insurance against a stray build artifact being picked up,
+  // not evidence that either exists.
   "exclude": ["node_modules", "fixtures", "**/*.d.cts", "**/*.cjs", "**/*.d.mts", "**/*.mjs"]
 }

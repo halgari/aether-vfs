@@ -3,7 +3,7 @@
 // The claim under test is §6's own, quoted in the brief: *"Everything except
 // [the host provider] is a Rust primitive. That is the test of whether §6
 // succeeded."* So there is exactly one JavaScript provider in this file — a
-// forward-only, slow, immutable "CDN" (`test/cdn-provider.cts`) — and every
+// forward-only, slow, immutable "CDN" (`test/cdn-provider.mts`) — and every
 // other node in every graph below is a Rust type reached through the addon.
 //
 // Written as spec §8's composition, translated from its Python:
@@ -19,8 +19,8 @@
 // It is real TypeScript — interfaces, annotations, `import` — run by vitest,
 // which transforms it through vite's esbuild. `.mts` because the package is ESM
 // as of the ESM migration's task 2; the fixture module beside this file
-// (`test/cdn-provider.cts`) stays CommonJS because it is loaded by **node**
-// inside a provider worker, whose type stripping does not rewrite module syntax.
+// (`test/cdn-provider.mts`) is ESM too, as of that migration's task 3, loaded by
+// **node** inside a provider worker via `await import(...)`.
 //
 // **The types are checked, as of task 3.** They were not before: `tsconfig.json`'s
 // `include` stopped short of `test/**` because
@@ -57,7 +57,7 @@ const {
   KIND,
 } = aether;
 
-const CDN_MODULE: string = path.join(import.meta.dirname, 'cdn-provider.cts');
+const CDN_MODULE: string = path.join(import.meta.dirname, 'cdn-provider.mts');
 const PROBE: string = path.join(import.meta.dirname, '..', 'fixtures', 'vfs-probe.exe');
 
 // ---------------------------------------------------------------------------

@@ -28,13 +28,12 @@
 import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'node:fs';
-import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
 import { teardown, type TestTeardown } from './teardown.mts';
 import type { ConformanceReport, Provider, ProviderWorker } from '../index.mjs';
-import type { ConformanceMake } from './conformance-providers.cts';
+import make from './conformance-providers.mts';
 import * as aether from '../index.mjs';
 
 const {
@@ -50,11 +49,10 @@ const {
   providerWorker,
 } = aether;
 
-// `conformance-providers.cts` stays CommonJS — see its header — so loading it
-// still needs `require`, which this file has no global copy of.
-const require = createRequire(import.meta.url);
-const FIXTURE_MODULE: string = path.join(import.meta.dirname, 'conformance-providers.cts');
-const make: ConformanceMake = require(FIXTURE_MODULE);
+// `conformance-providers.mts` is ESM, as of task 3 — see its header — and is
+// imported directly above; the worker loads it the same way, via
+// `providerWorker({ module: FIXTURE_MODULE })`'s `await import(...)`.
+const FIXTURE_MODULE: string = path.join(import.meta.dirname, 'conformance-providers.mts');
 
 // `ConformanceReport` used to be re-declared here by hand, with a note that it
 // "mirrors the exported" one. It is imported now: the declaration is emitted as

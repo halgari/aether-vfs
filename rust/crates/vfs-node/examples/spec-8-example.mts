@@ -60,10 +60,12 @@
 // 23.6; this is v24). `.mts` as of the ESM migration's task 2, which is what
 // lets every node builtin below be a real `import` instead of a `require` with a
 // type annotation. The provider entry this file names by path
-// (`steam-cdn-provider.cts`) stays CommonJS, loaded inside a provider worker, so
-// resolving its path still goes through `createRequire`. Loading the package
-// itself by two different specifiers is a dynamic `import()` instead, since a
-// static `import` cannot express choosing a specifier at runtime.
+// (`steam-cdn-provider.mts`) is ESM too, as of that migration's task 3, loaded
+// inside a provider worker via `await import(pathToFileURL(data.module).href)`;
+// its path is resolved here with `path.join(import.meta.dirname, ...)`, the same
+// pattern `providerWorker`'s own tests use. Loading the package itself by two
+// different specifiers is a dynamic `import()` instead, since a static `import`
+// cannot express choosing a specifier at runtime.
 //
 // **The types are checked, as of the TypeScript migration's task 3.** They were
 // not before, and this file said so. Two things changed then. The annotation
@@ -78,14 +80,11 @@
 import assert from 'node:assert';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { Provider, ProviderWorker, RejectedWrite } from '../index.mjs';
-
-const require = createRequire(import.meta.url);
 
 // `import('aethervfs')` when the package is installed, the in-tree entry
 // otherwise. Both go through `index.mjs`, so both are the same load. A dynamic
@@ -191,7 +190,7 @@ async function main(): Promise<void> {
   // is safe *because* this provider is not serviced by that loop: the rule is
   // loop identity, not thread role.
   const cdn: ProviderWorker = await providerWorker({
-    module: require.resolve('./steam-cdn-provider.cts'),
+    module: path.join(import.meta.dirname, 'steam-cdn-provider.mts'),
     options: { depot: '489830', latencyMs: 1, exeSource: PROBE },
   });
   openWorker = cdn;
@@ -477,7 +476,7 @@ async function main(): Promise<void> {
   fs.writeFileSync(
     leakProbe,
     `const p = await import(${JSON.stringify(entry)});\n` +
-      `const w = await p.providerWorker({ module: ${JSON.stringify(require.resolve('./steam-cdn-provider.cts'))},\n` +
+      `const w = await p.providerWorker({ module: ${JSON.stringify(path.join(import.meta.dirname, 'steam-cdn-provider.mts'))},\n` +
       `                   options: { exeSource: ${JSON.stringify(PROBE)} } });\n` +
       `if (process.argv[2] === 'release') await w.close();\n`
   );

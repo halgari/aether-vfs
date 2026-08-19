@@ -24,21 +24,19 @@
 // statements rather than the `require` + type-annotation workaround `.cts`
 // needed for node's type stripping. The package load below tries two different
 // specifiers at runtime, which a static `import` cannot express, so it is a
-// dynamic `import()` instead. `pretend-cdn-provider.cts` stays CommonJS — it is
-// loaded inside a provider worker — so both loading it here (for the
-// deadlock-guard step) and resolving its path still go through `createRequire`.
+// dynamic `import()` instead. `pretend-cdn-provider.mts` is ESM too, as of
+// task 3 — it is loaded inside a provider worker via
+// `await import(pathToFileURL(data.module).href)`, and here (for the
+// deadlock-guard step) via an ordinary static `import`.
 
 import assert from 'node:assert';
 import fs from 'node:fs';
-import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import type { ProviderWorker } from '../index.mjs';
-import type { PretendCdn } from './pretend-cdn-provider.cts';
-
-const require = createRequire(import.meta.url);
+import pretendCdn from './pretend-cdn-provider.mts';
 
 const pkgName = 'aethervfs';
 let mod: typeof import('../index.mjs');
@@ -73,7 +71,7 @@ async function main(): Promise<void> {
 
   step(1, 'providerWorker — a JS provider on its own event loop');
   const cdn: ProviderWorker = await providerWorker({
-    module: require.resolve('./pretend-cdn-provider.cts'),
+    module: path.join(import.meta.dirname, 'pretend-cdn-provider.mts'),
     options: { depot: '489830', latencyMs: 5 },
   });
   console.log(`    handle            ${cdn.handle}   (a process-global integer, not an object)`);
@@ -130,7 +128,8 @@ async function main(): Promise<void> {
   step(7, 'the deadlock guard — the same provider, registered on this loop instead');
   // Deliberately wrong, to show what it says. `registerProvider` binds to the
   // *calling* loop, and this script then drives the session from that same loop.
-  const pretendCdn: PretendCdn = require('./pretend-cdn-provider.cts');
+  // `pretendCdn` is the same factory imported at the top of this file — a real
+  // `import`, not a second load through `require`.
   const wrong = registerProvider(pretendCdn({ latencyMs: 0 }));
   const bad = new Session('js-provider-wrong');
   bad.addRoot(0, 'game', path.join(scratch, 'other-root'));
