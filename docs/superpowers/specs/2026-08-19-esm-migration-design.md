@@ -42,7 +42,7 @@ merely dated — it blocks the compiler upgrade outright.
 | | Now | After |
 |---|---|---|
 | Package format | CommonJS (`main: index.cjs`) | ESM (`"type": "module"`) |
-| Provider entry | CommonJS only | **ESM or CommonJS** |
+| Provider entry | CommonJS only | **ESM only** |
 | `module` / `moduleResolution` | `commonjs` / `node` | `nodenext` / `nodenext` |
 | Native addon load | `require('./index.cjs')` | `createRequire(import.meta.url)` |
 
@@ -55,19 +55,30 @@ const url = pathToFileURL(data.module).href;
 const mod = (await import(url)) as Record<string, unknown>;
 ```
 
-`import()` loads **both** module formats, so this is a strict superset of what
-works today. Two details matter:
+**Provider entries are ESM. CommonJS is not supported and not tested.** There
+are no existing users — this package is private and its only consumer is ours —
+so there is nothing to keep working, and pretending otherwise would mean
+carrying compatibility code that no caller exercises. (`import()` will in fact
+load a CJS file, exposing `module.exports` as `default`. That is incidental,
+undocumented, and must not be relied on or tested for.)
+
+Two details matter:
 
 **Path, not specifier.** `data.module` is an absolute filesystem path. Passing it
 to `import()` unconverted breaks on Windows, where `C:\...` parses as a URL
 scheme. `pathToFileURL` is not optional.
 
-**CJS arrives under `default`.** A CommonJS module loaded through `import()`
-exposes its `module.exports` as the namespace's `default`. The existing
-selection order — a named export, then `provider`, then `default`, then the
-module itself — already handles this, but the reason changes and the comment
-must say so. A CJS entry doing `module.exports = factory` previously matched the
-"module itself" arm; it now matches `default`.
+**The export selection simplifies, and should.** Today it is a named export, then
+`provider`, then `default`, then *the module itself*. That last arm exists only
+because a CommonJS `module.exports = factory` makes the module and the value the
+same object; against an ESM namespace it is meaningless — a namespace object is
+never a provider or a factory. Drop it. The order becomes: the named export if
+`spec.export` was given, else `provider`, else `default`.
+
+Removing the fallback also improves the failure. Today a module exporting
+nothing useful passes a namespace object down and fails later as a confusing
+"not a provider"; afterwards it fails immediately at the load site, naming the
+entry and the export names actually found.
 
 **The host becomes async.** `import()` returns a promise, so the top-level
 `try`/`catch` that currently registers the provider and posts the ready message
@@ -128,8 +139,9 @@ asserts a *failing* provider entry reports its failure, not merely that a good
 one loads.
 
 **Examples run as `.cts` today** (`node examples/js-provider.cts`) and are part
-of `npm test`. They must keep working, whether by staying CJS — which the widened
-contract now permits — or by converting.
+of `npm test`. They all convert to ESM; none stay CommonJS. Several of them
+*are* provider entries, so they double as the coverage for Definition-of-done
+item 2 — which means converting them is not busywork, it is the test.
 
 **The `.node` and DLLs are gitignored build artifacts.** A clean checkout needs
 a Rust build before tests pass, so the migration must be verified against a
@@ -139,13 +151,16 @@ rebuild, not only against the artifacts currently on disk.
 
 1. `pnpm typecheck` clean and `pnpm vitest run` green at **42/42**, the current
    baseline.
-2. A provider entry written as **ESM** registers and serves.
-3. A provider entry written as **CommonJS** still registers and serves —
-   backward compatibility is a tested claim, not an assumption.
-4. A provider entry that **throws on load** reports a diagnosable failure to the
+2. A provider entry written as **ESM** registers and serves — both as a default
+   export and as a named export via `spec.export`.
+3. A provider entry that **throws on load** reports a diagnosable failure to the
    parent, and does not hang.
+4. A provider entry that **exports nothing usable** fails at the load site with
+   a message naming the entry and the exports actually found — not later, as a
+   vague "not a provider".
 5. `assertConformance` passes.
-6. The examples in `npm test` all still run.
+6. Every example runs, converted to ESM.
 7. Verified against a **rebuilt** `.node`, not only the artifact on disk.
 8. `ProviderWorkerSpec.module`'s doc comment no longer claims CommonJS is
    required, and explains what the real isolate constraint is.
+9. No CommonJS compatibility shim, and no test asserting CJS entries work.
