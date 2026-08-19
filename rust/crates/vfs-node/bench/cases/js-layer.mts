@@ -1,8 +1,8 @@
 // §1 — what the JavaScript layer itself costs.
 //
-// `index.cjs` is a wrapper around `native.cjs`, and the wrapper is not free: it
+// `index.mjs` is a wrapper around `native.mjs`, and the wrapper is not free: it
 // coerces a `Provider` (or a `ProviderWorker`) down to the integer handle Rust
-// wants, and it re-exports the addon with `export * from './native.cjs'`, which
+// wants, and it re-exports the addon with `export * from './native.mjs'`, which
 // `tsc` emits as accessors. Both are load-bearing — `scripts/check-types.mts`
 // leg 4 exists because losing a wrapper would send an object where Rust wants a
 // `u32` — so what they cost is worth knowing.
@@ -25,12 +25,12 @@ import {
   table,
 } from '../harness.mts';
 
-type Vfs = typeof import('../../index.cjs');
-type Native = typeof import('../../native.cjs');
+type Vfs = typeof import('../../index.mjs');
+type Native = typeof import('../../native.mjs');
 
 export function run(): void {
-  const vfs = benchRequire(path.join(PKG_DIR, 'index.cjs')) as Vfs;
-  const native = benchRequire(path.join(PKG_DIR, 'native.cjs')) as Native;
+  const vfs = benchRequire(path.join(PKG_DIR, 'index.mjs')) as Vfs;
+  const native = benchRequire(path.join(PKG_DIR, 'native.mjs')) as Native;
 
   heading('1. the JavaScript layer');
 
@@ -63,9 +63,9 @@ export function run(): void {
   // make millions of them.
   heading('1b. the wrapper against the primitive it wraps');
   const opts = { iterations: 2000, samples: 3, warmup: 20 };
-  const viaWrapper = measure('readonly(provider)  — index.cjs wrapper', () => sink(vfs.readonly(mem).handle), opts);
+  const viaWrapper = measure('readonly(provider)  — index.mjs wrapper', () => sink(vfs.readonly(mem).handle), opts);
   const viaNative = measure(
-    'readonly(handle)    — native.cjs primitive',
+    'readonly(handle)    — native.mjs primitive',
     () => sink(native.readonly(mem.handle).handle),
     opts
   );
@@ -75,7 +75,7 @@ export function run(): void {
   );
 
   assertExact(
-    'index.cjs still shadows the primitive',
+    'index.mjs still shadows the primitive',
     vfs.readonly === native.readonly ? 1 : 0,
     0,
     'if the shadow were lost, a host passing a Provider would reach Rust with an object — and this ' +

@@ -43,14 +43,14 @@
 // missing primitive: it is not a convenience, it is correctness, and it is
 // re-implemented per provider and per binding until the combinator exists.
 // `memory()` is the case a host *cannot* fix this way, because it is a Rust
-// primitive — see `spec-8-example.cts`, step 8.
+// primitive — see `spec-8-example.mts`, step 8.
 
-import type { ProviderDirEntry, ProviderObject } from '../index.cjs';
+import type { ProviderDirEntry, ProviderObject } from '../index.mjs';
 
 const fs: typeof import('node:fs') = require('fs');
 const path: typeof import('node:path') = require('path');
 
-const { VfsError }: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
+const { VfsError }: typeof import('../index.mjs') = require(path.join(__dirname, '..', 'index.mjs'));
 
 /** Options `steamCdn()` understands. */
 export interface SteamCdnOptions {

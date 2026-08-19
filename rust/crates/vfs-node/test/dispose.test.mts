@@ -10,7 +10,7 @@
 //
 // **The `using` declarations below are now transformed rather than native.** Under
 // `node --test` this file was `.cjs` and node's own Explicit Resource Management
-// implementation ran it; as a `.cts` under vitest, vite's esbuild lowers `using`
+// implementation ran it; as a `.mts` under vitest, vite's esbuild lowers `using`
 // to `__addDisposableResource`/`__disposeResources`. That is a real change of
 // mechanism, and it is checked by the only thing that could check it — these
 // tests, which assert that the dispose actually happened, including out of a
@@ -18,13 +18,13 @@
 
 import { test } from 'vitest';
 import assert from 'node:assert';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { ProviderObject, Session } from '../index.cjs';
-
-const vfs: typeof import('../index.cjs') = require('..');
+import type { ProviderObject, Session } from '../index.mjs';
+import * as vfs from '../index.mjs';
 
 /** A minimal conforming read-only provider; nothing here is under test. */
 function stubProvider(): ProviderObject {
@@ -111,7 +111,7 @@ test('releaseProvider is idempotent and accepts a Provider as well as a handle',
 
 // **A handle is an index, so a near-miss is a different live provider.**
 //
-// Every other wrapper in `index.cts` takes its argument through `handleOf`, which
+// Every other wrapper in `index.mts` takes its argument through `handleOf`, which
 // requires a non-negative integer. `releaseProvider` did not, and it is the one
 // where skipping the check is destructive rather than merely wrong: Rust coerces
 // the number, so `releaseProvider(1.7)` released handle **1** and
@@ -140,8 +140,7 @@ test('releaseProvider refuses a non-integer handle instead of releasing its neig
 });
 
 test('a leaked provider is named on exit, in a child so the warning can be observed', () => {
-  const { spawnSync }: typeof import('node:child_process') = require('node:child_process');
-  const pkg = path.resolve(__dirname, '..');
+  const pkg = path.resolve(import.meta.dirname, '..');
   const r = spawnSync(
     process.execPath,
     [

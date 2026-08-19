@@ -16,27 +16,31 @@
 // through the ring to the graph rather than to a real file, because there is no
 // real file: `hello.txt` has no on-disk existence under the managed root.
 //
-// `require` with a type annotation, not `import`: node runs this file directly
-// and strips the annotations, but it does not rewrite module syntax. The
-// annotation rather than an `as` cast is what makes `assert.ok` an assertion
-// function to TypeScript (TS2775) — see `tsconfig.json`.
+// This file is ESM as of the ESM migration's task 2, so node runs it with real
+// `import` statements rather than the `require` + type-annotation workaround
+// `.cts` needed. The one exception is the package load two lines down: it tries
+// two different specifiers at runtime, which a static `import` cannot express,
+// so that one keeps `require` via `createRequire`.
 
-import type { Provider } from '../index.cjs';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+import os from 'node:os';
+import path from 'node:path';
 
-const assert: typeof import('node:assert') = require('assert');
-const fs: typeof import('node:fs') = require('fs');
-const os: typeof import('node:os') = require('os');
-const path: typeof import('node:path') = require('path');
+import type { Provider } from '../index.mjs';
+
+const require = createRequire(import.meta.url);
 
 // `require('aethervfs')` if this file is somehow resolved from outside the
 // package, and the in-tree path otherwise — which is the normal case, because
 // Node resolves a script's real path before walking `node_modules`, so an
 // example *inside* the package always resolves in-tree even when the package is
-// linked. Both go through `index.cjs`, so both are the same load. That a
+// linked. Both go through `index.mjs`, so both are the same load. That a
 // consumer can require the package **by name** is a separate claim and needs a
 // script outside the package to make it; there is one in the task-6 report.
 let entry = 'aethervfs';
-let mod: typeof import('../index.cjs');
+let mod: typeof import('../index.mjs');
 try {
   mod = require('aethervfs');
 } catch (e) {
@@ -46,7 +50,7 @@ try {
 }
 const { Session, Provider: ProviderClass, disk, version, packageDir } = mod;
 
-const probeExe = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
+const probeExe = path.join(import.meta.dirname, '..', 'fixtures', 'vfs-probe.exe');
 if (!fs.existsSync(probeExe)) {
   throw new Error(`${probeExe} is missing — run \`pnpm build\` first`);
 }

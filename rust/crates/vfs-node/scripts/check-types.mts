@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 
 // **Does the package's declaration describe the package that is actually there?**
 //
@@ -10,11 +10,11 @@
 // `Session.getattr` had been missing from the declaration entirely, which no type
 // checker can notice, because nothing references what does not exist.
 //
-// `index.d.cts` is now emitted from `index.cts`, so that particular comparison is
+// `index.d.mts` is now emitted from `index.mts`, so that particular comparison is
 // mostly a tautology — `tsc` cannot disagree with itself about a signature. The
 // drift moved rather than disappeared, and it moved somewhere sharper:
 //
-//  1. **`native.cts` is still hand-written.** It declares a Rust binary. Nothing
+//  1. **`native.mts` is still hand-written.** It declares a Rust binary. Nothing
 //     in the JavaScript toolchain can derive it, because the thing that could —
 //     `@napi-rs/cli` — is the network dependency this package refuses. A
 //     `#[napi]` export renamed, added, or dropped on the Rust side is invisible
@@ -45,7 +45,7 @@
 // the TypeScript compiler for the module's exported symbols, which is available
 // because `typescript` is a devDependency as of task 1 and which is strictly
 // better on a *generated* file: a regex over emitted output checks the emitter's
-// formatting, while `getExportsOfModule` follows `export * from './native.cjs'`
+// formatting, while `getExportsOfModule` follows `export * from './native.mjs'`
 // into the second declaration file for free and can tell a type-only export from
 // a value.
 //
@@ -66,9 +66,9 @@ const problems: string[] = [];
 // ---------------------------------------------------------------------------
 
 const pairs: Array<[string, string[]]> = [
-  ['index.cts', ['index.cjs', 'index.d.cts']],
-  ['native.cts', ['native.cjs', 'native.d.cts']],
-  ['provider-host.cts', ['provider-host.cjs']],
+  ['index.mts', ['index.mjs', 'index.d.mts']],
+  ['native.mts', ['native.mjs', 'native.d.mts']],
+  ['provider-host.mts', ['provider-host.mjs']],
 ];
 
 let missing = false;
@@ -95,16 +95,16 @@ if (missing) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. The addon's real exports against `native.cts`, which is hand-written.
+// 2. The addon's real exports against `native.mts`, which is hand-written.
 //
-//    One direction only. The other — a name `native.cts` declares that the addon
-//    does not have — is already enforced at load: `native.cts` takes every export
+//    One direction only. The other — a name `native.mts` declares that the addon
+//    does not have — is already enforced at load: `native.mts` takes every export
 //    through `fn(name)`, which throws a `TypeError` naming the addon and the
 //    missing name. If `require` below succeeded, that direction is clean.
 // ---------------------------------------------------------------------------
 
-const runtime = require(path.join(pkgDir, 'index.cjs')) as Record<string, unknown>;
-const nativeMod = require(path.join(pkgDir, 'native.cjs')) as Record<string, unknown>;
+const runtime = require(path.join(pkgDir, 'index.mjs')) as Record<string, unknown>;
+const nativeMod = require(path.join(pkgDir, 'native.mjs')) as Record<string, unknown>;
 const addon = require(path.join(pkgDir, 'aethervfs.node')) as Record<string, unknown>;
 
 const addonNames = Object.keys(addon);
@@ -112,8 +112,8 @@ const addonNames = Object.keys(addon);
 for (const name of addonNames) {
   if (!(name in nativeMod)) {
     problems.push(
-      `the addon exports \`${name}\` and \`native.cts\` does not declare it. A TypeScript ` +
-        'host cannot call it, and nothing else would report that — `native.cts` is the one ' +
+      `the addon exports \`${name}\` and \`native.mts\` does not declare it. A TypeScript ` +
+        'host cannot call it, and nothing else would report that — `native.mts` is the one ' +
         'declaration in this package that is still written rather than emitted.'
     );
   }
@@ -127,8 +127,8 @@ for (const name of addonNames) {
   if (!(name in runtime)) {
     problems.push(
       `the addon exports \`${name}\` and \`require('aethervfs').${name}\` is undefined. ` +
-        "`index.cts` forwards the addon with `export *`, so this means the name was lost " +
-        'between `native.cts` and here.'
+        "`index.mts` forwards the addon with `export *`, so this means the name was lost " +
+        'between `native.mts` and here.'
     );
   }
 }
@@ -136,7 +136,7 @@ for (const name of addonNames) {
 // ---------------------------------------------------------------------------
 // 4. The ten deliberate shadows are still shadows.
 //
-//    `index.cts` exports its own `memory`, `readonly`, … over the addon's, which
+//    `index.mts` exports its own `memory`, `readonly`, … over the addon's, which
 //    take integer handles. The mechanism is emit order — a local export is
 //    assigned to `exports` before `__exportStar` runs — so it is worth asserting
 //    rather than assuming.
@@ -167,7 +167,7 @@ for (const name of SHADOWED) {
   if (runtime[name] === addon[name]) {
     problems.push(
       `\`require('aethervfs').${name}\` is the addon's own function, not the wrapper in ` +
-        '`index.cts`. The wrapper is what accepts a `Provider` where Rust wants an integer ' +
+        '`index.mts`. The wrapper is what accepts a `Provider` where Rust wants an integer ' +
         "handle, so a host's `" +
         name +
         '(provider)` would now reach Rust with an object. This is an emit-order regression ' +
@@ -179,11 +179,11 @@ for (const name of SHADOWED) {
 // ---------------------------------------------------------------------------
 // 5. The declared surface against the runtime surface, both directions.
 //
-//    Asked of the compiler rather than scraped, so `export * from './native.cjs'`
+//    Asked of the compiler rather than scraped, so `export * from './native.mjs'`
 //    is followed and a type-only export is distinguishable from a value.
 // ---------------------------------------------------------------------------
 
-const entry = path.join(pkgDir, 'index.d.cts');
+const entry = path.join(pkgDir, 'index.d.mts');
 const program = ts.createProgram([entry], {
   module: ts.ModuleKind.NodeNext,
   moduleResolution: ts.ModuleResolutionKind.NodeNext,
@@ -196,12 +196,12 @@ const program = ts.createProgram([entry], {
 const checker = program.getTypeChecker();
 const entrySource = program.getSourceFile(entry);
 if (entrySource === undefined) {
-  problems.push(`could not load \`index.d.cts\` as a TypeScript program.`);
+  problems.push(`could not load \`index.d.mts\` as a TypeScript program.`);
   report();
 }
 const moduleSymbol = checker.getSymbolAtLocation(entrySource!);
 if (moduleSymbol === undefined) {
-  problems.push('`index.d.cts` does not look like a module — it declares no exports.');
+  problems.push('`index.d.mts` does not look like a module — it declares no exports.');
   report();
 }
 
@@ -276,7 +276,7 @@ for (const name of Object.keys(runtime)) {
 // 6. Declared members of the two addon classes must exist on their prototypes.
 //    napi-derive names JS methods in camelCase from Rust snake_case, so a rename
 //    on either side is exactly the drift this catches — and these two interfaces
-//    are hand-written in `native.cts`.
+//    are hand-written in `native.mts`.
 // ---------------------------------------------------------------------------
 
 for (const cls of ['Provider', 'Session'] as const) {
@@ -296,13 +296,13 @@ for (const cls of ['Provider', 'Session'] as const) {
   const proto = (ctor as { prototype: object }).prototype;
 
   // Instance side. Symbol-named members are checked explicitly below, because
-  // they are installed by `index.cts` rather than by napi-derive.
+  // they are installed by `index.mts` rather than by napi-derive.
   for (const member of checker.getPropertiesOfType(checker.getDeclaredTypeOfSymbol(target))) {
     const name = member.getName();
     if (name.startsWith('__@')) continue;
     if (!(name in proto)) {
       problems.push(
-        `\`native.cts\` declares \`${cls}.${name}\` and the runtime prototype has no such ` +
+        `\`native.mts\` declares \`${cls}.${name}\` and the runtime prototype has no such ` +
           'member. napi-derive camelCases Rust names, so check the spelling on both sides.'
       );
     }
@@ -318,17 +318,17 @@ for (const cls of ['Provider', 'Session'] as const) {
     if (name === 'prototype' || name.startsWith('__@')) continue;
     if (!(name in (ctor as object))) {
       problems.push(
-        `\`native.cts\` declares the static \`${cls}.${name}\` and the addon's constructor ` +
+        `\`native.mts\` declares the static \`${cls}.${name}\` and the addon's constructor ` +
           'has no such property.'
       );
     }
   }
 
-  // `Symbol.dispose` is installed by `index.cts`, not by Rust. If that
+  // `Symbol.dispose` is installed by `index.mts`, not by Rust. If that
   // assignment were ever dropped, `using` would silently stop releasing.
   if (!(Symbol.dispose in proto)) {
     problems.push(
-      `\`${cls}.prototype[Symbol.dispose]\` is missing. \`index.cts\` installs it; without ` +
+      `\`${cls}.prototype[Symbol.dispose]\` is missing. \`index.mts\` installs it; without ` +
         'it a `using` declaration compiles and releases nothing.'
     );
   }
@@ -345,7 +345,7 @@ function report(): never {
         problems.length === 1 ? '' : 's'
       }):\n\n` +
         problems.map((p) => `  * ${p}`).join('\n') +
-        '\n\n`index.d.cts` is emitted from `index.cts`, but `native.cts` — the addon\'s own ' +
+        '\n\n`index.d.mts` is emitted from `index.mts`, but `native.mts` — the addon\'s own ' +
         'surface — is still written by hand. Nothing else keeps it in step with the addon.\n'
     );
     process.exit(1);

@@ -23,11 +23,11 @@
 // of `providers.cts`. This module is resolved and loaded by node — on the main
 // loop by the test file, and inside a worker by `providerWorker({ module })`.
 
-import type { ProviderDirEntry, ProviderObject, ProviderStat } from '../index.cjs';
+import type { ProviderDirEntry, ProviderObject, ProviderStat } from '../index.mjs';
 
 const path: typeof import('node:path') = require('path');
 
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
+const aether: typeof import('../index.mjs') = require(path.join(__dirname, '..', 'index.mjs'));
 const { VfsError, OPEN, conformanceFixture } = aether;
 
 // `OPEN` is a `Record<string, number>` read from Rust, so each lookup is

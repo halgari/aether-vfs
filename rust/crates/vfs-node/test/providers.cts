@@ -26,11 +26,11 @@ import type {
   ProviderDirEntry,
   ProviderObject,
   ProviderStat,
-} from '../index.cjs';
+} from '../index.mjs';
 
 const path: typeof import('node:path') = require('path');
 
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
+const aether: typeof import('../index.mjs') = require(path.join(__dirname, '..', 'index.mjs'));
 const { VfsError, OPEN } = aether;
 
 // `OPEN` is a `Record<string, number>` read from Rust at load, so under
@@ -150,7 +150,7 @@ function memoryProvider(
       const hook = hooks[p];
       // The cast is the type system agreeing with the test: `badshape.txt`'s hook
       // returns a number, TypeScript would have refused to write it, and what is
-      // under test is the **runtime** coercion in `index.cts` that turns it into
+      // under test is the **runtime** coercion in `index.mts` that turns it into
       // `ST_IO_ERROR` instead of killing the process.
       if (hook) return hook(offset, len) as Uint8Array;
       return content.get(p)!.subarray(offset, offset + len);

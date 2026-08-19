@@ -2,13 +2,14 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   // Vite's esbuild transform filter is `/\.(m?ts|[jt]sx)$/` — `.ts`, `.mts`,
-  // `.jsx`, `.tsx`, and **not** `.cts`. **All five suites are `.cts`** as of
-  // task 3 (two were when this was written), so without this they reach rollup as
-  // plain JavaScript and die on their first `import type` with
+  // `.jsx`, `.tsx`, and **not** `.cts`. **All six suites are `.mts`** as of the
+  // ESM migration's task 2 (they were `.cts` before that), so without this filter
+  // widened they would reach rollup as plain JavaScript and die on their first
+  // `import type` with
   // `Parse failure: Expected ',', got '{'`. Widening the filter is the whole fix;
   // esbuild's `.cts` loader itself is already correct.
   //
-  // It is load-bearing for one thing beyond syntax: `test/dispose.test.cts` uses
+  // It is load-bearing for one thing beyond syntax: `test/dispose.test.mts` uses
   // real `using` declarations, and esbuild is what lowers them now that the file
   // is TypeScript rather than the `.cjs` node ran natively. The tests there assert
   // that the dispose actually happened, including out of a `throw`, so a broken
@@ -18,15 +19,16 @@ export default defineConfig({
   },
 
   test: {
-    // Every suite is `.cts` as of task 3, and the glob is narrowed to match on
-    // purpose: `tsconfig.json` cannot typecheck a `.cjs` file (`allowJs` is off,
-    // and every `.cjs` in this package is a build output), so a suite added as
-    // `.cjs` would run untypechecked. Keeping the two sets identical means a file
-    // is either both run and checked, or neither. There is no `setupFiles` any
-    // more — task 1's `vitest-setup.ts` mapped `require('node:test')` onto vitest
-    // so the suites could run unconverted, and task 3 converted them and deleted
-    // it.
-    include: ['test/**/*.test.cts'],
+    // Every suite is `.mts` as of the ESM migration's task 2 (`.cts` before
+    // that), and the glob is narrowed to match on purpose: `tsconfig.json` cannot
+    // typecheck a `.cjs`/`.mjs` file (`allowJs` is off, and every one of those in
+    // this package is a build output), so a suite added as `.mjs` would run
+    // untypechecked. Keeping the two sets identical means a file is either both
+    // run and checked, or neither. There is no `setupFiles` any more — the
+    // TypeScript migration's `vitest-setup.ts` mapped `require('node:test')` onto
+    // vitest so the suites could run unconverted, and its task 3 converted them
+    // and deleted it.
+    include: ['test/**/*.test.mts'],
 
     // ---------------------------------------------------------------------
     // POOL: forks, one process per test file. Do not change this to `threads`.

@@ -209,7 +209,7 @@ export function assertAtMostRatio(label: string, ratio: number, ceiling: number,
 /**
  * Tier 3 — an absolute wall-clock ceiling. Always recorded, asserted only where
  * headroom is large enough that a loaded runner cannot trip it. The convention
- * this project already follows: `provider.test.cts` asserts 500 µs against ~63 µs
+ * this project already follows: `provider.test.mts` asserts 500 µs against ~63 µs
  * observed.
  */
 export function assertAtMostNs(label: string, ns: number, ceilingNs: number, why: string): void {

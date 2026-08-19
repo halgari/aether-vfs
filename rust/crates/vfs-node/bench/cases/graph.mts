@@ -27,10 +27,10 @@ import {
   table,
 } from '../harness.mts';
 
-type Vfs = typeof import('../../index.cjs');
+type Vfs = typeof import('../../index.mjs');
 
 export function run(): void {
-  const vfs = benchRequire(path.join(PKG_DIR, 'index.cjs')) as Vfs;
+  const vfs = benchRequire(path.join(PKG_DIR, 'index.mjs')) as Vfs;
 
   heading('2. reads through a graph of Rust primitives');
 

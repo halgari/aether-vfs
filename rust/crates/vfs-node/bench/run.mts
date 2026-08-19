@@ -16,7 +16,7 @@
 //   tier 2  ratios between two things measured seconds apart in this same run.
 //           Machine speed cancels.
 //   tier 3  absolute wall clock. Recorded always; asserted only with large
-//           headroom, following provider.test.cts (500 µs ceiling, ~63 µs seen).
+//           headroom, following provider.test.mts (500 µs ceiling, ~63 µs seen).
 //
 // It is deliberately **not** part of `pnpm test`. That chain already builds,
 // typechecks, runs the drift check, three injected-process examples and vitest;

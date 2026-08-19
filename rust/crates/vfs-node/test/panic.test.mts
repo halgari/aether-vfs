@@ -27,9 +27,9 @@ import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
-const vfs: typeof import('../index.cjs') = require('..');
+import * as vfs from '../index.mjs';
 
-const PKG = path.resolve(__dirname, '..');
+const PKG = path.resolve(import.meta.dirname, '..');
 
 /** Run `expr` in a fresh node process; report how it ended. */
 function inChild(expr: string): { status: number | null; stdout: string; stderr: string } {

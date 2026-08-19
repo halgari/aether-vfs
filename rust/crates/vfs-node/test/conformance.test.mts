@@ -23,19 +23,20 @@
 //      accepted them, which is where conformance earns its place.
 //
 // Written in TypeScript and typechecked as of task 3. See the header of
-// `primitives.test.cts` for what changed and why the annotations are now a gate.
+// `primitives.test.mts` for what changed and why the annotations are now a gate.
 
 import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
-import { teardown, type TestTeardown } from './teardown.cts';
-import type { ConformanceReport, Provider, ProviderWorker } from '../index.cjs';
+import { teardown, type TestTeardown } from './teardown.mts';
+import type { ConformanceReport, Provider, ProviderWorker } from '../index.mjs';
 import type { ConformanceMake } from './conformance-providers.cts';
+import * as aether from '../index.mjs';
 
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const {
   assertConformance,
   conformanceFixture,
@@ -49,7 +50,10 @@ const {
   providerWorker,
 } = aether;
 
-const FIXTURE_MODULE: string = require.resolve(path.join(__dirname, 'conformance-providers.cts'));
+// `conformance-providers.cts` stays CommonJS — see its header — so loading it
+// still needs `require`, which this file has no global copy of.
+const require = createRequire(import.meta.url);
+const FIXTURE_MODULE: string = path.join(import.meta.dirname, 'conformance-providers.cts');
 const make: ConformanceMake = require(FIXTURE_MODULE);
 
 // `ConformanceReport` used to be re-declared here by hand, with a note that it

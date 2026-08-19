@@ -17,9 +17,10 @@
 // ## Why this file is TypeScript, and what that now buys
 //
 // It is real TypeScript — interfaces, annotations, `import` — run by vitest,
-// which transforms it through vite's esbuild. `.cts` rather than `.ts` because
-// the package is CommonJS and the fixture modules beside this file are loaded by
-// **node**, whose type stripping does not rewrite module syntax.
+// which transforms it through vite's esbuild. `.mts` because the package is ESM
+// as of the ESM migration's task 2; the fixture module beside this file
+// (`test/cdn-provider.cts`) stays CommonJS because it is loaded by **node**
+// inside a provider worker, whose type stripping does not rewrite module syntax.
 //
 // **The types are checked, as of task 3.** They were not before: `tsconfig.json`'s
 // `include` stopped short of `test/**` because
@@ -37,10 +38,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { teardown, type TestTeardown } from './teardown.cts';
-import type { Provider, ProviderCapabilities, ProviderWorker, RejectedWrite } from '../index.cjs';
+import { teardown, type TestTeardown } from './teardown.mts';
+import type { Provider, ProviderCapabilities, ProviderWorker, RejectedWrite } from '../index.mjs';
+import * as aether from '../index.mjs';
 
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const {
   Session,
   disk,
@@ -56,8 +57,8 @@ const {
   KIND,
 } = aether;
 
-const CDN_MODULE: string = require.resolve(path.join(__dirname, 'cdn-provider.cts'));
-const PROBE: string = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
+const CDN_MODULE: string = path.join(import.meta.dirname, 'cdn-provider.cts');
+const PROBE: string = path.join(import.meta.dirname, '..', 'fixtures', 'vfs-probe.exe');
 
 // ---------------------------------------------------------------------------
 // Scaffolding, same conventions as task 7's suite: a scratch tree and a session

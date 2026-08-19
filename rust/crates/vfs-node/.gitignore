@@ -5,15 +5,26 @@ aethervfs.node
 vfs_shim_dll.dll
 vfs_payload.dll
 
-# `tsc -p tsconfig.build.json` output, as of the TypeScript migration. The
-# sources are `index.cts`, `native.cts` and `provider-host.cts`, and they sit
-# beside their outputs — which works only because `.cts` and `.cjs` are different
-# extensions, and which keeps `__dirname` meaning the same directory in both.
+# `tsc -p tsconfig.build.json` output. The sources are `index.mts`, `native.mts`
+# and `provider-host.mts`, and they sit beside their outputs — which works only
+# because `.mts` and `.mjs` are different extensions, and which keeps
+# `import.meta.dirname` meaning the same directory in both.
 #
-# **`index.d.cts` is in here on purpose.** A hand-written `index.d.ts` used to be
-# committed beside a hand-written `index.cjs`; the whole point of task 2 is that
-# the declaration is emitted, and a committed copy of a build output is how it
-# starts drifting again. `package.json`'s `files` list is what ships it.
+# **`index.d.mts` is in here on purpose.** A hand-written `index.d.ts` used to be
+# committed beside a hand-written `index.cjs`; the whole point of the TypeScript
+# migration's task 2 is that the declaration is emitted, and a committed copy of
+# a build output is how it starts drifting again. `package.json`'s `files` list
+# is what ships it.
+#
+# The package was CommonJS before the ESM migration's task 2, and these are the
+# `.cjs`/`.d.cts` outputs from then — still ignored in case a stale one from an
+# old build survives on someone's disk.
+index.mjs
+index.d.mts
+native.mjs
+native.d.mts
+provider-host.mjs
+provider-host.d.mts
 index.cjs
 index.d.cts
 native.cjs

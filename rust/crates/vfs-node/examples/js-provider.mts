@@ -20,21 +20,24 @@
 // reads a path with no file behind it anywhere and gets bytes a JS function
 // produced.
 //
-// `require` with a type annotation, not `import`: node runs this file directly
-// (`node examples/js-provider.cts`) and strips the annotations, but it does not
-// rewrite module syntax. The annotation rather than the `as` cast this used to
-// carry is what makes `assert.ok` an assertion function to TypeScript — the whole
-// of task 3's 134 × TS2775, gone without one assertion changing.
+// This file is ESM as of the ESM migration's task 2, so it uses real `import`
+// statements rather than the `require` + type-annotation workaround `.cts`
+// needed for node's type stripping. `pretend-cdn-provider.cts` stays CommonJS —
+// it is loaded inside a provider worker — so both loading it here (for the
+// deadlock-guard step) and resolving its path still go through `createRequire`.
 
-import type { ProviderWorker } from '../index.cjs';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+import os from 'node:os';
+import path from 'node:path';
+
+import type { ProviderWorker } from '../index.mjs';
 import type { PretendCdn } from './pretend-cdn-provider.cts';
 
-const assert: typeof import('node:assert') = require('assert');
-const fs: typeof import('node:fs') = require('fs');
-const os: typeof import('node:os') = require('os');
-const path: typeof import('node:path') = require('path');
+const require = createRequire(import.meta.url);
 
-let mod: typeof import('../index.cjs');
+let mod: typeof import('../index.mjs');
 try {
   mod = require('aethervfs');
 } catch (e) {
@@ -43,7 +46,7 @@ try {
 }
 const { Session, disk, providerWorker, registerProvider, releaseProvider } = mod;
 
-const probeExe = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
+const probeExe = path.join(import.meta.dirname, '..', 'fixtures', 'vfs-probe.exe');
 if (!fs.existsSync(probeExe)) {
   throw new Error(`${probeExe} is missing — run \`pnpm build\` first`);
 }

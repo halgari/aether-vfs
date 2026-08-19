@@ -8,18 +8,27 @@
 // `registerProvider` binds the threadsafe function to whichever isolate calls
 // it, and that is this one.
 //
-// Compiled to `provider-host.cjs`, which is the path `index.cts` hands to
+// Compiled to `provider-host.mjs`, which is the path `index.mts` hands to
 // `new Worker(...)` and the name in `package.json`'s `files`.
 
+import { createRequire } from 'node:module';
 import { parentPort, workerData } from 'node:worker_threads';
 
-// `./index.cjs` and not the package name: this file *is* in the package, and
+// `./index.mjs` and not the package name: this file *is* in the package, and
 // resolving by name from inside it would depend on a node_modules link that need
-// not exist. Loading through index.cjs (rather than the .node directly) is what
+// not exist. Loading through index.mjs (rather than the .node directly) is what
 // records the package directory for DLL resolution.
-import * as aether from './index.cjs';
-import type { ProviderObject } from './index.cjs';
-import type { ProviderOptions } from './native.cjs';
+import * as aether from './index.mjs';
+import type { ProviderObject } from './index.mjs';
+import type { ProviderOptions } from './native.mjs';
+
+// This file is ESM, so `require(data.module)` needs a `require` of its own —
+// there is no global one. This is deliberately temporary: task 3 replaces this
+// whole load with `await import(pathToFileURL(data.module).href)`, at which
+// point provider entries stop being required as CommonJS. Leaving `require`
+// here for now keeps this commit a pure format change, with no semantic change
+// to how a provider module is loaded.
+const require = createRequire(import.meta.url);
 
 /** What `providerWorker()` puts in `workerData`. */
 interface HostData {
@@ -37,7 +46,7 @@ type Picked = ProviderObject | ((options: unknown) => ProviderObject);
 // free of a null check that could never fire.
 if (parentPort === null) {
   throw new Error(
-    'aethervfs: provider-host.cjs is a worker entry point and was loaded on the ' +
+    'aethervfs: provider-host.mjs is a worker entry point and was loaded on the ' +
       'main thread. Use providerWorker({ module }) instead of requiring it.'
   );
 }

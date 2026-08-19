@@ -25,11 +25,11 @@
 // header of `providers.cts`. This module is resolved and loaded **inside a
 // provider worker**, by node, so its module syntax has to survive type stripping.
 
-import type { ProviderDirEntry, ProviderObject } from '../index.cjs';
+import type { ProviderDirEntry, ProviderObject } from '../index.mjs';
 
 const path: typeof import('node:path') = require('path');
 
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
+const aether: typeof import('../index.mjs') = require(path.join(__dirname, '..', 'index.mjs'));
 const { VfsError } = aether;
 
 /** Options `makeCdn()` understands. */

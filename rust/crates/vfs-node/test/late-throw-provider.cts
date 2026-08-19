@@ -12,11 +12,11 @@
 // rewriting module syntax, so an `import` statement in a `.cts` file is a runtime
 // `SyntaxError`.
 
-import type { ProviderObject } from '../index.cjs';
+import type { ProviderObject } from '../index.mjs';
 
 const path: typeof import('node:path') = require('path');
 
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
+const aether: typeof import('../index.mjs') = require(path.join(__dirname, '..', 'index.mjs'));
 
 /** How long after registering to die. Short, but after the `{ ok: true }` reply. */
 interface LateThrowOptions {

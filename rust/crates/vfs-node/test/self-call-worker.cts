@@ -27,13 +27,13 @@
 // measured, not assumed), and type stripping erases annotations without
 // rewriting module syntax.
 
-import type { ProviderStats } from '../index.cjs';
+import type { ProviderStats } from '../index.mjs';
 import type { MakeProvider } from './providers.cts';
 
 const { parentPort, workerData }: typeof import('node:worker_threads') = require('worker_threads');
 const path: typeof import('node:path') = require('path');
 
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
+const aether: typeof import('../index.mjs') = require(path.join(__dirname, '..', 'index.mjs'));
 const make: MakeProvider = require(path.join(__dirname, 'providers.cts'));
 
 /** What this worker posts back. The test file imports the type. */

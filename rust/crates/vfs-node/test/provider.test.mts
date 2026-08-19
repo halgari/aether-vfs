@@ -17,7 +17,7 @@
 //      refused with a diagnosable error, from a worker as well as from main.
 //
 // Run: `pnpm test:unit` in the package directory, or `pnpm exec vitest run
-// test/provider.test.cts` for this file alone.
+// test/provider.test.mts` for this file alone.
 //
 // The stderr lines about provider throws, stalls and refusals are the *point* —
 // they are the "logged" half of rules 3 and 4 — so they are not suppressed.
@@ -27,30 +27,34 @@
 // Test files are transformed by vite before vitest runs them, so real `import`
 // statements work — and a real `import` is what makes `assert.ok` an assertion
 // function to TypeScript, which `require(...) as typeof import('node:assert')`
-// never was (TS2775, 134 of them across this tree before task 3). The provider
-// fixtures beside this file are loaded by **node** instead, both here and inside
-// a provider worker, so they keep `require` with a type annotation — see the
-// header of `providers.cts`.
+// never was (TS2775, 134 of them across this tree before the TypeScript
+// migration's task 3). The provider fixtures beside this file stay CommonJS and
+// are loaded by **node**, both here (through `createRequire`, since this file has
+// no global `require` of its own now that it is ESM) and inside a provider
+// worker, so they keep `require` with a type annotation — see the header of
+// `providers.cts`.
 
 import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
 
-import { teardown, type TestTeardown } from './teardown.cts';
-import type { Provider, ProviderOptions, ProviderStats, ProviderWorker } from '../index.cjs';
+import { teardown, type TestTeardown } from './teardown.mts';
+import type { Provider, ProviderOptions, ProviderStats, ProviderWorker } from '../index.mjs';
 import type { MakeOptions, MakeProvider, TestProvider } from './providers.cts';
 import type { SelfCallResult } from './self-call-worker.cts';
+import * as aether from '../index.mjs';
 
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const { Session, disk, registerProvider, providerWorker, releaseProvider, VfsError } = aether;
 
-const make: MakeProvider = require(path.join(__dirname, 'providers.cts'));
-const FIXTURE: string = require.resolve(path.join(__dirname, 'providers.cts'));
+const require = createRequire(import.meta.url);
+const make: MakeProvider = require(path.join(import.meta.dirname, 'providers.cts'));
+const FIXTURE: string = path.join(import.meta.dirname, 'providers.cts');
 
-const probeExe = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
+const probeExe = path.join(import.meta.dirname, '..', 'fixtures', 'vfs-probe.exe');
 
 // ---------------------------------------------------------------------------
 // Scaffolding. Each test gets its own scratch tree and its own session, and the
@@ -473,7 +477,7 @@ test('7. a call serviced by the loop that is blocked waiting for it is refused, 
   // the same.
   const workerRoot = emptyRoot(t, 'guard-worker');
   const result = await new Promise<SelfCallResult>((resolve, reject) => {
-    const w = new Worker(path.join(__dirname, 'self-call-worker.cts'), {
+    const w = new Worker(path.join(import.meta.dirname, 'self-call-worker.cts'), {
       workerData: { gameRoot: workerRoot },
     });
     w.once('message', resolve);
