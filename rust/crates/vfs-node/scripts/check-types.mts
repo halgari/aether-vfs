@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 
 // **Does the package's declaration describe the package that is actually there?**
 //
@@ -54,6 +54,7 @@
 import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ts = require('typescript') as typeof import('typescript');
@@ -100,11 +101,21 @@ if (missing) {
 //    One direction only. The other — a name `native.mts` declares that the addon
 //    does not have — is already enforced at load: `native.mts` takes every export
 //    through `fn(name)`, which throws a `TypeError` naming the addon and the
-//    missing name. If `require` below succeeded, that direction is clean.
+//    missing name. If the import below succeeded, that direction is clean.
 // ---------------------------------------------------------------------------
 
-const runtime = require(path.join(pkgDir, 'index.mjs')) as Record<string, unknown>;
-const nativeMod = require(path.join(pkgDir, 'native.mjs')) as Record<string, unknown>;
+// `import()`, not `require()`: the package is ESM. The addon itself is still
+// `require(...)`d just below — a `.node` binary can only ever be loaded that
+// way — but `index.mjs`/`native.mjs` are real ESM now and get no benefit from
+// going through `createRequire`'s synchronous CJS interop.
+const runtime = (await import(pathToFileURL(path.join(pkgDir, 'index.mjs')).href)) as Record<
+  string,
+  unknown
+>;
+const nativeMod = (await import(pathToFileURL(path.join(pkgDir, 'native.mjs')).href)) as Record<
+  string,
+  unknown
+>;
 const addon = require(path.join(pkgDir, 'aethervfs.node')) as Record<string, unknown>;
 
 const addonNames = Object.keys(addon);

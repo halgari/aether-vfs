@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import type { ProviderObject, Session } from '../index.mjs';
 import * as vfs from '../index.mjs';
@@ -141,11 +142,18 @@ test('releaseProvider refuses a non-integer handle instead of releasing its neig
 
 test('a leaked provider is named on exit, in a child so the warning can be observed', () => {
   const pkg = path.resolve(import.meta.dirname, '..');
+  const entry = pathToFileURL(path.join(pkg, 'index.mjs')).href;
+  // `--input-type=module` and `import()`, not `require()`: the package is ESM
+  // now, and a plain `node -e '...'` child defaults to CommonJS, which would
+  // only reach `index.mjs` through Node's synchronous require(ESM) interop —
+  // sound today, but a tripwire against index.mjs ever gaining a top-level
+  // await. `import()` has no such condition.
   const r = spawnSync(
     process.execPath,
     [
+      '--input-type=module',
       '-e',
-      `const vfs = require(${JSON.stringify(pkg)});
+      `const vfs = await import(${JSON.stringify(entry)});
        vfs.registerProvider({
          capabilities: { access: 'read' },
          getattr: () => null, readdir: () => [],

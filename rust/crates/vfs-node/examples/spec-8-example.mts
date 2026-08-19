@@ -59,10 +59,11 @@
 // directly by `node`, which strips types natively (Node 22.6+, unflagged since
 // 23.6; this is v24). `.mts` as of the ESM migration's task 2, which is what
 // lets every node builtin below be a real `import` instead of a `require` with a
-// type annotation. The two provider entries this file names by path
-// (`steam-cdn-provider.cts`) stay CommonJS, loaded inside a provider worker, so
-// resolving their paths and loading the package itself by two different
-// specifiers still go through `createRequire`.
+// type annotation. The provider entry this file names by path
+// (`steam-cdn-provider.cts`) stays CommonJS, loaded inside a provider worker, so
+// resolving its path still goes through `createRequire`. Loading the package
+// itself by two different specifiers is a dynamic `import()` instead, since a
+// static `import` cannot express choosing a specifier at runtime.
 //
 // **The types are checked, as of the TypeScript migration's task 3.** They were
 // not before, and this file said so. Two things changed then. The annotation
@@ -80,19 +81,27 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import type { Provider, ProviderWorker, RejectedWrite } from '../index.mjs';
 
 const require = createRequire(import.meta.url);
 
-// `require('aethervfs')` when the package is installed, the in-tree entry
-// otherwise. Both go through `index.mjs`, so both are the same load.
+// `import('aethervfs')` when the package is installed, the in-tree entry
+// otherwise. Both go through `index.mjs`, so both are the same load. A dynamic
+// `import()`, not `require()`, because these two specifiers are chosen at
+// runtime and a static `import` cannot express that.
+const pkgName = 'aethervfs';
 let mod: typeof import('../index.mjs');
 try {
-  mod = require('aethervfs');
+  // `pkgName`, not the string literal: TypeScript resolves a dynamic `import()`'s
+  // type from a literal specifier, and `aethervfs` is not on this machine's
+  // module path (it is loaded in-tree, below) — a literal here would be a
+  // standing TS2307 rather than the fallback this `try` exists to take.
+  mod = await import(pkgName);
 } catch (e) {
-  if ((e as NodeJS.ErrnoException).code !== 'MODULE_NOT_FOUND') throw e;
-  mod = require('..');
+  if ((e as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') throw e;
+  mod = await import(pathToFileURL(path.join(import.meta.dirname, '..', 'index.mjs')).href);
 }
 const {
   Session,
@@ -457,13 +466,20 @@ async function main(): Promise<void> {
   // A live threadsafe function keeps its loop alive, so a worker never exits
   // until its provider is released. Demonstrated with two child processes doing
   // nothing but registering a provider — one that releases it, one that does not.
-  const leakProbe = path.join(scratch, 'leak-probe.cjs');
+  // `.mjs` and `import()`, not `.cjs` and `require()`: the package is ESM, and a
+  // CommonJS child would only reach `index.mjs` through Node's synchronous
+  // require(ESM) interop — sound today, but a tripwire against `index.mjs` ever
+  // gaining a top-level await. `import()` has no such condition, and being a
+  // real `.mjs` entry point (rather than `node -e`) means top-level `await`
+  // needs no extra flag here.
+  const leakProbe = path.join(scratch, 'leak-probe.mjs');
+  const entry = pathToFileURL(path.join(import.meta.dirname, '..', 'index.mjs')).href;
   fs.writeFileSync(
     leakProbe,
-    `const p = require(${JSON.stringify(path.join(import.meta.dirname, '..', 'index.mjs'))});\n` +
-      `p.providerWorker({ module: ${JSON.stringify(require.resolve('./steam-cdn-provider.cts'))},\n` +
-      `                   options: { exeSource: ${JSON.stringify(PROBE)} } })\n` +
-      `  .then(async (w) => { if (process.argv[2] === 'release') await w.close(); });\n`
+    `const p = await import(${JSON.stringify(entry)});\n` +
+      `const w = await p.providerWorker({ module: ${JSON.stringify(require.resolve('./steam-cdn-provider.cts'))},\n` +
+      `                   options: { exeSource: ${JSON.stringify(PROBE)} } });\n` +
+      `if (process.argv[2] === 'release') await w.close();\n`
   );
   const PATIENCE_MS = 3000;
   for (const mode of ['release', 'leak']) {

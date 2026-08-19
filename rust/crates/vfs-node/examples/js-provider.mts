@@ -22,8 +22,10 @@
 //
 // This file is ESM as of the ESM migration's task 2, so it uses real `import`
 // statements rather than the `require` + type-annotation workaround `.cts`
-// needed for node's type stripping. `pretend-cdn-provider.cts` stays CommonJS —
-// it is loaded inside a provider worker — so both loading it here (for the
+// needed for node's type stripping. The package load below tries two different
+// specifiers at runtime, which a static `import` cannot express, so it is a
+// dynamic `import()` instead. `pretend-cdn-provider.cts` stays CommonJS — it is
+// loaded inside a provider worker — so both loading it here (for the
 // deadlock-guard step) and resolving its path still go through `createRequire`.
 
 import assert from 'node:assert';
@@ -31,18 +33,24 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import type { ProviderWorker } from '../index.mjs';
 import type { PretendCdn } from './pretend-cdn-provider.cts';
 
 const require = createRequire(import.meta.url);
 
+const pkgName = 'aethervfs';
 let mod: typeof import('../index.mjs');
 try {
-  mod = require('aethervfs');
+  // `pkgName`, not the string literal: TypeScript resolves a dynamic `import()`'s
+  // type from a literal specifier, and `aethervfs` is not on this machine's
+  // module path (it is loaded in-tree, below) — a literal here would be a
+  // standing TS2307 rather than the fallback this `try` exists to take.
+  mod = await import(pkgName);
 } catch (e) {
-  if ((e as NodeJS.ErrnoException).code !== 'MODULE_NOT_FOUND') throw e;
-  mod = require('..');
+  if ((e as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') throw e;
+  mod = await import(pathToFileURL(path.join(import.meta.dirname, '..', 'index.mjs')).href);
 }
 const { Session, disk, providerWorker, registerProvider, releaseProvider } = mod;
 

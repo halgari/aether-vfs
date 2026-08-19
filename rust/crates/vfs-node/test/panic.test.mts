@@ -26,16 +26,26 @@ import { test } from 'vitest';
 import assert from 'node:assert';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import * as vfs from '../index.mjs';
 
 const PKG = path.resolve(import.meta.dirname, '..');
+const ENTRY = pathToFileURL(path.join(PKG, 'index.mjs')).href;
 
-/** Run `expr` in a fresh node process; report how it ended. */
+/**
+ * Run `expr` in a fresh node process; report how it ended.
+ *
+ * `--input-type=module` + `import()`, not `require()`: the package is ESM, and
+ * a plain `node -e '...'` child defaults to CommonJS, which would only reach
+ * `index.mjs` through Node's synchronous require(ESM) interop — sound today,
+ * but a tripwire against `index.mjs` ever gaining a top-level await, at which
+ * point this file would fail for a reason that has nothing to do with panics.
+ */
 function inChild(expr: string): { status: number | null; stdout: string; stderr: string } {
   const r = spawnSync(
     process.execPath,
-    ['-e', `const vfs = require(${JSON.stringify(PKG)});\n${expr}`],
+    ['--input-type=module', '-e', `const vfs = await import(${JSON.stringify(ENTRY)});\n${expr}`],
     { encoding: 'utf8', cwd: PKG }
   );
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
