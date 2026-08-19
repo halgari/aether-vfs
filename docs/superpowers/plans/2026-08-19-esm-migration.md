@@ -419,7 +419,15 @@ git commit -am "fix: <whatever the clean rebuild exposed>"
 
 ## Definition of done
 
-1. `npx tsc --noEmit` clean; `npx vitest run` green at **46** (42 baseline + 4 new).
+> **Amended during execution.** Two items below moved. The test count is **48**,
+> not 46: a fifth test was added for the release-during-load race (the guard was
+> load-bearing and completely untested), and a sixth for rejecting a `file://`
+> URL as `spec.module`. Task 1 was **dropped** — TypeScript 7 removes the
+> Compiler API that `scripts/check-types.mts` uses to detect drift between the
+> addon's real exports and `native.mts`'s declarations, and losing that gate was
+> the worse trade. The package stays on TypeScript 5.9.3.
+
+1. `npx tsc --noEmit` clean; `npx vitest run` green at **48**.
 2. A provider entry written as **ESM** registers and serves — both as a default export and as a named export via `spec.export`.
 3. A provider entry that **throws on load** reports a diagnosable failure and does not hang.
 4. A provider entry that **exports nothing usable** fails at the load site naming the exports actually found.
