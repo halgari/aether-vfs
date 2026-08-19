@@ -34,7 +34,12 @@ provider-host.d.cts
 *.tsbuildinfo
 
 # The stand-in executable the demo launches. Built, not authored.
-fixtures/
+#
+# Anchored to this directory (`/fixtures/`, not `fixtures/`) on purpose: an
+# unanchored pattern matches a directory named `fixtures` at any depth, which
+# swallowed `test/fixtures/` — the ESM migration's task 4 fixture modules,
+# authored, not built, and meant to be committed.
+/fixtures/
 
 # The package has npm **devDependencies** as of the TypeScript migration —
 # vitest, typescript and @types/node — and no runtime dependencies, which is the
