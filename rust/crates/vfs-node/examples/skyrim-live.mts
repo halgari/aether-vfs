@@ -4,7 +4,7 @@
 // TypeScript — the Node counterpart of `vfs-directord`'s `skyrim-live` binary.
 //
 // ```text
-// pnpm build:release && node examples/skyrim-live.cts
+// pnpm build:release && node examples/skyrim-live.mts
 // ```
 //
 // The claim it exists to make is narrow and worth stating exactly: **a host
@@ -49,18 +49,18 @@
 // failure this project keeps meeting is not a crash — it is a run that looks
 // fine and measured nothing.
 //
-// `require` with type annotations rather than `import`: node runs this file
-// directly and strips annotations without rewriting module syntax, exactly as
-// the other examples here do.
+// Real `import` statements, not `require` with type annotations: this file is
+// ESM as of the ESM migration's task 2, so node runs it directly with no
+// workaround needed.
 
-import type { Provider, Session } from '../index.cjs';
+import assert from 'node:assert';
+import cp from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
-const assert: typeof import('node:assert') = require('assert');
-const cp: typeof import('node:child_process') = require('child_process');
-const fs: typeof import('node:fs') = require('fs');
-const path: typeof import('node:path') = require('path');
+import type { Provider, Session } from '../index.mjs';
+import * as mod from '../index.mjs';
 
-const mod: typeof import('../index.cjs') = require('../index.cjs');
 const { Session: VfsSession, disk, subdir, zip } = mod;
 
 // stdout is a pipe when this runs as a background task, and Node's writes to a

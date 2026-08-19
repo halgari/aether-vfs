@@ -55,38 +55,52 @@
 //
 // ## TypeScript, and what that is now worth here
 //
-// Real TypeScript — annotations, `import type` — run directly by `node`, which
-// strips types natively (Node 22.6+, unflagged since 23.6; this is v24). `.cts`
-// because the package is CommonJS and type stripping does not rewrite module
-// syntax, which is also why every builtin below is a `require` with a type
-// **annotation** rather than an `import`.
+// Real TypeScript — annotations, `import type`, real `import` statements — run
+// directly by `node`, which strips types natively (Node 22.6+, unflagged since
+// 23.6; this is v24). `.mts` as of the ESM migration's task 2, which is what
+// lets every node builtin below be a real `import` instead of a `require` with a
+// type annotation. The provider entry this file names by path
+// (`steam-cdn-provider.mts`) is ESM too, as of that migration's task 3, loaded
+// inside a provider worker via `await import(pathToFileURL(data.module).href)`;
+// its path is resolved here with `path.join(import.meta.dirname, ...)`, the same
+// pattern `providerWorker`'s own tests use. Loading the package itself by two
+// different specifiers is a dynamic `import()` instead, since a static `import`
+// cannot express choosing a specifier at runtime.
 //
-// **The types are checked, as of task 3.** They were not before, and this file
-// said so. Two things changed. The annotation replaced
-// `require('node:assert') as typeof import('node:assert')`, because a cast is not
-// an annotation and TypeScript will not treat `assert.ok` as an assertion
-// function without one — 134 × TS2775 across this tree, all of them that idiom.
-// And the `mod as any` that used to sit under the destructuring below is gone, so
-// the graph this file builds is now checked against the emitted declaration
-// instead of being `any` from the first line. `tsconfig.json`'s `include` covers
-// `examples/**` and `tsc --noEmit` is a step in `pnpm test`.
+// **The types are checked, as of the TypeScript migration's task 3.** They were
+// not before, and this file said so. Two things changed then. The annotation
+// replaced `require('node:assert') as typeof import('node:assert')`, because a
+// cast is not an annotation and TypeScript will not treat `assert.ok` as an
+// assertion function without one — 134 × TS2775 across this tree, all of them
+// that idiom. And the `mod as any` that used to sit under the destructuring below
+// is gone, so the graph this file builds is checked against the emitted
+// declaration instead of being `any` from the first line. `tsconfig.json`'s
+// `include` covers `examples/**` and `tsc --noEmit` is a step in `pnpm test`.
 
-import type { Provider, ProviderWorker, RejectedWrite } from '../index.cjs';
+import assert from 'node:assert';
+import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-const assert: typeof import('node:assert') = require('node:assert');
-const { spawn, spawnSync }: typeof import('node:child_process') = require('node:child_process');
-const fs: typeof import('node:fs') = require('node:fs');
-const os: typeof import('node:os') = require('node:os');
-const path: typeof import('node:path') = require('node:path');
+import type { Provider, ProviderWorker, RejectedWrite } from '../index.mjs';
 
-// `require('aethervfs')` when the package is installed, the in-tree entry
-// otherwise. Both go through `index.cjs`, so both are the same load.
-let mod: typeof import('../index.cjs');
+// `import('aethervfs')` when the package is installed, the in-tree entry
+// otherwise. Both go through `index.mjs`, so both are the same load. A dynamic
+// `import()`, not `require()`, because these two specifiers are chosen at
+// runtime and a static `import` cannot express that.
+const pkgName = 'aethervfs';
+let mod: typeof import('../index.mjs');
 try {
-  mod = require('aethervfs');
+  // `pkgName`, not the string literal: TypeScript resolves a dynamic `import()`'s
+  // type from a literal specifier, and `aethervfs` is not on this machine's
+  // module path (it is loaded in-tree, below) — a literal here would be a
+  // standing TS2307 rather than the fallback this `try` exists to take.
+  mod = await import(pkgName);
 } catch (e) {
-  if ((e as NodeJS.ErrnoException).code !== 'MODULE_NOT_FOUND') throw e;
-  mod = require('..');
+  if ((e as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') throw e;
+  mod = await import(pathToFileURL(path.join(import.meta.dirname, '..', 'index.mjs')).href);
 }
 const {
   Session,
@@ -103,7 +117,7 @@ const {
   version,
 } = mod;
 
-const PROBE = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
+const PROBE = path.join(import.meta.dirname, '..', 'fixtures', 'vfs-probe.exe');
 if (!fs.existsSync(PROBE)) {
   throw new Error(`${PROBE} is missing — run \`pnpm build\` first`);
 }
@@ -176,7 +190,7 @@ async function main(): Promise<void> {
   // is safe *because* this provider is not serviced by that loop: the rule is
   // loop identity, not thread role.
   const cdn: ProviderWorker = await providerWorker({
-    module: require.resolve('./steam-cdn-provider.cts'),
+    module: path.join(import.meta.dirname, 'steam-cdn-provider.mts'),
     options: { depot: '489830', latencyMs: 1, exeSource: PROBE },
   });
   openWorker = cdn;
@@ -451,13 +465,20 @@ async function main(): Promise<void> {
   // A live threadsafe function keeps its loop alive, so a worker never exits
   // until its provider is released. Demonstrated with two child processes doing
   // nothing but registering a provider — one that releases it, one that does not.
-  const leakProbe = path.join(scratch, 'leak-probe.cjs');
+  // `.mjs` and `import()`, not `.cjs` and `require()`: the package is ESM, and a
+  // CommonJS child would only reach `index.mjs` through Node's synchronous
+  // require(ESM) interop — sound today, but a tripwire against `index.mjs` ever
+  // gaining a top-level await. `import()` has no such condition, and being a
+  // real `.mjs` entry point (rather than `node -e`) means top-level `await`
+  // needs no extra flag here.
+  const leakProbe = path.join(scratch, 'leak-probe.mjs');
+  const entry = pathToFileURL(path.join(import.meta.dirname, '..', 'index.mjs')).href;
   fs.writeFileSync(
     leakProbe,
-    `const p = require(${JSON.stringify(path.join(__dirname, '..', 'index.cjs'))});\n` +
-      `p.providerWorker({ module: ${JSON.stringify(require.resolve('./steam-cdn-provider.cts'))},\n` +
-      `                   options: { exeSource: ${JSON.stringify(PROBE)} } })\n` +
-      `  .then(async (w) => { if (process.argv[2] === 'release') await w.close(); });\n`
+    `const p = await import(${JSON.stringify(entry)});\n` +
+      `const w = await p.providerWorker({ module: ${JSON.stringify(path.join(import.meta.dirname, 'steam-cdn-provider.mts'))},\n` +
+      `                   options: { exeSource: ${JSON.stringify(PROBE)} } });\n` +
+      `if (process.argv[2] === 'release') await w.close();\n`
   );
   const PATIENCE_MS = 3000;
   for (const mode of ['release', 'leak']) {
@@ -490,7 +511,7 @@ async function main(): Promise<void> {
  *
  * `spawnSync(..., { timeout })` was the obvious way to write this and it is the
  * wrong one: its timeout sends `SIGTERM`, and a leaked child that survives it
- * keeps `aethervfs.node` mapped — after which the next `scripts/build.cjs`
+ * keeps `aethervfs.node` mapped — after which the next `scripts/build.mts`
  * fails to copy the addon with `EBUSY`, which is precisely the family of trap
  * this project has been bitten by before (a stale native artifact that reports
  * success). So the kill is `taskkill /F /T`, by pid, and this waits for the

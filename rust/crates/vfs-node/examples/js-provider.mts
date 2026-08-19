@@ -20,30 +20,39 @@
 // reads a path with no file behind it anywhere and gets bytes a JS function
 // produced.
 //
-// `require` with a type annotation, not `import`: node runs this file directly
-// (`node examples/js-provider.cts`) and strips the annotations, but it does not
-// rewrite module syntax. The annotation rather than the `as` cast this used to
-// carry is what makes `assert.ok` an assertion function to TypeScript — the whole
-// of task 3's 134 × TS2775, gone without one assertion changing.
+// This file is ESM as of the ESM migration's task 2, so it uses real `import`
+// statements rather than the `require` + type-annotation workaround `.cts`
+// needed for node's type stripping. The package load below tries two different
+// specifiers at runtime, which a static `import` cannot express, so it is a
+// dynamic `import()` instead. `pretend-cdn-provider.mts` is ESM too, as of
+// task 3 — it is loaded inside a provider worker via
+// `await import(pathToFileURL(data.module).href)`, and here (for the
+// deadlock-guard step) via an ordinary static `import`.
 
-import type { ProviderWorker } from '../index.cjs';
-import type { PretendCdn } from './pretend-cdn-provider.cts';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-const assert: typeof import('node:assert') = require('assert');
-const fs: typeof import('node:fs') = require('fs');
-const os: typeof import('node:os') = require('os');
-const path: typeof import('node:path') = require('path');
+import type { ProviderWorker } from '../index.mjs';
+import pretendCdn from './pretend-cdn-provider.mts';
 
-let mod: typeof import('../index.cjs');
+const pkgName = 'aethervfs';
+let mod: typeof import('../index.mjs');
 try {
-  mod = require('aethervfs');
+  // `pkgName`, not the string literal: TypeScript resolves a dynamic `import()`'s
+  // type from a literal specifier, and `aethervfs` is not on this machine's
+  // module path (it is loaded in-tree, below) — a literal here would be a
+  // standing TS2307 rather than the fallback this `try` exists to take.
+  mod = await import(pkgName);
 } catch (e) {
-  if ((e as NodeJS.ErrnoException).code !== 'MODULE_NOT_FOUND') throw e;
-  mod = require('..');
+  if ((e as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') throw e;
+  mod = await import(pathToFileURL(path.join(import.meta.dirname, '..', 'index.mjs')).href);
 }
 const { Session, disk, providerWorker, registerProvider, releaseProvider } = mod;
 
-const probeExe = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
+const probeExe = path.join(import.meta.dirname, '..', 'fixtures', 'vfs-probe.exe');
 if (!fs.existsSync(probeExe)) {
   throw new Error(`${probeExe} is missing — run \`pnpm build\` first`);
 }
@@ -62,7 +71,7 @@ async function main(): Promise<void> {
 
   step(1, 'providerWorker — a JS provider on its own event loop');
   const cdn: ProviderWorker = await providerWorker({
-    module: require.resolve('./pretend-cdn-provider.cts'),
+    module: path.join(import.meta.dirname, 'pretend-cdn-provider.mts'),
     options: { depot: '489830', latencyMs: 5 },
   });
   console.log(`    handle            ${cdn.handle}   (a process-global integer, not an object)`);
@@ -119,7 +128,8 @@ async function main(): Promise<void> {
   step(7, 'the deadlock guard — the same provider, registered on this loop instead');
   // Deliberately wrong, to show what it says. `registerProvider` binds to the
   // *calling* loop, and this script then drives the session from that same loop.
-  const pretendCdn: PretendCdn = require('./pretend-cdn-provider.cts');
+  // `pretendCdn` is the same factory imported at the top of this file — a real
+  // `import`, not a second load through `require`.
   const wrong = registerProvider(pretendCdn({ latencyMs: 0 }));
   const bad = new Session('js-provider-wrong');
   bad.addRoot(0, 'game', path.join(scratch, 'other-root'));

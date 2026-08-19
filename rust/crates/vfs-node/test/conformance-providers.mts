@@ -19,15 +19,14 @@
 // running the suite can catch: a provider whose methods are all present and whose
 // behaviour does not match what it declared.
 //
-// `require` and not `import`, and an annotation rather than a cast: see the header
-// of `providers.cts`. This module is resolved and loaded by node — on the main
-// loop by the test file, and inside a worker by `providerWorker({ module })`.
+// ESM, as of task 3: see the header of `providers.mts`. This module is loaded by
+// node — on the main loop by the test file, through a real `import`, and inside a
+// worker by `providerWorker({ module })`'s `await import(...)`.
 
-import type { ProviderDirEntry, ProviderObject, ProviderStat } from '../index.cjs';
+import type { ProviderDirEntry, ProviderObject, ProviderStat } from '../index.mjs';
 
-const path: typeof import('node:path') = require('path');
+import * as aether from '../index.mjs';
 
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const { VfsError, OPEN, conformanceFixture } = aether;
 
 // `OPEN` is a `Record<string, number>` read from Rust, so each lookup is
@@ -285,14 +284,11 @@ function make(options: ConformanceMakeOptions = {}): ProviderObject {
   const factory = KINDS[kind];
   if (!factory) {
     throw new Error(
-      `test/conformance-providers.cts: no kind ${JSON.stringify(kind)}; have ${Object.keys(KINDS).join(', ')}`
+      `test/conformance-providers.mts: no kind ${JSON.stringify(kind)}; have ${Object.keys(KINDS).join(', ')}`
     );
   }
   return factory(options);
 }
 
-/** What `require()`ing this module gives back — see `providers.cts`'s note. */
-export type ConformanceMake = typeof make & { KINDS: typeof KINDS };
-
-module.exports = make;
-module.exports.KINDS = KINDS;
+export default make;
+export { KINDS };

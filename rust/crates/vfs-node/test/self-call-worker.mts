@@ -22,19 +22,16 @@
 // process, exactly as it was under `node --test`; under `pool: 'threads'` it
 // would not be, which is why `vitest.config.ts` pins the pool.
 //
-// `require` and not `import`: node loads this file as a worker entry point
-// (`new Worker('…/self-call-worker.cts')`, which node's type stripping accepts —
-// measured, not assumed), and type stripping erases annotations without
-// rewriting module syntax.
+// ESM, as of task 3: node loads this file as a worker entry point
+// (`new Worker('…/self-call-worker.mts')`, which node's type stripping accepts
+// the same way it did for `.cts`), so this is a real `import` throughout — no
+// `require` left anywhere in the file.
 
-import type { ProviderStats } from '../index.cjs';
-import type { MakeProvider } from './providers.cts';
+import { parentPort, workerData } from 'node:worker_threads';
 
-const { parentPort, workerData }: typeof import('node:worker_threads') = require('worker_threads');
-const path: typeof import('node:path') = require('path');
-
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
-const make: MakeProvider = require(path.join(__dirname, 'providers.cts'));
+import type { ProviderStats } from '../index.mjs';
+import * as aether from '../index.mjs';
+import make from './providers.mts';
 
 /** What this worker posts back. The test file imports the type. */
 export interface SelfCallResult {

@@ -4,8 +4,9 @@
   "private": true,
   "description": "Windows virtual filesystem: compose a process's view of the disk from pluggable providers",
   "license": "UNLICENSED",
-  "main": "index.cjs",
-  "types": "index.d.cts",
+  "type": "module",
+  "main": "index.mjs",
+  "types": "index.d.mts",
   "engines": {
     "node": ">=24"
   },
@@ -16,11 +17,11 @@
     "x64"
   ],
   "files": [
-    "index.cjs",
-    "index.d.cts",
-    "native.cjs",
-    "native.d.cts",
-    "provider-host.cjs",
+    "index.mjs",
+    "index.d.mts",
+    "native.mjs",
+    "native.d.mts",
+    "provider-host.mjs",
     "aethervfs.node",
     "vfs_shim_dll.dll",
     "vfs_payload.dll"
@@ -29,17 +30,17 @@
     "build:js": "tsc -p tsconfig.build.json",
     "build": "tsc -p tsconfig.build.json && node scripts/build.mts",
     "build:release": "tsc -p tsconfig.build.json && node scripts/build.mts --release",
-    "demo": "node examples/vertical-slice.cts",
-    "demo:provider": "node examples/js-provider.cts",
-    "demo:spec8": "node examples/spec-8-example.cts",
-  "demo:skyrim": "node examples/skyrim-live.cts",
+    "demo": "node examples/vertical-slice.mts",
+    "demo:provider": "node examples/js-provider.mts",
+    "demo:spec8": "node examples/spec-8-example.mts",
+  "demo:skyrim": "node examples/skyrim-live.mts",
     "check:types": "node scripts/check-types.mts",
     "typecheck": "tsc --noEmit",
     "bench": "tsc -p tsconfig.build.json && node scripts/build.mts --release && node bench/run.mts",
     "bench:ab": "tsc -p tsconfig.build.json && node scripts/build.mts --release && node bench/ab-js-layer.mts",
     "test:unit": "vitest run",
     "test:watch": "vitest",
-    "test": "tsc -p tsconfig.build.json && node scripts/build.mts && node scripts/check-types.mts && tsc --noEmit && node examples/vertical-slice.cts && node examples/js-provider.cts && node examples/spec-8-example.cts && vitest run"
+    "test": "tsc -p tsconfig.build.json && node scripts/build.mts && node scripts/check-types.mts && tsc --noEmit && node examples/vertical-slice.mts && node examples/js-provider.mts && node examples/spec-8-example.mts && vitest run"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

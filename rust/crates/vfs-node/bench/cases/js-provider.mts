@@ -3,7 +3,7 @@
 // `docs/benchmarks/node-ffi-round-trip.md` records 1.7–2.0 µs for a blocking
 // round trip, director thread → JS → back, and carries a banner saying the
 // harness that produced it (`spike-node/`) was deleted and **nothing in the tree
-// reproduces it**. `provider.test.cts` says the same in its own comment: its
+// reproduces it**. `provider.test.mts` says the same in its own comment: its
 // ~63 µs per `readFile` is an upper bound over three-plus crossings and "is not
 // comparable" to the bare number.
 //
@@ -12,7 +12,7 @@
 // Rust `memory()` leaf costs the same graph traversal with **zero** crossings. The
 // difference is one round trip plus one dispatch, measured rather than recalled.
 // The crossing counts are read from `provider.stats().calls`, so the divisor is a
-// fact and not an assumption — which is the part `provider.test.cts` could not do
+// fact and not an assumption — which is the part `provider.test.mts` could not do
 // when it divided by "3.1 crossings each".
 //
 // The provider lives on a worker loop, which is the shape §8c measured as the
@@ -21,13 +21,13 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   PKG_DIR,
   assertAtMostNs,
   assertAtMostRatio,
   assertExact,
-  benchRequire,
   fmtNs,
   heading,
   measure,
@@ -35,13 +35,13 @@ import {
   table,
 } from '../harness.mts';
 
-type Vfs = typeof import('../../index.cjs');
+type Vfs = typeof import('../../index.mjs');
 
 /** The task-7 fixture: `bytes` serves `small.bin` as 64 bytes of 0xab. */
-const FIXTURE = path.join(PKG_DIR, 'test', 'providers.cts');
+const FIXTURE = path.join(PKG_DIR, 'test', 'providers.mts');
 
 export async function run(): Promise<void> {
-  const vfs = benchRequire(path.join(PKG_DIR, 'index.cjs')) as Vfs;
+  const vfs = (await import(pathToFileURL(path.join(PKG_DIR, 'index.mjs')).href)) as Vfs;
 
   heading('3. the JavaScript provider bridge');
 
@@ -133,7 +133,7 @@ export async function run(): Promise<void> {
     'a JS provider is not slower than a real Rust provider doing real work',
     jsRead.nsPerOp / diskRead.nsPerOp,
     2.0,
-    'the comparison spec §8b actually invites. provider.test.cts already found the JS provider ' +
+    'the comparison spec §8b actually invites. provider.test.mts already found the JS provider ' +
       '*faster* than disk() — its leaf is a Buffer slice and disk()\'s is a real NTFS open — so ' +
       'this holds the finding rather than restating an aspiration. memory() is not the denominator ' +
       'to use: it is a HashMap lookup with no I/O and no bridge, which makes the ratio a statement ' +
@@ -147,7 +147,7 @@ export async function run(): Promise<void> {
     'a readFile through a JS provider stays in the tens of microseconds',
     jsRead.nsPerOp,
     500_000,
-    'the same ceiling provider.test.cts asserts, so the two agree on what a regression looks like'
+    'the same ceiling provider.test.mts asserts, so the two agree on what a regression looks like'
   );
 
   jsSession.close();

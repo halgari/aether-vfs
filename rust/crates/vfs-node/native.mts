@@ -1,13 +1,13 @@
 // The addon's `#[napi]` surface, and the one place that loads it.
 //
 // **This file is the irreducible hand-written part of the declaration.** Every
-// other `.d.cts` in this package is a `tsc` output; this one describes a Rust
+// other `.d.mts` in this package is a `tsc` output; this one describes a Rust
 // binary, and nothing in the JavaScript toolchain can derive it. `@napi-rs/cli`
 // could — from the `#[napi]` attributes themselves — and using it would put a
 // network npm install into the build path of a package whose build is four
 // `cargo` calls and four file copies. That trade is still refused, so the
 // declaration below is maintained by hand and checked by
-// `scripts/check-types.cts` against the addon's real exports.
+// `scripts/check-types.mts` against the addon's real exports.
 //
 // The difference from before the TypeScript migration is *how much* is
 // hand-written. `index.d.ts` used to declare the whole package — the addon and
@@ -50,23 +50,28 @@
 //   * **18** — load and use the addon. `require('aethervfs')` is N-API 8.
 //   * **22.6** — run the `.cts` sources and test files directly under node's
 //     type stripping.
-//   * **24** — the `using` declarations in `test/dispose.test.cts` (Explicit
+//   * **24** — the `using` declarations in `test/dispose.test.mts` (Explicit
 //     Resource Management syntax). The disposables themselves work anywhere
 //     `Symbol.dispose` exists; only writing `using` needs the syntax.
 //
 // `engines` is the highest, because it describes this package as it stands, with
 // its own scripts and tests. A consumer that only loads the addon can relax it.
 
+import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-const addonPath = path.join(__dirname, 'aethervfs.node');
+// The addon is a `.node` binary and can only be loaded by `require`; ESM has
+// no global `require`, so this file makes its own.
+const require = createRequire(import.meta.url);
+const addonDir = import.meta.dirname;
+const addonPath = path.join(addonDir, 'aethervfs.node');
 
 if (!fs.existsSync(addonPath)) {
   throw new Error(
     `aethervfs: native addon not found at ${addonPath}. ` +
       'Build it with `pnpm build` (or `pnpm build:release`) in ' +
-      `${__dirname}. That builds the addon, the shim DLL and the ` +
+      `${addonDir}. That builds the addon, the shim DLL and the ` +
       'separate-workspace payload DLL, and places all three here.'
   );
 }
@@ -148,7 +153,7 @@ export interface Provider {
    * correctly refuses and a host has to know to look for the leaves. A graph of
    * Rust primitives has no leaves and disposing it does nothing.
    *
-   * Installed by `index.cts`, not by Rust.
+   * Installed by `index.mts`, not by Rust.
    */
   [Symbol.dispose](): void;
 }
@@ -236,34 +241,34 @@ export const disk: (path: string) => Provider = fn('disk');
  * archive takes long enough to look like a hang. Open once and keep the
  * provider.
  *
- * Not shadowed in `index.cts`: it takes a path, so there is no handle to widen.
+ * Not shadowed in `index.mts`: it takes a path, so there is no handle to widen.
  */
 export const zip: (path: string) => Provider = fn('zip');
 
 // ---------------------------------------------------------------------------
 // Spec §6's primitive catalog, as Rust exports it: **integer handles**, because
-// a handle is the only thing that means the same in two isolates. `index.cts`
+// a handle is the only thing that means the same in two isolates. `index.mts`
 // shadows every name below with a wrapper that also accepts a `Provider`; these
 // are the primitives underneath.
 // ---------------------------------------------------------------------------
 
 /** One seed file for {@link memory}. */
 interface MemoryFile {
-  /** A vpath. Case-sensitive — see `index.cts`'s `memory()`. */
+  /** A vpath. Case-sensitive — see `index.mts`'s `memory()`. */
   path: string;
   bytes: Buffer;
 }
 
-/** The handle-taking `memory`. `index.cts` shadows it with the object form. */
+/** The handle-taking `memory`. `index.mts` shadows it with the object form. */
 export const memory: (files?: MemoryFile[]) => Provider = fn('memory');
 
-/** The handle-taking `readonly`. `index.cts` shadows it. */
+/** The handle-taking `readonly`. `index.mts` shadows it. */
 export const readonly: (provider: number) => Provider = fn('readonly');
 
-/** The handle-taking `seekable`. `index.cts` shadows it. */
+/** The handle-taking `seekable`. `index.mts` shadows it. */
 export const seekable: (provider: number) => Provider = fn('seekable');
 
-/** The handle-taking `subdir`. `index.cts` shadows it. */
+/** The handle-taking `subdir`. `index.mts` shadows it. */
 export const subdir: (provider: number, prefix: string) => Provider = fn('subdir');
 
 /** Options for `cached`. */
@@ -284,13 +289,13 @@ export interface CacheOptions {
   diskDir?: string;
 }
 
-/** The handle-taking `cached`. `index.cts` shadows it. */
+/** The handle-taking `cached`. `index.mts` shadows it. */
 export const cached: (provider: number, options?: CacheOptions) => Provider = fn('cached');
 
-/** The handle-taking `layered`. `index.cts` shadows it with the spread form. */
+/** The handle-taking `layered`. `index.mts` shadows it with the spread form. */
 export const layered: (providers: number[]) => Provider = fn('layered');
 
-/** The handle-taking `overlay`. `index.cts` shadows it. */
+/** The handle-taking `overlay`. `index.mts` shadows it. */
 export const overlay: (base: number, upper: number) => Provider = fn('overlay');
 
 /** One route for {@link router}. */
@@ -299,7 +304,7 @@ interface RouteSpec {
   provider: number;
 }
 
-/** The handle-taking `router`. `index.cts` shadows it with the object form. */
+/** The handle-taking `router`. `index.mts` shadows it with the object form. */
 export const router: (routes: RouteSpec[], defaultProvider: number) => Provider = fn('router');
 
 // ---------------------------------------------------------------------------
@@ -337,7 +342,7 @@ export interface ConformanceReport {
   durationMs: number;
 }
 
-/** The handle-taking `assertConformance`. `index.cts` shadows it. */
+/** The handle-taking `assertConformance`. `index.mts` shadows it. */
 export const assertConformance: (provider: number) => Promise<ConformanceReport> =
   fn('assertConformance');
 
@@ -543,7 +548,7 @@ export interface Session {
    * reaches the provider as `skyrim.ini`; a host-side read does not fold, and
    * `memory()` is case-sensitive. Until spec §6's `casefold` primitive exists, a
    * host that wants to read a child's writes back out of `memory()` must fold
-   * its own keys — see `examples/spec-8-example.cts`, which demonstrates both
+   * its own keys — see `examples/spec-8-example.mts`, which demonstrates both
    * the working round trip and the silent wrong answer.
    */
   readFile(vpath: string, root?: number): Buffer;
@@ -623,7 +628,7 @@ export interface Session {
   /**
    * `using s = new Session('x')` — `close()` on scope exit. Idempotent.
    *
-   * Installed by `index.cts`, not by Rust.
+   * Installed by `index.mts`, not by Rust.
    */
   [Symbol.dispose](): void;
 }
@@ -644,7 +649,7 @@ export const Session: SessionConstructor = fn('Session');
 // Loose functions.
 // ---------------------------------------------------------------------------
 
-/** Record the directory the addon was loaded from. `index.cts` calls this with `__dirname`. */
+/** Record the directory the addon was loaded from. `index.mts` calls this with `import.meta.dirname`. */
 export const setPackageDir: (dir: string) => void = fn('setPackageDir');
 
 export const packageDir: () => string | null = fn('packageDir');
@@ -662,7 +667,7 @@ export const version: () => string = fn('version');
  * Every `#[napi]` function in the addon carries `catch_unwind`, because
  * napi-derive emits the containment only when asked; that is enforced
  * structurally by `tests/napi_entry_points_contain_panics.rs`, and demonstrated
- * by `test/panic.test.cts`, whose only tool is this function. A structural check
+ * by `test/panic.test.mts`, whose only tool is this function. A structural check
  * cannot show the generated containment *works*.
  *
  * `kind` selects the panic payload shape — `'string'` (default), `'str'`, or
@@ -678,7 +683,7 @@ export const panicForTest: (kind?: 'string' | 'str' | 'other') => never = fn('pa
 //
 // These four shapes are the bridge's wire format. They were undeclared before
 // the TypeScript migration, which is why the dispatcher that builds them was
-// unchecked; `index.cts`'s `encode()` is now typed against `CallResult`.
+// unchecked; `index.mts`'s `encode()` is now typed against `CallResult`.
 // ---------------------------------------------------------------------------
 
 /** What a provider's `getattr` returns, once coerced for the bridge. */
@@ -686,7 +691,7 @@ export interface JsStat {
   /** One of `kinds()`. */
   kind: number;
   size: number;
-  /** **`undefined`, never `null`** — see `index.cts`'s `optionalNumber`. */
+  /** **`undefined`, never `null`** — see `index.mts`'s `optionalNumber`. */
   mtime?: number;
 }
 
@@ -756,7 +761,7 @@ export interface CallResult {
 }
 
 /**
- * **Internal.** How a provider call is settled: `index.cts`'s dispatcher calls
+ * **Internal.** How a provider call is settled: `index.mts`'s dispatcher calls
  * this with the call id and the result, and it wakes the parked director thread.
  * Declared because it is exported, not because a host should call it — a host
  * writes a `ProviderObject` and lets the dispatcher do this.
@@ -818,7 +823,7 @@ export interface ProviderStats {
  * The three-argument registration Rust exports: the provider object, the
  * dispatcher built from it, and the options.
  *
- * A host calls `index.cts`'s two-argument `registerProvider(obj, options?)`,
+ * A host calls `index.mts`'s two-argument `registerProvider(obj, options?)`,
  * which builds the dispatcher. An N-API threadsafe function is created from a
  * *function*, not an object, which is why the dispatcher has to be a separate
  * argument.
@@ -829,7 +834,7 @@ export const registerProvider: (
   options?: ProviderOptions
 ) => Provider = fn('registerProvider');
 
-/** The handle-taking `releaseProvider`. `index.cts` shadows it. */
+/** The handle-taking `releaseProvider`. `index.mts` shadows it. */
 export const releaseProvider: (handle: number) => void = fn('releaseProvider');
 
 /** Provider calls outstanding across the whole process. */

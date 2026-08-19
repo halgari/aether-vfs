@@ -24,9 +24,8 @@
 // crosses is a process-global integer (§8c). Being a factory also means the
 // object is built on the loop its methods will run on.
 //
-// `require` and not `import`, and an annotation rather than a cast: node loads
-// this file inside a provider worker, and its type stripping erases annotations
-// without rewriting module syntax.
+// ESM, as of task 3: node loads this file inside a provider worker via
+// `await import(pathToFileURL(data.module).href)`, so it is a real `import`.
 //
 // ## Why the lookups fold, and why that is a finding rather than a detail
 //
@@ -43,14 +42,12 @@
 // missing primitive: it is not a convenience, it is correctness, and it is
 // re-implemented per provider and per binding until the combinator exists.
 // `memory()` is the case a host *cannot* fix this way, because it is a Rust
-// primitive — see `spec-8-example.cts`, step 8.
+// primitive — see `spec-8-example.mts`, step 8.
 
-import type { ProviderDirEntry, ProviderObject } from '../index.cjs';
+import fs from 'node:fs';
 
-const fs: typeof import('node:fs') = require('fs');
-const path: typeof import('node:path') = require('path');
-
-const { VfsError }: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
+import type { ProviderDirEntry, ProviderObject } from '../index.mjs';
+import { VfsError } from '../index.mjs';
 
 /** Options `steamCdn()` understands. */
 export interface SteamCdnOptions {
@@ -176,7 +173,4 @@ function steamCdn({
   };
 }
 
-/** What `require()`ing this module gives back. See `test/providers.cts`'s note. */
-export type SteamCdn = typeof steamCdn;
-
-module.exports = steamCdn;
+export default steamCdn;

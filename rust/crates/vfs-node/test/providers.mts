@@ -3,34 +3,26 @@
 // constraint spec §8c records, since isolates share no JS objects — and one
 // factory is easier to keep honest than eight files.
 //
-// `make(options)` is the default export, so the worker's `mod.provider ??
-// mod.default ?? mod` picks it and calls it with `workerData.options`. The same
-// function is required directly by the test file for the cases that must be
-// serviced by the main loop (the deadlock guard), so every provider here is
-// exercised on both kinds of loop.
+// `make(options)` is the default export, so the worker's loader
+// (`data.export ? mod[data.export] : (mod.provider ?? mod.default)`) picks it up
+// and calls it with `workerData.options`. The same function is imported directly
+// by the test file for the cases that must be serviced by the main loop (the
+// deadlock guard), so every provider here is exercised on both kinds of loop.
 //
-// ## `require`, not `import`, and the annotation instead of a cast
+// ## ESM, as of task 3
 //
-// This module is loaded by **node**: by the test file through
-// `require(path.join(__dirname, 'providers.cts'))`, and inside a provider worker
-// through the module path `providerWorker({ module })` resolves there. Node's
-// type stripping erases annotations but does **not** rewrite module syntax, so an
-// `import` statement in a `.cts` file is a runtime `SyntaxError` — measured in
-// task 2, not assumed. What did change in task 3 is the *shape* of the typing:
-// `require(...) as typeof import(...)` became a type **annotation**, because a
-// cast is not one and TypeScript needs an annotation before it will treat
-// `assert.ok` as an assertion function (TS2775). The suites that call `assert`
-// are the reason; annotating every `require` keeps one idiom across the tree.
+// This module is loaded by **node**: inside a provider worker via
+// `await import(pathToFileURL(data.module).href)`, and by the test file and
+// `self-call-worker.mts` through an ordinary static `import`. There is no
+// `require` left anywhere in this file, and no CommonJS shape (`module.exports`)
+// to keep in sync with a hand-written type — a real `import` is what makes
+// `assert.ok` an assertion function to TypeScript (TS2775), which
+// `require(...) as typeof import(...)` never was.
 
-import type {
-  ProviderDirEntry,
-  ProviderObject,
-  ProviderStat,
-} from '../index.cjs';
+import type { ProviderDirEntry, ProviderObject, ProviderStat } from '../index.mjs';
 
-const path: typeof import('node:path') = require('path');
+import * as aether from '../index.mjs';
 
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const { VfsError, OPEN } = aether;
 
 // `OPEN` is a `Record<string, number>` read from Rust at load, so under
@@ -150,7 +142,7 @@ function memoryProvider(
       const hook = hooks[p];
       // The cast is the type system agreeing with the test: `badshape.txt`'s hook
       // returns a number, TypeScript would have refused to write it, and what is
-      // under test is the **runtime** coercion in `index.cts` that turns it into
+      // under test is the **runtime** coercion in `index.mts` that turns it into
       // `ST_IO_ERROR` instead of killing the process.
       if (hook) return hook(offset, len) as Uint8Array;
       return content.get(p)!.subarray(offset, offset + len);
@@ -298,26 +290,15 @@ function make(options: MakeOptions = {}): TestProvider {
   const factory = KINDS[kind];
   if (!factory) {
     throw new Error(
-      `test/providers.cts: no provider kind ${JSON.stringify(kind)}; have ${Object.keys(KINDS).join(', ')}`
+      `test/providers.mts: no provider kind ${JSON.stringify(kind)}; have ${Object.keys(KINDS).join(', ')}`
     );
   }
   return factory(options);
 }
 
-/**
- * What `require()`ing this module gives back.
- *
- * `module.exports = make` is the shape the provider worker's
- * `mod.provider ?? mod.default ?? mod` picks up, and it is not something
- * TypeScript can describe as an export — `export =` is not erasable syntax, so
- * node's type stripping refuses it. So the runtime shape is asserted here as a
- * type, and the two consumers annotate their `require` with it.
- */
-export type MakeProvider = typeof make & {
-  KINDS: typeof KINDS;
-  memoryProvider: typeof memoryProvider;
-};
-
-module.exports = make;
-module.exports.KINDS = KINDS;
-module.exports.memoryProvider = memoryProvider;
+/** What a default import of this module gives back — the shape the provider
+ * worker's `data.export ? mod[data.export] : (mod.provider ?? mod.default)`
+ * picks up. `KINDS` and `memoryProvider` are named exports for anything that
+ * wants the pieces rather than the assembled factory. */
+export default make;
+export { KINDS, memoryProvider };

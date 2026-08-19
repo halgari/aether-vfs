@@ -3,9 +3,11 @@
 // **This file is run, not compiled** — `.mts` for the same reason
 // `scripts/build.mts` is: node's type stripping erases annotations but does not
 // rewrite module syntax, and an `.mts` is ESM, so `import`/`export` work
-// natively. A `.cts` here would have to use `module.exports`, which is why the
-// test fixtures do. CommonJS loads go through `createRequire`, as in
-// `scripts/check-types.mts`.
+// natively. A `.cts` here would have to use `module.exports` — no fixture does
+// that any more, now that the package is ESM-only. `benchRequire` below still
+// goes through `createRequire`, but only for the one case that is really
+// CommonJS: `ab-js-layer.mts`'s A/B comparison against the historical
+// `index.cjs`.
 //
 // ## What this measures, and the four ways a benchmark lies
 //
@@ -209,7 +211,7 @@ export function assertAtMostRatio(label: string, ratio: number, ceiling: number,
 /**
  * Tier 3 — an absolute wall-clock ceiling. Always recorded, asserted only where
  * headroom is large enough that a loaded runner cannot trip it. The convention
- * this project already follows: `provider.test.cts` asserts 500 µs against ~63 µs
+ * this project already follows: `provider.test.mts` asserts 500 µs against ~63 µs
  * observed.
  */
 export function assertAtMostNs(label: string, ns: number, ceilingNs: number, why: string): void {

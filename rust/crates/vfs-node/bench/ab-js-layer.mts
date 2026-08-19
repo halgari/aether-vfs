@@ -3,8 +3,8 @@
 // **Did the TypeScript migration cost anything at runtime?**
 //
 // It is the one performance question the migration actually raises, and it has a
-// falsifiable answer. `index.cts` forwards the addon with
-// `export * from './native.cjs'`, and `tsc` emits that as `__exportStar`, which
+// falsifiable answer. `index.mts` forwards the addon with
+// `export * from './native.mjs'`, and `tsc` emits that as `__exportStar`, which
 // installs an **accessor** for every forwarded name. The hand-written `index.cjs`
 // it replaced had plain own data properties. So most of the package's exports
 // changed from a property read to a getter call, on the path every host takes to
@@ -46,6 +46,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   PKG_DIR,
@@ -72,7 +73,7 @@ const argv = process.argv.slice(2);
 const i = argv.indexOf('--baseline');
 const BASELINE = i === -1 ? DEFAULT_BASELINE : (argv[i + 1] ?? DEFAULT_BASELINE);
 
-type Vfs = typeof import('../index.cjs');
+type Vfs = typeof import('../index.mjs');
 
 function git(args: string[]): string {
   const r = spawnSync('git', args, {
@@ -96,7 +97,7 @@ function stageBaseline(rev: string): string {
   return dir;
 }
 
-function main(): number {
+async function main(): Promise<number> {
   assertReleaseAddon();
 
   const rev = git(['rev-parse', '--short', BASELINE]).trim();
@@ -108,7 +109,7 @@ function main(): number {
 
   const dir = stageBaseline(BASELINE);
   const oldVfs = benchRequire(path.join(dir, 'index.cjs')) as Vfs;
-  const newVfs = benchRequire(path.join(PKG_DIR, 'index.cjs')) as Vfs;
+  const newVfs = (await import(pathToFileURL(path.join(PKG_DIR, 'index.mjs')).href)) as Vfs;
 
   // -------------------------------------------------------------------------
   heading('1. the mechanism, asserted rather than assumed');
@@ -248,4 +249,12 @@ function main(): number {
   return verdict();
 }
 
-process.exitCode = main();
+main().then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (err: unknown) => {
+    console.error(err);
+    process.exitCode = 1;
+  }
+);

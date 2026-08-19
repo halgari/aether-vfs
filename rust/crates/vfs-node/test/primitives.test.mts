@@ -3,7 +3,7 @@
 // The claim under test is §6's own, quoted in the brief: *"Everything except
 // [the host provider] is a Rust primitive. That is the test of whether §6
 // succeeded."* So there is exactly one JavaScript provider in this file — a
-// forward-only, slow, immutable "CDN" (`test/cdn-provider.cts`) — and every
+// forward-only, slow, immutable "CDN" (`test/cdn-provider.mts`) — and every
 // other node in every graph below is a Rust type reached through the addon.
 //
 // Written as spec §8's composition, translated from its Python:
@@ -17,9 +17,10 @@
 // ## Why this file is TypeScript, and what that now buys
 //
 // It is real TypeScript — interfaces, annotations, `import` — run by vitest,
-// which transforms it through vite's esbuild. `.cts` rather than `.ts` because
-// the package is CommonJS and the fixture modules beside this file are loaded by
-// **node**, whose type stripping does not rewrite module syntax.
+// which transforms it through vite's esbuild. `.mts` because the package is ESM
+// as of the ESM migration's task 2; the fixture module beside this file
+// (`test/cdn-provider.mts`) is ESM too, as of that migration's task 3, loaded by
+// **node** inside a provider worker via `await import(...)`.
 //
 // **The types are checked, as of task 3.** They were not before: `tsconfig.json`'s
 // `include` stopped short of `test/**` because
@@ -37,10 +38,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { teardown, type TestTeardown } from './teardown.cts';
-import type { Provider, ProviderCapabilities, ProviderWorker, RejectedWrite } from '../index.cjs';
+import { teardown, type TestTeardown } from './teardown.mts';
+import type { Provider, ProviderCapabilities, ProviderWorker, RejectedWrite } from '../index.mjs';
+import * as aether from '../index.mjs';
 
-const aether: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
 const {
   Session,
   disk,
@@ -56,8 +57,8 @@ const {
   KIND,
 } = aether;
 
-const CDN_MODULE: string = require.resolve(path.join(__dirname, 'cdn-provider.cts'));
-const PROBE: string = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
+const CDN_MODULE: string = path.join(import.meta.dirname, 'cdn-provider.mts');
+const PROBE: string = path.join(import.meta.dirname, '..', 'fixtures', 'vfs-probe.exe');
 
 // ---------------------------------------------------------------------------
 // Scaffolding, same conventions as task 7's suite: a scratch tree and a session

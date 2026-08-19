@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// The task-6 vertical slice: `require('aethervfs')` through napi-rs and
+// The task-6 vertical slice: `import('aethervfs')` through napi-rs and
 // `vfs-embed` to a real injected process, with Rust primitives only.
 //
 // The shape mirrors `vfs-embed`'s own
@@ -16,37 +16,44 @@
 // through the ring to the graph rather than to a real file, because there is no
 // real file: `hello.txt` has no on-disk existence under the managed root.
 //
-// `require` with a type annotation, not `import`: node runs this file directly
-// and strips the annotations, but it does not rewrite module syntax. The
-// annotation rather than an `as` cast is what makes `assert.ok` an assertion
-// function to TypeScript (TS2775) — see `tsconfig.json`.
+// This file is ESM as of the ESM migration's task 2, so node runs it with real
+// `import` statements rather than the `require` + type-annotation workaround
+// `.cts` needed. The package load two lines down tries two different specifiers
+// at runtime, which a static `import` cannot express, so that one is a dynamic
+// `import()` instead — no `require()` of the package survives anywhere in this
+// file.
 
-import type { Provider } from '../index.cjs';
+import assert from 'node:assert';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-const assert: typeof import('node:assert') = require('assert');
-const fs: typeof import('node:fs') = require('fs');
-const os: typeof import('node:os') = require('os');
-const path: typeof import('node:path') = require('path');
+import type { Provider } from '../index.mjs';
 
-// `require('aethervfs')` if this file is somehow resolved from outside the
+// `import('aethervfs')` if this file is somehow resolved from outside the
 // package, and the in-tree path otherwise — which is the normal case, because
 // Node resolves a script's real path before walking `node_modules`, so an
 // example *inside* the package always resolves in-tree even when the package is
-// linked. Both go through `index.cjs`, so both are the same load. That a
-// consumer can require the package **by name** is a separate claim and needs a
+// linked. Both go through `index.mjs`, so both are the same load. That a
+// consumer can import the package **by name** is a separate claim and needs a
 // script outside the package to make it; there is one in the task-6 report.
 let entry = 'aethervfs';
-let mod: typeof import('../index.cjs');
+let mod: typeof import('../index.mjs');
 try {
-  mod = require('aethervfs');
+  // `entry`, not the string literal `'aethervfs'`: TypeScript resolves a dynamic
+  // `import()`'s type from a literal specifier, and `aethervfs` is not on this
+  // machine's module path (it is loaded in-tree, below) — a literal here would be
+  // a standing TS2307 rather than the fallback this `try` exists to take.
+  mod = await import(entry);
 } catch (e) {
-  if ((e as NodeJS.ErrnoException).code !== 'MODULE_NOT_FOUND') throw e;
+  if ((e as NodeJS.ErrnoException).code !== 'ERR_MODULE_NOT_FOUND') throw e;
   entry = '.. (in-tree, as expected for an in-package example)';
-  mod = require('..');
+  mod = await import(pathToFileURL(path.join(import.meta.dirname, '..', 'index.mjs')).href);
 }
 const { Session, Provider: ProviderClass, disk, version, packageDir } = mod;
 
-const probeExe = path.join(__dirname, '..', 'fixtures', 'vfs-probe.exe');
+const probeExe = path.join(import.meta.dirname, '..', 'fixtures', 'vfs-probe.exe');
 if (!fs.existsSync(probeExe)) {
   throw new Error(`${probeExe} is missing — run \`pnpm build\` first`);
 }
@@ -71,7 +78,7 @@ function listing(dir: string): Array<string | Buffer> {
 
 step(0, 'the addon is loaded');
 console.log(`    aethervfs ${version()}`);
-console.log(`    require(${JSON.stringify(entry)})`);
+console.log(`    import(${JSON.stringify(entry)})`);
 console.log(`    packageDir            ${packageDir()}`);
 
 // A scratch tree for everything this script creates. Not the session's own

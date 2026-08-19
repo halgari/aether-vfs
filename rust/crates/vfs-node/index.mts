@@ -4,8 +4,8 @@
 // `vfs_embed::LaunchOpts::shim_dll` falls back to searching next to
 // `std::env::current_exe()`, which inside an addon is `node.exe` — wherever the
 // user happens to have installed Node, and nowhere near the DLLs this package
-// ships. `__dirname` is the answer and only JS has it, so it is handed over at
-// load time. Requiring `aethervfs.node` directly skips this and produces a
+// ships. `import.meta.dirname` is the answer and only JS has it, so it is handed
+// over at load time. Requiring `aethervfs.node` directly skips this and produces a
 // "vfs_shim_dll.dll not found" that names no candidate directories.
 //
 // **Two: turn a plain JS object into a provider.**
@@ -20,7 +20,7 @@
 // busy main loop.
 //
 // ---------------------------------------------------------------------------
-// **This file is the source; `index.cjs` and `index.d.cts` are its outputs.**
+// **This file is the source; `index.mjs` and `index.d.mts` are its outputs.**
 //
 // `index.d.ts` used to be hand-written beside a hand-written `index.cjs`, and
 // the two had to agree by discipline. They did not: the declaration claimed the
@@ -30,18 +30,18 @@
 // 280 lines further down. Emitting the declaration removes the class of defect
 // where the two disagree about a *signature*. It does not remove the class where
 // they disagree about *prose*, and both of those defects were prose — which is
-// why `scripts/check-types.cts` still exists and why the doc comments below are
+// why `scripts/check-types.mts` still exists and why the doc comments below are
 // written where the code is, not in a second file.
 //
-// `native.cts` holds the addon's own surface. That one is still asserted rather
+// `native.mts` holds the addon's own surface. That one is still asserted rather
 // than derived, because `@napi-rs/cli` is the thing that could derive it and
 // this package does not take a network dependency to build.
 // ---------------------------------------------------------------------------
 
 import * as path from 'node:path';
-import type { Worker } from 'node:worker_threads';
+import { Worker as WorkerCtor } from 'node:worker_threads';
 
-import * as native from './native.cjs';
+import * as native from './native.mjs';
 import type {
   CacheOptions,
   CallRequest,
@@ -53,7 +53,7 @@ import type {
   Provider,
   ProviderOptions,
   ProviderStats,
-} from './native.cjs';
+} from './native.mjs';
 
 // Everything the addon exports, forwarded. Ten of these names are shadowed by
 // the wrappers below — the primitives, `registerProvider` and `releaseProvider`
@@ -62,11 +62,11 @@ import type {
 //
 // The forward is deliberately a `export *` and not a list: a `#[napi]` export
 // added on the Rust side reaches a host without an edit here. What it does *not*
-// do is declare itself — `native.cts` has to name it before TypeScript can see
-// it, and `scripts/check-types.cts` is what notices when it has not.
-export * from './native.cjs';
+// do is declare itself — `native.mts` has to name it before TypeScript can see
+// it, and `scripts/check-types.mts` is what notices when it has not.
+export * from './native.mjs';
 
-native.setPackageDir(__dirname);
+native.setPackageDir(import.meta.dirname);
 
 // Read once, from Rust, so there is exactly one definition of each number in the
 // process. A dispatcher and a Rust caller that disagreed about which integer
@@ -756,7 +756,7 @@ function handleOf(p: unknown, what: string): number {
 // Not exported: the hand-written declaration spelled this union out inline at
 // every use, and naming it here without exporting it keeps the package's public
 // type surface the same while writing it once. `tsc` emits the alias into
-// `index.d.cts` as a local declaration.
+// `index.d.mts` as a local declaration.
 type MemoryBytes = Buffer | Uint8Array | string;
 
 /** `{ 'a.ini': bytes }` or `[{ path, bytes }]` → what Rust's `memory()` takes. */
@@ -977,17 +977,22 @@ export function assertConformance(provider: ProviderLike): Promise<ConformanceRe
 
 export interface ProviderWorkerSpec {
   /**
-   * **Absolute path** to a CommonJS module — not an object. Isolates share no JS
+   * **Absolute path** to an ESM module — not an object. Isolates share no JS
    * objects, so a provider instance cannot be handed across one; what crosses is
    * the integer handle, which `mount()` accepts from any thread. Use
-   * `require.resolve()`.
+   * `path.join(import.meta.dirname, 'provider.mts')`, as every fixture, test,
+   * example and bench case in this repo does. If you need to resolve a bare
+   * specifier instead, wrap it —
+   * `fileURLToPath(import.meta.resolve('./provider.mts'))` — because
+   * `import.meta.resolve()` alone returns a `file://` URL, and this rejects
+   * anything that is not an absolute filesystem path.
    *
    * The module may export the provider directly, or a factory called with
    * `options` — a factory is preferable, because it constructs the provider on
    * the loop its methods will run on.
    */
   module: string;
-  /** Named export to use instead of `provider` / `default` / the module itself. */
+  /** Named export to use instead of `provider` / `default`. */
   export?: string;
   /** Passed to the factory, structured-cloned into the worker. */
   options?: unknown;
@@ -1000,7 +1005,7 @@ export interface ProviderWorkerSpec {
  * main loop (1449 MiB/s against 3.8 for a main-loop provider under ~1 ms of work
  * per turn). Concurrency scales with worker count and only with worker count.
  *
- * `spec.module` is an **absolute path** to a CommonJS module — not an object.
+ * `spec.module` is an **absolute path** to an ESM module — not an object.
  * That is not an ergonomic preference, it is the constraint spec §8c records:
  * isolates share no JS objects, so a provider instance cannot be handed across
  * one. What crosses is the integer handle, which `mount()` accepts from any
@@ -1016,26 +1021,25 @@ export interface ProviderWorkerSpec {
  *    difference between 1449 and 3.8 MiB/s in §8c's loaded-main-loop row.
  */
 export function providerWorker(spec: ProviderWorkerSpec): Promise<ProviderWorker> {
-  // Required lazily, as it was before the conversion: `require('aethervfs')`
-  // does not pull in worker_threads for a host that never asks for a worker.
-  const { Worker: WorkerCtor } = require('node:worker_threads') as typeof import('node:worker_threads');
   const s: unknown = spec;
   if (s === null || typeof s !== 'object' || typeof (s as ProviderWorkerSpec).module !== 'string') {
     throw new TypeError(
       'aethervfs: providerWorker({ module, options?, export?, provider? }) needs ' +
-        '`module`: an absolute path to the provider module. Use require.resolve().'
+        '`module`: an absolute path to the provider module. Use ' +
+        "path.join(import.meta.dirname, 'provider.mts')."
     );
   }
   if (!path.isAbsolute(spec.module)) {
     throw new TypeError(
       `aethervfs: providerWorker module ${JSON.stringify(spec.module)} must be an ` +
         'absolute path — the worker resolves it, and its idea of "here" is not ' +
-        "the caller's. Use require.resolve()."
+        "the caller's. Use path.join(import.meta.dirname, 'provider.mts'); " +
+        'import.meta.resolve() alone returns a file:// URL, which is rejected here.'
     );
   }
 
   return new Promise<ProviderWorker>((resolve, reject) => {
-    const worker = new WorkerCtor(path.join(__dirname, 'provider-host.cjs'), {
+    const worker = new WorkerCtor(path.join(import.meta.dirname, 'provider-host.mjs'), {
       workerData: {
         module: spec.module,
         export: spec.export ?? null,
@@ -1110,7 +1114,7 @@ export function providerWorker(spec: ProviderWorkerSpec): Promise<ProviderWorker
 
 /** The handle to a provider running on its own worker loop. */
 export class ProviderWorker {
-  readonly worker: Worker;
+  readonly worker: WorkerCtor;
   readonly handle: number;
   readonly provider: Provider;
 
@@ -1120,7 +1124,7 @@ export class ProviderWorker {
   /** The in-flight `close()`, so a second call awaits it rather than racing it. */
   private _closing: Promise<void> | null = null;
 
-  constructor(worker: Worker, handle: number) {
+  constructor(worker: WorkerCtor, handle: number) {
     this.worker = worker;
     this.handle = handle;
     this.provider = native.Provider.fromHandle(handle);

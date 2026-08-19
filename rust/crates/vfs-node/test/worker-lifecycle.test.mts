@@ -40,12 +40,11 @@ import { test } from 'vitest';
 import assert from 'node:assert';
 import path from 'node:path';
 
-import type { ProviderWorker } from '../index.cjs';
+import type { ProviderWorker } from '../index.mjs';
+import * as vfs from '../index.mjs';
 
-const vfs: typeof import('../index.cjs') = require(path.join(__dirname, '..', 'index.cjs'));
-
-const FIXTURE: string = require.resolve(path.join(__dirname, 'providers.cts'));
-const LATE_THROW: string = require.resolve(path.join(__dirname, 'late-throw-provider.cts'));
+const FIXTURE: string = path.join(import.meta.dirname, 'providers.mts');
+const LATE_THROW: string = path.join(import.meta.dirname, 'late-throw-provider.mts');
 
 /** A provider on its own worker loop. Nothing about the provider is under test. */
 function worker(): Promise<ProviderWorker> {
@@ -92,7 +91,7 @@ test('close() resolves on a worker that already exited normally', async () => {
 
   // Drive the normal shutdown *without* close(), which is what leaves close()
   // facing a spent 'exit' event. This is not a contrived route: it is exactly
-  // what provider-host.cjs does on the release message.
+  // what provider-host.mjs does on the release message.
   pw.worker.postMessage({ type: 'release' });
   await withTimeout(exited(pw), 'the worker exiting on the release message');
   assert.strictEqual(pw.worker.threadId, -1, 'the worker should be gone before close() is called');
