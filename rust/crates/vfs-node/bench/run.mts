@@ -40,8 +40,8 @@ async function main(): Promise<number> {
   assertReleaseAddon();
   process.stdout.write(`${environment()}\n`);
 
-  jsLayer();
-  graph();
+  await jsLayer();
+  await graph();
   await jsProvider();
 
   heading('notes');

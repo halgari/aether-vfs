@@ -14,13 +14,13 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   PKG_DIR,
   assertAtMostNs,
   assertAtMostRatio,
   assertExact,
-  benchRequire,
   heading,
   measure,
   sink,
@@ -29,8 +29,8 @@ import {
 
 type Vfs = typeof import('../../index.mjs');
 
-export function run(): void {
-  const vfs = benchRequire(path.join(PKG_DIR, 'index.mjs')) as Vfs;
+export async function run(): Promise<void> {
+  const vfs = (await import(pathToFileURL(path.join(PKG_DIR, 'index.mjs')).href)) as Vfs;
 
   heading('2. reads through a graph of Rust primitives');
 

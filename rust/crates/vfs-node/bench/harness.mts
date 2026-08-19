@@ -3,9 +3,11 @@
 // **This file is run, not compiled** — `.mts` for the same reason
 // `scripts/build.mts` is: node's type stripping erases annotations but does not
 // rewrite module syntax, and an `.mts` is ESM, so `import`/`export` work
-// natively. A `.cts` here would have to use `module.exports`, which is why the
-// test fixtures do. CommonJS loads go through `createRequire`, as in
-// `scripts/check-types.mts`.
+// natively. A `.cts` here would have to use `module.exports` — no fixture does
+// that any more, now that the package is ESM-only. `benchRequire` below still
+// goes through `createRequire`, but only for the one case that is really
+// CommonJS: `ab-js-layer.mts`'s A/B comparison against the historical
+// `index.cjs`.
 //
 // ## What this measures, and the four ways a benchmark lies
 //

@@ -11,6 +11,7 @@
 // numbers are large, everything above them is too.
 
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   PKG_DIR,
@@ -28,8 +29,8 @@ import {
 type Vfs = typeof import('../../index.mjs');
 type Native = typeof import('../../native.mjs');
 
-export function run(): void {
-  const vfs = benchRequire(path.join(PKG_DIR, 'index.mjs')) as Vfs;
+export async function run(): Promise<void> {
+  const vfs = (await import(pathToFileURL(path.join(PKG_DIR, 'index.mjs')).href)) as Vfs;
   const native = benchRequire(path.join(PKG_DIR, 'native.mjs')) as Native;
 
   heading('1. the JavaScript layer');

@@ -21,13 +21,13 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   PKG_DIR,
   assertAtMostNs,
   assertAtMostRatio,
   assertExact,
-  benchRequire,
   fmtNs,
   heading,
   measure,
@@ -41,7 +41,7 @@ type Vfs = typeof import('../../index.mjs');
 const FIXTURE = path.join(PKG_DIR, 'test', 'providers.mts');
 
 export async function run(): Promise<void> {
-  const vfs = benchRequire(path.join(PKG_DIR, 'index.mjs')) as Vfs;
+  const vfs = (await import(pathToFileURL(path.join(PKG_DIR, 'index.mjs')).href)) as Vfs;
 
   heading('3. the JavaScript provider bridge');
 

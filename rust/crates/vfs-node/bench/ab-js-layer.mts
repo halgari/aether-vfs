@@ -46,6 +46,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import {
   PKG_DIR,
@@ -96,7 +97,7 @@ function stageBaseline(rev: string): string {
   return dir;
 }
 
-function main(): number {
+async function main(): Promise<number> {
   assertReleaseAddon();
 
   const rev = git(['rev-parse', '--short', BASELINE]).trim();
@@ -108,7 +109,7 @@ function main(): number {
 
   const dir = stageBaseline(BASELINE);
   const oldVfs = benchRequire(path.join(dir, 'index.cjs')) as Vfs;
-  const newVfs = benchRequire(path.join(PKG_DIR, 'index.mjs')) as Vfs;
+  const newVfs = (await import(pathToFileURL(path.join(PKG_DIR, 'index.mjs')).href)) as Vfs;
 
   // -------------------------------------------------------------------------
   heading('1. the mechanism, asserted rather than assumed');
@@ -248,4 +249,12 @@ function main(): number {
   return verdict();
 }
 
-process.exitCode = main();
+main().then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (err: unknown) => {
+    console.error(err);
+    process.exitCode = 1;
+  }
+);
