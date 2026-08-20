@@ -429,6 +429,7 @@ use crate::engine::Engine;
 use crate::inject::{inject_child, re_suspend, self_dll_path};
 use crate::overlay::OverlayState;
 use crate::ntdef::{
+
     FileBasicInformation, FileFsDeviceInformation,
     FileEndOfFileInformation, FileInternalInformation, FileNetworkOpenInformation,
     FilePositionInformation,
@@ -477,6 +478,29 @@ static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
 static mut TRAMP_SETINFO: Option<NtSetInformationFileFn> = None;
 static mut TRAMP_READ: Option<NtReadFileFn> = None;
 static mut TRAMP_WRITE: Option<NtWriteFileFn> = None;
+/// The timestamp reported for every VFS-backed file.
+///
+/// Not zero, and that is the whole point. A `FILETIME` of 0 is 1 January
+/// 1601, and Cyberpunk 2077 refuses to start against it: it stats
+/// `r6/cache/final.redscripts`, gets 1601, and puts up "encountered an error
+/// caused by a corrupted or missing scripts file". Reporting a plausible date
+/// instead takes it from that dialog to a running game window. Skyrim SE never
+/// looked, which is why this survived until a second game existed.
+///
+/// The value is arbitrary but must be **stable across runs** and **not in the
+/// future**. Stability matters more than accuracy: a timestamp that moved every
+/// launch would invalidate exactly the caches this exists to satisfy, and a
+/// game that recompiles its script cache on every boot is no better off than
+/// one that refuses to boot.
+///
+/// Providers carry no real timestamps to plumb through instead — a Steam depot
+/// manifest has none, so ocm's depot provider supplies `mtime: 0` honestly.
+/// Should a provider ever have real times, they belong here in place of the
+/// constant.
+///
+/// 2024-01-01T00:00:00Z, in 100 ns ticks since 1601.
+const SYNTH_FILETIME: i64 = 133_485_408_000_000_000;
+
 static mut TRAMP_CREATE_SECTION: Option<NtCreateSectionFn> = None;
 static mut TRAMP_MAP_VIEW: Option<NtMapViewOfSectionFn> = None;
 static mut TRAMP_UNMAP_VIEW: Option<NtUnmapViewOfSectionFn> = None;
@@ -2495,10 +2519,10 @@ unsafe fn qattr_hook_body(
             match res {
                 Ok((is_dir, _size, _mtime)) => {
                     if !info.is_null() {
-                        (*info).creation_time = 0;
-                        (*info).last_access_time = 0;
-                        (*info).last_write_time = 0;
-                        (*info).change_time = 0;
+                        (*info).creation_time = SYNTH_FILETIME;
+                        (*info).last_access_time = SYNTH_FILETIME;
+                        (*info).last_write_time = SYNTH_FILETIME;
+                        (*info).change_time = SYNTH_FILETIME;
                         (*info).file_attributes =
                             if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
                     }
@@ -2520,10 +2544,10 @@ unsafe fn qattr_hook_body(
             match engine.overlay_state(&path) {
                 Some(OverlayState::Present { is_dir, .. }) => {
                     if !info.is_null() {
-                        (*info).creation_time = 0;
-                        (*info).last_access_time = 0;
-                        (*info).last_write_time = 0;
-                        (*info).change_time = 0;
+                        (*info).creation_time = SYNTH_FILETIME;
+                        (*info).last_access_time = SYNTH_FILETIME;
+                        (*info).last_write_time = SYNTH_FILETIME;
+                        (*info).change_time = SYNTH_FILETIME;
                         (*info).file_attributes =
                             if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
                     }
@@ -2566,10 +2590,10 @@ unsafe fn qfull_hook_body(
             match res {
                 Ok((is_dir, size, _mtime)) => {
                     if !info.is_null() {
-                        (*info).creation_time = 0;
-                        (*info).last_access_time = 0;
-                        (*info).last_write_time = 0;
-                        (*info).change_time = 0;
+                        (*info).creation_time = SYNTH_FILETIME;
+                        (*info).last_access_time = SYNTH_FILETIME;
+                        (*info).last_write_time = SYNTH_FILETIME;
+                        (*info).change_time = SYNTH_FILETIME;
                         (*info).allocation_size = size as i64;
                         (*info).end_of_file = size as i64;
                         (*info).file_attributes =
@@ -2591,10 +2615,10 @@ unsafe fn qfull_hook_body(
             match engine.overlay_state(&path) {
                 Some(OverlayState::Present { is_dir, size, .. }) => {
                     if !info.is_null() {
-                        (*info).creation_time = 0;
-                        (*info).last_access_time = 0;
-                        (*info).last_write_time = 0;
-                        (*info).change_time = 0;
+                        (*info).creation_time = SYNTH_FILETIME;
+                        (*info).last_access_time = SYNTH_FILETIME;
+                        (*info).last_write_time = SYNTH_FILETIME;
+                        (*info).change_time = SYNTH_FILETIME;
                         (*info).allocation_size = size as i64;
                         (*info).end_of_file = size as i64;
                         (*info).file_attributes =
@@ -3164,10 +3188,10 @@ unsafe fn fuse_query_information(
                 return STATUS_BUFFER_OVERFLOW;
             }
             let bi = info as *mut FileBasicInformation;
-            (*bi).creation_time = 0;
-            (*bi).last_access_time = 0;
-            (*bi).last_write_time = 0;
-            (*bi).change_time = 0;
+            (*bi).creation_time = SYNTH_FILETIME;
+            (*bi).last_access_time = SYNTH_FILETIME;
+            (*bi).last_write_time = SYNTH_FILETIME;
+            (*bi).change_time = SYNTH_FILETIME;
             (*bi).file_attributes =
                 if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
             (*bi)._reserved = 0;
@@ -3209,10 +3233,10 @@ unsafe fn fuse_query_information(
                 return STATUS_BUFFER_OVERFLOW;
             }
             let ni = info as *mut FileNetworkOpenInformation;
-            (*ni).creation_time = 0;
-            (*ni).last_access_time = 0;
-            (*ni).last_write_time = 0;
-            (*ni).change_time = 0;
+            (*ni).creation_time = SYNTH_FILETIME;
+            (*ni).last_access_time = SYNTH_FILETIME;
+            (*ni).last_write_time = SYNTH_FILETIME;
+            (*ni).change_time = SYNTH_FILETIME;
             (*ni).allocation_size = size as i64;
             (*ni).end_of_file = size as i64;
             (*ni).file_attributes =
