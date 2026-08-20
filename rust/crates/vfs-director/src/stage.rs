@@ -279,6 +279,26 @@ pub fn stage_launch_into(
     Ok(staged_dir)
 }
 
+/// Write one staged image, and record it for cleanup **only if staging is
+/// what put it there**.
+///
+/// When staging into a directory the caller owns, a destination that already
+/// exists belongs to the caller and is left exactly as found. The managed root
+/// is seeded with DirectX redistributables before any launch, and several of
+/// them — `X3DAudio1_7.dll`, `d3dx9_42.dll` — are also static imports of the
+/// game. Treating those as staged output overwrote them with identical bytes
+/// and then deleted them on cleanup, so the *second* launch of a loadout
+/// failed with "VFS has no X3DAudio1_7.dll". Staging must never remove a file
+/// it did not create.
+fn write_staged(dest: &Path, bytes: &[u8], staged_dir: &mut StagedDir) -> Result<(), String> {
+    if !staged_dir.owns_dir && dest.exists() {
+        return Ok(());
+    }
+    std::fs::write(dest, bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
+    staged_dir.files.push(dest.to_path_buf());
+    Ok(())
+}
+
 /// Create `base/rel` level by level, recording only the levels that did not
 /// already exist so cleanup prunes exactly what staging added.
 fn create_dir_tracked(base: &Path, rel: &Path, staged_dir: &mut StagedDir) -> Result<(), String> {
@@ -340,16 +360,16 @@ fn stage_into(
     }
 
     let exe_path = target_dir.join(&exe_name);
-    std::fs::write(&exe_path, &exe_bytes)
-        .map_err(|e| format!("write {}: {e}", exe_path.display()))?;
-    staged_dir.files.push(exe_path.clone());
+    write_staged(&exe_path, &exe_bytes, staged_dir)?;
 
     // Names and written paths accumulate locally and are merged at the end:
     // holding `&mut staged_dir.staged` across the loop would rule out
     // recording each write in `staged_dir.files`, which the non-owning
     // cleanup path needs.
     let mut staged: Vec<String> = std::mem::take(&mut staged_dir.staged);
-    let mut written: Vec<PathBuf> = Vec::new();
+    // Collected rather than written inline: `write_staged` needs &mut
+    // staged_dir, which `staged` is borrowed out of for the loop.
+    let mut writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     staged.push(exe_name.clone());
     let mut pending: Vec<Vec<u8>> = vec![exe_bytes];
     // Already-staged names carry across calls, so a second image does not
@@ -414,16 +434,16 @@ fn stage_into(
             // `bin/x64/Cyberpunk2077.exe` is `bin/x64/PhysX3_x64.dll`, and the
             // loader looks for it in the EXE's own directory.
             let dest = target_dir.join(&base);
-            std::fs::write(&dest, &bytes)
-                .map_err(|e| format!("write {}: {e}", dest.display()))?;
-            written.push(dest);
+            writes.push((dest, bytes.clone()));
             staged.push(base);
             pending.push(bytes);
         }
     }
 
     staged_dir.staged = staged;
-    staged_dir.files.extend(written);
+    for (dest, bytes) in writes {
+        write_staged(&dest, &bytes, staged_dir)?;
+    }
     Ok(())
 }
 
@@ -541,6 +561,38 @@ mod tests {
         // already and still holds a file, so it stays.
         assert!(!root.join("bin").join("x64").exists(), "created dir must be pruned");
         assert!(root.join("bin").is_dir(), "pre-existing dir must survive");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The regression that broke the *second* launch of every loadout: the
+    /// managed root is seeded with DirectX redistributables, several of which
+    /// are also static imports of the game. Staging overwrote them with
+    /// identical bytes, recorded them as its own, and deleted them on cleanup.
+    #[test]
+    fn never_removes_a_file_the_caller_already_had() {
+        let root = tmp_root("preexisting");
+        // Exactly the shape ocm seeds: a DX redistributable in the root that
+        // is also reachable through the graph.
+        std::fs::write(root.join("X3DAudio1_7.dll"), bare_pe()).unwrap();
+
+        let mut m = HashMap::new();
+        m.insert("SkyrimSE.exe".to_string(), bare_pe());
+        m.insert("X3DAudio1_7.dll".to_string(), bare_pe());
+        let src = Fake(m);
+
+        for launch in 1..=2 {
+            let staged =
+                stage_launch_into(&src, "SkyrimSE.exe", &["X3DAudio1_7.dll"], &root, &[])
+                    .unwrap_or_else(|e| panic!("launch {launch}: {e}"));
+            assert!(staged.exe().is_file());
+            drop(staged);
+            assert!(
+                root.join("X3DAudio1_7.dll").is_file(),
+                "launch {launch} deleted a file staging did not create"
+            );
+            assert!(!root.join("SkyrimSE.exe").exists(), "staged exe must be cleaned up");
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }
