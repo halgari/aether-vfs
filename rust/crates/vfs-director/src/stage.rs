@@ -22,11 +22,31 @@
 //! hand-replicated all of that over a substitute host image; staging removed
 //! the need (see `architecture.md` §4.2).
 //!
+//! # Where it lands, and why that is not a detail
+//!
+//! Images keep their vpath position, and [`stage_launch_into`] puts them
+//! inside the **virtual root** rather than in a sibling directory.
+//!
+//! A process resolves far more than its imports from its own module path, and
+//! none of that is the loader's doing or ours to enumerate. Cyberpunk 2077
+//! derives its game root as `exeDir/../..`; Stardew Valley's .NET apphost
+//! looks for its managed assembly, `runtimeconfig.json` and `deps.json` beside
+//! the EXE — and that assembly is not a static import at all, so its PE
+//! closure is empty and staging copies exactly one file. Put the EXE outside
+//! the virtual root and every one of those reads lands on real disk where the
+//! shim never sees it: Cyberpunk exits 0 in silence, Stardew fails
+//! `LibHostAppRootFindFailure`. Skyrim SE was unaffected only by coincidence —
+//! its EXE sits at the game root and it finds content through the cwd, which
+//! *is* set to the virtual root.
+//!
 //! # Lifetime
 //!
-//! [`StagedDir`] deletes the directory on drop, but the EXE is mapped while the
-//! process runs, so the caller must hold it until the child exits. A crashed
-//! launcher leaks one directory; [`sweep_stale`] reclaims those on the next run.
+//! The EXE is mapped while the process runs, so the caller must hold the
+//! [`StagedDir`] until the child exits. [`stage_launch`] owns the directory it
+//! made and removes it on drop; [`stage_launch_into`] removes only the files
+//! it wrote and prunes only the directories it created, because the directory
+//! belongs to the caller. A crashed launcher leaks whatever it staged;
+//! [`sweep_stale`] reclaims the owned-directory form on the next run.
 
 use std::path::{Path, PathBuf};
 
@@ -40,13 +60,28 @@ pub const STAGE_PREFIX: &str = "vfs-stage-";
 /// launch into an unbounded extraction.
 const MAX_STAGED_FILES: usize = 64;
 
-/// A staged launch directory. Deleted on drop.
+/// A staged launch directory.
+///
+/// Two ownership modes, because there are two places staging can land:
+///
+/// * `owns_dir` — the directory was created for this launch
+///   ([`stage_launch`]), and dropping removes the whole thing.
+/// * not `owns_dir` — the images were written *into* a directory the caller
+///   owns, normally the virtual root ([`stage_launch_into`]). Dropping removes
+///   exactly the files written and prunes the directories created for them.
+///   Removing the directory itself would delete the managed root.
 #[derive(Debug)]
 pub struct StagedDir {
     dir: PathBuf,
     /// Absolute path of the staged EXE (the `CreateProcess` image).
     exe: PathBuf,
     staged: Vec<String>,
+    /// Absolute paths written, for the non-owning cleanup path.
+    files: Vec<PathBuf>,
+    /// Absolute paths of directories created, deepest last so pruning can walk
+    /// them in reverse.
+    created_dirs: Vec<PathBuf>,
+    owns_dir: bool,
 }
 
 impl StagedDir {
@@ -68,13 +103,33 @@ impl StagedDir {
     /// Windows keeps the image file locked until the process fully exits, so
     /// call this only after waiting on the child.
     pub fn cleanup(&self) -> Result<(), String> {
-        remove_staged_dir(&self.dir)
+        if self.owns_dir {
+            return remove_staged_dir(&self.dir);
+        }
+        let mut failed: Vec<String> = Vec::new();
+        for f in &self.files {
+            if let Err(e) = std::fs::remove_file(f) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    failed.push(format!("{}: {e}", f.display()));
+                }
+            }
+        }
+        // Deepest first, and only if empty: a directory that already existed,
+        // or that the game has since written into, is not ours to remove.
+        for d in self.created_dirs.iter().rev() {
+            let _ = std::fs::remove_dir(d);
+        }
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("remove staged files: {}", failed.join("; ")))
+        }
     }
 }
 
 impl Drop for StagedDir {
     fn drop(&mut self) {
-        let _ = remove_staged_dir(&self.dir);
+        let _ = self.cleanup();
     }
 }
 
@@ -158,6 +213,25 @@ pub fn stage_launch_with(
     Ok(staged_dir)
 }
 
+/// The vpath's directory part, rejecting anything that could escape the base.
+///
+/// A vpath comes from a provider graph, not a user, but it becomes a path
+/// under a directory we then write to — `..` or a root component must never
+/// reach `join`.
+fn safe_parent(exe_vpath: &str) -> Result<PathBuf, String> {
+    let normalized = exe_vpath.replace('\\', "/");
+    let mut out = PathBuf::new();
+    let mut parts: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+    parts.pop(); // the file name
+    for p in parts {
+        if p == ".." || p == "." || p.contains(':') {
+            return Err(format!("refusing to stage {exe_vpath}: unsafe path component {p:?}"));
+        }
+        out.push(p);
+    }
+    Ok(out)
+}
+
 pub fn stage_launch(
     source: &dyn ImageSource,
     exe_vpath: &str,
@@ -165,24 +239,77 @@ pub fn stage_launch(
     tag: &str,
     fallback_dirs: &[PathBuf],
 ) -> Result<StagedDir, String> {
-    let exe_name = Path::new(exe_vpath)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| format!("no file name in {exe_vpath}"))?
-        .to_string();
-
     let dir = root.join(format!("{STAGE_PREFIX}{tag}"));
     // A leftover from a previous run with the same tag would shadow us.
     let _ = remove_staged_dir(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
 
-    let mut staged_dir = StagedDir {
-        dir: dir.clone(),
-        exe: dir.join(&exe_name),
-        staged: Vec::new(),
-    };
+    let mut staged_dir = new_staged_dir(&dir, exe_vpath, true)?;
     stage_into(source, exe_vpath, &mut staged_dir, fallback_dirs)?;
     Ok(staged_dir)
+}
+
+/// Stage into `dir` itself, with no per-launch subdirectory.
+///
+/// `dir` is the caller's — normally the **virtual root** — and is never
+/// removed; only the files written are.
+///
+/// This exists because where the image lands decides what the game can find.
+/// A staged EXE outside the virtual root takes everything the process resolves
+/// relative to its own module path with it, and those reads land on real disk
+/// where the shim never sees them. Cyberpunk 2077 derives its game root as
+/// `exeDir/../..` and quietly exits; Stardew Valley's .NET apphost looks for
+/// its managed assembly beside the EXE and fails
+/// `LibHostAppRootFindFailure`. Neither is a missing-import problem, so no
+/// amount of import-closure staging fixes them — the EXE has to sit at its own
+/// vpath inside the root.
+pub fn stage_launch_into(
+    source: &dyn ImageSource,
+    exe_vpath: &str,
+    also: &[&str],
+    dir: &Path,
+    fallback_dirs: &[PathBuf],
+) -> Result<StagedDir, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let mut staged_dir = new_staged_dir(dir, exe_vpath, false)?;
+    stage_into(source, exe_vpath, &mut staged_dir, fallback_dirs)?;
+    for extra in also {
+        stage_into(source, extra, &mut staged_dir, fallback_dirs)?;
+    }
+    Ok(staged_dir)
+}
+
+/// Create `base/rel` level by level, recording only the levels that did not
+/// already exist so cleanup prunes exactly what staging added.
+fn create_dir_tracked(base: &Path, rel: &Path, staged_dir: &mut StagedDir) -> Result<(), String> {
+    let mut cur = base.to_path_buf();
+    for comp in rel.components() {
+        cur.push(comp);
+        if cur.exists() {
+            continue;
+        }
+        std::fs::create_dir(&cur).map_err(|e| format!("mkdir {}: {e}", cur.display()))?;
+        if !staged_dir.created_dirs.contains(&cur) {
+            staged_dir.created_dirs.push(cur.clone());
+        }
+    }
+    Ok(())
+}
+
+fn new_staged_dir(dir: &Path, exe_vpath: &str, owns_dir: bool) -> Result<StagedDir, String> {
+    let exe_name = Path::new(exe_vpath)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("no file name in {exe_vpath}"))?
+        .to_string();
+    Ok(StagedDir {
+        dir: dir.to_path_buf(),
+        exe: dir.join(safe_parent(exe_vpath)?).join(&exe_name),
+        staged: Vec::new(),
+        files: Vec::new(),
+        created_dirs: Vec::new(),
+        owns_dir,
+    })
 }
 
 /// Add `exe_vpath` and its import closure to an existing staged directory.
@@ -198,6 +325,12 @@ fn stage_into(
         .and_then(|s| s.to_str())
         .ok_or_else(|| format!("no file name in {exe_vpath}"))?
         .to_string();
+    // Imports are siblings of the EXE, so this is where both it and they go.
+    // Preserving it is what keeps `exeDir` meaningful to the game and what
+    // makes the staging mount answer at the vpath it was read from.
+    let rel_dir = safe_parent(exe_vpath)?;
+    let target_dir = dir.join(&rel_dir);
+    create_dir_tracked(&dir, &rel_dir, staged_dir)?;
 
     let exe_bytes = source
         .read(exe_vpath)
@@ -206,11 +339,17 @@ fn stage_into(
         return Err(format!("{exe_vpath} is not a PE image"));
     }
 
-    let exe_path = dir.join(&exe_name);
+    let exe_path = target_dir.join(&exe_name);
     std::fs::write(&exe_path, &exe_bytes)
         .map_err(|e| format!("write {}: {e}", exe_path.display()))?;
+    staged_dir.files.push(exe_path.clone());
 
-    let staged = &mut staged_dir.staged;
+    // Names and written paths accumulate locally and are merged at the end:
+    // holding `&mut staged_dir.staged` across the loop would rule out
+    // recording each write in `staged_dir.files`, which the non-owning
+    // cleanup path needs.
+    let mut staged: Vec<String> = std::mem::take(&mut staged_dir.staged);
+    let mut written: Vec<PathBuf> = Vec::new();
     staged.push(exe_name.clone());
     let mut pending: Vec<Vec<u8>> = vec![exe_bytes];
     // Already-staged names carry across calls, so a second image does not
@@ -271,14 +410,20 @@ fn stage_into(
                     "import closure exceeded {MAX_STAGED_FILES} files at {base}"
                 ));
             }
-            let dest = dir.join(&base);
+            // Beside the EXE, not at the staging root: an import of
+            // `bin/x64/Cyberpunk2077.exe` is `bin/x64/PhysX3_x64.dll`, and the
+            // loader looks for it in the EXE's own directory.
+            let dest = target_dir.join(&base);
             std::fs::write(&dest, &bytes)
                 .map_err(|e| format!("write {}: {e}", dest.display()))?;
+            written.push(dest);
             staged.push(base);
             pending.push(bytes);
         }
     }
 
+    staged_dir.staged = staged;
+    staged_dir.files.extend(written);
     Ok(())
 }
 
@@ -333,6 +478,81 @@ mod tests {
             assert!(dir_path.file_name().unwrap().to_string_lossy().starts_with(STAGE_PREFIX));
         }
         assert!(!dir_path.exists(), "staging dir must be removed on drop");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Where the image lands is the whole point: a game that derives its root
+    /// from its own module path (Cyberpunk 2077 uses `exeDir/../..`) only
+    /// works if the EXE keeps its vpath position under the base directory.
+    #[test]
+    fn preserves_the_vpath_directory_structure() {
+        let root = tmp_root("nested");
+        let mut m = HashMap::new();
+        m.insert("bin/x64/Cyberpunk2077.exe".to_string(), bare_pe());
+        m.insert("tools/redmod/bin/redMod.exe".to_string(), bare_pe());
+        let src = Fake(m);
+
+        let staged = stage_launch_into(
+            &src,
+            "bin/x64/Cyberpunk2077.exe",
+            &["tools/redmod/bin/redMod.exe"],
+            &root,
+            &[],
+        )
+        .expect("stage");
+
+        assert_eq!(staged.exe(), root.join("bin").join("x64").join("Cyberpunk2077.exe"));
+        assert!(staged.exe().is_file());
+        assert!(root.join("tools/redmod/bin/redMod.exe").is_file());
+        // Flattening would have put it here, where `exeDir/../..` is wrong.
+        assert!(!root.join("Cyberpunk2077.exe").exists());
+
+        drop(staged);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The non-owning mode stages into a directory the caller owns — the
+    /// virtual root — so dropping must remove what it wrote and nothing else.
+    #[test]
+    fn staging_into_a_caller_owned_dir_leaves_the_dir_and_its_contents() {
+        let root = tmp_root("into");
+        // Pre-existing content: the managed root already holds DirectX DLLs
+        // and steam_appid.txt before any launch.
+        std::fs::write(root.join("steam_appid.txt"), b"489830
+").unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin").join("keepme.txt"), b"x").unwrap();
+
+        let mut m = HashMap::new();
+        m.insert("bin/x64/game.exe".to_string(), bare_pe());
+        let src = Fake(m);
+
+        {
+            let staged = stage_launch_into(&src, "bin/x64/game.exe", &[], &root, &[]).expect("stage");
+            assert!(staged.exe().is_file());
+            assert_eq!(staged.dir(), root.as_path());
+        }
+
+        assert!(root.is_dir(), "must not delete the caller's directory");
+        assert!(root.join("steam_appid.txt").is_file(), "must not touch pre-existing files");
+        assert!(root.join("bin").join("keepme.txt").is_file());
+        assert!(!root.join("bin").join("x64").join("game.exe").exists(), "staged file must go");
+        // `bin/x64` was created by staging, so it is pruned; `bin` existed
+        // already and still holds a file, so it stays.
+        assert!(!root.join("bin").join("x64").exists(), "created dir must be pruned");
+        assert!(root.join("bin").is_dir(), "pre-existing dir must survive");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn refuses_a_vpath_that_would_escape_the_base_directory() {
+        let root = tmp_root("escape");
+        let mut m = HashMap::new();
+        m.insert("../evil.exe".to_string(), bare_pe());
+        let src = Fake(m);
+        let err = stage_launch_into(&src, "../evil.exe", &[], &root, &[]).unwrap_err();
+        assert!(err.contains("unsafe path component"), "got: {err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

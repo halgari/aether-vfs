@@ -3,12 +3,11 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use vfs_director::ipc::IpcServe;
-use vfs_director::stage::{stage_launch_with, ImageSource, StagedDir};
+use vfs_director::stage::{stage_launch_into, ImageSource, StagedDir};
 use vfs_director::{Director, DiskProvider, MountGraph};
 use vfs_provider::{
     bad_request, exists, map_io_err, Access, DirEntry, Provider, RootId, Stat, OPEN_READ,
@@ -302,13 +301,11 @@ pub struct Session {
     /// `virtual_root` names — see [`Session::declare_root`].
     extra_roots: Vec<(u32, PathBuf)>,
     /// The most recent staged launch directory, held here because
-    /// [`StagedDir`]'s `Drop` removes the directory and Windows keeps the
-    /// image file mapped for as long as the child runs. Dropped with the
-    /// session, or replaced by the next staged launch.
+    /// [`StagedDir`]'s `Drop` removes the staged files — not the virtual root
+    /// they now live in — and Windows keeps the image file mapped for as long
+    /// as the child runs. Dropped with the session, or replaced by the next
+    /// staged launch.
     staged: Mutex<Option<StagedDir>>,
-    /// Distinguishes concurrent/successive staging directories within one
-    /// session, the way the daemon's per-session counter did.
-    next_stage_tag: AtomicU64,
 }
 
 impl Session {
@@ -342,7 +339,6 @@ impl Session {
             roots: Mutex::new(BTreeMap::new()),
             extra_roots: Vec::new(),
             staged: Mutex::new(None),
-            next_stage_tag: AtomicU64::new(1),
         }
     }
 
@@ -680,13 +676,17 @@ impl Session {
         source: &dyn ImageSource,
         opts: &StageOpts,
     ) -> Result<PathBuf, String> {
-        let tag = self.next_stage_tag.fetch_add(1, Ordering::Relaxed);
-        let staged = stage_launch_with(
+        // Into the virtual root, at the image's own vpath — not a sibling
+        // staging directory. A staged EXE outside the root drags everything
+        // the process resolves relative to its own module path out of the
+        // VFS with it, which is what stopped Cyberpunk 2077 and Stardew
+        // Valley booting while Skyrim (EXE at the root, content found via
+        // cwd) was unaffected.
+        let staged = stage_launch_into(
             source,
             opts.exe_vpath,
             opts.also,
-            &self.state_dir.join("stage"),
-            &tag.to_string(),
+            &self.virtual_root,
             opts.fallback_dirs,
         )?;
         let disk: Arc<dyn Provider> = Arc::new(DiskProvider::new(staged.dir()));
