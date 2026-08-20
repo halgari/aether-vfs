@@ -123,13 +123,16 @@ pub fn map_image_from_pe_bytes_local(pe: &[u8]) -> Result<(*mut c_void, usize), 
         if base_u != preferred_base {
             crate::map::apply_relocs(&mut img, e_lfanew, preferred_base, base_u);
         }
+        // No-op for PE32 (see resolve_imports_ex_with_bases).
         crate::map::resolve_imports(&mut img, e_lfanew)?;
         core::ptr::copy_nonoverlapping(img.as_ptr(), base as *mut u8, img.len().min(size_of_image));
 
         // Register unwind info for local manual maps (DLL path).
-        if let Some(rtl) = ntdll_proc(c"RtlAddFunctionTable") {
-            let opt = e_lfanew + 24;
-            let ex_dir = opt + 112 + 3 * 8;
+        // x64 unwind data only: a PE32 image has no .pdata to register, and
+        // RtlAddFunctionTable over a directory read at the PE32+ offset would
+        // be pointing at whatever field happens to live there.
+        if let Some(rtl) = ntdll_proc(c"RtlAddFunctionTable").filter(|_| crate::map::is_pe32_plus(&img, e_lfanew)) {
+            let ex_dir = crate::map::dd_base(&img, e_lfanew) + 3 * 8;
             if ex_dir + 8 <= img.len() {
                 let ex_rva = rd_u32(&img, ex_dir) as usize;
                 let ex_size = rd_u32(&img, ex_dir + 4);

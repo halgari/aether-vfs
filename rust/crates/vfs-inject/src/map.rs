@@ -13,6 +13,32 @@ fn rd_u64(b: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(b[o..o + 8].try_into().unwrap())
 }
 
+/// True for a PE32+ (64-bit) optional header, false for PE32 (32-bit).
+///
+/// Both appear in a .NET application. Native and ReadyToRun images are PE32+,
+/// but a **pure-IL assembly is emitted as PE32 even on x64** — the CLR consumes
+/// it as metadata, not as native code, so the 32-bit header is not a statement
+/// about the machine. `System.Runtime.dll` and the other framework facades are
+/// exactly this.
+pub fn is_pe32_plus(img: &[u8], e_lfanew: usize) -> bool {
+    let opt = e_lfanew + 24;
+    opt + 2 <= img.len() && rd_u16(img, opt) == 0x20B
+}
+
+/// Offset of the optional header's `DataDirectory` array.
+///
+/// The two formats differ only in the fixed part that precedes it: 112 bytes
+/// for PE32+, 96 for PE32. Assuming 112 on a PE32 image reads a neighbouring
+/// field as a directory RVA and quietly produces nonsense.
+pub fn dd_base(img: &[u8], e_lfanew: usize) -> usize {
+    let opt = e_lfanew + 24;
+    if is_pe32_plus(img, e_lfanew) {
+        opt + 112
+    } else {
+        opt + 96
+    }
+}
+
 /// Build a flat in-memory image (SizeOfImage bytes) from a PE file: copy
 /// headers, place each section at its VirtualAddress. Returns
 /// `(image, preferred_image_base, e_lfanew)`.
@@ -21,19 +47,33 @@ pub fn build_image(raw: &[u8]) -> Result<(Vec<u8>, u64, usize), &'static str> {
         return Err("PE too small");
     }
     let e_lfanew = rd_u32(raw, 0x3C) as usize;
-    if e_lfanew + 24 + 112 > raw.len() {
+    // 96, not 112: a PE32 optional header is shorter, and demanding the PE32+
+    // length here rejected small IL assemblies before the magic was even read.
+    if e_lfanew + 24 + 96 > raw.len() {
         return Err("bad e_lfanew");
     }
     if &raw[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
         return Err("bad PE sig");
     }
     let opt = e_lfanew + 24;
-    if rd_u16(raw, opt) != 0x20B {
-        return Err("not PE32+");
+    let magic = rd_u16(raw, opt);
+    if magic != 0x20B && magic != 0x10B {
+        return Err("not a PE32 or PE32+ optional header");
     }
+    let pe32_plus = magic == 0x20B;
+    if pe32_plus && e_lfanew + 24 + 112 > raw.len() {
+        return Err("bad e_lfanew");
+    }
+    // SizeOfImage and SizeOfHeaders sit at the same offsets in both formats;
+    // ImageBase does not — PE32+ has 8 bytes at 24, PE32 has 4 at 28, because
+    // PE32 spends 24..28 on BaseOfData.
     let size_of_image = rd_u32(raw, opt + 56) as usize;
     let size_of_headers = rd_u32(raw, opt + 60) as usize;
-    let image_base = rd_u64(raw, opt + 24);
+    let image_base = if pe32_plus {
+        rd_u64(raw, opt + 24)
+    } else {
+        rd_u32(raw, opt + 28) as u64
+    };
     let num_sections = rd_u16(raw, e_lfanew + 6) as usize;
     let size_opt = rd_u16(raw, e_lfanew + 20) as usize;
     let sect_base = opt + size_opt;
@@ -62,10 +102,22 @@ pub fn build_image(raw: &[u8]) -> Result<(Vec<u8>, u64, usize), &'static str> {
     Ok((img, image_base, e_lfanew))
 }
 
-/// Apply IMAGE_REL_BASED_DIR64 base relocations in-place for a new load base.
+/// Apply `IMAGE_REL_BASED_DIR64` base relocations in-place for a new load base.
+///
+/// **PE32 images are left alone, deliberately.** Their fixups are
+/// `IMAGE_REL_BASED_HIGHLOW`, a 32-bit field, and the only PE32 images that
+/// reach this mapper are pure-IL assemblies that get placed wherever
+/// `VirtualAlloc` finds room — far above 4 GiB. The delta does not fit, and
+/// applying it truncated corrupts the image: doing exactly that turned a clean
+/// load failure into an access violation inside the CLR. Nothing executes a
+/// PE32 image here — the runtime reads it as metadata by RVA — so leaving it
+/// unrelocated is correct, and is what Windows does when mapping an image for
+/// data rather than for execution.
 pub fn apply_relocs(img: &mut [u8], e_lfanew: usize, image_base: u64, new_base: u64) {
-    let opt = e_lfanew + 24;
-    let reloc_dir = opt + 112 + 5 * 8; // DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
+    if !is_pe32_plus(img, e_lfanew) {
+        return;
+    }
+    let reloc_dir = dd_base(img, e_lfanew) + 5 * 8; // DataDirectory[BASERELOC]
     if reloc_dir + 8 > img.len() {
         return;
     }
@@ -106,8 +158,7 @@ pub fn apply_relocs(img: &mut [u8], e_lfanew: usize, image_base: u64, new_base: 
 
 /// Collect import DLL names from a flat PE image (ANSI, no path).
 pub fn import_dll_names(img: &[u8], e_lfanew: usize) -> Vec<String> {
-    let opt = e_lfanew + 24;
-    let imp_dir = opt + 112 + 8;
+    let imp_dir = dd_base(img, e_lfanew) + 8;
     let mut out = Vec::new();
     if imp_dir + 8 > img.len() {
         return out;
@@ -172,8 +223,16 @@ pub fn resolve_imports_ex_with_bases(
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
-    let opt = e_lfanew + 24;
-    let imp_dir = opt + 112 + 8;
+    // A pure-IL PE32 assembly is metadata, not something we execute: its import
+    // table is empty or a single legacy `mscoree.dll!_CorDllMain` stub the CLR
+    // never calls. Resolving it would mean loading mscoree, which .NET Core does
+    // not even ship. Windows does not resolve imports when mapping an image for
+    // data either, so skip it -- and skip it before the thunk walk below, which
+    // assumes 8-byte PE32+ thunks and would misread 4-byte ones.
+    if !is_pe32_plus(img, e_lfanew) {
+        return Ok(());
+    }
+    let imp_dir = dd_base(img, e_lfanew) + 8;
     if imp_dir + 8 > img.len() {
         return Ok(());
     }

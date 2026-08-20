@@ -3732,13 +3732,98 @@ unsafe fn read_hook_body(
 ///   expanded to 16 MiB by vfs-inject — matches the known-good director-only path).
 /// - **Data >256 MiB**: lazy demand-page (reserve + warm + VEH) so multi‑GiB BSAs
 ///   never full-preload.
+/// Back a VFS-served PE with a real file so the kernel can build the image
+/// section, and return the trampoline's status.
+///
+/// `None` means the backing file could not be produced, and the caller should
+/// fall back to the manual mapper.
+///
+/// The cache is keyed on the vpath and size, so an assembly loaded repeatedly
+/// materialises once. Files live under the shim's own temp directory and are
+/// left for the OS to reclaim; they are content, not secrets, and the process
+/// may still have sections open on them at exit.
+#[allow(clippy::too_many_arguments)]
+unsafe fn real_image_section(
+    pe: &[u8],
+    file_handle: HANDLE,
+    section_handle: *mut HANDLE,
+    access: u32,
+    oa: *const ObjectAttributes,
+    max_size: *mut i64,
+    page_prot: u32,
+    alloc_attrs: u32,
+    tramp: NtCreateSectionFn,
+) -> Option<NTSTATUS> {
+    use std::os::windows::io::AsRawHandle;
+
+    // Our own file I/O must not re-enter the hooks that brought us here.
+    let _io = ShimIoGuard::enter();
+
+    let vpath = crate::fuse_synth::abs_path(file_handle as isize)?;
+    // FNV-1a over the vpath and length: stable across runs, and distinct for
+    // two builds of the same assembly.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in vpath.to_ascii_lowercase().bytes().chain(pe.len().to_le_bytes()) {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    let dir = std::env::temp_dir().join("vfs-pe-cache");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{h:016x}.bin"));
+
+    // Write once. A concurrent writer would be writing identical bytes, but a
+    // reader must never see a half-written image, so build beside it and rename.
+    let good = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).ok() == Some(pe.len() as u64);
+    if !good(&path) {
+        let tmp = dir.join(format!("{h:016x}.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, pe).ok()?;
+        // Rename is atomic within a directory; an existing good file wins.
+        if std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            if !good(&path) {
+                return None;
+            }
+        }
+    }
+
+    // GENERIC_READ | GENERIC_EXECUTE. An *image* section requires execute
+    // access on the backing file; a plain `File::open` grants only read and
+    // `NtCreateSection` answers STATUS_ACCESS_DENIED (0xC0000022).
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .access_mode(0x8000_0000 | 0x2000_0000)
+        .share_mode(0x0000_0001 | 0x0000_0002) // FILE_SHARE_READ | FILE_SHARE_WRITE
+        .open(&path)
+        .ok()?;
+    let st = tramp(
+        section_handle,
+        access,
+        oa,
+        max_size,
+        page_prot,
+        alloc_attrs,
+        f.as_raw_handle() as HANDLE,
+    );
+    // The section holds its own reference to the file object, so closing ours
+    // here (on drop) does not disturb it.
+    if st < 0 {
+        return None;
+    }
+    Some(st)
+}
+
 unsafe fn fuse_create_section(
     section_handle: *mut HANDLE,
+    access: u32,
+    oa: *const ObjectAttributes,
     max_size: *mut i64,
-    _page_prot: u32,
+    page_prot: u32,
     alloc_attrs: u32,
     file_handle: HANDLE,
+    tramp: NtCreateSectionFn,
 ) -> NTSTATUS {
+    let _page_prot = page_prot;
     let Some((fh, size, is_dir, _, _)) = crate::fuse_synth::lookup(file_handle as isize) else {
         return STATUS_INVALID_HANDLE;
     };
@@ -3762,6 +3847,32 @@ unsafe fn fuse_create_section(
         if !vfs_inject::pe_looks_like_image(&pe) {
             return STATUS_INVALID_FILE_FOR_SECTION;
         }
+
+        // Preferred path: write the bytes to a real file and let the kernel
+        // build the image section.
+        //
+        // The manual mapper below reimplements what Windows does when it maps
+        // a PE, and it is only ever approximately right: one `VirtualAlloc` of
+        // `PAGE_EXECUTE_READWRITE` for the whole image, no per-section
+        // protections, and a single shared region where a real image section
+        // gives each view its own copy-on-write. A .NET application maps
+        // hundreds of assemblies and the CLR faulted inside its own code
+        // (`c0000005`) on that difference. A genuine section gets all of it
+        // from the kernel for the price of one cached file on disk.
+        if let Some(st) = real_image_section(
+            &pe,
+            file_handle,
+            section_handle,
+            access,
+            oa,
+            max_size,
+            page_prot,
+            alloc_attrs,
+            tramp,
+        ) {
+            return st;
+        }
+
         return match vfs_inject::map_image_from_pe_bytes_local(&pe) {
             Ok((base, img_size)) => match crate::zipserve::register_mapped_image(base as usize, img_size as u64)
             {
@@ -3771,7 +3882,9 @@ unsafe fn fuse_create_section(
                     }
                     STATUS_SUCCESS
                 }
-                None => STATUS_INVALID_FILE_FOR_SECTION,
+                None => {
+                    STATUS_INVALID_FILE_FOR_SECTION
+                }
             },
             Err(_) => STATUS_INVALID_FILE_FOR_SECTION,
         };
@@ -3896,10 +4009,13 @@ unsafe fn create_section_hook_body(
         }
         return fuse_create_section(
             section_handle,
+            access,
+            oa,
             max_size,
             page_prot,
             alloc_attrs,
             file_handle,
+            tramp,
         );
     }
     tramp(
