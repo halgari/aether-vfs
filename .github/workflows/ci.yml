@@ -55,10 +55,10 @@ jobs:
           # Three floors, and this is the highest of them — `package.json`'s
           # `engines` says the same number, so keep the two in step:
           #   18    load the addon (N-API 8)
-          #   22.6  run a `.cts` file directly (type stripping) — which is how the
+          #   22.6  run an `.mts` file directly (type stripping) — which is how the
           #         examples, the provider fixtures and the worker entry point are
-          #         loaded, all of them `.cts` as of task 3
-          #   24    the `using` declarations in `test/dispose.test.cts`
+          #         loaded, all of them `.mts` as of the ESM migration
+          #   24    the `using` declarations in `test/dispose.test.mts`
           #         (Explicit Resource Management syntax)
           node-version: '24'
       # The package gained **devDependencies** in the TypeScript migration —
@@ -79,12 +79,12 @@ jobs:
       # into the package directory. It also prints each artifact's size and
       # mtime, which is how a stale DLL gets noticed.
       #
-      # It has to run before anything below: `index.cjs` and `index.d.cts` are
+      # It has to run before anything below: `index.mjs` and `index.d.mts` are
       # build outputs as of task 2 and are not in the repository.
       - name: Build the JavaScript layer, the addon and its DLLs
         run: pnpm build
         working-directory: rust/crates/vfs-node
-      # `index.d.cts` is emitted, but `native.cts` — the addon's own `#[napi]`
+      # `index.d.mts` is emitted, but `native.mts` — the addon's own `#[napi]`
       # surface — is still hand-written, because the thing that could generate it
       # (`@napi-rs/cli`) is a network dependency in the build path. Nothing else
       # checks it: a `#[napi]` export renamed, added or dropped on the Rust side
@@ -107,10 +107,10 @@ jobs:
         run: pnpm exec tsc --noEmit
         working-directory: rust/crates/vfs-node
       # The examples are tests: each one asserts its way through a full session,
-      # and `spec-8-example.cts` machine-checks spec §8's provider graph rather
-      # than describing it. All three are `.cts`, run directly by node.
+      # and `spec-8-example.mts` machine-checks spec §8's provider graph rather
+      # than describing it. All three are `.mts`, run directly by node.
       - name: Examples (vertical slice, JS provider, spec §8)
-        run: node examples/vertical-slice.cts && node examples/js-provider.cts && node examples/spec-8-example.cts
+        run: node examples/vertical-slice.mts && node examples/js-provider.mts && node examples/spec-8-example.mts
         working-directory: rust/crates/vfs-node
       # vitest, not `node --test`: task 3 converted the five suites to vitest's own
       # API and deleted the `node:test` shim that had been mapping one onto the
@@ -118,7 +118,7 @@ jobs:
       # deadlock guard's owning-thread comparison meaning what it meant under
       # `node --test`.
       #
-      # One test is a **`test.fails`** and must stay failing: `primitives.test.cts`'s
+      # One test is a **`test.fails`** and must stay failing: `primitives.test.mts`'s
       # "6b. a capitalised path in memory()" pins spec §6b's `casefold` hole, which
       # is the first item of the next stage. `test.fails` is stricter than the
       # `node --test` `todo` it replaced — node tolerated a todo that passed, while

@@ -178,17 +178,16 @@ assert.strictEqual(
   "the child's read of a path with no file behind it went through the ring to the graph"
 );
 
+// Staging lands **inside the virtual root, at the image's vpath**, so that
+// everything the child resolves relative to its own module path stays inside
+// the VFS. The managed root is therefore not empty here — what is promised is
+// that staging does not outlive the session, asserted after `close()` below.
+console.log(`    managed root now      ${JSON.stringify(fs.readdirSync(gameRoot))}`);
 assert.deepStrictEqual(
   fs.readdirSync(gameRoot),
-  [],
-  'nothing may be extracted into the managed root'
+  ['probe.exe'],
+  'the image must be staged into the managed root at its own vpath'
 );
-console.log(`    managed root still empty: ${gameRoot} → []`);
-
-const staged = path.join(session.stateDir, 'stage');
-console.log(`    staged into           ${staged}`);
-console.log(`      ${JSON.stringify(listing(staged))}`);
-assert.ok(listing(staged).some((e) => String(e).endsWith('probe.exe')), 'the image was staged');
 
 // `openTotals()` is a `Vec<u64>` on the Rust side and therefore a `number[]` in
 // the declaration, so the pair has to be named rather than destructured blind —
@@ -240,10 +239,15 @@ console.log(`    content dir on disk   ${JSON.stringify(fs.readdirSync(contentDi
 // The write was routed into the mounted provider's real directory, not into the
 // managed root and not into the shim's local overlay. That is what makes the
 // empty `rejectedWrites()` an explanation instead of a shrug.
+assert.strictEqual(
+  fs.existsSync(underRoot),
+  false,
+  'a write under the managed root must not land in the managed root'
+);
 assert.deepStrictEqual(
   fs.readdirSync(gameRoot),
-  [],
-  'a write under the managed root must not land in the managed root'
+  ['probe.exe'],
+  'the staged image is the only thing staging put in the managed root'
 );
 assert.strictEqual(
   fs.readFileSync(path.join(contentDir, 'written-by-the-child.bin')).toString(),
@@ -259,6 +263,15 @@ assert.throws(() => session.isServing(), /session is closed/);
 assert.throws(() => session.readFile('hello.txt'), /session is closed/);
 session.close(); // idempotent
 console.log('    close() stopped the ring; further calls throw rather than no-op');
+// Closing the session drops the staged image with it, which is the surviving
+// half of "nothing was extracted into the managed root": not that nothing is
+// ever written there, but that nothing outlives the session.
+console.log(`    managed root after close: ${JSON.stringify(fs.readdirSync(gameRoot))}`);
+assert.deepStrictEqual(
+  fs.readdirSync(gameRoot),
+  [],
+  'staging must not outlive the session'
+);
 console.log(`    baseDir left for inspection: ${session.baseDir}`);
 
 fs.rmSync(session.baseDir, { recursive: true, force: true });

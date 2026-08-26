@@ -347,8 +347,10 @@ fn read_utf16_bounded(buf: &[u8], base: *const u16, offset: u16, len: u16) -> Op
     if end > buf.len() || !len.is_multiple_of(2) {
         return None;
     }
+    // The `is_multiple_of(2)` guard above is what makes `as_chunks`' remainder
+    // provably empty, so discarding `.1` drops nothing.
     let units: Vec<u16> =
-        buf[start..end].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        buf[start..end].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
     Some(String::from_utf16_lossy(&units))
 }
 

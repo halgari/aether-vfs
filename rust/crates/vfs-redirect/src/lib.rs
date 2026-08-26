@@ -1328,8 +1328,10 @@ mod tests {
     }
     fn rname(buf: &[u8], rec: usize, name_off: usize, namelen: usize) -> String {
         let units: Vec<u16> = buf[rec + name_off..rec + name_off + namelen]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         String::from_utf16_lossy(&units)
     }
@@ -1428,7 +1430,7 @@ mod tests {
         let namelen = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
         assert_eq!(namelen, r"\Games\Skyrim\Data\foo.esp".encode_utf16().count() * 2);
         let units: Vec<u16> =
-            buf[4..4 + namelen].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            buf[4..4 + namelen].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         assert_eq!(String::from_utf16_lossy(&units), r"\Games\Skyrim\Data\foo.esp");
         assert_eq!(r.bytes, 4 + namelen);
     }

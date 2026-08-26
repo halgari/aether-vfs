@@ -170,7 +170,11 @@ test('1. a JS provider serves bytes through the director, host-side and over the
     'bytes-from-javascript',
     "the child's read went over the ring into JavaScript"
   );
-  assert.deepStrictEqual(fs.readdirSync(root), [], 'nothing was extracted into the managed root');
+  assert.deepStrictEqual(
+    fs.readdirSync(root),
+    ['probe.exe'],
+    'only the launch image is staged into the managed root; the JS-served bytes were not extracted'
+  );
 
   const afterRing = pw.stats()!;
   assert.ok(afterRing.calls > afterHost.calls, 'the child’s reads crossed the bridge too');
@@ -425,7 +429,11 @@ test('6. a ReadWrite object with no writeAt is refused at construction, and no s
     'written-into-javascript',
     "the child's write was served by the JS provider's writeAt"
   );
-  assert.deepStrictEqual(fs.readdirSync(root), [], 'and did not land on real disk under the root');
+  assert.deepStrictEqual(
+    fs.readdirSync(root),
+    ['probe.exe'],
+    'the write did not land on real disk — no `js/` directory exists under the root, and the staged launch image is all that does'
+  );
   show('read-write provider after a child write', pw.stats()!);
 });
 

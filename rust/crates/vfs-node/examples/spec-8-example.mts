@@ -381,13 +381,16 @@ async function main(): Promise<void> {
   const [opensOk, opensFailed] = session.openTotals() as [number, number];
   show(`opens at the director  ${opensOk} served, ${opensFailed} failed`);
   assert.ok(opensOk > 0, 'the child must have reached the director');
-  const staged = fs.readdirSync(path.join(session.stateDir, 'stage'), { recursive: true });
+  // Staging lands in the managed root at the image's own vpath, so that what
+  // the game resolves relative to its module path stays inside the VFS. The
+  // managed root is therefore not empty here; that it is empty *again* once the
+  // session closes is asserted at the end of this example.
+  const staged = fs.readdirSync(dirs.gameRoot, { recursive: true });
   show(`staged image    ${JSON.stringify(staged.map(String))}`);
   assert.ok(
     staged.some((f) => /SkyrimSE\.exe$/i.test(String(f))),
-    'the image was staged out of the graph'
+    'the image was staged out of the graph, into the managed root at its vpath'
   );
-  assert.deepStrictEqual(fs.readdirSync(dirs.gameRoot), [], 'nothing extracted into the managed root');
 
   // -------------------------------------------------------------------------
   step('7', "spec §8's last two lines — what the game actually wrote");
@@ -499,6 +502,13 @@ async function main(): Promise<void> {
   show(`jsLeaves to release: ${JSON.stringify(graph0.jsLeaves())}`);
   const sessionDir = session.baseDir;
   await release();
+  // Closing the session drops the staged image with it: the managed root is
+  // handed back exactly as it was found.
+  assert.deepStrictEqual(
+    fs.readdirSync(dirs.gameRoot),
+    [],
+    'staging must not outlive the session'
+  );
   fs.rmSync(sessionDir, { recursive: true, force: true });
   fs.rmSync(scratch, { recursive: true, force: true });
 

@@ -111,7 +111,15 @@ async function main(): Promise<void> {
   console.log(`    child read        ${JSON.stringify(fs.readFileSync(outFile).toString().trim())}`);
   console.log(`    bridge crossings  ${cdn.stats()!.calls - before} from director worker threads`);
   assert.ok(cdn.stats()!.calls > before, 'the child’s reads crossed into JS');
-  assert.deepStrictEqual(fs.readdirSync(gameRoot), [], 'nothing was extracted onto disk');
+  // Staging puts the image in the managed root at its own vpath, so that what
+  // the child resolves relative to its module path stays inside the VFS. The
+  // promise is not that nothing is written here, but that nothing outlives the
+  // session — asserted after `close()` in step 8.
+  assert.deepStrictEqual(
+    fs.readdirSync(gameRoot),
+    ['probe.exe'],
+    'the launched image must be staged into the managed root at its vpath'
+  );
   const [opensOk] = session.openTotals();
   console.log(`    opens at director ${opensOk} served`);
 
@@ -153,6 +161,13 @@ async function main(): Promise<void> {
 
   step(8, 'teardown');
   session.close();
+  // Closing drops the staged image with the session — the surviving half of
+  // "nothing was extracted onto disk".
+  assert.deepStrictEqual(
+    fs.readdirSync(gameRoot),
+    [],
+    'staging must not outlive the session'
+  );
   // Without this the worker's loop stays alive — a live threadsafe function is
   // what keeps the provider available, so releasing it is how the process exits.
   await cdn.close();
@@ -166,6 +181,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((e: unknown) => {
-  process.exitCode = 1;
   console.error(e);
+  // A live provider worker keeps this loop alive, so setting `exitCode` alone
+  // leaves a failed run hanging rather than failing — which in CI is a job that
+  // burns its timeout instead of reporting the assertion. Exit outright.
+  process.exit(1);
 });

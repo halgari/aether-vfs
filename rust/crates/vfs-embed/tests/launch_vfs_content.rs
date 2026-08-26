@@ -152,21 +152,28 @@ fn a_staged_copy_must_not_shadow_curated_content_at_the_same_path() {
     let _ = std::fs::remove_dir_all(&state);
 }
 
-/// A launcher's spawn target must land **beside it on disk**.
+/// A launcher's spawn target must land **where the launcher will look for it**.
 ///
 /// SKSE's `skse64_loader.exe` starts `SkyrimSE.exe` with an ordinary
 /// `CreateProcess` that nothing of ours intercepts, so the game has to be a
-/// real file next to the loader before the loader runs — the reason
+/// real file where the loader resolves it before the loader runs — the reason
 /// [`LaunchOpts::stage_also`] exists, and the reason `vfs-launch`'s default
-/// invocation needs it. That the two land in the *same* directory is the
-/// property; anything less and the loader starts and then dies looking for a
-/// game that only exists in the archives.
+/// invocation needs it.
+///
+/// Staging lands **inside the virtual root, at each image's vpath**. Two
+/// consequences, both asserted here: a companion that is the launcher's
+/// sibling in the graph is its sibling on disk — the SKSE shape, loader and
+/// game together at the game root — and a nested companion keeps its
+/// directory, which is what keeps a game resolving content relative to its own
+/// module path inside the VFS. Staging flattened into `state_dir/stage` did
+/// neither, and that is what stopped Cyberpunk 2077 and Stardew Valley.
 ///
 /// The bytes are `bare_pe`s, so the launch itself cannot succeed. What
 /// happened before that failure is the point, exactly as in `vfs-directord`'s
-/// `production_launch_stages_a_relative_image_before_create_process`.
+/// `production_launch_stages_a_relative_image_before_create_process` — the
+/// staged files survive it because the session holds the `StagedDir`.
 #[test]
-fn launch_stages_a_companion_image_beside_the_launcher() {
+fn launch_stages_companion_images_at_their_vpath_inside_the_root() {
     let state = tmp("companion-state");
     let root = tmp("companion-root");
 
@@ -178,7 +185,8 @@ fn launch_stages_a_companion_image_beside_the_launcher() {
         "",
         inline(&[
             ("loader.exe", &bare_pe(b"LOADER")),
-            ("Data/game.exe", &bare_pe(b"GAME")),
+            ("game.exe", &bare_pe(b"GAME")),
+            ("Data/nested.exe", &bare_pe(b"NESTED")),
         ]),
     )
     .unwrap();
@@ -187,31 +195,30 @@ fn launch_stages_a_companion_image_beside_the_launcher() {
     let err = s
         .launch(&LaunchOpts {
             image: "loader.exe".into(),
-            stage_also: vec!["Data/game.exe".into()],
+            stage_also: vec!["game.exe".into(), "Data/nested.exe".into()],
             wait: true,
             ..Default::default()
         })
         .expect_err("a bare_pe is not a runnable image");
     assert!(!err.is_empty());
 
-    // Staging is the session's, under `state_dir/stage`; the launcher and its
-    // spawn target must share one directory.
-    let staged_dir = std::fs::read_dir(state.join("stage"))
-        .expect("the session must have created its staging root")
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.is_dir())
-        .expect("one staged launch directory");
+    let listing = || {
+        std::fs::read_dir(&root).map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
+    };
     assert!(
-        staged_dir.join("loader.exe").is_file(),
-        "the launcher itself must be staged: {staged_dir:?}"
+        root.join("loader.exe").is_file(),
+        "the launcher itself must be staged into the root: {:?}",
+        listing()
     );
     assert!(
-        staged_dir.join("game.exe").is_file(),
-        "the companion image must be staged into the same directory as the \
-         launcher — the child's own CreateProcess resolves it from there: {:?}",
-        std::fs::read_dir(&staged_dir)
-            .map(|rd| rd.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+        root.join("game.exe").is_file(),
+        "a companion the launcher will spawn by bare name must be its sibling          on disk — the child's own CreateProcess resolves it from there: {:?}",
+        listing()
+    );
+    assert!(
+        root.join("Data").join("nested.exe").is_file(),
+        "a nested companion must keep its vpath directory rather than being          flattened beside the launcher: {:?}",
+        listing()
     );
 
     s.stop_serve();
@@ -307,7 +314,10 @@ fn ensure_fixtures() {
 ///
 /// Every assertion here is about something a host could not do before:
 ///
-/// * the root is empty before *and after*, so nothing was extracted into it;
+/// * the root is empty before the launch, and empty again once the session is
+///   dropped — staging lands in the root at the image's vpath, so what is
+///   promised is not that nothing is ever written there but that nothing
+///   *outlives the session*;
 /// * the child's own read of `hello.txt` — a path with no file behind it
 ///   anywhere — is served through the ring, which is what proves the process
 ///   ran virtualized rather than merely ran;
@@ -362,8 +372,8 @@ fn an_image_only_the_provider_graph_holds_launches_from_an_empty_managed_root() 
         "the child's read went through the ring to the provider graph"
     );
     assert!(
-        std::fs::read_dir(&root).unwrap().next().is_none(),
-        "nothing may be extracted into the managed root: {:?}",
+        root.join("probe.exe").is_file(),
+        "the image must be staged into the root at its own vpath — that is what          keeps everything the child resolves relative to its module path inside          the VFS: {:?}",
         std::fs::read_dir(&root)
             .map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
     );
@@ -386,6 +396,18 @@ fn an_image_only_the_provider_graph_holds_launches_from_an_empty_managed_root() 
     );
 
     s.stop_serve();
+    // `StagedDir`'s `Drop` is what removes the staged files, and the session is
+    // what holds it alive — so dropping the session is what returns the managed
+    // root to the state it was found in. This is the surviving half of "nothing
+    // was extracted into it".
+    drop(s);
+    assert!(
+        std::fs::read_dir(&root).unwrap().next().is_none(),
+        "staging must not outlive the session: {:?}",
+        std::fs::read_dir(&root)
+            .map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
+    );
+
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&state);
     let _ = std::fs::remove_dir_all(&overlay);

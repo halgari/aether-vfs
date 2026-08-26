@@ -496,8 +496,10 @@ pub fn nt_enum_classic_filtered(dir: *mut c_void, wildcard: Option<&str>) -> Vec
             let start = off + 64;
             if start + namelen <= buf.len() {
                 let units: Vec<u16> = buf[start..start + namelen]
-                    .chunks_exact(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| u16::from_le_bytes(*c))
                     .collect();
                 out.push(String::from_utf16_lossy(&units));
             }

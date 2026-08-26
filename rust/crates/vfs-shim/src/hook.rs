@@ -3725,13 +3725,6 @@ unsafe fn read_hook_body(
     tramp(handle, event, apc, apc_ctx, iosb, buffer, length, byte_offset, key)
 }
 
-/// Map a FUSE synthetic file into a synthetic section.
-///
-/// - **SEC_IMAGE**: map PE from director bytes (rare; PEs usually host-tramped).
-/// - **Data ≤256 MiB**: eager stream into a private mapping (primary stack is
-///   expanded to 16 MiB by vfs-inject — matches the known-good director-only path).
-/// - **Data >256 MiB**: lazy demand-page (reserve + warm + VEH) so multi‑GiB BSAs
-///   never full-preload.
 /// Back a VFS-served PE with a real file so the kernel can build the image
 /// section, and return the trampoline's status.
 ///
@@ -3813,6 +3806,14 @@ unsafe fn real_image_section(
     Some(st)
 }
 
+/// Map a FUSE synthetic file into a synthetic section.
+///
+/// - **SEC_IMAGE**: map PE from director bytes (rare; PEs usually host-tramped).
+/// - **Data ≤256 MiB**: eager stream into a private mapping (primary stack is
+///   expanded to 16 MiB by vfs-inject — matches the known-good director-only path).
+/// - **Data >256 MiB**: lazy demand-page (reserve + warm + VEH) so multi‑GiB BSAs
+///   never full-preload.
+#[allow(clippy::too_many_arguments)]
 unsafe fn fuse_create_section(
     section_handle: *mut HANDLE,
     access: u32,

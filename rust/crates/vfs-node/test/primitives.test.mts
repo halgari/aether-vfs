@@ -542,14 +542,19 @@ test('6. the game writes an INI into memory() and the host reads back what it wr
   });
   assert.strictEqual(code, 0, "the child's write reached the memory provider");
 
-  // Read back through the graph. Nothing touched disk: the managed root is
-  // empty and the bytes live in a Rust `HashMap`.
+  // Read back through the graph. The written bytes never touched disk: they
+  // live in a Rust `HashMap`, and the only thing under the managed root is the
+  // launch image staging put there at its vpath.
   assert.match(
     s.readFile('mygames/custom.ini').toString(),
     /uGridsToLoad=7/,
     'the host reads back exactly what the game wrote'
   );
-  assert.deepStrictEqual(fs.readdirSync(root), [], 'and the managed root is still empty on disk');
+  assert.deepStrictEqual(
+    fs.readdirSync(root),
+    ['probe.exe'],
+    'the staged image is the only thing on disk — no `mygames/` was ever created'
+  );
   assert.deepStrictEqual(s.rejectedWrites(), [], 'a writable provider refuses nothing');
   console.log(`    memory() round trip: ${s.readFile('mygames/custom.ini').toString().trim()}`);
 
