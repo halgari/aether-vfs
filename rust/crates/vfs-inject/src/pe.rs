@@ -33,58 +33,14 @@ fn pe_layout(raw: &[u8]) -> Result<(Vec<u8>, u64, u32, usize), &'static str> {
     Ok((img, base, entry_rva, size_of_image))
 }
 
-pub fn is_system_import_dll(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    let base = std::path::Path::new(&n)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&n);
-    base.starts_with("api-ms-")
-        || base.starts_with("ext-ms-")
-        || matches!(
-            base,
-            "kernel32.dll"
-                | "kernelbase.dll"
-                | "ntdll.dll"
-                | "user32.dll"
-                | "gdi32.dll"
-                | "gdi32full.dll"
-                | "advapi32.dll"
-                | "shell32.dll"
-                | "ole32.dll"
-                | "oleaut32.dll"
-                | "ws2_32.dll"
-                | "winhttp.dll"
-                | "winmm.dll"
-                | "setupapi.dll"
-                | "hid.dll"
-                | "d3d11.dll"
-                | "dxgi.dll"
-                | "dinput8.dll"
-                | "xinput1_3.dll"
-                | "xinput1_4.dll"
-                | "x3daudio1_7.dll"
-                | "msvcp140.dll"
-                | "vcruntime140.dll"
-                | "vcruntime140_1.dll"
-                | "ucrtbase.dll"
-                | "sechost.dll"
-                | "rpcrt4.dll"
-                | "combase.dll"
-                | "shlwapi.dll"
-                | "version.dll"
-                | "imm32.dll"
-                | "dwmapi.dll"
-                | "uxtheme.dll"
-                | "bcrypt.dll"
-                | "bcryptprimitives.dll"
-                | "crypt32.dll"
-                | "wintrust.dll"
-                | "psapi.dll"
-                | "userenv.dll"
-                | "dbghelp.dll"
-        )
-}
+// Moved to `vfs-pe` (pure parsing). `pe_looks_like_image` is re-exported so
+// `map_image_from_pe_bytes_local` below and `vfs-shim`'s hook path
+// (`vfs-shim/src/hook.rs`) keep their existing spelling — both still call it.
+// `is_system_import_dll` is re-exported too, but retained for API
+// compatibility with no remaining in-workspace caller: its last caller was
+// `vfs-director/src/stage.rs`, which now calls `vfs_pe::is_system_import_dll`
+// directly.
+pub use vfs_pe::{is_system_import_dll, pe_looks_like_image};
 
 // `keep_host_steam_api` lived here, re-exported from `lib.rs`, and had no
 // callers anywhere in the workspace — so the warning it carried about needing
@@ -149,8 +105,4 @@ pub fn map_image_from_pe_bytes_local(pe: &[u8]) -> Result<(*mut c_void, usize), 
 
         Ok((base, size_of_image))
     }
-}
-
-pub fn pe_looks_like_image(pe: &[u8]) -> bool {
-    pe.len() >= 0x40 && pe[0] == b'M' && pe[1] == b'Z'
 }

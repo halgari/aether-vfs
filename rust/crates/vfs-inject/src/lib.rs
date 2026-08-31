@@ -19,15 +19,12 @@ mod stub;
 
 pub use pe::{is_system_import_dll, map_image_from_pe_bytes_local, pe_looks_like_image};
 
-/// Static-import DLL names declared by a raw PE file image.
-///
-/// Callers staging a launch directory need the import list *before* any process
-/// exists, so this maps the file image in memory rather than reading a live
-/// process. Returns `None` when `raw` is not a usable PE.
-pub fn import_dll_names_of_pe(raw: &[u8]) -> Option<Vec<String>> {
-    let (img, _base, e_lfanew) = map::build_image(raw).ok()?;
-    Some(map::import_dll_names(&img, e_lfanew))
-}
+/// Import DLL names of a raw PE. Now `vfs-pe`'s; it parses the **file** image
+/// rather than a live process, which is why staging can call it before any
+/// process exists. Retained here for API compatibility with no remaining
+/// in-workspace caller: `vfs-director/src/stage.rs` now calls `vfs_pe::`
+/// directly, and `vfs-shim` never called it at this path.
+pub use vfs_pe::import_dll_names_of_pe;
 
 /// Parameters for [`run_target_with_shim`].
 pub struct RunConfig {

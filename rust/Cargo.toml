@@ -3,6 +3,11 @@ resolver = "2"
 members = [
   "crates/vfs-core",
   "crates/vfs-provider",
+  # Pure PE byte parsing, extracted from vfs-inject so the director can stage
+  # Windows executables on any host OS. No OS API and no dependencies: a PE is
+  # a file format, not a platform. See
+  # docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md.
+  "crates/vfs-pe",
   "crates/vfs-env",
   "crates/vfs-shared",
   "crates/vfs-protocol",

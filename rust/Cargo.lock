@@ -1618,8 +1618,8 @@ dependencies = [
  "vfs-compose",
  "vfs-core",
  "vfs-env",
- "vfs-inject",
  "vfs-ipc",
+ "vfs-pe",
  "vfs-protocol",
  "vfs-provider",
  "vfs-redirect",
@@ -1703,6 +1703,7 @@ version = "0.1.0"
 dependencies = [
  "vfs-core",
  "vfs-env",
+ "vfs-pe",
  "vfs-shared",
  "vfs-shim",
  "vfs-zip",
@@ -1737,6 +1738,10 @@ dependencies = [
  "napi-derive",
  "vfs-embed",
 ]
+
+[[package]]
+name = "vfs-pe"
+version = "0.1.0"
 
 [[package]]
 name = "vfs-protocol"
@@ -1795,6 +1800,7 @@ dependencies = [
  "vfs-inject",
  "vfs-ipc",
  "vfs-protocol",
+ "vfs-provider",
  "vfs-redirect",
  "vfs-shared",
  "vfs-win",

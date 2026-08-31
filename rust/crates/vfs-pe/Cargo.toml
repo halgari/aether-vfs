@@ -1,0 +1,7 @@
+[package]
+name = "vfs-pe"
+version = "0.1.0"
+edition = "2021"
+description = "Pure PE (Portable Executable) byte parsing: no OS API, no dependencies."
+
+[dependencies]

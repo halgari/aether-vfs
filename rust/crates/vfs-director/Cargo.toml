@@ -25,19 +25,22 @@ vfs-provider = { path = "../vfs-provider" }
 # `Session`.
 vfs-compose = { path = "../vfs-compose" }
 vfs-ipc = { path = "../vfs-ipc" }
-vfs-win = { path = "../vfs-win" }
-vfs-inject = { path = "../vfs-inject" }
-vfs-shim = { path = "../vfs-shim" }
+# Pure PE parsing for staging. Was reached through `vfs-inject`, which is
+# Windows-only for its injection half; the parsing half is a file format.
+vfs-pe = { path = "../vfs-pe" }
 
 [target.'cfg(windows)'.dependencies]
-# Window + process enumeration for the load benchmark (crates/vfs-director/src/bench.rs).
+# `ipc.rs` — SharedMapping + EventNotifier, the ring's OS handles.
+vfs-win = { path = "../vfs-win" }
+# Window + process enumeration for the load benchmark (src/bench.rs), which is
+# already `#[cfg(windows)]` in code — this makes the manifest agree.
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
   "Win32_System_Diagnostics_ToolHelp",
 ] }
 
-[dev-dependencies]
+[target.'cfg(windows)'.dev-dependencies]
 # Integrity tests compare the composed VFS against a native extract.
 vfs-zip = { path = "../vfs-zip" }
 vfs-shim = { path = "../vfs-shim" }

@@ -1,3 +1,8 @@
+// Builds its vpaths with the same `RootMap` the shim uses, which is Windows-only
+// — the point of the test is that both sides of the *ring* fold identically, and
+// the ring is the Windows transport.
+#![cfg(windows)]
+
 //! One fold, both sides of the ring.
 //!
 //! The shim canonicalises an incoming NT path with `vfs_redirect::RootMap`,
