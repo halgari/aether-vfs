@@ -121,12 +121,19 @@ mod tests {
 
     /// Classification is by file name only and is case- and path-insensitive,
     /// because import tables spell system DLLs inconsistently.
+    ///
+    /// The backslash case is the one that matters here: it must hold on Linux
+    /// too, which is why the implementation splits separators explicitly instead
+    /// of asking `std::path` — `Path::file_name()` would return the whole string
+    /// on a non-Windows host and classify a system DLL as a game-local one.
     #[test]
     fn system_dll_classification_ignores_case_and_directory() {
         assert!(is_system_import_dll("KERNEL32.dll"));
         assert!(is_system_import_dll("kernel32.dll"));
         assert!(is_system_import_dll("C:\\Windows\\System32\\kernel32.dll"));
+        assert!(is_system_import_dll("System32/kernel32.dll"));
         assert!(!is_system_import_dll("steam_api64.dll"));
+        assert!(!is_system_import_dll("C:\\game\\steam_api64.dll"));
     }
 
     /// A truncated buffer must return Err, never panic: `build_image` is the
@@ -164,6 +171,33 @@ Prepend to `rust/crates/vfs-pe/src/lib.rs`, above the test module. Copy the bodi
 
 - from `rust/crates/vfs-inject/src/map.rs`: `rd_u16`, `rd_u32`, `rd_u64` (keep private), then `is_pe32_plus`, `dd_base`, `build_image`, `apply_relocs`, `import_dll_names`, `export_rva`
 - from `rust/crates/vfs-inject/src/pe.rs`: `is_system_import_dll`, `pe_looks_like_image`
+
+**One deliberate change while moving `is_system_import_dll`.** Its current body
+extracts the basename with `std::path::Path::new(&n).file_name()`, which is
+**host-OS-dependent**: `\` is a path separator on Windows and an ordinary
+character everywhere else, so `is_system_import_dll("C:\\Windows\\System32\\kernel32.dll")`
+answers `true` on Windows and `false` on Linux. That is exactly the
+host-dependence this crate exists to eliminate, and an import table is the one
+place a path-shaped DLL name legitimately appears. Replace the `Path` lookup with
+an explicit split on both separators, leaving every other line of the function
+alone:
+
+```rust
+pub fn is_system_import_dll(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    // Not `Path::file_name()`: that treats `\` as a separator only on Windows,
+    // so the same import table would classify differently per host. A PE names
+    // its imports with Windows conventions no matter who reads the file, so
+    // both separators are split here explicitly.
+    let base = n.rsplit(['/', '\\']).next().unwrap_or(&n);
+    // ...the rest of the function is unchanged: `base.starts_with("api-ms-")`
+    // || `base.starts_with("ext-ms-")` || the `matches!` list, all verbatim.
+}
+```
+
+`rsplit` with a char array yields at least one item for any input, so `next()`
+never returns `None`; the `unwrap_or` is belt-and-braces. On Windows the output
+is identical for every input — this changes Linux only, from wrong to right.
 - from `rust/crates/vfs-inject/src/lib.rs:27-30`, the wrapper, rewritten against local functions:
 
 ```rust
