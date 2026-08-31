@@ -26,7 +26,9 @@ vfs-provider = { path = "../vfs-provider" }
 vfs-compose = { path = "../vfs-compose" }
 vfs-ipc = { path = "../vfs-ipc" }
 vfs-win = { path = "../vfs-win" }
-vfs-inject = { path = "../vfs-inject" }
+# Pure PE parsing for staging. Was reached through `vfs-inject`, which is
+# Windows-only for its injection half; the parsing half is a file format.
+vfs-pe = { path = "../vfs-pe" }
 
 [target.'cfg(windows)'.dependencies]
 # Window + process enumeration for the load benchmark (crates/vfs-director/src/bench.rs).

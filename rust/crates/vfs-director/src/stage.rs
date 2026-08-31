@@ -355,7 +355,7 @@ fn stage_into(
     let exe_bytes = source
         .read(exe_vpath)
         .ok_or_else(|| format!("VFS has no {exe_vpath}"))?;
-    if !vfs_inject::pe_looks_like_image(&exe_bytes) {
+    if !vfs_pe::pe_looks_like_image(&exe_bytes) {
         return Err(format!("{exe_vpath} is not a PE image"));
     }
 
@@ -379,7 +379,7 @@ fn stage_into(
     // Breadth-first over the import graph: a staged DLL can itself import
     // another game-local DLL, and the loader needs the whole closure present.
     while let Some(pe) = pending.pop() {
-        let Some(imports) = vfs_inject::import_dll_names_of_pe(&pe) else {
+        let Some(imports) = vfs_pe::import_dll_names_of_pe(&pe) else {
             continue;
         };
         for imp in imports {
@@ -389,7 +389,7 @@ fn stage_into(
                 .unwrap_or(&imp)
                 .to_string();
             let key = base.to_ascii_lowercase();
-            if seen.contains(&key) || vfs_inject::is_system_import_dll(&base) {
+            if seen.contains(&key) || vfs_pe::is_system_import_dll(&base) {
                 continue;
             }
             seen.push(key);
@@ -422,7 +422,7 @@ fn stage_into(
             else {
                 continue;
             };
-            if !vfs_inject::pe_looks_like_image(&bytes) {
+            if !vfs_pe::pe_looks_like_image(&bytes) {
                 continue;
             }
             if staged.len() >= MAX_STAGED_FILES {
