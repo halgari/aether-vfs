@@ -79,7 +79,7 @@ Four moves. Each severs one edge.
 |---|---|---|---|
 | 1 | `overlay_layer_dir` → `vfs-provider` (`path.rs`); `vfs-shim` re-exports it | `vfs-shim` | kills `retour` + `libudis86-sys` from the graph |
 | 2 | PE parsing → new crate `vfs-pe`; `vfs-inject` re-exports | `vfs-inject` | already proven to compile for Linux |
-| 3 | `ipc.rs`, `ring_dispatch.rs` behind `cfg(windows)` | `vfs-win` | ring is Windows-only by nature |
+| 3 | `ipc.rs` behind `cfg(windows)` | `vfs-win` | holds the ring's OS handles; `ring_dispatch.rs` was gated too as originally planned, but a later fix-wave review found it has no Windows dependency and ungated it — see §3 |
 | 4 | `vfs-win` → `[target.'cfg(windows)'.dependencies]` | — | that manifest section already existed for `windows-sys`; this increment only adds `vfs-win` to it |
 
 Move 2 covers exactly the three functions `stage.rs` calls —
@@ -103,7 +103,7 @@ The delivery mechanism is selected by target, automatically:
 
 ```rust
 #[cfg(windows)]                 mod ipc;            // SharedMapping + EventNotifier
-#[cfg(windows)]                 mod ring_dispatch;  // opcode -> Director
+                                 mod ring_dispatch;  // opcode -> Director      (portable)
 #[cfg(target_os = "linux")]     mod fuse_dispatch;  // FUSE op -> Director  (increment 2)
 
 mod director;   // portable kernel, always built
@@ -120,8 +120,14 @@ was also rejected, for the same reason: FUSE is the Linux transport, so a
 portable ring would be built and never used.
 
 Note that the ring *protocol* is already portable and stays that way —
-`vfs-protocol` and `vfs-ipc` compile and test on Linux today. Only the OS handles
-are gated.
+`vfs-protocol` and `vfs-ipc` compile and test on Linux today. Only the
+transport's OS handles are gated: `ipc.rs` holds the `vfs-win`
+`SharedMapping`/`EventNotifier` pair and is `#[cfg(windows)]`. `ring_dispatch`
+— opcode-to-`Director` protocol translation, the layer directly above `ipc`
+— has no Windows dependency of its own and is *not* gated: it compiles and
+its tests run on Linux today, ahead of `fuse_dispatch` existing. That is what
+makes it a usable reference for the `fuse_dispatch` sibling to imitate, rather
+than merely an analogy holding an untested shape.
 
 ## 4. Verification
 

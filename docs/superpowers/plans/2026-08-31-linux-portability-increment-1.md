@@ -574,6 +574,18 @@ git commit -m "refactor(director): stage PEs via vfs-pe, severing director -> in
 
 The ring is the Windows transport; on Linux, FUSE replaces it rather than running beside it. This is the last edge, so the Linux check goes green here.
 
+> **Superseded in part:** this task, as executed, gated both `ipc` and
+> `ring_dispatch`. A later fix-wave review found `ring_dispatch` has no
+> Windows dependency — it imports only `vfs-protocol`, `vfs-ipc`,
+> `vfs-compose` and `Director` — and ungated it, verifying both
+> `cargo check -p vfs-director --all-targets` (Windows) and
+> `cargo check --target x86_64-unknown-linux-gnu -p vfs-director
+> --all-targets` compile clean. Only `ipc` remains `#[cfg(windows)]` in
+> `rust/crates/vfs-director/src/lib.rs` today; the code excerpts, the
+> "Interfaces: Produces" line, and Step 7 below describe the state as
+> originally planned and implemented in this task, not the current state.
+> See the corrected illustration in the design spec, §3.
+
 **Files:**
 - Modify: `rust/crates/vfs-director/src/lib.rs:25,29`
 - Modify: `rust/crates/vfs-director/Cargo.toml`
