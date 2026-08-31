@@ -36,6 +36,8 @@
 - `rust/crates/vfs-inject/src/lib.rs:27-30` — `import_dll_names_of_pe` delegates to `vfs-pe`
 - `rust/crates/vfs-inject/Cargo.toml` — add `vfs-pe` dependency
 - `rust/crates/vfs-provider/src/path.rs` — gains `overlay_layer_dir`
+- `rust/crates/vfs-provider/src/lib.rs:16` — add `overlay_layer_dir` to the crate-root re-export. `lib.rs` re-exports *selected* items from `path.rs` (`pub use path::{RootId, VPath};`), so a function added to `path.rs` is not reachable as `vfs_provider::overlay_layer_dir` until it is named here — and that spelling is what Task 3 Step 6 requires.
+- `rust/crates/vfs-shim/Cargo.toml` — add a `vfs-provider` dependency. `vfs-shim` currently reaches `RootId` transitively through `vfs-redirect`'s re-export and has no direct edge, so its own re-export of `overlay_layer_dir` will not compile without one. `vfs-provider` has no dependencies, so this adds no transitive weight.
 - `rust/crates/vfs-shim/src/overlay.rs:12-29` — delete the definition, re-export from `vfs-provider`
 - `rust/crates/vfs-director/src/stage.rs:358,382,392,425` — call `vfs_pe::` instead of `vfs_inject::`
 - `rust/crates/vfs-director/src/lib.rs:25,29,42` — gate `ipc` / `ring_dispatch`, re-export `overlay_layer_dir` from `vfs-provider`
@@ -465,8 +467,18 @@ In `rust/crates/vfs-director/Cargo.toml`, delete the `vfs-shim = { path = "../vf
 
 - [ ] **Step 7: Verify the edge is gone and Windows still builds**
 
-Run: `cargo tree -p vfs-director | grep -c libudis86`
+Run: `cargo tree -p vfs-director -e normal | grep -c libudis86`
 Expected: `0`. (Note: `grep -c` exits 1 when the count is 0; that is the success case here.)
+
+**`-e normal` is load-bearing — do not drop it.** Default `cargo tree` includes
+dev-dependencies, and `vfs-shim` stays a `vfs-director` **dev**-dependency until
+Task 5, so the default command reports 2 here via
+`libudis86-sys <- retour <- vfs-shim [dev-dependencies] <- vfs-director`. That is
+expected and is not a failure. The property this task delivers is that the kernel
+*library* graph is clean, and dev-dependencies do not participate in
+`cargo check -p vfs-director`. Even after Task 5 gates them, the default command
+still shows the edge on a Windows host, because
+`[target.'cfg(windows)'.dev-dependencies]` resolves there.
 
 Run: `cargo build -p vfs-director -p vfs-shim -p vfs-embed`
 Expected: `Finished`. `vfs-embed/src/session.rs:394` calls `vfs_shim::overlay_layer_dir` and must still resolve through the re-export.
@@ -533,8 +545,9 @@ Confirm no others were added since: `grep -rn "vfs_inject" rust/crates/vfs-direc
 Run: `cargo build -p vfs-director`
 Expected: `Finished`.
 
-Run: `cargo tree -p vfs-director | grep -c vfs-inject`
-Expected: `0`.
+Run: `cargo tree -p vfs-director -e normal | grep -c vfs-inject`
+Expected: `0`. As in Task 3, `-e normal` restricts this to the library graph;
+`vfs-shim` remains a dev-dependency until Task 5 and pulls `vfs-inject` with it.
 
 - [ ] **Step 4: Run the staging tests**
 
@@ -694,8 +707,17 @@ cargo test -p vfs-pe -p vfs-provider -p vfs-director -p vfs-inject -p vfs-shim -
 ```bash
 cargo clippy --all-targets -- -D warnings          # expect: clean
 cargo check --target x86_64-unknown-linux-gnu -p vfs-director   # expect: Finished
-cargo tree -p vfs-director | grep -E "libudis86|retour|vfs-inject|vfs-win"   # expect: no output
+cargo tree -p vfs-director -e normal | grep -E "libudis86|retour|vfs-inject|vfs-win"   # expect: no output
 ```
+
+`-e normal` restricts the last check to the library graph, which is the graph
+this increment is about. Run it without `-e normal` and it will still report the
+Windows dev-dependency edge on a Windows host — `vfs-shim` is a legitimate
+`vfs-director` dev-dependency, gated to `cfg(windows)` by Task 5 but still
+resolved when the host *is* Windows. Dev-dependencies do not participate in
+`cargo check -p vfs-director`, so they cannot affect Linux compilation. If you
+want the stronger cross-check, `cargo tree -p vfs-director --target x86_64-unknown-linux-gnu`
+excludes them by target and should also be clean.
 
 From the repository root:
 
@@ -729,7 +751,7 @@ Windows edge in the kernel now fails the Linux job."
 Mirrors the spec's section 8. All seven must hold:
 
 - [ ] `cargo check --target x86_64-unknown-linux-gnu -p vfs-director` succeeds
-- [ ] `cargo tree -p vfs-director` contains neither `retour` nor `libudis86-sys`
+- [ ] `cargo tree -p vfs-director -e normal` contains neither `retour` nor `libudis86-sys` (the library graph; see Task 3 Step 7 for why the default graph legitimately still shows the Windows dev-dependency edge on a Windows host)
 - [ ] `cargo test --no-fail-fast` on Windows is green, with no test edited to make it so
 - [ ] `cargo clippy --all-targets -- -D warnings` is clean
 - [ ] `bin/regen-protocol` produces no diff under `resources/`
