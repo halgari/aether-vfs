@@ -181,7 +181,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p xtask-descriptor
+        run: cargo test -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor
+        working-directory: rust
+      # The director kernel itself, which stopped being Windows-only in
+      # increment 1 of the Linux port. Its own unit tests run here; its ring
+      # modules and their dev-dependencies are `cfg(windows)`, so what Linux
+      # builds is the kernel and the portable provider stack under it. A
+      # regression here means someone reintroduced a Windows edge into the
+      # kernel — see
+      # docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md.
+      - name: Director kernel (compile+test on Linux)
+        run: cargo test -p vfs-director
         working-directory: rust
       - name: Regenerate protocol artifacts
         run: bin/regen-protocol
