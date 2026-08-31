@@ -151,13 +151,24 @@ to the rest. Three gates are needed, and only the first is local:
 | gate | proves | where |
 |---|---|---|
 | `cargo check --target x86_64-unknown-linux-gnu -p vfs-director` | no Rust-level portability breaks | local |
-| `cargo tree -p vfs-director -e normal` free of `vfs-win`/`vfs-shim`/`vfs-inject`/`retour`/`libudis86-sys` | no Windows crate in the **library** graph — the structural gate, and the one that actually holds | local |
+| `cargo tree -p vfs-director --target x86_64-unknown-linux-gnu` names no Windows crate | no Windows crate anywhere in the graph for that target, dev-dependencies included — the structural gate, and the one that actually holds | local |
 | `cargo test -p vfs-director` on a real Linux host | it builds, links and the kernel's unit tests pass | CI |
 
-Use `-e normal` on the tree query deliberately: the default graph includes
-dev-dependencies, and `vfs-shim` remains a legitimate `vfs-director`
-dev-dependency, gated to `cfg(windows)` — which still resolves when the host is
-Windows.
+**`--target` on the tree query is the whole trick, and omitting it silently
+inverts the result.** `cargo tree` resolves for the **host** target by default, so
+on a Windows machine both `[target.'cfg(windows)'.dependencies]` and
+`[target.'cfg(windows)'.dev-dependencies]` resolve and the query reports Windows
+crates even when the property holds perfectly. Measured on this tree after the
+gating landed:
+
+```
+cargo tree -p vfs-director                                        -> vfs-win, windows-sys, retour, libudis86-sys
+cargo tree -p vfs-director --target x86_64-unknown-linux-gnu      -> none
+```
+
+Naming the target is therefore both stricter and simpler than filtering edge
+kinds with `-e normal`: it covers normal and dev dependencies in one query and
+needs no caveat about which tables resolve where.
 - **Windows regression:** `cargo test --no-fail-fast` and
   `cargo clippy --all-targets -- -D warnings`, both already green.
 - **CI:** extend the existing `rust-linux-portable` job to include
@@ -254,11 +265,12 @@ increment must not foreclose.
 1. `cargo check --target x86_64-unknown-linux-gnu -p vfs-director` succeeds.
    Necessary, not sufficient — see the correction in section 4 for why this alone
    proves less than it appears to.
-2. `cargo tree -p vfs-director -e normal` contains none of `retour`,
-   `libudis86-sys`, `vfs-win`, `vfs-shim` or `vfs-inject`. This is the structural
-   gate and the one that actually holds. `-e normal` restricts it to the library
-   graph; the default graph legitimately still shows the `cfg(windows)`
-   dev-dependency edge when the host is Windows.
+2. `cargo tree -p vfs-director --target x86_64-unknown-linux-gnu` contains none of
+   `retour`, `libudis86-sys`, `vfs-win`, `vfs-shim`, `vfs-inject` or
+   `windows-sys`. This is the structural gate and the one that actually holds.
+   **The `--target` flag is mandatory** — without it `cargo tree` resolves for the
+   Windows host, both `cfg(windows)` tables resolve, and the query reports Windows
+   crates even though the property holds. See section 4.
 3. `cargo test --no-fail-fast` on Windows is green, with no test edited to make
    it so.
 4. `cargo clippy --all-targets -- -D warnings` is clean.

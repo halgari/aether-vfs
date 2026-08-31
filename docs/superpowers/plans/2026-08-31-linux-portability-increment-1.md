@@ -644,8 +644,12 @@ only at link time.
 So this task's real deliverables are structural, and these are the checks that
 demonstrate them:
 
-- `cargo tree -p vfs-director -e normal | grep -cE "vfs-win|windows-sys"` → `0`
-  (the library graph no longer names the Windows transport)
+- `cargo tree -p vfs-director --target x86_64-unknown-linux-gnu | grep -cE "vfs-win|windows-sys"` → `0`
+  (for the Linux target, nothing in the graph names the Windows transport).
+  **`--target` is mandatory here.** Without it `cargo tree` resolves for the
+  Windows host, so both `cfg(windows)` tables resolve and the same query reports
+  `vfs-win` and `windows-sys` even though the gating is correct — measured, not
+  hypothetical.
 - the dev-dependency gating in Step 3, which is what lets
   `cargo test --target x86_64-unknown-linux-gnu -p vfs-director` get as far as
   linking instead of dying in `libudis86-sys`'s C build script
@@ -726,17 +730,16 @@ cargo test -p vfs-pe -p vfs-provider -p vfs-director -p vfs-inject -p vfs-shim -
 ```bash
 cargo clippy --all-targets -- -D warnings          # expect: clean
 cargo check --target x86_64-unknown-linux-gnu -p vfs-director   # expect: Finished
-cargo tree -p vfs-director -e normal | grep -E "libudis86|retour|vfs-inject|vfs-win"   # expect: no output
+cargo tree -p vfs-director --target x86_64-unknown-linux-gnu | grep -E "libudis86|retour|vfs-inject|vfs-win|windows-sys"   # expect: no output
 ```
 
-`-e normal` restricts the last check to the library graph, which is the graph
-this increment is about. Run it without `-e normal` and it will still report the
-Windows dev-dependency edge on a Windows host — `vfs-shim` is a legitimate
-`vfs-director` dev-dependency, gated to `cfg(windows)` by Task 5 but still
-resolved when the host *is* Windows. Dev-dependencies do not participate in
-`cargo check -p vfs-director`, so they cannot affect Linux compilation. If you
-want the stronger cross-check, `cargo tree -p vfs-director --target x86_64-unknown-linux-gnu`
-excludes them by target and should also be clean.
+**`--target` is mandatory on that last check and omitting it inverts the
+result.** `cargo tree` resolves for the host target by default, so on this
+Windows machine both `[target.'cfg(windows)'.dependencies]` and
+`[target.'cfg(windows)'.dev-dependencies]` resolve and the query reports
+`vfs-win`, `windows-sys`, `retour` and `libudis86-sys` even though the gating is
+correct. Naming the target covers normal and dev dependencies in one query and is
+the strongest form of this check.
 
 From the repository root:
 
@@ -770,7 +773,7 @@ Windows edge in the kernel now fails the Linux job."
 Mirrors the spec's section 8. All seven must hold:
 
 - [ ] `cargo check --target x86_64-unknown-linux-gnu -p vfs-director` succeeds
-- [ ] `cargo tree -p vfs-director -e normal` contains neither `retour` nor `libudis86-sys` (the library graph; see Task 3 Step 7 for why the default graph legitimately still shows the Windows dev-dependency edge on a Windows host)
+- [ ] `cargo tree -p vfs-director --target x86_64-unknown-linux-gnu` contains none of `retour`, `libudis86-sys`, `vfs-win`, `vfs-shim`, `vfs-inject`, `windows-sys`. `--target` is mandatory — without it the query resolves for the Windows host, both `cfg(windows)` tables resolve, and it reports Windows crates even when the property holds.
 - [ ] `cargo test --no-fail-fast` on Windows is green, with no test edited to make it so
 - [ ] `cargo clippy --all-targets -- -D warnings` is clean
 - [ ] `bin/regen-protocol` produces no diff under `resources/`
