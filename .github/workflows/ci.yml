@@ -44,8 +44,18 @@ jobs:
         run: cargo build --manifest-path crates/vfs-payload/Cargo.toml
         env:
           CARGO_TARGET_DIR: target
+      # `--no-fail-fast` is not optional here. Without it cargo stops after the
+      # first test binary that fails, and this suite is 689 tests across 116
+      # binaries — so a single failing `vfs-directord` e2e test truncated the run
+      # at 274 tests and reported "7 failed" when the real total was unknown.
+      # A red run that hides most of the suite is barely better than no run: it
+      # tells you something broke without telling you how much.
+      #
+      # This was discovered the first time this step ever got as far as *running*
+      # tests. Until the `vproxy.dll.lib` link ordering was fixed, it failed at
+      # compile on every push, so the truncation had never been observable.
       - name: Rust tests (full engine — includes Windows-only crates)
-        run: cargo test
+        run: cargo test --no-fail-fast
         working-directory: rust
 
   # The `aethervfs` addon and its JavaScript suites — stage 4's gate.
