@@ -169,7 +169,10 @@ export async function measureAsync(
 }
 
 // ---------------------------------------------------------------------------
-// The three assertion tiers. See `bench/README.md` for why they are separate.
+// The three assertion tiers. Why they are separate — and which of them are
+// allowed to fail a run — is `gatingTiers()` below; the numbers they hold are
+// documented in rust/docs/benchmarks/node-binding-surface.md. (This pointed at
+// `bench/README.md`, which does not exist in this tree.)
 // ---------------------------------------------------------------------------
 
 export interface Check {
@@ -183,6 +186,55 @@ const checks: Check[] = [];
 
 function record(tier: 1 | 2 | 3, label: string, ok: boolean, detail: string): void {
   checks.push({ tier, label, ok, detail });
+}
+
+/**
+ * Which tiers may fail the run, as opposed to merely reporting.
+ *
+ * `BENCH_GATE_TIERS` is a comma-separated list ("1", "1,3", "all"). Default is
+ * all three, which is what a developer running `pnpm bench` on a quiet machine
+ * wants. CI sets `1`.
+ *
+ * ## Why CI does not gate on timing
+ *
+ * The tiering was built on the theory that a ratio (tier 2) is load-immune
+ * because machine speed cancels between two measurements taken seconds apart.
+ * That holds for *steady-state* speed and not for transient interference: a
+ * scheduling storm that lands on one of the two measurements and not the other
+ * moves the ratio, and on a shared 4-vCPU runner that is normal. The theory was
+ * contradicted in practice — "a JS provider is not slower than a real Rust
+ * provider" reported 2.54x against a 2x ceiling on GitHub Actions while passing
+ * locally, and the neighbouring tier-2 check sat at 1.38x against 1.5x, i.e.
+ * 8% from red. Two checks, both hovering at their ceilings, on hardware whose
+ * noise the project does not control.
+ *
+ * A gate that goes red for reasons unrelated to the change under test does not
+ * report a regression; it teaches people that red means nothing. So CI keeps
+ * running every tier and keeps **printing** every number — the step is still
+ * there, and the log is still the evidence — but only tier 1, the deterministic
+ * counters, decides the exit code. Crossing counts and cache hits are the checks
+ * that actually encode the invariants worth defending (a readFile is exactly
+ * open + readAt + close; a warm re-read never misses), and no amount of load can
+ * move an integer.
+ *
+ * Timing regressions are therefore caught by running `pnpm bench` on a machine
+ * whose noise floor is known, which is the only place the numbers meant anything
+ * in the first place.
+ */
+function gatingTiers(): ReadonlySet<number> {
+  const raw = process.env.BENCH_GATE_TIERS?.trim();
+  if (!raw || raw === 'all') return new Set([1, 2, 3]);
+  const tiers = raw
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => n === 1 || n === 2 || n === 3);
+  if (tiers.length === 0) {
+    throw new Error(
+      `bench: BENCH_GATE_TIERS='${raw}' names no valid tier. Use a comma-separated ` +
+        "list of 1, 2, 3, or 'all'."
+    );
+  }
+  return new Set(tiers);
 }
 
 /**
@@ -304,17 +356,46 @@ export function table(): void {
  *
  * A benchmark suite that cannot fail is a report. This one is a gate, so the exit
  * code is the product and the tables above it are the evidence.
+ *
+ * Only the tiers named by `BENCH_GATE_TIERS` reach the exit code — see
+ * `gatingTiers()` for why CI narrows that to tier 1. Every check is printed
+ * either way; a failing check in a non-gating tier prints as `WARN` and is
+ * counted separately, so the number is never silently dropped. The distinction
+ * is deliberately visible in the output: a run that says "gating tiers: 1" is
+ * making a weaker claim than one that says "1,2,3", and the log should not let
+ * a reader confuse the two.
  */
 export function verdict(): number {
+  const gating = gatingTiers();
   heading('checks');
-  const failed = checks.filter((c) => !c.ok);
+
+  const failed = checks.filter((c) => !c.ok && gating.has(c.tier));
+  const warned = checks.filter((c) => !c.ok && !gating.has(c.tier));
+
   for (const c of checks) {
-    process.stdout.write(`  ${c.ok ? 'ok  ' : 'FAIL'}  [tier ${c.tier}]  ${c.label}\n          ${c.detail}\n`);
+    const mark = c.ok ? 'ok  ' : gating.has(c.tier) ? 'FAIL' : 'WARN';
+    process.stdout.write(`  ${mark}  [tier ${c.tier}]  ${c.label}\n          ${c.detail}\n`);
   }
+
+  const gateList = [...gating].sort((a, b) => a - b).join(',');
   process.stdout.write(
-    `\n${checks.length - failed.length}/${checks.length} checks passed` +
-      (failed.length ? `, ${failed.length} FAILED\n` : '\n')
+    `\ngating tiers: ${gateList}` +
+      (gateList === '1,2,3' ? '' : ' (timing tiers report only — set BENCH_GATE_TIERS=all to enforce)') +
+      '\n'
   );
+  process.stdout.write(
+    `${checks.length - failed.length - warned.length}/${checks.length} checks passed` +
+      (failed.length ? `, ${failed.length} FAILED` : '') +
+      (warned.length ? `, ${warned.length} over ceiling but not gating` : '') +
+      '\n'
+  );
+  if (warned.length) {
+    process.stdout.write(
+      '\n  A WARN is a real number over its ceiling, not a pass. It does not fail this\n' +
+        '  run because this machine\'s noise floor is unknown (see gatingTiers). Re-run\n' +
+        '  `pnpm bench` somewhere quiet before concluding either way.\n'
+    );
+  }
   return failed.length === 0 ? 0 : 1;
 }
 

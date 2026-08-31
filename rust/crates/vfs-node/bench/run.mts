@@ -14,9 +14,14 @@
 //   tier 1  deterministic counters — crossings, cache hits, export counts.
 //           Asserted exactly. Load cannot move these, so they are the real gate.
 //   tier 2  ratios between two things measured seconds apart in this same run.
-//           Machine speed cancels.
+//           Machine speed cancels — transient interference does not.
 //   tier 3  absolute wall clock. Recorded always; asserted only with large
 //           headroom, following provider.test.mts (500 µs ceiling, ~63 µs seen).
+//
+// Which tiers can fail the run is set by `BENCH_GATE_TIERS` (default: all).
+// CI sets it to `1`, so on shared runners tiers 2 and 3 print as WARN rather than
+// failing the job — see `gatingTiers()` in harness.mts for the incident that
+// motivated it. Run this locally, where the default applies, to gate on timing.
 //
 // It is deliberately **not** part of `pnpm test`. That chain already builds,
 // typechecks, runs the drift check, three injected-process examples and vitest;
