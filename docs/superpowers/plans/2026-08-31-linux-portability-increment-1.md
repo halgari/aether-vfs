@@ -626,10 +626,29 @@ Still in `rust/crates/vfs-director/Cargo.toml`, change the `[dev-dependencies]` 
 #![cfg(windows)]
 ```
 
-- [ ] **Step 5: The red test — verify Linux now compiles**
+- [ ] **Step 5: Verify Linux still compiles**
 
 Run: `cargo check --target x86_64-unknown-linux-gnu -p vfs-director`
-Expected: `Finished`, no errors. This command fails before this task and must succeed after it.
+Expected: `Finished`, no errors.
+
+**Corrected during implementation — do not expect a red-to-green transition
+here.** An earlier draft called this "the red test" and claimed it fails before
+this task. It does not: it goes green after **Task 4**, because the two failures
+it can actually see are `libudis86-sys`'s C build script (removed with the
+`vfs-shim` edge in Task 3) and `std::os::windows` in `vfs-inject`'s `inject.rs`
+(removed in Task 4). `cargo check` **cannot see the `vfs-win` edge at all** —
+`cargo check --target x86_64-unknown-linux-gnu -p vfs-win` succeeds, because
+`windows-sys` emits extern declarations that type-check on any target and fail
+only at link time.
+
+So this task's real deliverables are structural, and these are the checks that
+demonstrate them:
+
+- `cargo tree -p vfs-director -e normal | grep -cE "vfs-win|windows-sys"` → `0`
+  (the library graph no longer names the Windows transport)
+- the dev-dependency gating in Step 3, which is what lets
+  `cargo test --target x86_64-unknown-linux-gnu -p vfs-director` get as far as
+  linking instead of dying in `libudis86-sys`'s C build script
 
 - [ ] **Step 6: Verify the kernel's unit tests actually run on Linux**
 

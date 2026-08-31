@@ -125,16 +125,39 @@ are gated.
 
 ## 4. Verification
 
-Both directions are verifiable **locally**, which was not true when this work was
-first scoped:
+Much is verifiable **locally**, which was not true when this work was first
+scoped — but not everything, and the limit matters:
 
 - **`cargo check --target x86_64-unknown-linux-gnu`** needs no cross-linker,
   because `check` does not link. Confirmed working on the Windows dev machine
   after `rustup target add x86_64-unknown-linux-gnu`.
-- **The red test:** `cargo check --target x86_64-unknown-linux-gnu -p vfs-director`
-  fails today and must go green. Its current failures are exactly the three
-  edges above — `libudis86-sys`'s build script, then `E0433`/`E0599` in
-  `vfs-inject`'s `inject.rs`.
+- **It fails today** for `vfs-director`, on exactly two of the three edges:
+  `libudis86-sys`'s build script (a C cross-compile, reached via `vfs-shim`) and
+  `E0433`/`E0599` in `vfs-inject`'s `inject.rs` (`use std::os::windows::ffi::OsStrExt`).
+
+**Corrected 2026-08-31, during implementation:** an earlier draft of this section
+called that check "the red test" and treated it as proof of portability. It is
+not, and the correction is load-bearing for increment 2. **`cargo check` cannot
+detect a `windows-sys`-based dependency at all.** Demonstrated directly:
+`cargo check --target x86_64-unknown-linux-gnu -p vfs-win` **succeeds** — a crate
+whose entire purpose is Windows shared-memory and event handles type-checks
+cleanly for Linux, because `windows-sys` emits extern declarations that type-check
+on any target and only fail at *link* time.
+
+So the check catches one specific and valuable error class — Rust-level
+portability breaks like `std::os::windows` paths and missing items — and is blind
+to the rest. Three gates are needed, and only the first is local:
+
+| gate | proves | where |
+|---|---|---|
+| `cargo check --target x86_64-unknown-linux-gnu -p vfs-director` | no Rust-level portability breaks | local |
+| `cargo tree -p vfs-director -e normal` free of `vfs-win`/`vfs-shim`/`vfs-inject`/`retour`/`libudis86-sys` | no Windows crate in the **library** graph — the structural gate, and the one that actually holds | local |
+| `cargo test -p vfs-director` on a real Linux host | it builds, links and the kernel's unit tests pass | CI |
+
+Use `-e normal` on the tree query deliberately: the default graph includes
+dev-dependencies, and `vfs-shim` remains a legitimate `vfs-director`
+dev-dependency, gated to `cfg(windows)` — which still resolves when the host is
+Windows.
 - **Windows regression:** `cargo test --no-fail-fast` and
   `cargo clippy --all-targets -- -D warnings`, both already green.
 - **CI:** extend the existing `rust-linux-portable` job to include
@@ -229,7 +252,13 @@ increment must not foreclose.
 ## 8. Definition of done
 
 1. `cargo check --target x86_64-unknown-linux-gnu -p vfs-director` succeeds.
-2. `cargo tree -p vfs-director` contains neither `retour` nor `libudis86-sys`.
+   Necessary, not sufficient — see the correction in section 4 for why this alone
+   proves less than it appears to.
+2. `cargo tree -p vfs-director -e normal` contains none of `retour`,
+   `libudis86-sys`, `vfs-win`, `vfs-shim` or `vfs-inject`. This is the structural
+   gate and the one that actually holds. `-e normal` restricts it to the library
+   graph; the default graph legitimately still shows the `cfg(windows)`
+   dev-dependency edge when the host is Windows.
 3. `cargo test --no-fail-fast` on Windows is green, with no test edited to make
    it so.
 4. `cargo clippy --all-targets -- -D warnings` is clean.
