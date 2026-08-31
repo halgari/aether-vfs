@@ -19,8 +19,11 @@ mod stub;
 
 pub use pe::{is_system_import_dll, map_image_from_pe_bytes_local, pe_looks_like_image};
 
-/// Import DLL names of a raw PE. Now `vfs-pe`'s, re-exposed here because
-/// `vfs-shim` and the staging path have always called it at this path.
+/// Import DLL names of a raw PE. Now `vfs-pe`'s; it parses the **file** image
+/// rather than a live process, which is why staging can call it before any
+/// process exists. Retained here for API compatibility with no remaining
+/// in-workspace caller: `vfs-director/src/stage.rs` now calls `vfs_pe::`
+/// directly, and `vfs-shim` never called it at this path.
 pub use vfs_pe::import_dll_names_of_pe;
 
 /// Parameters for [`run_target_with_shim`].

@@ -33,8 +33,13 @@ fn pe_layout(raw: &[u8]) -> Result<(Vec<u8>, u64, u32, usize), &'static str> {
     Ok((img, base, entry_rva, size_of_image))
 }
 
-// Moved to `vfs-pe` (pure parsing). Re-exported so `map_image_from_pe_bytes_local`
-// below and `vfs-shim`'s hook path keep their existing spellings.
+// Moved to `vfs-pe` (pure parsing). `pe_looks_like_image` is re-exported so
+// `map_image_from_pe_bytes_local` below and `vfs-shim`'s hook path
+// (`vfs-shim/src/hook.rs`) keep their existing spelling — both still call it.
+// `is_system_import_dll` is re-exported too, but retained for API
+// compatibility with no remaining in-workspace caller: its last caller was
+// `vfs-director/src/stage.rs`, which now calls `vfs_pe::is_system_import_dll`
+// directly.
 pub use vfs_pe::{is_system_import_dll, pe_looks_like_image};
 
 // `keep_host_steam_api` lived here, re-exported from `lib.rs`, and had no

@@ -6,9 +6,11 @@
 // The pure parsing half of this module now lives in `vfs-pe` — a PE is a file
 // format, not a platform, and the director has to stage Windows executables on
 // hosts where none of the Windows API below exists. Re-exported rather than
-// re-pathed at each call site so this module's internal callers, and
-// `vfs-shim`, keep the spellings they already use: `inject.rs`, `pe.rs` and
-// `lib.rs` all reach these five through `crate::map::`.
+// re-pathed at each call site so this module's internal callers keep the
+// spellings they already use: `inject.rs` and `pe.rs` reach these five through
+// `crate::map::`. `lib.rs` no longer does — its own `map::build_image` call
+// was removed in the same change that delegated `import_dll_names_of_pe`
+// straight to `vfs-pe`.
 //
 // `import_dll_names` is not among them: after this task `lib.rs`'s
 // `import_dll_names_of_pe` delegates straight to `vfs-pe`'s combined helper,
