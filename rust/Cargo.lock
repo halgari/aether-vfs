@@ -1703,6 +1703,7 @@ version = "0.1.0"
 dependencies = [
  "vfs-core",
  "vfs-env",
+ "vfs-pe",
  "vfs-shared",
  "vfs-shim",
  "vfs-zip",
