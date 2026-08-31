@@ -39,7 +39,7 @@ pub use ops::{Provider, Handle, DirEntry, RootId, Stat, KIND_DIR, KIND_FILE, OPE
 // copy before a `vfs_embed::Session` exists, so it needs this without an
 // instance to call `Session::overlay_layer_dir` on — see that method's doc
 // comment for why the path matters at all.
-pub use vfs_shim::overlay_layer_dir;
+pub use vfs_provider::overlay_layer_dir;
 
 #[cfg(test)]
 mod tests {

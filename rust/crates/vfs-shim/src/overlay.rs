@@ -3,30 +3,17 @@
 //! filesystem access — no `unsafe`.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use vfs_core::{fold, wildcard_match};
 use vfs_redirect::{is_whiteout, whiteout_marker, DirItem, RootId};
 
-/// The physical subdirectory an [`Overlay`] rooted at `overlay_root` uses for
-/// `root`'s writes — [`Overlay::root_dir`] calls this too, so it is the one
-/// place the naming scheme is defined.
-///
-/// Exposed (re-exported at the crate root) because the shim's local overlay
-/// is not the only thing that reads this directory: a host-side session can
-/// separately mount a read layer (e.g. a `DiskProvider`) over the same
-/// physical directory so the director sees what the overlay writes, without
-/// the shim and the director ever talking to each other about it — the
-/// filesystem is the shared state. That caller needs the exact subtree the
-/// overlay actually uses, not a re-derived or hardcoded guess at it. See
-/// `vfs-director::Session::overlay_layer_dir` and its caller in
-/// `vfs-directord/src/bin/skyrim-live.rs`, which mounts
-/// `overlay_layer_dir(&overrides, RootId::DEFAULT)` instead of `&overrides`
-/// itself for exactly this reason.
-pub fn overlay_layer_dir(overlay_root: &Path, root: RootId) -> PathBuf {
-    overlay_root.join(format!("root-{}", root.0))
-}
+// Moved to `vfs-provider` so the director can reach it without depending on
+// this crate — that edge pulled `retour`/`libudis86-sys` into the kernel's
+// graph. Re-exported because this crate's own `Overlay::root_dir`, `engine.rs`
+// and eleven integration tests call it at this path.
+pub use vfs_provider::overlay_layer_dir;
 
 /// Remove this crate's whiteout markers from a directory listing, and with
 /// each one the name it hides.

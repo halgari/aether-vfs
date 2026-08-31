@@ -8,6 +8,9 @@ vfs-redirect = { path = "../vfs-redirect" }
 vfs-shared = { path = "../vfs-shared" }
 vfs-core = { path = "../vfs-core" }
 vfs-protocol = { path = "../vfs-protocol" }
+# `overlay_layer_dir` only — moved to vfs-provider (see overlay.rs) so the
+# director can reach it without depending on this crate.
+vfs-provider = { path = "../vfs-provider" }
 vfs-ipc = { path = "../vfs-ipc" }
 vfs-win = { path = "../vfs-win" }
 # Dual-layer vehicle (reflective map + RIP-redirect + spin gate) for children.

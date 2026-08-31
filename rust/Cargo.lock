@@ -1800,6 +1800,7 @@ dependencies = [
  "vfs-inject",
  "vfs-ipc",
  "vfs-protocol",
+ "vfs-provider",
  "vfs-redirect",
  "vfs-shared",
  "vfs-win",
