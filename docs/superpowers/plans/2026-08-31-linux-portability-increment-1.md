@@ -264,17 +264,30 @@ In `rust/crates/vfs-inject/src/map.rs`, delete the bodies of `rd_u16`, `rd_u32`,
 // hosts where none of the Windows API below exists. Re-exported rather than
 // re-pathed at each call site so this module's internal callers, and
 // `vfs-shim`, keep the spellings they already use.
-pub use vfs_pe::{
-    apply_relocs, build_image, dd_base, export_rva, import_dll_names, is_pe32_plus,
-};
+// The five names re-exported here are the ones `inject.rs`, `pe.rs` and
+// `lib.rs` reach through `crate::map::`. `import_dll_names` is deliberately not
+// among them: after this task its only user is the test module below, which
+// names `vfs_pe` directly.
+pub use vfs_pe::{apply_relocs, build_image, dd_base, export_rva, is_pe32_plus};
 ```
 
-All six must be re-exported, and `pub use` specifically, because callers reach
-them through `crate::map::` from outside this module: `inject.rs:27` imports
-`apply_relocs`, `build_image` and `export_rva`; `pe.rs` uses
-`crate::map::{build_image, apply_relocs, is_pe32_plus, dd_base}`; and
-`lib.rs` uses `map::{build_image, import_dll_names}`. `mod map;` is private in
-`lib.rs:15`, so these do not widen `vfs-inject`'s public surface.
+These five need `pub use` specifically, because callers reach them through
+`crate::map::` from outside this module: `inject.rs:27` imports `apply_relocs`,
+`build_image` and `export_rva`; `pe.rs` uses
+`crate::map::{build_image, apply_relocs, is_pe32_plus, dd_base}`; and `lib.rs`
+uses `map::build_image`. `mod map;` is private in `lib.rs:15`, so these do not
+widen `vfs-inject`'s public surface.
+
+**`import_dll_names` is excluded on purpose, and this is a correction.** An
+earlier draft of this plan re-exported it too, justified by `lib.rs:28` calling
+`map::import_dll_names` — but Step 3 below replaces those very lines, deleting
+that caller. Re-exporting it anyway leaves an import with no non-test user, and
+`cargo build` (which does not compile test code) warns unused, failing the
+clippy constraint. Do **not** resolve that with `#[allow(unused_imports)]`: a
+suppression hides the signal permanently, so a future edit that makes the import
+genuinely dead would go unreported. If `map.rs`'s `#[cfg(test)]` module
+references `import_dll_names`, have it call `vfs_pe::import_dll_names` directly —
+`vfs-pe` is a dependency, so the qualified path resolves with no import at all.
 
 Do **not** also import `pe_looks_like_image` or `is_system_import_dll` here —
 neither is referenced anywhere in `map.rs`, and an unused import fails
