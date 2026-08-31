@@ -7,16 +7,15 @@
 // format, not a platform, and the director has to stage Windows executables on
 // hosts where none of the Windows API below exists. Re-exported rather than
 // re-pathed at each call site so this module's internal callers, and
-// `vfs-shim`, keep the spellings they already use.
+// `vfs-shim`, keep the spellings they already use: `inject.rs`, `pe.rs` and
+// `lib.rs` all reach these five through `crate::map::`.
+//
+// `import_dll_names` is not among them: after this task `lib.rs`'s
+// `import_dll_names_of_pe` delegates straight to `vfs-pe`'s combined helper,
+// so `map::import_dll_names` has no production caller left. Its only user is
+// this module's own test below, which names `vfs_pe::import_dll_names`
+// directly instead of importing it here.
 pub use vfs_pe::{apply_relocs, build_image, dd_base, export_rva, is_pe32_plus};
-// `import_dll_names` has no production caller left in this crate now that
-// `lib.rs::import_dll_names_of_pe` delegates straight to `vfs-pe`'s combined
-// helper — this module's own tests are its only remaining user, so a plain
-// `cargo build` (which does not compile `#[cfg(test)]` code) sees it as
-// unused. Kept re-exported anyway, alongside the other five, for a uniform
-// `crate::map::` surface.
-#[allow(unused_imports)]
-pub use vfs_pe::import_dll_names;
 
 // `vfs-pe`'s byte readers are private to that crate on purpose — they are
 // byte-reading plumbing, not PE interface. The Windows-only remote-process
@@ -399,7 +398,7 @@ mod tests {
         let pe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
         // build_image flattens; import_dll_names indexes by RVA into the flat image.
         let (img, _, el) = build_image(&pe).expect("build_image");
-        let names = import_dll_names(&img, el);
+        let names = vfs_pe::import_dll_names(&img, el);
         assert!(
             names.iter().any(|n| n.eq_ignore_ascii_case("KERNEL32.dll")
                 || n.to_ascii_lowercase().contains("kernel32")),
