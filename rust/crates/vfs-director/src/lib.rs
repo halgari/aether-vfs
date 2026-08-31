@@ -27,12 +27,17 @@ pub mod io_stats;
 // ring is not merely unavailable there — it is the wrong transport. A
 // `fuse_dispatch` sibling lands in increment 2; see
 // docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md.
+// `ipc` is gated because it holds the transport's OS handles (the shared-
+// memory ring itself, `vfs_win` HANDLEs). `ring_dispatch` is not gated: it is
+// portable protocol translation on top of that transport — it depends only on
+// `vfs-protocol`, `vfs-ipc`, `vfs-compose` and `Director`, none of which are
+// Windows-only — so it compiles and its tests run on Linux today, ahead of
+// `fuse_dispatch` giving it a non-Windows caller.
 #[cfg(windows)]
 pub mod ipc;
 pub mod mount_graph;
 pub mod ops;
 pub mod path;
-#[cfg(windows)]
 pub mod ring_dispatch;
 pub mod bench;
 pub mod stage;
