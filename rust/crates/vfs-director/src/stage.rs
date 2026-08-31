@@ -383,11 +383,11 @@ fn stage_into(
             continue;
         };
         for imp in imports {
-            let base = Path::new(&imp)
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&imp)
-                .to_string();
+            // `Path::file_name()` splits on `\` only on Windows; these import
+            // names come from a Windows PE and must split on either separator
+            // regardless of host OS. Same precedent as
+            // `vfs_pe::is_system_import_dll`.
+            let base = imp.rsplit(['/', '\\']).next().unwrap_or(&imp).to_string();
             let key = base.to_ascii_lowercase();
             if seen.contains(&key) || vfs_pe::is_system_import_dll(&base) {
                 continue;

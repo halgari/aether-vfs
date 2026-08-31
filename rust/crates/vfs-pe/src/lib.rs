@@ -186,8 +186,7 @@ pub fn import_dll_names(img: &[u8], e_lfanew: usize) -> Vec<String> {
 
 /// Find an export's RVA by name (RVAs index into the flat image).
 pub fn export_rva(img: &[u8], e_lfanew: usize, name: &[u8]) -> Result<u32, &'static str> {
-    let opt = e_lfanew + 24;
-    let exp_dir = opt + 112; // DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT]
+    let exp_dir = dd_base(img, e_lfanew); // DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT]
     if exp_dir + 8 > img.len() {
         return Err("no export dir");
     }
