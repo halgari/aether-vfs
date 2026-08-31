@@ -22,10 +22,17 @@
 pub mod director;
 pub mod disk;
 pub mod io_stats;
+// The shared-memory ring is how the injected shim reaches this kernel on
+// Windows. On Linux the kernel is reached through /dev/fuse instead, so the
+// ring is not merely unavailable there — it is the wrong transport. A
+// `fuse_dispatch` sibling lands in increment 2; see
+// docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md.
+#[cfg(windows)]
 pub mod ipc;
 pub mod mount_graph;
 pub mod ops;
 pub mod path;
+#[cfg(windows)]
 pub mod ring_dispatch;
 pub mod bench;
 pub mod stage;
