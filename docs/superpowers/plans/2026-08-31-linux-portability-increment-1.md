@@ -40,7 +40,7 @@
 - `rust/crates/vfs-shim/Cargo.toml` — add a `vfs-provider` dependency. `vfs-shim` currently reaches `RootId` transitively through `vfs-redirect`'s re-export and has no direct edge, so its own re-export of `overlay_layer_dir` will not compile without one. `vfs-provider` has no dependencies, so this adds no transitive weight.
 - `rust/crates/vfs-shim/src/overlay.rs:12-29` — delete the definition, re-export from `vfs-provider`
 - `rust/crates/vfs-director/src/stage.rs:358,382,392,425` — call `vfs_pe::` instead of `vfs_inject::`
-- `rust/crates/vfs-director/src/lib.rs:25,29,42` — gate `ipc` / `ring_dispatch`, re-export `overlay_layer_dir` from `vfs-provider`
+- `rust/crates/vfs-director/src/lib.rs:25,29,42` — gate `ipc`, re-export `overlay_layer_dir` from `vfs-provider`. (Task 5 originally gated `ring_dispatch` too; the final review found it has no Windows dependency — only `ipc.rs` touches `vfs_win` — so it was ungated, and its five protocol-translation tests now run in Linux CI. See Task 5's callout and spec §3.)
 - `rust/crates/vfs-director/Cargo.toml` — drop `vfs-win`/`vfs-inject`/`vfs-shim`; move `windows-sys` and dev-deps to `cfg(windows)` tables
 - `rust/crates/vfs-director/tests/unicode_case_fold_across_the_ring.rs` — add `#![cfg(windows)]`
 - `.github/workflows/ci.yml` — extend `rust-linux-portable`
