@@ -5,6 +5,7 @@
 
 mod caps;
 pub mod conformance;
+mod layout;
 mod model;
 mod path;
 mod provider;
@@ -12,8 +13,9 @@ mod status;
 
 pub use caps::{Access, Capabilities};
 pub use conformance::{assert_conformance, write_fixture_tree, RwMemFixture, FIXTURE_FILES};
+pub use layout::overlay_layer_dir;
 pub use model::{DirEntry, Handle, SetAttr, Stat, KIND_DIR, KIND_FILE, KIND_TOMBSTONE};
-pub use path::{overlay_layer_dir, RootId, VPath};
+pub use path::{RootId, VPath};
 pub use provider::Provider;
 pub use status::{
     bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, not_supported, ok,
