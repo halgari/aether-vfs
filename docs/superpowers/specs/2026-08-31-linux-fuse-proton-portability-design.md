@@ -80,7 +80,7 @@ Four moves. Each severs one edge.
 | 1 | `overlay_layer_dir` → `vfs-provider` (`path.rs`); `vfs-shim` re-exports it | `vfs-shim` | kills `retour` + `libudis86-sys` from the graph |
 | 2 | PE parsing → new crate `vfs-pe`; `vfs-inject` re-exports | `vfs-inject` | already proven to compile for Linux |
 | 3 | `ipc.rs`, `ring_dispatch.rs` behind `cfg(windows)` | `vfs-win` | ring is Windows-only by nature |
-| 4 | `windows-sys` → `[target.'cfg(windows)'.dependencies]` | — | already `cfg`-gated in code, not in Cargo |
+| 4 | `vfs-win` → `[target.'cfg(windows)'.dependencies]` | — | that manifest section already existed for `windows-sys`; this increment only adds `vfs-win` to it |
 
 Move 2 covers exactly the three functions `stage.rs` calls —
 `pe_looks_like_image`, `import_dll_names_of_pe`, `is_system_import_dll`
@@ -275,6 +275,12 @@ increment must not foreclose.
    it so.
 4. `cargo clippy --all-targets -- -D warnings` is clean.
 5. `bin/regen-protocol` produces no diff under `resources/`.
-6. `rust-linux-portable` in CI covers `vfs-director` and `vfs-pe`.
+6. `rust-linux-portable` in CI covers `vfs-director` and `vfs-pe`. Unproven on
+   this machine: it has no cross-linker, so `cargo test --target
+   x86_64-unknown-linux-gnu -p vfs-director --no-run` dies with `linker 'cc'
+   not found`. `cargo test -p vfs-director` has **never actually run** on
+   Linux here — only type-checked (`cargo check --target
+   x86_64-unknown-linux-gnu`, item 1). This item is unproven until a CI push
+   confirms it.
 7. `vfs-embed`'s and `vfs-node`'s public surfaces are byte-identical to
    `f0a55ef`.

@@ -199,7 +199,14 @@ pub fn is_system_import_dll(name: &str) -> bool {
 
 `rsplit` with a char array yields at least one item for any input, so `next()`
 never returns `None`; the `unwrap_or` is belt-and-braces. On Windows the output
-is identical for every input — this changes Linux only, from wrong to right.
+is identical for every input the PE loader actually accepts and every caller
+actually passes — this changes Linux only, from wrong to right. It is not
+identical for two inputs neither caller reaches: a trailing separator
+(`"kernel32.dll\\"` — `Path::file_name()` strips it and yields `kernel32.dll`,
+`rsplit` yields `""`) and a drive-relative name (`"C:kernel32.dll"` —
+`Path::file_name()` yields `kernel32.dll`, `rsplit` yields the whole string).
+Both are unreachable here: the PE loader never emits either shape as an import
+name, and `stage.rs` basenames its input before calling this function anyway.
 - from `rust/crates/vfs-inject/src/lib.rs:27-30`, the wrapper, rewritten against local functions:
 
 ```rust
