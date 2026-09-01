@@ -39,6 +39,9 @@ members = [
   "crates/vfs-shim",
   "crates/vfs-shim-dll",
   "crates/vfs-win",
+  # The Unix mirror of vfs-win: one crate per OS, each owning that OS's handles,
+  # with the portable ring above both. Builds to an empty crate on Windows.
+  "crates/vfs-unix",
   "crates/vfs-zip",
   "crates/vfs-launch",
   "crates/vfs-fixture-read",

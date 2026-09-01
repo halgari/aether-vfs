@@ -1836,6 +1836,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vfs-unix"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "vfs-ipc",
+]
+
+[[package]]
 name = "vfs-win"
 version = "0.1.0"
 dependencies = [
