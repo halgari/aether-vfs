@@ -78,14 +78,41 @@ impl DiskProvider {
         let exact = self.resolve(path)?;
         Ok(resolve_fold_equal(&self.root, path).unwrap_or(exact))
     }
+
+    /// Fold-aware fallback for a path whose byte-exact spelling (`exact`,
+    /// from [`DiskProvider::resolve`]) the filesystem itself just reported
+    /// missing. Used by callers whose target is expected to already exist
+    /// (`getattr`, `readdir`, a non-creating `open`, `set_attr`): they try
+    /// `exact` first and pay for this — the same fold scan
+    /// `resolve_case_aware` used to run on every call, hit or miss — only
+    /// on that miss. A create must not use this: see
+    /// [`DiskProvider::resolve_case_aware`]'s doc and
+    /// `open_create_under_a_fold_equal_directory_does_not_fork_it`.
+    ///
+    /// A no-op on Windows: NTFS already folded `exact` for free, so the
+    /// caller's retry against the same path is a second, harmless attempt
+    /// rather than a wrong assumption that something new was found.
+    #[cfg(windows)]
+    fn resolve_fold_fallback(&self, _path: &str, exact: PathBuf) -> PathBuf {
+        exact
+    }
+
+    #[cfg(not(windows))]
+    fn resolve_fold_fallback(&self, path: &str, exact: PathBuf) -> PathBuf {
+        resolve_fold_equal(&self.root, path).unwrap_or(exact)
+    }
 }
 
 /// Resolve `rel` against `base` when the host filesystem is case-sensitive.
 ///
-/// Exact path first — the hit costs one syscall and no allocation. On a miss,
-/// walk components, and for each one that does not exist byte-exactly, scan the
-/// containing directory for a fold-equal entry. This is what Wine does, and
-/// what `ciopfs` exists to avoid doing repeatedly.
+/// Not a cheap function: calling it at all costs at least one `stat` and one
+/// `PathBuf` allocation, and a genuine fold miss costs one of each per path
+/// component. [`DiskProvider::resolve_case_aware`] (a create, which must
+/// resolve eagerly) and [`DiskProvider::resolve_fold_fallback`] (everything
+/// else, which resolves lazily and only reaches this function after the
+/// byte-exact spelling has already been tried and missed) both exist so this
+/// is called only when that cost is actually needed — never on a hit. This
+/// is what Wine does, and what `ciopfs` exists to avoid doing repeatedly.
 ///
 /// Compares with [`vfs_core::fold`], never `to_ascii_lowercase`, and never
 /// hands a folded spelling to the filesystem: `casefold.rs` warns the fold is
@@ -106,13 +133,23 @@ impl DiskProvider {
 /// isn't a right one once the source directory itself is ambiguous.
 #[cfg(not(windows))]
 fn resolve_fold_equal(base: &std::path::Path, rel: &str) -> Option<PathBuf> {
-    // Exact spelling first: if it exists, this costs one stat and nothing
-    // else, and the entry it names is unambiguously the right one.
+    // Exact spelling first: this still costs a `PathBuf` allocation and a
+    // `stat`, same as any other attempt at this path, but when it hits, the
+    // entry it names is unambiguously the right one and nothing below runs.
+    // A bare `..` component is rejected here exactly as the miss loop below
+    // rejects it (rather than being pushed and walked), so the doc comment
+    // above about this function never being an escape hatch around
+    // `resolve`'s `..` check is true of this branch too, not just the miss
+    // loop.
     let mut exact = base.to_path_buf();
     for part in rel.split('/') {
-        if !part.is_empty() {
-            exact.push(part);
+        if part.is_empty() {
+            continue;
         }
+        if part == ".." {
+            return None;
+        }
+        exact.push(part);
     }
     if std::fs::symlink_metadata(&exact).is_ok() {
         return Some(exact);
@@ -148,6 +185,14 @@ fn resolve_fold_equal(base: &std::path::Path, rel: &str) -> Option<PathBuf> {
         let mut best: Option<std::ffi::OsString> = None;
         for entry in entries.flatten() {
             let name = entry.file_name();
+            // Skip, don't `to_string_lossy()`: `part` came from a UTF-8
+            // vpath, so a non-UTF-8 on-disk name can never be the fold-equal
+            // match we're looking for, and lossily replacing its invalid
+            // bytes with U+FFFD would be a bug here specifically — two
+            // different non-UTF-8 names can both replace to the same
+            // sequence of replacement characters, which then fold-match
+            // each other (and possibly `folded_part`) even though the real
+            // names never did.
             let Some(name_str) = name.to_str() else {
                 continue;
             };
@@ -191,10 +236,21 @@ impl Provider for DiskProvider {
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
         let path = p.rel;
-        let p = self.resolve_case_aware(path)?;
-        let meta = match std::fs::metadata(&p) {
+        // Lazy resolution: `getattr` expects its target to already exist
+        // (or genuinely not to), so it tries the byte-exact path first and
+        // only pays for the fold-aware fallback on an actual miss — a hit
+        // costs exactly the one `stat` this call was always going to make.
+        let exact = self.resolve(path)?;
+        let meta = match std::fs::metadata(&exact) {
             Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let folded = self.resolve_fold_fallback(path, exact);
+                match std::fs::metadata(&folded) {
+                    Ok(m) => m,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(_) => return Err(map_io_err()),
+                }
+            }
             Err(_) => return Err(map_io_err()),
         };
         if meta.is_dir() {
@@ -216,16 +272,27 @@ impl Provider for DiskProvider {
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
         let path = p.rel;
-        let p = self.resolve_case_aware(path)?;
-        let rd = std::fs::read_dir(&p).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                not_found()
-            } else if e.kind() == std::io::ErrorKind::NotADirectory {
-                not_a_dir()
-            } else {
-                map_io_err()
+        // Lazy resolution, same as `getattr`: the directory being listed is
+        // expected to already exist, so the fold-aware fallback is paid for
+        // only when the byte-exact spelling actually misses.
+        let exact = self.resolve(path)?;
+        let rd = match std::fs::read_dir(&exact) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let folded = self.resolve_fold_fallback(path, exact);
+                std::fs::read_dir(&folded).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        not_found()
+                    } else if e.kind() == std::io::ErrorKind::NotADirectory {
+                        not_a_dir()
+                    } else {
+                        map_io_err()
+                    }
+                })?
             }
-        })?;
+            Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => return Err(not_a_dir()),
+            Err(_) => return Err(map_io_err()),
+        };
         let mut out = Vec::new();
         for ent in rd.flatten() {
             let name = ent.file_name().to_string_lossy().into_owned();
@@ -253,10 +320,21 @@ impl Provider for DiskProvider {
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         let path = p.rel;
-        let p = self.resolve_case_aware(path)?;
+        let creating = flags & OPEN_CREATE != 0;
 
         if flags & OPEN_WRITE == 0 {
-            let meta = std::fs::metadata(&p).map_err(|_| not_found())?;
+            // Read-only open: the target is expected to already exist, so
+            // resolve lazily — byte-exact first, fold-aware fallback only
+            // on an actual miss.
+            let exact = self.resolve(path)?;
+            let (p, meta) = match std::fs::metadata(&exact) {
+                Ok(m) => (exact, m),
+                Err(_) => {
+                    let folded = self.resolve_fold_fallback(path, exact);
+                    let m = std::fs::metadata(&folded).map_err(|_| not_found())?;
+                    (folded, m)
+                }
+            };
             if meta.is_dir() {
                 let bh = self.next.fetch_add(1, Ordering::Relaxed);
                 return Ok((bh, 0, true));
@@ -268,31 +346,51 @@ impl Provider for DiskProvider {
             return Ok((bh, size, false));
         }
 
-        if flags & OPEN_CREATE != 0 {
+        // `OPEN_WRITE` from here on. A create must resolve eagerly: the
+        // eager fold-aware resolution is what lands a create inside an
+        // existing, differently-cased directory instead of forking a
+        // divergent sibling (see
+        // `open_create_under_a_fold_equal_directory_does_not_fork_it`).
+        // Trying the byte-exact path first and creating there on a "miss"
+        // would never see a miss to fall back from — `OpenOptions::create`
+        // succeeds by creating exactly that path. A plain write-open of an
+        // already-existing file has no such hazard and resolves lazily,
+        // same as the read branch above.
+        let mut p = if creating { self.resolve_case_aware(path)? } else { self.resolve(path)? };
+
+        if creating {
             if let Some(parent) = p.parent() {
                 std::fs::create_dir_all(parent).map_err(|_| map_io_err())?;
             }
         }
 
-        let f = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(flags & OPEN_CREATE != 0)
-            .create_new(flags & OPEN_EXCL != 0)
-            .truncate(flags & OPEN_TRUNC != 0)
-            .open(&p)
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => not_found(),
-                // `OPEN_EXCL` (create_new) against an existing path. Without
-                // this arm it fell into the generic `map_io_err()` below,
-                // indistinguishable from a real I/O failure — and the shim
-                // then treated *any* write-open error as "director refused,
-                // fall through to the overlay", so an exclusive create
-                // against an existing file silently created it in the
-                // overlay and reported success instead of failing.
-                std::io::ErrorKind::AlreadyExists => exists(),
-                _ => map_io_err(),
-            })?;
+        let open_at = |target: &PathBuf| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(creating)
+                .create_new(flags & OPEN_EXCL != 0)
+                .truncate(flags & OPEN_TRUNC != 0)
+                .open(target)
+        };
+
+        let mut opened = open_at(&p);
+        if !creating && matches!(&opened, Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+            p = self.resolve_fold_fallback(path, p);
+            opened = open_at(&p);
+        }
+        let f = opened.map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => not_found(),
+            // `OPEN_EXCL` (create_new) against an existing path. Without
+            // this arm it fell into the generic `map_io_err()` below,
+            // indistinguishable from a real I/O failure — and the shim
+            // then treated *any* write-open error as "director refused,
+            // fall through to the overlay", so an exclusive create
+            // against an existing file silently created it in the
+            // overlay and reported success instead of failing.
+            std::io::ErrorKind::AlreadyExists => exists(),
+            _ => map_io_err(),
+        })?;
         let size = f.metadata().map_err(|_| map_io_err())?.len();
         let bh = self.next.fetch_add(1, Ordering::Relaxed);
         self.opens.lock().map_err(|_| map_io_err())?.insert(bh, f);
@@ -370,8 +468,16 @@ impl Provider for DiskProvider {
         if attr.size.is_none() && attr.mtime.is_none() {
             return Ok(());
         }
-        let path = self.resolve_case_aware(p.rel)?;
-        let f = File::options().write(true).open(&path).map_err(|_| map_io_err())?;
+        // Lazy resolution, same as `getattr`: `set_attr`'s target is
+        // expected to already exist.
+        let exact = self.resolve(p.rel)?;
+        let f = match File::options().write(true).open(&exact) {
+            Ok(f) => f,
+            Err(_) => {
+                let folded = self.resolve_fold_fallback(p.rel, exact);
+                File::options().write(true).open(&folded).map_err(|_| map_io_err())?
+            }
+        };
         if let Some(size) = attr.size {
             f.set_len(size).map_err(|_| map_io_err())?;
         }
