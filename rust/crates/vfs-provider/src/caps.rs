@@ -34,8 +34,11 @@ pub enum CaseMatch {
     /// `vfs_core::fold` — not `to_ascii_lowercase`, and not "the OS will
     /// sort it out".
     Insensitive,
-    /// Byte-exact names only. Correct for a provider over a case-sensitive
-    /// store that has not indexed for folding; **not** safe under a FUSE mount
+    /// No guarantee that fold-equal names resolve identically. Correct for a
+    /// provider over a case-sensitive store, and also the conservative
+    /// answer `weakest()` gives a composition whose layers disagree — such a
+    /// composition may still resolve fold-equal names on some paths, which
+    /// is why nothing is asserted about it. Not safe under a FUSE mount
     /// serving a Windows program.
     Sensitive,
 }

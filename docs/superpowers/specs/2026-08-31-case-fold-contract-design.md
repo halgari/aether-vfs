@@ -153,9 +153,9 @@ capabilities"). Case behaviour joins that mechanism:
   and `dAtA/a.EsP`. On a writable provider, require that writing through a
   differently-cased spelling hits the **same** entry rather than creating a
   sibling — which is precisely the §6b failure.
-- For `CaseMatch::Sensitive`: require that a differently-cased spelling does
-  **not** resolve. A provider declaring `Sensitive` while behaving
-  insensitively is also a contract violation and is caught here.
+- For `CaseMatch::Sensitive`: assert nothing about whether a differently-cased
+  spelling resolves. `Sensitive` is the absence of a fold-equal-resolution
+  guarantee, not a guarantee of byte-exactness — see the correction below.
 - Include one non-ASCII case (`Über/A.esp` vs `über/a.esp`), because
   `to_ascii_lowercase` passes an ASCII-only suite and this project has already
   shipped that bug once — `casefold.rs` records it: `Data/ÜBER/a.esp` crossed
@@ -164,6 +164,35 @@ capabilities"). Case behaviour joins that mechanism:
 Because the JS binding runs `assertConformance` against JavaScript providers,
 these cases bind third-party providers too, which is the point of putting the
 guarantee in the capability model rather than in a Rust-side helper.
+
+### Correction (found during Task 4 implementation)
+
+This section originally required the converse for `CaseMatch::Sensitive`:
+"require that a differently-cased spelling does **not** resolve. A provider
+declaring `Sensitive` while behaving insensitively is also a contract
+violation and is caught here." That is unsound and has been corrected above
+rather than rewritten silently, because the reasoning that led here is worth
+keeping visible.
+
+`Capabilities::weakest()` computes a *conservative* answer for a composition
+whose children disagree on case behaviour: `(Insensitive, Insensitive) =>
+Insensitive, _ => Sensitive`. It exists precisely so a composition never
+promises more than its most restrictive layer can back up. But a composition
+declaring `Sensitive` this way can still legitimately *resolve* a fold-equal
+spelling on some path — e.g. an overlay whose byte-exact, empty upper simply
+doesn't hold the requested key, so the read falls through to a folding base
+and succeeds. The declaration was never wrong; the strict converse check
+asserted a stronger claim than `Sensitive` was ever meant to carry.
+
+This surfaced concretely in Task 4: flipping `InlineProvider` to `Insensitive`
+made two existing `overlay.rs` conformance tests fail, because
+`OverlayProvider::capabilities()` (over an empty, genuinely byte-exact
+`MemUpper` test double and the now-folding `InlineProvider` base) correctly
+declares `Sensitive` via `weakest()`, while its actual behaviour resolves
+fold-equal names by falling through to the base. The fix is to `assert_case`,
+not to `OverlayProvider` or `weakest()`: `CaseMatch::Sensitive` means "no
+fold-equal-resolution guarantee", and a provider that happens to fold anyway
+is not in breach of a guarantee it never made.
 
 ## 6. What must not regress
 

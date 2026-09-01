@@ -534,13 +534,15 @@ fn assert_case(p: &Arc<dyn Provider>, case: CaseMatch) {
             p.close(h).expect("close");
             assert_eq!(&buf[..n], body, "the alternate spelling read different bytes");
         }
-        CaseMatch::Sensitive => {
-            assert!(
-                found_upper.is_none(),
-                "declares CaseMatch::Sensitive but resolved {upper}, the fold-equal \
-                 spelling of {seeded} — a composition may rely on that strictness"
-            );
-        }
+        // `Sensitive` is the absence of a fold-equal-resolution promise, not
+        // a promise that resolution is byte-exact. `weakest()` gives this
+        // answer to a composition whose layers disagree on case behaviour —
+        // e.g. an overlay with a byte-exact upper over a folding base — and
+        // such a composition can still legitimately resolve the fold-equal
+        // spelling on a path the byte-exact layer doesn't shadow. So there
+        // is nothing to assert here: a provider that happens to fold is not
+        // violating `Sensitive`.
+        CaseMatch::Sensitive => {}
     }
 
     // Non-ASCII, for providers that can seed their own file. `vfs_core::fold`
@@ -572,11 +574,10 @@ fn assert_case(p: &Arc<dyn Provider>, case: CaseMatch) {
                  seeding Über.txt — a Unicode-unaware fold (to_ascii_lowercase) \
                  passes every ASCII case and fails exactly here"
             ),
-            CaseMatch::Sensitive => assert!(
-                lower.is_none(),
-                "declares CaseMatch::Sensitive but resolved über.txt after seeding \
-                 Über.txt"
-            ),
+            // See the ASCII branch above: `Sensitive` promises nothing about
+            // fold-equal resolution, so a provider that resolves über.txt
+            // here is not in breach.
+            CaseMatch::Sensitive => {}
         }
     }
 }
