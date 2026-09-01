@@ -1412,7 +1412,10 @@ mod root_ownership_tests {
     }
 }
 
-#[cfg(test)]
+// The golden's only consumer is `serve`'s `shim.cfg` write, so both the
+// constant and the two helpers that decode it are `#[cfg(windows)]`; the test
+// follows them rather than the constant becoming dead code on other targets.
+#[cfg(all(test, windows))]
 mod snapshot_tests {
     use super::*;
 

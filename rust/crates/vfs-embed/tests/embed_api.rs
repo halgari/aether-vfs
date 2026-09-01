@@ -12,9 +12,13 @@
 use std::sync::Arc;
 
 use vfs_embed::{
-    rejected_writes, reset_rejected_writes, DiskProvider, InlineProvider, LaunchOpts, RootId,
-    RootSources, Session, OPEN_WRITE,
+    rejected_writes, reset_rejected_writes, InlineProvider, LaunchOpts, RootId, Session,
+    OPEN_WRITE,
 };
+// Named only by the two `#[cfg(windows)]` tests below — the ones that need a
+// live ring — so the import is gated with them.
+#[cfg(windows)]
+use vfs_embed::{DiskProvider, RootSources};
 
 /// A scratch directory holding one file, unique per test line.
 fn dir(tag: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
@@ -34,6 +38,7 @@ fn dir(tag: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
 /// the only host-side way to read the second root a *two*-root session exists to
 /// test was to bypass the accessor. `Session::read_file_at` is that gap closed,
 /// and this helper now exists only to unwrap and keep the assertions short.
+#[cfg(windows)]
 fn read_whole(session: &Session, root: RootId, rel: &str) -> Vec<u8> {
     session
         .read_file_at(root, rel)

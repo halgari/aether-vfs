@@ -24,7 +24,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use vfs_embed::stage::ImageSource;
-use vfs_embed::{InlineProvider, LaunchOpts, Provider, RootId, Session, StageOpts};
+use vfs_embed::{InlineProvider, Provider, RootId, Session, StageOpts};
+// Only the two `#[cfg(windows)]` launch tests below construct one.
+#[cfg(windows)]
+use vfs_embed::LaunchOpts;
 
 /// Minimal PE: MZ header, e_lfanew, PE32+ optional header, no imports — the
 /// same shape `vfs_director::stage`'s own tests and `vfs-directord`'s
@@ -237,6 +240,9 @@ fn launch_stages_companion_images_at_their_vpath_inside_the_root() {
 // The capability, end to end: a real process, from bytes only the graph held.
 // ---------------------------------------------------------------------------
 
+// The fixture-locating trio serves only the `#[cfg(windows)]` launch tests
+// below: the artifacts they look for are Windows PEs and DLLs.
+#[cfg(windows)]
 fn profile_dir() -> std::path::PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
     let dir = exe.parent().unwrap();
@@ -247,6 +253,7 @@ fn profile_dir() -> std::path::PathBuf {
     }
 }
 
+#[cfg(windows)]
 fn locate_artifact(name: &str) -> std::path::PathBuf {
     let profile = profile_dir();
     for cand in [profile.join(name), profile.join("deps").join(name)] {
@@ -265,6 +272,7 @@ fn locate_artifact(name: &str) -> std::path::PathBuf {
 /// convention every launch-capable test harness in the workspace follows
 /// (`vfs-inject`'s and `vfs-directord`'s do the same), and a `tests/support`
 /// module for two callers would be the only shared build step in the crate.
+#[cfg(windows)]
 fn ensure_fixtures() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
