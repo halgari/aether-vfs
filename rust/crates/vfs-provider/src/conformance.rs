@@ -547,6 +547,10 @@ fn assert_case(p: &Arc<dyn Provider>, case: CaseMatch) {
     // is Unicode-aware; `to_ascii_lowercase` is not, and substituting one for
     // the other passes every ASCII case above.
     if p.capabilities().access == Access::ReadWrite {
+        // OPEN_CREATE is required alongside OPEN_WRITE: this file does not
+        // exist yet, and OPEN_WRITE alone only opens an *existing* file for
+        // write (see status.rs) — without OPEN_CREATE this seed fails
+        // ST_NOT_FOUND for every provider, not just a misbehaving one.
         let (h, _len, _) = p
             .open(VPath::at_default("Über.txt"), OPEN_WRITE | crate::OPEN_CREATE)
             .expect("open for write to seed the non-ASCII case");

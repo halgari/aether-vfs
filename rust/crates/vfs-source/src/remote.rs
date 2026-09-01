@@ -61,11 +61,18 @@ impl RemoteProvider {
             immutable: caps_resp.immutable,
             slow: caps_resp.slow,
             preferred_block: (caps_resp.preferred_block != 0).then_some(caps_resp.preferred_block),
-            // `CapsResp` (source.proto) has no case field yet, so an
-            // out-of-process source cannot report its own matching
-            // behavior. Sensitive is the honest default until the contract
-            // grows one: we have no evidence the remote side folds.
-            case: CaseMatch::Sensitive,
+            // `CapsResp` (source.proto) has no case field yet, so this side
+            // cannot verify what the remote backend actually does — this is
+            // a requirement on the remote backend, not something we observe.
+            // Insensitive because that is what the remote backend normally
+            // is (DiskProvider on NTFS today, MemoryProvider after case-fold
+            // task 3) and, more importantly, because RemoteProvider sits
+            // below the ring in production and receives vpaths the shim has
+            // already folded — the protocol effectively assumes fold-equal
+            // resolution regardless of what any given backend does. Carrying
+            // `case` on the wire so this can be verified rather than assumed
+            // is the real fix, deferred to a later increment.
+            case: CaseMatch::Insensitive,
         };
 
         Ok(Self {
