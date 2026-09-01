@@ -39,9 +39,10 @@ pub enum Hook {
     Unlock = 16,
     FlushBuffers = 17,
     DeleteFile = 18,
+    QObj = 19,
 }
 
-const N: usize = 19;
+const N: usize = 20;
 
 const NAMES: [&str; N] = [
     "NtCreateFile",
@@ -63,6 +64,7 @@ const NAMES: [&str; N] = [
     "NtUnlockFile",
     "NtFlushBuffersFile",
     "NtDeleteFile",
+    "NtQueryObject",
 ];
 
 static CALLS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
@@ -1644,7 +1646,7 @@ mod tests {
         assert_eq!(NAMES.len(), N);
         // The last variant must index the last name, or a hook silently
         // reports under a neighbour's label.
-        assert_eq!(Hook::DeleteFile as usize, N - 1);
+        assert_eq!(Hook::QObj as usize, N - 1);
         // Spot-check the middle of the table too: appending variants without
         // appending names in the same order is the failure this guards, and
         // only the *last* index is caught by the check above.

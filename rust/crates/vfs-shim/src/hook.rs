@@ -245,6 +245,14 @@ hook_entry_points! {
         class: u32,
     ) -> NTSTATUS as "NtQueryInformationFile", on_panic STATUS_HOOK_PANICKED;
 
+    fn qobj_hook = qobj_hook_body(
+        handle: HANDLE,
+        class: u32,
+        info: *mut c_void,
+        length: u32,
+        ret_len: *mut u32,
+    ) -> NTSTATUS as "NtQueryObject", on_panic STATUS_HOOK_PANICKED;
+
     fn setinfo_hook = setinfo_hook_body(
         handle: HANDLE,
         iosb: *mut c_void,
@@ -436,7 +444,7 @@ use crate::ntdef::{
     FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateSectionFn,
     NtDeleteFileFn, NtFlushBuffersFileFn, NtLockFileFn, NtMapViewOfSectionFn,
     NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryDirectoryFileFn,
-    NtQueryInformationByNameFn, NtUnlockFileFn,
+    NtQueryInformationByNameFn, NtQueryObjectFn, NtUnlockFileFn,
     NtQueryFullAttributesFileFn,
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
     NtWriteFileFn, NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
@@ -445,9 +453,12 @@ use crate::ntdef::{
     FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION,
     FILE_DISPOSITION_INFORMATION_EX, FILE_END_OF_FILE_INFORMATION, FILE_FS_DEVICE_INFORMATION,
     FILE_INTERNAL_INFORMATION,
+    FILE_NAME_INFORMATION,
     FILE_NETWORK_OPEN_INFORMATION, FILE_NORMALIZED_NAME_INFORMATION, FILE_POSITION_INFORMATION,
     FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX, FILE_STANDARD_INFORMATION, SEC_IMAGE,
+    OBJECT_NAME_INFORMATION, OBJECT_NAME_INFORMATION_HEADER,
     SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW,
+    STATUS_INFO_LENGTH_MISMATCH,
     STATUS_END_OF_FILE, STATUS_INVALID_FILE_FOR_SECTION, STATUS_INVALID_HANDLE,
     STATUS_FILE_IS_A_DIRECTORY, STATUS_NO_MORE_FILES, STATUS_OBJECT_NAME_COLLISION,
     STATUS_OBJECT_NAME_NOT_FOUND,
@@ -475,6 +486,7 @@ static mut TRAMP_QIBN: Option<NtQueryInformationByNameFn> = None;
 static mut TRAMP_DELETE: Option<NtDeleteFileFn> = None;
 static mut TRAMP_CLOSE: Option<NtCloseFn> = None;
 static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
+static mut TRAMP_QOBJ: Option<NtQueryObjectFn> = None;
 static mut TRAMP_SETINFO: Option<NtSetInformationFileFn> = None;
 static mut TRAMP_READ: Option<NtReadFileFn> = None;
 static mut TRAMP_WRITE: Option<NtWriteFileFn> = None;
@@ -903,6 +915,29 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     }
     if !qibn_installed {
         note_skipped_detour("NtQueryInformationByName");
+    }
+
+    // The other half of handle identity, beside `NtQueryInformationFile`'s
+    // class-48 spoof: `GetFinalPathNameByHandleW` reaches
+    // `NtQueryInformationFile` on Windows and `NtQueryObject` here on Wine, so
+    // leaving this one unhooked leaks the backing path on whichever host takes
+    // the other route. Optional in the same style as the two above only because
+    // a host might not export it — both hosts measured here do, so
+    // `skipped_detours()` stays empty and `tests/hook_coverage.rs` asserts it.
+    let mut qobj_installed = false;
+    if let Ok(d_qobj) = make_detour(ntdll, c"NtQueryObject", qobj_hook as *const ()) {
+        TRAMP_QOBJ = Some(core::mem::transmute::<*const (), NtQueryObjectFn>(
+            d_qobj.trampoline() as *const (),
+        ));
+        if d_qobj.enable().is_ok() {
+            detours.push(d_qobj);
+            qobj_installed = true;
+        } else {
+            TRAMP_QOBJ = None;
+        }
+    }
+    if !qobj_installed {
+        note_skipped_detour("NtQueryObject");
     }
 
     d_qdir.enable().map_err(|_| InstallError::Detour)?;
@@ -3551,11 +3586,36 @@ unsafe fn flush_hook_body(handle: HANDLE, iosb: *mut c_void) -> NTSTATUS {
     tramp(handle, iosb)
 }
 
-/// `NtQueryInformationFile` hook. Spoofs only `FileNormalizedNameInformation`
-/// (class 48) on a redirected handle -> the virtual path, so
-/// `GetFinalPathNameByHandleW` reports where the mod file appears to live.
-/// Class 9 and everything else pass through (spoofing class 9 breaks
-/// `GetFinalPathNameByHandleW`).
+/// `NtQueryInformationFile` hook. Spoofs the two name classes —
+/// `FileNameInformation` (9) and `FileNormalizedNameInformation` (48) — on a
+/// redirected handle -> the virtual path, so `GetFinalPathNameByHandleW`
+/// reports where the mod file appears to live. Everything else passes through.
+///
+/// # Why class 9 is spoofed too, having once been documented as unspoofable
+///
+/// This comment used to read "spoofing class 9 breaks
+/// `GetFinalPathNameByHandleW`", and that was a true measurement of the shim as
+/// it then stood — but the cause was consistency, not class 9 itself.
+/// `GetFinalPathNameByHandleW` builds its answer from three sources and treats
+/// them as describing one file:
+///
+/// 1. `NtQueryObject(ObjectNameInformation)` — the full NT name;
+/// 2. `NtQueryInformationFile(FileNameInformation)` (class 9) — used for its
+///    **length only**: the device prefix is taken to be
+///    `ObjectName[.. ObjectName.len - class9.len]`;
+/// 3. `NtQueryInformationFile(FileNormalizedNameInformation)` (class 48) —
+///    appended to the drive letter that prefix maps to.
+///
+/// Spoof any one of those and the subtraction in (2) slices at the wrong
+/// offset. Measured 2026-09-01 with class 1 spoofed and class 9 left truthful:
+/// ObjectName `\Device\HarddiskVolume3\vfstmp\vfs-diag\mod.esp` (53 chars)
+/// minus the backing file's class 9 `\vfstmp\vfs-diag-backing\backing_blob.dat`
+/// (47 chars) gave a 6-character "device" of `\Devic`, which maps to no drive,
+/// so the call failed with `ERROR_FILE_NOT_FOUND`.
+///
+/// The rule is therefore **all three or none**: classes 1, 9 and 48 must
+/// describe the same path. They now do, and the subtraction lands on the real
+/// device prefix again because both operands moved by the same amount.
 unsafe fn qif_hook_body(
     handle: HANDLE,
     iosb: *mut c_void,
@@ -3571,7 +3631,9 @@ unsafe fn qif_hook_body(
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
         return fuse_query_information(handle, iosb, info, length, class);
     }
-    if class == FILE_NORMALIZED_NAME_INFORMATION && !info.is_null() {
+    if (class == FILE_NORMALIZED_NAME_INFORMATION || class == FILE_NAME_INFORMATION)
+        && !info.is_null()
+    {
         let vpath = match IDENTITY_TABLE.lock() {
             Ok(t) => t.get(&(handle as isize)).cloned(),
             Err(_) => None,
@@ -3592,6 +3654,241 @@ unsafe fn qif_hook_body(
         }
     }
     tramp(handle, iosb, info, length, class)
+}
+
+/// Resolve a DOS drive spec (`"C:"`) to the host's device path for it.
+///
+/// Separate from [`spoofed_object_name`] so that function stays pure and
+/// testable: this is the only part that has to ask the running kernel.
+fn device_for_drive(drive: &str) -> Option<String> {
+    let name: Vec<u16> = drive.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut out = [0u16; 512];
+    // SAFETY: `name` is NUL-terminated and `out` is writable for its own length,
+    // which is what `QueryDosDeviceW` requires. It reports 0 on failure.
+    #[allow(unsafe_code)]
+    let n = unsafe {
+        windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW(
+            name.as_ptr(),
+            out.as_mut_ptr(),
+            out.len() as u32,
+        )
+    };
+    if n == 0 {
+        return None;
+    }
+    let end = out.iter().position(|&c| c == 0).unwrap_or(n as usize);
+    if end == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&out[..end]))
+}
+
+/// The `ObjectNameInformation` name to emit for a redirected handle, given the
+/// host's own answer for the same handle (`real`) and the virtual NT path the
+/// caller opened (`vpath`).
+///
+/// The host's answer is consulted only for its **prefix convention** — never
+/// for its content, which is exactly the backing path being hidden. `device_of`
+/// is consulted only on the `\Device\` branch, so a host that uses `\??\` pays
+/// no `QueryDosDeviceW` call.
+///
+/// `None` means "emit nothing, pass the host's answer through": a convention
+/// this function does not recognise, or a virtual path that is not a
+/// drive-letter path, is a case where a made-up name would be worse than the
+/// real one.
+fn spoofed_object_name(
+    real: &str,
+    vpath: &str,
+    device_of: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    // DOS portion of the virtual path: `C:\dir\file`, no NT prefix.
+    let dos = vpath
+        .strip_prefix(r"\??\")
+        .or_else(|| vpath.strip_prefix(r"\\?\"))
+        .unwrap_or(vpath);
+    let b = dos.as_bytes();
+    // Must be `X:` optionally followed by a rooted remainder. Anything else
+    // (a UNC name, a volume GUID, a relative leftover) has no drive letter to
+    // resolve and no safe device form to build.
+    if b.len() < 2 || !b[0].is_ascii_alphabetic() || b[1] != b':' {
+        return None;
+    }
+    if b.len() > 2 && b[2] != b'\\' {
+        return None;
+    }
+    if real.starts_with(r"\??\") {
+        Some(format!(r"\??\{dos}"))
+    } else if real.starts_with(r"\Device\") {
+        let dev = device_of(&dos[..2])?;
+        Some(format!("{dev}{}", &dos[2..]))
+    } else {
+        None
+    }
+}
+
+/// `NtQueryObject` hook. Answers `ObjectNameInformation` (class 1) for a handle
+/// the shim redirected -> the VIRTUAL path, in the prefix convention this host
+/// actually uses. Every other class, and every handle we do not track, passes
+/// through untouched: this API answers about events, mutexes, sections and
+/// registry keys too, and inventing a name for one of those would break
+/// unrelated Windows APIs.
+///
+/// Why the convention is discovered rather than assumed: measured 2026-09-01,
+/// Windows returns `\Device\HarddiskVolume3\...` while Wine returns `\??\C:\...`,
+/// and `QueryDosDeviceW("C:")` reports `\Device\HarddiskVolume1` on Wine — it
+/// disagrees with Wine's own `NtQueryObject`. So building a device path from it
+/// would emit a form Wine never produces. Instead the trampoline runs first and
+/// its answer's prefix is reused.
+///
+/// **This closes a pre-existing leak on Windows, not only on Wine.**
+/// `GetFinalPathNameByHandleW` happens to route through
+/// `NtQueryInformationFile(FileNormalizedNameInformation)` on Windows — hooked
+/// by [`qif_hook_body`] — so the leak hid there; any caller reaching
+/// `NtQueryObject` directly got the backing path, silently. Wine routes
+/// `GetFinalPathNameByHandleW` through this entry point instead, which is how
+/// the leak became visible at all.
+///
+/// # The too-small-buffer contract (measured 2026-09-01, both hosts)
+///
+/// A caller that size-probes — query with a tiny buffer, allocate what
+/// `ReturnLength` asks for, query again — loops or fails unless this is
+/// reproduced exactly. Both hosts agreed, which is why one rule serves both:
+///
+/// | `ObjectInformationLength` | Windows 11 | Wine 11.0 (GE-Proton11-6) |
+/// |---|---|---|
+/// | 0 | `STATUS_INFO_LENGTH_MISMATCH` (0xC0000004) | same |
+/// | 8 (< the 16-byte header) | `STATUS_INFO_LENGTH_MISMATCH` | same |
+/// | 16 (header only) | `STATUS_BUFFER_OVERFLOW` (0x80000005) | same |
+/// | `required - 1` | `STATUS_BUFFER_OVERFLOW` | same |
+///
+/// `ReturnLength` was set to the full required size in **every** one of those
+/// cases, including length 0, and a NULL `ReturnLength` was tolerated rather
+/// than faulted. `required` = 16 + name bytes + 2 for the NUL; `Length`
+/// excludes the NUL, `MaximumLength` includes it, and `Buffer` points 16 bytes
+/// into the caller's own buffer on both hosts.
+unsafe fn qobj_hook_body(
+    handle: HANDLE,
+    class: u32,
+    info: *mut c_void,
+    length: u32,
+    ret_len: *mut u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QObj);
+    let tramp = match TRAMP_QOBJ {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    // Cheapest rejections first, in order of how much of the world they let
+    // past untouched. A class we do not answer is most of the traffic.
+    if class != OBJECT_NAME_INFORMATION {
+        return tramp(handle, class, info, length, ret_len);
+    }
+    // An untracked handle must cost nothing but this map lookup — no
+    // allocation, no scratch call. It may be an event, a mutex, a section or a
+    // registry key, and we have nothing true to say about any of them.
+    let vpath = match PATH_TABLE.lock() {
+        Ok(t) => t.get(&(handle as isize)).cloned(),
+        Err(_) => None,
+    };
+    let Some(vpath) = vpath else {
+        return tramp(handle, class, info, length, ret_len);
+    };
+
+    // The host's own answer, for its prefix convention. Sized generously so
+    // the common case is one call; grown once if some path is longer than that.
+    // Note this is deliberately NOT served from a fuse-synthetic handle — those
+    // are not kernel objects, the trampoline fails on them, and we fall through
+    // to letting the host answer rather than guessing a convention.
+    let mut scratch = vec![0u8; 2048];
+    let mut need: u32 = 0;
+    let mut st = tramp(
+        handle,
+        class,
+        scratch.as_mut_ptr().cast(),
+        scratch.len() as u32,
+        &mut need,
+    );
+    if (st == STATUS_BUFFER_OVERFLOW || st == STATUS_INFO_LENGTH_MISMATCH)
+        && need as usize > scratch.len()
+    {
+        scratch = vec![0u8; need as usize];
+        st = tramp(
+            handle,
+            class,
+            scratch.as_mut_ptr().cast(),
+            scratch.len() as u32,
+            &mut need,
+        );
+    }
+    if st < 0 {
+        // A real failure — an unnamed object, a revoked handle, a synthetic
+        // handle. Let the host answer the caller directly rather than
+        // substituting a success it did not earn.
+        return tramp(handle, class, info, length, ret_len);
+    }
+    let real = {
+        // SAFETY: the trampoline reported success into `scratch`, so its first
+        // `OBJECT_NAME_INFORMATION_HEADER` bytes are a UNICODE_STRING whose
+        // `Length` bytes of name follow. `Buffer` is ignored deliberately: the
+        // name is read at the fixed offset both hosts were measured to use, so
+        // a bogus pointer cannot be followed.
+        let hdr = OBJECT_NAME_INFORMATION_HEADER;
+        let n = u16::from_le_bytes([scratch[0], scratch[1]]) as usize;
+        if n == 0 || !n.is_multiple_of(2) || hdr + n > scratch.len() {
+            return tramp(handle, class, info, length, ret_len);
+        }
+        let units: Vec<u16> = scratch[hdr..hdr + n]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+
+    let Some(name) = spoofed_object_name(&real, &vpath, device_for_drive) else {
+        return tramp(handle, class, info, length, ret_len);
+    };
+
+    let name16: Vec<u16> = name.encode_utf16().collect();
+    let name_bytes = name16.len() * 2;
+    // `UNICODE_STRING::MaximumLength` is a u16 and must cover the NUL. A name
+    // that cannot be described in that field is one we must not try to emit.
+    if name_bytes + 2 > u16::MAX as usize {
+        return tramp(handle, class, info, length, ret_len);
+    }
+    let required = OBJECT_NAME_INFORMATION_HEADER + name_bytes + 2;
+    // Set unconditionally and before any short-buffer return: both hosts fill
+    // `ReturnLength` even when they write nothing at all.
+    if !ret_len.is_null() {
+        core::ptr::write_unaligned(ret_len, required as u32);
+    }
+    if info.is_null() || (length as usize) < OBJECT_NAME_INFORMATION_HEADER {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+    if (length as usize) < required {
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    // SAFETY: `info` is non-null and the caller declared `length` writable
+    // bytes, and `length >= required` was just checked, so every write below
+    // lands inside the caller's buffer.
+    #[allow(unsafe_code)]
+    unsafe {
+        let p = info as *mut u8;
+        core::ptr::write_unaligned(p as *mut u16, name_bytes as u16);
+        core::ptr::write_unaligned(p.add(2) as *mut u16, (name_bytes + 2) as u16);
+        // Both hosts point `Buffer` at the caller's own buffer, 16 bytes in.
+        core::ptr::write_unaligned(
+            p.add(8) as *mut usize,
+            p.add(OBJECT_NAME_INFORMATION_HEADER) as usize,
+        );
+        let dst = p.add(OBJECT_NAME_INFORMATION_HEADER);
+        for (i, u) in name16.iter().enumerate() {
+            core::ptr::write_unaligned(dst.add(i * 2) as *mut u16, *u);
+        }
+        core::ptr::write_unaligned(dst.add(name_bytes) as *mut u16, 0u16);
+    }
+    STATUS_SUCCESS
 }
 
 /// `NtWriteFile` hook. For synthetic (fuse) write handles, forward the game's
@@ -4612,6 +4909,108 @@ mod tests {
     /// not fail — it reports a file of the wrong size, or a size of zero, which
     /// a caller is free to treat as "not worth opening". That is silent, so it
     /// gets pinned down here.
+    /// `spoofed_object_name` adopts the host's prefix rather than assuming one.
+    /// Both forms are measured facts (2026-09-01): Windows answers
+    /// `\Device\HarddiskVolumeN\...`, Wine answers `\??\C:\...`. A hook that
+    /// emitted one fixed form would be wrong on one of the two hosts.
+    #[test]
+    fn spoofed_object_name_adopts_the_hosts_prefix() {
+        // Wine's form: the DOS portion of the virtual path, re-prefixed. The
+        // device lookup must not even be consulted here -- it disagrees with
+        // Wine's own answer, so consulting it would be actively misleading.
+        assert_eq!(
+            spoofed_object_name(
+                r"\??\C:\backing\blob.dat",
+                r"\??\C:\root\mod.esp",
+                |_| panic!("QueryDosDeviceW must not be consulted on the \\??\\ branch"),
+            ),
+            Some(r"\??\C:\root\mod.esp".to_string())
+        );
+        // Windows' form: the VIRTUAL path's drive resolved to a device, with the
+        // virtual path's volume-relative remainder appended. Note the device
+        // comes from the virtual drive, not from the real answer's device --
+        // the backing file may live on another volume entirely.
+        assert_eq!(
+            spoofed_object_name(
+                r"\Device\HarddiskVolume7\backing\blob.dat",
+                r"\??\C:\root\mod.esp",
+                |d| {
+                    assert_eq!(d, "C:");
+                    Some(r"\Device\HarddiskVolume3".to_string())
+                },
+            ),
+            Some(r"\Device\HarddiskVolume3\root\mod.esp".to_string())
+        );
+    }
+
+    /// Everything this function cannot build honestly must come back `None`, so
+    /// the hook passes the host's own answer through. A wrong name is worse
+    /// than the backing one: it is undiagnosable.
+    #[test]
+    fn spoofed_object_name_declines_rather_than_guesses() {
+        let dev = |_: &str| Some(r"\Device\HarddiskVolume3".to_string());
+        // A convention we do not recognise. `\Device\Mup\...`-style names reach
+        // the `\Device\` branch legitimately, but a bare NT object path such as
+        // a named pipe or a mailslot root does not.
+        assert_eq!(
+            spoofed_object_name(r"\BaseNamedObjects\SomeMutex", r"\??\C:\root\mod.esp", dev),
+            None
+        );
+        assert_eq!(spoofed_object_name("", r"\??\C:\root\mod.esp", dev), None);
+        // A virtual path with no drive letter to resolve.
+        assert_eq!(
+            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\UNC\server\share\f", dev),
+            None
+        );
+        assert_eq!(
+            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\", dev),
+            None
+        );
+        // `C:relative` is not a rooted path; appending it to a device prefix
+        // would splice two names together (`\Device\HarddiskVolume3relative`).
+        assert_eq!(
+            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\C:relative", dev),
+            None
+        );
+        // The device lookup failing is a decline, not a fallback: with no
+        // device name there is nothing to build the Windows form out of.
+        assert_eq!(
+            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\C:\root\mod.esp", |_| None),
+            None
+        );
+    }
+
+    /// A drive root has an empty remainder, and both prefixes must survive it
+    /// rather than producing a trailing-separator variant of the volume name.
+    #[test]
+    fn spoofed_object_name_handles_a_drive_root() {
+        assert_eq!(
+            spoofed_object_name(r"\??\C:\x", r"\??\C:", |_| unreachable!()),
+            Some(r"\??\C:".to_string())
+        );
+        assert_eq!(
+            spoofed_object_name(r"\Device\HarddiskVolume3\x", r"\??\C:", |_| Some(
+                r"\Device\HarddiskVolume3".to_string()
+            )),
+            Some(r"\Device\HarddiskVolume3".to_string())
+        );
+    }
+
+    /// `PATH_TABLE` holds `\??\`-prefixed paths today, but `record_path` stores
+    /// whatever the open was decoded as. The `\\?\` long-path prefix and a bare
+    /// Win32 path must both be understood, or a handle opened by one of those
+    /// spellings silently declines the spoof and leaks.
+    #[test]
+    fn spoofed_object_name_accepts_every_prefix_path_table_can_hold() {
+        for vpath in [r"\??\C:\root\mod.esp", r"\\?\C:\root\mod.esp", r"C:\root\mod.esp"] {
+            assert_eq!(
+                spoofed_object_name(r"\??\C:\backing", vpath, |_| unreachable!()),
+                Some(r"\??\C:\root\mod.esp".to_string()),
+                "vpath = {vpath}"
+            );
+        }
+    }
+
     const CLASS_BASIC: u32 = 4;
     const CLASS_STANDARD: u32 = 5;
     const CLASS_NETWORK_OPEN: u32 = 34;

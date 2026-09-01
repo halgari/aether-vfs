@@ -179,9 +179,39 @@ pub type NtQueryInformationFileFn = unsafe extern "system" fn(
     u32,         // FileInformationClass
 ) -> NTSTATUS;
 
-/// `FileNormalizedNameInformation` — the class `GetFinalPathNameByHandleW` uses
-/// as the authoritative path (spoof this; NOT class 9, which would break it).
+/// `FileNormalizedNameInformation` — the class `GetFinalPathNameByHandleW`
+/// appends to the drive letter to build its answer.
 pub const FILE_NORMALIZED_NAME_INFORMATION: u32 = 48;
+
+/// `FileNameInformation` — the volume-relative name, same record layout as
+/// class 48. `GetFinalPathNameByHandleW` uses its **length**, not its content:
+/// it takes the device prefix to be `ObjectName[.. ObjectName.len - this.len]`.
+/// So this and `NtQueryObject`'s `ObjectNameInformation` must describe the same
+/// path or that subtraction slices the device name in half — see
+/// `qif_hook_body`, which spoofs both together for exactly that reason.
+pub const FILE_NAME_INFORMATION: u32 = 9;
+
+/// `ntdll!NtQueryObject`. **Not file-specific**: the same entry point answers
+/// about events, mutexes, sections, registry keys and threads, so a hook on it
+/// must pass through every class and every handle it does not recognise.
+/// `ReturnLength` is a nullable `PULONG`.
+pub type NtQueryObjectFn = unsafe extern "system" fn(
+    HANDLE,      // Handle
+    u32,         // ObjectInformationClass
+    *mut c_void, // ObjectInformation
+    u32,         // ObjectInformationLength
+    *mut u32,    // ReturnLength
+) -> NTSTATUS;
+
+/// `ObjectNameInformation` (class 1): an `OBJECT_NAME_INFORMATION`, which is a
+/// `UNICODE_STRING` followed by the NUL-terminated name it points at.
+pub const OBJECT_NAME_INFORMATION: u32 = 1;
+
+/// Bytes of the `UNICODE_STRING` header an `OBJECT_NAME_INFORMATION` opens with
+/// (x64: `u16` Length, `u16` MaximumLength, 4 bytes padding, `*mut u16` Buffer).
+/// Measured on both hosts: `Buffer` points exactly this far into the caller's
+/// own buffer.
+pub const OBJECT_NAME_INFORMATION_HEADER: usize = 16;
 
 /// `ntdll!NtSetInformationFile` (same ABI as NtQueryInformationFile).
 pub type NtSetInformationFileFn = unsafe extern "system" fn(
@@ -220,6 +250,10 @@ pub const SL_RETURN_SINGLE_ENTRY: u32 = 0x02;
 pub const STATUS_NO_MORE_FILES: NTSTATUS = 0x8000_0006u32 as i32;
 /// `STATUS_BUFFER_OVERFLOW` — the caller buffer cannot hold even one entry.
 pub const STATUS_BUFFER_OVERFLOW: NTSTATUS = 0x8000_0005u32 as i32;
+/// `STATUS_INFO_LENGTH_MISMATCH` — the caller buffer cannot hold even the fixed
+/// header of the requested structure. Distinct from `STATUS_BUFFER_OVERFLOW`,
+/// and `NtQueryObject` returns each in its own range — see `qobj_hook_body`.
+pub const STATUS_INFO_LENGTH_MISMATCH: NTSTATUS = 0xC000_0004u32 as i32;
 
 /// `ntdll!NtReadFile`. `Event`/`ApcRoutine`/`ApcContext`/`Key` are unused by
 /// synchronous callers; `ByteOffset` is a `PLARGE_INTEGER` (nullable).
