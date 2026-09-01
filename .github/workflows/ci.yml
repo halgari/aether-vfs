@@ -94,6 +94,13 @@ jobs:
       # This was discovered the first time this step ever got as far as *running*
       # tests. Until the `vproxy.dll.lib` link ordering was fixed, it failed at
       # compile on every push, so the truncation had never been observable.
+      #
+      # DEVIATION from the task 4 brief, which asked for `-p vfs-proton` here as
+      # well as in the Linux job. This command takes no `-p` flags: it is an
+      # unfiltered workspace run, so `vfs-proton` (a workspace member since task
+      # 1) is already covered, and *adding* `-p vfs-proton` would narrow the run
+      # from 116 test binaries to one. The Linux job's command is a `-p` list and
+      # did genuinely need the addition.
       - name: Rust tests (full engine — includes Windows-only crates)
         run: cargo test --no-fail-fast
         working-directory: rust
@@ -238,8 +245,24 @@ jobs:
       # end-to-end, so the ring transport is proven on Linux, not merely
       # compiled. (That file predates the Linux port and is named for the
       # FUSE-style RPC design, not for /dev/fuse; it mounts nothing.)
+      #
+      # `vfs-proton` is the newest entry and the only one that is portable *on
+      # purpose* rather than by nature: extracting a Linux Proton tarball on
+      # Windows produces nothing anyone can run, and it stays in both jobs
+      # anyway so that its URL building, digest parsing, version ordering and
+      # layout logic are covered by the thicker Windows job too. Linux is where
+      # it is actually used, so it is listed here explicitly.
+      #
+      # **No test in `vfs-proton` touches the network.** The real GE-Proton
+      # tarball is 533,700,853 bytes and a CI job that downloads it would be
+      # unacceptable. Release resolution is tested against fixture JSON;
+      # download/verify/extract is tested end-to-end against a `TcpListener` on
+      # `127.0.0.1:0` serving a few hundred bytes the test itself built
+      # (`tests/loopback_install.rs`) — loopback, ephemeral port, no name
+      # resolution, no route off the machine. The one real download is a manual
+      # step, run by hand, documented in the task 4 brief.
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix
+        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton
         working-directory: rust
       # The director kernel itself, which stopped being Windows-only in
       # increment 1 of the Linux port. Its own unit tests run here; its ring

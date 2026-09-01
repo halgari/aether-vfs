@@ -1,0 +1,26 @@
+[package]
+name = "vfs-proton"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "GE-Proton acquisition and (later) launch: aether-vfs's self-contained runtime"
+
+[lib]
+name = "vfs_proton"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vfs-proton"
+path = "src/bin/vfs-proton.rs"
+
+[dependencies]
+# Chosen over shelling out to curl/tar/sha512sum so a host needs no external
+# tools; see the plan's deviation note. ureq's defaults already carry rustls +
+# ring + webpki-roots, so TLS needs no extra wiring.
+ureq = "3.4"
+sha2 = "0.11"
+tar = "0.4"
+flate2 = "1.1"
+vfs-env = { path = "../vfs-env" }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }

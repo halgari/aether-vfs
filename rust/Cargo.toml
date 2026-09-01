@@ -42,6 +42,11 @@ members = [
   # The Unix mirror of vfs-win: one crate per OS, each owning that OS's handles,
   # with the portable ring above both. Builds to an empty crate on Windows.
   "crates/vfs-unix",
+  # GE-Proton acquisition. Portable on purpose: extracting a Linux tarball on
+  # Windows is useless but harmless, and keeping it portable means the URL,
+  # digest, version-ordering and layout logic are covered by the Windows job,
+  # which is the thicker of the two.
+  "crates/vfs-proton",
   "crates/vfs-zip",
   "crates/vfs-launch",
   "crates/vfs-fixture-read",
