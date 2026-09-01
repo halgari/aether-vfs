@@ -367,7 +367,8 @@ mod tests {
 
     impl Provider for CountingProvider {
         fn capabilities(&self) -> Capabilities {
-            Capabilities::read_only()
+            // getattr below compares `p.rel` to "f" by byte equality.
+            Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() }
         }
         fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
             if p.rel == "f" {
@@ -498,6 +499,8 @@ mod tests {
                 immutable: true,
                 slow: true,
                 preferred_block: self.hint,
+                // getattr below compares `p.rel` to "f" by byte equality.
+                case: CaseMatch::Sensitive,
                 ..Capabilities::read_only()
             }
         }
@@ -887,7 +890,8 @@ mod tests {
 
     impl Provider for TwoRootProvider {
         fn capabilities(&self) -> Capabilities {
-            Capabilities::read_only()
+            // getattr/open below compare `p.rel` to "f" by byte equality.
+            Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() }
         }
         fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
             if p.rel == "f" {

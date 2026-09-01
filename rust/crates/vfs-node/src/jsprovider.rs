@@ -898,7 +898,11 @@ fn opt_unknown(obj: &JsObject, key: &str) -> Result<Option<JsUnknown>> {
 
 fn read_caps(obj: &JsObject) -> Result<Capabilities> {
     let Some(v) = opt_unknown(obj, "capabilities")? else {
-        return Ok(Capabilities::read_only());
+        // Same reasoning as the explicit-object branch below: an arbitrary
+        // JS provider's matching behavior is not something this crate can
+        // ask about, so it defaults to the conservative, honest answer
+        // rather than silently inheriting Insensitive from read_only().
+        return Ok(Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() });
     };
     if v.get_type()? != ValueType::Object {
         return Err(Error::from_reason(

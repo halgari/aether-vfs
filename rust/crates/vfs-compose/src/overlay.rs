@@ -1061,7 +1061,8 @@ pub(crate) mod tests {
 
     impl Provider for FlakyReadBase {
         fn capabilities(&self) -> Capabilities {
-            Capabilities::read_only()
+            // getattr below compares `p.rel` to "big.bin" by byte equality.
+            Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() }
         }
         fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
             if p.rel.is_empty() {

@@ -71,7 +71,9 @@ impl Default for MemFixture {
 
 impl Provider for MemFixture {
     fn capabilities(&self) -> Capabilities {
-        Capabilities::read_only()
+        // `files` is a HashMap<String, Vec<u8>> keyed on the exact seeded
+        // spelling (see `build`/`getattr`/`open` below) — no folding.
+        Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() }
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
@@ -167,7 +169,11 @@ impl Default for SeqFixture {
 
 impl Provider for SeqFixture {
     fn capabilities(&self) -> Capabilities {
-        Capabilities { access: Access::SeqRead, immutable: true, ..Capabilities::read_only() }
+        // getattr/readdir/open all delegate straight to `inner`, so its case
+        // behavior (and anything else it declares beyond what we override
+        // here) is this fixture's case behavior too — not a second, separate
+        // claim that could drift from it.
+        Capabilities { access: Access::SeqRead, immutable: true, ..self.inner.capabilities() }
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
