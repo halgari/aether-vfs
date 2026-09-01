@@ -242,11 +242,19 @@ Add to `conformance.rs`. `FIXTURE_FILES` and `write_fixture_tree` already exist 
 /// while folding is also a broken contract — a composition may have been built
 /// on the strictness it advertised.
 ///
-/// The non-ASCII case is not decoration. `to_ascii_lowercase` passes an
-/// ASCII-only suite, and this project shipped exactly that bug: `Data/ÜBER/a.esp`
+/// Coverage is split by access level, and deliberately:
+///
+/// - **Every provider** gets the ASCII check below, against `FIXTURE_FILES`.
+/// - **Writable providers** additionally get a non-ASCII check, because it can
+///   seed its own file. `FIXTURE_FILES` is ASCII-only (`a.txt`, `sub/b.txt`),
+///   so a read-only provider cannot be held to Unicode folding here — that
+///   coverage lives in each provider's own tests instead.
+///
+/// The non-ASCII case is not decoration: `to_ascii_lowercase` passes an
+/// ASCII-only suite, and this project shipped exactly that bug. `Data/ÜBER/a.esp`
 /// crossed the ring folded while every index below was keyed unfolded, so the
-/// file resolved to not-found while `DiskProvider` hid it (Windows folds Unicode
-/// itself).
+/// file resolved to not-found — and `DiskProvider` hid it, because Windows folds
+/// Unicode itself.
 fn assert_case(p: &Arc<dyn Provider>, case: CaseMatch) {
     // A file the fixture tree is known to contain, in its seeded spelling.
     let (seeded, body) = FIXTURE_FILES[0];
@@ -296,8 +304,42 @@ fn assert_case(p: &Arc<dyn Provider>, case: CaseMatch) {
             );
         }
     }
+
+    // Non-ASCII, for providers that can seed their own file. `vfs_core::fold`
+    // is Unicode-aware; `to_ascii_lowercase` is not, and substituting one for
+    // the other passes every ASCII case above.
+    if p.capabilities().access == Access::ReadWrite {
+        let (h, _len, _) = p
+            .open(VPath::at_default("Über.txt"), OPEN_WRITE)
+            .expect("open for write to seed the non-ASCII case");
+        p.write_at(h, 0, b"x").expect("seed write");
+        p.close(h).expect("close the seeded file");
+
+        let lower = p
+            .getattr(VPath::at_default("über.txt"))
+            .expect("getattr must not error on a differently-cased non-ASCII name");
+        match case {
+            CaseMatch::Insensitive => assert!(
+                lower.is_some(),
+                "declares CaseMatch::Insensitive but did not resolve über.txt after \
+                 seeding Über.txt — a Unicode-unaware fold (to_ascii_lowercase) \
+                 passes every ASCII case and fails exactly here"
+            ),
+            CaseMatch::Sensitive => assert!(
+                lower.is_none(),
+                "declares CaseMatch::Sensitive but resolved über.txt after seeding \
+                 Über.txt"
+            ),
+        }
+
+        p.remove(VPath::at_default("Über.txt")).expect("clean up the seeded file");
+    }
 }
 ```
+
+`OPEN_WRITE`, `Access` and `CaseMatch` must all be reachable in this module. `conformance.rs:13` imports from `crate::{...}` — add whichever of these are missing to that list. `OPEN_READ` is already there (`assert_positional` uses it).
+
+The seeded file is removed at the end so `assert_case` leaves the provider as it found it — `assert_conformance` runs `assert_writable` after this, and that suite has its own expectations about what the tree contains.
 
 - [ ] **Step 2: Wire it in**
 
