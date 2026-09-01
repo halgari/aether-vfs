@@ -802,17 +802,22 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     // trace anywhere. `skipped_detours()` reports what was passed over so a host
     // that expects total coverage can assert it rather than discover the hole
     // from a mod list that silently reads empty.
+    // Tracked in a local rather than by reading `TRAMP_QDIREX` back: taking a
+    // shared reference to a `static mut` is undefined behaviour if anything
+    // mutates it concurrently, and `static_mut_refs` rightly denies it.
+    let mut qdirex_installed = false;
     if let Ok(d_qdirex) = make_detour(ntdll, c"NtQueryDirectoryFileEx", qdirex_hook as *const ()) {
         TRAMP_QDIREX = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileExFn>(
             d_qdirex.trampoline() as *const (),
         ));
         if d_qdirex.enable().is_ok() {
             detours.push(d_qdirex);
+            qdirex_installed = true;
         } else {
             TRAMP_QDIREX = None;
         }
     }
-    if TRAMP_QDIREX.is_none() {
+    if !qdirex_installed {
         note_skipped_detour("NtQueryDirectoryFileEx");
     }
     // Both enumeration exports must be covered: whichever one the caller picks
@@ -884,17 +889,19 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     ));
 
     // Present since Win10 1709. Optional so an older host still installs.
+    let mut qibn_installed = false;
     if let Ok(d_qibn) = make_detour(ntdll, c"NtQueryInformationByName", qibn_hook as *const ()) {
         TRAMP_QIBN = Some(core::mem::transmute::<*const (), NtQueryInformationByNameFn>(
             d_qibn.trampoline() as *const (),
         ));
         if d_qibn.enable().is_ok() {
             detours.push(d_qibn);
+            qibn_installed = true;
         } else {
             TRAMP_QIBN = None;
         }
     }
-    if TRAMP_QIBN.is_none() {
+    if !qibn_installed {
         note_skipped_detour("NtQueryInformationByName");
     }
 

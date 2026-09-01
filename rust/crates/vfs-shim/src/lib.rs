@@ -24,7 +24,7 @@ pub use bootstrap::{
     BootstrapError, StaticImport,
 };
 pub use engine::{Engine, EngineError, RenameOutcome};
-pub use hook::{install, install_late, HookGuard, InstallError};
+pub use hook::{install, install_late, skipped_detours, HookGuard, InstallError};
 /// Run one `extern "system"` entry point's body with its panic contained.
 ///
 /// Exported for `vfs-shim-dll`, which owns the injected DLL's two other
