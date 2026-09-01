@@ -11,10 +11,14 @@
 //! Proton) when unset or wrong, so every runtime this crate hands back must
 //! be verified as GE-Proton. See [`runtime::verify_ge`].
 
+pub mod install;
 pub mod layout;
 pub mod release;
 pub mod runtime;
 
+pub use install::{
+    extract_tar_gz, install_release, parse_sha512sum, verify_digest, InstallError, Installed,
+};
 pub use layout::Root;
 pub use release::{fetch_releases, parse_releases, pick, Release, ResolveError};
 pub use runtime::{cmp_tags, installed, verify_ge, VerifyError};
