@@ -230,8 +230,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # `vfs-core`, `vfs-env`, `vfs-shared` and `vfs-server` were portable
+      # before anyone claimed it: measured 2026-09-01 in a WSL Arch box on an
+      # ext4 checkout, they contribute 85 passing tests with a Linux dependency
+      # graph containing no windows crate at all. `vfs-server` is the load-
+      # bearing one — its `tests/fuse_e2e.rs` drives the control ring
+      # end-to-end, so the ring transport is proven on Linux, not merely
+      # compiled. (That file predates the Linux port and is named for the
+      # FUSE-style RPC design, not for /dev/fuse; it mounts nothing.)
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor
+        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server
         working-directory: rust
       # The director kernel itself, which stopped being Windows-only in
       # increment 1 of the Linux port. Its own unit tests run here; its ring
