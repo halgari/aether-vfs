@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     map_io_err, not_found, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId,
-    Stat, VPath, KIND_DIR, KIND_FILE,
+    Stat, VPath, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE,
 };
 
 /// The reference tree every conformance-tested provider must expose.
@@ -473,6 +473,107 @@ fn read_all(p: &Arc<dyn Provider>, h: Handle, size: u64) -> Vec<u8> {
     out
 }
 
+/// Hold a provider to its declared [`CaseMatch`].
+///
+/// Both directions are checked. A provider claiming `Insensitive` while
+/// matching byte-exactly is the §6b defect. A provider claiming `Sensitive`
+/// while folding is also a broken contract — a composition may have been built
+/// on the strictness it advertised.
+///
+/// Coverage is split by access level, and deliberately:
+///
+/// - **Every provider** gets the ASCII check below, against `FIXTURE_FILES`.
+/// - **Writable providers** additionally get a non-ASCII check, because it can
+///   seed its own file. `FIXTURE_FILES` is ASCII-only (`a.txt`, `sub/b.txt`),
+///   so a read-only provider cannot be held to Unicode folding here — that
+///   coverage lives in each provider's own tests instead.
+///
+/// The non-ASCII case is not decoration: `to_ascii_lowercase` passes an
+/// ASCII-only suite, and this project shipped exactly that bug. `Data/ÜBER/a.esp`
+/// crossed the ring folded while every index below was keyed unfolded, so the
+/// file resolved to not-found — and `DiskProvider` hid it, because Windows folds
+/// Unicode itself.
+fn assert_case(p: &Arc<dyn Provider>, case: CaseMatch) {
+    // A file the fixture tree is known to contain, in its seeded spelling.
+    let (seeded, body) = FIXTURE_FILES[0];
+    let upper = seeded.to_uppercase();
+    if upper == seeded {
+        panic!(
+            "conformance: FIXTURE_FILES[0] ({seeded}) has no case variant, so the \
+             case cases cannot distinguish folded from exact matching"
+        );
+    }
+
+    let found_upper = p
+        .getattr(VPath::at_default(&upper))
+        .expect("getattr must not error on a differently-cased name, only report absence");
+
+    match case {
+        CaseMatch::Insensitive => {
+            let st = found_upper.unwrap_or_else(|| {
+                panic!(
+                    "declares CaseMatch::Insensitive but did not resolve {upper}, \
+                     the fold-equal spelling of the seeded {seeded}"
+                )
+            });
+            assert_eq!(
+                st.size,
+                body.len() as u64,
+                "resolved {upper} to an entry of the wrong size — it matched \
+                 something other than {seeded}"
+            );
+
+            // A handle opened through the alternate spelling must read the same
+            // bytes. `getattr` agreeing is not enough: the open path may key
+            // differently from the stat path.
+            let (h, _len, _) = p
+                .open(VPath::at_default(&upper), OPEN_READ)
+                .expect("open must accept a fold-equal spelling when Insensitive");
+            let mut buf = vec![0u8; body.len()];
+            let n = p.read_at(h, 0, &mut buf).expect("read_at through the alternate spelling");
+            p.close(h).expect("close");
+            assert_eq!(&buf[..n], body, "the alternate spelling read different bytes");
+        }
+        CaseMatch::Sensitive => {
+            assert!(
+                found_upper.is_none(),
+                "declares CaseMatch::Sensitive but resolved {upper}, the fold-equal \
+                 spelling of {seeded} — a composition may rely on that strictness"
+            );
+        }
+    }
+
+    // Non-ASCII, for providers that can seed their own file. `vfs_core::fold`
+    // is Unicode-aware; `to_ascii_lowercase` is not, and substituting one for
+    // the other passes every ASCII case above.
+    if p.capabilities().access == Access::ReadWrite {
+        let (h, _len, _) = p
+            .open(VPath::at_default("Über.txt"), OPEN_WRITE | crate::OPEN_CREATE)
+            .expect("open for write to seed the non-ASCII case");
+        p.write_at(h, 0, b"x").expect("seed write");
+        p.close(h).expect("close the seeded file");
+
+        let lower = p
+            .getattr(VPath::at_default("über.txt"))
+            .expect("getattr must not error on a differently-cased non-ASCII name");
+        match case {
+            CaseMatch::Insensitive => assert!(
+                lower.is_some(),
+                "declares CaseMatch::Insensitive but did not resolve über.txt after \
+                 seeding Über.txt — a Unicode-unaware fold (to_ascii_lowercase) \
+                 passes every ASCII case and fails exactly here"
+            ),
+            CaseMatch::Sensitive => assert!(
+                lower.is_none(),
+                "declares CaseMatch::Sensitive but resolved über.txt after seeding \
+                 Über.txt"
+            ),
+        }
+
+        p.remove(VPath::at_default("Über.txt")).expect("clean up the seeded file");
+    }
+}
+
 /// Run the conformance cases implied by `p`'s declared capabilities.
 ///
 /// Panics with a message naming the failing case. `p` must expose
@@ -488,6 +589,7 @@ pub fn assert_conformance(p: Arc<dyn Provider>) {
     );
 
     assert_common(&p);
+    assert_case(&p, caps.case);
     match caps.access {
         Access::SeqRead => assert_sequential(&p),
         Access::Read | Access::ReadWrite => assert_positional(&p),
