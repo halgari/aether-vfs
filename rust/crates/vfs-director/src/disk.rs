@@ -56,6 +56,124 @@ impl DiskProvider {
         }
         Ok(p)
     }
+
+    /// Case-fold-aware variant of [`DiskProvider::resolve`], for targets
+    /// where the host filesystem does not fold on its own.
+    ///
+    /// On Windows this costs nothing: NTFS already matches `rel`'s spelling
+    /// case-insensitively, so the exact path from `resolve` is already the
+    /// right one to hand to the OS.
+    #[cfg(windows)]
+    fn resolve_case_aware(&self, path: &str) -> Result<PathBuf, i32> {
+        self.resolve(path)
+    }
+
+    /// See the Windows arm above. Here the filesystem is byte-exact, so a
+    /// fold-equal spelling that misses byte-exactly needs
+    /// [`resolve_fold_equal`] to find the real on-disk entry before any
+    /// filesystem call is made — `resolve`'s exact path is used only as a
+    /// fallback when no such entry exists (i.e. this is a create).
+    #[cfg(not(windows))]
+    fn resolve_case_aware(&self, path: &str) -> Result<PathBuf, i32> {
+        let exact = self.resolve(path)?;
+        Ok(resolve_fold_equal(&self.root, path).unwrap_or(exact))
+    }
+}
+
+/// Resolve `rel` against `base` when the host filesystem is case-sensitive.
+///
+/// Exact path first — the hit costs one syscall and no allocation. On a miss,
+/// walk components, and for each one that does not exist byte-exactly, scan the
+/// containing directory for a fold-equal entry. This is what Wine does, and
+/// what `ciopfs` exists to avoid doing repeatedly.
+///
+/// Compares with [`vfs_core::fold`], never `to_ascii_lowercase`, and never
+/// hands a folded spelling to the filesystem: `casefold.rs` warns the fold is
+/// not NTFS-case-equivalence (`İ` folds to a genuinely different name), so the
+/// resolved *original* entry name is what gets opened.
+///
+/// `rel` is assumed already validated by the caller (`resolve_case_aware`
+/// calls `resolve` first, which rejects a bare `..` component) — but a `..`
+/// encountered here is still treated as an unmatched component rather than
+/// walked, so this function can never become an escape hatch around that
+/// check on its own.
+///
+/// Two or more siblings can be fold-equal on a case-sensitive filesystem
+/// (`A.esp` and `a.esp` coexisting is legal on ext4, impossible on NTFS).
+/// When that happens the lexicographically smallest byte spelling wins, so
+/// the choice is deterministic rather than dependent on `read_dir`'s
+/// unspecified order — not a claim that it is the "right" one, since there
+/// isn't a right one once the source directory itself is ambiguous.
+#[cfg(not(windows))]
+fn resolve_fold_equal(base: &std::path::Path, rel: &str) -> Option<PathBuf> {
+    // Exact spelling first: if it exists, this costs one stat and nothing
+    // else, and the entry it names is unambiguously the right one.
+    let mut exact = base.to_path_buf();
+    for part in rel.split('/') {
+        if !part.is_empty() {
+            exact.push(part);
+        }
+    }
+    if std::fs::symlink_metadata(&exact).is_ok() {
+        return Some(exact);
+    }
+
+    // Miss: walk components one at a time. `cur` accumulates the real
+    // on-disk path resolved so far. The moment a component cannot be
+    // resolved against the filesystem — it does not exist under any
+    // spelling, or `cur` turned out not to be a directory — stop resolving
+    // and keep that component, and everything after it, exactly as given.
+    // That is the common "this is a create, the target does not exist yet"
+    // case, and the point of stopping rather than giving up entirely is
+    // that the ancestry already resolved (by exact or fold match) must not
+    // be thrown away: a caller creating `data/new.txt` under an existing
+    // `Data/` must land inside `Data/`, not spawn a second, divergent
+    // `data/` directory beside it.
+    let mut cur = base.to_path_buf();
+    let mut parts = rel.split('/').filter(|p| !p.is_empty());
+    for part in parts.by_ref() {
+        if part == ".." {
+            return None;
+        }
+        let candidate = cur.join(part);
+        if std::fs::symlink_metadata(&candidate).is_ok() {
+            cur = candidate;
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&cur) else {
+            cur.push(part);
+            break;
+        };
+        let folded_part = vfs_core::fold(part);
+        let mut best: Option<std::ffi::OsString> = None;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            if vfs_core::fold(name_str) != folded_part {
+                continue;
+            }
+            best = match best {
+                Some(prev) if prev <= name => Some(prev),
+                _ => Some(name),
+            };
+        }
+        match best {
+            Some(name) => cur.push(name),
+            None => {
+                cur.push(part);
+                break;
+            }
+        }
+    }
+    // Anything left unconsumed (because the loop above broke out early)
+    // carries over verbatim: no more of it has a real on-disk entry to
+    // resolve against.
+    for rest in parts {
+        cur.push(rest);
+    }
+    Some(cur)
 }
 
 impl Provider for DiskProvider {
@@ -65,16 +183,15 @@ impl Provider for DiskProvider {
             immutable: false, // a real directory can change underneath us
             slow: false,
             preferred_block: None,
-            // True on Windows (NTFS folds); false on Linux until a later
-            // task in the case-fold plan fixes it. No conformance case
-            // reads this yet, so the window is latent, not breaking.
+            // True for free on Windows (NTFS folds); true by construction
+            // elsewhere via `resolve_case_aware`'s fold-scan.
             case: CaseMatch::Insensitive,
         }
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
         let path = p.rel;
-        let p = self.resolve(path)?;
+        let p = self.resolve_case_aware(path)?;
         let meta = match std::fs::metadata(&p) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -99,7 +216,7 @@ impl Provider for DiskProvider {
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
         let path = p.rel;
-        let p = self.resolve(path)?;
+        let p = self.resolve_case_aware(path)?;
         let rd = std::fs::read_dir(&p).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 not_found()
@@ -136,7 +253,7 @@ impl Provider for DiskProvider {
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         let path = p.rel;
-        let p = self.resolve(path)?;
+        let p = self.resolve_case_aware(path)?;
 
         if flags & OPEN_WRITE == 0 {
             let meta = std::fs::metadata(&p).map_err(|_| not_found())?;
@@ -209,12 +326,12 @@ impl Provider for DiskProvider {
     }
 
     fn mkdir(&self, p: VPath) -> Result<(), i32> {
-        let path = self.resolve(p.rel)?;
+        let path = self.resolve_case_aware(p.rel)?;
         std::fs::create_dir_all(&path).map_err(|_| map_io_err())
     }
 
     fn remove(&self, p: VPath) -> Result<(), i32> {
-        let path = self.resolve(p.rel)?;
+        let path = self.resolve_case_aware(p.rel)?;
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(not_found()),
@@ -244,8 +361,8 @@ impl Provider for DiskProvider {
         if from.root != to.root {
             return Err(bad_request());
         }
-        let from_path = self.resolve(from.rel)?;
-        let to_path = self.resolve(to.rel)?;
+        let from_path = self.resolve_case_aware(from.rel)?;
+        let to_path = self.resolve_case_aware(to.rel)?;
         std::fs::rename(&from_path, &to_path).map_err(|_| map_io_err())
     }
 
@@ -253,7 +370,7 @@ impl Provider for DiskProvider {
         if attr.size.is_none() && attr.mtime.is_none() {
             return Ok(());
         }
-        let path = self.resolve(p.rel)?;
+        let path = self.resolve_case_aware(p.rel)?;
         let f = File::options().write(true).open(&path).map_err(|_| map_io_err())?;
         if let Some(size) = attr.size {
             f.set_len(size).map_err(|_| map_io_err())?;
@@ -359,5 +476,61 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&sibling);
+    }
+
+    /// Fold-equal resolution must not depend on the host filesystem. On Windows
+    /// NTFS satisfies this for free; on Linux over ext4 nothing does, and a
+    /// FUSE mount serving a Windows program needs it either way.
+    #[test]
+    fn fold_equal_spellings_resolve_on_any_filesystem() {
+        let dir = std::env::temp_dir().join(format!("vfs-disk-fold-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("Data"));
+        std::fs::write(dir.join("Data").join("A.esp"), b"body").unwrap();
+
+        let p = DiskProvider::new(&dir);
+        for spelling in ["Data/A.esp", "data/a.esp", "DATA/A.ESP"] {
+            let st = p
+                .getattr(VPath::at_default(spelling))
+                .unwrap()
+                .unwrap_or_else(|| panic!("{spelling} did not resolve"));
+            assert_eq!(st.size, 4, "{spelling} resolved to the wrong entry");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Creating through a fold-equal spelling of an *existing* directory must
+    /// land inside that directory, not fork a second, divergently-cased one
+    /// beside it. A fold-scan that gives up entirely on a create (because the
+    /// leaf being created cannot itself be found) and falls back to a fully
+    /// byte-exact path would throw away the already-resolved ancestor and
+    /// reintroduce exactly the divergence this task exists to prevent — this
+    /// pins that the ancestor resolution survives the leaf being a miss.
+    #[test]
+    fn open_create_under_a_fold_equal_directory_does_not_fork_it() {
+        let dir = std::env::temp_dir().join(format!("vfs-diskcreatefold-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("Data"));
+
+        use vfs_provider::{Provider, OPEN_CREATE, OPEN_WRITE};
+        let p = DiskProvider::new(&dir);
+        let (h, _len, _is_dir) = p
+            .open(VPath::at_default("data/new.esp"), OPEN_WRITE | OPEN_CREATE)
+            .expect("create through a fold-equal directory spelling must succeed");
+        p.close(h).expect("close");
+
+        let top: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            top.iter().filter(|n| vfs_core::fold(n) == "data").count(),
+            1,
+            "creating through the fold-equal spelling `data` must land inside \
+             the existing `Data`, not spawn a second, divergently-cased \
+             directory: {top:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
