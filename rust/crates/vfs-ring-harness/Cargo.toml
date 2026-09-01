@@ -5,9 +5,27 @@ edition = "2021"
 
 [dependencies]
 vfs-ipc = { path = "../vfs-ipc" }
-vfs-win = { path = "../vfs-win" }
 vfs-protocol = { path = "../vfs-protocol" }
+
+# The platform mappings are the point of this crate's cross-boundary binaries,
+# and each only compiles on its own OS: `vfs-win` needs `windows-sys`, and
+# `vfs-unix` needs `libc`, which must never enter the Windows build graph.
+[target.'cfg(windows)'.dependencies]
+vfs-win = { path = "../vfs-win" }
+
+[target.'cfg(unix)'.dependencies]
+vfs-unix = { path = "../vfs-unix" }
 
 [[bin]]
 name = "vfs-ring-harness"
 path = "src/main.rs"
+
+# Two ends of one ring, deliberately separate binaries: the client is run under
+# Wine and the server natively, so they cannot be one process.
+[[bin]]
+name = "ring-file-server"
+path = "src/bin/ring-file-server.rs"
+
+[[bin]]
+name = "ring-file-client"
+path = "src/bin/ring-file-client.rs"
