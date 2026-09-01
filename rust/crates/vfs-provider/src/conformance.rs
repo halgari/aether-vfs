@@ -557,6 +557,11 @@ fn assert_case(p: &Arc<dyn Provider>, case: CaseMatch) {
         p.write_at(h, 0, b"x").expect("seed write");
         p.close(h).expect("close the seeded file");
 
+        // Guard the seed from here on: the assertions below are exactly the
+        // ones this check exists to fail, and a panic must not leave the
+        // seeded file behind in the provider's real backing store.
+        let _cleanup = SeedGuard { p, rel: "Über.txt" };
+
         let lower = p
             .getattr(VPath::at_default("über.txt"))
             .expect("getattr must not error on a differently-cased non-ASCII name");
@@ -573,8 +578,21 @@ fn assert_case(p: &Arc<dyn Provider>, case: CaseMatch) {
                  Über.txt"
             ),
         }
+    }
+}
 
-        p.remove(VPath::at_default("Über.txt")).expect("clean up the seeded file");
+/// Removes the seeded file even if an assertion below panics. Without this the
+/// cleanup runs only on the success path — and the failure path is the one this
+/// check exists to reach, so a provider that lies about its case behaviour would
+/// leave a stray file in its backing store for whatever runs next.
+struct SeedGuard<'a> {
+    p: &'a Arc<dyn Provider>,
+    rel: &'static str,
+}
+
+impl Drop for SeedGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.p.remove(VPath::at_default(self.rel));
     }
 }
 
