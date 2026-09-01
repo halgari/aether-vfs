@@ -334,7 +334,7 @@ impl Provider for CachingProvider {
 mod tests {
     use super::*;
     use crate::store::CacheConfig;
-    use vfs_provider::{RootId, KIND_FILE, OPEN_READ, OPEN_WRITE};
+    use vfs_provider::{CaseMatch, RootId, KIND_FILE, OPEN_READ, OPEN_WRITE};
 
     #[test]
     fn caching_provider_over_the_fixture_tree_passes_conformance() {
@@ -709,6 +709,8 @@ mod tests {
                 immutable: false,
                 slow: true,
                 preferred_block: None,
+                // getattr below compares `p.rel` to "f" by byte equality.
+                case: CaseMatch::Sensitive,
             }
         }
         fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {

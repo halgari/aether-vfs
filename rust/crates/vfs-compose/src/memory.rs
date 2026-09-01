@@ -41,8 +41,8 @@ use std::sync::Mutex;
 
 use vfs_provider::{
     bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, Access, Capabilities,
-    DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_EXCL,
-    OPEN_TRUNC,
+    CaseMatch, DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE,
+    OPEN_EXCL, OPEN_TRUNC,
 };
 
 fn normalize(path: &str) -> String {
@@ -137,7 +137,14 @@ impl Default for MemoryProvider {
 
 impl Provider for MemoryProvider {
     fn capabilities(&self) -> Capabilities {
-        Capabilities { access: Access::ReadWrite, immutable: false, slow: false, preferred_block: None }
+        // Sensitive until this provider folds — Tasks 3 and 4 of the case-fold plan.
+        Capabilities {
+            access: Access::ReadWrite,
+            immutable: false,
+            slow: false,
+            preferred_block: None,
+            case: CaseMatch::Sensitive,
+        }
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {

@@ -81,8 +81,8 @@ use napi::{Error, JsFunction, JsObject, JsUnknown, Result, Status, ValueType};
 use napi_derive::napi;
 
 use vfs_embed::{
-    Access, Capabilities, DirEntry, Handle, Provider as VfsProvider, SetAttr, Stat, VPath,
-    KIND_DIR, KIND_FILE, KIND_TOMBSTONE, ST_IO_ERROR, ST_NOT_SUPPORTED,
+    Access, Capabilities, CaseMatch, DirEntry, Handle, Provider as VfsProvider, SetAttr, Stat,
+    VPath, KIND_DIR, KIND_FILE, KIND_TOMBSTONE, ST_IO_ERROR, ST_NOT_SUPPORTED,
 };
 
 // ---------------------------------------------------------------------------
@@ -949,6 +949,12 @@ fn read_caps(obj: &JsObject) -> Result<Capabilities> {
         immutable,
         slow,
         preferred_block,
+        // Not yet exposed on the JS `capabilities` object — see the
+        // case-fold-contract plan's Definition of Done, which holds this
+        // surface unchanged apart from the field itself. Sensitive is the
+        // honest default: a plain JS object/Map is byte-exact, and this
+        // crate cannot ask an arbitrary JS provider whether it folds.
+        case: CaseMatch::Sensitive,
     };
     caps.validate().map_err(|e| {
         Error::from_reason(format!(

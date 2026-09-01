@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    map_io_err, not_found, Access, Capabilities, DirEntry, Handle, Provider, RootId, Stat, VPath,
-    KIND_DIR, KIND_FILE,
+    map_io_err, not_found, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId,
+    Stat, VPath, KIND_DIR, KIND_FILE,
 };
 
 /// The reference tree every conformance-tested provider must expose.
@@ -253,7 +253,15 @@ fn copy_at(body: &[u8], offset: u64, buf: &mut [u8]) -> usize {
 
 impl Provider for RwMemFixture {
     fn capabilities(&self) -> Capabilities {
-        Capabilities { access: Access::ReadWrite, immutable: false, slow: false, preferred_block: None }
+        // Backed by exact-keyed HashMaps (see `extra`/`base`); a fold-equal
+        // name that differs in case is a different key here.
+        Capabilities {
+            access: Access::ReadWrite,
+            immutable: false,
+            slow: false,
+            preferred_block: None,
+            case: CaseMatch::Sensitive,
+        }
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {

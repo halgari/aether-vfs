@@ -3,7 +3,10 @@
 use std::sync::Mutex;
 
 use tonic::transport::Channel;
-use vfs_provider::{map_io_err, Access, Capabilities, DirEntry, Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE};
+use vfs_provider::{
+    map_io_err, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, Stat, VPath,
+    KIND_DIR, KIND_FILE,
+};
 
 use crate::pb::source_client::SourceClient;
 use crate::pb::{Empty, GetAttrReq, OpenReq, ReadDirReq, ReadReq, ReleaseReq};
@@ -58,6 +61,11 @@ impl RemoteProvider {
             immutable: caps_resp.immutable,
             slow: caps_resp.slow,
             preferred_block: (caps_resp.preferred_block != 0).then_some(caps_resp.preferred_block),
+            // `CapsResp` (source.proto) has no case field yet, so an
+            // out-of-process source cannot report its own matching
+            // behavior. Sensitive is the honest default until the contract
+            // grows one: we have no evidence the remote side folds.
+            case: CaseMatch::Sensitive,
         };
 
         Ok(Self {

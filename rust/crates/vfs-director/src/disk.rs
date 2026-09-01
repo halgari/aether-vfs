@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use crate::ops::{
-    bad_request, exists, map_io_err, not_a_dir, not_found, Access, Capabilities, DirEntry,
-    Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_EXCL,
-    OPEN_TRUNC, OPEN_WRITE,
+    bad_request, exists, map_io_err, not_a_dir, not_found, Access, Capabilities, CaseMatch,
+    DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE,
+    OPEN_EXCL, OPEN_TRUNC, OPEN_WRITE,
 };
 
 pub struct DiskProvider {
@@ -65,6 +65,10 @@ impl Provider for DiskProvider {
             immutable: false, // a real directory can change underneath us
             slow: false,
             preferred_block: None,
+            // True on Windows (NTFS folds); false on Linux until a later
+            // task in the case-fold plan fixes it. No conformance case
+            // reads this yet, so the window is latent, not breaking.
+            case: CaseMatch::Insensitive,
         }
     }
 

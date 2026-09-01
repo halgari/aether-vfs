@@ -12,7 +12,8 @@ use std::sync::Mutex;
 
 use vfs_core::fold;
 use vfs_provider::{
-    Access, Capabilities, DirEntry, Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
+    Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE,
+    OPEN_WRITE,
 };
 use vfs_provider::{ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_NOT_A_DIRECTORY, ST_NOT_FOUND};
 
@@ -144,6 +145,8 @@ impl Provider for ZipProvider {
             immutable: true,
             slow: false,
             preferred_block: None,
+            // Path lookups fold (see the module doc and `by_fold` below).
+            case: CaseMatch::Insensitive,
         }
     }
 

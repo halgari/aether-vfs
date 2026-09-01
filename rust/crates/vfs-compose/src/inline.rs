@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use vfs_provider::{
-    bad_fh, bad_request, map_io_err, not_a_dir, not_found, Capabilities, DirEntry, Handle,
-    Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
+    bad_fh, bad_request, map_io_err, not_a_dir, not_found, Capabilities, CaseMatch, DirEntry,
+    Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
 
 struct FileData {
@@ -83,8 +83,10 @@ fn normalize(path: &str) -> String {
 
 impl Provider for InlineProvider {
     fn capabilities(&self) -> Capabilities {
+        // Sensitive until this provider folds — Tasks 3 and 4 of the case-fold plan.
         Capabilities {
             immutable: true,
+            case: CaseMatch::Sensitive,
             ..Capabilities::read_only()
         }
     }

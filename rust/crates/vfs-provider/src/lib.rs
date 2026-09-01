@@ -11,7 +11,7 @@ mod path;
 mod provider;
 mod status;
 
-pub use caps::{Access, Capabilities};
+pub use caps::{Access, Capabilities, CaseMatch};
 pub use conformance::{assert_conformance, write_fixture_tree, RwMemFixture, FIXTURE_FILES};
 pub use layout::overlay_layer_dir;
 pub use model::{DirEntry, Handle, SetAttr, Stat, KIND_DIR, KIND_FILE, KIND_TOMBSTONE};
