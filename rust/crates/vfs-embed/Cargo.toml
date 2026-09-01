@@ -31,9 +31,15 @@ vfs-compose = { path = "../vfs-compose" }
 # host-authored provider is expected to be wrapped in one (spec §8b).
 vfs-cache = { path = "../vfs-cache" }
 vfs-env = { path = "../vfs-env" }
+vfs-zip = { path = "../vfs-zip", optional = true }
+
+# Injection and the NT-hook shim are the Windows delivery mechanism. They are
+# gated in the manifest, not with cfg in source: `vfs-shim` pulls `retour` ->
+# `libudis86-sys`, whose build script is a C cross-compile that fails for a Linux
+# target before any of our code is reached.
+[target.'cfg(windows)'.dependencies]
 vfs-inject = { path = "../vfs-inject" }
 vfs-shim = { path = "../vfs-shim" }
-vfs-zip = { path = "../vfs-zip", optional = true }
 
 [dev-dependencies]
 # `vfs-zip` is optional above (the `zip` feature); tests use `ZipProvider`

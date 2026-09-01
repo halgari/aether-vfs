@@ -6,11 +6,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+// The shared-memory ring is the Windows delivery transport: `vfs_director::ipc`
+// holds the ring's OS handles and is `#[cfg(windows)]` in `vfs-director` itself
+// (the Linux side reaches the kernel through a different transport — see
+// docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md).
+// `Session::serve`/`launch`/`ipc()` are gated to match.
+#[cfg(windows)]
 use vfs_director::ipc::IpcServe;
 use vfs_director::stage::{stage_launch_into, ImageSource, StagedDir};
 use vfs_director::{Director, DiskProvider, MountGraph};
 use vfs_provider::{
-    bad_request, exists, map_io_err, Access, DirEntry, Provider, RootId, Stat, OPEN_READ,
+    bad_request, exists, map_io_err, overlay_layer_dir, Access, DirEntry, Provider, RootId, Stat,
+    OPEN_READ,
 };
 
 /// Serializes **every** process-global env mutation this crate performs —
@@ -282,7 +289,17 @@ pub struct Session {
     virtual_root: PathBuf,
     overlay: PathBuf,
     state_dir: PathBuf,
+    #[cfg(windows)]
     ipc: Option<IpcServe>,
+    /// Whether [`Session::serve`] has been called, tracked separately from
+    /// `ipc` on non-Windows targets: the ring (`IpcServe`) does not exist
+    /// there at all (see the `use vfs_director::ipc::IpcServe` comment above),
+    /// so there is no `Option<IpcServe>` to ask. [`Session::serve`] itself is
+    /// `#[cfg(not(windows))]`-stubbed to always fail until the Proton path
+    /// lands, so this stays `false` in practice — it exists so [`is_serving`]
+    /// keeps an identical signature on both targets.
+    #[cfg(not(windows))]
+    served: bool,
     /// Per-root composition inputs, keyed by the raw `u32` a `RootId` wraps.
     /// `Director` holds exactly one provider per root rather than a mergeable
     /// list, so every change to a root's inputs recomposes that root whole
@@ -335,7 +352,10 @@ impl Session {
             virtual_root: tmp.join("root"),
             overlay: tmp.join("overlay"),
             state_dir: tmp.join("state"),
+            #[cfg(windows)]
             ipc: None,
+            #[cfg(not(windows))]
+            served: false,
             roots: Mutex::new(BTreeMap::new()),
             extra_roots: Vec::new(),
             staged: Mutex::new(None),
@@ -391,7 +411,7 @@ impl Session {
     /// has actually written, and any writer/reader pair that disagrees on
     /// this path silently desyncs.
     pub fn overlay_layer_dir(&self, root: RootId) -> PathBuf {
-        vfs_shim::overlay_layer_dir(&self.overlay, root)
+        overlay_layer_dir(&self.overlay, root)
     }
 
     /// Declare a managed root: the host directory that `RootId(id)`
@@ -782,10 +802,26 @@ impl Session {
 
     /// Whether IPC workers are running (required before [`launch`]).
     pub fn is_serving(&self) -> bool {
-        self.ipc.is_some()
+        #[cfg(windows)]
+        {
+            self.ipc.is_some()
+        }
+        #[cfg(not(windows))]
+        {
+            self.served
+        }
     }
 
     /// Access the live IPC server (after [`serve`]) for probes / diagnostics.
+    ///
+    /// Windows-only, unlike every other method here: its return type is the
+    /// shared-memory ring itself (`vfs_director::ipc::IpcServe`), which does
+    /// not exist on other targets at all (see the `use` at the top of this
+    /// file) — there is no value a `#[cfg(not(windows))]` counterpart could
+    /// hand back with an identical signature, so none is provided. A host
+    /// that needs to know only *whether* a session is serving should use
+    /// [`Session::is_serving`], which is portable.
+    #[cfg(windows)]
     pub fn ipc(&self) -> Option<&IpcServe> {
         self.ipc.as_ref()
     }
@@ -882,6 +918,14 @@ impl Session {
 
     /// Start the control ring + workers so an injected child can remap I/O.
     /// Idempotent if already serving.
+    ///
+    /// Windows-only: the ring (`vfs_director::ipc::IpcServe`) is the Windows
+    /// delivery transport and does not exist on other targets — see the `use`
+    /// comment at the top of this file. The signature is identical on both
+    /// targets so a host compiles unchanged; on the Proton path (increment 2
+    /// of docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md) this
+    /// gains a real non-Windows body.
+    #[cfg(windows)]
     pub fn serve(&mut self) -> Result<(), String> {
         if self.ipc.is_some() {
             return Ok(());
@@ -927,6 +971,16 @@ impl Session {
 
         self.ipc = Some(ipc);
         Ok(())
+    }
+
+    /// Serve is Windows-only until the Proton path lands (increment 2 of
+    /// docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md). The
+    /// signature is identical on both targets so a host compiles unchanged.
+    #[cfg(not(windows))]
+    pub fn serve(&mut self) -> Result<(), String> {
+        Err("serve requires the Proton runtime, which is not implemented yet \
+             (see 2026-09-01-wine-hosted-shim-design.md, increment 2)"
+            .to_string())
     }
 
     /// Launch `opts.image` under the virtual root with dual-layer inject.
@@ -982,6 +1036,7 @@ impl Session {
     /// same names out of the child's own environment either way, so it does
     /// not move. Worth doing before a second host depends on the current
     /// shape.
+    #[cfg(windows)]
     pub fn launch(&self, opts: &LaunchOpts) -> Result<i32, String> {
         let ipc = self
             .ipc
@@ -1109,9 +1164,24 @@ impl Session {
         exit.map_err(|e| format!("launch: {e:?}"))
     }
 
+    /// Launch is Windows-only until the Proton path lands (increment 2 of
+    /// docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md). The
+    /// signature is identical on both targets so a host compiles unchanged.
+    #[cfg(not(windows))]
+    pub fn launch(&self, _opts: &LaunchOpts) -> Result<i32, String> {
+        Err("launch requires the Proton runtime, which is not implemented yet \
+             (see 2026-09-01-wine-hosted-shim-design.md, increment 2)"
+            .to_string())
+    }
+
     pub fn stop_serve(&mut self) {
+        #[cfg(windows)]
         if let Some(ipc) = self.ipc.take() {
             ipc.stop();
+        }
+        #[cfg(not(windows))]
+        {
+            self.served = false;
         }
     }
 }
@@ -1157,6 +1227,9 @@ fn from_hex(b: u8) -> u8 {
     }
 }
 
+// Only `launch`'s Windows body calls this (it resolves `vfs_inject`'s DLL/
+// payload pair), so it is gated alongside it.
+#[cfg(windows)]
 fn locate_shim_payload(opts: &LaunchOpts) -> Result<(String, String), String> {
     if let (Some(d), Some(p)) = (&opts.shim_dll, &opts.payload_dll) {
         return Ok((d.clone(), p.clone()));
