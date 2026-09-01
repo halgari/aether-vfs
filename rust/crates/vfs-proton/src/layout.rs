@@ -24,12 +24,12 @@ impl std::error::Error for InvalidTag {}
 
 impl Root {
     /// Resolves the base directory from the environment:
-    /// `$AETHER_VFS_HOME` if set, else `$XDG_DATA_HOME/aether-vfs`, else
+    /// `$VFS_HOME` if set, else `$XDG_DATA_HOME/aether-vfs`, else
     /// `$HOME/.local/share/aether-vfs`. On Windows, where `$HOME` is
     /// typically unset, falls back to `%LOCALAPPDATA%\aether-vfs` so the
     /// crate is usable for tests and development there.
     pub fn from_env() -> io::Result<Root> {
-        if let Ok(home) = std::env::var("AETHER_VFS_HOME") {
+        if let Ok(home) = std::env::var(vfs_env::HOME) {
             return Ok(Root::at(PathBuf::from(home)));
         }
         if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
@@ -43,7 +43,7 @@ impl Root {
         }
         Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "could not resolve a home directory: set AETHER_VFS_HOME, XDG_DATA_HOME, HOME, or (Windows) LOCALAPPDATA",
+            "could not resolve a home directory: set VFS_HOME, XDG_DATA_HOME, HOME, or (Windows) LOCALAPPDATA",
         ))
     }
 

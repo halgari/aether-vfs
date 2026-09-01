@@ -21,5 +21,6 @@ ureq = "3.4"
 sha2 = "0.11"
 tar = "0.4"
 flate2 = "1.1"
+vfs-env = { path = "../vfs-env" }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }

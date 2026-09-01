@@ -89,6 +89,14 @@ pub const VIRTUAL_DIR: &str = "VFS_VIRTUAL_DIR";
 pub const VIRTUAL_ROOTS: &str = "VFS_VIRTUAL_ROOTS";
 /// Directory for session state (ready flag, configs, logs).
 pub const STATE_DIR: &str = "VFS_STATE_DIR";
+/// Base directory aether-vfs owns: downloaded Proton runtimes, per-session
+/// prefixes, overlays. Defaults to `$XDG_DATA_HOME/aether-vfs`, then
+/// `$HOME/.local/share/aether-vfs`, and `%LOCALAPPDATA%\aether-vfs` on Windows.
+///
+/// Deliberately ours and never a system or Steam path: `umu` downloads Proton
+/// into `~/.local/share/Steam/compatibilitytools.d`, and not touching that is
+/// the point of acquiring runtimes ourselves.
+pub const HOME: &str = "VFS_HOME";
 /// Absolute path of the image to launch, normally the staged EXE. The shim also
 /// derives the staging directory from this, and serves that directory as an
 /// alias for the virtual root.
@@ -317,6 +325,7 @@ pub const ALL: &[Var] = &[
     Var { name: VIRTUAL_DIR, kind: Kind::Handshake, default: r"C:\GameLayers\runtime (see audit §2.6)" },
     Var { name: VIRTUAL_ROOTS, kind: Kind::Handshake, default: "none (root 0 only)" },
     Var { name: STATE_DIR, kind: Kind::Handshake, default: "session state dir" },
+    Var { name: HOME, kind: Kind::Handshake, default: "$XDG_DATA_HOME/aether-vfs" },
     Var { name: LAUNCH_IMAGE, kind: Kind::Handshake, default: "none; staging derives it" },
     Var { name: DISCOVERY_PATH, kind: Kind::Handshake, default: "platform default" },
     Var { name: READY_TIMEOUT_SECS, kind: Kind::Behaviour, default: "built-in timeout" },

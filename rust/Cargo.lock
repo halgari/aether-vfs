@@ -1991,6 +1991,7 @@ dependencies = [
  "sha2",
  "tar",
  "ureq",
+ "vfs-env",
 ]
 
 [[package]]
