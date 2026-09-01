@@ -475,10 +475,18 @@ fn read_all(p: &Arc<dyn Provider>, h: Handle, size: u64) -> Vec<u8> {
 
 /// Hold a provider to its declared [`CaseMatch`].
 ///
-/// Both directions are checked. A provider claiming `Insensitive` while
-/// matching byte-exactly is the §6b defect. A provider claiming `Sensitive`
-/// while folding is also a broken contract — a composition may have been built
-/// on the strictness it advertised.
+/// Only one direction is checked, and deliberately.
+///
+/// A provider claiming `Insensitive` while matching byte-exactly is the §6b
+/// defect, and that is asserted below. The converse is **not** asserted:
+/// since `Capabilities::weakest()` yields `Sensitive` whenever any child is,
+/// a composition can honestly declare `Sensitive` — the conservative "I
+/// promise nothing" answer — while still resolving fold-equal names on paths
+/// that fall through to a folding layer. `OverlayProvider` over a folding
+/// base is exactly that shape: its byte-exact upper starts empty, so a read
+/// falls through to the base and resolves a fold-equal spelling the upper
+/// never had a chance to reject. So `Sensitive` is the absence of a promise,
+/// and a provider that happens to fold is not violating it.
 ///
 /// Coverage is split by access level, and deliberately:
 ///
