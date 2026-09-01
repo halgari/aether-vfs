@@ -62,17 +62,20 @@ impl RemoteProvider {
             slow: caps_resp.slow,
             preferred_block: (caps_resp.preferred_block != 0).then_some(caps_resp.preferred_block),
             // `CapsResp` (source.proto) has no case field yet, so this side
-            // cannot verify what the remote backend actually does — this is
-            // a requirement on the remote backend, not something we observe.
-            // Insensitive because that is what the remote backend normally
-            // is (DiskProvider on NTFS today, MemoryProvider after case-fold
-            // task 3) and, more importantly, because RemoteProvider sits
-            // below the ring in production and receives vpaths the shim has
-            // already folded — the protocol effectively assumes fold-equal
-            // resolution regardless of what any given backend does. Carrying
-            // `case` on the wire so this can be verified rather than assumed
-            // is the real fix, deferred to a later increment.
-            case: CaseMatch::Insensitive,
+            // cannot observe what the remote backend actually does with a
+            // differently-cased spelling — it never sees the backend's
+            // filesystem or index, only whatever the wire hands back.
+            // `Sensitive` is the right answer for that: under this
+            // increment's own contract, `Insensitive` is a promise the
+            // *provider* makes about its own behavior, and `Sensitive` is
+            // simply the absence of one — never a claim that the backend is
+            // byte-exact. A `RemoteProvider` cannot make that promise on
+            // another process's behalf, however likely it is to hold in
+            // practice (DiskProvider on NTFS today, MemoryProvider after
+            // case-fold task 3). Carrying `case` on the wire, so this is
+            // actually verified instead of assumed, is the real fix,
+            // deferred to a later increment.
+            case: CaseMatch::Sensitive,
         };
 
         Ok(Self {
