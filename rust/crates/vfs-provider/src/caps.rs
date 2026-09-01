@@ -14,6 +14,35 @@ pub enum Access {
     ReadWrite,
 }
 
+/// How this provider matches a name it is given.
+///
+/// Declared, not probed — like every other capability here. The composition
+/// layer reads it to select conformance cases, and a future FUSE mount will
+/// read it to refuse a `Sensitive` provider outright, since a Windows program
+/// over one is broken by construction.
+///
+/// This exists because two delivery paths disagreed about the spelling a
+/// provider receives: the shim folds a vpath before sending it
+/// (`vfs-redirect`'s `match_canonical`), while a host-side caller
+/// (`vfs-embed`, `vfs-node`, this crate's conformance suite) sends the
+/// original case. A provider that resolves fold-equal names identically is
+/// correct under both, which is why the guarantee lives here rather than at
+/// either boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaseMatch {
+    /// Fold-equal names resolve to the same entry, where fold-equal means
+    /// `vfs_core::fold` — not `to_ascii_lowercase`, and not "the OS will
+    /// sort it out".
+    Insensitive,
+    /// No guarantee that fold-equal names resolve identically. Correct for a
+    /// provider over a case-sensitive store, and also the conservative
+    /// answer `weakest()` gives a composition whose layers disagree — such a
+    /// composition may still resolve fold-equal names on some paths, which
+    /// is why nothing is asserted about it. Not safe under a FUSE mount
+    /// serving a Windows program.
+    Sensitive,
+}
+
 /// A provider's declared capabilities.
 ///
 /// `immutable` and `slow` are orthogonal and the pair is what carries
@@ -29,12 +58,21 @@ pub struct Capabilities {
     pub slow: bool,
     /// Block-size hint for `cached`. `None` means "caller decides".
     pub preferred_block: Option<u32>,
+    /// How names are matched. See [`CaseMatch`]; `Insensitive` is what a
+    /// Windows-facing VFS must provide.
+    pub case: CaseMatch,
 }
 
 impl Capabilities {
     /// A fast, mutable, positional read-only provider — the common default.
     pub fn read_only() -> Self {
-        Capabilities { access: Access::Read, immutable: false, slow: false, preferred_block: None }
+        Capabilities {
+            access: Access::Read,
+            immutable: false,
+            slow: false,
+            preferred_block: None,
+            case: CaseMatch::Insensitive,
+        }
     }
 
     /// Reject self-contradictory declarations. Called at construction.
@@ -76,6 +114,10 @@ impl Capabilities {
                     preferred_block: match (acc.preferred_block, c.preferred_block) {
                         (Some(a), Some(b)) => Some(a.min(b)),
                         (a, b) => a.or(b),
+                    },
+                    case: match (acc.case, c.case) {
+                        (CaseMatch::Insensitive, CaseMatch::Insensitive) => CaseMatch::Insensitive,
+                        _ => CaseMatch::Sensitive,
                     },
                 },
             });
@@ -142,5 +184,36 @@ mod tests {
         let fast = Capabilities::read_only();
         let slow = Capabilities { slow: true, ..Capabilities::read_only() };
         assert!(Capabilities::weakest([fast, slow]).slow);
+    }
+
+    #[test]
+    fn read_only_declares_case_insensitive_because_that_is_what_windows_needs() {
+        assert_eq!(Capabilities::read_only().case, CaseMatch::Insensitive);
+    }
+
+    /// A graph is only as case-insensitive as its least-insensitive leaf. One
+    /// `Sensitive` child makes the whole composition `Sensitive`, the same way
+    /// one non-immutable child makes it mutable.
+    #[test]
+    fn weakest_is_case_sensitive_if_any_child_is() {
+        let ins = Capabilities::read_only();
+        let sen = Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() };
+        assert_eq!(Capabilities::weakest([ins, sen]).case, CaseMatch::Sensitive);
+        assert_eq!(Capabilities::weakest([sen, ins]).case, CaseMatch::Sensitive);
+    }
+
+    #[test]
+    fn weakest_stays_insensitive_when_all_children_are() {
+        let ins = Capabilities::read_only();
+        assert_eq!(Capabilities::weakest([ins, ins]).case, CaseMatch::Insensitive);
+    }
+
+    /// The combinators that pass access through must not silently reset case.
+    #[test]
+    fn the_passthrough_combinators_preserve_the_case_declaration() {
+        let sen = Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() };
+        assert_eq!(sen.seekable().case, CaseMatch::Sensitive);
+        assert_eq!(sen.cached().case, CaseMatch::Sensitive);
+        assert_eq!(sen.read_only_clamp().case, CaseMatch::Sensitive);
     }
 }

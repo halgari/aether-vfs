@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    map_io_err, not_found, Access, Capabilities, DirEntry, Handle, Provider, RootId, Stat, VPath,
-    KIND_DIR, KIND_FILE,
+    map_io_err, not_found, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId,
+    Stat, VPath, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE,
 };
 
 /// The reference tree every conformance-tested provider must expose.
@@ -71,7 +71,9 @@ impl Default for MemFixture {
 
 impl Provider for MemFixture {
     fn capabilities(&self) -> Capabilities {
-        Capabilities::read_only()
+        // `files` is a HashMap<String, Vec<u8>> keyed on the exact seeded
+        // spelling (see `build`/`getattr`/`open` below) — no folding.
+        Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() }
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
@@ -167,7 +169,11 @@ impl Default for SeqFixture {
 
 impl Provider for SeqFixture {
     fn capabilities(&self) -> Capabilities {
-        Capabilities { access: Access::SeqRead, immutable: true, ..Capabilities::read_only() }
+        // getattr/readdir/open all delegate straight to `inner`, so its case
+        // behavior (and anything else it declares beyond what we override
+        // here) is this fixture's case behavior too — not a second, separate
+        // claim that could drift from it.
+        Capabilities { access: Access::SeqRead, immutable: true, ..self.inner.capabilities() }
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
@@ -253,7 +259,15 @@ fn copy_at(body: &[u8], offset: u64, buf: &mut [u8]) -> usize {
 
 impl Provider for RwMemFixture {
     fn capabilities(&self) -> Capabilities {
-        Capabilities { access: Access::ReadWrite, immutable: false, slow: false, preferred_block: None }
+        // Backed by exact-keyed HashMaps (see `extra`/`base`); a fold-equal
+        // name that differs in case is a different key here.
+        Capabilities {
+            access: Access::ReadWrite,
+            immutable: false,
+            slow: false,
+            preferred_block: None,
+            case: CaseMatch::Sensitive,
+        }
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
@@ -459,6 +473,252 @@ fn read_all(p: &Arc<dyn Provider>, h: Handle, size: u64) -> Vec<u8> {
     out
 }
 
+/// Hold a provider to its declared [`CaseMatch`].
+///
+/// Only one direction is checked, and deliberately.
+///
+/// A provider claiming `Insensitive` while matching byte-exactly is the §6b
+/// defect, and that is asserted below. The converse is **not** asserted:
+/// since `Capabilities::weakest()` yields `Sensitive` whenever any child is,
+/// a composition can honestly declare `Sensitive` — the conservative "I
+/// promise nothing" answer — while still resolving fold-equal names on paths
+/// that fall through to a folding layer. `OverlayProvider` over a folding
+/// base is exactly that shape: its byte-exact upper starts empty, so a read
+/// falls through to the base and resolves a fold-equal spelling the upper
+/// never had a chance to reject. So `Sensitive` is the absence of a promise,
+/// and a provider that happens to fold is not violating it.
+///
+/// Coverage is split by access level, and deliberately:
+///
+/// - **Every provider** gets the ASCII check below, against `FIXTURE_FILES`.
+/// - **Writable providers** additionally get a non-ASCII check, because it can
+///   seed its own file. `FIXTURE_FILES` is ASCII-only (`a.txt`, `sub/b.txt`),
+///   so a read-only provider cannot be held to Unicode folding here — that
+///   coverage lives in each provider's own tests instead.
+///
+/// The non-ASCII case is not decoration: `to_ascii_lowercase` passes an
+/// ASCII-only suite, and this project shipped exactly that bug. `Data/ÜBER/a.esp`
+/// crossed the ring folded while every index below was keyed unfolded, so the
+/// file resolved to not-found — and `DiskProvider` hid it, because Windows folds
+/// Unicode itself.
+fn assert_case(p: &Arc<dyn Provider>, case: CaseMatch) {
+    // A file the fixture tree is known to contain, in its seeded spelling.
+    let (seeded, body) = FIXTURE_FILES[0];
+    let upper = seeded.to_uppercase();
+    if upper == seeded {
+        panic!(
+            "conformance: FIXTURE_FILES[0] ({seeded}) has no case variant, so the \
+             case cases cannot distinguish folded from exact matching"
+        );
+    }
+
+    let found_upper = p
+        .getattr(VPath::at_default(&upper))
+        .expect("getattr must not error on a differently-cased name, only report absence");
+
+    match case {
+        CaseMatch::Insensitive => {
+            let st = found_upper.unwrap_or_else(|| {
+                panic!(
+                    "declares CaseMatch::Insensitive but did not resolve {upper}, \
+                     the fold-equal spelling of the seeded {seeded}"
+                )
+            });
+            assert_eq!(
+                st.size,
+                body.len() as u64,
+                "resolved {upper} to an entry of the wrong size — it matched \
+                 something other than {seeded}"
+            );
+
+            // A handle opened through the alternate spelling must read the same
+            // bytes. `getattr` agreeing is not enough: the open path may key
+            // differently from the stat path.
+            //
+            // Split by access level, same as the rest of this suite:
+            // `read_at` defaults to `ST_NOT_SUPPORTED` for a provider that
+            // only implements `read_next` (`Access::SeqRead`), so calling it
+            // unconditionally here would fail a legitimate sequential
+            // provider that folds correctly, before `assert_sequential` ever
+            // gets to hold it to the sequential contract. `read_next` covers
+            // the same ground for that access level.
+            let (h, _len, _) = p
+                .open(VPath::at_default(&upper), OPEN_READ)
+                .expect("open must accept a fold-equal spelling when Insensitive");
+            let mut buf = vec![0u8; body.len()];
+            let n = match p.capabilities().access {
+                Access::SeqRead => {
+                    let mut total = 0;
+                    loop {
+                        let got = p
+                            .read_next(h, &mut buf[total..])
+                            .expect("read_next through the alternate spelling");
+                        if got == 0 {
+                            break;
+                        }
+                        total += got;
+                    }
+                    total
+                }
+                Access::Read | Access::ReadWrite => {
+                    p.read_at(h, 0, &mut buf).expect("read_at through the alternate spelling")
+                }
+            };
+            p.close(h).expect("close");
+            assert_eq!(&buf[..n], body, "the alternate spelling read different bytes");
+        }
+        // `Sensitive` is the absence of a fold-equal-resolution promise, not
+        // a promise that resolution is byte-exact. `weakest()` gives this
+        // answer to a composition whose layers disagree on case behaviour —
+        // e.g. an overlay with a byte-exact upper over a folding base — and
+        // such a composition can still legitimately resolve the fold-equal
+        // spelling on a path the byte-exact layer doesn't shadow. So there
+        // is nothing to assert here: a provider that happens to fold is not
+        // violating `Sensitive`.
+        CaseMatch::Sensitive => {}
+    }
+
+    // Non-ASCII, for providers that can seed their own file. `vfs_core::fold`
+    // is Unicode-aware; `to_ascii_lowercase` is not, and substituting one for
+    // the other passes every ASCII case above.
+    if p.capabilities().access == Access::ReadWrite {
+        // OPEN_CREATE is required alongside OPEN_WRITE: this file does not
+        // exist yet, and OPEN_WRITE alone only opens an *existing* file for
+        // write (see status.rs) — without OPEN_CREATE this seed fails
+        // ST_NOT_FOUND for every provider, not just a misbehaving one.
+        let (h, _len, _) = p
+            .open(VPath::at_default("Über.txt"), OPEN_WRITE | crate::OPEN_CREATE)
+            .expect("open for write to seed the non-ASCII case");
+        // Guard immediately, not after the write/close below: a panic in
+        // the seeding itself (either call can panic via `expect`) must not
+        // leave the seeded file behind in the provider's real backing
+        // store either, not just a panic in the assertions further down.
+        let _cleanup = SeedGuard { p, rel: "Über.txt" };
+        p.write_at(h, 0, b"x").expect("seed write");
+        p.close(h).expect("close the seeded file");
+
+        let lower = p
+            .getattr(VPath::at_default("über.txt"))
+            .expect("getattr must not error on a differently-cased non-ASCII name");
+        match case {
+            CaseMatch::Insensitive => assert!(
+                lower.is_some(),
+                "declares CaseMatch::Insensitive but did not resolve über.txt after \
+                 seeding Über.txt — a Unicode-unaware fold (to_ascii_lowercase) \
+                 passes every ASCII case and fails exactly here"
+            ),
+            // See the ASCII branch above: `Sensitive` promises nothing about
+            // fold-equal resolution, so a provider that resolves über.txt
+            // here is not in breach.
+            CaseMatch::Sensitive => {}
+        }
+    }
+
+    // Spec section 5's binding requirement, not decoration: "on a writable
+    // provider, require that writing through a differently-cased spelling
+    // hits the same entry rather than creating a sibling — which is
+    // precisely the section 6b failure." The cases above only ever
+    // create-then-look-up (`Über.txt`) or read (`upper`/`seeded`); neither
+    // is a write landing on an *existing* differently-cased entry, which is
+    // the shape spec 6b actually fails in. Gated on `Insensitive`: a
+    // `Sensitive` provider promises nothing about fold-equal resolution (see
+    // above), so holding one to this would fail a legitimately byte-exact
+    // writable provider like `RwMemFixture`.
+    if p.capabilities().access == Access::ReadWrite {
+        if let CaseMatch::Insensitive = case {
+            // (a) Writing through a differently-cased spelling of an
+            // *existing* file must hit that same entry: `seeded`/`upper`
+            // are the fixture file used above and its uppercase spelling.
+            let new_body = b"changed via the alternate spelling";
+            {
+                let (h, _, _) = p
+                    .open(VPath::at_default(&upper), OPEN_WRITE)
+                    .expect("open an existing fold-equal spelling for write, no OPEN_CREATE");
+                // Restore the fixture's original bytes even if an assertion
+                // below panics: `assert_positional`, which runs right after
+                // this function returns, expects `FIXTURE_FILES` untouched.
+                let _restore = RestoreGuard { p, rel: seeded, original: body };
+                p.write_at(h, 0, new_body).expect("write through the fold-equal spelling");
+                p.close(h).expect("close");
+
+                let (rh, _, _) = p
+                    .open(VPath::at_default(seeded), OPEN_READ)
+                    .expect("reopen through the originally-seeded spelling");
+                let mut buf = vec![0u8; new_body.len()];
+                let n = p.read_at(rh, 0, &mut buf).expect("read back through the seeded spelling");
+                p.close(rh).expect("close");
+                assert_eq!(
+                    &buf[..n],
+                    new_body,
+                    "writing through {upper} must hit the same entry as {seeded}, not create \
+                     a sibling — spec section 6b's failure mode, reached through a write \
+                     instead of a create"
+                );
+            }
+
+            // (b) Writing a *new* file through a differently-cased spelling
+            // of an existing directory must land inside that directory, not
+            // fork a divergently-cased sibling — the create-side half of
+            // the same requirement.
+            let new_child = "SUB/c.txt";
+            let (h, _, _) = p
+                .open(VPath::at_default(new_child), OPEN_WRITE | crate::OPEN_CREATE)
+                .expect("create under a fold-equal spelling of an existing directory");
+            p.close(h).expect("close");
+            let _cleanup = SeedGuard { p, rel: "sub/c.txt" };
+
+            let names: Vec<String> = p
+                .readdir(VPath::at_default("sub"))
+                .expect("readdir the existing directory")
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            assert!(
+                names.iter().any(|n| n == "c.txt"),
+                "creating through {new_child} must land inside the existing sub/, not fork \
+                 a divergently-cased sibling directory — sub/ contains {names:?}"
+            );
+        }
+    }
+}
+
+/// Removes the seeded file even if an assertion below panics. Without this the
+/// cleanup runs only on the success path — and the failure path is the one this
+/// check exists to reach, so a provider that lies about its case behaviour would
+/// leave a stray file in its backing store for whatever runs next.
+struct SeedGuard<'a> {
+    p: &'a Arc<dyn Provider>,
+    rel: &'static str,
+}
+
+impl Drop for SeedGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.p.remove(VPath::at_default(self.rel));
+    }
+}
+
+/// Restores `rel` to `original`'s exact bytes even if an assertion below
+/// panics. For the write-through-a-different-case case, which — unlike
+/// [`SeedGuard`]'s target — is not a file this suite created and may delete;
+/// it is a `FIXTURE_FILES` entry that `assert_positional` (run right after
+/// this function returns) expects to find untouched.
+struct RestoreGuard<'a> {
+    p: &'a Arc<dyn Provider>,
+    rel: &'static str,
+    original: &'static [u8],
+}
+
+impl Drop for RestoreGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok((h, _, _)) =
+            self.p.open(VPath::at_default(self.rel), OPEN_WRITE | crate::OPEN_TRUNC)
+        {
+            let _ = self.p.write_at(h, 0, self.original);
+            let _ = self.p.close(h);
+        }
+    }
+}
+
 /// Run the conformance cases implied by `p`'s declared capabilities.
 ///
 /// Panics with a message naming the failing case. `p` must expose
@@ -474,6 +734,7 @@ pub fn assert_conformance(p: Arc<dyn Provider>) {
     );
 
     assert_common(&p);
+    assert_case(&p, caps.case);
     match caps.access {
         Access::SeqRead => assert_sequential(&p),
         Access::Read | Access::ReadWrite => assert_positional(&p),
@@ -947,6 +1208,100 @@ mod tests {
     #[test]
     fn the_sequential_fixture_passes_its_own_suite() {
         assert_conformance(std::sync::Arc::new(SeqFixture::new()));
+    }
+
+    /// `SeqRead` + `Insensitive` — the combination Fix 2 exists for. Before
+    /// that fix, `assert_case` called `read_at` unconditionally for the
+    /// `Insensitive` read-back check, and `read_at` is `ST_NOT_SUPPORTED` by
+    /// contract for a `SeqRead` provider (`assert_sequential`, just above,
+    /// checks exactly that) — so a provider shaped like this one, honest
+    /// about *both* its access level and its case behavior, could not pass
+    /// conformance. It was latent in-tree only because [`SeqFixture`]
+    /// happens to be `Sensitive`, which skips the check entirely. This
+    /// fixture is deliberately different from `SeqFixture` in that one
+    /// respect, to close that gap.
+    ///
+    /// Folds with `to_ascii_lowercase`, not `vfs_core::fold`: `vfs-provider`
+    /// has zero dependencies, and `FIXTURE_FILES` is ASCII-only, so this is
+    /// only ever asked to fold ASCII here — the Unicode-fold requirement is
+    /// covered elsewhere, by providers that do depend on `vfs_core`.
+    struct SeqInsensitiveFixture {
+        inner: MemFixture,
+        next: AtomicU64,
+        /// Our handle -> (inner `MemFixture` handle, forward cursor).
+        opens: Mutex<HashMap<Handle, (Handle, u64)>>,
+    }
+
+    impl SeqInsensitiveFixture {
+        fn new() -> Self {
+            SeqInsensitiveFixture {
+                inner: MemFixture::new(),
+                next: AtomicU64::new(1),
+                opens: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn canonical(path: &str) -> Option<&'static str> {
+            // `sub` is the one implied directory `FIXTURE_FILES` has
+            // (`sub/b.txt`), and `MemFixture::getattr` special-cases it by
+            // its exact spelling — a fold-equal query for it needs the same
+            // rewrite `FIXTURE_FILES` entries get below.
+            if path.eq_ignore_ascii_case("sub") {
+                return Some("sub");
+            }
+            FIXTURE_FILES.iter().map(|(p, _)| *p).find(|p| p.eq_ignore_ascii_case(path))
+        }
+    }
+
+    impl Provider for SeqInsensitiveFixture {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                access: Access::SeqRead,
+                case: CaseMatch::Insensitive,
+                ..self.inner.capabilities()
+            }
+        }
+
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            match Self::canonical(p.rel) {
+                Some(real) => self.inner.getattr(VPath::new(p.root, real)),
+                None if p.rel.is_empty() => self.inner.getattr(p),
+                None => Ok(None),
+            }
+        }
+
+        fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+            self.inner.readdir(p)
+        }
+
+        fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+            let real = Self::canonical(p.rel).ok_or_else(not_found)?;
+            let (inner_h, size, is_dir) = self.inner.open(VPath::new(p.root, real), flags)?;
+            let h = self.next.fetch_add(1, Ordering::Relaxed);
+            self.opens.lock().map_err(|_| map_io_err())?.insert(h, (inner_h, 0));
+            Ok((h, size, is_dir))
+        }
+
+        fn close(&self, h: Handle) -> Result<(), i32> {
+            let inner_h = self.opens.lock().map_err(|_| map_io_err())?.remove(&h).map(|(ih, _)| ih);
+            match inner_h {
+                Some(ih) => self.inner.close(ih),
+                None => Ok(()),
+            }
+        }
+
+        fn read_next(&self, h: Handle, buf: &mut [u8]) -> Result<usize, i32> {
+            let mut g = self.opens.lock().map_err(|_| map_io_err())?;
+            let (inner_h, cursor) = g.get_mut(&h).ok_or_else(crate::bad_fh)?;
+            let n = self.inner.read_at(*inner_h, *cursor, buf)?;
+            *cursor += n as u64;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_sequential_case_insensitive_fixture_passes_its_own_suite() {
+        assert_conformance(std::sync::Arc::new(SeqInsensitiveFixture::new()));
     }
 
     #[test]

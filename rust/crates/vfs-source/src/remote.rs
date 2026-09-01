@@ -3,7 +3,10 @@
 use std::sync::Mutex;
 
 use tonic::transport::Channel;
-use vfs_provider::{map_io_err, Access, Capabilities, DirEntry, Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE};
+use vfs_provider::{
+    map_io_err, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, Stat, VPath,
+    KIND_DIR, KIND_FILE,
+};
 
 use crate::pb::source_client::SourceClient;
 use crate::pb::{Empty, GetAttrReq, OpenReq, ReadDirReq, ReadReq, ReleaseReq};
@@ -58,6 +61,21 @@ impl RemoteProvider {
             immutable: caps_resp.immutable,
             slow: caps_resp.slow,
             preferred_block: (caps_resp.preferred_block != 0).then_some(caps_resp.preferred_block),
+            // `CapsResp` (source.proto) has no case field yet, so this side
+            // cannot observe what the remote backend actually does with a
+            // differently-cased spelling — it never sees the backend's
+            // filesystem or index, only whatever the wire hands back.
+            // `Sensitive` is the right answer for that: under this
+            // increment's own contract, `Insensitive` is a promise the
+            // *provider* makes about its own behavior, and `Sensitive` is
+            // simply the absence of one — never a claim that the backend is
+            // byte-exact. A `RemoteProvider` cannot make that promise on
+            // another process's behalf, however likely it is to hold in
+            // practice (DiskProvider on NTFS today, MemoryProvider after
+            // case-fold task 3). Carrying `case` on the wire, so this is
+            // actually verified instead of assumed, is the real fix,
+            // deferred to a later increment.
+            case: CaseMatch::Sensitive,
         };
 
         Ok(Self {

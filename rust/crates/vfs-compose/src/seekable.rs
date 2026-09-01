@@ -249,7 +249,7 @@ impl Provider for SeekableProvider {
 mod tests {
     use super::*;
     use vfs_provider::conformance::SeqFixture;
-    use vfs_provider::{RwMemFixture, ST_NOT_SUPPORTED, OPEN_READ};
+    use vfs_provider::{CaseMatch, RwMemFixture, ST_NOT_SUPPORTED, OPEN_READ};
 
     fn seekable_seq() -> Arc<dyn Provider> {
         Arc::new(SeekableProvider::new(Arc::new(SeqFixture::new())))
@@ -379,7 +379,12 @@ mod tests {
         }
         impl Provider for BigSeq {
             fn capabilities(&self) -> Capabilities {
-                Capabilities { access: Access::SeqRead, ..Capabilities::read_only() }
+                // getattr below compares `p.rel` to "big.bin" by byte equality.
+                Capabilities {
+                    access: Access::SeqRead,
+                    case: CaseMatch::Sensitive,
+                    ..Capabilities::read_only()
+                }
             }
             fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
                 Ok(if p.rel == "big.bin" {

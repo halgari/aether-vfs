@@ -12,7 +12,15 @@ impl RootId {
 }
 
 /// A path as a provider sees it: normalized, forward-slash separated, no
-/// leading slash, provider root is `""`, original case preserved.
+/// leading slash, provider root is `""`.
+///
+/// **Case is the caller's, and a provider must not depend on it.** The shim
+/// folds a vpath before sending it (`vfs-redirect`'s `match_canonical`), while
+/// host-side callers — `vfs-embed`, `vfs-node`, this crate's conformance suite —
+/// send the original spelling. A provider therefore resolves fold-equal names
+/// identically unless it declares [`crate::CaseMatch::Sensitive`]. An earlier
+/// version of this comment said "original case preserved", which was true of
+/// only one of the two paths and is what spec §6b was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VPath<'a> {
     pub root: RootId,

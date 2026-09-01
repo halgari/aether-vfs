@@ -676,7 +676,7 @@ impl Provider for OverlayProvider {
 pub(crate) mod tests {
     use super::*;
     use crate::InlineProvider;
-    use vfs_provider::{OPEN_EXCL, OPEN_READ};
+    use vfs_provider::{CaseMatch, OPEN_EXCL, OPEN_READ};
 
     /// Slow and immutable, but sequential-only — exercises both the
     /// pass-through fields and the forced access/immutable overrides at once.
@@ -689,6 +689,9 @@ pub(crate) mod tests {
                 immutable: true,
                 slow: true,
                 preferred_block: Some(4096),
+                // Never resolves any name (see the stubs below), so
+                // fold-equal-resolves-identically holds vacuously.
+                case: CaseMatch::Insensitive,
             }
         }
         fn getattr(&self, _p: VPath) -> Result<Option<Stat>, i32> {
@@ -735,6 +738,8 @@ pub(crate) mod tests {
                 immutable: false,
                 slow: false,
                 preferred_block: None,
+                // Exact-keyed HashMap below: byte-exact, not fold-equal.
+                case: CaseMatch::Sensitive,
             }
         }
 
@@ -1056,7 +1061,8 @@ pub(crate) mod tests {
 
     impl Provider for FlakyReadBase {
         fn capabilities(&self) -> Capabilities {
-            Capabilities::read_only()
+            // getattr below compares `p.rel` to "big.bin" by byte equality.
+            Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() }
         }
         fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
             if p.rel.is_empty() {
