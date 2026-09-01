@@ -3,7 +3,7 @@
 
 use core::cell::Cell;
 use core::ffi::c_void;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock};
 
 // Host-side metadata probes from inside hooks must not re-enter detours
@@ -571,6 +571,34 @@ pub struct HookGuard {
     _detours: Vec<RawDetour>,
 }
 
+/// Detours `install_all_detours` passed over because the host's ntdll does not
+/// export the function. `BTreeSet::new()` is `const`, so this needs no lazy init.
+///
+/// Empty on Windows. Non-empty under Wine, whose ntdll omits the newer
+/// enumeration and query entry points. This exists so a skipped hook is a fact a
+/// host can read rather than an invisible gap: an unhooked handle-taking NT API
+/// does not error, it quietly serves the real directory instead of the composed
+/// one, which reads exactly like a mod list that is simply empty.
+static SKIPPED_DETOURS: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+
+fn note_skipped_detour(name: &'static str) {
+    if let Ok(mut s) = SKIPPED_DETOURS.lock() {
+        s.insert(name);
+    }
+}
+
+/// Names of hooks not installed because ntdll had no such export.
+///
+/// Empty means every hook this build knows about is live. A caller that requires
+/// total interception should treat a non-empty result as fatal rather than
+/// advisory — see [`SKIPPED_DETOURS`].
+pub fn skipped_detours() -> Vec<&'static str> {
+    SKIPPED_DETOURS
+        .lock()
+        .map(|s| s.iter().copied().collect())
+        .unwrap_or_default()
+}
+
 /// Resolve `name` in ntdll and build (not yet enabled) a detour to `hookfn`.
 unsafe fn make_detour(
     ntdll: HMODULE,
@@ -756,10 +784,37 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
         detours.extend([d_create, d_qattr, d_qfull, d_open]);
     }
 
-    let d_qdirex = make_detour(ntdll, c"NtQueryDirectoryFileEx", qdirex_hook as *const ())?;
-    TRAMP_QDIREX = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileExFn>(
-        d_qdirex.trampoline() as *const (),
-    ));
+    // Present since Win8, and optional for the same reason `NtQueryInformationByName`
+    // below is: a host may not export it. Measured against GE-Proton11-6
+    // (Wine 11.0 Staging), whose ntdll exports 18 of the 20 functions installed
+    // here and omits exactly these two.
+    //
+    // Skipping it costs no coverage on such a host. `make_detour` fails because
+    // `GetProcAddress` found nothing, and a symbol absent from ntdll's export
+    // table is equally unreachable for the game — it cannot be resolved
+    // dynamically and a static import against it would fail module load. So the
+    // only reachable enumeration entry point there is `NtQueryDirectoryFile`,
+    // hooked unconditionally just below.
+    //
+    // This is NOT licence to let enumeration go unhooked where the export does
+    // exist: on Windows both are present and both are hooked, and a caller on an
+    // unhooked enumeration path sees the real, near-empty folder and leaves no
+    // trace anywhere. `skipped_detours()` reports what was passed over so a host
+    // that expects total coverage can assert it rather than discover the hole
+    // from a mod list that silently reads empty.
+    if let Ok(d_qdirex) = make_detour(ntdll, c"NtQueryDirectoryFileEx", qdirex_hook as *const ()) {
+        TRAMP_QDIREX = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileExFn>(
+            d_qdirex.trampoline() as *const (),
+        ));
+        if d_qdirex.enable().is_ok() {
+            detours.push(d_qdirex);
+        } else {
+            TRAMP_QDIREX = None;
+        }
+    }
+    if TRAMP_QDIREX.is_none() {
+        note_skipped_detour("NtQueryDirectoryFileEx");
+    }
     // Both enumeration exports must be covered: whichever one the caller picks
     // decides whether it sees the composed tree or the real, near-empty folder
     // behind it, and a caller on the unhooked one leaves no trace anywhere.
@@ -839,8 +894,10 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
             TRAMP_QIBN = None;
         }
     }
+    if TRAMP_QIBN.is_none() {
+        note_skipped_detour("NtQueryInformationByName");
+    }
 
-    d_qdirex.enable().map_err(|_| InstallError::Detour)?;
     d_qdir.enable().map_err(|_| InstallError::Detour)?;
     d_delete.enable().map_err(|_| InstallError::Detour)?;
     d_close.enable().map_err(|_| InstallError::Detour)?;
@@ -858,7 +915,7 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     // Every enabled detour must be kept alive here: dropping one silently
     // un-patches it, which reads exactly like "the process never calls this".
     detours.extend([
-        d_qdirex, d_qdir, d_delete, d_close, d_qif, d_setinfo, d_read, d_write, d_csec, d_map,
+        d_qdir, d_delete, d_close, d_qif, d_setinfo, d_read, d_write, d_csec, d_map,
         d_unmap, d_qvol, d_lock, d_unlock, d_flush,
     ]);
 
