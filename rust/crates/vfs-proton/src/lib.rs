@@ -12,7 +12,9 @@
 //! be verified as GE-Proton. See [`runtime::verify_ge`].
 
 pub mod layout;
+pub mod release;
 pub mod runtime;
 
 pub use layout::Root;
+pub use release::{fetch_releases, parse_releases, pick, Release, ResolveError};
 pub use runtime::{cmp_tags, installed, verify_ge, VerifyError};
