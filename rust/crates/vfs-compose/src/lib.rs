@@ -3,6 +3,7 @@
 //! Full CoW write path (copy-up on first write) is partial: read-side whiteouts
 //! and upper-wins are implemented; create/write-through is M-Write follow-up.
 
+mod casefold;
 mod glob;
 mod inline;
 mod layered;
