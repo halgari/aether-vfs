@@ -5,11 +5,51 @@ on:
 jobs:
   rust-windows:
     runs-on: windows-latest
+    # A runner's default TMP sits under `C:\Users\RUNNER~1\AppData\Local\Temp`:
+    # the account is `runneradmin`, which exceeds eight characters, so the
+    # profile directory carries an 8.3 alias and **every path derived from
+    # `std::env::temp_dir()` carries it too**. Eleven tests failed for that
+    # reason alone — `vfs-redirect`'s two 8.3 unit tests plus nine
+    # `vfs-directord` e2e tests — while passing on any developer machine whose
+    # user name happens to fit in 8.3, which is why it went unnoticed for weeks.
+    #
+    # The defect those tests trip over is real but shallow in practice: a root
+    # *declared* in short form matches short paths and nothing else, including
+    # its own long-form paths. It does not arise in production, because a
+    # launcher's paths come from Steam config, the registry or a file picker,
+    # all long-form.
+    #
+    # Fixing it in `RootMap` was tried and reverted — `vfs-shim` derives overlay
+    # paths and seal decisions from the root's *as-declared* spelling, so
+    # expanding it in the map desynchronises the two views. Measured under a
+    # short-spelled TMP, that took the suite from 271 passed / 11 failed to
+    # 250 passed / 33 failed, the new failures landing in copy-up, write seals
+    # and junction sealing. See the `#[ignore]`d
+    # `a_root_declared_in_8dot3_form_recognises_its_long_form_paths` in
+    # `vfs-redirect/src/lib.rs`, which records the measurement so the next
+    # person to reach for that one-line fix finds out it has been tried.
+    #
+    # So the runner's TMP is what gets corrected, not the product. `vfstmp` is
+    # six characters, so Windows generates no 8.3 alias for it and nothing
+    # derived from it can carry one.
+    #
+    # Note this does NOT help a developer whose own Windows user name exceeds
+    # eight characters — they still see those eleven failures locally. The real
+    # two-layer fix is the answer there.
+    env:
+      TMP: C:\vfstmp
+      TEMP: C:\vfstmp
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # `TMP`/`TEMP` above only name the directory; nothing creates it, and code
+      # that writes straight into `temp_dir()` without a `create_dir_all` first
+      # would fail on a path that does not exist.
+      - name: Create an 8.3-free TMP
+        run: New-Item -ItemType Directory -Force -Path C:\vfstmp | Out-Null
+        shell: pwsh
       # The gate this project actually enforces by hand, made automatic. It was
       # absent while `cargo clippy --all-targets -- -D warnings` was a standing
       # requirement in every task brief — i.e. the standard was upheld only by

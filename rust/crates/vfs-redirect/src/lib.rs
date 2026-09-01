@@ -1599,6 +1599,96 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// The mirror of the test above, and the case that had no coverage: the
+    /// root is **declared** in its 8.3 form, and a long-form path under it
+    /// must still be recognised as inside.
+    ///
+    /// This is not symmetry for its own sake. `std::env::temp_dir()` returns
+    /// whatever `TMP` holds, and on a GitHub Windows runner `TMP` lives under
+    /// `C:\Users\RUNNER~1\...` — the account name `runneradmin` exceeds eight
+    /// characters, so the profile directory has an 8.3 alias and every path
+    /// derived from `temp_dir()` carries it. Eleven tests failed on CI for
+    /// this reason alone while passing on any machine whose user name happens
+    /// to fit in 8.3, which is why it went unnoticed: a root declared in short
+    /// form matched *nothing*, so every path under it looked like it belonged
+    /// to no one.
+    ///
+    /// That is the "content simply missing" failure `with_roots` already warns
+    /// about, arriving through the spelling of the root rather than through a
+    /// parse error.
+    ///
+    /// ## Why this is `#[ignore]`d rather than fixed
+    ///
+    /// The obvious fix — expand the declared root's 8.3 components in
+    /// `with_capacity`, so the root is stored in the spelling an unfolded path
+    /// presents — **was implemented and reverted.** It works at this layer and
+    /// breaks the layer above: measured under a short-spelled `TMP`, the
+    /// `vfs-directord`/`vfs-shim`/`vfs-redirect` suites went from 271 passed /
+    /// 11 failed to 250 passed / 33 failed.
+    ///
+    /// The reason is that `RootMap` is not the only thing that holds a root.
+    /// `vfs-shim` derives overlay paths and seal decisions from the root's
+    /// **as-declared** spelling, so expanding it here desynchronises the map's
+    /// view of the root from the shim's. The 22 new failures were concentrated
+    /// exactly there — copy-up, write seals, second-root overlays, and
+    /// `mo2_style_junction_inside_root_pointing_to_external_staging_is_sealed`.
+    ///
+    /// So a real fix has to align both views at once, which is a larger change
+    /// than the symptom warrants: a launcher gets its paths from Steam config,
+    /// the registry or a file picker, all long-form, so a short-spelled root
+    /// does not arise in production. CI hits it only because a GitHub runner's
+    /// `TMP` sits under `RUNNER~1`, and that is handled by pointing `TMP` at a
+    /// long-form directory in the workflow instead.
+    ///
+    /// This test stays, ignored, because the gap is real and the next person to
+    /// reach for the one-line fix should find out here that it has already been
+    /// tried and what it costs.
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "known gap: expanding the declared root here desynchronises vfs-shim's \
+                own view of it — see this test's doc comment for the measurement"]
+    fn a_root_declared_in_8dot3_form_recognises_its_long_form_paths() {
+        let base = std::env::temp_dir()
+            .join(format!("vfs-redirect-830-declared-{}", std::process::id()));
+        let long_name = "ThisIsALongRootDirectoryNameDeclaredShort";
+        let root_dir = base.join(long_name);
+        std::fs::create_dir_all(root_dir.join("Data")).unwrap();
+        std::fs::write(root_dir.join("Data").join("a.esp"), b"x").unwrap();
+        let long_root = root_dir.to_str().unwrap().to_string();
+
+        let short_root = match vfs_win::short_path_name(&long_root) {
+            Some(s) if !s.eq_ignore_ascii_case(&long_root) => s,
+            _ => {
+                // 8.3 generation disabled on this volume: there is no short
+                // spelling to declare, so nothing to test. Same convention as
+                // the sibling test above.
+                std::fs::remove_dir_all(&base).ok();
+                return;
+            }
+        };
+
+        // Declare the root by its SHORT spelling — the CI condition.
+        let map = RootMap::new(&short_root, VolumeMap::empty()).unwrap();
+
+        let raw = format!(r"{long_root}\Data\a.esp");
+        assert!(
+            map.contains(&raw),
+            "a root declared as {short_root} did not recognise its own long-form \
+             path as inside: {raw}"
+        );
+
+        // And the short spelling must keep working, so the fix is an addition
+        // rather than a swap of which spelling is privileged.
+        let raw_short = format!(r"{short_root}\Data\a.esp");
+        assert!(
+            map.contains(&raw_short),
+            "a root declared as {short_root} stopped recognising the spelling it \
+             was declared with: {raw_short}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     /// A resolution that never left the raw string (pure `canonicalise` +
     /// component match, no OS call) is a deterministic function of its input
     /// and is safe to cache: the second lookup of the same raw spelling must
