@@ -575,67 +575,41 @@ test('6. the game writes an INI into memory() and the host reads back what it wr
 // The same round trip on a path with a capital letter in it — which is every INI
 // the spec's own example names (`Skyrim.ini`, `SkyrimPrefs.ini`).
 //
-// **The mechanism, measured rather than guessed.** The shim folds vpath
-// components to lower case before they cross the ring; `MemoryProvider` is
-// case-sensitive by design (spec §10: *"a case-sensitive provider gains
-// correctness from the `casefold` combinator rather than from every provider
-// reimplementing folding"*). So the child's write to `Skyrim.ini` creates
-// `skyrim.ini` beside the host's `Skyrim.ini`, the host reading back with the
-// original case gets its own stale bytes, and **nothing anywhere reports an
-// error**. `readdir` shows one entry rather than two only because the director
-// dedupes listings by folded name.
+// **The hole, and how it closed.** The shim folds vpath components to lower
+// case before they cross the ring. `MemoryProvider` used to key a plain
+// `HashMap` on the exact string it was given, so a child's write to
+// `Skyrim.ini` arrived as `skyrim.ini` and created a *second* entry beside the
+// host's `Skyrim.ini` — nothing anywhere reported an error. That was spec
+// §6b: a provider matching byte-exactly worked for one caller (host-side,
+// original spelling) and silently failed the other (shim-side, folded).
 //
-// `casefold(p)` is spec §6's ninth primitive and the fix; it does not exist in
-// Rust, so this is not something the binding can compose its way out of. The
-// assertion states the behaviour a host is entitled to, so a fix turns it green
-// for the right reason, while a passing test asserting today's behaviour would
-// freeze the bug in place.
-//
-// ## `test.fails`, and the two things not to do to it
-//
-// This was `{ todo: … }` under node:test. In vitest it is **`test.fails`, never
-// `skip` and never `todo`** — a skip deletes exactly the evidence this test
-// exists to preserve and leaves a green name behind. `test.fails` is also a
-// *stricter* contract than node's `todo`: node tolerates a todo that passes,
-// while `test.fails` goes red with `Expected test to fail` the day `casefold`
-// lands. That is the direction to be strict in.
-//
-// **Do not add a `throw` to the wrapper below for the "it started passing" case.**
-// Task 1 did, and it silently defeated the whole mechanism: a throw inside a
-// `.fails` body is precisely what `.fails` is looking for, so a passing todo
-// reported green. Verified then by a two-todo probe. The `catch` here only logs
-// and rethrows, because vitest prints nothing for a `.fails` test that duly
-// failed and the failing assertion is the entire point of this one.
-test.fails(
-  '6b. a capitalised path in memory() (known-failing — §6 casefold does not exist)',
+// `MemoryProvider` now declares `CaseMatch::Insensitive` and keeps a second
+// index, `by_fold`, mapping each entry's folded name to its literal key. A
+// lookup tries the exact string first and, only on a miss, consults `by_fold`
+// — so the write from the injected child still lands under the literal key
+// `Skyrim.ini` the host seeded, and both the folded and unfolded names resolve
+// to the same entry. This test used to be `test.fails`, pinning the hole
+// open; it is an ordinary passing test now that the fix is in place.
+test(
+  '6b. a capitalised path in memory() resolves through the fold index',
   async () => {
     const t = teardown();
-    const why =
-      'the shim folds the vpath; memory() is case-sensitive; the write lands beside the seed';
-    try {
-      const { s, root, src } = memoryRoundTrip(t, 'memory-fold');
-      // Seed under a capitalised name, exactly as spec §8's example does.
-      s.mount(0, memory({ 'Skyrim.ini': '[General]\nuGridsToLoad=5\n' }), 'caps');
-      const code: number = s.launch('probe.exe', {
-        args: [src, path.join(root, 'caps', 'Skyrim.ini')],
-        wait: true,
-      });
-      assert.strictEqual(code, 0, 'the child believes it wrote');
-      assert.deepStrictEqual(s.rejectedWrites(), [], 'and nothing refused it');
-      // The evidence, printed whether the assertion below holds or not.
-      console.log(`    readdir('caps') = ${JSON.stringify(names(s.readdir('caps')))}`);
-      assert.match(
-        s.readFile('caps/Skyrim.ini').toString(),
-        /uGridsToLoad=7/,
-        'the host must read back what the game wrote, under the name it seeded'
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.log(
-        `    known-failing (node:test todo -> test.fails): ${why}\n` +
-          `    the assertion still fails, as intended: ${message}`
-      );
-      throw err;
-    }
+    const { s, root, src } = memoryRoundTrip(t, 'memory-fold');
+    // Seed under a capitalised name, exactly as spec §8's example does.
+    s.mount(0, memory({ 'Skyrim.ini': '[General]\nuGridsToLoad=5\n' }), 'caps');
+    const code: number = s.launch('probe.exe', {
+      args: [src, path.join(root, 'caps', 'Skyrim.ini')],
+      wait: true,
+    });
+    assert.strictEqual(code, 0, 'the child believes it wrote');
+    assert.deepStrictEqual(s.rejectedWrites(), [], 'and nothing refused it');
+    // The write happened through the shim's folded path (`skyrim.ini`), but the
+    // fold index means it landed on the same entry the host seeded.
+    console.log(`    readdir('caps') = ${JSON.stringify(names(s.readdir('caps')))}`);
+    assert.match(
+      s.readFile('caps/Skyrim.ini').toString(),
+      /uGridsToLoad=7/,
+      'the host reads back what the game wrote, under the name it seeded'
+    );
   }
 );
