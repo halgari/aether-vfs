@@ -9,6 +9,15 @@
 //! exists to prove the same guarantee holds at the layer a caller actually
 //! uses, through a real `serve()` + `launch()` session rather than a
 //! hand-built `RunConfig`.
+//!
+//! **Whole target is Windows-only.** It needs a live ring, a real
+//! `CreateProcess` and DLL injection, and the three Windows fixture artifacts
+//! `ensure_fixtures` locates; `Session::serve`/`launch` have no non-Windows
+//! body yet (increment 2 of
+//! docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md). Gated at the
+//! crate root of the target rather than per item, since there is only the one
+//! test and every helper here exists to serve it.
+#![cfg(windows)]
 
 use std::sync::Arc;
 

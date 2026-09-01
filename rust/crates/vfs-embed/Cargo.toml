@@ -44,8 +44,12 @@ vfs-shim = { path = "../vfs-shim" }
 [dev-dependencies]
 # `vfs-zip` is optional above (the `zip` feature); tests use `ZipProvider`
 # whether or not that feature is on, so it is unconditional here. `vfs-shim`
-# is NOT repeated — it is a plain dependency above and a duplicate entry only
-# looks like the two serve different purposes.
+# is NOT repeated — it is a `cfg(windows)` dependency above, and the one test
+# that names it (`zip_serve_integrity::ring_client_reads_are_byte_exact`) is
+# `#[cfg(windows)]` to match. Adding it here unconditionally would drag
+# `retour` -> `libudis86-sys` into the Linux dev graph, where its build script
+# is a C cross-compile that fails before any of our code is reached — the same
+# reason the dependency is gated in the first place.
 vfs-zip = { path = "../vfs-zip" }
 # Ring wire codecs, for the tests that drive a served session over the ring
 # the way the injected shim does.

@@ -121,7 +121,26 @@ impl SharedMapping {
 
     /// Map a read/write view of an existing file at `path`, which must already
     /// be at least `size` bytes. See [`Self::create_file_backed`].
+    ///
+    /// A shorter file is **refused**. `CreateFileMappingW` with a nonzero size
+    /// would otherwise extend the file to `size` and return success, which
+    /// contradicts the "must already be" above and diverges from
+    /// `vfs_unix::FileMapping::open`, the deliberate mirror of this function.
+    /// The divergence matters across the boundary: silently growing a short
+    /// file hands the ring code a zero-filled segment, which surfaces as an
+    /// `IpcError::Layout` about a missing magic rather than as the length
+    /// mismatch it actually is.
     pub fn open_file_backed(path: &Path, size: usize) -> io::Result<Self> {
+        // Checked before the mapping is created, not after: once
+        // `CreateFileMappingW` succeeds the file has already been extended, and
+        // an error returned at that point leaves the damage behind.
+        let actual = std::fs::metadata(path)?.len();
+        if actual < size as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("backing file is {actual} bytes, need at least {size}"),
+            ));
+        }
         let file = open_backing(path, false)?;
         let (size_high, size_low) = split_size(size)?;
         // SAFETY: FFI. As in `create_file_backed`.
@@ -365,5 +384,19 @@ mod tests {
         let p = temp_path("absent-xyz");
         let _ = std::fs::remove_file(&p);
         assert!(SharedMapping::open_file_backed(&p, 64 * 1024).is_err());
+    }
+
+    #[test]
+    fn file_backed_open_too_short_file_errors_rather_than_growing_it() {
+        let p = temp_path("short");
+        let _ = std::fs::remove_file(&p);
+        std::fs::write(&p, [0u8; 128]).unwrap();
+        assert!(SharedMapping::open_file_backed(&p, 64 * 1024).is_err());
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().len(),
+            128,
+            "a refused open must not have grown the file"
+        );
+        let _ = std::fs::remove_file(&p);
     }
 }

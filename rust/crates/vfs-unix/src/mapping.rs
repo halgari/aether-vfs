@@ -28,18 +28,33 @@ unsafe impl Send for FileMapping {}
 unsafe impl Sync for FileMapping {}
 
 impl FileMapping {
-    /// Create or truncate `path` to exactly `size` bytes and map it shared.
+    /// Create `path` if it does not exist, ensure it is **at least** `size`
+    /// bytes, and map that many bytes shared.
+    ///
+    /// **Grow-only: an existing file longer than `size` is left at its current
+    /// length, never truncated.** Truncating is not a tidiness question here.
+    /// Another process may already hold a live `MAP_SHARED` mapping of this
+    /// path — a second Director on the same ring file is the ordinary case —
+    /// and shortening a file below a mapped length does not make that process's
+    /// accesses fail, it makes them raise SIGBUS. So a `create` that truncated
+    /// would kill the first Director from inside the second one's setup path.
+    ///
+    /// Stale content from a previous, longer occupant is not a concern:
+    /// `vfs_ipc::ring::init` overwrites the header and geometry, and it is
+    /// exactly that write which makes the segment usable to either side.
     pub fn create(path: &Path, size: usize) -> io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .truncate(true)
             .open(path)?;
         // Size the file before mapping. `mmap` past EOF succeeds and then
         // SIGBUSes on first touch, which would surface as a crash in the
-        // Director rather than an error at setup.
-        file.set_len(size as u64)?;
+        // Director rather than an error at setup. Grow only — see above.
+        let actual = file.metadata()?.len();
+        if actual < size as u64 {
+            file.set_len(size as u64)?;
+        }
         Self::map(&file, size)
     }
 
@@ -81,10 +96,27 @@ impl FileMapping {
             return Err(io::Error::last_os_error());
         }
         let ptr = ptr as *mut u8;
-        // SAFETY: `ptr` is valid for `size` bytes until this value is dropped,
-        // and `mmap` returns page-aligned memory, satisfying the ring's 8-byte
-        // atomics. The file descriptor may be closed now: the mapping keeps its
-        // own reference to the underlying file.
+        // SAFETY: `mmap` returned page-aligned memory, satisfying the ring's
+        // 8-byte atomics, and the file descriptor may be closed now — the
+        // mapping keeps its own reference to the underlying file object.
+        //
+        // `ptr` is valid for `size` bytes for this value's lifetime **provided
+        // no process truncates the backing file below `size`**. That proviso is
+        // not something this type can enforce, and it is not a soft one: a
+        // `MAP_SHARED` mapping over a file shortened under it does not begin
+        // returning errors, it delivers **SIGBUS** on the next touch of a page
+        // beyond the new end of file. That is an uncatchable fault killing the
+        // process, not an `io::Result` any caller could handle. Windows is
+        // accidentally immune (`ERROR_USER_MAPPED_FILE` refuses the truncation);
+        // here nothing refuses it.
+        //
+        // What upholds the proviso is therefore the protocol, not the code
+        // below: `Self::create` is grow-only and never shrinks an existing file
+        // (see its docs), and no other path in this crate calls `set_len` /
+        // `ftruncate` on a mapped path. Any caller that shortens or replaces a
+        // live ring file by some other means — `set_len`, `O_TRUNC`, a
+        // `rename`-over followed by a shorter write — breaks this invariant and
+        // crashes whoever still holds the mapping.
         #[allow(unsafe_code)]
         let seg = unsafe { SharedSeg::from_raw(ptr, size) };
         Ok(Self { ptr, len: size, seg })
@@ -144,13 +176,40 @@ mod tests {
 
     #[test]
     fn create_sizes_the_file_so_a_mapping_cannot_fault_on_touch() {
-        // mmap beyond EOF succeeds and then SIGBUSes on access. The file is
-        // ftruncate'd to `size` precisely so that cannot happen.
+        // mmap beyond EOF succeeds and then SIGBUSes on access. `create` grows
+        // the file to at least `size` precisely so that cannot happen.
         let p = temp_path("sized");
         let _ = std::fs::remove_file(&p);
         let m = FileMapping::create(&p, 64 * 1024).unwrap();
         assert_eq!(std::fs::metadata(&p).unwrap().len(), 64 * 1024);
         drop(m);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn create_never_shrinks_an_existing_file() {
+        // A second Director on the same ring path must not truncate the first
+        // one's live mapping out from under it: MAP_SHARED over a shortened file
+        // SIGBUSes on next touch rather than failing cleanly.
+        let p = temp_path("noshrink");
+        let _ = std::fs::remove_file(&p);
+        let big = FileMapping::create(&p, 128 * 1024).unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().len(), 128 * 1024);
+        let small = FileMapping::create(&p, 64 * 1024).unwrap();
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().len(),
+            128 * 1024,
+            "create must grow-only; shrinking would SIGBUS the live mapping"
+        );
+        // The first mapping is still usable.
+        // SAFETY: `big` maps 128 KiB of a file still at least that long.
+        #[allow(unsafe_code)]
+        unsafe {
+            big.as_mut_ptr().add(100 * 1024).write_volatile(0xCD);
+            assert_eq!(big.as_mut_ptr().add(100 * 1024).read_volatile(), 0xCD);
+        }
+        drop(small);
+        drop(big);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -199,6 +258,11 @@ mod tests {
         let _ = std::fs::remove_file(&p);
         std::fs::write(&p, [0u8; 128]).unwrap();
         assert!(FileMapping::open(&p, 64 * 1024).is_err());
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().len(),
+            128,
+            "a refused open must not have grown the file"
+        );
         let _ = std::fs::remove_file(&p);
     }
 }

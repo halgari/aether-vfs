@@ -341,6 +341,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Drives the live shared-memory ring end to end, so it is Windows-only:
+    // `Session::serve` has no non-Windows body yet and `Session::ipc` (used
+    // below) does not exist there at all — increment 2 of
+    // docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md.
+    #[cfg(windows)]
     #[test]
     fn session_serve_and_ring_read() {
         use vfs_protocol::{

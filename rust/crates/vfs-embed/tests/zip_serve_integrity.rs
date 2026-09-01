@@ -196,6 +196,11 @@ fn real_archive_matches_native_extract() {
 /// ring slot. A mis-indexed bank or mismatched response would corrupt data
 /// silently — the director would still be byte-exact, and only the game would
 /// see garbage.
+// `vfs_shim` (the ring client this drives) is in the `cfg(windows)` dependency
+// table, and `Session::serve` has no non-Windows body yet — increment 2 of
+// docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md. Every other
+// test in this file is portable and stays ungated.
+#[cfg(windows)]
 #[test]
 fn ring_client_reads_are_byte_exact() {
     let dir = tmp("ring");

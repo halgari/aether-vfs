@@ -4,6 +4,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+// Only `launch`'s Windows body has a timeout to express; gated with it so a
+// Linux `--tests` check is warning-free.
+#[cfg(windows)]
 use std::time::Duration;
 
 // The shared-memory ring is the Windows delivery transport: `vfs_director::ipc`
@@ -36,6 +39,10 @@ use vfs_provider::{
 /// more still. Serializing our own writers is the floor, not the fix; the fix
 /// is to stop touching process env at all and hand `CreateProcessW` an
 /// explicit environment block built for the child (see [`Session::launch`]).
+///
+/// Windows-only, like the two methods that take it: `serve` and `launch` are
+/// the only writers of process env here, and both are `#[cfg(windows)]`.
+#[cfg(windows)]
 static LAUNCH_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Options for [`Session::launch`].
@@ -146,8 +153,13 @@ pub struct StageOpts<'a> {
 /// Reads whole files out of a session's own composed graph, for
 /// [`vfs_director::stage`]. Root 0: staging always concerns the launched
 /// image, which lives in the game-directory root.
+/// Windows-only: the sole constructor is `launch`'s staging step, which is
+/// itself `#[cfg(windows)]`. `stage_launch` stays portable — it takes any
+/// `&dyn ImageSource` a host supplies.
+#[cfg(windows)]
 struct KernelSource(Arc<Director>);
 
+#[cfg(windows)]
 impl ImageSource for KernelSource {
     fn read(&self, vpath: &str) -> Option<Vec<u8>> {
         let (fh, size, is_dir) = self.0.open(RootId::DEFAULT, vpath, OPEN_READ).ok()?;
@@ -474,6 +486,9 @@ impl Session {
     /// mechanism by which a `declare_root(0, …)` was silently discarded —
     /// dropping it keeps the invariant in one place, where it is enforced
     /// rather than compensated for.
+    /// Windows-only: its one caller is `serve`'s `apply_env_roots`, and the
+    /// ring's env protocol does not exist on other targets.
+    #[cfg(windows)]
     fn extra_roots_env(&self) -> Vec<(u32, String)> {
         debug_assert!(
             !self.extra_roots.iter().any(|(id, _)| *id == 0),
@@ -1194,12 +1209,18 @@ impl Default for Session {
 
 /// Protocol golden `empty-tree-snapshot`: a single empty root directory.
 /// Kept inline so `vfs-director` does not need the vfs-core bridge just for this.
+///
+/// Windows-only with its two helpers below: the only consumer is `serve`'s
+/// `shim.cfg` write, and the shim config is part of the Windows delivery
+/// mechanism.
+#[cfg(windows)]
 const EMPTY_TREE_SNAPSHOT_HEX: &str = "\
 535346560100000000000000000000008000000000000000010000003000000000000000\
 800000000000000080000000000000000000000080000000000000000000000000000000\
 800000000000000000000000000000000000000000000000000000000000000000000000\
 0000000000000000000000000000000000000000";
 
+#[cfg(windows)]
 fn empty_tree_snapshot() -> Vec<u8> {
     let hex = EMPTY_TREE_SNAPSHOT_HEX.as_bytes();
     debug_assert_eq!(
@@ -1218,6 +1239,7 @@ fn empty_tree_snapshot() -> Vec<u8> {
     out
 }
 
+#[cfg(windows)]
 fn from_hex(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',
