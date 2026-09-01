@@ -1770,6 +1770,7 @@ version = "0.1.0"
 dependencies = [
  "vfs-ipc",
  "vfs-protocol",
+ "vfs-unix",
  "vfs-win",
 ]
 
