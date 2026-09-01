@@ -1,0 +1,21 @@
+[package]
+name = "vfs-unix"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Unix-side OS handles for the ring: file-backed shared memory"
+
+[lib]
+name = "vfs_unix"
+path = "src/lib.rs"
+
+[dependencies]
+vfs-ipc = { path = "../vfs-ipc" }
+
+# The single external dependency, and the reason this crate exists rather than
+# the mapping living in `vfs-ipc`: Rust's std has no `mmap`, `vfs-ipc` has no
+# external dependencies at all, and `libc` appears nowhere else in this
+# workspace. Confining it to a `cfg(unix)` table keeps it out of every existing
+# crate's graph and off the Windows build entirely.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

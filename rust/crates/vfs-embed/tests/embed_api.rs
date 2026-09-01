@@ -12,9 +12,13 @@
 use std::sync::Arc;
 
 use vfs_embed::{
-    rejected_writes, reset_rejected_writes, DiskProvider, InlineProvider, LaunchOpts, RootId,
-    RootSources, Session, OPEN_WRITE,
+    rejected_writes, reset_rejected_writes, InlineProvider, LaunchOpts, RootId, Session,
+    OPEN_WRITE,
 };
+// Named only by the two `#[cfg(windows)]` tests below — the ones that need a
+// live ring — so the import is gated with them.
+#[cfg(windows)]
+use vfs_embed::{DiskProvider, RootSources};
 
 /// A scratch directory holding one file, unique per test line.
 fn dir(tag: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
@@ -34,6 +38,7 @@ fn dir(tag: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
 /// the only host-side way to read the second root a *two*-root session exists to
 /// test was to bypass the accessor. `Session::read_file_at` is that gap closed,
 /// and this helper now exists only to unwrap and keep the assertions short.
+#[cfg(windows)]
 fn read_whole(session: &Session, root: RootId, rel: &str) -> Vec<u8> {
     session
         .read_file_at(root, rel)
@@ -47,6 +52,10 @@ fn read_whole(session: &Session, root: RootId, rel: &str) -> Vec<u8> {
 /// Two roots, because one root hides the whole class of bug this session type
 /// exists to prevent: a single-root session cannot show that root 1's write
 /// lands in root 1's write layer rather than root 0's.
+// The shared-memory ring is the Windows delivery transport; `Session::serve`
+// has no non-Windows body yet (increment 2 of the Wine-hosted-shim design), so
+// a test that needs a live ring is gated rather than left to fail there.
+#[cfg(windows)]
 #[test]
 fn a_two_root_session_composes_writes_and_reads_back_through_vfs_embed_alone() {
     let base = dir("base", &[("shared.txt", b"BASE"), ("only-base.txt", b"KEEP")]);
@@ -284,6 +293,10 @@ fn declaring_root_zero_repoints_the_managed_root_instead_of_being_discarded() {
 /// image the graph serves but the stager cannot use, a name nothing serves at
 /// all, and no name given. Collapsing any two of them sends a host chasing the
 /// wrong thing.
+// The shared-memory ring is the Windows delivery transport; `Session::serve`
+// has no non-Windows body yet (increment 2 of the Wine-hosted-shim design), so
+// a test that needs a live ring is gated rather than left to fail there.
+#[cfg(windows)]
 #[test]
 fn launching_a_relative_image_reports_which_of_the_three_ways_it_failed() {
     let content = dir("launch-content", &[("game.exe", b"MZ-not-really")]);

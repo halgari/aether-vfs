@@ -1770,6 +1770,7 @@ version = "0.1.0"
 dependencies = [
  "vfs-ipc",
  "vfs-protocol",
+ "vfs-unix",
  "vfs-win",
 ]
 
@@ -1833,6 +1834,14 @@ dependencies = [
  "vfs-director",
  "vfs-provider",
  "vfs-zip",
+]
+
+[[package]]
+name = "vfs-unix"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "vfs-ipc",
 ]
 
 [[package]]
