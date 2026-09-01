@@ -468,9 +468,20 @@ impl Provider for MemoryProvider {
         let to_c = canonical_in(&files, &dirs, &by_fold, &to_p);
 
         if let Some(body) = files.remove(&from_c) {
-            // A plain file rename overwrites its destination unconditionally —
-            // see the doc comment above. That is unchanged by folding: no
-            // occupied-destination check here.
+            // A plain file rename overwrites its destination unconditionally --
+            // see the doc comment above. Under case-insensitive matching "the
+            // destination" may be a fold-equal entry whose literal spelling
+            // differs from `to_p`; that entry must actually be removed here,
+            // or the insert below creates a second, unreachable-by-its-old-
+            // name entry that folds to the same key as the one just written --
+            // spec section 6b's failure mode, reached through rename instead
+            // of open/write_at.
+            if let Some(existing) = to_c.as_ref() {
+                if existing != &from_c {
+                    files.remove(existing);
+                    index_remove(&mut by_fold, existing);
+                }
+            }
             files.insert(to_p.clone(), body);
             reindex(&mut by_fold, &from_c, &to_p);
             return Ok(());
@@ -490,7 +501,13 @@ impl Provider for MemoryProvider {
         if moving.is_empty() && moving_dirs.is_empty() {
             return Err(not_found());
         }
-        if to_p.starts_with(&from_prefix) {
+        // Fold-aware: `from_prefix` is built from the canonical `from_c`, so
+        // comparing it against the caller's raw `to_p` would let a
+        // differently-cased self-nesting move (`Data` -> `DATA/Sub`) slip
+        // past this guard. Folding the whole strings (not slicing either by
+        // an offset measured on the other) keeps this correct even though
+        // fold is not length-preserving.
+        if fold(&to_p).starts_with(&fold(&from_prefix)) {
             return Err(bad_request());
         }
         let to_occupied = matches!(&to_c, Some(existing) if *existing != from_c);
@@ -670,6 +687,87 @@ mod tests {
         assert!(
             p.getattr(VPath::at_default("über/a.esp")).unwrap().is_some(),
             "Unicode fold-equal spelling did not resolve"
+        );
+    }
+
+    /// Rename's "file overwrite" semantics must apply to the fold-equal
+    /// destination, not just its literal spelling. Without this, the old
+    /// destination survives under its own name while a second,
+    /// differently-cased entry appears holding the moved content -- spec
+    /// section 6b's failure mode (a write landing beside the existing file),
+    /// reached through `rename` instead of `open`/`write_at`.
+    #[test]
+    fn renaming_a_file_onto_a_fold_equal_existing_file_overwrites_it() {
+        let p = MemoryProvider::from_files([
+            ("a.txt", b"from a".as_slice()),
+            ("b.txt", b"from b".as_slice()),
+        ]);
+        p.rename(VPath::at_default("a.txt"), VPath::at_default("B.TXT"))
+            .expect("rename onto a fold-equal destination");
+
+        let names: Vec<String> =
+            p.readdir(VPath::at_default("")).unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(
+            names,
+            vec!["B.TXT".to_string()],
+            "the fold-equal destination must be overwritten, not duplicated: {names:?}"
+        );
+
+        let (h, size, _) = p.open(VPath::at_default("b.txt"), vfs_provider::OPEN_READ).unwrap();
+        assert_eq!(size, 6, "found via the old destination's fold-equal spelling");
+        let mut buf = [0u8; 6];
+        p.read_at(h, 0, &mut buf).unwrap();
+        assert_eq!(&buf, b"from a", "the renamed file's content must win");
+        p.close(h).unwrap();
+    }
+
+    /// The occupied-destination refusal for a directory rename must be
+    /// fold-aware too: a destination that is fold-equal to an existing,
+    /// different directory is exactly as occupied as one spelled identically.
+    #[test]
+    fn renaming_a_directory_onto_a_fold_equal_occupied_path_is_refused() {
+        let p = MemoryProvider::from_files([
+            ("sub/b.txt", b"world!".as_slice()),
+            ("Dest/keep.txt", b"kept".as_slice()),
+        ]);
+        p.mkdir(VPath::at_default("sub")).unwrap();
+        assert_eq!(
+            p.rename(VPath::at_default("sub"), VPath::at_default("DEST")),
+            Err(vfs_provider::ST_EXISTS),
+            "rename onto a fold-equal occupied path must be refused"
+        );
+        assert_eq!(
+            p.getattr(VPath::at_default("Dest/keep.txt")).unwrap().map(|s| s.size),
+            Some(4),
+            "the refused rename must leave the fold-equal destination alone"
+        );
+        assert_eq!(
+            p.getattr(VPath::at_default("sub/b.txt")).unwrap().map(|s| s.size),
+            Some(6),
+            "the refused rename must leave the source alone"
+        );
+    }
+
+    /// The self-nesting guard must compare fold-equal spellings, not raw
+    /// bytes: moving a directory into a differently-cased spelling of its own
+    /// subtree is exactly as nonsensical as moving it into an identically
+    /// cased one, and must be refused the same way.
+    #[test]
+    fn renaming_a_directory_into_a_fold_equal_spelling_of_its_own_subtree_is_refused() {
+        let p = MemoryProvider::from_files([("Data/A.esp", &b"body"[..])]);
+        assert_eq!(
+            p.rename(VPath::at_default("Data"), VPath::at_default("DATA/Sub")),
+            Err(vfs_provider::ST_BAD_REQUEST),
+            "a fold-equal self-nesting rename must be refused"
+        );
+        assert_eq!(
+            p.getattr(VPath::at_default("Data/A.esp")).unwrap().map(|s| s.size),
+            Some(4),
+            "the refused rename must leave the source alone"
+        );
+        assert!(
+            p.getattr(VPath::at_default("DATA/Sub/A.esp")).unwrap().is_none(),
+            "the refused rename must not have moved anything"
         );
     }
 
