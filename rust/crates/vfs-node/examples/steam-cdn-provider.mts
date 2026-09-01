@@ -36,13 +36,17 @@
 // So a provider keyed on the exact string it is given answers one of those two
 // callers and not the other, with no error on the path that misses.
 //
-// Spec §6's answer is a `casefold(p)` combinator, and it does not exist in Rust
-// (§6b). Until it does, **every host-authored provider must fold its own
-// lookups**, which is what `find()` below does. That is a real cost of the
-// missing primitive: it is not a convenience, it is correctness, and it is
-// re-implemented per provider and per binding until the combinator exists.
-// `memory()` is the case a host *cannot* fix this way, because it is a Rust
-// primitive — see `spec-8-example.mts`, step 8.
+// Spec §6 names a `casefold(p)` combinator; Rust exposes none, because the
+// case-fold contract put the decision on the provider instead. A provider
+// declares how it resolves spelling through `Capabilities::case`, and the Rust
+// primitives that can honour `Insensitive` do — `memory()` resolves fold-equal
+// spellings to one entry (see `spec-8-example.mts`, step 8).
+//
+// A provider written in JavaScript declares `CaseMatch::Sensitive`, which means
+// "no fold-equal guarantee". So **every host-authored provider must still fold
+// its own lookups**, which is what `find()` below does. That is correctness, not
+// convenience, and it is re-implemented per provider until a JS provider can
+// declare its own case behaviour.
 
 import fs from 'node:fs';
 

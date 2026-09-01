@@ -175,13 +175,18 @@ pub struct MemoryFile {
 /// goes through the graph (`session.readFile`), because a `Provider` handle is
 /// an integer and not an object with its own file API.
 ///
-/// **Fold the keys.** The shim folds every vpath component before it crosses the
-/// ring and this provider is case-sensitive by design, so a host that seeds
-/// `Skyrim.ini` and a child that writes `Skyrim.ini` end up with **two** files —
-/// with no error from the child, from `rejectedWrites()`, or from disk. Spec
-/// §6b's `casefold` primitive is the fix and does not exist yet;
-/// `examples/spec-8-example.cts` demonstrates the working round trip and the
-/// silent wrong answer side by side.
+/// **Spelling does not fork the file.** This provider resolves fold-equal
+/// spellings to a single entry and declares `CaseMatch::Insensitive`, so a host
+/// that seeds `Skyrim.ini` and a child that writes `skyrim.ini` reach the same
+/// bytes. It did not always: before the case-fold contract the shim folded every
+/// vpath component before it crossed the ring while this provider stayed
+/// case-sensitive, so the two spellings became two files with no error from the
+/// child, from `rejectedWrites()`, or from disk. `examples/spec-8-example.mts`,
+/// step 8, is the regression test that they no longer do.
+///
+/// A **host-authored** provider gets no such guarantee — a JS provider declares
+/// `CaseMatch::Sensitive` and must fold its own lookups. See
+/// `examples/steam-cdn-provider.mts`.
 ///
 /// Declares `Access::ReadWrite`, so it can serve as an `overlay` upper or a
 /// `router` target for exactly the paths a host wants writable.

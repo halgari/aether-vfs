@@ -40,18 +40,25 @@
 // argv[2]. Everything about the chain is real except the size and complexity of
 // the process at the end of it.
 //
-// ## The one place a host must compensate for a missing primitive
+// ## Case resolution, and the finding this example used to carry
 //
-// Spec §6's catalog lists `casefold` and Rust does not implement it (§6b). The
-// shim folds every vpath component before it crosses the ring, host-side reads
-// do not fold, and `memory()` is case-sensitive by design. So §8's own last line
-// — `inis.read("Skyrim.ini")` — reads back **the host's seed, not the game's
-// write**, with no error anywhere. This example does not paper over that:
+// Spec §6's catalog lists `casefold` and Rust still exposes no such combinator
+// — but it no longer needs one. The case-fold contract increment moved folding
+// into the providers themselves: `Capabilities::case` declares how a provider
+// resolves spelling, and `memory()` resolves fold-equal spellings to a single
+// entry instead of forking them. So §8's own last line — `inis.read(...)` —
+// reads back **the game's write**, which is what §8 always claimed.
 //
-//  * step 7 does the round trip with **folded keys**, which is what a host must
-//    do today, and reads the game's bytes back;
-//  * step 8 does it exactly as §8 spells it and **demonstrates the silent wrong
-//    answer**, printing both entries side by side.
+// This example used to document the opposite, and the inversion is the point.
+// Before that increment the shim folded every vpath component before it crossed
+// the ring while host-side reads did not, so §8's spelling returned the host's
+// stale seed with no error anywhere:
+//
+//  * step 7 does the round trip with **folded keys** — the workaround a host
+//    needed then. Harmless now, and kept, because it still asserts the write
+//    lands where the mod layer says it does;
+//  * step 8 does it exactly as §8 spells it and is now a **regression test**
+//    that both spellings reach one entry.
 //
 // ## TypeScript, and what that is now worth here
 //
@@ -277,15 +284,16 @@ async function main(): Promise<void> {
 
   // And the coverage claim, checked rather than asserted in prose: **every
   // primitive this addon exposes appears in this one composition.** §6's catalog
-  // has nine entries; the ninth is `casefold`, which does not exist in Rust, and
-  // step 8 is what its absence costs.
+  // has nine entries; the ninth is `casefold`, which Rust exposes as no
+  // combinator because folding moved into the providers instead — step 8 is
+  // what checks that it did.
   const exposed = ['cached', 'disk', 'layered', 'memory', 'overlay', 'readonly', 'router', 'seekable'];
   assert.deepStrictEqual(
     [...new Set(all)].filter((k) => k !== 'js').sort(),
     exposed,
     'every primitive the addon exposes is in this graph'
   );
-  show(`primitives      ${exposed.length}/${exposed.length} exposed, all used; casefold is the 9th and is not implemented`);
+  show(`primitives      ${exposed.length}/${exposed.length} exposed, all used; casefold is the 9th and needs no combinator — folding lives in the providers`);
 
   // §6's capability recomputation, on the graph that was just built: `seekable`
   // promoted the leaf so it can be mounted, and `cached` answered `slow` so
@@ -410,11 +418,12 @@ async function main(): Promise<void> {
   show('the INI never existed under either root on disk — mod layer over the depot → child → memory() → host');
 
   // -------------------------------------------------------------------------
-  step('8', 'the same round trip spelled as §8 spells it — and why it lies');
+  step('8', 'the same round trip spelled as §8 spells it — and why it now holds');
   // -------------------------------------------------------------------------
   // Seeded under the capitalised name spec §8 uses, on its own prefix so step 7
-  // stays untouched. Nothing below fails, throws or is refused: that is the
-  // finding.
+  // stays untouched. The game writes through one spelling and the host reads
+  // through the other; they must reach the same entry, and the seed must be
+  // gone rather than shadowed by a second entry beside it.
   const capitalised: Provider = memory({ 'SkyrimPrefs.ini': '[Display]\niSize H=1080\n; the seed\n' });
   session.mount(1, capitalised, 'asspecwritesit');
   const cPre = base.cacheStats()!;
@@ -433,9 +442,10 @@ async function main(): Promise<void> {
   const asItLanded = session.readFile('asspecwritesit/skyrimprefs.ini', 1).toString();
   show(`inis.read("SkyrimPrefs.ini")  ${JSON.stringify(asSpecWritesIt)}`);
   show(`inis.read("skyrimprefs.ini")  ${JSON.stringify(asItLanded)}`);
-  assert.match(asSpecWritesIt, /the seed/, "§8's own spelling returns the HOST'S SEED");
-  assert.match(asItLanded, /from the depot/, 'the write landed beside it, under the folded name');
-  show('two entries, one file, no error anywhere — spec §6b, and why `casefold` matters');
+  assert.match(asSpecWritesIt, /from the depot/, "§8's own spelling returns the GAME'S WRITE");
+  assert.doesNotMatch(asSpecWritesIt, /the seed/, "the host's seed was overwritten, not shadowed by a second entry");
+  assert.strictEqual(asItLanded, asSpecWritesIt, 'both spellings resolve to one entry, not two');
+  show('one entry under two spellings — the case-fold contract, end to end through an injected process');
 
   // The child's read came out of the depot, which also proves the JS provider
   // served an **injected process** and not only a host-side call: this path is in
