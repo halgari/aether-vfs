@@ -21,6 +21,25 @@ pub enum VerifyError {
     NotGe(String),
 }
 
+impl std::fmt::Display for VerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VerifyError::Missing => write!(f, "no version file: not an installed runtime"),
+            VerifyError::Unreadable(e) => write!(f, "version file unreadable: {e}"),
+            VerifyError::NotGe(s) => write!(f, "not a GE-Proton runtime: version says {s:?}"),
+        }
+    }
+}
+
+impl std::error::Error for VerifyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            VerifyError::Unreadable(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 /// Reads `dir/version`, confirms it names a GE-Proton build, and returns the
 /// tag (e.g. `"GE-Proton11-6"`).
 ///
@@ -67,10 +86,25 @@ fn parse_tag(tag: &str) -> Option<(u64, u64)> {
 /// silently excluded rather than surfaced as errors, since a stray
 /// non-runtime directory there is expected, not exceptional.
 pub fn installed(root: &Root) -> io::Result<Vec<String>> {
-    let mut tags = Vec::new();
+    Ok(installed_dirs(root)?
+        .into_iter()
+        .map(|(tag, _)| tag)
+        .collect())
+}
+
+/// Like [`installed`], but pairs each verified tag with the directory it was
+/// actually found in, newest first.
+///
+/// The pairing is the point: the tag comes from the tree's `version` file
+/// while the directory name comes from the release it was installed from, and
+/// `vfs-proton list` must not print a path it inferred by re-joining the tag
+/// onto `runtimes()` — that assumes the two always agree, and printing a path
+/// that does not exist is exactly the failure a `list` command must not have.
+pub fn installed_dirs(root: &Root) -> io::Result<Vec<(String, std::path::PathBuf)>> {
+    let mut found = Vec::new();
     let entries = match std::fs::read_dir(root.runtimes()) {
         Ok(e) => e,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(tags),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(found),
         Err(e) => return Err(e),
     };
     for entry in entries {
@@ -78,12 +112,13 @@ pub fn installed(root: &Root) -> io::Result<Vec<String>> {
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        if let Ok(tag) = verify_ge(&entry.path()) {
-            tags.push(tag);
+        let path = entry.path();
+        if let Ok(tag) = verify_ge(&path) {
+            found.push((tag, path));
         }
     }
-    tags.sort_by(|a, b| cmp_tags(a, b).reverse());
-    Ok(tags)
+    found.sort_by(|(a, _), (b, _)| cmp_tags(a, b).reverse());
+    Ok(found)
 }
 
 #[cfg(test)]

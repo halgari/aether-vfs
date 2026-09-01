@@ -17,8 +17,9 @@ pub mod release;
 pub mod runtime;
 
 pub use install::{
-    extract_tar_gz, install_release, parse_sha512sum, verify_digest, InstallError, Installed,
+    extract_tar_gz, install_release, parse_sha512sum, partial_path, verify_digest, InstallError,
+    Installed,
 };
 pub use layout::Root;
 pub use release::{fetch_releases, parse_releases, pick, Release, ResolveError};
-pub use runtime::{cmp_tags, installed, verify_ge, VerifyError};
+pub use runtime::{cmp_tags, installed, installed_dirs, verify_ge, VerifyError};

@@ -386,6 +386,19 @@ fn symlink(target: &Path, dst: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_file(target, dst)
 }
 
+/// Where [`install_release`] streams the tarball for `tag` before it is
+/// verified.
+///
+/// Public because progress reporting needs it: the download is a
+/// [`std::io::copy`] into this file with no callback anywhere in the path, so
+/// the only honest measure of how far a 533 MB fetch has got is the file's
+/// current length. The `vfs-proton` binary polls it once a second. Exposing
+/// the name here rather than letting the caller rebuild it is what keeps the
+/// two spellings from drifting — `install_release` uses this function too.
+pub fn partial_path(root: &Root, tag: &str) -> PathBuf {
+    root.downloads().join(format!("{tag}.tar.gz.partial"))
+}
+
 /// Downloads, verifies and installs `rel` under `root`, returning the
 /// installed runtime.
 ///
@@ -431,7 +444,7 @@ pub fn install_release(
 
     // 3. Stream the body to a `.partial`. Never buffered: the real body is
     //    533,700,853 bytes.
-    let partial = downloads.join(format!("{}.tar.gz.partial", rel.tag));
+    let partial = partial_path(root, &rel.tag);
     download_to(agent, &rel.tarball_url, &partial)?;
 
     // 4. Verify, and on mismatch delete the partial so a later run cannot
