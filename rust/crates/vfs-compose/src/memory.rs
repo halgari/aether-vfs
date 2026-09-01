@@ -85,6 +85,70 @@ fn stat_of(files: &HashMap<String, Vec<u8>>, dirs: &HashSet<String>, path: &str)
     None
 }
 
+/// The stored spelling for `path`, resolved against maps the caller already
+/// holds. Exact match first: that is the hot path and needs no allocation.
+///
+/// Takes borrows rather than locking for itself, so a caller that goes on to
+/// mutate does so under the same guard it resolved under. An earlier version
+/// locked internally and returned an owned `String`, which opened a window
+/// where a concurrent mutation could invalidate the resolved path before the
+/// caller used it — every method released the lock this took, then re-locked
+/// to act, and nothing stopped another thread's mutation from landing in
+/// between.
+fn canonical_in(
+    files: &HashMap<String, Vec<u8>>,
+    dirs: &HashSet<String>,
+    by_fold: &HashMap<String, String>,
+    path: &str,
+) -> Option<String> {
+    if path.is_empty() {
+        return Some(String::new());
+    }
+    if files.contains_key(path) || dirs.contains(path) {
+        return Some(path.to_string());
+    }
+    let folded = fold(path);
+    if let Some(hit) = by_fold.get(&folded) {
+        return Some(hit.clone());
+    }
+
+    // `path` may name a directory implied by some file's or directory's own
+    // path (`Data/A.esp` implies `Data`) rather than a stored entry itself.
+    // Implied directories are never materialized, so `by_fold` has nothing
+    // for them, and they must be found with a live scan. Component-wise, not
+    // byte-offset: `fold` is not length-preserving (`İ` is 2 bytes, folds to
+    // 3), so a folded prefix cannot be sliced off an unfolded key by its byte
+    // length — it has to be compared component by component.
+    let want: Vec<String> = folded.split('/').map(str::to_string).collect();
+    files.keys().chain(dirs.iter()).find_map(|k| {
+        let comps: Vec<&str> = k.split('/').collect();
+        if comps.len() <= want.len() {
+            return None;
+        }
+        let is_match = comps[..want.len()].iter().zip(want.iter()).all(|(c, w)| fold(c) == *w);
+        is_match.then(|| comps[..want.len()].join("/"))
+    })
+}
+
+/// Record that `key` now names a live entry, in the `by_fold` map the caller
+/// already holds locked.
+fn index_insert(by_fold: &mut HashMap<String, String>, key: &str) {
+    by_fold.insert(fold(key), key.to_string());
+}
+
+/// Forget that `key` names a live entry.
+fn index_remove(by_fold: &mut HashMap<String, String>, key: &str) {
+    by_fold.remove(&fold(key));
+}
+
+/// `old` stops naming a live entry and `new` starts, as one map mutation, so
+/// under the lock the caller holds no observer ever sees the entry absent
+/// under both spellings.
+fn reindex(by_fold: &mut HashMap<String, String>, old: &str, new: &str) {
+    by_fold.remove(&fold(old));
+    by_fold.insert(fold(new), new.to_string());
+}
+
 /// Read-write in-memory file tree. Root-blind by design, like
 /// [`crate::InlineProvider`]: it serves the same tree under every root id,
 /// which `assert_common`'s non-default-root case accepts as one of the two
@@ -137,59 +201,6 @@ impl MemoryProvider {
             by_fold: Mutex::new(by_fold),
         }
     }
-
-    /// The stored spelling for `path`, or `None` if nothing fold-equal exists.
-    /// Exact match first — that is the hot path and needs no allocation.
-    fn canonical(&self, path: &str) -> Option<String> {
-        if path.is_empty() {
-            return Some(String::new());
-        }
-        let files = self.files.lock().unwrap();
-        let dirs = self.dirs.lock().unwrap();
-        if files.contains_key(path) || dirs.contains(path) {
-            return Some(path.to_string());
-        }
-        let folded = fold(path);
-        if let Some(hit) = self.by_fold.lock().unwrap().get(&folded).cloned() {
-            return Some(hit);
-        }
-
-        // `path` may name a directory implied by some file's or directory's own
-        // path (`Data/A.esp` implies `Data`) rather than a stored entry itself.
-        // Implied directories are never materialized, so `by_fold` has nothing
-        // for them, and they must be found with a live scan. Component-wise,
-        // not byte-offset: `fold` is not length-preserving (`İ` is 2 bytes,
-        // folds to 3), so a folded prefix cannot be sliced off an unfolded key
-        // by its byte length — it has to be compared component by component.
-        let want: Vec<String> = folded.split('/').map(str::to_string).collect();
-        files.keys().chain(dirs.iter()).find_map(|k| {
-            let comps: Vec<&str> = k.split('/').collect();
-            if comps.len() <= want.len() {
-                return None;
-            }
-            let is_match = comps[..want.len()].iter().zip(want.iter()).all(|(c, w)| fold(c) == *w);
-            is_match.then(|| comps[..want.len()].join("/"))
-        })
-    }
-
-    /// Record that `key` now names a live entry.
-    fn index_insert(&self, key: &str) {
-        self.by_fold.lock().unwrap().insert(fold(key), key.to_string());
-    }
-
-    /// Forget that `key` names a live entry.
-    fn index_remove(&self, key: &str) {
-        self.by_fold.lock().unwrap().remove(&fold(key));
-    }
-
-    /// `old` stops naming a live entry and `new` starts, as one critical
-    /// section — so a concurrent fold lookup landing between the two halves
-    /// never sees the entry as absent under both spellings.
-    fn reindex(&self, old: &str, new: &str) {
-        let mut bf = self.by_fold.lock().unwrap();
-        bf.remove(&fold(old));
-        bf.insert(fold(new), new.to_string());
-    }
 }
 
 impl Default for MemoryProvider {
@@ -211,17 +222,19 @@ impl Provider for MemoryProvider {
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
         let path = normalize(p.rel);
-        let path = self.canonical(&path).unwrap_or(path);
         let files = self.files.lock().map_err(|_| map_io_err())?;
         let dirs = self.dirs.lock().map_err(|_| map_io_err())?;
+        let by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
+        let path = canonical_in(&files, &dirs, &by_fold, &path).unwrap_or(path);
         Ok(stat_of(&files, &dirs, &path))
     }
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
         let path = normalize(p.rel);
-        let path = self.canonical(&path).unwrap_or(path);
         let files = self.files.lock().map_err(|_| map_io_err())?;
         let dirs = self.dirs.lock().map_err(|_| map_io_err())?;
+        let by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
+        let path = canonical_in(&files, &dirs, &by_fold, &path).unwrap_or(path);
         match stat_of(&files, &dirs, &path) {
             Some(s) if s.kind == KIND_DIR => {}
             Some(_) => return Err(not_a_dir()),
@@ -268,8 +281,10 @@ impl Provider for MemoryProvider {
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         let path = normalize(p.rel);
-        let path = self.canonical(&path).unwrap_or(path);
         let mut files = self.files.lock().map_err(|_| map_io_err())?;
+        let dirs = self.dirs.lock().map_err(|_| map_io_err())?;
+        let mut by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
+        let path = canonical_in(&files, &dirs, &by_fold, &path).unwrap_or(path);
         let exists = files.contains_key(&path);
 
         if flags & OPEN_EXCL != 0 && exists {
@@ -278,7 +293,7 @@ impl Provider for MemoryProvider {
         if flags & OPEN_CREATE != 0 {
             files.entry(path.clone()).or_default();
             if !exists {
-                self.index_insert(&path);
+                index_insert(&mut by_fold, &path);
             }
         } else if !exists {
             return Err(not_found());
@@ -289,6 +304,8 @@ impl Provider for MemoryProvider {
 
         let size = files.get(&path).map(|b| b.len()).unwrap_or(0) as u64;
         drop(files);
+        drop(dirs);
+        drop(by_fold);
 
         let h = self.next.fetch_add(1, Ordering::Relaxed);
         self.opens.lock().map_err(|_| map_io_err())?.insert(h, path);
@@ -313,9 +330,9 @@ impl Provider for MemoryProvider {
     fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
         let path = self.opens.lock().map_err(|_| map_io_err())?.get(&h).cloned().ok_or_else(bad_fh)?;
         let mut files = self.files.lock().map_err(|_| map_io_err())?;
-        // `open` already created/resolved this path via `canonical`, so this is
-        // normally a hit — the existence check only guards the (racy, but
-        // possible) case where the entry was removed since this handle opened.
+        // `open` already created/resolved this path, so this is normally a
+        // hit — the existence check only guards the (racy, but possible) case
+        // where the entry was removed since this handle opened.
         let existed = files.contains_key(&path);
         {
             let body = files.entry(path.clone()).or_default();
@@ -326,7 +343,8 @@ impl Provider for MemoryProvider {
             body[offset as usize..end].copy_from_slice(buf);
         }
         if !existed {
-            self.index_insert(&path);
+            let mut by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
+            index_insert(&mut by_fold, &path);
         }
         Ok(buf.len())
     }
@@ -337,7 +355,8 @@ impl Provider for MemoryProvider {
         let existed = files.contains_key(&path);
         files.entry(path.clone()).or_default().resize(len as usize, 0);
         if !existed {
-            self.index_insert(&path);
+            let mut by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
+            index_insert(&mut by_fold, &path);
         }
         Ok(())
     }
@@ -348,9 +367,12 @@ impl Provider for MemoryProvider {
 
     fn mkdir(&self, p: VPath) -> Result<(), i32> {
         let path = normalize(p.rel);
-        let path = self.canonical(&path).unwrap_or(path);
-        if self.dirs.lock().map_err(|_| map_io_err())?.insert(path.clone()) {
-            self.index_insert(&path);
+        let files = self.files.lock().map_err(|_| map_io_err())?;
+        let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
+        let mut by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
+        let path = canonical_in(&files, &dirs, &by_fold, &path).unwrap_or(path);
+        if dirs.insert(path.clone()) {
+            index_insert(&mut by_fold, &path);
         }
         Ok(())
     }
@@ -374,13 +396,14 @@ impl Provider for MemoryProvider {
     /// information, for a new number every host would have to learn.
     fn remove(&self, p: VPath) -> Result<(), i32> {
         let path = normalize(p.rel);
-        let path = self.canonical(&path).unwrap_or(path);
         // files before dirs, the order every method here takes them in.
         let mut files = self.files.lock().map_err(|_| map_io_err())?;
         let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
+        let mut by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
+        let path = canonical_in(&files, &dirs, &by_fold, &path).unwrap_or(path);
 
         if files.remove(&path).is_some() {
-            self.index_remove(&path);
+            index_remove(&mut by_fold, &path);
             return Ok(());
         }
         let prefix = child_prefix(&path);
@@ -389,7 +412,7 @@ impl Provider for MemoryProvider {
             return Err(is_dir());
         }
         if dirs.remove(&path) {
-            self.index_remove(&path);
+            index_remove(&mut by_fold, &path);
             return Ok(());
         }
         Err(not_found())
@@ -425,9 +448,14 @@ impl Provider for MemoryProvider {
             return Ok(());
         }
 
-        // Resolved before the mutating locks are taken: `canonical` takes
-        // `files`/`dirs` itself, and `Mutex` here is not reentrant.
-        //
+        // All three maps are locked up front and held for the whole method,
+        // so resolution and mutation happen under one critical section — no
+        // window where a concurrent caller can act on a path this method
+        // already decided was canonical but that has since changed.
+        let mut files = self.files.lock().map_err(|_| map_io_err())?;
+        let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
+        let mut by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
+
         // `from_c` finds the real entry regardless of which fold-equal
         // spelling the caller used. `to_c`, when it resolves to something
         // *other than* the entry being renamed, means the destination is
@@ -435,18 +463,16 @@ impl Provider for MemoryProvider {
         // literal spelling differs from `to_p`. When it resolves to the same
         // entry as `from_c`, this is a spelling-only rename (`"A.txt"` ->
         // `"a.txt"`) and must not be refused as a collision.
-        let from_c = self.canonical(&from_p).unwrap_or_else(|| from_p.clone());
-        let to_c = self.canonical(&to_p);
-
-        let mut files = self.files.lock().map_err(|_| map_io_err())?;
-        let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
+        let from_c =
+            canonical_in(&files, &dirs, &by_fold, &from_p).unwrap_or_else(|| from_p.clone());
+        let to_c = canonical_in(&files, &dirs, &by_fold, &to_p);
 
         if let Some(body) = files.remove(&from_c) {
             // A plain file rename overwrites its destination unconditionally —
             // see the doc comment above. That is unchanged by folding: no
             // occupied-destination check here.
             files.insert(to_p.clone(), body);
-            self.reindex(&from_c, &to_p);
+            reindex(&mut by_fold, &from_c, &to_p);
             return Ok(());
         }
 
@@ -483,13 +509,13 @@ impl Provider for MemoryProvider {
         for old in moving {
             let body = files.remove(&old).unwrap_or_default();
             let new_key = rewrite(&old);
-            self.reindex(&old, &new_key);
+            reindex(&mut by_fold, &old, &new_key);
             files.insert(new_key, body);
         }
         for old in moving_dirs {
             dirs.remove(&old);
             let new_key = rewrite(&old);
-            self.reindex(&old, &new_key);
+            reindex(&mut by_fold, &old, &new_key);
             dirs.insert(new_key);
         }
         Ok(())
