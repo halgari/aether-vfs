@@ -97,6 +97,9 @@ pub enum LaunchError {
     /// `wine` could not be started at all, or exited without an exit code
     /// (killed by a signal). Carries a description including the wine path.
     Spawn(String),
+    /// The ring geometry cannot describe the ring, so the child would attach
+    /// cleanly and fail only under load. See `check_geometry`.
+    Geometry(String),
     /// The injector itself failed and the target never ran — its documented
     /// exit codes 2 (bad argv) and 3 (injection failed), from
     /// `vfs-inject/src/bin/vfs-injector.rs`.
@@ -115,6 +118,7 @@ impl std::fmt::Display for LaunchError {
             LaunchError::Io(e) => write!(f, "io error: {e}"),
             LaunchError::NotGe(s) => write!(f, "runtime is not GE-Proton: {s}"),
             LaunchError::Spawn(s) => write!(f, "could not run wine: {s}"),
+            LaunchError::Geometry(s) => write!(f, "ring geometry is inconsistent: {s}"),
             LaunchError::NonZeroWine(c) => write!(
                 f,
                 "vfs-injector exited {c} without running the target \
@@ -217,11 +221,30 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
 /// error ([`LaunchError::NotGe`]), never a fallback.
 pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
     verify_ge(&l.runtime).map_err(|e| LaunchError::NotGe(e.to_string()))?;
+    check_geometry(l)?;
 
     let (prog, argv) = command_line(l);
-    let status = std::process::Command::new(&prog)
-        .args(&argv)
-        .envs(launch_env(l))
+    let mut cmd = std::process::Command::new(&prog);
+    cmd.args(&argv).envs(launch_env(l));
+    // Explicitly unset the transport variables this launch does not use.
+    //
+    // `Command::envs` *adds to* the parent environment, so a host process that
+    // has served a named-section session earlier still has `VFS_RING_SECTION`
+    // and friends set, and the child would inherit them. `VFS_RING_PATH` wins
+    // over `VFS_RING_SECTION` by design, so the ring itself is safe — but
+    // `VFS_VIRTUAL_ROOTS` is not adjudicated that way, and a stale value would
+    // point the child's root map somewhere this session never chose. That is
+    // the same stale-value hazard `IpcServe::apply_env_roots` clears with
+    // `remove_var`, and it applies here for the same reason.
+    for stale in [
+        "VFS_RING_SECTION",
+        "VFS_SERVER_EV",
+        "VFS_CLIENT_EV",
+        "VFS_VIRTUAL_ROOTS",
+    ] {
+        cmd.env_remove(stale);
+    }
+    let status = cmd
         .status()
         .map_err(|e| LaunchError::Spawn(format!("{prog}: {e}")))?;
 
@@ -232,6 +255,41 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
         None => Err(LaunchError::Spawn(format!(
             "{prog} exited without a code (signalled): {status}"
         ))),
+    }
+}
+
+/// Refuse a launch whose ring geometry cannot describe the ring.
+///
+/// Under-mapping is the failure this exists for, and it is nasty because it is
+/// **silent at attach**: `ring::open` succeeds — the header is present and
+/// valid — and only a read whose arena bank falls outside the mapped view
+/// fails. Measured 2026-09-02 with a 2 MiB view over a ~34 MiB ring: a 256 KiB
+/// read passed because its bank happened to land inside, and only a 4 MiB read
+/// failed, with the server logging every read answered. A game would attach
+/// cleanly and then die under load.
+///
+/// So the arithmetic is checked before anything is spawned, and the ring file's
+/// real length is checked too — `ring_bytes` describing more than the file
+/// holds is the same bug wearing a different hat.
+fn check_geometry(l: &WineLaunch) -> Result<(), LaunchError> {
+    let need = l.arena_offset.saturating_add(l.arena_len);
+    if need > l.ring_bytes {
+        return Err(LaunchError::Geometry(format!(
+            "arena_offset {} + arena_len {} = {need} exceeds ring_bytes {}; the child would              map a view too small to hold the arena and fail only under load",
+            l.arena_offset, l.arena_len, l.ring_bytes
+        )));
+    }
+    match std::fs::metadata(&l.ring_path) {
+        Ok(m) if (m.len() as usize) < l.ring_bytes => Err(LaunchError::Geometry(format!(
+            "ring file {} is {} bytes but ring_bytes is {}; mapping past the end of a file              faults on touch rather than failing at map time",
+            l.ring_path.display(),
+            m.len(),
+            l.ring_bytes
+        ))),
+        // A missing ring file is the caller's sequencing error, not a geometry
+        // one: `serve()` creates it. Let the launch proceed and let the child
+        // report the open failure, which names the path.
+        _ => Ok(()),
     }
 }
 
@@ -256,6 +314,49 @@ fn absolute(p: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_view_too_small_for_the_arena_is_refused_before_spawning() {
+        // The whole point: this must fail up front, not attach cleanly and die
+        // on the first read whose bank falls outside the view.
+        let mut l = sample();
+        l.ring_bytes = 2 * 1024 * 1024;
+        l.arena_offset = 132_136;
+        l.arena_len = 33_554_432;
+        match check_geometry(&l) {
+            Err(LaunchError::Geometry(m)) => {
+                assert!(m.contains("exceeds ring_bytes"), "{m}");
+            }
+            other => panic!("expected a Geometry refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_consistent_geometry_passes() {
+        let mut l = sample();
+        l.ring_bytes = 33_751_040;
+        l.arena_offset = 132_136;
+        l.arena_len = 33_554_432;
+        assert!(check_geometry(&l).is_ok());
+    }
+
+    #[test]
+    fn a_ring_file_shorter_than_ring_bytes_is_refused() {
+        // Mapping past the end of a file faults on touch rather than failing at
+        // map time, so a short file is the same hazard as a small view.
+        let mut l = sample();
+        let p = std::env::temp_dir().join(format!("vfs-launch-short-{}.bin", std::process::id()));
+        std::fs::write(&p, [0u8; 128]).unwrap();
+        l.ring_path = p.clone();
+        l.ring_bytes = 64 * 1024;
+        l.arena_offset = 0;
+        l.arena_len = 0;
+        match check_geometry(&l) {
+            Err(LaunchError::Geometry(m)) => assert!(m.contains("but ring_bytes is"), "{m}"),
+            other => panic!("expected a Geometry refusal, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
 
     /// An absolute path on whichever host is running the test. `/x` is not
     /// absolute on Windows and `C:\x` is not absolute on Linux, and the
