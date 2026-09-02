@@ -1,9 +1,14 @@
 //! Thin director FUSE client: ring + bulk arena + optional event wake.
+//!
+//! The ring comes from one of two places — see [`RingSource`]. A named section
+//! plus an event wake is the Windows deployment; a mapped *file* with no event
+//! at all is how a shim inside Wine reaches a native Linux director.
 
 // Waking the director is a Win32 SetEvent on a handle we opened; the rest of
 // the crate stays unsafe-free.
 #![allow(unsafe_code)]
 
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use vfs_ipc::{Geom, RingClient};
@@ -59,13 +64,63 @@ pub fn global() -> Option<&'static FuseClient> {
 /// swallow.
 #[derive(Debug)]
 pub enum FuseInitError {
-    /// No ring was named (`VFS_RING_SECTION` unset). The process was not
-    /// launched to talk to a director — no longer a supported deployment.
+    /// No ring was named — neither [`vfs_env::RING_PATH`] nor
+    /// [`vfs_env::RING_SECTION`] is set. The process was not launched to talk
+    /// to a director — no longer a supported deployment.
     NotConfigured,
     /// A ring was named but the client could not attach, or the post-connect
     /// heartbeat failed. The caller intended virtualisation and it silently
     /// did not happen — this must reach whoever launched the process.
     ConnectFailed(String),
+}
+
+/// Where the ring's shared memory comes from.
+///
+/// Two spellings of one thing: a mapped `SharedSeg` the director also has. The
+/// distinction survives only as far as [`FuseClient::connect_source`], which
+/// obtains the mapping and then stops caring.
+#[derive(Debug, PartialEq, Eq)]
+enum RingSource {
+    /// A named page-file-backed section ([`vfs_env::RING_SECTION`]) — the
+    /// Windows deployment, and what the shipped shim uses.
+    Section(String),
+    /// A real file ([`vfs_env::RING_PATH`]), mapped by path — the only kind of
+    /// shared memory a shim inside Wine and a native Linux director can both
+    /// name. A page-file-backed section has no identity outside its own
+    /// Windows/Wine session.
+    File(String),
+}
+
+/// Pick the ring source. **The path wins when both are set**, and that
+/// ordering is a correctness requirement rather than a preference.
+///
+/// A session configured for the Wine boundary must never fall back to a named
+/// section: `VFS_RING_SECTION` may well still be set (the launcher writes ten
+/// `VFS_*` vars together), and a section of that name may even exist — from an
+/// unrelated director on the same box. Falling back would attach the shim to
+/// the *wrong* director, or to nothing, and report success either way.
+///
+/// An empty `VFS_RING_PATH` is treated as absent. Believing it would map `""`
+/// and fail with a confusing io error while a perfectly good section was
+/// named — the same trap as an empty `VFS_RING_SECTION` (see the Task 2 ruling
+/// in this increment's ledger). Neither set stays `None`, which the caller
+/// turns into [`FuseInitError::NotConfigured`] exactly as before.
+///
+/// Split from [`ring_source_from_env`] so the precedence is testable without
+/// writing to the process environment — global mutable state every other test
+/// in this binary shares.
+fn ring_source(ring_path: Option<String>, section: Option<String>) -> Option<RingSource> {
+    match ring_path.filter(|p| !p.is_empty()) {
+        Some(path) => Some(RingSource::File(path)),
+        None => section.map(RingSource::Section),
+    }
+}
+
+fn ring_source_from_env() -> Option<RingSource> {
+    ring_source(
+        vfs_env::text(vfs_env::RING_PATH),
+        vfs_env::text(vfs_env::RING_SECTION),
+    )
 }
 
 pub fn try_init_from_env() -> Result<(), FuseInitError> {
@@ -80,7 +135,7 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
             format!("forced failure via {}", vfs_env::TEST_FUSE_INIT_FAIL),
         ));
     }
-    let section = vfs_env::text(vfs_env::RING_SECTION).ok_or(FuseInitError::NotConfigured)?;
+    let source = ring_source_from_env().ok_or(FuseInitError::NotConfigured)?;
     let ring_bytes: usize = vfs_env::text(vfs_env::RING_BYTES)
         .and_then(|s| s.parse().ok())
         .unwrap_or(2 * 1024 * 1024);
@@ -95,7 +150,7 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
     // layout that no longer exists, so an unset root connected the client to a
     // path nothing matched — surfacing much later as content simply missing.
     //
-    // Reachable only once `section` above is `Some` — i.e. a director launch
+    // Reachable only once `source` above is `Some` — i.e. a director launch
     // was intended — so this is a `ConnectFailed`, not `NotConfigured`.
     let root = vfs_env::text(vfs_env::VIRTUAL_DIR).ok_or_else(|| {
         FuseInitError::ConnectFailed(
@@ -103,7 +158,7 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
         )
     })?;
     let roots = roots_from_env(&root);
-    let client = FuseClient::connect(&section, &roots, payload_cap, ring_bytes, arena_len)
+    let client = FuseClient::connect_source(&source, &roots, payload_cap, ring_bytes, arena_len)
         .map_err(FuseInitError::ConnectFailed)?;
     client.heartbeat().map_err(FuseInitError::ConnectFailed)?;
     let _ = FUSE.set(client);
@@ -130,12 +185,23 @@ const PIPELINE_DEPTH_STREAM: usize = 8;
 ///
 /// Spinning for the *response* stays right: it arrives in 20–209 µs, far below
 /// the cost of sleeping for it.
+///
+/// **A null `server_ev` makes both notifications no-ops**, and that is the
+/// whole of [`RingSource::File`] mode. Under Wine a `SetEvent` targets a *Wine*
+/// event object, which cannot wake a native Linux process — so there is nothing
+/// to signal and the syscall would only cost. The Linux director compensates by
+/// **spinning** rather than sleeping (`IpcServe::start_file_backed` gives every
+/// worker a `SpinNotifier`). Do not "fix" the CPU burn by putting that director
+/// back to sleep: nothing could wake it, which reintroduces exactly the
+/// 15.6 ms timer-tick stall measured above.
 struct WakeServerSpinClient {
     server_ev: HANDLE,
 }
 
 impl vfs_ipc::Notifier for WakeServerSpinClient {
     fn notify_server(&self) {
+        // Null in file-backed mode, by construction in `connect_source` — see
+        // this type's doc for why signalling there would be a lie.
         if !self.server_ev.is_null() {
             // SAFETY: handle owned by FuseClient for its lifetime; SetEvent is
             // safe on an auto-reset event from any thread.
@@ -149,6 +215,7 @@ impl vfs_ipc::Notifier for WakeServerSpinClient {
     }
     fn notify_slot_free(&self) {
         // A full ring can leave the director blocked; wake it on release too.
+        // Null (file-backed) means there is nothing wakeable on the other side.
         if !self.server_ev.is_null() {
             unsafe {
                 let _ = SetEvent(self.server_ev);
@@ -178,7 +245,9 @@ pub struct FuseClient {
     roots: RootMap,
     arena_len: usize,
     /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened —
-    /// the ring still works, just with the old timer-tick latency.
+    /// the ring still works, just with the old timer-tick latency — and null
+    /// *by design* for a [`RingSource::File`] ring, where the director is a
+    /// native Linux process no Wine event can reach.
     server_ev: HANDLE,
     /// Serializes ring claim/submit — not safe for concurrent clients on one ring.
     ring_lock: Mutex<()>,
@@ -199,18 +268,57 @@ impl FuseClient {
         ring_bytes: usize,
         arena_len: usize,
     ) -> Result<Self, String> {
-        let mapping = SharedMapping::open(section, ring_bytes)
-            .map_err(|e| format!("open section {section}: {e}"))?;
+        Self::connect_source(
+            &RingSource::Section(section.to_string()),
+            roots,
+            payload_cap,
+            ring_bytes,
+            arena_len,
+        )
+    }
+
+    /// [`Self::connect`] over either ring source. One code path: the two
+    /// sources differ in how the shared memory is obtained and in whether
+    /// there is a director event worth opening, and in nothing else.
+    fn connect_source(
+        source: &RingSource,
+        roots: &[(RootId, String)],
+        payload_cap: u32,
+        ring_bytes: usize,
+        arena_len: usize,
+    ) -> Result<Self, String> {
+        let (mapping, server_ev) = match source {
+            RingSource::Section(section) => {
+                let mapping = SharedMapping::open(section, ring_bytes)
+                    .map_err(|e| format!("open section {section}: {e}"))?;
+                // Opening the director's wake event is best-effort: without it
+                // the ring still works, it just falls back to the director's
+                // timed wait.
+                let ev = vfs_env::text(vfs_env::SERVER_EV)
+                    .map(|n| {
+                        let w: Vec<u16> = n.encode_utf16().chain(core::iter::once(0)).collect();
+                        // SAFETY: name is NUL-terminated; a failed open returns null.
+                        unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, w.as_ptr()) }
+                    })
+                    .unwrap_or(core::ptr::null_mut());
+                (mapping, ev)
+            }
+            RingSource::File(path) => {
+                let mapping = SharedMapping::open_file_backed(Path::new(path), ring_bytes)
+                    .map_err(|e| format!("open ring file {path}: {e}"))?;
+                // **No event, deliberately** — not a fallback and not a
+                // best-effort miss. This mode exists because the director is a
+                // native Linux process, and a Wine event object cannot wake
+                // one; `VFS_SERVER_EV` is therefore not even consulted, so a
+                // stale value from an earlier Windows launch cannot resurrect
+                // a handle that signals into the void. Null here is what makes
+                // `WakeServerSpinClient`'s two notifications no-ops — see its
+                // doc for the 15.6 ms stall this trades against, and why the
+                // answer is a spinning director rather than a sleeping one.
+                (mapping, core::ptr::null_mut())
+            }
+        };
         let geom = vfs_ipc::ring::open(mapping.seg()).map_err(|e| format!("ring open: {e:?}"))?;
-        // Opening the director's wake event is best-effort: without it the ring
-        // still works, it just falls back to the director's timed wait.
-        let server_ev = vfs_env::text(vfs_env::SERVER_EV)
-            .map(|n| {
-                let w: Vec<u16> = n.encode_utf16().chain(core::iter::once(0)).collect();
-                // SAFETY: name is NUL-terminated; a failed open returns null.
-                unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, w.as_ptr()) }
-            })
-            .unwrap_or(core::ptr::null_mut());
 
         // The staged launch directory is a second spelling of root 0, not a
         // root of its own: a staged game resolves `Data\` relative to its own
@@ -911,6 +1019,116 @@ mod tests {
                 (RootId(0), game.to_string()),
                 (RootId(3), r"C:\Three".to_string()),
             ]
+        );
+    }
+
+    /// Serializes the one test below that writes `VFS_RING_PATH` /
+    /// `VFS_RING_SECTION`. Process environment is global mutable state every
+    /// other test in this binary shares — the same hazard, and the same
+    /// remedy, as `vfs-embed`'s `LAUNCH_ENV_LOCK` (a `static` cannot be shared
+    /// across test binaries, so this is that established pattern applied here
+    /// rather than a second convention).
+    static RING_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// **The precedence, as a test.** With both variables set the client must
+    /// map the *file*, and must not consult `VFS_RING_SECTION` at all.
+    ///
+    /// The section name here names nothing, so a reversed precedence does not
+    /// merely pick the other source — it fails at `OpenFileMappingW`, which is
+    /// exactly the silent-misconnection this ordering exists to prevent (a
+    /// session configured for the Wine boundary attaching to whatever named
+    /// section happens to exist, or to nothing, with no error).
+    #[test]
+    fn ring_path_wins_over_ring_section_and_is_the_file_that_gets_mapped() {
+        let _g = RING_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Non-default geometry on purpose: reading it back proves the client
+        // mapped *this file's* header rather than defaulting to something.
+        const SLOTS: u32 = 8;
+        const CAP: u32 = 4096;
+        const MAP: usize = 256 * 1024;
+
+        let p = std::env::temp_dir()
+            .join(format!("vfs-shim-ring-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        // Stands in for `IpcServe::start_file_backed`: create the backing file
+        // and lay a ring out in it. No director, no threads — this test is
+        // about which ring the client attaches to, not about serving.
+        let creator = SharedMapping::create_file_backed(&p, MAP).unwrap();
+        let created = vfs_ipc::ring::init(creator.seg(), SLOTS, CAP).unwrap();
+        drop(creator);
+
+        let prev_path = std::env::var(vfs_env::RING_PATH).ok();
+        let prev_section = std::env::var(vfs_env::RING_SECTION).ok();
+        std::env::set_var(vfs_env::RING_PATH, &p);
+        std::env::set_var(
+            vfs_env::RING_SECTION,
+            format!("vfs-shim-absent-section-{}", std::process::id()),
+        );
+
+        let source = ring_source_from_env();
+        assert_eq!(
+            source,
+            Some(RingSource::File(p.to_string_lossy().into_owned())),
+            "VFS_RING_PATH must win over VFS_RING_SECTION"
+        );
+        let client = FuseClient::connect_source(
+            source.as_ref().unwrap(),
+            &[(RootId::DEFAULT, r"C:\Games\Skyrim".to_string())],
+            CAP,
+            MAP,
+            0,
+        );
+
+        // Restore before asserting, so a failure cannot leak env into the rest
+        // of the binary.
+        match prev_path {
+            Some(v) => std::env::set_var(vfs_env::RING_PATH, v),
+            None => std::env::remove_var(vfs_env::RING_PATH),
+        }
+        match prev_section {
+            Some(v) => std::env::set_var(vfs_env::RING_SECTION, v),
+            None => std::env::remove_var(vfs_env::RING_SECTION),
+        }
+
+        let client = client.expect("must open the ring file named by VFS_RING_PATH");
+        assert_eq!(
+            client.geom, created,
+            "geometry must be read from that file's ring header"
+        );
+        assert!(
+            client.server_ev.is_null(),
+            "file-backed mode must hold no wake event: a Wine event object cannot \
+             wake a native Linux director, so signalling it is a syscall that lies"
+        );
+        drop(client);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The selection itself, without touching process env.
+    #[test]
+    fn ring_source_prefers_the_path_and_reports_neither_as_none() {
+        let file = || Some(RingSource::File(r"R:\ring.bin".to_string()));
+        assert_eq!(
+            ring_source(Some(r"R:\ring.bin".into()), Some("sect".into())),
+            file(),
+            "path wins when both are set"
+        );
+        assert_eq!(ring_source(Some(r"R:\ring.bin".into()), None), file());
+        assert_eq!(
+            ring_source(None, Some("sect".into())),
+            Some(RingSource::Section("sect".to_string())),
+            "the named-section path is unchanged when no path is given"
+        );
+        // Neither set stays `None`, which `try_init_from_env` turns into
+        // `NotConfigured` exactly as before.
+        assert_eq!(ring_source(None, None), None);
+        // An empty `VFS_RING_PATH` is absent, not a path. Believing it would
+        // map `""` and fail with a confusing io error while a perfectly good
+        // section was named — the same trap as an empty `VFS_RING_SECTION`.
+        assert_eq!(
+            ring_source(Some(String::new()), Some("sect".into())),
+            Some(RingSource::Section("sect".to_string()))
         );
     }
 }
