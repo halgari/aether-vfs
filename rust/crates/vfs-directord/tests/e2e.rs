@@ -211,6 +211,55 @@ NOTE: this is NOT a code failure — cargo could not replace {} because these   
     }
 }
 
+/// Move a build artifact aside when a live process has it mapped.
+///
+/// Windows refuses to *delete or overwrite* a mapped file, which is what makes
+/// `cargo build` fail with `Access is denied. (os error 5)` — but it permits
+/// **renaming** one. Moving the old file out of the way frees the path so cargo
+/// can write a fresh copy, while the process holding the old bytes keeps them.
+///
+/// This exists because the alternative is a wedged machine. A hung fixture
+/// outlives its test and keeps `vfs_shim_dll.dll` mapped; if that fixture is
+/// stuck in a non-alertable kernel wait it cannot even be terminated, so every
+/// later build on that machine fails until someone reboots. Measured 2026-09-02:
+/// three such fixtures survived repeated `Stop-Process` and `taskkill /F`, and
+/// with them holding the DLL, 19 tests failed across two runs for a reason none
+/// of them had anything to do with. Renaming recovered it without a reboot.
+///
+/// Best-effort by design: if the rename fails too, the build is attempted
+/// anyway and [`lock_holders_hint`] explains what happened.
+fn move_locked_artifacts_aside(names: &[&str]) {
+    for name in names {
+        let path = profile_dir().join(name);
+        if !path.exists() {
+            continue;
+        }
+        // Only disturb a file we cannot write; renaming a healthy artifact would
+        // churn the build directory for nothing.
+        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            continue;
+        }
+        let aside = path.with_extension(format!(
+            "orphanlocked-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        match std::fs::rename(&path, &aside) {
+            Ok(()) => eprintln!(
+                "note: {} was mapped by a live process; moved aside to {} so cargo can                  replace it (see move_locked_artifacts_aside)",
+                path.display(),
+                aside.display()
+            ),
+            Err(e) => eprintln!(
+                "note: {} is mapped and could not be moved aside ({e}); the build below                  will probably fail",
+                path.display()
+            ),
+        }
+    }
+}
+
 fn ensure_inject_artifacts() {
     // Session::launch locates shim/payload near the current exe (the test
     // binary). Co-locate them into the profile dir if cargo left them only in
@@ -239,6 +288,10 @@ fn ensure_inject_artifacts() {
         ("vfs-fixture-escape.exe", "vfs-fixture-escape"),
         ("vfs-fixture-prefs.exe", "vfs-fixture-prefs"),
     ];
+    // Free any artifact path a dead-but-unkillable process still holds, or the
+    // build below fails with a bare `Access is denied`.
+    move_locked_artifacts_aside(&needed);
+
     let main_stale = main_artifact_crates.iter().any(|(artifact, crate_name)| {
         artifact_is_stale(&profile.join(artifact), &workspace.join("crates").join(crate_name))
     });
