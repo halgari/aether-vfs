@@ -314,6 +314,15 @@ impl IpcServe {
     ) {
         // Process-global env is for the injected child (and single-session hosts).
         std::env::set_var(vfs_env::RING_SECTION, &self.section_name);
+        // Cleared for the same reason `VIRTUAL_ROOTS` is below, and it is the
+        // more dangerous of the two: `VFS_RING_PATH` **wins** over
+        // `VFS_RING_SECTION` in the shim (see `fuse_client::ring_source`), so a
+        // stale value left by an earlier file-backed session in this process
+        // would send the child to that old ring file — attaching it to a
+        // director that is gone, or to a stale ring another one is still
+        // serving — while this session's brand-new section sat unused and every
+        // log said the launch was configured correctly.
+        std::env::remove_var(vfs_env::RING_PATH);
         std::env::set_var(vfs_env::RING_BYTES, self.map_bytes.to_string());
         std::env::set_var(vfs_env::RING_PAYLOAD_CAP, self.payload_cap.to_string());
         std::env::set_var(vfs_env::ARENA_OFFSET, self.arena_offset.to_string());
