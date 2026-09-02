@@ -21,9 +21,16 @@ mod zipserve;
 
 pub use bootstrap::{
     bootstrap_from_config_path, bootstrap_from_config_path_with_payload, decode_config,
-    decode_config_full, encode_config, encode_config_full, encode_config_with_overlay,
-    load_static_imports_from_config_path, static_imports_to_preinit, sync_bootstrap,
-    BootstrapError, StaticImport,
+    decode_config_full, load_static_imports_from_config_path, static_imports_to_preinit,
+    sync_bootstrap, BootstrapError,
+};
+// The encoders (and `StaticImport`) live in `vfs_protocol::shimcfg` — pure
+// byte assembly with no Windows dependency — so a native Linux Director can
+// build a shim config too. Re-exported here so every existing caller
+// (`vfs-embed`, `vfs-inject`'s tests, `vfs-shim/tests/exit_stall_repro.rs`)
+// keeps compiling unchanged against `vfs_shim::`.
+pub use vfs_protocol::shimcfg::{
+    encode_config, encode_config_full, encode_config_with_overlay, StaticImport,
 };
 pub use engine::{Engine, EngineError, RenameOutcome};
 pub use hook::{install, install_late, skipped_detours, HookGuard, InstallError};

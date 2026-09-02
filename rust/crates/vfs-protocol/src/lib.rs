@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ops;
+pub mod shimcfg;
 
 pub use ops::{
     bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, not_supported, ok,
