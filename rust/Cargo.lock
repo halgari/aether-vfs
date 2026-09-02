@@ -1896,6 +1896,7 @@ dependencies = [
  "vfs-env",
  "vfs-inject",
  "vfs-protocol",
+ "vfs-proton",
  "vfs-provider",
  "vfs-shim",
  "vfs-zip",

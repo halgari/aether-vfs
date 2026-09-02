@@ -9,25 +9,21 @@ use std::sync::{Arc, Mutex};
 #[cfg(windows)]
 use std::time::Duration;
 
-// `vfs_director::ipc` is **no longer** `#[cfg(windows)]` — this comment claimed
-// it was until the file-backed ring landed, and the claim outlived the fact.
-// The module is portable: it chooses its mapping type by target, and
-// `IpcServe::start_file_backed` serves a ring held in a real file on unix,
-// which is how a shim inside Wine reaches a native Linux director.
-//
-// What is still Windows-only is the **named-section handshake**: `IpcServe::start`,
-// the event notifier, `write_thin_config` and `apply_env_roots`. `Session` is
-// gated to that half rather than to the module, because `serve`/`launch` are
-// written against exactly it — a named section, an event pair, and the
-// `VFS_RING_SECTION` env protocol. Teaching `Session` the file-backed mode is a
-// separate piece of work (see
-// docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md);
-// until then the unix path here is unimplemented, not absent for want of a
-// transport.
-#[cfg(windows)]
+// `vfs_director::ipc` is portable, and `Session` now uses **both** of its
+// halves: the named-section handshake on Windows (`IpcServe::start`, the event
+// pair, `write_thin_config`, `apply_env_roots`) and the file-backed ring on
+// unix (`IpcServe::start_file_backed`), which is how a shim inside Wine reaches
+// a native Linux director. So neither this import nor the `ipc` field below is
+// gated; only the two bodies that pick a transport are.
 use vfs_director::ipc::IpcServe;
 use vfs_director::stage::{stage_launch_into, ImageSource, StagedDir};
 use vfs_director::{Director, DiskProvider, MountGraph};
+// The Proton delivery mechanism: the unix counterpart of the `vfs-inject` +
+// `vfs-shim` pair, carrying GE-Proton discovery, the per-session Wine prefix,
+// and the injector's positional argv plus the shim's env handshake. Gated in
+// the manifest too (`[target.'cfg(unix)'.dependencies]`).
+#[cfg(unix)]
+use vfs_proton::{launch::WineLaunch, layout::Root as ProtonRoot, prefix::Prefix};
 use vfs_provider::{
     bad_request, exists, map_io_err, overlay_layer_dir, Access, DirEntry, Provider, RootId, Stat,
     OPEN_READ,
@@ -50,9 +46,13 @@ use vfs_provider::{
 /// is to stop touching process env at all and hand `CreateProcessW` an
 /// explicit environment block built for the child (see [`Session::launch`]).
 ///
-/// Windows-only, like the two methods that take it: `serve` and `launch` are
-/// the only writers of process env here, and both are `#[cfg(windows)]`.
-#[cfg(windows)]
+/// Held on both targets, by different writers. On Windows: `serve`'s
+/// `apply_env_roots` and `launch`'s `opts.env` save/set/restore. On unix only
+/// the latter — a Wine child is handed an explicit environment block built by
+/// `vfs_proton::launch::launch_env`, so this session's ring coordinates never
+/// travel through this process's environment there. `opts.env` still does,
+/// because `Command::envs` adds to the parent environment and `LaunchOpts` has
+/// no per-child block of its own.
 static LAUNCH_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Options for [`Session::launch`].
@@ -104,6 +104,14 @@ pub struct LaunchOpts {
     /// `__dirname`) and set both. The symptom otherwise is
     /// "`vfs_shim_dll.dll` not found" from a host that shipped the DLL, with
     /// nothing pointing at why the search looked where it did.
+    ///
+    /// **On the Proton path these two fields answer for three files.** A Wine
+    /// launch also needs `vfs-injector.exe`, and it has no field of its own:
+    /// it is looked for **beside `shim_dll`** when that is set, and otherwise
+    /// beside `current_exe()` — the one directory `cargo build` puts all three
+    /// in. None of the three can be built on Linux, so a missing one is
+    /// reported by name (see `locate_wine_artifacts`) rather than surfacing as
+    /// a path error out of `wine`.
     pub shim_dll: Option<String>,
     pub payload_dll: Option<String>,
     /// Extra environment variables for the child.
@@ -311,19 +319,11 @@ pub struct Session {
     virtual_root: PathBuf,
     overlay: PathBuf,
     state_dir: PathBuf,
-    #[cfg(windows)]
+    /// The live ring, on both targets: a named section on Windows, a real file
+    /// under `state_dir` on unix. One field rather than a `bool` beside it,
+    /// because [`Session::is_serving`] and [`Session::stop_serve`] then have
+    /// one thing to consult and cannot disagree with each other by target.
     ipc: Option<IpcServe>,
-    /// Whether [`Session::serve`] has been called, tracked separately from
-    /// `ipc` on non-Windows targets: this session holds no `IpcServe` there —
-    /// not because the type is missing (it is portable now; see the
-    /// `use vfs_director::ipc::IpcServe` comment above) but because the only
-    /// constructor `Session` uses is the Windows-only named-section one — so
-    /// there is no `Option<IpcServe>` to ask. [`Session::serve`] itself is
-    /// `#[cfg(not(windows))]`-stubbed to always fail until the Proton path
-    /// lands, so this stays `false` in practice — it exists so [`is_serving`]
-    /// keeps an identical signature on both targets.
-    #[cfg(not(windows))]
-    served: bool,
     /// Per-root composition inputs, keyed by the raw `u32` a `RootId` wraps.
     /// `Director` holds exactly one provider per root rather than a mergeable
     /// list, so every change to a root's inputs recomposes that root whole
@@ -376,10 +376,7 @@ impl Session {
             virtual_root: tmp.join("root"),
             overlay: tmp.join("overlay"),
             state_dir: tmp.join("state"),
-            #[cfg(windows)]
             ipc: None,
-            #[cfg(not(windows))]
-            served: false,
             roots: Mutex::new(BTreeMap::new()),
             extra_roots: Vec::new(),
             staged: Mutex::new(None),
@@ -501,8 +498,11 @@ impl Session {
     /// Windows-only: its one caller is `serve`'s `apply_env_roots`, which is
     /// itself `#[cfg(windows)]` — it publishes the named-section handshake
     /// (`VFS_RING_SECTION` plus the two event names). The file-backed ring has
-    /// its own env protocol (`VFS_RING_PATH`) and no host wiring yet, so there
-    /// is nothing on other targets to call this.
+    /// its own env protocol, published into the **child's** environment by
+    /// `vfs_proton::launch::launch_env` rather than into this process's, and
+    /// that protocol carries no `VFS_VIRTUAL_ROOTS` at all — which is why the
+    /// unix `launch` refuses a session declaring a root beyond root 0 instead
+    /// of launching a child that would classify its paths as nobody's.
     #[cfg(windows)]
     fn extra_roots_env(&self) -> Vec<(u32, String)> {
         debug_assert!(
@@ -832,26 +832,18 @@ impl Session {
 
     /// Whether IPC workers are running (required before [`launch`]).
     pub fn is_serving(&self) -> bool {
-        #[cfg(windows)]
-        {
-            self.ipc.is_some()
-        }
-        #[cfg(not(windows))]
-        {
-            self.served
-        }
+        self.ipc.is_some()
     }
 
     /// Access the live IPC server (after [`serve`]) for probes / diagnostics.
     ///
-    /// Windows-only, unlike every other method here: its return type is the
-    /// shared-memory ring itself (`vfs_director::ipc::IpcServe`), which does
-    /// not exist on other targets at all (see the `use` at the top of this
-    /// file) — there is no value a `#[cfg(not(windows))]` counterpart could
-    /// hand back with an identical signature, so none is provided. A host
-    /// that needs to know only *whether* a session is serving should use
-    /// [`Session::is_serving`], which is portable.
-    #[cfg(windows)]
+    /// Portable, now that both transports are wired: `IpcServe` exists on unix
+    /// too, holding a file-backed ring. This is also the honest way to read a
+    /// session's ring **geometry** — `map_bytes`, `arena_offset`, `arena_len`,
+    /// `payload_cap` are exactly what a child must be told, and a default in
+    /// their place is silent at attach and fatal under load (see
+    /// `vfs_proton::launch`). A host that needs only *whether* a session is
+    /// serving should use [`Session::is_serving`].
     pub fn ipc(&self) -> Option<&IpcServe> {
         self.ipc.as_ref()
     }
@@ -949,16 +941,12 @@ impl Session {
     /// Start the control ring + workers so an injected child can remap I/O.
     /// Idempotent if already serving.
     ///
-    /// Windows-only because of *what this body does*, not because the ring is
-    /// missing elsewhere: it creates a named section, an event pair and a thin
-    /// config, and publishes `VFS_RING_SECTION` — the half of
-    /// `vfs_director::ipc` that is still `#[cfg(windows)]`. The file-backed
-    /// half exists on unix (`IpcServe::start_file_backed`); wiring it in here
-    /// is what the non-Windows body below is waiting for. See the `use`
-    /// comment at the top of this file. The signature is identical on both
-    /// targets so a host compiles unchanged; on the Proton path (increment 2
-    /// of docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md) this
-    /// gains a real non-Windows body.
+    /// This body is Windows-only because of *what it does*, not because the
+    /// ring is missing elsewhere: it creates a named section, an event pair and
+    /// a thin config, and publishes `VFS_RING_SECTION` — the named-section half
+    /// of `vfs_director::ipc`. The unix body below starts the file-backed ring
+    /// instead. The signature is identical on both targets so a host compiles
+    /// unchanged.
     #[cfg(windows)]
     pub fn serve(&mut self) -> Result<(), String> {
         if self.ipc.is_some() {
@@ -1007,14 +995,119 @@ impl Session {
         Ok(())
     }
 
-    /// Serve is Windows-only until the Proton path lands (increment 2 of
-    /// docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md). The
-    /// signature is identical on both targets so a host compiles unchanged.
-    #[cfg(not(windows))]
+    /// Start the control ring + workers, file-backed, so a shim inside Wine
+    /// can remap its I/O to this native director. Idempotent if already
+    /// serving.
+    ///
+    /// Same shape as the Windows body above, with the transport swapped: the
+    /// ring is a **real file** at `state_dir/ring.bin` that both sides `mmap`
+    /// by path, because a Wine process and a native Linux director share no
+    /// named section and no event either could wake the other with (see
+    /// `IpcServe::start_file_backed`).
+    ///
+    /// Two things the Windows body does are deliberately **not** done here:
+    ///
+    /// - **No `VFS_*` is published into this process's environment.** A Wine
+    ///   child gets an explicit environment block from
+    ///   `vfs_proton::launch::launch_env`, so there is nothing for it to
+    ///   inherit and no window in which another session could repoint it.
+    /// - **No `shim.cfg` is written.** Its contents are the managed root and
+    ///   overlay *as the shim sees them*, and those `C:\` names do not exist
+    ///   until a Wine prefix does — so [`Session::launch`] writes it.
+    #[cfg(unix)]
     pub fn serve(&mut self) -> Result<(), String> {
-        Err("serve requires the Proton runtime, which is not implemented yet \
-             (see 2026-09-01-wine-hosted-shim-design.md, increment 2)"
-            .to_string())
+        if self.ipc.is_some() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&self.virtual_root)
+            .map_err(|e| format!("create root: {e}"))?;
+        std::fs::create_dir_all(&self.overlay).map_err(|e| format!("create overlay: {e}"))?;
+        std::fs::create_dir_all(&self.state_dir).map_err(|e| format!("create state: {e}"))?;
+
+        let ring = self.state_dir.join(RING_FILE);
+        // Unlinked rather than reused. `FileMapping::create` grows a file but
+        // never shrinks one and `ring::init` rewrites the header in place, so a
+        // ring left by an earlier run of this session would be re-initialised
+        // underneath anything still mapping it. Unlinking gives this director a
+        // fresh inode and leaves such a reader on the old one, where it fails
+        // visibly instead of racing us for slots.
+        let _ = std::fs::remove_file(&ring);
+        let ipc = IpcServe::start_file_backed(
+            Arc::clone(&self.kernel),
+            &ring,
+            PROTON_PAYLOAD_CAP,
+        )?;
+
+        self.ipc = Some(ipc);
+        Ok(())
+    }
+
+    /// A stable, traversal-safe id for this session's Wine prefix, derived
+    /// from its `state_dir`.
+    ///
+    /// `Session` has no id of its own, and the prefix needs to be the *same*
+    /// directory across two launches of one session (`wineboot` is expensive
+    /// and [`vfs_proton::prefix::ensure`] is idempotent only against a stable
+    /// name) while being a *different* one for two live sessions, which each
+    /// link their own directories into the prefix's `drive_c`. `state_dir` is
+    /// exactly that identity: [`Session::new`] gives every session a unique
+    /// one, and a host that points two sessions at one state directory has
+    /// already handed them a single ring file to fight over.
+    ///
+    /// The hash is `DefaultHasher`, whose output is stable within a build but
+    /// not promised across Rust releases. That is fine for what it names: a
+    /// rebuilt host boots one new prefix and reuses it from then on.
+    #[cfg(unix)]
+    fn wine_session_id(&self) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.state_dir.hash(&mut h);
+        format!("session-{:016x}", h.finish())
+    }
+
+    /// Links the managed root, the overlay and the state directory into
+    /// `prefix/drive_c/vfs-session/`, and returns the three `C:\` paths they
+    /// are reachable at, in that order.
+    ///
+    /// **A Wine process can only name what is under one of its drives**, and
+    /// these three live wherever the host put them — normally under `/tmp`,
+    /// outside the prefix entirely. Symlinks into `drive_c` rather than a
+    /// `dosdevices` letter each ([`Prefix::map_drive`]): one location instead
+    /// of three letters to allocate, [`Prefix::windows_path`] renders the
+    /// result, and every path the shim is handed is a subdirectory rather than
+    /// a bare drive root.
+    ///
+    /// Each link is replaced, not created-if-absent: a session relaunches into
+    /// the prefix it already booted, and `set_root` may have moved the target
+    /// in between.
+    #[cfg(unix)]
+    fn link_into_prefix(&self, prefix: &Prefix) -> Result<(String, String, String), String> {
+        let base = prefix.drive_c().join(WINE_LINK_DIR);
+        std::fs::create_dir_all(&base)
+            .map_err(|e| format!("launch: create {}: {e}", base.display()))?;
+        let link = |name: &str, target: &Path| -> Result<String, String> {
+            let at = base.join(name);
+            match std::fs::remove_file(&at) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("launch: replace {}: {e}", at.display())),
+            }
+            std::os::unix::fs::symlink(target, &at).map_err(|e| {
+                format!("launch: link {} -> {}: {e}", at.display(), target.display())
+            })?;
+            prefix.windows_path(&at).ok_or_else(|| {
+                format!(
+                    "launch: {} is not under {}, so it has no C: form",
+                    at.display(),
+                    prefix.drive_c().display()
+                )
+            })
+        };
+        Ok((
+            link("root", &self.virtual_root)?,
+            link("overlay", &self.overlay)?,
+            link("state", &self.state_dir)?,
+        ))
     }
 
     /// Launch `opts.image` under the virtual root with dual-layer inject.
@@ -1198,24 +1291,240 @@ impl Session {
         exit.map_err(|e| format!("launch: {e:?}"))
     }
 
-    /// Launch is Windows-only until the Proton path lands (increment 2 of
-    /// docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md). The
-    /// signature is identical on both targets so a host compiles unchanged.
-    #[cfg(not(windows))]
-    pub fn launch(&self, _opts: &LaunchOpts) -> Result<i32, String> {
-        Err("launch requires the Proton runtime, which is not implemented yet \
-             (see 2026-09-01-wine-hosted-shim-design.md, increment 2)"
-            .to_string())
+    /// Launch `opts.image` under GE-Proton with the shim injected, served by
+    /// this native director over the file-backed ring [`Session::serve`]
+    /// started. Requires [`serve`] first, like the Windows body.
+    ///
+    /// Four things a Wine launch needs that a Windows one does not:
+    ///
+    /// 1. **A runtime.** The newest verified GE-Proton under this host's
+    ///    aether-vfs home (`VFS_HOME`, else `XDG_DATA_HOME`, else `$HOME` —
+    ///    `vfs_proton::layout::Root::from_env`). Never a fallback to stock
+    ///    Proton: `vfs_proton::launch::run` re-verifies before it spawns.
+    /// 2. **A prefix**, this session's own, keyed by `state_dir`
+    ///    ([`Session::wine_session_id`]).
+    /// 3. **`C:\` names for the session's directories**, which live outside
+    ///    the prefix ([`Session::link_into_prefix`]) — and `shim.cfg` written
+    ///    *here* rather than in `serve`, since it carries two of them.
+    /// 4. **This ring's real geometry**, taken straight off the live
+    ///    [`IpcServe`]: `map_bytes`, `arena_offset`, `arena_len`,
+    ///    `payload_cap`. The shim defaults `VFS_RING_BYTES` to 2 MiB, and that
+    ///    default over a ~34 MiB ring attaches cleanly, answers a 256 KiB read
+    ///    and fails only at 4 MiB — measured, see `vfs_proton::launch`.
+    ///    Nothing here may pass a default in their place.
+    ///
+    /// Three of [`LaunchOpts`]' knobs are **refused rather than ignored**,
+    /// because dropping any of them silently produces a child that runs and is
+    /// wrong: `wait: false` (nothing here can detach — `run` waits), a session
+    /// with roots beyond root 0 (the file-backed env protocol carries no root
+    /// map, so those paths would fall through to real disk inside Wine), and an
+    /// `image` only the provider graph holds (staging is not wired to this
+    /// path). `stage_also` / `stage_fallback_dirs` are staging knobs and so are
+    /// unused here, exactly as their docs say.
+    #[cfg(unix)]
+    pub fn launch(&self, opts: &LaunchOpts) -> Result<i32, String> {
+        let ipc = self
+            .ipc
+            .as_ref()
+            .ok_or_else(|| "serve() before launch()".to_string())?;
+        // `serve` on this target always starts file-backed, so this is really a
+        // check that the ring belongs to that `serve` and not to a named
+        // section somebody else handed this session.
+        let ring = ipc
+            .ring_path()
+            .ok_or_else(|| {
+                "launch: the live ring has no file, so it is not the file-backed ring \
+                 serve() starts on this target — a Wine child can only reach a ring by path"
+                    .to_string()
+            })?
+            .to_path_buf();
+
+        if opts.image.trim().is_empty() {
+            return Err("LaunchOpts.image is empty — name the image to launch".to_string());
+        }
+        if !opts.wait {
+            return Err("launch: wait: false (detach) is not supported on the Proton path — \
+                        vfs_proton::launch::run waits for the child and returns its exit \
+                        code. Returning after the wait while reporting a detach would be a \
+                        launch that lied about when it finished."
+                .to_string());
+        }
+        if !self.extra_roots.is_empty() {
+            return Err(format!(
+                "launch: this session declares {} root(s) beyond root 0, and the file-backed \
+                 env protocol carries no root map (see vfs_proton::launch::launch_env, which \
+                 sets VFS_VIRTUAL_DIR and deliberately not VFS_VIRTUAL_ROOTS). A root the \
+                 shim is never told about is one whose paths it classifies as nobody's and \
+                 lets fall through to real disk, silently — so this is refused rather than \
+                 launched with roots missing.",
+                self.extra_roots.len()
+            ));
+        }
+
+        let home = ProtonRoot::from_env()
+            .map_err(|e| format!("launch: no aether-vfs home (set VFS_HOME): {e}"))?;
+        // `installed_dirs`, not `installed` + `runtime_dir`: the tag comes from
+        // the tree's `version` file and the directory name from the release it
+        // was installed from, and re-joining the tag onto `runtimes()` assumes
+        // those always agree.
+        let runtime = vfs_proton::runtime::installed_dirs(&home)
+            .map_err(|e| format!("launch: reading {}: {e}", home.runtimes().display()))?
+            .into_iter()
+            .next()
+            .map(|(_tag, dir)| dir)
+            .ok_or_else(|| {
+                format!(
+                    "launch: no verified GE-Proton runtime under {} — install one with \
+                     `vfs-proton install` (VFS_HOME selects where it lands). Launching on \
+                     stock Proton instead is the silent downgrade this path refuses.",
+                    home.runtimes().display()
+                )
+            })?;
+
+        let prefix = vfs_proton::prefix::ensure(&home, &runtime, &self.wine_session_id())
+            .map_err(|e| format!("launch: wine prefix: {e}"))?;
+        let (wine_root, wine_overlay, wine_state) = self.link_into_prefix(&prefix)?;
+
+        // The ring as the shim sees it. Its bytes are the same inode `serve`
+        // created; only the name differs.
+        let ring_name = ring
+            .file_name()
+            .ok_or_else(|| format!("launch: ring path {} has no file name", ring.display()))?;
+        let wine_ring = join_wine(&wine_state, Path::new(ring_name))?;
+
+        let target = self.wine_target(opts, &wine_root)?;
+
+        // Written here, not in `serve`: these are the root and overlay *as the
+        // shim sees them*, and neither existed as a `C:\` name until the prefix
+        // above did. The snapshot must still be a valid empty tree —
+        // `Engine::build` rejects zero-length snapshot bytes, which would abort
+        // dual-layer bootstrap before hooks install.
+        let config_path = self.state_dir.join("shim.cfg");
+        let snap = empty_tree_snapshot();
+        std::fs::write(
+            &config_path,
+            vfs_protocol::shimcfg::encode_config_with_overlay(&wine_root, &wine_overlay, &snap),
+        )
+        .map_err(|e| format!("launch: write {}: {e}", config_path.display()))?;
+
+        let ready_path = self.state_dir.join("ready.flag");
+        let _ = std::fs::remove_file(&ready_path);
+
+        let (injector, shim_dll, payload_dll) = locate_wine_artifacts(opts)?;
+
+        let wine = WineLaunch {
+            runtime,
+            prefix: prefix.dir.clone(),
+            injector,
+            shim_dll,
+            payload_dll,
+            target,
+            config_file: config_path,
+            ready_file: ready_path,
+            ring_path: PathBuf::from(wine_ring),
+            // The live ring's own numbers. `map_bytes` is the whole mapping
+            // (control ring + arena), which is what the shim must map.
+            ring_bytes: ipc.map_bytes,
+            arena_offset: ipc.arena_offset,
+            arena_len: ipc.arena_len,
+            payload_cap: ipc.payload_cap,
+            virtual_dir: wine_root,
+            args: opts.args.clone(),
+        };
+
+        // `opts.env` reaches the child by inheritance here too: `run` builds the
+        // child's `VFS_*`/Wine block explicitly but adds it *to* this process's
+        // environment (`Command::envs`). Same lock and same restore as the
+        // Windows body, for the same reason — see [`LAUNCH_ENV_LOCK`].
+        let _guard = LAUNCH_ENV_LOCK
+            .lock()
+            .map_err(|_| "launch env lock poisoned".to_string())?;
+        let mut saved: Vec<(String, Option<String>)> = Vec::with_capacity(opts.env.len());
+        for (k, v) in &opts.env {
+            saved.push((k.clone(), std::env::var(k).ok()));
+            std::env::set_var(k, v);
+        }
+
+        let exit = vfs_proton::launch::run(&wine);
+
+        for (k, old) in saved {
+            match old {
+                Some(v) => std::env::set_var(&k, v),
+                None => std::env::remove_var(&k),
+            }
+        }
+
+        exit.map_err(|e| format!("launch: {e}"))
+    }
+
+    /// `opts.image` as the **child** must name it, or a refusal saying which
+    /// of the three forms it failed.
+    ///
+    /// Three accepted forms, all ending in a path the Wine process can open:
+    ///
+    /// - Already a Windows path (`C:\…`, `\\?\…`, a UNC name): handed through.
+    ///   A host that knows the child's own path space is not second-guessed.
+    /// - Relative: resolved under the managed root, which the child reaches as
+    ///   `<wine_root>\…`.
+    /// - An absolute **host** path inside the managed root: the same case,
+    ///   rewritten. Outside it there is no drive to name it by, so it is
+    ///   refused rather than passed to `wine` as a Unix path.
+    ///
+    /// **A vpath only the provider graph serves is refused**, unlike the
+    /// Windows body, which stages it. `CreateProcess` inside Wine reads the
+    /// image before any hook of ours exists, exactly as on Windows, so staging
+    /// would be needed — but the staged directory has to be nameable from
+    /// inside Wine and mounted back under the curated graph, and none of that
+    /// is wired to this path yet. Refused by name beats a `wine` error about a
+    /// file nobody can see.
+    #[cfg(unix)]
+    fn wine_target(&self, opts: &LaunchOpts, wine_root: &str) -> Result<String, String> {
+        if is_windows_path(&opts.image) {
+            return Ok(opts.image.clone());
+        }
+        let image = Path::new(&opts.image);
+        let rel = if image.is_absolute() {
+            image.strip_prefix(&self.virtual_root).map_err(|_| {
+                format!(
+                    "launch: {} is an absolute host path outside the managed root ({}), so no \
+                     drive in this session's Wine prefix names it. Put the image under the \
+                     managed root, or give it as the child sees it (C:\\...).",
+                    image.display(),
+                    self.virtual_root.display()
+                )
+            })?
+        } else {
+            image
+        };
+        let on_disk = self.virtual_root.join(rel);
+        if !on_disk.is_file() {
+            let in_graph = self
+                .kernel
+                .getattr(RootId::DEFAULT, &opts.image)
+                .ok()
+                .flatten()
+                .is_some();
+            return Err(format!(
+                "launch: {:?} resolves to {}, which is not a real file{}. The Proton path \
+                 launches a real image only — CreateProcess inside Wine reads it before any \
+                 hook of ours exists, and staging a graph-only image is not wired to this \
+                 path yet.",
+                opts.image,
+                on_disk.display(),
+                if in_graph {
+                    " — root 0's provider graph does serve that vpath, so staging is what is \
+                     missing, not the content"
+                } else {
+                    ", and root 0's provider graph does not serve it either"
+                }
+            ));
+        }
+        join_wine(wine_root, rel)
     }
 
     pub fn stop_serve(&mut self) {
-        #[cfg(windows)]
         if let Some(ipc) = self.ipc.take() {
             ipc.stop();
-        }
-        #[cfg(not(windows))]
-        {
-            self.served = false;
         }
     }
 }
@@ -1229,17 +1538,15 @@ impl Default for Session {
 /// Protocol golden `empty-tree-snapshot`: a single empty root directory.
 /// Kept inline so `vfs-director` does not need the vfs-core bridge just for this.
 ///
-/// Windows-only with its two helpers below: the only consumer is `serve`'s
-/// `shim.cfg` write, and the shim config is part of the Windows delivery
-/// mechanism.
-#[cfg(windows)]
+/// Portable, with its two helpers below: `shim.cfg` is written by `serve` on
+/// Windows and by `launch` on unix — where the `C:\` form of the managed root
+/// is not known until a Wine prefix exists — and both need this snapshot.
 const EMPTY_TREE_SNAPSHOT_HEX: &str = "\
 535346560100000000000000000000008000000000000000010000003000000000000000\
 800000000000000080000000000000000000000080000000000000000000000000000000\
 800000000000000000000000000000000000000000000000000000000000000000000000\
 0000000000000000000000000000000000000000";
 
-#[cfg(windows)]
 fn empty_tree_snapshot() -> Vec<u8> {
     let hex = EMPTY_TREE_SNAPSHOT_HEX.as_bytes();
     debug_assert_eq!(
@@ -1258,7 +1565,6 @@ fn empty_tree_snapshot() -> Vec<u8> {
     out
 }
 
-#[cfg(windows)]
 fn from_hex(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',
@@ -1290,6 +1596,127 @@ fn locate_shim_payload(opts: &LaunchOpts) -> Result<(String, String), String> {
         .or_else(|| vfs_inject::ensure_payload_beside_shim(&dll, None))
         .ok_or_else(|| "vfs_payload.dll not found".to_string())?;
     Ok((dll, payload))
+}
+
+/// The ring file [`Session::serve`] creates inside `state_dir` on unix. Named
+/// as a constant because [`Session::launch`] has to render the same file as a
+/// `C:\` path for the shim, and the two must not drift apart.
+#[cfg(unix)]
+const RING_FILE: &str = "ring.bin";
+
+/// Where [`Session::launch`] links the session's directories inside the
+/// prefix's `drive_c` — see [`Session::link_into_prefix`].
+#[cfg(unix)]
+const WINE_LINK_DIR: &str = "vfs-session";
+
+/// Inline ring payload capacity for the file-backed ring.
+///
+/// The value the named-section path uses (`vfs_ipc::DEFAULT_PAYLOAD_CAP`),
+/// restated because `vfs-embed` does not depend on `vfs-ipc`. Restating it
+/// cannot desynchronize the two ends of *this* ring: the child is told this
+/// server's capacity from `IpcServe::payload_cap`, never a default at either
+/// end. It would only mean a Wine session pipelines differently from a Windows
+/// one if the constant there changed.
+#[cfg(unix)]
+const PROTON_PAYLOAD_CAP: u32 = 1_048_576;
+
+/// Whether `s` is already a path in the child's own space rather than this
+/// host's: `C:\…` / `C:/…`, `\\?\…`, or a UNC name.
+///
+/// Prefix-only, no filesystem check: this decides which *namespace* the string
+/// belongs to, and a Windows path cannot be resolved on the host to confirm it.
+#[cfg(unix)]
+fn is_windows_path(s: &str) -> bool {
+    let b = s.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
+        || s.starts_with("\\\\")
+}
+
+/// Appends `rel`'s components to a `C:\…` prefix with Wine's separator.
+///
+/// Anything that is not a plain component is **refused, not normalized**: this
+/// builds the name the child will open, and `..` would leave the managed root
+/// while a root or drive component would produce a path with two prefixes.
+/// Quietly normalizing either one points a launch somewhere nobody asked for.
+#[cfg(unix)]
+fn join_wine(base: &str, rel: &Path) -> Result<String, String> {
+    let mut out = base.to_string();
+    for c in rel.components() {
+        match c {
+            std::path::Component::Normal(part) => {
+                out.push('\\');
+                out.push_str(&part.to_string_lossy());
+            }
+            other => {
+                return Err(format!(
+                    "launch: {} cannot be named under {base}: {other:?} is not a plain path \
+                     component",
+                    rel.display()
+                ))
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The three Windows binaries a Proton launch needs, resolved and checked, or
+/// a message naming exactly which are missing.
+///
+/// **None of them can be built on Linux** — `vfs-injector.exe`,
+/// `vfs_shim_dll.dll` and `vfs_payload.dll` are Windows targets — so this
+/// resolves what a host has copied in rather than producing anything, and says
+/// so in the failure. [`LaunchOpts::shim_dll`] / [`LaunchOpts::payload_dll`]
+/// win when set; the documented default location is the directory holding
+/// `shim_dll` if only that is set, else the directory holding
+/// `current_exe()`. The injector has no `LaunchOpts` field of its own (adding
+/// one is a change to a public struct, which this increment does not make), so
+/// that same directory is where it is looked for — the one `cargo build` puts
+/// all three in.
+///
+/// All three are checked before any of them is used, and every missing one is
+/// listed: a launch that reported them one at a time would cost a Wine
+/// round-trip per file.
+#[cfg(unix)]
+fn locate_wine_artifacts(opts: &LaunchOpts) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    let base = match &opts.shim_dll {
+        Some(s) => Path::new(s)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        None => std::env::current_exe()
+            .map_err(|e| format!("launch: current_exe: {e}"))?
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "launch: current_exe() has no parent directory".to_string())?,
+    };
+    let shim = opts
+        .shim_dll
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| base.join("vfs_shim_dll.dll"));
+    let payload = opts
+        .payload_dll
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| base.join("vfs_payload.dll"));
+    let injector = base.join("vfs-injector.exe");
+
+    let missing: Vec<String> = [&injector, &shim, &payload]
+        .iter()
+        .filter(|p| !p.is_file())
+        .map(|p| p.display().to_string())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "launch: these Windows artifacts are missing, and none of them can be built on \
+             Linux: {}. Build them on Windows (`cargo build -p vfs-inject -p vfs-shim`), copy \
+             all three into {}, or set LaunchOpts.shim_dll and LaunchOpts.payload_dll to \
+             where they are (vfs-injector.exe is then looked for beside shim_dll).",
+            missing.join(", "),
+            base.display()
+        ));
+    }
+    Ok((injector, shim, payload))
 }
 
 /// Who owns a root's provider — the session that composes it, or a caller
@@ -1431,10 +1858,9 @@ mod root_ownership_tests {
     }
 }
 
-// The golden's only consumer is `serve`'s `shim.cfg` write, so both the
-// constant and the two helpers that decode it are `#[cfg(windows)]`; the test
-// follows them rather than the constant becoming dead code on other targets.
-#[cfg(all(test, windows))]
+// The golden is consumed by a `shim.cfg` write on both targets now, so the
+// constant, the two helpers that decode it and this test are all portable.
+#[cfg(test)]
 mod snapshot_tests {
     use super::*;
 
