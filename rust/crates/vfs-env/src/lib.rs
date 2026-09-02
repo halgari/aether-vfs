@@ -42,6 +42,15 @@ use std::path::PathBuf;
 
 /// Name of the shared-memory section backing the control ring.
 pub const RING_SECTION: &str = "VFS_RING_SECTION";
+/// The ring's backing **file**, used instead of [`RING_SECTION`] when the client
+/// and the server sit on opposite sides of a Wine boundary.
+///
+/// A page-file-backed named section exists only inside one Windows (or Wine)
+/// session and has no identity a native Linux process can open, whereas a
+/// file-backed mapping is coherent with an `mmap` of the same path. When this is
+/// set it **wins** over `RING_SECTION`: a session configured for the Wine path
+/// must not silently fall back to a named section that happens to exist.
+pub const RING_PATH: &str = "VFS_RING_PATH";
 /// Total size of that mapping, in bytes.
 pub const RING_BYTES: &str = "VFS_RING_BYTES";
 /// Maximum inline payload carried in a ring slot.
@@ -314,6 +323,7 @@ pub struct Var {
 /// Every switch. The drift test asserts the source reads nothing outside this.
 pub const ALL: &[Var] = &[
     Var { name: RING_SECTION, kind: Kind::Handshake, default: "required by the shim" },
+    Var { name: RING_PATH, kind: Kind::Handshake, default: "none (named section via VFS_RING_SECTION)" },
     Var { name: RING_BYTES, kind: Kind::Handshake, default: "ring default" },
     Var { name: RING_PAYLOAD_CAP, kind: Kind::Handshake, default: "ring default" },
     Var { name: ARENA_OFFSET, kind: Kind::Handshake, default: "ring default" },
