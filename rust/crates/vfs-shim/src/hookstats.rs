@@ -100,6 +100,11 @@ pub struct Timed {
 
 impl Timed {
     pub fn new(hook: Hook) -> Self {
+        // Independent of `enabled()`: the breadcrumb is for a hang, where the
+        // stats path is useless (its clock reads and reporter thread have been
+        // measured to suppress the race). Two relaxed stores, or nothing at all
+        // when the breadcrumb is off.
+        crate::breadcrumb::enter(hook as u32);
         Timed {
             hook,
             start: if enabled() { Some(Instant::now()) } else { None },
@@ -115,6 +120,7 @@ impl Timed {
 
 impl Drop for Timed {
     fn drop(&mut self) {
+        crate::breadcrumb::exit(self.hook as u32);
         let Some(start) = self.start else { return };
         let i = self.hook as usize;
         let ns = start.elapsed().as_nanos() as u64;

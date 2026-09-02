@@ -625,6 +625,9 @@ unsafe fn make_detour(
 /// Idempotent-guarded. Patches the four path/attr stubs itself.
 pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
     install_panic_hook();
+    // Before the detours go live: creating the breadcrumb file is real I/O, and
+    // once hooks are installed that I/O re-enters them.
+    crate::breadcrumb::init();
     crate::hookstats::start_reporter();
     ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
     // SAFETY: ntdll lookup + detour install; each hook matches its ABI.
@@ -732,6 +735,9 @@ pub unsafe fn install_late(
         return Err(InstallError::Detour);
     }
     install_panic_hook();
+    // Before the detours go live: creating the breadcrumb file is real I/O, and
+    // once hooks are installed that I/O re-enters them.
+    crate::breadcrumb::init();
     crate::hookstats::start_reporter();
     ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
 
@@ -2737,25 +2743,36 @@ unsafe fn qfull_hook_body(
 /// its value.
 unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Close);
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::ENTER);
     let tramp = match TRAMP_CLOSE {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_TABLE);
         if let Some(fh) = crate::fuse_synth::close_fuse(handle as isize) {
+            crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_CLIENT);
             if let Some(c) = crate::fuse_client::global() {
+                crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_RING);
                 let _ = c.close(fh);
+                crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_DONE);
             }
         }
+        crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_EXIT);
         return STATUS_SUCCESS;
     }
     if crate::zipserve::is_synth_section(handle as isize) {
+        crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_TABLE);
         // Releasing shim-owned VA waits for the last view (NT semantics).
         if let Some(window) = crate::zipserve::close_section(handle as isize) {
+            crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_REGION);
             crate::lazy_section::on_section_closed(window);
+            crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_DONE);
         }
+        crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_EXIT);
         return STATUS_SUCCESS;
     }
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLES);
     if let Ok(mut table) = DIR_TABLE.lock() {
         table.remove(&(handle as isize));
     }
@@ -2768,7 +2785,10 @@ unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     if let Ok(mut t) = PATH_TABLE.lock() {
         t.remove(&(handle as isize));
     }
-    tramp(handle)
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP);
+    let r = tramp(handle);
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP_DONE);
+    r
 }
 
 /// `NtDeleteFile` hook — the **path-based** delete (gate 5, Task 5).

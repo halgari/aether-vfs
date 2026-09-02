@@ -197,6 +197,16 @@ pub const DRM_EXE_LOG: &str = "VFS_DRM_EXE_LOG";
 pub const SECTION_FILL_LOG: &str = "VFS_SECTION_FILL_LOG";
 /// Where the shim records a panic before it takes the game down.
 pub const SHIM_PANIC_LOG: &str = "VFS_SHIM_PANIC_LOG";
+/// Path for the hook breadcrumb: a file-backed mapping naming the hook this
+/// process is currently inside.
+///
+/// For diagnosing an injected process that hangs in a hook with zero CPU and
+/// immune to `TerminateProcess`. It must be a shared *file* rather than heap
+/// state, because such a process cannot be attached to — an outside reader
+/// samples the file while the target is wedged. Two relaxed stores per hook, no
+/// clock and no thread, unlike [`SHIM_STATS_LOG`], whose reporter thread has
+/// been measured to suppress the very race it would be used to find.
+pub const SHIM_BREADCRUMB: &str = "VFS_SHIM_BREADCRUMB";
 /// Label for the benchmark row emitted under [`BENCH`].
 pub const BENCH_LABEL: &str = "VFS_BENCH_LABEL";
 
@@ -359,6 +369,7 @@ pub const ALL: &[Var] = &[
     Var { name: DRM_EXE_LOG, kind: Kind::Diagnostic, default: "off" },
     Var { name: SECTION_FILL_LOG, kind: Kind::Diagnostic, default: "off" },
     Var { name: SHIM_PANIC_LOG, kind: Kind::Diagnostic, default: "state dir" },
+    Var { name: SHIM_BREADCRUMB, kind: Kind::Diagnostic, default: "off (no breadcrumb)" },
     Var { name: BENCH_LABEL, kind: Kind::Diagnostic, default: "\"run\"" },
     Var { name: SKYRIM_ZIP, kind: Kind::Harness, default: r"C:\tmp\skyrimse.zip" },
     Var { name: SKYRIM_DATA, kind: Kind::Harness, default: r"C:\tmp\skyrim-data" },

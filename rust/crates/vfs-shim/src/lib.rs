@@ -9,6 +9,8 @@ mod engine;
 pub mod fuse_client;
 mod fuse_synth;
 mod hook;
+/// Lock-free record of the hook currently executing, in a shared file.
+pub mod breadcrumb;
 mod hookstats;
 mod inject;
 mod lazy_section;
