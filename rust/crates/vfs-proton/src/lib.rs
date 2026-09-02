@@ -12,6 +12,7 @@
 //! be verified as GE-Proton. See [`runtime::verify_ge`].
 
 pub mod install;
+pub mod launch;
 pub mod layout;
 pub mod prefix;
 pub mod release;
@@ -21,6 +22,7 @@ pub use install::{
     extract_tar_gz, install_release, parse_sha512sum, partial_path, verify_digest, InstallError,
     Installed,
 };
+pub use launch::{command_line, launch_env, wine_binary, LaunchError, WineLaunch};
 pub use layout::Root;
 pub use prefix::{ensure, Prefix, PrefixError};
 pub use release::{fetch_releases, parse_releases, pick, Release, ResolveError};
