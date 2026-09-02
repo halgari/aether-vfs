@@ -157,6 +157,60 @@ fn artifact_is_stale(artifact: &Path, crate_dir: &Path) -> bool {
         .any(|source_mtime| source_mtime > artifact_mtime)
 }
 
+/// Name the processes holding the shim DLL, for the one build failure that is
+/// never about the code.
+///
+/// `cargo build` cannot replace `vfs_shim_dll.dll` while any process has it
+/// mapped, and it reports only `Access is denied. (os error 5)` — which reads
+/// like a permissions problem and sends you looking in the wrong place. Two
+/// things routinely hold it: a leftover game launched by this project's own
+/// injector, and orphaned fixtures from a previously killed test.
+///
+/// The orphan case is self-reinforcing and worth naming loudly: a wedged fixture
+/// outlives its test, keeps the DLL mapped, and every later build on that
+/// machine fails until someone notices. Measured 2026-09-02: one wedge left
+/// three orphans, and with a stale `SkyrimSE` also holding it, 19 tests failed
+/// across two runs for a reason none of them had anything to do with.
+fn lock_holders_hint() -> String {
+    let dll = profile_dir().join("vfs_shim_dll.dll");
+    // Only bother if the DLL is genuinely unwritable; a build can fail for
+    // ordinary reasons too and this hint would then be noise.
+    if std::fs::OpenOptions::new().write(true).open(&dll).is_ok() {
+        return String::new();
+    }
+    let out = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-Process | ForEach-Object { $p=$_; try { if ($p.Modules |              Where-Object { $_.ModuleName -eq 'vfs_shim_dll.dll' }) {              \"$($p.ProcessName) (pid $($p.Id))\" } } catch {} }",
+        ])
+        .output();
+    let holders = match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+        Err(_) => String::new(),
+    };
+    if holders.is_empty() {
+        format!(
+            "
+
+NOTE: {} is not writable, so cargo could not replace it. This is not a              code failure. Could not enumerate the holders.",
+            dll.display()
+        )
+    } else {
+        format!(
+            "
+
+NOTE: this is NOT a code failure — cargo could not replace {} because these              processes have it mapped: {holders}. Close them (an orphaned fixture from a killed              test, or a game left running by the injector) and re-run.",
+            dll.display()
+        )
+    }
+}
+
 fn ensure_inject_artifacts() {
     // Session::launch locates shim/payload near the current exe (the test
     // binary). Co-locate them into the profile dir if cargo left them only in
@@ -207,7 +261,11 @@ fn ensure_inject_artifacts() {
             ])
             .status()
             .expect("spawn cargo");
-        assert!(status.success(), "fixture/artifact build failed: {status}");
+        assert!(
+            status.success(),
+            "fixture/artifact build failed: {status}{}",
+            lock_holders_hint()
+        );
     }
 
     // vfs-payload lives in its own workspace (panic = "abort"). Build it
@@ -268,6 +326,75 @@ fn ensure_inject_artifacts() {
 /// test's whole session lifecycle, which clippy's `await_holding_lock` rightly
 /// refuses for a std lock.
 static LAUNCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// How long a launched fixture may take before this file calls it wedged.
+///
+/// Override with `VFS_TEST_LAUNCH_TIMEOUT_SECS` (the `VFS_TEST_` prefix is
+/// exempt from `vfs-env`'s registry lint by design, for exactly this kind of
+/// harness-only knob).
+fn launch_timeout() -> Duration {
+    std::env::var("VFS_TEST_LAUNCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(Duration::from_secs(240), Duration::from_secs)
+}
+
+/// Drain a launch event stream to completion, **bounded**.
+///
+/// `stream.message().await` carries no timeout of its own, so a fixture that
+/// wedges — or an injected shim that never lets it exit — hangs the awaiting
+/// test forever. That is not a private failure. Every launching test in this
+/// file serialises on [`LAUNCH_LOCK`], so one wedge queues all the others behind
+/// it and the binary stops with nothing to diagnose from.
+///
+/// Measured on CI 2026-09-02: four tests reported "running for over 60 seconds"
+/// at the same instant, and the job was still stuck 43 minutes later having
+/// produced no further output. Three of those four were victims of the lock, not
+/// independent failures.
+///
+/// A bound turns that into one legible failure, releases the lock so the
+/// remaining tests still report honestly, and — the reason this matters — makes
+/// the underlying wedge diagnosable at all, because the panic says what had been
+/// seen before the stall.
+async fn drain_launch_events(
+    stream: &mut tonic::Streaming<vfs_control::pb::LaunchEvent>,
+    label: &str,
+    exit_code: &mut Option<i32>,
+) {
+    let mut events = 0usize;
+    // `Started` is the discriminator that makes a future stall conclusive:
+    // seen-but-no-Exited means the child launched and then wedged, while never
+    // seeing it means the launch itself never got off the ground. Without this
+    // the panic can only say "no Exited", which fits both causes.
+    let mut saw_started = false;
+    let drain = async {
+        while let Some(ev) = stream.message().await.expect("stream") {
+            events += 1;
+            match ev.event {
+                Some(vfs_control::pb::launch_event::Event::Exited(x)) => {
+                    *exit_code = Some(x.code)
+                }
+                Some(vfs_control::pb::launch_event::Event::Started(_)) => saw_started = true,
+                Some(vfs_control::pb::launch_event::Event::Log(l)) => {
+                    eprintln!("{label}: {}", l.line)
+                }
+                None => {}
+            }
+        }
+    };
+    if tokio::time::timeout(launch_timeout(), drain).await.is_err() {
+        panic!(
+            "launch event stream stalled after {:?} ({label}): {events} event(s) seen,              saw_started={saw_started}, exit_code={exit_code:?}. {}. Raise              VFS_TEST_LAUNCH_TIMEOUT_SECS if this machine is merely slow.",
+            launch_timeout(),
+            if saw_started {
+                "The child STARTED and then never reported Exited, so it is wedged or died                  without the daemon noticing"
+            } else {
+                "The child never even reported Started, so the launch itself did not get                  going — suspect artifact staging or the daemon, not the fixture"
+            }
+        );
+    }
+}
+
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scenario_toml_disk_source_fixture_read() {
@@ -354,7 +481,7 @@ wait      = true
     // already has the session's sources/launch, but CreateSession was already
     // called — call apply pieces manually.
     use vfs_control::pb::{
-        launch_event, source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
+        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
     };
 
     // Precedence is declaration order (the flat-list sugar), so position in
@@ -395,14 +522,7 @@ wait      = true
         .into_inner();
 
     let mut exit_code = None;
-    while let Some(ev) = stream.message().await.expect("stream") {
-        match ev.event {
-            Some(launch_event::Event::Exited(x)) => exit_code = Some(x.code),
-            Some(launch_event::Event::Started(_)) => {}
-            Some(launch_event::Event::Log(l)) => eprintln!("log: {}", l.line),
-            None => {}
-        }
-    }
+    drain_launch_events(&mut stream, "log", &mut exit_code).await;
 
     assert_eq!(
         exit_code,
@@ -475,7 +595,7 @@ async fn scenario_toml_disk_source_fixture_writepath() {
     assert!(!session.id.is_empty());
     assert!(!session.root.is_empty());
 
-    use vfs_control::pb::{launch_event, source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
+    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
 
     client
         .add_source(AddSourceReq {
@@ -529,14 +649,7 @@ async fn scenario_toml_disk_source_fixture_writepath() {
         .into_inner();
 
     let mut exit_code = None;
-    while let Some(ev) = stream.message().await.expect("stream") {
-        match ev.event {
-            Some(launch_event::Event::Exited(x)) => exit_code = Some(x.code),
-            Some(launch_event::Event::Started(_)) => {}
-            Some(launch_event::Event::Log(l)) => eprintln!("log: {}", l.line),
-            None => {}
-        }
-    }
+    drain_launch_events(&mut stream, "log", &mut exit_code).await;
 
     assert_eq!(
         exit_code,
@@ -747,7 +860,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
     assert!(!session.id.is_empty());
     assert!(!session.root.is_empty());
 
-    use vfs_control::pb::{launch_event, source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
+    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
 
     client
         .add_source(AddSourceReq {
@@ -810,14 +923,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
         .into_inner();
 
     let mut exit_code = None;
-    while let Some(ev) = stream.message().await.expect("stream") {
-        match ev.event {
-            Some(launch_event::Event::Exited(x)) => exit_code = Some(x.code),
-            Some(launch_event::Event::Started(_)) => {}
-            Some(launch_event::Event::Log(l)) => eprintln!("log: {}", l.line),
-            None => {}
-        }
-    }
+    drain_launch_events(&mut stream, "log", &mut exit_code).await;
 
     assert_eq!(
         exit_code,
@@ -1022,7 +1128,7 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
         .into_inner();
 
     use vfs_control::pb::{
-        launch_event, source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
+        source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource,
         ZipSource,
     };
 
@@ -1110,14 +1216,7 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
         .into_inner();
 
     let mut exit_code = None;
-    while let Some(ev) = stream.message().await.expect("stream") {
-        match ev.event {
-            Some(launch_event::Event::Exited(x)) => exit_code = Some(x.code),
-            Some(launch_event::Event::Started(_)) => {}
-            Some(launch_event::Event::Log(l)) => eprintln!("log: {}", l.line),
-            None => {}
-        }
-    }
+    drain_launch_events(&mut stream, "log", &mut exit_code).await;
     assert_eq!(
         exit_code,
         Some(0),
@@ -1486,7 +1585,7 @@ async fn run_escape_fixture(
     out_file: &Path,
     only_vector: Option<&str>,
 ) -> (i32, Vec<EscapeLine>, std::collections::BTreeSet<String>, bool) {
-    use vfs_control::pb::{launch_event, LaunchReq};
+    use vfs_control::pb::LaunchReq;
     let EscapeFixtureCtx { session_id, fixture, stats_log, vector7_link_dir, write_access } = *ctx;
 
     let _ = std::fs::remove_file(stats_log);
@@ -1541,14 +1640,7 @@ async fn run_escape_fixture(
         .into_inner();
 
     let mut exit_code = None;
-    while let Some(ev) = stream.message().await.expect("stream") {
-        match ev.event {
-            Some(launch_event::Event::Exited(x)) => exit_code = Some(x.code),
-            Some(launch_event::Event::Started(_)) => {}
-            Some(launch_event::Event::Log(l)) => eprintln!("escape fixture log: {}", l.line),
-            None => {}
-        }
-    }
+    drain_launch_events(&mut stream, "escape fixture log", &mut exit_code).await;
 
     let text = std::fs::read_to_string(out_file).unwrap_or_default();
     let lines = parse_escape_lines(&text);
@@ -2213,7 +2305,7 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
         .expect("CreateSession")
         .into_inner();
 
-    use vfs_control::pb::{launch_event, source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
+    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
     client
         .add_source(AddSourceReq {
             session_id: session.id.clone(),
@@ -2280,14 +2372,7 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
         .into_inner();
 
     let mut exit_code = None;
-    while let Some(ev) = stream.message().await.expect("stream") {
-        match ev.event {
-            Some(launch_event::Event::Exited(x)) => exit_code = Some(x.code),
-            Some(launch_event::Event::Started(_)) => {}
-            Some(launch_event::Event::Log(l)) => eprintln!("prefs fixture log: {}", l.line),
-            None => {}
-        }
-    }
+    drain_launch_events(&mut stream, "prefs fixture log", &mut exit_code).await;
     assert_eq!(
         exit_code,
         Some(0),
@@ -2564,7 +2649,7 @@ async fn profile_api_writes_a_managed_root_ini_through_the_director() {
         .expect("CreateSession")
         .into_inner();
 
-    use vfs_control::pb::{launch_event, source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
+    use vfs_control::pb::{source_spec, AddSourceReq, DiskSource, LaunchReq, SourceSpec as PbSource};
     client
         .add_source(AddSourceReq {
             session_id: session.id.clone(),
@@ -2609,14 +2694,7 @@ async fn profile_api_writes_a_managed_root_ini_through_the_director() {
         .into_inner();
 
     let mut exit_code = None;
-    while let Some(ev) = stream.message().await.expect("stream") {
-        match ev.event {
-            Some(launch_event::Event::Exited(x)) => exit_code = Some(x.code),
-            Some(launch_event::Event::Started(_)) => {}
-            Some(launch_event::Event::Log(l)) => eprintln!("prefs fixture log: {}", l.line),
-            None => {}
-        }
-    }
+    drain_launch_events(&mut stream, "prefs fixture log", &mut exit_code).await;
     assert_eq!(exit_code, Some(0), "the prefs fixture must exit 0");
 
     let text = std::fs::read_to_string(&out_file).unwrap_or_default();

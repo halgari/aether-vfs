@@ -15,3 +15,10 @@ pub use endpoint::{Request, Response, RingClient, RingServer};
 pub use notifier::{Notifier, SpinNotifier};
 pub use ring::{Geom, IpcError};
 pub use seg::{OwnedSeg, SharedSeg};
+
+/// How long an endpoint waits for a published request to be answered.
+///
+/// Generous on purpose: a director that has not answered in a minute is broken,
+/// not busy, and the point is only to convert a permanent hang into a reportable
+/// error. Measured round trips are 20-209 microseconds.
+pub const RESPONSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);

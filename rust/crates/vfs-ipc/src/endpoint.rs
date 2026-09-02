@@ -61,6 +61,32 @@ impl<'a, N: Notifier> RingClient<'a, N> {
         }
     }
 
+
+    /// Wait for `slot`'s response, bounded by [`crate::RESPONSE_DEADLINE`].
+    ///
+    /// A **time** bound, not a try count like `claim_slot`'s: `wait_client` is
+    /// advisory and its cost varies enormously by implementation. The shim's
+    /// spins (a try count would expire in well under a second), while
+    /// `EventNotifier`'s sleeps 1 ms per call (where the same count would be
+    /// thirteen hours). Only wall-clock means the same thing to both.
+    ///
+    /// `Instant::now()` is checked once every 4096 iterations so a spinning
+    /// notifier does not pay for a clock read per turn.
+    fn await_response(&self, slot: u32) -> Result<(i32, Vec<u8>), IpcError> {
+        let start = std::time::Instant::now();
+        let mut tries: u32 = 0;
+        loop {
+            if let Some(r) = ring::take_response(self.seg, &self.geom, slot) {
+                return Ok(r);
+            }
+            tries = tries.wrapping_add(1);
+            if tries.is_multiple_of(4096) && start.elapsed() > crate::RESPONSE_DEADLINE {
+                return Err(IpcError::Timeout);
+            }
+            self.notifier.wait_client(slot);
+        }
+    }
+
     /// Submit a request and block (via the notifier / spin) until the response.
     pub fn submit(&self, opcode: u32, flags: u32, payload: &[u8]) -> Result<Response, IpcError> {
         if payload.len() > self.geom.payload_cap as usize {
@@ -69,11 +95,15 @@ impl<'a, N: Notifier> RingClient<'a, N> {
         let slot = self.claim_slot()?;
         ring::publish_request(self.seg, &self.geom, slot, opcode, flags, payload)?;
         self.notifier.notify_server();
-        let (status, payload) = loop {
-            if let Some(r) = ring::take_response(self.seg, &self.geom, slot) {
-                break r;
+        let (status, payload) = match self.await_response(slot) {
+            Ok(r) => r,
+            Err(e) => {
+                // Release the slot even on timeout, or a stalled director costs
+                // the ring a slot permanently and the next request sees RingFull.
+                let _ = ring::free_slot(self.seg, &self.geom, slot);
+                self.notifier.notify_slot_free();
+                return Err(e);
             }
-            self.notifier.wait_client(slot);
         };
         ring::free_slot(self.seg, &self.geom, slot)?;
         self.notifier.notify_slot_free();
@@ -122,11 +152,16 @@ impl<'a, N: Notifier> RingClient<'a, N> {
         self.notifier.notify_server();
         let mut out = Vec::with_capacity(reqs.len());
         for &slot in &slots {
-            let (status, payload) = loop {
-                if let Some(r) = ring::take_response(self.seg, &self.geom, slot) {
-                    break r;
+            let (status, payload) = match self.await_response(slot) {
+                Ok(r) => r,
+                Err(e) => {
+                    // Every slot this call holds must go back, not just this one.
+                    for &s in &slots {
+                        let _ = ring::free_slot(self.seg, &self.geom, s);
+                    }
+                    self.notifier.notify_slot_free();
+                    return Err(e);
                 }
-                self.notifier.wait_client(slot);
             };
             out.push(Response { status, payload });
         }

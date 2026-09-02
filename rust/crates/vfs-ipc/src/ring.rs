@@ -8,6 +8,16 @@ use crate::seg::SharedSeg;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IpcError {
     RingFull,
+    /// A published request was never answered within [`crate::RESPONSE_DEADLINE`].
+    ///
+    /// The endpoint used to wait for a response forever. That is a latent
+    /// process hang, not merely a slow path: `wait_client` is advisory — the
+    /// shim's implementation is a bare `spin_loop()` — so a response that never
+    /// arrives left the caller looping inside whichever NT call it was serving.
+    /// For a game that is a permanent freeze mid-read rather than an I/O error
+    /// it could report or retry. `claim_slot` already bounded its sibling loop;
+    /// this is the other half.
+    Timeout,
     PayloadTooLarge,
     BadResponse,
     Closed,
