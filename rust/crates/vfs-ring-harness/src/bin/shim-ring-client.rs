@@ -24,15 +24,25 @@
 //! (the header is at offset 0) while the bulk arena falls outside the mapping,
 //! so it is echoed here to be checked against the server's own log.
 //!
+//! Two reads, deliberately: a 16-byte one that travels inline in the ring
+//! payload, and the whole file (past the 64 KiB bulk threshold) whose bytes
+//! travel through the shared arena instead. The arena is the read path large
+//! assets take, and it is the only one an under-sized `VFS_RING_BYTES` breaks.
+//!
 //! Exit 0 with `CLIENT: OK` means a Wine-hosted shim read bytes out of a
 //! native Linux Director. Any other exit prints why on stderr.
 
 #[cfg(windows)]
 mod imp {
-    use std::io::Write as _;
+    use std::io::{Read as _, Write as _};
     use std::process::exit;
 
     use vfs_shim::{fuse_client, install, Engine};
+
+    /// Bytes of the first, deliberately small read. Under
+    /// `FuseClient`'s 64 KiB bulk threshold, so it travels inline in the ring
+    /// slot's own payload.
+    const INLINE_PROBE: usize = 16;
 
     fn fail(msg: &str) -> ! {
         eprintln!("CLIENT FAIL: {msg}");
@@ -62,11 +72,17 @@ mod imp {
 
     pub fn main() {
         let args: Vec<String> = std::env::args().collect();
-        if args.len() != 3 {
-            fail("usage: shim-ring-client <file-path> <expected-content>");
+        if args.len() != 4 {
+            fail("usage: shim-ring-client <file-path> <pattern> <total-len>");
         }
         let path = args[1].clone();
-        let expect = args[2].as_bytes().to_vec();
+        let pattern = args[2].as_bytes().to_vec();
+        let total: usize = args[3]
+            .parse()
+            .unwrap_or_else(|_| fail("total-len must be a positive integer"));
+        if pattern.len() < INLINE_PROBE {
+            fail("pattern must be at least as long as the inline probe");
+        }
 
         // Echoed, not chosen: the geometry has to be the server's, and this is
         // the record that it was.
@@ -103,32 +119,61 @@ mod imp {
         say(&format!("hooks installed, root={root}"));
 
         // A by-name attribute query first (`NtQueryFullAttributesFile` →
-        // GETATTR) and then the read (`NtCreateFile` + `NtReadFile` → OPEN,
-        // READ, CLOSE). Both are ordinary std calls; nothing here knows a ring
-        // exists.
+        // GETATTR). An ordinary std call; nothing here knows a ring exists.
         let md = std::fs::metadata(&path)
             .unwrap_or_else(|e| fail(&format!("metadata {path}: {e}")));
         say(&format!("metadata {path} len={}", md.len()));
-        if md.len() != expect.len() as u64 {
-            fail(&format!(
-                "metadata len {} != expected {}",
-                md.len(),
-                expect.len()
-            ));
+        if md.len() != total as u64 {
+            fail(&format!("metadata len {} != expected {total}", md.len()));
         }
 
-        let got = std::fs::read(&path).unwrap_or_else(|e| fail(&format!("read {path}: {e}")));
-        if got != expect {
+        // A small read first, and separately from the big one, because the two
+        // take **different transports** inside `FuseClient::read_fragmented`:
+        // under 64 KiB the bytes ride inline in the ring slot's payload, at or
+        // above it they ride in the shared bulk arena and the ring carries only
+        // (len, arena offset). An inline-only proof would leave the arena — and
+        // with it the mapping-size hazard below — untested.
+        let mut f =
+            std::fs::File::open(&path).unwrap_or_else(|e| fail(&format!("open {path}: {e}")));
+        let mut head = [0u8; INLINE_PROBE];
+        f.read_exact(&mut head)
+            .unwrap_or_else(|e| fail(&format!("inline read {path}: {e}")));
+        if head[..] != pattern[..INLINE_PROBE] {
             fail(&format!(
-                "content mismatch: got {:?}, want {:?}",
-                String::from_utf8_lossy(&got),
-                String::from_utf8_lossy(&expect)
+                "inline read mismatch: got {:?}, want {:?}",
+                String::from_utf8_lossy(&head),
+                String::from_utf8_lossy(&pattern[..INLINE_PROBE])
+            ));
+        }
+        drop(f);
+        say(&format!(
+            "inline read {INLINE_PROBE} bytes: {:?}",
+            String::from_utf8_lossy(&head)
+        ));
+
+        // The whole file: past the bulk threshold, so the bytes cross through
+        // the arena. **This is what makes a wrong `VFS_RING_BYTES` fatal**
+        // rather than invisible — an under-sized mapping still opens the ring
+        // (the header is at offset 0) and only fails once an arena bank lands
+        // outside the view, which an inline read never touches.
+        let got = std::fs::read(&path).unwrap_or_else(|e| fail(&format!("read {path}: {e}")));
+        if got.len() != total {
+            fail(&format!("read {} bytes, want {total}", got.len()));
+        }
+        // Position-sensitive on purpose: a copy that is truncated, short, or
+        // offset by an arena bank mismatches instead of coincidentally
+        // agreeing.
+        if let Some(i) = (0..got.len()).find(|&i| got[i] != pattern[i % pattern.len()]) {
+            fail(&format!(
+                "content mismatch at byte {i} of {total}: got {}, want {}",
+                got[i],
+                pattern[i % pattern.len()]
             ));
         }
         say(&format!(
-            "read {} bytes through the shim: {:?}",
+            "bulk read {} bytes through the shim, pattern matches; head={:?}",
             got.len(),
-            String::from_utf8_lossy(&got)
+            String::from_utf8_lossy(&got[..INLINE_PROBE])
         ));
         say("OK");
         exit(0);
