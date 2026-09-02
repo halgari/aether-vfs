@@ -1855,6 +1855,7 @@ dependencies = [
  "vfs-provider",
  "vfs-redirect",
  "vfs-shim",
+ "vfs-unix",
  "vfs-win",
  "vfs-zip",
  "windows-sys 0.61.2",

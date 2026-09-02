@@ -29,6 +29,10 @@ vfs-ipc = { path = "../vfs-ipc" }
 # Windows-only for its injection half; the parsing half is a file format.
 vfs-pe = { path = "../vfs-pe" }
 
+[target.'cfg(unix)'.dependencies]
+# `ipc.rs` — FileMapping, the file-backed ring a Wine-hosted shim shares by path.
+vfs-unix = { path = "../vfs-unix" }
+
 [target.'cfg(windows)'.dependencies]
 # `ipc.rs` — SharedMapping + EventNotifier, the ring's OS handles.
 vfs-win = { path = "../vfs-win" }
