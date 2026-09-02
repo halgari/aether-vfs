@@ -13,6 +13,7 @@
 
 pub mod install;
 pub mod layout;
+pub mod prefix;
 pub mod release;
 pub mod runtime;
 
@@ -21,5 +22,6 @@ pub use install::{
     Installed,
 };
 pub use layout::Root;
+pub use prefix::{ensure, Prefix, PrefixError};
 pub use release::{fetch_releases, parse_releases, pick, Release, ResolveError};
 pub use runtime::{cmp_tags, installed, installed_dirs, verify_ge, VerifyError};
