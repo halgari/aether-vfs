@@ -12,15 +12,40 @@ path = "src/lib.rs"
 [[bin]]
 name = "vfs-proton"
 path = "src/bin/vfs-proton.rs"
+# The CLI is the acquisition surface (`install` / `list` / `path`), so it needs
+# the feature that carries it. Enabled by default, so `cargo build` still
+# produces this binary.
+required-features = ["acquire"]
+
+[features]
+## Runtime **acquisition**: the GitHub release query and the
+## download/verify/extract path (`release` + `install`), plus the CLI that
+## drives them. Default, so builds, tests and the binary are unchanged.
+##
+## Turning it off is what `vfs-embed` does, and the reason it exists.
+## Acquisition pulls `ureq` -> `rustls` -> `ring`, whose build script is a **C
+## cross-compile**: with it on, `cargo check -p vfs-embed --target
+## x86_64-unknown-linux-gnu` from a Windows box dies inside `ring`'s build
+## script before any of our code is reached. That is the same failure
+## `vfs-shim`'s `retour` -> `libudis86-sys` produces in the other direction,
+## and the reason that pair is gated out of the Linux graph — a public
+## embeddable API should not force a C toolchain (or a TLS stack) on a host
+## that only wants to launch a process.
+##
+## `Session::launch` uses `layout`, `prefix`, `runtime` and `launch`, and none
+## of those depend on anything beyond `vfs-env`.
+default = ["acquire"]
+acquire = ["dep:ureq", "dep:sha2", "dep:tar", "dep:flate2", "dep:serde_json", "dep:clap"]
 
 [dependencies]
 # Chosen over shelling out to curl/tar/sha512sum so a host needs no external
 # tools; see the plan's deviation note. ureq's defaults already carry rustls +
-# ring + webpki-roots, so TLS needs no extra wiring.
-ureq = "3.4"
-sha2 = "0.11"
-tar = "0.4"
-flate2 = "1.1"
+# ring + webpki-roots, so TLS needs no extra wiring. All optional: see the
+# `acquire` feature above for why the split is load-bearing rather than tidy.
+ureq = { version = "3.4", optional = true }
+sha2 = { version = "0.11", optional = true }
+tar = { version = "0.4", optional = true }
+flate2 = { version = "1.1", optional = true }
 vfs-env = { path = "../vfs-env" }
-serde_json = "1"
-clap = { version = "4", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }

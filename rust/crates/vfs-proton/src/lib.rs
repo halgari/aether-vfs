@@ -11,15 +11,27 @@
 //! Proton) when unset or wrong, so every runtime this crate hands back must
 //! be verified as GE-Proton. See [`runtime::verify_ge`].
 
+// Acquisition — the network query and the download/verify/extract path — is
+// behind the `acquire` feature (default on). See the manifest for why: it
+// carries `ureq` -> `rustls` -> `ring`, a C cross-compile in a build script,
+// and `vfs-embed` consumes this crate on unix to *launch*, not to install.
+#[cfg(feature = "acquire")]
 pub mod install;
+pub mod launch;
 pub mod layout;
+pub mod prefix;
+#[cfg(feature = "acquire")]
 pub mod release;
 pub mod runtime;
 
+#[cfg(feature = "acquire")]
 pub use install::{
     extract_tar_gz, install_release, parse_sha512sum, partial_path, verify_digest, InstallError,
     Installed,
 };
+pub use launch::{command_line, launch_env, wine_binary, LaunchError, WineLaunch};
 pub use layout::Root;
+pub use prefix::{ensure, Prefix, PrefixError};
+#[cfg(feature = "acquire")]
 pub use release::{fetch_releases, parse_releases, pick, Release, ResolveError};
 pub use runtime::{cmp_tags, installed, installed_dirs, verify_ge, VerifyError};

@@ -85,7 +85,7 @@ fn hex(bytes: &[u8]) -> String {
 /// dependency-free here so `xtask-descriptor` stays portable (no `vfs-shim`,
 /// which is Windows-only via `retour`/`windows-sys` and would break the
 /// ubuntu `cargo test -p xtask-descriptor` CI job). Format (documented in
-/// `vfs-shim::bootstrap::encode_config_full`, and pinned there against this
+/// `vfs_protocol::shimcfg::encode_config_full`, and pinned there against this
 /// exact byte shape by a same-crate unit test):
 /// `[u32 root_len][root utf8][u32 overlay_len][overlay utf8]"VFS1"[u32 n_static]
 ///  n times: [u32 name_len][name utf8][u32 backing_len][backing utf8][snapshot bytes]`.

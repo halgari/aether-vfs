@@ -9,14 +9,15 @@ pub struct Root {
     base: PathBuf,
 }
 
-/// A tag failed [`Root::try_runtime_dir`]'s validation: it was empty,
-/// absolute, or tried to leave `runtimes()` via a path separator or `..`.
+/// A tag failed [`Root::try_runtime_dir`] or [`Root::try_session_dir`]'s
+/// validation: it was empty, absolute, or tried to leave the parent
+/// directory via a path separator or `..`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidTag(pub String);
 
 impl std::fmt::Display for InvalidTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid runtime tag: {:?}", self.0)
+        write!(f, "invalid tag: {:?}", self.0)
     }
 }
 
@@ -63,6 +64,12 @@ impl Root {
         self.base.join("downloads")
     }
 
+    /// Directory holding one subdirectory per session, each containing that
+    /// session's private Wine prefix.
+    pub fn sessions(&self) -> PathBuf {
+        self.base.join("sessions")
+    }
+
     /// Infallible convenience for literal, known-good tags (e.g. in tests or
     /// after `try_runtime_dir` has already validated the value). Callers
     /// handling a tag from a CLI argument or a GitHub release name must use
@@ -77,16 +84,34 @@ impl Root {
     /// argument, a GitHub release name) and must not be able to escape the
     /// runtimes directory.
     pub fn try_runtime_dir(&self, tag: &str) -> Result<PathBuf, InvalidTag> {
-        let refuse = tag.is_empty()
-            || tag.contains('/')
-            || tag.contains('\\')
-            || tag.contains("..")
-            || Path::new(tag).is_absolute();
-        if refuse {
-            return Err(InvalidTag(tag.to_string()));
-        }
-        Ok(self.runtime_dir(tag))
+        let name = validate_component(tag)?;
+        Ok(self.runtime_dir(name))
     }
+
+    /// Validates `session` before joining it under `sessions()`. A session
+    /// id can come from a caller (a launcher, a CLI argument), not
+    /// necessarily well-formed, so it gets the same traversal guard as
+    /// [`Root::try_runtime_dir`]: reject empty, absolute, or `..`/separator-
+    /// bearing values rather than let one escape `sessions()`.
+    pub fn try_session_dir(&self, session: &str) -> Result<PathBuf, InvalidTag> {
+        let name = validate_component(session)?;
+        Ok(self.sessions().join(name))
+    }
+}
+
+/// Shared guard for [`Root::try_runtime_dir`] and [`Root::try_session_dir`]:
+/// rejects anything empty, absolute, or able to leave the parent directory
+/// via a path separator or `..` component.
+fn validate_component(value: &str) -> Result<&str, InvalidTag> {
+    let refuse = value.is_empty()
+        || value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || Path::new(value).is_absolute();
+    if refuse {
+        return Err(InvalidTag(value.to_string()));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -102,6 +127,30 @@ mod tests {
             std::path::Path::new("/tmp/aebase/runtimes/GE-Proton11-6")
         );
         assert_eq!(r.downloads(), std::path::Path::new("/tmp/aebase/downloads"));
+    }
+
+    #[test]
+    fn sessions_places_each_session_under_the_sessions_directory() {
+        let r = Root::at(std::path::PathBuf::from("/tmp/aebase"));
+        assert_eq!(r.sessions(), std::path::Path::new("/tmp/aebase/sessions"));
+        assert_eq!(
+            r.try_session_dir("abc123").unwrap(),
+            std::path::Path::new("/tmp/aebase/sessions/abc123")
+        );
+    }
+
+    #[test]
+    fn a_session_id_cannot_escape_the_sessions_directory() {
+        // A session id can come from a caller, so it gets the same traversal
+        // guard as a runtime tag.
+        for evil in ["../../etc", "..", "a/../../b", "/absolute", "a/b", ""] {
+            assert!(
+                Root::at(std::path::PathBuf::from("/tmp/aebase"))
+                    .try_session_dir(evil)
+                    .is_err(),
+                "session id {evil:?} must be refused"
+            );
+        }
     }
 
     #[test]

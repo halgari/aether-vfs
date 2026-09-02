@@ -41,6 +41,24 @@ vfs-zip = { path = "../vfs-zip", optional = true }
 vfs-inject = { path = "../vfs-inject" }
 vfs-shim = { path = "../vfs-shim" }
 
+# The Proton (Wine) delivery mechanism: the unix counterpart of the pair above.
+# GE-Proton discovery and verification, the per-session Wine prefix, and the
+# injector's positional argv plus the shim's file-backed env handshake, all of
+# which `Session::launch` drives on unix. Gated in the manifest for symmetry
+# with the Windows pair, and because a Windows host has no use for it.
+[target.'cfg(unix)'.dependencies]
+# `default-features = false` drops its `acquire` feature, and with it
+# `ureq` -> `rustls` -> `ring` — a C cross-compile in a build script, which is
+# the same reason `vfs-shim` is kept out of the Linux graph above. A host
+# embedding this API launches a runtime; it does not download one.
+vfs-proton = { path = "../vfs-proton", default-features = false }
+# The portable shim-config encoder (`vfs_protocol::shimcfg`). On Windows the
+# same bytes come from `vfs-shim`'s re-export of it; on unix `vfs-shim` cannot
+# be built at all (`retour` -> `libudis86-sys`), which is why the encoder moved
+# into `vfs-protocol` in the first place. Also a dev-dependency below, for the
+# ring codecs — the two entries are the same crate, not two copies.
+vfs-protocol = { path = "../vfs-protocol" }
+
 [dev-dependencies]
 # `vfs-zip` is optional above (the `zip` feature); tests use `ZipProvider`
 # whether or not that feature is on, so it is unconditional here. `vfs-shim`

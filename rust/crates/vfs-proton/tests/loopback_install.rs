@@ -1,3 +1,9 @@
+// The whole file is acquisition: `install_release` over loopback, with `ureq`,
+// `sha2`, `tar` and `flate2` all named directly. Those are the `acquire`
+// feature's optional dependencies (default on, so this runs in every ordinary
+// `cargo test`), and without it there is nothing here to compile against.
+#![cfg(feature = "acquire")]
+
 //! End-to-end tests for [`install_release`]'s step ordering, over loopback.
 //!
 //! # Why a server at all
