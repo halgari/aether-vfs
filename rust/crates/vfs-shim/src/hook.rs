@@ -1289,9 +1289,11 @@ unsafe fn tag_under_root(file_handle: *mut HANDLE, path: Option<&str>, status: N
     // would make case 4 fire for every outside-root ancestor handle too,
     // changing that branch from a rare safety net into a per-open cost.
     if let Ok(mut t) = HANDLE_PATHS.lock() {
+        crate::breadcrumb::set_holder(crate::breadcrumb::holder::TAG_UNDER_ROOT);
         if t.len() < HANDLE_PATHS_MAX {
             t.insert(key, path.to_string());
         }
+        crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
     }
     if path_is_ours(path) {
         if let Ok(mut table) = DIR_TABLE.lock() {
@@ -1307,7 +1309,11 @@ static HANDLE_PATHS: Mutex<BTreeMap<isize, String>> = Mutex::new(BTreeMap::new()
 const HANDLE_PATHS_MAX: usize = 65_536;
 
 fn path_of_handle(handle: HANDLE) -> Option<String> {
-    HANDLE_PATHS.lock().ok()?.get(&(handle as isize)).cloned()
+    let g = HANDLE_PATHS.lock().ok()?;
+    crate::breadcrumb::set_holder(crate::breadcrumb::holder::PATH_OF_HANDLE);
+    let r = g.get(&(handle as isize)).cloned();
+    crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
+    r
 }
 
 /// Record a redirected handle's virtual identity: after a successful redirected
@@ -2772,17 +2778,45 @@ unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
         crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_EXIT);
         return STATUS_SUCCESS;
     }
+    // **`try_lock`, never `lock`.** This is best-effort reclamation, and a
+    // blocking acquisition here hangs the process permanently.
+    //
+    // Traced 2026-09-02 with `VFS_SHIM_BREADCRUMB`, three reproductions:
+    // `threads=1`, `current=NtClose`, `mark=TABLE_HANDLE_PATHS`,
+    // `holder=CLOSE_HOOK`, `entries - exits = 2`, zero CPU, and immune to
+    // `TerminateProcess`. The holder is `close_hook_body` — but the only
+    // statement it holds the guard across is a `BTreeMap<isize, String>`
+    // remove, which cannot close a handle and so cannot be a live outer frame
+    // re-entering. The holder is a **dead** frame.
+    //
+    // A thread terminated while holding a `std::sync::Mutex` leaves it locked
+    // **forever, and not poisoned** — so every `if let Ok(..)` in this crate is
+    // no defence against it. At process exit Windows terminates every thread
+    // but one before `DLL_PROCESS_DETACH`, and the surviving thread then closes
+    // handles on its way out. `vfs_shim_dll`'s own `DllMain` records this exact
+    // hazard for a different lock: "one killed mid-write leaves a lock the flush
+    // waits on forever".
+    //
+    // `try_lock` cannot deadlock. Losing a reclamation is harmless: the entry
+    // is keyed by a handle value that is about to become invalid, `HANDLE_PATHS`
+    // is bounded by `HANDLE_PATHS_MAX` against unbounded growth, and the
+    // process is on its way out in the case that matters.
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLES);
-    if let Ok(mut table) = DIR_TABLE.lock() {
+    if let Ok(mut table) = DIR_TABLE.try_lock() {
         table.remove(&(handle as isize));
     }
-    if let Ok(mut t) = HANDLE_PATHS.lock() {
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_HANDLE_PATHS);
+    if let Ok(mut t) = HANDLE_PATHS.try_lock() {
+        crate::breadcrumb::set_holder(crate::breadcrumb::holder::CLOSE_HOOK);
+        t.remove(&(handle as isize));
+        crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
+    }
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_IDENTITY);
+    if let Ok(mut t) = IDENTITY_TABLE.try_lock() {
         t.remove(&(handle as isize));
     }
-    if let Ok(mut t) = IDENTITY_TABLE.lock() {
-        t.remove(&(handle as isize));
-    }
-    if let Ok(mut t) = PATH_TABLE.lock() {
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_PATH);
+    if let Ok(mut t) = PATH_TABLE.try_lock() {
         t.remove(&(handle as isize));
     }
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP);
@@ -4878,31 +4912,56 @@ unsafe fn serve_dir_query(
     };
 
     // Phase 3 (locked): store the built listing (if rebuilt) and serve a slice.
-    let mut table = match DIR_TABLE.lock() {
-        Ok(t) => t,
-        Err(_) => return passthrough(),
+    //
+    // **The caller's buffer is filled after the guard is released, never under
+    // it.** `write_dir_info` writes into a scratch buffer we own; the copy into
+    // `info` happens below, unlocked.
+    //
+    // That ordering is the fix for the intermittent hang traced on 2026-09-02.
+    // `info` belongs to the caller and may lie inside one of our own
+    // demand-paged regions, so touching it can fault into `lazy_section`, which
+    // does file I/O, whose `NtClose` re-enters the shim and takes
+    // `DIR_TABLE.lock()` again. `std::sync::Mutex` is not reentrant, so that
+    // second acquisition blocked forever on a lock the same thread already
+    // held: zero CPU, one thread, and immune to `TerminateProcess`. Measured
+    // three times with `VFS_SHIM_BREADCRUMB` — `threads=1`, `entries - exits =
+    // 2`, `mark=TABLES`.
+    //
+    // A scratch buffer rather than cloning the entries: the copy is bounded by
+    // `length`, whereas a directory listing is unbounded.
+    let mut scratch = vec![0u8; length as usize];
+    let result = {
+        let mut table = match DIR_TABLE.lock() {
+            Ok(t) => t,
+            Err(_) => return passthrough(),
+        };
+        let tracked = match table.get_mut(&key) {
+            Some(t) => t,
+            None => return passthrough(),
+        };
+        if let Some((entries, source)) = rebuilt {
+            crate::hookstats::note_readdir(
+                &dir_path,
+                wildcard_of(file_name).as_deref(),
+                entries.len(),
+                source,
+            );
+            tracked.state = Some(EnumState { entries, cursor: 0 });
+        }
+        let st = match tracked.state.as_mut() {
+            Some(s) => s,
+            None => return passthrough(),
+        };
+        let result = write_dir_info(class, &st.entries[st.cursor..], &mut scratch, single);
+        st.cursor += result.count;
+        result
     };
-    let tracked = match table.get_mut(&key) {
-        Some(t) => t,
-        None => return passthrough(),
-    };
-    if let Some((entries, source)) = rebuilt {
-        crate::hookstats::note_readdir(
-            &dir_path,
-            wildcard_of(file_name).as_deref(),
-            entries.len(),
-            source,
-        );
-        tracked.state = Some(EnumState { entries, cursor: 0 });
+
+    // Unlocked from here: a fault on `info` can now re-enter the shim freely.
+    if result.bytes > 0 {
+        let buf = core::slice::from_raw_parts_mut(info as *mut u8, length as usize);
+        buf[..result.bytes].copy_from_slice(&scratch[..result.bytes]);
     }
-    let st = match tracked.state.as_mut() {
-        Some(s) => s,
-        None => return passthrough(),
-    };
-    let buf = core::slice::from_raw_parts_mut(info as *mut u8, length as usize);
-    let result = write_dir_info(class, &st.entries[st.cursor..], buf, single);
-    st.cursor += result.count;
-    drop(table);
 
     let status = match result.status {
         DirStatus::Success => STATUS_SUCCESS,

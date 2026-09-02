@@ -40,6 +40,7 @@
 //! | 32 | 4 | monotonic trail index |
 //! | 40 | 32 | trail: 8 hook ids, most recent at `(idx-1) % 8` |
 //! | 76 | 4 | sub-phase marker, for narrowing within one hook |
+//! | 80 | 4 | which site holds `HANDLE_PATHS` (see `holder`) |
 //!
 //! The diagnosis is a comparison, not a single read: sample twice. If `entries`
 //! has not moved and `current != NONE`, the process is stuck inside that hook.
@@ -74,6 +75,15 @@ const OFF_TRAIL: usize = 40;
 /// section, ordinary handle) plus a ring round trip, and picking between them
 /// by reading the code is how several plausible-but-wrong theories got built.
 const OFF_MARK: usize = 76;
+/// Which site currently holds `HANDLE_PATHS`, or 0 for nobody.
+///
+/// A *separate* slot from [`OFF_MARK`] on purpose: the frame that blocks
+/// overwrites `mark`, so the holder's identity would be lost if they shared one.
+/// Measured 2026-09-02 that a nested `NtClose` blocks acquiring `HANDLE_PATHS`
+/// on a single thread — which means an outer frame holds it — and none of the
+/// three lock sites appeared, by reading, to hold it across anything that could
+/// close a handle. So the holder is recorded rather than deduced.
+const OFF_HOLDER: usize = 80;
 /// Entries in the trail. Small on purpose — this answers "what was nested
 /// inside what" at the moment of a hang, not "what has this process ever done".
 const TRAIL: usize = 8;
@@ -226,10 +236,41 @@ pub mod mark_close {
     /// a re-entrant acquisition of a shim table lock rather than anything in
     /// the synthetic-handle paths.
     pub const TABLES: u32 = 1020;
+    /// Ordinary handle: `DIR_TABLE` acquired, about to take `HANDLE_PATHS`.
+    pub const TABLE_HANDLE_PATHS: u32 = 1023;
+    /// Ordinary handle: about to take `IDENTITY_TABLE`.
+    pub const TABLE_IDENTITY: u32 = 1024;
+    /// Ordinary handle: about to take `PATH_TABLE`.
+    pub const TABLE_PATH: u32 = 1025;
     /// Ordinary handle: about to call real ntdll `NtClose`.
     pub const TRAMP: u32 = 1021;
     /// Ordinary handle: real `NtClose` returned.
     pub const TRAMP_DONE: u32 = 1022;
+}
+
+/// Site ids for [`OFF_HOLDER`]: who is inside `HANDLE_PATHS` right now.
+pub mod holder {
+    /// Nobody holds it.
+    pub const NOBODY: u32 = 0;
+    /// `tag_under_root`'s insert.
+    pub const TAG_UNDER_ROOT: u32 = 1;
+    /// `path_of_handle`'s lookup.
+    pub const PATH_OF_HANDLE: u32 = 2;
+    /// `close_hook_body`'s remove.
+    pub const CLOSE_HOOK: u32 = 3;
+}
+
+/// Record which site holds `HANDLE_PATHS`. One relaxed store.
+#[inline]
+pub fn set_holder(site: u32) {
+    if let Some(Some(mm)) = SLOT.get() {
+        let base = mm.as_mut_ptr();
+        // SAFETY: `mm` is a live MAP_BYTES mapping owned by SLOT.
+        #[allow(unsafe_code)]
+        unsafe {
+            u32_at(base, OFF_HOLDER).store(site, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Record a sub-phase marker. One relaxed store; see [`OFF_MARK`].
