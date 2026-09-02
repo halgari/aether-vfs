@@ -12,7 +12,7 @@ pub mod seg;
 
 pub use arena::{DataArena, DEFAULT_ARENA_BYTES, DEFAULT_PAYLOAD_CAP, DEFAULT_WORKER_COUNT};
 pub use endpoint::{Request, Response, RingClient, RingServer};
-pub use notifier::{Notifier, SpinNotifier};
+pub use notifier::{AdaptiveNotifier, Notifier, SpinNotifier};
 pub use ring::{Geom, IpcError};
 pub use seg::{OwnedSeg, SharedSeg};
 

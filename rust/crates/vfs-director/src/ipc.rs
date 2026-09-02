@@ -13,6 +13,8 @@ use std::thread::{self, JoinHandle};
 
 use vfs_ipc::ring::{self, Geom};
 use vfs_ipc::{RingClient, RingServer, SpinNotifier};
+#[cfg(unix)]
+use vfs_ipc::AdaptiveNotifier;
 use vfs_ipc::{DataArena, DEFAULT_WORKER_COUNT};
 #[cfg(windows)]
 use vfs_ipc::{Notifier, DEFAULT_PAYLOAD_CAP};
@@ -184,15 +186,26 @@ impl IpcServe {
     /// identity a native Linux process could open, which is why [`Self::start`]
     /// is unusable here.
     ///
-    /// Every worker gets a [`SpinNotifier`], and that is not a simplification
-    /// to be tidied up later. The shim's `WakeServerSpinClient::notify_server`
-    /// calls `SetEvent` on a **Wine** event object, which cannot wake a native
-    /// Linux process; under Wine that call therefore signals nothing. A
-    /// Director that slept would be woken only by the 15.6 ms timer tick — the
-    /// stall measured on 2026-08-12, where 16 of 231 `NtQueryFullAttributesFile`
-    /// calls waited that long and owned ~93% of that hook's total time. Spinning
-    /// costs CPU and sees each request immediately; that trade is accepted for
-    /// this increment, and a shared-memory futex is the eventual answer.
+    /// Every worker gets an [`AdaptiveNotifier`]. This server has **no waker**:
+    /// the shim's `WakeServerSpinClient::notify_server` calls `SetEvent` on a
+    /// **Wine** event object, which cannot wake a native Linux process, so under
+    /// Wine that call signals nothing at all.
+    ///
+    /// This used to be a [`SpinNotifier`] for that reason, defended by the stall
+    /// measured on 2026-08-12: a sleeping Director was woken only at the 15.6 ms
+    /// timer tick, and 16 of 231 `NtQueryFullAttributesFile` calls waited that
+    /// long, owning ~93% of that hook's total time. **That objection does not
+    /// apply here.** 15.6 ms is Windows' default timer resolution rounding a
+    /// short timeout up; this function is `cfg(unix)`, where `thread::sleep`
+    /// honours a 100 microsecond request. So the argument for spinning was
+    /// inherited from the wrong platform.
+    ///
+    /// Pure spinning was also expensive in a way worth naming: `DEFAULT_WORKER_COUNT`
+    /// is 4, so an idle session pinned four cores at 100% — unacceptable for a
+    /// session a game holds for hours. Adaptive spins only in the window after a
+    /// completed request, where the next one is very likely to arrive, and sleeps
+    /// once the ring goes quiet. Safe because notifiers are advisory: correctness
+    /// rests on the ring atomics, which both ends re-check in a loop.
     ///
     /// The geometry arithmetic below is [`Self::start`]'s, copied rather than
     /// factored differently, because a client computes the same numbers.
@@ -230,7 +243,7 @@ impl IpcServe {
         let mut joins = Vec::with_capacity(workers);
         for _ in 0..workers {
             let inner2 = inner.clone();
-            joins.push(thread::spawn(move || worker_loop(&inner2, SpinNotifier)));
+            joins.push(thread::spawn(move || worker_loop(&inner2, AdaptiveNotifier)));
         }
 
         Ok(IpcServe {
