@@ -47,6 +47,11 @@ impl FileMapping {
             .read(true)
             .write(true)
             .create(true)
+            // Spelled out, not left to the default: truncation here is the one
+            // thing that would SIGBUS another process's live mapping of this
+            // path (see the type's docs), so `create` must never imply it.
+            // Clippy's `suspicious_open_options` asks for exactly this.
+            .truncate(false)
             .open(path)?;
         // Size the file before mapping. `mmap` past EOF succeeds and then
         // SIGBUSes on first touch, which would surface as a crash in the

@@ -9,6 +9,16 @@ description = "Director kernel: one provider per root, ring server, staging. The
 name = "vfs_director"
 path = "src/lib.rs"
 
+# The server half of the Wine boundary run: a native Linux Director serving one
+# file over a file-backed ring, for a shim inside Proton's Wine. Declared
+# explicitly rather than left to autobins so the binary is visible in the
+# manifest next to the library it drives. Its body is `cfg(unix)` — the ring
+# file is an `mmap` — and its Windows `main` exits nonzero rather than
+# pretending to serve.
+[[bin]]
+name = "vfs-serve-fb"
+path = "src/bin/vfs-serve-fb.rs"
+
 # No `zip` feature: it existed only for `Session::mount_zip`, and `Session`
 # now lives in `vfs-embed`, which carries the feature instead.
 
@@ -28,6 +38,10 @@ vfs-ipc = { path = "../vfs-ipc" }
 # Pure PE parsing for staging. Was reached through `vfs-inject`, which is
 # Windows-only for its injection half; the parsing half is a file format.
 vfs-pe = { path = "../vfs-pe" }
+
+[target.'cfg(unix)'.dependencies]
+# `ipc.rs` — FileMapping, the file-backed ring a Wine-hosted shim shares by path.
+vfs-unix = { path = "../vfs-unix" }
 
 [target.'cfg(windows)'.dependencies]
 # `ipc.rs` — SharedMapping + EventNotifier, the ring's OS handles.

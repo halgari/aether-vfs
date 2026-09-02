@@ -9,11 +9,21 @@ use std::sync::{Arc, Mutex};
 #[cfg(windows)]
 use std::time::Duration;
 
-// The shared-memory ring is the Windows delivery transport: `vfs_director::ipc`
-// holds the ring's OS handles and is `#[cfg(windows)]` in `vfs-director` itself
-// (the Linux side reaches the kernel through a different transport — see
-// docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md).
-// `Session::serve`/`launch`/`ipc()` are gated to match.
+// `vfs_director::ipc` is **no longer** `#[cfg(windows)]` — this comment claimed
+// it was until the file-backed ring landed, and the claim outlived the fact.
+// The module is portable: it chooses its mapping type by target, and
+// `IpcServe::start_file_backed` serves a ring held in a real file on unix,
+// which is how a shim inside Wine reaches a native Linux director.
+//
+// What is still Windows-only is the **named-section handshake**: `IpcServe::start`,
+// the event notifier, `write_thin_config` and `apply_env_roots`. `Session` is
+// gated to that half rather than to the module, because `serve`/`launch` are
+// written against exactly it — a named section, an event pair, and the
+// `VFS_RING_SECTION` env protocol. Teaching `Session` the file-backed mode is a
+// separate piece of work (see
+// docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md);
+// until then the unix path here is unimplemented, not absent for want of a
+// transport.
 #[cfg(windows)]
 use vfs_director::ipc::IpcServe;
 use vfs_director::stage::{stage_launch_into, ImageSource, StagedDir};
@@ -304,9 +314,11 @@ pub struct Session {
     #[cfg(windows)]
     ipc: Option<IpcServe>,
     /// Whether [`Session::serve`] has been called, tracked separately from
-    /// `ipc` on non-Windows targets: the ring (`IpcServe`) does not exist
-    /// there at all (see the `use vfs_director::ipc::IpcServe` comment above),
-    /// so there is no `Option<IpcServe>` to ask. [`Session::serve`] itself is
+    /// `ipc` on non-Windows targets: this session holds no `IpcServe` there —
+    /// not because the type is missing (it is portable now; see the
+    /// `use vfs_director::ipc::IpcServe` comment above) but because the only
+    /// constructor `Session` uses is the Windows-only named-section one — so
+    /// there is no `Option<IpcServe>` to ask. [`Session::serve`] itself is
     /// `#[cfg(not(windows))]`-stubbed to always fail until the Proton path
     /// lands, so this stays `false` in practice — it exists so [`is_serving`]
     /// keeps an identical signature on both targets.
@@ -486,8 +498,11 @@ impl Session {
     /// mechanism by which a `declare_root(0, …)` was silently discarded —
     /// dropping it keeps the invariant in one place, where it is enforced
     /// rather than compensated for.
-    /// Windows-only: its one caller is `serve`'s `apply_env_roots`, and the
-    /// ring's env protocol does not exist on other targets.
+    /// Windows-only: its one caller is `serve`'s `apply_env_roots`, which is
+    /// itself `#[cfg(windows)]` — it publishes the named-section handshake
+    /// (`VFS_RING_SECTION` plus the two event names). The file-backed ring has
+    /// its own env protocol (`VFS_RING_PATH`) and no host wiring yet, so there
+    /// is nothing on other targets to call this.
     #[cfg(windows)]
     fn extra_roots_env(&self) -> Vec<(u32, String)> {
         debug_assert!(
@@ -934,8 +949,12 @@ impl Session {
     /// Start the control ring + workers so an injected child can remap I/O.
     /// Idempotent if already serving.
     ///
-    /// Windows-only: the ring (`vfs_director::ipc::IpcServe`) is the Windows
-    /// delivery transport and does not exist on other targets — see the `use`
+    /// Windows-only because of *what this body does*, not because the ring is
+    /// missing elsewhere: it creates a named section, an event pair and a thin
+    /// config, and publishes `VFS_RING_SECTION` — the half of
+    /// `vfs_director::ipc` that is still `#[cfg(windows)]`. The file-backed
+    /// half exists on unix (`IpcServe::start_file_backed`); wiring it in here
+    /// is what the non-Windows body below is waiting for. See the `use`
     /// comment at the top of this file. The signature is identical on both
     /// targets so a host compiles unchanged; on the Proton path (increment 2
     /// of docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md) this

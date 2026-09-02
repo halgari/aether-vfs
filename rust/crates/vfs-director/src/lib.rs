@@ -22,18 +22,16 @@
 pub mod director;
 pub mod disk;
 pub mod io_stats;
-// The shared-memory ring is how the injected shim reaches this kernel on
-// Windows. On Linux the kernel is reached through /dev/fuse instead, so the
-// ring is not merely unavailable there — it is the wrong transport. A
-// `fuse_dispatch` sibling lands in increment 2; see
-// docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md.
-// `ipc` is gated because it holds the transport's OS handles (the shared-
-// memory ring itself, `vfs_win` HANDLEs). `ring_dispatch` is not gated: it is
-// portable protocol translation on top of that transport — it depends only on
-// `vfs-protocol`, `vfs-ipc`, `vfs-compose` and `Director`, none of which are
-// Windows-only — so it compiles and its tests run on Linux today, ahead of
-// `fuse_dispatch` giving it a non-Windows caller.
-#[cfg(windows)]
+// The shared-memory ring is how an injected shim reaches this kernel — on
+// Windows directly, and under Proton from inside Wine, where the ring lives in
+// a real file both sides mmap by path (`IpcServe::start_file_backed`). So `ipc`
+// is no longer gated at the module: the OS handles it holds are chosen *inside*
+// the file by `RingMapping`, the same shape the earlier increment used for
+// `ring_dispatch`. Only the named-section half (`IpcServe::start`, the event
+// notifier, the `VFS_RING_SECTION` handshake) is `#[cfg(windows)]` now.
+// `ring_dispatch` remains ungated for the reason it always was: it is portable
+// protocol translation on top of the transport, depending only on
+// `vfs-protocol`, `vfs-ipc`, `vfs-compose` and `Director`.
 pub mod ipc;
 pub mod mount_graph;
 pub mod ops;
@@ -44,6 +42,7 @@ pub mod stage;
 
 pub use director::Director;
 pub use disk::DiskProvider;
+pub use ipc::IpcServe;
 pub use io_stats::{mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report};
 pub use mount_graph::MountGraph;
 pub use ops::{Provider, Handle, DirEntry, RootId, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};

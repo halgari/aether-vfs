@@ -12,6 +12,17 @@ vfs-protocol = { path = "../vfs-protocol" }
 # `vfs-unix` needs `libc`, which must never enter the Windows build graph.
 [target.'cfg(windows)'.dependencies]
 vfs-win = { path = "../vfs-win" }
+# `shim-ring-client` installs the **real** shim in-process, which is what makes
+# it a proof of the shipped code path rather than of a hand-written client.
+# Windows-only for the same reason `vfs-win` is: NT detours.
+vfs-shim = { path = "../vfs-shim" }
+# The engine needs a *valid* snapshot, and an empty one is built here directly
+# with `SnapshotBuilder` — no `bridge` feature, which would pull `vfs-core` in
+# only to describe a tree with nothing in it.
+vfs-shared = { path = "../vfs-shared" }
+# The env protocol the shim reads, echoed by the client so the geometry it used
+# is in the log rather than assumed.
+vfs-env = { path = "../vfs-env" }
 
 [target.'cfg(unix)'.dependencies]
 vfs-unix = { path = "../vfs-unix" }
@@ -29,3 +40,10 @@ path = "src/bin/ring-file-server.rs"
 [[bin]]
 name = "ring-file-client"
 path = "src/bin/ring-file-client.rs"
+
+# The same boundary as `ring-file-client`, one layer up: the reader is
+# `std::fs::read` behind the real shim's hooks, not a hand-written ring client.
+# Its Linux `main` is empty, like its sibling's.
+[[bin]]
+name = "shim-ring-client"
+path = "src/bin/shim-ring-client.rs"
