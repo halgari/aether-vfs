@@ -171,13 +171,12 @@ pub struct StageOpts<'a> {
 /// Reads whole files out of a session's own composed graph, for
 /// [`vfs_director::stage`]. Root 0: staging always concerns the launched
 /// image, which lives in the game-directory root.
-/// Windows-only: the sole constructor is `launch`'s staging step, which is
-/// itself `#[cfg(windows)]`. `stage_launch` stays portable — it takes any
-/// `&dyn ImageSource` a host supplies.
-#[cfg(windows)]
+/// Constructed by `launch`'s staging step on **both** targets — the Windows
+/// body and the Wine one stage the same way, out of the same graph.
+/// `stage_launch` itself stays portable and takes any `&dyn ImageSource` a
+/// host supplies.
 struct KernelSource(Arc<Director>);
 
-#[cfg(windows)]
 impl ImageSource for KernelSource {
     fn read(&self, vpath: &str) -> Option<Vec<u8>> {
         let (fh, size, is_dir) = self.0.open(RootId::DEFAULT, vpath, OPEN_READ).ok()?;
@@ -1553,28 +1552,52 @@ impl Session {
             image
         };
         let on_disk = self.virtual_root.join(rel);
-        if !on_disk.is_file() {
-            let in_graph = self
-                .kernel
-                .getattr(RootId::DEFAULT, &opts.image)
-                .ok()
-                .flatten()
-                .is_some();
+        if on_disk.is_file() {
+            return join_wine(wine_root, rel);
+        }
+
+        // Not a real file. If root 0's graph serves it, stage it — the same
+        // sequence the Windows body runs, and for the same reason:
+        // `CreateProcess` inside Wine reads the image, and the loader resolves
+        // its static imports, before any hook of ours exists in the child.
+        //
+        // Nothing extra is needed to make the result reachable from Wine.
+        // `stage_launch` writes into `self.virtual_root` at the image's own
+        // vpath, and the managed root is already linked into the prefix as
+        // `C:\vfs-session\root` — so the staged exe is nameable the moment it
+        // exists, and the staging directory is mounted back under the curated
+        // graph so the same bytes stay answerable at their vpath.
+        if self.kernel.getattr(RootId::DEFAULT, &opts.image).ok().flatten().is_none() {
             return Err(format!(
-                "launch: {:?} resolves to {}, which is not a real file{}. The Proton path \
-                 launches a real image only — CreateProcess inside Wine reads it before any \
-                 hook of ours exists, and staging a graph-only image is not wired to this \
-                 path yet.",
+                "launch: {:?} resolves to {}, which is not a real file, and root 0's provider \
+                 graph does not serve it either — so there is nothing to stage. A relative \
+                 LaunchOpts.image must be a real file under the managed root or a vpath root 0 \
+                 serves.",
                 opts.image,
-                on_disk.display(),
-                if in_graph {
-                    " — root 0's provider graph does serve that vpath, so staging is what is \
-                     missing, not the content"
-                } else {
-                    ", and root 0's provider graph does not serve it either"
-                }
+                on_disk.display()
             ));
         }
+        let also: Vec<&str> = opts.stage_also.iter().map(String::as_str).collect();
+        let staged = self
+            .stage_launch(
+                &KernelSource(Arc::clone(&self.kernel)),
+                &StageOpts {
+                    exe_vpath: &opts.image,
+                    also: &also,
+                    fallback_dirs: &opts.stage_fallback_dirs,
+                },
+            )
+            .map_err(|e| format!("launch: staging {:?}: {e}", opts.image))?;
+        // Staged under the managed root by construction, so this cannot fail
+        // — but saying so with a real error beats an `expect` that would take
+        // the host down if `stage_launch` ever changed where it writes.
+        let rel = staged.strip_prefix(&self.virtual_root).map_err(|_| {
+            format!(
+                "launch: staged {} outside the managed root {}, so it has no C: form",
+                staged.display(),
+                self.virtual_root.display()
+            )
+        })?;
         join_wine(wine_root, rel)
     }
 

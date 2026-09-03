@@ -400,6 +400,83 @@ fn a_declared_second_root_is_served_through_the_ring() {
     }
 }
 
+/// A launch whose **image itself** exists only in the provider graph.
+///
+/// The Wine path refused this by name until now — "staging a graph-only image
+/// is not wired to this path yet" — and the refusal was about wiring, not
+/// about a barrier: `Session::stage_launch` was already portable, and it
+/// writes into the managed root, which is already linked into the prefix as
+/// `C:\vfs-session\root`. So the staged exe is nameable from inside Wine the
+/// moment it exists.
+///
+/// It has to work, because it is how a real loadout launches. A script
+/// extender spawns the game with its own `CreateProcess`, which no hook of
+/// ours intercepts, so the game exe must be a **real file** beside the loader
+/// even though the collection serves it out of archives.
+///
+/// The managed root starts empty here, so a launch that skipped staging would
+/// find no image at all.
+#[test]
+#[ignore = "same requirements as the launch test above"]
+fn an_image_served_only_by_the_graph_is_staged_and_launched() {
+    let art = windows_artifacts();
+    let root = tmp("stage-root");
+    let state = tmp("stage-state");
+    let overlay = tmp("stage-overlay");
+
+    // The provider's content: the fixture exe *and* the data it will read.
+    // Neither is under the managed root.
+    let content = tmp("stage-content");
+    std::fs::create_dir_all(content.join("data")).unwrap();
+    std::fs::write(content.join("data").join("hello.txt"), [FILL; LEN]).unwrap();
+    std::fs::copy(&art["vfs-fixture-read.exe"], content.join("fixture.exe"))
+        .expect("the image goes in the provider, not the root");
+
+    assert!(
+        !root.join("fixture.exe").exists(),
+        "the managed root must start without the image — that is the whole point"
+    );
+
+    let provider = Arc::new(Loud::new(&content));
+    let mut s = Session::new();
+    s.set_root(&root);
+    s.set_state_dir(&state);
+    s.set_overlay(&overlay);
+    s.mount("", Arc::clone(&provider) as Arc<dyn Provider>).expect("mount root 0");
+    s.serve().expect("serve");
+
+    let mut env = BTreeMap::new();
+    env.insert("VFS_FIXTURE_PATH".to_string(), CHILD_PATH.to_string());
+    env.insert("VFS_FIXTURE_EXPECT".to_string(), LEN.to_string());
+    env.insert("VFS_FIXTURE_FILL".to_string(), FILL.to_string());
+
+    let code = s
+        .launch(&LaunchOpts {
+            image: "fixture.exe".into(),
+            wait: true,
+            shim_dll: Some(art["vfs_shim_dll.dll"].to_string_lossy().into_owned()),
+            payload_dll: Some(art["vfs_payload.dll"].to_string_lossy().into_owned()),
+            env,
+            ..Default::default()
+        })
+        .unwrap_or_else(|e| panic!("launch: {e}\nDIRECTOR saw: {:?}", provider.transcript()));
+
+    assert_eq!(
+        code, 0,
+        "the staged image must run and read {LEN} bytes from the graph. DIRECTOR saw: {:?}",
+        provider.transcript()
+    );
+    assert!(
+        root.join("fixture.exe").is_file(),
+        "staging must write the image into the managed root, where Wine can name it"
+    );
+
+    s.stop_serve();
+    for d in [&root, &state, &overlay, &content] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
 fn count_dirs(at: &Path) -> usize {
     std::fs::read_dir(at).map(|d| d.flatten().count()).unwrap_or(0)
 }
