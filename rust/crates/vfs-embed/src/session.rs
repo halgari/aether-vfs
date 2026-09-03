@@ -360,6 +360,26 @@ pub struct Session {
     staged: Mutex<Option<StagedDir>>,
 }
 
+/// Where a session's directories are reachable from **inside** Wine.
+///
+/// A tuple carried these until a fourth member arrived. Three same-typed
+/// `String`s returned positionally were already a swap waiting to happen —
+/// the overlay and the state directory are both plausible in either slot, and
+/// exchanging them produces a session that starts and writes to the wrong
+/// place — and a per-root list has no position to be in at all.
+#[cfg(unix)]
+struct WinePaths {
+    /// Root 0, the managed root: `VFS_VIRTUAL_DIR`.
+    root: String,
+    /// The shim's write overlay.
+    overlay: String,
+    /// The session's state directory, which holds the ring.
+    state: String,
+    /// Roots beyond root 0, as `(id, C:\path)` — the shape
+    /// [`vfs_env::VIRTUAL_ROOTS`] wants.
+    extra_roots: Vec<(u32, String)>,
+}
+
 impl Session {
     /// A session with default `root`/`overlay`/`state` directories under
     /// `%TEMP%`, which a host normally replaces via
@@ -1109,9 +1129,9 @@ impl Session {
         format!("session-{:016x}", h.finish())
     }
 
-    /// Links the managed root, the overlay and the state directory into
-    /// `prefix/drive_c/vfs-session/`, and returns the three `C:\` paths they
-    /// are reachable at, in that order.
+    /// Links the managed root, the overlay, the state directory and every
+    /// declared root beyond root 0 into `prefix/drive_c/vfs-session/`, and
+    /// returns the `C:\` paths they are reachable at.
     ///
     /// **A Wine process can only name what is under one of its drives**, and
     /// these three live wherever the host put them — normally under `/tmp`,
@@ -1125,7 +1145,7 @@ impl Session {
     /// the prefix it already booted, and `set_root` may have moved the target
     /// in between.
     #[cfg(unix)]
-    fn link_into_prefix(&self, prefix: &Prefix) -> Result<(String, String, String), String> {
+    fn link_into_prefix(&self, prefix: &Prefix) -> Result<WinePaths, String> {
         let base = prefix.drive_c().join(WINE_LINK_DIR);
         std::fs::create_dir_all(&base)
             .map_err(|e| format!("launch: create {}: {e}", base.display()))?;
@@ -1147,11 +1167,18 @@ impl Session {
                 )
             })
         };
-        Ok((
-            link("root", &self.virtual_root)?,
-            link("overlay", &self.overlay)?,
-            link("state", &self.state_dir)?,
-        ))
+        let mut extra = Vec::with_capacity(self.extra_roots.len());
+        for (id, path) in &self.extra_roots {
+            // `root-<id>`, so the name says which root it is and cannot
+            // collide with the three fixed links above.
+            extra.push((*id, link(&format!("root-{id}"), path)?));
+        }
+        Ok(WinePaths {
+            root: link("root", &self.virtual_root)?,
+            overlay: link("overlay", &self.overlay)?,
+            state: link("state", &self.state_dir)?,
+            extra_roots: extra,
+        })
     }
 
     /// Launch `opts.image` under the virtual root with dual-layer inject.
@@ -1393,18 +1420,6 @@ impl Session {
                         launch that lied about when it finished."
                 .to_string());
         }
-        if !self.extra_roots.is_empty() {
-            return Err(format!(
-                "launch: this session declares {} root(s) beyond root 0, and the file-backed \
-                 env protocol carries no root map (see vfs_proton::launch::launch_env, which \
-                 sets VFS_VIRTUAL_DIR and deliberately not VFS_VIRTUAL_ROOTS). A root the \
-                 shim is never told about is one whose paths it classifies as nobody's and \
-                 lets fall through to real disk, silently — so this is refused rather than \
-                 launched with roots missing.",
-                self.extra_roots.len()
-            ));
-        }
-
         let home = ProtonRoot::from_env()
             .map_err(|e| format!("launch: no aether-vfs home (set VFS_HOME): {e}"))?;
         // Which Wine, and how its prefixes are made, is the only part of this
@@ -1417,7 +1432,9 @@ impl Session {
             Some(dir) => crate::wine_host::ensure_prefix_at(&host, dir)?,
             None => crate::wine_host::ensure_prefix(&host, &home, &self.wine_session_id())?,
         };
-        let (wine_root, wine_overlay, wine_state) = self.link_into_prefix(&prefix)?;
+        let wine = self.link_into_prefix(&prefix)?;
+        let (wine_root, wine_overlay, wine_state) =
+            (wine.root.clone(), wine.overlay.clone(), wine.state.clone());
 
         // The ring as the shim sees it. Its bytes are the same inode `serve`
         // created; only the name differs.
@@ -1463,6 +1480,7 @@ impl Session {
             arena_len: ipc.arena_len,
             payload_cap: ipc.payload_cap,
             virtual_dir: wine_root,
+            extra_roots: wine.extra_roots,
             args: opts.args.clone(),
         };
 

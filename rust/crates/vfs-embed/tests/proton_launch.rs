@@ -42,8 +42,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use vfs_embed::{
-    Capabilities, DirEntry, DiskProvider, Handle, LaunchOpts, Provider, Session, SetAttr, Stat,
-    VPath,
+    Capabilities, DirEntry, DiskProvider, Handle, LaunchOpts, Provider, RootId, Session, SetAttr,
+    Stat, VPath,
 };
 
 /// The one file that exists only in the provider, as the child names it.
@@ -308,6 +308,96 @@ fn set_prefix_dir_puts_the_prefix_where_the_host_named_it() {
         home.display()
     );
     let _ = std::fs::remove_dir_all(named.parent().unwrap());
+}
+
+/// A launch whose file lives in **root 1**, not root 0.
+///
+/// The unix launch path refused a multi-root session outright until the root
+/// map travelled with it, and the refusal was right: `VFS_VIRTUAL_ROOTS` is
+/// how the shim learns that a second tree is virtualised at all, and a root it
+/// has never heard of is one whose paths it classifies as nobody's and lets
+/// fall through to **real disk** — no error, no log, just a game reading an
+/// empty directory where its load order should be.
+///
+/// So this test is deliberately arranged so that fall-through cannot pass:
+/// root 1's host directory is left empty and the bytes exist only inside its
+/// provider. A shim that ignored the root map would find nothing and the
+/// fixture would fail; one that read the wrong root would miss too.
+#[test]
+#[ignore = "same requirements as the launch test above"]
+fn a_declared_second_root_is_served_through_the_ring() {
+    let art = windows_artifacts();
+    let root = tmp("mr-root");
+    let state = tmp("mr-state");
+    let overlay = tmp("mr-overlay");
+    // Root 1's *host* directory. Deliberately empty: everything the child
+    // reads from root 1 comes from the provider below, so a fall-through to
+    // disk finds nothing rather than accidentally succeeding.
+    let root1 = tmp("mr-root1");
+    let content1 = tmp("mr-content1");
+    std::fs::create_dir_all(content1.join("data")).unwrap();
+    std::fs::write(content1.join("data").join("hello.txt"), [FILL; LEN]).unwrap();
+
+    let image = root.join("fixture.exe");
+    std::fs::copy(&art["vfs-fixture-read.exe"], &image).expect("copy the fixture");
+
+    // Root 0 gets a provider with *nothing* in it, so that a read answered
+    // from root 0 by mistake is a failure rather than a coincidence.
+    let empty = tmp("mr-empty");
+    let p0 = Arc::new(Loud::new(&empty));
+    let p1 = Arc::new(Loud::new(&content1));
+
+    let mut s = Session::new();
+    s.set_root(&root);
+    s.set_state_dir(&state);
+    s.set_overlay(&overlay);
+    s.declare_root(1, &root1);
+    s.mount("", Arc::clone(&p0) as Arc<dyn Provider>).expect("mount root 0");
+    s.mount_at(RootId(1), "", Arc::clone(&p1) as Arc<dyn Provider>).expect("mount root 1");
+    s.serve().expect("serve");
+
+    // `link_into_prefix` names a declared root `root-<id>` beside `root`.
+    let child_path = r"C:\vfs-session\root-1\data\hello.txt";
+    let mut env = BTreeMap::new();
+    env.insert("VFS_FIXTURE_PATH".to_string(), child_path.to_string());
+    env.insert("VFS_FIXTURE_EXPECT".to_string(), LEN.to_string());
+    env.insert("VFS_FIXTURE_FILL".to_string(), FILL.to_string());
+
+    let code = s
+        .launch(&LaunchOpts {
+            image: "fixture.exe".into(),
+            wait: true,
+            shim_dll: Some(art["vfs_shim_dll.dll"].to_string_lossy().into_owned()),
+            payload_dll: Some(art["vfs_payload.dll"].to_string_lossy().into_owned()),
+            env,
+            ..Default::default()
+        })
+        .unwrap_or_else(|e| {
+            panic!("launch: {e}\nroot0 saw: {:?}\nroot1 saw: {:?}", p0.transcript(), p1.transcript())
+        });
+
+    assert_eq!(
+        code, 0,
+        "the fixture exits 0 only if it read {LEN} bytes from {child_path}. \
+         root1 saw: {:?}",
+        p1.transcript()
+    );
+    assert!(
+        p1.saw("open", VPATH) && p1.saw("read_at", VPATH),
+        "root 1's provider must have served the bytes — otherwise the root map never \
+         reached the shim. root1 saw: {:?}",
+        p1.transcript()
+    );
+    assert!(
+        !p0.saw("read_at", VPATH),
+        "root 0 must not have answered a read addressed to root 1. root0 saw: {:?}",
+        p0.transcript()
+    );
+
+    s.stop_serve();
+    for d in [&root, &state, &overlay, &root1, &content1, &empty] {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }
 
 fn count_dirs(at: &Path) -> usize {

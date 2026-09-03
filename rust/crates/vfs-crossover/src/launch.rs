@@ -74,10 +74,15 @@ pub fn run(runtime: &Runtime, l: &WineLaunch) -> Result<i32, LaunchError> {
 
     let (prog, argv) = command_line(runtime, l);
     let mut cmd = std::process::Command::new(&prog);
-    cmd.args(&argv).envs(launch_env(runtime, l));
+    cmd.args(&argv);
+    // Cleared before the block is applied, for the reason
+    // `vfs_proton::launch::run` spells out: `VFS_VIRTUAL_ROOTS` appears in
+    // both lists, and removing after setting would silently delete the root
+    // map of every multi-root launch.
     for stale in vfs_proton::STALE_TRANSPORT_VARS {
         cmd.env_remove(stale);
     }
+    cmd.envs(launch_env(runtime, l));
     let status = cmd
         .status()
         .map_err(|e| LaunchError::Spawn(format!("{}: {e}", prog.display())))?;
@@ -118,6 +123,7 @@ mod tests {
             arena_len: 33_554_432,
             payload_cap: 4096,
             virtual_dir: r"C:\vfs-session\root".to_string(),
+            extra_roots: Vec::new(),
             args: vec!["--windowed".to_string()],
         }
     }

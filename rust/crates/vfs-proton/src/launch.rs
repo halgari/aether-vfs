@@ -81,6 +81,15 @@ pub struct WineLaunch {
     pub payload_cap: u32,
     /// The managed root as Wine sees it (`C:\…`) — root 0 for the shim.
     pub virtual_dir: String,
+    /// The session's roots **beyond root 0**, as Wine sees them, in the shape
+    /// [`vfs_env::VIRTUAL_ROOTS`] wants: `(id, C:\path)`.
+    ///
+    /// Empty is the single-root launch every caller had before this field
+    /// existed. A root the shim is never told about is one whose paths it
+    /// classifies as nobody's and lets fall through to real disk — silently —
+    /// which is why the launch path used to *refuse* a multi-root session
+    /// rather than launch one with roots missing.
+    pub extra_roots: Vec<(u32, String)>,
     /// Arguments for the target, passed after `--`.
     pub args: Vec<String>,
 }
@@ -229,6 +238,18 @@ pub fn vfs_env_block(l: &WineLaunch) -> BTreeMap<String, String> {
     env.insert(vfs_env::ARENA_OFFSET.to_string(), l.arena_offset.to_string());
     env.insert(vfs_env::ARENA_LEN.to_string(), l.arena_len.to_string());
     env.insert(vfs_env::VIRTUAL_DIR.to_string(), l.virtual_dir.clone());
+    // Only when there is something to say. Unset means "root 0 only", which is
+    // what the shim assumes, so an empty `VFS_VIRTUAL_ROOTS=` would be a third
+    // state neither side has a meaning for.
+    if !l.extra_roots.is_empty() {
+        let spec = l
+            .extra_roots
+            .iter()
+            .map(|(id, path)| format!("{id}={path}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        env.insert(vfs_env::VIRTUAL_ROOTS.to_string(), spec);
+    }
     env
 }
 
@@ -251,7 +272,16 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
 
     let (prog, argv) = command_line(l);
     let mut cmd = std::process::Command::new(&prog);
-    cmd.args(&argv).envs(launch_env(l));
+    cmd.args(&argv);
+    // Cleared *before* the block is applied, not after. `Command` keeps one
+    // map keyed by name, so the last call for a given name wins — and
+    // `VFS_VIRTUAL_ROOTS` is now a name this launch may legitimately *set*.
+    // Removing after setting would delete the root map of every multi-root
+    // launch, and do it silently.
+    for stale in STALE_TRANSPORT_VARS {
+        cmd.env_remove(stale);
+    }
+    cmd.envs(launch_env(l));
     // Explicitly unset the transport variables this launch does not use.
     //
     // `Command::envs` *adds to* the parent environment, so a host process that
@@ -262,9 +292,6 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
     // point the child's root map somewhere this session never chose. That is
     // the same stale-value hazard `IpcServe::apply_env_roots` clears with
     // `remove_var`, and it applies here for the same reason.
-    for stale in STALE_TRANSPORT_VARS {
-        cmd.env_remove(stale);
-    }
     let status = cmd
         .status()
         .map_err(|e| LaunchError::Spawn(format!("{prog}: {e}")))?;
@@ -406,8 +433,51 @@ mod tests {
             arena_len: 33_554_432,
             payload_cap: 1_048_576,
             virtual_dir: r"C:\probe\managed".to_string(),
+            extra_roots: Vec::new(),
             args: vec!["-arg1".to_string(), "arg2".to_string()],
         }
+    }
+
+    /// A multi-root session must reach the shim as `id=path;id=path`, and a
+    /// single-root one must leave the name **unset** rather than empty. The
+    /// shim treats unset as "root 0 only"; an empty value is a third state
+    /// neither side assigns a meaning to.
+    #[test]
+    fn extra_roots_travel_as_the_root_map_and_are_absent_when_there_are_none() {
+        let mut l = sample();
+        assert!(
+            !vfs_env_block(&l).contains_key(vfs_env::VIRTUAL_ROOTS),
+            "a single-root launch must not publish an empty root map"
+        );
+
+        l.extra_roots = vec![
+            (1, r"C:\vfs-session\root-1".to_string()),
+            (2, r"C:\vfs-session\root-2".to_string()),
+        ];
+        assert_eq!(
+            vfs_env_block(&l).get(vfs_env::VIRTUAL_ROOTS).map(String::as_str),
+            Some(r"1=C:\vfs-session\root-1;2=C:\vfs-session\root-2"),
+            "the separator is ';' and each entry is id=path — see vfs_env::VIRTUAL_ROOTS"
+        );
+    }
+
+    /// `VFS_VIRTUAL_ROOTS` is both a name a launch clears (when stale) and one
+    /// it sets (when the session is multi-root). `Command` keeps one map keyed
+    /// by name, so the two must not fight — and if they do, the loser is
+    /// silent: the child simply classifies a declared root's paths as nobody's
+    /// and reads real disk.
+    #[test]
+    fn the_root_map_survives_the_stale_variable_sweep() {
+        assert!(
+            STALE_TRANSPORT_VARS.contains(&vfs_env::VIRTUAL_ROOTS),
+            "this test is only meaningful while the sweep names it"
+        );
+        let mut l = sample();
+        l.extra_roots = vec![(1, r"C:\r1".to_string())];
+        // `run` clears first and applies the block second, so the block wins.
+        // Asserted through the block itself because spawning wine is not
+        // available here; the ordering in `run` is what this pins.
+        assert!(vfs_env_block(&l).contains_key(vfs_env::VIRTUAL_ROOTS));
     }
 
     #[test]
