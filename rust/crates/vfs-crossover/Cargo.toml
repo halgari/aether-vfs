@@ -9,7 +9,26 @@ description = "CrossOver as a Wine host on macOS: runtime discovery, session bot
 name = "vfs_crossover"
 path = "src/lib.rs"
 
+[features]
+## Fetching the Microsoft Visual C++ runtime a modded game needs in its
+## prefix. See `prefix::provision`.
+##
+## **Off by default, where `vfs-proton`'s equivalent feature is on**, and the
+## asymmetry is deliberate. This crate is a workspace member and so is built by
+## `cargo build --workspace` on every host, including the Windows CI job.
+## Acquisition pulls `ureq` -> `rustls` -> `ring`, whose build script is a C
+## cross-compile; making it default would put that in every job to serve a
+## crate only macOS ever links. `vfs-embed` turns it on in its own
+## `cfg(target_os = "macos")` table, which is the one place it is wanted.
+default = []
+acquire = ["dep:ureq"]
+
 [dependencies]
+# The one network call this crate makes, and only with `acquire`. Version and
+# reasoning follow `vfs-proton`: ureq's defaults already carry rustls and
+# webpki-roots, so TLS needs no wiring, and shelling out to `curl` would put an
+# external tool between us and a failure we want to report precisely.
+ureq = { version = "3.4", optional = true }
 # The launch *description* and the pre-flight checks, not the Linux launch.
 # `WineLaunch`, the injector's positional argv (`command_line`), the ring
 # geometry check and the `VFS_*` env block are all platform-neutral and must

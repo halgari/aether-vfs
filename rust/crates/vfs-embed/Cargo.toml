@@ -58,7 +58,12 @@ vfs-proton = { path = "../vfs-proton", default-features = false }
 # `src/wine_host.rs`. Narrower than `cfg(unix)` deliberately: a Linux build
 # has no CrossOver to find and must not carry a crate that only knows how
 # to look for one.
-vfs-crossover = { path = "../vfs-crossover" }
+# `acquire` on, unlike this crate's `vfs-proton` line above. That feature is
+# off by default in `vfs-crossover` so a workspace build on any host does not
+# pull `ureq -> rustls -> ring`; it is wanted *here*, and only here, because
+# this dependency edge exists only on macOS — where a fresh Wine prefix has to
+# fetch the Visual C++ runtime before a modded game will survive in it.
+vfs-crossover = { path = "../vfs-crossover", features = ["acquire"] }
 # The portable shim-config encoder (`vfs_protocol::shimcfg`). On Windows the
 # same bytes come from `vfs-shim`'s re-export of it; on unix `vfs-shim` cannot
 # be built at all (`retour` -> `libudis86-sys`), which is why the encoder moved

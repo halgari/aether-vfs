@@ -1846,6 +1846,7 @@ dependencies = [
 name = "vfs-crossover"
 version = "0.1.0"
 dependencies = [
+ "ureq",
  "vfs-env",
  "vfs-proton",
 ]
