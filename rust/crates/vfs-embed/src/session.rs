@@ -1168,9 +1168,26 @@ impl Session {
         };
         let mut extra = Vec::with_capacity(self.extra_roots.len());
         for (id, path) in &self.extra_roots {
-            // `root-<id>`, so the name says which root it is and cannot
-            // collide with the three fixed links above.
-            extra.push((*id, link(&format!("root-{id}"), path)?));
+            // A root that is **already inside the prefix** keeps the name it
+            // has there. Relocating it would be actively wrong: the shim
+            // classifies a path by the prefix it falls under, and these roots
+            // exist because the *game* reaches for a real Windows location of
+            // its own accord — `%LOCALAPPDATA%\<game>` for a load order,
+            // `Documents\My Games\<game>` for INIs. It asks the shell for
+            // that path and opens it by name. Told the root lives at
+            // `C:\vfs-session\root-1`, the shim would watch a directory
+            // nothing ever opens and let every real access fall through to
+            // disk — silently, which is the whole hazard `VFS_VIRTUAL_ROOTS`
+            // exists to close.
+            //
+            // Everything else is content the session owns and the child only
+            // ever reaches through root 0, so it is linked in as before.
+            match prefix.windows_path(path) {
+                Some(natural) => extra.push((*id, natural)),
+                // `root-<id>`, so the name says which root it is and cannot
+                // collide with the three fixed links above.
+                None => extra.push((*id, link(&format!("root-{id}"), path)?)),
+            }
         }
         Ok(WinePaths {
             root: link("root", &self.virtual_root)?,
