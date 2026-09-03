@@ -197,7 +197,7 @@ pub fn command_line(l: &WineLaunch) -> (String, Vec<String>) {
 /// geometry field that exists at one end and not the other is exactly the
 /// drift `vfs-env` was created to stop.
 pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
-    let mut env = BTreeMap::new();
+    let mut env = vfs_env_block(l);
     env.insert("WINEPREFIX".to_string(), path_string(&l.prefix));
     // Absolutized, not passed through: a relative `PROTONPATH` resolves to
     // UMU-Proton (stock Valve Proton), and that downgrade produces no error.
@@ -205,7 +205,24 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
     // Mono and Gecko prompts would otherwise block a launch on a fresh prefix.
     env.insert("WINEDLLOVERRIDES".to_string(), "mscoree=d;mshtml=d".to_string());
     env.insert("WINEDEBUG".to_string(), "-all".to_string());
+    env
+}
 
+/// Just the `VFS_*` half of [`launch_env`]: the transport handshake the shim
+/// reads inside Wine, with nothing about *which* Wine.
+///
+/// Split out because a second Wine host exists. GE-Proton is selected with
+/// `PROTONPATH` and a `WINEPREFIX`; CrossOver on macOS is selected with a
+/// `--bottle` argument and overwrites `WINEPREFIX` itself (see `vfs-crossover`).
+/// The two hosts disagree about every Wine-side name in `launch_env` and agree
+/// about every name here — and the names here are the ones where a
+/// disagreement is *silent*, because a defaulted `VFS_RING_BYTES` attaches to
+/// the ring cleanly and fails only under load.
+///
+/// So this, not the whole of [`launch_env`], is what the second host reuses.
+/// Restating six names over there would mean two places to forget one.
+pub fn vfs_env_block(l: &WineLaunch) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
     env.insert(vfs_env::RING_PATH.to_string(), path_string(&l.ring_path));
     env.insert(vfs_env::RING_BYTES.to_string(), l.ring_bytes.to_string());
     env.insert(vfs_env::RING_PAYLOAD_CAP.to_string(), l.payload_cap.to_string());
@@ -214,6 +231,15 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
     env.insert(vfs_env::VIRTUAL_DIR.to_string(), l.virtual_dir.clone());
     env
 }
+
+/// Transport names a launch must **clear** rather than set.
+///
+/// See [`run`] for why: `Command::envs` adds to the parent environment, so a
+/// stale `VFS_VIRTUAL_ROOTS` from an earlier named-section session points the
+/// child's root map somewhere this session never chose. Shared with the other
+/// Wine host for the same reason [`vfs_env_block`] is.
+pub const STALE_TRANSPORT_VARS: &[&str] =
+    &["VFS_RING_SECTION", "VFS_SERVER_EV", "VFS_CLIENT_EV", "VFS_VIRTUAL_ROOTS"];
 
 /// Spawns the launch, waits for it, and returns the target's exit code.
 ///
@@ -236,12 +262,7 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
     // point the child's root map somewhere this session never chose. That is
     // the same stale-value hazard `IpcServe::apply_env_roots` clears with
     // `remove_var`, and it applies here for the same reason.
-    for stale in [
-        "VFS_RING_SECTION",
-        "VFS_SERVER_EV",
-        "VFS_CLIENT_EV",
-        "VFS_VIRTUAL_ROOTS",
-    ] {
+    for stale in STALE_TRANSPORT_VARS {
         cmd.env_remove(stale);
     }
     let status = cmd
@@ -271,7 +292,7 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
 /// So the arithmetic is checked before anything is spawned, and the ring file's
 /// real length is checked too — `ring_bytes` describing more than the file
 /// holds is the same bug wearing a different hat.
-fn check_geometry(l: &WineLaunch) -> Result<(), LaunchError> {
+pub fn check_geometry(l: &WineLaunch) -> Result<(), LaunchError> {
     let need = l.arena_offset.saturating_add(l.arena_len);
     if need > l.ring_bytes {
         return Err(LaunchError::Geometry(format!(

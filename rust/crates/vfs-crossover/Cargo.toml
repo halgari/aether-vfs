@@ -1,0 +1,24 @@
+[package]
+name = "vfs-crossover"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "CrossOver as a Wine host on macOS: runtime discovery, session bottles, launch"
+
+[lib]
+name = "vfs_crossover"
+path = "src/lib.rs"
+
+[dependencies]
+# The launch *description* and the pre-flight checks, not the Linux launch.
+# `WineLaunch`, the injector's positional argv (`command_line`), the ring
+# geometry check and the `VFS_*` env block are all platform-neutral and must
+# not exist twice — see `vfs_proton::launch::vfs_env_block` for why the split
+# is where it is.
+#
+# `default-features = false` turns off `acquire`, which carries
+# `ureq -> rustls -> ring` and a C cross-compile in a build script. There is
+# nothing to acquire here: CrossOver is a licensed application the user
+# installs, not a tarball this crate downloads.
+vfs-proton = { path = "../vfs-proton", default-features = false }
+vfs-env = { path = "../vfs-env" }

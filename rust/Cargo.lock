@@ -1843,6 +1843,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vfs-crossover"
+version = "0.1.0"
+dependencies = [
+ "vfs-env",
+ "vfs-proton",
+]
+
+[[package]]
 name = "vfs-director"
 version = "0.1.0"
 dependencies = [
@@ -1892,6 +1900,7 @@ version = "0.1.0"
 dependencies = [
  "vfs-cache",
  "vfs-compose",
+ "vfs-crossover",
  "vfs-director",
  "vfs-env",
  "vfs-inject",

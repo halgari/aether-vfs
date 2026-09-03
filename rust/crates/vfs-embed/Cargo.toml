@@ -52,6 +52,13 @@ vfs-shim = { path = "../vfs-shim" }
 # the same reason `vfs-shim` is kept out of the Linux graph above. A host
 # embedding this API launches a runtime; it does not download one.
 vfs-proton = { path = "../vfs-proton", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The macOS Wine host. A peer of `vfs-proton`, not a replacement — see
+# `src/wine_host.rs`. Narrower than `cfg(unix)` deliberately: a Linux build
+# has no CrossOver to find and must not carry a crate that only knows how
+# to look for one.
+vfs-crossover = { path = "../vfs-crossover" }
 # The portable shim-config encoder (`vfs_protocol::shimcfg`). On Windows the
 # same bytes come from `vfs-shim`'s re-export of it; on unix `vfs-shim` cannot
 # be built at all (`retour` -> `libudis86-sys`), which is why the encoder moved

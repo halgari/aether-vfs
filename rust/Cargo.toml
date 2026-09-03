@@ -49,6 +49,11 @@ members = [
   "crates/vfs-proton",
   "crates/vfs-zip",
   "crates/vfs-launch",
+  # The macOS Wine host, a peer of `vfs-proton` rather than a replacement:
+  # only one of the two is ever selected, by target, and both reuse
+  # `WineLaunch` and the injector's argv from `vfs-proton` so the two
+  # cannot drift about how a launch is spelled.
+  "crates/vfs-crossover",
   "crates/vfs-fixture-read",
   "crates/vfs-fixture-writepath",
   "crates/vfs-fixture-escape",

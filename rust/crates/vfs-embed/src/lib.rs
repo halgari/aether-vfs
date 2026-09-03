@@ -111,6 +111,11 @@
 
 #![deny(unsafe_code)]
 
+// Which Wine hosts a launch on this platform. `cfg(unix)` because it is
+// `Session::launch`'s unix body that consumes it; the Windows body injects
+// directly and has no Wine to select.
+#[cfg(unix)]
+mod wine_host;
 mod session;
 mod sources;
 

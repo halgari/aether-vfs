@@ -1363,26 +1363,11 @@ impl Session {
 
         let home = ProtonRoot::from_env()
             .map_err(|e| format!("launch: no aether-vfs home (set VFS_HOME): {e}"))?;
-        // `installed_dirs`, not `installed` + `runtime_dir`: the tag comes from
-        // the tree's `version` file and the directory name from the release it
-        // was installed from, and re-joining the tag onto `runtimes()` assumes
-        // those always agree.
-        let runtime = vfs_proton::runtime::installed_dirs(&home)
-            .map_err(|e| format!("launch: reading {}: {e}", home.runtimes().display()))?
-            .into_iter()
-            .next()
-            .map(|(_tag, dir)| dir)
-            .ok_or_else(|| {
-                format!(
-                    "launch: no verified GE-Proton runtime under {} — install one with \
-                     `vfs-proton install` (VFS_HOME selects where it lands). Launching on \
-                     stock Proton instead is the silent downgrade this path refuses.",
-                    home.runtimes().display()
-                )
-            })?;
-
-        let prefix = vfs_proton::prefix::ensure(&home, &runtime, &self.wine_session_id())
-            .map_err(|e| format!("launch: wine prefix: {e}"))?;
+        // Which Wine, and how its prefixes are made, is the only part of this
+        // body that differs between Linux and macOS. See `wine_host`.
+        let host = crate::wine_host::resolve(&home)?;
+        let runtime = crate::wine_host::runtime_path(&host);
+        let prefix = crate::wine_host::ensure_prefix(&host, &home, &self.wine_session_id())?;
         let (wine_root, wine_overlay, wine_state) = self.link_into_prefix(&prefix)?;
 
         // The ring as the shim sees it. Its bytes are the same inode `serve`
@@ -1445,7 +1430,7 @@ impl Session {
             std::env::set_var(k, v);
         }
 
-        let exit = vfs_proton::launch::run(&wine);
+        let exit = crate::wine_host::run(&host, &wine);
 
         for (k, old) in saved {
             match old {
@@ -1454,7 +1439,11 @@ impl Session {
             }
         }
 
-        exit.map_err(|e| format!("launch: {e}"))
+        // The Wine is named in the failure, not only in a success log: a launch
+        // that dies inside the runtime is exactly when "which Wine was this?"
+        // is the first question, and the answer is otherwise nowhere in the
+        // message.
+        exit.map_err(|e| format!("launch: {e} (host: {})", crate::wine_host::describe(&host)))
     }
 
     /// `opts.image` as the **child** must name it, or a refusal saying which
@@ -1708,9 +1697,11 @@ fn locate_wine_artifacts(opts: &LaunchOpts) -> Result<(PathBuf, PathBuf, PathBuf
         .collect();
     if !missing.is_empty() {
         return Err(format!(
-            "launch: these Windows artifacts are missing, and none of them can be built on \
-             Linux: {}. Build them on Windows (`cargo build -p vfs-inject -p vfs-shim`), copy \
-             all three into {}, or set LaunchOpts.shim_dll and LaunchOpts.payload_dll to \
+            "launch: these Windows artifacts are missing: {}. They are PE binaries, so a unix \
+             host either cross-builds them (`cargo xwin build --target \
+             x86_64-pc-windows-msvc -p vfs-inject -p vfs-shim-dll`, plus the separate \
+             `crates/vfs-payload` workspace) or copies in the same three built on Windows. \
+             Put all three in {}, or set LaunchOpts.shim_dll and LaunchOpts.payload_dll to \
              where they are (vfs-injector.exe is then looked for beside shim_dll).",
             missing.join(", "),
             base.display()

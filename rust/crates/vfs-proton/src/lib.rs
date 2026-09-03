@@ -29,7 +29,10 @@ pub use install::{
     extract_tar_gz, install_release, parse_sha512sum, partial_path, verify_digest, InstallError,
     Installed,
 };
-pub use launch::{command_line, launch_env, wine_binary, LaunchError, WineLaunch};
+pub use launch::{
+    check_geometry, command_line, launch_env, vfs_env_block, wine_binary, LaunchError,
+    WineLaunch, STALE_TRANSPORT_VARS,
+};
 pub use layout::Root;
 pub use prefix::{ensure, Prefix, PrefixError};
 #[cfg(feature = "acquire")]

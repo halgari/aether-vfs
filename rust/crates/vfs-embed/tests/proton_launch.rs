@@ -232,10 +232,10 @@ fn windows_artifacts() -> BTreeMap<&'static str, PathBuf> {
     }
     assert!(
         missing.is_empty(),
-        "these Windows artifacts are missing and none of them can be built on Linux: {}.\n\
-         Build them on Windows (`cargo build -p vfs-inject -p vfs-shim-dll -p \
-         vfs-fixture-read` plus the separate `crates/vfs-payload` workspace) and copy them \
-         into {} (or its `deps/`).",
+        "these Windows artifacts are missing: {}.\n\
+         Cross-build them (`cargo xwin build --target x86_64-pc-windows-msvc -p vfs-inject \
+         -p vfs-shim-dll -p vfs-fixture-read` plus the separate `crates/vfs-payload` \
+         workspace) or build them on Windows, and copy them into {} (or its `deps/`).",
         missing.join(", "),
         profile.display()
     );
@@ -268,15 +268,16 @@ fn tmp(name: &str) -> PathBuf {
 ///   for the 32-bit loader even under `WINEARCH=win64`;
 /// * the four **Windows-built artifacts** listed in [`windows_artifacts`].
 #[test]
-#[ignore = "needs a GE-Proton runtime under $VFS_HOME/runtimes, a bootable Wine prefix, and \
-            Windows-built artifacts (vfs-injector.exe, vfs_shim_dll.dll, vfs_payload.dll, \
-            vfs-fixture-read.exe) copied beside the test binary"]
+#[ignore = "needs a Wine host (Linux: a GE-Proton runtime under $VFS_HOME/runtimes; macOS: \
+            CrossOver installed), a bootable prefix, and the Windows artifacts \
+            (vfs-injector.exe, vfs_shim_dll.dll, vfs_payload.dll, vfs-fixture-read.exe) \
+            copied beside the test binary"]
 fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider() {
     let art = windows_artifacts();
     assert!(
         std::env::var_os("VFS_HOME").is_some(),
-        "set VFS_HOME to the aether-vfs home holding runtimes/GE-Proton…; \
-         Session::launch resolves the runtime and this session's prefix from it"
+        "set VFS_HOME to the aether-vfs home: on Linux it holds runtimes/GE-Proton…, and on \
+         both platforms it is where Session::launch boots this session's prefix"
     );
 
     let root = tmp("root");
