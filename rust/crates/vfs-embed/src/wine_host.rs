@@ -73,6 +73,17 @@ mod linux {
             .map_err(|e| format!("launch: wine prefix: {e}"))
     }
 
+    /// A prefix at a directory the host named, rather than one derived under
+    /// `root`. See [`Session::set_prefix_dir`](crate::Session::set_prefix_dir).
+    ///
+    /// `vfs_proton::prefix::ensure` composes the path itself from a session
+    /// tag, so this is the same two steps it performs — the GE gate, then
+    /// `wineboot` — against a caller-chosen directory.
+    pub fn ensure_prefix_at(host: &Host, dir: &std::path::Path) -> Result<Prefix, String> {
+        vfs_proton::prefix::ensure_at(&host.dir, dir)
+            .map_err(|e| format!("launch: wine prefix: {e}"))
+    }
+
     pub fn run(_host: &Host, l: &WineLaunch) -> Result<i32, LaunchError> {
         vfs_proton::launch::run(l)
     }
@@ -125,8 +136,15 @@ mod macos {
         let session_dir = root
             .try_session_dir(session)
             .map_err(|e| format!("launch: session id: {e}"))?;
-        vfs_crossover::ensure(host, &session_dir.join("prefix"))
-            .map_err(|e| format!("launch: crossover bottle: {e}"))
+        ensure_prefix_at(host, &session_dir.join("prefix"))
+    }
+
+    /// A bottle at a directory the host named. See
+    /// [`Session::set_prefix_dir`](crate::Session::set_prefix_dir) — on this
+    /// platform a prefix can hold a logged-in Steam client, which makes the
+    /// derived, hash-keyed name actively wrong.
+    pub fn ensure_prefix_at(host: &Host, dir: &std::path::Path) -> Result<Prefix, String> {
+        vfs_crossover::ensure(host, dir).map_err(|e| format!("launch: crossover bottle: {e}"))
     }
 
     pub fn run(host: &Host, l: &WineLaunch) -> Result<i32, LaunchError> {

@@ -341,6 +341,17 @@ pub struct Session {
     /// Host directories for the session's roots **beyond root 0**, which
     /// `virtual_root` names — see [`Session::declare_root`].
     extra_roots: Vec<(u32, PathBuf)>,
+    /// An explicit Wine prefix directory, overriding the derived one.
+    ///
+    /// `None` means "derive it", which is [`Session::wine_session_id`] under
+    /// the aether-vfs home — the behaviour every caller had before this field
+    /// existed. See [`Session::set_prefix_dir`] for when deriving is wrong.
+    ///
+    /// Not gated to unix even though only the unix launch reads it: a
+    /// `cfg`-gated *field* means `Session` is a different struct per target,
+    /// and a host setting it inside `#[cfg(unix)]` is easier to get wrong than
+    /// a setter that is simply inert on Windows.
+    prefix_dir: Option<PathBuf>,
     /// The most recent staged launch directory, held here because
     /// [`StagedDir`]'s `Drop` removes the staged files — not the virtual root
     /// they now live in — and Windows keeps the image file mapped for as long
@@ -379,6 +390,7 @@ impl Session {
             ipc: None,
             roots: Mutex::new(BTreeMap::new()),
             extra_roots: Vec::new(),
+            prefix_dir: None,
             staged: Mutex::new(None),
         }
     }
@@ -412,6 +424,38 @@ impl Session {
 
     pub fn set_state_dir(&mut self, path: impl Into<PathBuf>) {
         self.state_dir = path.into();
+    }
+
+    /// Names this session's Wine prefix explicitly, instead of deriving one.
+    ///
+    /// Inert on Windows, where nothing is launched under Wine.
+    ///
+    /// # Why a host would want this
+    ///
+    /// The derived name is a `DefaultHasher` of `state_dir`, whose output is
+    /// *stable within a build and not promised across Rust releases* — so a
+    /// rebuilt host boots one new prefix and reuses it from then on. That is a
+    /// fine trade when a prefix costs a `wineboot`, and a bad one as soon as a
+    /// prefix holds anything expensive.
+    ///
+    /// It holds something expensive on macOS. A Steam-DRM'd game checks with a
+    /// **logged-in Steam client in its own Windows environment**, so the
+    /// client has to be installed into the same prefix as the game: a few
+    /// hundred megabytes and an interactive sign-in. Losing that to a
+    /// recompile is not an acceptable failure mode, and neither is
+    /// re-deriving it when a host legitimately moves its state directory.
+    ///
+    /// So a host that knows a *durable* identity for the prefix — the game it
+    /// is for, rather than where this session happened to put its ring —
+    /// should name it. `state_dir` answers "where does this run keep its
+    /// scratch", which is the wrong question to key a prefix on.
+    pub fn set_prefix_dir(&mut self, path: impl Into<PathBuf>) {
+        self.prefix_dir = Some(path.into());
+    }
+
+    /// The explicit prefix directory, if [`Session::set_prefix_dir`] named one.
+    pub fn prefix_dir(&self) -> Option<&Path> {
+        self.prefix_dir.as_deref()
     }
 
     pub fn virtual_root(&self) -> &Path {
@@ -1367,7 +1411,12 @@ impl Session {
         // body that differs between Linux and macOS. See `wine_host`.
         let host = crate::wine_host::resolve(&home)?;
         let runtime = crate::wine_host::runtime_path(&host);
-        let prefix = crate::wine_host::ensure_prefix(&host, &home, &self.wine_session_id())?;
+        let prefix = match &self.prefix_dir {
+            // Named by the host: created in place, not under the home's
+            // `sessions/`. See `set_prefix_dir` for why a host would.
+            Some(dir) => crate::wine_host::ensure_prefix_at(&host, dir)?,
+            None => crate::wine_host::ensure_prefix(&host, &home, &self.wine_session_id())?,
+        };
         let (wine_root, wine_overlay, wine_state) = self.link_into_prefix(&prefix)?;
 
         // The ring as the shim sees it. Its bytes are the same inode `serve`

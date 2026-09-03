@@ -78,18 +78,27 @@ pub fn ensure(root: &Root, runtime: &Path, session: &str) -> Result<Prefix, Pref
     let session_dir = root.try_session_dir(session).map_err(|e| {
         PrefixError::Io(io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))
     })?;
-    let dir = session_dir.join("prefix");
+    ensure_at(runtime, &session_dir.join("prefix"))
+}
 
-    if !is_initialised(&dir) {
+/// Creates `dir` as a Wine prefix if it is not one already, verifying
+/// `runtime` is GE-Proton first.
+///
+/// The half of [`ensure`] that does the work, split out so a host can name a
+/// prefix that outlives a session — see `Session::set_prefix_dir`. [`ensure`]
+/// is this function with the directory composed from a session tag under
+/// [`Root`].
+pub fn ensure_at(runtime: &Path, dir: &Path) -> Result<Prefix, PrefixError> {
+    if !is_initialised(dir) {
         // Verify GE *before* touching anything else on disk: `PROTONPATH`
         // defaults to stock Proton, and refusing here is what stops a
         // silent downgrade rather than a partially-created prefix.
         verify_ge(runtime).map_err(|e| PrefixError::NotGe(e.to_string()))?;
-        std::fs::create_dir_all(&dir)?;
-        run_wineboot(runtime, &dir)?;
+        std::fs::create_dir_all(dir)?;
+        run_wineboot(runtime, dir)?;
     }
 
-    Ok(Prefix { dir })
+    Ok(Prefix { dir: dir.to_path_buf() })
 }
 
 fn is_initialised(prefix_dir: &Path) -> bool {

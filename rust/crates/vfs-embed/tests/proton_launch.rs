@@ -273,6 +273,48 @@ fn tmp(name: &str) -> PathBuf {
             (vfs-injector.exe, vfs_shim_dll.dll, vfs_payload.dll, vfs-fixture-read.exe) \
             copied beside the test binary"]
 fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider() {
+    launch_the_fixture(None);
+}
+
+/// The same launch, with the prefix named by the host rather than derived.
+///
+/// **This is what protects an expensive prefix.** The derived name hashes
+/// `state_dir` with `DefaultHasher`, whose output is not promised across Rust
+/// releases, so a rebuilt host silently boots a *new* prefix. That is cheap
+/// when a prefix is a `wineboot` and ruinous when it holds a logged-in Steam
+/// client — which on macOS it must, because a Steam-DRM'd game checks with a
+/// client in its own Windows environment. So the test asserts both halves:
+/// the prefix is created where it was named, and nothing was derived under
+/// the home's `sessions/`.
+#[test]
+#[ignore = "same requirements as the launch test above"]
+fn set_prefix_dir_puts_the_prefix_where_the_host_named_it() {
+    let home = PathBuf::from(std::env::var("VFS_HOME").expect("VFS_HOME"));
+    let sessions_before = count_dirs(&home.join("sessions"));
+
+    let named = tmp("named-prefix").join("prefix");
+    launch_the_fixture(Some(&named));
+
+    assert!(
+        named.join("drive_c").join("windows").join("system32").is_dir(),
+        "the prefix must be booted at the directory the host named, not merely created: {}",
+        named.display()
+    );
+    assert_eq!(
+        count_dirs(&home.join("sessions")),
+        sessions_before,
+        "naming a prefix must not also derive one under {}/sessions — a host that got both \
+         would be paying for two prefixes and trusting the wrong one",
+        home.display()
+    );
+    let _ = std::fs::remove_dir_all(named.parent().unwrap());
+}
+
+fn count_dirs(at: &Path) -> usize {
+    std::fs::read_dir(at).map(|d| d.flatten().count()).unwrap_or(0)
+}
+
+fn launch_the_fixture(prefix: Option<&Path>) {
     let art = windows_artifacts();
     assert!(
         std::env::var_os("VFS_HOME").is_some(),
@@ -304,6 +346,9 @@ fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider(
     s.set_root(&root);
     s.set_state_dir(&state);
     s.set_overlay(&overlay);
+    if let Some(dir) = prefix {
+        s.set_prefix_dir(dir);
+    }
     s.mount("", Arc::clone(&provider) as Arc<dyn Provider>)
         .expect("mount the disk-backed provider over root 0");
     s.serve().expect("serve");
