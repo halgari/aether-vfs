@@ -712,6 +712,17 @@ pub enum DirInfoClass {
     Names,           // 12 FILE_NAMES_INFORMATION
     IdBothDirectory, // 37 FILE_ID_BOTH_DIR_INFORMATION
     IdFullDirectory, // 38 FILE_ID_FULL_DIR_INFORMATION
+    /// 60 `FILE_ID_EXTD_DIR_INFORMATION`.
+    IdExtdDirectory,
+    /// 63 `FILE_ID_EXTD_BOTH_DIR_INFORMATION`.
+    ///
+    /// **This is what Wine's `FindFirstFileW` asks for**, measured 2026-09-02
+    /// against CrossOver 26.3 on macOS. Without it, enumeration of a managed
+    /// directory fell through to the real ntdll holding a *synthetic* handle,
+    /// which answers `STATUS_INVALID_HANDLE` — so a game saw an empty
+    /// directory. Skyrim's SKSE reported "no listeners registered" with 176
+    /// plugin DLLs sitting in the mount.
+    IdExtdBothDirectory,
 }
 
 impl DirInfoClass {
@@ -724,6 +735,8 @@ impl DirInfoClass {
             12 => DirInfoClass::Names,
             37 => DirInfoClass::IdBothDirectory,
             38 => DirInfoClass::IdFullDirectory,
+            60 => DirInfoClass::IdExtdDirectory,
+            63 => DirInfoClass::IdExtdBothDirectory,
             _ => return None,
         })
     }
@@ -736,7 +749,16 @@ impl DirInfoClass {
             DirInfoClass::FullDirectory => 68,
             DirInfoClass::IdFullDirectory => 80,
             DirInfoClass::BothDirectory => 94,
+            // NextEntryOffset 0, FileIndex 4, four times 8, EndOfFile 40,
+            // AllocationSize 48, FileAttributes 56, FileNameLength 60,
+            // EaSize 64, ReparsePointTag 68, FILE_ID_128 72..88, then the
+            // name. `FILE_ID_128` is `UCHAR[16]`, so it needs no padding.
+            DirInfoClass::IdExtdDirectory => 88,
             DirInfoClass::IdBothDirectory => 104,
+            // As `IdExtdDirectory`, plus `CCHAR ShortNameLength` at 88 and
+            // `WCHAR ShortName[12]` at 90 (the odd byte is padded for the
+            // `WCHAR`'s alignment), ending at 114.
+            DirInfoClass::IdExtdBothDirectory => 114,
         }
     }
 
@@ -751,6 +773,65 @@ impl DirInfoClass {
     /// Whether this class carries `EndOfFile`/`AllocationSize`/`FileAttributes`.
     fn has_metadata(self) -> bool {
         !matches!(self, DirInfoClass::Names)
+    }
+}
+
+#[cfg(test)]
+mod extd_dir_classes {
+    use super::*;
+
+    /// The name offsets are struct arithmetic, so they are checked the way
+    /// arithmetic is: against a layout the shim already gets right.
+    ///
+    /// `FILE_ID_BOTH_DIR_INFORMATION` (37) is the control. Its name sits at
+    /// 104 — EaSize 64, `CCHAR ShortNameLength` 68, `WCHAR ShortName[12]` 70,
+    /// `LARGE_INTEGER FileId` 96 (8-byte aligned), name 104 — and that is the
+    /// value already shipped and exercised. The same method applied to the
+    /// extended pair gives 88 and 114.
+    #[test]
+    fn the_extended_classes_put_the_name_where_the_struct_does() {
+        assert_eq!(DirInfoClass::IdBothDirectory.name_offset(), 104, "control");
+        assert_eq!(DirInfoClass::IdExtdDirectory.name_offset(), 88);
+        assert_eq!(DirInfoClass::IdExtdBothDirectory.name_offset(), 114);
+    }
+
+    /// Class 63 is the one Wine's `FindFirstFileW` asks for. Recognising it is
+    /// the whole fix: an unrecognised class passes through to the real ntdll
+    /// with a synthetic handle, which is an empty directory to the caller.
+    #[test]
+    fn wines_enumeration_class_is_recognised() {
+        assert_eq!(DirInfoClass::from_u32(63), Some(DirInfoClass::IdExtdBothDirectory));
+        assert_eq!(DirInfoClass::from_u32(60), Some(DirInfoClass::IdExtdDirectory));
+    }
+
+    /// Both carry the metadata triple at the shared offsets, so the generic
+    /// marshaller needs nothing else from them.
+    #[test]
+    fn both_carry_metadata_at_the_shared_offsets() {
+        for class in [DirInfoClass::IdExtdDirectory, DirInfoClass::IdExtdBothDirectory] {
+            assert!(class.has_metadata());
+            assert_eq!(class.name_len_offset(), 60);
+        }
+    }
+
+    /// A round trip through the marshaller: the name lands at the class's own
+    /// offset, with its length where the struct says, and the attribute byte
+    /// marking a directory.
+    #[test]
+    fn an_entry_marshals_into_the_extended_both_layout() {
+        let items = [DirItem { name: "SKSE64.dll".to_string(), size: 1234, is_dir: false, mtime: 0 }];
+        let mut buf = [0u8; 512];
+        let r = write_dir_info(DirInfoClass::IdExtdBothDirectory, &items, &mut buf, true);
+        assert_eq!(r.count, 1);
+        let off = DirInfoClass::IdExtdBothDirectory.name_offset();
+        let len = u32::from_le_bytes(buf[60..64].try_into().unwrap()) as usize;
+        assert_eq!(len, "SKSE64.dll".len() * 2);
+        let name: Vec<u16> = buf[off..off + len]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&name).unwrap(), "SKSE64.dll");
+        assert_eq!(u32::from_le_bytes(buf[56..60].try_into().unwrap()), 0x80, "a file");
     }
 }
 

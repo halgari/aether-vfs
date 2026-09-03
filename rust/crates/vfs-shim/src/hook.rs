@@ -4729,9 +4729,34 @@ unsafe fn serve_dir_query(
     passthrough: &dyn Fn() -> NTSTATUS,
 ) -> NTSTATUS {
     // Unknown info class -> let the OS handle it verbatim.
+    // An enumeration class this shim cannot marshal.
+    //
+    // **Recorded, not silent.** Passing through is the only thing that can be
+    // done with a layout we cannot write — but for a handle under a managed
+    // root the passthrough reaches the real ntdll holding a *synthetic*
+    // handle, which answers `STATUS_INVALID_HANDLE`. The caller sees an
+    // enumeration that failed, or an empty directory, and nothing anywhere
+    // says why.
+    //
+    // That is not hypothetical: Wine's `FindFirstFileW` asks for class 63
+    // (`FileIdExtdBothDirectoryInformation`), which was absent here, and the
+    // result was Skyrim's SKSE loading none of the 176 plugin DLLs the mount
+    // was serving — "no listeners registered", with no error on any side. The
+    // class is handled now; this row is what makes the *next* one a line in a
+    // log instead of another silent empty directory.
     let class = match DirInfoClass::from_u32(class_raw) {
         Some(c) => c,
-        None => return passthrough(),
+        None => {
+            if crate::hookstats::enabled() {
+                crate::hookstats::note_readdir(
+                    &format!("<unmarshalled-dir-info-class-{class_raw}>"),
+                    wildcard_of(file_name).as_deref(),
+                    0,
+                    crate::hookstats::ReadDirSource::Os,
+                );
+            }
+            return passthrough();
+        }
     };
     let key = handle as isize;
 

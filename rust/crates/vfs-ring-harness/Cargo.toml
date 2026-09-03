@@ -47,3 +47,9 @@ path = "src/bin/ring-file-client.rs"
 [[bin]]
 name = "shim-ring-client"
 path = "src/bin/shim-ring-client.rs"
+
+# Reads and listings are different hooks that fail differently. This isolates
+# the second, which is the one that looks like an empty mod list.
+[[bin]]
+name = "dir-ring-client"
+path = "src/bin/dir-ring-client.rs"
