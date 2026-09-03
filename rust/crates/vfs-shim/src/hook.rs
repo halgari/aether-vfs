@@ -3425,7 +3425,30 @@ unsafe fn fuse_query_information(
             synth_iosb_ok(iosb, PREFIX);
             STATUS_SUCCESS
         }
+        // Anything else this function has no dedicated arm for, but whose
+        // byte layout the *by-name* path already knows. `fill_by_name` takes
+        // exactly `(is_dir, size)`, which is what a synthetic handle has, so
+        // reusing it keeps one description of each layout instead of two that
+        // can drift.
+        //
+        // **`FileStatInformation` (68) is why this exists.** Wine's
+        // kernelbase answers `GetFileInformationByHandle` — and therefore
+        // Rust's `fs::metadata`, and therefore an enormous amount of ordinary
+        // game code — by issuing class 68, where Windows issues
+        // `FileAllInformation`. Measured 2026-09-02 against CrossOver 26.3
+        // (Wine 10) on macOS: a 200,000-byte file served over the ring
+        // reported `len=0`. Nothing errored. The fall-through below returns
+        // `STATUS_SUCCESS` with the caller's buffer **untouched**, so a zeroed
+        // buffer reads as a zero-length file and every caller believes it.
+        //
+        // That silence is the real hazard, and it is why this arm is a lookup
+        // rather than another hand-written layout: the next Wine build to
+        // prefer some other class fails the same invisible way.
         _ => {
+            if let Some(n) = fill_by_name(class, info, length, is_dir, size) {
+                synth_iosb_ok(iosb, n);
+                return STATUS_SUCCESS;
+            }
             synth_iosb_ok(iosb, 0);
             STATUS_SUCCESS
         }
