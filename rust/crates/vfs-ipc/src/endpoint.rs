@@ -203,14 +203,7 @@ impl<'a, N: Notifier> RingServer<'a, N> {
         let req = Request { slot, opcode, flags, req_id, payload };
         let (status, resp) = handler(&req);
         ring::server_complete(self.seg, &self.geom, slot, status, &resp)?;
-        // The client said whether it sleeps for responses. Believing it is what
-        // makes skipping the signal safe: only a client that never waits sets
-        // the flag, and such a client cannot miss a wakeup.
-        if flags & vfs_protocol::FLAG_CLIENT_POLLS != 0 {
-            self.notifier.notify_client_polling(slot);
-        } else {
-            self.notifier.notify_client(slot);
-        }
+        self.notifier.notify_client(slot);
         Ok(true)
     }
 }
@@ -222,77 +215,6 @@ mod tests {
     use crate::notifier::SpinNotifier;
     use crate::ring::{self, init};
     use crate::seg::OwnedSeg;
-
-    /// A notifier that records which completion path the server took.
-    ///
-    /// Counters are shared with the test, because `RingServer` takes the
-    /// notifier by value — asserting on a copy it moved would prove nothing.
-    #[derive(Clone, Default)]
-    struct CountingNotifier {
-        signalled: std::sync::Arc<std::sync::atomic::AtomicU32>,
-        silent: std::sync::Arc<std::sync::atomic::AtomicU32>,
-    }
-
-    impl Notifier for CountingNotifier {
-        fn notify_client(&self, _slot: u32) {
-            self.signalled
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        fn notify_client_polling(&self, _slot: u32) {
-            self.silent
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    #[test]
-    fn a_polling_client_is_completed_without_being_signalled() {
-        // The point of `FLAG_CLIENT_POLLS`: the server still completes the
-        // request, but skips the event. That event is a syscall on the response
-        // path of every round trip, and a client that spins never reads it.
-        let owned = OwnedSeg::new(4096);
-        let geom = init(owned.seg(), 2, 128).unwrap();
-        let seg = owned.seg();
-
-        let slot = ring::claim_free(seg, &geom).unwrap();
-        ring::publish_request(
-            seg,
-            &geom,
-            slot,
-            OP_GETATTR,
-            vfs_protocol::FLAG_CLIENT_POLLS,
-            b"x",
-        )
-        .unwrap();
-        let n = CountingNotifier::default();
-        let server = RingServer::new(seg, n.clone()).unwrap();
-        assert!(server.serve_one(|_| (0, Vec::new())).unwrap());
-        use std::sync::atomic::Ordering::Relaxed;
-        assert_eq!(n.signalled.load(Relaxed), 0, "the event was still raised");
-        assert_eq!(n.silent.load(Relaxed), 1, "the completion did not happen");
-        // The response is there either way — correctness never rested on the
-        // event, only promptness did.
-        assert!(ring::take_response(seg, &geom, slot).is_some());
-    }
-
-    #[test]
-    fn a_client_that_may_sleep_is_still_signalled() {
-        // The other half, so the flag cannot become a blanket excuse to stop
-        // signalling: without it a client may be asleep on the event, and
-        // missing the wake costs it a full timer tick.
-        let owned = OwnedSeg::new(4096);
-        let geom = init(owned.seg(), 2, 128).unwrap();
-        let seg = owned.seg();
-
-        let slot = ring::claim_free(seg, &geom).unwrap();
-        ring::publish_request(seg, &geom, slot, OP_GETATTR, 0, b"x").unwrap();
-        let n = CountingNotifier::default();
-        let server = RingServer::new(seg, n.clone()).unwrap();
-        assert!(server.serve_one(|_| (0, Vec::new())).unwrap());
-        use std::sync::atomic::Ordering::Relaxed;
-        assert_eq!(n.signalled.load(Relaxed), 1, "a sleeper was not woken");
-        assert_eq!(n.silent.load(Relaxed), 0);
-        assert!(ring::take_response(seg, &geom, slot).is_some());
-    }
 
     #[test]
     fn serve_one_handles_a_prepublished_request() {

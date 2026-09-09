@@ -3,7 +3,6 @@
 
 use std::cell::Cell;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -85,47 +84,9 @@ thread_local! {
     /// Deadline until which this thread spins instead of sleeping. Set when the
     /// thread submits a request, so each RPC gets a fresh budget.
     static SPIN_UNTIL: Cell<Option<Instant>> = const { Cell::new(None) };
-}
-
-/// Micros since [`srv_base`] when *any* worker last completed a request.
-///
-/// **Shared across workers, where it used to be a `thread_local`.** There are
-/// [`vfs_ipc::arena::DEFAULT_WORKER_COUNT`] of them and a guest that walks a
-/// directory tree issues its requests one at a time. Per thread, exactly one
-/// worker was ever hot: it took the request, marked itself active and kept
-/// polling, while the rest had no recent activity of their own and went to
-/// `WaitForSingleObject`. `server_ev` is auto-reset, so the client's `SetEvent`
-/// released **one sleeper** — a scheduler wake, measured in microseconds —
-/// even though a polling worker was sitting right there.
-///
-/// Shared, a burst keeps every worker in its spin window and the request is
-/// taken by whichever one notices first. The cost is CPU while the ring is hot,
-/// bounded by the same [`spin_budget`] as before; the saving is a wake per
-/// round trip on a path that can do hundreds of thousands of them.
-static SRV_ACTIVE_US: AtomicU64 = AtomicU64::new(0);
-
-/// Process start, so activity can be a plain integer rather than an `Instant`.
-fn srv_base() -> Instant {
-    static BASE: OnceLock<Instant> = OnceLock::new();
-    *BASE.get_or_init(Instant::now)
-}
-
-fn mark_server_active() {
-    let us = srv_base().elapsed().as_micros().min(u64::MAX as u128) as u64;
-    SRV_ACTIVE_US.store(us, Ordering::Relaxed);
-}
-
-/// Whether any worker has completed a request within `budget`.
-fn server_is_hot(budget: Duration) -> bool {
-    if budget.is_zero() {
-        return false;
-    }
-    let last = SRV_ACTIVE_US.load(Ordering::Relaxed);
-    if last == 0 {
-        return false;
-    }
-    let now = srv_base().elapsed().as_micros().min(u64::MAX as u128) as u64;
-    now.saturating_sub(last) < budget.as_micros().min(u64::MAX as u128) as u64
+    /// When this server thread last completed a request. Drives the hot/idle
+    /// decision in `wait_server`.
+    static SRV_ACTIVE: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 impl Notifier for EventNotifier {
@@ -153,7 +114,8 @@ impl Notifier for EventNotifier {
     /// and none at idle, where the timed wait still applies.
     fn wait_server(&self) {
         let budget = spin_budget();
-        let hot = server_is_hot(budget);
+        let hot = !budget.is_zero()
+            && SRV_ACTIVE.with(|c| c.get()).is_some_and(|t| t.elapsed() < budget);
         if hot {
             // Return promptly so the caller re-checks the ring atomics.
             for _ in 0..64 {
@@ -169,23 +131,10 @@ impl Notifier for EventNotifier {
         // Runs on the server thread once a request is complete: the ring is
         // active, so keep `wait_server` spinning for the next one.
         if !spin_budget().is_zero() {
-            mark_server_active();
+            SRV_ACTIVE.with(|c| c.set(Some(Instant::now())));
         }
         unsafe {
             let _ = SetEvent(self.client_ev);
-        }
-    }
-
-    /// The same bookkeeping, without the signal.
-    ///
-    /// The client set `FLAG_CLIENT_POLLS`, meaning it spins for its response
-    /// and never waits on `client_ev` — so signalling it is a syscall on the
-    /// response path that nothing observes. Marking the ring hot still matters
-    /// and still happens: that is what keeps the next request from having to
-    /// wake a sleeping worker.
-    fn notify_client_polling(&self, _slot: u32) {
-        if !spin_budget().is_zero() {
-            mark_server_active();
         }
     }
     /// Spin for the remaining budget, then fall back to the event.
