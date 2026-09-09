@@ -174,6 +174,15 @@ const BULK_THRESHOLD: u32 = 64 * 1024;
 /// Deep pipeline for multi‑MiB sequential streams (CreateSection fill).
 const PIPELINE_DEPTH_STREAM: usize = 8;
 
+/// Set on every request this client sends.
+///
+/// `WakeServerSpinClient::wait_client` is a pure spin: this client never sleeps
+/// for a response, so the server's `SetEvent` on the client event signals
+/// something nobody is waiting on. The flag lets the server skip that syscall
+/// on the response path of every round trip. See
+/// [`vfs_protocol::FLAG_CLIENT_POLLS`].
+const POLLS: u32 = vfs_protocol::FLAG_CLIENT_POLLS;
+
 /// Wakes the director on submit, then spins for the response.
 ///
 /// The client used to be a plain `SpinNotifier`, whose `notify_server` is a
@@ -377,7 +386,7 @@ impl FuseClient {
         let _g = self.ring_lock.lock().map_err(|_| "ring lock poisoned".to_string())?;
         let c = self.client();
         let r = c
-            .submit(OP_HEARTBEAT, 0, &[])
+            .submit(OP_HEARTBEAT, POLLS, &[])
             .map_err(|e| format!("HEARTBEAT: {e:?}"))?;
         if r.status != ST_OK {
             return Err(format!("HEARTBEAT status {}", r.status));
@@ -389,7 +398,7 @@ impl FuseClient {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_GETATTR, 0, &encode_path_req(root.0, vpath))
+            .submit(OP_GETATTR, POLLS, &encode_path_req(root.0, vpath))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -401,7 +410,7 @@ impl FuseClient {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_READDIR, 0, &encode_path_req(root.0, vpath))
+            .submit(OP_READDIR, POLLS, &encode_path_req(root.0, vpath))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -413,7 +422,7 @@ impl FuseClient {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_OPEN, 0, &encode_open_req(root.0, OPEN_READ, vpath))
+            .submit(OP_OPEN, POLLS, &encode_open_req(root.0, OPEN_READ, vpath))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -437,7 +446,7 @@ impl FuseClient {
         let r = c
             .submit(
                 OP_OPEN,
-                0,
+                POLLS,
                 &encode_open_req(root.0, OPEN_WRITE | create_flags, vpath),
             )
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
@@ -463,7 +472,7 @@ impl FuseClient {
             let r = c
                 .submit(
                     OP_WRITE,
-                    0,
+                    POLLS,
                     &encode_write_req(
                         &WriteReq {
                             fh,
@@ -539,7 +548,7 @@ impl FuseClient {
                 if chunk == 0 {
                     break;
                 }
-                let flags = if bulk { FLAG_READ_BULK } else { 0 };
+                let flags = POLLS | if bulk { FLAG_READ_BULK } else { 0 };
                 reqs.push((
                     OP_READ,
                     flags,
@@ -627,7 +636,7 @@ impl FuseClient {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_DELETE, 0, &encode_path_req(root.0, vpath))
+            .submit(OP_DELETE, POLLS, &encode_path_req(root.0, vpath))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -645,7 +654,7 @@ impl FuseClient {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_RENAME, 0, &encode_rename_req(root.0, from, to))
+            .submit(OP_RENAME, POLLS, &encode_rename_req(root.0, from, to))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -658,7 +667,7 @@ impl FuseClient {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_MKDIR, 0, &encode_mkdir_req(root.0, mode, vpath))
+            .submit(OP_MKDIR, POLLS, &encode_mkdir_req(root.0, mode, vpath))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -671,7 +680,7 @@ impl FuseClient {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_SETATTR, 0, &encode_setattr_req(&SetattrReq { fh, size }))
+            .submit(OP_SETATTR, POLLS, &encode_setattr_req(&SetattrReq { fh, size }))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
@@ -683,7 +692,7 @@ impl FuseClient {
         let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
-            .submit(OP_CLOSE, 0, &encode_close_req(fh))
+            .submit(OP_CLOSE, POLLS, &encode_close_req(fh))
             .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);

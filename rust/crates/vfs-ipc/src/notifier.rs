@@ -8,6 +8,17 @@ pub trait Notifier {
     fn notify_server(&self) {}
     fn wait_server(&self) {}
     fn notify_client(&self, _slot: u32) {}
+    /// Completion for a client that spins for its response (see
+    /// `vfs_protocol::FLAG_CLIENT_POLLS`).
+    ///
+    /// Defaults to [`Notifier::notify_client`], so an implementation with no
+    /// cheaper path is unaffected. One that signals an event should override
+    /// this to do everything *except* the signal — a spinning client sees the
+    /// ring atomic on its next iteration, and waking it costs a syscall on the
+    /// response path for nothing.
+    fn notify_client_polling(&self, slot: u32) {
+        self.notify_client(slot);
+    }
     fn wait_client(&self, _slot: u32) {}
     fn notify_slot_free(&self) {}
 }

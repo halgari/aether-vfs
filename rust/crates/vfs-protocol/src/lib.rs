@@ -34,6 +34,18 @@ pub const OP_HEARTBEAT: u32 = 13;
 
 /// Ring/request flag: prefer bulk-arena READ (data in shared arena, not ring payload).
 pub const FLAG_READ_BULK: u32 = 0x1;
+/// Ring/request flag: **this client spins for its response and will never
+/// sleep waiting for one.**
+///
+/// Set by a client whose `wait_client` is a pure spin. The server then skips
+/// the `SetEvent` on the client event, which for such a client signals
+/// something nobody is waiting on: a syscall per round trip, paid on the
+/// response path, buying nothing.
+///
+/// Safe by construction rather than by timing. A lost wakeup is the hazard with
+/// any such optimisation, and a client that never waits cannot lose one. A
+/// client that *might* sleep must not set this.
+pub const FLAG_CLIENT_POLLS: u32 = 0x2;
 /// High bit on READ response `bytes_read` means bulk: data lives at arena_offset.
 pub const READ_RESP_BULK_BIT: u32 = 0x8000_0000;
 
