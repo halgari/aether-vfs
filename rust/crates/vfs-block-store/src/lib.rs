@@ -15,6 +15,7 @@ mod pack;
 mod stats;
 mod store;
 mod tracker;
+mod write;
 
 pub use config::{CompactOptions, StoreConfig};
 pub use error::{Error, Result};
