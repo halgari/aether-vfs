@@ -16,9 +16,11 @@ mod read;
 mod stats;
 mod store;
 mod tracker;
+mod verify;
 mod write;
 
 pub use config::{CompactOptions, StoreConfig};
 pub use error::{Error, Result};
 pub use stats::{IndexSize, PackStats, Stats};
 pub use store::{BlockStore, FileInfo, ReadResult};
+pub use verify::VerifyReport;
