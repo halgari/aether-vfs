@@ -8,6 +8,7 @@ mod codec;
 mod config;
 mod crash;
 mod error;
+mod files;
 mod index;
 mod manifest;
 
