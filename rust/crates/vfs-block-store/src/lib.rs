@@ -12,6 +12,7 @@ mod files;
 mod index;
 mod manifest;
 mod pack;
+mod tracker;
 
 pub use config::{CompactOptions, StoreConfig};
 pub use error::{Error, Result};
