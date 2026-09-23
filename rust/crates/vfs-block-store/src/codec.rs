@@ -142,6 +142,9 @@ pub fn decode_payload(
             return Err("decompressed length mismatch");
         }
     } else {
+        if payload.len() != out.len() {
+            return Err("raw payload length mismatch");
+        }
         out.copy_from_slice(payload);
     }
     Ok(())
@@ -231,5 +234,22 @@ mod tests {
     #[test]
     fn hash_is_first_16_bytes_of_blake3() {
         assert_eq!(&hash128(b"abc")[..], &blake3::hash(b"abc").as_bytes()[..16]);
+    }
+
+    #[test]
+    fn raw_record_with_mismatched_raw_len_is_rejected() {
+        let mut buf = vec![0u8; 4096];
+        blake3::Hasher::new()
+            .update(b"seed")
+            .finalize_xof()
+            .fill(&mut buf);
+        let mut enc = encode_block(&buf, hash128(&buf), 6).unwrap();
+        assert_eq!(enc.header.flags, 0);
+        enc.header.raw_len = enc.header.stored_len + 1;
+        let mut out = vec![0u8; enc.header.raw_len as usize];
+        assert_eq!(
+            decode_payload(&enc.header, &enc.payload, &mut out),
+            Err("raw payload length mismatch")
+        );
     }
 }
