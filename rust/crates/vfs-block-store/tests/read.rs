@@ -150,3 +150,27 @@ fn concurrent_readers_and_writers() {
         }
     });
 }
+
+#[test]
+fn corrupt_shared_block_counts_one_heal() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = random_bytes(21, BS);
+    let data = [b.clone(), b].concat();
+    {
+        let store = open(dir.path());
+        store.set_len(b"f", data.len() as u64).unwrap();
+        store.write_blocks(b"f", 0, &data).unwrap();
+        store.close().unwrap();
+    }
+    // Flip the first payload byte of the first record.
+    let pack = dir.path().join("packs").join("00000001.pack");
+    let mut bytes = std::fs::read(&pack).unwrap();
+    bytes[40] ^= 0xff;
+    std::fs::write(&pack, bytes).unwrap();
+
+    let store = open(dir.path());
+    let mut buf = vec![0u8; data.len()];
+    let r = store.read(b"f", 0, &mut buf).unwrap();
+    assert_eq!(r.missing, vec![0..2 * BS as u64]);
+    assert_eq!(store.stats().unwrap().healed_blocks, 1);
+}

@@ -131,23 +131,27 @@ impl BlockStore {
 
     /// Drops a corrupt block from the index so it reads as missing and can be rewritten.
     pub(crate) fn heal(&self, id: u64, loc: &BlockLoc, reason: &'static str) -> Result<()> {
-        tracing::warn!(
-            block = id,
-            pack = loc.pack,
-            offset = loc.offset,
-            reason,
-            "dropping corrupt block"
-        );
-        self.index.update(false, |t| {
+        let removed = self.index.update(false, |t| {
             if let Some(cur) = t.block(id)?
                 && cur.pack == loc.pack
                 && cur.offset == loc.offset
             {
                 t.remove_block(id, &cur)?;
+                Ok(true)
+            } else {
+                Ok(false)
             }
-            Ok(())
         })?;
-        self.healed.fetch_add(1, Ordering::Relaxed);
+        if removed {
+            tracing::warn!(
+                block = id,
+                pack = loc.pack,
+                offset = loc.offset,
+                reason,
+                "dropping corrupt block"
+            );
+            self.healed.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 }
