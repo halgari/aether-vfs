@@ -164,7 +164,7 @@ impl BlockStore {
             if w.packs.needs_new_pack(len) {
                 let id = w.next_pack_id;
                 w.next_pack_id += 1;
-                let old = w.packs.active_id();
+                let old = w.packs.current_id();
                 // Register before creating the file: an orphan row is cleaned up on open, and no
                 // commit can reference a pack before its registration commit.
                 self.index.update(false, |t| {
@@ -345,4 +345,75 @@ fn recover(t: &mut Tables<'_>, pack_dir: &Path, cfg: &StoreConfig) -> Result<(Op
     let max_registered = registered.iter().copied().max().unwrap_or(0);
     let next = (t.meta(META_NEXT_PACK_ID)?.unwrap_or(1) as u32).max(max_registered + 1);
     Ok((resume, next))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    pub(crate) const BS: usize = 4096;
+
+    pub(crate) fn test_config() -> StoreConfig {
+        StoreConfig {
+            block_size: BS as u32,
+            max_pack_size: 64 * 1024,
+            index_cache_bytes: 4 << 20,
+            write_txn_bytes: 8 * BS,
+            ..StoreConfig::default()
+        }
+    }
+
+    pub(crate) fn random_bytes(seed: u64, len: usize) -> Vec<u8> {
+        let mut out = vec![0u8; len];
+        blake3::Hasher::new()
+            .update(&seed.to_le_bytes())
+            .finalize_xof()
+            .fill(&mut out);
+        out
+    }
+
+    pub(crate) fn read_all(store: &BlockStore, id: &[u8]) -> Vec<u8> {
+        let len = store.stat(id).unwrap().unwrap().len as usize;
+        let mut buf = vec![0u8; len];
+        let r = store.read(id, 0, &mut buf).unwrap();
+        assert!(r.missing.is_empty(), "missing {:?}", r.missing);
+        buf
+    }
+
+    pub(crate) fn put(store: &BlockStore, id: &[u8], data: &[u8]) -> Result<()> {
+        store.set_len(id, data.len() as u64)?;
+        store.write_blocks(id, 0, data)
+    }
+
+    #[test]
+    fn failed_append_moves_later_writes_to_a_new_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = random_bytes(1, 2 * BS);
+        let b = random_bytes(2, 2 * BS);
+        let c = random_bytes(3, 2 * BS);
+        {
+            let store = BlockStore::open(dir.path(), test_config()).unwrap();
+            put(&store, b"a", &a).unwrap();
+            let first = store.writer.lock().unwrap().packs.active_id().unwrap();
+            store.writer.lock().unwrap().packs.fail_next_append = true;
+            assert!(put(&store, b"b", &b).is_err());
+            put(&store, b"c", &c).unwrap();
+            let now = store.writer.lock().unwrap().packs.active_id().unwrap();
+            assert_ne!(
+                now, first,
+                "writes after a failed append must use a new pack"
+            );
+            let packs = store.index.read().unwrap().packs().unwrap();
+            let info = packs.iter().find(|p| p.0 == first).unwrap().1;
+            assert_eq!(info.state, PackState::Sealed);
+            assert_eq!(read_all(&store, b"a"), a);
+            assert_eq!(read_all(&store, b"c"), c);
+            assert!(store.verify().unwrap().is_ok());
+            store.close().unwrap();
+        }
+        let store = BlockStore::open(dir.path(), test_config()).unwrap();
+        assert_eq!(read_all(&store, b"a"), a);
+        assert_eq!(read_all(&store, b"c"), c);
+        assert!(store.verify().unwrap().is_ok());
+    }
 }
