@@ -199,8 +199,13 @@ impl BlockStore {
 #[cfg(test)]
 mod tests {
     use super::{pack_accepts_records, validate_write};
+    use crate::codec::hash128;
+    use crate::config::CompactOptions;
     use crate::error::Error;
     use crate::index::{Index, PackInfo, PackState};
+    use crate::pack::pack_path;
+    use crate::store::BlockStore;
+    use crate::store::tests::{BS, put, random_bytes, read_all, test_config};
 
     #[test]
     fn validation() {
@@ -235,6 +240,63 @@ mod tests {
             validate_write(len, bs, u64::MAX, 1),
             Err(Error::OutOfRange)
         ));
+    }
+
+    #[test]
+    fn retries_when_a_dedup_hit_is_freed_before_the_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlockStore::open(dir.path(), test_config()).unwrap();
+        let d = random_bytes(1, 2 * BS);
+        put(&store, b"x", &d).unwrap();
+        store.flush().unwrap();
+        store.set_len(b"y", d.len() as u64).unwrap();
+        let h = hash128(&d[..BS]);
+        // Every block of "y" is a dedup hit on "x"; free them all between append and commit.
+        *store.hooks.before_write_commit.lock().unwrap() = Some(Box::new(move |s| {
+            s.delete(b"x").unwrap();
+            assert!(s.index.read().unwrap().dedup(&h).unwrap().is_none());
+        }));
+        store.write_blocks(b"y", 0, &d).unwrap();
+        assert!(store.hooks.before_write_commit.lock().unwrap().is_none());
+        // The retry had to append the blocks again.
+        assert!(store.stats().unwrap().unflushed_bytes > 0);
+        assert_eq!(read_all(&store, b"y"), d);
+        assert!(store.verify().unwrap().is_ok());
+        store.close().unwrap();
+        let store = BlockStore::open(dir.path(), test_config()).unwrap();
+        assert_eq!(read_all(&store, b"y"), d);
+        assert!(store.verify().unwrap().is_ok());
+    }
+
+    #[test]
+    fn retries_when_a_new_record_pack_is_retired_before_the_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlockStore::open(dir.path(), test_config()).unwrap();
+        let n = random_bytes(2, BS);
+        let z = random_bytes(3, 20 * BS);
+        store.set_len(b"y", n.len() as u64).unwrap();
+        let z2 = z.clone();
+        // Between append and commit, fill the pack holding the new record, then compact it away.
+        *store.hooks.before_write_commit.lock().unwrap() = Some(Box::new(move |s| {
+            let p = s.writer.lock().unwrap().packs.active_id().unwrap();
+            put(s, b"z", &z2).unwrap();
+            let all = CompactOptions {
+                min_garbage_ratio: 0.0,
+                max_bytes: u64::MAX,
+            };
+            s.compact(all).unwrap();
+            assert!(!s.stats().unwrap().packs.iter().any(|x| x.id == p));
+            assert!(!pack_path(&s.pack_dir, p).exists());
+        }));
+        store.write_blocks(b"y", 0, &n).unwrap();
+        assert!(store.hooks.before_write_commit.lock().unwrap().is_none());
+        assert_eq!(read_all(&store, b"y"), n);
+        assert_eq!(read_all(&store, b"z"), z);
+        assert!(store.verify().unwrap().is_ok());
+        store.close().unwrap();
+        let store = BlockStore::open(dir.path(), test_config()).unwrap();
+        assert_eq!(read_all(&store, b"y"), n);
+        assert!(store.verify().unwrap().is_ok());
     }
 
     #[test]
