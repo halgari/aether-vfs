@@ -330,10 +330,13 @@ fn recover(t: &mut Tables<'_>, pack_dir: &Path, cfg: &StoreConfig) -> Result<(Op
             active.push(id);
         }
     }
-    // Pack files created after the last durable commit hold no referenced data.
+    // Pack files created after the last durable commit hold no referenced data. One that cannot
+    // be deleted now (another program holds it) is retried on the next open.
     for &id in &on_disk {
-        if !registered.contains(&id) {
-            remove_pack_file(pack_dir, id)?;
+        if !registered.contains(&id)
+            && let Err(e) = remove_pack_file(pack_dir, id)
+        {
+            tracing::warn!(pack = id, error = %e, "could not delete orphan pack file");
         }
     }
     // Resume the newest active pack only after a clean shutdown; otherwise its tail may be torn.
@@ -344,8 +347,15 @@ fn recover(t: &mut Tables<'_>, pack_dir: &Path, cfg: &StoreConfig) -> Result<(Op
         info.state = PackState::Sealed;
         t.put_pack(id, &info)?;
     }
-    let max_registered = registered.iter().copied().max().unwrap_or(0);
-    let next = (t.meta(META_NEXT_PACK_ID)?.unwrap_or(1) as u32).max(max_registered + 1);
+    // Past every registered pack and every file on disk, so a new pack never collides with an
+    // orphan file that could not be deleted.
+    let max_seen = registered
+        .iter()
+        .chain(&on_disk)
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let next = (t.meta(META_NEXT_PACK_ID)?.unwrap_or(1) as u32).max(max_seen + 1);
     Ok((resume, next))
 }
 

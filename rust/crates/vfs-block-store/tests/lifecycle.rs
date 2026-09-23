@@ -118,3 +118,86 @@ fn store_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<BlockStore>();
 }
+
+fn pack_path(dir: &std::path::Path, id: u32) -> std::path::PathBuf {
+    dir.join("packs").join(format!("{id:08}.pack"))
+}
+
+/// Ids of the pack files in the store at `dir`.
+fn pack_ids(dir: &std::path::Path) -> Vec<u32> {
+    let mut ids: Vec<u32> = std::fs::read_dir(dir.join("packs"))
+        .unwrap()
+        .filter_map(|e| {
+            e.unwrap()
+                .file_name()
+                .to_str()?
+                .strip_suffix(".pack")?
+                .parse()
+                .ok()
+        })
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// A store holding file "a", closed cleanly. Returns a's data.
+fn store_with_two_packs(dir: &std::path::Path) -> Vec<u8> {
+    let store = open(dir);
+    let a = random_bytes(1, 20 * BS);
+    store.set_len(b"a", a.len() as u64).unwrap();
+    store.write_blocks(b"a", 0, &a).unwrap();
+    store.close().unwrap();
+    assert!(pack_ids(dir).len() >= 2);
+    a
+}
+
+/// Writes enough to start new packs, then checks everything reads back.
+fn write_more_and_check(store: &BlockStore, a: &[u8]) {
+    let b = random_bytes(2, 20 * BS);
+    store.set_len(b"b", b.len() as u64).unwrap();
+    store.write_blocks(b"b", 0, &b).unwrap();
+    assert_eq!(read_all(store, b"a"), a);
+    assert_eq!(read_all(store, b"b"), b);
+    let report = store.verify().unwrap();
+    assert!(report.is_ok(), "{:#?}", report.problems);
+}
+
+#[test]
+fn orphan_pack_file_is_deleted_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = store_with_two_packs(dir.path());
+    let orphan = pack_ids(dir.path()).last().unwrap() + 1;
+    std::fs::write(pack_path(dir.path(), orphan), b"not referenced").unwrap();
+    let store = open(dir.path());
+    assert!(!pack_path(dir.path(), orphan).exists());
+    write_more_and_check(&store, &a);
+}
+
+/// An orphan pack file that cannot be deleted (held open by another program) must not stop the
+/// store from opening, and new packs must not collide with it.
+#[cfg(windows)]
+#[test]
+fn undeletable_orphan_pack_file_does_not_block_open() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let a = store_with_two_packs(dir.path());
+    let orphan = pack_ids(dir.path()).last().unwrap() + 1;
+    let path = pack_path(dir.path(), orphan);
+    std::fs::write(&path, b"not referenced").unwrap();
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&path)
+        .unwrap();
+    {
+        let store = open(dir.path());
+        assert!(path.exists());
+        write_more_and_check(&store, &a);
+        assert!(pack_ids(dir.path()).iter().any(|&id| id > orphan));
+    }
+    drop(held);
+    let store = open(dir.path());
+    assert!(!path.exists());
+    assert_eq!(read_all(&store, b"a"), a);
+    assert!(store.verify().unwrap().is_ok());
+}
