@@ -98,7 +98,12 @@ impl BlockStore {
             }
         }
         moved += self.move_scanned(pack, batch)?;
-        moved += self.evacuate_by_index(pack)?;
+        // The scan normally moves every live record, leaving no live bytes. Only then is the
+        // whole-table scan of `evacuate_by_index` skipped.
+        let live = self.index.read()?.pack(pack)?.map_or(0, |p| p.live_bytes);
+        if live != 0 {
+            moved += self.evacuate_by_index(pack)?;
+        }
 
         crash::point("compact_before_retire");
         let retired = self.durable_commit(|t| {
@@ -152,8 +157,9 @@ impl BlockStore {
         self.move_records(live)
     }
 
-    /// Moves any block still recorded in `pack` by looking it up in the index. Normally finds
-    /// nothing; it covers records the sequential scan could not reach (corrupt headers).
+    /// Moves any block still recorded in `pack` by looking it up in the index. Scans the whole
+    /// `blocks` table, so it runs only when the sequential scan left live bytes behind (records
+    /// behind a corrupt header, or a record committed into the pack after the scan).
     fn evacuate_by_index(&self, pack: u32) -> Result<u64> {
         let mut locs = Vec::new();
         self.index.read()?.for_each_block(|id, loc| {

@@ -221,6 +221,12 @@ impl IndexRead {
             .map(|g| g.value()))
     }
 
+    pub fn pack(&self, id: u32) -> Result<Option<PackInfo>> {
+        Ok(lazy_table(&self.txn, &self.packs, PACKS)?
+            .get(id)?
+            .map(|g| PackInfo::decode(g.value())))
+    }
+
     pub fn packs(&self) -> Result<Vec<(u32, PackInfo)>> {
         let mut out = Vec::new();
         for e in lazy_table(&self.txn, &self.packs, PACKS)?.iter()? {
