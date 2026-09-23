@@ -155,7 +155,7 @@ fn compaction_heals_a_corrupt_live_record() {
     let mut buf = vec![0u8; len];
     let result = store.read(b"f0", 0, &mut buf).unwrap();
     assert_eq!(result.missing, vec![0..BS as u64]);
-    assert_eq!(buf[BS as usize..], data[0][BS as usize..]);
+    assert_eq!(buf[BS..], data[0][BS..]);
     let pack_path = dir.path().join("packs").join("00000001.pack");
     assert!(!pack_path.exists());
 }
@@ -186,15 +186,9 @@ fn compaction_evacuates_records_behind_a_corrupt_header() {
     let mut buf = vec![0u8; len];
     let result = store.read(b"f0", 0, &mut buf).unwrap();
     assert_eq!(result.missing, vec![BS as u64..2 * BS as u64]);
-    assert_eq!(buf[0..BS as usize], data[0][0..BS as usize]);
-    assert_eq!(
-        buf[2 * BS as usize..3 * BS as usize],
-        data[0][2 * BS as usize..3 * BS as usize]
-    );
-    assert_eq!(
-        buf[3 * BS as usize..4 * BS as usize],
-        data[0][3 * BS as usize..4 * BS as usize]
-    );
+    assert_eq!(buf[0..BS], data[0][0..BS]);
+    assert_eq!(buf[2 * BS..3 * BS], data[0][2 * BS..3 * BS]);
+    assert_eq!(buf[3 * BS..4 * BS], data[0][3 * BS..4 * BS]);
     let pack_path = dir.path().join("packs").join("00000001.pack");
     assert!(!pack_path.exists());
 }
