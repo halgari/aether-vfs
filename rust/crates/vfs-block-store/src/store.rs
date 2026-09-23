@@ -14,7 +14,7 @@ use crate::index::{
     PackState, SCHEMA_VERSION, Tables,
 };
 use crate::manifest::{MISSING, block_count, decode_ids, file_len, segment_count};
-use crate::pack::{PackFiles, PackWriter, list_pack_ids, remove_pack_file};
+use crate::pack::{PackFiles, PackWriter, list_pack_ids, remove_pack_file, sync_dir};
 use crate::tracker::ReadTracker;
 use crate::{crash, files};
 
@@ -64,6 +64,8 @@ impl BlockStore {
         let dir = dir.as_ref();
         let pack_dir = dir.join("packs");
         std::fs::create_dir_all(&pack_dir)?;
+        // Make the `packs` directory entry durable (a no-op on Windows).
+        sync_dir(dir)?;
 
         let lock = OpenOptions::new()
             .create(true)

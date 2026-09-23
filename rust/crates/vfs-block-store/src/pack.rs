@@ -191,6 +191,11 @@ impl PackWriter {
             .append(true)
             .create_new(true)
             .open(pack_path(&self.dir, id))?;
+        if let Err(e) = sync_dir(&self.dir) {
+            // The file exists but its directory entry may not be durable; never append to it.
+            self.abandoned = Some((id, file));
+            return Err(e);
+        }
         self.active = Some(ActivePack {
             id,
             out: BufWriter::with_capacity(1 << 20, file),
@@ -249,6 +254,15 @@ impl PackWriter {
         }
         Ok(())
     }
+}
+
+/// Makes a new directory entry in `dir` durable. Windows needs no directory fsync.
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    File::open(dir)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
 }
 
 #[cfg(test)]
