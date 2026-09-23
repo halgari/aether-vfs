@@ -4,6 +4,7 @@
 //! Blocks are deduplicated by content (BLAKE3-128), compressed with zstd, and appended
 //! to a small number of large pack files. Metadata lives in a redb database.
 
+mod codec;
 mod config;
 mod crash;
 mod error;
