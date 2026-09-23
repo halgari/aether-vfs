@@ -232,7 +232,8 @@ impl BlockStore {
     pub(crate) fn delete_retired(&self) -> Result<()> {
         let pending = std::mem::take(&mut *self.retired.lock().unwrap());
         let mut keep = Vec::new();
-        for (pack, generation) in pending {
+        let mut pending = pending.into_iter();
+        while let Some((pack, generation)) = pending.next() {
             if !self.tracker.is_clear_before(generation) {
                 keep.push((pack, generation));
                 continue;
@@ -244,9 +245,84 @@ impl BlockStore {
                 keep.push((pack, generation));
                 continue;
             }
-            self.commit(|t| t.remove_pack(pack))?;
+            if let Err(e) = self.remove_retired_row(pack) {
+                // Requeue this pack (its file is gone, which a retry treats as deleted) and every
+                // pack not processed yet.
+                let mut retired = self.retired.lock().unwrap();
+                retired.extend(keep);
+                retired.push((pack, generation));
+                retired.extend(pending);
+                return Err(e);
+            }
         }
         self.retired.lock().unwrap().extend(keep);
         Ok(())
+    }
+
+    fn remove_retired_row(&self, pack: u32) -> Result<()> {
+        #[cfg(test)]
+        if self
+            .hooks
+            .fail_retired_row_removal
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(Error::Corrupt(
+                "injected retired row removal failure".into(),
+            ));
+        }
+        self.commit(|t| t.remove_pack(pack))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::BlockStore;
+    use crate::index::{PackInfo, PackState};
+    use crate::pack::pack_path;
+    use crate::store::tests::test_config;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn failed_retired_row_removal_keeps_the_rest_of_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlockStore::open(dir.path(), test_config()).unwrap();
+        let ids = [100u32, 101, 102];
+        store
+            .index
+            .update(false, |t| {
+                for &id in &ids {
+                    t.put_pack(
+                        id,
+                        &PackInfo {
+                            live_bytes: 0,
+                            state: PackState::Retired,
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let generation = store.tracker.advance();
+        for &id in &ids {
+            std::fs::write(pack_path(&store.pack_dir, id), b"retired").unwrap();
+            store.retired.lock().unwrap().push((id, generation));
+        }
+
+        store
+            .hooks
+            .fail_retired_row_removal
+            .store(true, Ordering::Relaxed);
+        assert!(store.delete_retired().is_err());
+        let mut pending: Vec<u32> = store.retired.lock().unwrap().iter().map(|r| r.0).collect();
+        pending.sort_unstable();
+        assert_eq!(pending, ids, "entries lost from the retired queue");
+
+        store.delete_retired().unwrap();
+        assert!(store.retired.lock().unwrap().is_empty());
+        let r = store.index.read().unwrap();
+        for &id in &ids {
+            assert!(r.pack(id).unwrap().is_none());
+            assert!(!pack_path(&store.pack_dir, id).exists());
+        }
     }
 }

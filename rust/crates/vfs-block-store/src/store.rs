@@ -57,6 +57,19 @@ pub struct BlockStore {
     pub(crate) healed: AtomicU64,
     shut_down: AtomicBool,
     _lock: File,
+    #[cfg(test)]
+    pub(crate) hooks: TestHooks,
+}
+
+/// Failure and race injection for unit tests.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TestHooks {
+    /// Runs once in `write_chunk`, after the records are appended and before the commit.
+    #[allow(clippy::type_complexity)]
+    pub before_write_commit: Mutex<Option<Box<dyn FnOnce(&BlockStore) + Send>>>,
+    /// Makes the next retired-pack row removal in `delete_retired` fail.
+    pub fail_retired_row_removal: AtomicBool,
 }
 
 impl BlockStore {
@@ -111,6 +124,8 @@ impl BlockStore {
             shut_down: AtomicBool::new(false),
             _lock: lock,
             cfg,
+            #[cfg(test)]
+            hooks: TestHooks::default(),
         })
     }
 
