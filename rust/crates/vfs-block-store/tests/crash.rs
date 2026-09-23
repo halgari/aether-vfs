@@ -169,3 +169,80 @@ fn store_is_usable_after_crash() {
     let store = check_after_crash(dir.path());
     assert_eq!(read_all(&store, b"c"), c);
 }
+
+fn pack_files(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir.join("packs"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&e.path(), &to.join(e.file_name()));
+        } else {
+            std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+        }
+    }
+}
+
+#[test]
+fn retired_pack_whose_file_is_already_gone() {
+    let dir = crash_child("compact", "compact_after_retire");
+    // Find the files open deletes (the retired pack, and any orphans) by opening a copy.
+    let probe = tempfile::tempdir().unwrap();
+    copy_dir(dir.path(), probe.path());
+    drop(open(probe.path()));
+    let after = pack_files(probe.path());
+    let gone: Vec<String> = pack_files(dir.path())
+        .into_iter()
+        .filter(|f| !after.contains(f))
+        .collect();
+    assert!(!gone.is_empty(), "no retired pack to delete");
+    // Delete them first, as if a previous open had removed the file but not the row.
+    for f in &gone {
+        std::fs::remove_file(dir.path().join("packs").join(f)).unwrap();
+    }
+    let store = check_after_crash(dir.path());
+    assert_eq!(
+        pack_files(dir.path()).len(),
+        store.stats().unwrap().packs.len()
+    );
+}
+
+#[test]
+fn torn_tail_of_a_pack_sealed_after_a_crash() {
+    let dir = crash_child("write", "write_after_append");
+    // Tear the tail of the newest pack: a record header followed by only part of its payload.
+    let newest = dir
+        .path()
+        .join("packs")
+        .join(pack_files(dir.path()).last().unwrap());
+    let bytes = std::fs::read(&newest).unwrap();
+    let mut torn = bytes[..40].to_vec();
+    torn.extend_from_slice(&[0xab; 10]);
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&newest)
+        .unwrap();
+    std::io::Write::write_all(&mut f, &torn).unwrap();
+    drop(f);
+
+    // The open is unclean, so the pack is sealed rather than resumed.
+    let store = check_after_crash(dir.path());
+    let report = store
+        .compact(CompactOptions {
+            min_garbage_ratio: 0.0,
+            max_bytes: u64::MAX,
+        })
+        .unwrap();
+    assert!(report.packs_compacted >= 1);
+    assert!(!newest.exists(), "the torn pack was not compacted away");
+    drop(store);
+    check_after_crash(dir.path());
+}
