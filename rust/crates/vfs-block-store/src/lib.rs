@@ -5,6 +5,7 @@
 //! to a small number of large pack files. Metadata lives in a redb database.
 
 mod codec;
+mod compact;
 mod config;
 mod crash;
 mod error;
@@ -19,6 +20,7 @@ mod tracker;
 mod verify;
 mod write;
 
+pub use compact::CompactReport;
 pub use config::{CompactOptions, StoreConfig};
 pub use error::{Error, Result};
 pub use stats::{IndexSize, PackStats, Stats};
