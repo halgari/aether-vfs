@@ -52,6 +52,8 @@ pub struct BlockStore {
     pub(crate) compact_lock: Mutex<()>,
     pub(crate) pool: Option<rayon::ThreadPool>,
     pub(crate) unflushed: AtomicU64,
+    /// Non-durable index commits since the last durable commit.
+    pub(crate) unflushed_commits: AtomicU64,
     pub(crate) healed: AtomicU64,
     shut_down: AtomicBool,
     _lock: File,
@@ -104,6 +106,7 @@ impl BlockStore {
             compact_lock: Mutex::new(()),
             pool,
             unflushed: AtomicU64::new(0),
+            unflushed_commits: AtomicU64::new(0),
             healed: AtomicU64::new(0),
             shut_down: AtomicBool::new(false),
             _lock: lock,
@@ -137,14 +140,29 @@ impl BlockStore {
         let mut w = self.writer.lock().unwrap();
         w.packs.sync()?;
         crash::point("flush_before_commit");
+        // Commits counted after this load may or may not be covered; counting them again is safe.
+        let commits = self.unflushed_commits.load(Ordering::Relaxed);
         let r = self.index.update(true, f)?;
         self.unflushed.store(0, Ordering::Relaxed);
+        self.unflushed_commits.fetch_sub(commits, Ordering::Relaxed);
         drop(w);
         Ok(r)
     }
 
+    /// Runs `f` in a non-durable index transaction and counts the commit toward auto-flush.
+    /// Every non-durable commit the store makes goes through here.
+    pub(crate) fn commit<R>(&self, f: impl FnOnce(&mut Tables<'_>) -> Result<R>) -> Result<R> {
+        let r = self.index.update(false, f)?;
+        self.unflushed_commits.fetch_add(1, Ordering::Relaxed);
+        Ok(r)
+    }
+
+    /// Flushes once `auto_flush_bytes` bytes or `auto_flush_commits` non-durable commits have
+    /// piled up, since redb holds memory for non-durable commits until the next durable one.
     pub(crate) fn maybe_auto_flush(&self) -> Result<()> {
-        if self.unflushed.load(Ordering::Relaxed) >= self.cfg.auto_flush_bytes {
+        if self.unflushed.load(Ordering::Relaxed) >= self.cfg.auto_flush_bytes
+            || self.unflushed_commits.load(Ordering::Relaxed) >= self.cfg.auto_flush_commits
+        {
             self.flush()?;
         }
         Ok(())
@@ -169,7 +187,7 @@ impl BlockStore {
                 let old = w.packs.current_id();
                 // Register before creating the file: an orphan row is cleaned up on open, and no
                 // commit can reference a pack before its registration commit.
-                self.index.update(false, |t| {
+                self.commit(|t| {
                     if let Some(old) = old
                         && let Some(mut info) = t.pack(old)?
                     {
@@ -222,24 +240,26 @@ impl BlockStore {
     pub fn set_len(&self, file_id: &[u8], len: u64) -> Result<()> {
         self.check_id(file_id)?;
         let bs = self.cfg.block_size;
-        self.index.update(false, |t| {
+        self.commit(|t| {
             for id in files::resize(t, file_id, len, bs)? {
                 t.decref(id)?;
             }
             Ok(())
-        })
+        })?;
+        self.maybe_auto_flush()
     }
 
     /// Deletes a file. Its blocks are freed once no other file references them.
     pub fn delete(&self, file_id: &[u8]) -> Result<()> {
         self.check_id(file_id)?;
         let bs = self.cfg.block_size;
-        self.index.update(false, |t| {
+        self.commit(|t| {
             for id in files::remove(t, file_id, bs)?.ok_or(Error::NotFound)? {
                 t.decref(id)?;
             }
             Ok(())
-        })
+        })?;
+        self.maybe_auto_flush()
     }
 
     /// Cached byte ranges of a file, merged and in order.

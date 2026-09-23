@@ -16,6 +16,10 @@ pub struct StoreConfig {
     /// A durable flush happens automatically after this many bytes are appended. Bounds redb memory
     /// use, since non-durable redb commits hold memory until the next durable commit.
     pub auto_flush_bytes: u64,
+    /// A durable flush also happens automatically after this many non-durable index commits
+    /// (writes, `set_len`, `delete`, heals, compaction batches), which bounds redb memory when
+    /// few bytes are appended. Must be at least 1.
+    pub auto_flush_commits: u64,
     /// Maximum length of a file id in bytes.
     pub max_file_id_len: usize,
     /// Threads for hashing and compression. `None` uses rayon's global pool.
@@ -31,6 +35,7 @@ impl Default for StoreConfig {
             index_cache_bytes: 64 << 20,
             write_txn_bytes: 16 << 20,
             auto_flush_bytes: 1 << 30,
+            auto_flush_commits: 10_000,
             max_file_id_len: 256,
             compression_threads: None,
         }
@@ -50,6 +55,11 @@ impl StoreConfig {
         if self.max_pack_size < self.block_size as u64 * 2 {
             return Err(Error::Config(
                 "max_pack_size must be at least two blocks".into(),
+            ));
+        }
+        if self.auto_flush_commits == 0 {
+            return Err(Error::Config(
+                "auto_flush_commits must be at least 1".into(),
             ));
         }
         if self.max_file_id_len == 0 || self.max_file_id_len > 4096 {
@@ -109,6 +119,10 @@ mod tests {
             },
             StoreConfig {
                 max_file_id_len: 0,
+                ..StoreConfig::default()
+            },
+            StoreConfig {
+                auto_flush_commits: 0,
                 ..StoreConfig::default()
             },
         ];

@@ -89,7 +89,7 @@ impl BlockStore {
         loop {
             self.encode_and_append(&blocks, &hashes, &need, &mut new_records)?;
             crash::point("write_after_append");
-            let retry = self.index.update(false, |t| {
+            let retry = self.commit(|t| {
                 let len = files::len(t, file_id)?.ok_or(Error::NotFound)?;
                 validate_write(len, bs, first, chunk.len())?;
 

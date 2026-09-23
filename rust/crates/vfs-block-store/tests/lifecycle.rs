@@ -105,6 +105,10 @@ fn invalid_config_is_rejected() {
             max_file_id_len: 0,
             ..test_config()
         },
+        StoreConfig {
+            auto_flush_commits: 0,
+            ..test_config()
+        },
     ] {
         assert!(matches!(
             BlockStore::open(dir.path(), cfg),
@@ -200,4 +204,34 @@ fn undeletable_orphan_pack_file_does_not_block_open() {
     assert!(!path.exists());
     assert_eq!(read_all(&store, b"a"), a);
     assert!(store.verify().unwrap().is_ok());
+}
+
+#[test]
+fn auto_flush_after_many_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = StoreConfig {
+        auto_flush_commits: 3,
+        ..test_config()
+    };
+    let store = BlockStore::open(dir.path(), cfg).unwrap();
+    store.set_len(b"f", 1).unwrap();
+    store.set_len(b"f", 2).unwrap();
+    assert_eq!(store.stats().unwrap().unflushed_commits, 2);
+    store.set_len(b"f", 3).unwrap();
+    assert_eq!(store.stats().unwrap().unflushed_commits, 0);
+    store.set_len(b"g", 3).unwrap();
+    store.delete(b"g").unwrap();
+    store.delete(b"f").unwrap();
+    assert_eq!(store.stats().unwrap().unflushed_commits, 0);
+    // Writes that are all dedup hits append nothing but still count.
+    let data = random_bytes(1, BS);
+    store.set_len(b"a", BS as u64).unwrap();
+    store.write_blocks(b"a", 0, &data).unwrap();
+    store.flush().unwrap();
+    assert_eq!(store.stats().unwrap().unflushed_commits, 0);
+    for _ in 0..3 {
+        store.write_blocks(b"a", 0, &data).unwrap();
+    }
+    let stats = store.stats().unwrap();
+    assert_eq!((stats.unflushed_commits, stats.unflushed_bytes), (0, 0));
 }

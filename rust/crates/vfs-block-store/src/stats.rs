@@ -35,6 +35,8 @@ pub struct Stats {
     pub healed_blocks: u64,
     /// Bytes appended since the last durable flush.
     pub unflushed_bytes: u64,
+    /// Non-durable index commits since the last durable flush.
+    pub unflushed_commits: u64,
 }
 
 impl BlockStore {
@@ -59,6 +61,7 @@ impl BlockStore {
             packs,
             healed_blocks: self.healed.load(Ordering::Relaxed),
             unflushed_bytes: self.unflushed.load(Ordering::Relaxed),
+            unflushed_commits: self.unflushed_commits.load(Ordering::Relaxed),
         })
     }
 

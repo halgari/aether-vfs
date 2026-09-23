@@ -131,7 +131,7 @@ impl BlockStore {
 
     /// Drops a corrupt block from the index so it reads as missing and can be rewritten.
     pub(crate) fn heal(&self, id: u64, loc: &BlockLoc, reason: &'static str) -> Result<()> {
-        let removed = self.index.update(false, |t| {
+        let removed = self.commit(|t| {
             if let Some(cur) = t.block(id)?
                 && cur.pack == loc.pack
                 && cur.offset == loc.offset

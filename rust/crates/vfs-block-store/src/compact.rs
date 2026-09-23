@@ -198,7 +198,7 @@ impl BlockStore {
                 .map(|l| (&l.bytes[..HEADER_LEN], &l.bytes[HEADER_LEN..])),
         )?;
         crash::point("compact_after_copy");
-        self.index.update(false, |t| {
+        self.commit(|t| {
             let mut moved = 0u64;
             for (l, (new_pack, new_offset)) in live.iter().zip(new_locs) {
                 let Some(cur) = t.block(l.id)? else { continue };
@@ -238,7 +238,7 @@ impl BlockStore {
                 keep.push((pack, generation));
                 continue;
             }
-            self.index.update(false, |t| t.remove_pack(pack))?;
+            self.commit(|t| t.remove_pack(pack))?;
         }
         self.retired.lock().unwrap().extend(keep);
         Ok(())
