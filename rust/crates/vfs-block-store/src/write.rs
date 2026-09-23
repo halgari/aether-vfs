@@ -6,7 +6,7 @@ use rayon::prelude::*;
 
 use crate::codec::{EncodedBlock, HEADER_LEN, Hash128, encode_block, hash128};
 use crate::error::{Error, Result};
-use crate::index::BlockLoc;
+use crate::index::{BlockLoc, PackState, Tables};
 use crate::manifest::{MISSING, block_count, block_len};
 use crate::store::BlockStore;
 use crate::{crash, files};
@@ -27,6 +27,11 @@ pub(crate) fn validate_write(len: u64, block_size: u32, first: u64, data_len: us
         return Err(Error::Unaligned);
     }
     Ok(())
+}
+
+/// True if records in `pack` may still be committed: the pack is registered and not retired.
+pub(crate) fn pack_accepts_records(t: &Tables<'_>, pack: u32) -> Result<bool> {
+    Ok(t.pack(pack)?.is_some_and(|p| p.state != PackState::Retired))
 }
 
 impl BlockStore {
@@ -89,11 +94,16 @@ impl BlockStore {
                 validate_write(len, bs, first, chunk.len())?;
 
                 // A dedup hit seen earlier may have been freed by another commit since.
+                // A new record whose pack was retired by a concurrent compaction must be appended again.
                 // Check before modifying anything; committing an untouched transaction is harmless.
                 let mut missing = Vec::new();
                 for (i, h) in hashes.iter().enumerate() {
-                    if !new_records.contains_key(h) && t.dedup(h)?.is_none() {
-                        missing.push(i);
+                    if t.dedup(h)?.is_some() {
+                        continue;
+                    }
+                    match new_records.get(h) {
+                        Some(loc) if pack_accepts_records(t, loc.pack)? => {}
+                        _ => missing.push(i),
                     }
                 }
                 if !missing.is_empty() {
@@ -122,7 +132,12 @@ impl BlockStore {
             })?;
             match retry {
                 None => return Ok(()),
-                Some(missing) => need = missing,
+                Some(missing) => {
+                    for &i in &missing {
+                        new_records.remove(&hashes[i]);
+                    }
+                    need = missing;
+                }
             }
         }
     }
@@ -176,8 +191,9 @@ impl BlockStore {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_write;
-    use crate::Error;
+    use super::{pack_accepts_records, validate_write};
+    use crate::error::Error;
+    use crate::index::{Index, PackInfo, PackState};
 
     #[test]
     fn validation() {
@@ -212,5 +228,46 @@ mod tests {
             validate_write(len, bs, u64::MAX, 1),
             Err(Error::OutOfRange)
         ));
+    }
+
+    #[test]
+    fn pack_accepts_records_only_for_live_packs() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(&dir.path().join("i.redb"), 1 << 20).unwrap();
+        index
+            .update(false, |t| {
+                t.put_pack(
+                    1,
+                    &PackInfo {
+                        live_bytes: 100,
+                        state: PackState::Active,
+                    },
+                )?;
+                t.put_pack(
+                    2,
+                    &PackInfo {
+                        live_bytes: 100,
+                        state: PackState::Sealed,
+                    },
+                )?;
+                t.put_pack(
+                    3,
+                    &PackInfo {
+                        live_bytes: 0,
+                        state: PackState::Retired,
+                    },
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        index
+            .update(false, |t| {
+                assert!(pack_accepts_records(t, 1).unwrap());
+                assert!(pack_accepts_records(t, 2).unwrap());
+                assert!(!pack_accepts_records(t, 3).unwrap());
+                assert!(!pack_accepts_records(t, 4).unwrap());
+                Ok(())
+            })
+            .unwrap();
     }
 }

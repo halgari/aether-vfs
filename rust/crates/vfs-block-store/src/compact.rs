@@ -101,18 +101,22 @@ impl BlockStore {
         moved += self.evacuate_by_index(pack)?;
 
         crash::point("compact_before_retire");
-        self.durable_commit(|t| {
+        let retired = self.durable_commit(|t| {
             let mut info = t
                 .pack(pack)?
                 .ok_or_else(|| Error::Corrupt(format!("pack {pack} vanished during compaction")))?;
             if info.live_bytes != 0 {
-                return Err(Error::Corrupt(format!(
-                    "pack {pack} still has live data after compaction"
-                )));
+                // A write committed a record into this pack after the scan; leave it sealed for a later compaction.
+                return Ok(false);
             }
             info.state = PackState::Retired;
-            t.put_pack(pack, &info)
+            t.put_pack(pack, &info)?;
+            Ok(true)
         })?;
+        if !retired {
+            tracing::info!(pack, "pack gained live data during compaction; left sealed");
+            return Ok(moved);
+        }
         let generation = self.tracker.advance();
         self.retired.lock().unwrap().push((pack, generation));
         crash::point("compact_after_retire");

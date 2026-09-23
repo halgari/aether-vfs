@@ -127,3 +127,74 @@ fn reads_and_writes_during_compaction() {
         assert_eq!(read_all(&store, format!("f{i}").as_bytes()), data[i]);
     }
 }
+
+#[test]
+fn compaction_heals_a_corrupt_live_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = {
+        let store = open(dir.path());
+        let data = fill(&store, 40);
+        for i in (0..40).filter(|i| i % 4 != 0) {
+            store.delete(format!("f{i}").as_bytes()).unwrap();
+        }
+        store.close().unwrap();
+        data
+    };
+    // Corrupt the first payload byte of the first record in pack 1
+    {
+        let pack_path = dir.path().join("packs").join("00000001.pack");
+        let mut bytes = std::fs::read(&pack_path).unwrap();
+        bytes[40] ^= 0xff; // First payload byte of first record
+        std::fs::write(&pack_path, bytes).unwrap();
+    }
+    let store = open(dir.path());
+    let _report = store.compact(CompactOptions::default()).unwrap();
+    assert!(store.stats().unwrap().healed_blocks >= 1);
+    assert!(store.verify().unwrap().is_ok());
+    let len = store.stat(b"f0").unwrap().unwrap().len as usize;
+    let mut buf = vec![0u8; len];
+    let result = store.read(b"f0", 0, &mut buf).unwrap();
+    assert_eq!(result.missing, vec![0..BS as u64]);
+    assert_eq!(buf[BS as usize..], data[0][BS as usize..]);
+    let pack_path = dir.path().join("packs").join("00000001.pack");
+    assert!(!pack_path.exists());
+}
+
+#[test]
+fn compaction_evacuates_records_behind_a_corrupt_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = {
+        let store = open(dir.path());
+        let data = fill(&store, 40);
+        for i in (0..40).filter(|i| i % 4 != 0) {
+            store.delete(format!("f{i}").as_bytes()).unwrap();
+        }
+        store.close().unwrap();
+        data
+    };
+    // Corrupt the magic of the second record in pack 1
+    {
+        let pack_path = dir.path().join("packs").join("00000001.pack");
+        let mut bytes = std::fs::read(&pack_path).unwrap();
+        bytes[4136] ^= 0xff; // Magic of second record
+        std::fs::write(&pack_path, bytes).unwrap();
+    }
+    let store = open(dir.path());
+    let _report = store.compact(CompactOptions::default()).unwrap();
+    assert!(store.verify().unwrap().is_ok());
+    let len = store.stat(b"f0").unwrap().unwrap().len as usize;
+    let mut buf = vec![0u8; len];
+    let result = store.read(b"f0", 0, &mut buf).unwrap();
+    assert_eq!(result.missing, vec![BS as u64..2 * BS as u64]);
+    assert_eq!(buf[0..BS as usize], data[0][0..BS as usize]);
+    assert_eq!(
+        buf[2 * BS as usize..3 * BS as usize],
+        data[0][2 * BS as usize..3 * BS as usize]
+    );
+    assert_eq!(
+        buf[3 * BS as usize..4 * BS as usize],
+        data[0][3 * BS as usize..4 * BS as usize]
+    );
+    let pack_path = dir.path().join("packs").join("00000001.pack");
+    assert!(!pack_path.exists());
+}
