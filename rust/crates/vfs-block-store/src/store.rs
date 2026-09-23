@@ -13,7 +13,7 @@ use crate::index::{
     Index, META_BLOCK_SIZE, META_CLEAN_SHUTDOWN, META_NEXT_PACK_ID, META_SCHEMA_VERSION, PackInfo,
     PackState, SCHEMA_VERSION, Tables,
 };
-use crate::manifest::{MISSING, block_count, decode_ids, file_len, segment_count};
+use crate::manifest::{MISSING, block_count, decode_ids, file_len, len_fits, segment_count};
 use crate::pack::{PackFiles, PackWriter, list_pack_ids, remove_pack_file, sync_dir};
 use crate::tracker::ReadTracker;
 use crate::{crash, files};
@@ -240,6 +240,9 @@ impl BlockStore {
     pub fn set_len(&self, file_id: &[u8], len: u64) -> Result<()> {
         self.check_id(file_id)?;
         let bs = self.cfg.block_size;
+        if !len_fits(len, bs) {
+            return Err(Error::OutOfRange);
+        }
         self.commit(|t| {
             for id in files::resize(t, file_id, len, bs)? {
                 t.decref(id)?;

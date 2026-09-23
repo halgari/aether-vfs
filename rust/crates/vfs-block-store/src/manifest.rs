@@ -13,7 +13,13 @@ pub fn block_count(len: u64, block_size: u32) -> u64 {
     len.div_ceil(block_size as u64)
 }
 
+/// True if a file of `len` bytes has a segment count that fits in a u32 (segment keys are u32).
+pub fn len_fits(len: u64, block_size: u32) -> bool {
+    block_count(len, block_size).div_ceil(BLOCKS_PER_SEGMENT) <= u32::MAX as u64
+}
+
 /// Number of segments for a file with `blocks` blocks. Always at least 1 (segment 0 holds the header).
+/// `blocks` must satisfy [`len_fits`].
 pub fn segment_count(blocks: u64) -> u32 {
     blocks.div_ceil(BLOCKS_PER_SEGMENT).max(1) as u32
 }

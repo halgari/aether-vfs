@@ -235,3 +235,20 @@ fn auto_flush_after_many_commits() {
     let stats = store.stats().unwrap();
     assert_eq!((stats.unflushed_commits, stats.unflushed_bytes), (0, 0));
 }
+
+#[test]
+fn set_len_rejects_lengths_the_manifest_cannot_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    assert!(matches!(
+        store.set_len(b"f", u64::MAX),
+        Err(Error::OutOfRange)
+    ));
+    assert!(store.stat(b"f").unwrap().is_none());
+    store.set_len(b"f", 10).unwrap();
+    assert!(matches!(
+        store.set_len(b"f", u64::MAX),
+        Err(Error::OutOfRange)
+    ));
+    assert_eq!(store.stat(b"f").unwrap().unwrap().len, 10);
+}
