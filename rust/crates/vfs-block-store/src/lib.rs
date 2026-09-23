@@ -11,6 +11,7 @@ mod error;
 mod files;
 mod index;
 mod manifest;
+mod pack;
 
 pub use config::{CompactOptions, StoreConfig};
 pub use error::{Error, Result};
