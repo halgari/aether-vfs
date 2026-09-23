@@ -1,0 +1,24 @@
+[package]
+name = "block-store"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Deduplicating, compressing block store for a virtual file system cache"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+blake3 = "1.8"
+rayon = "1.12"
+redb = "4.3"
+thiserror = "2"
+tracing = "0.1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zstd = "0.14"
+
+[dev-dependencies]
+proptest = "1.11"
+tempfile = "3.27"
+
+[features]
+# Enables crash::point() calls that abort the process when BLOCK_STORE_CRASH_AT matches.
+crash-points = []
