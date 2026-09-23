@@ -12,6 +12,7 @@ mod files;
 mod index;
 mod manifest;
 mod pack;
+mod read;
 mod stats;
 mod store;
 mod tracker;

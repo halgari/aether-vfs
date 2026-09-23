@@ -33,3 +33,17 @@ pub fn random_bytes(seed: u64, len: usize) -> Vec<u8> {
 pub fn pattern_bytes(seed: u64, len: usize) -> Vec<u8> {
     (0..len).map(|i| (seed as usize + i / 64) as u8).collect()
 }
+
+/// Reads a whole file, asserting nothing is missing.
+pub fn read_all(store: &BlockStore, id: &[u8]) -> Vec<u8> {
+    let len = store.stat(id).unwrap().unwrap().len as usize;
+    let mut buf = vec![0u8; len];
+    let r = store.read(id, 0, &mut buf).unwrap();
+    assert_eq!(r.bytes, len);
+    assert!(
+        r.missing.is_empty(),
+        "unexpected missing ranges {:?}",
+        r.missing
+    );
+    buf
+}
