@@ -12,7 +12,11 @@ mod files;
 mod index;
 mod manifest;
 mod pack;
+mod stats;
+mod store;
 mod tracker;
 
 pub use config::{CompactOptions, StoreConfig};
 pub use error::{Error, Result};
+pub use stats::{IndexSize, PackStats, Stats};
+pub use store::{BlockStore, FileInfo, ReadResult};
