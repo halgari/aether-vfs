@@ -8,6 +8,7 @@ mod codec;
 mod config;
 mod crash;
 mod error;
+mod manifest;
 
 pub use config::{CompactOptions, StoreConfig};
 pub use error::{Error, Result};
