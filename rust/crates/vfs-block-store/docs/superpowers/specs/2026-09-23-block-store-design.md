@@ -161,6 +161,7 @@ serialized only at the index commit; hashing and compression run in parallel wit
   past the new end of file. If the new length cuts through a block, that block is dropped
   (becomes missing), because its stored length no longer matches. Growing a file whose last
   block was short drops that block too, for the same reason.
+- `set_len` rejects a length whose manifest would need more than 2^32 segments (`OutOfRange`).
 - `write_blocks` requires the file to exist (`NotFound` otherwise). `first_block` must be within
   the file (`OutOfRange`). `data` must contain whole blocks, except that the file's final block
   must be exactly `len - idx * block_size` bytes (`Unaligned` otherwise).
@@ -213,8 +214,9 @@ can be appended between the sync and the durable commit, so a durable index neve
 bytes that are not on disk.
 
 **Automatic flush.** redb keeps memory for non-durable commits until the next durable commit
-(redb 3.0 changelog). So after `auto_flush_bytes` (default 1 GiB) of appended records, the write
-path calls `flush()` itself.
+(redb 3.0 changelog). So after `auto_flush_bytes` (default 1 GiB) of appended records, or after
+`auto_flush_commits` (default 10,000) non-durable index commits of any kind, `write_blocks`,
+`set_len` and `delete` call `flush()` themselves.
 
 `close()` (and `Drop`) flushes and also sets `meta.clean_shutdown = 1` in the same durable commit.
 
@@ -290,7 +292,8 @@ Compaction temporarily needs free disk space equal to one pack's live bytes (at 
    - Remove rows of packs whose file is missing and whose `live_bytes` is 0 (registered, never
      created). A missing file with live data is `Corrupt`.
    - Delete pack files on disk that have no row. They were created after the last durable
-     commit and hold nothing referenced.
+     commit and hold nothing referenced. A file that cannot be deleted is logged and left for the
+     next open; new pack ids start past every pack id on disk, so they never collide with it.
    - **After a clean shutdown**, resume appending to the newest `active` pack; its file ends
      exactly at the last record. **After a crash**, seal every `active` pack instead, and the
      next write starts a new pack. The sealed pack's tail may be torn, but no durable index
@@ -336,13 +339,15 @@ StoreConfig {
     index_cache_bytes: 64 << 20,
     write_txn_bytes: 16 << 20,
     auto_flush_bytes: 1 << 30,      // durable flush after this many appended bytes (bounds redb memory)
+    auto_flush_commits: 10_000,     // ... or after this many non-durable index commits
     max_file_id_len: 256,
     compression_threads: None,      // None = rayon default
 }
 ```
 
 `open` rejects out-of-range values with `Config`: `block_size` must be 4 KiB-16 MiB, `zstd_level`
-must be in zstd's range, `max_pack_size` must be at least two blocks, and `max_file_id_len` must be 1-4096.
+must be in zstd's range, `max_pack_size` must be at least two blocks, `auto_flush_commits` must be
+at least 1, and `max_file_id_len` must be 1-4096.
 
 ## 11. Testing
 
@@ -418,3 +423,27 @@ Each was found while building and testing the design in full before writing the 
 11. **Recovery bug found by the crash tests and fixed:** `open` deleted a retired pack's file and
     then tried to delete it again as an unregistered file. All pack deletions now treat "already
     gone" as success.
+
+### Amendments from the final review
+
+12. **`auto_flush_commits`** (default 10,000). `auto_flush_bytes` counted only appended pack
+    bytes, so `set_len`, `delete`, all-dedup-hit writes, heals and highly compressible data could
+    pile up non-durable commits, and redb memory, until the caller flushed. The store now counts
+    every non-durable index commit it makes, and `write_blocks`, `set_len` and `delete` flush once
+    either limit is reached. `Stats::unflushed_commits` reports the count.
+13. **Length bound.** `set_len` returns `OutOfRange` for a length whose segment count does not fit
+    in a u32 (segment keys are u32), before any transaction. `resize` now touches one manifest
+    segment at a time, so growing or shrinking a large file no longer holds every slot in memory.
+14. **Pack abandonment after an I/O error.** If `append`, the buffer flush or the fsync of the
+    active pack fails, the pack writer drops its buffered bytes and abandons the pack: nothing more
+    is appended to it, so offsets handed out later always match the file. The next record starts a
+    new pack, and the abandoned pack is sealed in the same registration commit. The abandoned file
+    stays open until then, so `flush()` still fsyncs the bytes that reached it. Its tail may hold a
+    partial record, which compaction already tolerates.
+15. **Directory fsync (Unix).** After creating a pack file, the `packs/` directory is fsynced, so
+    the new file's directory entry is durable before any durable commit references it. `open` also
+    fsyncs the store directory after creating `packs/`. Windows needs no directory fsync.
+16. **Orphan pack files that cannot be deleted** no longer fail `open`: they are logged with
+    `tracing::warn!` and retried on the next open, as retired packs already were. The next pack id
+    is past every registered pack and every pack file on disk. `delete_retired` also requeues every
+    unprocessed entry if removing a retired row fails.

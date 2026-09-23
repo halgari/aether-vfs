@@ -41,7 +41,9 @@ block, which is exactly its remaining length.
 ## Durability
 
 Writes become durable at `flush()`, at `close()`, and automatically after about 1 GiB of new
-data. After a crash the store reopens consistent: everything flushed is readable and no read
+data (`auto_flush_bytes`) or 10,000 index commits (`auto_flush_commits`), whichever comes first.
+The commit count also covers `set_len`, `delete` and writes that are all dedup hits, which append
+no data. After a crash the store reopens consistent: everything flushed is readable and no read
 returns bytes that were not written to that block. A corrupt block is dropped from the index and
 reported as missing, so the caller fetches it again.
 
