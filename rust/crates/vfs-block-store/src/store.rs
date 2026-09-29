@@ -250,6 +250,21 @@ impl BlockStore {
             .map(|s| FileInfo { len: file_len(&s) }))
     }
 
+    /// Every stored file id, once each, in key order. For callers that keep
+    /// their own catalog and must reconcile it with the store after a crash.
+    pub fn file_ids(&self) -> Result<Vec<Vec<u8>>> {
+        let _guard = self.tracker.enter();
+        let r = self.index.read()?;
+        let mut out = Vec::new();
+        r.for_each_segment(|id, seg, _| {
+            if seg == 0 {
+                out.push(id.to_vec());
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
     /// Creates the file if it does not exist (every block missing), or changes its length.
     /// Blocks past the new end, and a last block whose length changes, become missing.
     pub fn set_len(&self, file_id: &[u8], len: u64) -> Result<()> {

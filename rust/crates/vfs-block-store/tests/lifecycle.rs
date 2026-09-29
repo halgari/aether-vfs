@@ -1,7 +1,7 @@
 mod common;
 
-use vfs_block_store::{BlockStore, Error, StoreConfig};
 use common::*;
+use vfs_block_store::{BlockStore, Error, StoreConfig};
 
 #[test]
 fn set_len_creates_and_stat_reports_length() {
@@ -251,4 +251,22 @@ fn set_len_rejects_lengths_the_manifest_cannot_hold() {
         Err(Error::OutOfRange)
     ));
     assert_eq!(store.stat(b"f").unwrap().unwrap().len, 10);
+}
+
+#[test]
+fn file_ids_lists_every_file_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let store =
+        vfs_block_store::BlockStore::open(dir.path(), vfs_block_store::StoreConfig::default())
+            .unwrap();
+    // A file big enough to span two manifest segments must still be listed once.
+    let big = 4096u64 * 64 * 1024 + 1;
+    store.set_len(b"b-big", big).unwrap();
+    store.set_len(b"a-small", 10).unwrap();
+    store.set_len(b"c-gone", 10).unwrap();
+    store.delete(b"c-gone").unwrap();
+    assert_eq!(
+        store.file_ids().unwrap(),
+        vec![b"a-small".to_vec(), b"b-big".to_vec()]
+    );
 }

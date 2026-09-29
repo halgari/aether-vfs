@@ -5,9 +5,9 @@ mod common;
 use std::collections::HashMap;
 use std::ops::Range;
 
-use vfs_block_store::{BlockStore, CompactOptions, Error};
 use common::*;
 use proptest::prelude::*;
+use vfs_block_store::{BlockStore, CompactOptions, Error};
 
 const FILES: u8 = 4;
 const MAX_BLOCKS: u64 = 6;

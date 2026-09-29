@@ -3,8 +3,8 @@
 use std::hint::black_box;
 use std::time::Duration;
 
-use vfs_block_store::{BlockStore, CompactOptions, StoreConfig};
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
+use vfs_block_store::{BlockStore, CompactOptions, StoreConfig};
 
 const BS: usize = 64 * 1024;
 
