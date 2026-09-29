@@ -31,6 +31,7 @@ for range in result.missing {
 }
 
 store.flush()?; // make everything so far durable
+let ids = store.file_ids()?; // every stored file id, in key order
 store.delete(b"mods/42/data.pak")?;
 store.compact(CompactOptions::default())?; // reclaim space from deleted data
 ```
