@@ -14,14 +14,12 @@
 //! became evictable) or the minute changes, and the warning fires once per
 //! episode (until a run reaches its target).
 
-use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use vfs_block_store::CompactOptions;
 
 use crate::cached::{lock, now_minute, sub_logical};
-use crate::catalog::CacheRec;
 use crate::ids::cache_file_id;
 use crate::storage::{Storage, StorageError};
 
@@ -41,11 +39,12 @@ impl Storage {
         // The catalog's rows, overlaid with the access log's newer ones. The
         // log is read, not committed: access times reach the catalog at most
         // once a minute, however often eviction runs.
-        let (pending, order) = self.access_snapshot();
-        let mut recs: HashMap<[u8; 16], CacheRec> = self.catalog.cache_all()?.into_iter().collect();
-        recs.extend(pending);
-        let mut total: u64 = recs.values().map(|r| r.logical_bytes).sum();
         let max = self.cfg.cache_max_bytes;
+        let (recs, order, mut total) = self.budget_snapshot(max)?;
+        #[cfg(test)]
+        if let Some(hook) = lock(&self.cache.after_snapshot).take() {
+            hook();
+        }
         if total <= max {
             self.cache.warned_stuck.store(false, Ordering::Relaxed);
             return Ok(0);
@@ -67,12 +66,15 @@ impl Storage {
             }
             // Catalog row first, store file second (spec §6). If the row
             // cannot be removed, nothing has changed: try the next file.
-            if let Err(e) = self.catalog.cache_remove(&hash) {
-                tracing::warn!(error = %e, "evicting a cache file: catalog row not removed");
-                first_err.get_or_insert(e);
-                continue;
-            }
-            self.forget_access(&hash);
+            // What the file holds now: it may have grown since the snapshot.
+            let held = match self.remove_cache_row(&hash) {
+                Ok(held) => held.unwrap_or(rec.logical_bytes),
+                Err(e) => {
+                    tracing::warn!(error = %e, "evicting a cache file: catalog row not removed");
+                    first_err.get_or_insert(e);
+                    continue;
+                }
+            };
             self.ram.invalidate_file(&id);
             // The row is gone, so the file no longer counts, whatever the
             // store says; a store file left behind is an orphan that
@@ -86,7 +88,7 @@ impl Storage {
             }
             drop(counts);
             total = total.saturating_sub(rec.logical_bytes);
-            sub_logical(&self.cache.cached_logical, rec.logical_bytes);
+            sub_logical(&self.cache.cached_logical, held);
             evicted += 1;
         }
         if total > target {

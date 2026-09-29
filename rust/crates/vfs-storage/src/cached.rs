@@ -111,6 +111,11 @@ pub(crate) struct CacheState {
     /// The "stays over target" warning fired in the current stuck episode
     /// (cleared by a run that reaches its target).
     pub(crate) warned_stuck: AtomicBool,
+    /// Test hook: run by the next eviction right after it has read the
+    /// catalog and the access log.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) after_snapshot: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Locks `m`, entering a poisoned lock: every critical section here leaves its
@@ -153,6 +158,8 @@ impl CacheState {
             evict_lock: Mutex::new(()),
             stuck_since: Mutex::new(None),
             warned_stuck: AtomicBool::new(false),
+            #[cfg(test)]
+            after_snapshot: Mutex::new(None),
         }
     }
 }
@@ -322,20 +329,39 @@ impl Storage {
         self.commit_access_locked(&mut lock(&self.cache.access))
     }
 
-    /// Uncommitted access records and the session touch order (eviction's
-    /// tie-break within a minute).
-    pub(crate) fn access_snapshot(&self) -> (HashMap<[u8; 16], CacheRec>, HashMap<[u8; 16], u64>) {
+    /// The catalog's cache rows overlaid with the uncommitted access log, the
+    /// session touch order, and their logical total. Read under
+    /// `open_counts` and `access`, the locks every change to the running
+    /// total is made under, so the sum is exactly what the running total
+    /// should hold; when it is within `max`, the running total is set to it,
+    /// so drift cannot keep starting eviction runs that find nothing to do.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn budget_snapshot(
+        &self,
+        max: u64,
+    ) -> Result<(HashMap<[u8; 16], CacheRec>, HashMap<[u8; 16], u64>, u64), StorageError> {
+        let _counts = self.open_counts();
         let a = lock(&self.cache.access);
-        (a.pending.clone(), a.seq.clone())
+        let mut recs: HashMap<[u8; 16], CacheRec> = self.catalog.cache_all()?.into_iter().collect();
+        recs.extend(a.pending.iter().map(|(h, r)| (*h, *r)));
+        let total: u64 = recs.values().map(|r| r.logical_bytes).sum();
+        if total <= max {
+            self.cache.cached_logical.store(total, Ordering::Relaxed);
+        }
+        Ok((recs, a.seq.clone(), total))
     }
 
-    /// Forgets `hash`'s uncommitted access, so a later commit cannot bring
-    /// back the catalog row of an evicted file.
-    pub(crate) fn forget_access(&self, hash: &[u8; 16]) {
+    /// Removes `hash`'s catalog row and forgets its uncommitted access, both
+    /// under the `access` lock, so no batched commit can land in between and
+    /// bring the row back. Returns the logical bytes the file held in memory
+    /// (`None` if it was not opened this session: its row's count is exact).
+    /// The caller holds `open_counts`.
+    pub(crate) fn remove_cache_row(&self, hash: &[u8; 16]) -> Result<Option<u64>, StorageError> {
         let mut a = lock(&self.cache.access);
+        self.catalog.cache_remove(hash)?;
         a.pending.remove(hash);
         a.seq.remove(hash);
-        a.logical.remove(hash);
+        Ok(a.logical.remove(hash))
     }
 }
 
@@ -1207,6 +1233,55 @@ mod tests {
             src.reads() > before,
             "f2, the least recently used, was evicted"
         );
+    }
+
+    /// A file read further while an eviction runs (after it took its
+    /// snapshot) is subtracted with what it holds when it is evicted, not
+    /// what the snapshot said, so the running total cannot drift upward.
+    #[test]
+    fn eviction_subtracts_what_a_file_holds_when_it_goes() {
+        let (s, _d) = temp_storage_with(StorageConfig {
+            cache_max_bytes: 4 * BS as u64,
+            ..small_cfg()
+        });
+        let src = slow(MapSource::with(&[
+            ("a", pattern(4 * BS, 1)),
+            ("b", pattern(4 * BS, 2)),
+        ]));
+        let p = s.cached(src, key());
+        s.cache.evicting.store(true, Ordering::SeqCst); // no background runs
+        let (h, _, _) = p.open(VPath::at_default("a"), OPEN_READ).unwrap();
+        p.read_at(h, 0, &mut [0u8; 10]).unwrap(); // one block of a
+        p.close(h).unwrap();
+        read_all(&p, "b");
+        assert_eq!(s.cache_stats().cached_logical_bytes, 5 * BS as u64);
+
+        let p2 = Arc::clone(&p);
+        *s.cache.after_snapshot.lock().unwrap() = Some(Box::new(move || {
+            read_all(&p2, "a"); // a now holds four blocks
+        }));
+        assert_eq!(s.enforce_cache_budget().unwrap(), 2);
+        assert_eq!(s.cache_stats().cached_logical_bytes, 0);
+        assert!(s.catalog.cache_all().unwrap().is_empty());
+        s.cache.evicting.store(false, Ordering::SeqCst);
+    }
+
+    /// A run that finds the cache within budget sets the running total to
+    /// what the catalog and the access log say, so a drifted count cannot
+    /// keep starting no-op runs.
+    #[test]
+    fn a_run_within_budget_resyncs_the_total() {
+        let (s, _d) = temp_storage_with(StorageConfig {
+            cache_max_bytes: 8 * BS as u64,
+            ..small_cfg()
+        });
+        let src = slow(MapSource::with(&[("b", pattern(4 * BS, 2))]));
+        let p = s.cached(src, key());
+        read_all(&p, "b");
+        s.wait_for_eviction();
+        s.cache.cached_logical.fetch_add(1 << 40, Ordering::SeqCst);
+        assert_eq!(s.enforce_cache_budget().unwrap(), 0);
+        assert_eq!(s.cache_stats().cached_logical_bytes, 4 * BS as u64);
     }
 
     #[test]
