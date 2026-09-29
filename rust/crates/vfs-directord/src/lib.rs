@@ -313,14 +313,18 @@ pub fn root_flag_entries(flags: &[String]) -> Result<Vec<vfs_control::RootEntry>
 /// [`vfs_control::SessionConfig::validate_roots`] rather than silently
 /// serving whatever subset of itself happens to be addressable — the same
 /// failure shape the old root-0-only filter had.
+///
+/// **All or nothing.** Any failure after `CreateSession` — a refused root, a
+/// source that cannot be built, a launch that cannot start — tears the new
+/// session down before the original error is returned. A half-applied
+/// session left live would hold the config's name, so the corrected retry
+/// would be refused as a duplicate (or, before that rule, become a second
+/// session of the same name).
 pub async fn apply_session_config(
     client: &mut DirectorClient<Channel>,
     cfg: &vfs_control::SessionConfig,
 ) -> Result<(String, Option<i32>), String> {
-    use vfs_control::pb::{
-        source_spec, AddSourceReq, CreateSessionReq, DeclareRootReq, DiskSource, HttpSource,
-        RemoteSource, SourceSpec as PbSource, ZipSource,
-    };
+    use vfs_control::pb::{CreateSessionReq, TeardownReq};
 
     cfg.validate_roots()?;
 
@@ -331,6 +335,33 @@ pub async fn apply_session_config(
         .map_err(|e| format!("CreateSession: {e}"))?
         .into_inner();
     let session_id = session.id.clone();
+
+    match configure_session(client, &session_id, cfg).await {
+        Ok(exit_code) => Ok((session_id, exit_code)),
+        Err(e) => {
+            // Best effort: the error being reported is the original one.
+            let _ = client
+                .teardown_session(TeardownReq {
+                    session_id: session_id.clone(),
+                })
+                .await;
+            Err(e)
+        }
+    }
+}
+
+/// [`apply_session_config`] after `CreateSession`: declare the roots, add the
+/// sources, run the optional launch.
+async fn configure_session(
+    client: &mut DirectorClient<Channel>,
+    session_id: &str,
+    cfg: &vfs_control::SessionConfig,
+) -> Result<Option<i32>, String> {
+    use vfs_control::pb::{
+        source_spec, AddSourceReq, DeclareRootReq, DiskSource, HttpSource, RemoteSource,
+        SourceSpec as PbSource, ZipSource,
+    };
+    let session_id = session_id.to_string();
 
     // Declare each root's location before any source is added, so the
     // shim is told about every root the config names — not only about the
@@ -405,12 +436,10 @@ pub async fn apply_session_config(
             .map_err(|e| format!("AddSource: {e}"))?;
     }
 
-    let exit_code = match &cfg.launch {
-        Some(launch) => run_launch(client, &session_id, launch).await?,
-        None => None,
-    };
-
-    Ok((session_id, exit_code))
+    match &cfg.launch {
+        Some(launch) => run_launch(client, &session_id, launch).await,
+        None => Ok(None),
+    }
 }
 
 /// Launch `launch` in the live session `session_id` (an id or a session

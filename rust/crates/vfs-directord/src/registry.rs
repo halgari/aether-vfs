@@ -196,6 +196,11 @@ impl LiveSession {
     }
 }
 
+/// How [`SessionRegistry::create`]'s refusal of an already-live name begins,
+/// so the gRPC layer can answer it as `AlreadyExists` rather than guessing
+/// from prose.
+pub const DUPLICATE_NAME: &str = "a live session is already named";
+
 /// Process-wide sequence for session base-directory naming — see the comment
 /// in [`SessionRegistry::create`] for why this must be independent of any one
 /// registry's own session-id counter.
@@ -241,7 +246,20 @@ impl SessionRegistry {
         self.inner.lock().map(|g| g.len()).unwrap_or(0)
     }
 
+    /// Create a session named `name` (empty: unnamed).
+    ///
+    /// A non-empty name already held by a live session is refused, naming
+    /// that session's id (the message starts with [`DUPLICATE_NAME`]): a
+    /// second live `demo` would make every later `--session demo` ambiguous,
+    /// and on Linux both would use the one persistent prefix
+    /// `$VFS_HOME/sessions/demo`. Checked before any work and again at
+    /// insertion, under the map lock, so two concurrent creates cannot both
+    /// win.
     pub fn create(&self, name: String) -> Result<SessionSummary, String> {
+        self.refuse_live_name(
+            &name,
+            &*self.inner.lock().map_err(|_| "session registry poisoned".to_string())?,
+        )?;
         let id = format!("s{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         // `base_seq` is process-wide, deliberately independent of `id`/`next_id`
         // (which are per-registry): two `SessionRegistry`s in the same process —
@@ -295,6 +313,7 @@ impl SessionRegistry {
             root: root.clone(),
         };
 
+        let name_for_check = name.clone();
         let entry = SessionEntry {
             id: id.clone(),
             name: name.clone(),
@@ -312,11 +331,38 @@ impl SessionRegistry {
             }),
         };
 
-        self.inner
+        let mut map = self
+            .inner
             .lock()
-            .map_err(|_| "session registry poisoned".to_string())?
-            .insert(id, Arc::new(entry));
+            .map_err(|_| "session registry poisoned".to_string())?;
+        // A concurrent create may have taken the name since the check above.
+        // `entry` (and its `Session`) is dropped on the way out, lock released
+        // first.
+        if let Err(e) = self.refuse_live_name(&name_for_check, &map) {
+            drop(map);
+            drop(entry);
+            return Err(e);
+        }
+        map.insert(id, Arc::new(entry));
         Ok(summary)
+    }
+
+    fn refuse_live_name(
+        &self,
+        name: &str,
+        map: &HashMap<String, Arc<SessionEntry>>,
+    ) -> Result<(), String> {
+        if name.is_empty() {
+            return Ok(());
+        }
+        match map.values().find(|e| e.name == name) {
+            Some(live) => Err(format!(
+                "{DUPLICATE_NAME} {name:?} ({}); take it down first (`vfs down --session {}`) \
+                 or pick another name",
+                live.id, live.id
+            )),
+            None => Ok(()),
+        }
     }
 
     /// The entry for `id`, cloned out so the caller can drop the map lock
@@ -995,13 +1041,46 @@ root = 1
         assert!(e.contains("beta") && e.contains("alpha"), "{e}");
     }
 
+    /// `create` refuses a second live session under one name (below), so an
+    /// ambiguous name cannot arise through it any more; the refusal in
+    /// `resolve_session` stays as the backstop, exercised here by renaming a
+    /// live entry behind `create`'s back.
     #[test]
     fn resolve_session_ambiguous_name_lists_ids() {
         let reg = SessionRegistry::new();
         let a = reg.create("dup".into()).unwrap();
-        let b = reg.create("dup".into()).unwrap();
+        let b = reg.create("dup-2".into()).unwrap();
+        {
+            let mut map = reg.inner.lock().unwrap();
+            let entry = Arc::try_unwrap(map.remove(&b.id).unwrap()).ok().unwrap();
+            map.insert(
+                b.id.clone(),
+                Arc::new(SessionEntry { name: "dup".into(), ..entry }),
+            );
+        }
         let e = reg.resolve_session("dup").unwrap_err();
         assert!(e.contains(&a.id) && e.contains(&b.id), "{e}");
+    }
+
+    /// Two `vfs up` runs of one config must not leave two live sessions
+    /// sharing a name (every later `--session NAME` would be ambiguous, and on
+    /// Linux both would share `$VFS_HOME/sessions/NAME`). The second is
+    /// refused, naming the live one; once that is down the name is free.
+    #[test]
+    fn create_refuses_a_name_that_is_already_live() {
+        let reg = SessionRegistry::new();
+        let first = reg.create("demo".into()).unwrap();
+        let e = reg.create("demo".into()).unwrap_err();
+        assert!(
+            e.contains("demo") && e.contains(&first.id) && e.starts_with(DUPLICATE_NAME),
+            "{e}"
+        );
+        assert_eq!(reg.len(), 1, "the refused session must not be registered");
+        // Unnamed sessions never collide.
+        reg.create(String::new()).unwrap();
+        reg.create(String::new()).unwrap();
+        reg.teardown(&first.id).unwrap();
+        reg.create("demo".into()).expect("the name is free once its session is down");
     }
 
     #[test]

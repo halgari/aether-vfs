@@ -3790,6 +3790,103 @@ async fn launch_and_teardown_address_a_session_by_name() {
     server.abort();
 }
 
+/// `apply_session_config` is all or nothing: a config that fails half-way —
+/// a source that cannot be built, a launch refused before anything spawns —
+/// leaves no session behind, so the corrected retry of the same named config
+/// is not refused as a duplicate. And a second live session under one name is
+/// refused (`AlreadyExists`), naming the one that holds it. Nothing here
+/// spawns a program, so it runs on any host.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_apply_leaves_no_session_and_a_live_name_is_not_reused() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let svc = DirectorService::new(SessionRegistry::new());
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut client = connect(&format!("{addr}")).await.unwrap();
+
+    let content = tempfile::tempdir().unwrap();
+    let good = SessionConfig {
+        session: vfs_control::SessionMeta { name: Some("half".into()) },
+        roots: vec![vfs_control::RootEntry {
+            id: 0,
+            name: "Games".into(),
+            path: if cfg!(windows) {
+                content.path().join("loc").to_string_lossy().into_owned()
+            } else {
+                r"C:\Games\Half".into()
+            },
+        }],
+        sources: vec![vfs_control::SourceEntry {
+            spec: vfs_control::SourceSpec::Disk {
+                path: content.path().to_string_lossy().into_owned(),
+            },
+            mount: "/".into(),
+            root: 0,
+            write_layer: false,
+        }],
+        ..Default::default()
+    };
+    let live = |client: &mut vfs_control::pb::director_client::DirectorClient<_>| {
+        let mut client = client.clone();
+        async move {
+            client
+                .list_sessions(vfs_control::pb::Empty {})
+                .await
+                .unwrap()
+                .into_inner()
+                .sessions
+        }
+    };
+
+    // A source the daemon cannot build: refused at AddSource.
+    let mut bad_source = good.clone();
+    bad_source.sources.push(vfs_control::SourceEntry {
+        spec: vfs_control::SourceSpec::Zip {
+            path: content.path().join("missing.zip").to_string_lossy().into_owned(),
+        },
+        mount: "/".into(),
+        root: 0,
+        write_layer: false,
+    });
+    let e = apply_session_config(&mut client, &bad_source).await.unwrap_err();
+    assert!(e.contains("AddSource"), "{e}");
+    assert!(live(&mut client).await.is_empty(), "a failed AddSource must not leave a session");
+
+    // A launch refused before anything is spawned.
+    let mut bad_launch = good.clone();
+    bad_launch.launch = Some(vfs_control::LaunchConfig {
+        exec: r"{Nope}\x.exe".into(),
+        args: vec![],
+        wait: true,
+        env: Default::default(),
+    });
+    let e = apply_session_config(&mut client, &bad_launch).await.unwrap_err();
+    assert!(e.contains("Nope"), "{e}");
+    assert!(live(&mut client).await.is_empty(), "a failed launch must not leave a session");
+
+    // The corrected config applies — its name was not left held.
+    let (id, _) = apply_session_config(&mut client, &good).await.expect("the corrected retry");
+    // …and applying it again while it is live is refused, naming it.
+    let e = apply_session_config(&mut client, &good).await.unwrap_err();
+    assert!(e.contains("AlreadyExists") || e.contains("already named"), "{e}");
+    assert!(e.contains(&id), "the refusal must name the live session: {e}");
+    let sessions = live(&mut client).await;
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
+        .await
+        .unwrap();
+    server.abort();
+}
+
 /// Stage 2b task 5: a config's `[[root]] path` reaches the live session, so
 /// the injected shim is told where each root *is* and not merely what it
 /// serves.
