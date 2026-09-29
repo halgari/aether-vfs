@@ -24,15 +24,33 @@ pub enum StorageError {
     NoSuchLayer(String),
     /// The layer is open and cannot be deleted or replaced.
     LayerInUse(String),
+    /// No catalog entry at this (folded) path.
+    NotFound(String),
+    /// A directory still holds entries, so it cannot be removed.
+    NotEmpty(String),
+    /// The destination of a rename is a directory that holds entries.
+    Exists(String),
+    /// A request that can never succeed: a layer root as the target, or a
+    /// directory moved into its own subtree.
+    BadRequest(String),
 }
 
 impl StorageError {
     /// The `vfs_provider` status a provider should answer with.
+    ///
+    /// The directory refusals match `vfs-compose`'s `MemoryProvider`: removing
+    /// a non-empty directory is `ST_IS_DIR` (which the shim already translates
+    /// to what `DeleteFileW` gives for a directory), renaming onto an occupied
+    /// directory is `ST_EXISTS`, and a move into its own subtree is
+    /// `ST_BAD_REQUEST`.
     pub fn to_status(&self) -> i32 {
         match self {
             StorageError::NoSuchLayer(_)
+            | StorageError::NotFound(_)
             | StorageError::Store(vfs_block_store::Error::NotFound) => vfs_provider::ST_NOT_FOUND,
-            StorageError::LayerExists(_) => vfs_provider::ST_EXISTS,
+            StorageError::LayerExists(_) | StorageError::Exists(_) => vfs_provider::ST_EXISTS,
+            StorageError::NotEmpty(_) => vfs_provider::ST_IS_DIR,
+            StorageError::BadRequest(_) => vfs_provider::ST_BAD_REQUEST,
             StorageError::Store(_)
             | StorageError::Catalog(_)
             | StorageError::Io(_)
@@ -50,6 +68,10 @@ impl fmt::Display for StorageError {
             StorageError::LayerExists(n) => write!(f, "layer {n:?} already exists"),
             StorageError::NoSuchLayer(n) => write!(f, "no layer {n:?}"),
             StorageError::LayerInUse(n) => write!(f, "layer {n:?} is in use"),
+            StorageError::NotFound(p) => write!(f, "no entry {p:?}"),
+            StorageError::NotEmpty(p) => write!(f, "directory {p:?} is not empty"),
+            StorageError::Exists(p) => write!(f, "{p:?} is a directory that is not empty"),
+            StorageError::BadRequest(m) => write!(f, "bad request: {m}"),
         }
     }
 }
@@ -204,6 +226,22 @@ mod tests {
         assert_eq!(
             StorageError::LayerInUse("x".into()).to_status(),
             vfs_provider::ST_IO_ERROR
+        );
+        assert_eq!(
+            StorageError::NotFound("x".into()).to_status(),
+            vfs_provider::ST_NOT_FOUND
+        );
+        assert_eq!(
+            StorageError::NotEmpty("x".into()).to_status(),
+            vfs_provider::ST_IS_DIR
+        );
+        assert_eq!(
+            StorageError::Exists("x".into()).to_status(),
+            vfs_provider::ST_EXISTS
+        );
+        assert_eq!(
+            StorageError::BadRequest("x".into()).to_status(),
+            vfs_provider::ST_BAD_REQUEST
         );
     }
 }

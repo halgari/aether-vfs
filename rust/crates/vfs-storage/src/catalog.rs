@@ -102,6 +102,13 @@ pub struct CacheRec {
 
 /// The catalog database. Cheap to share between threads; redb serialises
 /// writers, so one write blocks while another is in progress.
+///
+/// **Each call is atomic; a sequence of calls is not.** A `get` then `put`, or
+/// `children` then `remove`, can interleave with another thread's writes. The
+/// refusals that protect the tree's shape (a non-empty directory in
+/// [`Catalog::remove`] and as a [`Catalog::rename`] destination) are therefore
+/// checked inside the call's own transaction, and a layer provider serialises
+/// its read-modify-write sequences with a per-layer lock.
 pub struct Catalog {
     db: Database,
 }
@@ -269,8 +276,13 @@ impl Catalog {
         })
     }
 
-    /// Inserts or replaces the entry at `folded`. `durable: false` commits with
-    /// no durability; see the module docs.
+    /// Inserts or replaces the entry at `folded`.
+    ///
+    /// `durable: false` commits with no durability. `durable: true` commits
+    /// with `Durability::Immediate`, and a durable commit also makes **every
+    /// earlier non-durable row** durable, not just this one: call
+    /// `BlockStore::flush()` first, so no durable row references store data that
+    /// is not yet durable (spec §6).
     pub fn put(
         &self,
         layer: u64,
@@ -287,62 +299,103 @@ impl Catalog {
         })
     }
 
-    /// Removes the entry at `folded` (only that row: a directory's children are
-    /// the caller's to remove first). Removing a missing row is not an error.
+    /// Removes the entry at `folded`: a file, or an **empty** directory.
+    ///
+    /// Refused, inside the transaction, with [`StorageError::NotEmpty`] when any
+    /// row exists under `folded/` — removing only the directory's row would
+    /// orphan its children (invisible, never reconciled, and resurrected when
+    /// the directory is re-created). [`StorageError::NotFound`] for a missing
+    /// row, [`StorageError::BadRequest`] for the layer root.
+    ///
+    /// `durable` is as for [`Self::put`], including that a durable commit makes
+    /// every earlier non-durable row durable: `BlockStore::flush()` first.
     pub fn remove(&self, layer: u64, folded: &str, durable: bool) -> Result<(), StorageError> {
         let key = vfs_core::fold(folded);
+        if key.is_empty() {
+            return Err(StorageError::BadRequest("remove of a layer root".into()));
+        }
         self.write(durable, |txn| {
             let mut t = txn.open_table(ENTRIES).map_err(db_err)?;
-            t.remove((layer, key.as_str())).map_err(db_err)?;
+            if has_children(&t, layer, &key)? {
+                return Err(StorageError::NotEmpty(key.clone()));
+            }
+            if t.remove((layer, key.as_str())).map_err(db_err)?.is_none() {
+                return Err(StorageError::NotFound(key.clone()));
+            }
             Ok(())
         })
     }
 
-    /// The direct children of `folded_dir` (`""` for the layer root).
+    /// The direct children of `folded_dir` (`""` for the layer root), in key
+    /// order.
+    ///
+    /// O(direct children), not O(subtree): keys under `prefix` are contiguous in
+    /// byte order, and on meeting a grandchild `prefix + c + "/..."` the scan
+    /// jumps to `prefix + c + "0"` — `'0'` is the byte after `'/'` — which is
+    /// the first key past all of `c`'s subtree.
     pub fn children(&self, layer: u64, folded_dir: &str) -> Result<Vec<EntryRec>, StorageError> {
         let prefix = dir_prefix(&vfs_core::fold(folded_dir));
         self.entries(|t| {
             let mut out = Vec::new();
-            // Keys under `prefix` are contiguous in byte order, so the scan
-            // stops at the first key outside it.
-            for e in t.range((layer, prefix.as_str())..).map_err(db_err)? {
-                let (k, v) = e.map_err(db_err)?;
-                let (l, path) = k.value();
-                if l != layer {
-                    break;
+            let mut start = prefix.clone();
+            loop {
+                let mut skip_to = None;
+                for e in t.range((layer, start.as_str())..).map_err(db_err)? {
+                    let (k, v) = e.map_err(db_err)?;
+                    let (l, path) = k.value();
+                    if l != layer {
+                        break;
+                    }
+                    let Some(rest) = path.strip_prefix(prefix.as_str()) else {
+                        break;
+                    };
+                    match rest.find('/') {
+                        Some(i) => {
+                            skip_to = Some(format!("{prefix}{}0", &rest[..i]));
+                            break;
+                        }
+                        None if !rest.is_empty() => out.push(EntryRec::decode(v.value())?),
+                        None => {}
+                    }
                 }
-                let Some(rest) = path.strip_prefix(prefix.as_str()) else {
-                    break;
-                };
-                if !rest.is_empty() && !rest.contains('/') {
-                    out.push(EntryRec::decode(v.value())?);
+                match skip_to {
+                    Some(s) => start = s,
+                    None => return Ok(out),
                 }
             }
-            Ok(out)
         })
     }
 
     /// Moves the entry at `from` to `to`, naming it `to_name`, with every entry
     /// under `from/` moved under `to/` — one transaction, so a crash leaves
-    /// either the old tree or the new one. An existing `to` (and anything under
-    /// it) is replaced; the caller decides whether replacing is allowed, and
-    /// owns deleting a replaced file's GUID from the store. `from == to` (a
-    /// case-only rename) changes only the name. Non-durable; see the module
-    /// docs.
+    /// either the old tree or the new one. Non-durable; see the module docs.
+    ///
+    /// An existing `to` that is a file or an **empty** directory is replaced,
+    /// and the GUIDs of the file rows replaced are returned — collected in the
+    /// same transaction — for the caller to delete from the store. A `to` that
+    /// is a directory with anything under it is refused with
+    /// [`StorageError::Exists`]: there is no correct way to combine two
+    /// subtrees. Whether a file may replace a directory (or the reverse) is the
+    /// provider's rule to apply, not the catalog's.
+    ///
+    /// `from == to` after folding (a case-only rename) changes only the name.
+    /// [`StorageError::NotFound`] for a missing `from`;
+    /// [`StorageError::BadRequest`] for a layer root or a move into its own
+    /// subtree.
     pub fn rename(
         &self,
         layer: u64,
         from: &str,
         to: &str,
         to_name: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Vec<Guid>, StorageError> {
         let from = vfs_core::fold(from);
         let to = vfs_core::fold(to);
         if from.is_empty() || to.is_empty() {
-            return Err(StorageError::Catalog("rename of a layer root".into()));
+            return Err(StorageError::BadRequest("rename of a layer root".into()));
         }
         if from != to && to.starts_with(&dir_prefix(&from)) {
-            return Err(StorageError::Catalog(format!(
+            return Err(StorageError::BadRequest(format!(
                 "rename of {from:?} into its own subtree {to:?}"
             )));
         }
@@ -350,19 +403,23 @@ impl Catalog {
             let mut t = txn.open_table(ENTRIES).map_err(db_err)?;
             let mut rec = match t.get((layer, from.as_str())).map_err(db_err)? {
                 Some(g) => EntryRec::decode(g.value())?,
-                None => {
-                    return Err(StorageError::Catalog(format!("rename: no entry {from:?}")));
-                }
+                None => return Err(StorageError::NotFound(from.clone())),
             };
             rec.name = to_name.to_owned();
             if from == to {
                 t.insert((layer, to.as_str()), rec.encode().as_slice())
                     .map_err(db_err)?;
-                return Ok(());
+                return Ok(Vec::new());
             }
-            // Replace the destination, subtree included, so nothing is orphaned.
-            for path in subtree(&t, layer, &to)? {
-                t.remove((layer, path.as_str())).map_err(db_err)?;
+            if has_children(&t, layer, &to)? {
+                return Err(StorageError::Exists(to.clone()));
+            }
+            let mut replaced = Vec::new();
+            if let Some(g) = t.remove((layer, to.as_str())).map_err(db_err)? {
+                let old = EntryRec::decode(g.value())?;
+                if old.kind == vfs_provider::KIND_FILE {
+                    replaced.push(old.guid);
+                }
             }
             let from_prefix = dir_prefix(&from);
             let to_prefix = dir_prefix(&to);
@@ -380,7 +437,7 @@ impl Catalog {
             }
             t.insert((layer, to.as_str()), rec.encode().as_slice())
                 .map_err(db_err)?;
-            Ok(())
+            Ok(replaced)
         })
     }
 
@@ -449,6 +506,27 @@ fn cache_rec((last_access_min, logical_bytes): (u64, u64)) -> CacheRec {
         last_access_min,
         logical_bytes,
     }
+}
+
+/// Whether any row exists under `path/` (one range probe).
+fn has_children(
+    t: &impl ReadableTable<(u64, &'static str), &'static [u8]>,
+    layer: u64,
+    path: &str,
+) -> Result<bool, StorageError> {
+    use std::ops::Bound;
+    let prefix = dir_prefix(path);
+    // Excluded: for the root the prefix is `""`, which is the root's own row.
+    let from = (layer, prefix.as_str());
+    let mut range = t
+        .range::<(u64, &str)>((Bound::Excluded(from), Bound::Unbounded))
+        .map_err(db_err)?;
+    let Some(e) = range.next() else {
+        return Ok(false);
+    };
+    let (k, _) = e.map_err(db_err)?;
+    let (l, p) = k.value();
+    Ok(l == layer && p.starts_with(prefix.as_str()))
 }
 
 /// `path` itself and every key under `path/`, in one layer.
@@ -621,7 +699,79 @@ mod tests {
         assert!(c.children(b, "").unwrap().is_empty());
         c.remove(a, "SAVES", false).unwrap();
         assert!(c.get(a, "saves").unwrap().is_none());
-        c.remove(a, "saves", false).unwrap(); // a missing row is not an error
+        assert!(matches!(
+            c.remove(a, "saves", false),
+            Err(StorageError::NotFound(_))
+        ));
+    }
+
+    /// Removing only a directory's own row would orphan its children:
+    /// invisible, never reconciled, and back again when the directory is
+    /// re-created.
+    #[test]
+    fn remove_refuses_a_directory_with_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(&dir);
+        let l = c.create_layer("p").unwrap();
+        c.put(l, "d", &dirr("d"), false).unwrap();
+        c.put(l, "d/f", &file("f", 1), false).unwrap();
+        c.put(l, "d-sibling", &file("s", 2), false).unwrap();
+        let err = c.remove(l, "d", false).unwrap_err();
+        assert!(matches!(err, StorageError::NotEmpty(_)), "{err}");
+        assert_eq!(err.to_status(), vfs_provider::ST_IS_DIR);
+        assert!(c.get(l, "d").unwrap().is_some() && c.get(l, "d/f").unwrap().is_some());
+        c.remove(l, "d/f", false).unwrap();
+        // Empty now; a sibling sharing the prefix `d` does not count as a child.
+        c.remove(l, "d", false).unwrap();
+        assert!(c.get(l, "d").unwrap().is_none());
+        assert!(matches!(
+            c.remove(l, "", false),
+            Err(StorageError::BadRequest(_))
+        ));
+    }
+
+    /// A directory whose children have their own deep subtrees still lists
+    /// only its direct children (the scan skips each child's subtree).
+    #[test]
+    fn children_skip_deep_subtrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(&dir);
+        let l = c.create_layer("p").unwrap();
+        c.put(l, "root", &dirr("root"), false).unwrap();
+        for d in ["a", "b", "c"] {
+            c.put(l, &format!("root/{d}"), &dirr(d), false).unwrap();
+            for i in 0..50 {
+                c.put(l, &format!("root/{d}/x{i}"), &dirr("x"), false)
+                    .unwrap();
+                c.put(
+                    l,
+                    &format!("root/{d}/x{i}/deep.ess"),
+                    &file("deep.ess", 1),
+                    false,
+                )
+                .unwrap();
+            }
+        }
+        c.put(l, "root/a.txt", &file("a.txt", 2), false).unwrap(); // sorts after "a/..."
+        c.put(l, "root/b0", &file("b0", 3), false).unwrap(); // the skip target itself
+        c.put(l, "root/orphan/child", &file("child", 4), false)
+            .unwrap(); // no "root/orphan" row
+        c.put(l, "root/z", &file("z", 5), false).unwrap();
+        c.put(l, "root0", &file("root0", 6), false).unwrap(); // past the prefix
+        let names: Vec<_> = c
+            .children(l, "root")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names, vec!["a", "a.txt", "b", "b0", "c", "z"]);
+        let top: Vec<_> = c
+            .children(l, "")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(top, vec!["root", "root0"]);
     }
 
     #[test]
@@ -668,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn rename_replaces_the_destination_and_its_subtree() {
+    fn rename_moves_a_subtree_onto_an_empty_directory() {
         let dir = tempfile::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
@@ -677,13 +827,9 @@ mod tests {
         c.put(l, "a/sub", &dirr("sub"), false).unwrap();
         c.put(l, "a/sub/y", &file("y", 2), false).unwrap();
         c.put(l, "b", &dirr("b"), false).unwrap();
-        c.put(l, "b/stale", &file("stale", 9), false).unwrap();
         c.put(l, "ab", &file("ab", 4), false).unwrap(); // shares the prefix "a", not "a/"
-        c.rename(l, "a", "b", "B").unwrap();
-        assert!(
-            c.get(l, "b/stale").unwrap().is_none(),
-            "the replaced subtree was orphaned"
-        );
+        assert_eq!(c.rename(l, "a", "b", "B").unwrap(), Vec::<Guid>::new());
+        assert_eq!(c.get(l, "b/x").unwrap().unwrap().guid, [1; 16]);
         assert_eq!(c.get(l, "b/sub/y").unwrap().unwrap().guid, [2; 16]);
         assert_eq!(c.get(l, "ab").unwrap().unwrap().guid, [4; 16]);
         let mut names: Vec<_> = c
@@ -696,6 +842,51 @@ mod tests {
         assert_eq!(names, vec!["B", "ab"]);
     }
 
+    /// The replaced file's GUID comes back from the same transaction, so the
+    /// caller can delete its store data without a racy get-then-rename.
+    #[test]
+    fn rename_over_a_file_returns_its_guid() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(&dir);
+        let l = c.create_layer("p").unwrap();
+        c.put(l, "new.ess", &file("new.ess", 1), false).unwrap();
+        c.put(l, "save.ess", &file("Save.ess", 2), false).unwrap();
+        assert_eq!(
+            c.rename(l, "new.ess", "save.ess", "Save.ess").unwrap(),
+            vec![[2; 16]]
+        );
+        assert!(c.get(l, "new.ess").unwrap().is_none());
+        let got = c.get(l, "save.ess").unwrap().unwrap();
+        assert_eq!((got.name.as_str(), got.guid), ("Save.ess", [1; 16]));
+    }
+
+    #[test]
+    fn rename_refuses_a_destination_directory_with_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = open(&dir);
+        let l = c.create_layer("p").unwrap();
+        c.put(l, "a", &dirr("a"), false).unwrap();
+        c.put(l, "a/x", &file("x", 1), false).unwrap();
+        c.put(l, "b", &dirr("b"), false).unwrap();
+        c.put(l, "b/keep", &file("keep", 9), false).unwrap();
+        c.put(l, "f", &file("f", 3), false).unwrap();
+        for from in ["a", "f"] {
+            let err = c.rename(l, from, "b", "b").unwrap_err();
+            assert!(matches!(err, StorageError::Exists(_)), "{err}");
+            assert_eq!(err.to_status(), vfs_provider::ST_EXISTS);
+        }
+        // Refused inside the transaction: nothing moved, nothing was replaced.
+        assert_eq!(c.get(l, "b/keep").unwrap().unwrap().guid, [9; 16]);
+        assert_eq!(c.get(l, "a/x").unwrap().unwrap().guid, [1; 16]);
+        assert_eq!(c.get(l, "f").unwrap().unwrap().guid, [3; 16]);
+        // A directory onto its own parent is the same refusal: the parent holds it.
+        c.put(l, "a/inner", &dirr("inner"), false).unwrap();
+        assert!(matches!(
+            c.rename(l, "a/inner", "a", "a"),
+            Err(StorageError::Exists(_))
+        ));
+    }
+
     #[test]
     fn a_case_only_rename_keeps_the_subtree() {
         let dir = tempfile::tempdir().unwrap();
@@ -703,7 +894,7 @@ mod tests {
         let l = c.create_layer("p").unwrap();
         c.put(l, "a", &dirr("a"), false).unwrap();
         c.put(l, "a/x", &file("x", 1), false).unwrap();
-        c.rename(l, "a", "A", "A").unwrap();
+        assert!(c.rename(l, "a", "A", "A").unwrap().is_empty());
         assert_eq!(c.get(l, "a").unwrap().unwrap().name, "A");
         assert_eq!(c.get(l, "a/x").unwrap().unwrap().guid, [1; 16]);
     }
@@ -714,9 +905,19 @@ mod tests {
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
         c.put(l, "a", &dirr("a"), false).unwrap();
-        assert!(c.rename(l, "nope", "b", "b").is_err());
-        assert!(c.rename(l, "a", "a/b", "b").is_err());
-        assert!(c.rename(l, "", "b", "b").is_err());
+        let missing = c.rename(l, "nope", "b", "b").unwrap_err();
+        assert!(matches!(missing, StorageError::NotFound(_)), "{missing}");
+        assert_eq!(missing.to_status(), vfs_provider::ST_NOT_FOUND);
+        let into_self = c.rename(l, "a", "a/b", "b").unwrap_err();
+        assert!(
+            matches!(into_self, StorageError::BadRequest(_)),
+            "{into_self}"
+        );
+        assert_eq!(into_self.to_status(), vfs_provider::ST_BAD_REQUEST);
+        assert!(matches!(
+            c.rename(l, "", "b", "b"),
+            Err(StorageError::BadRequest(_))
+        ));
         assert_eq!(c.get(l, "a").unwrap().unwrap().name, "a");
     }
 

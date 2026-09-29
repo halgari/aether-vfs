@@ -253,6 +253,17 @@ impl RamTier {
     ///
     /// Infallible: a poisoned shard is cleared through its poison, because a
     /// shard that keeps a stale block after its file was written would serve it.
+    ///
+    /// **A stale refill can race it.** A reader that missed this tier, read the
+    /// block's *old* bytes from the store (or source) before the write, and
+    /// `put`s them after this sweep puts a stale block straight back behind it.
+    /// The window is a read racing a write on the same file with no ordering
+    /// between them, where the reader may legitimately observe either version;
+    /// what this guarantees is that a read strictly *after* a completed write
+    /// and its invalidation does not see the old bytes. Closing the window
+    /// completely needs a per-file epoch checked by `put`, which is the
+    /// caller's to add if it needs it (ported from `vfs-cache`'s
+    /// `invalidate_file`, where the refill came from the `.blk` disk tier).
     pub fn invalidate_file(&self, file_id: &[u8; 17]) {
         for s in self.shards.iter() {
             let mut g = write(s);
