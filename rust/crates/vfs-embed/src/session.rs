@@ -521,6 +521,20 @@ impl Session {
         }
     }
 
+    /// Unix: whether `location` is one `launch` can link a root at — a `C:\\…`
+    /// path below the drive root, without `..`
+    /// ([`vfs_proton::prefix::parse_location`], the rule `launch` itself
+    /// applies). [`Session::declare_root`] stays infallible, so a host that
+    /// takes locations from a user calls this first and refuses a bad one at
+    /// declare time rather than at the first launch. The error names the
+    /// location and what is wrong with it.
+    #[cfg(unix)]
+    pub fn check_root_location(location: &str) -> Result<(), String> {
+        vfs_proton::prefix::parse_location(location)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// The roots declared beyond root 0, in declaration order. For
     /// diagnostics and for tests that need to prove a config's `[[root]]`
     /// table actually reached the session rather than being parsed and
@@ -2294,6 +2308,17 @@ mod launch_image_tests {
         assert_eq!(s.root_backing_dir(2), Some(s.state_dir().join("roots").join("2")));
         assert_eq!(s.root_backing_dir(0).as_deref(), Some(s.virtual_root()));
         assert_eq!(s.root_backing_dir(7), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_root_location_applies_the_link_rule() {
+        Session::check_root_location(r"C:\\Games\\Fixture").unwrap();
+        Session::check_root_location("c:/users/steamuser/Saves").unwrap();
+        for bad in [r"D:\\Games", "/tmp/host-dir", r"C:\\", r"C:\\a\\..\\b", "Games"] {
+            let e = Session::check_root_location(bad).unwrap_err();
+            assert!(e.contains("bad root location") && e.contains(bad), "{bad}: {e}");
+        }
     }
 
     #[cfg(unix)]

@@ -307,6 +307,10 @@ impl SessionRegistry {
         }
         session.serve()?;
 
+        // The summary reports root 0's *location* — where the program sees it —
+        // never its host backing directory, so one field means one thing on
+        // every platform (on Windows the two are the same path).
+        let root = root0_location(&session);
         let summary = SessionSummary {
             id: id.clone(),
             name: name.clone(),
@@ -471,7 +475,11 @@ impl SessionRegistry {
     ///
     /// Root 0 may be declared too: it moves where the program sees root 0,
     /// replacing the daemon's default, and the session summary's `root`
-    /// becomes the declared location. On Linux that is root 0's location in
+    /// (always root 0's location) becomes the declared one.
+    ///
+    /// On unix a location `launch` could not link into the Wine prefix is
+    /// refused here ([`Session::check_root_location`]), and nothing is
+    /// recorded. On Linux that is root 0's location in
     /// the prefix (still backed by the session's own directory); on Windows
     /// it is root 0's host directory, and the launch republishes the shim's
     /// config with it — see [`vfs_embed::Session::launch`].
@@ -482,13 +490,21 @@ impl SessionRegistry {
         path: &Path,
         name: &str,
     ) -> Result<(), String> {
+        // On Linux a location is a `C:\\…` path the launch links into the
+        // Wine prefix; one it could not link (another drive, a host path, the
+        // drive root, `..`) is refused here, at `vfs up`, rather than at the
+        // first `vfs exec`.
+        #[cfg(unix)]
+        Session::check_root_location(&path.to_string_lossy())
+            .map_err(|e| format!("root {root}: {e}"))?;
         let entry = self.entry(session_id)?;
-        entry
+        let mut live = entry
             .live
             .lock()
-            .map_err(|_| format!("session {session_id} poisoned"))?
-            .session
-            .declare_root(root, path);
+            .map_err(|_| format!("session {session_id} poisoned"))?;
+        live.session.declare_root(root, path);
+        let root0 = root0_location(&live.session);
+        drop(live);
         let mut meta = entry
             .meta
             .lock()
@@ -497,9 +513,7 @@ impl SessionRegistry {
             meta.root_names.insert(root, name.to_string());
         }
         meta.root_locs.insert(root, path.to_string_lossy().into_owned());
-        if root == 0 {
-            meta.root = path.to_path_buf();
-        }
+        meta.root = root0;
         Ok(())
     }
 
@@ -709,6 +723,21 @@ impl SessionRegistry {
     }
 }
 
+/// Root 0's location as the launched program sees it: the declared one, else
+/// the default — the daemon's host directory on Windows, `C:\\vfs-session\\root`
+/// on Linux.
+fn root0_location(session: &Session) -> PathBuf {
+    session
+        .root_locations()
+        .into_iter()
+        .next()
+        .map(|r| PathBuf::from(r.location))
+        .unwrap_or_default()
+}
+
+/// One live session as `ListSessions`/`CreateSession` report it. `root` is
+/// root 0's **location** (see [`root0_location`]), not its host backing
+/// directory.
 #[derive(Clone, Debug)]
 pub struct SessionSummary {
     pub id: String,
@@ -1202,6 +1231,48 @@ root = 1
         assert!(reg.list().unwrap().is_empty());
         assert_eq!(Arc::strong_count(&held), 1, "the registry must drop its reference");
         assert_eq!(reg.teardown_all(), 0, "draining an empty registry is a no-op");
+    }
+
+    /// A root location the launch could not link is refused when it is
+    /// declared (`vfs up`), not at the first `vfs exec`, and nothing of it
+    /// is recorded.
+    #[cfg(unix)]
+    #[test]
+    fn declare_root_refuses_a_location_the_prefix_cannot_hold() {
+        let reg = SessionRegistry::new();
+        let s = reg.create("bad-loc".into()).unwrap();
+        for bad in [r"D:\Games", "/tmp/host-dir", r"C:\", r"C:\a\..\b"] {
+            for root in [0, 1] {
+                let e = reg.declare_root(&s.id, root, Path::new(bad), "R").unwrap_err();
+                assert!(e.contains(&format!("root {root}")) && e.contains(bad), "{bad}: {e}");
+            }
+        }
+        assert!(reg.with_session_mut(&s.id, |l| Ok(l.session.declared_roots().is_empty())).unwrap());
+        assert_eq!(reg.list().unwrap()[0].root, Path::new(r"C:\vfs-session\root"));
+        assert!(reg.expand_root_name(&s.id, r"{R}\x.exe").is_err(), "no name was recorded");
+    }
+
+    /// The summary's `root` is root 0's location — where the program sees it
+    /// — whether declared or defaulted, never the host directory backing it.
+    #[test]
+    fn the_summary_root_is_root_zeros_location() {
+        let reg = SessionRegistry::new();
+        let s = reg.create("summary-root".into()).unwrap();
+        let loc = if cfg!(windows) { r"C:\vfs-test\Summary" } else { r"C:\Games\Summary" };
+        let backing = reg
+            .with_session_mut(&s.id, |l| Ok(l.session.virtual_root().to_path_buf()))
+            .unwrap();
+        if cfg!(windows) {
+            assert_eq!(s.root, backing, "on Windows the default location is the host dir");
+        } else {
+            assert_eq!(s.root, Path::new(r"C:\vfs-session\root"));
+            assert_ne!(s.root, backing);
+        }
+        assert_eq!(reg.list().unwrap()[0].root, s.root);
+        reg.declare_root(&s.id, 1, Path::new(&format!(r"{loc}\Saves")), "Saves").unwrap();
+        assert_eq!(reg.list().unwrap()[0].root, s.root, "another root leaves it alone");
+        reg.declare_root(&s.id, 0, Path::new(loc), "Games").unwrap();
+        assert_eq!(reg.list().unwrap()[0].root, Path::new(loc));
     }
 
     fn toml_quote(s: &str) -> String {

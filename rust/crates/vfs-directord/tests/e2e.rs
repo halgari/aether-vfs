@@ -3922,6 +3922,14 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
     let docs = tempfile::tempdir().unwrap();
     std::fs::write(game.path().join("a.txt"), b"g").unwrap();
     std::fs::write(docs.path().join("a.txt"), b"d").unwrap();
+    // Each root's location: where the program sees it. On Windows that is a
+    // host directory (here the source directory itself, as before); on Linux
+    // a `C:\…` path inside the Wine prefix — a host path is refused there.
+    let (game_loc, docs_loc) = if cfg!(windows) {
+        (game.path().to_path_buf(), docs.path().to_path_buf())
+    } else {
+        (PathBuf::from(r"C:\Games\Game"), PathBuf::from(r"C:\users\steamuser\Docs"))
+    };
 
     let cfg = SessionConfig {
         session: vfs_control::SessionMeta { name: Some("two-root-cfg".into()) },
@@ -3929,12 +3937,12 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
             vfs_control::RootEntry {
                 id: 0,
                 name: "game".into(),
-                path: game.path().to_string_lossy().into_owned(),
+                path: game_loc.to_string_lossy().into_owned(),
             },
             vfs_control::RootEntry {
                 id: 1,
                 name: "docs".into(),
-                path: docs.path().to_string_lossy().into_owned(),
+                path: docs_loc.to_string_lossy().into_owned(),
             },
         ],
         sources: vec![
@@ -3972,8 +3980,8 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
             assert_eq!(declared[0].0, 1);
             assert_eq!(
                 declared[0].1,
-                docs.path(),
-                "root 1's declared host path is not the one the config named"
+                docs_loc,
+                "root 1's declared location is not the one the config named"
             );
             // Both providers are mounted too — declaring must not have
             // replaced mounting, only joined it.
@@ -4002,9 +4010,8 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
         .find(|s| s.id == id)
         .expect("the session is live");
     assert_eq!(
-        summary.root,
-        game.path(),
-        "root 0's declared path must reach the live session as its root"
+        summary.root, game_loc,
+        "root 0's declared location must reach the live session as its root"
     );
 
     client
