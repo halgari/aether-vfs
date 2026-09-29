@@ -111,6 +111,14 @@ fn spawn_daemon(exe: &PathBuf, discovery_path: &std::path::Path) -> Result<(), S
         const DETACHED_PROCESS: u32 = 0x00000008;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
     }
+    // Its own process group, so Ctrl-C in the terminal that ran the CLI does
+    // not reach the daemon it spawned — the unix counterpart of
+    // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS above.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.spawn()
         .map_err(|e| format!("spawn daemon {}: {e}", exe.display()))?;
     Ok(())
