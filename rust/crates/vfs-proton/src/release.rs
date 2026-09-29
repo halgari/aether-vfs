@@ -125,15 +125,36 @@ fn tag_major(tag: &str) -> Option<u32> {
 /// [`parse_releases`]. GitHub rejects requests with no `User-Agent`, so one
 /// is always set.
 ///
+/// Unauthenticated, the API allows 60 requests an hour per IP, and a shared
+/// runner or NAT exhausts that with a 403 — the first CI run to miss the
+/// runtime cache failed exactly so. A non-empty `GITHUB_TOKEN` is therefore
+/// sent as a bearer token. It is the ecosystem's name, not one of ours, which
+/// is why it is not a `vfs_env` constant; and it goes **only** to this fixed
+/// `api.github.com` URL, never to the tarball download, which is served
+/// elsewhere and needs no credential.
+///
 /// No test calls this: the real response is fetched from the network, and
 /// the point of [`parse_releases`] being pure is that this wrapper needs no
 /// test of its own beyond "it calls parse_releases on the body".
 pub fn fetch_releases(agent: &ureq::Agent) -> Result<Vec<Release>, ResolveError> {
-    let body = agent
+    let mut req = agent
         .get(RELEASES_URL)
-        .header("User-Agent", "aether-vfs (vfs-proton)")
+        .header("User-Agent", "aether-vfs (vfs-proton)");
+    let token = std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty());
+    if let Some(token) = &token {
+        req = req.header("Authorization", &format!("Bearer {token}"));
+    }
+    let body = req
         .call()
-        .map_err(|e| ResolveError::Http(e.to_string()))?
+        .map_err(|e| {
+            let hint = match (&e, &token) {
+                (ureq::Error::StatusCode(403 | 429), None) => {
+                    " (likely GitHub's unauthenticated rate limit; set GITHUB_TOKEN)"
+                }
+                _ => "",
+            };
+            ResolveError::Http(format!("{e}{hint}"))
+        })?
         .body_mut()
         .read_to_string()
         .map_err(|e| ResolveError::Http(e.to_string()))?;
