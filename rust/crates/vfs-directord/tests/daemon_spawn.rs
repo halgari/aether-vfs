@@ -42,3 +42,43 @@ fn an_auto_spawned_daemon_that_cannot_open_its_storage_reports_why() {
     assert!(log.contains("cannot open storage"), "{log}");
     drop(held);
 }
+
+/// The daemon installs a `tracing` subscriber on stderr (default level
+/// `warn`), so what `vfs-storage` logs — here, reconciliation refusing a
+/// store whose catalog is gone — reaches `<discovery>.daemon.log`.
+#[test]
+fn storage_log_events_reach_the_daemon_log() {
+    use vfs_embed::{VPath, OPEN_CREATE, OPEN_WRITE};
+    let t = tempfile::tempdir().unwrap();
+    let storage_dir = t.path().join("storage");
+    {
+        let s = vfs_embed::Storage::open(&storage_dir, vfs_embed::StorageConfig::default())
+            .expect("storage");
+        let p = s.layer("saves").unwrap();
+        let (h, _, _) = p
+            .open(VPath::at_default("a.ess"), OPEN_WRITE | OPEN_CREATE)
+            .unwrap();
+        p.write_at(h, 0, b"save").unwrap();
+        p.close(h).unwrap();
+        drop(p);
+        s.close().unwrap();
+    }
+    std::fs::remove_file(storage_dir.join("catalog.redb")).unwrap();
+    let discovery = t.path().join("discovery.json");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_vfs"))
+        .args(["--discovery", discovery.to_str().unwrap(), "health"])
+        .env("VFS_STORAGE_DIR", &storage_dir)
+        .env("VFS_HOME", t.path().join("home"))
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("run vfs health");
+    assert!(!out.status.success());
+    let log = std::fs::read_to_string(t.path().join("discovery.json.daemon.log"))
+        .expect("the daemon's stderr is kept beside the discovery file");
+    // The `tracing::error!` event, not the daemon's own error line.
+    assert!(
+        log.contains("ERROR") && log.contains("refusing to open"),
+        "{log}"
+    );
+}
