@@ -123,19 +123,7 @@ fn spawn_daemon(
         let _ = std::fs::create_dir_all(dir);
     }
     let live = read_discovery(discovery_path).is_ok_and(|d| process_alive(d.pid));
-    let file = if live {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log)
-            .and_then(|mut f| {
-                use std::io::Write;
-                writeln!(f, "--- vfs: spawning another daemon ---").map(|()| f)
-            })
-    } else {
-        std::fs::File::create(&log)
-    };
-    match file {
+    match open_spawn_log(&log, live) {
         Ok(f) => cmd.stderr(f),
         Err(_) => cmd.stderr(std::process::Stdio::null()),
     };
@@ -156,6 +144,26 @@ fn spawn_daemon(
     }
     cmd.spawn()
         .map_err(|e| format!("spawn daemon {}: {e}", exe.display()))
+}
+
+/// Opens a spawned daemon's log for its stderr: truncated first (unless a
+/// live daemon may still be writing it: then a separator is appended), and
+/// always opened for **append**. Two CLIs that spawn at once each truncate
+/// it; with append, the first daemon's later writes go to the end of the
+/// file rather than to its old offset, which would leave a run of NULs.
+fn open_spawn_log(log: &std::path::Path, live: bool) -> std::io::Result<std::fs::File> {
+    use std::io::Write;
+    if !live {
+        std::fs::File::create(log)?; // truncate
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)?;
+    if live {
+        writeln!(f, "--- vfs: spawning another daemon ---")?;
+    }
+    Ok(f)
 }
 
 /// [`wait_for_daemon`] for a daemon this process just spawned: if `child`
@@ -1027,6 +1035,23 @@ mod tests {
             "error should name the removed '#LAYER' syntax: {err}"
         );
     }
+    /// Two spawns that each truncate the log: the first daemon's later
+    /// writes land at the end of the file, never past a hole of NULs.
+    #[test]
+    fn concurrent_spawn_logs_leave_no_holes() {
+        use std::io::Write;
+        let d = tempfile::tempdir().unwrap();
+        let log = d.path().join("d.json.daemon.log");
+        let mut first = open_spawn_log(&log, false).unwrap();
+        first.write_all(b"first daemon starting\n").unwrap();
+        let mut second = open_spawn_log(&log, false).unwrap();
+        second.write_all(b"second\n").unwrap();
+        first.write_all(b"first daemon: warning\n").unwrap();
+        let text = std::fs::read(&log).unwrap();
+        assert!(!text.contains(&0), "{:?}", String::from_utf8_lossy(&text));
+        assert_eq!(text, b"second\nfirst daemon: warning\n");
+    }
+
     /// A layer is only ever a write layer; `--source layer:NAME` would be
     /// refused later by `validate_roots` with config-file advice. The flag
     /// parser refuses it at once and names the flag to use.
