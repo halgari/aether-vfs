@@ -137,7 +137,7 @@ pub(crate) fn maybe_evict(s: &Arc<Storage>) {
     }
     let bg = Arc::clone(s);
     let spawned = std::thread::Builder::new()
-        .name("vfs-cache-evict".into())
+        .name("vfs-storage-evict".into())
         .spawn(move || {
             if let Err(e) = bg.enforce_cache_budget() {
                 tracing::warn!(error = %e, "cache eviction failed");

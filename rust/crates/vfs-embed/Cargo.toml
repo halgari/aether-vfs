@@ -28,9 +28,10 @@ vfs-provider = { path = "../vfs-provider" }
 # `compose_root` builds a root's writable upper out of it — and the rest are
 # re-exported so a host composes a graph without a second dependency.
 vfs-compose = { path = "../vfs-compose" }
-# The `cached` primitive, re-exported for the same reason: a slow
-# host-authored provider is expected to be wrapped in one (spec §8b).
-vfs-cache = { path = "../vfs-cache" }
+# Persistent storage — the pull-through cache for slow, immutable sources and
+# named write layers — re-exported for the same reason: a host opens its own
+# `Storage` and wraps its providers with it (vfs-storage spec §3).
+vfs-storage = { path = "../vfs-storage" }
 vfs-env = { path = "../vfs-env" }
 vfs-zip = { path = "../vfs-zip", optional = true }
 

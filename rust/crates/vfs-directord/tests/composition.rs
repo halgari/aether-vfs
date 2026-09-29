@@ -1,4 +1,4 @@
-//! Composition + cache integration through the session registry (no inject).
+//! Composition + storage integration through the session registry (no inject).
 
 use std::io::Write;
 use std::path::Path;
@@ -9,8 +9,12 @@ use tonic::transport::Server;
 use vfs_control::pb::director_server::DirectorServer;
 use vfs_control::pb::{source_spec, AddSourceReq, CreateSessionReq, DiskSource, Empty, ZipSource};
 use vfs_control::SourceSpec;
-use vfs_directord::{connect, DirectorService, SessionRegistry};
 use vfs_director::RootId;
+use vfs_directord::{connect, DirectorService, SessionRegistry};
+use vfs_embed::{
+    Access, Capabilities, DirEntry, Handle, MemoryProvider, Provider, SourceKey, Stat, Storage,
+    StorageConfig, VPath,
+};
 use vfs_source::build_provider;
 
 fn write_stored_zip(dir: &Path, entry: &str, content: &[u8]) -> std::path::PathBuf {
@@ -53,7 +57,10 @@ fn write_stored_zip(dir: &Path, entry: &str, content: &[u8]) -> std::path::PathB
     buf.extend_from_slice(&cd_size.to_le_bytes());
     buf.extend_from_slice(&cd_start.to_le_bytes());
     buf.extend_from_slice(&0u16.to_le_bytes());
-    std::fs::File::create(&path).unwrap().write_all(&buf).unwrap();
+    std::fs::File::create(&path)
+        .unwrap()
+        .write_all(&buf)
+        .unwrap();
     path
 }
 
@@ -88,8 +95,8 @@ fn registry_layered_disk_sources_top_wins() {
         path: mod_dir.path().to_string_lossy().into_owned(),
     })
     .unwrap();
-    reg.add_source(&summary.id, 0, "/", 0,base_be).unwrap();
-    reg.add_source(&summary.id, 0, "/", 10,mod_be).unwrap();
+    reg.add_source(&summary.id, 0, "/", 0, base_be).unwrap();
+    reg.add_source(&summary.id, 0, "/", 10, mod_be).unwrap();
 
     reg.with_session_mut(&summary.id, |live| {
         let shared = live.session.read_file("shared.txt").unwrap();
@@ -113,7 +120,7 @@ fn registry_zip_source_reads_entry() {
         path: zip.to_string_lossy().into_owned(),
     })
     .unwrap();
-    reg.add_source(&summary.id, 0, "/", 0,be).unwrap();
+    reg.add_source(&summary.id, 0, "/", 0, be).unwrap();
     reg.with_session_mut(&summary.id, |live| {
         let got = live.session.read_file("Data/proof.dat").unwrap();
         assert_eq!(got, b"ZIP-BYTES");
@@ -122,36 +129,83 @@ fn registry_zip_source_reads_entry() {
     .unwrap();
 }
 
+/// With storage, a slow immutable source is read through the pull-through
+/// cache: the second full read is served from it, not from the source.
 #[test]
 fn registry_cache_hits_on_second_read() {
-    let dir = tempfile::tempdir().unwrap();
-    // Large enough to span multiple 1MiB? Use small block via custom cache.
-    use vfs_cache::{BlockCache, CacheConfig};
-    let cache = Arc::new(BlockCache::new(CacheConfig {
-        block_size: 16,
-        ram_budget: 1024 * 1024,
-        disk_dir: None,
-    }));
-    let reg = SessionRegistry::with_cache(cache.clone());
+    let store_dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(store_dir.path(), StorageConfig::default()).unwrap();
+    let reg = SessionRegistry::with_storage(Arc::clone(&storage));
     let summary = reg.create("cache".into()).unwrap();
-    let payload = vec![7u8; 40];
-    std::fs::write(dir.path().join("blob.bin"), &payload).unwrap();
-    let be = build_provider(&SourceSpec::Disk {
-        path: dir.path().to_string_lossy().into_owned(),
-    })
+    // Several 64 KiB store blocks.
+    let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let be: Arc<dyn Provider> = Arc::new(SlowImmutable(MemoryProvider::from_files([(
+        "blob.bin",
+        payload.clone(),
+    )])));
+    reg.add_source_keyed(
+        &summary.id,
+        0,
+        "/",
+        0,
+        be,
+        SourceKey("composition-test".into()),
+    )
     .unwrap();
-    reg.add_source(&summary.id, 0, "/", 0,be).unwrap();
-    reg.with_session_mut(&summary.id, |live| {
-        let a = live.session.read_file("blob.bin").unwrap();
-        let b = live.session.read_file("blob.bin").unwrap();
-        assert_eq!(a, payload);
-        assert_eq!(b, payload);
-        Ok(())
-    })
-    .unwrap();
-    let stats = cache.stats();
-    assert!(stats.hits >= 1, "expected cache hits after second full read: {stats:?}");
-    assert!(stats.misses >= 1, "expected at least one miss: {stats:?}");
+    let first = reg
+        .with_session_mut(&summary.id, |live| Ok(live.session.read_file("blob.bin")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, payload);
+    let after_first = storage.stats().cache;
+    assert!(
+        after_first.misses >= 1,
+        "the first read fetches from the source: {after_first:?}"
+    );
+    let second = reg
+        .with_session_mut(&summary.id, |live| Ok(live.session.read_file("blob.bin")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(second, payload);
+    let after_second = storage.stats().cache;
+    assert_eq!(
+        after_second.misses, after_first.misses,
+        "the second read must not reach the source: {after_second:?}"
+    );
+    assert!(
+        after_second.hits > after_first.hits,
+        "the second read is a hit: {after_second:?}"
+    );
+}
+
+/// A `MemoryProvider` that declares itself slow and immutable, so
+/// `Storage::cached` wraps it.
+struct SlowImmutable(MemoryProvider);
+
+impl Provider for SlowImmutable {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            access: Access::Read,
+            immutable: true,
+            slow: true,
+            ..self.0.capabilities()
+        }
+    }
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        self.0.getattr(p)
+    }
+    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+        self.0.readdir(p)
+    }
+    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+        self.0.open(p, flags)
+    }
+    fn read_at(&self, h: Handle, off: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        self.0.read_at(h, off, buf)
+    }
+    fn close(&self, h: Handle) -> Result<(), i32> {
+        self.0.close(h)
+    }
 }
 
 /// Historical note: this test used to demonstrate two confirmed gaps in
@@ -191,11 +245,12 @@ fn non_root_mount_matches_lowercase_open_and_is_discoverable_via_parent_readdir(
         path: mod_dir.path().to_string_lossy().into_owned(),
     })
     .unwrap();
-    reg.add_source(&summary.id, 0, "/", 0,root_be).unwrap();
+    reg.add_source(&summary.id, 0, "/", 0, root_be).unwrap();
     // Mixed case, deliberately — the original `escape-matrix.md`-documented
     // spelling. Case folding at compare time means this must match a
     // lowercased live open exactly as a lowercase-authored mount would.
-    reg.add_source(&summary.id, 0, "Data/SomeMod", 10, mod_be).unwrap();
+    reg.add_source(&summary.id, 0, "Data/SomeMod", 10, mod_be)
+        .unwrap();
 
     reg.with_session_mut(&summary.id, |live| {
         // A direct open by a known relative path succeeds through the
@@ -205,16 +260,24 @@ fn non_root_mount_matches_lowercase_open_and_is_discoverable_via_parent_readdir(
         assert_eq!(bytes, b"MOD-BYTES");
 
         // The base content is still there and enumerable...
-        let base_entries = live.session.kernel().readdir(RootId::DEFAULT, "data").unwrap();
+        let base_entries = live
+            .session
+            .kernel()
+            .readdir(RootId::DEFAULT, "data")
+            .unwrap();
         assert!(
-            base_entries.iter().any(|e| e.name.eq_ignore_ascii_case("Skyrim.esm")),
+            base_entries
+                .iter()
+                .any(|e| e.name.eq_ignore_ascii_case("Skyrim.esm")),
             "expected the real base content to still enumerate: {:?}",
             base_entries.iter().map(|e| &e.name).collect::<Vec<_>>()
         );
         // ...and the mount point itself now appears as a synthetic child
         // entry too: the gap this test used to demonstrate is closed.
         assert!(
-            base_entries.iter().any(|e| e.name.eq_ignore_ascii_case("somemod")),
+            base_entries
+                .iter()
+                .any(|e| e.name.eq_ignore_ascii_case("somemod")),
             "expected readdir(\"data\") to list the non-root mount point as \
              a synthetic child entry: {:?}",
             base_entries.iter().map(|e| &e.name).collect::<Vec<_>>()
@@ -244,9 +307,7 @@ async fn stats_rpc_reports_sessions_and_cache() {
     assert_eq!(before.sessions, 0);
 
     let session = client
-        .create_session(CreateSessionReq {
-            name: "s".into(),
-        })
+        .create_session(CreateSessionReq { name: "s".into() })
         .await
         .unwrap()
         .into_inner();

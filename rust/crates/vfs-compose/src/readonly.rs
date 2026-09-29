@@ -15,8 +15,8 @@
 //! that already holds a handle, or that reached this provider through a
 //! combinator which routed a write here anyway. A wrapper that only clamped
 //! capabilities would be a provider whose declaration and behaviour disagree,
-//! which is the defect class `LayeredProvider` and `CachingProvider` were both
-//! fixed for.
+//! which is the defect class `LayeredProvider` and the (since deleted)
+//! `vfs-cache` `CachingProvider` were both fixed for.
 //!
 //! Handles pass straight through rather than being renumbered through a table
 //! of this provider's own. There is nothing to translate: a handle is

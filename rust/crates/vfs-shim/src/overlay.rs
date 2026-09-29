@@ -96,9 +96,9 @@ pub enum OverlayState {
 /// [`Overlay::root_dir`]) so two roots serving the same relative path never
 /// share one overlay file.
 ///
-/// This is the same collision the block cache had before this branch mixed
-/// `RootId` into `CachingProvider::file_id_for` (see
-/// `two_roots_same_path_size_and_mtime_do_not_collide` in `vfs-cache`) —
+/// This is the same collision the old block cache (`vfs-cache`, since replaced
+/// by `vfs-storage`, whose cache identity includes the root) had before
+/// `RootId` was mixed into its file ids —
 /// fixed here one layer up, deliberately one task ahead of `Engine` becoming
 /// multi-root (gate 4, Task 3) — which is when the collision would otherwise
 /// have gone live, since `Engine` now resolves each path's own `RootId` and
@@ -296,10 +296,9 @@ impl Overlay {
 mod tests {
     use super::*;
 
-    /// The identical collision `CachingProvider` had before `RootId` was
-    /// mixed into `file_id_for` (see
-    /// `two_roots_same_path_size_and_mtime_do_not_collide` in
-    /// `vfs-cache/src/provider.rs`), one layer up: two roots serving the same
+    /// The identical collision the old block cache (`vfs-cache`, since
+    /// deleted) had before `RootId` was mixed into its file ids, one layer
+    /// up: two roots serving the same
     /// relative path must not share one overlay file, and a whiteout written
     /// under one root must not hide the other root's file.
     #[test]

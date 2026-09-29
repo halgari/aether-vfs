@@ -5,14 +5,17 @@ pub mod discovery;
 pub mod registry;
 pub mod service;
 
+use std::ffi::OsString;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tonic::transport::Channel;
 use tonic::transport::Server;
 
 use vfs_control::pb::director_client::DirectorClient;
+use vfs_embed::{CloseOutcome, Storage, StorageConfig};
 
 pub use discovery::{default_discovery_path, read_discovery, write_discovery, Discovery};
 pub use registry::SessionRegistry;
@@ -56,15 +59,21 @@ pub async fn connect_or_spawn(
         }
     }
 
-    spawn_daemon(&daemon_exe, &path)?;
-    wait_for_daemon(&path, Duration::from_secs(15)).await
+    let mut child = spawn_daemon(&daemon_exe, &path)?;
+    wait_for_spawned(&path, &mut child, Duration::from_secs(15)).await
+}
+
+/// Where an auto-spawned daemon's stderr goes: `<discovery>.daemon.log`. A
+/// file rather than a pipe, because the detached daemon outlives the CLI
+/// that spawned it.
+pub fn daemon_log_path(discovery_path: &std::path::Path) -> PathBuf {
+    let mut p = discovery_path.as_os_str().to_os_string();
+    p.push(".daemon.log");
+    PathBuf::from(p)
 }
 
 async fn health_ok(client: &mut DirectorClient<Channel>) -> bool {
-    client
-        .health(vfs_control::pb::HealthReq {})
-        .await
-        .is_ok()
+    client.health(vfs_control::pb::HealthReq {}).await.is_ok()
 }
 
 fn process_alive(pid: u32) -> bool {
@@ -97,13 +106,39 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
-fn spawn_daemon(exe: &PathBuf, discovery_path: &std::path::Path) -> Result<(), String> {
+fn spawn_daemon(
+    exe: &PathBuf,
+    discovery_path: &std::path::Path,
+) -> Result<std::process::Child, String> {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("daemon");
     cmd.env("VFS_DISCOVERY_PATH", discovery_path);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
+    // Truncated on each spawn, so it describes this daemon rather than an
+    // earlier one — unless the daemon the discovery file names is alive and
+    // may still be writing it: then append, after a separator.
+    let log = daemon_log_path(discovery_path);
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let live = read_discovery(discovery_path).is_ok_and(|d| process_alive(d.pid));
+    let file = if live {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "--- vfs: spawning another daemon ---").map(|()| f)
+            })
+    } else {
+        std::fs::File::create(&log)
+    };
+    match file {
+        Ok(f) => cmd.stderr(f),
+        Err(_) => cmd.stderr(std::process::Stdio::null()),
+    };
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -120,8 +155,76 @@ fn spawn_daemon(exe: &PathBuf, discovery_path: &std::path::Path) -> Result<(), S
         cmd.process_group(0);
     }
     cmd.spawn()
-        .map_err(|e| format!("spawn daemon {}: {e}", exe.display()))?;
-    Ok(())
+        .map_err(|e| format!("spawn daemon {}: {e}", exe.display()))
+}
+
+/// [`wait_for_daemon`] for a daemon this process just spawned: if `child`
+/// exits before it is ready (it could not open its storage, say), fail at
+/// once with its exit status and its log, instead of waiting out `timeout`.
+async fn wait_for_spawned(
+    discovery_path: &std::path::Path,
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<DirectorClient<Channel>, String> {
+    wait_for_spawned_with(
+        discovery_path,
+        || {
+            child
+                .try_wait()
+                .map(|st| st.map(|st| st.to_string()))
+                .map_err(|e| format!("waiting on the spawned daemon: {e}"))
+        },
+        timeout,
+    )
+    .await
+}
+
+/// How long a CLI whose spawned daemon exited still looks for another
+/// daemon at the same discovery path (a concurrent spawn that won the race).
+const SPAWN_RACE_GRACE: Duration = Duration::from_secs(2);
+
+/// [`wait_for_spawned`] with the child's exit check injected (`Ok(Some(status))`
+/// once it has exited), so the decision can be tested without a process.
+async fn wait_for_spawned_with(
+    discovery_path: &std::path::Path,
+    mut exited: impl FnMut() -> Result<Option<String>, String>,
+    timeout: Duration,
+) -> Result<DirectorClient<Channel>, String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = exited()? {
+            // Two CLIs that auto-spawn at once each start a daemon; the one
+            // that loses the storage lock exits while the winner comes up at
+            // the same discovery path. Give the winner a short, bounded
+            // chance before blaming our own daemon's exit.
+            let grace = SPAWN_RACE_GRACE.min(
+                deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .max(Duration::from_millis(200)),
+            );
+            if let Ok(c) = wait_for_daemon(discovery_path, grace).await {
+                return Ok(c);
+            }
+            let log = daemon_log_path(discovery_path);
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            return Err(format!(
+                "daemon exited ({status}) before becoming ready: {} [log: {}]",
+                text.trim(),
+                log.display()
+            ));
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(format!(
+                "daemon did not become ready (log: {})",
+                daemon_log_path(discovery_path).display()
+            ));
+        }
+        // One short readiness attempt per poll, so an exit is seen promptly.
+        if let Ok(c) = wait_for_daemon(discovery_path, left.min(Duration::from_millis(200))).await {
+            return Ok(c);
+        }
+    }
 }
 
 async fn wait_for_daemon(
@@ -147,13 +250,124 @@ async fn wait_for_daemon(
     Err(last_err)
 }
 
+/// The daemon's storage directory: `flag` (`--storage-dir`), else
+/// `VFS_STORAGE_DIR`, else `<home>/storage`, where the aether-vfs home is
+/// `VFS_HOME`, else — on unix — `$XDG_DATA_HOME/aether-vfs`, then
+/// `$HOME/.local/share/aether-vfs`; on Windows `%LOCALAPPDATA%\aether-vfs`.
+/// `None` when nothing names a home at all.
+///
+/// `env` is the environment lookup (`std::env::var_os` in the daemon), so the
+/// order can be tested without touching the process environment.
+pub fn storage_dir_from(
+    flag: Option<&Path>,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    storage_dir_for(flag, env, cfg!(windows))
+}
+
+/// [`storage_dir_from`] with the OS as a parameter, so both orders are tested
+/// on either OS.
+fn storage_dir_for(
+    flag: Option<&Path>,
+    env: &dyn Fn(&str) -> Option<OsString>,
+    windows: bool,
+) -> Option<PathBuf> {
+    if let Some(dir) = flag {
+        return Some(dir.to_path_buf());
+    }
+    let set = |k: &str| env(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(dir) = set(vfs_env::STORAGE_DIR) {
+        return Some(dir);
+    }
+    let home = match set(vfs_env::HOME) {
+        Some(h) => h,
+        None if windows => set("LOCALAPPDATA")?.join("aether-vfs"),
+        None => set("XDG_DATA_HOME")
+            .map(|x| x.join("aether-vfs"))
+            .or_else(|| set("HOME").map(|h| h.join(".local/share/aether-vfs")))?,
+    };
+    Some(home.join("storage"))
+}
+
+/// Open the daemon's storage at `dir`, with `cache_max_gib` as the cache
+/// budget (the default otherwise; `0` is refused), and print what
+/// reconciliation repaired.
+///
+/// A failure — above all another daemon holding the directory — is an error
+/// naming the directory and how to choose another.
+pub fn open_daemon_storage(dir: &Path, cache_max_gib: Option<u64>) -> Result<Arc<Storage>, String> {
+    let mut cfg = StorageConfig::default();
+    if let Some(gib) = cache_max_gib {
+        if gib == 0 {
+            return Err(
+                "--cache-max-gib 0: the cache budget must be at least 1 GiB (omit the flag \
+                 for the default, 32)"
+                    .to_string(),
+            );
+        }
+        cfg.cache_max_bytes = gib.saturating_mul(1 << 30);
+    }
+    let storage = Storage::open(dir, cfg).map_err(|e| {
+        let hint = if e.is_locked() {
+            " (is another vfs daemon using it?)"
+        } else {
+            ""
+        };
+        format!(
+            "cannot open storage at {}: {e}{hint}; choose another directory with \
+             --storage-dir or {}",
+            dir.display(),
+            vfs_env::STORAGE_DIR
+        )
+    })?;
+    let r = storage.last_reconcile();
+    let repaired = r.emptied_files.len()
+        + r.zero_filled_files.len()
+        + r.resized_rows.len()
+        + r.orphans_deleted as usize
+        + r.cache_rows_dropped as usize;
+    if repaired > 0 {
+        eprintln!(
+            "vfs daemon: storage at {} was repaired at open:",
+            dir.display()
+        );
+        for (layer, path) in &r.emptied_files {
+            eprintln!("  layer {layer:?}: {path} lost its data and is now empty");
+        }
+        for (layer, path) in &r.zero_filled_files {
+            eprintln!("  layer {layer:?}: {path} had missing blocks, now zeros");
+        }
+        for (layer, path) in &r.resized_rows {
+            eprintln!("  layer {layer:?}: {path} length corrected to the store's");
+        }
+        if r.orphans_deleted > 0 {
+            eprintln!("  {} unreferenced store file(s) deleted", r.orphans_deleted);
+        }
+        if r.cache_rows_dropped > 0 {
+            eprintln!(
+                "  {} cache entr(ies) without data dropped",
+                r.cache_rows_dropped
+            );
+        }
+    }
+    Ok(storage)
+}
+
 /// Run the tonic director server until SIGINT/SIGTERM (Ctrl-C on Windows),
-/// then drain it — see [`serve_daemon_until`].
+/// then drain it — see [`serve_daemon_until`]. `storage` is the daemon's
+/// already-opened storage (see [`open_daemon_storage`]).
 pub async fn serve_daemon(
     bind: SocketAddr,
     discovery_path: PathBuf,
+    storage: Arc<Storage>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    serve_daemon_until(bind, discovery_path, SessionRegistry::new(), shutdown_signal()).await
+    serve_daemon_until(
+        bind,
+        discovery_path,
+        SessionRegistry::with_storage(storage),
+        shutdown_signal(),
+    )
+    .await
 }
 
 /// Resolves on the first SIGINT or SIGTERM (unix) / Ctrl-C (Windows). If the
@@ -163,7 +377,10 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        match (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) {
+        match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
             (Ok(mut term), Ok(mut int)) => {
                 tokio::select! {
                     _ = term.recv() => {}
@@ -188,8 +405,16 @@ async fn shutdown_signal() {
 /// finish (a waited launch included — its session is dropped when it
 /// returns), **drains the registry** ([`SessionRegistry::teardown_all`], so
 /// every session's `Drop` runs: on Linux that removes root links and deletes
-/// anonymous Wine prefixes, which a killed process would leak), and finally
-/// removes the discovery file if it still names this process.
+/// anonymous Wine prefixes, which a killed process would leak), then **closes
+/// the registry's storage**, and finally removes the discovery file if it
+/// still names this process.
+///
+/// The storage closes after the drain because every session holds it: a
+/// layer write layer is a provider holding the `Storage`, and so is a cached
+/// source. `registry` is consumed so this function's reference is the one
+/// the close can take; a caller that keeps a clone of the registry (or a
+/// launch still running in a torn-down session) keeps the store open and the
+/// directory locked, which is reported rather than silently left.
 pub async fn serve_daemon_until(
     bind: SocketAddr,
     discovery_path: PathBuf,
@@ -220,11 +445,29 @@ pub async fn serve_daemon_until(
 
     // Dropping a session can block for seconds (stopping a prefix's
     // `wineserver`, deleting a ~600 MB prefix), so off the async executor.
-    let drained = tokio::task::spawn_blocking(move || registry.teardown_all())
-        .await
-        .unwrap_or(0);
+    let storage = registry.storage().cloned();
+    let drained = tokio::task::spawn_blocking(move || {
+        let n = registry.teardown_all();
+        // The registry's own reference goes with it, before the close below.
+        drop(registry);
+        n
+    })
+    .await
+    .unwrap_or(0);
     if drained > 0 {
         eprintln!("vfs daemon: tore down {drained} session(s) on shutdown");
+    }
+    if let Some(storage) = storage {
+        match tokio::task::spawn_blocking(move || storage.close()).await {
+            Ok(Ok(CloseOutcome::Released)) => {}
+            Ok(Ok(CloseOutcome::StillShared { refs })) => eprintln!(
+                "vfs daemon: storage flushed, but {} other reference(s) are still alive \
+                 (a launch still running?); its directory stays locked until they drop",
+                refs - 1
+            ),
+            Ok(Err(e)) => eprintln!("vfs daemon: closing storage failed: {e}"),
+            Err(e) => eprintln!("vfs daemon: closing storage panicked: {e}"),
+        }
     }
 
     // Best-effort cleanup if we still own the discovery file.
@@ -257,6 +500,9 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     };
 
     if path.is_empty() {
+        if ty == "layer" {
+            return Err(format!("source flag {s:?}: `layer:` needs a layer name"));
+        }
         return Err(format!("empty path in source flag: {s:?}"));
     }
     // The old syntax was `TYPE:PATH@MOUNT#LAYER`; `#LAYER` was removed when
@@ -295,16 +541,23 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     })
 }
 
-/// The `--write-layer DIR` flag as a config entry: root 0's writable upper.
+/// The `--write-layer DIR|layer:NAME` flag as a config entry: root 0's
+/// writable upper.
 ///
 /// A separate flag rather than a `--source` spelling because it is a
 /// different fact — `--source` says what the session *serves*, this says
-/// where its writes *land*, seeded from whatever the sources hold. Always a
-/// disk directory (nothing else in this workspace is writable), always root
-/// 0 (the CLI has no syntax for naming another root), always mounted at the
-/// root (the upper covers the whole root by construction).
-pub fn write_layer_flag_entry(path: &str) -> vfs_control::SourceEntry {
+/// where its writes *land*, seeded from whatever the sources hold. Either a
+/// disk directory, or `layer:NAME`, a named persistent layer in the daemon's
+/// storage (an empty name is refused). Always root 0 (the CLI has no syntax
+/// for naming another root), always mounted at the root (the upper covers
+/// the whole root by construction).
+pub fn write_layer_flag_entry(path: &str) -> Result<vfs_control::SourceEntry, String> {
     let spec = match path.strip_prefix("layer:") {
+        Some("") => {
+            return Err(format!(
+                "--write-layer {path:?}: `layer:` needs a layer name (layer:NAME)"
+            ))
+        }
         Some(name) => vfs_control::SourceSpec::Layer {
             name: name.to_string(),
         },
@@ -312,13 +565,13 @@ pub fn write_layer_flag_entry(path: &str) -> vfs_control::SourceEntry {
             path: path.to_string(),
         },
     };
-    vfs_control::SourceEntry {
+    Ok(vfs_control::SourceEntry {
         spec,
         mount: "/".to_string(),
         root: 0,
         write_layer: true,
         cache_key: None,
-    }
+    })
 }
 
 /// Parse one `--root ID=NAME=LOCATION` flag into a `[[root]]` entry.
@@ -415,8 +668,8 @@ async fn configure_session(
     cfg: &vfs_control::SessionConfig,
 ) -> Result<Option<i32>, String> {
     use vfs_control::pb::{
-        source_spec, AddSourceReq, DeclareRootReq, DiskSource, HttpSource, LayerSource, RemoteSource,
-        SourceSpec as PbSource, ZipSource,
+        source_spec, AddSourceReq, DeclareRootReq, DiskSource, HttpSource, LayerSource,
+        RemoteSource, SourceSpec as PbSource, ZipSource,
     };
     let session_id = session_id.to_string();
 
@@ -525,7 +778,10 @@ pub async fn launch_one_shot(
             })
             .await
         {
-            eprintln!("vfs: session {session_id} was not torn down: {}", e.message());
+            eprintln!(
+                "vfs: session {session_id} was not torn down: {}",
+                e.message()
+            );
         }
     }
     Ok((session_id, exit))
@@ -550,7 +806,11 @@ pub async fn run_launch(
             exec: launch.exec.clone(),
             args: launch.args.clone(),
             wait: launch.wait,
-            env: launch.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            env: launch
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         })
         .await
         .map_err(|e| format!("Launch: {e}"))?
@@ -622,7 +882,10 @@ mod tests {
             .unwrap()
             .expect("a clean shutdown");
         assert!(registry.is_empty(), "shutdown must tear every session down");
-        assert!(!discovery.exists(), "shutdown must remove its discovery file");
+        assert!(
+            !discovery.exists(),
+            "shutdown must remove its discovery file"
+        );
     }
 
     /// `--source` and `--write-layer` must not be confusable: a source is
@@ -631,7 +894,7 @@ mod tests {
     /// one more mod directory instead of a copy-up target.
     #[test]
     fn write_layer_flag_declares_a_write_layer_not_a_source() {
-        let e = write_layer_flag_entry(r#"C:\mods\overwrite"#);
+        let e = write_layer_flag_entry(r#"C:\mods\overwrite"#).unwrap();
         assert!(e.write_layer, "the --write-layer flag must set the flag");
         assert_eq!(
             e.spec,
@@ -642,7 +905,11 @@ mod tests {
         assert_eq!(e.mount, "/", "a write layer covers the whole root");
         assert_eq!(e.root, 0);
         // The contrast that makes the assertion above mean something.
-        assert!(!parse_source_flag(r#"disk:C:\mods\overwrite"#).unwrap().write_layer);
+        assert!(
+            !parse_source_flag(r#"disk:C:\mods\overwrite"#)
+                .unwrap()
+                .write_layer
+        );
         // …and the config it produces is one the daemon will accept.
         vfs_control::SessionConfig {
             sources: vec![e],
@@ -664,7 +931,13 @@ mod tests {
 
     #[test]
     fn parse_root_flag_rejects_malformed() {
-        for bad in ["Games=C:\\x", "x=Games=C:\\x", "0=C:\\x", "0==C:\\x", "0=Games="] {
+        for bad in [
+            "Games=C:\\x",
+            "x=Games=C:\\x",
+            "0=C:\\x",
+            "0==C:\\x",
+            "0=Games=",
+        ] {
             let e = parse_root_flag(bad).unwrap_err();
             assert!(e.contains("--root") && e.contains(bad), "{bad}: {e}");
         }
@@ -674,7 +947,10 @@ mod tests {
     fn root_flags_must_declare_root_zero() {
         assert!(root_flag_entries(&[]).unwrap().is_empty());
         let e = root_flag_entries(&["1=Docs=C:\\docs".to_string()]).unwrap_err();
-        assert_eq!(e, "--root: declare root 0 too; --source and --write-layer target root 0");
+        assert_eq!(
+            e,
+            "--root: declare root 0 too; --source and --write-layer target root 0"
+        );
         let ok = root_flag_entries(&[
             "0=Games=C:\\games".to_string(),
             "1=Docs=C:\\docs".to_string(),
@@ -740,17 +1016,257 @@ mod tests {
     #[test]
     fn parse_source_flag_layer() {
         let e = parse_source_flag("layer:prof").unwrap();
-        assert_eq!(e.spec, vfs_control::SourceSpec::Layer { name: "prof".into() });
+        assert_eq!(
+            e.spec,
+            vfs_control::SourceSpec::Layer {
+                name: "prof".into()
+            }
+        );
         assert_eq!(e.mount, "/");
         assert!(!e.write_layer);
     }
 
     #[test]
     fn write_layer_flag_entry_layer_prefix_builds_a_layer() {
-        let e = write_layer_flag_entry("layer:prof");
-        assert_eq!(e.spec, vfs_control::SourceSpec::Layer { name: "prof".into() });
+        let e = write_layer_flag_entry("layer:prof").unwrap();
+        assert_eq!(
+            e.spec,
+            vfs_control::SourceSpec::Layer {
+                name: "prof".into()
+            }
+        );
         assert!(e.write_layer);
-        let d = write_layer_flag_entry("C:/scratch");
+        let d = write_layer_flag_entry("C:/scratch").unwrap();
         assert!(matches!(d.spec, vfs_control::SourceSpec::Disk { .. }));
+    }
+
+    /// `layer:` with no name would reach the daemon as a layer called "",
+    /// which `Storage::layer` would happily create. Refused at parse time.
+    #[test]
+    fn an_empty_layer_name_is_refused_by_both_flags() {
+        for flag in ["layer:", "layer:@/"] {
+            let e = parse_source_flag(flag).unwrap_err();
+            assert!(e.contains("layer name"), "{flag}: {e}");
+        }
+        let e = write_layer_flag_entry("layer:").unwrap_err();
+        assert!(
+            e.contains("layer name") && e.contains("--write-layer"),
+            "{e}"
+        );
+    }
+
+    /// `--storage-dir`, then `VFS_STORAGE_DIR`, then `<home>/storage`: the
+    /// home is `VFS_HOME`, then XDG/HOME on unix and LOCALAPPDATA on Windows.
+    #[test]
+    fn storage_dir_resolution_order() {
+        use std::collections::HashMap;
+        use std::ffi::OsString;
+        let env = |pairs: &[(&str, &str)]| {
+            let m: HashMap<String, OsString> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), OsString::from(v)))
+                .collect();
+            move |k: &str| m.get(k).cloned()
+        };
+        let p = |s: &str| PathBuf::from(s);
+        let all = env(&[
+            (vfs_env::STORAGE_DIR, "/env/storage"),
+            (vfs_env::HOME, "/vfs-home"),
+            ("XDG_DATA_HOME", "/xdg"),
+            ("HOME", "/home/u"),
+            ("LOCALAPPDATA", "/lad"),
+        ]);
+        for windows in [false, true] {
+            let flag = p("/flag/storage");
+            assert_eq!(
+                storage_dir_for(Some(&flag), &all, windows),
+                Some(flag.clone())
+            );
+            assert_eq!(
+                storage_dir_for(None, &all, windows),
+                Some(p("/env/storage"))
+            );
+            let vfs_home = env(&[(vfs_env::HOME, "/vfs-home"), ("HOME", "/home/u")]);
+            assert_eq!(
+                storage_dir_for(None, &vfs_home, windows),
+                Some(p("/vfs-home").join("storage"))
+            );
+            assert_eq!(storage_dir_for(None, &env(&[]), windows), None);
+        }
+        // Unix: XDG, then HOME; LOCALAPPDATA is not consulted.
+        let rest = env(&[
+            ("XDG_DATA_HOME", "/xdg"),
+            ("HOME", "/home/u"),
+            ("LOCALAPPDATA", "/lad"),
+        ]);
+        assert_eq!(
+            storage_dir_for(None, &rest, false),
+            Some(p("/xdg").join("aether-vfs").join("storage"))
+        );
+        assert_eq!(
+            storage_dir_for(
+                None,
+                &env(&[("HOME", "/home/u"), ("LOCALAPPDATA", "/lad")]),
+                false
+            ),
+            Some(p("/home/u").join(".local/share/aether-vfs").join("storage"))
+        );
+        assert_eq!(
+            storage_dir_for(None, &env(&[("LOCALAPPDATA", "/lad")]), false),
+            None
+        );
+        // Windows: LOCALAPPDATA wins over HOME and XDG.
+        assert_eq!(
+            storage_dir_for(None, &rest, true),
+            Some(p("/lad").join("aether-vfs").join("storage"))
+        );
+        assert_eq!(
+            storage_dir_for(None, &env(&[("HOME", "/home/u")]), true),
+            None
+        );
+    }
+
+    /// Two CLIs auto-spawn at once: ours loses the storage lock and exits,
+    /// while the winner comes up at the same discovery path. The loser must
+    /// connect to the winner, not report its own daemon's exit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_spawned_daemon_that_lost_the_race_yields_to_the_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let discovery = dir.path().join("discovery.json");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        // The winner: started a moment after "our" child has already exited.
+        let winner = {
+            let discovery = discovery.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                serve_daemon_until(
+                    DEFAULT_BIND.parse().unwrap(),
+                    discovery,
+                    SessionRegistry::new(),
+                    async {
+                        let _ = stopped.await;
+                    },
+                )
+                .await
+            })
+        };
+        let start = std::time::Instant::now();
+        let got = wait_for_spawned_with(
+            &discovery,
+            || Ok(Some("exit status: 1".to_string())),
+            Duration::from_secs(15),
+        )
+        .await;
+        assert!(got.is_ok(), "must connect to the winner: {:?}", got.err());
+        assert!(start.elapsed() < Duration::from_secs(5));
+        stop.send(()).unwrap();
+        winner.await.unwrap().unwrap();
+    }
+
+    /// Our daemon exited and nobody else came up: the error, with the log,
+    /// arrives after the short grace window, not the full timeout.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_spawned_daemon_that_exited_alone_reports_its_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let discovery = dir.path().join("discovery.json");
+        std::fs::write(daemon_log_path(&discovery), "cannot open storage at X").unwrap();
+        let start = std::time::Instant::now();
+        let e = wait_for_spawned_with(
+            &discovery,
+            || Ok(Some("exit status: 1".to_string())),
+            Duration::from_secs(15),
+        )
+        .await
+        .expect_err("no daemon: an error");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(
+            e.contains("daemon exited (exit status: 1)") && e.contains("cannot open storage"),
+            "{e}"
+        );
+    }
+
+    /// A storage directory another daemon holds is refused with an error that
+    /// names the directory and the way to pick another.
+    #[test]
+    fn a_locked_storage_dir_is_refused_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = open_daemon_storage(dir.path(), None).expect("first open");
+        let e = open_daemon_storage(dir.path(), None)
+            .err()
+            .expect("second open refused");
+        assert!(
+            e.contains(&dir.path().display().to_string())
+                && e.contains("--storage-dir")
+                && e.contains("another vfs daemon"),
+            "{e}"
+        );
+        drop(held);
+    }
+
+    /// Only a lock asks about another daemon: a directory that is a file is a
+    /// different failure and must not be blamed on one.
+    #[test]
+    fn only_a_locked_storage_dir_blames_another_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        let e = open_daemon_storage(&file, None)
+            .err()
+            .expect("a file is refused");
+        assert!(
+            e.contains("--storage-dir") && !e.contains("another vfs daemon"),
+            "{e}"
+        );
+    }
+
+    /// `--cache-max-gib 0` is refused rather than silently making every
+    /// cached block evictable at once.
+    #[test]
+    fn a_zero_cache_budget_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = open_daemon_storage(dir.path(), Some(0))
+            .err()
+            .expect("0 refused");
+        assert!(e.contains("--cache-max-gib"), "{e}");
+        assert!(open_daemon_storage(dir.path(), Some(1)).is_ok());
+    }
+
+    /// The shutdown drain closes the storage after the sessions (which hold
+    /// its layer providers) are gone, so the directory is free again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_closes_the_storage_after_the_drain() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_dir = dir.path().join("storage");
+        let discovery = dir.path().join("discovery.json");
+        let registry = SessionRegistry::with_storage(
+            open_daemon_storage(&store_dir, None).expect("open storage"),
+        );
+        let s = registry.create("drain-layer".into()).unwrap();
+        registry.set_layer_write_layer(&s.id, 0, "drained").unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_daemon_until(
+            DEFAULT_BIND.parse().unwrap(),
+            discovery.clone(),
+            registry,
+            async {
+                let _ = stopped.await;
+            },
+        ));
+        wait_for_daemon(&discovery, Duration::from_secs(10))
+            .await
+            .expect("the daemon comes up");
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(20), server)
+            .await
+            .expect("the daemon stops")
+            .unwrap()
+            .expect("a clean shutdown");
+        let reopened = open_daemon_storage(&store_dir, None)
+            .expect("the drain must have released the storage directory");
+        assert_eq!(reopened.layers().unwrap()[0].name, "drained");
     }
 }

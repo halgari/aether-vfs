@@ -762,14 +762,15 @@ impl Session {
     /// leaves the session exactly as it was rather than parking an unusable
     /// provider that would make every later `mount` on this root fail too.
     ///
-    /// **Never wrap the upper in a [`crate::CachingProvider`].** A host is
-    /// expected to put slow sources behind the block cache (spec §8b) and it
-    /// is natural to do that uniformly, in one loop, over everything it
-    /// mounts. The write layer is the one provider in the graph whose bytes
-    /// change underneath the director: a cached read of a file that was just
-    /// copied up serves the pre-write content, and the symptom is a game
-    /// reading back its own edit as the original. `vfs-directord` caches every
-    /// source and exempts the layer here for that reason.
+    /// **Never wrap the upper in [`crate::Storage::cached`].** A host is
+    /// expected to put slow sources behind the cache and it is natural to do
+    /// that uniformly, in one loop, over everything it mounts. The write
+    /// layer is the one provider in the graph whose bytes change underneath
+    /// the director: a cached read of a file that was just copied up would
+    /// serve the pre-write content. (`Storage::cached` returns a mutable
+    /// provider unchanged, so a writable upper is not cached in practice; a
+    /// named layer from [`crate::Storage::layer`] is the upper as it is.)
+    /// `vfs-directord` caches every source and never the layer.
     pub fn set_write_layer_at(&self, root: RootId, upper: Arc<dyn Provider>) -> Result<(), i32> {
         if upper.capabilities().access != Access::ReadWrite {
             return Err(bad_request());

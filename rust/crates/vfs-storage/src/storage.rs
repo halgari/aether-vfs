@@ -42,6 +42,12 @@ pub enum StorageError {
 }
 
 impl StorageError {
+    /// Whether another `Storage` (in this or another process) holds the
+    /// directory: what [`Storage::open`] fails with when it is taken.
+    pub fn is_locked(&self) -> bool {
+        matches!(self, StorageError::Store(vfs_block_store::Error::Locked))
+    }
+
     /// The `vfs_provider` status a provider should answer with.
     ///
     /// The directory refusals match `vfs-compose`'s `MemoryProvider`: removing
@@ -102,6 +108,17 @@ impl From<std::io::Error> for StorageError {
     fn from(e: std::io::Error) -> Self {
         StorageError::Io(e)
     }
+}
+
+/// What [`Storage::close`] managed: whether the directory is released now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseOutcome {
+    /// The store is closed and the directory lock released.
+    Released,
+    /// Everything was flushed, but `refs` references (this one included) were
+    /// alive, so the store stays open and the directory locked until the last
+    /// of them drops.
+    StillShared { refs: usize },
 }
 
 /// The block store, used as pull-through cache and layer storage: one per
@@ -203,12 +220,13 @@ impl Storage {
     /// store and releases the directory.
     ///
     /// If other references to this `Storage` are still alive, everything is
-    /// flushed the same way and `Ok` is returned, but the store stays open and
-    /// the directory stays locked until the last reference drops (the store
-    /// closes itself on drop); a warning is logged. Every layer provider and
-    /// cached source holds such a reference, so a caller that must reopen the
-    /// directory (in this process or another) drops those first.
-    pub fn close(self: Arc<Self>) -> Result<(), StorageError> {
+    /// flushed the same way and `Ok(StillShared)` is returned, but the store
+    /// stays open and the directory stays locked until the last reference
+    /// drops (the store closes itself on drop); a warning is logged. Every
+    /// layer provider and cached source holds such a reference, so a caller
+    /// that must reopen the directory (in this process or another) drops
+    /// those first.
+    pub fn close(self: Arc<Self>) -> Result<CloseOutcome, StorageError> {
         // A background eviction holds a reference; let it finish.
         self.wait_for_eviction();
         self.commit_access()?;
@@ -218,15 +236,16 @@ impl Storage {
                 let Storage { store, catalog, .. } = s;
                 store.close()?;
                 drop(catalog);
-                Ok(())
+                Ok(CloseOutcome::Released)
             }
             Err(still_shared) => {
+                let refs = Arc::strong_count(&still_shared);
                 tracing::warn!(
-                    refs = Arc::strong_count(&still_shared),
+                    refs,
                     "Storage::close with other references alive: flushed, but the \
                      directory stays locked until the last one drops"
                 );
-                Ok(())
+                Ok(CloseOutcome::StillShared { refs })
             }
         }
     }
@@ -322,10 +341,11 @@ mod tests {
     fn storage_opens_twice_in_sequence_but_not_concurrently() {
         let dir = tempfile::tempdir().unwrap();
         let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
-        assert!(
-            Storage::open(dir.path(), StorageConfig::default()).is_err(),
-            "the block store lock must hold"
-        );
+        let e = Storage::open(dir.path(), StorageConfig::default())
+            .err()
+            .expect("the block store lock must hold");
+        assert!(e.is_locked(), "{e}");
+        assert!(!StorageError::Catalog("x".into()).is_locked());
         s.close().unwrap();
         Storage::open(dir.path(), StorageConfig::default()).unwrap();
     }
@@ -347,9 +367,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
         let other = Arc::clone(&s);
-        s.close().unwrap();
+        assert_eq!(s.close().unwrap(), CloseOutcome::StillShared { refs: 2 });
         assert!(Storage::open(dir.path(), StorageConfig::default()).is_err());
         drop(other);
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert_eq!(s.close().unwrap(), CloseOutcome::Released);
         Storage::open(dir.path(), StorageConfig::default()).unwrap();
     }
 

@@ -6,8 +6,9 @@ These figures come from `spike-node/`, a throwaway cargo workspace built for
 stage 4 task 5 to answer one question before the `aethervfs` addon was designed:
 *how expensive is it to serve a provider call from JavaScript?* The spike was
 deleted once its findings had all landed — the deadlock guard it motivated is in
-`vfs-node/src/jsprovider.rs`, the `vfs-cache` defect it stumbled onto is fixed
-and regression-tested in `vfs-cache/tests/`, and the addon itself supersedes the
+`vfs-node/src/jsprovider.rs`, the `vfs-cache` defect it stumbled onto was fixed
+and regression-tested in `vfs-cache/tests/` (that crate has since been deleted,
+replaced by `vfs-storage`), and the addon itself supersedes the
 bench harness. What could not be re-derived from anything that remains is the
 **bare round-trip number**, so it is written down here.
 
@@ -78,9 +79,10 @@ It was its own cargo workspace, listed in neither `rust/`'s `members` nor its
 `exclude`, so nothing in the workspace ever compiled it — while it held a path
 dependency on `vfs-embed`, the crate whose surface changed in every task of stage
 4. Its `spike.node` output was gitignored, so a fresh clone could not run the
-benchmark even by hand. Its `cache-cost` binary is superseded by
-`vfs-cache/tests/hit_scaling_cost.rs` and `hit_copy_cost.rs` — which CI runs, but
-in **debug**, not the release configuration these figures came from. See the
+benchmark even by hand. Its `cache-cost` binary was superseded by
+`vfs-cache/tests/hit_scaling_cost.rs` and `hit_copy_cost.rs` — which CI ran, but
+in **debug**, not the release configuration these figures came from. Both went
+with `vfs-cache` when it was deleted. See the
 correction in [block-cache-hit-cost.md](./block-cache-hit-cost.md).
 
 See [block-cache-hit-cost.md](./block-cache-hit-cost.md) for the defect it found

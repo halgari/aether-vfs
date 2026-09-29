@@ -2012,13 +2012,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vfs-cache"
-version = "0.1.0"
-dependencies = [
- "vfs-provider",
-]
-
-[[package]]
 name = "vfs-compose"
 version = "0.1.0"
 dependencies = [
@@ -2081,7 +2074,6 @@ dependencies = [
  "tokio-stream",
  "toml",
  "tonic",
- "vfs-cache",
  "vfs-compose",
  "vfs-control",
  "vfs-director",
@@ -2097,7 +2089,6 @@ dependencies = [
 name = "vfs-embed"
 version = "0.1.0"
 dependencies = [
- "vfs-cache",
  "vfs-compose",
  "vfs-director",
  "vfs-env",
@@ -2106,6 +2097,7 @@ dependencies = [
  "vfs-proton",
  "vfs-provider",
  "vfs-shim",
+ "vfs-storage",
  "vfs-zip",
 ]
 

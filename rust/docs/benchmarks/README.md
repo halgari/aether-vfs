@@ -12,7 +12,7 @@ Numbers for the director FUSE control ring (shared-memory RPC) and related delta
 | [phase12-game-buffer-delta.md](./phase12-game-buffer-delta.md) | Into-game-buffer path notes (bulk preferred) |
 | [load-debug-vs-release.md](./load-debug-vs-release.md) | Real game load: time-to-window, debug vs release |
 | [hollow-removal.md](./hollow-removal.md) | Launch cost with and without process hollowing |
-| [block-cache-hit-cost.md](./block-cache-hit-cost.md) | `vfs-cache` hit path: 110x at the default block size, and why the sweep flattened |
+| [block-cache-hit-cost.md](./block-cache-hit-cost.md) | `vfs-cache` hit path: 110x at the default block size, and why the sweep flattened. **Historical** — `vfs-cache` is deleted; its RAM store lives on as `vfs-storage`'s RAM tier |
 | [node-ffi-round-trip.md](./node-ffi-round-trip.md) | Node ↔ Rust provider round trip: 1.7–2.0 µs. **Historical** — the harness is gone, but see the two below |
 | [node-binding-surface.md](./node-binding-surface.md) | The `aethervfs` binding's performance surface, held by `pnpm bench` as a tiered gate. Includes a live `main → worker` crossing figure (22.3 µs against a recorded 47 µs) |
 | [node-typescript-js-layer.md](./node-typescript-js-layer.md) | Did the TypeScript migration cost anything? No — 3.9 ns on a forwarded property read, and 1.00–1.02x on everything that crosses into Rust |
@@ -33,6 +33,10 @@ superseded by the tests below). What holds those numbers now is these two tests:
 ```powershell
 cargo test -p vfs-cache --release --test hit_copy_cost --test hit_scaling_cost
 ```
+
+**`vfs-cache` has since been deleted** (replaced by `vfs-storage`, whose RAM
+tier is its ported sharded CLOCK store, unit tests included); these two tests
+went with it and the command above no longer runs.
 
 `hit_copy_cost` is deterministic and allocation-counted; `hit_scaling_cost`
 measures wall-clock ratios and documents its own thresholds and known limits.

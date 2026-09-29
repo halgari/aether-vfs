@@ -221,8 +221,8 @@ Any language can implement `vfs-source/proto/source.proto` (`Source` service).
 | Provider contract, capabilities, conformance suite | `vfs-provider` |
 | Provider builders, gRPC SourceService | `vfs-source` |
 | Layered / router / overlay (read) | `vfs-compose` |
-| Block cache (RAM + disk) | `vfs-cache` |
-| Deduplicating, compressing block store (replaces `vfs-cache` next) | `vfs-block-store` |
+| Storage: pull-through cache for slow sources, named persistent write layers | `vfs-storage` |
+| Deduplicating, compressing block store (under `vfs-storage`) | `vfs-block-store` |
 | Director kernel + ring server + staging | `vfs-director` |
 | Inject / shim / payload | `vfs-inject`, `vfs-shim`, `vfs-payload` |
 
