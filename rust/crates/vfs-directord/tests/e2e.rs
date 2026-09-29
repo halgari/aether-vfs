@@ -3949,8 +3949,8 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
     .expect("copy fixture");
     std::fs::write(content.path().join("hello.txt"), b"hello").unwrap();
 
-    // Root 0's location: a fresh path that does not exist yet (the session
-    // creates it), so fixture.exe is graph-only relative to it.
+    // Root 0's location: a fresh path that does not exist yet (the first
+    // launch creates it), so fixture.exe is graph-only relative to it.
     let base = tempfile::tempdir().expect("base tempdir");
     let loc = base.path().join("Game").to_string_lossy().replace('/', "\\");
     assert!(!Path::new(&loc).exists());
@@ -3986,25 +3986,45 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
         args: vec![],
         wait: true,
         env: [
-            (
-                "VFS_FIXTURE_PATH".to_string(),
-                format!(r"{loc}\hello.txt"),
-            ),
+            ("VFS_FIXTURE_PATH".to_string(), format!(r"{loc}\hello.txt")),
             ("VFS_FIXTURE_EXPECT".to_string(), "5".to_string()),
         ]
         .into_iter()
         .collect(),
     };
 
-    let by_name = vfs_directord::run_launch(&mut client, &id, &launch_with(r"{Game}\fixture.exe".into()))
-        .await
-        .expect("launch by root name");
+    // Bounded like `drain_launch_events`: `run_launch` itself waits forever, and
+    // this test holds LAUNCH_LOCK.
+    let stall = |which: &str| -> String {
+        format!(
+            "launch {which} stalled after {:?}; raise VFS_TEST_LAUNCH_TIMEOUT_SECS \
+             if this machine is merely slow",
+            launch_timeout()
+        )
+    };
+
+    let by_name = tokio::time::timeout(
+        launch_timeout(),
+        vfs_directord::run_launch(&mut client, &id, &launch_with(r"{Game}\fixture.exe".into())),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{}", stall(r"{Game}\fixture.exe")))
+    .expect("launch by root name");
     assert_eq!(by_name, Some(0), "{{Game}}\\fixture.exe should stage and exit 0");
 
-    let by_path = vfs_directord::run_launch(&mut client, &id, &launch_with(format!(r"{loc}\fixture.exe")))
-        .await
-        .expect("launch by absolute path");
-    assert_eq!(by_path, Some(0), "absolute path inside root 0 should stage and exit 0");
+    let abs = format!(r"{loc}\fixture.exe");
+    let by_path = tokio::time::timeout(
+        launch_timeout(),
+        vfs_directord::run_launch(&mut client, &id, &launch_with(abs.clone())),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{}", stall(&abs)))
+    .expect("launch by absolute path");
+    assert_eq!(
+        by_path,
+        Some(0),
+        "absolute path inside root 0 should stage and exit 0"
+    );
 
     client
         .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
