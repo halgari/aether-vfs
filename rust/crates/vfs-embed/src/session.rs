@@ -1429,6 +1429,7 @@ impl Session {
             arena_len: ipc.arena_len,
             payload_cap: ipc.payload_cap,
             virtual_dir: wine_root,
+            virtual_roots: Vec::new(),
             args: opts.args.clone(),
         };
 

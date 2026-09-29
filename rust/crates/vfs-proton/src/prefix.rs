@@ -37,6 +37,11 @@ pub enum PrefixError {
     /// this can't be avoided by architecture choice — only by installing the
     /// packages.
     Missing32Bit,
+    /// Another live launch holds this prefix's lock.
+    Busy(PathBuf),
+    /// A root location that cannot be linked into the prefix (not on `C:`,
+    /// contains `..`, is the drive root, or is occupied by a real file).
+    BadLocation(String),
 }
 
 impl std::fmt::Display for PrefixError {
@@ -45,6 +50,10 @@ impl std::fmt::Display for PrefixError {
             PrefixError::Io(e) => write!(f, "io error: {e}"),
             PrefixError::Wineboot(s) => write!(f, "wineboot failed: {s}"),
             PrefixError::NotGe(s) => write!(f, "runtime is not GE-Proton: {s}"),
+            PrefixError::Busy(d) => {
+                write!(f, "prefix {} is in use by another live launch", d.display())
+            }
+            PrefixError::BadLocation(s) => write!(f, "bad root location {s}"),
             PrefixError::Missing32Bit => write!(
                 f,
                 "wineboot needs a 32-bit runtime: install lib32-glibc and \
@@ -58,7 +67,11 @@ impl std::error::Error for PrefixError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             PrefixError::Io(e) => Some(e),
-            PrefixError::Wineboot(_) | PrefixError::NotGe(_) | PrefixError::Missing32Bit => None,
+            PrefixError::Wineboot(_)
+            | PrefixError::NotGe(_)
+            | PrefixError::Missing32Bit
+            | PrefixError::Busy(_)
+            | PrefixError::BadLocation(_) => None,
         }
     }
 }
@@ -128,7 +141,95 @@ fn run_wineboot(runtime: &Path, prefix_dir: &Path) -> Result<(), PrefixError> {
     Err(PrefixError::Wineboot(combined))
 }
 
+/// Held for one launch; the OS releases the lock when the file closes.
+#[derive(Debug)]
+pub struct PrefixLock(#[allow(dead_code)] std::fs::File);
+
+#[cfg(unix)]
+fn make_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn make_symlink(_target: &Path, _link: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "root links are a unix (Wine) concept only",
+    ))
+}
+
+/// Deletes `root.sessions()/<session>` — prefix and all. Absent is fine.
+pub fn remove_session(root: &Root, session: &str) -> io::Result<()> {
+    let dir = root
+        .try_session_dir(session)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+    match std::fs::remove_dir_all(&dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
 impl Prefix {
+    /// Links `location` (a `C:\…` path, as the program sees it) to `target` on
+    /// the host, creating missing parent directories under `drive_c`. Returns
+    /// the host path of the link.
+    ///
+    /// Replaces an existing **symlink** (a relaunch relinks), and refuses to
+    /// touch anything else: a persistent prefix may hold a user's own files
+    /// at that path, and a root is never placed over them.
+    pub fn link_location(&self, location: &str, target: &Path) -> Result<PathBuf, PrefixError> {
+        let bad = |why: &str| PrefixError::BadLocation(format!("{location}: {why}"));
+        let norm = location.replace('/', "\\");
+        let rest = norm
+            .strip_prefix("C:\\")
+            .or_else(|| norm.strip_prefix("c:\\"))
+            .ok_or_else(|| bad("a root location must be on drive C: (C:\\...)"))?;
+        let comps: Vec<&str> = rest.split('\\').filter(|c| !c.is_empty() && *c != ".").collect();
+        if comps.is_empty() {
+            return Err(bad("the drive root itself cannot be a root location"));
+        }
+        if comps.contains(&"..") {
+            return Err(bad("'..' is not allowed"));
+        }
+        let mut link = self.drive_c();
+        for c in &comps {
+            link.push(c);
+        }
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::symlink_metadata(&link) {
+            Ok(m) if m.file_type().is_symlink() => std::fs::remove_file(&link)?,
+            Ok(_) => {
+                return Err(bad(&format!(
+                    "{} already exists in the prefix as a real file or directory; a root \
+                     cannot be placed over it",
+                    link.display()
+                )))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        make_symlink(target, &link)?;
+        Ok(link)
+    }
+
+    /// An exclusive lock on this prefix for the duration of one launch, so two
+    /// live sessions cannot relink the same roots under each other.
+    pub fn lock(&self) -> Result<PrefixLock, PrefixError> {
+        std::fs::create_dir_all(&self.dir)?;
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.dir.join(".aether-vfs.lock"))?;
+        match f.try_lock() {
+            Ok(()) => Ok(PrefixLock(f)),
+            Err(std::fs::TryLockError::WouldBlock) => Err(PrefixError::Busy(self.dir.clone())),
+            Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+        }
+    }
+
     /// `<prefix>/drive_c`, the root of the Windows-visible filesystem.
     pub fn drive_c(&self) -> PathBuf {
         self.dir.join("drive_c")
@@ -252,5 +353,64 @@ mod tests {
         std::os::unix::fs::symlink("/", dd.join("z:")).unwrap();
         p.unmap_drive('z').unwrap();
         assert!(!dd.join("z:").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_location_creates_parents_and_links() {
+        let p = Prefix { dir: scratch("ll") };
+        let target = scratch("ll-target");
+        let link = p.link_location(r"C:\Games\Fixture", &target).unwrap();
+        assert_eq!(link, p.drive_c().join("Games").join("Fixture"));
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        // Relinking (a relaunch) replaces our own symlink.
+        let target2 = scratch("ll-target2");
+        p.link_location("c:/Games/Fixture/", &target2).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), target2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_location_refuses_to_replace_a_real_directory() {
+        let p = Prefix { dir: scratch("ll-real") };
+        let real = p.drive_c().join("Games").join("Mine");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("keep.txt"), b"keep").unwrap();
+        let err = p.link_location(r"C:\Games\Mine", &scratch("ll-t")).unwrap_err();
+        assert!(matches!(err, PrefixError::BadLocation(_)), "{err}");
+        assert!(real.join("keep.txt").is_file(), "a real directory must never be removed");
+    }
+
+    #[test]
+    fn link_location_refuses_other_drives_and_dot_dot() {
+        let p = Prefix { dir: scratch("ll-bad") };
+        for bad in [r"D:\Games", r"C:\a\..\b", r"C:\", "Games", r"\\srv\share\x"] {
+            assert!(
+                matches!(p.link_location(bad, Path::new("/tmp")), Err(PrefixError::BadLocation(_))),
+                "{bad} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_lock_is_busy_and_the_lock_is_released_on_drop() {
+        let p = Prefix { dir: scratch("lock") };
+        let held = p.lock().unwrap();
+        assert!(matches!(p.lock(), Err(PrefixError::Busy(_))));
+        drop(held);
+        p.lock().expect("the lock must be released on drop");
+    }
+
+    #[test]
+    fn remove_session_deletes_only_that_session() {
+        let base = scratch("rm");
+        let root = Root::at(base.clone());
+        let a = root.try_session_dir("a").unwrap();
+        let b = root.try_session_dir("b").unwrap();
+        std::fs::create_dir_all(a.join("prefix")).unwrap();
+        std::fs::create_dir_all(b.join("prefix")).unwrap();
+        remove_session(&root, "a").unwrap();
+        assert!(!a.exists() && b.exists());
+        remove_session(&root, "a").expect("removing an absent session is not an error");
     }
 }

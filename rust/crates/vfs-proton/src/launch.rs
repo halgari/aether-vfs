@@ -81,6 +81,10 @@ pub struct WineLaunch {
     pub payload_cap: u32,
     /// The managed root as Wine sees it (`C:\…`) — root 0 for the shim.
     pub virtual_dir: String,
+    /// Roots beyond root 0, `(id, location as Wine sees it)`. Sent as
+    /// `VFS_VIRTUAL_ROOTS` in the format `IpcServe::apply_env_roots` writes on
+    /// Windows, so the shim's parser is shared.
+    pub virtual_roots: Vec<(u32, String)>,
     /// Arguments for the target, passed after `--`.
     pub args: Vec<String>,
 }
@@ -189,7 +193,8 @@ pub fn command_line(l: &WineLaunch) -> (String, Vec<String>) {
 /// - `VFS_SERVER_EV` / `VFS_CLIENT_EV` — a Wine event cannot wake a native
 ///   Linux Director, so `connect_source` does not even consult them on the
 ///   file path (it passes a null event on purpose; the Director spins).
-/// - `VFS_VIRTUAL_ROOTS` — single-root launches only, for now.
+///
+/// `VFS_VIRTUAL_ROOTS` is set iff there are extra roots.
 ///
 /// `VFS_ARENA_OFFSET` *is* exported even though today's client derives the
 /// offset from the ring header: it is what the working `vfs-serve-fb` run
@@ -212,6 +217,15 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
     env.insert(vfs_env::ARENA_OFFSET.to_string(), l.arena_offset.to_string());
     env.insert(vfs_env::ARENA_LEN.to_string(), l.arena_len.to_string());
     env.insert(vfs_env::VIRTUAL_DIR.to_string(), l.virtual_dir.clone());
+    if !l.virtual_roots.is_empty() {
+        let spec = l
+            .virtual_roots
+            .iter()
+            .map(|(id, loc)| format!("{id}={loc}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        env.insert(vfs_env::VIRTUAL_ROOTS.to_string(), spec);
+    }
     env
 }
 
@@ -225,7 +239,8 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
 
     let (prog, argv) = command_line(l);
     let mut cmd = std::process::Command::new(&prog);
-    cmd.args(&argv).envs(launch_env(l));
+    let env = launch_env(l);
+    cmd.args(&argv).envs(&env);
     // Explicitly unset the transport variables this launch does not use.
     //
     // `Command::envs` *adds to* the parent environment, so a host process that
@@ -236,13 +251,10 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
     // point the child's root map somewhere this session never chose. That is
     // the same stale-value hazard `IpcServe::apply_env_roots` clears with
     // `remove_var`, and it applies here for the same reason.
-    for stale in [
-        "VFS_RING_SECTION",
-        "VFS_SERVER_EV",
-        "VFS_CLIENT_EV",
-        "VFS_VIRTUAL_ROOTS",
-    ] {
-        cmd.env_remove(stale);
+    for stale in ["VFS_RING_SECTION", "VFS_SERVER_EV", "VFS_CLIENT_EV", "VFS_VIRTUAL_ROOTS"] {
+        if !env.contains_key(stale) {
+            cmd.env_remove(stale);
+        }
     }
     let status = cmd
         .status()
@@ -385,8 +397,25 @@ mod tests {
             arena_len: 33_554_432,
             payload_cap: 1_048_576,
             virtual_dir: r"C:\probe\managed".to_string(),
+            virtual_roots: vec![],
             args: vec!["-arg1".to_string(), "arg2".to_string()],
         }
+    }
+
+    #[test]
+    fn extra_roots_travel_in_the_windows_format() {
+        let mut l = sample();
+        l.virtual_roots = vec![(1, r"C:\users\steamuser\Saves".into()), (2, r"C:\x".into())];
+        let env = launch_env(&l);
+        assert_eq!(
+            env.get("VFS_VIRTUAL_ROOTS").map(String::as_str),
+            Some(r"1=C:\users\steamuser\Saves;2=C:\x")
+        );
+    }
+
+    #[test]
+    fn no_extra_roots_means_no_root_map() {
+        assert!(!launch_env(&sample()).contains_key("VFS_VIRTUAL_ROOTS"));
     }
 
     #[test]
