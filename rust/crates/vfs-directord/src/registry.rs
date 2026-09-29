@@ -475,14 +475,15 @@ impl SessionRegistry {
     ///
     /// Root 0 may be declared too: it moves where the program sees root 0,
     /// replacing the daemon's default, and the session summary's `root`
-    /// (always root 0's location) becomes the declared one.
+    /// (always root 0's location) becomes the declared one. On Linux that is
+    /// root 0's location in the prefix (still backed by the session's own
+    /// directory); on Windows it is root 0's host directory, and the launch
+    /// republishes the shim's config with it — see
+    /// [`vfs_embed::Session::launch`].
     ///
     /// On unix a location `launch` could not link into the Wine prefix is
     /// refused here ([`Session::check_root_location`]), and nothing is
-    /// recorded. On Linux that is root 0's location in
-    /// the prefix (still backed by the session's own directory); on Windows
-    /// it is root 0's host directory, and the launch republishes the shim's
-    /// config with it — see [`vfs_embed::Session::launch`].
+    /// recorded.
     pub fn declare_root(
         &self,
         session_id: &str,
@@ -490,7 +491,7 @@ impl SessionRegistry {
         path: &Path,
         name: &str,
     ) -> Result<(), String> {
-        // On Linux a location is a `C:\\…` path the launch links into the
+        // On Linux a location is a `C:\…` path the launch links into the
         // Wine prefix; one it could not link (another drive, a host path, the
         // drive root, `..`) is refused here, at `vfs up`, rather than at the
         // first `vfs exec`.
@@ -724,7 +725,7 @@ impl SessionRegistry {
 }
 
 /// Root 0's location as the launched program sees it: the declared one, else
-/// the default — the daemon's host directory on Windows, `C:\\vfs-session\\root`
+/// the default — the daemon's host directory on Windows, `C:\vfs-session\root`
 /// on Linux.
 fn root0_location(session: &Session) -> PathBuf {
     session

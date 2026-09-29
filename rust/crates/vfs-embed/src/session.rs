@@ -521,7 +521,7 @@ impl Session {
         }
     }
 
-    /// Unix: whether `location` is one `launch` can link a root at — a `C:\\…`
+    /// Unix: whether `location` is one `launch` can link a root at — a `C:\…`
     /// path below the drive root, without `..`
     /// ([`vfs_proton::prefix::parse_location`], the rule `launch` itself
     /// applies). [`Session::declare_root`] stays infallible, so a host that
@@ -2313,9 +2313,9 @@ mod launch_image_tests {
     #[cfg(unix)]
     #[test]
     fn check_root_location_applies_the_link_rule() {
-        Session::check_root_location(r"C:\\Games\\Fixture").unwrap();
+        Session::check_root_location(r"C:\Games\Fixture").unwrap();
         Session::check_root_location("c:/users/steamuser/Saves").unwrap();
-        for bad in [r"D:\\Games", "/tmp/host-dir", r"C:\\", r"C:\\a\\..\\b", "Games"] {
+        for bad in [r"D:\Games", "/tmp/host-dir", r"C:\", r"C:\a\..\b", "Games"] {
             let e = Session::check_root_location(bad).unwrap_err();
             assert!(e.contains("bad root location") && e.contains(bad), "{bad}: {e}");
         }
