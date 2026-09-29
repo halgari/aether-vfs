@@ -8,6 +8,8 @@
 mod catalog;
 mod config;
 mod ids;
+mod layer;
+mod layer_io;
 mod ram;
 mod storage;
 

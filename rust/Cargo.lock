@@ -2292,6 +2292,7 @@ dependencies = [
  "tracing",
  "uuid",
  "vfs-block-store",
+ "vfs-compose",
  "vfs-core",
  "vfs-provider",
 ]
