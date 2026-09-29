@@ -24,7 +24,7 @@ pub enum Access {
 /// This exists because two delivery paths disagreed about the spelling a
 /// provider receives: the shim folds a vpath before sending it
 /// (`vfs-redirect`'s `match_canonical`), while a host-side caller
-/// (`vfs-embed`, `vfs-node`, this crate's conformance suite) sends the
+/// (`vfs-embed`, this crate's conformance suite) sends the
 /// original case. A provider that resolves fold-equal names identically is
 /// correct under both, which is why the guarantee lives here rather than at
 /// either boundary.
