@@ -61,6 +61,12 @@ pub struct CacheStats {
     pub cached_logical_bytes: u64,
     /// Fetched blocks the store failed to write (they were still served).
     pub store_write_errors: u64,
+    /// Store reads of cached blocks that failed (a damaged store); the
+    /// source served those blocks instead.
+    pub store_read_errors: u64,
+    /// Opens served straight from the source, uncached, because their cache
+    /// file could not be opened.
+    pub bypassed_opens: u64,
 }
 
 /// One in-flight fetch: the block, and whether it came from the store after
@@ -96,6 +102,8 @@ pub(crate) struct CacheState {
     /// Readers that joined another reader's fetch instead of starting one.
     pub(crate) coalesced_waits: AtomicU64,
     store_write_errors: AtomicU64,
+    store_read_errors: AtomicU64,
+    bypassed_opens: AtomicU64,
     /// A background eviction is running (or about to).
     pub(crate) evicting: AtomicBool,
     /// Eviction runs started (a test counter for the back-off).
@@ -111,6 +119,12 @@ pub(crate) struct CacheState {
     /// The "stays over target" warning fired in the current stuck episode
     /// (cleared by a run that reaches its target).
     pub(crate) warned_stuck: AtomicBool,
+    /// Test hook: every store read of a cached block fails.
+    #[cfg(test)]
+    pub(crate) fail_store_reads: AtomicBool,
+    /// Test hook: the next `cache_acquire` fails.
+    #[cfg(test)]
+    pub(crate) fail_acquire: AtomicBool,
     /// Test hook: run by the next eviction right after it has read the
     /// catalog and the access log.
     #[cfg(test)]
@@ -152,12 +166,18 @@ impl CacheState {
             bytes_from_source: AtomicU64::new(0),
             coalesced_waits: AtomicU64::new(0),
             store_write_errors: AtomicU64::new(0),
+            store_read_errors: AtomicU64::new(0),
+            bypassed_opens: AtomicU64::new(0),
             evicting: AtomicBool::new(false),
             eviction_runs: AtomicU64::new(0),
             evict_threads: Mutex::new(Vec::new()),
             evict_lock: Mutex::new(()),
             stuck_since: Mutex::new(None),
             warned_stuck: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_store_reads: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_acquire: AtomicBool::new(false),
             #[cfg(test)]
             after_snapshot: Mutex::new(None),
         }
@@ -218,6 +238,8 @@ impl Storage {
             ram_bytes: ram.bytes,
             cached_logical_bytes: c.cached_logical.load(Ordering::Relaxed),
             store_write_errors: c.store_write_errors.load(Ordering::Relaxed),
+            store_read_errors: c.store_read_errors.load(Ordering::Relaxed),
+            bypassed_opens: c.bypassed_opens.load(Ordering::Relaxed),
         }
     }
 
@@ -228,6 +250,12 @@ impl Storage {
     /// never read leaves nothing behind.
     fn cache_acquire(&self, hash: &[u8; 16]) -> Result<(), StorageError> {
         let id = cache_file_id(hash);
+        #[cfg(test)]
+        if self.cache.fail_acquire.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected acquire failure",
+            )));
+        }
         let mut counts = lock(&self.cache.open_counts);
         *counts.entry(id).or_insert(0) += 1;
         let r = (|| {
@@ -441,7 +469,7 @@ impl CachedSource {
             s.cache.ram_hits.fetch_add(1, Ordering::Relaxed);
             return Ok((d, true));
         }
-        if let Some(d) = self.read_stored(f, b)? {
+        if let Some(d) = self.read_stored(f, b) {
             return Ok((d, true));
         }
         let key = (f.id, b);
@@ -467,24 +495,44 @@ impl CachedSource {
         got
     }
 
-    fn read_stored(&self, f: &CachedFile, b: u64) -> Result<Option<Arc<[u8]>>, i32> {
+    /// Block `b` of `f` from the store, if it holds it. A store that fails
+    /// the read (it is damaged) is a miss, not an error: the cache is a copy,
+    /// and the source still has the block.
+    fn read_stored(&self, f: &CachedFile, b: u64) -> Option<Arc<[u8]>> {
         let s = &*self.storage;
         let bs = s.block_size();
         let len = bs.min(f.size - b * bs) as usize;
         let mut buf = vec![0u8; len];
-        let r = match s.store.read(&f.id, b * bs, &mut buf) {
+        #[cfg(test)]
+        let r = if s.cache.fail_store_reads.load(Ordering::SeqCst) {
+            Err(vfs_block_store::Error::Corrupt(
+                "injected read failure".into(),
+            ))
+        } else {
+            s.store.read(&f.id, b * bs, &mut buf)
+        };
+        #[cfg(not(test))]
+        let r = s.store.read(&f.id, b * bs, &mut buf);
+        let r = match r {
             Ok(r) => r,
             // Not stored yet: the first fetch creates it.
-            Err(vfs_block_store::Error::NotFound) => return Ok(None),
-            Err(e) => return Err(StorageError::from(e).to_status()),
+            Err(vfs_block_store::Error::NotFound) => return None,
+            Err(e) => {
+                s.cache.store_read_errors.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    error = %e, block = b,
+                    "reading a cached block failed; fetching it from the source"
+                );
+                return None;
+            }
         };
         if !r.missing.is_empty() || r.bytes != len {
-            return Ok(None);
+            return None;
         }
         let d: Arc<[u8]> = buf.into();
         s.cache.store_hits.fetch_add(1, Ordering::Relaxed);
         s.ram.put(&f.id, b, Arc::clone(&d));
-        Ok(Some(d))
+        Some(d)
     }
 
     /// Fetches block `b` whole from the source, stores it and returns it. Runs
@@ -492,7 +540,7 @@ impl CachedSource {
     fn fetch(&self, f: &CachedFile, inner: Handle, b: u64) -> Result<(Arc<[u8]>, bool), i32> {
         // A fetch that finished between our store miss and our joining the
         // in-flight map has already stored the block.
-        if let Some(d) = self.read_stored(f, b)? {
+        if let Some(d) = self.read_stored(f, b) {
             return Ok((d, true));
         }
         let s = &*self.storage;
@@ -588,18 +636,25 @@ impl Provider for CachedSource {
                     &st.mtime.to_le_bytes(),
                 );
                 match self.storage.cache_acquire(&hash) {
-                    Ok(()) => {}
+                    Ok(()) => Some(CachedFile {
+                        hash,
+                        id: cache_file_id(&hash),
+                        size,
+                    }),
+                    // A damaged cache must not fail an open the source can
+                    // serve: this handle passes through, uncached.
                     Err(e) => {
-                        tracing::warn!(error = %e, path = p.rel, "opening a cache file failed");
-                        let _ = self.inner.close(inner);
-                        return Err(e.to_status());
+                        self.storage
+                            .cache
+                            .bypassed_opens
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            error = %e, path = p.rel,
+                            "opening a cache file failed; serving this open uncached"
+                        );
+                        None
                     }
                 }
-                Some(CachedFile {
-                    hash,
-                    id: cache_file_id(&hash),
-                    size,
-                })
             }
         };
         let h = self.next.fetch_add(1, Ordering::Relaxed);
@@ -1117,6 +1172,38 @@ mod tests {
         assert_eq!(rows[0].1.logical_bytes, BS as u64);
         assert_eq!(s.store.file_ids().unwrap().len(), 1);
         assert_eq!(s.cache_stats().cached_logical_bytes, BS as u64);
+    }
+
+    /// A damaged cache is bypassed, not fatal: a store read that fails, or a
+    /// cache file that cannot be opened, is served by the (healthy) source
+    /// and counted.
+    #[test]
+    fn a_damaged_cache_falls_back_to_the_source() {
+        let (s, _d) = temp_storage_with(StorageConfig {
+            ram_tier_bytes: 0, // every hit goes to the store
+            ..small_cfg()
+        });
+        let body = pattern(3 * BS, 7);
+        let src = slow(MapSource::with(&[("a", body.clone())]));
+        let p = s.cached(src.clone(), key());
+        assert_eq!(read_all(&p, "a"), body);
+
+        s.cache.fail_store_reads.store(true, Ordering::SeqCst);
+        let before = src.reads();
+        assert_eq!(read_all(&p, "a"), body);
+        assert!(src.reads() > before, "the source served the reads");
+        assert!(
+            s.cache_stats().store_read_errors >= 3,
+            "{:?}",
+            s.cache_stats()
+        );
+        s.cache.fail_store_reads.store(false, Ordering::SeqCst);
+
+        s.cache.fail_acquire.store(true, Ordering::SeqCst);
+        let before = src.reads();
+        assert_eq!(read_all(&p, "a"), body);
+        assert!(src.reads() > before, "served uncached");
+        assert_eq!(s.cache_stats().bypassed_opens, 1);
     }
 
     #[test]
