@@ -109,8 +109,8 @@ pub struct LaunchOpts {
     /// launch also needs `vfs-injector.exe`, and it has no field of its own:
     /// it is looked for **beside `shim_dll`** when that is set, and otherwise
     /// beside `current_exe()` — the one directory `cargo build` puts all three
-    /// in. None of the three can be built on Linux, so a missing one is
-    /// reported by name (see `locate_wine_artifacts`) rather than surfacing as
+    /// in. On Linux they are a separate Windows cross-build
+    /// (`bin/build-windows`), so a missing one is reported by name (see `locate_wine_artifacts`) rather than surfacing as
     /// a path error out of `wine`.
     pub shim_dll: Option<String>,
     pub payload_dll: Option<String>,
@@ -1662,10 +1662,10 @@ fn join_wine(base: &str, rel: &Path) -> Result<String, String> {
 /// The three Windows binaries a Proton launch needs, resolved and checked, or
 /// a message naming exactly which are missing.
 ///
-/// **None of them can be built on Linux** — `vfs-injector.exe`,
-/// `vfs_shim_dll.dll` and `vfs_payload.dll` are Windows targets — so this
-/// resolves what a host has copied in rather than producing anything, and says
-/// so in the failure. [`LaunchOpts::shim_dll`] / [`LaunchOpts::payload_dll`]
+/// `vfs-injector.exe`, `vfs_shim_dll.dll` and `vfs_payload.dll` are Windows
+/// targets, cross-built separately from the Linux host (`bin/build-windows`,
+/// which copies them beside the Linux binaries) — so this resolves what is
+/// already there rather than producing anything, and says so in the failure. [`LaunchOpts::shim_dll`] / [`LaunchOpts::payload_dll`]
 /// win when set; the documented default location is the directory holding
 /// `shim_dll` if only that is set, else the directory holding
 /// `current_exe()`. The injector has no `LaunchOpts` field of its own (adding
@@ -1708,10 +1708,10 @@ fn locate_wine_artifacts(opts: &LaunchOpts) -> Result<(PathBuf, PathBuf, PathBuf
         .collect();
     if !missing.is_empty() {
         return Err(format!(
-            "launch: these Windows artifacts are missing, and none of them can be built on \
-             Linux: {}. Build them on Windows (`cargo build -p vfs-inject -p vfs-shim`), copy \
-             all three into {}, or set LaunchOpts.shim_dll and LaunchOpts.payload_dll to \
-             where they are (vfs-injector.exe is then looked for beside shim_dll).",
+            "launch: these Windows artifacts are missing: {}. Cross-build them with \
+             `bin/build-windows` (which copies them beside the Linux binaries), put all three \
+             in {}, or set LaunchOpts.shim_dll and LaunchOpts.payload_dll to where they are \
+             (vfs-injector.exe is then looked for beside shim_dll).",
             missing.join(", "),
             base.display()
         ));

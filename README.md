@@ -30,6 +30,32 @@ cargo build -p vfs-directord -p vfs-shim-dll -p vfs-fixture-read
 cargo build --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
 ```
 
+### Linux (Proton)
+
+On Linux the game is still a Windows program, and so is the shim: it is injected
+into the game inside GE-Proton's Wine, while the Director runs natively on Linux
+and serves it over a file-backed ring. So the Windows half is cross-built, and
+the Linux half is plain `cargo`:
+
+```bash
+# one-time toolchain (Arch; other distros: clang, lld, llvm)
+sudo pacman -S --needed clang lld llvm
+rustup target add x86_64-pc-windows-msvc
+cargo install --locked cargo-xwin
+
+bin/build-windows                       # injector, shim, payload, fixture -> rust/target/debug/
+cd rust && cargo run -p vfs-proton -- install   # verified GE-Proton under ~/.local/share/aether-vfs
+
+# end to end: a Windows fixture under Proton reads a file only the Linux Director serves
+cargo test -p vfs-embed --test proton_launch -- --ignored
+```
+
+The first `bin/build-windows` downloads the MSVC CRT and Windows SDK via
+`cargo-xwin` (accepting Microsoft's license). Wine also needs a 32-bit loader
+(`lib32-glibc`, `lib32-gcc-libs` on Arch). Windows-only crates (`vfs-inject`,
+`vfs-shim`, `vfs-directord`, …) do not build for a Linux *host*, so a bare
+`cargo build --workspace` on Linux fails; build the Linux crates by name.
+
 ### Daemon + CLI (`vfs`)
 
 ```powershell

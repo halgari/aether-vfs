@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Cross-build the Windows half of the Proton path from Linux: the injector, the
+# shim DLL, the payload DLL and the read fixture. They run inside Wine; the
+# Director that serves them is native Linux and is built by plain `cargo`.
+#
+# The artifacts are copied beside the Linux binaries in target/<profile>/,
+# which is where `Session::launch` (and the proton_launch e2e test) looks for
+# them by default.
+#
+# Needs: rustup target x86_64-pc-windows-msvc, cargo-xwin, clang, lld, llvm.
+# The first run downloads the MSVC CRT and Windows SDK into ~/.cache/cargo-xwin
+# (XWIN_ACCEPT_LICENSE=1 accepts Microsoft's license for that download).
+#
+# Usage: bin/build-windows [--release]
+set -euo pipefail
+cd "$(dirname "$0")/../rust"
+
+target=x86_64-pc-windows-msvc
+profile=debug
+flags=()
+if [[ "${1:-}" == "--release" ]]; then
+  profile=release
+  flags=(--release)
+fi
+
+export XWIN_ACCEPT_LICENSE=1
+cargo xwin build "${flags[@]}" --target "$target" \
+  -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read
+# vfs-payload is its own workspace (panic=abort, no CRT), so it builds apart.
+cargo xwin build "${flags[@]}" --target "$target" \
+  --manifest-path crates/vfs-payload/Cargo.toml --target-dir target
+
+src="target/$target/$profile"
+dst="target/$profile"
+mkdir -p "$dst"
+for f in vfs-injector.exe vfs_shim_dll.dll vfs_payload.dll vfs-fixture-read.exe; do
+  cp -f "$src/$f" "$dst/$f"
+  echo "  $dst/$f"
+done
