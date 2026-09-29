@@ -175,6 +175,62 @@ real directory at a root location is refused, never replaced — and so is a
 symlink aether-vfs did not create (the ones it did are listed in the prefix's
 `.aether-vfs-links`).
 
+#### Storage: the source cache and named layers
+
+The daemon keeps one storage directory, a deduplicating, compressing block
+store (`vfs-storage`), which holds two things:
+
+- **A pull-through cache** for sources that declare themselves **immutable and
+  slow**. Today that means a remote (gRPC) source that declares both; an HTTP
+  source will, once it exists. The first read of a file fetches its blocks
+  from the source, and later reads, in this session or any later one, are
+  served from the store. Local `disk` and `zip` sources are never cached,
+  because the OS page cache already serves them and a mod folder you edit must
+  not go stale. The reference `vfs-source-plugin` serves a disk directory and
+  declares it mutable, so it is not cached either. A cached file is keyed by
+  the source (its remote endpoint, or `cache_key = "..."` on its `[[source]]`
+  to pin one), its path, its size and its version (the source's file id, else
+  its mtime). If the file changes on the source, the new version is fetched
+  rather than served stale. The cache has a budget, `--cache-max-gib` (default
+  32). Past it, the least recently used files are evicted until it is back
+  under 90%.
+- **Named layers**: persistent write layers. A root's write layer can be a
+  layer instead of a directory. The session's writes (saves, edited INIs,
+  copied-up files) land in the store under that name and survive `vfs down`
+  and a daemon restart. A file is durable once the program closes it. Layer
+  data never counts against the cache budget and is never evicted.
+
+```toml
+[[source]]
+type = "layer"
+name = "skyrim-profile-a"   # created on first use
+root = 1
+write_layer = true          # a layer source is always the write layer
+```
+
+With flags: `vfs launch ... --write-layer layer:skyrim-profile-a`
+(`--write-layer DIR` still means a disk directory).
+
+Layers are managed through the daemon, which holds the store:
+
+```sh
+vfs layer list                          # NAME, file count, bytes
+vfs layer export skyrim-profile-a DIR   # write it out as plain files (DIR empty or absent)
+vfs layer import DIR new-profile        # create a layer from a tree (NAME must not exist)
+vfs layer delete skyrim-profile-a       # refused while a live session writes into it
+vfs stats                               # second line: layers, pack/live bytes, cached bytes
+```
+
+**Where it lives:** `--storage-dir DIR` on `vfs daemon`, else
+`$VFS_STORAGE_DIR`, else `$VFS_HOME/storage`. `VFS_HOME` defaults to
+`$XDG_DATA_HOME/aether-vfs` or `~/.local/share/aether-vfs` on Linux, and
+`%LOCALAPPDATA%\aether-vfs` on Windows. Only one daemon can use a storage
+directory at a time. A second daemon pointed at the same directory refuses to
+start, and says so. A daemon that a `vfs` command auto-spawns takes no flags,
+so choose its directory with `VFS_STORAGE_DIR` in that command's environment.
+If an auto-spawned daemon cannot start, the command reports why, and the
+daemon's stderr is in `<discovery file>.daemon.log`.
+
 ## Embedding
 
 **`vfs-embed` is the seam.** It owns one session — its roots, the provider graph

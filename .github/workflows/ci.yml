@@ -230,6 +230,11 @@ jobs:
       - name: Proton end-to-end (Windows fixture under Wine, Linux Director)
         run: timeout 900 cargo test -p vfs-embed --test proton_launch -- --ignored --nocapture
         working-directory: rust
-      - name: vfs CLI end to end (vfs up + vfs exec under Proton)
+      # Both `#[ignore]`d tests in the file: the disk write layer, and the
+      # named storage layer (`type = "layer"`) whose save must survive `vfs
+      # down` and a daemon restart and come back out through `vfs layer
+      # export`. Each sets `VFS_STORAGE_DIR` to its own temp directory, so no
+      # daemon here touches `$VFS_HOME/storage`.
+      - name: vfs CLI end to end (vfs up + vfs exec under Proton, disk and layer write layers)
         run: timeout 900 cargo test -p vfs-directord --test proton_cli -- --ignored --nocapture
         working-directory: rust
