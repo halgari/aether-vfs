@@ -260,9 +260,19 @@ impl SessionConfig {
             return Ok(());
         }
         let mut seen = std::collections::HashSet::new();
+        let mut names: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
         for r in &self.roots {
             if !seen.insert(r.id) {
                 return Err(format!("duplicate [[root]] id {}", r.id));
+            }
+            if !r.name.is_empty() {
+                if let Some(prev) = names.insert(r.name.to_ascii_lowercase(), &r.name) {
+                    return Err(format!(
+                        "[[root]] names {:?} and {:?} collide; root names are matched \
+                         case-insensitively (they are what {{Name}} in a launch path refers to)",
+                        prev, r.name
+                    ));
+                }
             }
         }
         for entry in &self.sources {
@@ -303,6 +313,25 @@ pub fn load(path: impl AsRef<Path>) -> Result<SessionConfig, ConfigError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn validate_roots_rejects_duplicate_root_names_case_insensitively() {
+        let cfg: SessionConfig = toml::from_str(
+            r#"
+[[root]]
+id = 0
+name = "Games"
+path = 'C:\Games\X'
+[[root]]
+id = 1
+name = "games"
+path = 'C:\Other'
+"#,
+        )
+        .unwrap();
+        let e = cfg.validate_roots().unwrap_err();
+        assert!(e.contains("Games") && e.contains("games"), "{e}");
+    }
+
     use super::*;
 
     #[test]
