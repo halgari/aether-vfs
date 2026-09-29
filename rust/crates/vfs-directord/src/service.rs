@@ -184,9 +184,20 @@ impl Director for DirectorService {
             .registry
             .resolve_session(&req.into_inner().session_id)
             .map_err(Status::not_found)?;
-        self.registry
-            .teardown(&id)
-            .map_err(Status::not_found)?;
+        // Dropping the session can block for seconds on Linux (stopping a
+        // prefix's `wineserver`, deleting an anonymous prefix): off the
+        // async executor.
+        let registry = self.registry.clone();
+        tokio::task::spawn_blocking(move || registry.teardown(&id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| {
+                if e.starts_with("unknown session") {
+                    Status::not_found(e)
+                } else {
+                    Status::failed_precondition(e)
+                }
+            })?;
         Ok(Response::new(Empty {}))
     }
 

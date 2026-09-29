@@ -12,8 +12,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use vfs_control::pb::{Empty, HealthReq, TeardownReq};
 use vfs_directord::{
-    apply_session_config, connect_or_spawn, default_discovery_path, parse_source_flag,
-    root_flag_entries, run_launch, serve_daemon, DEFAULT_BIND,
+    apply_session_config, connect_or_spawn, default_discovery_path, launch_one_shot,
+    parse_source_flag, root_flag_entries, run_launch, serve_daemon, DEFAULT_BIND,
 };
 
 /// The `vfs` control CLI + daemon.
@@ -217,7 +217,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                         }),
                         cache: None,
                     };
-                    let (session_id, exit) = apply_session_config(&mut client, &cfg).await?;
+                    let (session_id, exit) = launch_one_shot(&mut client, &cfg).await?;
                     println!("session {session_id}");
                     Ok(exit_code(exit))
                 }

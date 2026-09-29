@@ -147,14 +147,54 @@ async fn wait_for_daemon(
     Err(last_err)
 }
 
-/// Run the tonic director server until shutdown (or forever).
-///
-/// Binds `bind` (use `127.0.0.1:0` for ephemeral), writes the discovery file,
-/// then serves. Removes the discovery file on clean exit when it still names
-/// this process.
+/// Run the tonic director server until SIGINT/SIGTERM (Ctrl-C on Windows),
+/// then drain it — see [`serve_daemon_until`].
 pub async fn serve_daemon(
     bind: SocketAddr,
     discovery_path: PathBuf,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    serve_daemon_until(bind, discovery_path, SessionRegistry::new(), shutdown_signal()).await
+}
+
+/// Resolves on the first SIGINT or SIGTERM (unix) / Ctrl-C (Windows). If the
+/// handler cannot be installed it never resolves — the daemon then runs until
+/// killed, as it always did.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) {
+            (Ok(mut term), Ok(mut int)) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = int.recv() => {}
+                }
+            }
+            _ => std::future::pending::<()>().await,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Run the tonic director server over `registry` until `shutdown` resolves.
+///
+/// Binds `bind` (use `127.0.0.1:0` for ephemeral), writes the discovery file,
+/// then serves. On shutdown it stops accepting, lets in-flight requests
+/// finish (a waited launch included — its session is dropped when it
+/// returns), **drains the registry** ([`SessionRegistry::teardown_all`], so
+/// every session's `Drop` runs: on Linux that removes root links and deletes
+/// anonymous Wine prefixes, which a killed process would leak), and finally
+/// removes the discovery file if it still names this process.
+pub async fn serve_daemon_until(
+    bind: SocketAddr,
+    discovery_path: PathBuf,
+    registry: SessionRegistry,
+    shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let local = listener.local_addr()?;
@@ -170,14 +210,22 @@ pub async fn serve_daemon(
     eprintln!("vfs daemon listening on {endpoint} (pid {pid})");
     eprintln!("discovery file: {}", discovery_path.display());
 
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
+    let svc = DirectorService::new(registry.clone());
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
     let result = Server::builder()
         .add_service(vfs_control::pb::director_server::DirectorServer::new(svc))
-        .serve_with_incoming(incoming)
+        .serve_with_incoming_shutdown(incoming, shutdown)
         .await;
+
+    // Dropping a session can block for seconds (stopping a prefix's
+    // `wineserver`, deleting a ~600 MB prefix), so off the async executor.
+    let drained = tokio::task::spawn_blocking(move || registry.teardown_all())
+        .await
+        .unwrap_or(0);
+    if drained > 0 {
+        eprintln!("vfs daemon: tore down {drained} session(s) on shutdown");
+    }
 
     // Best-effort cleanup if we still own the discovery file.
     if let Ok(d) = read_discovery(&discovery_path) {
@@ -442,6 +490,34 @@ async fn configure_session(
     }
 }
 
+/// The one-shot `vfs launch`: apply `cfg` (a fresh session plus its launch)
+/// and, when that launch was **waited**, tear the session down again once it
+/// has returned — success or failure. Nothing can launch into a one-shot
+/// session afterwards, so keeping it would only hold its name and, on Linux,
+/// its anonymous Wine prefix (~600 MB) until the daemon exits. A `--no-wait`
+/// launch leaves it up: the program may still be running in it.
+///
+/// A failure before or during the launch already tears the session down
+/// ([`apply_session_config`]); a teardown that fails here is reported on
+/// stderr, and the launch's own outcome is still returned.
+pub async fn launch_one_shot(
+    client: &mut DirectorClient<Channel>,
+    cfg: &vfs_control::SessionConfig,
+) -> Result<(String, Option<i32>), String> {
+    let (session_id, exit) = apply_session_config(client, cfg).await?;
+    if cfg.launch.as_ref().is_some_and(|l| l.wait) {
+        if let Err(e) = client
+            .teardown_session(vfs_control::pb::TeardownReq {
+                session_id: session_id.clone(),
+            })
+            .await
+        {
+            eprintln!("vfs: session {session_id} was not torn down: {}", e.message());
+        }
+    }
+    Ok((session_id, exit))
+}
+
 /// Launch `launch` in the live session `session_id` (an id or a session
 /// name) and follow its event stream to the end, reporting each event on
 /// stderr. Returns the child's exit code when the stream carried one.
@@ -493,6 +569,48 @@ pub async fn run_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The daemon's shutdown path (what SIGTERM/SIGINT drive in
+    /// `serve_daemon`), driven here by a oneshot: once `shutdown` resolves,
+    /// the server stops, every live session is torn down — so its `Drop`
+    /// runs, which on Linux is what deletes an anonymous prefix — and the
+    /// discovery file naming this process is removed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_drains_the_registry_and_removes_the_discovery_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let discovery = dir.path().join("discovery.json");
+        let registry = SessionRegistry::new();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_daemon_until(
+            DEFAULT_BIND.parse().unwrap(),
+            discovery.clone(),
+            registry.clone(),
+            async {
+                let _ = stopped.await;
+            },
+        ));
+
+        let mut client = wait_for_daemon(&discovery, Duration::from_secs(10))
+            .await
+            .expect("the daemon comes up");
+        for name in ["drain-named", ""] {
+            client
+                .create_session(vfs_control::pb::CreateSessionReq { name: name.into() })
+                .await
+                .expect("create session");
+        }
+        assert_eq!(registry.len(), 2);
+        drop(client);
+
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("the daemon stops once shutdown resolves")
+            .unwrap()
+            .expect("a clean shutdown");
+        assert!(registry.is_empty(), "shutdown must tear every session down");
+        assert!(!discovery.exists(), "shutdown must remove its discovery file");
+    }
 
     /// `--source` and `--write-layer` must not be confusable: a source is
     /// content, a write layer is where writes land. The flag that reaches the

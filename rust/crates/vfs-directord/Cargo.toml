@@ -36,7 +36,7 @@ vfs-protocol = { path = "../vfs-protocol" }
 # root's junction to its real target in `skyrim-live` — see that binary's
 # `resolve_second_root_target`.
 vfs-win = { path = "../vfs-win" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util", "signal"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14"
 prost = "0.14"

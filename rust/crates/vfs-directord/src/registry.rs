@@ -652,6 +652,30 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// Tear every live session down — the daemon's shutdown drain, so each
+    /// `Session`'s `Drop` runs (on Linux: root links removed, anonymous Wine
+    /// prefixes deleted) instead of being skipped by process exit. Returns
+    /// how many sessions it removed.
+    ///
+    /// Unlike [`Self::teardown`] this never refuses: a session still running a
+    /// launch is removed from the registry all the same, and is dropped by
+    /// that launch's own thread when the launch returns (it holds the last
+    /// reference). Sessions are dropped after the map lock is released.
+    pub fn teardown_all(&self) -> usize {
+        let entries: Vec<Arc<SessionEntry>> = match self.inner.lock() {
+            Ok(mut map) => map.drain().map(|(_, e)| e).collect(),
+            Err(p) => p.into_inner().drain().map(|(_, e)| e).collect(),
+        };
+        let n = entries.len();
+        for entry in entries {
+            if let Ok(mut live) = entry.live.try_lock() {
+                live.session.stop_serve();
+            }
+            drop(entry);
+        }
+        n
+    }
+
     /// The production launch entrypoint (`DirectorService::launch` → here,
     /// the same path `vfs launch --exec` and scenario-TOML `[launch] exec =`
     /// drive). `opts.image` here names a VFS vpath, not an already-staged
@@ -1162,6 +1186,22 @@ root = 1
         holder.join().unwrap();
         reg.teardown(&busy.id).expect("torn down once the operation ends");
         assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn teardown_all_removes_and_drops_every_session() {
+        let reg = SessionRegistry::new();
+        let a = reg.create("drain-a".into()).unwrap();
+        reg.create(String::new()).unwrap();
+        // Hold a clone of one session's entry, as a launch in flight does, to
+        // observe when the registry lets go of it.
+        let held = reg.entry(&a.id).unwrap();
+        assert_eq!(Arc::strong_count(&held), 2);
+        assert_eq!(reg.teardown_all(), 2);
+        assert!(reg.is_empty());
+        assert!(reg.list().unwrap().is_empty());
+        assert_eq!(Arc::strong_count(&held), 1, "the registry must drop its reference");
+        assert_eq!(reg.teardown_all(), 0, "draining an empty registry is a no-op");
     }
 
     fn toml_quote(s: &str) -> String {
