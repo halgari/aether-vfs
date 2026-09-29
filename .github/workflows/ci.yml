@@ -140,7 +140,7 @@ jobs:
       # non-ignored tests run on any Linux box; its one Wine test is
       # `#[ignore]`d and run by `proton-linux`.
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton -p vfs-embed
+        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord
         working-directory: rust
       # The director kernel itself, which stopped being Windows-only in
       # increment 1 of the Linux port. Its own unit tests run here; its ring
@@ -215,4 +215,7 @@ jobs:
         working-directory: rust
       - name: Proton end-to-end (Windows fixture under Wine, Linux Director)
         run: timeout 900 cargo test -p vfs-embed --test proton_launch -- --ignored --nocapture
+        working-directory: rust
+      - name: vfs CLI end to end (vfs up + vfs exec under Proton)
+        run: timeout 900 cargo test -p vfs-directord --test proton_cli -- --ignored --nocapture
         working-directory: rust
