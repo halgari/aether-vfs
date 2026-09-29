@@ -111,6 +111,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod image;
 mod session;
 mod sources;
 
