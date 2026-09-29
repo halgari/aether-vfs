@@ -5,12 +5,15 @@
 //! cached files' eviction bookkeeping), and a [`RamTier`] of decompressed
 //! blocks. See `docs/superpowers/specs/2026-09-29-vfs-storage-design.md`.
 
+mod cached;
 mod catalog;
 mod config;
+mod evict;
 mod ids;
 mod ram;
 mod storage;
 
+pub use cached::{CacheStats, SourceKey};
 pub use catalog::{CacheRec, Catalog, EntryRec};
 pub use config::StorageConfig;
 pub use ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Guid, StoreIdKind};

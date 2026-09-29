@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use vfs_block_store::BlockStore;
 
+use crate::cached::CacheState;
 use crate::catalog::Catalog;
 use crate::config::StorageConfig;
 use crate::ram::RamTier;
@@ -103,10 +104,10 @@ impl From<std::io::Error> for StorageError {
 pub struct Storage {
     pub(crate) store: BlockStore,
     pub(crate) catalog: Catalog,
-    // Read by the cache and layer providers, which land in later changes.
-    #[allow(dead_code)]
     pub(crate) ram: RamTier,
     pub(crate) cfg: StorageConfig,
+    /// Pull-through cache bookkeeping shared by every cached source.
+    pub(crate) cache: CacheState,
 }
 
 impl Storage {
@@ -123,15 +124,22 @@ impl Storage {
         let store = BlockStore::open(dir, cfg.store.clone())?;
         let catalog = Catalog::open(&dir.join("catalog.redb"))?;
         let ram = RamTier::with_geometry(cfg.ram_tier_bytes, u64::from(cfg.store.block_size));
+        let cached_logical = catalog
+            .cache_all()?
+            .iter()
+            .map(|(_, r)| r.logical_bytes)
+            .sum();
         Ok(Arc::new(Storage {
             store,
             catalog,
             ram,
             cfg,
+            cache: CacheState::new(cached_logical),
         }))
     }
 
-    /// Flushes the store, then commits the catalog durably (in that order, so
+    /// Waits for a background eviction, commits batched cache access times,
+    /// flushes the store, then commits the catalog durably (in that order, so
     /// every durable catalog row references durable store data), then closes the
     /// store and releases the directory.
     ///
@@ -139,6 +147,9 @@ impl Storage {
     /// flushed the same way but the directory stays locked until the last one
     /// drops (the store closes itself on drop).
     pub fn close(self: Arc<Self>) -> Result<(), StorageError> {
+        // A background eviction holds a reference; let it finish.
+        self.wait_for_eviction();
+        self.commit_access()?;
         self.store.flush()?;
         self.catalog.commit_durable()?;
         match Arc::try_unwrap(self) {
