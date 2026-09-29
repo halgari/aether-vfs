@@ -1,7 +1,10 @@
 //! The `vfs` CLI end to end under GE-Proton: `vfs up` brings a named session
 //! up, `vfs exec` launches a Windows fixture into it, and the fixture reads
 //! content only the Linux Director serves and writes a save into a write
-//! layer. Then a second `vfs exec` proves the mappings are reused.
+//! layer. Then a second `vfs exec`, by the absolute path, launches into the
+//! same live session — its roots, links and prefix reused, not rebuilt. (The
+//! first exec staged `fixture.exe` into root 0, so the second finds a real file
+//! there and launches it as is: it does not exercise staging again.)
 //!
 //! Needs GE-Proton under `$VFS_HOME` and the `bin/build-windows` artifacts
 //! beside the `vfs` binary, so it is `#[ignore]`d; the `proton-linux` CI job
@@ -280,6 +283,9 @@ write_layer = true
         );
     }
 
+    // The absolute form into the same live session. The first exec's staged
+    // `fixture.exe` is still in root 0, so this takes the real-file branch —
+    // what it proves is that the session's mappings and prefix are reused.
     let mut args: Vec<&str> = vec!["exec", "--session", &name, "C:\\Games\\Fixture\\fixture.exe"];
     for e in read_env {
         args.extend(["--env", e]);

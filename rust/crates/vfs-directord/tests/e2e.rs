@@ -4021,11 +4021,14 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
     server.abort();
 }
 
-/// A rooted launch on Windows: `{Game}\fixture.exe` and the same image spelled
-/// as an absolute path inside root 0's location both resolve to the graph-only
+/// A rooted launch on Windows: `{Game}\fixture.exe` resolves to the graph-only
 /// `fixture.exe` (a copy living only in the disk source, absent from `loc`),
 /// which the session stages, and the launched process reads `hello.txt` through
-/// the injected shim at `<loc>\hello.txt`.
+/// the injected shim at `<loc>\hello.txt`. Then the same image spelled as an
+/// absolute path inside root 0's location launches too — but by then the first
+/// launch's staged copy is a real file at that path, so this second launch takes
+/// the **real-file** branch, not staging: it proves the absolute form resolves
+/// to the same root-0 vpath, not that it stages.
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
@@ -4127,7 +4130,7 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
     assert_eq!(
         by_path,
         Some(0),
-        "absolute path inside root 0 should stage and exit 0"
+        "absolute path inside root 0 (now the staged real file) should launch and exit 0"
     );
 
     client
