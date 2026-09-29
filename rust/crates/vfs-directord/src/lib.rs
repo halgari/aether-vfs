@@ -326,7 +326,8 @@ pub fn open_daemon_storage(dir: &Path, cache_max_gib: Option<u64>) -> Result<Arc
         + r.corrupt_files.len()
         + r.resized_rows.len()
         + r.orphans_deleted as usize
-        + r.cache_rows_dropped as usize;
+        + r.cache_rows_dropped as usize
+        + r.failed_repairs.len();
     if repaired > 0 {
         eprintln!(
             "vfs daemon: storage at {} was reconciled at open:",
@@ -349,6 +350,9 @@ pub fn open_daemon_storage(dir: &Path, cache_max_gib: Option<u64>) -> Result<Arc
         }
         if r.orphans_deleted > 0 {
             eprintln!("  {} unreferenced store file(s) deleted", r.orphans_deleted);
+        }
+        for what in &r.failed_repairs {
+            eprintln!("  repair failed (retried at the next open): {what}");
         }
         if r.cache_rows_dropped > 0 {
             eprintln!(

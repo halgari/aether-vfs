@@ -64,6 +64,33 @@ pub struct ReconcileReport {
     pub orphans_deleted: u64,
     /// Cache rows whose store file was missing, dropped.
     pub cache_rows_dropped: u64,
+    /// Repairs that failed and were skipped (logged at error level); the
+    /// next open tries them again. Each is a one-line description.
+    pub failed_repairs: Vec<String>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: every store repair (zero-fill, empty-file recreate,
+    /// compaction) fails on this thread.
+    pub(crate) static FAIL_REPAIRS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs the store repair `f`, with the test hook applied.
+fn repair<T>(f: impl FnOnce() -> Result<T, StorageError>) -> Result<T, StorageError> {
+    #[cfg(test)]
+    if FAIL_REPAIRS.with(std::cell::Cell::get) {
+        return Err(StorageError::Io(std::io::Error::other(
+            "injected repair failure",
+        )));
+    }
+    f()
+}
+
+/// Logs a failed repair at error level and records it in `report`.
+fn repair_failed(report: &mut ReconcileReport, what: String, e: &StorageError) {
+    tracing::error!(error = %e, "reconcile: {what} failed; left for the next open");
+    report.failed_repairs.push(format!("{what}: {e}"));
 }
 
 /// Blocks per `write_blocks` call when zero-filling.
@@ -151,10 +178,18 @@ pub(crate) fn reconcile(
                          with zeros"
                     );
                 }
-                for r in &fill {
-                    zero_fill(store, &id, r, info.len, bs)?;
+                let filled = fill
+                    .iter()
+                    .try_for_each(|r| repair(|| zero_fill(store, &id, r, info.len, bs)));
+                match filled {
+                    Ok(()) => report.zero_filled_files.push((lname.clone(), path.clone())),
+                    Err(e) => {
+                        repair_failed(&mut report, format!("zero-filling {lname}:{path}"), &e);
+                        // Its row keeps its length, for the same reason as a
+                        // corrupt file's below.
+                        continue;
+                    }
                 }
-                report.zero_filled_files.push((lname.clone(), path.clone()));
             }
             // A corrupt file keeps its row's length: taking the store's could
             // move the boundary below the hole and zero-fill it next time.
@@ -165,8 +200,14 @@ pub(crate) fn reconcile(
                         "layer file row length differs from the store's; using the store's"
                     );
                     rec.len = info.len;
-                    catalog.put(layer, &path, &rec, false)?;
-                    report.resized_rows.push((lname, path));
+                    match catalog.put(layer, &path, &rec, false) {
+                        Ok(()) => report.resized_rows.push((lname, path)),
+                        Err(e) => repair_failed(
+                            &mut report,
+                            format!("correcting the row length of {lname}:{path}"),
+                            &e,
+                        ),
+                    }
                 }
             }
             continue;
@@ -176,12 +217,17 @@ pub(crate) fn reconcile(
             "layer file data missing from the store (lost in a crash before a flush); \
              recreated empty"
         );
-        store.set_len(&id, 0)?;
-        if let Some(mut rec) = catalog.get(layer, &path)? {
-            rec.len = 0;
-            catalog.put(layer, &path, &rec, false)?;
+        let emptied = repair(|| Ok(store.set_len(&id, 0)?)).and_then(|()| {
+            if let Some(mut rec) = catalog.get(layer, &path)? {
+                rec.len = 0;
+                catalog.put(layer, &path, &rec, false)?;
+            }
+            Ok(())
+        });
+        match emptied {
+            Ok(()) => report.emptied_files.push((lname, path)),
+            Err(e) => repair_failed(&mut report, format!("recreating {lname}:{path} empty"), &e),
         }
-        report.emptied_files.push((lname, path));
     }
 
     for (h, _) in catalog.cache_all()? {
@@ -225,7 +271,13 @@ pub(crate) fn reconcile(
             files = report.orphans_deleted,
             "store files no catalog row references deleted"
         );
-        store.compact(CompactOptions::default())?;
+        if let Err(e) = repair(|| Ok(store.compact(CompactOptions::default())?)) {
+            repair_failed(
+                &mut report,
+                "compacting after the orphan deletes".into(),
+                &e,
+            );
+        }
     }
     // Spec §6 order: the store's half first, then the catalog's.
     let _gate = gate.write().unwrap_or_else(|e| e.into_inner());
@@ -751,6 +803,64 @@ mod tests {
         let k = Storage::open(killed.path(), cfg()).unwrap();
         assert!(k.catalog.layer_id("fresh").unwrap().is_some());
         drop(p);
+    }
+
+    /// A repair that fails (a zero-fill, recreating a lost file, the
+    /// compaction) is logged, reported and skipped: the store still opens,
+    /// and the next open repairs it.
+    #[test]
+    fn a_failed_repair_does_not_stop_the_store_opening() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("l").unwrap();
+        write_file(&p, "grown.bin", &vec![1u8; 2 * BS as usize]);
+        write_file(&p, "ok.bin", b"fine");
+        drop(p);
+        let lid = s.catalog.layer_id("l").unwrap().unwrap();
+        let grown = layer_file_id(&s.catalog.get(lid, "grown.bin").unwrap().unwrap().guid);
+        s.store.set_len(&grown, 4 * BS).unwrap(); // blocks 2, 3 to zero-fill
+        let lost = EntryRec {
+            name: "lost.bin".into(),
+            kind: KIND_FILE,
+            guid: new_guid(),
+            len: 10,
+            mtime: 1,
+        };
+        s.catalog.put(lid, "lost.bin", &lost, false).unwrap(); // to recreate empty
+        s.store.set_len(&layer_file_id(&new_guid()), 5).unwrap(); // an orphan: compaction
+        s.close().unwrap();
+
+        super::FAIL_REPAIRS.with(|f| f.set(true));
+        let s = Storage::open(d.path(), cfg());
+        super::FAIL_REPAIRS.with(|f| f.set(false));
+        let s = s.expect("a failed repair must not stop the open");
+        let r = s.last_reconcile().clone();
+        assert_eq!(r.failed_repairs.len(), 3, "{r:?}");
+        assert!(
+            r.zero_filled_files.is_empty() && r.emptied_files.is_empty(),
+            "{r:?}"
+        );
+        assert!(
+            r.resized_rows.is_empty(),
+            "an unfilled file keeps its row: {r:?}"
+        );
+        let p = s.layer("l").unwrap();
+        assert_eq!(read_file(&p, "ok.bin"), b"fine");
+        drop(p);
+        s.close().unwrap();
+
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let r = s.last_reconcile();
+        assert!(r.failed_repairs.is_empty(), "{r:?}");
+        assert_eq!(
+            r.zero_filled_files,
+            vec![("l".to_string(), "grown.bin".to_string())]
+        );
+        assert_eq!(
+            r.emptied_files,
+            vec![("l".to_string(), "lost.bin".to_string())]
+        );
+        assert_consistent(&s);
     }
 
     #[test]
