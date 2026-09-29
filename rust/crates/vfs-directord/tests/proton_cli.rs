@@ -6,6 +6,12 @@
 //! first exec staged `fixture.exe` into root 0, so the second finds a real file
 //! there and launches it as is: it does not exercise staging again.)
 //!
+//! Two variants: the save's write layer is a disk directory, or a named layer
+//! in the daemon's storage (`type = "layer"`), which must survive `vfs down`
+//! and a daemon restart and come back out with `vfs layer export`. Every
+//! daemon either starts gets `VFS_STORAGE_DIR` set to the run's own temp
+//! directory, never the user's `$VFS_HOME/storage`.
+//!
 //! Needs GE-Proton under `$VFS_HOME` and the `bin/build-windows` artifacts
 //! beside the `vfs` binary, so it is `#[ignore]`d; the `proton-linux` CI job
 //! runs it.
@@ -13,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(300);
@@ -152,10 +159,14 @@ impl Drop for Cleanup {
         pids.sort_unstable();
         pids.dedup();
         for pid in &pids {
-            let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+            let _ = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
         }
         let deadline = Instant::now() + Duration::from_secs(60);
-        while pids.iter().any(|p| Path::new(&format!("/proc/{p}")).exists())
+        while pids
+            .iter()
+            .any(|p| Path::new(&format!("/proc/{p}")).exists())
             && Instant::now() < deadline
         {
             std::thread::sleep(Duration::from_millis(100));
@@ -225,14 +236,46 @@ fn read_discovery_field(discovery: &Path, field: &str) -> Option<serde_json::Val
 }
 
 fn read_daemon_pid(discovery: &Path) -> Option<u32> {
-    read_discovery_field(discovery, "pid")?.as_u64().map(|p| p as u32)
+    read_discovery_field(discovery, "pid")?
+        .as_u64()
+        .map(|p| p as u32)
+}
+
+/// Where root 1's write layer — the one the fixture's save lands in — lives.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SaveLayer {
+    /// A disk directory (`type = "disk"`, `write_layer = true`).
+    Disk,
+    /// A named layer in the daemon's storage (`type = "layer"`).
+    Layer,
 }
 
 #[test]
 #[ignore = "needs GE-Proton under $VFS_HOME and bin/build-windows artifacts beside the vfs binary"]
 fn vfs_up_then_exec_runs_a_windows_fixture_under_proton() {
+    up_then_exec(SaveLayer::Disk);
+}
+
+/// The headline storage workflow (spec §1, §8): root 1's write layer is a
+/// named layer, `layer:e2e-<pid>`. The fixture's save is in the layer after
+/// `vfs down`, and still there after the daemon is stopped and the next `vfs`
+/// command auto-spawns a fresh one over the same storage directory — proved by
+/// `vfs layer export` from each daemon.
+#[test]
+#[ignore = "needs GE-Proton under $VFS_HOME and bin/build-windows artifacts beside the vfs binary"]
+fn vfs_up_then_exec_with_a_layer_write_layer() {
+    up_then_exec(SaveLayer::Layer);
+}
+
+/// The two variants each bring up a Wine prefix and a daemon; run them one
+/// at a time, however the harness schedules them.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+fn up_then_exec(save_layer: SaveLayer) {
+    let _serial = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let vfs: &'static str = env!("CARGO_BIN_EXE_vfs");
-    let vfs_home = PathBuf::from(std::env::var("VFS_HOME").expect("set VFS_HOME to the GE-Proton home"));
+    let vfs_home =
+        PathBuf::from(std::env::var("VFS_HOME").expect("set VFS_HOME to the GE-Proton home"));
 
     let t = tempfile::tempdir().unwrap();
     let t = t.path();
@@ -248,13 +291,28 @@ fn vfs_up_then_exec_runs_a_windows_fixture_under_proton() {
     std::fs::copy(&fixture_src, t.join("game").join("fixture.exe")).unwrap();
     write_stored_zip(&t.join("data.zip"), "data/hello.txt", &[b'A'; 4096]);
     std::fs::create_dir_all(t.join("saves-layer")).unwrap();
+    // This run's own storage directory, for every daemon it starts (including
+    // the ones `vfs` auto-spawns, which inherit the variable): a test daemon
+    // must never contend for the lock on the user's `$VFS_HOME/storage`.
+    let storage_dir = t.join("storage");
 
-    let name = format!("e2e-{}", std::process::id());
+    // Both variants run in one process, so the pid alone does not tell their
+    // sessions apart. The layer is `e2e-<pid>`, in this run's own storage.
+    let pid = std::process::id();
+    let name = match save_layer {
+        SaveLayer::Disk => format!("e2e-{pid}"),
+        SaveLayer::Layer => format!("e2e-layer-{pid}"),
+    };
+    let layer_name = format!("e2e-{pid}");
     // This run's own name. A directory already there is a previous run's
     // leftover under a recycled pid — a stale persistent prefix this run
     // would otherwise reuse (and whose root links it would find foreign).
     let _ = std::fs::remove_dir_all(vfs_home.join("sessions").join(&name));
     let discovery = t.join("discovery.json");
+    let save_source = match save_layer {
+        SaveLayer::Disk => format!("type = \"disk\"\npath = \"{}/saves-layer\"", t.display()),
+        SaveLayer::Layer => format!("type = \"layer\"\nname = \"{layer_name}\""),
+    };
     let config = format!(
         r#"[session]
 name = "{name}"
@@ -280,8 +338,7 @@ path = "{t}/data.zip"
 root = 0
 
 [[source]]
-type = "disk"
-path = "{t}/saves-layer"
+{save_source}
 root = 1
 write_layer = true
 "#,
@@ -302,7 +359,8 @@ write_layer = true
         let mut c = Command::new(vfs);
         c.args(args)
             .env("VFS_HOME", &vfs_home)
-            .env("VFS_DISCOVERY_PATH", &discovery);
+            .env("VFS_DISCOVERY_PATH", &discovery)
+            .env("VFS_STORAGE_DIR", &storage_dir);
         c
     };
 
@@ -330,15 +388,31 @@ write_layer = true
         args.extend(["--env", e]);
     }
     let out = run("exec1", t, vfs_cmd(&args));
-    assert!(out.status.success(), "first vfs exec failed: {:?}", out.status);
-
-    assert_eq!(
-        std::fs::read(t.join("saves-layer").join("save.txt")).expect("save.txt in the write layer"),
-        b"saved"
+    assert!(
+        out.status.success(),
+        "first vfs exec failed: {:?}",
+        out.status
     );
 
+    match save_layer {
+        SaveLayer::Disk => assert_eq!(
+            std::fs::read(t.join("saves-layer").join("save.txt"))
+                .expect("save.txt in the write layer"),
+            b"saved"
+        ),
+        // The save lives in the daemon's storage, not on disk: nothing may
+        // have leaked into the (unused) directory.
+        SaveLayer::Layer => assert!(
+            !t.join("saves-layer").join("save.txt").exists(),
+            "a layer write layer must not write through to a disk directory"
+        ),
+    }
+
     let prefix = vfs_home.join("sessions").join(&name).join("prefix");
-    for rel in ["drive_c/users/steamuser/vfs-e2e-save", "drive_c/Games/Fixture"] {
+    for rel in [
+        "drive_c/users/steamuser/vfs-e2e-save",
+        "drive_c/Games/Fixture",
+    ] {
         let p = prefix.join(rel);
         let md = std::fs::symlink_metadata(&p)
             .unwrap_or_else(|e| panic!("{} missing: {e}", p.display()));
@@ -352,16 +426,141 @@ write_layer = true
     // The absolute form into the same live session. The first exec's staged
     // `fixture.exe` is still in root 0, so this takes the real-file branch —
     // what it proves is that the session's mappings and prefix are reused.
-    let mut args: Vec<&str> = vec!["exec", "--session", &name, "C:\\Games\\Fixture\\fixture.exe"];
+    let mut args: Vec<&str> = vec![
+        "exec",
+        "--session",
+        &name,
+        "C:\\Games\\Fixture\\fixture.exe",
+    ];
     for e in read_env {
         args.extend(["--env", e]);
     }
     let out = run("exec2", t, vfs_cmd(&args));
-    assert!(out.status.success(), "second vfs exec failed: {:?}", out.status);
+    assert!(
+        out.status.success(),
+        "second vfs exec failed: {:?}",
+        out.status
+    );
+
+    if save_layer == SaveLayer::Layer {
+        layer_survives_down_and_a_daemon_restart(
+            t,
+            &name,
+            &layer_name,
+            &discovery,
+            &mut guard,
+            &vfs_cmd,
+        );
+    }
 
     drop(guard);
     assert!(
         !vfs_home.join("sessions").join(&name).exists(),
         "cleanup left the session directory behind"
+    );
+}
+
+/// After the exec: the save is in layer `name` once `session` is down, and
+/// after the daemon is stopped and a fresh one is auto-spawned over the same
+/// storage directory. Then the layer is deleted.
+fn layer_survives_down_and_a_daemon_restart(
+    t: &Path,
+    session: &str,
+    name: &str,
+    discovery: &Path,
+    guard: &mut Cleanup,
+    vfs_cmd: &dyn Fn(&[&str]) -> Command,
+) {
+    let out = run("down", t, vfs_cmd(&["down", "--session", session]));
+    assert!(out.status.success(), "vfs down failed: {:?}", out.status);
+
+    // From the daemon that ran the session, now that the session is down.
+    let export1 = t.join("export-before-restart");
+    let out = run(
+        "export1",
+        t,
+        vfs_cmd(&["layer", "export", name, export1.to_str().unwrap()]),
+    );
+    assert!(
+        out.status.success(),
+        "vfs layer export failed: {:?}",
+        out.status
+    );
+    assert_eq!(
+        std::fs::read(export1.join("save.txt")).expect("save.txt in the export after vfs down"),
+        b"saved"
+    );
+
+    // Stop the daemon and wait for it to exit: its storage lock is released
+    // and its discovery file removed, so the next `vfs` command spawns anew.
+    let first = read_daemon_pid(discovery).expect("the first daemon's pid");
+    assert_eq!(
+        Some(first),
+        guard.daemon_pid,
+        "the daemon that ran `vfs up`"
+    );
+    let _ = Command::new("kill")
+        .args(["-TERM", &first.to_string()])
+        .status();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Path::new(&format!("/proc/{first}")).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !Path::new(&format!("/proc/{first}")).exists(),
+        "the first daemon (pid {first}) did not exit within 60 s of TERM"
+    );
+    assert!(
+        !discovery.exists(),
+        "the stopped daemon must remove its discovery file"
+    );
+
+    let out = run("layer-list", t, vfs_cmd(&["layer", "list"]));
+    let second = read_daemon_pid(discovery);
+    // The fresh daemon is the guard's to stop from here on.
+    guard.daemon_pid = second;
+    assert!(
+        out.status.success(),
+        "vfs layer list failed: {:?}",
+        out.status
+    );
+    let second = second.expect("the next vfs command auto-spawned a daemon");
+    assert_ne!(second, first, "a fresh daemon, not the stopped one");
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|l| l.split('\t').next() == Some(name)),
+        "the restarted daemon lists layer {name}"
+    );
+
+    let export2 = t.join("export-after-restart");
+    let out = run(
+        "export2",
+        t,
+        vfs_cmd(&["layer", "export", name, export2.to_str().unwrap()]),
+    );
+    assert!(
+        out.status.success(),
+        "vfs layer export failed: {:?}",
+        out.status
+    );
+    assert_eq!(
+        std::fs::read(export2.join("save.txt")).expect("save.txt in the export after a restart"),
+        b"saved"
+    );
+
+    let out = run("layer-delete", t, vfs_cmd(&["layer", "delete", name]));
+    assert!(
+        out.status.success(),
+        "vfs layer delete failed: {:?}",
+        out.status
+    );
+    let out = run("layer-list-after", t, vfs_cmd(&["layer", "list"]));
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|l| l.split('\t').next() == Some(name)),
+        "layer {name} is gone after vfs layer delete"
     );
 }
