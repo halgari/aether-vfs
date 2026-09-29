@@ -6,6 +6,9 @@
 //! answers `getattr`/`open` for every staged artifact, and that real game
 //! content still wins over the staged copy where both could serve a path.
 
+// The launch tests below are Windows-only (they inject real Windows processes); their helpers are unused on Linux.
+#![cfg_attr(not(windows), allow(dead_code, unused_imports))]
+
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -180,6 +183,7 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
 /// now gone and resolution must fail; if it did stage it, the *staging*
 /// provider's independent on-disk copy (a different `DiskProvider`, over a
 /// different directory) is what has to answer.
+#[cfg(windows)]
 #[test]
 fn production_launch_stages_a_relative_image_before_create_process() {
     let content_dir = tempfile::tempdir().unwrap();

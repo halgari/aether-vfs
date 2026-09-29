@@ -241,6 +241,12 @@ pub const FIXTURE_PATH: &str = "VFS_FIXTURE_PATH";
 pub const FIXTURE_EXPECT: &str = "VFS_FIXTURE_EXPECT";
 /// Expected fill byte, for the read fixture.
 pub const FIXTURE_FILL: &str = "VFS_FIXTURE_FILL";
+/// `vfs-fixture-read`: after the read, write `FIXTURE_WRITE_DATA` (default
+/// `written`) here — how a Linux e2e proves a write into a second root lands
+/// in that root's write layer.
+pub const FIXTURE_WRITE_PATH: &str = "VFS_FIXTURE_WRITE_PATH";
+/// `vfs-fixture-read`: the bytes written to `FIXTURE_WRITE_PATH` (default `written`).
+pub const FIXTURE_WRITE_DATA: &str = "VFS_FIXTURE_WRITE_DATA";
 // `VFS_FIXTURE_DATA` and `VFS_FIXTURE_DIR` lived here for `vfs-fixture-write`
 // and `vfs-fixture-writeset`. Both fixture crates were deleted in gate 4 task
 // 8 — no test harness had ever invoked either — so the switches went with
@@ -385,6 +391,8 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_PATH, kind: Kind::Fixture, default: "fixture-specific" },
     Var { name: FIXTURE_EXPECT, kind: Kind::Fixture, default: "none" },
     Var { name: FIXTURE_FILL, kind: Kind::Fixture, default: "none" },
+    Var { name: FIXTURE_WRITE_PATH, kind: Kind::Fixture, default: "unset: no write" },
+    Var { name: FIXTURE_WRITE_DATA, kind: Kind::Fixture, default: "written" },
     Var {
         name: FIXTURE_COW_PATH,
         kind: Kind::Fixture,

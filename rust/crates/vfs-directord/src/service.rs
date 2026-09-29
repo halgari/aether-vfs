@@ -44,10 +44,7 @@ impl Director for DirectorService {
         req: Request<CreateSessionReq>,
     ) -> Result<Response<Session>, Status> {
         let name = req.into_inner().name;
-        let summary = self
-            .registry
-            .create(name)
-            .map_err(Status::internal)?;
+        let summary = self.registry.create(name).map_err(create_status)?;
         Ok(Response::new(Session {
             id: summary.id,
             name: summary.name,
@@ -64,7 +61,7 @@ impl Director for DirectorService {
             return Err(Status::invalid_argument("path is required"));
         }
         self.registry
-            .declare_root(&r.session_id, r.root, std::path::Path::new(&r.path))
+            .declare_root(&r.session_id, r.root, std::path::Path::new(&r.path), &r.name)
             .map_err(Status::invalid_argument)?;
         Ok(Response::new(Empty {}))
     }
@@ -124,9 +121,20 @@ impl Director for DirectorService {
         if r.exec.is_empty() {
             return Err(Status::invalid_argument("exec is required"));
         }
-        let session_id = r.session_id;
+        // `LaunchReq.session_id` may name the session (`vfs exec --session
+        // NAME`), and `exec` may start with a root's `{Name}`; both are this
+        // host's vocabulary, so both are resolved here before `Session` sees
+        // an id and a path.
+        let session_id = self
+            .registry
+            .resolve_session(&r.session_id)
+            .map_err(Status::not_found)?;
+        let exec = self
+            .registry
+            .expand_root_name(&session_id, &r.exec)
+            .map_err(Status::invalid_argument)?;
         let opts = LaunchOpts {
-            image: r.exec,
+            image: exec,
             args: r.args,
             wait: r.wait,
             shim_dll: None,
@@ -171,10 +179,25 @@ impl Director for DirectorService {
         &self,
         req: Request<TeardownReq>,
     ) -> Result<Response<Empty>, Status> {
-        let id = req.into_inner().session_id;
-        self.registry
-            .teardown(&id)
+        // By id or by name, like `Launch` — `vfs down --session NAME`.
+        let id = self
+            .registry
+            .resolve_session(&req.into_inner().session_id)
             .map_err(Status::not_found)?;
+        // Dropping the session can block for seconds on Linux (stopping a
+        // prefix's `wineserver`, deleting an anonymous prefix): off the
+        // async executor.
+        let registry = self.registry.clone();
+        tokio::task::spawn_blocking(move || registry.teardown(&id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| {
+                if e.starts_with("unknown session") {
+                    Status::not_found(e)
+                } else {
+                    Status::failed_precondition(e)
+                }
+            })?;
         Ok(Response::new(Empty {}))
     }
 
@@ -234,6 +257,19 @@ fn registry_status(err: String) -> Status {
         Status::not_found(err)
     } else {
         Status::invalid_argument(err)
+    }
+}
+
+/// Map a `SessionRegistry::create` refusal onto a gRPC status: a name
+/// already live is `AlreadyExists`; a name that cannot name a Wine prefix is
+/// the caller's to fix (`InvalidArgument`); anything else is the daemon's.
+fn create_status(err: String) -> Status {
+    if err.starts_with(crate::registry::DUPLICATE_NAME) {
+        Status::already_exists(err)
+    } else if err.contains("cannot name a Wine prefix") {
+        Status::invalid_argument(err)
+    } else {
+        Status::internal(err)
     }
 }
 

@@ -1,6 +1,8 @@
 //! Injection read target: opens a (virtual) file via the normal Win32 path
 //! (std::fs::read → CreateFileW → NtCreateFile, so the injected shim's hooks
 //! intercept it), and asserts its length/content. Exit 0 iff it matches.
+//! If `VFS_FIXTURE_WRITE_PATH` is set, after a successful read it also writes
+//! `VFS_FIXTURE_WRITE_DATA` (default `written`) there, exiting 1 on error.
 use std::process::exit;
 
 fn main() {
@@ -24,6 +26,14 @@ fn main() {
         if data.iter().any(|&x| x != b) {
             eprintln!("FIXTURE FAIL: content byte != {b}"); exit(1);
         }
+    }
+    if let Ok(wpath) = std::env::var("VFS_FIXTURE_WRITE_PATH") {
+        let data = std::env::var("VFS_FIXTURE_WRITE_DATA").unwrap_or_else(|_| "written".into());
+        if let Err(e) = std::fs::write(&wpath, data.as_bytes()) {
+            eprintln!("FIXTURE FAIL: write {wpath}: {e}");
+            exit(1);
+        }
+        println!("FIXTURE WROTE: {wpath}");
     }
     println!("FIXTURE OK: {} bytes", data.len());
     exit(0);

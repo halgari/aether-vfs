@@ -111,6 +111,14 @@ fn spawn_daemon(exe: &PathBuf, discovery_path: &std::path::Path) -> Result<(), S
         const DETACHED_PROCESS: u32 = 0x00000008;
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
     }
+    // Its own process group, so Ctrl-C in the terminal that ran the CLI does
+    // not reach the daemon it spawned — the unix counterpart of
+    // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS above.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.spawn()
         .map_err(|e| format!("spawn daemon {}: {e}", exe.display()))?;
     Ok(())
@@ -139,14 +147,54 @@ async fn wait_for_daemon(
     Err(last_err)
 }
 
-/// Run the tonic director server until shutdown (or forever).
-///
-/// Binds `bind` (use `127.0.0.1:0` for ephemeral), writes the discovery file,
-/// then serves. Removes the discovery file on clean exit when it still names
-/// this process.
+/// Run the tonic director server until SIGINT/SIGTERM (Ctrl-C on Windows),
+/// then drain it — see [`serve_daemon_until`].
 pub async fn serve_daemon(
     bind: SocketAddr,
     discovery_path: PathBuf,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    serve_daemon_until(bind, discovery_path, SessionRegistry::new(), shutdown_signal()).await
+}
+
+/// Resolves on the first SIGINT or SIGTERM (unix) / Ctrl-C (Windows). If the
+/// handler cannot be installed it never resolves — the daemon then runs until
+/// killed, as it always did.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) {
+            (Ok(mut term), Ok(mut int)) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = int.recv() => {}
+                }
+            }
+            _ => std::future::pending::<()>().await,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Run the tonic director server over `registry` until `shutdown` resolves.
+///
+/// Binds `bind` (use `127.0.0.1:0` for ephemeral), writes the discovery file,
+/// then serves. On shutdown it stops accepting, lets in-flight requests
+/// finish (a waited launch included — its session is dropped when it
+/// returns), **drains the registry** ([`SessionRegistry::teardown_all`], so
+/// every session's `Drop` runs: on Linux that removes root links and deletes
+/// anonymous Wine prefixes, which a killed process would leak), and finally
+/// removes the discovery file if it still names this process.
+pub async fn serve_daemon_until(
+    bind: SocketAddr,
+    discovery_path: PathBuf,
+    registry: SessionRegistry,
+    shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let local = listener.local_addr()?;
@@ -162,14 +210,22 @@ pub async fn serve_daemon(
     eprintln!("vfs daemon listening on {endpoint} (pid {pid})");
     eprintln!("discovery file: {}", discovery_path.display());
 
-    let registry = SessionRegistry::new();
-    let svc = DirectorService::new(registry);
+    let svc = DirectorService::new(registry.clone());
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
     let result = Server::builder()
         .add_service(vfs_control::pb::director_server::DirectorServer::new(svc))
-        .serve_with_incoming(incoming)
+        .serve_with_incoming_shutdown(incoming, shutdown)
         .await;
+
+    // Dropping a session can block for seconds (stopping a prefix's
+    // `wineserver`, deleting a ~600 MB prefix), so off the async executor.
+    let drained = tokio::task::spawn_blocking(move || registry.teardown_all())
+        .await
+        .unwrap_or(0);
+    if drained > 0 {
+        eprintln!("vfs daemon: tore down {drained} session(s) on shutdown");
+    }
 
     // Best-effort cleanup if we still own the discovery file.
     if let Ok(d) = read_discovery(&discovery_path) {
@@ -185,9 +241,9 @@ pub async fn serve_daemon(
 /// Precedence among several `--source` flags is declaration order (later
 /// flag wins on a shared path) — the same flat-list sugar
 /// [`vfs_control::config`] documents for `[[source]]`, not a per-flag numeric
-/// layer. Every entry this builds targets root `0`; the CLI has no syntax
-/// yet for naming a non-default root (config files do, via `[[root]]` +
-/// `root =`).
+/// layer. Every entry this builds targets root `0`: `--root` declares where
+/// roots are, but a `--source` cannot yet name a non-default root (config
+/// files can, via `[[root]]` + `root =`).
 pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     let (ty, rest) = s
         .split_once(':')
@@ -256,7 +312,46 @@ pub fn write_layer_flag_entry(path: &str) -> vfs_control::SourceEntry {
     }
 }
 
-/// Drive CreateSession → AddSource* → optional Launch from a [`SessionConfig`].
+/// Parse one `--root ID=NAME=LOCATION` flag into a `[[root]]` entry.
+///
+/// Only the first two `=` split, so a location may itself contain one. The
+/// name is what a launch path spells as `{NAME}\…`; the location is where
+/// the program sees the root (a `C:\…` path inside the prefix on Linux).
+pub fn parse_root_flag(s: &str) -> Result<vfs_control::RootEntry, String> {
+    let bad = || format!("--root expects ID=NAME=LOCATION, got `{s}`");
+    let mut parts = s.splitn(3, '=');
+    let (Some(id), Some(name), Some(location)) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(bad());
+    };
+    let id: u32 = id.trim().parse().map_err(|_| bad())?;
+    if name.is_empty() || location.is_empty() {
+        return Err(bad());
+    }
+    Ok(vfs_control::RootEntry {
+        id,
+        name: name.to_string(),
+        path: location.to_string(),
+    })
+}
+
+/// Every `--root` flag as `[[root]]` entries. Once any root is declared the
+/// config has a `[[root]]` table, and `--source`/`--write-layer` target root
+/// 0 — so root 0 must be among them, or the config names a root it never
+/// declares.
+pub fn root_flag_entries(flags: &[String]) -> Result<Vec<vfs_control::RootEntry>, String> {
+    let roots = flags
+        .iter()
+        .map(|f| parse_root_flag(f))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !roots.is_empty() && !roots.iter().any(|r| r.id == 0) {
+        return Err(
+            "--root: declare root 0 too; --source and --write-layer target root 0".to_string(),
+        );
+    }
+    Ok(roots)
+}
+
+/// Drive CreateSession → DeclareRoot* → AddSource* → optional Launch from a [`SessionConfig`].
 ///
 /// Every source is sent, not only root 0's: `AddSourceReq` carries a `root`
 /// field (stage 2b), and `Director` now holds one provider per root, so
@@ -266,14 +361,18 @@ pub fn write_layer_flag_entry(path: &str) -> vfs_control::SourceEntry {
 /// [`vfs_control::SessionConfig::validate_roots`] rather than silently
 /// serving whatever subset of itself happens to be addressable — the same
 /// failure shape the old root-0-only filter had.
+///
+/// **All or nothing.** Any failure after `CreateSession` — a refused root, a
+/// source that cannot be built, a launch that cannot start — tears the new
+/// session down before the original error is returned. A half-applied
+/// session left live would hold the config's name, so the corrected retry
+/// would be refused as a duplicate (or, before that rule, become a second
+/// session of the same name).
 pub async fn apply_session_config(
     client: &mut DirectorClient<Channel>,
     cfg: &vfs_control::SessionConfig,
 ) -> Result<(String, Option<i32>), String> {
-    use vfs_control::pb::{
-        launch_event, source_spec, AddSourceReq, CreateSessionReq, DeclareRootReq, DiskSource,
-        HttpSource, LaunchReq, RemoteSource, SourceSpec as PbSource, ZipSource,
-    };
+    use vfs_control::pb::{CreateSessionReq, TeardownReq};
 
     cfg.validate_roots()?;
 
@@ -285,24 +384,51 @@ pub async fn apply_session_config(
         .into_inner();
     let session_id = session.id.clone();
 
-    // Declare each root's host directory before any source is added, so the
+    match configure_session(client, &session_id, cfg).await {
+        Ok(exit_code) => Ok((session_id, exit_code)),
+        Err(e) => {
+            // Best effort: the error being reported is the original one.
+            let _ = client
+                .teardown_session(TeardownReq {
+                    session_id: session_id.clone(),
+                })
+                .await;
+            Err(e)
+        }
+    }
+}
+
+/// [`apply_session_config`] after `CreateSession`: declare the roots, add the
+/// sources, run the optional launch.
+async fn configure_session(
+    client: &mut DirectorClient<Channel>,
+    session_id: &str,
+    cfg: &vfs_control::SessionConfig,
+) -> Result<Option<i32>, String> {
+    use vfs_control::pb::{
+        source_spec, AddSourceReq, DeclareRootReq, DiskSource, HttpSource, RemoteSource,
+        SourceSpec as PbSource, ZipSource,
+    };
+    let session_id = session_id.to_string();
+
+    // Declare each root's location before any source is added, so the
     // shim is told about every root the config names — not only about the
     // providers behind them. Mounting a provider on root 1 while never
     // declaring where root 1 *is* produces a session that looks configured
     // and serves nothing under that root, which is the silent-partial shape
     // this project keeps rediscovering.
     //
-    // Root 0 is skipped deliberately: its host directory is the daemon's own
-    // `Session.root`, chosen at `CreateSession` and already published. A
-    // config's `[[root]] path` for id 0 is descriptive (which tree the author
-    // means) and cannot repoint the directory the daemon created — declaring
-    // it would be rejected by the daemon anyway.
-    for root in cfg.roots.iter().filter(|r| r.id != 0) {
+    // Root 0 is declared too: its `[[root]] path` is root 0's location (where
+    // the program sees it) and replaces the daemon's default for the session.
+    // Every root's `name` travels with it, so a launch can spell a path as
+    // `{Name}\…`.
+    for root in &cfg.roots {
         client
             .declare_root(DeclareRootReq {
                 session_id: session_id.clone(),
                 root: root.id,
                 path: root.path.clone(),
+                name: root.name.clone(),
             })
             .await
             .map_err(|e| format!("DeclareRoot {} ({}): {e}", root.id, root.name))?;
@@ -358,47 +484,133 @@ pub async fn apply_session_config(
             .map_err(|e| format!("AddSource: {e}"))?;
     }
 
-    let mut exit_code = None;
-    if let Some(launch) = &cfg.launch {
-        let mut stream = client
-            .launch(LaunchReq {
+    match &cfg.launch {
+        Some(launch) => run_launch(client, &session_id, launch).await,
+        None => Ok(None),
+    }
+}
+
+/// The one-shot `vfs launch`: apply `cfg` (a fresh session plus its launch)
+/// and, when that launch was **waited**, tear the session down again once it
+/// has returned — success or failure. Nothing can launch into a one-shot
+/// session afterwards, so keeping it would only hold its name and, on Linux,
+/// its anonymous Wine prefix (~600 MB) until the daemon exits. A `--no-wait`
+/// launch leaves it up: the program may still be running in it.
+///
+/// A failure before or during the launch already tears the session down
+/// ([`apply_session_config`]); a teardown that fails here is reported on
+/// stderr, and the launch's own outcome is still returned.
+pub async fn launch_one_shot(
+    client: &mut DirectorClient<Channel>,
+    cfg: &vfs_control::SessionConfig,
+) -> Result<(String, Option<i32>), String> {
+    let (session_id, exit) = apply_session_config(client, cfg).await?;
+    if cfg.launch.as_ref().is_some_and(|l| l.wait) {
+        if let Err(e) = client
+            .teardown_session(vfs_control::pb::TeardownReq {
                 session_id: session_id.clone(),
-                exec: launch.exec.clone(),
-                args: launch.args.clone(),
-                wait: launch.wait,
-                env: launch.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             })
             .await
-            .map_err(|e| format!("Launch: {e}"))?
-            .into_inner();
-
-        while let Some(ev) = stream
-            .message()
-            .await
-            .map_err(|e| format!("Launch stream: {e}"))?
         {
-            match ev.event {
-                Some(launch_event::Event::Started(s)) => {
-                    eprintln!("started pid={}", s.pid);
-                }
-                Some(launch_event::Event::Exited(x)) => {
-                    eprintln!("exited code={}", x.code);
-                    exit_code = Some(x.code);
-                }
-                Some(launch_event::Event::Log(l)) => {
-                    eprintln!("log: {}", l.line);
-                }
-                None => {}
-            }
+            eprintln!("vfs: session {session_id} was not torn down: {}", e.message());
         }
     }
+    Ok((session_id, exit))
+}
 
-    Ok((session_id, exit_code))
+/// Launch `launch` in the live session `session_id` (an id or a session
+/// name) and follow its event stream to the end, reporting each event on
+/// stderr. Returns the child's exit code when the stream carried one.
+///
+/// Shared by `vfs up`/`vfs launch` (through [`apply_session_config`]) and
+/// `vfs exec`, which launches into a session that is already up.
+pub async fn run_launch(
+    client: &mut DirectorClient<Channel>,
+    session_id: &str,
+    launch: &vfs_control::LaunchConfig,
+) -> Result<Option<i32>, String> {
+    use vfs_control::pb::{launch_event, LaunchReq};
+
+    let mut stream = client
+        .launch(LaunchReq {
+            session_id: session_id.to_string(),
+            exec: launch.exec.clone(),
+            args: launch.args.clone(),
+            wait: launch.wait,
+            env: launch.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        })
+        .await
+        .map_err(|e| format!("Launch: {e}"))?
+        .into_inner();
+
+    let mut exit_code = None;
+    while let Some(ev) = stream
+        .message()
+        .await
+        .map_err(|e| format!("Launch stream: {e}"))?
+    {
+        match ev.event {
+            Some(launch_event::Event::Started(s)) => {
+                eprintln!("started pid={}", s.pid);
+            }
+            Some(launch_event::Event::Exited(x)) => {
+                eprintln!("exited code={}", x.code);
+                exit_code = Some(x.code);
+            }
+            Some(launch_event::Event::Log(l)) => {
+                eprintln!("log: {}", l.line);
+            }
+            None => {}
+        }
+    }
+    Ok(exit_code)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The daemon's shutdown path (what SIGTERM/SIGINT drive in
+    /// `serve_daemon`), driven here by a oneshot: once `shutdown` resolves,
+    /// the server stops, every live session is torn down — so its `Drop`
+    /// runs, which on Linux is what deletes an anonymous prefix — and the
+    /// discovery file naming this process is removed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_drains_the_registry_and_removes_the_discovery_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let discovery = dir.path().join("discovery.json");
+        let registry = SessionRegistry::new();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_daemon_until(
+            DEFAULT_BIND.parse().unwrap(),
+            discovery.clone(),
+            registry.clone(),
+            async {
+                let _ = stopped.await;
+            },
+        ));
+
+        let mut client = wait_for_daemon(&discovery, Duration::from_secs(10))
+            .await
+            .expect("the daemon comes up");
+        for name in ["drain-named", ""] {
+            client
+                .create_session(vfs_control::pb::CreateSessionReq { name: name.into() })
+                .await
+                .expect("create session");
+        }
+        assert_eq!(registry.len(), 2);
+        drop(client);
+
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("the daemon stops once shutdown resolves")
+            .unwrap()
+            .expect("a clean shutdown");
+        assert!(registry.is_empty(), "shutdown must tear every session down");
+        assert!(!discovery.exists(), "shutdown must remove its discovery file");
+    }
 
     /// `--source` and `--write-layer` must not be confusable: a source is
     /// content, a write layer is where writes land. The flag that reaches the
@@ -425,6 +637,37 @@ mod tests {
         }
         .validate_roots()
         .expect("the flag must produce a config that validates");
+    }
+
+    #[test]
+    fn parse_root_flag_splits_id_name_location() {
+        let r = parse_root_flag(r"0=Games=C:\Games\Fixture").unwrap();
+        assert_eq!(r.id, 0);
+        assert_eq!(r.name, "Games");
+        assert_eq!(r.path, r"C:\Games\Fixture");
+        // Only the first two `=` split: a location may contain one.
+        assert_eq!(parse_root_flag("1=Docs=C:\\a=b").unwrap().path, "C:\\a=b");
+    }
+
+    #[test]
+    fn parse_root_flag_rejects_malformed() {
+        for bad in ["Games=C:\\x", "x=Games=C:\\x", "0=C:\\x", "0==C:\\x", "0=Games="] {
+            let e = parse_root_flag(bad).unwrap_err();
+            assert!(e.contains("--root") && e.contains(bad), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn root_flags_must_declare_root_zero() {
+        assert!(root_flag_entries(&[]).unwrap().is_empty());
+        let e = root_flag_entries(&["1=Docs=C:\\docs".to_string()]).unwrap_err();
+        assert_eq!(e, "--root: declare root 0 too; --source and --write-layer target root 0");
+        let ok = root_flag_entries(&[
+            "0=Games=C:\\games".to_string(),
+            "1=Docs=C:\\docs".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(ok.iter().map(|r| r.id).collect::<Vec<_>>(), [0, 1]);
     }
 
     #[test]

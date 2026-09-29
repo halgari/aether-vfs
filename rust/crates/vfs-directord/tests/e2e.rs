@@ -1,6 +1,9 @@
 //! M0 acceptance: daemon → CreateSession → AddSource(disk) → Launch(fixture-read)
 //! via a scenario.toml, asserting the fixture reads virtual bytes through the ring.
 
+// The launch tests below are Windows-only (they inject real Windows processes); their helpers are unused on Linux.
+#![cfg_attr(not(windows), allow(dead_code, unused_imports))]
+
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -449,6 +452,7 @@ async fn drain_launch_events(
 }
 
 
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn scenario_toml_disk_source_fixture_read() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -604,6 +608,7 @@ wait      = true
 /// reads from. A test that only checks the bytes exist somewhere would pass
 /// with that bypass fully intact; the decisive check is that overlay/ stays
 /// EMPTY, proving the write actually crossed the ring instead.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn scenario_toml_disk_source_fixture_writepath() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -870,6 +875,7 @@ fn overlay_tree(dir: &std::path::Path) -> Vec<PathBuf> {
 /// routes every write to the topmost child that declares `ReadWrite` — both
 /// `DiskProvider`s here do — so the written bytes must land in the top
 /// content directory, not the bottom one and not the overlay fallback.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn scenario_toml_two_disk_sources_fixture_writepath() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -1117,6 +1123,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
 /// The rest of the fixture (create, append, rename, delete) runs too, so this
 /// is also the first live exercise of those through an `OverlayProvider`
 /// upper rather than a bare writable mount.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -1745,6 +1752,7 @@ async fn run_escape_fixture(
 /// *served* target, because `RootMap::compute_under_root`'s OS-consult
 /// branch made its own hooked `CreateFileW` call with no re-entrancy guard.
 /// See `task-6-report.md` for the full account.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn escape_matrix_positive_and_negative_canary() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -2088,6 +2096,7 @@ async fn escape_matrix_positive_and_negative_canary() {
 /// assertion. Neither mutation alone suffices, which is the measurement
 /// behind "latent, not live" above. See `task-8b-report.md` for both
 /// mutations and their output.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -2315,6 +2324,7 @@ const PREFS_DEFAULT: &str = "MISSING";
 /// A test that only asserted "not MISSING" would pass on an escape, and one
 /// that only compared against the director's bytes without a decoy on disk
 /// could not tell a served read from a passthrough at all.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn profile_api_reads_a_managed_root_ini_through_the_director() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -2661,6 +2671,7 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
 /// overlay or the real file behind the mount would satisfy that too — but that
 /// the **provider's own backing file** on disk holds the new value while the
 /// decoy under the session root is untouched.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn profile_api_writes_a_managed_root_ini_through_the_director() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -2971,6 +2982,7 @@ fn make_escape_junction(tag: &str, target: &Path) -> (PathBuf, Option<String>) {
 /// physical one (asserted on `session.root`), and every vector stays
 /// buildable because the physical file the 8.3-name and hardlink
 /// constructions need is really there.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn escape_matrix_write_access_positive_and_negative_canary() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -3302,6 +3314,7 @@ fn assert_no_escaped_real_files(dir: &Path, canary: &str, canary_path: &Path, la
 /// link missing turns the positive canary's ordinary spelling into
 /// `not-found`, which is what makes this worth its runtime rather than a
 /// duplicate of the root-0 run.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn escape_matrix_holds_against_a_second_root() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -3387,12 +3400,8 @@ async fn escape_matrix_holds_against_a_second_root() {
         .expect("AddSource root 1");
 
     reg_handle
-        .declare_root(&session.id, 1, docs_root.path())
+        .declare_root(&session.id, 1, docs_root.path(), "docs")
         .expect("declare root 1");
-    assert!(
-        reg_handle.declare_root(&session.id, 0, docs_root.path()).is_err(),
-        "root 0 is the session's own root and must not be re-declarable"
-    );
 
     let sub = PathBuf::from("Saves");
     std::fs::create_dir_all(docs_root.path().join(&sub)).expect("mkdir under root 1");
@@ -3549,6 +3558,7 @@ async fn escape_matrix_holds_against_a_second_root() {
 /// **If this ever reads `found` again**, the client predicate has lost its
 /// canonicalisation. Do not relax the assertion — find what stopped
 /// consulting `RootMap`.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -3724,6 +3734,159 @@ async fn apply_session_config_health_and_list() {
     server.abort();
 }
 
+/// `vfs exec --session NAME` and `vfs down --session NAME`: the `Launch` and
+/// `TeardownSession` RPCs take a session's name as well as its id, and
+/// `Launch` expands a leading `{RootName}`. Every refusal here happens before
+/// anything is spawned, so this runs on any host.
+#[tokio::test(flavor = "multi_thread")]
+async fn launch_and_teardown_address_a_session_by_name() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let svc = DirectorService::new(SessionRegistry::new());
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut client = connect(&format!("{addr}")).await.unwrap();
+
+    let cfg = SessionConfig {
+        session: vfs_control::SessionMeta { name: Some("by-name".into()) },
+        roots: vec![vfs_control::RootEntry {
+            id: 0,
+            name: "Games".into(),
+            path: r"C:\Games\ByName".into(),
+        }],
+        ..Default::default()
+    };
+    let (id, _) = apply_session_config(&mut client, &cfg).await.unwrap();
+
+    let launch = |session: &str, exec: &str| vfs_control::pb::LaunchReq {
+        session_id: session.into(),
+        exec: exec.into(),
+        args: vec![],
+        wait: true,
+        env: Default::default(),
+    };
+    let st = client.launch(launch("no-such", "x.exe")).await.expect_err("unknown session");
+    assert_eq!(st.code(), tonic::Code::NotFound, "{st:?}");
+    assert!(
+        st.message().contains("no-such") && st.message().contains("by-name"),
+        "the refusal must list what is live: {st:?}"
+    );
+    let st = client.launch(launch("by-name", r"{Nope}\x.exe")).await.expect_err("unknown root");
+    assert_eq!(st.code(), tonic::Code::InvalidArgument, "{st:?}");
+    assert!(st.message().contains("Nope") && st.message().contains("Games"), "{st:?}");
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq { session_id: "by-name".into() })
+        .await
+        .expect("teardown by name");
+    let list = client.list_sessions(vfs_control::pb::Empty {}).await.unwrap().into_inner();
+    assert!(list.sessions.iter().all(|s| s.id != id), "{list:?}");
+    server.abort();
+}
+
+/// `apply_session_config` is all or nothing: a config that fails half-way —
+/// a source that cannot be built, a launch refused before anything spawns —
+/// leaves no session behind, so the corrected retry of the same named config
+/// is not refused as a duplicate. And a second live session under one name is
+/// refused (`AlreadyExists`), naming the one that holds it. Nothing here
+/// spawns a program, so it runs on any host.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_apply_leaves_no_session_and_a_live_name_is_not_reused() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let svc = DirectorService::new(SessionRegistry::new());
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut client = connect(&format!("{addr}")).await.unwrap();
+
+    let content = tempfile::tempdir().unwrap();
+    let good = SessionConfig {
+        session: vfs_control::SessionMeta { name: Some("half".into()) },
+        roots: vec![vfs_control::RootEntry {
+            id: 0,
+            name: "Games".into(),
+            path: if cfg!(windows) {
+                content.path().join("loc").to_string_lossy().into_owned()
+            } else {
+                r"C:\Games\Half".into()
+            },
+        }],
+        sources: vec![vfs_control::SourceEntry {
+            spec: vfs_control::SourceSpec::Disk {
+                path: content.path().to_string_lossy().into_owned(),
+            },
+            mount: "/".into(),
+            root: 0,
+            write_layer: false,
+        }],
+        ..Default::default()
+    };
+    let live = |client: &mut vfs_control::pb::director_client::DirectorClient<_>| {
+        let mut client = client.clone();
+        async move {
+            client
+                .list_sessions(vfs_control::pb::Empty {})
+                .await
+                .unwrap()
+                .into_inner()
+                .sessions
+        }
+    };
+
+    // A source the daemon cannot build: refused at AddSource.
+    let mut bad_source = good.clone();
+    bad_source.sources.push(vfs_control::SourceEntry {
+        spec: vfs_control::SourceSpec::Zip {
+            path: content.path().join("missing.zip").to_string_lossy().into_owned(),
+        },
+        mount: "/".into(),
+        root: 0,
+        write_layer: false,
+    });
+    let e = apply_session_config(&mut client, &bad_source).await.unwrap_err();
+    assert!(e.contains("AddSource"), "{e}");
+    assert!(live(&mut client).await.is_empty(), "a failed AddSource must not leave a session");
+
+    // A launch refused before anything is spawned.
+    let mut bad_launch = good.clone();
+    bad_launch.launch = Some(vfs_control::LaunchConfig {
+        exec: r"{Nope}\x.exe".into(),
+        args: vec![],
+        wait: true,
+        env: Default::default(),
+    });
+    let e = apply_session_config(&mut client, &bad_launch).await.unwrap_err();
+    assert!(e.contains("Nope"), "{e}");
+    assert!(live(&mut client).await.is_empty(), "a failed launch must not leave a session");
+
+    // The corrected config applies — its name was not left held.
+    let (id, _) = apply_session_config(&mut client, &good).await.expect("the corrected retry");
+    // …and applying it again while it is live is refused, naming it.
+    let e = apply_session_config(&mut client, &good).await.unwrap_err();
+    assert!(e.contains("AlreadyExists") || e.contains("already named"), "{e}");
+    assert!(e.contains(&id), "the refusal must name the live session: {e}");
+    let sessions = live(&mut client).await;
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
+        .await
+        .unwrap();
+    server.abort();
+}
+
 /// Stage 2b task 5: a config's `[[root]] path` reaches the live session, so
 /// the injected shim is told where each root *is* and not merely what it
 /// serves.
@@ -3759,6 +3922,14 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
     let docs = tempfile::tempdir().unwrap();
     std::fs::write(game.path().join("a.txt"), b"g").unwrap();
     std::fs::write(docs.path().join("a.txt"), b"d").unwrap();
+    // Each root's location: where the program sees it. On Windows that is a
+    // host directory (here the source directory itself, as before); on Linux
+    // a `C:\…` path inside the Wine prefix — a host path is refused there.
+    let (game_loc, docs_loc) = if cfg!(windows) {
+        (game.path().to_path_buf(), docs.path().to_path_buf())
+    } else {
+        (PathBuf::from(r"C:\Games\Game"), PathBuf::from(r"C:\users\steamuser\Docs"))
+    };
 
     let cfg = SessionConfig {
         session: vfs_control::SessionMeta { name: Some("two-root-cfg".into()) },
@@ -3766,12 +3937,12 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
             vfs_control::RootEntry {
                 id: 0,
                 name: "game".into(),
-                path: game.path().to_string_lossy().into_owned(),
+                path: game_loc.to_string_lossy().into_owned(),
             },
             vfs_control::RootEntry {
                 id: 1,
                 name: "docs".into(),
-                path: docs.path().to_string_lossy().into_owned(),
+                path: docs_loc.to_string_lossy().into_owned(),
             },
         ],
         sources: vec![
@@ -3803,14 +3974,14 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
             assert_eq!(
                 declared.len(),
                 1,
-                "exactly root 1 should be declared — root 0 is the daemon's own \
-                 `Session.root` and a config cannot repoint it: {declared:?}"
+                "`declared_roots` lists the roots beyond root 0, so exactly root 1 — \
+                 root 0's declared path is its location, asserted below: {declared:?}"
             );
             assert_eq!(declared[0].0, 1);
             assert_eq!(
                 declared[0].1,
-                docs.path(),
-                "root 1's declared host path is not the one the config named"
+                docs_loc,
+                "root 1's declared location is not the one the config named"
             );
             // Both providers are mounted too — declaring must not have
             // replaced mounting, only joined it.
@@ -3830,10 +4001,142 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
         })
         .unwrap();
 
+    // Root 0 was declared as well: the config's root 0 path replaces the
+    // daemon's default, and the session summary reports it.
+    let summary = reg_handle
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == id)
+        .expect("the session is live");
+    assert_eq!(
+        summary.root, game_loc,
+        "root 0's declared location must reach the live session as its root"
+    );
+
     client
         .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
         .await
         .unwrap();
+    server.abort();
+}
+
+/// A rooted launch on Windows: `{Game}\fixture.exe` resolves to the graph-only
+/// `fixture.exe` (a copy living only in the disk source, absent from `loc`),
+/// which the session stages, and the launched process reads `hello.txt` through
+/// the injected shim at `<loc>\hello.txt`. Then the same image spelled as an
+/// absolute path inside root 0's location launches too — but by then the first
+/// launch's staged copy is a real file at that path, so this second launch takes
+/// the **real-file** branch, not staging: it proves the absolute form resolves
+/// to the same root-0 vpath, not that it stages.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
+    let _guard = LAUNCH_LOCK.lock().await;
+    ensure_inject_artifacts();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let svc = DirectorService::new(SessionRegistry::new());
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The disk source holds a COPY of the fixture plus hello.txt.
+    let content = tempfile::tempdir().expect("content tempdir");
+    std::fs::copy(
+        locate_artifact("vfs-fixture-read.exe"),
+        content.path().join("fixture.exe"),
+    )
+    .expect("copy fixture");
+    std::fs::write(content.path().join("hello.txt"), b"hello").unwrap();
+
+    // Root 0's location: a fresh path that does not exist yet (the first
+    // launch creates it), so fixture.exe is graph-only relative to it.
+    let base = tempfile::tempdir().expect("base tempdir");
+    let loc = base.path().join("Game").to_string_lossy().replace('/', "\\");
+    assert!(!Path::new(&loc).exists());
+
+    let cfg = SessionConfig {
+        session: vfs_control::SessionMeta {
+            name: Some("rooted-launch".into()),
+        },
+        roots: vec![vfs_control::RootEntry {
+            id: 0,
+            name: "Game".into(),
+            path: loc.clone(),
+        }],
+        sources: vec![vfs_control::SourceEntry {
+            spec: vfs_control::SourceSpec::Disk {
+                path: content.path().to_string_lossy().into_owned(),
+            },
+            mount: "/".into(),
+            root: 0,
+            write_layer: false,
+        }],
+        launch: None,
+        ..Default::default()
+    };
+
+    let mut client = connect(&format!("{addr}")).await.expect("connect");
+    let (id, _) = apply_session_config(&mut client, &cfg)
+        .await
+        .expect("apply_session_config");
+
+    let launch_with = |exec: String| vfs_control::LaunchConfig {
+        exec,
+        args: vec![],
+        wait: true,
+        env: [
+            ("VFS_FIXTURE_PATH".to_string(), format!(r"{loc}\hello.txt")),
+            ("VFS_FIXTURE_EXPECT".to_string(), "5".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    // Bounded like `drain_launch_events`: `run_launch` itself waits forever, and
+    // this test holds LAUNCH_LOCK.
+    let stall = |which: &str| -> String {
+        format!(
+            "launch {which} stalled after {:?}; raise VFS_TEST_LAUNCH_TIMEOUT_SECS \
+             if this machine is merely slow",
+            launch_timeout()
+        )
+    };
+
+    let by_name = tokio::time::timeout(
+        launch_timeout(),
+        vfs_directord::run_launch(&mut client, &id, &launch_with(r"{Game}\fixture.exe".into())),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{}", stall(r"{Game}\fixture.exe")))
+    .expect("launch by root name");
+    assert_eq!(by_name, Some(0), "{{Game}}\\fixture.exe should stage and exit 0");
+
+    let abs = format!(r"{loc}\fixture.exe");
+    let by_path = tokio::time::timeout(
+        launch_timeout(),
+        vfs_directord::run_launch(&mut client, &id, &launch_with(abs.clone())),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{}", stall(&abs)))
+    .expect("launch by absolute path");
+    assert_eq!(
+        by_path,
+        Some(0),
+        "absolute path inside root 0 (now the staged real file) should launch and exit 0"
+    );
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
+        .await
+        .expect("teardown");
     server.abort();
 }
 

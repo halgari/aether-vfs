@@ -16,6 +16,7 @@ use std::time::Duration;
 // a native Linux director. So neither this import nor the `ipc` field below is
 // gated; only the two bodies that pick a transport are.
 use vfs_director::ipc::IpcServe;
+use crate::image::{self, ImageTarget, RootLocation};
 use vfs_director::stage::{stage_launch_into, ImageSource, StagedDir};
 use vfs_director::{Director, DiskProvider, MountGraph};
 // The Proton delivery mechanism: the unix counterpart of the `vfs-inject` +
@@ -60,15 +61,14 @@ static LAUNCH_ENV_LOCK: Mutex<()> = Mutex::new(());
 pub struct LaunchOpts {
     /// Path to the image to launch.
     ///
-    /// An **absolute** path is launched as given — it is a real file and no
-    /// lookup of ours applies to it.
-    ///
-    /// A **relative** name is resolved in two steps: first joined onto the
-    /// managed root and looked for on real disk (a host whose root is a real
-    /// game directory), and failing that looked up as a vpath in root 0's
-    /// **provider graph**, in which case [`Session::launch`] stages it — see
-    /// there. A name neither holds is refused by name rather than handed to
-    /// `CreateProcess`.
+    /// Resolved against the session's root **locations**
+    /// ([`Session::root_locations`], [`crate::image::classify_image`]): a
+    /// **relative** name is shorthand for root 0; an **absolute** path inside
+    /// a root's location is that root's vpath — a real file there is launched
+    /// as is, one only root 0's provider graph serves is staged first (see
+    /// [`Session::launch`]); an absolute path outside every root is a real
+    /// program, launched as given. Anything else is refused by name rather
+    /// than handed to `CreateProcess`.
     pub image: String,
     pub args: Vec<String>,
     /// Wait for process exit (false = detach; session must stay alive).
@@ -171,13 +171,11 @@ pub struct StageOpts<'a> {
 /// Reads whole files out of a session's own composed graph, for
 /// [`vfs_director::stage`]. Root 0: staging always concerns the launched
 /// image, which lives in the game-directory root.
-/// Windows-only: the sole constructor is `launch`'s staging step, which is
-/// itself `#[cfg(windows)]`. `stage_launch` stays portable — it takes any
-/// `&dyn ImageSource` a host supplies.
-#[cfg(windows)]
+/// The sole constructor is `launch`'s staging step, on both targets.
+/// `stage_launch` stays portable — it takes any `&dyn ImageSource` a host
+/// supplies.
 struct KernelSource(Arc<Director>);
 
-#[cfg(windows)]
 impl ImageSource for KernelSource {
     fn read(&self, vpath: &str) -> Option<Vec<u8>> {
         let (fh, size, is_dir) = self.0.open(RootId::DEFAULT, vpath, OPEN_READ).ok()?;
@@ -338,9 +336,32 @@ pub struct Session {
     /// exactly how the daemon surface lost copy-on-write while the harness
     /// kept it (gate 4, Task 6b).
     roots: Mutex<BTreeMap<u32, RootComposition>>,
-    /// Host directories for the session's roots **beyond root 0**, which
-    /// `virtual_root` names — see [`Session::declare_root`].
+    /// The session's roots **beyond root 0**, as declared — see
+    /// [`Session::declare_root`]. On Windows each is the host directory the
+    /// root virtualizes; on unix it is the root's **location** inside the Wine
+    /// prefix (`C:\…`), backed by `state_dir/roots/<id>`.
     extra_roots: Vec<(u32, PathBuf)>,
+    /// Root 0's location as the Wine child sees it, when declared; `None` is
+    /// [`DEFAULT_ROOT0_LOCATION`]. `virtual_root` stays its **host** backing
+    /// directory.
+    #[cfg(unix)]
+    root0_location: Option<String>,
+    /// A persistent prefix name ([`Session::set_prefix_name`]); `None` boots
+    /// an anonymous prefix keyed by `state_dir` and deleted on drop.
+    #[cfg(unix)]
+    prefix_name: Option<String>,
+    /// The anonymous prefix this session booted, if any — what `Drop`
+    /// deletes, with the home and runtime `launch` used for it. A named
+    /// prefix is never recorded here.
+    #[cfg(unix)]
+    anon: Mutex<Option<AnonPrefix>>,
+    /// `(prefix dir, link, target)` for every root link `launch` placed in a
+    /// prefix, so `Drop` can remove them through
+    /// [`Prefix::unlink_location`] — only while each is still a symlink to
+    /// what we linked, so a later session's relink of the same location
+    /// survives.
+    #[cfg(unix)]
+    prefix_links: Mutex<Vec<(PathBuf, PathBuf, PathBuf)>>,
     /// The most recent staged launch directory, held here because
     /// [`StagedDir`]'s `Drop` removes the staged files — not the virtual root
     /// they now live in — and Windows keeps the image file mapped for as long
@@ -379,6 +400,14 @@ impl Session {
             ipc: None,
             roots: Mutex::new(BTreeMap::new()),
             extra_roots: Vec::new(),
+            #[cfg(unix)]
+            root0_location: None,
+            #[cfg(unix)]
+            prefix_name: None,
+            #[cfg(unix)]
+            anon: Mutex::new(None),
+            #[cfg(unix)]
+            prefix_links: Mutex::new(Vec::new()),
             staged: Mutex::new(None),
         }
     }
@@ -459,18 +488,31 @@ impl Session {
     /// that cannot be right, and a fallible signature would force every host
     /// to special-case the id that needs it least.
     ///
-    /// (A *daemon* session is a different matter: there root 0 is a directory
-    /// the daemon created and already published to its client, so
-    /// `SessionRegistry::declare_root` refuses id 0 above this layer. That is
-    /// a policy of that host, not of embedding.)
+    /// A daemon session declares root 0 the same way when its config names
+    /// one (`SessionRegistry::declare_root`), and reports the declared
+    /// location as the session's root.
     ///
     /// Re-declaring an id replaces its path. Takes effect at the next
     /// [`Session::serve`] or [`Session::launch`], which is what publishes it
     /// into the environment the child inherits.
+    ///
+    /// **On unix `path` is a location, not a host directory**: the `C:\…`
+    /// path the Wine child sees the root at. `launch` backs it with a host
+    /// directory (root 0: `virtual_root`, still set by [`Session::set_root`];
+    /// root N: `state_dir/roots/N`) symlinked into the prefix at that
+    /// location. So on unix `declare_root(0, …)` sets root 0's **location**
+    /// and leaves `virtual_root` alone. See [`Session::root_locations`].
     pub fn declare_root(&mut self, id: u32, path: impl Into<PathBuf>) {
         let path = path.into();
         if id == 0 {
-            self.virtual_root = path;
+            #[cfg(unix)]
+            {
+                self.root0_location = Some(path.to_string_lossy().into_owned());
+            }
+            #[cfg(not(unix))]
+            {
+                self.virtual_root = path;
+            }
             return;
         }
         match self.extra_roots.iter_mut().find(|(r, _)| *r == id) {
@@ -479,12 +521,85 @@ impl Session {
         }
     }
 
+    /// Unix: whether `location` is one `launch` can link a root at — a `C:\…`
+    /// path below the drive root, without `..`
+    /// ([`vfs_proton::prefix::parse_location`], the rule `launch` itself
+    /// applies). [`Session::declare_root`] stays infallible, so a host that
+    /// takes locations from a user calls this first and refuses a bad one at
+    /// declare time rather than at the first launch. The error names the
+    /// location and what is wrong with it.
+    #[cfg(unix)]
+    pub fn check_root_location(location: &str) -> Result<(), String> {
+        vfs_proton::prefix::parse_location(location)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// The roots declared beyond root 0, in declaration order. For
     /// diagnostics and for tests that need to prove a config's `[[root]]`
     /// table actually reached the session rather than being parsed and
     /// dropped.
     pub fn declared_roots(&self) -> &[(u32, PathBuf)] {
         &self.extra_roots
+    }
+
+    /// Every root's **location** — the path the launched program sees it at —
+    /// root 0 first, then the extra roots in declaration order.
+    ///
+    /// On Windows root 0's location is `virtual_root` and each extra root's is
+    /// its declared host directory. On unix root 0's is its declared location,
+    /// else [`DEFAULT_ROOT0_LOCATION`], and each extra root's is its declared
+    /// `C:\…` location. [`crate::image::classify_image`] resolves launch
+    /// images against exactly this list.
+    pub fn root_locations(&self) -> Vec<RootLocation> {
+        #[cfg(unix)]
+        let root0 = self
+            .root0_location
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ROOT0_LOCATION.to_string());
+        #[cfg(not(unix))]
+        let root0 = self.virtual_root.to_string_lossy().into_owned();
+        std::iter::once(RootLocation { id: 0, location: root0 })
+            .chain(self.extra_roots.iter().map(|(id, p)| RootLocation {
+                id: *id,
+                location: p.to_string_lossy().into_owned(),
+            }))
+            .collect()
+    }
+
+    /// The host directory that backs `root`: root 0's is `virtual_root`; a
+    /// declared extra root's is its declared path on Windows and
+    /// `state_dir/roots/<id>` on unix. `None` for an undeclared root.
+    fn root_backing_dir(&self, root: u32) -> Option<PathBuf> {
+        if root == 0 {
+            return Some(self.virtual_root.clone());
+        }
+        let (_, declared) = self.extra_roots.iter().find(|(id, _)| *id == root)?;
+        #[cfg(unix)]
+        {
+            let _ = declared;
+            Some(self.state_dir.join("roots").join(root.to_string()))
+        }
+        #[cfg(not(unix))]
+        {
+            Some(declared.clone())
+        }
+    }
+
+    /// Select a **persistent** Wine prefix, `$VFS_HOME/sessions/<name>/`,
+    /// reused across runs and never deleted by aether-vfs. Without a name,
+    /// `launch` boots an anonymous prefix keyed by `state_dir` and this
+    /// session deletes it when it drops.
+    ///
+    /// `name` must be one plain path component (no separator, no `..`, not
+    /// empty, not absolute) — the same rule as the anonymous id.
+    #[cfg(unix)]
+    pub fn set_prefix_name(&mut self, name: &str) -> Result<(), String> {
+        ProtonRoot::at(PathBuf::new())
+            .try_session_dir(name)
+            .map_err(|e| format!("prefix name {name:?} must be one plain path component: {e}"))?;
+        self.prefix_name = Some(name.to_string());
+        Ok(())
     }
 
     /// The declared roots beyond root 0, as `apply_env_roots` wants them.
@@ -500,9 +615,8 @@ impl Session {
     /// (`VFS_RING_SECTION` plus the two event names). The file-backed ring has
     /// its own env protocol, published into the **child's** environment by
     /// `vfs_proton::launch::launch_env` rather than into this process's, and
-    /// that protocol carries no `VFS_VIRTUAL_ROOTS` at all — which is why the
-    /// unix `launch` refuses a session declaring a root beyond root 0 instead
-    /// of launching a child that would classify its paths as nobody's.
+    /// the unix `launch` hands the child its roots' **locations** through
+    /// `WineLaunch::virtual_roots` instead.
     #[cfg(windows)]
     fn extra_roots_env(&self) -> Vec<(u32, String)> {
         debug_assert!(
@@ -1054,9 +1168,12 @@ impl Session {
     /// one, and a host that points two sessions at one state directory has
     /// already handed them a single ring file to fight over.
     ///
-    /// The hash is `DefaultHasher`, whose output is stable within a build but
-    /// not promised across Rust releases. That is fine for what it names: a
-    /// rebuilt host boots one new prefix and reuses it from then on.
+    /// The prefix it names is **anonymous**: this session boots it at its
+    /// first launch, reuses it for every later launch, and deletes it when it
+    /// drops — it never outlives the session, so no later session (or later
+    /// run) ever finds it again. Hence the hash may be `DefaultHasher`, whose
+    /// output is stable within a build but not promised across Rust releases:
+    /// the id only has to agree with itself for one session's lifetime.
     #[cfg(unix)]
     fn wine_session_id(&self) -> String {
         use std::hash::{Hash, Hasher};
@@ -1065,23 +1182,23 @@ impl Session {
         format!("session-{:016x}", h.finish())
     }
 
-    /// Links the managed root, the overlay and the state directory into
-    /// `prefix/drive_c/vfs-session/`, and returns the three `C:\` paths they
-    /// are reachable at, in that order.
+    /// Links the overlay and the state directory into
+    /// `prefix/drive_c/vfs-session/`, and returns the two `C:\` paths they
+    /// are reachable at, in that order. The roots are linked at their own
+    /// locations by [`Session::link_roots`].
     ///
     /// **A Wine process can only name what is under one of its drives**, and
-    /// these three live wherever the host put them — normally under `/tmp`,
-    /// outside the prefix entirely. Symlinks into `drive_c` rather than a
-    /// `dosdevices` letter each ([`Prefix::map_drive`]): one location instead
-    /// of three letters to allocate, [`Prefix::windows_path`] renders the
-    /// result, and every path the shim is handed is a subdirectory rather than
-    /// a bare drive root.
+    /// these live wherever the host put them — normally under `/tmp`, outside
+    /// the prefix entirely. Symlinks into `drive_c` rather than a `dosdevices`
+    /// letter each ([`Prefix::map_drive`]): one location instead of a letter
+    /// per directory, [`Prefix::windows_path`] renders the result, and every
+    /// path the shim is handed is a subdirectory rather than a bare drive root.
     ///
     /// Each link is replaced, not created-if-absent: a session relaunches into
-    /// the prefix it already booted, and `set_root` may have moved the target
-    /// in between.
+    /// the prefix it already booted, and `set_overlay`/`set_state_dir` may
+    /// have moved the target in between.
     #[cfg(unix)]
-    fn link_into_prefix(&self, prefix: &Prefix) -> Result<(String, String, String), String> {
+    fn link_into_prefix(&self, prefix: &Prefix) -> Result<(String, String), String> {
         let base = prefix.drive_c().join(WINE_LINK_DIR);
         std::fs::create_dir_all(&base)
             .map_err(|e| format!("launch: create {}: {e}", base.display()))?;
@@ -1103,11 +1220,152 @@ impl Session {
                 )
             })
         };
-        Ok((
-            link("root", &self.virtual_root)?,
-            link("overlay", &self.overlay)?,
-            link("state", &self.state_dir)?,
-        ))
+        Ok((link("overlay", &self.overlay)?, link("state", &self.state_dir)?))
+    }
+
+    /// Links every root's host backing directory into `prefix` at the root's
+    /// location ([`Prefix::link_location`]), creating the backing directory
+    /// first, and records each link for `Drop` to remove.
+    ///
+    /// Shallowest location first, so a root nested inside another root's
+    /// location lands inside the outer root's (already linked) backing
+    /// directory rather than creating real directories where the outer link
+    /// must go. A location occupied by a real file or directory in the prefix
+    /// is refused, never replaced.
+    #[cfg(unix)]
+    fn link_roots(&self, prefix: &Prefix, roots: &[RootLocation]) -> Result<(), String> {
+        let depth = |loc: &str| loc.split(['\\', '/']).filter(|c| !c.is_empty()).count();
+        let mut order: Vec<&RootLocation> = roots.iter().collect();
+        order.sort_by_key(|r| depth(&r.location));
+        for loc in order {
+            let backing = self
+                .root_backing_dir(loc.id)
+                .ok_or_else(|| format!("launch: root {} has no backing directory", loc.id))?;
+            std::fs::create_dir_all(&backing)
+                .map_err(|e| format!("launch: root {}: create {}: {e}", loc.id, backing.display()))?;
+            let link = prefix
+                .link_location(&loc.location, &backing)
+                .map_err(|e| format!("launch: root {}: {e}", loc.id))?;
+            let mut links = self
+                .prefix_links
+                .lock()
+                .map_err(|_| "prefix links lock poisoned".to_string())?;
+            links.retain(|(d, l, _)| !(*d == prefix.dir && *l == link));
+            links.push((prefix.dir.clone(), link, backing));
+        }
+        Ok(())
+    }
+
+    /// Where `opts.image` points, staged if need be: the one resolver both
+    /// `launch` bodies share. The three forms are
+    /// [`crate::image::classify_image`]'s, against [`Session::root_locations`]:
+    ///
+    /// - **In a root** at a vpath: a real file in that root's backing
+    ///   directory is used as is; failing that, a vpath the root's provider
+    ///   graph serves is **staged** into root 0's backing directory (root 0
+    ///   only — another root's graph-only image is refused by name); failing
+    ///   that, refused.
+    /// - **Outside every root**: launched as given. On unix only a `C:\…`
+    ///   form can be given — a host path has no drive in the prefix.
+    ///
+    /// On unix an absolute **host** path is first rewritten to its remainder
+    /// under `virtual_root` (an accepted form before roots had locations), or
+    /// refused if it is not under it.
+    fn resolve_launch_image(&self, opts: &LaunchOpts) -> Result<ResolvedImage, String> {
+        #[cfg(unix)]
+        let image: String = {
+            let host = Path::new(&opts.image);
+            if host.is_absolute() {
+                let rel = host
+                    .strip_prefix(&self.virtual_root)
+                    .map_err(|_| no_drive_names(&opts.image))?;
+                rel.components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            } else {
+                opts.image.clone()
+            }
+        };
+        #[cfg(not(unix))]
+        let image: String = opts.image.clone();
+
+        match image::classify_image(&image, &self.root_locations())? {
+            ImageTarget::Outside(p) => {
+                #[cfg(unix)]
+                if !image::is_windows_absolute(&p) {
+                    return Err(no_drive_names(&p));
+                }
+                Ok(ResolvedImage::Outside(p))
+            }
+            ImageTarget::InRoot { root, vpath } => {
+                // A component with a drive (`C:foo.exe`, drive-relative, which
+                // `classify_image` calls relative) would make `Path::join`
+                // replace the whole base on Windows and escape the root.
+                if vpath.split('/').any(|c| c.contains(':')) {
+                    return Err(format!(
+                        "launch: {:?} has a path component containing ':' (a drive-relative \
+                         name); name the image by a plain path inside a root, or give it as \
+                         an absolute path",
+                        opts.image
+                    ));
+                }
+                let base = self
+                    .root_backing_dir(root)
+                    .ok_or_else(|| format!("launch: root {root} has no backing directory"))?;
+                let host = vpath.split('/').fold(base, |p, c| p.join(c));
+                if host.is_file() {
+                    return Ok(ResolvedImage::InRoot { root, vpath, host });
+                }
+                let served = self
+                    .kernel
+                    .getattr(RootId(root), &vpath)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if !served {
+                    return Err(format!(
+                        "launch: {:?} resolves to root {root} vpath {vpath:?}, which is neither \
+                         a real file at {} nor served by that root, so there is nothing to \
+                         stage",
+                        opts.image,
+                        host.display()
+                    ));
+                }
+                if root != 0 {
+                    return Err(format!(
+                        "launch: {vpath:?} is served by root {root}'s provider graph but is not \
+                         a real file, and staging is root 0 only — put the program in root 0 \
+                         or on disk"
+                    ));
+                }
+                // VFS content. Write it (and its import closure) out, mount
+                // the staging directory back under the curated graph, and
+                // launch the real file that produces.
+                let also: Vec<&str> = opts.stage_also.iter().map(String::as_str).collect();
+                let host = self
+                    .stage_launch(
+                        &KernelSource(Arc::clone(&self.kernel)),
+                        &StageOpts {
+                            exe_vpath: &vpath,
+                            also: &also,
+                            fallback_dirs: &opts.stage_fallback_dirs,
+                        },
+                    )
+                    .map_err(|e| format!("launch: staging {vpath:?}: {e}"))?;
+                Ok(ResolvedImage::InRoot { root, vpath, host })
+            }
+        }
+    }
+
+    /// [`Session::resolve_launch_image`]'s host path, for unit tests of the
+    /// in-root forms.
+    #[cfg(test)]
+    fn resolve_for_test(&self, opts: &LaunchOpts) -> Result<PathBuf, String> {
+        match self.resolve_launch_image(opts)? {
+            ResolvedImage::InRoot { host, .. } => Ok(host),
+            ResolvedImage::Outside(p) => Ok(PathBuf::from(p)),
+        }
     }
 
     /// Launch `opts.image` under the virtual root with dual-layer inject.
@@ -1117,14 +1375,20 @@ impl Session {
     ///
     /// ## How `image` is resolved
     ///
-    /// Absolute: launched as given.
+    /// By [`crate::image::classify_image`] against [`Session::root_locations`]
+    /// (see [`LaunchOpts::image`]), in one of three forms:
     ///
-    /// Relative: joined onto the virtual root and launched from there if a
-    /// real file exists (a host whose root is a real game directory —
-    /// fixtures, a vanilla install). Otherwise looked up as a **vpath in root
-    /// 0's provider graph**, and if the graph holds it, staged — see below.
-    /// Neither: refused by name, because `CreateProcess` would only fail
-    /// later and less clearly.
+    /// - **Relative**: a vpath in root 0. The real file under the virtual
+    ///   root is launched if there is one (a host whose root is a real game
+    ///   directory — fixtures, a vanilla install); otherwise, if root 0's
+    ///   **provider graph** serves the vpath, it is staged — see below.
+    /// - **Absolute, inside a root's location**: that root's vpath, resolved
+    ///   the same way — the real file in the root's directory, else staged
+    ///   (root 0 only; another root's graph-only image is refused by name).
+    /// - **Absolute, outside every root**: launched as given.
+    ///
+    /// An in-root image that is neither a real file nor served is refused by
+    /// name, because `CreateProcess` would only fail later and less clearly.
     ///
     /// ## Launching an image that is VFS content
     ///
@@ -1174,46 +1438,27 @@ impl Session {
             return Err("LaunchOpts.image is empty — name the image to launch".to_string());
         }
 
-        let root_s = self.virtual_root.to_string_lossy().into_owned();
-        let image_path = Path::new(&opts.image);
-        let target = if image_path.is_absolute() {
-            image_path.to_path_buf()
-        } else {
-            let on_disk = self.virtual_root.join(&opts.image);
-            if on_disk.is_file() {
-                on_disk
-            } else if self
-                .kernel
-                .getattr(RootId::DEFAULT, &opts.image)
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                // VFS content. Write it (and its import closure) out, mount
-                // the staging directory back under the curated graph, and
-                // launch the real file that produces.
-                let also: Vec<&str> = opts.stage_also.iter().map(String::as_str).collect();
-                self.stage_launch(
-                    &KernelSource(Arc::clone(&self.kernel)),
-                    &StageOpts {
-                        exe_vpath: &opts.image,
-                        also: &also,
-                        fallback_dirs: &opts.stage_fallback_dirs,
-                    },
-                )
-                .map_err(|e| format!("launch: staging {:?}: {e}", opts.image))?
-            } else {
-                return Err(format!(
-                    "launch: {:?} resolves to {}, which does not exist — and this session's \
-                     provider graph does not serve it either, so there is nothing to stage. A \
-                     relative LaunchOpts.image must be a real file under the managed root or a \
-                     vpath root 0 serves.",
-                    opts.image,
-                    on_disk.display()
-                ));
-            }
+        // Root 0 may have been declared after `serve`, which created the
+        // managed root it had then; resolving (and staging) needs this one.
+        std::fs::create_dir_all(&self.virtual_root)
+            .map_err(|e| format!("launch: create root {}: {e}", self.virtual_root.display()))?;
+        let target = match self.resolve_launch_image(opts)? {
+            ResolvedImage::InRoot { host, .. } => host,
+            ResolvedImage::Outside(p) => PathBuf::from(p),
         };
         let config_path = self.state_dir.join("shim.cfg");
+        // `serve` wrote `shim.cfg` and the thin config from root 0's location
+        // as it was then; root 0 may have been declared since. Rewrite both
+        // from the current one so the shim is told the root this child sees.
+        let root_s = self.virtual_root.to_string_lossy().into_owned();
+        let overlay_s = self.overlay.to_string_lossy().into_owned();
+        std::fs::write(
+            &config_path,
+            vfs_shim::encode_config_with_overlay(&root_s, &overlay_s, &empty_tree_snapshot()),
+        )
+        .map_err(|e| format!("launch: write {}: {e}", config_path.display()))?;
+        let thin = self.state_dir.join("fuse.cfg");
+        ipc.write_thin_config(&thin, &root_s)?;
         let ready_path = self.state_dir.join("ready.flag");
         let _ = std::fs::remove_file(&ready_path);
 
@@ -1250,7 +1495,6 @@ impl Session {
             .lock()
             .map_err(|_| "launch env lock poisoned".to_string())?;
 
-        let thin = self.state_dir.join("fuse.cfg");
         // Re-published here, not only in `serve`: the launch env lock is held
         // from this point, and a root declared after `serve` (or by another
         // session sharing this process's environment) must reach this child.
@@ -1295,17 +1539,37 @@ impl Session {
     /// this native director over the file-backed ring [`Session::serve`]
     /// started. Requires [`serve`] first, like the Windows body.
     ///
-    /// Four things a Wine launch needs that a Windows one does not:
+    /// ## How `image` is resolved
+    ///
+    /// By [`crate::image::classify_image`] against [`Session::root_locations`]
+    /// (see [`LaunchOpts::image`]): relative is root 0; a `C:\…` path inside a
+    /// root's location is that root's vpath — a real file in the root's
+    /// backing directory is launched as is, and a vpath only root 0's graph
+    /// serves is **staged** into root 0's backing directory first, exactly as
+    /// on Windows (`CreateProcess` inside Wine reads the image, and the loader
+    /// resolves its static imports, before any hook of ours exists); a `C:\…`
+    /// path outside every root is a prefix program, launched as given. An
+    /// absolute host path is accepted only inside `virtual_root`.
+    /// `stage_also` / `stage_fallback_dirs` apply to staging as on Windows.
+    ///
+    /// ## What a Wine launch needs that a Windows one does not
     ///
     /// 1. **A runtime.** The newest verified GE-Proton under this host's
     ///    aether-vfs home (`VFS_HOME`, else `XDG_DATA_HOME`, else `$HOME` —
     ///    `vfs_proton::layout::Root::from_env`). Never a fallback to stock
     ///    Proton: `vfs_proton::launch::run` re-verifies before it spawns.
-    /// 2. **A prefix**, this session's own, keyed by `state_dir`
-    ///    ([`Session::wine_session_id`]).
-    /// 3. **`C:\` names for the session's directories**, which live outside
-    ///    the prefix ([`Session::link_into_prefix`]) — and `shim.cfg` written
-    ///    *here* rather than in `serve`, since it carries two of them.
+    /// 2. **A prefix**: the persistent one [`Session::set_prefix_name`]
+    ///    selected, else an anonymous one keyed by `state_dir`
+    ///    ([`Session::wine_session_id`]) that this session deletes when it
+    ///    drops. Held under an exclusive lock for the launch, so a second live
+    ///    session on the same prefix fails fast instead of relinking roots
+    ///    under this one.
+    /// 3. **`C:\` names for the session's directories**: every root's backing
+    ///    directory is symlinked into `drive_c` at the root's location
+    ///    ([`Session::link_roots`]; removed on drop), the overlay and state
+    ///    directory under `C:\vfs-session` ([`Session::link_into_prefix`]) —
+    ///    and `shim.cfg` written *here* rather than in `serve`, since it
+    ///    carries root 0's location.
     /// 4. **This ring's real geometry**, taken straight off the live
     ///    [`IpcServe`]: `map_bytes`, `arena_offset`, `arena_len`,
     ///    `payload_cap`. The shim defaults `VFS_RING_BYTES` to 2 MiB, and that
@@ -1313,14 +1577,9 @@ impl Session {
     ///    and fails only at 4 MiB — measured, see `vfs_proton::launch`.
     ///    Nothing here may pass a default in their place.
     ///
-    /// Three of [`LaunchOpts`]' knobs are **refused rather than ignored**,
-    /// because dropping any of them silently produces a child that runs and is
-    /// wrong: `wait: false` (nothing here can detach — `run` waits), a session
-    /// with roots beyond root 0 (the file-backed env protocol carries no root
-    /// map, so those paths would fall through to real disk inside Wine), and an
-    /// `image` only the provider graph holds (staging is not wired to this
-    /// path). `stage_also` / `stage_fallback_dirs` are staging knobs and so are
-    /// unused here, exactly as their docs say.
+    /// `wait: false` is **refused rather than ignored**: nothing here can
+    /// detach (`run` waits), and returning after the wait while reporting a
+    /// detach would be a launch that lied about when it finished.
     #[cfg(unix)]
     pub fn launch(&self, opts: &LaunchOpts) -> Result<i32, String> {
         let ipc = self
@@ -1349,17 +1608,10 @@ impl Session {
                         launch that lied about when it finished."
                 .to_string());
         }
-        if !self.extra_roots.is_empty() {
-            return Err(format!(
-                "launch: this session declares {} root(s) beyond root 0, and the file-backed \
-                 env protocol carries no root map (see vfs_proton::launch::launch_env, which \
-                 sets VFS_VIRTUAL_DIR and deliberately not VFS_VIRTUAL_ROOTS). A root the \
-                 shim is never told about is one whose paths it classifies as nobody's and \
-                 lets fall through to real disk, silently — so this is refused rather than \
-                 launched with roots missing.",
-                self.extra_roots.len()
-            ));
-        }
+
+        // Before the runtime lookup: a bad image fails fast, and staging
+        // behaves as on Windows.
+        let resolved = self.resolve_launch_image(opts)?;
 
         let home = ProtonRoot::from_env()
             .map_err(|e| format!("launch: no aether-vfs home (set VFS_HOME): {e}"))?;
@@ -1381,9 +1633,33 @@ impl Session {
                 )
             })?;
 
-        let prefix = vfs_proton::prefix::ensure(&home, &runtime, &self.wine_session_id())
+        let prefix_id = match &self.prefix_name {
+            Some(name) => name.clone(),
+            None => {
+                // Recorded before `ensure`, so a boot that fails half-way is
+                // still deleted on drop.
+                // With the home and runtime used here, so `Drop` deletes this
+                // prefix from where it is rather than wherever the environment
+                // points by then.
+                let id = self.wine_session_id();
+                *self
+                    .anon
+                    .lock()
+                    .map_err(|_| "anon prefix lock poisoned".to_string())? = Some(AnonPrefix {
+                    id: id.clone(),
+                    home: home.clone(),
+                    runtime: runtime.clone(),
+                });
+                id
+            }
+        };
+        let prefix = vfs_proton::prefix::ensure(&home, &runtime, &prefix_id)
             .map_err(|e| format!("launch: wine prefix: {e}"))?;
-        let (wine_root, wine_overlay, wine_state) = self.link_into_prefix(&prefix)?;
+        let _prefix_lock = prefix.lock().map_err(|e| format!("launch: {e}"))?;
+
+        let (wine_overlay, wine_state) = self.link_into_prefix(&prefix)?;
+        let roots = self.root_locations();
+        self.link_roots(&prefix, &roots)?;
 
         // The ring as the shim sees it. Its bytes are the same inode `serve`
         // created; only the name differs.
@@ -1392,18 +1668,30 @@ impl Session {
             .ok_or_else(|| format!("launch: ring path {} has no file name", ring.display()))?;
         let wine_ring = join_wine(&wine_state, Path::new(ring_name))?;
 
-        let target = self.wine_target(opts, &wine_root)?;
+        let target = match resolved {
+            ResolvedImage::InRoot { root, vpath, .. } => {
+                let loc = roots
+                    .iter()
+                    .find(|r| r.id == root)
+                    .ok_or_else(|| format!("launch: root {root} has no location"))?;
+                image::join_location(&loc.location, &vpath)
+            }
+            ResolvedImage::Outside(p) => p,
+        };
+        let root0 = roots[0].location.clone();
+        let extra: Vec<(u32, String)> =
+            roots[1..].iter().map(|r| (r.id, r.location.clone())).collect();
 
-        // Written here, not in `serve`: these are the root and overlay *as the
-        // shim sees them*, and neither existed as a `C:\` name until the prefix
-        // above did. The snapshot must still be a valid empty tree —
+        // Written here, not in `serve`: root 0's location and the overlay *as
+        // the shim sees them*, and the overlay had no `C:\` name until the
+        // prefix above did. The snapshot must still be a valid empty tree —
         // `Engine::build` rejects zero-length snapshot bytes, which would abort
         // dual-layer bootstrap before hooks install.
         let config_path = self.state_dir.join("shim.cfg");
         let snap = empty_tree_snapshot();
         std::fs::write(
             &config_path,
-            vfs_protocol::shimcfg::encode_config_with_overlay(&wine_root, &wine_overlay, &snap),
+            vfs_protocol::shimcfg::encode_config_with_overlay(&root0, &wine_overlay, &snap),
         )
         .map_err(|e| format!("launch: write {}: {e}", config_path.display()))?;
 
@@ -1428,7 +1716,8 @@ impl Session {
             arena_offset: ipc.arena_offset,
             arena_len: ipc.arena_len,
             payload_cap: ipc.payload_cap,
-            virtual_dir: wine_root,
+            virtual_dir: root0,
+            virtual_roots: extra,
             args: opts.args.clone(),
         };
 
@@ -1457,71 +1746,6 @@ impl Session {
         exit.map_err(|e| format!("launch: {e}"))
     }
 
-    /// `opts.image` as the **child** must name it, or a refusal saying which
-    /// of the three forms it failed.
-    ///
-    /// Three accepted forms, all ending in a path the Wine process can open:
-    ///
-    /// - Already a Windows path (`C:\…`, `\\?\…`, a UNC name): handed through.
-    ///   A host that knows the child's own path space is not second-guessed.
-    /// - Relative: resolved under the managed root, which the child reaches as
-    ///   `<wine_root>\…`.
-    /// - An absolute **host** path inside the managed root: the same case,
-    ///   rewritten. Outside it there is no drive to name it by, so it is
-    ///   refused rather than passed to `wine` as a Unix path.
-    ///
-    /// **A vpath only the provider graph serves is refused**, unlike the
-    /// Windows body, which stages it. `CreateProcess` inside Wine reads the
-    /// image before any hook of ours exists, exactly as on Windows, so staging
-    /// would be needed — but the staged directory has to be nameable from
-    /// inside Wine and mounted back under the curated graph, and none of that
-    /// is wired to this path yet. Refused by name beats a `wine` error about a
-    /// file nobody can see.
-    #[cfg(unix)]
-    fn wine_target(&self, opts: &LaunchOpts, wine_root: &str) -> Result<String, String> {
-        if is_windows_path(&opts.image) {
-            return Ok(opts.image.clone());
-        }
-        let image = Path::new(&opts.image);
-        let rel = if image.is_absolute() {
-            image.strip_prefix(&self.virtual_root).map_err(|_| {
-                format!(
-                    "launch: {} is an absolute host path outside the managed root ({}), so no \
-                     drive in this session's Wine prefix names it. Put the image under the \
-                     managed root, or give it as the child sees it (C:\\...).",
-                    image.display(),
-                    self.virtual_root.display()
-                )
-            })?
-        } else {
-            image
-        };
-        let on_disk = self.virtual_root.join(rel);
-        if !on_disk.is_file() {
-            let in_graph = self
-                .kernel
-                .getattr(RootId::DEFAULT, &opts.image)
-                .ok()
-                .flatten()
-                .is_some();
-            return Err(format!(
-                "launch: {:?} resolves to {}, which is not a real file{}. The Proton path \
-                 launches a real image only — CreateProcess inside Wine reads it before any \
-                 hook of ours exists, and staging a graph-only image is not wired to this \
-                 path yet.",
-                opts.image,
-                on_disk.display(),
-                if in_graph {
-                    " — root 0's provider graph does serve that vpath, so staging is what is \
-                     missing, not the content"
-                } else {
-                    ", and root 0's provider graph does not serve it either"
-                }
-            ));
-        }
-        join_wine(wine_root, rel)
-    }
-
     pub fn stop_serve(&mut self) {
         if let Some(ipc) = self.ipc.take() {
             ipc.stop();
@@ -1533,6 +1757,85 @@ impl Default for Session {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl Drop for Session {
+    /// On unix: stop serving, remove the root links `launch` placed in a
+    /// prefix (only those still symlinks to what this session linked), and
+    /// delete the anonymous prefix this session booted — after stopping its
+    /// `wineserver`, which would otherwise write the registry back into it. A named prefix
+    /// ([`Session::set_prefix_name`]) is persistent and left alone. Best
+    /// effort — a destructor has nowhere to report a failure.
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            self.stop_serve();
+            let links = match self.prefix_links.get_mut() {
+                Ok(l) => std::mem::take(l),
+                Err(p) => std::mem::take(p.into_inner()),
+            };
+            // Reverse of link order (shallowest first), so a nested root's
+            // link — recorded through the outer root's link — is removed while
+            // that path still resolves. `unlink_location` removes only a
+            // link the prefix's manifest lists that still points where we
+            // pointed it, and delists it.
+            for (dir, link, target) in links.into_iter().rev() {
+                let _ = Prefix { dir }.unlink_location(&link, &target);
+            }
+            let anon = match self.anon.get_mut() {
+                Ok(a) => a.take(),
+                Err(p) => p.into_inner().take(),
+            };
+            if let Some(AnonPrefix { id, home, runtime }) = anon {
+                // `wineserver` lingers after the child and rewrites the
+                // registry into the prefix as it exits; stop it first (bounded)
+                // or the deleted prefix comes back.
+                if let Ok(dir) = home.try_session_dir(&id) {
+                    let _ = Prefix { dir: dir.join("prefix") }.stop_wineserver(&runtime);
+                }
+                let _ = vfs_proton::prefix::remove_session(&home, &id);
+            }
+        }
+    }
+}
+
+/// An anonymous Wine prefix a session booted: its id under `home`'s
+/// `sessions/`, and the runtime whose `wineserver` serves it.
+#[cfg(unix)]
+struct AnonPrefix {
+    id: String,
+    home: ProtonRoot,
+    runtime: PathBuf,
+}
+
+/// What [`Session::resolve_launch_image`] resolved an image to.
+#[derive(Debug)]
+enum ResolvedImage {
+    /// Inside `root`'s location at `vpath`; `host` is the real file backing
+    /// it — already there, or just staged into root 0's backing directory.
+    InRoot {
+        // The unix body names the child's image by the root's location and
+        // this vpath; the Windows body launches `host` and reads neither.
+        #[cfg_attr(not(unix), allow(dead_code))]
+        root: u32,
+        #[cfg_attr(not(unix), allow(dead_code))]
+        vpath: String,
+        // The Windows body launches `host`; the unix body names the child's
+        // image by the root's location instead, so only tests read it there.
+        #[cfg_attr(unix, allow(dead_code))]
+        host: PathBuf,
+    },
+    /// Outside every root: a real program, launched as given.
+    Outside(String),
+}
+
+/// The refusal for a unix host path no Wine drive names.
+#[cfg(unix)]
+fn no_drive_names(p: &str) -> String {
+    format!(
+        "launch: {p} is a host path outside every root, so no drive in this session's Wine \
+         prefix names it. Give it as the program sees it (C:\\...) or put it in a root."
+    )
 }
 
 /// Protocol golden `empty-tree-snapshot`: a single empty root directory.
@@ -1609,6 +1912,12 @@ const RING_FILE: &str = "ring.bin";
 #[cfg(unix)]
 const WINE_LINK_DIR: &str = "vfs-session";
 
+/// Root 0's location inside the prefix when none is declared — the path it has
+/// always had, `C:\` + [`WINE_LINK_DIR`] + `\root`, so existing hosts and tests
+/// see no change.
+#[cfg(unix)]
+const DEFAULT_ROOT0_LOCATION: &str = r"C:\vfs-session\root";
+
 /// Inline ring payload capacity for the file-backed ring.
 ///
 /// The value the named-section path uses (`vfs_ipc::DEFAULT_PAYLOAD_CAP`),
@@ -1619,18 +1928,6 @@ const WINE_LINK_DIR: &str = "vfs-session";
 /// one if the constant there changed.
 #[cfg(unix)]
 const PROTON_PAYLOAD_CAP: u32 = 1_048_576;
-
-/// Whether `s` is already a path in the child's own space rather than this
-/// host's: `C:\…` / `C:/…`, `\\?\…`, or a UNC name.
-///
-/// Prefix-only, no filesystem check: this decides which *namespace* the string
-/// belongs to, and a Windows path cannot be resolved on the host to confirm it.
-#[cfg(unix)]
-fn is_windows_path(s: &str) -> bool {
-    let b = s.as_bytes();
-    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
-        || s.starts_with("\\\\")
-}
 
 /// Appends `rel`'s components to a `C:\…` prefix with Wine's separator.
 ///
@@ -1871,5 +2168,307 @@ mod snapshot_tests {
         // MAGIC "SSFV" little-endian = 0x5646_5353
         assert_eq!(&snap[0..4], &[0x53, 0x53, 0x46, 0x56]);
         assert_eq!(u32::from_le_bytes(snap[4..8].try_into().unwrap()), 1);
+    }
+}
+
+#[cfg(test)]
+mod launch_image_tests {
+    use super::*;
+    use vfs_director::DiskProvider;
+
+    /// Minimal PE32+ with no imports — staging parses the import table, so
+    /// the bytes must be a real (if empty) PE. Same shape as
+    /// `vfs-directord/tests/staging.rs`'s `bare_pe`.
+    fn bare_pe() -> Vec<u8> {
+        let mut pe = vec![0u8; 0x400];
+        pe[0] = b'M';
+        pe[1] = b'Z';
+        pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+        pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+        pe[0x94..0x96].copy_from_slice(&240u16.to_le_bytes());
+        pe[0x98..0x9A].copy_from_slice(&0x20Bu16.to_le_bytes());
+        pe
+    }
+
+    fn content(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("vfs-li-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("game.exe"), bare_pe()).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_graph_only_image_in_root_zero_is_staged_into_the_root() {
+        let c = content("stage");
+        let s = Session::new();
+        s.mount("", Arc::new(DiskProvider::new(&c))).unwrap();
+        let loc0 = s.root_locations()[0].location.clone();
+        let img = image::join_location(&loc0, "game.exe");
+        let host = s.resolve_for_test(&LaunchOpts { image: img, ..Default::default() }).unwrap();
+        assert!(host.is_file(), "staged image must exist on the host: {}", host.display());
+        assert!(host.starts_with(s.virtual_root()), "staged into root 0's backing dir");
+    }
+
+    #[test]
+    fn a_graph_only_image_in_another_root_is_refused_by_name() {
+        let c = content("r1");
+        let mut s = Session::new();
+        let loc1 = if cfg!(windows) {
+            std::env::temp_dir().join(format!("vfs-li-r1loc-{}", std::process::id()))
+                .to_string_lossy().into_owned()
+        } else {
+            r"C:\users\steamuser\Saves".to_string()
+        };
+        s.declare_root(1, &loc1);
+        s.mount_at(RootId(1), "", Arc::new(DiskProvider::new(&c))).unwrap();
+        let e = s
+            .resolve_for_test(&LaunchOpts { image: image::join_location(&loc1, "game.exe"), ..Default::default() })
+            .unwrap_err();
+        assert!(e.contains("root 1") && e.contains("root 0"), "{e}");
+    }
+
+    #[test]
+    fn an_image_no_root_serves_is_refused() {
+        let s = Session::new();
+        let e = s.resolve_for_test(&LaunchOpts { image: "missing.exe".into(), ..Default::default() }).unwrap_err();
+        // "nothing to stage" is the Windows launch's refusal text, which
+        // `embed_api.rs`'s Windows-only launch test asserts on.
+        assert!(e.contains("missing.exe") && e.contains("nothing to stage"), "{e}");
+    }
+
+    /// A drive-relative `C:foo.exe` is relative to `classify_image`, so it
+    /// lands in root 0 — but on Windows `Path::join` of a component with a
+    /// drive replaces the whole base. Refused on every target, by name, even
+    /// where a file of that name really exists in the root (unix allows it).
+    #[test]
+    fn a_vpath_component_with_a_colon_is_refused_by_name() {
+        let s = Session::new();
+        std::fs::create_dir_all(s.virtual_root().join("bin")).unwrap();
+        if cfg!(unix) {
+            std::fs::write(s.virtual_root().join("C:foo.exe"), bare_pe()).unwrap();
+            std::fs::write(s.virtual_root().join("bin").join("D:x.exe"), bare_pe()).unwrap();
+        }
+        for img in ["C:foo.exe", r"bin\D:x.exe"] {
+            let e = s
+                .resolve_for_test(&LaunchOpts { image: img.into(), ..Default::default() })
+                .unwrap_err();
+            assert!(e.contains(&format!("{img:?}")) && e.contains("':'"), "{img}: {e}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_root_zero_location_defaults_and_can_be_declared() {
+        let mut s = Session::new();
+        assert_eq!(s.root_locations()[0].location, r"C:\vfs-session\root");
+        s.declare_root(0, r"C:\Games\Fixture");
+        assert_eq!(s.root_locations()[0].location, r"C:\Games\Fixture");
+        assert_ne!(s.virtual_root(), Path::new(r"C:\Games\Fixture"), "virtual_root stays the host dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_host_path_outside_every_root_is_refused() {
+        let s = Session::new();
+        let e = s.resolve_for_test(&LaunchOpts { image: "/usr/bin/true".into(), ..Default::default() }).unwrap_err();
+        assert!(e.contains("no drive"), "{e}");
+    }
+
+    /// The accepted pre-location form: an absolute host path inside the
+    /// managed root is the same as its relative remainder.
+    #[cfg(unix)]
+    #[test]
+    fn unix_host_path_inside_the_managed_root_is_root_zero() {
+        let s = Session::new();
+        std::fs::create_dir_all(s.virtual_root().join("bin")).unwrap();
+        let real = s.virtual_root().join("bin").join("real.exe");
+        std::fs::write(&real, bare_pe()).unwrap();
+        let host = s
+            .resolve_for_test(&LaunchOpts { image: real.to_string_lossy().into_owned(), ..Default::default() })
+            .unwrap();
+        assert_eq!(host, real);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_default_root_zero_location_is_where_the_session_dir_is_linked() {
+        assert_eq!(DEFAULT_ROOT0_LOCATION, format!(r"C:\{WINE_LINK_DIR}\root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_extra_roots_follow_root_zero_in_declaration_order() {
+        let mut s = Session::new();
+        s.declare_root(2, r"C:\b");
+        s.declare_root(1, r"C:\a");
+        let ids: Vec<u32> = s.root_locations().iter().map(|r| r.id).collect();
+        assert_eq!(ids, [0, 2, 1]);
+        assert_eq!(s.root_backing_dir(2), Some(s.state_dir().join("roots").join("2")));
+        assert_eq!(s.root_backing_dir(0).as_deref(), Some(s.virtual_root()));
+        assert_eq!(s.root_backing_dir(7), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_root_location_applies_the_link_rule() {
+        Session::check_root_location(r"C:\Games\Fixture").unwrap();
+        Session::check_root_location("c:/users/steamuser/Saves").unwrap();
+        for bad in [r"D:\Games", "/tmp/host-dir", r"C:\", r"C:\a\..\b", "Games"] {
+            let e = Session::check_root_location(bad).unwrap_err();
+            assert!(e.contains("bad root location") && e.contains(bad), "{bad}: {e}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_prefix_name_takes_one_plain_component() {
+        let mut s = Session::new();
+        for bad in ["", "a/b", "..", "/abs", r"a\b"] {
+            assert!(s.set_prefix_name(bad).is_err(), "{bad:?} must be refused");
+        }
+        s.set_prefix_name("skyrim").unwrap();
+    }
+
+    #[cfg(unix)]
+    fn scratch(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("vfs-lr-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// A session with its own host dirs and a scratch (never booted) prefix.
+    #[cfg(unix)]
+    fn linked_session(tag: &str) -> (Session, Prefix) {
+        let mut s = Session::new();
+        s.set_root(scratch(&format!("{tag}-root")));
+        s.set_state_dir(scratch(&format!("{tag}-state")));
+        (s, Prefix { dir: scratch(&format!("{tag}-prefix")) })
+    }
+
+    /// Ruling 3: a root nested in another root's location links *inside* the
+    /// outer root's backing dir, whichever order the roots arrive in.
+    #[cfg(unix)]
+    #[test]
+    fn nested_roots_link_inside_the_outer_backing_dir_in_either_order() {
+        // Root 0 outer, root 1 inner; the slice handed over both ways round.
+        for (tag, reverse) in [("n-fwd", false), ("n-rev", true)] {
+            let (mut s, prefix) = linked_session(tag);
+            s.declare_root(0, r"C:\G");
+            s.declare_root(1, r"C:\G\Saves");
+            let mut roots = s.root_locations();
+            if reverse {
+                roots.reverse();
+            }
+            s.link_roots(&prefix, &roots).unwrap();
+            let outer = prefix.drive_c().join("G");
+            assert_eq!(std::fs::read_link(&outer).unwrap(), s.virtual_root(), "{tag}");
+            let inner = s.virtual_root().join("Saves");
+            assert_eq!(
+                std::fs::read_link(&inner).unwrap(),
+                s.state_dir().join("roots").join("1"),
+                "{tag}: the inner link must land inside root 0's backing dir"
+            );
+            assert!(outer.join("Saves").is_dir(), "{tag}: the inner root resolves through the outer");
+        }
+        // Two extra roots, inner declared first.
+        let (mut s, prefix) = linked_session("n-extra");
+        s.declare_root(1, r"C:\G\Saves");
+        s.declare_root(2, r"C:\G");
+        s.link_roots(&prefix, &s.root_locations()).unwrap();
+        let outer_backing = s.state_dir().join("roots").join("2");
+        assert_eq!(std::fs::read_link(prefix.drive_c().join("G")).unwrap(), outer_backing);
+        assert_eq!(
+            std::fs::read_link(outer_backing.join("Saves")).unwrap(),
+            s.state_dir().join("roots").join("1")
+        );
+        // And drop removes both of this session's own links.
+        let links = [prefix.drive_c().join("G"), outer_backing.join("Saves")];
+        drop(s);
+        for l in links {
+            assert!(std::fs::symlink_metadata(&l).is_err(), "{} must be removed on drop", l.display());
+        }
+        assert!(
+            prefix.read_manifest().unwrap().is_empty(),
+            "drop must delist the links it removed from the prefix's manifest"
+        );
+    }
+
+    /// A user's own symlink at a root location in a persistent prefix: the
+    /// launch refuses it (by name), and it survives the session.
+    #[cfg(unix)]
+    #[test]
+    fn a_foreign_symlink_at_a_root_location_is_refused_and_survives() {
+        let (mut s, prefix) = linked_session("foreign");
+        s.declare_root(1, r"C:\Games\Skyrim");
+        let theirs = scratch("foreign-theirs");
+        let at = prefix.drive_c().join("Games").join("Skyrim");
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&theirs, &at).unwrap();
+        let e = s.link_roots(&prefix, &s.root_locations()).unwrap_err();
+        assert!(e.contains("root 1") && e.contains("did not create"), "{e}");
+        drop(s);
+        assert_eq!(std::fs::read_link(&at).unwrap(), theirs, "their link must survive");
+    }
+
+    /// Another session relinked the same location after this one launched:
+    /// this session's drop must leave that link alone.
+    #[cfg(unix)]
+    #[test]
+    fn drop_leaves_a_link_another_session_repointed() {
+        let (mut s, prefix) = linked_session("d-repoint");
+        s.declare_root(1, r"C:\users\steamuser\Saves");
+        s.link_roots(&prefix, &s.root_locations()).unwrap();
+        let link = prefix.drive_c().join("users").join("steamuser").join("Saves");
+        let theirs = scratch("d-repoint-theirs");
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&theirs, &link).unwrap();
+        drop(s);
+        assert_eq!(std::fs::read_link(&link).unwrap(), theirs, "another session's link must survive");
+    }
+
+    /// Something replaced the recorded link with a real directory: drop must
+    /// never remove it or its contents.
+    #[cfg(unix)]
+    #[test]
+    fn drop_leaves_a_real_directory_at_a_recorded_link_path() {
+        let (mut s, prefix) = linked_session("d-real");
+        s.declare_root(1, r"C:\Games\Mine");
+        s.link_roots(&prefix, &s.root_locations()).unwrap();
+        let link = prefix.drive_c().join("Games").join("Mine");
+        std::fs::remove_file(&link).unwrap();
+        std::fs::create_dir(&link).unwrap();
+        std::fs::write(link.join("keep.txt"), b"keep").unwrap();
+        drop(s);
+        assert_eq!(std::fs::read(link.join("keep.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_anonymous_prefix_is_removed_on_drop_and_a_named_one_is_not() {
+        let home = std::env::temp_dir().join(format!("vfs-drop-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let root = ProtonRoot::at(home.clone());
+        let anon_dir = root.try_session_dir("anon-x").unwrap().join("prefix");
+        let named_dir = root.try_session_dir("named-x").unwrap().join("prefix");
+        std::fs::create_dir_all(&anon_dir).unwrap();
+        std::fs::create_dir_all(&named_dir).unwrap();
+        // The environment's home is somewhere else entirely: `Drop` must use
+        // the home recorded at launch, never re-read `VFS_HOME`.
+        {
+            let a = Session::new();
+            *a.anon.lock().unwrap() = Some(AnonPrefix {
+                id: "anon-x".into(),
+                home: root.clone(),
+                // No `wineserver` here: stopping it fails fast and is ignored.
+                runtime: home.join("no-runtime"),
+            });
+            let mut n = Session::new();
+            n.set_prefix_name("named-x").unwrap();
+        }
+        assert!(!anon_dir.exists(), "anonymous prefix must be deleted on drop");
+        assert!(named_dir.exists(), "a named prefix is persistent");
     }
 }

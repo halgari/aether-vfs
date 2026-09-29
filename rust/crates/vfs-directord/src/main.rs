@@ -4,6 +4,7 @@
 //! * every other subcommand is a client; it discovers a running daemon (or
 //!   auto-spawns `vfs daemon`) and drives it over gRPC.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -11,8 +12,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use vfs_control::pb::{Empty, HealthReq, TeardownReq};
 use vfs_directord::{
-    apply_session_config, connect_or_spawn, default_discovery_path, parse_source_flag,
-    serve_daemon, DEFAULT_BIND,
+    apply_session_config, connect_or_spawn, default_discovery_path, launch_one_shot,
+    parse_source_flag, root_flag_entries, run_launch, serve_daemon, DEFAULT_BIND,
 };
 
 /// The `vfs` control CLI + daemon.
@@ -51,6 +52,24 @@ enum Command {
         #[arg(long)]
         session: String,
     },
+    /// Launch a program in a live session (`vfs up` without `[launch]`).
+    /// PATH is `{RootName}\rel`, an absolute path, or root-0-relative.
+    Exec {
+        /// The live session, by id or by name.
+        #[arg(long)]
+        session: String,
+        path: String,
+        /// `KEY=VALUE` child environment entries, repeatable.
+        #[arg(long = "env")]
+        env: Vec<String>,
+        /// Return as soon as the child starts instead of waiting for it to
+        /// exit. (Refused on Linux, where a Proton launch always waits.)
+        #[arg(long = "no-wait")]
+        no_wait: bool,
+        /// Arguments for the program, after `--`.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Launch an executable in a fresh session from `--source` flags.
     Launch {
         /// `TYPE:PATH@MOUNT`, repeatable. Precedence is declaration order
@@ -63,12 +82,23 @@ enum Command {
         /// read-only content and an in-place edit of it is refused.
         #[arg(long = "write-layer")]
         write_layer: Option<String>,
+        /// `ID=NAME=LOCATION`, repeatable: a root, its name (for `{NAME}\…`
+        /// paths) and where the program sees it. Once any is given, root 0
+        /// must be one of them.
+        #[arg(long = "root")]
+        roots: Vec<String>,
+        /// Session name; on Linux it also names a persistent Wine prefix.
+        #[arg(long)]
+        name: Option<String>,
+        /// `{RootName}\rel`, an absolute path, or root-0-relative.
         #[arg(long)]
         exec: String,
         #[arg(long)]
         args: Vec<String>,
-        #[arg(long, default_value_t = true)]
-        wait: bool,
+        /// Return as soon as the child starts instead of waiting for it to
+        /// exit. (Refused on Linux, where a Proton launch always waits.)
+        #[arg(long = "no-wait")]
+        no_wait: bool,
         /// `KEY=VALUE` child environment entries, repeatable.
         #[arg(long = "env")]
         env: Vec<String>,
@@ -131,15 +161,23 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     let cfg = vfs_control::load(&config)?;
                     let (session_id, exit) = apply_session_config(&mut client, &cfg).await?;
                     println!("session {session_id}");
-                    if let Some(code) = exit {
-                        if code == 0 {
-                            Ok(ExitCode::SUCCESS)
-                        } else {
-                            Ok(ExitCode::from(code.clamp(0, 255) as u8))
-                        }
-                    } else {
-                        Ok(ExitCode::SUCCESS)
-                    }
+                    Ok(exit_code(exit))
+                }
+                Command::Exec {
+                    session,
+                    path,
+                    env,
+                    no_wait,
+                    args,
+                } => {
+                    let launch = vfs_control::LaunchConfig {
+                        exec: path,
+                        args,
+                        wait: !no_wait,
+                        env: parse_env(&env)?,
+                    };
+                    let exit = run_launch(&mut client, &session, &launch).await?;
+                    Ok(exit_code(exit))
                 }
                 Command::Down { session } => {
                     client
@@ -153,9 +191,11 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 Command::Launch {
                     sources,
                     write_layer,
+                    roots,
+                    name,
                     exec,
                     args,
-                    wait,
+                    no_wait,
                     env,
                 } => {
                     let mut entries = Vec::new();
@@ -165,36 +205,21 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     if let Some(path) = &write_layer {
                         entries.push(vfs_directord::write_layer_flag_entry(path));
                     }
-                    let mut env_map = std::collections::BTreeMap::new();
-                    for e in &env {
-                        let (k, v) = e.split_once('=').ok_or_else(|| {
-                            format!("--env expects KEY=VALUE, got {e:?}")
-                        })?;
-                        env_map.insert(k.to_string(), v.to_string());
-                    }
                     let cfg = vfs_control::SessionConfig {
-                        session: vfs_control::SessionMeta { name: None },
-                        roots: vec![],
+                        session: vfs_control::SessionMeta { name },
+                        roots: root_flag_entries(&roots)?,
                         sources: entries,
                         launch: Some(vfs_control::LaunchConfig {
                             exec,
                             args,
-                            wait,
-                            env: env_map,
+                            wait: !no_wait,
+                            env: parse_env(&env)?,
                         }),
                         cache: None,
                     };
-                    let (session_id, exit) = apply_session_config(&mut client, &cfg).await?;
+                    let (session_id, exit) = launch_one_shot(&mut client, &cfg).await?;
                     println!("session {session_id}");
-                    if let Some(code) = exit {
-                        if code == 0 {
-                            Ok(ExitCode::SUCCESS)
-                        } else {
-                            Ok(ExitCode::from(code.clamp(0, 255) as u8))
-                        }
-                    } else {
-                        Ok(ExitCode::SUCCESS)
-                    }
+                    Ok(exit_code(exit))
                 }
                 Command::Sessions => {
                     let list = client.list_sessions(Empty {}).await?.into_inner();
@@ -227,6 +252,73 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 }
 
+/// `--env KEY=VALUE` flags as the child's environment map.
+fn parse_env(flags: &[String]) -> Result<BTreeMap<String, String>, String> {
+    flags
+        .iter()
+        .map(|e| {
+            e.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| format!("--env expects KEY=VALUE, got {e:?}"))
+        })
+        .collect()
+}
+
+/// The CLI's exit status for a launch: the child's code, or success when
+/// there was none to report. See [`exit_byte`].
+fn exit_code(exit: Option<i32>) -> ExitCode {
+    ExitCode::from(exit_byte(exit))
+}
+
+/// The one byte a process can exit with, for a child's exit code: `0` only
+/// for `0` (or no code at all); an ordinary `1..=255` as itself; anything
+/// else — negative, or too wide for a byte — `1`.
+///
+/// Never a clamp or a truncation. On Windows `GetExitCodeProcess`'s `u32`
+/// arrives here cast to `i32`, so a crash (`0xC0000005`, an access
+/// violation) is negative: clamping it to `0` reported a crashed program as
+/// success. Truncating is no better — `256`'s low byte is `0`.
+fn exit_byte(exit: Option<i32>) -> u8 {
+    match exit {
+        None | Some(0) => 0,
+        Some(code) => u8::try_from(code).ok().filter(|&b| b != 0).unwrap_or(1),
+    }
+}
+
 fn discovery_path_for_env(path: &std::path::Path) -> Option<std::ffi::OsString> {
     Some(path.as_os_str().to_os_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exit_byte;
+
+    #[test]
+    fn success_and_no_code_exit_zero() {
+        assert_eq!(exit_byte(None), 0);
+        assert_eq!(exit_byte(Some(0)), 0);
+    }
+
+    #[test]
+    fn an_ordinary_code_is_kept() {
+        for c in [1, 3, 42, 255] {
+            assert_eq!(exit_byte(Some(c)), c as u8);
+        }
+    }
+
+    /// `0xC0000005` (access violation) as `GetExitCodeProcess`'s `u32` cast
+    /// to `i32`: a crash must never read as success.
+    #[test]
+    fn a_negative_code_is_failure() {
+        assert_eq!(exit_byte(Some(0xC000_0005_u32 as i32)), 1);
+        assert_eq!(exit_byte(Some(-1)), 1);
+        assert_eq!(exit_byte(Some(i32::MIN)), 1);
+    }
+
+    #[test]
+    fn a_code_wider_than_a_byte_is_failure() {
+        assert_eq!(exit_byte(Some(256)), 1, "256's low byte is 0; it must not read as success");
+        assert_eq!(exit_byte(Some(257)), 1);
+        assert_eq!(exit_byte(Some(i32::MAX)), 1);
+    }
 }

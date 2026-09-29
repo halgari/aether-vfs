@@ -21,6 +21,9 @@
 //! detail and `print_open_totals`/`CountingProvider` for the per-root
 //! counters this adds.
 
+// On Linux `main` exits immediately, so the Windows-only helpers are unused.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -37,6 +40,10 @@ fn env_path(key: &str, default: &str) -> PathBuf {
 }
 
 fn main() {
+    if cfg!(not(windows)) {
+        eprintln!("skyrim-live is a Windows harness; on Linux use `vfs up` + `vfs exec`");
+        std::process::exit(2);
+    }
     if let Err(e) = run() {
         eprintln!("error: {e}");
         std::process::exit(1);
@@ -626,6 +633,7 @@ fn mount_low_priority_disk_layers(
 /// directory, and asking the OS once, explicitly and verifiably, is more
 /// honest than assuming `profiles` is still correct or relying a second time
 /// on the disk layer's own transparent junction-following.
+#[cfg(windows)]
 fn resolve_second_root_target(docs: &Path) -> Result<PathBuf, String> {
     let raw = docs.to_string_lossy().into_owned();
     let resolved = vfs_win::final_path_for_open(&raw).ok_or_else(|| {
@@ -640,6 +648,11 @@ fn resolve_second_root_target(docs: &Path) -> Result<PathBuf, String> {
     // this exact API's output shape.
     let stripped = resolved.strip_prefix(r"\\?\").unwrap_or(&resolved);
     Ok(PathBuf::from(stripped))
+}
+
+#[cfg(not(windows))]
+fn resolve_second_root_target(_docs: &Path) -> Result<PathBuf, String> {
+    Err("GetFinalPathNameByHandleW is not available on this platform".to_string())
 }
 
 /// Whether `resolved` (root 1's OS-resolved real location) is the same
@@ -1875,6 +1888,7 @@ fn merge_dir(src: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn is_reparse_point(path: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -1882,6 +1896,11 @@ fn is_reparse_point(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
         .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_path: &Path) -> bool {
+    false
 }
 
 fn ensure_junction(link: &Path, target: &Path) -> Result<(), String> {
