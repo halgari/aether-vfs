@@ -34,6 +34,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::path::Path;
 use std::sync::RwLock;
 
 use vfs_block_store::{BlockStore, CompactOptions};
@@ -72,12 +73,37 @@ const RUN_BLOCKS: u64 = 64;
 /// then flushes the store and commits the catalog durably, in that order,
 /// under the exclusive durability `gate`. Runs before anything else can use
 /// either; `bs` is the store's block size.
+///
+/// Refuses (and changes nothing) when the catalog has never had a layer but
+/// the store holds layer files: the catalog at `catalog_path` was lost or
+/// replaced, and every layer file would otherwise look like an orphan and be
+/// deleted. A new layer is made durable before any of its data is written
+/// ([`Storage::layer`]), so this cannot follow a mere crash.
 pub(crate) fn reconcile(
     store: &BlockStore,
     catalog: &Catalog,
+    catalog_path: &Path,
     gate: &RwLock<()>,
     bs: u64,
 ) -> Result<ReconcileReport, StorageError> {
+    let store_ids = store.file_ids()?;
+    if !catalog.has_layer_history()?
+        && store_ids
+            .iter()
+            .any(|id| matches!(classify_store_id(id), StoreIdKind::Layer(_)))
+    {
+        let dir = catalog_path.parent().unwrap_or(catalog_path);
+        tracing::error!(
+            catalog = %catalog_path.display(),
+            "the catalog is missing or empty but the store holds layer data; refusing to open"
+        );
+        return Err(StorageError::Catalog(format!(
+            "{} is missing (or empty) but the store in {} holds layer data; \
+             restore the catalog or move the store aside",
+            catalog_path.display(),
+            dir.display()
+        )));
+    }
     let mut report = ReconcileReport::default();
     let names: HashMap<u64, String> = catalog
         .layer_names()?
@@ -168,7 +194,7 @@ pub(crate) fn reconcile(
         }
     }
 
-    for id in store.file_ids()? {
+    for id in store_ids {
         match classify_store_id(&id) {
             StoreIdKind::Foreign => {
                 tracing::warn!(id = ?id, "store holds a file id vfs-storage never writes; left alone");
@@ -662,6 +688,69 @@ mod tests {
             assert_eq!(s.catalog.get(lid, "f.bin").unwrap().unwrap().len, len);
             s.close().unwrap();
         }
+    }
+
+    /// A catalog that is gone (or was replaced by an empty one) while the
+    /// store holds layer data: opening refuses, naming the directory, and
+    /// deletes nothing. Restoring the catalog brings everything back.
+    #[test]
+    fn a_missing_catalog_with_layer_data_refuses_to_open() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("saves").unwrap();
+        write_file(&p, "a.ess", b"precious");
+        drop(p);
+        s.close().unwrap();
+        let cat = d.path().join("catalog.redb");
+        let backup = d.path().join("catalog.bak");
+        std::fs::rename(&cat, &backup).unwrap();
+
+        for attempt in 0..2 {
+            let e = Storage::open(d.path(), cfg())
+                .err()
+                .expect("must refuse to open");
+            let msg = e.to_string();
+            assert!(
+                msg.contains("catalog.redb") && msg.contains(&d.path().display().to_string()),
+                "attempt {attempt}: {msg}"
+            );
+        }
+        std::fs::remove_file(&cat).ok();
+        std::fs::rename(&backup, &cat).unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        assert_eq!(*s.last_reconcile(), Default::default());
+        let p = s.layer("saves").unwrap();
+        assert_eq!(read_file(&p, "a.ess"), b"precious");
+    }
+
+    /// With no catalog and only cache files in the store, those are orphans
+    /// like any other and are deleted.
+    #[test]
+    fn a_missing_catalog_with_only_cache_data_opens() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        s.store.set_len(&cache_file_id(&[4u8; 16]), 10).unwrap();
+        s.close().unwrap();
+        std::fs::remove_file(d.path().join("catalog.redb")).unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        assert_eq!(s.last_reconcile().orphans_deleted, 1);
+        assert_consistent(&s);
+    }
+
+    /// A new layer is durable as soon as it exists, before any of its data:
+    /// otherwise a crash could leave layer data in the store under a catalog
+    /// that never had a layer, which opening refuses.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_new_layer_is_durable_before_its_data() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("fresh").unwrap();
+        let killed = tempfile::tempdir().unwrap();
+        crate::test_util::snapshot(d.path(), killed.path());
+        let k = Storage::open(killed.path(), cfg()).unwrap();
+        assert!(k.catalog.layer_id("fresh").unwrap().is_some());
+        drop(p);
     }
 
     #[test]

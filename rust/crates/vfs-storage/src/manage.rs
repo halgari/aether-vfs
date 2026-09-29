@@ -159,7 +159,7 @@ impl Storage {
                 dir.display()
             )));
         }
-        self.catalog.create_layer(name)?;
+        self.create_layer_durably(name)?;
         let p = self.layer_provider(name, false)?;
         let mut files = 0;
         let copied = import_dir(&p, dir, "", &mut files)
