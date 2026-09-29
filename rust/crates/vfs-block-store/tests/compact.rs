@@ -1,9 +1,9 @@
 mod common;
 
-use block_store::CompactOptions;
+use vfs_block_store::CompactOptions;
 use common::*;
 
-fn fill(store: &block_store::BlockStore, files: u64) -> Vec<Vec<u8>> {
+fn fill(store: &vfs_block_store::BlockStore, files: u64) -> Vec<Vec<u8>> {
     (0..files)
         .map(|i| {
             let data = random_bytes(100 + i, 4 * BS);

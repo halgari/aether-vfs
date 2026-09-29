@@ -1,6 +1,6 @@
 mod common;
 
-use block_store::{BlockStore, Error, StoreConfig};
+use vfs_block_store::{BlockStore, Error, StoreConfig};
 use common::*;
 
 #[test]

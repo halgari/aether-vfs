@@ -140,7 +140,21 @@ jobs:
       # non-ignored tests run on any Linux box; its one Wine test is
       # `#[ignore]`d and run by `proton-linux`.
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord
+        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord -p vfs-block-store
+        working-directory: rust
+      # The block store's own gates, carried over from its repository:
+      # `crash-points` compiles in the abort hooks its subprocess crash tests
+      # drive (off by default, so the plain run above skips them), and the
+      # model test runs 512 proptest cases in release, where it is fast
+      # enough to be worth the depth.
+      - name: Block store (all features, clippy, deep model test)
+        run: |
+          cargo clippy -p vfs-block-store --all-targets --all-features -- -D warnings
+          cargo test -p vfs-block-store --all-features
+          cargo test -p vfs-block-store --release --test model
+          cargo bench -p vfs-block-store --no-run
+        env:
+          PROPTEST_CASES: "512"
         working-directory: rust
       # The director kernel itself, which stopped being Windows-only in
       # increment 1 of the Linux port. Its own unit tests run here; its ring

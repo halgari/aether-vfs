@@ -5,7 +5,7 @@ mod common;
 use std::collections::HashMap;
 use std::ops::Range;
 
-use block_store::{BlockStore, CompactOptions, Error};
+use vfs_block_store::{BlockStore, CompactOptions, Error};
 use common::*;
 use proptest::prelude::*;
 

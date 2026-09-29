@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use block_store::{BlockStore, StoreConfig};
+use vfs_block_store::{BlockStore, StoreConfig};
 
 pub const BS: usize = 4096;
 

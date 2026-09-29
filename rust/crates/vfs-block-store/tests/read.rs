@@ -1,6 +1,6 @@
 mod common;
 
-use block_store::{Error, ReadResult};
+use vfs_block_store::{Error, ReadResult};
 use common::*;
 
 #[test]

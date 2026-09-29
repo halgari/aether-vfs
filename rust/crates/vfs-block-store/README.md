@@ -1,4 +1,4 @@
-# block-store
+# vfs-block-store
 
 A deduplicating, compressing block store for caching virtual file system content.
 
@@ -10,12 +10,12 @@ A deduplicating, compressing block store for caching virtual file system content
   [redb](https://github.com/cberner/redb) database.
 - One process opens a store at a time; any number of threads in that process can use it.
 
-Design: [docs/superpowers/specs/2026-09-23-block-store-design.md](docs/superpowers/specs/2026-09-23-block-store-design.md)
+Design: [docs/superpowers/specs/2026-09-23-block-store-design.md](../../../docs/superpowers/specs/2026-09-23-block-store-design.md)
 
 ## Usage
 
 ```rust
-use block_store::{BlockStore, CompactOptions, StoreConfig};
+use vfs_block_store::{BlockStore, CompactOptions, StoreConfig};
 
 let store = BlockStore::open("cache-dir", StoreConfig::default())?;
 

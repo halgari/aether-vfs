@@ -6,7 +6,7 @@
 
 use std::time::Instant;
 
-use block_store::{BlockStore, StoreConfig};
+use vfs_block_store::{BlockStore, StoreConfig};
 
 const BS: usize = 64 * 1024;
 

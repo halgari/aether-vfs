@@ -15,6 +15,11 @@ members = [
   "crates/vfs-source",
   "crates/vfs-compose",
   "crates/vfs-cache",
+  # Deduplicating, compressing block store (redb index + zstd packs),
+  # imported with its history from aether-vfs-block-store. It replaces the
+  # vfs-cache layer in a later change; nothing depends on it yet. Edition
+  # 2024 and MIT OR Apache-2.0, as it was upstream.
+  "crates/vfs-block-store",
   "crates/vfs-directord",
   "crates/vfs-ipc",
   "crates/vfs-inject",
