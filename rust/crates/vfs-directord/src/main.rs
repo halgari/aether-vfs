@@ -44,7 +44,7 @@ enum Command {
         /// Default: `$VFS_STORAGE_DIR`, else `$VFS_HOME/storage`.
         #[arg(long = "storage-dir")]
         storage_dir: Option<PathBuf>,
-        /// Budget for cached source data, in GiB (default 32).
+        /// Budget for cached source data, in GiB (default 32; at least 1).
         #[arg(long = "cache-max-gib")]
         cache_max_gib: Option<u64>,
     },

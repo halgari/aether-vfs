@@ -130,10 +130,15 @@ impl Director for DirectorService {
         // then silently lacks copy-on-write.
         if r.write_layer {
             check_whole_root(&mount)?;
-            let id = self
-                .registry
-                .set_write_layer(&r.session_id, r.root, backend)
-                .map_err(registry_status)?;
+            // Replacing a named-layer upper drops its provider, whose `Drop`
+            // runs a durable point (fsyncs): off the async executor.
+            let (registry, sid) = (self.registry.clone(), r.session_id);
+            let id = tokio::task::spawn_blocking(move || {
+                registry.set_write_layer(&sid, r.root, backend)
+            })
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(registry_status)?;
             return Ok(Response::new(SourceRef { id }));
         }
 

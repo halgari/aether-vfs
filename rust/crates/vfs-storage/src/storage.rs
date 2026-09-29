@@ -42,6 +42,12 @@ pub enum StorageError {
 }
 
 impl StorageError {
+    /// Whether another `Storage` (in this or another process) holds the
+    /// directory: what [`Storage::open`] fails with when it is taken.
+    pub fn is_locked(&self) -> bool {
+        matches!(self, StorageError::Store(vfs_block_store::Error::Locked))
+    }
+
     /// The `vfs_provider` status a provider should answer with.
     ///
     /// The directory refusals match `vfs-compose`'s `MemoryProvider`: removing
@@ -335,10 +341,11 @@ mod tests {
     fn storage_opens_twice_in_sequence_but_not_concurrently() {
         let dir = tempfile::tempdir().unwrap();
         let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
-        assert!(
-            Storage::open(dir.path(), StorageConfig::default()).is_err(),
-            "the block store lock must hold"
-        );
+        let e = Storage::open(dir.path(), StorageConfig::default())
+            .err()
+            .expect("the block store lock must hold");
+        assert!(e.is_locked(), "{e}");
+        assert!(!StorageError::Catalog("x".into()).is_locked());
         s.close().unwrap();
         Storage::open(dir.path(), StorageConfig::default()).unwrap();
     }

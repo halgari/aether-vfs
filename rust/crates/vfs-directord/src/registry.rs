@@ -539,10 +539,25 @@ impl SessionRegistry {
         }
         // Checked before the layer is created, so a bad id creates nothing.
         self.entry(session_id)?;
+        let existed = storage
+            .layers()
+            .map_err(|e| format!("layer {name:?}: {e}"))?
+            .iter()
+            .any(|l| l.name == name);
         let upper = storage
             .layer(name)
             .map_err(|e| format!("layer {name:?}: {e}"))?;
-        self.set_write_layer_inner(session_id, root, upper, Some(name))
+        let result = self.set_write_layer_inner(session_id, root, upper, Some(name));
+        // A refused upper is dropped before the error returns, so a layer this
+        // call created can go again; one that existed is left alone.
+        if result.is_err() && !existed {
+            if let Err(e) = storage.delete_layer(name) {
+                eprintln!(
+                    "vfs: layer {name:?} created for a refused write layer was not deleted: {e}"
+                );
+            }
+        }
+        result
     }
 
     fn set_write_layer_inner(
@@ -1594,6 +1609,41 @@ root = 1
             .with_session_mut(&s.id, |live| Ok(live.session.read_file("saves/a.sav")))
             .unwrap();
         assert_eq!(got.unwrap(), b"PERSISTED");
+    }
+
+    /// A layer write layer the session refuses leaves no layer behind if this
+    /// call created it, and never deletes one that already existed.
+    #[test]
+    fn a_refused_layer_write_layer_deletes_only_a_layer_it_created() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let reg = SessionRegistry::with_storage(open_storage(store_dir.path()));
+        let storage = Arc::clone(reg.storage().unwrap());
+        drop(storage.layer("existing").unwrap());
+        let s = reg.create("refused".into()).unwrap();
+        // A root the kernel serves directly, outside the session's own
+        // composition, cannot take a write layer (`Session::claim`).
+        reg.with_session_mut(&s.id, |live| {
+            live.session
+                .kernel()
+                .mount(RootId(3), Arc::new(vfs_embed::MemoryProvider::new()))
+                .map_err(|st| format!("mount: {st}"))
+        })
+        .unwrap();
+        for name in ["fresh", "existing"] {
+            reg.set_layer_write_layer(&s.id, 3, name).expect_err(name);
+        }
+        let names: Vec<String> = storage
+            .layers()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["existing"],
+            "only the layer this call created is removed"
+        );
+        assert!(reg.layer_users("existing").is_empty());
     }
 
     #[test]

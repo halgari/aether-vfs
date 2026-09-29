@@ -59,8 +59,17 @@ pub async fn connect_or_spawn(
         }
     }
 
-    spawn_daemon(&daemon_exe, &path)?;
-    wait_for_daemon(&path, Duration::from_secs(15)).await
+    let mut child = spawn_daemon(&daemon_exe, &path)?;
+    wait_for_spawned(&path, &mut child, Duration::from_secs(15)).await
+}
+
+/// Where an auto-spawned daemon's stderr goes: `<discovery>.daemon.log`. A
+/// file rather than a pipe, because the detached daemon outlives the CLI
+/// that spawned it.
+pub fn daemon_log_path(discovery_path: &std::path::Path) -> PathBuf {
+    let mut p = discovery_path.as_os_str().to_os_string();
+    p.push(".daemon.log");
+    PathBuf::from(p)
 }
 
 async fn health_ok(client: &mut DirectorClient<Channel>) -> bool {
@@ -97,13 +106,24 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
-fn spawn_daemon(exe: &PathBuf, discovery_path: &std::path::Path) -> Result<(), String> {
+fn spawn_daemon(
+    exe: &PathBuf,
+    discovery_path: &std::path::Path,
+) -> Result<std::process::Child, String> {
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("daemon");
     cmd.env("VFS_DISCOVERY_PATH", discovery_path);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
+    // Truncated on each spawn: it describes this daemon, not an earlier one.
+    let log = daemon_log_path(discovery_path);
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match std::fs::File::create(&log) {
+        Ok(f) => cmd.stderr(f),
+        Err(_) => cmd.stderr(std::process::Stdio::null()),
+    };
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -120,8 +140,44 @@ fn spawn_daemon(exe: &PathBuf, discovery_path: &std::path::Path) -> Result<(), S
         cmd.process_group(0);
     }
     cmd.spawn()
-        .map_err(|e| format!("spawn daemon {}: {e}", exe.display()))?;
-    Ok(())
+        .map_err(|e| format!("spawn daemon {}: {e}", exe.display()))
+}
+
+/// [`wait_for_daemon`] for a daemon this process just spawned: if `child`
+/// exits before it is ready (it could not open its storage, say), fail at
+/// once with its exit status and its log, instead of waiting out `timeout`.
+async fn wait_for_spawned(
+    discovery_path: &std::path::Path,
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<DirectorClient<Channel>, String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let log = daemon_log_path(discovery_path);
+                let text = std::fs::read_to_string(&log).unwrap_or_default();
+                return Err(format!(
+                    "daemon exited ({status}) before becoming ready: {} [log: {}]",
+                    text.trim(),
+                    log.display()
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => return Err(format!("waiting on the spawned daemon: {e}")),
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(format!(
+                "daemon did not become ready (log: {})",
+                daemon_log_path(discovery_path).display()
+            ));
+        }
+        // One short readiness attempt per poll, so an exit is seen promptly.
+        if let Ok(c) = wait_for_daemon(discovery_path, left.min(Duration::from_millis(200))).await {
+            return Ok(c);
+        }
+    }
 }
 
 async fn wait_for_daemon(
@@ -148,17 +204,26 @@ async fn wait_for_daemon(
 }
 
 /// The daemon's storage directory: `flag` (`--storage-dir`), else
-/// `VFS_STORAGE_DIR`, else `<home>/storage` where the aether-vfs home is
-/// `VFS_HOME`, else `$XDG_DATA_HOME/aether-vfs`, else
-/// `$HOME/.local/share/aether-vfs`, else `%LOCALAPPDATA%\aether-vfs` — the
-/// same order the Proton runtimes' home resolves in. `None` when nothing
-/// names a home at all.
+/// `VFS_STORAGE_DIR`, else `<home>/storage`, where the aether-vfs home is
+/// `VFS_HOME`, else — on unix — `$XDG_DATA_HOME/aether-vfs`, then
+/// `$HOME/.local/share/aether-vfs`; on Windows `%LOCALAPPDATA%\aether-vfs`.
+/// `None` when nothing names a home at all.
 ///
 /// `env` is the environment lookup (`std::env::var_os` in the daemon), so the
 /// order can be tested without touching the process environment.
 pub fn storage_dir_from(
     flag: Option<&Path>,
     env: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    storage_dir_for(flag, env, cfg!(windows))
+}
+
+/// [`storage_dir_from`] with the OS as a parameter, so both orders are tested
+/// on either OS.
+fn storage_dir_for(
+    flag: Option<&Path>,
+    env: &dyn Fn(&str) -> Option<OsString>,
+    windows: bool,
 ) -> Option<PathBuf> {
     if let Some(dir) = flag {
         return Some(dir.to_path_buf());
@@ -167,27 +232,43 @@ pub fn storage_dir_from(
     if let Some(dir) = set(vfs_env::STORAGE_DIR) {
         return Some(dir);
     }
-    let home = set(vfs_env::HOME)
-        .or_else(|| set("XDG_DATA_HOME").map(|x| x.join("aether-vfs")))
-        .or_else(|| set("HOME").map(|h| h.join(".local/share/aether-vfs")))
-        .or_else(|| set("LOCALAPPDATA").map(|l| l.join("aether-vfs")))?;
+    let home = match set(vfs_env::HOME) {
+        Some(h) => h,
+        None if windows => set("LOCALAPPDATA")?.join("aether-vfs"),
+        None => set("XDG_DATA_HOME")
+            .map(|x| x.join("aether-vfs"))
+            .or_else(|| set("HOME").map(|h| h.join(".local/share/aether-vfs")))?,
+    };
     Some(home.join("storage"))
 }
 
 /// Open the daemon's storage at `dir`, with `cache_max_gib` as the cache
-/// budget (the default otherwise), and print what reconciliation repaired.
+/// budget (the default otherwise; `0` is refused), and print what
+/// reconciliation repaired.
 ///
 /// A failure — above all another daemon holding the directory — is an error
 /// naming the directory and how to choose another.
 pub fn open_daemon_storage(dir: &Path, cache_max_gib: Option<u64>) -> Result<Arc<Storage>, String> {
     let mut cfg = StorageConfig::default();
     if let Some(gib) = cache_max_gib {
+        if gib == 0 {
+            return Err(
+                "--cache-max-gib 0: the cache budget must be at least 1 GiB (omit the flag \
+                 for the default, 32)"
+                    .to_string(),
+            );
+        }
         cfg.cache_max_bytes = gib.saturating_mul(1 << 30);
     }
     let storage = Storage::open(dir, cfg).map_err(|e| {
+        let hint = if e.is_locked() {
+            " (is another vfs daemon using it?)"
+        } else {
+            ""
+        };
         format!(
-            "cannot open storage at {}: {e} (is another vfs daemon using it? choose \
-             another directory with --storage-dir or {})",
+            "cannot open storage at {}: {e}{hint}; choose another directory with \
+             --storage-dir or {}",
             dir.display(),
             vfs_env::STORAGE_DIR
         )
@@ -927,8 +1008,8 @@ mod tests {
         );
     }
 
-    /// `--storage-dir`, then `VFS_STORAGE_DIR`, then `<VFS_HOME>/storage`
-    /// with VFS_HOME resolved as the Proton runtimes' home is.
+    /// `--storage-dir`, then `VFS_STORAGE_DIR`, then `<home>/storage`: the
+    /// home is `VFS_HOME`, then XDG/HOME on unix and LOCALAPPDATA on Windows.
     #[test]
     fn storage_dir_resolution_order() {
         use std::collections::HashMap;
@@ -940,6 +1021,7 @@ mod tests {
                 .collect();
             move |k: &str| m.get(k).cloned()
         };
+        let p = |s: &str| PathBuf::from(s);
         let all = env(&[
             (vfs_env::STORAGE_DIR, "/env/storage"),
             (vfs_env::HOME, "/vfs-home"),
@@ -947,36 +1029,54 @@ mod tests {
             ("HOME", "/home/u"),
             ("LOCALAPPDATA", "/lad"),
         ]);
-        let flag = PathBuf::from("/flag/storage");
-        assert_eq!(storage_dir_from(Some(&flag), &all), Some(flag.clone()));
+        for windows in [false, true] {
+            let flag = p("/flag/storage");
+            assert_eq!(
+                storage_dir_for(Some(&flag), &all, windows),
+                Some(flag.clone())
+            );
+            assert_eq!(
+                storage_dir_for(None, &all, windows),
+                Some(p("/env/storage"))
+            );
+            let vfs_home = env(&[(vfs_env::HOME, "/vfs-home"), ("HOME", "/home/u")]);
+            assert_eq!(
+                storage_dir_for(None, &vfs_home, windows),
+                Some(p("/vfs-home").join("storage"))
+            );
+            assert_eq!(storage_dir_for(None, &env(&[]), windows), None);
+        }
+        // Unix: XDG, then HOME; LOCALAPPDATA is not consulted.
+        let rest = env(&[
+            ("XDG_DATA_HOME", "/xdg"),
+            ("HOME", "/home/u"),
+            ("LOCALAPPDATA", "/lad"),
+        ]);
         assert_eq!(
-            storage_dir_from(None, &all),
-            Some(PathBuf::from("/env/storage"))
+            storage_dir_for(None, &rest, false),
+            Some(p("/xdg").join("aether-vfs").join("storage"))
         );
-        let p = |s: &str| Some(PathBuf::from(s));
         assert_eq!(
-            storage_dir_from(
+            storage_dir_for(
                 None,
-                &env(&[(vfs_env::HOME, "/vfs-home"), ("HOME", "/home/u")])
+                &env(&[("HOME", "/home/u"), ("LOCALAPPDATA", "/lad")]),
+                false
             ),
-            p("/vfs-home").map(|h| h.join("storage"))
+            Some(p("/home/u").join(".local/share/aether-vfs").join("storage"))
         );
         assert_eq!(
-            storage_dir_from(
-                None,
-                &env(&[("XDG_DATA_HOME", "/xdg"), ("HOME", "/home/u")])
-            ),
-            p("/xdg").map(|h| h.join("aether-vfs").join("storage"))
+            storage_dir_for(None, &env(&[("LOCALAPPDATA", "/lad")]), false),
+            None
+        );
+        // Windows: LOCALAPPDATA wins over HOME and XDG.
+        assert_eq!(
+            storage_dir_for(None, &rest, true),
+            Some(p("/lad").join("aether-vfs").join("storage"))
         );
         assert_eq!(
-            storage_dir_from(None, &env(&[("HOME", "/home/u"), ("LOCALAPPDATA", "/lad")])),
-            p("/home/u").map(|h| h.join(".local/share/aether-vfs").join("storage"))
+            storage_dir_for(None, &env(&[("HOME", "/home/u")]), true),
+            None
         );
-        assert_eq!(
-            storage_dir_from(None, &env(&[("LOCALAPPDATA", "/lad")])),
-            p("/lad").map(|h| h.join("aether-vfs").join("storage"))
-        );
-        assert_eq!(storage_dir_from(None, &env(&[])), None);
     }
 
     /// A storage directory another daemon holds is refused with an error that
@@ -989,10 +1089,40 @@ mod tests {
             .err()
             .expect("second open refused");
         assert!(
-            e.contains(&dir.path().display().to_string()) && e.contains("--storage-dir"),
+            e.contains(&dir.path().display().to_string())
+                && e.contains("--storage-dir")
+                && e.contains("another vfs daemon"),
             "{e}"
         );
         drop(held);
+    }
+
+    /// Only a lock asks about another daemon: a directory that is a file is a
+    /// different failure and must not be blamed on one.
+    #[test]
+    fn only_a_locked_storage_dir_blames_another_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        let e = open_daemon_storage(&file, None)
+            .err()
+            .expect("a file is refused");
+        assert!(
+            e.contains("--storage-dir") && !e.contains("another vfs daemon"),
+            "{e}"
+        );
+    }
+
+    /// `--cache-max-gib 0` is refused rather than silently making every
+    /// cached block evictable at once.
+    #[test]
+    fn a_zero_cache_budget_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = open_daemon_storage(dir.path(), Some(0))
+            .err()
+            .expect("0 refused");
+        assert!(e.contains("--cache-max-gib"), "{e}");
+        assert!(open_daemon_storage(dir.path(), Some(1)).is_ok());
     }
 
     /// The shutdown drain closes the storage after the sessions (which hold
