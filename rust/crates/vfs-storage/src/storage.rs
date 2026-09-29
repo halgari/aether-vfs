@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 
 use vfs_block_store::BlockStore;
 use vfs_provider::Provider;
@@ -113,6 +113,30 @@ pub struct Storage {
     pub(crate) cfg: StorageConfig,
     /// Pull-through cache bookkeeping shared by every cached source.
     pub(crate) cache: CacheState,
+    /// The durability gate (spec §6: every durable catalog row references
+    /// durable store data). Held **shared** across every "write store data,
+    /// then write the catalog row that describes it" pair: a layer commit
+    /// (`FileCell::commit` and the row update), a layer file create (row, then
+    /// `set_len`), a cache file registration (row, then `set_len`) and a cache
+    /// fetch (`write_blocks`, then the access-log update a later row commit
+    /// persists). Held **exclusive** across `store.flush()` +
+    /// `catalog.commit_durable()` wherever that pair runs: a layer's durable
+    /// point, `delete_layer`, `close` and reconciliation. So no row can land
+    /// between a flush and the durable commit that would publish it ahead of
+    /// its data. (The store's own auto-flush and compaction commits can still
+    /// make a store state durable mid-commit; reconciliation repairs those.)
+    ///
+    /// **Lock order**, outermost first:
+    /// - layers: a file cell's `state` → `gate` → the layer's `ns` → the
+    ///   layer's leaf locks (`cells`, `handles`, `doomed`, a cell's `path`
+    ///   and `mtime_override`);
+    /// - cache: `gate` → `open_counts` → `access`.
+    ///
+    /// The gate is never taken recursively (shared or exclusive) by a thread
+    /// that holds it. The exclusive holder takes nothing else during the
+    /// fsyncs (a layer's durable point takes `ns` only briefly, before them,
+    /// to collect its doomed files).
+    pub(crate) gate: RwLock<()>,
     /// Every layer with a provider, by name: live, or dropped and still
     /// inside its `Drop` (a last commit and durable point). A provider removes
     /// its own entry at the end of its `Drop` and signals `layers_gone`. One
@@ -123,6 +147,9 @@ pub struct Storage {
     pub(crate) layers_gone: Condvar,
     /// What reconciliation at open repaired.
     pub(crate) reconciled: ReconcileReport,
+    /// Test hook: `import_layer` fails when it reaches this layer path.
+    #[cfg(test)]
+    pub(crate) fail_import_at: Mutex<Option<String>>,
     /// Test hook: run by the next `LayerProvider::drop`, after its durable
     /// point and before it leaves `layers`.
     #[cfg(test)]
@@ -145,7 +172,8 @@ impl Storage {
         let catalog = Catalog::open(&dir.join("catalog.redb"))?;
         // Spec §6: repair what a crash between the two halves' commits left,
         // before the cache budget is summed and before any provider exists.
-        let reconciled = reconcile(&store, &catalog)?;
+        let gate = RwLock::new(());
+        let reconciled = reconcile(&store, &catalog, &gate, u64::from(cfg.store.block_size))?;
         let ram = RamTier::with_geometry(cfg.ram_tier_bytes, u64::from(cfg.store.block_size));
         let cached_logical = catalog
             .cache_all()?
@@ -158,9 +186,12 @@ impl Storage {
             ram,
             cfg,
             cache: CacheState::new(cached_logical),
+            gate,
             layers: Mutex::new(HashMap::new()),
             layers_gone: Condvar::new(),
             reconciled,
+            #[cfg(test)]
+            fail_import_at: Mutex::new(None),
             #[cfg(test)]
             drop_hook: Mutex::new(None),
         }))
@@ -181,8 +212,7 @@ impl Storage {
         // A background eviction holds a reference; let it finish.
         self.wait_for_eviction();
         self.commit_access()?;
-        self.store.flush()?;
-        self.catalog.commit_durable()?;
+        self.flush_durably()?;
         match Arc::try_unwrap(self) {
             Ok(s) => {
                 let Storage { store, catalog, .. } = s;
@@ -199,6 +229,24 @@ impl Storage {
                 Ok(())
             }
         }
+    }
+
+    /// The durability gate, shared: see [`Storage::gate`].
+    pub(crate) fn gate_shared(&self) -> RwLockReadGuard<'_, ()> {
+        self.gate.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The durability gate, exclusive: see [`Storage::gate`].
+    pub(crate) fn gate_exclusive(&self) -> RwLockWriteGuard<'_, ()> {
+        self.gate.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `store.flush()` then `catalog.commit_durable()`, under the exclusive
+    /// gate.
+    pub(crate) fn flush_durably(&self) -> Result<(), StorageError> {
+        let _gate = self.gate_exclusive();
+        self.store.flush()?;
+        self.catalog.commit_durable()
     }
 
     /// The block store's block size in bytes.

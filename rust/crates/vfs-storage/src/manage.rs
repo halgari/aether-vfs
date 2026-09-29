@@ -4,7 +4,7 @@
 use std::fs;
 use std::io::Read;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -76,11 +76,18 @@ fn layer_err(what: &str, rel: &str, status: i32) -> StorageError {
     )))
 }
 
-/// One path component, as exported to or imported from the host: refused if
-/// it is empty, `.`/`..`, or holds a separator (the layer treats `\` as one),
-/// so it can neither step outside its directory nor split into two names.
+/// One path component, as exported to or imported from the host: exactly
+/// one plain component (`Path::components` yields a single `Normal`), with no
+/// separator (the layer treats `\` as one) and no `:`. So it can neither step
+/// outside its directory (`..`, a root, a Windows drive or `C:rel` prefix,
+/// which `Path::join` would let replace the base) nor split into two names.
 fn host_component(name: &str) -> Result<&str, StorageError> {
-    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
+    let mut c = Path::new(name).components();
+    let single = matches!(
+        (c.next(), c.next()),
+        (Some(Component::Normal(n)), None) if n == std::ffi::OsStr::new(name)
+    );
+    if !single || name.contains(['/', '\\', ':']) {
         return Err(StorageError::BadRequest(format!(
             "layer entry name {name:?} is not a valid file name"
         )));
@@ -189,8 +196,7 @@ impl Storage {
         };
         // Every durable catalog row must reference durable store data, and the
         // commit makes other layers' pending rows durable too.
-        self.store.flush()?;
-        self.catalog.commit_durable()?;
+        self.flush_durably()?;
         let mut deleted = false;
         for g in guids {
             let id = layer_file_id(&g);
@@ -310,16 +316,40 @@ fn import_dir(
     rel: &str,
     files: &mut u64,
 ) -> Result<(), StorageError> {
-    let mut ents = fs::read_dir(src)?.collect::<Result<Vec<_>, _>>()?;
-    ents.sort_by_key(|e| e.file_name());
-    for e in ents {
+    let mut ents = Vec::new();
+    for e in fs::read_dir(src)? {
+        let e = e?;
         let name = e.file_name().into_string().map_err(|n| {
             StorageError::BadRequest(format!("{n:?} in {}: not UTF-8", src.display()))
         })?;
-        let child = join(rel, host_component(&name)?);
+        host_component(&name)?;
+        ents.push((name, e));
+    }
+    ents.sort_by(|a, b| a.0.cmp(&b.0));
+    // The layer is case-insensitive: two names that fold alike would land on
+    // one entry, the second silently replacing the first.
+    let mut folded = std::collections::HashMap::new();
+    for (name, _) in &ents {
+        if let Some(other) = folded.insert(vfs_core::fold(name), name) {
+            return Err(StorageError::BadRequest(format!(
+                "{other:?} and {name:?} in {} differ only in case; a layer is \
+                 case-insensitive and cannot hold both",
+                src.display()
+            )));
+        }
+    }
+    for (name, e) in ents {
+        let child = join(rel, &name);
         let path = e.path();
         let ft = e.file_type()?;
-        let meta = fs::metadata(&path)?;
+        let meta = match fs::metadata(&path) {
+            Ok(m) => m,
+            Err(err) if ft.is_symlink() => {
+                tracing::warn!(path = %path.display(), error = %err, "import: broken symbolic link; skipped");
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
         if meta.is_dir() && !ft.is_symlink() {
             p.mkdir(at(&child))
                 .map_err(|st| layer_err("mkdir", &child, st))?;
@@ -340,6 +370,12 @@ fn import_file(
     rel: &str,
     meta: &fs::Metadata,
 ) -> Result<(), StorageError> {
+    #[cfg(test)]
+    if crate::cached::lock(&p.storage().fail_import_at).as_deref() == Some(rel) {
+        return Err(StorageError::Io(std::io::Error::other(
+            "injected import failure",
+        )));
+    }
     let mut f = fs::File::open(src)?;
     let (h, _, _) = p
         .open(at(rel), OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC)
@@ -568,6 +604,20 @@ mod tests {
             Err(StorageError::Io(_))
         ));
         assert!(s.layers().unwrap().iter().all(|l| l.name != "other"));
+
+        // A failure after the layer exists and holds files: the partial layer
+        // and its store data are deleted, and the name is free again.
+        std::fs::write(src.join("a.txt"), b"first").unwrap();
+        *s.fail_import_at.lock().unwrap() = Some("Saves/one.ess".into());
+        let before: Vec<_> = s.store.file_ids().unwrap();
+        assert!(matches!(
+            s.import_layer(&src, "partial"),
+            Err(StorageError::Io(_))
+        ));
+        assert!(s.layers().unwrap().iter().all(|l| l.name != "partial"));
+        assert_eq!(s.store.file_ids().unwrap(), before, "no store data left");
+        *s.fail_import_at.lock().unwrap() = None;
+        assert_eq!(s.import_layer(&src, "partial").unwrap(), 2);
         s.close().unwrap();
 
         let s = Storage::open(d.path().join("store"), cfg()).unwrap();
@@ -665,5 +715,110 @@ mod tests {
         reopened.join().unwrap().unwrap();
         assert!(s.layers_in_use().is_empty());
         s.delete_layer("x").unwrap();
+    }
+
+    #[test]
+    fn host_components_are_single_plain_names() {
+        use super::host_component;
+        for ok in ["a.txt", "Saves", "..x", "x..", ".hidden", "sp ace"] {
+            assert_eq!(host_component(ok).unwrap(), ok);
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a\\b",
+            "/abs",
+            "\\abs",
+            "C:",
+            "C:evil",
+            "C:\\evil",
+            "a:b",
+            "\\\\srv\\share",
+        ] {
+            assert!(
+                matches!(host_component(bad), Err(StorageError::BadRequest(_))),
+                "{bad:?} accepted"
+            );
+        }
+    }
+
+    /// A catalog name with a drive prefix cannot make an export write outside
+    /// its target (on Windows, `dir.join("C:evil")` would replace `dir`).
+    #[test]
+    fn export_refuses_a_drive_prefixed_name() {
+        let (s, d) = temp_storage();
+        let p = s.layer("l").unwrap();
+        write_file(&p, "ok.txt", b"ok");
+        drop(p);
+        let lid = s.catalog.layer_id("l").unwrap().unwrap();
+        let guid = crate::ids::new_guid();
+        s.store.set_len(&layer_file_id(&guid), 0).unwrap();
+        s.catalog
+            .put(
+                lid,
+                "c:evil",
+                &crate::catalog::EntryRec {
+                    name: "C:evil".into(),
+                    kind: KIND_FILE,
+                    guid,
+                    len: 0,
+                    mtime: 0,
+                },
+                false,
+            )
+            .unwrap();
+        let out = d.path().join("out");
+        assert!(matches!(
+            s.export_layer("l", &out),
+            Err(StorageError::BadRequest(_))
+        ));
+        assert!(!d.path().join("C:evil").exists());
+        assert!(disk_names(&out).iter().all(|n| !n.contains("evil")));
+    }
+
+    /// Two host names that differ only in case would be one layer entry.
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn import_refuses_names_that_differ_only_in_case() {
+        let (s, d) = temp_storage();
+        let src = d.path().join("in");
+        std::fs::create_dir_all(src.join("Sub")).unwrap();
+        std::fs::write(src.join("first.txt"), b"1").unwrap();
+        std::fs::write(src.join("Sub/Save.ess"), b"A").unwrap();
+        std::fs::write(src.join("Sub/save.ess"), b"B").unwrap();
+        match s.import_layer(&src, "cases") {
+            Err(StorageError::BadRequest(m)) => assert!(m.contains("differ only in case"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(s.layers().unwrap().iter().all(|l| l.name != "cases"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_skips_broken_symlinks() {
+        let (s, d) = temp_storage();
+        let src = d.path().join("in");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("real.txt"), b"real").unwrap();
+        std::os::unix::fs::symlink(src.join("nowhere"), src.join("dangling")).unwrap();
+        std::os::unix::fs::symlink(src.join("real.txt"), src.join("link.txt")).unwrap();
+        assert_eq!(s.import_layer(&src, "links").unwrap(), 2);
+        let p = s.layer("links").unwrap();
+        assert!(p.getattr(at("dangling")).unwrap().is_none());
+        assert_eq!(read_file(&p, "link.txt"), b"real");
+    }
+
+    /// A provider whose `Drop` panics still leaves the registry, so the layer
+    /// is not in use forever and `layer()` does not wait forever.
+    #[test]
+    fn a_panicking_provider_drop_still_leaves_the_registry() {
+        let (s, _d) = temp_storage();
+        let x = s.layer("x").unwrap();
+        *s.drop_hook.lock().unwrap() = Some(Box::new(|| panic!("injected drop panic")));
+        assert!(std::thread::spawn(move || drop(x)).join().is_err());
+        assert!(s.layers_in_use().is_empty());
+        s.layer("x").unwrap();
     }
 }
