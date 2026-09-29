@@ -158,6 +158,31 @@ fn make_symlink(_target: &Path, _link: &Path) -> io::Result<()> {
     ))
 }
 
+/// The entry of `dir` named `name` under Wine's rule — ASCII
+/// case-insensitive — preferring an exact match. `None` when absent.
+///
+/// Wine resolves `C:\Users` to `drive_c/users`; ext4 would happily create a
+/// second, differently-spelled `Users` beside it that Wine never looks in.
+fn find_entry_ci(dir: &Path, name: &str) -> io::Result<Option<std::ffi::OsString>> {
+    match std::fs::symlink_metadata(dir.join(name)) {
+        Ok(_) => return Ok(Some(name.into())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let found = entry?.file_name();
+        if found.to_str().is_some_and(|f| f.eq_ignore_ascii_case(name)) {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
 /// Deletes `root.sessions()/<session>` — prefix and all. Absent is fine.
 pub fn remove_session(root: &Root, session: &str) -> io::Result<()> {
     let dir = root
@@ -173,6 +198,12 @@ impl Prefix {
     /// Links `location` (a `C:\…` path, as the program sees it) to `target` on
     /// the host, creating missing parent directories under `drive_c`. Returns
     /// the host path of the link.
+    ///
+    /// Each component is matched against what already exists **ASCII
+    /// case-insensitively**, as Wine resolves it: `C:\Users\SteamUser\X`
+    /// links at `drive_c/users/steamuser/X` when `drive_c/users/steamuser`
+    /// exists. Only missing components are created, with the declared
+    /// spelling.
     ///
     /// Replaces an existing **symlink** (a relaunch relinks), and refuses to
     /// touch anything else: a persistent prefix may hold a user's own files
@@ -191,25 +222,33 @@ impl Prefix {
         if comps.contains(&"..") {
             return Err(bad("'..' is not allowed"));
         }
-        let mut link = self.drive_c();
-        for c in &comps {
-            link.push(c);
+        let (last, parents) = comps.split_last().expect("comps is non-empty");
+        let mut parent = self.drive_c();
+        std::fs::create_dir_all(&parent)?;
+        for c in parents {
+            match find_entry_ci(&parent, c)? {
+                Some(existing) => parent.push(existing),
+                None => {
+                    parent.push(c);
+                    match std::fs::create_dir(&parent) {
+                        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e.into()),
+                        _ => {}
+                    }
+                }
+            }
         }
-        if let Some(parent) = link.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        match std::fs::symlink_metadata(&link) {
-            Ok(m) if m.file_type().is_symlink() => std::fs::remove_file(&link)?,
-            Ok(_) => {
+        if let Some(existing) = find_entry_ci(&parent, last)? {
+            let at = parent.join(existing);
+            if !std::fs::symlink_metadata(&at)?.file_type().is_symlink() {
                 return Err(bad(&format!(
                     "{} already exists in the prefix as a real file or directory; a root \
                      cannot be placed over it",
-                    link.display()
-                )))
+                    at.display()
+                )));
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+            std::fs::remove_file(&at)?;
         }
+        let link = parent.join(last);
         make_symlink(target, &link)?;
         Ok(link)
     }
@@ -367,6 +406,45 @@ mod tests {
         let target2 = scratch("ll-target2");
         p.link_location("c:/Games/Fixture/", &target2).unwrap();
         assert_eq!(std::fs::read_link(&link).unwrap(), target2);
+    }
+
+    /// Wine resolves names case-insensitively; ext4 does not. A location
+    /// spelled `C:\Users\SteamUser\Saves` must land inside the prefix's own
+    /// `drive_c/users/steamuser`, not beside it in a new `Users` tree Wine
+    /// would never look in.
+    #[cfg(unix)]
+    #[test]
+    fn link_location_reuses_existing_parents_case_insensitively() {
+        let p = Prefix { dir: scratch("ll-case") };
+        std::fs::create_dir_all(p.drive_c().join("users").join("steamuser")).unwrap();
+        let target = scratch("ll-case-target");
+        let link = p.link_location(r"C:\Users\SteamUser\Saves", &target).unwrap();
+        assert_eq!(link, p.drive_c().join("users").join("steamuser").join("Saves"));
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert!(
+            !p.drive_c().join("Users").exists(),
+            "an existing parent must be reused, not shadowed by a sibling spelled differently"
+        );
+        // Relinking under another spelling finds and replaces our own link.
+        let target2 = scratch("ll-case-target2");
+        let link2 = p.link_location(r"c:\USERS\steamuser\saves", &target2).unwrap();
+        let entries: Vec<_> = std::fs::read_dir(p.drive_c().join("users").join("steamuser"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries.len(), 1, "the old link must be replaced, not joined: {entries:?}");
+        assert_eq!(std::fs::read_link(&link2).unwrap(), target2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_location_refuses_a_real_directory_spelled_differently() {
+        let p = Prefix { dir: scratch("ll-case-real") };
+        let real = p.drive_c().join("games").join("mine");
+        std::fs::create_dir_all(&real).unwrap();
+        let err = p.link_location(r"C:\Games\Mine", &scratch("ll-case-t")).unwrap_err();
+        assert!(matches!(err, PrefixError::BadLocation(_)), "{err}");
+        assert!(real.is_dir() && !real.is_symlink());
     }
 
     #[cfg(unix)]
