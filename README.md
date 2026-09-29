@@ -171,4 +171,4 @@ Ship those four next to each other (the daemon locates the DLLs beside the
 
 ## License
 
-Private / unlicensed for external use unless otherwise stated.
+GPL-3.0-only. See [LICENSE](LICENSE).

@@ -2,6 +2,7 @@
 name = "vfs-env"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-only"
 description = "The complete VFS_* environment switch surface: one definition per name."
 
 # Deliberately no dependencies. Every crate that reads a switch depends on this,
