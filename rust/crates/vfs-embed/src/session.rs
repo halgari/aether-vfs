@@ -1775,7 +1775,10 @@ impl Drop for Session {
                 Ok(l) => std::mem::take(l),
                 Err(p) => std::mem::take(p.into_inner()),
             };
-            for (link, target) in links {
+            // Reverse of link order (shallowest first), so a nested root's
+            // link — recorded through the outer root's link — is removed while
+            // that path still resolves.
+            for (link, target) in links.into_iter().rev() {
                 let ours = std::fs::symlink_metadata(&link)
                     .is_ok_and(|m| m.file_type().is_symlink())
                     && std::fs::read_link(&link).is_ok_and(|t| t == target);
@@ -2298,6 +2301,99 @@ mod launch_image_tests {
             assert!(s.set_prefix_name(bad).is_err(), "{bad:?} must be refused");
         }
         s.set_prefix_name("skyrim").unwrap();
+    }
+
+    #[cfg(unix)]
+    fn scratch(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("vfs-lr-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// A session with its own host dirs and a scratch (never booted) prefix.
+    #[cfg(unix)]
+    fn linked_session(tag: &str) -> (Session, Prefix) {
+        let mut s = Session::new();
+        s.set_root(scratch(&format!("{tag}-root")));
+        s.set_state_dir(scratch(&format!("{tag}-state")));
+        (s, Prefix { dir: scratch(&format!("{tag}-prefix")) })
+    }
+
+    /// Ruling 3: a root nested in another root's location links *inside* the
+    /// outer root's backing dir, whichever order the roots arrive in.
+    #[cfg(unix)]
+    #[test]
+    fn nested_roots_link_inside_the_outer_backing_dir_in_either_order() {
+        // Root 0 outer, root 1 inner; the slice handed over both ways round.
+        for (tag, reverse) in [("n-fwd", false), ("n-rev", true)] {
+            let (mut s, prefix) = linked_session(tag);
+            s.declare_root(0, r"C:\G");
+            s.declare_root(1, r"C:\G\Saves");
+            let mut roots = s.root_locations();
+            if reverse {
+                roots.reverse();
+            }
+            s.link_roots(&prefix, &roots).unwrap();
+            let outer = prefix.drive_c().join("G");
+            assert_eq!(std::fs::read_link(&outer).unwrap(), s.virtual_root(), "{tag}");
+            let inner = s.virtual_root().join("Saves");
+            assert_eq!(
+                std::fs::read_link(&inner).unwrap(),
+                s.state_dir().join("roots").join("1"),
+                "{tag}: the inner link must land inside root 0's backing dir"
+            );
+            assert!(outer.join("Saves").is_dir(), "{tag}: the inner root resolves through the outer");
+        }
+        // Two extra roots, inner declared first.
+        let (mut s, prefix) = linked_session("n-extra");
+        s.declare_root(1, r"C:\G\Saves");
+        s.declare_root(2, r"C:\G");
+        s.link_roots(&prefix, &s.root_locations()).unwrap();
+        let outer_backing = s.state_dir().join("roots").join("2");
+        assert_eq!(std::fs::read_link(prefix.drive_c().join("G")).unwrap(), outer_backing);
+        assert_eq!(
+            std::fs::read_link(outer_backing.join("Saves")).unwrap(),
+            s.state_dir().join("roots").join("1")
+        );
+        // And drop removes both of this session's own links.
+        let links = [prefix.drive_c().join("G"), outer_backing.join("Saves")];
+        drop(s);
+        for l in links {
+            assert!(std::fs::symlink_metadata(&l).is_err(), "{} must be removed on drop", l.display());
+        }
+    }
+
+    /// Another session relinked the same location after this one launched:
+    /// this session's drop must leave that link alone.
+    #[cfg(unix)]
+    #[test]
+    fn drop_leaves_a_link_another_session_repointed() {
+        let (mut s, prefix) = linked_session("d-repoint");
+        s.declare_root(1, r"C:\users\steamuser\Saves");
+        s.link_roots(&prefix, &s.root_locations()).unwrap();
+        let link = prefix.drive_c().join("users").join("steamuser").join("Saves");
+        let theirs = scratch("d-repoint-theirs");
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&theirs, &link).unwrap();
+        drop(s);
+        assert_eq!(std::fs::read_link(&link).unwrap(), theirs, "another session's link must survive");
+    }
+
+    /// Something replaced the recorded link with a real directory: drop must
+    /// never remove it or its contents.
+    #[cfg(unix)]
+    #[test]
+    fn drop_leaves_a_real_directory_at_a_recorded_link_path() {
+        let (mut s, prefix) = linked_session("d-real");
+        s.declare_root(1, r"C:\Games\Mine");
+        s.link_roots(&prefix, &s.root_locations()).unwrap();
+        let link = prefix.drive_c().join("Games").join("Mine");
+        std::fs::remove_file(&link).unwrap();
+        std::fs::create_dir(&link).unwrap();
+        std::fs::write(link.join("keep.txt"), b"keep").unwrap();
+        drop(s);
+        assert_eq!(std::fs::read(link.join("keep.txt")).unwrap(), b"keep");
     }
 
     #[cfg(unix)]
