@@ -27,7 +27,9 @@
 //! - a `b'L'` or `b'C'` store id no catalog row names (a create whose row
 //!   never became durable, or a delete that never reached the store): deleted;
 //! - a cache row whose store file is missing: dropped, so the cache budget
-//!   counts only what the store holds.
+//!   counts only what the store holds; and a cache row that counts no bytes
+//!   (created by a fetch whose block write never landed): dropped, and its
+//!   store file deleted as an orphan.
 //!
 //! Store ids of any other shape are not `vfs-storage`'s: they are logged and
 //! left alone.
@@ -62,7 +64,8 @@ pub struct ReconcileReport {
     pub resized_rows: Vec<(String, String)>,
     /// Store files no catalog row referenced, deleted.
     pub orphans_deleted: u64,
-    /// Cache rows whose store file was missing, dropped.
+    /// Cache rows whose store file was missing, or that counted no bytes,
+    /// dropped.
     pub cache_rows_dropped: u64,
     /// Repairs that failed and were skipped (logged at error level); the
     /// next open tries them again. Each is a one-line description.
@@ -230,9 +233,9 @@ pub(crate) fn reconcile(
         }
     }
 
-    for (h, _) in catalog.cache_all()? {
+    for (h, rec) in catalog.cache_all()? {
         let id = cache_file_id(&h);
-        if store.stat(&id)?.is_some() {
+        if rec.logical_bytes > 0 && store.stat(&id)?.is_some() {
             known.insert(id);
         } else {
             catalog.cache_remove(&h)?;
@@ -471,7 +474,7 @@ mod tests {
                 h,
                 CacheRec {
                     last_access_min: 1,
-                    logical_bytes: 0,
+                    logical_bytes: 10,
                 },
             )])
             .unwrap();
@@ -534,6 +537,32 @@ mod tests {
         assert_eq!(rows, vec![kept]);
         assert_eq!(s.cache_stats().cached_logical_bytes, 300);
         assert_consistent(&s);
+    }
+
+    /// A cache row that counts no bytes (its fetch's block write never
+    /// landed) is dropped with its store file.
+    #[test]
+    fn zero_byte_cache_rows_are_dropped_with_their_files() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let h = [5u8; 16];
+        s.catalog
+            .cache_put_many(&[(
+                h,
+                CacheRec {
+                    last_access_min: 1,
+                    logical_bytes: 0,
+                },
+            )])
+            .unwrap();
+        s.store.set_len(&cache_file_id(&h), 4000).unwrap();
+        s.close().unwrap();
+
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        assert_eq!(s.last_reconcile().cache_rows_dropped, 1);
+        assert_eq!(s.last_reconcile().orphans_deleted, 1);
+        assert!(s.catalog.cache_all().unwrap().is_empty());
+        assert!(s.store.file_ids().unwrap().is_empty());
     }
 
     #[test]

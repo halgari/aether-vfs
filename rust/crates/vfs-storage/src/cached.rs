@@ -82,7 +82,7 @@ struct AccessLog {
 /// Cache bookkeeping one [`Storage`] shares between all its cached sources.
 pub(crate) struct CacheState {
     /// Open handles per cache file id. Also the lock under which a file is
-    /// registered (opened for the first time) or evicted.
+    /// created in the store (by its first fetch) or evicted.
     open_counts: Mutex<HashMap<[u8; 17], usize>>,
     inflight: Mutex<HashMap<([u8; 17], u64), Fetch>>,
     access: Mutex<AccessLog>,
@@ -221,13 +221,13 @@ impl Storage {
         }
     }
 
-    /// Registers an open handle on cache file `hash` of `size` bytes. If the
-    /// store lacks the file, writes its catalog row (first) and creates it
-    /// empty; either way loads what it has stored into the access log.
-    fn cache_acquire(&self, hash: &[u8; 16], size: u64) -> Result<(), StorageError> {
+    /// Registers an open handle on cache file `hash` and loads what the store
+    /// holds of it into the access log. A file the store lacks is not
+    /// created here: its catalog row and store file wait for the first block
+    /// a fetch stores ([`Storage::ensure_cache_file`]), so a file opened and
+    /// never read leaves nothing behind.
+    fn cache_acquire(&self, hash: &[u8; 16]) -> Result<(), StorageError> {
         let id = cache_file_id(hash);
-        // Row, then store file: one pair under the durability gate.
-        let _gate = self.gate_shared();
         let mut counts = lock(&self.cache.open_counts);
         *counts.entry(id).or_insert(0) += 1;
         let r = (|| {
@@ -235,21 +235,17 @@ impl Storage {
             if present && lock(&self.cache.access).logical.contains_key(hash) {
                 return Ok(());
             }
-            let row = self.catalog.cache_get(hash)?;
             let stored = if present {
-                row.map_or(0, |r| r.logical_bytes)
+                self.catalog.cache_get(hash)?.map_or(0, |r| r.logical_bytes)
             } else {
-                // Catalog row first, store file second (spec §6). A row left
-                // from a store file a crash lost was counted at open; the file
-                // now holds nothing.
-                let rec = CacheRec {
-                    last_access_min: now_minute(),
-                    logical_bytes: 0,
-                };
-                self.catalog.cache_put_many(&[(*hash, rec)])?;
-                self.store.set_len(&id, size)?;
-                if let Some(r) = row {
-                    sub_logical(&self.cache.cached_logical, r.logical_bytes);
+                // A row left from a store file that is gone was counted in
+                // the total; it goes, with any batched access for it.
+                if let Some(row) = self.catalog.cache_get(hash)? {
+                    let held = self.remove_cache_row(hash)?;
+                    sub_logical(
+                        &self.cache.cached_logical,
+                        held.unwrap_or(row.logical_bytes),
+                    );
                 }
                 0
             };
@@ -261,16 +257,34 @@ impl Storage {
         }
         drop(counts);
         if r.is_ok() {
-            self.touch(hash, 0, size);
+            self.touch(hash, 0, 0);
         }
         r
+    }
+
+    /// Creates cache file `hash` of `size` bytes if the store lacks it: its
+    /// catalog row first, then the store file (spec §6). Called by a fetch,
+    /// under the durability gate, before it stores the file's first block;
+    /// the handle it fetches for keeps the file from eviction.
+    fn ensure_cache_file(&self, hash: &[u8; 16], size: u64) -> Result<(), StorageError> {
+        let id = cache_file_id(hash);
+        let _counts = lock(&self.cache.open_counts);
+        if self.store.stat(&id)?.is_some() {
+            return Ok(());
+        }
+        let rec = CacheRec {
+            last_access_min: now_minute(),
+            logical_bytes: 0,
+        };
+        self.catalog.cache_put_many(&[(*hash, rec)])?;
+        Ok(self.store.set_len(&id, size)?)
     }
 
     /// Drops an open handle on cache file `hash`, recording the access first
     /// (so an eviction that sees the count reach zero also sees this access).
     /// A file becoming evictable ends an eviction back-off.
-    fn cache_release(&self, hash: &[u8; 16], size: u64) {
-        self.touch(hash, 0, size);
+    fn cache_release(&self, hash: &[u8; 16]) {
+        self.touch(hash, 0, 0);
         let id = cache_file_id(hash);
         let mut counts = lock(&self.cache.open_counts);
         release_count(&mut counts, &id);
@@ -287,7 +301,9 @@ impl Storage {
 
     /// Records an access to `hash`, adding `stored` newly stored bytes to its
     /// logical size (capped at the file's `size`) and to the cache total;
-    /// commits the batch if a minute has passed since the last commit.
+    /// commits the batch if a minute has passed since the last commit. A
+    /// file that holds nothing gets no batched row (it has no row to update:
+    /// see [`Storage::cache_acquire`]), only its place in the touch order.
     fn touch(&self, hash: &[u8; 16], stored: u64, size: u64) {
         let now = now_minute();
         let seq = self.cache.touch_seq.fetch_add(1, Ordering::Relaxed) + 1;
@@ -299,6 +315,10 @@ impl Storage {
         self.cache
             .cached_logical
             .fetch_add(now_logical - before, Ordering::Relaxed);
+        a.seq.insert(*hash, seq);
+        if now_logical == 0 {
+            return;
+        }
         a.pending.insert(
             *hash,
             CacheRec {
@@ -306,7 +326,6 @@ impl Storage {
                 logical_bytes: now_logical,
             },
         );
-        a.seq.insert(*hash, seq);
         if now > a.last_commit_min {
             if let Err(e) = self.commit_access_locked(&mut a) {
                 tracing::warn!(error = %e, "committing cache access times failed; will retry");
@@ -453,10 +472,12 @@ impl CachedSource {
         let bs = s.block_size();
         let len = bs.min(f.size - b * bs) as usize;
         let mut buf = vec![0u8; len];
-        let r = s
-            .store
-            .read(&f.id, b * bs, &mut buf)
-            .map_err(|e| StorageError::from(e).to_status())?;
+        let r = match s.store.read(&f.id, b * bs, &mut buf) {
+            Ok(r) => r,
+            // Not stored yet: the first fetch creates it.
+            Err(vfs_block_store::Error::NotFound) => return Ok(None),
+            Err(e) => return Err(StorageError::from(e).to_status()),
+        };
         if !r.missing.is_empty() || r.bytes != len {
             return Ok(None);
         }
@@ -504,7 +525,10 @@ impl CachedSource {
         // commit never counts a block its store flush did not cover.
         {
             let _gate = s.gate_shared();
-            match s.store.write_blocks(&f.id, b, &buf) {
+            let stored = s
+                .ensure_cache_file(&f.hash, f.size)
+                .and_then(|()| Ok(s.store.write_blocks(&f.id, b, &buf)?));
+            match stored {
                 Ok(()) => s.touch(&f.hash, len as u64, f.size),
                 Err(e) => {
                     s.cache.store_write_errors.fetch_add(1, Ordering::Relaxed);
@@ -563,7 +587,7 @@ impl Provider for CachedSource {
                     size,
                     &st.mtime.to_le_bytes(),
                 );
-                match self.storage.cache_acquire(&hash, size) {
+                match self.storage.cache_acquire(&hash) {
                     Ok(()) => {}
                     Err(e) => {
                         tracing::warn!(error = %e, path = p.rel, "opening a cache file failed");
@@ -586,7 +610,7 @@ impl Provider for CachedSource {
     fn close(&self, h: Handle) -> Result<(), i32> {
         let rec = lock(&self.opens).remove(&h).ok_or_else(bad_fh)?;
         if let Some(f) = rec.file {
-            self.storage.cache_release(&f.hash, f.size);
+            self.storage.cache_release(&f.hash);
             crate::evict::maybe_evict(&self.storage);
         }
         self.inner.close(rec.inner)
@@ -631,7 +655,7 @@ impl Drop for CachedSource {
         let opens = std::mem::take(&mut *lock(&self.opens));
         for (_, rec) in opens {
             if let Some(f) = rec.file {
-                self.storage.cache_release(&f.hash, f.size);
+                self.storage.cache_release(&f.hash);
             }
             let _ = self.inner.close(rec.inner);
         }
@@ -1067,6 +1091,32 @@ mod tests {
         let p = s.cached(src.clone(), key());
         assert_eq!(read_all(&p, "a.txt"), b"hello");
         assert_eq!(src.reads(), before, "zero source reads after a reopen");
+    }
+
+    /// A file opened and closed without a read stores nothing: no catalog
+    /// row, no store file. Its first stored block creates both.
+    #[test]
+    fn opening_without_reading_stores_nothing() {
+        let (s, _d) = temp_storage();
+        let src = slow(MapSource::with(&[("a", pattern(3 * BS, 1))]));
+        let p = s.cached(src, key());
+        let (h, _, _) = p.open(VPath::at_default("a"), OPEN_READ).unwrap();
+        p.close(h).unwrap();
+        s.commit_access().unwrap();
+        assert!(s.catalog.cache_all().unwrap().is_empty());
+        assert!(s.store.file_ids().unwrap().is_empty());
+
+        let (h, _, _) = p.open(VPath::at_default("a"), OPEN_READ).unwrap();
+        let mut buf = [0u8; 10];
+        p.read_at(h, BS as u64, &mut buf).unwrap();
+        assert_eq!(buf[..], pattern(3 * BS, 1)[BS..BS + 10]);
+        p.close(h).unwrap();
+        s.commit_access().unwrap();
+        let rows = s.catalog.cache_all().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.logical_bytes, BS as u64);
+        assert_eq!(s.store.file_ids().unwrap().len(), 1);
+        assert_eq!(s.cache_stats().cached_logical_bytes, BS as u64);
     }
 
     #[test]

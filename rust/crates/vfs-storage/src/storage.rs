@@ -134,9 +134,9 @@ pub struct Storage {
     /// durable store data). Held **shared** across every "write store data,
     /// then write the catalog row that describes it" pair: a layer commit
     /// (`FileCell::commit` and the row update), a layer file create (row, then
-    /// `set_len`), a cache file registration (row, then `set_len`) and a cache
-    /// fetch (`write_blocks`, then the access-log update a later row commit
-    /// persists). Held **exclusive** across `store.flush()` +
+    /// `set_len`) and a cache fetch (for a file's first block, its row and
+    /// `set_len`; then `write_blocks`, then the access-log update a later row
+    /// commit persists). Held **exclusive** across `store.flush()` +
     /// `catalog.commit_durable()` wherever that pair runs: a layer's durable
     /// point, `delete_layer`, `close` and reconciliation. So no row can land
     /// between a flush and the durable commit that would publish it ahead of
