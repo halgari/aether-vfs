@@ -34,6 +34,13 @@ const RUN_BLOCKS: u64 = 64;
 /// The largest layer file (1 PiB): far past anything a game writes, well
 /// inside what the block store's manifest can address at any block size, and
 /// small enough that block arithmetic cannot overflow.
+///
+/// It bounds correctness, not cost: growing a file commits every block of the
+/// gap as an explicit zero block (spec §5, so a layer file never has a missing
+/// block). Each one dedups to the same stored block, but each is still hashed
+/// and compressed, so a grow of many GiB is slow and one near `MAX_LEN` would
+/// effectively never finish. Games do not do this; a sparse-extent encoding
+/// would be the fix if something ever does.
 const MAX_LEN: u64 = 1 << 50;
 
 /// The mutable part of a layer file, behind [`FileCell::state`].
@@ -43,6 +50,11 @@ pub(crate) struct FileState {
     /// The length the block store holds. `len >= committed_len` except
     /// transiently inside `set_len`, which commits before it returns.
     pub committed_len: u64,
+    /// The lowest length the file was truncated to since the last successful
+    /// commit. Committed bytes at or past it are gone as far as handles are
+    /// concerned, even while the store still holds them (a shrink whose
+    /// commit failed): they read as zeros and are never loaded back.
+    pub valid_len: u64,
     /// Block index → the block's bytes, possibly shorter than the block (the
     /// rest reads as zeros, up to `len`).
     pub dirty: BTreeMap<u64, Vec<u8>>,
@@ -51,7 +63,14 @@ pub(crate) struct FileState {
 impl FileState {
     /// Whether a commit has anything to do.
     pub fn is_dirty(&self) -> bool {
-        !self.dirty.is_empty() || self.len != self.committed_len
+        !self.dirty.is_empty()
+            || self.len != self.committed_len
+            || self.valid_len < self.committed_len
+    }
+
+    /// How much of the store's copy is still the file's content.
+    fn committed_valid(&self) -> u64 {
+        self.committed_len.min(self.valid_len)
     }
 }
 
@@ -71,6 +90,9 @@ pub(crate) struct FileCell {
     /// An mtime set through `set_attr` while the file was open; later commits
     /// keep it rather than stamping the current time.
     pub mtime_override: Mutex<Option<i64>>,
+    /// Test hook: the next commit fails before it touches the store.
+    #[cfg(test)]
+    pub fail_commit: std::sync::atomic::AtomicBool,
 }
 
 /// The bytes of block `b` of a file of `len` bytes that the store holds.
@@ -98,12 +120,15 @@ impl FileCell {
             state: Mutex::new(FileState {
                 len,
                 committed_len: len,
+                valid_len: len,
                 dirty: BTreeMap::new(),
             }),
             live_len: AtomicU64::new(len),
             path: Mutex::new(Some(path)),
             opens: AtomicUsize::new(0),
             mtime_override: Mutex::new(None),
+            #[cfg(test)]
+            fail_commit: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -189,9 +214,10 @@ impl FileCell {
             let dst = &mut buf[(pos - offset) as usize..(to - offset) as usize];
             if let Some(d) = st.dirty.get(&b) {
                 copy_padded(d, skip, dst);
-            } else if b * bs < st.committed_len {
+            } else if b * bs < st.committed_valid() {
                 let c = self.committed_block(s, layer, st, b)?;
-                copy_padded(&c, skip, dst);
+                let valid = ((st.committed_valid() - b * bs) as usize).min(c.len());
+                copy_padded(&c[..valid], skip, dst);
             } else {
                 dst.fill(0);
             }
@@ -203,8 +229,11 @@ impl FileCell {
     /// Loads block `b` into the dirty buffer if it is not there already.
     fn make_dirty(&self, s: &Storage, layer: &str, st: &mut FileState, b: u64) -> Result<(), i32> {
         if !st.dirty.contains_key(&b) {
-            let v = if b * s.block_size() < st.committed_len {
-                self.committed_block(s, layer, st, b)?.to_vec()
+            let start = b * s.block_size();
+            let v = if start < st.committed_valid() {
+                let c = self.committed_block(s, layer, st, b)?;
+                let valid = ((st.committed_valid() - start) as usize).min(c.len());
+                c[..valid].to_vec()
             } else {
                 Vec::new()
             };
@@ -273,7 +302,7 @@ impl FileCell {
             if !len.is_multiple_of(bs) {
                 let tail = len / bs;
                 let keep = (len - tail * bs) as usize;
-                if st.dirty.contains_key(&tail) || tail * bs < st.committed_len {
+                if st.dirty.contains_key(&tail) || tail * bs < st.committed_valid() {
                     self.make_dirty(s, layer, st, tail)?;
                     st.dirty
                         .get_mut(&tail)
@@ -282,6 +311,7 @@ impl FileCell {
                 }
             }
         }
+        st.valid_len = st.valid_len.min(len);
         self.set_len_field(st, len);
         Ok(())
     }
@@ -300,22 +330,28 @@ impl FileCell {
         if !st.is_dirty() {
             return Ok(false);
         }
+        #[cfg(test)]
+        if self.fail_commit.swap(false, Ordering::SeqCst) {
+            return Err(map_io_err());
+        }
         let bs = s.block_size();
         let old = st.committed_len;
+        // The store's content that is still the file's: below `valid`, the
+        // store copy is used; from it on, every block below `new` is written.
+        let valid = st.committed_valid();
         let new = st.len;
         let store_err = |what: &str, e: crate::StorageError| {
             tracing::error!(layer, path = %self.path_for_log(), error = %e, "layer {what} failed");
             map_io_err()
         };
 
+        // The block holding `cut` changes length in the store (or holds bytes
+        // past `valid` that must go): capture its valid part first.
+        let cut = valid.min(new);
+        if (new != old || valid < old) && !cut.is_multiple_of(bs) && (cut / bs) * bs < valid {
+            self.make_dirty(s, layer, st, cut / bs)?;
+        }
         if new != old {
-            let cut = if new > old { old } else { new };
-            if !cut.is_multiple_of(bs) {
-                let b = cut / bs;
-                if b * bs < old {
-                    self.make_dirty(s, layer, st, b)?;
-                }
-            }
             s.store
                 .set_len(&self.id, new)
                 .map_err(|e| store_err("set_len", e.into()))?;
@@ -324,8 +360,8 @@ impl FileCell {
         let nb = block_count(new, bs);
         let _ = st.dirty.split_off(&nb);
         // Blocks the store lacks after a length change, beyond the dirty ones.
-        let gap = if new != old {
-            (old.min(new) / bs)..nb
+        let gap = if new != old || valid < old {
+            (cut / bs)..nb
         } else {
             0..0
         };
@@ -376,6 +412,7 @@ impl FileCell {
             s.ram.put(&self.id, b, Arc::from(d));
         }
         st.committed_len = new;
+        st.valid_len = new;
         Ok(true)
     }
 }

@@ -105,6 +105,9 @@ pub(crate) struct LayerProvider {
     /// GUIDs whose rows are gone and that no handle has open: deleted from the
     /// store at the next durable point.
     doomed: Mutex<Vec<Guid>>,
+    /// Test hook: the next file create fails at the store.
+    #[cfg(test)]
+    pub(crate) fail_store_create: AtomicBool,
 }
 
 impl LayerProvider {
@@ -118,6 +121,8 @@ impl LayerProvider {
             handles: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             doomed: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            fail_store_create: AtomicBool::new(false),
         }
     }
 
@@ -162,26 +167,48 @@ impl LayerProvider {
         }
     }
 
-    /// Creates every missing parent directory of `p`. Under `ns`.
-    fn ensure_parents(&self, p: &LPath) -> Result<(), i32> {
+    /// Creates every missing parent directory of `p` and returns the folded
+    /// paths it created, outermost first, for [`Self::rollback`] if the
+    /// operation that needed them fails. Under `ns`.
+    fn ensure_parents(&self, p: &LPath) -> Result<Vec<String>, i32> {
+        let mut created = Vec::new();
         for i in 1..p.parts.len() {
             let folded = fold(&p.parts[..i].join("/"));
-            match self.get(&folded)? {
-                Some(r) if r.kind == KIND_DIR => {}
-                Some(_) => return Err(not_a_dir()),
-                None => self.put(
-                    &folded,
-                    &EntryRec {
-                        name: p.parts[i - 1].clone(),
-                        kind: KIND_DIR,
-                        guid: [0; 16],
-                        len: 0,
-                        mtime: now(),
-                    },
-                )?,
+            let step = match self.get(&folded) {
+                Ok(Some(r)) if r.kind == KIND_DIR => Ok(false),
+                Ok(Some(_)) => Err(not_a_dir()),
+                Ok(None) => self
+                    .put(
+                        &folded,
+                        &EntryRec {
+                            name: p.parts[i - 1].clone(),
+                            kind: KIND_DIR,
+                            guid: [0; 16],
+                            len: 0,
+                            mtime: now(),
+                        },
+                    )
+                    .map(|()| true),
+                Err(e) => Err(e),
+            };
+            match step {
+                Ok(true) => created.push(folded),
+                Ok(false) => {}
+                Err(e) => {
+                    self.rollback(&created);
+                    return Err(e);
+                }
             }
         }
-        Ok(())
+        Ok(created)
+    }
+
+    /// Removes the directory rows [`Self::ensure_parents`] created, innermost
+    /// first. Best effort. Under `ns`.
+    fn rollback(&self, created: &[String]) {
+        for dir in created.iter().rev() {
+            let _ = self.storage.catalog.remove(self.id, dir, false);
+        }
     }
 
     /// The shared cell of the file row `rec` at `folded`, created on first
@@ -248,6 +275,49 @@ impl LayerProvider {
         Ok(())
     }
 
+    /// Creates the file row at `p` (and any missing parents) and its store
+    /// file, and acquires its cell. On failure everything it created is
+    /// rolled back. Under `ns`.
+    fn create(&self, p: &LPath) -> Result<Arc<FileCell>, i32> {
+        let parents = self.ensure_parents(p)?;
+        let guid = new_guid();
+        let id = layer_file_id(&guid);
+        let rec = EntryRec {
+            name: p.name().to_owned(),
+            kind: KIND_FILE,
+            guid,
+            len: 0,
+            mtime: now(),
+        };
+        let mut row = false;
+        let mut stored = false;
+        let made = (|| {
+            // Spec §6: the row (non-durable) before the store file.
+            self.put(&p.folded, &rec)?;
+            row = true;
+            #[cfg(test)]
+            if self.fail_store_create.swap(false, Ordering::SeqCst) {
+                return Err(map_io_err());
+            }
+            self.storage
+                .store
+                .set_len(&id, 0)
+                .map_err(|e| self.st_err("store create", e.into()))?;
+            stored = true;
+            self.acquire(&rec, &p.folded)
+        })();
+        if made.is_err() {
+            if row {
+                let _ = self.storage.catalog.remove(self.id, &p.folded, false);
+            }
+            if stored {
+                let _ = self.storage.store.delete(&id);
+            }
+            self.rollback(&parents);
+        }
+        made
+    }
+
     /// Commits `cell` and, if anything changed, its catalog row's length and
     /// mtime. Called with the cell's state lock held.
     fn commit(&self, cell: &FileCell, st: &mut FileState) -> Result<(), i32> {
@@ -270,6 +340,13 @@ impl LayerProvider {
 
     /// Store flush, then the durable catalog commit, then the store deletes
     /// that commit made safe.
+    ///
+    /// Holds `ns` across both fsyncs, so no other file's row update can land
+    /// between the store flush and the durable catalog commit (a row made
+    /// durable without its blocks). The known cost: every other committer and
+    /// namespace operation of this layer waits out the store's and redb's
+    /// fsyncs. A flush-epoch design (rows tagged with the store flush that
+    /// covers them) would let them proceed; that is future work.
     fn durable_point(&self) -> Result<(), i32> {
         let _ns = lock(&self.ns)?;
         let s = &self.storage;
@@ -380,24 +457,7 @@ impl Provider for LayerProvider {
                 (self.acquire(&r, &p.folded)?, false)
             }
             None if !create => return Err(not_found()),
-            None => {
-                self.ensure_parents(&p)?;
-                let guid = new_guid();
-                let rec = EntryRec {
-                    name: p.name().to_owned(),
-                    kind: KIND_FILE,
-                    guid,
-                    len: 0,
-                    mtime: now(),
-                };
-                // Spec §6: the row (non-durable) before the store file.
-                self.put(&p.folded, &rec)?;
-                if let Err(e) = self.storage.store.set_len(&layer_file_id(&guid), 0) {
-                    let _ = self.storage.catalog.remove(self.id, &p.folded, false);
-                    return Err(self.st_err("store create", e.into()));
-                }
-                (self.acquire(&rec, &p.folded)?, true)
-            }
+            None => (self.create(&p)?, true),
         };
         drop(ns);
 
@@ -477,24 +537,30 @@ impl Provider for LayerProvider {
         if p.is_root() {
             return Ok(());
         }
-        let _ns = lock(&self.ns)?;
-        match self.get(&p.folded)? {
-            Some(r) if r.kind == KIND_DIR => Ok(()),
-            Some(_) => Err(exists()),
-            None => {
-                self.ensure_parents(&p)?;
-                self.put(
-                    &p.folded,
-                    &EntryRec {
-                        name: p.name().to_owned(),
-                        kind: KIND_DIR,
-                        guid: [0; 16],
-                        len: 0,
-                        mtime: now(),
-                    },
-                )
+        {
+            let _ns = lock(&self.ns)?;
+            match self.get(&p.folded)? {
+                Some(r) if r.kind == KIND_DIR => return Ok(()),
+                Some(_) => return Err(exists()),
+                None => {}
             }
+            let parents = self.ensure_parents(&p)?;
+            let made = self.put(
+                &p.folded,
+                &EntryRec {
+                    name: p.name().to_owned(),
+                    kind: KIND_DIR,
+                    guid: [0; 16],
+                    len: 0,
+                    mtime: now(),
+                },
+            );
+            if made.is_err() {
+                self.rollback(&parents);
+            }
+            made?;
         }
+        self.durable_point()
     }
 
     fn remove(&self, p: VPath) -> Result<(), i32> {
@@ -502,16 +568,20 @@ impl Provider for LayerProvider {
         if p.is_root() {
             return Err(bad_request());
         }
-        let _ns = lock(&self.ns)?;
-        let rec = self.get(&p.folded)?.ok_or_else(not_found)?;
-        self.storage
-            .catalog
-            .remove(self.id, &p.folded, false)
-            .map_err(|e| self.st_err("catalog remove", e))?;
-        if rec.kind == KIND_FILE {
-            self.doom(rec.guid)?;
+        {
+            let _ns = lock(&self.ns)?;
+            let rec = self.get(&p.folded)?.ok_or_else(not_found)?;
+            self.storage
+                .catalog
+                .remove(self.id, &p.folded, false)
+                .map_err(|e| self.st_err("catalog remove", e))?;
+            if rec.kind == KIND_FILE {
+                self.doom(rec.guid)?;
+            }
         }
-        Ok(())
+        // Durable now, and the durable point deletes the file's data (unless
+        // a handle still has it open).
+        self.durable_point()
     }
 
     fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
@@ -523,8 +593,24 @@ impl Provider for LayerProvider {
         if from.is_root() || to.is_root() || to.folded.starts_with(&format!("{}/", from.folded)) {
             return Err(bad_request());
         }
+        self.rename_rows(&from, &to)?;
+        // A game saves by writing a temp file, closing it and renaming it over
+        // the real one: the save is only safe once the rename is durable.
+        // The durable point also deletes a replaced file's data.
+        self.durable_point()
+    }
+
+    fn set_attr(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
+        self.set_attr_impl(p, attr)
+    }
+}
+
+impl LayerProvider {
+    /// The namespace half of `rename`, under `ns`.
+    fn rename_rows(&self, from: &LPath, to: &LPath) -> Result<(), i32> {
         let _ns = lock(&self.ns)?;
         let from_is_dir = self.get(&from.folded)?.ok_or_else(not_found)?.kind == KIND_DIR;
+        let mut parents = Vec::new();
         if from.folded != to.folded {
             let dest = self.get(&to.folded)?;
             // A directory moves only onto a free name: two subtrees cannot be
@@ -537,13 +623,20 @@ impl Provider for LayerProvider {
             if matches!(dest, Some(r) if r.kind == KIND_DIR) {
                 return Err(exists());
             }
-            self.ensure_parents(&to)?;
+            parents = self.ensure_parents(to)?;
         }
-        let replaced = self
-            .storage
-            .catalog
-            .rename(self.id, &from.folded, &to.folded, to.name())
-            .map_err(|e| self.st_err("catalog rename", e))?;
+        let replaced =
+            match self
+                .storage
+                .catalog
+                .rename(self.id, &from.folded, &to.folded, to.name())
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    self.rollback(&parents);
+                    return Err(self.st_err("catalog rename", e));
+                }
+            };
         for g in replaced {
             self.doom(g)?;
         }
@@ -565,7 +658,7 @@ impl Provider for LayerProvider {
         Ok(())
     }
 
-    fn set_attr(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
+    fn set_attr_impl(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
         let p = LPath::parse(p.rel)?;
         if let Some(size) = attr.size {
             let ns = lock(&self.ns)?;
@@ -627,6 +720,8 @@ mod tests {
     use crate::config::StorageConfig;
     use crate::ids::layer_file_id;
     use crate::storage::Storage;
+
+    use super::LayerProvider;
 
     const BS: u64 = 4096;
 
@@ -853,6 +948,136 @@ mod tests {
                 std::fs::copy(e.path(), dest).unwrap();
             }
         }
+    }
+
+    /// Opens a kill-time copy of `d`'s storage and its layer `name`.
+    #[cfg(not(windows))]
+    fn killed_copy(
+        d: &std::path::Path,
+        name: &str,
+    ) -> (Arc<Storage>, Arc<dyn Provider>, tempfile::TempDir) {
+        let killed = tempfile::tempdir().unwrap();
+        snapshot(d, killed.path());
+        let k = Storage::open(killed.path(), cfg()).unwrap();
+        let kp = k.layer(name).unwrap();
+        (k, kp, killed)
+    }
+
+    #[cfg(not(windows))]
+    fn names(p: &Arc<dyn Provider>, dir: &str) -> Vec<String> {
+        p.readdir(at(dir))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect()
+    }
+
+    /// The reviewer's reproduction: save to a temp file, rename it over the
+    /// real save, get killed. The rename must have been durable.
+    #[cfg(not(windows))]
+    #[test]
+    fn save_then_rename_over_is_durable() {
+        let (s, d) = temp_storage();
+        let p = s.layer("saves").unwrap();
+        write_file(&p, "save.ess", 0, b"old save");
+        write_file(&p, "save.tmp", 0, b"new save");
+        p.rename(at("save.tmp"), at("save.ess")).unwrap();
+        let (_k, kp, _kd) = killed_copy(d.path(), "saves");
+        assert_eq!(names(&kp, ""), ["save.ess"]);
+        assert_eq!(read_file(&kp, "save.ess"), b"new save");
+        drop(p);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn save_then_rename_to_a_fresh_name_is_durable() {
+        let (s, d) = temp_storage();
+        let p = s.layer("saves").unwrap();
+        write_file(&p, "Saves/save5.tmp", 0, b"fifth");
+        p.rename(at("Saves/save5.tmp"), at("Saves/save5.ess"))
+            .unwrap();
+        let (_k, kp, _kd) = killed_copy(d.path(), "saves");
+        assert_eq!(names(&kp, "saves"), ["save5.ess"]);
+        assert_eq!(read_file(&kp, "saves/save5.ess"), b"fifth");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn remove_and_mkdir_are_durable() {
+        let (s, d) = temp_storage();
+        let p = s.layer("saves").unwrap();
+        write_file(&p, "a.ess", 0, b"a");
+        write_file(&p, "b.ess", 0, b"b");
+        p.remove(at("a.ess")).unwrap();
+        p.mkdir(at("Backups/Old")).unwrap();
+        let (_k, kp, _kd) = killed_copy(d.path(), "saves");
+        assert_eq!(names(&kp, ""), ["b.ess", "Backups"]); // folded key order
+        assert_eq!(names(&kp, "backups"), ["Old"]);
+        assert_eq!(read_file(&kp, "b.ess"), b"b");
+    }
+
+    #[test]
+    fn remove_deletes_the_store_file_at_once_when_closed() {
+        let (s, _d) = temp_storage();
+        let p = s.layer("l").unwrap();
+        write_file(&p, "x", 0, b"x");
+        let lid = s.catalog.layer_id("l").unwrap().unwrap();
+        let id = layer_file_id(&s.catalog.get(lid, "x").unwrap().unwrap().guid);
+        p.remove(at("x")).unwrap();
+        assert!(s.store.stat(&id).unwrap().is_none());
+    }
+
+    /// A shrink whose commit fails must still drop the cut bytes: a later
+    /// grow (by `set_len` or a write) reads zeros there, before and after it
+    /// commits, never the store's stale copy.
+    #[test]
+    fn a_failed_shrink_commit_never_resurrects_the_cut_bytes() {
+        for (cut, regrow) in [(BS + 5, "set_len"), (BS, "set_len"), (BS + 5, "write")] {
+            let (s, _d) = temp_storage();
+            let lid = s.catalog.create_layer("l").unwrap();
+            let lp: Arc<LayerProvider> =
+                Arc::new(LayerProvider::new(Arc::clone(&s), "l".into(), lid));
+            let p: Arc<dyn Provider> = lp.clone();
+            write_file(&p, "f", 0, &vec![0xAAu8; 3 * BS as usize]);
+            let guid = s.catalog.get(lid, "f").unwrap().unwrap().guid;
+
+            let (h, _, _) = p.open(at("f"), OPEN_WRITE).unwrap();
+            let cell = lp.live_cell(&guid).unwrap();
+            cell.fail_commit
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(p.set_len(h, cut), Err(ST_IO_ERROR), "{cut} {regrow}");
+            let mut want = vec![0xAAu8; cut as usize];
+            want.resize(3 * BS as usize, 0);
+            if regrow == "set_len" {
+                p.set_len(h, 3 * BS).unwrap();
+            } else {
+                p.write_at(h, 3 * BS - 1, &[0]).unwrap();
+            }
+            assert!(
+                read_range(&p, h, 0, want.len()) == want,
+                "{cut} {regrow}: open handle"
+            );
+            p.close(h).unwrap();
+            assert!(read_file(&p, "f") == want, "{cut} {regrow}: after close");
+        }
+    }
+
+    #[test]
+    fn a_failed_create_rolls_back_its_parent_directories() {
+        let (s, _d) = temp_storage();
+        let id = s.catalog.create_layer("l").unwrap();
+        let lp = LayerProvider::new(Arc::clone(&s), "l".into(), id);
+        lp.mkdir(at("keep")).unwrap();
+        lp.fail_store_create
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            lp.open(at("keep/new/deeper/f.txt"), OPEN_WRITE | OPEN_CREATE)
+                .map(|_| ()),
+            Err(ST_IO_ERROR)
+        );
+        assert!(lp.getattr(at("keep/new")).unwrap().is_none());
+        assert!(lp.getattr(at("keep/new/deeper/f.txt")).unwrap().is_none());
+        assert!(lp.getattr(at("keep")).unwrap().is_some());
     }
 
     #[test]
