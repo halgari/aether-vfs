@@ -115,6 +115,13 @@ pub struct LiveSession {
     /// source this host declared but a consequence of launching (Task 4b; see
     /// [`vfs_embed::Session::stage_launch`]).
     roots: HashMap<u32, RootSources>,
+    /// Each declared root's `[[root]] name`, for `{Name}` launch paths
+    /// ([`SessionRegistry::expand_root_name`]). A root declared without a
+    /// name has no entry.
+    root_names: BTreeMap<u32, String>,
+    /// Each declared root's location exactly as declared — what a `{Name}`
+    /// expands to.
+    root_locs: BTreeMap<u32, String>,
 }
 
 impl LiveSession {
@@ -246,6 +253,16 @@ impl SessionRegistry {
         session.set_root(&root);
         session.set_overlay(&overlay);
         session.set_state_dir(&state);
+        // A named session gets a persistent Wine prefix named after it
+        // (`$VFS_HOME/sessions/<name>/`), reused across runs; an unnamed one
+        // an anonymous prefix deleted when the session drops. Refused before
+        // `serve`, so a name that cannot be a prefix never becomes a session.
+        #[cfg(unix)]
+        if !name.is_empty() {
+            session
+                .set_prefix_name(&name)
+                .map_err(|e| format!("session name {name:?} cannot name a Wine prefix: {e}"))?;
+        }
         session.serve()?;
 
         let summary = SessionSummary {
@@ -261,6 +278,8 @@ impl SessionRegistry {
             session,
             next_source_id: AtomicU64::new(1),
             roots: HashMap::new(),
+            root_names: BTreeMap::new(),
+            root_locs: BTreeMap::new(),
         };
 
         self.inner
@@ -355,9 +374,9 @@ impl SessionRegistry {
         })
     }
 
-    /// Declare the host directory a non-zero root virtualizes, so the
-    /// injected shim recognises paths under it as belonging to `root` rather
-    /// than to no one.
+    /// Declare where a root is — its location — so the injected shim
+    /// recognises paths under it as belonging to `root` rather than to no
+    /// one.
     ///
     /// The companion to [`Self::add_source`], and deliberately not folded
     /// into it: `add_source` says *what a root serves*, this says *where the
@@ -365,16 +384,108 @@ impl SessionRegistry {
     /// truth for this; `add_source` never sees it, because `AddSourceReq`
     /// carries a root id and no path.
     ///
-    /// Root 0 is the session's own root (`SessionSummary::root`) and is
-    /// rejected here rather than silently ignored — repointing it would
-    /// desynchronise the shim from the directory the daemon actually created.
-    pub fn declare_root(&self, session_id: &str, root: u32, path: &Path) -> Result<(), String> {
-        if root == 0 {
-            return Err("root 0 is the session's own root and cannot be re-declared".to_string());
-        }
+    /// `path` is the root's **location** — where the launched program sees
+    /// it (a host path on Windows, a `C:\…` path inside the Wine prefix on
+    /// Linux). `name`, when non-empty, is the root's `[[root]] name`, which a
+    /// launch path can then spell as `{name}\…` (see
+    /// [`Self::expand_root_name`]).
+    ///
+    /// Root 0 may be declared too: it moves where the program sees root 0,
+    /// replacing the daemon's default, and the session summary's `root`
+    /// becomes the declared location. On Linux that is root 0's location in
+    /// the prefix (still backed by the session's own directory); on Windows
+    /// it is root 0's host directory, and the launch republishes the shim's
+    /// config with it — see [`vfs_embed::Session::launch`].
+    pub fn declare_root(
+        &self,
+        session_id: &str,
+        root: u32,
+        path: &Path,
+        name: &str,
+    ) -> Result<(), String> {
         self.with_session_mut(session_id, |live| {
             live.session.declare_root(root, path);
+            if !name.is_empty() {
+                live.root_names.insert(root, name.to_string());
+            }
+            live.root_locs.insert(root, path.to_string_lossy().into_owned());
+            if root == 0 {
+                live.root = path.to_path_buf();
+            }
             Ok(())
+        })
+    }
+
+    /// The id of the live session `id_or_name` names: an exact session id
+    /// first, else the one live session with that name.
+    ///
+    /// No match lists every live session; a name two live sessions share is
+    /// refused as ambiguous, listing their ids — launching into whichever one
+    /// a hash map happened to yield first would be a coin flip.
+    pub fn resolve_session(&self, id_or_name: &str) -> Result<String, String> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| "session registry poisoned".to_string())?;
+        if guard.contains_key(id_or_name) {
+            return Ok(id_or_name.to_string());
+        }
+        let mut named: Vec<&str> = guard
+            .values()
+            .filter(|s| s.name == id_or_name)
+            .map(|s| s.id.as_str())
+            .collect();
+        named.sort();
+        match named.as_slice() {
+            [one] => Ok(one.to_string()),
+            [] => {
+                let mut live: Vec<String> =
+                    guard.values().map(|s| format!("{} ({})", s.id, s.name)).collect();
+                live.sort();
+                let live = if live.is_empty() { "none".to_string() } else { live.join(", ") };
+                Err(format!("no live session is named or numbered {id_or_name}; live: {live}"))
+            }
+            many => Err(format!(
+                "session name {id_or_name} is ambiguous: ids {}; use an id",
+                many.join(", ")
+            )),
+        }
+    }
+
+    /// Expand a leading `{Name}` in a launch path to that root's declared
+    /// location (names match case-insensitively); anything else is returned
+    /// unchanged. An unknown name is refused, listing this session's root
+    /// names.
+    ///
+    /// The daemon's job rather than `Session`'s: names are config-level, and
+    /// `Session` knows only root ids and locations. The expanded path is then
+    /// resolved by `Session::launch` like any other absolute path.
+    pub fn expand_root_name(&self, session_id: &str, exec: &str) -> Result<String, String> {
+        let Some((name, rest)) = exec.strip_prefix('{').and_then(|t| t.split_once('}')) else {
+            return Ok(exec.to_string());
+        };
+        self.with_session_mut(session_id, |live| {
+            let Some(root) = live
+                .root_names
+                .iter()
+                .find(|(_, n)| n.eq_ignore_ascii_case(name))
+                .map(|(root, _)| *root)
+            else {
+                let names: Vec<&str> = live.root_names.values().map(String::as_str).collect();
+                let names = if names.is_empty() { "none".to_string() } else { names.join(", ") };
+                return Err(format!(
+                    "unknown root name {name}; this session's roots: {names}"
+                ));
+            };
+            let location = live
+                .root_locs
+                .get(&root)
+                .ok_or_else(|| format!("root {root} ({name}) has no declared location"))?;
+            let rest = rest.trim_start_matches(['\\', '/']);
+            if rest.is_empty() {
+                return Ok(location.clone());
+            }
+            Ok(vfs_embed::image::join_location(location, &rest.replace('\\', "/")))
         })
     }
 
@@ -787,6 +898,63 @@ root = 1
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn resolve_session_by_id_then_name() {
+        let reg = SessionRegistry::new();
+        let a = reg.create("alpha".into()).unwrap();
+        assert_eq!(reg.resolve_session(&a.id).unwrap(), a.id);
+        assert_eq!(reg.resolve_session("alpha").unwrap(), a.id);
+    }
+
+    #[test]
+    fn resolve_session_unknown_lists_what_exists() {
+        let reg = SessionRegistry::new();
+        reg.create("alpha".into()).unwrap();
+        let e = reg.resolve_session("beta").unwrap_err();
+        assert!(e.contains("beta") && e.contains("alpha"), "{e}");
+    }
+
+    #[test]
+    fn resolve_session_ambiguous_name_lists_ids() {
+        let reg = SessionRegistry::new();
+        let a = reg.create("dup".into()).unwrap();
+        let b = reg.create("dup".into()).unwrap();
+        let e = reg.resolve_session("dup").unwrap_err();
+        assert!(e.contains(&a.id) && e.contains(&b.id), "{e}");
+    }
+
+    #[test]
+    fn expand_root_name_replaces_the_name_with_its_location() {
+        let reg = SessionRegistry::new();
+        let s = reg.create("x".into()).unwrap();
+        let loc = if cfg!(windows) { r"C:\vfs-test\Games" } else { r"C:\Games\Fixture" };
+        reg.declare_root(&s.id, 0, Path::new(loc), "Games").unwrap();
+        assert_eq!(
+            reg.expand_root_name(&s.id, r"{games}\bin\f.exe").unwrap(),
+            format!(r"{loc}\bin\f.exe"),
+            "names match case-insensitively"
+        );
+        assert_eq!(reg.expand_root_name(&s.id, r"C:\other.exe").unwrap(), r"C:\other.exe");
+        let e = reg.expand_root_name(&s.id, r"{Nope}\f.exe").unwrap_err();
+        assert!(e.contains("Nope") && e.contains("Games"), "{e}");
+    }
+
+    /// A daemon session's name becomes its persistent Wine prefix's directory
+    /// name, so a name that is not one plain path component is refused at
+    /// `create` rather than at the first launch. A space is fine.
+    #[cfg(unix)]
+    #[test]
+    fn create_refuses_a_name_that_cannot_name_a_prefix() {
+        let reg = SessionRegistry::new();
+        for bad in ["a/b", ".."] {
+            let e = reg.create(bad.into()).expect_err(bad);
+            assert!(e.contains("cannot name a Wine prefix") && e.contains(bad), "{e}");
+        }
+        assert!(reg.is_empty(), "a refused session must not be registered");
+        reg.create("my game".into()).expect("a space is a plain path component");
+        reg.create(String::new()).expect("no name: an anonymous prefix");
     }
 
     fn toml_quote(s: &str) -> String {

@@ -64,7 +64,7 @@ impl Director for DirectorService {
             return Err(Status::invalid_argument("path is required"));
         }
         self.registry
-            .declare_root(&r.session_id, r.root, std::path::Path::new(&r.path))
+            .declare_root(&r.session_id, r.root, std::path::Path::new(&r.path), &r.name)
             .map_err(Status::invalid_argument)?;
         Ok(Response::new(Empty {}))
     }
@@ -124,9 +124,20 @@ impl Director for DirectorService {
         if r.exec.is_empty() {
             return Err(Status::invalid_argument("exec is required"));
         }
-        let session_id = r.session_id;
+        // `LaunchReq.session_id` may name the session (`vfs exec --session
+        // NAME`), and `exec` may start with a root's `{Name}`; both are this
+        // host's vocabulary, so both are resolved here before `Session` sees
+        // an id and a path.
+        let session_id = self
+            .registry
+            .resolve_session(&r.session_id)
+            .map_err(Status::not_found)?;
+        let exec = self
+            .registry
+            .expand_root_name(&session_id, &r.exec)
+            .map_err(Status::invalid_argument)?;
         let opts = LaunchOpts {
-            image: r.exec,
+            image: exec,
             args: r.args,
             wait: r.wait,
             shim_dll: None,
@@ -171,7 +182,11 @@ impl Director for DirectorService {
         &self,
         req: Request<TeardownReq>,
     ) -> Result<Response<Empty>, Status> {
-        let id = req.into_inner().session_id;
+        // By id or by name, like `Launch` — `vfs down --session NAME`.
+        let id = self
+            .registry
+            .resolve_session(&req.into_inner().session_id)
+            .map_err(Status::not_found)?;
         self.registry
             .teardown(&id)
             .map_err(Status::not_found)?;

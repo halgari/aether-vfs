@@ -4,6 +4,7 @@
 //! * every other subcommand is a client; it discovers a running daemon (or
 //!   auto-spawns `vfs daemon`) and drives it over gRPC.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,7 +13,7 @@ use clap::{Parser, Subcommand};
 use vfs_control::pb::{Empty, HealthReq, TeardownReq};
 use vfs_directord::{
     apply_session_config, connect_or_spawn, default_discovery_path, parse_source_flag,
-    serve_daemon, DEFAULT_BIND,
+    root_flag_entries, run_launch, serve_daemon, DEFAULT_BIND,
 };
 
 /// The `vfs` control CLI + daemon.
@@ -51,6 +52,24 @@ enum Command {
         #[arg(long)]
         session: String,
     },
+    /// Launch a program in a live session (`vfs up` without `[launch]`).
+    /// PATH is `{RootName}\rel`, an absolute path, or root-0-relative.
+    Exec {
+        /// The live session, by id or by name.
+        #[arg(long)]
+        session: String,
+        path: String,
+        /// `KEY=VALUE` child environment entries, repeatable.
+        #[arg(long = "env")]
+        env: Vec<String>,
+        /// Return as soon as the child starts instead of waiting for it to
+        /// exit. (Refused on Linux, where a Proton launch always waits.)
+        #[arg(long = "no-wait")]
+        no_wait: bool,
+        /// Arguments for the program, after `--`.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Launch an executable in a fresh session from `--source` flags.
     Launch {
         /// `TYPE:PATH@MOUNT`, repeatable. Precedence is declaration order
@@ -63,6 +82,15 @@ enum Command {
         /// read-only content and an in-place edit of it is refused.
         #[arg(long = "write-layer")]
         write_layer: Option<String>,
+        /// `ID=NAME=LOCATION`, repeatable: a root, its name (for `{NAME}\…`
+        /// paths) and where the program sees it. Once any is given, root 0
+        /// must be one of them.
+        #[arg(long = "root")]
+        roots: Vec<String>,
+        /// Session name; on Linux it also names a persistent Wine prefix.
+        #[arg(long)]
+        name: Option<String>,
+        /// `{RootName}\rel`, an absolute path, or root-0-relative.
         #[arg(long)]
         exec: String,
         #[arg(long)]
@@ -133,15 +161,23 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     let cfg = vfs_control::load(&config)?;
                     let (session_id, exit) = apply_session_config(&mut client, &cfg).await?;
                     println!("session {session_id}");
-                    if let Some(code) = exit {
-                        if code == 0 {
-                            Ok(ExitCode::SUCCESS)
-                        } else {
-                            Ok(ExitCode::from(code.clamp(0, 255) as u8))
-                        }
-                    } else {
-                        Ok(ExitCode::SUCCESS)
-                    }
+                    Ok(exit_code(exit))
+                }
+                Command::Exec {
+                    session,
+                    path,
+                    env,
+                    no_wait,
+                    args,
+                } => {
+                    let launch = vfs_control::LaunchConfig {
+                        exec: path,
+                        args,
+                        wait: !no_wait,
+                        env: parse_env(&env)?,
+                    };
+                    let exit = run_launch(&mut client, &session, &launch).await?;
+                    Ok(exit_code(exit))
                 }
                 Command::Down { session } => {
                     client
@@ -155,6 +191,8 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 Command::Launch {
                     sources,
                     write_layer,
+                    roots,
+                    name,
                     exec,
                     args,
                     no_wait,
@@ -167,36 +205,21 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     if let Some(path) = &write_layer {
                         entries.push(vfs_directord::write_layer_flag_entry(path));
                     }
-                    let mut env_map = std::collections::BTreeMap::new();
-                    for e in &env {
-                        let (k, v) = e.split_once('=').ok_or_else(|| {
-                            format!("--env expects KEY=VALUE, got {e:?}")
-                        })?;
-                        env_map.insert(k.to_string(), v.to_string());
-                    }
                     let cfg = vfs_control::SessionConfig {
-                        session: vfs_control::SessionMeta { name: None },
-                        roots: vec![],
+                        session: vfs_control::SessionMeta { name },
+                        roots: root_flag_entries(&roots)?,
                         sources: entries,
                         launch: Some(vfs_control::LaunchConfig {
                             exec,
                             args,
                             wait: !no_wait,
-                            env: env_map,
+                            env: parse_env(&env)?,
                         }),
                         cache: None,
                     };
                     let (session_id, exit) = apply_session_config(&mut client, &cfg).await?;
                     println!("session {session_id}");
-                    if let Some(code) = exit {
-                        if code == 0 {
-                            Ok(ExitCode::SUCCESS)
-                        } else {
-                            Ok(ExitCode::from(code.clamp(0, 255) as u8))
-                        }
-                    } else {
-                        Ok(ExitCode::SUCCESS)
-                    }
+                    Ok(exit_code(exit))
                 }
                 Command::Sessions => {
                     let list = client.list_sessions(Empty {}).await?.into_inner();
@@ -226,6 +249,27 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 }
             }
         }
+    }
+}
+
+/// `--env KEY=VALUE` flags as the child's environment map.
+fn parse_env(flags: &[String]) -> Result<BTreeMap<String, String>, String> {
+    flags
+        .iter()
+        .map(|e| {
+            e.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| format!("--env expects KEY=VALUE, got {e:?}"))
+        })
+        .collect()
+}
+
+/// The CLI's exit status for a launch: the child's code (clamped to a byte),
+/// or success when there was none to report.
+fn exit_code(exit: Option<i32>) -> ExitCode {
+    match exit {
+        None | Some(0) => ExitCode::SUCCESS,
+        Some(code) => ExitCode::from(code.clamp(0, 255) as u8),
     }
 }
 
