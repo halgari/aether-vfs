@@ -71,7 +71,7 @@ Storage (one per process, one per directory)
 **Who owns it:**
 
 - The **daemon** opens `Storage` once at startup at `$VFS_HOME/storage`
-  (overridable with `vfs daemon --storage-dir DIR`; cache budget with
+  (overridable with `vfs daemon --storage-dir DIR` or `VFS_STORAGE_DIR`; cache budget with
   `--cache-max-gib N`). It is process-wide because the store allows one
   process per directory.
 - `SessionRegistry` takes an `Option<Arc<Storage>>`. Without one, sources are
@@ -224,7 +224,10 @@ reconciliation carry consistency:
 - **No ring/shim change.** Storage lives entirely in the Director's provider
   graph; `bin/regen-protocol` stays clean.
 - **gRPC:** additive only (`LayerSource`, layer RPCs, new `StatsResp` fields).
-- **No unregistered env switch.** None is added.
+- **No unregistered env switch.** One is added and registered in `vfs_env`:
+  `VFS_STORAGE_DIR`, the daemon's storage directory (same as
+  `--storage-dir`). An auto-spawned daemon takes no flags, and a test daemon
+  must not contend for the lock on the user's real `$VFS_HOME/storage`.
 - **Windows:** `vfs-storage` is portable; the Windows CI job runs its tests.
 
 ## 10. Out of scope
