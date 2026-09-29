@@ -1,5 +1,8 @@
 # Block cache hit cost
 
+> **Historical.** `vfs-cache` has been deleted; its RAM store is now
+> `vfs-storage`'s RAM tier, and the two tests named below went with the crate.
+
 > **Correction, 2026-08-17.** This file was titled "the 110x delta" and its §1
 > table carried an `after MiB/s` column that **disagrees with every other
 > measurement in the file, and with independent re-measurement, by roughly 14x.**

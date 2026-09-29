@@ -10,10 +10,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use vfs_control::pb::{Empty, HealthReq, TeardownReq};
+use vfs_control::pb::{Empty, HealthReq, LayerNameReq, LayerPathReq, TeardownReq};
 use vfs_directord::{
     apply_session_config, connect_or_spawn, default_discovery_path, launch_one_shot,
-    parse_source_flag, root_flag_entries, run_launch, serve_daemon, DEFAULT_BIND,
+    open_daemon_storage, parse_source_flag, root_flag_entries, run_launch, serve_daemon,
+    storage_dir_from, DEFAULT_BIND,
 };
 
 /// The `vfs` control CLI + daemon.
@@ -39,6 +40,13 @@ enum Command {
         /// Bind address (`host:port`). Port 0 = ephemeral (written to discovery).
         #[arg(long, default_value = DEFAULT_BIND)]
         bind: String,
+        /// Directory of the daemon's storage (named layers and the cache).
+        /// Default: `$VFS_STORAGE_DIR`, else `$VFS_HOME/storage`.
+        #[arg(long = "storage-dir")]
+        storage_dir: Option<PathBuf>,
+        /// Budget for cached source data, in GiB (default 32; at least 1).
+        #[arg(long = "cache-max-gib")]
+        cache_max_gib: Option<u64>,
     },
     /// Check daemon health.
     Health,
@@ -77,9 +85,11 @@ enum Command {
         /// flat `[[source]]` list.
         #[arg(long = "source")]
         sources: Vec<String>,
-        /// Directory the session's writes land in, copied up from whatever
-        /// the sources hold (gate 4). Without it every source composes as
-        /// read-only content and an in-place edit of it is refused.
+        /// Where the session's writes land, copied up from whatever the
+        /// sources hold (gate 4): a directory, or `layer:NAME` for a named,
+        /// persistent layer in the daemon's storage (see `vfs layer`).
+        /// Without it every source composes as read-only content and an
+        /// in-place edit of it is refused.
         #[arg(long = "write-layer")]
         write_layer: Option<String>,
         /// `ID=NAME=LOCATION`, repeatable: a root, its name (for `{NAME}\…`
@@ -105,8 +115,25 @@ enum Command {
     },
     /// List active sessions.
     Sessions,
-    /// Cache / daemon stats.
+    /// Cache / storage / daemon stats.
     Stats,
+    /// Manage the named layers in the daemon's storage.
+    Layer {
+        #[command(subcommand)]
+        command: LayerCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum LayerCommand {
+    /// List every layer with its file count and size.
+    List,
+    /// Write layer NAME into DIR as plain files (DIR must be empty or absent).
+    Export { name: String, dir: PathBuf },
+    /// Create layer NAME from the tree under DIR (NAME must not exist).
+    Import { dir: PathBuf, name: String },
+    /// Delete layer NAME (refused while a live session writes into it).
+    Delete { name: String },
 }
 
 #[tokio::main]
@@ -120,41 +147,67 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Sends `tracing` events (what `vfs-storage` and `vfs-block-store` log) to
+/// stderr — `<discovery>.daemon.log` for an auto-spawned daemon — at `warn`
+/// and above, or as `RUST_LOG` says.
+fn init_daemon_log() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .try_init();
+}
+
 async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let discovery = cli.discovery.clone().or_else(|| {
-        vfs_env::path(vfs_env::DISCOVERY_PATH)
-    });
+    let discovery = cli
+        .discovery
+        .clone()
+        .or_else(|| vfs_env::path(vfs_env::DISCOVERY_PATH));
 
     match cli.command {
-        Command::Daemon { bind } => {
-            let addr: SocketAddr = bind.parse().map_err(|e| format!("bad --bind {bind}: {e}"))?;
+        Command::Daemon {
+            bind,
+            storage_dir,
+            cache_max_gib,
+        } => {
+            init_daemon_log();
+            let addr: SocketAddr = bind
+                .parse()
+                .map_err(|e| format!("bad --bind {bind}: {e}"))?;
+            let dir = storage_dir_from(storage_dir.as_deref(), &|k| std::env::var_os(k))
+                .ok_or_else(|| {
+                    format!(
+                        "no storage directory: pass --storage-dir, or set {} or {}",
+                        vfs_env::STORAGE_DIR,
+                        vfs_env::HOME
+                    )
+                })?;
+            // Opened before the discovery file is written, so a daemon that
+            // cannot have its storage never advertises itself.
+            let storage = open_daemon_storage(&dir, cache_max_gib)?;
+            eprintln!("vfs daemon: storage at {}", dir.display());
             let path = discovery.unwrap_or_else(default_discovery_path);
             if let Some(p) = discovery_path_for_env(&path) {
                 std::env::set_var(vfs_env::DISCOVERY_PATH, p);
             }
-            serve_daemon(addr, path)
+            serve_daemon(addr, path, storage)
                 .await
                 .map_err(|e| format!("daemon: {e}"))?;
             Ok(ExitCode::SUCCESS)
         }
         other => {
             let exe = std::env::current_exe()?;
-            let mut client = connect_or_spawn(
-                cli.endpoint.as_deref(),
-                discovery.clone(),
-                exe,
-            )
-            .await?;
+            let mut client =
+                connect_or_spawn(cli.endpoint.as_deref(), discovery.clone(), exe).await?;
 
             match other {
                 Command::Daemon { .. } => unreachable!(),
                 Command::Health => {
                     let resp = client.health(HealthReq {}).await?.into_inner();
-                    println!(
-                        "ok version={} sessions={}",
-                        resp.version, resp.sessions
-                    );
+                    println!("ok version={} sessions={}", resp.version, resp.sessions);
                     Ok(ExitCode::SUCCESS)
                 }
                 Command::Up { config } => {
@@ -203,7 +256,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                         entries.push(parse_source_flag(s)?);
                     }
                     if let Some(path) = &write_layer {
-                        entries.push(vfs_directord::write_layer_flag_entry(path));
+                        entries.push(vfs_directord::write_layer_flag_entry(path)?);
                     }
                     let cfg = vfs_control::SessionConfig {
                         session: vfs_control::SessionMeta { name },
@@ -245,11 +298,74 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                         s.cache_bytes_from_cache,
                         s.cache_bytes_from_source
                     );
+                    println!(
+                        "layers={} pack_bytes={} live_bytes={} cache_logical_bytes={}",
+                        s.layers, s.store_pack_bytes, s.store_live_bytes, s.cache_logical_bytes
+                    );
+                    Ok(ExitCode::SUCCESS)
+                }
+                Command::Layer { command } => {
+                    match command {
+                        LayerCommand::List => {
+                            let list = client.list_layers(Empty {}).await?.into_inner();
+                            if list.layers.is_empty() {
+                                println!("(no layers)");
+                            }
+                            for l in list.layers {
+                                println!(
+                                    "{}\t{} files\t{} bytes",
+                                    l.name, l.files, l.logical_bytes
+                                );
+                            }
+                        }
+                        LayerCommand::Export { name, dir } => {
+                            let n = client
+                                .export_layer(LayerPathReq {
+                                    name: name.clone(),
+                                    dir: absolute(&dir)?,
+                                })
+                                .await?
+                                .into_inner()
+                                .files;
+                            println!(
+                                "exported {n} file(s) from layer {name} to {}",
+                                dir.display()
+                            );
+                        }
+                        LayerCommand::Import { dir, name } => {
+                            let n = client
+                                .import_layer(LayerPathReq {
+                                    name: name.clone(),
+                                    dir: absolute(&dir)?,
+                                })
+                                .await?
+                                .into_inner()
+                                .files;
+                            println!(
+                                "imported {n} file(s) from {} into layer {name}",
+                                dir.display()
+                            );
+                        }
+                        LayerCommand::Delete { name } => {
+                            client
+                                .delete_layer(LayerNameReq { name: name.clone() })
+                                .await?;
+                            println!("deleted layer {name}");
+                        }
+                    }
                     Ok(ExitCode::SUCCESS)
                 }
             }
         }
     }
+}
+
+/// `dir` as an absolute path string: the daemon resolves a relative one
+/// against its own working directory, not this command's.
+fn absolute(dir: &std::path::Path) -> Result<String, String> {
+    std::path::absolute(dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| format!("{}: {e}", dir.display()))
 }
 
 /// `--env KEY=VALUE` flags as the child's environment map.
@@ -317,7 +433,11 @@ mod tests {
 
     #[test]
     fn a_code_wider_than_a_byte_is_failure() {
-        assert_eq!(exit_byte(Some(256)), 1, "256's low byte is 0; it must not read as success");
+        assert_eq!(
+            exit_byte(Some(256)),
+            1,
+            "256's low byte is 0; it must not read as success"
+        );
         assert_eq!(exit_byte(Some(257)), 1);
         assert_eq!(exit_byte(Some(i32::MAX)), 1);
     }

@@ -1,7 +1,7 @@
 mod common;
 
-use vfs_block_store::{Error, ReadResult};
 use common::*;
+use vfs_block_store::{Error, ReadResult};
 
 #[test]
 fn write_then_read_whole_file() {

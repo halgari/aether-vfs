@@ -96,8 +96,12 @@
 //!   writers and cannot order a host's: `std::env::set_var` is unsound in a
 //!   multi-threaded process, and a Node or Python host is multi-threaded by
 //!   construction. See [`Session::launch`] for what removing the hazard takes.
-//! * **A `CachingProvider` per source, and never over the write layer** — see
-//!   [`Session::set_write_layer_at`] for why the exemption is not optional.
+//! * **Its own [`Storage`], if it wants caching or persistent layers.** A
+//!   `Session` owns none: a host opens one per storage directory (the store
+//!   allows one process per directory), wraps each slow source with
+//!   [`Storage::cached`], and takes named write layers from [`Storage::layer`].
+//!   Never wrap the write layer itself in a cache — see
+//!   [`Session::set_write_layer_at`].
 //! * **Session directories that do not inherit a previous run's litter** — see
 //!   [`Session::set_overlay`]. [`Session::new`]'s own defaults handle this for
 //!   themselves; a host that calls `set_root`/`set_overlay`/`set_state_dir`
@@ -151,34 +155,45 @@ pub use vfs_provider::{assert_conformance, write_fixture_tree, FIXTURE_FILES};
 // Leaves and combinators (spec §6's primitive catalog). A host composes a
 // graph out of these and its own providers; it writes none of them.
 // ---------------------------------------------------------------------------
-// `CacheStats` is on this list because `BlockCache::stats()` returns it and that
-// method is re-exported — a host able to call a method but not to name what it
-// returns is the seam leaking by omission. `DEFAULT_BLOCK_SIZE` and `MountGraph`
-// were on it and are gone: neither appears in any re-exported signature, no
-// consumer in or out of the workspace named either, and `Session`'s own
-// composition already owns the `MountGraph` decision (a host hands mounts to
-// `mount_at`/`set_root_mounts` and never builds one). Re-exporting a type nothing
-// can reach is not neutral: it advertises a supported surface.
-pub use vfs_cache::{BlockCache, CacheConfig, CacheStats, CachingProvider};
+// `DEFAULT_BLOCK_SIZE` and `MountGraph` were on this list and are gone: neither
+// appears in any re-exported signature, no consumer in or out of the workspace
+// named either, and `Session`'s own composition already owns the `MountGraph`
+// decision (a host hands mounts to `mount_at`/`set_root_mounts` and never
+// builds one). Re-exporting a type nothing can reach is not neutral: it
+// advertises a supported surface.
 pub use vfs_compose::{
-    stack_layers, InlineProvider, LayeredProvider, MemoryProvider, OverlayProvider, ReadOnlyProvider,
-    Route, RouterProvider, SeekableProvider, SubdirProvider,
+    stack_layers, InlineProvider, LayeredProvider, MemoryProvider, OverlayProvider,
+    ReadOnlyProvider, Route, RouterProvider, SeekableProvider, SubdirProvider,
 };
 pub use vfs_director::DiskProvider;
 #[cfg(feature = "zip")]
 pub use vfs_zip::ZipProvider;
 
 // ---------------------------------------------------------------------------
+// Storage: the block store as pull-through cache and as named, persistent
+// write layers (docs/superpowers/specs/2026-09-29-vfs-storage-design.md).
+// Opt-in: a host opens one and wraps providers with it; `Session` owns none.
+// `StorageStats`, `CacheStats`, `ReconcileReport` and `CloseOutcome` come along
+// because `Storage::stats()`, `last_reconcile()` and `close()` return them — a
+// host able to call a method but not to name what it returns is the seam
+// leaking by omission.
+// ---------------------------------------------------------------------------
+pub use vfs_storage::{
+    CacheStats, CloseOutcome, LayerInfo, ReconcileReport, SourceKey, Storage, StorageConfig,
+    StorageError, StorageStats,
+};
+
+// ---------------------------------------------------------------------------
 // The kernel, for the cases a host genuinely needs it: reading back through
 // the same graph the injected process sees, and staging a launch image.
 // ---------------------------------------------------------------------------
-pub use vfs_director::stage;
-pub use vfs_director::Director;
 /// Where a root's shim-local overlay writes actually land on disk — see
 /// [`Session::overlay_layer_dir`], which is the same thing bound to a session.
 /// The free function exists for a host that must write into that directory
 /// *before* a `Session` exists.
 pub use vfs_director::overlay_layer_dir;
+pub use vfs_director::stage;
+pub use vfs_director::Director;
 
 /// Every write refused because no `ReadWrite` provider served that path, as
 /// `(path, count)`.
@@ -321,8 +336,11 @@ mod tests {
         std::fs::write(dir.join("vanilla.ini"), b"[General]").unwrap();
 
         let s = Session::new();
-        s.mount("", Arc::new(ReadOnlyProvider::new(Arc::new(DiskProvider::new(&dir)))))
-            .unwrap();
+        s.mount(
+            "",
+            Arc::new(ReadOnlyProvider::new(Arc::new(DiskProvider::new(&dir)))),
+        )
+        .unwrap();
 
         reset_rejected_writes();
         // The director's own pre-check: the root's provider declares Read, so an
@@ -337,7 +355,10 @@ mod tests {
             "the refused write must be discoverable by path; got {rejected:?}"
         );
         // The file on disk is untouched: the refusal is not a silent success.
-        assert_eq!(std::fs::read(dir.join("vanilla.ini")).unwrap(), b"[General]");
+        assert_eq!(
+            std::fs::read(dir.join("vanilla.ini")).unwrap(),
+            b"[General]"
+        );
         reset_rejected_writes();
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -350,8 +371,8 @@ mod tests {
     #[test]
     fn session_serve_and_ring_read() {
         use vfs_protocol::{
-            decode_open_resp, decode_read_resp, encode_open_req, encode_read_req, OpenResp, ReadReq,
-            OP_OPEN, OP_READ, OPEN_READ, ST_OK,
+            decode_open_resp, decode_read_resp, encode_open_req, encode_read_req, OpenResp,
+            ReadReq, OPEN_READ, OP_OPEN, OP_READ, ST_OK,
         };
 
         let dir = std::env::temp_dir().join(format!("vfs-sess-ring-{}", std::process::id()));

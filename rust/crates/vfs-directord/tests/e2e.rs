@@ -560,6 +560,7 @@ wait      = true
                 layer: layer as i32,
                 root: entry.root,
                 write_layer: entry.write_layer,
+                cache_key: String::new(),
             })
             .await
             .expect("AddSource");
@@ -667,6 +668,7 @@ async fn scenario_toml_disk_source_fixture_writepath() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource");
@@ -933,6 +935,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource bottom");
@@ -949,6 +952,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
             layer: 1,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource top");
@@ -1094,9 +1098,12 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
 ///   a lone layer unwrapped, so a single-source session builds no
 ///   `LayeredProvider` at all. Hence three sources here — archive, then two
 ///   mod directories — which is also what an ordinary modded game looks like.
-/// - **`CachingProvider` under the overlay.** Every registry source is cache-
-///   wrapped; `skyrim-live` mounts raw. So a copy-up seeded *through the block
-///   cache* — a cached read feeding a write — had never happened live.
+/// - **The registry's own source wrapping under the overlay.** This bullet
+///   was written when every registry source went through `vfs-cache`'s
+///   `CachingProvider`, so a copy-up seeded through the block cache had never
+///   happened live. That crate is gone: `vfs-storage` caches only slow,
+///   immutable sources, so the archive and directories here are mounted as
+///   they are, exactly as the daemon mounts them.
 /// - **The whole declaration path**, from `AddSourceReq.write_layer` to a real
 ///   `fopen(…, "r+b")` in an injected process.
 ///
@@ -1204,6 +1211,7 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource (archive)");
@@ -1225,6 +1233,7 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
                 layer,
                 root: 0,
                 write_layer: false,
+                cache_key: String::new(),
             })
             .await
             .unwrap_or_else(|e| panic!("AddSource (mods layer {layer}): {e}"));
@@ -1242,6 +1251,7 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
             layer: 0,
             root: 0,
             write_layer: true,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource (write layer)");
@@ -1809,6 +1819,7 @@ async fn escape_matrix_positive_and_negative_canary() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource");
@@ -2149,6 +2160,7 @@ async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file(
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource");
@@ -2381,6 +2393,7 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource");
@@ -2726,6 +2739,7 @@ async fn profile_api_writes_a_managed_root_ini_through_the_director() {
             layer: 0,
             root: 0,
             write_layer: true,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource");
@@ -3040,6 +3054,7 @@ async fn escape_matrix_write_access_positive_and_negative_canary() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource");
@@ -3379,6 +3394,7 @@ async fn escape_matrix_holds_against_a_second_root() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource root 0");
@@ -3395,6 +3411,7 @@ async fn escape_matrix_holds_against_a_second_root() {
             layer: 0,
             root: 1,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource root 1");
@@ -3614,6 +3631,7 @@ async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource");
@@ -3714,6 +3732,7 @@ async fn apply_session_config_health_and_list() {
             mount: "/".into(),
             root: 0,
             write_layer: false,
+            cache_key: None,
         }],
         launch: None,
         cache: None,
@@ -3830,6 +3849,7 @@ async fn a_failed_apply_leaves_no_session_and_a_live_name_is_not_reused() {
             mount: "/".into(),
             root: 0,
             write_layer: false,
+            cache_key: None,
         }],
         ..Default::default()
     };
@@ -3854,6 +3874,7 @@ async fn a_failed_apply_leaves_no_session_and_a_live_name_is_not_reused() {
         mount: "/".into(),
         root: 0,
         write_layer: false,
+        cache_key: None,
     });
     let e = apply_session_config(&mut client, &bad_source).await.unwrap_err();
     assert!(e.contains("AddSource"), "{e}");
@@ -3953,6 +3974,7 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
                 mount: "/".into(),
                 root: 0,
                 write_layer: false,
+                cache_key: None,
             },
             vfs_control::SourceEntry {
                 spec: vfs_control::SourceSpec::Disk {
@@ -3961,6 +3983,7 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
                 mount: "/".into(),
                 root: 1,
                 write_layer: false,
+                cache_key: None,
             },
         ],
         launch: None,
@@ -4078,6 +4101,7 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
             mount: "/".into(),
             root: 0,
             write_layer: false,
+            cache_key: None,
         }],
         launch: None,
         ..Default::default()

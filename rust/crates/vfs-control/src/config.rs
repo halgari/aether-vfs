@@ -70,6 +70,9 @@ pub enum SourceSpec {
     Zip { path: String },
     Http { url: String },
     Remote { endpoint: String },
+    /// A named persistent write layer held in the daemon's storage. Only valid
+    /// with `write_layer = true`; the daemon (not `vfs_source`) builds it.
+    Layer { name: String },
     /// An in-memory name→content map (`vfs_compose::MemoryProvider`).
     ///
     /// Content is UTF-8 text, not arbitrary bytes: this variant exists so a
@@ -145,11 +148,16 @@ pub struct SourceEntry {
     /// content — what a mod tool or an INI writer does — fails, because
     /// layering can route a write but cannot seed a copy from a lower layer.
     ///
-    /// Must be a writable source (`type = "disk"`), must mount at the root,
-    /// and at most one per root — see
+    /// Must be a writable source (`type = "disk"`, or `type = "layer"`, a
+    /// named persistent layer in the daemon's storage, which is only ever a
+    /// write layer), must mount at the root, and at most one per root — see
     /// [`SessionConfig::validate_roots`].
     #[serde(default)]
     pub write_layer: bool,
+    /// Stable identity for the slow-source block cache: two sources with the
+    /// same key share cached blocks across sessions.
+    #[serde(default)]
+    pub cache_key: Option<String>,
 }
 
 /// The `[launch]` block.
@@ -164,7 +172,8 @@ pub struct LaunchConfig {
     pub env: BTreeMap<String, String>,
 }
 
-/// The `[cache]` block. Honored from M2; ignored earlier.
+/// The `[cache]` block. Parsed so old configs load, but ignored: the cache is
+/// daemon-wide (`vfs daemon --storage-dir/--cache-max-gib`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheConfig {
     pub block_size: Option<String>,
@@ -224,6 +233,16 @@ impl SessionConfig {
     /// this flag exists to prevent. Checked before the flat-list early return,
     /// because the flat form can declare a write layer too.
     pub fn validate_roots(&self) -> Result<(), String> {
+        if let Some(e) = self
+            .sources
+            .iter()
+            .find(|e| matches!(e.spec, SourceSpec::Layer { .. }) && !e.write_layer)
+        {
+            return Err(format!(
+                "source for root {}: a layer source is a write layer; set write_layer = true",
+                e.root
+            ));
+        }
         let mut write_layer_roots = std::collections::HashSet::new();
         for entry in self.sources.iter().filter(|e| e.write_layer) {
             if !write_layer_roots.insert(entry.root) {
@@ -251,10 +270,10 @@ impl SessionConfig {
             // copy-up — it is already `Access::ReadWrite`). Say so here,
             // where the author can see which line is wrong, rather than as a
             // status code out of `AddSource`.
-            if !matches!(entry.spec, SourceSpec::Disk { .. }) {
+            if !matches!(entry.spec, SourceSpec::Disk { .. } | SourceSpec::Layer { .. }) {
                 return Err(format!(
-                    "write_layer source for root {} is {:?}; only a disk source may serve as a \
-                     write layer",
+                    "write_layer source for root {} is {:?}; only a disk or layer source may \
+                     serve as a write layer",
                     entry.root, entry.spec
                 ));
             }
@@ -307,11 +326,19 @@ pub fn load(path: impl AsRef<Path>) -> Result<SessionConfig, ConfigError> {
     let path = path.as_ref();
     let text = std::fs::read_to_string(path)
         .map_err(|e| ConfigError::Read(path.display().to_string(), e))?;
-    match path.extension().and_then(|s| s.to_str()) {
-        Some("toml") => Ok(toml::from_str(&text)?),
-        Some("json") => Ok(serde_json::from_str(&text)?),
-        _ => Err(ConfigError::Extension(path.display().to_string())),
+    let cfg: SessionConfig = match path.extension().and_then(|s| s.to_str()) {
+        Some("toml") => toml::from_str(&text)?,
+        Some("json") => serde_json::from_str(&text)?,
+        _ => return Err(ConfigError::Extension(path.display().to_string())),
+    };
+    if cfg.cache.is_some() {
+        eprintln!(
+            "warning: {}: the [cache] block is ignored; the cache is daemon-wide: \
+             vfs daemon --storage-dir/--cache-max-gib",
+            path.display()
+        );
     }
+    Ok(cfg)
 }
 
 #[cfg(test)]
@@ -510,6 +537,7 @@ layer = 20
                 mount: "/".into(),
                 root: 7, // would be undeclared if any [[root]] existed
                 write_layer: false,
+                cache_key: None,
             }],
             ..Default::default()
         };
@@ -525,6 +553,7 @@ layer = 20
                 mount: "/".into(),
                 root: 1,
                 write_layer: false,
+                cache_key: None,
             }],
             ..Default::default()
         };
@@ -557,6 +586,7 @@ layer = 20
                 mount: "/".into(),
                 root: 0,
                 write_layer: false,
+                cache_key: None,
             }],
             ..Default::default()
         };
@@ -593,5 +623,82 @@ path = "C:/a"
         std::fs::write(&bad, "x").unwrap();
         assert!(matches!(load(&bad), Err(ConfigError::Extension(_))));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn layer_source_parses_with_name_and_write_layer() {
+        let cfg: SessionConfig = toml::from_str(
+            r#"
+[[source]]
+type = "layer"
+name = "profile-a"
+write_layer = true
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.sources[0].spec, SourceSpec::Layer { name: "profile-a".into() });
+        assert!(cfg.sources[0].write_layer);
+        cfg.validate_roots().expect("a layer write layer is valid");
+    }
+
+    #[test]
+    fn cache_key_parses_and_defaults_to_none() {
+        let cfg: SessionConfig = toml::from_str(
+            r#"
+[[source]]
+type = "zip"
+path = "C:/a.zip"
+cache_key = "skyrim-base"
+
+[[source]]
+type = "zip"
+path = "C:/b.zip"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.sources[0].cache_key.as_deref(), Some("skyrim-base"));
+        assert_eq!(cfg.sources[1].cache_key, None);
+    }
+
+    #[test]
+    fn validate_roots_rejects_a_layer_without_write_layer() {
+        let cfg: SessionConfig = toml::from_str(
+            r#"
+[[source]]
+type = "layer"
+name = "p"
+"#,
+        )
+        .unwrap();
+        let err = cfg.validate_roots().unwrap_err();
+        assert!(err.contains("a layer source is a write layer; set write_layer = true"), "{err}");
+    }
+
+    #[test]
+    fn validate_roots_rejects_a_zip_write_layer() {
+        let cfg: SessionConfig = toml::from_str(
+            r#"
+[[source]]
+type = "zip"
+path = "C:/a.zip"
+write_layer = true
+"#,
+        )
+        .unwrap();
+        let err = cfg.validate_roots().unwrap_err();
+        assert!(err.contains("disk") && err.contains("layer"), "{err}");
+    }
+
+    #[test]
+    fn an_old_config_with_a_cache_block_still_loads() {
+        let path = std::env::temp_dir().join(format!("vfs-control-cache-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            "[cache]\nblock_size = \"64K\"\n\n[[source]]\ntype = \"disk\"\npath = \"C:/x\"\n",
+        )
+        .unwrap();
+        let cfg = load(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(cfg.cache.is_some());
+        assert_eq!(cfg.sources.len(), 1);
     }
 }

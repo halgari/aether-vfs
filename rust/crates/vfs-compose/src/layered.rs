@@ -288,8 +288,9 @@ mod tests {
     // `InlineProvider` children, so the write half of the trait never ran —
     // which is exactly how `open()`'s hard `bad_request()` on `OPEN_WRITE`
     // survived review undetected. These two reproduce the real production
-    // shape (`SessionRegistry::add_source` stacks N `CachingProvider`-wrapped
-    // `DiskProvider`s, every one `Access::ReadWrite`) in both possible
+    // shape (`SessionRegistry::add_source` stacks N `DiskProvider`s, every
+    // one `Access::ReadWrite`; the storage cache leaves a mutable source
+    // unwrapped) in both possible
     // top/bottom arrangements.
 
     /// Both children writable — the actual "two-or-more root-mounted

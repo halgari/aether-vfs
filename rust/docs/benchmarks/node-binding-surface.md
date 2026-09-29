@@ -13,8 +13,9 @@ are held by assertions that CI runs.
 ## The three tiers, and why they are separate
 
 Wall-clock thresholds on a shared runner are how a gate becomes a flake. This
-follows what `vfs-cache` already does — `hit_copy_cost` is deterministic and
-allocation-counted, `hit_scaling_cost` asserts *ratios* and documents its limits:
+follows what `vfs-cache` did (that crate is now deleted) — its `hit_copy_cost`
+was deterministic and allocation-counted, its `hit_scaling_cost` asserted
+*ratios* and documented its limits:
 
 | tier | what it asserts | why it survives a loaded machine |
 |---|---|---|

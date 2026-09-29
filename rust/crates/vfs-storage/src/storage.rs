@@ -1,0 +1,436 @@
+//! [`Storage`]: one block store, its catalog and the RAM tier, opened together.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
+
+use vfs_block_store::BlockStore;
+use vfs_provider::Provider;
+
+use crate::cached::{lock, CacheState};
+use crate::catalog::Catalog;
+use crate::config::StorageConfig;
+use crate::layer::LayerProvider;
+use crate::ram::RamTier;
+use crate::reconcile::{reconcile, ReconcileReport};
+
+/// Errors from `vfs-storage`.
+#[derive(Debug)]
+pub enum StorageError {
+    /// The block store failed.
+    Store(vfs_block_store::Error),
+    /// The catalog database failed, or holds a row it cannot decode.
+    Catalog(String),
+    Io(std::io::Error),
+    /// A layer of this name already exists.
+    LayerExists(String),
+    /// No layer of this name (or id).
+    NoSuchLayer(String),
+    /// The layer is open and cannot be deleted or replaced.
+    LayerInUse(String),
+    /// No catalog entry at this (folded) path.
+    NotFound(String),
+    /// A directory still holds entries, so it cannot be removed.
+    NotEmpty(String),
+    /// The destination of a rename is a directory that holds entries, or an
+    /// export's target directory is not empty.
+    Exists(String),
+    /// A request that can never succeed: a layer root as the target, or a
+    /// directory moved into its own subtree.
+    BadRequest(String),
+}
+
+impl StorageError {
+    /// Whether another `Storage` (in this or another process) holds the
+    /// directory: what [`Storage::open`] fails with when it is taken.
+    pub fn is_locked(&self) -> bool {
+        matches!(self, StorageError::Store(vfs_block_store::Error::Locked))
+    }
+
+    /// The `vfs_provider` status a provider should answer with.
+    ///
+    /// The directory refusals match `vfs-compose`'s `MemoryProvider`: removing
+    /// a non-empty directory is `ST_IS_DIR` (which the shim already translates
+    /// to what `DeleteFileW` gives for a directory), renaming onto an occupied
+    /// directory is `ST_EXISTS`, and a move into its own subtree is
+    /// `ST_BAD_REQUEST`.
+    pub fn to_status(&self) -> i32 {
+        match self {
+            StorageError::NoSuchLayer(_)
+            | StorageError::NotFound(_)
+            | StorageError::Store(vfs_block_store::Error::NotFound) => vfs_provider::ST_NOT_FOUND,
+            StorageError::LayerExists(_) | StorageError::Exists(_) => vfs_provider::ST_EXISTS,
+            StorageError::NotEmpty(_) => vfs_provider::ST_IS_DIR,
+            StorageError::BadRequest(_) => vfs_provider::ST_BAD_REQUEST,
+            StorageError::Store(_)
+            | StorageError::Catalog(_)
+            | StorageError::Io(_)
+            | StorageError::LayerInUse(_) => vfs_provider::ST_IO_ERROR,
+        }
+    }
+}
+
+impl fmt::Display for StorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageError::Store(e) => write!(f, "block store: {e}"),
+            StorageError::Catalog(e) => write!(f, "catalog: {e}"),
+            StorageError::Io(e) => write!(f, "i/o: {e}"),
+            StorageError::LayerExists(n) => write!(f, "layer {n:?} already exists"),
+            StorageError::NoSuchLayer(n) => write!(f, "no layer {n:?}"),
+            StorageError::LayerInUse(n) => write!(f, "layer {n:?} is in use"),
+            StorageError::NotFound(p) => write!(f, "no entry {p:?}"),
+            StorageError::NotEmpty(p) => write!(f, "directory {p:?} is not empty"),
+            StorageError::Exists(p) => write!(f, "{p:?} is a directory that is not empty"),
+            StorageError::BadRequest(m) => write!(f, "bad request: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for StorageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            StorageError::Store(e) => Some(e),
+            StorageError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<vfs_block_store::Error> for StorageError {
+    fn from(e: vfs_block_store::Error) -> Self {
+        StorageError::Store(e)
+    }
+}
+
+impl From<std::io::Error> for StorageError {
+    fn from(e: std::io::Error) -> Self {
+        StorageError::Io(e)
+    }
+}
+
+/// What [`Storage::close`] managed: whether the directory is released now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseOutcome {
+    /// The store is closed and the directory lock released.
+    Released,
+    /// Everything was flushed, but `refs` references (this one included) were
+    /// alive, so the store stays open and the directory locked until the last
+    /// of them drops.
+    StillShared { refs: usize },
+}
+
+/// The block store, used as pull-through cache and layer storage: one per
+/// directory, and one per process for a directory (the store holds a lock file).
+pub struct Storage {
+    pub(crate) store: BlockStore,
+    pub(crate) catalog: Catalog,
+    pub(crate) ram: RamTier,
+    pub(crate) cfg: StorageConfig,
+    /// Pull-through cache bookkeeping shared by every cached source.
+    pub(crate) cache: CacheState,
+    /// The durability gate (spec §6: every durable catalog row references
+    /// durable store data). Held **shared** across every "write store data,
+    /// then write the catalog row that describes it" pair: a layer commit
+    /// (`FileCell::commit` and the row update), a layer file create (row, then
+    /// `set_len`) and a cache fetch (for a file's first block, its row and
+    /// `set_len`; then `write_blocks`, then the access-log update a later row
+    /// commit persists). Held **exclusive** across `store.flush()` +
+    /// `catalog.commit_durable()` wherever that pair runs: a layer's durable
+    /// point, `delete_layer`, `close` and reconciliation. So no row can land
+    /// between a flush and the durable commit that would publish it ahead of
+    /// its data. (The store's own auto-flush and compaction commits can still
+    /// make a store state durable mid-commit; reconciliation repairs those.)
+    ///
+    /// **Lock order**, outermost first:
+    /// - layers: a file cell's `state` → `gate` → the layer's `ns` → the
+    ///   layer's leaf locks (`cells`, `handles`, `doomed`, a cell's `path`
+    ///   and `mtime_override`);
+    /// - the `layers` registry → `gate` (a new layer is made durable while
+    ///   the registry is held; nothing holding the gate takes the registry);
+    /// - cache: `gate` → `open_counts` → `access`.
+    ///
+    /// The gate is never taken recursively (shared or exclusive) by a thread
+    /// that holds it. The exclusive holder takes nothing else during the
+    /// fsyncs (a layer's durable point takes `ns` only briefly, before them,
+    /// to collect its doomed files).
+    pub(crate) gate: RwLock<()>,
+    /// Every layer with a provider, by name: live, or dropped and still
+    /// inside its `Drop` (a last commit and durable point). A provider removes
+    /// its own entry at the end of its `Drop` and signals `layers_gone`. One
+    /// provider per layer, so all of a layer's handles share one namespace
+    /// lock and one file state per GUID.
+    pub(crate) layers: Mutex<HashMap<String, Weak<LayerProvider>>>,
+    /// Signalled whenever a provider leaves `layers`.
+    pub(crate) layers_gone: Condvar,
+    /// What reconciliation at open repaired.
+    pub(crate) reconciled: ReconcileReport,
+    /// Test hook: `import_layer` fails when it reaches this layer path.
+    #[cfg(test)]
+    pub(crate) fail_import_at: Mutex<Option<String>>,
+    /// Test hook: run by the next `LayerProvider::drop`, after its durable
+    /// point and before it leaves `layers`.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) drop_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl Storage {
+    /// Opens (creating if needed) the storage in `dir`: the block store in `dir`
+    /// itself, the catalog at `dir/catalog.redb`, and an empty RAM tier.
+    ///
+    /// Fails with `Store(Locked)` while another `Storage` (in any process) has
+    /// the directory open.
+    pub fn open(dir: impl AsRef<Path>, cfg: StorageConfig) -> Result<Arc<Storage>, StorageError> {
+        let dir = dir.as_ref();
+        std::fs::create_dir_all(dir)?;
+        // The store first: it takes the directory lock, so a second opener
+        // fails here, before it opens (and waits on) the catalog database.
+        let store = BlockStore::open(dir, cfg.store.clone())?;
+        let catalog_path = dir.join("catalog.redb");
+        let catalog = Catalog::open(&catalog_path)?;
+        // Spec §6: repair what a crash between the two halves' commits left,
+        // before the cache budget is summed and before any provider exists.
+        let gate = RwLock::new(());
+        let reconciled = reconcile(
+            &store,
+            &catalog,
+            &catalog_path,
+            &gate,
+            u64::from(cfg.store.block_size),
+        )?;
+        let ram = RamTier::with_geometry(cfg.ram_tier_bytes, u64::from(cfg.store.block_size));
+        let cached_logical = catalog
+            .cache_all()?
+            .iter()
+            .map(|(_, r)| r.logical_bytes)
+            .sum();
+        Ok(Arc::new(Storage {
+            store,
+            catalog,
+            ram,
+            cfg,
+            cache: CacheState::new(cached_logical),
+            gate,
+            layers: Mutex::new(HashMap::new()),
+            layers_gone: Condvar::new(),
+            reconciled,
+            #[cfg(test)]
+            fail_import_at: Mutex::new(None),
+            #[cfg(test)]
+            drop_hook: Mutex::new(None),
+        }))
+    }
+
+    /// Waits for a background eviction, commits batched cache access times,
+    /// flushes the store, then commits the catalog durably (in that order, so
+    /// every durable catalog row references durable store data), then closes the
+    /// store and releases the directory.
+    ///
+    /// If other references to this `Storage` are still alive, everything is
+    /// flushed the same way and `Ok(StillShared)` is returned, but the store
+    /// stays open and the directory stays locked until the last reference
+    /// drops (the store closes itself on drop); a warning is logged. Every
+    /// layer provider and cached source holds such a reference, so a caller
+    /// that must reopen the directory (in this process or another) drops
+    /// those first.
+    pub fn close(self: Arc<Self>) -> Result<CloseOutcome, StorageError> {
+        // A background eviction holds a reference; let it finish.
+        self.wait_for_eviction();
+        self.commit_access()?;
+        self.flush_durably()?;
+        match Arc::try_unwrap(self) {
+            Ok(s) => {
+                let Storage { store, catalog, .. } = s;
+                store.close()?;
+                drop(catalog);
+                Ok(CloseOutcome::Released)
+            }
+            Err(still_shared) => {
+                let refs = Arc::strong_count(&still_shared);
+                tracing::warn!(
+                    refs,
+                    "Storage::close with other references alive: flushed, but the \
+                     directory stays locked until the last one drops"
+                );
+                Ok(CloseOutcome::StillShared { refs })
+            }
+        }
+    }
+
+    /// The durability gate, shared: see [`Storage::gate`].
+    pub(crate) fn gate_shared(&self) -> RwLockReadGuard<'_, ()> {
+        self.gate.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The durability gate, exclusive: see [`Storage::gate`].
+    pub(crate) fn gate_exclusive(&self) -> RwLockWriteGuard<'_, ()> {
+        self.gate.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `store.flush()` then `catalog.commit_durable()`, under the exclusive
+    /// gate.
+    pub(crate) fn flush_durably(&self) -> Result<(), StorageError> {
+        let _gate = self.gate_exclusive();
+        self.store.flush()?;
+        self.catalog.commit_durable()
+    }
+
+    /// The block store's block size in bytes.
+    pub fn block_size(&self) -> u64 {
+        u64::from(self.cfg.store.block_size)
+    }
+
+    /// The layer named `name` as a read-write provider, creating the layer if
+    /// it does not exist. While a provider for it is alive, every call returns
+    /// that same provider; while the last one is still being dropped, the call
+    /// waits for that drop to finish rather than build a second one.
+    pub fn layer(self: &Arc<Self>, name: &str) -> Result<Arc<dyn Provider>, StorageError> {
+        Ok(self.layer_provider(name, true)?)
+    }
+
+    /// The provider of layer `name`, shared as [`Storage::layer`] describes.
+    /// A missing layer is created when `create`, else `NoSuchLayer`.
+    pub(crate) fn layer_provider(
+        self: &Arc<Self>,
+        name: &str,
+        create: bool,
+    ) -> Result<Arc<LayerProvider>, StorageError> {
+        let mut layers = lock(&self.layers);
+        while let Some(w) = layers.get(name) {
+            if let Some(live) = w.upgrade() {
+                return Ok(live);
+            }
+            // Its last reference is gone but its `Drop` is still committing.
+            layers = self
+                .layers_gone
+                .wait(layers)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+        let id = match self.catalog.layer_id(name)? {
+            Some(id) => id,
+            None if create => self.create_layer_durably(name)?,
+            None => return Err(StorageError::NoSuchLayer(name.to_owned())),
+        };
+        let p = Arc::new(LayerProvider::new(Arc::clone(self), name.to_owned(), id));
+        layers.insert(name.to_owned(), Arc::downgrade(&p));
+        Ok(p)
+    }
+
+    /// Creates layer `name` and makes it durable before any of its data can
+    /// be written, so the store never holds layer data under a catalog that
+    /// has no durable layer (which [`Storage::open`] refuses as a lost
+    /// catalog). May be called with the `layers` registry lock held.
+    pub(crate) fn create_layer_durably(&self, name: &str) -> Result<u64, StorageError> {
+        let id = self.catalog.create_layer(name)?;
+        self.flush_durably()?;
+        Ok(id)
+    }
+
+    /// Called at the end of `LayerProvider::drop`: removes `p`'s registry
+    /// entry (if it is still `p`'s) and wakes waiters.
+    pub(crate) fn layer_dropped(&self, name: &str, p: *const LayerProvider) {
+        let mut layers = lock(&self.layers);
+        if layers
+            .get(name)
+            .is_some_and(|w| std::ptr::eq(w.as_ptr(), p))
+        {
+            layers.remove(name);
+        }
+        drop(layers);
+        self.layers_gone.notify_all();
+    }
+
+    /// The names of the layers with a provider, sorted: live, or dropped but
+    /// still finishing its last commit.
+    pub fn layers_in_use(&self) -> Vec<String> {
+        let mut names: Vec<String> = lock(&self.layers).keys().cloned().collect();
+        names.sort();
+        names
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::StorageConfig;
+
+    #[test]
+    fn storage_opens_twice_in_sequence_but_not_concurrently() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        let e = Storage::open(dir.path(), StorageConfig::default())
+            .err()
+            .expect("the block store lock must hold");
+        assert!(e.is_locked(), "{e}");
+        assert!(!StorageError::Catalog("x".into()).is_locked());
+        s.close().unwrap();
+        Storage::open(dir.path(), StorageConfig::default()).unwrap();
+    }
+
+    #[test]
+    fn catalog_rows_survive_close_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        let id = s.catalog.create_layer("prof").unwrap();
+        assert_eq!(s.block_size(), 64 * 1024);
+        s.close().unwrap();
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert_eq!(s.catalog.layer_id("prof").unwrap(), Some(id));
+        assert!(dir.path().join("catalog.redb").exists());
+    }
+
+    #[test]
+    fn close_with_another_reference_flushes_and_keeps_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        let other = Arc::clone(&s);
+        assert_eq!(s.close().unwrap(), CloseOutcome::StillShared { refs: 2 });
+        assert!(Storage::open(dir.path(), StorageConfig::default()).is_err());
+        drop(other);
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert_eq!(s.close().unwrap(), CloseOutcome::Released);
+        Storage::open(dir.path(), StorageConfig::default()).unwrap();
+    }
+
+    #[test]
+    fn errors_map_to_provider_statuses() {
+        assert_eq!(
+            StorageError::NoSuchLayer("x".into()).to_status(),
+            vfs_provider::ST_NOT_FOUND
+        );
+        assert_eq!(
+            StorageError::LayerExists("x".into()).to_status(),
+            vfs_provider::ST_EXISTS
+        );
+        assert_eq!(
+            StorageError::Store(vfs_block_store::Error::NotFound).to_status(),
+            vfs_provider::ST_NOT_FOUND
+        );
+        assert_eq!(
+            StorageError::Catalog("x".into()).to_status(),
+            vfs_provider::ST_IO_ERROR
+        );
+        assert_eq!(
+            StorageError::LayerInUse("x".into()).to_status(),
+            vfs_provider::ST_IO_ERROR
+        );
+        assert_eq!(
+            StorageError::NotFound("x".into()).to_status(),
+            vfs_provider::ST_NOT_FOUND
+        );
+        assert_eq!(
+            StorageError::NotEmpty("x".into()).to_status(),
+            vfs_provider::ST_IS_DIR
+        );
+        assert_eq!(
+            StorageError::Exists("x".into()).to_status(),
+            vfs_provider::ST_EXISTS
+        );
+        assert_eq!(
+            StorageError::BadRequest("x".into()).to_status(),
+            vfs_provider::ST_BAD_REQUEST
+        );
+    }
+}

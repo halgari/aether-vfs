@@ -1,0 +1,20 @@
+[package]
+name = "vfs-storage"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+description = "The block store as pull-through cache and layer storage: catalog, RAM tier and Storage"
+
+[dependencies]
+vfs-block-store = { path = "../vfs-block-store" }
+vfs-provider = { path = "../vfs-provider" }
+vfs-core = { path = "../vfs-core" }
+redb = "4.3"
+uuid = { version = "1", features = ["v4"] }
+blake3 = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+vfs-compose = { path = "../vfs-compose" }

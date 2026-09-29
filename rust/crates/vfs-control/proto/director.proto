@@ -14,6 +14,10 @@ service Director {
   rpc TeardownSession(TeardownReq) returns (Empty);
   rpc ListSessions(Empty) returns (SessionList);
   rpc Stats(Empty) returns (StatsResp);
+  rpc ListLayers(Empty) returns (LayerList);
+  rpc ExportLayer(LayerPathReq) returns (LayerCount);
+  rpc ImportLayer(LayerPathReq) returns (LayerCount);
+  rpc DeleteLayer(LayerNameReq) returns (Empty);
 }
 
 message Empty {}
@@ -43,12 +47,14 @@ message SourceSpec {
     ZipSource zip = 2;
     HttpSource http = 3;
     RemoteSource remote = 4;
+    LayerSource layer = 5;
   }
 }
 message DiskSource { string path = 1; }
 message ZipSource { string path = 1; }
 message HttpSource { string url = 1; }
 message RemoteSource { string endpoint = 1; }
+message LayerSource { string name = 1; } // a named persistent write layer
 
 // Declare a session root's location: where the launched program sees it — a
 // host directory on Windows, a `C:\…` path inside the session's Wine prefix on
@@ -87,11 +93,14 @@ message AddSourceReq {
   // composition can route a write to a source that owns the path, but cannot
   // seed a destination from a lower layer.
   //
-  // The provider must declare ReadWrite (a `disk` source; a zip or a remote
-  // is rejected), it must mount at the root ("/"), and `layer` is ignored —
-  // the write layer is above every layer by construction. At most one per
-  // root; a second declaration replaces the first.
+  // The provider must declare ReadWrite (a `disk` or `layer` source; a zip or
+  // a remote is rejected, and a `layer` source is accepted only here), it
+  // must mount at the root ("/"), and `layer` is ignored — the write layer is
+  // above every layer by construction. At most one per root; a second
+  // declaration replaces the first.
   bool write_layer = 6;
+  // Stable identity of a slow source for the block cache (optional).
+  string cache_key = 7;
 }
 message SourceRef {
   uint64 id = 1;
@@ -146,4 +155,21 @@ message StatsResp {
   uint64 opens_ok = 9;
   uint64 opens_err = 10;
   repeated RejectedWrite rejected_writes = 11;
+  uint64 store_pack_bytes = 12;
+  uint64 store_live_bytes = 13;
+  uint64 cache_logical_bytes = 14;
+  uint32 layers = 15;
 }
+
+message LayerInfo {
+  string name = 1;
+  uint64 files = 2;
+  uint64 logical_bytes = 3;
+}
+message LayerList { repeated LayerInfo layers = 1; }
+message LayerPathReq {
+  string name = 1;
+  string dir = 2;
+}
+message LayerNameReq { string name = 1; }
+message LayerCount { uint64 files = 1; }

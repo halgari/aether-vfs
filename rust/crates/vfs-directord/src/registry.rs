@@ -11,10 +11,11 @@ use std::sync::{Arc, Mutex};
 // into the engine is evidence the seam is in the wrong place. The cache and
 // composition primitives below are re-exports from `vfs-embed`'s own catalog,
 // not a second route to the same crates. `daemon_names_only_the_embed_api`
-// (bottom of this file) keeps it that way.
+// (bottom of this file) keeps it that way. Storage too: `vfs_embed::Storage`
+// is `vfs-storage`'s, re-exported.
 use vfs_embed::{
-    stack_layers, BlockCache, CacheConfig, CachingProvider, LaunchOpts, Provider, RootId,
-    RootSources, Session,
+    stack_layers, LaunchOpts, Provider, RootId, RootSources, Session, SourceKey, Storage,
+    StorageError,
 };
 
 /// Build the composed provider each root in a [`vfs_control::SessionConfig`]
@@ -75,7 +76,10 @@ pub fn build_provider_graph(
         .collect::<std::collections::BTreeSet<u32>>()
     {
         let mounts = match by_root.remove(&root) {
-            Some(stack) => vec![(String::new(), stack_layers(stack).map_err(|e| e.to_string())?)],
+            Some(stack) => vec![(
+                String::new(),
+                stack_layers(stack).map_err(|e| e.to_string())?,
+            )],
             None => Vec::new(),
         };
         let composed = vfs_embed::compose_root(mounts, write_layers.remove(&root))
@@ -123,6 +127,9 @@ pub struct LiveSession {
 struct SessionMeta {
     /// Root 0's location — what the session summary reports as `root`.
     root: PathBuf,
+    /// The named storage layer each root writes into, if its write layer is
+    /// one — what [`SessionRegistry::delete_layer`] names when it refuses.
+    layers: BTreeMap<u32, String>,
     /// Each declared root's `[[root]] name`, for `{Name}` launch paths
     /// ([`SessionRegistry::expand_root_name`]). A root declared without a
     /// name has no entry.
@@ -188,7 +195,7 @@ impl LiveSession {
                      An in-place edit of content a read-only source (zip/remote) holds will \
                      fail, and new files land in the topmost writable source rather than a \
                      directory of your choosing. Declare one with `write_layer = true` on a \
-                     disk source, or `vfs launch --write-layer <dir>`.",
+                     disk or layer source, or `vfs launch --write-layer <dir>|layer:NAME`.",
                     self.id
                 );
             }
@@ -206,35 +213,60 @@ pub const DUPLICATE_NAME: &str = "a live session is already named";
 /// registry's own session-id counter.
 static SESSION_BASE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Process-wide multi-session table owned by the daemon.
-#[derive(Clone)]
-pub struct SessionRegistry {
-    inner: Arc<Mutex<HashMap<String, Arc<SessionEntry>>>>,
-    next_id: Arc<AtomicU64>,
-    cache: Arc<BlockCache>,
+/// Why a layer operation ([`SessionRegistry::delete_layer`]) was refused.
+#[derive(Debug)]
+pub enum LayerOpError {
+    /// The registry was built without storage ([`SessionRegistry::new`]).
+    NoStorage,
+    /// A live session writes into the layer; the message names it.
+    InUse(String),
+    /// The storage refused or failed.
+    Storage(StorageError),
 }
 
-impl Default for SessionRegistry {
-    fn default() -> Self {
-        Self::with_cache(Arc::new(BlockCache::new(CacheConfig::default())))
+impl std::fmt::Display for LayerOpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayerOpError::NoStorage => f.write_str(NO_STORAGE),
+            LayerOpError::InUse(m) => f.write_str(m),
+            LayerOpError::Storage(e) => write!(f, "{e}"),
+        }
     }
 }
 
+/// How every refusal for want of storage begins.
+pub const NO_STORAGE: &str =
+    "this daemon has no storage (start it with `vfs daemon --storage-dir DIR`)";
+
+/// Process-wide multi-session table owned by the daemon.
+#[derive(Clone, Default)]
+pub struct SessionRegistry {
+    inner: Arc<Mutex<HashMap<String, Arc<SessionEntry>>>>,
+    next_id: Arc<AtomicU64>,
+    /// The daemon's storage (spec §3): the pull-through cache every keyed
+    /// source goes through, and where named layers live. `None` serves
+    /// sources uncached and refuses `layer` sources.
+    storage: Option<Arc<Storage>>,
+}
+
 impl SessionRegistry {
+    /// A registry without storage: sources are served uncached and a `layer`
+    /// source is refused.
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn with_cache(cache: Arc<BlockCache>) -> Self {
+    /// A registry over `storage`: slow immutable sources are cached in it and
+    /// `layer` write layers live in it.
+    pub fn with_storage(storage: Arc<Storage>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
-            next_id: Arc::new(AtomicU64::new(0)),
-            cache,
+            storage: Some(storage),
+            ..Self::default()
         }
     }
 
-    pub fn cache(&self) -> &Arc<BlockCache> {
-        &self.cache
+    pub fn storage(&self) -> Option<&Arc<Storage>> {
+        self.storage.as_ref()
     }
 
     /// Number of live sessions.
@@ -258,7 +290,10 @@ impl SessionRegistry {
     pub fn create(&self, name: String) -> Result<SessionSummary, String> {
         self.refuse_live_name(
             &name,
-            &*self.inner.lock().map_err(|_| "session registry poisoned".to_string())?,
+            &*self
+                .inner
+                .lock()
+                .map_err(|_| "session registry poisoned".to_string())?,
         )?;
         let id = format!("s{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
         // `base_seq` is process-wide, deliberately independent of `id`/`next_id`
@@ -270,8 +305,8 @@ impl SessionRegistry {
         // any test that actually reads/writes bytes through a mounted
         // `DiskProvider` rather than only exercising RPC bookkeeping.
         let base_seq = SESSION_BASE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::temp_dir()
-            .join(format!("vfs-daemon-{}-{base_seq}-{id}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("vfs-daemon-{}-{base_seq}-{id}", std::process::id()));
         // A new session starts from an empty directory. Every component of
         // that name repeats across *runs* — the OS recycles pids freely, and
         // `base_seq`/`id` both restart at zero in each new process — and
@@ -323,6 +358,7 @@ impl SessionRegistry {
             name: name.clone(),
             meta: Mutex::new(SessionMeta {
                 root,
+                layers: BTreeMap::new(),
                 root_names: BTreeMap::new(),
                 root_locs: BTreeMap::new(),
             }),
@@ -391,7 +427,44 @@ impl SessionRegistry {
     /// read-only content is [`Self::set_write_layer`], and the rebuild below
     /// goes through `Session` precisely so the two compose instead of
     /// clobbering each other.
+    ///
+    /// Served **uncached**: without a [`SourceKey`] there is no identity that
+    /// names this source's content stably across runs. The RPC path always
+    /// has one and calls [`Self::add_source_keyed`].
     pub fn add_source(
+        &self,
+        session_id: &str,
+        root: u32,
+        mount: &str,
+        layer: i32,
+        backend: Arc<dyn Provider>,
+    ) -> Result<u64, String> {
+        self.add_source_inner(session_id, root, mount, layer, backend)
+    }
+
+    /// [`Self::add_source`], through the storage's pull-through cache when
+    /// this registry has storage: `Storage::cached` wraps a slow, immutable
+    /// source (a remote one, typically) under `key` and returns any other
+    /// source unchanged. `key` is part of every cached file's identity, so it
+    /// must name the source's content stably across runs — a config's
+    /// `cache_key`, else the remote endpoint.
+    pub fn add_source_keyed(
+        &self,
+        session_id: &str,
+        root: u32,
+        mount: &str,
+        layer: i32,
+        backend: Arc<dyn Provider>,
+        key: SourceKey,
+    ) -> Result<u64, String> {
+        let backend = match &self.storage {
+            Some(storage) => storage.cached(backend, key),
+            None => backend,
+        };
+        self.add_source_inner(session_id, root, mount, layer, backend)
+    }
+
+    fn add_source_inner(
         &self,
         session_id: &str,
         root: u32,
@@ -401,11 +474,8 @@ impl SessionRegistry {
     ) -> Result<u64, String> {
         self.with_session_mut(session_id, |live| {
             let id = live.next_source_id();
-            // Wrap with process-wide block cache.
-            let cached: Arc<dyn Provider> =
-                Arc::new(CachingProvider::new(backend, Arc::clone(&self.cache), id));
             let build = live.roots.entry(root).or_default();
-            build.add(mount, layer, cached);
+            build.add(mount, layer, backend);
             // Rebuild this root's sibling-mount list from its recorded source
             // list (layered root sources + non-root prefix mounts) and hand
             // the *list* to the session, which composes it — with this root's
@@ -434,10 +504,10 @@ impl SessionRegistry {
     /// would scatter a game's saves and edited INIs into whichever mod folder
     /// was declared last.
     ///
-    /// Unlike a source, the layer is **not** wrapped in the block cache: it
-    /// is the one provider in the graph whose bytes change underneath the
-    /// director, and a cached read of a just-copied-up file would serve the
-    /// pre-write content.
+    /// Unlike a source, the layer is **not** wrapped in the cache: it is the
+    /// one provider in the graph whose bytes change underneath the director,
+    /// and a cached read of a just-copied-up file would serve the pre-write
+    /// content.
     ///
     /// Order-independent with respect to `add_source`: whichever comes second
     /// recomposes the root from both halves. Returns a source id, so a caller
@@ -448,12 +518,126 @@ impl SessionRegistry {
         root: u32,
         upper: Arc<dyn Provider>,
     ) -> Result<u64, String> {
-        self.with_session_mut(session_id, |live| {
+        self.set_write_layer_inner(session_id, root, upper, None)
+    }
+
+    /// [`Self::set_write_layer`] with the storage layer `name` as the upper
+    /// (created if it does not exist), recorded against the session so
+    /// [`Self::delete_layer`] can say who uses it. Refused without storage.
+    pub fn set_layer_write_layer(
+        &self,
+        session_id: &str,
+        root: u32,
+        name: &str,
+    ) -> Result<u64, String> {
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or_else(|| format!("layer {name:?}: {NO_STORAGE}"))?;
+        if name.is_empty() {
+            return Err("a layer source needs a layer name".to_string());
+        }
+        // Checked before the layer is created, so a bad id creates nothing.
+        self.entry(session_id)?;
+        let existed = storage
+            .layers()
+            .map_err(|e| format!("layer {name:?}: {e}"))?
+            .iter()
+            .any(|l| l.name == name);
+        let upper = storage
+            .layer(name)
+            .map_err(|e| format!("layer {name:?}: {e}"))?;
+        let result = self.set_write_layer_inner(session_id, root, upper, Some(name));
+        // A refused upper is dropped before the error returns, so a layer this
+        // call created can go again; one that existed is left alone.
+        if result.is_err() && !existed {
+            if let Err(e) = storage.delete_layer(name) {
+                eprintln!(
+                    "vfs: layer {name:?} created for a refused write layer was not deleted: {e}"
+                );
+            }
+        }
+        result
+    }
+
+    fn set_write_layer_inner(
+        &self,
+        session_id: &str,
+        root: u32,
+        upper: Arc<dyn Provider>,
+        layer_name: Option<&str>,
+    ) -> Result<u64, String> {
+        let entry = self.entry(session_id)?;
+        let id = {
+            let live = entry
+                .live
+                .lock()
+                .map_err(|_| format!("session {session_id} poisoned"))?;
             let id = live.next_source_id();
             live.session
                 .set_write_layer_at(RootId(root), upper)
                 .map_err(|st| format!("set write layer for root {root}: status {st}"))?;
-            Ok(id)
+            id
+        };
+        let mut meta = entry
+            .meta
+            .lock()
+            .map_err(|_| format!("session {session_id} poisoned"))?;
+        match layer_name {
+            Some(name) => meta.layers.insert(root, name.to_string()),
+            None => meta.layers.remove(&root),
+        };
+        Ok(id)
+    }
+
+    /// The ids of the live sessions writing into storage layer `name`, sorted.
+    pub fn layer_users(&self, name: &str) -> Vec<String> {
+        let Ok(map) = self.inner.lock() else {
+            return Vec::new();
+        };
+        let mut ids: Vec<String> = map
+            .values()
+            .filter(|e| {
+                e.meta
+                    .lock()
+                    .map(|m| m.layers.values().any(|n| n == name))
+                    .unwrap_or(false)
+            })
+            .map(|e| e.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Delete storage layer `name`. Refused while a live session writes into
+    /// it, naming the session; the storage itself also refuses a layer that
+    /// still has a provider (a session this registry no longer lists, such as
+    /// one torn down while its launch is still running).
+    pub fn delete_layer(&self, name: &str) -> Result<(), LayerOpError> {
+        let storage = self.storage.as_ref().ok_or(LayerOpError::NoStorage)?;
+        let users = self.layer_users(name);
+        if !users.is_empty() {
+            let named: Vec<String> = users
+                .iter()
+                .map(|id| match self.entry(id) {
+                    Ok(e) if !e.name.is_empty() => format!("{id} ({})", e.name),
+                    _ => id.clone(),
+                })
+                .collect();
+            return Err(LayerOpError::InUse(format!(
+                "layer {name:?} is in use by session {}; take it down first \
+                 (`vfs down --session {}`)",
+                named.join(", "),
+                users[0]
+            )));
+        }
+        storage.delete_layer(name).map_err(|e| match e {
+            StorageError::LayerInUse(_) => LayerOpError::InUse(format!(
+                "layer {name:?} is in use: a session that is no longer listed (one torn \
+                 down while its program runs) still holds it, or its last writer is \
+                 finishing"
+            )),
+            e => LayerOpError::Storage(e),
         })
     }
 
@@ -513,7 +697,8 @@ impl SessionRegistry {
         if !name.is_empty() {
             meta.root_names.insert(root, name.to_string());
         }
-        meta.root_locs.insert(root, path.to_string_lossy().into_owned());
+        meta.root_locs
+            .insert(root, path.to_string_lossy().into_owned());
         meta.root = root0;
         Ok(())
     }
@@ -541,11 +726,19 @@ impl SessionRegistry {
         match named.as_slice() {
             [one] => Ok(one.to_string()),
             [] => {
-                let mut live: Vec<String> =
-                    guard.values().map(|s| format!("{} ({})", s.id, s.name)).collect();
+                let mut live: Vec<String> = guard
+                    .values()
+                    .map(|s| format!("{} ({})", s.id, s.name))
+                    .collect();
                 live.sort();
-                let live = if live.is_empty() { "none".to_string() } else { live.join(", ") };
-                Err(format!("no live session is named or numbered {id_or_name}; live: {live}"))
+                let live = if live.is_empty() {
+                    "none".to_string()
+                } else {
+                    live.join(", ")
+                };
+                Err(format!(
+                    "no live session is named or numbered {id_or_name}; live: {live}"
+                ))
             }
             many => Err(format!(
                 "session name {id_or_name} is ambiguous: ids {}; use an id",
@@ -578,8 +771,14 @@ impl SessionRegistry {
             .map(|(root, _)| *root)
         else {
             let names: Vec<&str> = meta.root_names.values().map(String::as_str).collect();
-            let names = if names.is_empty() { "none".to_string() } else { names.join(", ") };
-            return Err(format!("unknown root name {name}; this session's roots: {names}"));
+            let names = if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            };
+            return Err(format!(
+                "unknown root name {name}; this session's roots: {names}"
+            ));
         };
         let location = meta
             .root_locs
@@ -589,7 +788,10 @@ impl SessionRegistry {
         if rest.is_empty() {
             return Ok(location.clone());
         }
-        Ok(vfs_embed::image::join_location(location, &rest.replace('\\', "/")))
+        Ok(vfs_embed::image::join_location(
+            location,
+            &rest.replace('\\', "/"),
+        ))
     }
 
     /// Run `f` on session `id` holding **only that session's** lock: the
@@ -815,7 +1017,11 @@ fn daemon_names_only_the_embed_api() {
     for path in files {
         let src = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         for needle in needles {
             assert!(
                 !src.contains(needle),
@@ -832,8 +1038,8 @@ mod root_graph_tests {
     use super::*;
     use vfs_control::{SessionConfig, SourceEntry, SourceSpec};
     use vfs_embed::DiskProvider;
-    use vfs_embed::OPEN_READ;
     use vfs_embed::VPath;
+    use vfs_embed::OPEN_READ;
 
     fn read_whole(p: &Arc<dyn Provider>, root: RootId, rel: &str) -> Vec<u8> {
         let (h, size, is_dir) = p.open(VPath::new(root, rel), OPEN_READ).unwrap();
@@ -874,12 +1080,18 @@ mod root_graph_tests {
     /// tried. `create`'s single call to this is verified by reading.
     #[test]
     fn prepare_session_base_clears_a_previous_runs_directory() {
-        let base = std::env::temp_dir()
-            .join(format!("vfs-prepare-base-{}-{}", std::process::id(), line!()));
+        let base = std::env::temp_dir().join(format!(
+            "vfs-prepare-base-{}-{}",
+            std::process::id(),
+            line!()
+        ));
         let stale = base.join("overlay").join("root-0").join("data");
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("x.esp"), b"PREVIOUS-RUN").unwrap();
-        assert!(stale.join("x.esp").is_file(), "litter must exist to be cleared");
+        assert!(
+            stale.join("x.esp").is_file(),
+            "litter must exist to be cleared"
+        );
 
         prepare_session_base(&base);
 
@@ -912,6 +1124,7 @@ mod root_graph_tests {
                     mount: "/".into(),
                     root: 0,
                     write_layer: false,
+                    cache_key: None,
                 },
                 SourceEntry {
                     spec: SourceSpec::Disk {
@@ -920,6 +1133,7 @@ mod root_graph_tests {
                     mount: "/".into(),
                     root: 0,
                     write_layer: true,
+                    cache_key: None,
                 },
             ],
             ..Default::default()
@@ -1014,6 +1228,7 @@ root = 1
                     mount: "/".into(),
                     root: 0,
                     write_layer: false,
+                    cache_key: None,
                 },
                 SourceEntry {
                     spec: SourceSpec::Disk {
@@ -1022,6 +1237,7 @@ root = 1
                     mount: "/".into(),
                     root: 0,
                     write_layer: false,
+                    cache_key: None,
                 },
             ],
             ..Default::default()
@@ -1054,10 +1270,22 @@ root = 1
 
         let reg = SessionRegistry::new();
         let summary = reg.create("two-root-live".into()).unwrap();
-        reg.add_source(&summary.id, 0, "/", 0, Arc::new(DiskProvider::new(game_dir.path())))
-            .unwrap();
-        reg.add_source(&summary.id, 1, "/", 0, Arc::new(DiskProvider::new(docs_dir.path())))
-            .unwrap();
+        reg.add_source(
+            &summary.id,
+            0,
+            "/",
+            0,
+            Arc::new(DiskProvider::new(game_dir.path())),
+        )
+        .unwrap();
+        reg.add_source(
+            &summary.id,
+            1,
+            "/",
+            0,
+            Arc::new(DiskProvider::new(docs_dir.path())),
+        )
+        .unwrap();
 
         reg.with_session_mut(&summary.id, |live| {
             let kernel = live.session.kernel();
@@ -1109,7 +1337,10 @@ root = 1
             let entry = Arc::try_unwrap(map.remove(&b.id).unwrap()).ok().unwrap();
             map.insert(
                 b.id.clone(),
-                Arc::new(SessionEntry { name: "dup".into(), ..entry }),
+                Arc::new(SessionEntry {
+                    name: "dup".into(),
+                    ..entry
+                }),
             );
         }
         let e = reg.resolve_session("dup").unwrap_err();
@@ -1134,21 +1365,29 @@ root = 1
         reg.create(String::new()).unwrap();
         reg.create(String::new()).unwrap();
         reg.teardown(&first.id).unwrap();
-        reg.create("demo".into()).expect("the name is free once its session is down");
+        reg.create("demo".into())
+            .expect("the name is free once its session is down");
     }
 
     #[test]
     fn expand_root_name_replaces_the_name_with_its_location() {
         let reg = SessionRegistry::new();
         let s = reg.create("x".into()).unwrap();
-        let loc = if cfg!(windows) { r"C:\vfs-test\Games" } else { r"C:\Games\Fixture" };
+        let loc = if cfg!(windows) {
+            r"C:\vfs-test\Games"
+        } else {
+            r"C:\Games\Fixture"
+        };
         reg.declare_root(&s.id, 0, Path::new(loc), "Games").unwrap();
         assert_eq!(
             reg.expand_root_name(&s.id, r"{games}\bin\f.exe").unwrap(),
             format!(r"{loc}\bin\f.exe"),
             "names match case-insensitively"
         );
-        assert_eq!(reg.expand_root_name(&s.id, r"C:\other.exe").unwrap(), r"C:\other.exe");
+        assert_eq!(
+            reg.expand_root_name(&s.id, r"C:\other.exe").unwrap(),
+            r"C:\other.exe"
+        );
         let e = reg.expand_root_name(&s.id, r"{Nope}\f.exe").unwrap_err();
         assert!(e.contains("Nope") && e.contains("Games"), "{e}");
     }
@@ -1162,11 +1401,16 @@ root = 1
         let reg = SessionRegistry::new();
         for bad in ["a/b", ".."] {
             let e = reg.create(bad.into()).expect_err(bad);
-            assert!(e.contains("cannot name a Wine prefix") && e.contains(bad), "{e}");
+            assert!(
+                e.contains("cannot name a Wine prefix") && e.contains(bad),
+                "{e}"
+            );
         }
         assert!(reg.is_empty(), "a refused session must not be registered");
-        reg.create("my game".into()).expect("a space is a plain path component");
-        reg.create(String::new()).expect("no name: an anonymous prefix");
+        reg.create("my game".into())
+            .expect("a space is a plain path component");
+        reg.create(String::new())
+            .expect("no name: an anonymous prefix");
     }
 
     /// A long operation on one session — standing in for a waited launch,
@@ -1179,8 +1423,13 @@ root = 1
         use std::time::{Duration, Instant};
         let reg = SessionRegistry::new();
         let busy = reg.create("busy".into()).unwrap();
-        let loc = if cfg!(windows) { r"C:\vfs-test\Busy" } else { r"C:\Games\Busy" };
-        reg.declare_root(&busy.id, 0, Path::new(loc), "Games").unwrap();
+        let loc = if cfg!(windows) {
+            r"C:\vfs-test\Busy"
+        } else {
+            r"C:\Games\Busy"
+        };
+        reg.declare_root(&busy.id, 0, Path::new(loc), "Games")
+            .unwrap();
         let other = reg.create("other".into()).unwrap();
 
         const HOLD: Duration = Duration::from_millis(1500);
@@ -1203,10 +1452,16 @@ root = 1
         assert_eq!(reg.len(), 2);
         assert_eq!(reg.list().unwrap().len(), 2);
         assert_eq!(reg.resolve_session("busy").unwrap(), busy.id);
-        assert!(reg.expand_root_name(&busy.id, r"{Games}\x.exe").unwrap().ends_with("x.exe"));
+        assert!(reg
+            .expand_root_name(&busy.id, r"{Games}\x.exe")
+            .unwrap()
+            .ends_with("x.exe"));
         reg.with_session_mut(&other.id, |_| Ok(())).unwrap();
         let e = reg.teardown(&busy.id).unwrap_err();
-        assert!(e.contains(&busy.id) && e.contains("running a launch"), "{e}");
+        assert!(
+            e.contains(&busy.id) && e.contains("running a launch"),
+            "{e}"
+        );
         let waited = start.elapsed();
         assert!(
             waited < HOLD / 3,
@@ -1214,7 +1469,8 @@ root = 1
         );
 
         holder.join().unwrap();
-        reg.teardown(&busy.id).expect("torn down once the operation ends");
+        reg.teardown(&busy.id)
+            .expect("torn down once the operation ends");
         assert_eq!(reg.len(), 1);
     }
 
@@ -1230,8 +1486,16 @@ root = 1
         assert_eq!(reg.teardown_all(), 2);
         assert!(reg.is_empty());
         assert!(reg.list().unwrap().is_empty());
-        assert_eq!(Arc::strong_count(&held), 1, "the registry must drop its reference");
-        assert_eq!(reg.teardown_all(), 0, "draining an empty registry is a no-op");
+        assert_eq!(
+            Arc::strong_count(&held),
+            1,
+            "the registry must drop its reference"
+        );
+        assert_eq!(
+            reg.teardown_all(),
+            0,
+            "draining an empty registry is a no-op"
+        );
     }
 
     /// A root location the launch could not link is refused when it is
@@ -1244,13 +1508,26 @@ root = 1
         let s = reg.create("bad-loc".into()).unwrap();
         for bad in [r"D:\Games", "/tmp/host-dir", r"C:\", r"C:\a\..\b"] {
             for root in [0, 1] {
-                let e = reg.declare_root(&s.id, root, Path::new(bad), "R").unwrap_err();
-                assert!(e.contains(&format!("root {root}")) && e.contains(bad), "{bad}: {e}");
+                let e = reg
+                    .declare_root(&s.id, root, Path::new(bad), "R")
+                    .unwrap_err();
+                assert!(
+                    e.contains(&format!("root {root}")) && e.contains(bad),
+                    "{bad}: {e}"
+                );
             }
         }
-        assert!(reg.with_session_mut(&s.id, |l| Ok(l.session.declared_roots().is_empty())).unwrap());
-        assert_eq!(reg.list().unwrap()[0].root, Path::new(r"C:\vfs-session\root"));
-        assert!(reg.expand_root_name(&s.id, r"{R}\x.exe").is_err(), "no name was recorded");
+        assert!(reg
+            .with_session_mut(&s.id, |l| Ok(l.session.declared_roots().is_empty()))
+            .unwrap());
+        assert_eq!(
+            reg.list().unwrap()[0].root,
+            Path::new(r"C:\vfs-session\root")
+        );
+        assert!(
+            reg.expand_root_name(&s.id, r"{R}\x.exe").is_err(),
+            "no name was recorded"
+        );
     }
 
     /// The summary's `root` is root 0's location — where the program sees it
@@ -1259,25 +1536,204 @@ root = 1
     fn the_summary_root_is_root_zeros_location() {
         let reg = SessionRegistry::new();
         let s = reg.create("summary-root".into()).unwrap();
-        let loc = if cfg!(windows) { r"C:\vfs-test\Summary" } else { r"C:\Games\Summary" };
+        let loc = if cfg!(windows) {
+            r"C:\vfs-test\Summary"
+        } else {
+            r"C:\Games\Summary"
+        };
         let backing = reg
             .with_session_mut(&s.id, |l| Ok(l.session.virtual_root().to_path_buf()))
             .unwrap();
         if cfg!(windows) {
-            assert_eq!(s.root, backing, "on Windows the default location is the host dir");
+            assert_eq!(
+                s.root, backing,
+                "on Windows the default location is the host dir"
+            );
         } else {
             assert_eq!(s.root, Path::new(r"C:\vfs-session\root"));
             assert_ne!(s.root, backing);
         }
         assert_eq!(reg.list().unwrap()[0].root, s.root);
-        reg.declare_root(&s.id, 1, Path::new(&format!(r"{loc}\Saves")), "Saves").unwrap();
-        assert_eq!(reg.list().unwrap()[0].root, s.root, "another root leaves it alone");
+        reg.declare_root(&s.id, 1, Path::new(&format!(r"{loc}\Saves")), "Saves")
+            .unwrap();
+        assert_eq!(
+            reg.list().unwrap()[0].root,
+            s.root,
+            "another root leaves it alone"
+        );
         reg.declare_root(&s.id, 0, Path::new(loc), "Games").unwrap();
         assert_eq!(reg.list().unwrap()[0].root, Path::new(loc));
+    }
+
+    fn open_storage(dir: &Path) -> Arc<vfs_embed::Storage> {
+        vfs_embed::Storage::open(dir, vfs_embed::StorageConfig::default()).expect("open storage")
+    }
+
+    /// A named layer is persistent: what a session writes into it survives
+    /// the session, the registry and the storage being closed, and a new
+    /// session on a reopened storage reads it back.
+    #[test]
+    fn layer_write_layer_persists_across_registries() {
+        use vfs_embed::{OPEN_CREATE, OPEN_WRITE};
+        let store_dir = tempfile::tempdir().unwrap();
+
+        let reg = SessionRegistry::with_storage(open_storage(store_dir.path()));
+        let s = reg.create("layer-a".into()).unwrap();
+        reg.set_layer_write_layer(&s.id, 0, "p")
+            .expect("a layer write layer");
+        reg.with_session_mut(&s.id, |live| {
+            let k = live.session.kernel();
+            k.mkdir(RootId(0), "saves").unwrap();
+            let (fh, _, _) = k
+                .open(RootId(0), "saves/a.sav", OPEN_WRITE | OPEN_CREATE)
+                .unwrap();
+            assert_eq!(k.write(fh, 0, b"PERSISTED").unwrap(), 9);
+            k.close(fh).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(reg.layer_users("p"), vec![s.id.clone()]);
+        reg.teardown(&s.id).unwrap();
+        assert!(
+            reg.layer_users("p").is_empty(),
+            "teardown forgets the session's layer"
+        );
+        let storage = Arc::clone(reg.storage().expect("storage"));
+        drop(reg);
+        assert_eq!(storage.close().unwrap(), vfs_embed::CloseOutcome::Released);
+
+        let reg = SessionRegistry::with_storage(open_storage(store_dir.path()));
+        let s = reg.create("layer-b".into()).unwrap();
+        reg.set_layer_write_layer(&s.id, 0, "p").unwrap();
+        let got = reg
+            .with_session_mut(&s.id, |live| Ok(live.session.read_file("saves/a.sav")))
+            .unwrap();
+        assert_eq!(got.unwrap(), b"PERSISTED");
+    }
+
+    /// A layer write layer the session refuses leaves no layer behind if this
+    /// call created it, and never deletes one that already existed.
+    #[test]
+    fn a_refused_layer_write_layer_deletes_only_a_layer_it_created() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let reg = SessionRegistry::with_storage(open_storage(store_dir.path()));
+        let storage = Arc::clone(reg.storage().unwrap());
+        drop(storage.layer("existing").unwrap());
+        let s = reg.create("refused".into()).unwrap();
+        // A root the kernel serves directly, outside the session's own
+        // composition, cannot take a write layer (`Session::claim`).
+        reg.with_session_mut(&s.id, |live| {
+            live.session
+                .kernel()
+                .mount(RootId(3), Arc::new(vfs_embed::MemoryProvider::new()))
+                .map_err(|st| format!("mount: {st}"))
+        })
+        .unwrap();
+        for name in ["fresh", "existing"] {
+            reg.set_layer_write_layer(&s.id, 3, name).expect_err(name);
+        }
+        let names: Vec<String> = storage
+            .layers()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["existing"],
+            "only the layer this call created is removed"
+        );
+        assert!(reg.layer_users("existing").is_empty());
+    }
+
+    #[test]
+    fn layer_source_without_storage_is_refused() {
+        let reg = SessionRegistry::new();
+        assert!(reg.storage().is_none());
+        let s = reg.create("no-storage".into()).unwrap();
+        let e = reg.set_layer_write_layer(&s.id, 0, "p").unwrap_err();
+        assert!(
+            e.contains("this daemon has no storage") && e.contains("\"p\""),
+            "{e}"
+        );
+        assert!(reg.layer_users("p").is_empty(), "nothing is recorded");
+    }
+
+    /// `delete` of a layer a live session writes into is refused, naming the
+    /// session; once the session is down the layer can go.
+    #[test]
+    fn delete_layer_names_the_session_using_it() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let reg = SessionRegistry::with_storage(open_storage(store_dir.path()));
+        let s = reg.create("user".into()).unwrap();
+        reg.set_layer_write_layer(&s.id, 0, "busy").unwrap();
+        let e = reg.delete_layer("busy").unwrap_err().to_string();
+        assert!(
+            e.contains("busy") && e.contains(&s.id) && e.contains("user"),
+            "{e}"
+        );
+        reg.teardown(&s.id).unwrap();
+        reg.delete_layer("busy")
+            .expect("deleted once no session uses it");
+        assert!(reg.storage().unwrap().layers().unwrap().is_empty());
+        let e = reg.delete_layer("busy").unwrap_err().to_string();
+        assert!(e.contains("no layer"), "{e}");
+    }
+
+    /// With storage, a slow immutable source is served through the cache,
+    /// keyed by the caller's key; a fast or mutable source is not wrapped.
+    #[test]
+    fn add_source_keyed_caches_slow_immutable_sources() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let reg = SessionRegistry::with_storage(open_storage(store_dir.path()));
+        let s = reg.create("cached".into()).unwrap();
+        let slow: Arc<dyn Provider> = Arc::new(SlowImmutable(
+            vfs_embed::MemoryProvider::from_files([("blob.bin", vec![5u8; 100_000])]),
+        ));
+        reg.add_source_keyed(&s.id, 0, "/", 0, slow, vfs_embed::SourceKey("k".into()))
+            .unwrap();
+        for _ in 0..2 {
+            let got = reg
+                .with_session_mut(&s.id, |l| Ok(l.session.read_file("blob.bin")))
+                .unwrap()
+                .unwrap();
+            assert_eq!(got, vec![5u8; 100_000]);
+        }
+        let st = reg.storage().unwrap().stats();
+        assert!(st.cache.misses >= 1 && st.cache.hits >= 1, "{st:?}");
+    }
+
+    /// A `MemoryProvider` that says it is slow and immutable, so
+    /// `Storage::cached` wraps it.
+    struct SlowImmutable(vfs_embed::MemoryProvider);
+
+    impl Provider for SlowImmutable {
+        fn capabilities(&self) -> vfs_embed::Capabilities {
+            vfs_embed::Capabilities {
+                access: vfs_embed::Access::Read,
+                immutable: true,
+                slow: true,
+                ..self.0.capabilities()
+            }
+        }
+        fn getattr(&self, p: VPath<'_>) -> Result<Option<vfs_embed::Stat>, i32> {
+            self.0.getattr(p)
+        }
+        fn readdir(&self, p: VPath<'_>) -> Result<Vec<vfs_embed::DirEntry>, i32> {
+            self.0.readdir(p)
+        }
+        fn open(&self, p: VPath<'_>, flags: u32) -> Result<(vfs_embed::Handle, u64, bool), i32> {
+            self.0.open(p, flags)
+        }
+        fn read_at(&self, h: vfs_embed::Handle, off: u64, buf: &mut [u8]) -> Result<usize, i32> {
+            self.0.read_at(h, off, buf)
+        }
+        fn close(&self, h: vfs_embed::Handle) -> Result<(), i32> {
+            self.0.close(h)
+        }
     }
 
     fn toml_quote(s: &str) -> String {
         format!("{:?}", s)
     }
 }
-
