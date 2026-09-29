@@ -25,9 +25,9 @@ use std::sync::Arc;
 
 use vfs_embed::stage::ImageSource;
 use vfs_embed::{InlineProvider, Provider, RootId, Session, StageOpts};
-// Only the two `#[cfg(windows)]` launch tests below construct one.
+// Only the `#[cfg(windows)]` launch tests below construct these.
 #[cfg(windows)]
-use vfs_embed::LaunchOpts;
+use vfs_embed::{DiskProvider, LaunchOpts};
 
 /// Minimal PE: MZ header, e_lfanew, PE32+ optional header, no imports — the
 /// same shape `vfs_director::stage`'s own tests and `vfs-directord`'s
@@ -264,8 +264,8 @@ fn locate_artifact(name: &str) -> std::path::PathBuf {
     panic!("{name} not found near {profile:?} after ensure_fixtures()");
 }
 
-/// Build the shim DLL, the (separate-workspace) payload DLL and `vfs-probe`
-/// once per test process and co-locate them beside the test binary, so
+/// Build the shim DLL, the (separate-workspace) payload DLL, `vfs-probe` and
+/// `vfs-fixture-read` once per test process and co-locate them beside the test binary, so
 /// `Session::launch`'s own DLL search (near `current_exe()`) finds them.
 ///
 /// Duplicated from `fuse_init_gate.rs` rather than shared: this is the
@@ -286,11 +286,12 @@ fn ensure_fixtures() {
         let status = std::process::Command::new(&cargo)
             .current_dir(&workspace)
             .args([
-                "build", "-p", "vfs-shim-dll", "-p", "vfs-inject", "--bin", "vfs-probe", "--quiet",
+                "build", "-p", "vfs-shim-dll", "-p", "vfs-inject", "--bin", "vfs-probe",
+                "-p", "vfs-fixture-read", "--quiet",
             ])
             .status()
-            .expect("spawn cargo to build shim + vfs-probe");
-        assert!(status.success(), "shim/vfs-probe build failed: {status}");
+            .expect("spawn cargo to build shim + vfs-probe + vfs-fixture-read");
+        assert!(status.success(), "shim/vfs-probe/vfs-fixture-read build failed: {status}");
 
         let target_dir = workspace.join("target");
         let status = std::process::Command::new(&cargo)
@@ -307,7 +308,12 @@ fn ensure_fixtures() {
         assert!(status.success(), "vfs-payload build failed: {status}");
 
         let profile = profile_dir();
-        for name in ["vfs_shim_dll.dll", "vfs_payload.dll", "vfs-probe.exe"] {
+        for name in [
+            "vfs_shim_dll.dll",
+            "vfs_payload.dll",
+            "vfs-probe.exe",
+            "vfs-fixture-read.exe",
+        ] {
             let dest = profile.join(name);
             if dest.is_file() {
                 continue;
@@ -422,6 +428,66 @@ fn an_image_only_the_provider_graph_holds_launches_from_an_empty_managed_root() 
             .map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
     );
 
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&state);
+    let _ = std::fs::remove_dir_all(&overlay);
+}
+
+/// An **absolute** image inside root 0 that only the provider graph holds is
+/// staged and launched, exactly as its relative form is. Before, an absolute
+/// image was always "launched as given", so this one — no file behind it on
+/// disk — failed in `CreateProcess`.
+///
+/// Root 0 is set with `declare_root(0, …)`, the form a config uses, and the
+/// content comes from a disk directory mounted into the graph — not from the
+/// root's own directory, which stays empty until staging writes the image.
+// Needs a live ring and a real `CreateProcess` + inject.
+#[cfg(windows)]
+#[test]
+fn an_absolute_image_inside_root_zero_that_only_the_graph_holds_is_staged_and_launched() {
+    ensure_fixtures();
+
+    let content = tmp("abs-content");
+    std::fs::copy(locate_artifact("vfs-fixture-read.exe"), content.join("vfs-fixture-read.exe"))
+        .expect("copy vfs-fixture-read.exe into the content dir");
+    std::fs::write(content.join("hello.txt"), b"hello").unwrap();
+    let root = tmp("abs-root");
+    let state = tmp("abs-state");
+    let overlay = tmp("abs-overlay");
+
+    let mut s = Session::new();
+    s.set_state_dir(&state);
+    s.set_overlay(&overlay);
+    s.mount("", Arc::new(DiskProvider::new(&content))).unwrap();
+    s.declare_root(0, &root);
+    s.serve().expect("serve");
+
+    let image = root.join("vfs-fixture-read.exe");
+    assert!(
+        !image.exists(),
+        "the image must not be a real file in root 0 — that is the whole case"
+    );
+
+    let mut env = std::collections::BTreeMap::new();
+    env.insert(
+        "VFS_FIXTURE_PATH".to_string(),
+        root.join("hello.txt").to_string_lossy().into_owned(),
+    );
+    env.insert("VFS_FIXTURE_EXPECT".to_string(), "5".to_string());
+    let code = s
+        .launch(&LaunchOpts {
+            image: image.to_string_lossy().into_owned(),
+            env,
+            wait: true,
+            ..Default::default()
+        })
+        .expect("an absolute image inside root 0 that the graph serves must launch");
+    assert_eq!(code, 0, "the child must read root 0's hello.txt (5 bytes) through the ring");
+    assert!(image.is_file(), "the image must have been staged into root 0 at its vpath");
+
+    s.stop_serve();
+    drop(s);
+    let _ = std::fs::remove_dir_all(&content);
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(&state);
     let _ = std::fs::remove_dir_all(&overlay);
