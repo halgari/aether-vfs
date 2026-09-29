@@ -2,6 +2,7 @@
 name = "vfs-director"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-only"
 publish = false
 description = "Director kernel: one provider per root, ring server, staging. The embeddable API is vfs-embed."
 

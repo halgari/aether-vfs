@@ -202,8 +202,8 @@ fn profile_dir() -> PathBuf {
 }
 
 /// `vfs-injector.exe`, `vfs_shim_dll.dll`, `vfs_payload.dll` and the fixture
-/// are **Windows PEs and cannot be built here**, so they are copied in beside
-/// the test binary. Missing ones are named together with where they go: one
+/// are **Windows PEs**, cross-built by `bin/build-windows`, which copies them
+/// in beside the test binary. Missing ones are named together with where they go: one
 /// message per run instead of one per artifact.
 fn windows_artifacts() -> BTreeMap<&'static str, PathBuf> {
     let profile = profile_dir();
@@ -232,10 +232,9 @@ fn windows_artifacts() -> BTreeMap<&'static str, PathBuf> {
     }
     assert!(
         missing.is_empty(),
-        "these Windows artifacts are missing and none of them can be built on Linux: {}.\n\
-         Build them on Windows (`cargo build -p vfs-inject -p vfs-shim-dll -p \
-         vfs-fixture-read` plus the separate `crates/vfs-payload` workspace) and copy them \
-         into {} (or its `deps/`).",
+        "these Windows artifacts are missing: {}.\n\
+         Cross-build them with `bin/build-windows` (from the repo root), which copies them \
+         into {}.",
         missing.join(", "),
         profile.display()
     );
@@ -266,11 +265,12 @@ fn tmp(name: &str) -> PathBuf {
 ///   `$VFS_HOME/sessions/<id>/prefix` — so a 32-bit runtime must be installed
 ///   (`lib32-glibc`, `lib32-gcc-libs` on Arch), since `wine`'s launcher probes
 ///   for the 32-bit loader even under `WINEARCH=win64`;
-/// * the four **Windows-built artifacts** listed in [`windows_artifacts`].
+/// * the four **Windows artifacts** listed in [`windows_artifacts`], from
+///   `bin/build-windows`.
 #[test]
 #[ignore = "needs a GE-Proton runtime under $VFS_HOME/runtimes, a bootable Wine prefix, and \
             Windows-built artifacts (vfs-injector.exe, vfs_shim_dll.dll, vfs_payload.dll, \
-            vfs-fixture-read.exe) copied beside the test binary"]
+            vfs-fixture-read.exe) beside the test binary — see bin/build-windows"]
 fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider() {
     let art = windows_artifacts();
     assert!(

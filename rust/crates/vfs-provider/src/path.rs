@@ -16,7 +16,7 @@ impl RootId {
 ///
 /// **Case is the caller's, and a provider must not depend on it.** The shim
 /// folds a vpath before sending it (`vfs-redirect`'s `match_canonical`), while
-/// host-side callers — `vfs-embed`, `vfs-node`, this crate's conformance suite —
+/// host-side callers — `vfs-embed`, this crate's conformance suite —
 /// send the original spelling. A provider therefore resolves fold-equal names
 /// identically unless it declares [`crate::CaseMatch::Sensitive`]. An earlier
 /// version of this comment said "original case preserved", which was true of

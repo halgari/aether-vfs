@@ -54,7 +54,7 @@ jobs:
       # absent while `cargo clippy --all-targets -- -D warnings` was a standing
       # requirement in every task brief — i.e. the standard was upheld only by
       # whoever remembered to type it. `--all-targets` matters: it is what covers
-      # tests, benches and the `vfs-node` cdylib.
+      # tests, benches and the cdylibs.
       - name: Clippy (workspace, all targets, warnings are errors)
         run: cargo clippy --all-targets -- -D warnings
         working-directory: rust
@@ -105,133 +105,6 @@ jobs:
         run: cargo test --no-fail-fast
         working-directory: rust
 
-  # The `aethervfs` addon and its JavaScript suites — stage 4's gate.
-  #
-  # Nothing here was covered before. `cargo build --workspace --tests` filters
-  # cdylibs, so the addon's own Rust was never built by CI; `[lib] test = false`
-  # keeps `cargo test` away from it; and ~2,500 lines of JS tests plus the
-  # conformance gate itself were verified only by a human typing `npm test`. A
-  # gate nobody runs is not a gate, and this repository has already had CI
-  # silently disabled once by a deletion sweep that covered source and not
-  # workflows.
-  node-addon-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          # Three floors, and this is the highest of them — `package.json`'s
-          # `engines` says the same number, so keep the two in step:
-          #   18    load the addon (N-API 8)
-          #   22.6  run an `.mts` file directly (type stripping) — which is how the
-          #         examples, the provider fixtures and the worker entry point are
-          #         loaded, all of them `.mts` as of the ESM migration
-          #   24    the `using` declarations in `test/dispose.test.mts`
-          #         (Explicit Resource Management syntax)
-          node-version: '24'
-      # The package gained **devDependencies** in the TypeScript migration —
-      # typescript, @types/node, vitest — and still no runtime dependency. The
-      # install is needed before the build, because the build now begins with
-      # `tsc`. `--frozen-lockfile` is what makes `pnpm-lock.yaml` load-bearing:
-      # a lockfile nobody freezes is a lockfile that drifts.
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-      - name: Install (frozen lockfile, dev dependencies only exist here)
-        run: pnpm install --frozen-lockfile
-        working-directory: rust/crates/vfs-node
-      # `pnpm build` is the only correct way to build this package: `tsc -p
-      # tsconfig.build.json` (the JavaScript layer and its declaration), then
-      # four unfiltered cargo invocations (the addon cdylib, the shim cdylib, the
-      # separate-workspace payload, and the probe exe) followed by four copies
-      # into the package directory. It also prints each artifact's size and
-      # mtime, which is how a stale DLL gets noticed.
-      #
-      # It has to run before anything below: `index.mjs` and `index.d.mts` are
-      # build outputs as of task 2 and are not in the repository.
-      - name: Build the JavaScript layer, the addon and its DLLs
-        run: pnpm build
-        working-directory: rust/crates/vfs-node
-      # `index.d.mts` is emitted, but `native.mts` — the addon's own `#[napi]`
-      # surface — is still hand-written, because the thing that could generate it
-      # (`@napi-rs/cli`) is a network dependency in the build path. Nothing else
-      # checks it: a `#[napi]` export renamed, added or dropped on the Rust side
-      # is invisible to `tsc`. This is the check that sees it, and it is the same
-      # class of defect as `Session.readdir` and `Session.getattr` having been
-      # missing from the declaration entirely — which no type checker can notice,
-      # because nothing references what does not exist. `tsc --noEmit` below is a
-      # separate gate that complements it.
-      - name: Check the declaration against the addon's real exports
-        run: node scripts/check-types.mts
-        working-directory: rust/crates/vfs-node
-      # Typechecks **the whole package**, `test/**` and `examples/**` included as
-      # of task 3. Until then `include` stopped at the package's own sources,
-      # because `require(...) as typeof import(...)` in the suites produced
-      # 134 × TS2775 on `assert.ok` — a cast is not the explicit annotation an
-      # assertion function needs. The conversion replaced the idiom and widened the
-      # scope, and this step going green over the wider scope is the check that it
-      # landed.
-      - name: Typecheck
-        run: pnpm exec tsc --noEmit
-        working-directory: rust/crates/vfs-node
-      # The examples are tests: each one asserts its way through a full session,
-      # and `spec-8-example.mts` machine-checks spec §8's provider graph rather
-      # than describing it. All three are `.mts`, run directly by node.
-      - name: Examples (vertical slice, JS provider, spec §8)
-        run: node examples/vertical-slice.mts && node examples/js-provider.mts && node examples/spec-8-example.mts
-        working-directory: rust/crates/vfs-node
-      # vitest, not `node --test`: task 3 converted the five suites to vitest's own
-      # API and deleted the `node:test` shim that had been mapping one onto the
-      # other. `vitest.config.ts` pins `pool: 'forks'`, which is what keeps the
-      # deadlock guard's owning-thread comparison meaning what it meant under
-      # `node --test`.
-      #
-      # One test is a **`test.fails`** and must stay failing: `primitives.test.mts`'s
-      # "6b. a capitalised path in memory()" pins spec §6b's `casefold` hole, which
-      # is the first item of the next stage. `test.fails` is stricter than the
-      # `node --test` `todo` it replaced — node tolerated a todo that passed, while
-      # this turns the run **red** the day the hole closes, so it cannot close
-      # without anyone noticing.
-      - name: JS suites (vitest)
-        run: pnpm exec vitest run
-        working-directory: rust/crates/vfs-node
-      # The performance gate. Its own step rather than part of `pnpm test`,
-      # because that chain is already build + typecheck + drift + three
-      # injected-process examples + vitest, and timing assertions get noisier the
-      # longer and more contended the run.
-      #
-      # It builds **release** itself and then refuses to run unless
-      # `aethervfs.node` is byte-identical to `target/release` — so unlike the
-      # `vfs-cache` cost tests, it cannot quietly report debug numbers (see the
-      # correction in rust/docs/benchmarks/README.md).
-      #
-      # Assertions are tiered, and **here only tier 1 gates** — the deterministic
-      # counters (crossing counts, cache hits), which load cannot move. Tiers 2
-      # and 3 still run and still print every number; a value over its ceiling
-      # shows as WARN and does not fail the job.
-      #
-      # This step used to gate on all three. The claim above it was that tiers 2
-      # and 3 carry "multiples of headroom, never snug against an observed
-      # number", and that a 4-vCPU runner therefore could not flake them. That
-      # was not true of tier 2: "a JS provider is not slower than a real Rust
-      # provider" went red at 2.54x against a 2x ceiling while passing locally,
-      # and the tier-2 check beside it was sitting 8% under its own ceiling
-      # (1.38x of 1.5x). A ratio cancels steady-state machine speed, not a
-      # scheduling storm that hits one of its two measurements — so on shared
-      # hardware these are noise as often as signal, and a gate that goes red for
-      # reasons unrelated to the diff trains people to ignore red.
-      #
-      # So: keep the step, keep the numbers in the log, stop letting GitHub's
-      # noise floor decide whether the build passes. Timing is gated on a machine
-      # with a known noise floor by running `pnpm bench` (which gates all three
-      # tiers by default). Set BENCH_GATE_TIERS here if that ever changes.
-      - name: Benchmarks (tier-1 gate; timing reported, not enforced)
-        run: pnpm bench
-        working-directory: rust/crates/vfs-node
-        env:
-          BENCH_GATE_TIERS: '1'
-
   rust-linux-portable:
     runs-on: ubuntu-latest
     steps:
@@ -259,10 +132,15 @@ jobs:
       # download/verify/extract is tested end-to-end against a `TcpListener` on
       # `127.0.0.1:0` serving a few hundred bytes the test itself built
       # (`tests/loopback_install.rs`) — loopback, ephemeral port, no name
-      # resolution, no route off the machine. The one real download is a manual
-      # step, run by hand, documented in the task 4 brief.
+      # resolution, no route off the machine. The one real download belongs to
+      # the `proton-linux` job below, pinned and cached rather than per run.
+      #
+      # `vfs-embed` is here because `Session::serve`/`launch` have a unix
+      # implementation (the file-backed ring and the Proton launch) whose
+      # non-ignored tests run on any Linux box; its one Wine test is
+      # `#[ignore]`d and run by `proton-linux`.
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton
+        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton -p vfs-embed
         working-directory: rust
       # The director kernel itself, which stopped being Windows-only in
       # increment 1 of the Linux port. Its own unit tests run here; its ring
@@ -278,3 +156,55 @@ jobs:
         run: bin/regen-protocol
       - name: Fail on protocol drift
         run: git diff --exit-code resources/
+
+  # The Proton path end to end, on Linux: the shim is always a Windows PE,
+  # injected into a Windows program inside GE-Proton's Wine, while the Director
+  # serving it is native Linux. So this job cross-builds the Windows half
+  # (`bin/build-windows`, MSVC target via cargo-xwin — the same ABI and link
+  # flags the Windows jobs use), then runs the `#[ignore]`d
+  # `proton_launch` test, whose fixture reads a file that exists only in the
+  # Linux Director's provider.
+  proton-linux:
+    runs-on: ubuntu-latest
+    env:
+      # Pinned, not "newest": a new GE release is a new Wine, and the export set
+      # the shim hooks is an observation about a release, not a guarantee (spec
+      # 2026-09-01 §10). Bump deliberately, and the cache key with it.
+      GE_PROTON: GE-Proton11-7
+      VFS_HOME: ${{ github.workspace }}/.vfs-home
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin
+      # clang-cl, lld-link and llvm-lib for cargo-xwin. The 32-bit loader is for
+      # Wine: its launcher probes it even under WINEARCH=win64, and wineboot
+      # fails with `/lib/ld-linux.so.2: could not open` without it.
+      - name: Install cross + Wine prerequisites
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm libc6:i386 libgcc-s1:i386
+      # The MSVC CRT + Windows SDK cargo-xwin downloads on first use.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/cargo-xwin
+          key: cargo-xwin-v1
+      - uses: actions/cache@v4
+        with:
+          path: .vfs-home/runtimes
+          key: ${{ env.GE_PROTON }}-v1
+      - name: Cross-build the Windows artifacts
+        run: bin/build-windows
+      # A no-op on a cache hit: install skips a tag that is already present and
+      # verified. On a miss it downloads ~537 MiB and checks the published
+      # sha512 before extracting.
+      - name: Install GE-Proton
+        run: cargo run -q -p vfs-proton -- install --version "$GE_PROTON"
+        working-directory: rust
+      - name: Proton end-to-end (Windows fixture under Wine, Linux Director)
+        run: timeout 900 cargo test -p vfs-embed --test proton_launch -- --ignored --nocapture
+        working-directory: rust

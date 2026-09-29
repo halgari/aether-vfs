@@ -409,7 +409,7 @@ fn no_host_in_this_workspace_reaches_past_the_seam() {
         .expect("crates/");
     // The hosts. The daemon is absent because it has a stricter guard of its
     // own; `vfs-payload` and the engine crates are not hosts.
-    let hosts = ["vfs-node", "vfs-launch"];
+    let hosts = ["vfs-launch"];
 
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         for e in std::fs::read_dir(dir)
@@ -446,5 +446,5 @@ fn no_host_in_this_workspace_reaches_past_the_seam() {
             );
         }
     }
-    assert!(checked >= 5, "only {checked} host sources were read");
+    assert!(checked >= 3, "only {checked} host sources were read");
 }

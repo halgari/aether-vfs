@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Cross-build the Windows half of the Proton path from Linux: the injector, the
+# shim DLL, the payload DLL and the read fixture. They run inside Wine; the
+# Director that serves them is native Linux and is built by plain `cargo`.
+#
+# The artifacts are copied beside the Linux binaries in target/<profile>/,
+# which is where `Session::launch` (and the proton_launch e2e test) looks for
+# them by default.
+#
+# Needs: rustup target x86_64-pc-windows-msvc, cargo-xwin, clang, lld, llvm.
+# The first run downloads the MSVC CRT and Windows SDK into ~/.cache/cargo-xwin
+# (XWIN_ACCEPT_LICENSE=1 accepts Microsoft's license for that download).
+#
+# Usage: bin/build-windows [--release]
+set -euo pipefail
+cd "$(dirname "$0")/../rust"
+
+target=x86_64-pc-windows-msvc
+profile=debug
+flags=()
+if [[ "${1:-}" == "--release" ]]; then
+  profile=release
+  flags=(--release)
+fi
+
+export XWIN_ACCEPT_LICENSE=1
+
+# `libudis86-sys` (reached through `retour`, i.e. the shim) calls `memset`
+# without including string.h and papers over it with the GCC-only flag
+# `-includestring.h`. cl.exe tolerates the implicit declaration; clang-cl drops
+# the unknown flag and then rejects it as an error. Demote that one diagnostic
+# back to a warning. A forced include (`/FIstring.h`) is *not* a substitute: it
+# reaches every C compile for the target, including blake3's preprocessed
+# assembly, which it breaks.
+#
+# Set here rather than in .cargo/config.toml so a native Windows build — real
+# cl.exe, which would warn about the unknown flag — never sees it. The hyphenated
+# name is deliberate: cargo-xwin sets the underscored
+# `CFLAGS_x86_64_pc_windows_msvc` itself, and cc-rs reads both.
+# Bash cannot export a hyphenated name, so it goes in through `env`.
+cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declaration")
+"${cross[@]}" cargo xwin build "${flags[@]}" --target "$target" \
+  -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read
+# vfs-payload is its own workspace (panic=abort, no CRT), so it builds apart.
+"${cross[@]}" cargo xwin build "${flags[@]}" --target "$target" \
+  --manifest-path crates/vfs-payload/Cargo.toml --target-dir target
+
+src="target/$target/$profile"
+dst="target/$profile"
+mkdir -p "$dst"
+for f in vfs-injector.exe vfs_shim_dll.dll vfs_payload.dll vfs-fixture-read.exe; do
+  cp -f "$src/$f" "$dst/$f"
+  echo "  $dst/$f"
+done

@@ -30,6 +30,32 @@ cargo build -p vfs-directord -p vfs-shim-dll -p vfs-fixture-read
 cargo build --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
 ```
 
+### Linux (Proton)
+
+On Linux the game is still a Windows program, and so is the shim: it is injected
+into the game inside GE-Proton's Wine, while the Director runs natively on Linux
+and serves it over a file-backed ring. So the Windows half is cross-built, and
+the Linux half is plain `cargo`:
+
+```bash
+# one-time toolchain (Arch; other distros: clang, lld, llvm)
+sudo pacman -S --needed clang lld llvm
+rustup target add x86_64-pc-windows-msvc
+cargo install --locked cargo-xwin
+
+bin/build-windows                       # injector, shim, payload, fixture -> rust/target/debug/
+cd rust && cargo run -p vfs-proton -- install   # verified GE-Proton under ~/.local/share/aether-vfs
+
+# end to end: a Windows fixture under Proton reads a file only the Linux Director serves
+cargo test -p vfs-embed --test proton_launch -- --ignored
+```
+
+The first `bin/build-windows` downloads the MSVC CRT and Windows SDK via
+`cargo-xwin` (accepting Microsoft's license). Wine also needs a 32-bit loader
+(`lib32-glibc`, `lib32-gcc-libs` on Arch). Windows-only crates (`vfs-inject`,
+`vfs-shim`, `vfs-directord`, …) do not build for a Linux *host*, so a bare
+`cargo build --workspace` on Linux fails; build the Linux crates by name.
+
 ### Daemon + CLI (`vfs`)
 
 ```powershell
@@ -80,7 +106,7 @@ wait      = true
 **`vfs-embed` is the seam.** It owns one session — its roots, the provider graph
 each root serves, the ring the injected shim talks over, and the launch — and it
 is the *only* crate a host is meant to name. Everything above it is a host
-(`vfs.exe` and its daemon, the Node addon, a Python binding after it); everything
+(`vfs.exe` and its daemon, and any language binding after it); everything
 below it is the engine (the director kernel, the provider contract, the
 composition primitives). If a host has to reach past it, the fix belongs in
 `vfs-embed` rather than in the host, and that is enforced by tests on both sides
@@ -102,43 +128,6 @@ session.launch(&LaunchOpts { image: "MyGame.exe".into(), ..Default::default() })
 println!("{:?}", session.rejected_writes());
 ```
 
-### The Node addon (`aethervfs`)
-
-`rust/crates/vfs-node` is an N-API addon over `vfs-embed`, on the same footing as
-the daemon: it composes graphs, launches injected processes, and lets **a plain
-JavaScript object be a first-class provider** — held to the workspace's own Rust
-conformance suite via `assertConformance()`, not to a reimplementation of it.
-
-```powershell
-cd rust\crates\vfs-node
-pnpm install --frozen-lockfile   # devDependencies only: typescript, vitest, @types/node
-pnpm build                       # tsc, then four cargo builds + four copies
-pnpm test                        # build, drift check, tsc --noEmit, examples, vitest
-```
-
-The **published package still has no runtime dependency** — the three above are
-devDependencies, and a consumer install pulls exactly one package.
-
-```js
-const { Session, disk, layered, readonly, providerWorker } = require('aethervfs');
-
-const s = new Session('demo');
-s.addRoot(0, 'game', s.virtualRoot);
-await using cdn = await providerWorker({ module: require.resolve('./my-cdn.cjs') });
-s.mount(0, layered(readonly(cdn.provider), disk(modsDir)));
-s.launch('MyGame.exe');
-s.close();
-```
-
-A provider is serviced by the event loop that registered it, and a blocking call
-issued *on* that loop can never settle — so `providerWorker()` is the recommended
-shape, and the alternative is refused with an explanation rather than hanging.
-`index.d.cts` carries the full API, and it is a build output: `index.cts` is the
-source, and `tsc` emits the declaration from the code that implements it.
-`native.cts` is the one declaration still written by hand, because it describes
-the Rust addon and `@napi-rs/cli` — the thing that could generate it — would be a
-network dependency in the build path.
-
 ### Out-of-process source plugin
 
 ```powershell
@@ -155,7 +144,6 @@ Any language can implement `vfs-source/proto/source.proto` (`Source` service).
 | Control gRPC + config schema | `vfs-control` |
 | Daemon + `vfs` CLI | `vfs-directord` |
 | **The seam.** Embeddable API: session lifecycle, roots, composition, launch | `vfs-embed` |
-| Node addon (`aethervfs`): a JS object as a provider | `vfs-node` |
 | Provider contract, capabilities, conformance suite | `vfs-provider` |
 | Provider builders, gRPC SourceService | `vfs-source` |
 | Layered / router / overlay (read) | `vfs-compose` |
@@ -183,4 +171,4 @@ Ship those four next to each other (the daemon locates the DLLs beside the
 
 ## License
 
-Private / unlicensed for external use unless otherwise stated.
+GPL-3.0-only. See [LICENSE](LICENSE).
