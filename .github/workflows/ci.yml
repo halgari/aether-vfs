@@ -132,10 +132,15 @@ jobs:
       # download/verify/extract is tested end-to-end against a `TcpListener` on
       # `127.0.0.1:0` serving a few hundred bytes the test itself built
       # (`tests/loopback_install.rs`) — loopback, ephemeral port, no name
-      # resolution, no route off the machine. The one real download is a manual
-      # step, run by hand, documented in the task 4 brief.
+      # resolution, no route off the machine. The one real download belongs to
+      # the `proton-linux` job below, pinned and cached rather than per run.
+      #
+      # `vfs-embed` is here because `Session::serve`/`launch` have a unix
+      # implementation (the file-backed ring and the Proton launch) whose
+      # non-ignored tests run on any Linux box; its one Wine test is
+      # `#[ignore]`d and run by `proton-linux`.
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton
+        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-cache -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton -p vfs-embed
         working-directory: rust
       # The director kernel itself, which stopped being Windows-only in
       # increment 1 of the Linux port. Its own unit tests run here; its ring
@@ -151,3 +156,55 @@ jobs:
         run: bin/regen-protocol
       - name: Fail on protocol drift
         run: git diff --exit-code resources/
+
+  # The Proton path end to end, on Linux: the shim is always a Windows PE,
+  # injected into a Windows program inside GE-Proton's Wine, while the Director
+  # serving it is native Linux. So this job cross-builds the Windows half
+  # (`bin/build-windows`, MSVC target via cargo-xwin — the same ABI and link
+  # flags the Windows jobs use), then runs the `#[ignore]`d
+  # `proton_launch` test, whose fixture reads a file that exists only in the
+  # Linux Director's provider.
+  proton-linux:
+    runs-on: ubuntu-latest
+    env:
+      # Pinned, not "newest": a new GE release is a new Wine, and the export set
+      # the shim hooks is an observation about a release, not a guarantee (spec
+      # 2026-09-01 §10). Bump deliberately, and the cache key with it.
+      GE_PROTON: GE-Proton11-7
+      VFS_HOME: ${{ github.workspace }}/.vfs-home
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin
+      # clang-cl, lld-link and llvm-lib for cargo-xwin. The 32-bit loader is for
+      # Wine: its launcher probes it even under WINEARCH=win64, and wineboot
+      # fails with `/lib/ld-linux.so.2: could not open` without it.
+      - name: Install cross + Wine prerequisites
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm libc6:i386 libgcc-s1:i386
+      # The MSVC CRT + Windows SDK cargo-xwin downloads on first use.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/cargo-xwin
+          key: cargo-xwin-v1
+      - uses: actions/cache@v4
+        with:
+          path: .vfs-home/runtimes
+          key: ${{ env.GE_PROTON }}-v1
+      - name: Cross-build the Windows artifacts
+        run: bin/build-windows
+      # A no-op on a cache hit: install skips a tag that is already present and
+      # verified. On a miss it downloads ~537 MiB and checks the published
+      # sha512 before extracting.
+      - name: Install GE-Proton
+        run: cargo run -q -p vfs-proton -- install --version "$GE_PROTON"
+        working-directory: rust
+      - name: Proton end-to-end (Windows fixture under Wine, Linux Director)
+        run: timeout 900 cargo test -p vfs-embed --test proton_launch -- --ignored --nocapture
+        working-directory: rust
