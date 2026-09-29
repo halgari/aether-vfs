@@ -264,15 +264,61 @@ fn parse_env(flags: &[String]) -> Result<BTreeMap<String, String>, String> {
         .collect()
 }
 
-/// The CLI's exit status for a launch: the child's code (clamped to a byte),
-/// or success when there was none to report.
+/// The CLI's exit status for a launch: the child's code, or success when
+/// there was none to report. See [`exit_byte`].
 fn exit_code(exit: Option<i32>) -> ExitCode {
+    ExitCode::from(exit_byte(exit))
+}
+
+/// The one byte a process can exit with, for a child's exit code: `0` only
+/// for `0` (or no code at all); an ordinary `1..=255` as itself; anything
+/// else — negative, or too wide for a byte — `1`.
+///
+/// Never a clamp or a truncation. On Windows `GetExitCodeProcess`'s `u32`
+/// arrives here cast to `i32`, so a crash (`0xC0000005`, an access
+/// violation) is negative: clamping it to `0` reported a crashed program as
+/// success. Truncating is no better — `256`'s low byte is `0`.
+fn exit_byte(exit: Option<i32>) -> u8 {
     match exit {
-        None | Some(0) => ExitCode::SUCCESS,
-        Some(code) => ExitCode::from(code.clamp(0, 255) as u8),
+        None | Some(0) => 0,
+        Some(code) => u8::try_from(code).ok().filter(|&b| b != 0).unwrap_or(1),
     }
 }
 
 fn discovery_path_for_env(path: &std::path::Path) -> Option<std::ffi::OsString> {
     Some(path.as_os_str().to_os_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exit_byte;
+
+    #[test]
+    fn success_and_no_code_exit_zero() {
+        assert_eq!(exit_byte(None), 0);
+        assert_eq!(exit_byte(Some(0)), 0);
+    }
+
+    #[test]
+    fn an_ordinary_code_is_kept() {
+        for c in [1, 3, 42, 255] {
+            assert_eq!(exit_byte(Some(c)), c as u8);
+        }
+    }
+
+    /// `0xC0000005` (access violation) as `GetExitCodeProcess`'s `u32` cast
+    /// to `i32`: a crash must never read as success.
+    #[test]
+    fn a_negative_code_is_failure() {
+        assert_eq!(exit_byte(Some(0xC000_0005_u32 as i32)), 1);
+        assert_eq!(exit_byte(Some(-1)), 1);
+        assert_eq!(exit_byte(Some(i32::MIN)), 1);
+    }
+
+    #[test]
+    fn a_code_wider_than_a_byte_is_failure() {
+        assert_eq!(exit_byte(Some(256)), 1, "256's low byte is 0; it must not read as success");
+        assert_eq!(exit_byte(Some(257)), 1);
+        assert_eq!(exit_byte(Some(i32::MAX)), 1);
+    }
 }
