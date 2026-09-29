@@ -21,6 +21,9 @@ use vfs_embed::{
 use vfs_embed::{DiskProvider, RootSources};
 
 /// A scratch directory holding one file, unique per test line.
+// Every caller is a test gated off unix (the live-ring tests, and root 0 as a
+// host directory), so the helper is gated with them.
+#[cfg(not(unix))]
 fn dir(tag: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!("vfs-embed-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&p);
@@ -258,6 +261,11 @@ fn launch_opts_are_constructible_from_this_crate() {
 /// took. Root 0's host directory is the managed root, so that is where the
 /// declaration goes; a host walking its roots and declaring all of them gets
 /// what it asked for rather than a silent no-op on the first one.
+///
+/// Windows only: there a root's declared path *is* its host directory. On
+/// unix it is the root's location inside the Wine prefix — see
+/// `declaring_root_zero_on_unix_sets_its_location_not_the_managed_root`.
+#[cfg(not(unix))]
 #[test]
 fn declaring_root_zero_repoints_the_managed_root_instead_of_being_discarded() {
     let game = dir("declare0-game", &[]);
@@ -281,6 +289,30 @@ fn declaring_root_zero_repoints_the_managed_root_instead_of_being_discarded() {
     session.declare_root(0, docs.join("elsewhere"));
     assert_eq!(session.virtual_root(), docs.join("elsewhere").as_path());
     assert_eq!(session.declared_roots(), [(1u32, docs.clone())]);
+}
+
+/// On unix a declared path is a **location** (`C:\\…`, as the Wine child sees
+/// it), and root 0's host backing directory stays `set_root`'s. Declaring root
+/// 0 must still do something — move its location — and must still not land in
+/// the extra-roots list.
+#[cfg(unix)]
+#[test]
+fn declaring_root_zero_on_unix_sets_its_location_not_the_managed_root() {
+    let mut session = Session::new();
+    let host_root = session.virtual_root().to_path_buf();
+    session.declare_root(0, r"C:\Games\Fixture");
+    assert_eq!(session.root_locations()[0].location, r"C:\Games\Fixture");
+    assert_eq!(session.virtual_root(), host_root.as_path(), "the host backing dir is unchanged");
+    assert!(session.declared_roots().is_empty());
+
+    session.declare_root(1, r"C:\users\steamuser\Saves");
+    session.declare_root(0, r"C:\Games\Other");
+    let locs: Vec<(u32, String)> =
+        session.root_locations().into_iter().map(|r| (r.id, r.location)).collect();
+    assert_eq!(
+        locs,
+        [(0, r"C:\Games\Other".to_string()), (1, r"C:\users\steamuser\Saves".to_string())]
+    );
 }
 
 /// A relative `LaunchOpts.image` is resolved on real disk under the managed

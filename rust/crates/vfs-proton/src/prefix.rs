@@ -269,6 +269,29 @@ impl Prefix {
         }
     }
 
+    /// Stops this prefix's `wineserver` (and any Wine process still in it) and
+    /// waits until it has exited, using `runtime`'s own `wineserver`.
+    ///
+    /// Needed before deleting a prefix: `wineserver` outlives the last Wine
+    /// process by a few seconds and **writes the registry back into the prefix
+    /// as it exits**, so a prefix removed while it lingers is recreated
+    /// (`system.reg`, `user.reg`, `userdef.reg`) moments later. Absent
+    /// server: returns promptly.
+    pub fn stop_wineserver(&self, runtime: &Path) -> io::Result<()> {
+        let server = runtime.join("files").join("bin").join("wineserver");
+        for flag in ["-k", "-w"] {
+            // `-k` exits non-zero when no server is running; that is fine.
+            std::process::Command::new(&server)
+                .arg(flag)
+                .env("WINEPREFIX", &self.dir)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()?;
+        }
+        Ok(())
+    }
+
     /// `<prefix>/drive_c`, the root of the Windows-visible filesystem.
     pub fn drive_c(&self) -> PathBuf {
         self.dir.join("drive_c")
