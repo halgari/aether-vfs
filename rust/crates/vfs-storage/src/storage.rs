@@ -1,14 +1,17 @@
 //! [`Storage`]: one block store, its catalog and the RAM tier, opened together.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use vfs_block_store::BlockStore;
+use vfs_provider::Provider;
 
 use crate::cached::CacheState;
 use crate::catalog::Catalog;
 use crate::config::StorageConfig;
+use crate::layer::LayerProvider;
 use crate::ram::RamTier;
 
 /// Errors from `vfs-storage`.
@@ -108,6 +111,10 @@ pub struct Storage {
     pub(crate) cfg: StorageConfig,
     /// Pull-through cache bookkeeping shared by every cached source.
     pub(crate) cache: CacheState,
+    /// Every layer with a live provider, by name. One provider per layer, so
+    /// all of a layer's handles share one namespace lock and one file state
+    /// per GUID.
+    layers: Mutex<HashMap<String, Weak<LayerProvider>>>,
 }
 
 impl Storage {
@@ -135,6 +142,7 @@ impl Storage {
             ram,
             cfg,
             cache: CacheState::new(cached_logical),
+            layers: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -173,6 +181,41 @@ impl Storage {
     /// The block store's block size in bytes.
     pub fn block_size(&self) -> u64 {
         u64::from(self.cfg.store.block_size)
+    }
+
+    /// The layer named `name` as a read-write provider, creating the layer if
+    /// it does not exist. While a provider for it is alive, every call returns
+    /// that same provider.
+    pub fn layer(self: &Arc<Self>, name: &str) -> Result<Arc<dyn Provider>, StorageError> {
+        let mut layers = self
+            .layers
+            .lock()
+            .map_err(|_| StorageError::Catalog("layer registry poisoned".into()))?;
+        if let Some(live) = layers.get(name).and_then(Weak::upgrade) {
+            return Ok(live);
+        }
+        let id = match self.catalog.layer_id(name)? {
+            Some(id) => id,
+            None => self.catalog.create_layer(name)?,
+        };
+        let p = Arc::new(LayerProvider::new(Arc::clone(self), name.to_owned(), id));
+        layers.retain(|_, w| w.strong_count() > 0);
+        layers.insert(name.to_owned(), Arc::downgrade(&p));
+        Ok(p)
+    }
+
+    /// The names of the layers with a live provider, sorted.
+    pub fn layers_in_use(&self) -> Vec<String> {
+        let Ok(layers) = self.layers.lock() else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = layers
+            .iter()
+            .filter(|(_, w)| w.strong_count() > 0)
+            .map(|(n, _)| n.clone())
+            .collect();
+        names.sort();
+        names
     }
 }
 

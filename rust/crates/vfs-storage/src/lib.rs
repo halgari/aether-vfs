@@ -10,6 +10,8 @@ mod catalog;
 mod config;
 mod evict;
 mod ids;
+mod layer;
+mod layer_io;
 mod ram;
 mod storage;
 
