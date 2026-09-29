@@ -8,10 +8,19 @@
 //!
 //! - a catalog file whose store file is missing (created, then killed before
 //!   a store flush): recreated empty, its row's length set to 0, and logged;
-//! - a layer file with blocks missing below its length (the store's own
-//!   auto-flush or a compaction made a `set_len` durable before the
-//!   `write_blocks` that followed it): the missing blocks are written as
-//!   zeros, so a layer file never has a missing block (spec §5);
+//! - a layer file with blocks missing at or past the block that holds its
+//!   durable row's length (the store's own auto-flush or a compaction made a
+//!   commit's `set_len` durable before the `write_blocks` that followed it,
+//!   so the lost bytes were written by a handle that never closed — or, for
+//!   the block holding the row's length, the tail a grow's resize dropped;
+//!   see `FileCell::commit`): the missing blocks are written as zeros, so a
+//!   layer file never has a missing block (spec §5);
+//! - a layer file with blocks missing wholly below that block: bytes the
+//!   durable row says a closed file holds are gone. That is corruption, and
+//!   spec §5 never serves it as zeros: the blocks stay missing (a read of
+//!   them is `ST_IO_ERROR`), the file is reported in
+//!   [`ReconcileReport::corrupt_files`] and logged at error level, and its
+//!   row keeps its length so the next open reports it again;
 //! - a layer file row whose length differs from the store's (the row is
 //!   updated after the blocks, and only a durable point publishes it): the
 //!   row takes the store's length, which is what the data says;
@@ -39,9 +48,14 @@ pub struct ReconcileReport {
     /// Layer files whose data was missing from the store, now empty:
     /// `(layer name, folded path)`.
     pub emptied_files: Vec<(String, String)>,
-    /// Layer files that had blocks missing below their length, now filled
-    /// with zeros: `(layer name, folded path)`.
+    /// Layer files that had blocks missing at or past the block holding
+    /// their durable length, now filled with zeros: `(layer name, folded
+    /// path)`.
     pub zero_filled_files: Vec<(String, String)>,
+    /// Layer files with blocks missing below the block holding their durable
+    /// length: closed data is gone. The blocks stay missing and read as
+    /// `ST_IO_ERROR`: `(layer name, folded path)`.
+    pub corrupt_files: Vec<(String, String)>,
     /// Layer file rows whose length disagreed with the store's, now set to
     /// the store's: `(layer name, folded path)`.
     pub resized_rows: Vec<(String, String)>,
@@ -80,19 +94,45 @@ pub(crate) fn reconcile(
             .cloned()
             .unwrap_or_else(|| format!("#{layer}"));
         if let Some(info) = store.stat(&id)? {
+            let row = catalog.get(layer, &path)?;
+            let row_len = row.as_ref().map_or(0, |r| r.len);
+            // Blocks wholly below the one holding the durable length held
+            // closed bytes; from that block on, bytes a crash may lose.
+            let boundary = row_len / bs * bs;
             let missing = missing_ranges(&store.cached_ranges(&id)?, info.len);
-            if !missing.is_empty() {
-                tracing::warn!(
-                    layer = %lname, path = %path, ranges = ?missing,
-                    "layer file has blocks missing below its length (a store flush \
-                     landed between its resize and its block writes); filled with zeros"
+            let (lost, fill) = split_at(&missing, boundary);
+            let corrupt = !lost.is_empty();
+            if corrupt {
+                tracing::error!(
+                    layer = %lname, path = %path, ranges = ?lost, len = row_len,
+                    "layer file has blocks missing below its durable length: corruption; \
+                     left missing (reads of them fail)"
                 );
-                for r in &missing {
+                report.corrupt_files.push((lname.clone(), path.clone()));
+            }
+            if !fill.is_empty() {
+                if fill[0].start < row_len {
+                    tracing::error!(
+                        layer = %lname, path = %path, ranges = ?fill, len = row_len,
+                        "layer file lost the block holding its durable length (a crash \
+                         between a resize and its block writes); filled with zeros"
+                    );
+                } else {
+                    tracing::warn!(
+                        layer = %lname, path = %path, ranges = ?fill,
+                        "layer file has blocks missing past its durable length (a store \
+                         flush landed between its resize and its block writes); filled \
+                         with zeros"
+                    );
+                }
+                for r in &fill {
                     zero_fill(store, &id, r, info.len, bs)?;
                 }
                 report.zero_filled_files.push((lname.clone(), path.clone()));
             }
-            if let Some(mut rec) = catalog.get(layer, &path)? {
+            // A corrupt file keeps its row's length: taking the store's could
+            // move the boundary below the hole and zero-fill it next time.
+            if let Some(mut rec) = row.filter(|_| !corrupt) {
                 if rec.len != info.len {
                     tracing::warn!(
                         layer = %lname, path = %path, row = rec.len, store = info.len,
@@ -184,6 +224,22 @@ fn missing_ranges(cached: &[Range<u64>], len: u64) -> Vec<Range<u64>> {
     }
     out.retain(|r| r.start < r.end);
     out
+}
+
+/// Splits block-aligned `ranges` at `at` (a block boundary): the parts below
+/// it and the parts at or past it.
+fn split_at(ranges: &[Range<u64>], at: u64) -> (Vec<Range<u64>>, Vec<Range<u64>>) {
+    let mut below = Vec::new();
+    let mut above = Vec::new();
+    for r in ranges {
+        if r.start < at {
+            below.push(r.start..r.end.min(at));
+        }
+        if r.end > at {
+            above.push(r.start.max(at)..r.end);
+        }
+    }
+    (below, above)
 }
 
 /// Writes zero blocks over the missing range `r` of a file of length `len`.
@@ -478,23 +534,24 @@ mod tests {
     }
 
     /// The store's own auto-flush (or a compaction) made a grow durable before
-    /// the zero blocks that follow it in a commit: the file has blocks missing
-    /// below its length. Reopening fills them with zeros.
+    /// the zero blocks that follow it in a commit; the durable row still has
+    /// the old length. Every missing block is at or past the block holding
+    /// that length, so reopening fills them with zeros — including that
+    /// block, the closed tail the grow's resize dropped (the residual crash
+    /// window `FileCell::commit` documents).
     #[test]
-    fn missing_blocks_below_the_length_are_zero_filled() {
+    fn missing_blocks_from_the_durable_length_on_are_zero_filled() {
         let d = tempfile::tempdir().unwrap();
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("l").unwrap();
-        let body = vec![0x5Au8; 2 * BS as usize];
+        let body = vec![0x5Au8; 2 * BS as usize + 50];
         write_file(&p, "Grown.bin", &body);
         drop(p);
         let lid = s.catalog.layer_id("l").unwrap().unwrap();
-        let mut rec = s.catalog.get(lid, "grown.bin").unwrap().unwrap();
+        let rec = s.catalog.get(lid, "grown.bin").unwrap().unwrap();
         let id = layer_file_id(&rec.guid);
         let len = 5 * BS + 100;
         s.store.set_len(&id, len).unwrap(); // blocks 2..6 now missing
-        rec.len = len; // the row agrees; only blocks are missing
-        s.catalog.put(lid, "grown.bin", &rec, false).unwrap();
         s.close().unwrap();
 
         let s = Storage::open(d.path(), cfg()).unwrap();
@@ -503,14 +560,120 @@ mod tests {
             r.zero_filled_files,
             vec![("l".to_string(), "grown.bin".to_string())]
         );
-        assert!(r.resized_rows.is_empty());
+        assert!(r.corrupt_files.is_empty(), "{r:?}");
+        assert_eq!(
+            r.resized_rows,
+            vec![("l".to_string(), "grown.bin".to_string())]
+        );
         assert_eq!(s.store.cached_ranges(&id).unwrap(), vec![0..len]);
         let p = s.layer("l").unwrap();
         assert_eq!(p.getattr(at("grown.bin")).unwrap().unwrap().size, len);
-        let mut want = body.clone();
+        let mut want = body[..2 * BS as usize].to_vec();
         want.resize(len as usize, 0);
         assert_eq!(read_file(&p, "grown.bin"), want);
         assert_consistent(&s);
+    }
+
+    /// Blocks missing wholly below the block holding the durable length are
+    /// closed data that is gone: never served as zeros (spec §5). They stay
+    /// missing, reads of them fail, the file is reported, and the next open
+    /// reports it again rather than filling it.
+    #[test]
+    fn missing_blocks_below_the_durable_length_are_corruption() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("l").unwrap();
+        let len = 5 * BS + 100;
+        let body: Vec<u8> = (0..len).map(|i| (i % 241) as u8).collect();
+        write_file(&p, "Save.ess", &body);
+        drop(p);
+        let lid = s.catalog.layer_id("l").unwrap().unwrap();
+        let id = layer_file_id(&s.catalog.get(lid, "save.ess").unwrap().unwrap().guid);
+        // Lose blocks 1 and 2: cut to one block, grow back, restore 3..=5.
+        s.store.set_len(&id, BS).unwrap();
+        s.store.set_len(&id, len).unwrap();
+        s.store
+            .write_blocks(&id, 3, &body[3 * BS as usize..])
+            .unwrap();
+        s.close().unwrap();
+
+        for round in 0..2 {
+            let s = Storage::open(d.path(), cfg()).unwrap();
+            let r = s.last_reconcile().clone();
+            assert_eq!(
+                r.corrupt_files,
+                vec![("l".to_string(), "save.ess".to_string())],
+                "round {round}"
+            );
+            assert!(r.zero_filled_files.is_empty(), "round {round}: {r:?}");
+            assert_eq!(
+                s.store.cached_ranges(&id).unwrap(),
+                vec![0..BS, 3 * BS..len],
+                "round {round}: left missing"
+            );
+            let p = s.layer("l").unwrap();
+            let (h, size, _) = p.open(at("save.ess"), OPEN_READ).unwrap();
+            assert_eq!(size, len);
+            let mut buf = vec![0u8; BS as usize];
+            assert_eq!(p.read_at(h, 0, &mut buf).unwrap(), BS as usize);
+            assert_eq!(buf, body[..BS as usize]);
+            assert_eq!(
+                p.read_at(h, BS + 10, &mut buf),
+                Err(vfs_provider::ST_IO_ERROR),
+                "round {round}: a lost block is an error, never zeros"
+            );
+            assert_eq!(p.read_at(h, 3 * BS, &mut buf).unwrap(), BS as usize);
+            assert_eq!(buf, body[3 * BS as usize..4 * BS as usize]);
+            p.close(h).unwrap();
+            drop(p);
+            s.close().unwrap();
+        }
+    }
+
+    /// A shrink's resize made durable without its tail write (the store is
+    /// shorter than the durable row, its new tail block missing): corruption,
+    /// and the row keeps its length, so a second open does not move the
+    /// boundary below the hole and fill it with zeros.
+    #[test]
+    fn a_lost_tail_below_a_longer_row_stays_reported() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("l").unwrap();
+        let len = 5 * BS + 100;
+        write_file(&p, "f.bin", &vec![7u8; len as usize]);
+        drop(p);
+        let lid = s.catalog.layer_id("l").unwrap().unwrap();
+        let id = layer_file_id(&s.catalog.get(lid, "f.bin").unwrap().unwrap().guid);
+        s.store.set_len(&id, 2 * BS + 7).unwrap(); // block 2 dropped
+        s.close().unwrap();
+
+        for round in 0..2 {
+            let s = Storage::open(d.path(), cfg()).unwrap();
+            let r = s.last_reconcile().clone();
+            assert_eq!(
+                r.corrupt_files,
+                vec![("l".to_string(), "f.bin".to_string())],
+                "round {round}"
+            );
+            assert!(
+                r.zero_filled_files.is_empty() && r.resized_rows.is_empty(),
+                "{r:?}"
+            );
+            assert_eq!(s.catalog.get(lid, "f.bin").unwrap().unwrap().len, len);
+            s.close().unwrap();
+        }
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn split_at_cuts_ranges_at_a_block_boundary() {
+        use super::split_at;
+        assert_eq!(
+            split_at(&[0..4, 8..16, 20..22], 12),
+            (vec![0..4, 8..12], vec![12..16, 20..22])
+        );
+        assert_eq!(split_at(&[8..16], 0), (vec![], vec![8..16]));
+        assert_eq!(split_at(&[8..16], 16), (vec![8..16], vec![]));
     }
 
     /// A row whose length disagrees with the store's (the store's data made

@@ -323,12 +323,13 @@ pub fn open_daemon_storage(dir: &Path, cache_max_gib: Option<u64>) -> Result<Arc
     let r = storage.last_reconcile();
     let repaired = r.emptied_files.len()
         + r.zero_filled_files.len()
+        + r.corrupt_files.len()
         + r.resized_rows.len()
         + r.orphans_deleted as usize
         + r.cache_rows_dropped as usize;
     if repaired > 0 {
         eprintln!(
-            "vfs daemon: storage at {} was repaired at open:",
+            "vfs daemon: storage at {} was reconciled at open:",
             dir.display()
         );
         for (layer, path) in &r.emptied_files {
@@ -336,6 +337,12 @@ pub fn open_daemon_storage(dir: &Path, cache_max_gib: Option<u64>) -> Result<Arc
         }
         for (layer, path) in &r.zero_filled_files {
             eprintln!("  layer {layer:?}: {path} had missing blocks, now zeros");
+        }
+        for (layer, path) in &r.corrupt_files {
+            eprintln!(
+                "  layer {layer:?}: {path} is CORRUPT: blocks of the closed file are \
+                 missing (reads of them fail)"
+            );
         }
         for (layer, path) in &r.resized_rows {
             eprintln!("  layer {layer:?}: {path} length corrected to the store's");

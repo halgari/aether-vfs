@@ -1181,7 +1181,10 @@ mod tests {
             snapshot(d.path(), killed.path());
             let k = Storage::open(killed.path(), cfg()).unwrap();
             let r = k.last_reconcile();
-            assert!(r.zero_filled_files.is_empty(), "{r:?}");
+            assert!(
+                r.zero_filled_files.is_empty() && r.corrupt_files.is_empty(),
+                "{r:?}"
+            );
             let kp = k.layer("l").unwrap();
             assert_eq!(read_file(&kp, "f"), want_store);
         }
