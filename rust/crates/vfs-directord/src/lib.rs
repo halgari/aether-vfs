@@ -503,6 +503,13 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
         .split_once(':')
         .ok_or_else(|| format!("source flag needs TYPE:PATH…, got {s:?}"))?;
     let ty = ty.to_ascii_lowercase();
+    // A layer is only ever a root's write layer, which has its own flag.
+    if ty == "layer" {
+        return Err(format!(
+            "--source {s:?}: a layer is a write layer, not a content source; \
+             use --write-layer layer:NAME"
+        ));
+    }
 
     let (path, mount) = if let Some((p, m)) = rest.rsplit_once('@') {
         (p.to_string(), m.to_string())
@@ -511,9 +518,6 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     };
 
     if path.is_empty() {
-        if ty == "layer" {
-            return Err(format!("source flag {s:?}: `layer:` needs a layer name"));
-        }
         return Err(format!("empty path in source flag: {s:?}"));
     }
     // The old syntax was `TYPE:PATH@MOUNT#LAYER`; `#LAYER` was removed when
@@ -532,7 +536,6 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     }
 
     let spec = match ty.as_str() {
-        "layer" => vfs_control::SourceSpec::Layer { name: path },
         "disk" => vfs_control::SourceSpec::Disk { path },
         "zip" => vfs_control::SourceSpec::Zip { path },
         "http" => vfs_control::SourceSpec::Http { url: path },
@@ -1024,17 +1027,15 @@ mod tests {
             "error should name the removed '#LAYER' syntax: {err}"
         );
     }
+    /// A layer is only ever a write layer; `--source layer:NAME` would be
+    /// refused later by `validate_roots` with config-file advice. The flag
+    /// parser refuses it at once and names the flag to use.
     #[test]
-    fn parse_source_flag_layer() {
-        let e = parse_source_flag("layer:prof").unwrap();
-        assert_eq!(
-            e.spec,
-            vfs_control::SourceSpec::Layer {
-                name: "prof".into()
-            }
-        );
-        assert_eq!(e.mount, "/");
-        assert!(!e.write_layer);
+    fn parse_source_flag_refuses_a_layer() {
+        for flag in ["layer:prof", "LAYER:prof@/"] {
+            let e = parse_source_flag(flag).unwrap_err();
+            assert!(e.contains("--write-layer layer:NAME"), "{flag}: {e}");
+        }
     }
 
     #[test]
@@ -1057,7 +1058,7 @@ mod tests {
     fn an_empty_layer_name_is_refused_by_both_flags() {
         for flag in ["layer:", "layer:@/"] {
             let e = parse_source_flag(flag).unwrap_err();
-            assert!(e.contains("layer name"), "{flag}: {e}");
+            assert!(e.contains("--write-layer layer:NAME"), "{flag}: {e}");
         }
         let e = write_layer_flag_entry("layer:").unwrap_err();
         assert!(
