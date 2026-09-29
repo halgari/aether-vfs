@@ -148,8 +148,9 @@ pub struct SourceEntry {
     /// content — what a mod tool or an INI writer does — fails, because
     /// layering can route a write but cannot seed a copy from a lower layer.
     ///
-    /// Must be a writable source (`type = "disk"`), must mount at the root,
-    /// and at most one per root — see
+    /// Must be a writable source (`type = "disk"`, or `type = "layer"`, a
+    /// named persistent layer in the daemon's storage, which is only ever a
+    /// write layer), must mount at the root, and at most one per root — see
     /// [`SessionConfig::validate_roots`].
     #[serde(default)]
     pub write_layer: bool,
