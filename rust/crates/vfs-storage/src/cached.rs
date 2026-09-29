@@ -55,9 +55,12 @@ pub struct CacheStats {
     pub bytes_from_source: u64,
     /// Bytes resident in the RAM tier (shared with layers).
     pub ram_bytes: u64,
-    /// Logical bytes (file lengths) of the cache files the store holds: what
-    /// `cache_max_bytes` is checked against.
+    /// Logical (uncompressed, before dedup) bytes of the blocks cache files
+    /// hold in the store: what `cache_max_bytes` is checked against. Opening
+    /// a file stores nothing; each block a fetch stores adds its length.
     pub cached_logical_bytes: u64,
+    /// Fetched blocks the store failed to write (they were still served).
+    pub store_write_errors: u64,
 }
 
 /// One in-flight fetch: the block, and whether it came from the store after
@@ -70,6 +73,9 @@ struct AccessLog {
     /// Session-local touch order: the tie-break within one access minute, so
     /// eviction is least-recently-used first even inside a minute.
     seq: HashMap<[u8; 16], u64>,
+    /// Logical bytes stored per cache file opened this session: loaded from
+    /// the catalog row at first open, grown by each block a fetch stores.
+    logical: HashMap<[u8; 16], u64>,
     last_commit_min: u64,
 }
 
@@ -89,8 +95,22 @@ pub(crate) struct CacheState {
     bytes_from_source: AtomicU64,
     /// Readers that joined another reader's fetch instead of starting one.
     pub(crate) coalesced_waits: AtomicU64,
+    store_write_errors: AtomicU64,
+    /// A background eviction is running (or about to).
     pub(crate) evicting: AtomicBool,
-    pub(crate) evict_thread: Mutex<Option<JoinHandle<()>>>,
+    /// Eviction runs started (a test counter for the back-off).
+    pub(crate) eviction_runs: AtomicU64,
+    /// Background eviction threads not yet joined.
+    pub(crate) evict_threads: Mutex<Vec<JoinHandle<()>>>,
+    /// Serialises eviction runs, background or explicit.
+    pub(crate) evict_lock: Mutex<()>,
+    /// Set to the minute of a run that could not reach its target because the
+    /// rest of the cache is open. No background run starts again until a
+    /// handle on a cache file is released or a minute has passed.
+    pub(crate) stuck_since: Mutex<Option<u64>>,
+    /// The "stays over target" warning fired in the current stuck episode
+    /// (cleared by a run that reaches its target).
+    pub(crate) warned_stuck: AtomicBool,
 }
 
 /// Locks `m`, entering a poisoned lock: every critical section here leaves its
@@ -99,7 +119,7 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn now_minute() -> u64 {
+pub(crate) fn now_minute() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() / 60)
@@ -115,6 +135,7 @@ impl CacheState {
             access: Mutex::new(AccessLog {
                 pending: HashMap::new(),
                 seq: HashMap::new(),
+                logical: HashMap::new(),
                 last_commit_min: now_minute(),
             }),
             touch_seq: AtomicU64::new(0),
@@ -125,8 +146,13 @@ impl CacheState {
             bytes_from_cache: AtomicU64::new(0),
             bytes_from_source: AtomicU64::new(0),
             coalesced_waits: AtomicU64::new(0),
+            store_write_errors: AtomicU64::new(0),
             evicting: AtomicBool::new(false),
-            evict_thread: Mutex::new(None),
+            eviction_runs: AtomicU64::new(0),
+            evict_threads: Mutex::new(Vec::new()),
+            evict_lock: Mutex::new(()),
+            stuck_since: Mutex::new(None),
+            warned_stuck: AtomicBool::new(false),
         }
     }
 }
@@ -184,50 +210,64 @@ impl Storage {
             bytes_from_source: c.bytes_from_source.load(Ordering::Relaxed),
             ram_bytes: ram.bytes,
             cached_logical_bytes: c.cached_logical.load(Ordering::Relaxed),
+            store_write_errors: c.store_write_errors.load(Ordering::Relaxed),
         }
     }
 
-    /// Registers an open handle on cache file `hash`. Creates the store file
-    /// (and its catalog row, first) if the store lacks it. Returns whether the
-    /// file was new to the cache.
-    fn cache_acquire(&self, hash: &[u8; 16], size: u64) -> Result<bool, StorageError> {
+    /// Registers an open handle on cache file `hash` of `size` bytes. If the
+    /// store lacks the file, writes its catalog row (first) and creates it
+    /// empty; either way loads what it has stored into the access log.
+    fn cache_acquire(&self, hash: &[u8; 16], size: u64) -> Result<(), StorageError> {
         let id = cache_file_id(hash);
         let mut counts = lock(&self.cache.open_counts);
         *counts.entry(id).or_insert(0) += 1;
-        let registered = (|| {
-            if self.store.stat(&id)?.is_some() {
-                return Ok(false);
+        let r = (|| {
+            let present = self.store.stat(&id)?.is_some();
+            if present && lock(&self.cache.access).logical.contains_key(hash) {
+                return Ok(());
             }
-            // A row without its store file (a crash lost the file) is already
-            // counted in `cached_logical`.
-            let known = self.catalog.cache_get(hash)?.is_some();
-            let rec = CacheRec {
-                last_access_min: now_minute(),
-                logical_bytes: size,
+            let row = self.catalog.cache_get(hash)?;
+            let stored = if present {
+                row.map_or(0, |r| r.logical_bytes)
+            } else {
+                // Catalog row first, store file second (spec §6). A row left
+                // from a store file a crash lost was counted at open; the file
+                // now holds nothing.
+                let rec = CacheRec {
+                    last_access_min: now_minute(),
+                    logical_bytes: 0,
+                };
+                self.catalog.cache_put_many(&[(*hash, rec)])?;
+                self.store.set_len(&id, size)?;
+                if let Some(r) = row {
+                    sub_logical(&self.cache.cached_logical, r.logical_bytes);
+                }
+                0
             };
-            // Catalog row first, store file second (spec §6).
-            self.catalog.cache_put_many(&[(*hash, rec)])?;
-            self.store.set_len(&id, size)?;
-            if !known {
-                self.cache.cached_logical.fetch_add(size, Ordering::Relaxed);
-            }
-            Ok(!known)
+            lock(&self.cache.access).logical.insert(*hash, stored);
+            Ok(())
         })();
-        if registered.is_err() {
+        if r.is_err() {
             release_count(&mut counts, &id);
         }
         drop(counts);
-        if registered.is_ok() {
-            self.touch(hash, size);
+        if r.is_ok() {
+            self.touch(hash, 0, size);
         }
-        registered
+        r
     }
 
     /// Drops an open handle on cache file `hash`, recording the access first
     /// (so an eviction that sees the count reach zero also sees this access).
+    /// A file becoming evictable ends an eviction back-off.
     fn cache_release(&self, hash: &[u8; 16], size: u64) {
-        self.touch(hash, size);
-        release_count(&mut lock(&self.cache.open_counts), &cache_file_id(hash));
+        self.touch(hash, 0, size);
+        let id = cache_file_id(hash);
+        let mut counts = lock(&self.cache.open_counts);
+        release_count(&mut counts, &id);
+        if !counts.contains_key(&id) {
+            *lock(&self.cache.stuck_since) = None;
+        }
     }
 
     /// Open-handle counts per cache file id. Eviction holds this lock while
@@ -236,17 +276,25 @@ impl Storage {
         lock(&self.cache.open_counts)
     }
 
-    /// Records an access; commits the batch if a minute has passed since the
-    /// last commit.
-    fn touch(&self, hash: &[u8; 16], size: u64) {
+    /// Records an access to `hash`, adding `stored` newly stored bytes to its
+    /// logical size (capped at the file's `size`) and to the cache total;
+    /// commits the batch if a minute has passed since the last commit.
+    fn touch(&self, hash: &[u8; 16], stored: u64, size: u64) {
         let now = now_minute();
         let seq = self.cache.touch_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let mut a = lock(&self.cache.access);
+        let logical = a.logical.entry(*hash).or_insert(0);
+        let before = *logical;
+        *logical = before.saturating_add(stored).min(size.max(before));
+        let now_logical = *logical;
+        self.cache
+            .cached_logical
+            .fetch_add(now_logical - before, Ordering::Relaxed);
         a.pending.insert(
             *hash,
             CacheRec {
                 last_access_min: now,
-                logical_bytes: size,
+                logical_bytes: now_logical,
             },
         );
         a.seq.insert(*hash, seq);
@@ -272,10 +320,11 @@ impl Storage {
         self.commit_access_locked(&mut lock(&self.cache.access))
     }
 
-    /// Session touch order of each file touched since open, for eviction's
-    /// tie-break.
-    pub(crate) fn touch_order(&self) -> HashMap<[u8; 16], u64> {
-        lock(&self.cache.access).seq.clone()
+    /// Uncommitted access records and the session touch order (eviction's
+    /// tie-break within a minute).
+    pub(crate) fn access_snapshot(&self) -> (HashMap<[u8; 16], CacheRec>, HashMap<[u8; 16], u64>) {
+        let a = lock(&self.cache.access);
+        (a.pending.clone(), a.seq.clone())
     }
 
     /// Forgets `hash`'s uncommitted access, so a later commit cannot bring
@@ -284,7 +333,15 @@ impl Storage {
         let mut a = lock(&self.cache.access);
         a.pending.remove(hash);
         a.seq.remove(hash);
+        a.logical.remove(hash);
     }
+}
+
+/// Subtracts from the cache total without wrapping.
+pub(crate) fn sub_logical(total: &AtomicU64, n: u64) {
+    let _ = total.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_sub(n))
+    });
 }
 
 fn release_count(counts: &mut HashMap<[u8; 17], usize>, id: &[u8; 17]) {
@@ -298,7 +355,7 @@ fn release_count(counts: &mut HashMap<[u8; 17], usize>, id: &[u8; 17]) {
 
 struct OpenRec {
     inner: Handle,
-    /// `None` for a directory, which passes through uncached.
+    /// `None` for a directory, or a file served uncached: both pass through.
     file: Option<CachedFile>,
 }
 
@@ -414,8 +471,12 @@ impl CachedSource {
             .bytes_from_source
             .fetch_add(len as u64, Ordering::Relaxed);
         // The source read succeeded, so a store failure costs only caching.
-        if let Err(e) = s.store.write_blocks(&f.id, b, &buf) {
-            tracing::warn!(error = %e, "writing a fetched block to the store failed");
+        match s.store.write_blocks(&f.id, b, &buf) {
+            Ok(()) => s.touch(&f.hash, len as u64, f.size),
+            Err(e) => {
+                s.cache.store_write_errors.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(error = %e, "writing a fetched block to the store failed");
+            }
         }
         let d: Arc<[u8]> = buf.into();
         s.ram.put(&f.id, b, Arc::clone(&d));
@@ -446,34 +507,42 @@ impl Provider for CachedSource {
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         let st = self.inner.getattr(p)?;
         let (inner, size, is_dir) = self.inner.open(p, flags)?;
-        let file = if is_dir {
-            None
-        } else {
-            let mtime = st.map_or(0, |s| s.mtime);
-            let hash = identity(
-                &self.key,
-                p.root,
-                &self.normalize(p.rel),
-                size,
-                &mtime.to_le_bytes(),
-            );
-            match self.storage.cache_acquire(&hash, size) {
-                Ok(new) => {
-                    if new {
-                        crate::evict::maybe_evict(&self.storage);
+        // The version tag is `getattr`'s mtime, so it only identifies what
+        // `open` returned if `getattr` saw the same file; a size that differs
+        // says it did not (or the source is inconsistent), and that open is
+        // served uncached rather than filed under a mismatched identity.
+        let stat = st.filter(|st| st.size == size);
+        let file = match stat {
+            _ if is_dir => None,
+            None => {
+                tracing::debug!(
+                    path = p.rel,
+                    "getattr and open disagree; not caching this open"
+                );
+                None
+            }
+            Some(st) => {
+                let hash = identity(
+                    &self.key,
+                    p.root,
+                    &self.normalize(p.rel),
+                    size,
+                    &st.mtime.to_le_bytes(),
+                );
+                match self.storage.cache_acquire(&hash, size) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, path = p.rel, "opening a cache file failed");
+                        let _ = self.inner.close(inner);
+                        return Err(e.to_status());
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, path = p.rel, "opening a cache file failed");
-                    let _ = self.inner.close(inner);
-                    return Err(e.to_status());
-                }
+                Some(CachedFile {
+                    hash,
+                    id: cache_file_id(&hash),
+                    size,
+                })
             }
-            Some(CachedFile {
-                hash,
-                id: cache_file_id(&hash),
-                size,
-            })
         };
         let h = self.next.fetch_add(1, Ordering::Relaxed);
         lock(&self.opens).insert(h, OpenRec { inner, file });
@@ -484,6 +553,7 @@ impl Provider for CachedSource {
         let rec = lock(&self.opens).remove(&h).ok_or_else(bad_fh)?;
         if let Some(f) = rec.file {
             self.storage.cache_release(&f.hash, f.size);
+            crate::evict::maybe_evict(&self.storage);
         }
         self.inner.close(rec.inner)
     }
@@ -810,6 +880,122 @@ mod tests {
         assert!(st.hits > 0);
         assert!(st.bytes_from_cache > 0);
         assert_eq!(st.cached_logical_bytes, body.len() as u64);
+        assert_eq!(st.store_write_errors, 0);
+    }
+
+    #[test]
+    fn only_stored_blocks_count_against_the_budget() {
+        let d = tempfile::tempdir().unwrap();
+        let src = slow(MapSource::with(&[("big.bin", pattern(10 * BS, 5))]));
+        {
+            let s = Storage::open(d.path(), small_cfg()).unwrap();
+            let p = s.cached(src.clone(), key());
+            let (h, size, _) = p.open(VPath::at_default("big.bin"), OPEN_READ).unwrap();
+            assert_eq!(size, 10 * BS as u64);
+            assert_eq!(
+                s.cache_stats().cached_logical_bytes,
+                0,
+                "opening stores nothing"
+            );
+            let mut probe = [0u8; 64];
+            p.read_at(h, 0, &mut probe).unwrap();
+            assert_eq!(
+                s.cache_stats().cached_logical_bytes,
+                BS as u64,
+                "a header probe counts one block, not the whole file"
+            );
+            p.read_at(h, 0, &mut probe).unwrap();
+            assert_eq!(s.cache_stats().cached_logical_bytes, BS as u64);
+            p.close(h).unwrap();
+            drop(p);
+            s.close().unwrap();
+        }
+        let s = Storage::open(d.path(), small_cfg()).unwrap();
+        assert_eq!(s.cache_stats().cached_logical_bytes, BS as u64);
+        let rows = s.catalog.cache_all().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.logical_bytes, BS as u64);
+        // A second block read after the reopen adds to the persisted count.
+        let p = s.cached(src.clone(), key());
+        let (h, _, _) = p.open(VPath::at_default("big.bin"), OPEN_READ).unwrap();
+        p.read_at(h, BS as u64, &mut [0u8; 8]).unwrap();
+        assert_eq!(s.cache_stats().cached_logical_bytes, 2 * BS as u64);
+        p.close(h).unwrap();
+    }
+
+    #[test]
+    fn eviction_backs_off_while_open_files_hold_the_cache_over_budget() {
+        let (s, _d) = temp_storage_with(StorageConfig {
+            cache_max_bytes: 3 * BS as u64,
+            ..small_cfg()
+        });
+        let src = slow(MapSource::with(&[("big.bin", pattern(40 * BS, 9))]));
+        let p = s.cached(src.clone(), key());
+        let (h, _, _) = p.open(VPath::at_default("big.bin"), OPEN_READ).unwrap();
+        let mut buf = vec![0u8; BS];
+        for b in 0..40u64 {
+            assert_eq!(p.read_at(h, b * BS as u64, &mut buf).unwrap(), BS);
+            // Each background run finishes before the next miss, so a missing
+            // back-off would show up as one run per miss past the budget.
+            s.wait_for_eviction();
+        }
+        let runs = s.cache.eviction_runs.load(Ordering::SeqCst);
+        // One run gets stuck on the open file; a second only if the clock's
+        // minute turned during the loop.
+        assert!((1..=2).contains(&runs), "eviction ran {runs} times");
+        assert_eq!(s.cache_stats().cached_logical_bytes, 40 * BS as u64);
+
+        // Closing the file makes it evictable, which ends the back-off.
+        p.close(h).unwrap();
+        s.wait_for_eviction();
+        assert!(s.cache_stats().cached_logical_bytes <= 3 * BS as u64 * 9 / 10);
+    }
+
+    /// A source whose `getattr` size disagrees with what `open` returns.
+    struct Liar(Arc<MapSource>);
+
+    impl Provider for Liar {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                immutable: true,
+                slow: true,
+                ..self.0.capabilities()
+            }
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            Ok(self.0.getattr(p)?.map(|st| Stat {
+                size: st.size + 1,
+                ..st
+            }))
+        }
+        fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+            self.0.readdir(p)
+        }
+        fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+            self.0.open(p, flags)
+        }
+        fn close(&self, h: Handle) -> Result<(), i32> {
+            self.0.close(h)
+        }
+        fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+            self.0.read_at(h, offset, buf)
+        }
+    }
+
+    #[test]
+    fn a_size_mismatch_between_getattr_and_open_is_served_uncached() {
+        let (s, _d) = temp_storage();
+        let src = slow(Arc::new(Liar(MapSource::with(&[(
+            "a.txt",
+            b"hello".to_vec(),
+        )]))));
+        let p = s.cached(src.clone(), key());
+        assert_eq!(read_all(&p, "a.txt"), b"hello");
+        let first = src.reads();
+        assert_eq!(read_all(&p, "a.txt"), b"hello");
+        assert!(src.reads() > first, "not cached, so read from the source");
+        assert!(s.catalog.cache_all().unwrap().is_empty());
+        assert_eq!(s.cache_stats().cached_logical_bytes, 0);
     }
 
     #[test]
