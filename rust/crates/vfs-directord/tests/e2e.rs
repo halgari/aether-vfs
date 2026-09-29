@@ -1,6 +1,9 @@
 //! M0 acceptance: daemon → CreateSession → AddSource(disk) → Launch(fixture-read)
 //! via a scenario.toml, asserting the fixture reads virtual bytes through the ring.
 
+// The launch tests below are Windows-only (they inject real Windows processes); their helpers are unused on Linux.
+#![cfg_attr(not(windows), allow(dead_code, unused_imports))]
+
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -449,6 +452,7 @@ async fn drain_launch_events(
 }
 
 
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn scenario_toml_disk_source_fixture_read() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -604,6 +608,7 @@ wait      = true
 /// reads from. A test that only checks the bytes exist somewhere would pass
 /// with that bypass fully intact; the decisive check is that overlay/ stays
 /// EMPTY, proving the write actually crossed the ring instead.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn scenario_toml_disk_source_fixture_writepath() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -870,6 +875,7 @@ fn overlay_tree(dir: &std::path::Path) -> Vec<PathBuf> {
 /// routes every write to the topmost child that declares `ReadWrite` — both
 /// `DiskProvider`s here do — so the written bytes must land in the top
 /// content directory, not the bottom one and not the overlay fallback.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn scenario_toml_two_disk_sources_fixture_writepath() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -1117,6 +1123,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
 /// The rest of the fixture (create, append, rename, delete) runs too, so this
 /// is also the first live exercise of those through an `OverlayProvider`
 /// upper rather than a bare writable mount.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -1745,6 +1752,7 @@ async fn run_escape_fixture(
 /// *served* target, because `RootMap::compute_under_root`'s OS-consult
 /// branch made its own hooked `CreateFileW` call with no re-entrancy guard.
 /// See `task-6-report.md` for the full account.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn escape_matrix_positive_and_negative_canary() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -2088,6 +2096,7 @@ async fn escape_matrix_positive_and_negative_canary() {
 /// assertion. Neither mutation alone suffices, which is the measurement
 /// behind "latent, not live" above. See `task-8b-report.md` for both
 /// mutations and their output.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -2315,6 +2324,7 @@ const PREFS_DEFAULT: &str = "MISSING";
 /// A test that only asserted "not MISSING" would pass on an escape, and one
 /// that only compared against the director's bytes without a decoy on disk
 /// could not tell a served read from a passthrough at all.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn profile_api_reads_a_managed_root_ini_through_the_director() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -2661,6 +2671,7 @@ async fn profile_api_reads_a_managed_root_ini_through_the_director() {
 /// overlay or the real file behind the mount would satisfy that too — but that
 /// the **provider's own backing file** on disk holds the new value while the
 /// decoy under the session root is untouched.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn profile_api_writes_a_managed_root_ini_through_the_director() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -2971,6 +2982,7 @@ fn make_escape_junction(tag: &str, target: &Path) -> (PathBuf, Option<String>) {
 /// physical one (asserted on `session.root`), and every vector stays
 /// buildable because the physical file the 8.3-name and hardlink
 /// constructions need is really there.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn escape_matrix_write_access_positive_and_negative_canary() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -3302,6 +3314,7 @@ fn assert_no_escaped_real_files(dir: &Path, canary: &str, canary_path: &Path, la
 /// link missing turns the positive canary's ordinary spelling into
 /// `not-found`, which is what makes this worth its runtime rather than a
 /// duplicate of the root-0 run.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn escape_matrix_holds_against_a_second_root() {
     let _guard = LAUNCH_LOCK.lock().await;
@@ -3549,6 +3562,7 @@ async fn escape_matrix_holds_against_a_second_root() {
 /// **If this ever reads `found` again**, the client predicate has lost its
 /// canonicalisation. Do not relax the assertion — find what stopped
 /// consulting `RootMap`.
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn metadata_queries_are_sealed_for_canonicaliser_only_spellings() {
     let _guard = LAUNCH_LOCK.lock().await;

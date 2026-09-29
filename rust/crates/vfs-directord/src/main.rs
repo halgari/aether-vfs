@@ -67,8 +67,10 @@ enum Command {
         exec: String,
         #[arg(long)]
         args: Vec<String>,
-        #[arg(long, default_value_t = true)]
-        wait: bool,
+        /// Return as soon as the child starts instead of waiting for it to
+        /// exit. (Refused on Linux, where a Proton launch always waits.)
+        #[arg(long = "no-wait")]
+        no_wait: bool,
         /// `KEY=VALUE` child environment entries, repeatable.
         #[arg(long = "env")]
         env: Vec<String>,
@@ -155,7 +157,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     write_layer,
                     exec,
                     args,
-                    wait,
+                    no_wait,
                     env,
                 } => {
                     let mut entries = Vec::new();
@@ -179,7 +181,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                         launch: Some(vfs_control::LaunchConfig {
                             exec,
                             args,
-                            wait,
+                            wait: !no_wait,
                             env: env_map,
                         }),
                         cache: None,
