@@ -101,6 +101,63 @@ exec      = "C:/tools/my-probe.exe"
 wait      = true
 ```
 
+#### Root locations and `vfs exec` (Linux under Proton, or Windows)
+
+A `[[root]]` gives a root an `id`, a `name` and a `path`: the location the
+program sees. On Linux that is a `C:\...` path inside the session's Wine prefix
+(a symlink the daemon creates in `drive_c`, so the prefix holds links, not
+content). Root 0 may be declared like any other. Sources attach to a root with
+`root = <id>`.
+
+```toml
+[session]
+name = "demo"
+
+[[root]]
+id = 0
+name = "Games"
+path = 'C:\Games\Fixture'
+
+[[root]]
+id = 1
+name = "Saves"
+path = 'C:\users\steamuser\saves'
+
+[[source]]
+type = "disk"
+path = "/home/me/game"
+root = 0
+
+[[source]]
+type = "zip"
+path = "/home/me/data.zip"
+root = 0
+
+[[source]]
+type = "disk"
+path = "/home/me/saves-layer"
+root = 1
+write_layer = true
+```
+
+Bring the session up (no `[launch]`, so it stays running), launch into it as
+often as you like, then take it down:
+
+```sh
+vfs up --config demo.toml
+vfs exec --session demo '{Games}\game.exe' --env KEY=VAL -- --some-arg
+vfs down --session demo
+```
+
+`vfs exec` takes the program in one of three forms: `{RootName}\rel` (a path
+under a named root), an absolute path (resolved to the root that contains it,
+and staged to real disk if only the composed graph serves it), or a path
+relative to root 0. `--no-wait` returns once the program has started.
+
+A named session keeps a persistent Wine prefix at
+`$VFS_HOME/sessions/<name>/prefix`, so later `vfs exec` calls reuse it. An
+existing real directory at a root location is refused, never replaced.
+
 ## Embedding
 
 **`vfs-embed` is the seam.** It owns one session — its roots, the provider graph
