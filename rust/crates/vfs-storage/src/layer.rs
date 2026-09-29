@@ -329,19 +329,38 @@ impl LayerProvider {
     ///
     /// The blocks and the row go in under one shared hold of the durability
     /// gate ([`Storage::gate`]), taken after `state` and before `ns`.
+    ///
+    /// A commit that fails after it changed the store's length (a large
+    /// shrink stops at a block boundary, see [`FileCell::commit`]) still sets
+    /// the row's length to the store's, so `getattr` and a later `open` agree.
     fn commit(&self, cell: &FileCell, st: &mut FileState) -> Result<(), i32> {
         let _gate = self.storage.gate_shared();
-        if !cell.commit(&self.storage, &self.name, st)? {
-            return Ok(());
+        let before = st.committed_len;
+        match cell.commit(&self.storage, &self.name, st) {
+            Ok(true) => self.update_row(cell, st.len, true),
+            Ok(false) => Ok(()),
+            Err(e) => {
+                if st.committed_len != before {
+                    let _ = self.update_row(cell, st.committed_len, false);
+                }
+                Err(e)
+            }
         }
+    }
+
+    /// Sets `cell`'s row length to `len` (and its mtime, if `stamp`), if the
+    /// row is still `cell`'s. Under the gate, which the caller holds.
+    fn update_row(&self, cell: &FileCell, len: u64, stamp: bool) -> Result<(), i32> {
         let _ns = lock(&self.ns)?;
         let Some(path) = lock(&cell.path)?.clone() else {
             return Ok(());
         };
         if let Some(mut rec) = self.get(&path)? {
             if rec.guid == cell.guid {
-                rec.len = st.len;
-                rec.mtime = lock(&cell.mtime_override)?.unwrap_or_else(now);
+                rec.len = len;
+                if stamp {
+                    rec.mtime = lock(&cell.mtime_override)?.unwrap_or_else(now);
+                }
                 self.put(&path, &rec)?;
             }
         }
@@ -1091,6 +1110,145 @@ mod tests {
             p.close(h).unwrap();
             assert!(read_file(&p, "f") == want, "{cut} {regrow}: after close");
         }
+    }
+
+    /// A layer `l` with provider `lp` and a closed file `f` holding `body`;
+    /// returns the file's store id and GUID.
+    fn layer_with_file(
+        s: &Arc<Storage>,
+        body: &[u8],
+    ) -> (Arc<LayerProvider>, Arc<dyn Provider>, [u8; 17], [u8; 16]) {
+        let lid = s.catalog.create_layer("l").unwrap();
+        let lp: Arc<LayerProvider> = Arc::new(LayerProvider::new(Arc::clone(s), "l".into(), lid));
+        let p: Arc<dyn Provider> = lp.clone();
+        write_file(&p, "f", 0, body);
+        let guid = s.catalog.get(lid, "f").unwrap().unwrap().guid;
+        (lp, p, layer_file_id(&guid), guid)
+    }
+
+    /// What the block store holds for `id`: its whole length, with no block
+    /// missing.
+    fn stored(s: &Storage, id: &[u8; 17]) -> Vec<u8> {
+        let len = s.store.stat(id).unwrap().expect("store file").len;
+        let mut buf = vec![0u8; len as usize];
+        let r = s.store.read(id, 0, &mut buf).unwrap();
+        assert!(
+            r.missing.is_empty(),
+            "store blocks missing: {:?}",
+            r.missing
+        );
+        assert_eq!(r.bytes, buf.len());
+        buf
+    }
+
+    /// A grow whose block writes fail after the store was resized (disk
+    /// full) puts the store back: the closed file's length and its tail
+    /// block are what they were, so a crash right after loses nothing that
+    /// was closed. The dirty block below the resize went in first.
+    #[test]
+    fn a_failed_grow_commit_keeps_the_closed_tail() {
+        let (s, d) = temp_storage();
+        let old: Vec<u8> = (0..(2 * BS + 100)).map(|i| (i % 251) as u8).collect();
+        let (lp, p, id, guid) = layer_with_file(&s, &old);
+
+        let (h, _, _) = p.open(at("f"), OPEN_WRITE).unwrap();
+        p.write_at(h, 10, b"head").unwrap(); // block 0: below the resize
+        p.write_at(h, 5 * BS, b"grown").unwrap();
+        lp.live_cell(&guid)
+            .unwrap()
+            .fail_after_set_len
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(p.flush(h), Err(ST_IO_ERROR));
+
+        let mut want_store = old.clone();
+        want_store[10..14].copy_from_slice(b"head");
+        assert_eq!(
+            stored(&s, &id),
+            want_store,
+            "the store is back at the closed length"
+        );
+        let lid = s.catalog.layer_id("l").unwrap().unwrap();
+        assert_eq!(
+            s.catalog.get(lid, "f").unwrap().unwrap().len,
+            old.len() as u64
+        );
+
+        // Killed now, after the store reached disk: the closed bytes are there.
+        #[cfg(not(windows))]
+        {
+            s.store.flush().unwrap();
+            let killed = tempfile::tempdir().unwrap();
+            snapshot(d.path(), killed.path());
+            let k = Storage::open(killed.path(), cfg()).unwrap();
+            let r = k.last_reconcile();
+            assert!(
+                r.zero_filled_files.is_empty() && r.corrupt_files.is_empty(),
+                "{r:?}"
+            );
+            let kp = k.layer("l").unwrap();
+            assert_eq!(read_file(&kp, "f"), want_store);
+        }
+        #[cfg(windows)]
+        let _ = d;
+
+        // The handle still has its writes, and the next commit lands them.
+        let mut want = want_store.clone();
+        want.resize(5 * BS as usize, 0);
+        want.extend_from_slice(b"grown");
+        assert!(read_range(&p, h, 0, want.len() + 1) == want, "open handle");
+        p.close(h).unwrap();
+        assert!(read_file(&p, "f") == want, "after close");
+    }
+
+    /// A shrink to an unaligned length whose tail write fails after the
+    /// resize puts every dropped block back.
+    #[test]
+    fn a_failed_shrink_commit_keeps_the_closed_bytes() {
+        let (s, _d) = temp_storage();
+        let old: Vec<u8> = (0..(5 * BS + 100)).map(|i| (i % 253) as u8).collect();
+        let (lp, p, id, guid) = layer_with_file(&s, &old);
+
+        let (h, _, _) = p.open(at("f"), OPEN_WRITE).unwrap();
+        lp.live_cell(&guid)
+            .unwrap()
+            .fail_after_set_len
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(p.set_len(h, 2 * BS + 7), Err(ST_IO_ERROR));
+        assert_eq!(stored(&s, &id), old);
+
+        p.close(h).unwrap();
+        assert!(
+            read_file(&p, "f") == old[..(2 * BS + 7) as usize],
+            "after close"
+        );
+    }
+
+    /// A shrink that drops more blocks than a commit captures first shrinks
+    /// the store to the block boundary above the new length (only bytes the
+    /// handle already cut go); a failure after that restores the tail block,
+    /// and the row follows the store's length.
+    #[test]
+    fn a_failed_large_shrink_commit_stops_at_the_block_boundary() {
+        let (s, _d) = temp_storage();
+        let old: Vec<u8> = (0..((crate::layer_io::MAX_CAPTURE_BLOCKS + 10) * BS + 100))
+            .map(|i| (i % 249) as u8)
+            .collect();
+        let (lp, p, id, guid) = layer_with_file(&s, &old);
+
+        let (h, _, _) = p.open(at("f"), OPEN_WRITE).unwrap();
+        lp.live_cell(&guid)
+            .unwrap()
+            .fail_after_set_len
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(p.set_len(h, 100), Err(ST_IO_ERROR));
+        assert_eq!(stored(&s, &id), old[..BS as usize]);
+        let lid = s.catalog.layer_id("l").unwrap().unwrap();
+        assert_eq!(s.catalog.get(lid, "f").unwrap().unwrap().len, BS);
+        assert_eq!(p.getattr(at("f")).unwrap().unwrap().size, 100);
+
+        p.close(h).unwrap();
+        assert!(read_file(&p, "f") == old[..100], "after close");
+        assert_eq!(s.catalog.get(lid, "f").unwrap().unwrap().len, 100);
     }
 
     #[test]

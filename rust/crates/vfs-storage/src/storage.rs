@@ -134,9 +134,9 @@ pub struct Storage {
     /// durable store data). Held **shared** across every "write store data,
     /// then write the catalog row that describes it" pair: a layer commit
     /// (`FileCell::commit` and the row update), a layer file create (row, then
-    /// `set_len`), a cache file registration (row, then `set_len`) and a cache
-    /// fetch (`write_blocks`, then the access-log update a later row commit
-    /// persists). Held **exclusive** across `store.flush()` +
+    /// `set_len`) and a cache fetch (for a file's first block, its row and
+    /// `set_len`; then `write_blocks`, then the access-log update a later row
+    /// commit persists). Held **exclusive** across `store.flush()` +
     /// `catalog.commit_durable()` wherever that pair runs: a layer's durable
     /// point, `delete_layer`, `close` and reconciliation. So no row can land
     /// between a flush and the durable commit that would publish it ahead of
@@ -147,6 +147,8 @@ pub struct Storage {
     /// - layers: a file cell's `state` → `gate` → the layer's `ns` → the
     ///   layer's leaf locks (`cells`, `handles`, `doomed`, a cell's `path`
     ///   and `mtime_override`);
+    /// - the `layers` registry → `gate` (a new layer is made durable while
+    ///   the registry is held; nothing holding the gate takes the registry);
     /// - cache: `gate` → `open_counts` → `access`.
     ///
     /// The gate is never taken recursively (shared or exclusive) by a thread
@@ -186,11 +188,18 @@ impl Storage {
         // The store first: it takes the directory lock, so a second opener
         // fails here, before it opens (and waits on) the catalog database.
         let store = BlockStore::open(dir, cfg.store.clone())?;
-        let catalog = Catalog::open(&dir.join("catalog.redb"))?;
+        let catalog_path = dir.join("catalog.redb");
+        let catalog = Catalog::open(&catalog_path)?;
         // Spec §6: repair what a crash between the two halves' commits left,
         // before the cache budget is summed and before any provider exists.
         let gate = RwLock::new(());
-        let reconciled = reconcile(&store, &catalog, &gate, u64::from(cfg.store.block_size))?;
+        let reconciled = reconcile(
+            &store,
+            &catalog,
+            &catalog_path,
+            &gate,
+            u64::from(cfg.store.block_size),
+        )?;
         let ram = RamTier::with_geometry(cfg.ram_tier_bytes, u64::from(cfg.store.block_size));
         let cached_logical = catalog
             .cache_all()?
@@ -301,12 +310,22 @@ impl Storage {
         }
         let id = match self.catalog.layer_id(name)? {
             Some(id) => id,
-            None if create => self.catalog.create_layer(name)?,
+            None if create => self.create_layer_durably(name)?,
             None => return Err(StorageError::NoSuchLayer(name.to_owned())),
         };
         let p = Arc::new(LayerProvider::new(Arc::clone(self), name.to_owned(), id));
         layers.insert(name.to_owned(), Arc::downgrade(&p));
         Ok(p)
+    }
+
+    /// Creates layer `name` and makes it durable before any of its data can
+    /// be written, so the store never holds layer data under a catalog that
+    /// has no durable layer (which [`Storage::open`] refuses as a lost
+    /// catalog). May be called with the `layers` registry lock held.
+    pub(crate) fn create_layer_durably(&self, name: &str) -> Result<u64, StorageError> {
+        let id = self.catalog.create_layer(name)?;
+        self.flush_durably()?;
+        Ok(id)
     }
 
     /// Called at the end of `LayerProvider::drop`: removes `p`'s registry

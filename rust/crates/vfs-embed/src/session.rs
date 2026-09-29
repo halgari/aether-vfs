@@ -770,7 +770,8 @@ impl Session {
     /// serve the pre-write content. (`Storage::cached` returns a mutable
     /// provider unchanged, so a writable upper is not cached in practice; a
     /// named layer from [`crate::Storage::layer`] is the upper as it is.)
-    /// `vfs-directord` caches every source and never the layer.
+    /// `vfs-directord` passes every source through `Storage::cached`, which
+    /// wraps only the immutable, slow ones, and never the write layer.
     pub fn set_write_layer_at(&self, root: RootId, upper: Arc<dyn Provider>) -> Result<(), i32> {
         if upper.capabilities().access != Access::ReadWrite {
             return Err(bad_request());

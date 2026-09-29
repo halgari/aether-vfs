@@ -212,6 +212,14 @@ impl Catalog {
         })
     }
 
+    /// Whether a layer was ever created in this catalog (its layer-id
+    /// counter exists). A fresh or replaced catalog has none.
+    pub fn has_layer_history(&self) -> Result<bool, StorageError> {
+        let txn = self.db.begin_read().map_err(db_err)?;
+        let t = txn.open_table(META).map_err(db_err)?;
+        Ok(t.get(META_NEXT_LAYER_ID).map_err(db_err)?.is_some())
+    }
+
     /// Every layer, as `(name, id)`, in name order.
     pub fn layer_names(&self) -> Result<Vec<(String, u64)>, StorageError> {
         let txn = self.db.begin_read().map_err(db_err)?;

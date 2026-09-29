@@ -61,6 +61,12 @@ pub struct CacheStats {
     pub cached_logical_bytes: u64,
     /// Fetched blocks the store failed to write (they were still served).
     pub store_write_errors: u64,
+    /// Store reads of cached blocks that failed (a damaged store); the
+    /// source served those blocks instead.
+    pub store_read_errors: u64,
+    /// Opens served straight from the source, uncached, because their cache
+    /// file could not be opened.
+    pub bypassed_opens: u64,
 }
 
 /// One in-flight fetch: the block, and whether it came from the store after
@@ -82,7 +88,7 @@ struct AccessLog {
 /// Cache bookkeeping one [`Storage`] shares between all its cached sources.
 pub(crate) struct CacheState {
     /// Open handles per cache file id. Also the lock under which a file is
-    /// registered (opened for the first time) or evicted.
+    /// created in the store (by its first fetch) or evicted.
     open_counts: Mutex<HashMap<[u8; 17], usize>>,
     inflight: Mutex<HashMap<([u8; 17], u64), Fetch>>,
     access: Mutex<AccessLog>,
@@ -96,6 +102,8 @@ pub(crate) struct CacheState {
     /// Readers that joined another reader's fetch instead of starting one.
     pub(crate) coalesced_waits: AtomicU64,
     store_write_errors: AtomicU64,
+    store_read_errors: AtomicU64,
+    bypassed_opens: AtomicU64,
     /// A background eviction is running (or about to).
     pub(crate) evicting: AtomicBool,
     /// Eviction runs started (a test counter for the back-off).
@@ -111,6 +119,17 @@ pub(crate) struct CacheState {
     /// The "stays over target" warning fired in the current stuck episode
     /// (cleared by a run that reaches its target).
     pub(crate) warned_stuck: AtomicBool,
+    /// Test hook: every store read of a cached block fails.
+    #[cfg(test)]
+    pub(crate) fail_store_reads: AtomicBool,
+    /// Test hook: the next `cache_acquire` fails.
+    #[cfg(test)]
+    pub(crate) fail_acquire: AtomicBool,
+    /// Test hook: run by the next eviction right after it has read the
+    /// catalog and the access log.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) after_snapshot: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// Locks `m`, entering a poisoned lock: every critical section here leaves its
@@ -147,12 +166,20 @@ impl CacheState {
             bytes_from_source: AtomicU64::new(0),
             coalesced_waits: AtomicU64::new(0),
             store_write_errors: AtomicU64::new(0),
+            store_read_errors: AtomicU64::new(0),
+            bypassed_opens: AtomicU64::new(0),
             evicting: AtomicBool::new(false),
             eviction_runs: AtomicU64::new(0),
             evict_threads: Mutex::new(Vec::new()),
             evict_lock: Mutex::new(()),
             stuck_since: Mutex::new(None),
             warned_stuck: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_store_reads: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_acquire: AtomicBool::new(false),
+            #[cfg(test)]
+            after_snapshot: Mutex::new(None),
         }
     }
 }
@@ -211,16 +238,24 @@ impl Storage {
             ram_bytes: ram.bytes,
             cached_logical_bytes: c.cached_logical.load(Ordering::Relaxed),
             store_write_errors: c.store_write_errors.load(Ordering::Relaxed),
+            store_read_errors: c.store_read_errors.load(Ordering::Relaxed),
+            bypassed_opens: c.bypassed_opens.load(Ordering::Relaxed),
         }
     }
 
-    /// Registers an open handle on cache file `hash` of `size` bytes. If the
-    /// store lacks the file, writes its catalog row (first) and creates it
-    /// empty; either way loads what it has stored into the access log.
-    fn cache_acquire(&self, hash: &[u8; 16], size: u64) -> Result<(), StorageError> {
+    /// Registers an open handle on cache file `hash` and loads what the store
+    /// holds of it into the access log. A file the store lacks is not
+    /// created here: its catalog row and store file wait for the first block
+    /// a fetch stores ([`Storage::ensure_cache_file`]), so a file opened and
+    /// never read leaves nothing behind.
+    fn cache_acquire(&self, hash: &[u8; 16]) -> Result<(), StorageError> {
         let id = cache_file_id(hash);
-        // Row, then store file: one pair under the durability gate.
-        let _gate = self.gate_shared();
+        #[cfg(test)]
+        if self.cache.fail_acquire.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected acquire failure",
+            )));
+        }
         let mut counts = lock(&self.cache.open_counts);
         *counts.entry(id).or_insert(0) += 1;
         let r = (|| {
@@ -228,21 +263,17 @@ impl Storage {
             if present && lock(&self.cache.access).logical.contains_key(hash) {
                 return Ok(());
             }
-            let row = self.catalog.cache_get(hash)?;
             let stored = if present {
-                row.map_or(0, |r| r.logical_bytes)
+                self.catalog.cache_get(hash)?.map_or(0, |r| r.logical_bytes)
             } else {
-                // Catalog row first, store file second (spec §6). A row left
-                // from a store file a crash lost was counted at open; the file
-                // now holds nothing.
-                let rec = CacheRec {
-                    last_access_min: now_minute(),
-                    logical_bytes: 0,
-                };
-                self.catalog.cache_put_many(&[(*hash, rec)])?;
-                self.store.set_len(&id, size)?;
-                if let Some(r) = row {
-                    sub_logical(&self.cache.cached_logical, r.logical_bytes);
+                // A row left from a store file that is gone was counted in
+                // the total; it goes, with any batched access for it.
+                if let Some(row) = self.catalog.cache_get(hash)? {
+                    let held = self.remove_cache_row(hash)?;
+                    sub_logical(
+                        &self.cache.cached_logical,
+                        held.unwrap_or(row.logical_bytes),
+                    );
                 }
                 0
             };
@@ -254,16 +285,39 @@ impl Storage {
         }
         drop(counts);
         if r.is_ok() {
-            self.touch(hash, 0, size);
+            self.touch(hash, 0, 0);
         }
         r
+    }
+
+    /// Creates cache file `hash` of `size` bytes if the store lacks it: its
+    /// catalog row first, then the store file (spec §6). Called by a fetch,
+    /// under the durability gate, before it stores the file's first block;
+    /// the handle it fetches for keeps the file from eviction.
+    fn ensure_cache_file(&self, hash: &[u8; 16], size: u64) -> Result<(), StorageError> {
+        let id = cache_file_id(hash);
+        // Once it exists it stays while the handle is open: checked without
+        // the lock first, so misses on created files do not queue on it.
+        if self.store.stat(&id)?.is_some() {
+            return Ok(());
+        }
+        let _counts = lock(&self.cache.open_counts);
+        if self.store.stat(&id)?.is_some() {
+            return Ok(());
+        }
+        let rec = CacheRec {
+            last_access_min: now_minute(),
+            logical_bytes: 0,
+        };
+        self.catalog.cache_put_many(&[(*hash, rec)])?;
+        Ok(self.store.set_len(&id, size)?)
     }
 
     /// Drops an open handle on cache file `hash`, recording the access first
     /// (so an eviction that sees the count reach zero also sees this access).
     /// A file becoming evictable ends an eviction back-off.
-    fn cache_release(&self, hash: &[u8; 16], size: u64) {
-        self.touch(hash, 0, size);
+    fn cache_release(&self, hash: &[u8; 16]) {
+        self.touch(hash, 0, 0);
         let id = cache_file_id(hash);
         let mut counts = lock(&self.cache.open_counts);
         release_count(&mut counts, &id);
@@ -280,7 +334,9 @@ impl Storage {
 
     /// Records an access to `hash`, adding `stored` newly stored bytes to its
     /// logical size (capped at the file's `size`) and to the cache total;
-    /// commits the batch if a minute has passed since the last commit.
+    /// commits the batch if a minute has passed since the last commit. A
+    /// file that holds nothing gets no batched row (it has no row to update:
+    /// see [`Storage::cache_acquire`]), only its place in the touch order.
     fn touch(&self, hash: &[u8; 16], stored: u64, size: u64) {
         let now = now_minute();
         let seq = self.cache.touch_seq.fetch_add(1, Ordering::Relaxed) + 1;
@@ -292,6 +348,10 @@ impl Storage {
         self.cache
             .cached_logical
             .fetch_add(now_logical - before, Ordering::Relaxed);
+        a.seq.insert(*hash, seq);
+        if now_logical == 0 {
+            return;
+        }
         a.pending.insert(
             *hash,
             CacheRec {
@@ -299,7 +359,6 @@ impl Storage {
                 logical_bytes: now_logical,
             },
         );
-        a.seq.insert(*hash, seq);
         if now > a.last_commit_min {
             if let Err(e) = self.commit_access_locked(&mut a) {
                 tracing::warn!(error = %e, "committing cache access times failed; will retry");
@@ -322,20 +381,39 @@ impl Storage {
         self.commit_access_locked(&mut lock(&self.cache.access))
     }
 
-    /// Uncommitted access records and the session touch order (eviction's
-    /// tie-break within a minute).
-    pub(crate) fn access_snapshot(&self) -> (HashMap<[u8; 16], CacheRec>, HashMap<[u8; 16], u64>) {
+    /// The catalog's cache rows overlaid with the uncommitted access log, the
+    /// session touch order, and their logical total. Read under
+    /// `open_counts` and `access`, the locks every change to the running
+    /// total is made under, so the sum is exactly what the running total
+    /// should hold; when it is within `max`, the running total is set to it,
+    /// so drift cannot keep starting eviction runs that find nothing to do.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn budget_snapshot(
+        &self,
+        max: u64,
+    ) -> Result<(HashMap<[u8; 16], CacheRec>, HashMap<[u8; 16], u64>, u64), StorageError> {
+        let _counts = self.open_counts();
         let a = lock(&self.cache.access);
-        (a.pending.clone(), a.seq.clone())
+        let mut recs: HashMap<[u8; 16], CacheRec> = self.catalog.cache_all()?.into_iter().collect();
+        recs.extend(a.pending.iter().map(|(h, r)| (*h, *r)));
+        let total: u64 = recs.values().map(|r| r.logical_bytes).sum();
+        if total <= max {
+            self.cache.cached_logical.store(total, Ordering::Relaxed);
+        }
+        Ok((recs, a.seq.clone(), total))
     }
 
-    /// Forgets `hash`'s uncommitted access, so a later commit cannot bring
-    /// back the catalog row of an evicted file.
-    pub(crate) fn forget_access(&self, hash: &[u8; 16]) {
+    /// Removes `hash`'s catalog row and forgets its uncommitted access, both
+    /// under the `access` lock, so no batched commit can land in between and
+    /// bring the row back. Returns the logical bytes the file held in memory
+    /// (`None` if it was not opened this session: its row's count is exact).
+    /// The caller holds `open_counts`.
+    pub(crate) fn remove_cache_row(&self, hash: &[u8; 16]) -> Result<Option<u64>, StorageError> {
         let mut a = lock(&self.cache.access);
+        self.catalog.cache_remove(hash)?;
         a.pending.remove(hash);
         a.seq.remove(hash);
-        a.logical.remove(hash);
+        Ok(a.logical.remove(hash))
     }
 }
 
@@ -396,7 +474,7 @@ impl CachedSource {
             s.cache.ram_hits.fetch_add(1, Ordering::Relaxed);
             return Ok((d, true));
         }
-        if let Some(d) = self.read_stored(f, b)? {
+        if let Some(d) = self.read_stored(f, b) {
             return Ok((d, true));
         }
         let key = (f.id, b);
@@ -422,22 +500,44 @@ impl CachedSource {
         got
     }
 
-    fn read_stored(&self, f: &CachedFile, b: u64) -> Result<Option<Arc<[u8]>>, i32> {
+    /// Block `b` of `f` from the store, if it holds it. A store that fails
+    /// the read (it is damaged) is a miss, not an error: the cache is a copy,
+    /// and the source still has the block.
+    fn read_stored(&self, f: &CachedFile, b: u64) -> Option<Arc<[u8]>> {
         let s = &*self.storage;
         let bs = s.block_size();
         let len = bs.min(f.size - b * bs) as usize;
         let mut buf = vec![0u8; len];
-        let r = s
-            .store
-            .read(&f.id, b * bs, &mut buf)
-            .map_err(|e| StorageError::from(e).to_status())?;
+        #[cfg(test)]
+        let r = if s.cache.fail_store_reads.load(Ordering::SeqCst) {
+            Err(vfs_block_store::Error::Corrupt(
+                "injected read failure".into(),
+            ))
+        } else {
+            s.store.read(&f.id, b * bs, &mut buf)
+        };
+        #[cfg(not(test))]
+        let r = s.store.read(&f.id, b * bs, &mut buf);
+        let r = match r {
+            Ok(r) => r,
+            // Not stored yet: the first fetch creates it.
+            Err(vfs_block_store::Error::NotFound) => return None,
+            Err(e) => {
+                s.cache.store_read_errors.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    error = %e, block = b,
+                    "reading a cached block failed; fetching it from the source"
+                );
+                return None;
+            }
+        };
         if !r.missing.is_empty() || r.bytes != len {
-            return Ok(None);
+            return None;
         }
         let d: Arc<[u8]> = buf.into();
         s.cache.store_hits.fetch_add(1, Ordering::Relaxed);
         s.ram.put(&f.id, b, Arc::clone(&d));
-        Ok(Some(d))
+        Some(d)
     }
 
     /// Fetches block `b` whole from the source, stores it and returns it. Runs
@@ -445,7 +545,7 @@ impl CachedSource {
     fn fetch(&self, f: &CachedFile, inner: Handle, b: u64) -> Result<(Arc<[u8]>, bool), i32> {
         // A fetch that finished between our store miss and our joining the
         // in-flight map has already stored the block.
-        if let Some(d) = self.read_stored(f, b)? {
+        if let Some(d) = self.read_stored(f, b) {
             return Ok((d, true));
         }
         let s = &*self.storage;
@@ -478,7 +578,10 @@ impl CachedSource {
         // commit never counts a block its store flush did not cover.
         {
             let _gate = s.gate_shared();
-            match s.store.write_blocks(&f.id, b, &buf) {
+            let stored = s
+                .ensure_cache_file(&f.hash, f.size)
+                .and_then(|()| Ok(s.store.write_blocks(&f.id, b, &buf)?));
+            match stored {
                 Ok(()) => s.touch(&f.hash, len as u64, f.size),
                 Err(e) => {
                     s.cache.store_write_errors.fetch_add(1, Ordering::Relaxed);
@@ -537,19 +640,26 @@ impl Provider for CachedSource {
                     size,
                     &st.mtime.to_le_bytes(),
                 );
-                match self.storage.cache_acquire(&hash, size) {
-                    Ok(()) => {}
+                match self.storage.cache_acquire(&hash) {
+                    Ok(()) => Some(CachedFile {
+                        hash,
+                        id: cache_file_id(&hash),
+                        size,
+                    }),
+                    // A damaged cache must not fail an open the source can
+                    // serve: this handle passes through, uncached.
                     Err(e) => {
-                        tracing::warn!(error = %e, path = p.rel, "opening a cache file failed");
-                        let _ = self.inner.close(inner);
-                        return Err(e.to_status());
+                        self.storage
+                            .cache
+                            .bypassed_opens
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            error = %e, path = p.rel,
+                            "opening a cache file failed; serving this open uncached"
+                        );
+                        None
                     }
                 }
-                Some(CachedFile {
-                    hash,
-                    id: cache_file_id(&hash),
-                    size,
-                })
             }
         };
         let h = self.next.fetch_add(1, Ordering::Relaxed);
@@ -560,7 +670,7 @@ impl Provider for CachedSource {
     fn close(&self, h: Handle) -> Result<(), i32> {
         let rec = lock(&self.opens).remove(&h).ok_or_else(bad_fh)?;
         if let Some(f) = rec.file {
-            self.storage.cache_release(&f.hash, f.size);
+            self.storage.cache_release(&f.hash);
             crate::evict::maybe_evict(&self.storage);
         }
         self.inner.close(rec.inner)
@@ -605,7 +715,7 @@ impl Drop for CachedSource {
         let opens = std::mem::take(&mut *lock(&self.opens));
         for (_, rec) in opens {
             if let Some(f) = rec.file {
-                self.storage.cache_release(&f.hash, f.size);
+                self.storage.cache_release(&f.hash);
             }
             let _ = self.inner.close(rec.inner);
         }
@@ -1043,6 +1153,64 @@ mod tests {
         assert_eq!(src.reads(), before, "zero source reads after a reopen");
     }
 
+    /// A file opened and closed without a read stores nothing: no catalog
+    /// row, no store file. Its first stored block creates both.
+    #[test]
+    fn opening_without_reading_stores_nothing() {
+        let (s, _d) = temp_storage();
+        let src = slow(MapSource::with(&[("a", pattern(3 * BS, 1))]));
+        let p = s.cached(src, key());
+        let (h, _, _) = p.open(VPath::at_default("a"), OPEN_READ).unwrap();
+        p.close(h).unwrap();
+        s.commit_access().unwrap();
+        assert!(s.catalog.cache_all().unwrap().is_empty());
+        assert!(s.store.file_ids().unwrap().is_empty());
+
+        let (h, _, _) = p.open(VPath::at_default("a"), OPEN_READ).unwrap();
+        let mut buf = [0u8; 10];
+        p.read_at(h, BS as u64, &mut buf).unwrap();
+        assert_eq!(buf[..], pattern(3 * BS, 1)[BS..BS + 10]);
+        p.close(h).unwrap();
+        s.commit_access().unwrap();
+        let rows = s.catalog.cache_all().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.logical_bytes, BS as u64);
+        assert_eq!(s.store.file_ids().unwrap().len(), 1);
+        assert_eq!(s.cache_stats().cached_logical_bytes, BS as u64);
+    }
+
+    /// A damaged cache is bypassed, not fatal: a store read that fails, or a
+    /// cache file that cannot be opened, is served by the (healthy) source
+    /// and counted.
+    #[test]
+    fn a_damaged_cache_falls_back_to_the_source() {
+        let (s, _d) = temp_storage_with(StorageConfig {
+            ram_tier_bytes: 0, // every hit goes to the store
+            ..small_cfg()
+        });
+        let body = pattern(3 * BS, 7);
+        let src = slow(MapSource::with(&[("a", body.clone())]));
+        let p = s.cached(src.clone(), key());
+        assert_eq!(read_all(&p, "a"), body);
+
+        s.cache.fail_store_reads.store(true, Ordering::SeqCst);
+        let before = src.reads();
+        assert_eq!(read_all(&p, "a"), body);
+        assert!(src.reads() > before, "the source served the reads");
+        assert!(
+            s.cache_stats().store_read_errors >= 3,
+            "{:?}",
+            s.cache_stats()
+        );
+        s.cache.fail_store_reads.store(false, Ordering::SeqCst);
+
+        s.cache.fail_acquire.store(true, Ordering::SeqCst);
+        let before = src.reads();
+        assert_eq!(read_all(&p, "a"), body);
+        assert!(src.reads() > before, "served uncached");
+        assert_eq!(s.cache_stats().bypassed_opens, 1);
+    }
+
     #[test]
     fn fast_or_mutable_sources_are_not_wrapped() {
         let (s, _d) = temp_storage();
@@ -1207,6 +1375,55 @@ mod tests {
             src.reads() > before,
             "f2, the least recently used, was evicted"
         );
+    }
+
+    /// A file read further while an eviction runs (after it took its
+    /// snapshot) is subtracted with what it holds when it is evicted, not
+    /// what the snapshot said, so the running total cannot drift upward.
+    #[test]
+    fn eviction_subtracts_what_a_file_holds_when_it_goes() {
+        let (s, _d) = temp_storage_with(StorageConfig {
+            cache_max_bytes: 4 * BS as u64,
+            ..small_cfg()
+        });
+        let src = slow(MapSource::with(&[
+            ("a", pattern(4 * BS, 1)),
+            ("b", pattern(4 * BS, 2)),
+        ]));
+        let p = s.cached(src, key());
+        s.cache.evicting.store(true, Ordering::SeqCst); // no background runs
+        let (h, _, _) = p.open(VPath::at_default("a"), OPEN_READ).unwrap();
+        p.read_at(h, 0, &mut [0u8; 10]).unwrap(); // one block of a
+        p.close(h).unwrap();
+        read_all(&p, "b");
+        assert_eq!(s.cache_stats().cached_logical_bytes, 5 * BS as u64);
+
+        let p2 = Arc::clone(&p);
+        *s.cache.after_snapshot.lock().unwrap() = Some(Box::new(move || {
+            read_all(&p2, "a"); // a now holds four blocks
+        }));
+        assert_eq!(s.enforce_cache_budget().unwrap(), 2);
+        assert_eq!(s.cache_stats().cached_logical_bytes, 0);
+        assert!(s.catalog.cache_all().unwrap().is_empty());
+        s.cache.evicting.store(false, Ordering::SeqCst);
+    }
+
+    /// A run that finds the cache within budget sets the running total to
+    /// what the catalog and the access log say, so a drifted count cannot
+    /// keep starting no-op runs.
+    #[test]
+    fn a_run_within_budget_resyncs_the_total() {
+        let (s, _d) = temp_storage_with(StorageConfig {
+            cache_max_bytes: 8 * BS as u64,
+            ..small_cfg()
+        });
+        let src = slow(MapSource::with(&[("b", pattern(4 * BS, 2))]));
+        let p = s.cached(src, key());
+        read_all(&p, "b");
+        s.wait_for_eviction();
+        s.cache.cached_logical.fetch_add(1 << 40, Ordering::SeqCst);
+        assert_eq!(s.enforce_cache_budget().unwrap(), 0);
+        assert_eq!(s.cache_stats().cached_logical_bytes, 4 * BS as u64);
     }
 
     #[test]

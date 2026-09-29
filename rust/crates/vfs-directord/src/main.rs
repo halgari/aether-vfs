@@ -147,6 +147,19 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Sends `tracing` events (what `vfs-storage` and `vfs-block-store` log) to
+/// stderr — `<discovery>.daemon.log` for an auto-spawned daemon — at `warn`
+/// and above, or as `RUST_LOG` says.
+fn init_daemon_log() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .try_init();
+}
+
 async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let discovery = cli
@@ -160,6 +173,7 @@ async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             storage_dir,
             cache_max_gib,
         } => {
+            init_daemon_log();
             let addr: SocketAddr = bind
                 .parse()
                 .map_err(|e| format!("bad --bind {bind}: {e}"))?;

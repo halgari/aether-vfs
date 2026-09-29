@@ -123,19 +123,7 @@ fn spawn_daemon(
         let _ = std::fs::create_dir_all(dir);
     }
     let live = read_discovery(discovery_path).is_ok_and(|d| process_alive(d.pid));
-    let file = if live {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log)
-            .and_then(|mut f| {
-                use std::io::Write;
-                writeln!(f, "--- vfs: spawning another daemon ---").map(|()| f)
-            })
-    } else {
-        std::fs::File::create(&log)
-    };
-    match file {
+    match open_spawn_log(&log, live) {
         Ok(f) => cmd.stderr(f),
         Err(_) => cmd.stderr(std::process::Stdio::null()),
     };
@@ -156,6 +144,26 @@ fn spawn_daemon(
     }
     cmd.spawn()
         .map_err(|e| format!("spawn daemon {}: {e}", exe.display()))
+}
+
+/// Opens a spawned daemon's log for its stderr: truncated first (unless a
+/// live daemon may still be writing it: then a separator is appended), and
+/// always opened for **append**. Two CLIs that spawn at once each truncate
+/// it; with append, the first daemon's later writes go to the end of the
+/// file rather than to its old offset, which would leave a run of NULs.
+fn open_spawn_log(log: &std::path::Path, live: bool) -> std::io::Result<std::fs::File> {
+    use std::io::Write;
+    if !live {
+        std::fs::File::create(log)?; // truncate
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)?;
+    if live {
+        writeln!(f, "--- vfs: spawning another daemon ---")?;
+    }
+    Ok(f)
 }
 
 /// [`wait_for_daemon`] for a daemon this process just spawned: if `child`
@@ -323,12 +331,14 @@ pub fn open_daemon_storage(dir: &Path, cache_max_gib: Option<u64>) -> Result<Arc
     let r = storage.last_reconcile();
     let repaired = r.emptied_files.len()
         + r.zero_filled_files.len()
+        + r.corrupt_files.len()
         + r.resized_rows.len()
         + r.orphans_deleted as usize
-        + r.cache_rows_dropped as usize;
+        + r.cache_rows_dropped as usize
+        + r.failed_repairs.len();
     if repaired > 0 {
         eprintln!(
-            "vfs daemon: storage at {} was repaired at open:",
+            "vfs daemon: storage at {} was reconciled at open:",
             dir.display()
         );
         for (layer, path) in &r.emptied_files {
@@ -337,11 +347,20 @@ pub fn open_daemon_storage(dir: &Path, cache_max_gib: Option<u64>) -> Result<Arc
         for (layer, path) in &r.zero_filled_files {
             eprintln!("  layer {layer:?}: {path} had missing blocks, now zeros");
         }
+        for (layer, path) in &r.corrupt_files {
+            eprintln!(
+                "  layer {layer:?}: {path} is CORRUPT: blocks of the closed file are \
+                 missing (reads of them fail)"
+            );
+        }
         for (layer, path) in &r.resized_rows {
             eprintln!("  layer {layer:?}: {path} length corrected to the store's");
         }
         if r.orphans_deleted > 0 {
             eprintln!("  {} unreferenced store file(s) deleted", r.orphans_deleted);
+        }
+        for what in &r.failed_repairs {
+            eprintln!("  repair failed (retried at the next open): {what}");
         }
         if r.cache_rows_dropped > 0 {
             eprintln!(
@@ -492,6 +511,13 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
         .split_once(':')
         .ok_or_else(|| format!("source flag needs TYPE:PATH…, got {s:?}"))?;
     let ty = ty.to_ascii_lowercase();
+    // A layer is only ever a root's write layer, which has its own flag.
+    if ty == "layer" {
+        return Err(format!(
+            "--source {s:?}: a layer is a write layer, not a content source; \
+             use --write-layer layer:NAME"
+        ));
+    }
 
     let (path, mount) = if let Some((p, m)) = rest.rsplit_once('@') {
         (p.to_string(), m.to_string())
@@ -500,9 +526,6 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     };
 
     if path.is_empty() {
-        if ty == "layer" {
-            return Err(format!("source flag {s:?}: `layer:` needs a layer name"));
-        }
         return Err(format!("empty path in source flag: {s:?}"));
     }
     // The old syntax was `TYPE:PATH@MOUNT#LAYER`; `#LAYER` was removed when
@@ -521,7 +544,6 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     }
 
     let spec = match ty.as_str() {
-        "layer" => vfs_control::SourceSpec::Layer { name: path },
         "disk" => vfs_control::SourceSpec::Disk { path },
         "zip" => vfs_control::SourceSpec::Zip { path },
         "http" => vfs_control::SourceSpec::Http { url: path },
@@ -1013,17 +1035,32 @@ mod tests {
             "error should name the removed '#LAYER' syntax: {err}"
         );
     }
+    /// Two spawns that each truncate the log: the first daemon's later
+    /// writes land at the end of the file, never past a hole of NULs.
     #[test]
-    fn parse_source_flag_layer() {
-        let e = parse_source_flag("layer:prof").unwrap();
-        assert_eq!(
-            e.spec,
-            vfs_control::SourceSpec::Layer {
-                name: "prof".into()
-            }
-        );
-        assert_eq!(e.mount, "/");
-        assert!(!e.write_layer);
+    fn concurrent_spawn_logs_leave_no_holes() {
+        use std::io::Write;
+        let d = tempfile::tempdir().unwrap();
+        let log = d.path().join("d.json.daemon.log");
+        let mut first = open_spawn_log(&log, false).unwrap();
+        first.write_all(b"first daemon starting\n").unwrap();
+        let mut second = open_spawn_log(&log, false).unwrap();
+        second.write_all(b"second\n").unwrap();
+        first.write_all(b"first daemon: warning\n").unwrap();
+        let text = std::fs::read(&log).unwrap();
+        assert!(!text.contains(&0), "{:?}", String::from_utf8_lossy(&text));
+        assert_eq!(text, b"second\nfirst daemon: warning\n");
+    }
+
+    /// A layer is only ever a write layer; `--source layer:NAME` would be
+    /// refused later by `validate_roots` with config-file advice. The flag
+    /// parser refuses it at once and names the flag to use.
+    #[test]
+    fn parse_source_flag_refuses_a_layer() {
+        for flag in ["layer:prof", "LAYER:prof@/"] {
+            let e = parse_source_flag(flag).unwrap_err();
+            assert!(e.contains("--write-layer layer:NAME"), "{flag}: {e}");
+        }
     }
 
     #[test]
@@ -1046,7 +1083,7 @@ mod tests {
     fn an_empty_layer_name_is_refused_by_both_flags() {
         for flag in ["layer:", "layer:@/"] {
             let e = parse_source_flag(flag).unwrap_err();
-            assert!(e.contains("layer name"), "{flag}: {e}");
+            assert!(e.contains("--write-layer layer:NAME"), "{flag}: {e}");
         }
         let e = write_layer_flag_entry("layer:").unwrap_err();
         assert!(

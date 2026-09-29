@@ -189,9 +189,11 @@ store (`vfs-storage`), which holds two things:
   not go stale. The reference `vfs-source-plugin` serves a disk directory and
   declares it mutable, so it is not cached either. A cached file is keyed by
   the source (its remote endpoint, or `cache_key = "..."` on its `[[source]]`
-  to pin one), its path, its size and its version (the source's file id, else
-  its mtime). If the file changes on the source, the new version is fetched
-  rather than served stale. The cache has a budget, `--cache-max-gib` (default
+  to pin one), its path, its size and its mtime. A change on the source that
+  alters the file's size or mtime gives it a new key, so the new version is
+  fetched rather than served stale. The limitation: a file changed in place
+  that keeps both its size and its mtime is served stale from the cache. The
+  cache has a budget, `--cache-max-gib` (default
   32). Past it, the least recently used files are evicted until it is back
   under 90%.
 - **Named layers**: persistent write layers. A root's write layer can be a
