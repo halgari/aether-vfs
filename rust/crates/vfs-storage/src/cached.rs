@@ -296,6 +296,11 @@ impl Storage {
     /// the handle it fetches for keeps the file from eviction.
     fn ensure_cache_file(&self, hash: &[u8; 16], size: u64) -> Result<(), StorageError> {
         let id = cache_file_id(hash);
+        // Once it exists it stays while the handle is open: checked without
+        // the lock first, so misses on created files do not queue on it.
+        if self.store.stat(&id)?.is_some() {
+            return Ok(());
+        }
         let _counts = lock(&self.cache.open_counts);
         if self.store.stat(&id)?.is_some() {
             return Ok(());
