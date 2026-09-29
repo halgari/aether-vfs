@@ -498,10 +498,9 @@ impl Session {
     /// that cannot be right, and a fallible signature would force every host
     /// to special-case the id that needs it least.
     ///
-    /// (A *daemon* session is a different matter: there root 0 is a directory
-    /// the daemon created and already published to its client, so
-    /// `SessionRegistry::declare_root` refuses id 0 above this layer. That is
-    /// a policy of that host, not of embedding.)
+    /// A daemon session declares root 0 the same way when its config names
+    /// one (`SessionRegistry::declare_root`), and reports the declared
+    /// location as the session's root.
     ///
     /// Re-declaring an id replaces its path. Takes effect at the next
     /// [`Session::serve`] or [`Session::launch`], which is what publishes it

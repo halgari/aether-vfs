@@ -3400,12 +3400,8 @@ async fn escape_matrix_holds_against_a_second_root() {
         .expect("AddSource root 1");
 
     reg_handle
-        .declare_root(&session.id, 1, docs_root.path())
+        .declare_root(&session.id, 1, docs_root.path(), "docs")
         .expect("declare root 1");
-    assert!(
-        reg_handle.declare_root(&session.id, 0, docs_root.path()).is_err(),
-        "root 0 is the session's own root and must not be re-declarable"
-    );
 
     let sub = PathBuf::from("Saves");
     std::fs::create_dir_all(docs_root.path().join(&sub)).expect("mkdir under root 1");
@@ -3738,6 +3734,62 @@ async fn apply_session_config_health_and_list() {
     server.abort();
 }
 
+/// `vfs exec --session NAME` and `vfs down --session NAME`: the `Launch` and
+/// `TeardownSession` RPCs take a session's name as well as its id, and
+/// `Launch` expands a leading `{RootName}`. Every refusal here happens before
+/// anything is spawned, so this runs on any host.
+#[tokio::test(flavor = "multi_thread")]
+async fn launch_and_teardown_address_a_session_by_name() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let svc = DirectorService::new(SessionRegistry::new());
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut client = connect(&format!("{addr}")).await.unwrap();
+
+    let cfg = SessionConfig {
+        session: vfs_control::SessionMeta { name: Some("by-name".into()) },
+        roots: vec![vfs_control::RootEntry {
+            id: 0,
+            name: "Games".into(),
+            path: r"C:\Games\ByName".into(),
+        }],
+        ..Default::default()
+    };
+    let (id, _) = apply_session_config(&mut client, &cfg).await.unwrap();
+
+    let launch = |session: &str, exec: &str| vfs_control::pb::LaunchReq {
+        session_id: session.into(),
+        exec: exec.into(),
+        args: vec![],
+        wait: true,
+        env: Default::default(),
+    };
+    let st = client.launch(launch("no-such", "x.exe")).await.expect_err("unknown session");
+    assert_eq!(st.code(), tonic::Code::NotFound, "{st:?}");
+    assert!(
+        st.message().contains("no-such") && st.message().contains("by-name"),
+        "the refusal must list what is live: {st:?}"
+    );
+    let st = client.launch(launch("by-name", r"{Nope}\x.exe")).await.expect_err("unknown root");
+    assert_eq!(st.code(), tonic::Code::InvalidArgument, "{st:?}");
+    assert!(st.message().contains("Nope") && st.message().contains("Games"), "{st:?}");
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq { session_id: "by-name".into() })
+        .await
+        .expect("teardown by name");
+    let list = client.list_sessions(vfs_control::pb::Empty {}).await.unwrap().into_inner();
+    assert!(list.sessions.iter().all(|s| s.id != id), "{list:?}");
+    server.abort();
+}
+
 /// Stage 2b task 5: a config's `[[root]] path` reaches the live session, so
 /// the injected shim is told where each root *is* and not merely what it
 /// serves.
@@ -3817,8 +3869,8 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
             assert_eq!(
                 declared.len(),
                 1,
-                "exactly root 1 should be declared — root 0 is the daemon's own \
-                 `Session.root` and a config cannot repoint it: {declared:?}"
+                "`declared_roots` lists the roots beyond root 0, so exactly root 1 — \
+                 root 0's declared path is its location, asserted below: {declared:?}"
             );
             assert_eq!(declared[0].0, 1);
             assert_eq!(
@@ -3843,6 +3895,20 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
             Ok(())
         })
         .unwrap();
+
+    // Root 0 was declared as well: the config's root 0 path replaces the
+    // daemon's default, and the session summary reports it.
+    let summary = reg_handle
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == id)
+        .expect("the session is live");
+    assert_eq!(
+        summary.root,
+        game.path(),
+        "root 0's declared path must reach the live session as its root"
+    );
 
     client
         .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
