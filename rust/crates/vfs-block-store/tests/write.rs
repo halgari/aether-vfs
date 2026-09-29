@@ -1,7 +1,7 @@
 mod common;
 
-use vfs_block_store::{BlockStore, Error};
 use common::*;
+use vfs_block_store::{BlockStore, Error};
 
 const RECORD: u64 = 40 + BS as u64; // header + one incompressible block stored raw
 

@@ -1,7 +1,7 @@
 mod common;
 
-use vfs_block_store::CompactOptions;
 use common::*;
+use vfs_block_store::CompactOptions;
 
 fn fill(store: &vfs_block_store::BlockStore, files: u64) -> Vec<Vec<u8>> {
     (0..files)

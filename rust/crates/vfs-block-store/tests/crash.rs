@@ -8,8 +8,8 @@ mod common;
 use std::path::Path;
 use std::process::Command;
 
-use vfs_block_store::{BlockStore, CompactOptions};
 use common::*;
+use vfs_block_store::{BlockStore, CompactOptions};
 
 const ROLE: &str = "BLOCK_STORE_CRASH_ROLE";
 const DIR: &str = "BLOCK_STORE_CRASH_DIR";
