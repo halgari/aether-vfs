@@ -30,7 +30,7 @@ message CreateSessionReq {
 message Session {
   string id = 1;
   string name = 2;
-  string root = 3; // daemon-chosen virtual root; address files as <root>/<path>
+  string root = 3; // root 0's location (daemon-chosen unless the config declares root 0)
 }
 message SessionList {
   repeated Session sessions = 1;
@@ -62,7 +62,8 @@ message RemoteSource { string endpoint = 1; }
 message DeclareRootReq {
   string session_id = 1;
   uint32 root = 2;
-  string path = 3; // absolute host directory
+  string path = 3; // the root's location: the path the launched program sees
+  string name = 4; // the [[root]] name; `{name}` in LaunchReq.exec refers to it
 }
 
 message AddSourceReq {
@@ -95,7 +96,7 @@ message SourceRef {
 
 message LaunchReq {
   string session_id = 1;
-  string exec = 2;            // image path under the virtual root
+  string exec = 2;            // {RootName}\rel, an absolute path (resolved to a root, or launched as given outside every root), or a root-0-relative path
   repeated string args = 3;
   bool wait = 4;
   reserved 5;                 // was hollow_pe; the staged launch has no hollow

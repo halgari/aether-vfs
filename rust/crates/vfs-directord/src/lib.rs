@@ -303,6 +303,7 @@ pub async fn apply_session_config(
                 session_id: session_id.clone(),
                 root: root.id,
                 path: root.path.clone(),
+                name: root.name.clone(),
             })
             .await
             .map_err(|e| format!("DeclareRoot {} ({}): {e}", root.id, root.name))?;
