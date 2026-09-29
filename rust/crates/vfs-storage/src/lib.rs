@@ -12,12 +12,18 @@ mod evict;
 mod ids;
 mod layer;
 mod layer_io;
+mod manage;
 mod ram;
+mod reconcile;
 mod storage;
+#[cfg(test)]
+mod test_util;
 
 pub use cached::{CacheStats, SourceKey};
 pub use catalog::{CacheRec, Catalog, EntryRec};
 pub use config::StorageConfig;
 pub use ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Guid, StoreIdKind};
+pub use manage::{LayerInfo, StorageStats};
 pub use ram::{RamStats, RamTier};
+pub use reconcile::ReconcileReport;
 pub use storage::{Storage, StorageError};

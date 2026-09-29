@@ -457,6 +457,26 @@ impl Catalog {
         })
     }
 
+    /// Per layer id, its file count and the sum of its files' row lengths.
+    /// Layers without files are absent.
+    pub(crate) fn layer_file_totals(
+        &self,
+    ) -> Result<std::collections::HashMap<u64, (u64, u64)>, StorageError> {
+        self.entries(|t| {
+            let mut out = std::collections::HashMap::<u64, (u64, u64)>::new();
+            for e in t.iter().map_err(db_err)? {
+                let (k, v) = e.map_err(db_err)?;
+                let rec = EntryRec::decode(v.value())?;
+                if rec.kind == vfs_provider::KIND_FILE {
+                    let tot = out.entry(k.value().0).or_default();
+                    tot.0 += 1;
+                    tot.1 = tot.1.saturating_add(rec.len);
+                }
+            }
+            Ok(out)
+        })
+    }
+
     pub fn cache_get(&self, id: &[u8; 16]) -> Result<Option<CacheRec>, StorageError> {
         let txn = self.db.begin_read().map_err(db_err)?;
         let t = txn.open_table(CACHE_FILES).map_err(db_err)?;

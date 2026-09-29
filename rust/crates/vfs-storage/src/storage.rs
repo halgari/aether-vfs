@@ -3,16 +3,17 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use vfs_block_store::BlockStore;
 use vfs_provider::Provider;
 
-use crate::cached::CacheState;
+use crate::cached::{lock, CacheState};
 use crate::catalog::Catalog;
 use crate::config::StorageConfig;
 use crate::layer::LayerProvider;
 use crate::ram::RamTier;
+use crate::reconcile::{reconcile, ReconcileReport};
 
 /// Errors from `vfs-storage`.
 #[derive(Debug)]
@@ -32,7 +33,8 @@ pub enum StorageError {
     NotFound(String),
     /// A directory still holds entries, so it cannot be removed.
     NotEmpty(String),
-    /// The destination of a rename is a directory that holds entries.
+    /// The destination of a rename is a directory that holds entries, or an
+    /// export's target directory is not empty.
     Exists(String),
     /// A request that can never succeed: a layer root as the target, or a
     /// directory moved into its own subtree.
@@ -111,10 +113,21 @@ pub struct Storage {
     pub(crate) cfg: StorageConfig,
     /// Pull-through cache bookkeeping shared by every cached source.
     pub(crate) cache: CacheState,
-    /// Every layer with a live provider, by name. One provider per layer, so
-    /// all of a layer's handles share one namespace lock and one file state
-    /// per GUID.
-    layers: Mutex<HashMap<String, Weak<LayerProvider>>>,
+    /// Every layer with a provider, by name: live, or dropped and still
+    /// inside its `Drop` (a last commit and durable point). A provider removes
+    /// its own entry at the end of its `Drop` and signals `layers_gone`. One
+    /// provider per layer, so all of a layer's handles share one namespace
+    /// lock and one file state per GUID.
+    pub(crate) layers: Mutex<HashMap<String, Weak<LayerProvider>>>,
+    /// Signalled whenever a provider leaves `layers`.
+    pub(crate) layers_gone: Condvar,
+    /// What reconciliation at open repaired.
+    pub(crate) reconciled: ReconcileReport,
+    /// Test hook: run by the next `LayerProvider::drop`, after its durable
+    /// point and before it leaves `layers`.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) drop_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Storage {
@@ -130,6 +143,9 @@ impl Storage {
         // fails here, before it opens (and waits on) the catalog database.
         let store = BlockStore::open(dir, cfg.store.clone())?;
         let catalog = Catalog::open(&dir.join("catalog.redb"))?;
+        // Spec §6: repair what a crash between the two halves' commits left,
+        // before the cache budget is summed and before any provider exists.
+        let reconciled = reconcile(&store, &catalog)?;
         let ram = RamTier::with_geometry(cfg.ram_tier_bytes, u64::from(cfg.store.block_size));
         let cached_logical = catalog
             .cache_all()?
@@ -143,6 +159,10 @@ impl Storage {
             cfg,
             cache: CacheState::new(cached_logical),
             layers: Mutex::new(HashMap::new()),
+            layers_gone: Condvar::new(),
+            reconciled,
+            #[cfg(test)]
+            drop_hook: Mutex::new(None),
         }))
     }
 
@@ -152,8 +172,11 @@ impl Storage {
     /// store and releases the directory.
     ///
     /// If other references to this `Storage` are still alive, everything is
-    /// flushed the same way but the directory stays locked until the last one
-    /// drops (the store closes itself on drop).
+    /// flushed the same way and `Ok` is returned, but the store stays open and
+    /// the directory stays locked until the last reference drops (the store
+    /// closes itself on drop); a warning is logged. Every layer provider and
+    /// cached source holds such a reference, so a caller that must reopen the
+    /// directory (in this process or another) drops those first.
     pub fn close(self: Arc<Self>) -> Result<(), StorageError> {
         // A background eviction holds a reference; let it finish.
         self.wait_for_eviction();
@@ -185,35 +208,58 @@ impl Storage {
 
     /// The layer named `name` as a read-write provider, creating the layer if
     /// it does not exist. While a provider for it is alive, every call returns
-    /// that same provider.
+    /// that same provider; while the last one is still being dropped, the call
+    /// waits for that drop to finish rather than build a second one.
     pub fn layer(self: &Arc<Self>, name: &str) -> Result<Arc<dyn Provider>, StorageError> {
-        let mut layers = self
-            .layers
-            .lock()
-            .map_err(|_| StorageError::Catalog("layer registry poisoned".into()))?;
-        if let Some(live) = layers.get(name).and_then(Weak::upgrade) {
-            return Ok(live);
+        Ok(self.layer_provider(name, true)?)
+    }
+
+    /// The provider of layer `name`, shared as [`Storage::layer`] describes.
+    /// A missing layer is created when `create`, else `NoSuchLayer`.
+    pub(crate) fn layer_provider(
+        self: &Arc<Self>,
+        name: &str,
+        create: bool,
+    ) -> Result<Arc<LayerProvider>, StorageError> {
+        let mut layers = lock(&self.layers);
+        while let Some(w) = layers.get(name) {
+            if let Some(live) = w.upgrade() {
+                return Ok(live);
+            }
+            // Its last reference is gone but its `Drop` is still committing.
+            layers = self
+                .layers_gone
+                .wait(layers)
+                .unwrap_or_else(|e| e.into_inner());
         }
         let id = match self.catalog.layer_id(name)? {
             Some(id) => id,
-            None => self.catalog.create_layer(name)?,
+            None if create => self.catalog.create_layer(name)?,
+            None => return Err(StorageError::NoSuchLayer(name.to_owned())),
         };
         let p = Arc::new(LayerProvider::new(Arc::clone(self), name.to_owned(), id));
-        layers.retain(|_, w| w.strong_count() > 0);
         layers.insert(name.to_owned(), Arc::downgrade(&p));
         Ok(p)
     }
 
-    /// The names of the layers with a live provider, sorted.
+    /// Called at the end of `LayerProvider::drop`: removes `p`'s registry
+    /// entry (if it is still `p`'s) and wakes waiters.
+    pub(crate) fn layer_dropped(&self, name: &str, p: *const LayerProvider) {
+        let mut layers = lock(&self.layers);
+        if layers
+            .get(name)
+            .is_some_and(|w| std::ptr::eq(w.as_ptr(), p))
+        {
+            layers.remove(name);
+        }
+        drop(layers);
+        self.layers_gone.notify_all();
+    }
+
+    /// The names of the layers with a provider, sorted: live, or dropped but
+    /// still finishing its last commit.
     pub fn layers_in_use(&self) -> Vec<String> {
-        let Ok(layers) = self.layers.lock() else {
-            return Vec::new();
-        };
-        let mut names: Vec<String> = layers
-            .iter()
-            .filter(|(_, w)| w.strong_count() > 0)
-            .map(|(n, _)| n.clone())
-            .collect();
+        let mut names: Vec<String> = lock(&self.layers).keys().cloned().collect();
         names.sort();
         names
     }

@@ -347,7 +347,7 @@ impl LayerProvider {
     /// namespace operation of this layer waits out the store's and redb's
     /// fsyncs. A flush-epoch design (rows tagged with the store flush that
     /// covers them) would let them proceed; that is future work.
-    fn durable_point(&self) -> Result<(), i32> {
+    pub(crate) fn durable_point(&self) -> Result<(), i32> {
         let _ns = lock(&self.ns)?;
         let s = &self.storage;
         s.store
@@ -691,7 +691,8 @@ impl LayerProvider {
 
 impl Drop for LayerProvider {
     /// Commits whatever handles were left open and runs a last durable
-    /// point, which also deletes doomed files.
+    /// point, which also deletes doomed files; then leaves the storage's
+    /// layer registry, so the layer counts as in use until this finishes.
     fn drop(&mut self) {
         let open: Vec<Arc<FileCell>> = match self.handles.lock() {
             Ok(h) => h.values().filter_map(|of| of.cell.clone()).collect(),
@@ -705,6 +706,12 @@ impl Drop for LayerProvider {
         if let Err(e) = self.durable_point() {
             tracing::warn!(layer = %self.name, status = e, "layer close: durable point failed");
         }
+        #[cfg(test)]
+        if let Some(hook) = crate::cached::lock(&self.storage.drop_hook).take() {
+            hook();
+        }
+        // Only now may the layer be deleted or get a new provider.
+        self.storage.layer_dropped(&self.name, self);
     }
 }
 
@@ -722,6 +729,8 @@ mod tests {
     use crate::storage::Storage;
 
     use super::LayerProvider;
+    #[cfg(not(windows))]
+    use crate::test_util::snapshot;
 
     const BS: u64 = 4096;
 
@@ -930,24 +939,6 @@ mod tests {
         assert_eq!(p.getattr(at("e/f.txt")).unwrap().unwrap().size, 6);
         assert!(p.getattr(at("d/f.txt")).unwrap().is_none());
         assert!(p.getattr(at("d")).unwrap().is_none());
-    }
-
-    /// Copies the storage directory as it is on disk right now: what a process
-    /// killed at this instant leaves behind. redb keeps non-durable commits out of
-    /// the file's committed state, so a row that was never made durable is absent
-    /// from the copy.
-    #[cfg(not(windows))]
-    fn snapshot(from: &std::path::Path, to: &std::path::Path) {
-        std::fs::create_dir_all(to).unwrap();
-        for e in std::fs::read_dir(from).unwrap() {
-            let e = e.unwrap();
-            let dest = to.join(e.file_name());
-            if e.file_type().unwrap().is_dir() {
-                snapshot(&e.path(), &dest);
-            } else {
-                std::fs::copy(e.path(), dest).unwrap();
-            }
-        }
     }
 
     /// Opens a kill-time copy of `d`'s storage and its layer `name`.
