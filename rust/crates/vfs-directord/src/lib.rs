@@ -275,6 +275,7 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     }
 
     let spec = match ty.as_str() {
+        "layer" => vfs_control::SourceSpec::Layer { name: path },
         "disk" => vfs_control::SourceSpec::Disk { path },
         "zip" => vfs_control::SourceSpec::Zip { path },
         "http" => vfs_control::SourceSpec::Http { url: path },
@@ -290,6 +291,7 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
         // about a session (where its writes land), so it gets its own flag
         // rather than a magic suffix on this one — see `--write-layer`.
         write_layer: false,
+        cache_key: None,
     })
 }
 
@@ -302,13 +304,20 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
 /// 0 (the CLI has no syntax for naming another root), always mounted at the
 /// root (the upper covers the whole root by construction).
 pub fn write_layer_flag_entry(path: &str) -> vfs_control::SourceEntry {
-    vfs_control::SourceEntry {
-        spec: vfs_control::SourceSpec::Disk {
+    let spec = match path.strip_prefix("layer:") {
+        Some(name) => vfs_control::SourceSpec::Layer {
+            name: name.to_string(),
+        },
+        None => vfs_control::SourceSpec::Disk {
             path: path.to_string(),
         },
+    };
+    vfs_control::SourceEntry {
+        spec,
         mount: "/".to_string(),
         root: 0,
         write_layer: true,
+        cache_key: None,
     }
 }
 
@@ -406,7 +415,7 @@ async fn configure_session(
     cfg: &vfs_control::SessionConfig,
 ) -> Result<Option<i32>, String> {
     use vfs_control::pb::{
-        source_spec, AddSourceReq, DeclareRootReq, DiskSource, HttpSource, RemoteSource,
+        source_spec, AddSourceReq, DeclareRootReq, DiskSource, HttpSource, LayerSource, RemoteSource,
         SourceSpec as PbSource, ZipSource,
     };
     let session_id = session_id.to_string();
@@ -457,6 +466,9 @@ async fn configure_session(
                     endpoint: endpoint.clone(),
                 })
             }
+            vfs_control::SourceSpec::Layer { name } => {
+                source_spec::Kind::Layer(LayerSource { name: name.clone() })
+            }
             // No `source.proto` `Kind::Memory` exists yet — the daemon's
             // gRPC control plane has no wire shape for an inline name→bytes
             // map. `vfs_source::build_provider` and `vfs_embed::MemoryProvider`
@@ -479,6 +491,7 @@ async fn configure_session(
                 layer: layer as i32,
                 root: entry.root,
                 write_layer: entry.write_layer,
+                cache_key: entry.cache_key.clone().unwrap_or_default(),
             })
             .await
             .map_err(|e| format!("AddSource: {e}"))?;
@@ -723,5 +736,21 @@ mod tests {
             err.contains('#') && err.contains("layer"),
             "error should name the removed '#LAYER' syntax: {err}"
         );
+    }
+    #[test]
+    fn parse_source_flag_layer() {
+        let e = parse_source_flag("layer:prof").unwrap();
+        assert_eq!(e.spec, vfs_control::SourceSpec::Layer { name: "prof".into() });
+        assert_eq!(e.mount, "/");
+        assert!(!e.write_layer);
+    }
+
+    #[test]
+    fn write_layer_flag_entry_layer_prefix_builds_a_layer() {
+        let e = write_layer_flag_entry("layer:prof");
+        assert_eq!(e.spec, vfs_control::SourceSpec::Layer { name: "prof".into() });
+        assert!(e.write_layer);
+        let d = write_layer_flag_entry("C:/scratch");
+        assert!(matches!(d.spec, vfs_control::SourceSpec::Disk { .. }));
     }
 }

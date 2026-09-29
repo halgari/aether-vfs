@@ -264,6 +264,7 @@ async fn stats_rpc_reports_sessions_and_cache() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .unwrap();
@@ -325,6 +326,7 @@ async fn stats_rpc_reports_open_counts_after_session_activity() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .unwrap();
@@ -401,6 +403,7 @@ async fn add_zip_source_via_grpc() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource zip");

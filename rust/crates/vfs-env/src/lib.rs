@@ -106,6 +106,9 @@ pub const STATE_DIR: &str = "VFS_STATE_DIR";
 /// into `~/.local/share/Steam/compatibilitytools.d`, and not touching that is
 /// the point of acquiring runtimes ourselves.
 pub const HOME: &str = "VFS_HOME";
+/// Directory of the daemon's persistent storage (write layers and the block
+/// cache). Defaults to `$VFS_HOME/storage`.
+pub const STORAGE_DIR: &str = "VFS_STORAGE_DIR";
 /// Absolute path of the image to launch, normally the staged EXE. The shim also
 /// derives the staging directory from this, and serves that directory as an
 /// alias for the virtual root.
@@ -352,6 +355,7 @@ pub const ALL: &[Var] = &[
     Var { name: VIRTUAL_ROOTS, kind: Kind::Handshake, default: "none (root 0 only)" },
     Var { name: STATE_DIR, kind: Kind::Handshake, default: "session state dir" },
     Var { name: HOME, kind: Kind::Handshake, default: "$XDG_DATA_HOME/aether-vfs" },
+    Var { name: STORAGE_DIR, kind: Kind::Behaviour, default: "$VFS_HOME/storage" },
     Var { name: LAUNCH_IMAGE, kind: Kind::Handshake, default: "none; staging derives it" },
     Var { name: DISCOVERY_PATH, kind: Kind::Handshake, default: "platform default" },
     Var { name: READY_TIMEOUT_SECS, kind: Kind::Behaviour, default: "built-in timeout" },

@@ -359,6 +359,7 @@ async fn a_write_layer_declared_over_grpc_gives_the_session_copy_on_write() {
             layer: 0,
             root: 0,
             write_layer: false,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource (archive)");
@@ -382,6 +383,7 @@ async fn a_write_layer_declared_over_grpc_gives_the_session_copy_on_write() {
             layer: 0,
             root: 0,
             write_layer: true,
+            cache_key: String::new(),
         })
         .await
         .expect("AddSource (write layer)");
@@ -425,6 +427,7 @@ async fn a_write_layer_declared_over_grpc_gives_the_session_copy_on_write() {
             layer: 0,
             root: 0,
             write_layer: true,
+            cache_key: String::new(),
         })
         .await
         .expect_err("a zip cannot be a write layer");
@@ -444,6 +447,7 @@ async fn a_write_layer_declared_over_grpc_gives_the_session_copy_on_write() {
             layer: 0,
             root: 0,
             write_layer: true,
+            cache_key: String::new(),
         })
         .await
         .expect_err("a write layer cannot mount at a sub-path");
@@ -467,6 +471,7 @@ async fn a_write_layer_declared_over_grpc_gives_the_session_copy_on_write() {
                 layer: 0,
                 root: 0,
                 write_layer: is_write_layer,
+                cache_key: String::new(),
             })
             .await
             .expect_err("an unknown session cannot take a source");

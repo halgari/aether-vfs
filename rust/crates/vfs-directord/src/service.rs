@@ -11,7 +11,7 @@ use tonic::{Request, Response, Status};
 use vfs_control::pb::director_server::Director;
 use vfs_control::pb::{
     launch_event, source_spec, AddSourceReq, CreateSessionReq, DeclareRootReq, Empty, HealthReq,
-    HealthResp, LaunchEvent, LaunchReq, RejectedWrite, Session, SessionList, SourceRef, StatsResp,
+    HealthResp, LaunchEvent, LaunchReq, LayerCount, LayerList, LayerNameReq, LayerPathReq, RejectedWrite, Session, SessionList, SourceRef, StatsResp,
     TeardownReq,
 };
 use vfs_control::SourceSpec;
@@ -70,6 +70,11 @@ impl Director for DirectorService {
         let r = req.into_inner();
         let spec = pb_to_source_spec(r.source.as_ref())
             .map_err(Status::invalid_argument)?;
+        if matches!(spec, SourceSpec::Layer { .. }) {
+            return Err(Status::unimplemented(
+                "layer sources are not yet supported (storage lands in Task 7)",
+            ));
+        }
         // build_provider may block (remote connect); run off the async executor.
         let backend = tokio::task::spawn_blocking(move || build_provider(&spec))
             .await
@@ -240,7 +245,33 @@ impl Director for DirectorService {
             opens_ok,
             opens_err,
             rejected_writes,
+            store_pack_bytes: 0,
+            store_live_bytes: 0,
+            cache_logical_bytes: 0,
+            layers: 0,
         }))
+    }
+
+    async fn list_layers(&self, _req: Request<Empty>) -> Result<Response<LayerList>, Status> {
+        Err(Status::unimplemented("storage lands in Task 7"))
+    }
+
+    async fn export_layer(
+        &self,
+        _req: Request<LayerPathReq>,
+    ) -> Result<Response<LayerCount>, Status> {
+        Err(Status::unimplemented("storage lands in Task 7"))
+    }
+
+    async fn import_layer(
+        &self,
+        _req: Request<LayerPathReq>,
+    ) -> Result<Response<LayerCount>, Status> {
+        Err(Status::unimplemented("storage lands in Task 7"))
+    }
+
+    async fn delete_layer(&self, _req: Request<LayerNameReq>) -> Result<Response<Empty>, Status> {
+        Err(Status::unimplemented("storage lands in Task 7"))
     }
 }
 
@@ -287,6 +318,9 @@ fn pb_to_source_spec(src: Option<&vfs_control::pb::SourceSpec>) -> Result<Source
         }),
         Some(source_spec::Kind::Remote(r)) => Ok(SourceSpec::Remote {
             endpoint: r.endpoint.clone(),
+        }),
+        Some(source_spec::Kind::Layer(l)) => Ok(SourceSpec::Layer {
+            name: l.name.clone(),
         }),
         None => Err("source.kind is required".into()),
     }
