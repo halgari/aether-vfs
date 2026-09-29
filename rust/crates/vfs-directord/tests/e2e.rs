@@ -3917,6 +3917,102 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
     server.abort();
 }
 
+/// A rooted launch on Windows: `{Game}\fixture.exe` and the same image spelled
+/// as an absolute path inside root 0's location both resolve to the graph-only
+/// `fixture.exe` (a copy living only in the disk source, absent from `loc`),
+/// which the session stages, and the launched process reads `hello.txt` through
+/// the injected shim at `<loc>\hello.txt`.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
+    let _guard = LAUNCH_LOCK.lock().await;
+    ensure_inject_artifacts();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let svc = DirectorService::new(SessionRegistry::new());
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // The disk source holds a COPY of the fixture plus hello.txt.
+    let content = tempfile::tempdir().expect("content tempdir");
+    std::fs::copy(
+        locate_artifact("vfs-fixture-read.exe"),
+        content.path().join("fixture.exe"),
+    )
+    .expect("copy fixture");
+    std::fs::write(content.path().join("hello.txt"), b"hello").unwrap();
+
+    // Root 0's location: a fresh path that does not exist yet (the session
+    // creates it), so fixture.exe is graph-only relative to it.
+    let base = tempfile::tempdir().expect("base tempdir");
+    let loc = base.path().join("Game").to_string_lossy().replace('/', "\\");
+    assert!(!Path::new(&loc).exists());
+
+    let cfg = SessionConfig {
+        session: vfs_control::SessionMeta {
+            name: Some("rooted-launch".into()),
+        },
+        roots: vec![vfs_control::RootEntry {
+            id: 0,
+            name: "Game".into(),
+            path: loc.clone(),
+        }],
+        sources: vec![vfs_control::SourceEntry {
+            spec: vfs_control::SourceSpec::Disk {
+                path: content.path().to_string_lossy().into_owned(),
+            },
+            mount: "/".into(),
+            root: 0,
+            write_layer: false,
+        }],
+        launch: None,
+        ..Default::default()
+    };
+
+    let mut client = connect(&format!("{addr}")).await.expect("connect");
+    let (id, _) = apply_session_config(&mut client, &cfg)
+        .await
+        .expect("apply_session_config");
+
+    let launch_with = |exec: String| vfs_control::LaunchConfig {
+        exec,
+        args: vec![],
+        wait: true,
+        env: [
+            (
+                "VFS_FIXTURE_PATH".to_string(),
+                format!(r"{loc}\hello.txt"),
+            ),
+            ("VFS_FIXTURE_EXPECT".to_string(), "5".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let by_name = vfs_directord::run_launch(&mut client, &id, &launch_with(r"{Game}\fixture.exe".into()))
+        .await
+        .expect("launch by root name");
+    assert_eq!(by_name, Some(0), "{{Game}}\\fixture.exe should stage and exit 0");
+
+    let by_path = vfs_directord::run_launch(&mut client, &id, &launch_with(format!(r"{loc}\fixture.exe")))
+        .await
+        .expect("launch by absolute path");
+    assert_eq!(by_path, Some(0), "absolute path inside root 0 should stage and exit 0");
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
+        .await
+        .expect("teardown");
+    server.abort();
+}
+
 fn toml_string(s: &str) -> String {
     // Quote a path for TOML (escape backslashes).
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
