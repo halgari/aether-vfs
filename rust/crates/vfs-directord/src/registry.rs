@@ -912,6 +912,7 @@ mod root_graph_tests {
                     mount: "/".into(),
                     root: 0,
                     write_layer: false,
+                    cache_key: None,
                 },
                 SourceEntry {
                     spec: SourceSpec::Disk {
@@ -920,6 +921,7 @@ mod root_graph_tests {
                     mount: "/".into(),
                     root: 0,
                     write_layer: true,
+                    cache_key: None,
                 },
             ],
             ..Default::default()
@@ -1014,6 +1016,7 @@ root = 1
                     mount: "/".into(),
                     root: 0,
                     write_layer: false,
+                    cache_key: None,
                 },
                 SourceEntry {
                     spec: SourceSpec::Disk {
@@ -1022,6 +1025,7 @@ root = 1
                     mount: "/".into(),
                     root: 0,
                     write_layer: false,
+                    cache_key: None,
                 },
             ],
             ..Default::default()

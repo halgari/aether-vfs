@@ -50,6 +50,9 @@ pub fn build_provider(spec: &SourceSpec) -> Result<Arc<dyn Provider>, BuildError
                 .map_err(|e| BuildError::Open(format!("{path}: {e:?}")))?;
             Ok(Arc::new(p))
         }
+        SourceSpec::Layer { .. } => Err(BuildError::Unsupported(
+            "a layer source needs the daemon's storage",
+        )),
         SourceSpec::Http { .. } => Err(BuildError::Unsupported("http source (later milestone)")),
         SourceSpec::Remote { endpoint } => {
             let p = RemoteProvider::connect_blocking(endpoint)
@@ -229,5 +232,13 @@ mod tests {
             .unwrap();
         assert_eq!(st.size, 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_layer_source_needs_the_daemons_storage() {
+        let err = build_provider(&SourceSpec::Layer { name: "p".into() })
+            .err()
+            .expect("layer has no standalone provider");
+        assert!(err.to_string().contains("a layer source needs the daemon's storage"));
     }
 }
