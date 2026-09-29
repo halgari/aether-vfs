@@ -14,15 +14,15 @@ members = [
   "crates/vfs-control",
   "crates/vfs-source",
   "crates/vfs-compose",
-  "crates/vfs-cache",
   # Deduplicating, compressing block store (redb index + zstd packs),
-  # imported with its history from aether-vfs-block-store. It replaces the
-  # vfs-cache layer in a later change; nothing depends on it yet. Edition
-  # 2024 and MIT OR Apache-2.0, as it was upstream.
+  # imported with its history from aether-vfs-block-store. vfs-storage below
+  # is its one consumer. Edition 2024 and MIT OR Apache-2.0, as it was
+  # upstream.
   "crates/vfs-block-store",
   # The block store as pull-through cache and layer storage: one BlockStore,
-  # a redb catalog beside it and a RAM tier of decompressed blocks. Replaces
-  # vfs-cache. See docs/superpowers/specs/2026-09-29-vfs-storage-design.md.
+  # a redb catalog beside it and a RAM tier of decompressed blocks: the
+  # daemon's pull-through cache and its named write layers. See
+  # docs/superpowers/specs/2026-09-29-vfs-storage-design.md.
   "crates/vfs-storage",
   "crates/vfs-directord",
   "crates/vfs-ipc",

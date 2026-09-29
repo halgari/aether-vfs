@@ -261,9 +261,9 @@ and in `vfs-compose` today. To avoid documenting aspiration as fact:
   `capabilities()` always reports `Access::Read` regardless of what its base
   provider declares); `router`'s `readdir` is single-dispatch (it returns one
   route's listing, not the union across routes the design calls for).
-  `seekable`, `cached` (as a combinator — `vfs-cache` has a `CachingProvider`
-  today, but not as a `vfs-compose` primitive), `casefold`, and `readonly` are
-  not implemented.
+  `seekable`, `cached` (as a combinator — `vfs-storage` has
+  `Storage::cached` today, but not as a `vfs-compose` primitive), `casefold`,
+  and `readonly` are not implemented.
 - **No registry.** There is no `register_provider` and no `type` string →
   factory mapping; providers are constructed directly in Rust.
 - **No `vfs-embed` and no Python binding.** Those are Stage 4 in the design

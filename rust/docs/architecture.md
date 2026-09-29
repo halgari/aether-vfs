@@ -87,7 +87,7 @@ snapshot of that tree, with a seqlock so a reader never observes a torn update.
 Keeping this layer pure is what makes the merge semantics testable without a
 game, a driver, or even a filesystem.
 
-### 3.2 Providers and composition — `vfs-provider`, `vfs-source`, `vfs-zip`, `vfs-compose`, `vfs-cache`
+### 3.2 Providers and composition — `vfs-provider`, `vfs-source`, `vfs-zip`, `vfs-compose`, `vfs-storage`
 
 Everything that can supply bytes implements the `Provider` trait
 (`vfs-provider`), addressed by `(RootId, relative path)` via `VPath` rather
@@ -136,10 +136,14 @@ never cached).
   `Access::Read` and rejects `OPEN_WRITE`; copy-up writes are a later stage),
   `subdir` (rewrite addressing to expose a subtree as a root), and `inline`
   (an in-memory provider used by tests).
-- **`vfs-cache`**'s `CachingProvider` wraps any provider with a block cache
-  (RAM LRU, optional disk tier); its capabilities are derived from the inner
-  provider via `Capabilities::cached()` — access passes through, `slow` is
-  cleared.
+- **`vfs-storage`** owns one `vfs-block-store` block store (deduplicated,
+  compressed packs), a redb catalog beside it and a RAM tier of decompressed
+  blocks, and serves two things from it: `Storage::cached` wraps an
+  immutable, slow source (a remote one) as a pull-through cache keyed by a
+  stable `SourceKey`, and `Storage::layer` hands out a named, persistent
+  read-write layer — a session's write layer that survives the session. The
+  daemon opens one `Storage` per process (`vfs daemon --storage-dir`). See
+  [the vfs-storage design](../../docs/superpowers/specs/2026-09-29-vfs-storage-design.md).
 - **`vfs-source`** turns a declarative spec into a live provider, including
   `RemoteProvider`, which forwards every op to an out-of-process gRPC plugin
   — so a provider can be written in any language.
@@ -549,7 +553,8 @@ observer before concluding the process is idle.
 | `vfs-win` | Windows shared memory and events |
 | `vfs-zip` | ZIP64 central directory, Stored windows, `ZipProvider` |
 | `vfs-compose` | read-only provider combinators: layered, overlay, router, subdir, inline |
-| `vfs-cache` | block cache, RAM LRU + optional disk tier, as a `Provider` wrapper |
+| `vfs-storage` | pull-through cache for slow sources + named persistent layers, on `vfs-block-store` |
+| `vfs-block-store` | deduplicating, compressing block store (redb index + zstd packs) |
 | `vfs-source` | declarative spec → provider, incl. `RemoteProvider` gRPC plugins |
 | `vfs-director` | FUSE kernel, session, staging, launch |
 | `vfs-directord` | daemon + CLI; `skyrim-live` harness |

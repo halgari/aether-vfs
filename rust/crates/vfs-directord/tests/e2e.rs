@@ -1098,9 +1098,12 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
 ///   a lone layer unwrapped, so a single-source session builds no
 ///   `LayeredProvider` at all. Hence three sources here — archive, then two
 ///   mod directories — which is also what an ordinary modded game looks like.
-/// - **`CachingProvider` under the overlay.** Every registry source is cache-
-///   wrapped; `skyrim-live` mounts raw. So a copy-up seeded *through the block
-///   cache* — a cached read feeding a write — had never happened live.
+/// - **The registry's own source wrapping under the overlay.** This bullet
+///   was written when every registry source went through `vfs-cache`'s
+///   `CachingProvider`, so a copy-up seeded through the block cache had never
+///   happened live. That crate is gone: `vfs-storage` caches only slow,
+///   immutable sources, so the archive and directories here are mounted as
+///   they are, exactly as the daemon mounts them.
 /// - **The whole declaration path**, from `AddSourceReq.write_layer` to a real
 ///   `fopen(…, "r+b")` in an injected process.
 ///

@@ -72,7 +72,8 @@ workspace and carries its own profile; `vfs-protocol/tests/unwind.rs` pins both.
 | `vfs-control` | gRPC control proto + scenario config |
 | `vfs-source` | Source builders + out-of-proc SourceService |
 | `vfs-compose` | Layered / router / overlay composition |
-| `vfs-cache` | Block cache |
+| `vfs-storage` | Pull-through cache + named write layers, on `vfs-block-store` |
+| `vfs-block-store` | Deduplicating, compressing block store |
 | `vfs-director` | Kernel + Session + inject launch |
 
 ## License

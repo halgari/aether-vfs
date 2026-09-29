@@ -2012,13 +2012,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vfs-cache"
-version = "0.1.0"
-dependencies = [
- "vfs-provider",
-]
-
-[[package]]
 name = "vfs-compose"
 version = "0.1.0"
 dependencies = [
