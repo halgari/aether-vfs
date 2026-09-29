@@ -105,10 +105,13 @@ fn default_true() -> bool {
     true
 }
 
-/// One `[[root]]` entry: a real filesystem location the session virtualizes,
-/// served by exactly one provider. `id` is what travels the hot path and the
-/// wire; `name` exists for config, logs, and error messages. `path` is the
-/// host directory this root maps onto.
+/// One `[[root]]` entry: a location the session virtualizes, served by
+/// exactly one provider. `id` is what travels the hot path and the wire.
+/// `name` is what `{Name}` at the start of a launch path refers to (unique
+/// within a session, case-insensitively). `path` is the root's **location as
+/// the launched program sees it**: a host path on Windows; on Linux a
+/// `C:\…` path inside the session's Wine prefix, which the launch backs with a
+/// host directory linked there.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RootEntry {
     pub id: u32,

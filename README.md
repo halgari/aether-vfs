@@ -53,8 +53,10 @@ cargo test -p vfs-embed --test proton_launch -- --ignored
 The first `bin/build-windows` downloads the MSVC CRT and Windows SDK via
 `cargo-xwin` (accepting Microsoft's license). Wine also needs a 32-bit loader
 (`lib32-glibc`, `lib32-gcc-libs` on Arch). Windows-only crates (`vfs-inject`,
-`vfs-shim`, `vfs-directord`, …) do not build for a Linux *host*, so a bare
+`vfs-shim`, …) do not build for a Linux *host*, so a bare
 `cargo build --workspace` on Linux fails; build the Linux crates by name.
+`vfs-directord` — the `vfs` CLI and daemon — is one of them and builds on
+Linux (its `skyrim-live` harness is Windows-only and just exits there).
 
 ### Daemon + CLI (`vfs`)
 
@@ -104,10 +106,12 @@ wait      = true
 #### Root locations and `vfs exec` (Linux under Proton, or Windows)
 
 A `[[root]]` gives a root an `id`, a `name` and a `path`: the location the
-program sees. On Linux that is a `C:\...` path inside the session's Wine prefix
-(a symlink the daemon creates in `drive_c`, so the prefix holds links, not
-content). Root 0 may be declared like any other. Sources attach to a root with
-`root = <id>`.
+program sees. On Linux that is a `C:\...` path inside the session's Wine prefix:
+a symlink into `drive_c` that the session's first launch creates (and the
+session removes when it goes down), so the prefix holds links, not content. A
+location Wine cannot hold that way (another drive, a host path, `C:\` itself,
+`..`) is refused by `vfs up`. Root 0 may be declared like any other. Sources
+attach to a root with `root = <id>`.
 
 ```toml
 [session]
@@ -152,11 +156,24 @@ vfs down --session demo
 `vfs exec` takes the program in one of three forms: `{RootName}\rel` (a path
 under a named root), an absolute path (resolved to the root that contains it,
 and staged to real disk if only the composed graph serves it), or a path
-relative to root 0. `--no-wait` returns once the program has started.
+relative to root 0. A path containing `..` is refused in every form — on
+Windows too, where an absolute image with `..` used to be launched as given.
+On Windows `--no-wait` returns once the program has started; on Linux it is
+refused, because a Proton launch always waits for the program to exit.
+
+One live session per name: a second `vfs up` of the same config is refused
+until the first is down, and a config that fails half-way leaves no session
+behind. `vfs down` is refused while a launch in that session is still running.
+The one-shot `vfs launch` takes its session down once a waited launch returns,
+and a daemon stopped with Ctrl-C / SIGTERM takes every session down before it
+exits.
 
 A named session keeps a persistent Wine prefix at
-`$VFS_HOME/sessions/<name>/prefix`, so later `vfs exec` calls reuse it. An
-existing real directory at a root location is refused, never replaced.
+`$VFS_HOME/sessions/<name>/prefix`, so later `vfs exec` calls reuse it; an
+unnamed session's prefix is deleted when the session goes down. An existing
+real directory at a root location is refused, never replaced — and so is a
+symlink aether-vfs did not create (the ones it did are listed in the prefix's
+`.aether-vfs-links`).
 
 ## Embedding
 
