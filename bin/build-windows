@@ -24,10 +24,25 @@ if [[ "${1:-}" == "--release" ]]; then
 fi
 
 export XWIN_ACCEPT_LICENSE=1
-cargo xwin build "${flags[@]}" --target "$target" \
+
+# `libudis86-sys` (reached through `retour`, i.e. the shim) calls `memset`
+# without including string.h and papers over it with the GCC-only flag
+# `-includestring.h`. cl.exe tolerates the implicit declaration; clang-cl drops
+# the unknown flag and then rejects it as an error. Demote that one diagnostic
+# back to a warning. A forced include (`/FIstring.h`) is *not* a substitute: it
+# reaches every C compile for the target, including blake3's preprocessed
+# assembly, which it breaks.
+#
+# Set here rather than in .cargo/config.toml so a native Windows build — real
+# cl.exe, which would warn about the unknown flag — never sees it. The hyphenated
+# name is deliberate: cargo-xwin sets the underscored
+# `CFLAGS_x86_64_pc_windows_msvc` itself, and cc-rs reads both.
+# Bash cannot export a hyphenated name, so it goes in through `env`.
+cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declaration")
+"${cross[@]}" cargo xwin build "${flags[@]}" --target "$target" \
   -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read
 # vfs-payload is its own workspace (panic=abort, no CRT), so it builds apart.
-cargo xwin build "${flags[@]}" --target "$target" \
+"${cross[@]}" cargo xwin build "${flags[@]}" --target "$target" \
   --manifest-path crates/vfs-payload/Cargo.toml --target-dir target
 
 src="target/$target/$profile"
