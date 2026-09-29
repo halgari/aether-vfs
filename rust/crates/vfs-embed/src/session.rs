@@ -1272,7 +1272,6 @@ impl Session {
     /// On unix an absolute **host** path is first rewritten to its remainder
     /// under `virtual_root` (an accepted form before roots had locations), or
     /// refused if it is not under it.
-    #[cfg_attr(not(unix), allow(dead_code))] // the Windows `launch` body adopts it next
     fn resolve_launch_image(&self, opts: &LaunchOpts) -> Result<ResolvedImage, String> {
         #[cfg(unix)]
         let image: String = {
@@ -1301,6 +1300,17 @@ impl Session {
                 Ok(ResolvedImage::Outside(p))
             }
             ImageTarget::InRoot { root, vpath } => {
+                // A component with a drive (`C:foo.exe`, drive-relative, which
+                // `classify_image` calls relative) would make `Path::join`
+                // replace the whole base on Windows and escape the root.
+                if vpath.split('/').any(|c| c.contains(':')) {
+                    return Err(format!(
+                        "launch: {:?} has a path component containing ':' (a drive-relative \
+                         name); name the image by a plain path inside a root, or give it as \
+                         an absolute path",
+                        opts.image
+                    ));
+                }
                 let base = self
                     .root_backing_dir(root)
                     .ok_or_else(|| format!("launch: root {root} has no backing directory"))?;
@@ -1317,7 +1327,8 @@ impl Session {
                 if !served {
                     return Err(format!(
                         "launch: {:?} resolves to root {root} vpath {vpath:?}, which is neither \
-                         a real file at {} nor served by that root",
+                         a real file at {} nor served by that root, so there is nothing to \
+                         stage",
                         opts.image,
                         host.display()
                     ));
@@ -1365,14 +1376,20 @@ impl Session {
     ///
     /// ## How `image` is resolved
     ///
-    /// Absolute: launched as given.
+    /// By [`crate::image::classify_image`] against [`Session::root_locations`]
+    /// (see [`LaunchOpts::image`]), in one of three forms:
     ///
-    /// Relative: joined onto the virtual root and launched from there if a
-    /// real file exists (a host whose root is a real game directory —
-    /// fixtures, a vanilla install). Otherwise looked up as a **vpath in root
-    /// 0's provider graph**, and if the graph holds it, staged — see below.
-    /// Neither: refused by name, because `CreateProcess` would only fail
-    /// later and less clearly.
+    /// - **Relative**: a vpath in root 0. The real file under the virtual
+    ///   root is launched if there is one (a host whose root is a real game
+    ///   directory — fixtures, a vanilla install); otherwise, if root 0's
+    ///   **provider graph** serves the vpath, it is staged — see below.
+    /// - **Absolute, inside a root's location**: that root's vpath, resolved
+    ///   the same way — the real file in the root's directory, else staged
+    ///   (root 0 only; another root's graph-only image is refused by name).
+    /// - **Absolute, outside every root**: launched as given.
+    ///
+    /// An in-root image that is neither a real file nor served is refused by
+    /// name, because `CreateProcess` would only fail later and less clearly.
     ///
     /// ## Launching an image that is VFS content
     ///
@@ -1422,46 +1439,27 @@ impl Session {
             return Err("LaunchOpts.image is empty — name the image to launch".to_string());
         }
 
-        let root_s = self.virtual_root.to_string_lossy().into_owned();
-        let image_path = Path::new(&opts.image);
-        let target = if image_path.is_absolute() {
-            image_path.to_path_buf()
-        } else {
-            let on_disk = self.virtual_root.join(&opts.image);
-            if on_disk.is_file() {
-                on_disk
-            } else if self
-                .kernel
-                .getattr(RootId::DEFAULT, &opts.image)
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                // VFS content. Write it (and its import closure) out, mount
-                // the staging directory back under the curated graph, and
-                // launch the real file that produces.
-                let also: Vec<&str> = opts.stage_also.iter().map(String::as_str).collect();
-                self.stage_launch(
-                    &KernelSource(Arc::clone(&self.kernel)),
-                    &StageOpts {
-                        exe_vpath: &opts.image,
-                        also: &also,
-                        fallback_dirs: &opts.stage_fallback_dirs,
-                    },
-                )
-                .map_err(|e| format!("launch: staging {:?}: {e}", opts.image))?
-            } else {
-                return Err(format!(
-                    "launch: {:?} resolves to {}, which does not exist — and this session's \
-                     provider graph does not serve it either, so there is nothing to stage. A \
-                     relative LaunchOpts.image must be a real file under the managed root or a \
-                     vpath root 0 serves.",
-                    opts.image,
-                    on_disk.display()
-                ));
-            }
+        // Root 0 may have been declared after `serve`, which created the
+        // managed root it had then; resolving (and staging) needs this one.
+        std::fs::create_dir_all(&self.virtual_root)
+            .map_err(|e| format!("launch: create root {}: {e}", self.virtual_root.display()))?;
+        let target = match self.resolve_launch_image(opts)? {
+            ResolvedImage::InRoot { host, .. } => host,
+            ResolvedImage::Outside(p) => PathBuf::from(p),
         };
         let config_path = self.state_dir.join("shim.cfg");
+        // `serve` wrote `shim.cfg` and the thin config from root 0's location
+        // as it was then; root 0 may have been declared since. Rewrite both
+        // from the current one so the shim is told the root this child sees.
+        let root_s = self.virtual_root.to_string_lossy().into_owned();
+        let overlay_s = self.overlay.to_string_lossy().into_owned();
+        std::fs::write(
+            &config_path,
+            vfs_shim::encode_config_with_overlay(&root_s, &overlay_s, &empty_tree_snapshot()),
+        )
+        .map_err(|e| format!("launch: write {}: {e}", config_path.display()))?;
+        let thin = self.state_dir.join("fuse.cfg");
+        ipc.write_thin_config(&thin, &root_s)?;
         let ready_path = self.state_dir.join("ready.flag");
         let _ = std::fs::remove_file(&ready_path);
 
@@ -1498,7 +1496,6 @@ impl Session {
             .lock()
             .map_err(|_| "launch env lock poisoned".to_string())?;
 
-        let thin = self.state_dir.join("fuse.cfg");
         // Re-published here, not only in `serve`: the launch env lock is held
         // from this point, and a root declared after `serve` (or by another
         // session sharing this process's environment) must reach this child.
@@ -1818,12 +1815,15 @@ impl Drop for Session {
 
 /// What [`Session::resolve_launch_image`] resolved an image to.
 #[derive(Debug)]
-#[cfg_attr(not(unix), allow(dead_code))] // the Windows `launch` body adopts it next
 enum ResolvedImage {
     /// Inside `root`'s location at `vpath`; `host` is the real file backing
     /// it — already there, or just staged into root 0's backing directory.
     InRoot {
+        // The unix body names the child's image by the root's location and
+        // this vpath; the Windows body launches `host` and reads neither.
+        #[cfg_attr(not(unix), allow(dead_code))]
         root: u32,
+        #[cfg_attr(not(unix), allow(dead_code))]
         vpath: String,
         // The Windows body launches `host`; the unix body names the child's
         // image by the root's location instead, so only tests read it there.
@@ -2238,7 +2238,29 @@ mod launch_image_tests {
     fn an_image_no_root_serves_is_refused() {
         let s = Session::new();
         let e = s.resolve_for_test(&LaunchOpts { image: "missing.exe".into(), ..Default::default() }).unwrap_err();
-        assert!(e.contains("missing.exe"), "{e}");
+        // "nothing to stage" is the Windows launch's refusal text, which
+        // `embed_api.rs`'s Windows-only launch test asserts on.
+        assert!(e.contains("missing.exe") && e.contains("nothing to stage"), "{e}");
+    }
+
+    /// A drive-relative `C:foo.exe` is relative to `classify_image`, so it
+    /// lands in root 0 — but on Windows `Path::join` of a component with a
+    /// drive replaces the whole base. Refused on every target, by name, even
+    /// where a file of that name really exists in the root (unix allows it).
+    #[test]
+    fn a_vpath_component_with_a_colon_is_refused_by_name() {
+        let s = Session::new();
+        std::fs::create_dir_all(s.virtual_root().join("bin")).unwrap();
+        if cfg!(unix) {
+            std::fs::write(s.virtual_root().join("C:foo.exe"), bare_pe()).unwrap();
+            std::fs::write(s.virtual_root().join("bin").join("D:x.exe"), bare_pe()).unwrap();
+        }
+        for img in ["C:foo.exe", r"bin\D:x.exe"] {
+            let e = s
+                .resolve_for_test(&LaunchOpts { image: img.into(), ..Default::default() })
+                .unwrap_err();
+            assert!(e.contains(&format!("{img:?}")) && e.contains("':'"), "{img}: {e}");
+        }
     }
 
     #[cfg(unix)]
