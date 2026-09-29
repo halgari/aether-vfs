@@ -97,11 +97,12 @@ fn prepare_session_base(base: &Path) {
     let _ = std::fs::remove_dir_all(base);
 }
 
-/// One live host session plus metadata returned on ListSessions.
+/// One live host session: the [`Session`] and what this host keeps beside
+/// it. Reached through [`SessionRegistry::with_session_mut`], which holds
+/// **only this session's** lock — see [`SessionEntry`].
 pub struct LiveSession {
     pub id: String,
     pub name: String,
-    pub root: PathBuf,
     pub session: Session,
     next_source_id: AtomicU64,
     /// Per-declared-root bookkeeping for rebuild. Keyed by the raw `u32` a
@@ -115,6 +116,13 @@ pub struct LiveSession {
     /// source this host declared but a consequence of launching (Task 4b; see
     /// [`vfs_embed::Session::stage_launch`]).
     roots: HashMap<u32, RootSources>,
+}
+
+/// What `ListSessions`, `{Name}` expansion and name lookup read, kept
+/// **outside** the session's own lock so none of them waits for a launch.
+struct SessionMeta {
+    /// Root 0's location — what the session summary reports as `root`.
+    root: PathBuf,
     /// Each declared root's `[[root]] name`, for `{Name}` launch paths
     /// ([`SessionRegistry::expand_root_name`]). A root declared without a
     /// name has no entry.
@@ -122,6 +130,22 @@ pub struct LiveSession {
     /// Each declared root's location exactly as declared — what a `{Name}`
     /// expands to.
     root_locs: BTreeMap<u32, String>,
+}
+
+/// One registry slot. The map holds these behind an `Arc` so that a
+/// long-running operation on one session — above all a waited launch, which
+/// on Linux lasts as long as the game runs — clones the `Arc` out, **drops the
+/// map lock**, and holds only `live`'s lock while it works. Every other
+/// session, and every command that only reads the registry (`health`,
+/// `sessions`, `stats`, name lookup), proceeds meanwhile.
+///
+/// Lock order, where both are held: map, then `meta` or `live` — never the
+/// map while holding `live`.
+struct SessionEntry {
+    id: String,
+    name: String,
+    meta: Mutex<SessionMeta>,
+    live: Mutex<LiveSession>,
 }
 
 impl LiveSession {
@@ -180,7 +204,7 @@ static SESSION_BASE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Process-wide multi-session table owned by the daemon.
 #[derive(Clone)]
 pub struct SessionRegistry {
-    inner: Arc<Mutex<HashMap<String, LiveSession>>>,
+    inner: Arc<Mutex<HashMap<String, Arc<SessionEntry>>>>,
     next_id: Arc<AtomicU64>,
     cache: Arc<BlockCache>,
 }
@@ -271,22 +295,39 @@ impl SessionRegistry {
             root: root.clone(),
         };
 
-        let live = LiveSession {
+        let entry = SessionEntry {
             id: id.clone(),
-            name,
-            root,
-            session,
-            next_source_id: AtomicU64::new(1),
-            roots: HashMap::new(),
-            root_names: BTreeMap::new(),
-            root_locs: BTreeMap::new(),
+            name: name.clone(),
+            meta: Mutex::new(SessionMeta {
+                root,
+                root_names: BTreeMap::new(),
+                root_locs: BTreeMap::new(),
+            }),
+            live: Mutex::new(LiveSession {
+                id: id.clone(),
+                name,
+                session,
+                next_source_id: AtomicU64::new(1),
+                roots: HashMap::new(),
+            }),
         };
 
         self.inner
             .lock()
             .map_err(|_| "session registry poisoned".to_string())?
-            .insert(id, live);
+            .insert(id, Arc::new(entry));
         Ok(summary)
+    }
+
+    /// The entry for `id`, cloned out so the caller can drop the map lock
+    /// before taking the session's own.
+    fn entry(&self, id: &str) -> Result<Arc<SessionEntry>, String> {
+        self.inner
+            .lock()
+            .map_err(|_| "session registry poisoned".to_string())?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("unknown session {id}"))
     }
 
     /// Add one source to `session_id`, targeting `root` (`0` for every
@@ -308,14 +349,7 @@ impl SessionRegistry {
         layer: i32,
         backend: Arc<dyn Provider>,
     ) -> Result<u64, String> {
-        let source_id = {
-            let mut guard = self
-                .inner
-                .lock()
-                .map_err(|_| "session registry poisoned".to_string())?;
-            let live = guard
-                .get_mut(session_id)
-                .ok_or_else(|| format!("unknown session {session_id}"))?;
+        self.with_session_mut(session_id, |live| {
             let id = live.next_source_id();
             // Wrap with process-wide block cache.
             let cached: Arc<dyn Provider> =
@@ -332,9 +366,8 @@ impl SessionRegistry {
             live.session
                 .set_root_mounts(RootId(root), mounts)
                 .map_err(|st| format!("mount root {root} status {st}"))?;
-            id
-        };
-        Ok(source_id)
+            Ok(id)
+        })
     }
 
     /// Declare the writable layer `root`'s writes land in for `session_id` —
@@ -403,17 +436,25 @@ impl SessionRegistry {
         path: &Path,
         name: &str,
     ) -> Result<(), String> {
-        self.with_session_mut(session_id, |live| {
-            live.session.declare_root(root, path);
-            if !name.is_empty() {
-                live.root_names.insert(root, name.to_string());
-            }
-            live.root_locs.insert(root, path.to_string_lossy().into_owned());
-            if root == 0 {
-                live.root = path.to_path_buf();
-            }
-            Ok(())
-        })
+        let entry = self.entry(session_id)?;
+        entry
+            .live
+            .lock()
+            .map_err(|_| format!("session {session_id} poisoned"))?
+            .session
+            .declare_root(root, path);
+        let mut meta = entry
+            .meta
+            .lock()
+            .map_err(|_| format!("session {session_id} poisoned"))?;
+        if !name.is_empty() {
+            meta.root_names.insert(root, name.to_string());
+        }
+        meta.root_locs.insert(root, path.to_string_lossy().into_owned());
+        if root == 0 {
+            meta.root = path.to_path_buf();
+        }
+        Ok(())
     }
 
     /// The id of the live session `id_or_name` names: an exact session id
@@ -464,70 +505,104 @@ impl SessionRegistry {
         let Some((name, rest)) = exec.strip_prefix('{').and_then(|t| t.split_once('}')) else {
             return Ok(exec.to_string());
         };
-        self.with_session_mut(session_id, |live| {
-            let Some(root) = live
-                .root_names
-                .iter()
-                .find(|(_, n)| n.eq_ignore_ascii_case(name))
-                .map(|(root, _)| *root)
-            else {
-                let names: Vec<&str> = live.root_names.values().map(String::as_str).collect();
-                let names = if names.is_empty() { "none".to_string() } else { names.join(", ") };
-                return Err(format!(
-                    "unknown root name {name}; this session's roots: {names}"
-                ));
-            };
-            let location = live
-                .root_locs
-                .get(&root)
-                .ok_or_else(|| format!("root {root} ({name}) has no declared location"))?;
-            let rest = rest.trim_start_matches(['\\', '/']);
-            if rest.is_empty() {
-                return Ok(location.clone());
-            }
-            Ok(vfs_embed::image::join_location(location, &rest.replace('\\', "/")))
-        })
+        let entry = self.entry(session_id)?;
+        let meta = entry
+            .meta
+            .lock()
+            .map_err(|_| format!("session {session_id} poisoned"))?;
+        let Some(root) = meta
+            .root_names
+            .iter()
+            .find(|(_, n)| n.eq_ignore_ascii_case(name))
+            .map(|(root, _)| *root)
+        else {
+            let names: Vec<&str> = meta.root_names.values().map(String::as_str).collect();
+            let names = if names.is_empty() { "none".to_string() } else { names.join(", ") };
+            return Err(format!("unknown root name {name}; this session's roots: {names}"));
+        };
+        let location = meta
+            .root_locs
+            .get(&root)
+            .ok_or_else(|| format!("root {root} ({name}) has no declared location"))?;
+        let rest = rest.trim_start_matches(['\\', '/']);
+        if rest.is_empty() {
+            return Ok(location.clone());
+        }
+        Ok(vfs_embed::image::join_location(location, &rest.replace('\\', "/")))
     }
 
+    /// Run `f` on session `id` holding **only that session's** lock: the
+    /// registry-wide map lock is released first, so a long `f` (a waited
+    /// launch) blocks nobody but a caller of this same session.
     pub fn with_session_mut<R>(
         &self,
         id: &str,
         f: impl FnOnce(&mut LiveSession) -> Result<R, String>,
     ) -> Result<R, String> {
-        let mut guard = self
-            .inner
+        let entry = self.entry(id)?;
+        let mut live = entry
+            .live
             .lock()
-            .map_err(|_| "session registry poisoned".to_string())?;
-        let live = guard
-            .get_mut(id)
-            .ok_or_else(|| format!("unknown session {id}"))?;
-        f(live)
+            .map_err(|_| format!("session {id} poisoned"))?;
+        f(&mut live)
     }
 
+    /// Every live session's summary. Never waits for a launch: it reads
+    /// only the map and each session's metadata, not the session itself.
     pub fn list(&self) -> Result<Vec<SessionSummary>, String> {
         let guard = self
             .inner
             .lock()
             .map_err(|_| "session registry poisoned".to_string())?;
-        Ok(guard
+        guard
             .values()
-            .map(|s| SessionSummary {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                root: s.root.clone(),
+            .map(|s| {
+                let meta = s
+                    .meta
+                    .lock()
+                    .map_err(|_| format!("session {} poisoned", s.id))?;
+                Ok(SessionSummary {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                    root: meta.root.clone(),
+                })
             })
-            .collect())
+            .collect()
     }
 
+    /// Tear session `id` down: stop serving it and drop it.
+    ///
+    /// **Refused while the session is running a launch** (its lock is held),
+    /// with a message saying so, rather than waiting: on Linux a launch lasts
+    /// as long as the program runs, and a `vfs down` that hangs until the
+    /// game exits looks exactly like a dead daemon. Stop the program, then
+    /// tear the session down.
+    ///
+    /// The session is dropped **after** the map lock is released — dropping
+    /// an anonymous-prefix session stops its `wineserver` and deletes the
+    /// prefix, which must not stall every other command.
     pub fn teardown(&self, id: &str) -> Result<(), String> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| "session registry poisoned".to_string())?;
-        let mut live = guard
-            .remove(id)
-            .ok_or_else(|| format!("unknown session {id}"))?;
-        live.session.stop_serve();
+        let entry = {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|_| "session registry poisoned".to_string())?;
+            let entry = guard
+                .get(id)
+                .ok_or_else(|| format!("unknown session {id}"))?;
+            match entry.live.try_lock() {
+                Ok(mut live) => live.session.stop_serve(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return Err(format!(
+                        "session {id} is running a launch; it can be torn down once the \
+                         program exits"
+                    ))
+                }
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().session.stop_serve(),
+            }
+            guard.remove(id)
+        };
+        drop(entry);
         Ok(())
     }
 
@@ -549,6 +624,10 @@ impl SessionRegistry {
     /// registry), or a test-fixture binary that was never VFS content — is
     /// launched as given; that split is `Session::launch`'s and no longer
     /// re-implemented here.
+    ///
+    /// Holds only this session's lock for the launch (see
+    /// [`Self::with_session_mut`]); the rest of the registry stays usable
+    /// while the program runs.
     pub fn launch(&self, id: &str, opts: LaunchOpts) -> Result<i32, String> {
         self.with_session_mut(id, |live| {
             // The composition is final here and about to be written through
@@ -955,6 +1034,55 @@ root = 1
         assert!(reg.is_empty(), "a refused session must not be registered");
         reg.create("my game".into()).expect("a space is a plain path component");
         reg.create(String::new()).expect("no name: an anonymous prefix");
+    }
+
+    /// A long operation on one session — standing in for a waited launch,
+    /// which on Linux lasts as long as the game runs — must not hold the
+    /// registry: `health`/`sessions` (`len`/`list`), name lookup, `{Name}`
+    /// expansion and other sessions all answer meanwhile, and a teardown of
+    /// the busy session is refused by name instead of hanging.
+    #[test]
+    fn a_long_operation_on_one_session_does_not_block_the_registry() {
+        use std::time::{Duration, Instant};
+        let reg = SessionRegistry::new();
+        let busy = reg.create("busy".into()).unwrap();
+        let loc = if cfg!(windows) { r"C:\vfs-test\Busy" } else { r"C:\Games\Busy" };
+        reg.declare_root(&busy.id, 0, Path::new(loc), "Games").unwrap();
+        let other = reg.create("other".into()).unwrap();
+
+        const HOLD: Duration = Duration::from_millis(1500);
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let reg = reg.clone();
+            let id = busy.id.clone();
+            std::thread::spawn(move || {
+                reg.with_session_mut(&id, |_live| {
+                    held_tx.send(()).unwrap();
+                    std::thread::sleep(HOLD);
+                    Ok(())
+                })
+                .unwrap();
+            })
+        };
+        held_rx.recv().unwrap();
+
+        let start = Instant::now();
+        assert_eq!(reg.len(), 2);
+        assert_eq!(reg.list().unwrap().len(), 2);
+        assert_eq!(reg.resolve_session("busy").unwrap(), busy.id);
+        assert!(reg.expand_root_name(&busy.id, r"{Games}\x.exe").unwrap().ends_with("x.exe"));
+        reg.with_session_mut(&other.id, |_| Ok(())).unwrap();
+        let e = reg.teardown(&busy.id).unwrap_err();
+        assert!(e.contains(&busy.id) && e.contains("running a launch"), "{e}");
+        let waited = start.elapsed();
+        assert!(
+            waited < HOLD / 3,
+            "the registry waited {waited:?} on a session another thread holds"
+        );
+
+        holder.join().unwrap();
+        reg.teardown(&busy.id).expect("torn down once the operation ends");
+        assert_eq!(reg.len(), 1);
     }
 
     fn toml_quote(s: &str) -> String {
