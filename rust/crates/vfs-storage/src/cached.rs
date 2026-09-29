@@ -219,6 +219,8 @@ impl Storage {
     /// empty; either way loads what it has stored into the access log.
     fn cache_acquire(&self, hash: &[u8; 16], size: u64) -> Result<(), StorageError> {
         let id = cache_file_id(hash);
+        // Row, then store file: one pair under the durability gate.
+        let _gate = self.gate_shared();
         let mut counts = lock(&self.cache.open_counts);
         *counts.entry(id).or_insert(0) += 1;
         let r = (|| {
@@ -471,11 +473,17 @@ impl CachedSource {
             .bytes_from_source
             .fetch_add(len as u64, Ordering::Relaxed);
         // The source read succeeded, so a store failure costs only caching.
-        match s.store.write_blocks(&f.id, b, &buf) {
-            Ok(()) => s.touch(&f.hash, len as u64, f.size),
-            Err(e) => {
-                s.cache.store_write_errors.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(error = %e, "writing a fetched block to the store failed");
+        // The block and the logical bytes a later row commit records for it
+        // go in under one shared hold of the durability gate, so a durable
+        // commit never counts a block its store flush did not cover.
+        {
+            let _gate = s.gate_shared();
+            match s.store.write_blocks(&f.id, b, &buf) {
+                Ok(()) => s.touch(&f.hash, len as u64, f.size),
+                Err(e) => {
+                    s.cache.store_write_errors.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(error = %e, "writing a fetched block to the store failed");
+                }
             }
         }
         let d: Arc<[u8]> = buf.into();

@@ -126,6 +126,12 @@ impl LayerProvider {
         }
     }
 
+    /// The storage this layer lives in.
+    #[cfg(test)]
+    pub(crate) fn storage(&self) -> &Storage {
+        &self.storage
+    }
+
     fn st_err(&self, what: &str, e: StorageError) -> i32 {
         let status = e.to_status();
         if status == vfs_provider::ST_IO_ERROR {
@@ -320,7 +326,11 @@ impl LayerProvider {
 
     /// Commits `cell` and, if anything changed, its catalog row's length and
     /// mtime. Called with the cell's state lock held.
+    ///
+    /// The blocks and the row go in under one shared hold of the durability
+    /// gate ([`Storage::gate`]), taken after `state` and before `ns`.
     fn commit(&self, cell: &FileCell, st: &mut FileState) -> Result<(), i32> {
+        let _gate = self.storage.gate_shared();
         if !cell.commit(&self.storage, &self.name, st)? {
             return Ok(());
         }
@@ -341,22 +351,36 @@ impl LayerProvider {
     /// Store flush, then the durable catalog commit, then the store deletes
     /// that commit made safe.
     ///
-    /// Holds `ns` across both fsyncs, so no other file's row update can land
-    /// between the store flush and the durable catalog commit (a row made
-    /// durable without its blocks). The known cost: every other committer and
-    /// namespace operation of this layer waits out the store's and redb's
-    /// fsyncs. A flush-epoch design (rows tagged with the store flush that
-    /// covers them) would let them proceed; that is future work.
-    fn durable_point(&self) -> Result<(), i32> {
-        let _ns = lock(&self.ns)?;
+    /// The flush and the commit run under the exclusive durability gate
+    /// ([`Storage::gate`]), so no layer's or cache's row can land between them
+    /// ahead of its data. `ns` is held only while the doomed list is taken
+    /// (before the fsyncs): every GUID in it had its row removed before the
+    /// commit, which therefore makes the removal durable before the store
+    /// delete (spec §6). GUIDs doomed later wait for the next durable point.
+    pub(crate) fn durable_point(&self) -> Result<(), i32> {
         let s = &self.storage;
-        s.store
-            .flush()
-            .map_err(|e| self.st_err("store flush", e.into()))?;
-        s.catalog
-            .commit_durable()
-            .map_err(|e| self.st_err("catalog commit", e))?;
-        for g in std::mem::take(&mut *lock(&self.doomed)?) {
+        let doomed = {
+            let _gate = s.gate_exclusive();
+            let doomed = {
+                let _ns = lock(&self.ns)?;
+                std::mem::take(&mut *lock(&self.doomed)?)
+            };
+            let flushed = s
+                .store
+                .flush()
+                .map_err(|e| self.st_err("store flush", e.into()))
+                .and_then(|()| {
+                    s.catalog
+                        .commit_durable()
+                        .map_err(|e| self.st_err("catalog commit", e))
+                });
+            if let Err(e) = flushed {
+                lock(&self.doomed)?.extend(doomed);
+                return Err(e);
+            }
+            doomed
+        };
+        for g in doomed {
             let id = layer_file_id(&g);
             s.ram.invalidate_file(&id);
             match s.store.delete(&id) {
@@ -434,6 +458,9 @@ impl Provider for LayerProvider {
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         let p = LPath::parse(p.rel)?;
         let create = flags & OPEN_CREATE != 0;
+        // A create writes a row, then its store file: a pair under the
+        // durability gate, which comes before `ns`.
+        let gate = create.then(|| self.storage.gate_shared());
         let ns = lock(&self.ns)?;
         let (cell, created) = match self.get(&p.folded)? {
             Some(r) if r.kind == KIND_DIR => {
@@ -460,6 +487,7 @@ impl Provider for LayerProvider {
             None => (self.create(&p)?, true),
         };
         drop(ns);
+        drop(gate);
 
         let h = self.track(OpenFile {
             cell: Some(Arc::clone(&cell)),
@@ -691,8 +719,18 @@ impl LayerProvider {
 
 impl Drop for LayerProvider {
     /// Commits whatever handles were left open and runs a last durable
-    /// point, which also deletes doomed files.
+    /// point, which also deletes doomed files; then leaves the storage's
+    /// layer registry, so the layer counts as in use until this finishes.
     fn drop(&mut self) {
+        /// Leaves the registry even if something below panics, so a later
+        /// `Storage::layer(name)` never waits forever for this provider.
+        struct Leave<'a>(&'a LayerProvider);
+        impl Drop for Leave<'_> {
+            fn drop(&mut self) {
+                self.0.storage.layer_dropped(&self.0.name, self.0);
+            }
+        }
+        let _leave = Leave(self);
         let open: Vec<Arc<FileCell>> = match self.handles.lock() {
             Ok(h) => h.values().filter_map(|of| of.cell.clone()).collect(),
             Err(_) => Vec::new(),
@@ -705,6 +743,15 @@ impl Drop for LayerProvider {
         if let Err(e) = self.durable_point() {
             tracing::warn!(layer = %self.name, status = e, "layer close: durable point failed");
         }
+        #[cfg(test)]
+        {
+            let hook = crate::cached::lock(&self.storage.drop_hook).take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        // `_leave` drops last: only now may the layer be deleted or get a new
+        // provider.
     }
 }
 
@@ -722,6 +769,8 @@ mod tests {
     use crate::storage::Storage;
 
     use super::LayerProvider;
+    #[cfg(not(windows))]
+    use crate::test_util::snapshot;
 
     const BS: u64 = 4096;
 
@@ -930,24 +979,6 @@ mod tests {
         assert_eq!(p.getattr(at("e/f.txt")).unwrap().unwrap().size, 6);
         assert!(p.getattr(at("d/f.txt")).unwrap().is_none());
         assert!(p.getattr(at("d")).unwrap().is_none());
-    }
-
-    /// Copies the storage directory as it is on disk right now: what a process
-    /// killed at this instant leaves behind. redb keeps non-durable commits out of
-    /// the file's committed state, so a row that was never made durable is absent
-    /// from the copy.
-    #[cfg(not(windows))]
-    fn snapshot(from: &std::path::Path, to: &std::path::Path) {
-        std::fs::create_dir_all(to).unwrap();
-        for e in std::fs::read_dir(from).unwrap() {
-            let e = e.unwrap();
-            let dest = to.join(e.file_name());
-            if e.file_type().unwrap().is_dir() {
-                snapshot(&e.path(), &dest);
-            } else {
-                std::fs::copy(e.path(), dest).unwrap();
-            }
-        }
     }
 
     /// Opens a kill-time copy of `d`'s storage and its layer `name`.

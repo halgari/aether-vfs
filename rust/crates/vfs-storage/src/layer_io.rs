@@ -10,7 +10,8 @@
 //! lock, never after it (the layer updates the catalog row while it still
 //! holds the state lock after a commit). Everything the namespace side needs
 //! from a cell without taking `state` is mirrored outside it: `live_len`,
-//! `path`, `opens`.
+//! `path`, `opens`. A commit runs under the storage's durability gate, taken
+//! after `state` and before `ns` (the full order is on [`Storage::gate`]).
 //!
 //! **RAM tier.** A layer file's blocks enter the RAM tier only from this module
 //! and only under the cell's `state` lock — a read's fill and a commit's

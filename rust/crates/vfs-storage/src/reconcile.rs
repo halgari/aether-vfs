@@ -1,0 +1,574 @@
+//! Reconciliation of the catalog with the block store at [`Storage::open`]
+//! (spec §6).
+//!
+//! The catalog and the store commit separately. The write paths order them
+//! (a file's row before its store file; the store flush before the durable
+//! catalog commit; a row's removal before its store delete), so after a crash
+//! the two can disagree only in ways this pass repairs:
+//!
+//! - a catalog file whose store file is missing (created, then killed before
+//!   a store flush): recreated empty, its row's length set to 0, and logged;
+//! - a layer file with blocks missing below its length (the store's own
+//!   auto-flush or a compaction made a `set_len` durable before the
+//!   `write_blocks` that followed it): the missing blocks are written as
+//!   zeros, so a layer file never has a missing block (spec §5);
+//! - a layer file row whose length differs from the store's (the row is
+//!   updated after the blocks, and only a durable point publishes it): the
+//!   row takes the store's length, which is what the data says;
+//! - a `b'L'` or `b'C'` store id no catalog row names (a create whose row
+//!   never became durable, or a delete that never reached the store): deleted;
+//! - a cache row whose store file is missing: dropped, so the cache budget
+//!   counts only what the store holds.
+//!
+//! Store ids of any other shape are not `vfs-storage`'s: they are logged and
+//! left alone.
+
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::sync::RwLock;
+
+use vfs_block_store::{BlockStore, CompactOptions};
+
+use crate::catalog::Catalog;
+use crate::ids::{cache_file_id, classify_store_id, layer_file_id, StoreIdKind};
+use crate::storage::{Storage, StorageError};
+
+/// What reconciliation at [`Storage::open`] repaired.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconcileReport {
+    /// Layer files whose data was missing from the store, now empty:
+    /// `(layer name, folded path)`.
+    pub emptied_files: Vec<(String, String)>,
+    /// Layer files that had blocks missing below their length, now filled
+    /// with zeros: `(layer name, folded path)`.
+    pub zero_filled_files: Vec<(String, String)>,
+    /// Layer file rows whose length disagreed with the store's, now set to
+    /// the store's: `(layer name, folded path)`.
+    pub resized_rows: Vec<(String, String)>,
+    /// Store files no catalog row referenced, deleted.
+    pub orphans_deleted: u64,
+    /// Cache rows whose store file was missing, dropped.
+    pub cache_rows_dropped: u64,
+}
+
+/// Blocks per `write_blocks` call when zero-filling.
+const RUN_BLOCKS: u64 = 64;
+
+/// Brings `catalog` and `store` back into agreement (see the module docs),
+/// then flushes the store and commits the catalog durably, in that order,
+/// under the exclusive durability `gate`. Runs before anything else can use
+/// either; `bs` is the store's block size.
+pub(crate) fn reconcile(
+    store: &BlockStore,
+    catalog: &Catalog,
+    gate: &RwLock<()>,
+    bs: u64,
+) -> Result<ReconcileReport, StorageError> {
+    let mut report = ReconcileReport::default();
+    let names: HashMap<u64, String> = catalog
+        .layer_names()?
+        .into_iter()
+        .map(|(n, id)| (id, n))
+        .collect();
+    let mut known: HashSet<[u8; 17]> = HashSet::new();
+
+    for (layer, path, guid) in catalog.all_layer_guids()? {
+        let id = layer_file_id(&guid);
+        known.insert(id);
+        let lname = names
+            .get(&layer)
+            .cloned()
+            .unwrap_or_else(|| format!("#{layer}"));
+        if let Some(info) = store.stat(&id)? {
+            let missing = missing_ranges(&store.cached_ranges(&id)?, info.len);
+            if !missing.is_empty() {
+                tracing::warn!(
+                    layer = %lname, path = %path, ranges = ?missing,
+                    "layer file has blocks missing below its length (a store flush \
+                     landed between its resize and its block writes); filled with zeros"
+                );
+                for r in &missing {
+                    zero_fill(store, &id, r, info.len, bs)?;
+                }
+                report.zero_filled_files.push((lname.clone(), path.clone()));
+            }
+            if let Some(mut rec) = catalog.get(layer, &path)? {
+                if rec.len != info.len {
+                    tracing::warn!(
+                        layer = %lname, path = %path, row = rec.len, store = info.len,
+                        "layer file row length differs from the store's; using the store's"
+                    );
+                    rec.len = info.len;
+                    catalog.put(layer, &path, &rec, false)?;
+                    report.resized_rows.push((lname, path));
+                }
+            }
+            continue;
+        }
+        tracing::warn!(
+            layer = %lname, path = %path,
+            "layer file data missing from the store (lost in a crash before a flush); \
+             recreated empty"
+        );
+        store.set_len(&id, 0)?;
+        if let Some(mut rec) = catalog.get(layer, &path)? {
+            rec.len = 0;
+            catalog.put(layer, &path, &rec, false)?;
+        }
+        report.emptied_files.push((lname, path));
+    }
+
+    for (h, _) in catalog.cache_all()? {
+        let id = cache_file_id(&h);
+        if store.stat(&id)?.is_some() {
+            known.insert(id);
+        } else {
+            catalog.cache_remove(&h)?;
+            report.cache_rows_dropped += 1;
+        }
+    }
+
+    for id in store.file_ids()? {
+        match classify_store_id(&id) {
+            StoreIdKind::Foreign => {
+                tracing::warn!(id = ?id, "store holds a file id vfs-storage never writes; left alone");
+            }
+            StoreIdKind::Layer(_) | StoreIdKind::Cache(_) => {
+                let key: [u8; 17] = id.as_slice().try_into().expect("classified as 17 bytes");
+                if known.contains(&key) {
+                    continue;
+                }
+                match store.delete(&id) {
+                    Ok(()) | Err(vfs_block_store::Error::NotFound) => report.orphans_deleted += 1,
+                    // Harmless to keep: the next open tries again.
+                    Err(e) => {
+                        tracing::warn!(id = ?id, error = %e, "deleting an orphan store file failed")
+                    }
+                }
+            }
+        }
+    }
+    if report.cache_rows_dropped > 0 {
+        tracing::warn!(
+            rows = report.cache_rows_dropped,
+            "cache rows without store data dropped"
+        );
+    }
+    if report.orphans_deleted > 0 {
+        tracing::warn!(
+            files = report.orphans_deleted,
+            "store files no catalog row references deleted"
+        );
+        store.compact(CompactOptions::default())?;
+    }
+    // Spec §6 order: the store's half first, then the catalog's.
+    let _gate = gate.write().unwrap_or_else(|e| e.into_inner());
+    store.flush()?;
+    catalog.commit_durable()?;
+    Ok(report)
+}
+
+/// The parts of `0..len` that `cached`, the store's merged and ordered
+/// stored ranges of one file, does not cover.
+fn missing_ranges(cached: &[Range<u64>], len: u64) -> Vec<Range<u64>> {
+    let mut out = Vec::new();
+    let mut at = 0u64;
+    for r in cached {
+        if r.start > at {
+            out.push(at..r.start.min(len));
+        }
+        at = at.max(r.end);
+    }
+    if at < len {
+        out.push(at..len);
+    }
+    out.retain(|r| r.start < r.end);
+    out
+}
+
+/// Writes zero blocks over the missing range `r` of a file of length `len`.
+/// The store stores whole blocks, so `r` starts on a block boundary and ends
+/// on one or at `len`; should it ever start inside a block, that block is
+/// stored and is left alone.
+fn zero_fill(
+    store: &BlockStore,
+    id: &[u8],
+    r: &Range<u64>,
+    len: u64,
+    bs: u64,
+) -> Result<(), StorageError> {
+    let first = r.start.div_ceil(bs);
+    let end = r.end.div_ceil(bs);
+    let mut b = first;
+    while b < end {
+        let n = (end - b).min(RUN_BLOCKS);
+        let bytes = ((b + n) * bs).min(len) - b * bs;
+        store.write_blocks(id, b, &vec![0u8; bytes as usize])?;
+        b += n;
+    }
+    Ok(())
+}
+
+impl Storage {
+    /// What reconciliation did when this `Storage` was opened.
+    pub fn last_reconcile(&self) -> &ReconcileReport {
+        &self.reconciled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use vfs_provider::{Provider, VPath, KIND_FILE, OPEN_CREATE, OPEN_READ, OPEN_WRITE};
+
+    use crate::catalog::{CacheRec, EntryRec};
+    use crate::config::StorageConfig;
+    use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, StoreIdKind};
+    use crate::storage::Storage;
+
+    const BS: u64 = 4096;
+
+    fn cfg() -> StorageConfig {
+        let mut c = StorageConfig::default();
+        c.store.block_size = BS as u32;
+        c
+    }
+
+    fn at(p: &str) -> VPath<'_> {
+        VPath::at_default(p)
+    }
+
+    fn write_file(p: &Arc<dyn Provider>, rel: &str, body: &[u8]) {
+        let (h, _, _) = p.open(at(rel), OPEN_WRITE | OPEN_CREATE).unwrap();
+        assert_eq!(p.write_at(h, 0, body).unwrap(), body.len());
+        p.close(h).unwrap();
+    }
+
+    fn read_file(p: &Arc<dyn Provider>, rel: &str) -> Vec<u8> {
+        let (h, size, _) = p.open(at(rel), OPEN_READ).unwrap();
+        let mut out = vec![0u8; size as usize];
+        let mut done = 0;
+        while done < out.len() {
+            let n = p.read_at(h, done as u64, &mut out[done..]).unwrap();
+            if n == 0 {
+                break;
+            }
+            done += n;
+        }
+        out.truncate(done);
+        p.close(h).unwrap();
+        out
+    }
+
+    /// Every store id a catalog row names, and every catalog file has store
+    /// data: what reconciliation leaves behind.
+    fn assert_consistent(s: &Storage) {
+        let mut known = HashSet::new();
+        for (_, path, g) in s.catalog.all_layer_guids().unwrap() {
+            let id = layer_file_id(&g);
+            assert!(
+                s.store.stat(&id).unwrap().is_some(),
+                "{path} lacks store data"
+            );
+            known.insert(id.to_vec());
+        }
+        for (h, _) in s.catalog.cache_all().unwrap() {
+            let id = cache_file_id(&h);
+            assert!(s.store.stat(&id).unwrap().is_some(), "cache row lacks data");
+            known.insert(id.to_vec());
+        }
+        for id in s.store.file_ids().unwrap() {
+            if classify_store_id(&id) != StoreIdKind::Foreign {
+                assert!(known.contains(&id), "unreferenced store id {id:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_catalog_row_without_store_data_becomes_empty() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let lid = s.catalog.create_layer("l").unwrap();
+        let guid = new_guid();
+        let rec = EntryRec {
+            name: "Lost.txt".into(),
+            kind: KIND_FILE,
+            guid,
+            len: 5000,
+            mtime: 7,
+        };
+        s.catalog.put(lid, "lost.txt", &rec, false).unwrap();
+        s.close().unwrap();
+
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let r = s.last_reconcile();
+        assert_eq!(
+            r.emptied_files,
+            vec![("l".to_string(), "lost.txt".to_string())]
+        );
+        assert_eq!(r.orphans_deleted, 0);
+        assert_eq!(s.store.stat(&layer_file_id(&guid)).unwrap().unwrap().len, 0);
+        let p = s.layer("l").unwrap();
+        assert_eq!(p.getattr(at("lost.txt")).unwrap().unwrap().size, 0);
+        assert_eq!(read_file(&p, "LOST.TXT"), b"");
+        assert_consistent(&s);
+        drop(p);
+        s.close().unwrap();
+
+        // The repair was durable: nothing left to do.
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        assert_eq!(*s.last_reconcile(), Default::default());
+    }
+
+    #[test]
+    fn store_orphans_are_deleted() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        // Referenced: a layer file and a cache file.
+        let p = s.layer("l").unwrap();
+        write_file(&p, "kept.bin", &vec![3u8; 3 * BS as usize]);
+        drop(p);
+        let h = [9u8; 16];
+        s.store.set_len(&cache_file_id(&h), 10).unwrap();
+        s.catalog
+            .cache_put_many(&[(
+                h,
+                CacheRec {
+                    last_access_min: 1,
+                    logical_bytes: 0,
+                },
+            )])
+            .unwrap();
+        // Unreferenced: a layer id, a cache id, and a foreign id (left alone).
+        let orphan_l = layer_file_id(&new_guid());
+        let orphan_c = cache_file_id(&[1u8; 16]);
+        s.store.set_len(&orphan_l, 10).unwrap();
+        s.store.set_len(&orphan_c, 10).unwrap();
+        s.store.set_len(b"foreign", 3).unwrap();
+        s.close().unwrap();
+
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        assert_eq!(s.last_reconcile().orphans_deleted, 2);
+        assert!(s.last_reconcile().emptied_files.is_empty());
+        let ids: HashSet<Vec<u8>> = s.store.file_ids().unwrap().into_iter().collect();
+        assert!(!ids.contains(orphan_l.as_slice()));
+        assert!(!ids.contains(orphan_c.as_slice()));
+        assert!(ids.contains(cache_file_id(&h).as_slice()));
+        assert!(ids.contains(b"foreign".as_slice()));
+        assert_consistent(&s);
+        let p = s.layer("l").unwrap();
+        assert_eq!(read_file(&p, "kept.bin"), vec![3u8; 3 * BS as usize]);
+    }
+
+    #[test]
+    fn cache_rows_without_store_data_are_dropped_from_the_budget() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let (lost, kept) = ([1u8; 16], [2u8; 16]);
+        s.store.set_len(&cache_file_id(&kept), 300).unwrap();
+        s.catalog
+            .cache_put_many(&[
+                (
+                    lost,
+                    CacheRec {
+                        last_access_min: 1,
+                        logical_bytes: 1000,
+                    },
+                ),
+                (
+                    kept,
+                    CacheRec {
+                        last_access_min: 1,
+                        logical_bytes: 300,
+                    },
+                ),
+            ])
+            .unwrap();
+        s.close().unwrap();
+
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        assert_eq!(s.last_reconcile().cache_rows_dropped, 1);
+        let rows: Vec<[u8; 16]> = s
+            .catalog
+            .cache_all()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        assert_eq!(rows, vec![kept]);
+        assert_eq!(s.cache_stats().cached_logical_bytes, 300);
+        assert_consistent(&s);
+    }
+
+    #[test]
+    fn closed_file_survives_reopen_without_close() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("saves").unwrap();
+        let body: Vec<u8> = (0..(5 * BS + 17)).map(|i| (i % 251) as u8).collect();
+        write_file(&p, "Saves/quick.ess", &body);
+
+        // Killed between the close and any later flush point.
+        #[cfg(not(windows))]
+        {
+            let killed = tempfile::tempdir().unwrap();
+            crate::test_util::snapshot(d.path(), killed.path());
+            let k = Storage::open(killed.path(), cfg()).unwrap();
+            assert_eq!(*k.last_reconcile(), Default::default());
+            let kp = k.layer("saves").unwrap();
+            assert_eq!(read_file(&kp, "saves/quick.ess"), body);
+            assert_consistent(&k);
+        }
+
+        // Dropped without `Storage::close`.
+        drop(p);
+        drop(s);
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        assert!(s.last_reconcile().emptied_files.is_empty());
+        let p = s.layer("saves").unwrap();
+        assert_eq!(read_file(&p, "Saves/Quick.ess"), body);
+    }
+
+    /// A kill while a file is being created and written (dirty blocks already
+    /// committed to the store, nothing durable yet) leaves a store that opens
+    /// consistent.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_kill_mid_write_reopens_consistent() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("l").unwrap();
+        write_file(&p, "done.bin", b"done");
+        let (h, _, _) = p
+            .open(at("new/open.bin"), OPEN_WRITE | OPEN_CREATE)
+            .unwrap();
+        p.write_at(h, 0, &vec![7u8; 9 * BS as usize]).unwrap();
+        s.store.flush().unwrap(); // the store half reached disk, the catalog did not
+
+        let killed = tempfile::tempdir().unwrap();
+        crate::test_util::snapshot(d.path(), killed.path());
+        let k = Storage::open(killed.path(), cfg()).unwrap();
+        assert_consistent(&k);
+        assert!(k.last_reconcile().orphans_deleted >= 1);
+        let kp = k.layer("l").unwrap();
+        assert_eq!(read_file(&kp, "done.bin"), b"done");
+        assert!(kp.getattr(at("new/open.bin")).unwrap().is_none());
+        p.close(h).unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn missing_ranges_are_the_complement_below_the_length() {
+        use super::missing_ranges;
+        assert_eq!(missing_ranges(&[], 10), vec![0..10]);
+        assert_eq!(
+            missing_ranges(&[0..10], 10),
+            Vec::<std::ops::Range<u64>>::new()
+        );
+        assert_eq!(
+            missing_ranges(&[4..8, 12..16], 20),
+            vec![0..4, 8..12, 16..20]
+        );
+        assert_eq!(
+            missing_ranges(&[0..4], 0),
+            Vec::<std::ops::Range<u64>>::new()
+        );
+    }
+
+    /// The store's own auto-flush (or a compaction) made a grow durable before
+    /// the zero blocks that follow it in a commit: the file has blocks missing
+    /// below its length. Reopening fills them with zeros.
+    #[test]
+    fn missing_blocks_below_the_length_are_zero_filled() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("l").unwrap();
+        let body = vec![0x5Au8; 2 * BS as usize];
+        write_file(&p, "Grown.bin", &body);
+        drop(p);
+        let lid = s.catalog.layer_id("l").unwrap().unwrap();
+        let mut rec = s.catalog.get(lid, "grown.bin").unwrap().unwrap();
+        let id = layer_file_id(&rec.guid);
+        let len = 5 * BS + 100;
+        s.store.set_len(&id, len).unwrap(); // blocks 2..6 now missing
+        rec.len = len; // the row agrees; only blocks are missing
+        s.catalog.put(lid, "grown.bin", &rec, false).unwrap();
+        s.close().unwrap();
+
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let r = s.last_reconcile();
+        assert_eq!(
+            r.zero_filled_files,
+            vec![("l".to_string(), "grown.bin".to_string())]
+        );
+        assert!(r.resized_rows.is_empty());
+        assert_eq!(s.store.cached_ranges(&id).unwrap(), vec![0..len]);
+        let p = s.layer("l").unwrap();
+        assert_eq!(p.getattr(at("grown.bin")).unwrap().unwrap().size, len);
+        let mut want = body.clone();
+        want.resize(len as usize, 0);
+        assert_eq!(read_file(&p, "grown.bin"), want);
+        assert_consistent(&s);
+    }
+
+    /// A row whose length disagrees with the store's (the store's data made
+    /// durable, the row update not) takes the store's length.
+    #[test]
+    fn a_row_length_is_set_to_the_stores() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("l").unwrap();
+        let body: Vec<u8> = (0..(2 * BS + 9)).map(|i| (i % 7) as u8).collect();
+        write_file(&p, "f.bin", &body);
+        drop(p);
+        let lid = s.catalog.layer_id("l").unwrap().unwrap();
+        let mut rec = s.catalog.get(lid, "f.bin").unwrap().unwrap();
+        rec.len = 100;
+        s.catalog.put(lid, "f.bin", &rec, false).unwrap();
+        s.close().unwrap();
+
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let r = s.last_reconcile();
+        assert_eq!(r.resized_rows, vec![("l".to_string(), "f.bin".to_string())]);
+        assert!(r.zero_filled_files.is_empty());
+        assert_eq!(
+            s.catalog.get(lid, "f.bin").unwrap().unwrap().len,
+            body.len() as u64
+        );
+        let p = s.layer("l").unwrap();
+        assert_eq!(
+            p.getattr(at("f.bin")).unwrap().unwrap().size,
+            body.len() as u64
+        );
+        assert_eq!(read_file(&p, "f.bin"), body);
+    }
+
+    /// A durable point waits for a commit that holds the durability gate, so
+    /// no row can land between its store flush and its catalog commit.
+    #[test]
+    fn a_durable_point_waits_for_in_flight_commits() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("l").unwrap();
+        let (h, _, _) = p.open(at("f"), OPEN_WRITE | OPEN_CREATE).unwrap();
+        p.write_at(h, 0, b"abc").unwrap();
+        let in_flight = s.gate_shared(); // another layer's commit, mid-way
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p2 = Arc::clone(&p);
+        let t = std::thread::spawn(move || {
+            p2.flush(h).unwrap();
+            tx.send(()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "the durable point ran while a commit held the gate"
+        );
+        drop(in_flight);
+        rx.recv().unwrap();
+        t.join().unwrap();
+        p.close(h).unwrap();
+    }
+}
