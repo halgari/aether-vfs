@@ -1,7 +1,10 @@
 //! The `vfs` CLI end to end under GE-Proton: `vfs up` brings a named session
 //! up, `vfs exec` launches a Windows fixture into it, and the fixture reads
 //! content only the Linux Director serves and writes a save into a write
-//! layer. Then a second `vfs exec` proves the mappings are reused.
+//! layer. Then a second `vfs exec`, by the absolute path, launches into the
+//! same live session — its roots, links and prefix reused, not rebuilt. (The
+//! first exec staged `fixture.exe` into root 0, so the second finds a real file
+//! there and launches it as is: it does not exercise staging again.)
 //!
 //! Needs GE-Proton under `$VFS_HOME` and the `bin/build-windows` artifacts
 //! beside the `vfs` binary, so it is `#[ignore]`d; the `proton-linux` CI job
@@ -110,9 +113,11 @@ fn write_stored_zip(path: &Path, entry: &str, content: &[u8]) {
     std::fs::write(path, &buf).unwrap();
 }
 
-/// Tears the session down even when the test panics: `vfs down`, then a
-/// TERM to the daemon named in the discovery file, then removal of this
-/// run's own session directory (never any other).
+/// Tears the session down even when the test panics: `vfs down` against the
+/// daemon the discovery file names (never an auto-spawned replacement), a TERM
+/// to every daemon this run knows of, a bounded wait for them to exit, a stop
+/// of the named prefix's `wineserver`, and only then removal of this run's own
+/// session directory (never any other).
 struct Cleanup {
     vfs: &'static str,
     vfs_home: PathBuf,
@@ -123,44 +128,104 @@ struct Cleanup {
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let mut down = Command::new(self.vfs);
-        down.args(["down", "--session", &self.name])
-            .env("VFS_HOME", &self.vfs_home)
-            .env("VFS_DISCOVERY_PATH", &self.discovery)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if let Ok(mut child) = down.spawn() {
-            let start = Instant::now();
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) | Err(_) => break,
-                    Ok(None) if start.elapsed() > Duration::from_secs(60) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break;
-                    }
-                    Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                }
+        // `--endpoint`, so a dead daemon is not silently replaced by a fresh
+        // auto-spawned one whose pid nothing here would know. No discovery
+        // file: no daemon to talk to.
+        if let Some(endpoint) = read_discovery_field(&self.discovery, "endpoint")
+            .and_then(|v| v.as_str().map(str::to_string))
+        {
+            let mut down = Command::new(self.vfs);
+            down.args(["--endpoint", &endpoint, "down", "--session", &self.name])
+                .env("VFS_HOME", &self.vfs_home)
+                .env("VFS_DISCOVERY_PATH", &self.discovery)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if let Ok(child) = down.spawn() {
+                wait_bounded(child, Duration::from_secs(60));
             }
         }
-        let pid = self.daemon_pid.or_else(|| read_daemon_pid(&self.discovery));
-        if let Some(pid) = pid {
-            let _ = Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .status();
+        // The pid recorded at `up`, and whatever the discovery file names now,
+        // in case they differ.
+        let mut pids: Vec<u32> = self.daemon_pid.into_iter().collect();
+        pids.extend(read_daemon_pid(&self.discovery));
+        pids.sort_unstable();
+        pids.dedup();
+        for pid in &pids {
+            let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        }
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while pids.iter().any(|p| Path::new(&format!("/proc/{p}")).exists())
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(100));
         }
         // Only ever this run's own directory, by its unique name.
         if self.name.starts_with("e2e-") {
-            let _ = std::fs::remove_dir_all(self.vfs_home.join("sessions").join(&self.name));
+            let session_dir = self.vfs_home.join("sessions").join(&self.name);
+            // A named prefix outlives its session by design, and its
+            // `wineserver` lingers a few seconds after the last Wine process,
+            // writing the registry back into the prefix as it exits. Stop it
+            // first, or it recreates what is removed below.
+            stop_wineservers(&self.vfs_home, &session_dir.join("prefix"));
+            let _ = std::fs::remove_dir_all(&session_dir);
         }
     }
 }
 
-fn read_daemon_pid(discovery: &Path) -> Option<u32> {
+/// `wineserver -k` then `-w` for `prefix`, with every installed runtime's
+/// `wineserver`, each bounded.
+fn stop_wineservers(vfs_home: &Path, prefix: &Path) {
+    if !prefix.exists() {
+        return;
+    }
+    let Ok(runtimes) = std::fs::read_dir(vfs_home.join("runtimes")) else {
+        return;
+    };
+    for rt in runtimes.flatten() {
+        let server = rt.path().join("files").join("bin").join("wineserver");
+        if !server.is_file() {
+            continue;
+        }
+        for flag in ["-k", "-w"] {
+            if let Ok(child) = Command::new(&server)
+                .arg(flag)
+                .env("WINEPREFIX", prefix)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                wait_bounded(child, Duration::from_secs(30));
+            }
+        }
+    }
+}
+
+/// Waits for `child` at most `timeout`, then kills and reaps it.
+fn wait_bounded(mut child: std::process::Child, timeout: Duration) {
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if start.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+fn read_discovery_field(discovery: &Path, field: &str) -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(discovery).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("pid")?.as_u64().map(|p| p as u32)
+    v.get(field).cloned()
+}
+
+fn read_daemon_pid(discovery: &Path) -> Option<u32> {
+    read_discovery_field(discovery, "pid")?.as_u64().map(|p| p as u32)
 }
 
 #[test]
@@ -185,6 +250,10 @@ fn vfs_up_then_exec_runs_a_windows_fixture_under_proton() {
     std::fs::create_dir_all(t.join("saves-layer")).unwrap();
 
     let name = format!("e2e-{}", std::process::id());
+    // This run's own name. A directory already there is a previous run's
+    // leftover under a recycled pid — a stale persistent prefix this run
+    // would otherwise reuse (and whose root links it would find foreign).
+    let _ = std::fs::remove_dir_all(vfs_home.join("sessions").join(&name));
     let discovery = t.join("discovery.json");
     let config = format!(
         r#"[session]
@@ -280,6 +349,9 @@ write_layer = true
         );
     }
 
+    // The absolute form into the same live session. The first exec's staged
+    // `fixture.exe` is still in root 0, so this takes the real-file branch —
+    // what it proves is that the session's mappings and prefix are reused.
     let mut args: Vec<&str> = vec!["exec", "--session", &name, "C:\\Games\\Fixture\\fixture.exe"];
     for e in read_env {
         args.extend(["--env", e]);

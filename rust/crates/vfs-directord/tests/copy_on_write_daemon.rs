@@ -366,10 +366,10 @@ async fn a_write_layer_declared_over_grpc_gives_the_session_copy_on_write() {
     // The overwrite directory a config would name. Deliberately **not**
     // created here: a user's overwrite folder need not exist yet, and copy-up
     // has to make it rather than failing on the first edit.
-    let overrides = PathBuf::from(&session.root)
-        .parent()
-        .expect("session root has a parent")
-        .join("declared-overwrite");
+    // (`session.root` is root 0's *location* — on Linux a `C:\…` path inside
+    // the Wine prefix — so it is no place to put a host directory.)
+    let overwrite_parent = tempfile::tempdir().unwrap();
+    let overrides = overwrite_parent.path().join("declared-overwrite");
     client
         .add_source(AddSourceReq {
             session_id: session.id.clone(),

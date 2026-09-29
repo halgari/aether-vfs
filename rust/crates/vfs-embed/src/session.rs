@@ -350,24 +350,18 @@ pub struct Session {
     /// an anonymous prefix keyed by `state_dir` and deleted on drop.
     #[cfg(unix)]
     prefix_name: Option<String>,
-    /// The anonymous prefix id this session booted, if any — what `Drop`
-    /// deletes. A named prefix is never recorded here.
+    /// The anonymous prefix this session booted, if any — what `Drop`
+    /// deletes, with the home and runtime `launch` used for it. A named
+    /// prefix is never recorded here.
     #[cfg(unix)]
-    anon_prefix: Mutex<Option<String>>,
-    /// The GE-Proton runtime the anonymous prefix was booted with, so `Drop`
-    /// can stop that prefix's `wineserver` before deleting it (see
-    /// `Prefix::stop_wineserver`).
+    anon: Mutex<Option<AnonPrefix>>,
+    /// `(prefix dir, link, target)` for every root link `launch` placed in a
+    /// prefix, so `Drop` can remove them through
+    /// [`Prefix::unlink_location`] — only while each is still a symlink to
+    /// what we linked, so a later session's relink of the same location
+    /// survives.
     #[cfg(unix)]
-    anon_runtime: Mutex<Option<PathBuf>>,
-    /// `(link, target)` for every root link `launch` placed in a prefix, so
-    /// `Drop` can remove them — only while each is still a symlink to what we
-    /// linked, so a later session's relink of the same location survives.
-    #[cfg(unix)]
-    prefix_links: Mutex<Vec<(PathBuf, PathBuf)>>,
-    /// Test hook: the aether-vfs home `Drop` removes an anonymous prefix from,
-    /// instead of `ProtonRoot::from_env()`.
-    #[cfg(all(unix, test))]
-    drop_home: Option<PathBuf>,
+    prefix_links: Mutex<Vec<(PathBuf, PathBuf, PathBuf)>>,
     /// The most recent staged launch directory, held here because
     /// [`StagedDir`]'s `Drop` removes the staged files — not the virtual root
     /// they now live in — and Windows keeps the image file mapped for as long
@@ -411,13 +405,9 @@ impl Session {
             #[cfg(unix)]
             prefix_name: None,
             #[cfg(unix)]
-            anon_prefix: Mutex::new(None),
-            #[cfg(unix)]
-            anon_runtime: Mutex::new(None),
+            anon: Mutex::new(None),
             #[cfg(unix)]
             prefix_links: Mutex::new(Vec::new()),
-            #[cfg(all(unix, test))]
-            drop_home: None,
             staged: Mutex::new(None),
         }
     }
@@ -531,6 +521,20 @@ impl Session {
         }
     }
 
+    /// Unix: whether `location` is one `launch` can link a root at — a `C:\…`
+    /// path below the drive root, without `..`
+    /// ([`vfs_proton::prefix::parse_location`], the rule `launch` itself
+    /// applies). [`Session::declare_root`] stays infallible, so a host that
+    /// takes locations from a user calls this first and refuses a bad one at
+    /// declare time rather than at the first launch. The error names the
+    /// location and what is wrong with it.
+    #[cfg(unix)]
+    pub fn check_root_location(location: &str) -> Result<(), String> {
+        vfs_proton::prefix::parse_location(location)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     /// The roots declared beyond root 0, in declaration order. For
     /// diagnostics and for tests that need to prove a config's `[[root]]`
     /// table actually reached the session rather than being parsed and
@@ -596,13 +600,6 @@ impl Session {
             .map_err(|e| format!("prefix name {name:?} must be one plain path component: {e}"))?;
         self.prefix_name = Some(name.to_string());
         Ok(())
-    }
-
-    /// Test hook: which aether-vfs home `Drop` deletes an anonymous prefix
-    /// from, so a unit test never touches the real `VFS_HOME`.
-    #[cfg(all(unix, test))]
-    fn drop_home_for_test(&mut self, home: PathBuf) {
-        self.drop_home = Some(home);
     }
 
     /// The declared roots beyond root 0, as `apply_env_roots` wants them.
@@ -1171,9 +1168,12 @@ impl Session {
     /// one, and a host that points two sessions at one state directory has
     /// already handed them a single ring file to fight over.
     ///
-    /// The hash is `DefaultHasher`, whose output is stable within a build but
-    /// not promised across Rust releases. That is fine for what it names: a
-    /// rebuilt host boots one new prefix and reuses it from then on.
+    /// The prefix it names is **anonymous**: this session boots it at its
+    /// first launch, reuses it for every later launch, and deletes it when it
+    /// drops — it never outlives the session, so no later session (or later
+    /// run) ever finds it again. Hence the hash may be `DefaultHasher`, whose
+    /// output is stable within a build but not promised across Rust releases:
+    /// the id only has to agree with itself for one session's lifetime.
     #[cfg(unix)]
     fn wine_session_id(&self) -> String {
         use std::hash::{Hash, Hasher};
@@ -1250,8 +1250,8 @@ impl Session {
                 .prefix_links
                 .lock()
                 .map_err(|_| "prefix links lock poisoned".to_string())?;
-            links.retain(|(l, _)| *l != link);
-            links.push((link, backing));
+            links.retain(|(d, l, _)| !(*d == prefix.dir && *l == link));
+            links.push((prefix.dir.clone(), link, backing));
         }
         Ok(())
     }
@@ -1638,15 +1638,18 @@ impl Session {
             None => {
                 // Recorded before `ensure`, so a boot that fails half-way is
                 // still deleted on drop.
+                // With the home and runtime used here, so `Drop` deletes this
+                // prefix from where it is rather than wherever the environment
+                // points by then.
                 let id = self.wine_session_id();
                 *self
-                    .anon_prefix
+                    .anon
                     .lock()
-                    .map_err(|_| "anon prefix lock poisoned".to_string())? = Some(id.clone());
-                *self
-                    .anon_runtime
-                    .lock()
-                    .map_err(|_| "anon runtime lock poisoned".to_string())? = Some(runtime.clone());
+                    .map_err(|_| "anon prefix lock poisoned".to_string())? = Some(AnonPrefix {
+                    id: id.clone(),
+                    home: home.clone(),
+                    runtime: runtime.clone(),
+                });
                 id
             }
         };
@@ -1773,43 +1776,36 @@ impl Drop for Session {
             };
             // Reverse of link order (shallowest first), so a nested root's
             // link — recorded through the outer root's link — is removed while
-            // that path still resolves.
-            for (link, target) in links.into_iter().rev() {
-                let ours = std::fs::symlink_metadata(&link)
-                    .is_ok_and(|m| m.file_type().is_symlink())
-                    && std::fs::read_link(&link).is_ok_and(|t| t == target);
-                if ours {
-                    let _ = std::fs::remove_file(&link);
-                }
+            // that path still resolves. `unlink_location` removes only a
+            // link the prefix's manifest lists that still points where we
+            // pointed it, and delists it.
+            for (dir, link, target) in links.into_iter().rev() {
+                let _ = Prefix { dir }.unlink_location(&link, &target);
             }
-            let anon = match self.anon_prefix.get_mut() {
+            let anon = match self.anon.get_mut() {
                 Ok(a) => a.take(),
                 Err(p) => p.into_inner().take(),
             };
-            if let Some(id) = anon {
-                #[cfg(test)]
-                let home = match self.drop_home.clone() {
-                    Some(h) => Some(ProtonRoot::at(h)),
-                    None => ProtonRoot::from_env().ok(),
-                };
-                #[cfg(not(test))]
-                let home = ProtonRoot::from_env().ok();
-                if let Some(home) = home {
-                    let runtime = match self.anon_runtime.get_mut() {
-                        Ok(r) => r.take(),
-                        Err(p) => p.into_inner().take(),
-                    };
-                    // `wineserver` lingers after the child and rewrites the
-                    // registry into the prefix as it exits; stop it first or
-                    // the deleted prefix comes back.
-                    if let (Some(runtime), Ok(dir)) = (runtime, home.try_session_dir(&id)) {
-                        let _ = Prefix { dir: dir.join("prefix") }.stop_wineserver(&runtime);
-                    }
-                    let _ = vfs_proton::prefix::remove_session(&home, &id);
+            if let Some(AnonPrefix { id, home, runtime }) = anon {
+                // `wineserver` lingers after the child and rewrites the
+                // registry into the prefix as it exits; stop it first (bounded)
+                // or the deleted prefix comes back.
+                if let Ok(dir) = home.try_session_dir(&id) {
+                    let _ = Prefix { dir: dir.join("prefix") }.stop_wineserver(&runtime);
                 }
+                let _ = vfs_proton::prefix::remove_session(&home, &id);
             }
         }
     }
+}
+
+/// An anonymous Wine prefix a session booted: its id under `home`'s
+/// `sessions/`, and the runtime whose `wineserver` serves it.
+#[cfg(unix)]
+struct AnonPrefix {
+    id: String,
+    home: ProtonRoot,
+    runtime: PathBuf,
 }
 
 /// What [`Session::resolve_launch_image`] resolved an image to.
@@ -2316,6 +2312,17 @@ mod launch_image_tests {
 
     #[cfg(unix)]
     #[test]
+    fn check_root_location_applies_the_link_rule() {
+        Session::check_root_location(r"C:\Games\Fixture").unwrap();
+        Session::check_root_location("c:/users/steamuser/Saves").unwrap();
+        for bad in [r"D:\Games", "/tmp/host-dir", r"C:\", r"C:\a\..\b", "Games"] {
+            let e = Session::check_root_location(bad).unwrap_err();
+            assert!(e.contains("bad root location") && e.contains(bad), "{bad}: {e}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn set_prefix_name_takes_one_plain_component() {
         let mut s = Session::new();
         for bad in ["", "a/b", "..", "/abs", r"a\b"] {
@@ -2383,6 +2390,27 @@ mod launch_image_tests {
         for l in links {
             assert!(std::fs::symlink_metadata(&l).is_err(), "{} must be removed on drop", l.display());
         }
+        assert!(
+            prefix.read_manifest().unwrap().is_empty(),
+            "drop must delist the links it removed from the prefix's manifest"
+        );
+    }
+
+    /// A user's own symlink at a root location in a persistent prefix: the
+    /// launch refuses it (by name), and it survives the session.
+    #[cfg(unix)]
+    #[test]
+    fn a_foreign_symlink_at_a_root_location_is_refused_and_survives() {
+        let (mut s, prefix) = linked_session("foreign");
+        s.declare_root(1, r"C:\Games\Skyrim");
+        let theirs = scratch("foreign-theirs");
+        let at = prefix.drive_c().join("Games").join("Skyrim");
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&theirs, &at).unwrap();
+        let e = s.link_roots(&prefix, &s.root_locations()).unwrap_err();
+        assert!(e.contains("root 1") && e.contains("did not create"), "{e}");
+        drop(s);
+        assert_eq!(std::fs::read_link(&at).unwrap(), theirs, "their link must survive");
     }
 
     /// Another session relinked the same location after this one launched:
@@ -2427,12 +2455,17 @@ mod launch_image_tests {
         let named_dir = root.try_session_dir("named-x").unwrap().join("prefix");
         std::fs::create_dir_all(&anon_dir).unwrap();
         std::fs::create_dir_all(&named_dir).unwrap();
+        // The environment's home is somewhere else entirely: `Drop` must use
+        // the home recorded at launch, never re-read `VFS_HOME`.
         {
-            let mut a = Session::new();
-            a.drop_home_for_test(home.clone());          // test hook: which VFS_HOME Drop uses
-            *a.anon_prefix.lock().unwrap() = Some("anon-x".into());
+            let a = Session::new();
+            *a.anon.lock().unwrap() = Some(AnonPrefix {
+                id: "anon-x".into(),
+                home: root.clone(),
+                // No `wineserver` here: stopping it fails fast and is ignored.
+                runtime: home.join("no-runtime"),
+            });
             let mut n = Session::new();
-            n.drop_home_for_test(home.clone());
             n.set_prefix_name("named-x").unwrap();
         }
         assert!(!anon_dir.exists(), "anonymous prefix must be deleted on drop");

@@ -50,15 +50,18 @@ message ZipSource { string path = 1; }
 message HttpSource { string url = 1; }
 message RemoteSource { string endpoint = 1; }
 
-// Declare which real host directory a non-zero session root virtualizes
-// (stage 2b). `AddSourceReq.root` says what a root *serves*; this says where
-// the injected process should recognise it, which is a different fact and has
-// a different source (a config's `[[root]] path`). Without it a multi-root
-// config mounts its providers and the shim never classifies a single path
-// into the second root — every one falls through to real disk, silently.
+// Declare a session root's location: where the launched program sees it — a
+// host directory on Windows, a `C:\…` path inside the session's Wine prefix on
+// Linux (where anything else is rejected). `AddSourceReq.root` says what a root
+// *serves*; this says where the injected process should recognise it, which is
+// a different fact and has a different source (a config's `[[root]] path`).
+// Without it a multi-root config mounts its providers and the shim never
+// classifies a single path into the second root — every one falls through to
+// real disk, silently.
 //
-// Root 0 is the daemon-chosen `Session.root` and is rejected here rather than
-// re-pointed.
+// Any root may be declared, root 0 included: declaring root 0 replaces the
+// daemon's default location for it, and `Session.root` then reports the
+// declared one.
 message DeclareRootReq {
   string session_id = 1;
   uint32 root = 2;

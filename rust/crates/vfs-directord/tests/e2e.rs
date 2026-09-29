@@ -3790,6 +3790,103 @@ async fn launch_and_teardown_address_a_session_by_name() {
     server.abort();
 }
 
+/// `apply_session_config` is all or nothing: a config that fails half-way —
+/// a source that cannot be built, a launch refused before anything spawns —
+/// leaves no session behind, so the corrected retry of the same named config
+/// is not refused as a duplicate. And a second live session under one name is
+/// refused (`AlreadyExists`), naming the one that holds it. Nothing here
+/// spawns a program, so it runs on any host.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_apply_leaves_no_session_and_a_live_name_is_not_reused() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let svc = DirectorService::new(SessionRegistry::new());
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(DirectorServer::new(svc))
+            .serve_with_incoming(incoming)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut client = connect(&format!("{addr}")).await.unwrap();
+
+    let content = tempfile::tempdir().unwrap();
+    let good = SessionConfig {
+        session: vfs_control::SessionMeta { name: Some("half".into()) },
+        roots: vec![vfs_control::RootEntry {
+            id: 0,
+            name: "Games".into(),
+            path: if cfg!(windows) {
+                content.path().join("loc").to_string_lossy().into_owned()
+            } else {
+                r"C:\Games\Half".into()
+            },
+        }],
+        sources: vec![vfs_control::SourceEntry {
+            spec: vfs_control::SourceSpec::Disk {
+                path: content.path().to_string_lossy().into_owned(),
+            },
+            mount: "/".into(),
+            root: 0,
+            write_layer: false,
+        }],
+        ..Default::default()
+    };
+    let live = |client: &mut vfs_control::pb::director_client::DirectorClient<_>| {
+        let mut client = client.clone();
+        async move {
+            client
+                .list_sessions(vfs_control::pb::Empty {})
+                .await
+                .unwrap()
+                .into_inner()
+                .sessions
+        }
+    };
+
+    // A source the daemon cannot build: refused at AddSource.
+    let mut bad_source = good.clone();
+    bad_source.sources.push(vfs_control::SourceEntry {
+        spec: vfs_control::SourceSpec::Zip {
+            path: content.path().join("missing.zip").to_string_lossy().into_owned(),
+        },
+        mount: "/".into(),
+        root: 0,
+        write_layer: false,
+    });
+    let e = apply_session_config(&mut client, &bad_source).await.unwrap_err();
+    assert!(e.contains("AddSource"), "{e}");
+    assert!(live(&mut client).await.is_empty(), "a failed AddSource must not leave a session");
+
+    // A launch refused before anything is spawned.
+    let mut bad_launch = good.clone();
+    bad_launch.launch = Some(vfs_control::LaunchConfig {
+        exec: r"{Nope}\x.exe".into(),
+        args: vec![],
+        wait: true,
+        env: Default::default(),
+    });
+    let e = apply_session_config(&mut client, &bad_launch).await.unwrap_err();
+    assert!(e.contains("Nope"), "{e}");
+    assert!(live(&mut client).await.is_empty(), "a failed launch must not leave a session");
+
+    // The corrected config applies — its name was not left held.
+    let (id, _) = apply_session_config(&mut client, &good).await.expect("the corrected retry");
+    // …and applying it again while it is live is refused, naming it.
+    let e = apply_session_config(&mut client, &good).await.unwrap_err();
+    assert!(e.contains("AlreadyExists") || e.contains("already named"), "{e}");
+    assert!(e.contains(&id), "the refusal must name the live session: {e}");
+    let sessions = live(&mut client).await;
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+
+    client
+        .teardown_session(vfs_control::pb::TeardownReq { session_id: id })
+        .await
+        .unwrap();
+    server.abort();
+}
+
 /// Stage 2b task 5: a config's `[[root]] path` reaches the live session, so
 /// the injected shim is told where each root *is* and not merely what it
 /// serves.
@@ -3825,6 +3922,14 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
     let docs = tempfile::tempdir().unwrap();
     std::fs::write(game.path().join("a.txt"), b"g").unwrap();
     std::fs::write(docs.path().join("a.txt"), b"d").unwrap();
+    // Each root's location: where the program sees it. On Windows that is a
+    // host directory (here the source directory itself, as before); on Linux
+    // a `C:\…` path inside the Wine prefix — a host path is refused there.
+    let (game_loc, docs_loc) = if cfg!(windows) {
+        (game.path().to_path_buf(), docs.path().to_path_buf())
+    } else {
+        (PathBuf::from(r"C:\Games\Game"), PathBuf::from(r"C:\users\steamuser\Docs"))
+    };
 
     let cfg = SessionConfig {
         session: vfs_control::SessionMeta { name: Some("two-root-cfg".into()) },
@@ -3832,12 +3937,12 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
             vfs_control::RootEntry {
                 id: 0,
                 name: "game".into(),
-                path: game.path().to_string_lossy().into_owned(),
+                path: game_loc.to_string_lossy().into_owned(),
             },
             vfs_control::RootEntry {
                 id: 1,
                 name: "docs".into(),
-                path: docs.path().to_string_lossy().into_owned(),
+                path: docs_loc.to_string_lossy().into_owned(),
             },
         ],
         sources: vec![
@@ -3875,8 +3980,8 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
             assert_eq!(declared[0].0, 1);
             assert_eq!(
                 declared[0].1,
-                docs.path(),
-                "root 1's declared host path is not the one the config named"
+                docs_loc,
+                "root 1's declared location is not the one the config named"
             );
             // Both providers are mounted too — declaring must not have
             // replaced mounting, only joined it.
@@ -3905,9 +4010,8 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
         .find(|s| s.id == id)
         .expect("the session is live");
     assert_eq!(
-        summary.root,
-        game.path(),
-        "root 0's declared path must reach the live session as its root"
+        summary.root, game_loc,
+        "root 0's declared location must reach the live session as its root"
     );
 
     client
@@ -3917,11 +4021,14 @@ async fn a_configs_declared_root_paths_reach_the_live_session() {
     server.abort();
 }
 
-/// A rooted launch on Windows: `{Game}\fixture.exe` and the same image spelled
-/// as an absolute path inside root 0's location both resolve to the graph-only
+/// A rooted launch on Windows: `{Game}\fixture.exe` resolves to the graph-only
 /// `fixture.exe` (a copy living only in the disk source, absent from `loc`),
 /// which the session stages, and the launched process reads `hello.txt` through
-/// the injected shim at `<loc>\hello.txt`.
+/// the injected shim at `<loc>\hello.txt`. Then the same image spelled as an
+/// absolute path inside root 0's location launches too — but by then the first
+/// launch's staged copy is a real file at that path, so this second launch takes
+/// the **real-file** branch, not staging: it proves the absolute form resolves
+/// to the same root-0 vpath, not that it stages.
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
@@ -4023,7 +4130,7 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
     assert_eq!(
         by_path,
         Some(0),
-        "absolute path inside root 0 should stage and exit 0"
+        "absolute path inside root 0 (now the staged real file) should launch and exit 0"
     );
 
     client

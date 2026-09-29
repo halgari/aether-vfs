@@ -44,10 +44,7 @@ impl Director for DirectorService {
         req: Request<CreateSessionReq>,
     ) -> Result<Response<Session>, Status> {
         let name = req.into_inner().name;
-        let summary = self
-            .registry
-            .create(name)
-            .map_err(Status::internal)?;
+        let summary = self.registry.create(name).map_err(create_status)?;
         Ok(Response::new(Session {
             id: summary.id,
             name: summary.name,
@@ -187,9 +184,20 @@ impl Director for DirectorService {
             .registry
             .resolve_session(&req.into_inner().session_id)
             .map_err(Status::not_found)?;
-        self.registry
-            .teardown(&id)
-            .map_err(Status::not_found)?;
+        // Dropping the session can block for seconds on Linux (stopping a
+        // prefix's `wineserver`, deleting an anonymous prefix): off the
+        // async executor.
+        let registry = self.registry.clone();
+        tokio::task::spawn_blocking(move || registry.teardown(&id))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| {
+                if e.starts_with("unknown session") {
+                    Status::not_found(e)
+                } else {
+                    Status::failed_precondition(e)
+                }
+            })?;
         Ok(Response::new(Empty {}))
     }
 
@@ -249,6 +257,19 @@ fn registry_status(err: String) -> Status {
         Status::not_found(err)
     } else {
         Status::invalid_argument(err)
+    }
+}
+
+/// Map a `SessionRegistry::create` refusal onto a gRPC status: a name
+/// already live is `AlreadyExists`; a name that cannot name a Wine prefix is
+/// the caller's to fix (`InvalidArgument`); anything else is the daemon's.
+fn create_status(err: String) -> Status {
+    if err.starts_with(crate::registry::DUPLICATE_NAME) {
+        Status::already_exists(err)
+    } else if err.contains("cannot name a Wine prefix") {
+        Status::invalid_argument(err)
+    } else {
+        Status::internal(err)
     }
 }
 
