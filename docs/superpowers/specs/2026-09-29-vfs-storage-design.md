@@ -124,8 +124,9 @@ deduplicates — at block level, inside the store.
 
 **Read path.** RAM tier → `BlockStore::read` → for each missing range, fetch
 whole blocks from the source (block-aligned; a file's final block exactly its
-remaining length), `write_blocks` them, fill the buffer. The file is
-`set_len`'d on first open if the store lacks it. Concurrent misses on the same
+remaining length), `write_blocks` them, fill the buffer. The store file and its catalog
+row are created when the file's first block is stored, not at open, so a
+file that is opened but never read leaves nothing behind. Concurrent misses on the same
 `(file id, block)` are coalesced into one fetch.
 
 **Eviction.** The catalog's `cache_files` table records, per cached file id,
