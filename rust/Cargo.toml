@@ -20,6 +20,10 @@ members = [
   # vfs-cache layer in a later change; nothing depends on it yet. Edition
   # 2024 and MIT OR Apache-2.0, as it was upstream.
   "crates/vfs-block-store",
+  # The block store as pull-through cache and layer storage: one BlockStore,
+  # a redb catalog beside it and a RAM tier of decompressed blocks. Replaces
+  # vfs-cache. See docs/superpowers/specs/2026-09-29-vfs-storage-design.md.
+  "crates/vfs-storage",
   "crates/vfs-directord",
   "crates/vfs-ipc",
   "crates/vfs-inject",
