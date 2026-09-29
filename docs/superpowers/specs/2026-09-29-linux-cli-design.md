@@ -256,6 +256,14 @@ rejected by `validate_roots`.
   gRPC `LaunchReq` needs no new field either: the daemon resolves its
   `session_id` string as an id first, then as a session name, and expands
   `{Name}` in `exec` — only `exec`'s comment in `director.proto` changes.
+  `DeclareRootReq` does gain an additive `string name = 4`: the daemon cannot
+  resolve `{Name}` without learning root names, and today that RPC carries
+  only an id and a path. `director.proto` is not part of the regenerated
+  protocol descriptor, so this is a compatible gRPC change, not wire drift.
+- **Windows config at launch.** Windows `serve` writes `shim.cfg` and
+  `fuse.cfg` with root 0's location at session creation, before a config can
+  declare root 0. The Windows `launch` rewrites both from the current
+  location, so a declared root 0 is what the shim is told.
 - **No unregistered env switch.** `VFS_VIRTUAL_ROOTS` is already in
   `vfs_env::ALL`; nothing new is read.
 - **`vfs-embed` API:** additive only (`Session::set_prefix_name`; `declare_root`
