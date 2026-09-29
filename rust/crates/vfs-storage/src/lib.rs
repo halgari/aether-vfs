@@ -26,4 +26,4 @@ pub use ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Guid, S
 pub use manage::{LayerInfo, StorageStats};
 pub use ram::{RamStats, RamTier};
 pub use reconcile::ReconcileReport;
-pub use storage::{Storage, StorageError};
+pub use storage::{CloseOutcome, Storage, StorageError};
