@@ -202,8 +202,16 @@ jobs:
       # A no-op on a cache hit: install skips a tag that is already present and
       # verified. On a miss it downloads ~537 MiB and checks the published
       # sha512 before extracting.
+      #
+      # The token matters on a miss: resolving the tag lists releases through
+      # api.github.com, whose unauthenticated limit (60/hour per IP) a shared
+      # runner routinely exhausts with a 403. It is sent only to that listing.
+      # Caches are per-branch (a PR branch's cache is invisible to master), so
+      # a miss is the first run on each branch, not a rare event.
       - name: Install GE-Proton
         run: cargo run -q -p vfs-proton -- install --version "$GE_PROTON"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         working-directory: rust
       - name: Proton end-to-end (Windows fixture under Wine, Linux Director)
         run: timeout 900 cargo test -p vfs-embed --test proton_launch -- --ignored --nocapture
