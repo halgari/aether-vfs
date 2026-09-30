@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use vfs_provider::{
     bad_fh, map_io_err, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId, Stat,
-    VPath,
+    VPath, KIND_FILE,
 };
 
 use crate::catalog::CacheRec;
@@ -220,6 +220,15 @@ impl CacheState {
     }
 }
 
+/// `rel` as a cached file's identity spells it: case-folded only if the
+/// source matches names case-insensitively.
+fn normalize(case: CaseMatch, rel: &str) -> String {
+    match case {
+        CaseMatch::Insensitive => vfs_core::fold(rel),
+        CaseMatch::Sensitive => rel.to_string(),
+    }
+}
+
 /// The identity hash of a cached file (see the module docs).
 fn identity(key: &SourceKey, root: RootId, path: &str, size: u64, version: &[u8]) -> [u8; 16] {
     let mut h = blake3::Hasher::new();
@@ -257,6 +266,40 @@ impl Storage {
             next: AtomicU64::new(1),
             opens: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The byte ranges of `p` that the pull-through cache of `source` under
+    /// `key` holds, merged and in order: what [`Storage::cached`]`(source,
+    /// key)` would serve without reading `source`. Empty when nothing is
+    /// cached, when `source` has no file at `p`, or when `p` is a directory.
+    ///
+    /// The file is named exactly as a cached open names it — `key`, the root,
+    /// the path (folded if `source` is case-insensitive), and `source`'s
+    /// `getattr` size and mtime — so `source.getattr` is called once, and a
+    /// file whose size or mtime changed reports the (empty) coverage of its
+    /// new identity. Read-only: nothing is fetched, touched or counted.
+    pub fn cached_coverage(
+        &self,
+        source: &dyn Provider,
+        key: &SourceKey,
+        p: VPath,
+    ) -> Result<Vec<std::ops::Range<u64>>, StorageError> {
+        let st = source.getattr(p).map_err(|status| {
+            StorageError::Io(std::io::Error::other(format!(
+                "getattr {:?} for cache coverage failed with status {status}",
+                p.rel
+            )))
+        })?;
+        let Some(st) = st.filter(|st| st.kind == KIND_FILE) else {
+            return Ok(Vec::new());
+        };
+        let rel = normalize(source.capabilities().case, p.rel);
+        let hash = identity(key, p.root, &rel, st.size, &st.mtime.to_le_bytes());
+        match self.store.cached_ranges(&cache_file_id(&hash)) {
+            Ok(r) => Ok(r),
+            Err(vfs_block_store::Error::NotFound) => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// The pull-through cache's counters.
@@ -498,11 +541,7 @@ struct CachedSource {
 
 impl CachedSource {
     fn normalize(&self, rel: &str) -> String {
-        // Fold-equal spellings are one file only if the source says so.
-        match self.caps.case {
-            CaseMatch::Insensitive => vfs_core::fold(rel),
-            CaseMatch::Sensitive => rel.to_string(),
-        }
+        normalize(self.caps.case, rel)
     }
 
     /// Block `b` of `f`: RAM tier, else store, else one (coalesced) fetch of
@@ -1804,5 +1843,35 @@ mod tests {
         assert_eq!(got_y[..], body[BS..2 * BS], "Y got its own block 1, not X's block 4");
         assert_eq!(src_x.reads(), 1);
         assert_eq!(src_y.reads(), 1);
+    }
+
+    #[test]
+    fn cached_coverage_reports_what_the_cache_holds_of_a_file() {
+        let (s, _d) = temp_storage();
+        let body = pattern(3 * BS + 10, 2);
+        let src = slow(MapSource::with(&[("f", body.clone())]));
+        let p = s.cached(src.clone(), key());
+        let at = VPath::at_default("f");
+        assert!(s.cached_coverage(&*src, &key(), at).unwrap().is_empty(), "nothing yet");
+
+        let (h, _, _) = p.open(at, OPEN_READ).unwrap();
+        p.read_at(h, BS as u64 + 1, &mut [0u8; 4]).unwrap();
+        p.close(h).unwrap();
+        assert_eq!(
+            s.cached_coverage(&*src, &key(), at).unwrap(),
+            vec![BS as u64..2 * BS as u64]
+        );
+
+        read_all(&p, "f");
+        assert_eq!(
+            s.cached_coverage(&*src, &key(), at).unwrap(),
+            vec![0..body.len() as u64],
+            "merged into one range, the short tail block included"
+        );
+        let reads = src.reads();
+        assert!(s.cached_coverage(&*src, &SourceKey("other".into()), at).unwrap().is_empty());
+        assert!(s.cached_coverage(&*src, &key(), VPath::at_default("missing")).unwrap().is_empty());
+        assert!(s.cached_coverage(&*src, &key(), VPath::at_default("")).unwrap().is_empty(), "a directory");
+        assert_eq!(src.reads(), reads, "coverage never reads the source");
     }
 }
