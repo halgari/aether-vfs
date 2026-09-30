@@ -304,13 +304,14 @@ fn is_initialised(prefix_dir: &Path) -> bool {
 
 fn run_wineboot(runtime: &Path, prefix_dir: &Path) -> Result<(), PrefixError> {
     let wine = runtime.join("files").join("bin").join("wine");
-    let output = std::process::Command::new(&wine)
-        .arg("wineboot")
+    let mut cmd = std::process::Command::new(&wine);
+    cmd.arg("wineboot")
         .arg("-u")
         .env("WINEPREFIX", prefix_dir)
         .env("WINEDLLOVERRIDES", "mscoree=d;mshtml=d")
-        .env("WINEDEBUG", "-all")
-        .output()?;
+        .env("WINEDEBUG", "-all");
+    own_process_group(&mut cmd);
+    let output = cmd.output()?;
 
     if output.status.success() {
         return Ok(());
@@ -750,7 +751,27 @@ fn run_bounded_status(
     }
 }
 
-/// `cmd.spawn()`, retried briefly on `ETXTBSY`.
+/// Put the child in a process group of its own.
+///
+/// A terminal delivers Ctrl-C (SIGINT) to its whole foreground process group,
+/// and a child spawned plainly joins its parent's. The host decides what
+/// Ctrl-C means — typically "stop the launch", through `wineserver -k`, which
+/// is orderly — but Proton's prefix setup (a Python script), `wine` and the
+/// `wineserver -w` watch would each get the raw signal first and die
+/// mid-step: a prefix half-built by an interrupted `proton run` is left
+/// behind, and a killed watch ends a launch that is still running.
+fn own_process_group(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = cmd;
+}
+
+/// `cmd.spawn()` in a process group of its own ([`own_process_group`]),
+/// retried briefly on `ETXTBSY`.
 ///
 /// A script written just before it is run can still be open for writing in a
 /// child another thread of this process forked in the meantime (the write
@@ -760,6 +781,7 @@ fn run_bounded_status(
 pub(crate) fn spawn_retrying_busy(
     cmd: &mut std::process::Command,
 ) -> io::Result<std::process::Child> {
+    own_process_group(cmd);
     let mut attempt = 0;
     loop {
         match cmd.spawn() {
@@ -1002,6 +1024,30 @@ mod tests {
                 Err(e) => panic!("the lock must be released on drop: {e}"),
             }
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn children_get_a_process_group_of_their_own() {
+        // Field 5 of /proc/<pid>/stat is the process group; the command name
+        // (field 2) is parenthesized and may hold spaces, so split after it.
+        fn pgrp(stat: &str) -> i64 {
+            let rest = &stat[stat.rfind(')').unwrap() + 2..];
+            rest.split(' ').nth(2).unwrap().parse().unwrap()
+        }
+        let ours = pgrp(&std::fs::read_to_string("/proc/self/stat").unwrap());
+        let mut cmd = std::process::Command::new("cat");
+        cmd.arg("/proc/self/stat")
+            .stdout(std::process::Stdio::piped());
+        let child = spawn_retrying_busy(&mut cmd).unwrap();
+        let pid = child.id() as i64;
+        let out = child.wait_with_output().unwrap();
+        let theirs = pgrp(&String::from_utf8(out.stdout).unwrap());
+        assert_eq!(theirs, pid, "the child leads its own group");
+        assert_ne!(
+            theirs, ours,
+            "a terminal's Ctrl-C to our group must not reach it"
+        );
     }
 
     #[cfg(unix)]
