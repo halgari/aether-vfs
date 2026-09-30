@@ -176,6 +176,16 @@ real directory at a root location is refused, never replaced — and so is a
 symlink aether-vfs did not create (the ones it did are listed in the prefix's
 `.aether-vfs-links`).
 
+An embedding host can do all of this without environment variables:
+`Session::set_home` chooses the aether home (runtimes and prefixes),
+`Session::set_prefix_init(PrefixInit::Proton { steam_client, app_id })` sets a
+prefix up with Proton's own `proton run` (DXVK, vkd3d-proton, the DirectX and
+Visual C++ redistributables and Steam's bridge — what a game needs; the
+default `wineboot` prefix is enough for console programs), and
+`LaunchOpts::env` reaches only the child. `Session::launch_detached` returns a
+`LaunchHandle` a host can poll and stop. `crates/vfs-embed/tests/proton_skyrim.rs`
+is the whole shape end to end.
+
 #### Storage: the source cache and named layers
 
 The daemon keeps one storage directory, a deduplicating, compressing block
