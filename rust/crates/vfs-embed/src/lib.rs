@@ -181,13 +181,14 @@ pub use vfs_zip::ZipProvider;
 // write layers (docs/superpowers/specs/2026-09-29-vfs-storage-design.md).
 // Opt-in: a host opens one and wraps providers with it; `Session` owns none.
 // `StorageStats`, `CacheStats`, `ReconcileReport` and `CloseOutcome` come along
-// because `Storage::stats()`, `last_reconcile()` and `close()` return them — a
+// because `Storage::stats()`, `last_reconcile()` and `close()` return them, and
+// `Durability` because `StorageConfig` holds one — a
 // host able to call a method but not to name what it returns is the seam
 // leaking by omission.
 // ---------------------------------------------------------------------------
 pub use vfs_storage::{
-    CacheStats, CloseOutcome, LayerInfo, ReconcileReport, SourceKey, Storage, StorageConfig,
-    StorageError, StorageStats,
+    CacheStats, CloseOutcome, Durability, LayerInfo, ReconcileReport, SourceKey, Storage,
+    StorageConfig, StorageError, StorageStats,
 };
 
 // ---------------------------------------------------------------------------

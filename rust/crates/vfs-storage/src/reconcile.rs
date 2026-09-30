@@ -361,7 +361,7 @@ mod tests {
     use vfs_provider::{Provider, VPath, KIND_FILE, OPEN_CREATE, OPEN_READ, OPEN_WRITE};
 
     use crate::catalog::{CacheRec, EntryRec};
-    use crate::config::StorageConfig;
+    use crate::config::{Durability, StorageConfig};
     use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, StoreIdKind};
     use crate::storage::Storage;
 
@@ -371,6 +371,14 @@ mod tests {
         let mut c = StorageConfig::default();
         c.store.block_size = BS as u32;
         c
+    }
+
+    /// [`cfg`] with every close, flush and namespace change a durable point.
+    fn cfg_every_close() -> StorageConfig {
+        StorageConfig {
+            durability: Durability::OnEveryClose,
+            ..cfg()
+        }
     }
 
     fn at(p: &str) -> VPath<'_> {
@@ -568,7 +576,7 @@ mod tests {
     #[test]
     fn closed_file_survives_reopen_without_close() {
         let d = tempfile::tempdir().unwrap();
-        let s = Storage::open(d.path(), cfg()).unwrap();
+        let s = Storage::open(d.path(), cfg_every_close()).unwrap();
         let p = s.layer("saves").unwrap();
         let body: Vec<u8> = (0..(5 * BS + 17)).map(|i| (i % 251) as u8).collect();
         write_file(&p, "Saves/quick.ess", &body);
@@ -604,6 +612,7 @@ mod tests {
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("l").unwrap();
         write_file(&p, "done.bin", b"done");
+        s.sync().unwrap(); // done.bin is durable, whatever the policy
         let (h, _, _) = p
             .open(at("new/open.bin"), OPEN_WRITE | OPEN_CREATE)
             .unwrap();
@@ -941,7 +950,7 @@ mod tests {
     #[test]
     fn a_durable_point_waits_for_in_flight_commits() {
         let d = tempfile::tempdir().unwrap();
-        let s = Storage::open(d.path(), cfg()).unwrap();
+        let s = Storage::open(d.path(), cfg_every_close()).unwrap();
         let p = s.layer("l").unwrap();
         let (h, _, _) = p.open(at("f"), OPEN_WRITE | OPEN_CREATE).unwrap();
         p.write_at(h, 0, b"abc").unwrap();
