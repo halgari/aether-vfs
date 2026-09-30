@@ -80,6 +80,10 @@ type Fetch = Arc<OnceLock<Result<Unit, i32>>>;
 /// A fetched unit's blocks in order, and whether all came from the store.
 type Unit = (Arc<[Arc<[u8]>]>, bool);
 
+/// A fetch's geometry: `(cache file id, the unit's first block, blocks per
+/// unit)`. See [`CacheState::inflight`] for why an index alone is not enough.
+type FetchKey = ([u8; 17], u64, u64);
+
 /// The most bytes one fetch unit may span. A source's `preferred_block`
 /// above this is clamped: a unit is one buffer, held whole in memory for the
 /// length of a miss.
@@ -113,8 +117,16 @@ pub(crate) struct CacheState {
     /// Open handles per cache file id. Also the lock under which a file is
     /// created in the store (by its first fetch) or evicted.
     open_counts: Mutex<HashMap<[u8; 17], usize>>,
-    /// In-flight fetches by `(cache file id, fetch unit index)`.
-    inflight: Mutex<HashMap<([u8; 17], u64), Fetch>>,
+    /// In-flight fetches by `(cache file id, the unit's first block, blocks
+    /// per unit)`: the fetch's actual geometry, not just a unit index. Two
+    /// `CachedSource`s can share one cache file (same `SourceKey`, root,
+    /// path, size and mtime) while declaring different `preferred_block`s,
+    /// so a unit *index* alone is ambiguous — `blocks 4..8` under a 4-block
+    /// unit and `block 1` alone under a 1-block unit are both "unit 1" by
+    /// index, but cover different bytes. Keying by the resolved geometry
+    /// means two misses only ever join one fetch when they would read
+    /// exactly the same span.
+    inflight: Mutex<HashMap<FetchKey, Fetch>>,
     access: Mutex<AccessLog>,
     touch_seq: AtomicU64,
     pub(crate) cached_logical: AtomicU64,
@@ -506,7 +518,13 @@ impl CachedSource {
             return Ok((d, true));
         }
         let u = b / self.unit;
-        let key = (f.id, u);
+        let first_block = u * self.unit;
+        // Keyed by this fetch's actual geometry (first block + unit size),
+        // not just the unit index `u`: an index alone collides across
+        // `CachedSource`s with different units over the same cache file (see
+        // `CacheState::inflight`), which would hand a joiner another unit's
+        // bytes under the block index it asked for.
+        let key = (f.id, first_block, self.unit);
         let cell = {
             let mut inflight = lock(&s.cache.inflight);
             match inflight.get(&key) {
@@ -528,10 +546,13 @@ impl CachedSource {
         }
         drop(inflight);
         let (blocks, hit) = got?;
-        let d = blocks
-            .get((b - u * self.unit) as usize)
-            .cloned()
-            .ok_or_else(map_io_err)?;
+        let idx = (b - first_block) as usize;
+        debug_assert!(
+            idx < blocks.len(),
+            "block {b} outside the fetch unit starting at {first_block} ({} blocks)",
+            blocks.len()
+        );
+        let d = blocks.get(idx).cloned().ok_or_else(map_io_err)?;
         Ok((d, hit))
     }
 
@@ -627,7 +648,11 @@ impl CachedSource {
         let missing = self.stored_span(f, start, &mut buf);
         let from_store = missing.is_empty();
         if from_store {
-            s.cache.store_hits.fetch_add(1, Ordering::Relaxed);
+            // One count per block, like every other block-granularity
+            // counter, so `hits`/`misses` ratios stay meaningful regardless
+            // of how large a unit is.
+            let blocks_in_unit = (buf.len() as u64).div_ceil(bs);
+            s.cache.store_hits.fetch_add(blocks_in_unit, Ordering::Relaxed);
         } else {
             let (lo, hi) = (missing[0].start, missing[missing.len() - 1].end);
             let mut filled = lo;
@@ -1713,5 +1738,71 @@ mod tests {
         }
         assert_eq!(src.reads(), 1, "one source fetch for eight blocks of one unit");
         assert_eq!(s.cache_stats().misses, READERS as u64);
+    }
+
+    /// Two `CachedSource`s over one `Storage` and cache file (same
+    /// `SourceKey`, path, size and mtime — see `identity`) but different
+    /// `preferred_block` units must never cross wires, even though their
+    /// naive unit index `b / unit` can coincide: X's 4-block unit puts block
+    /// 5 in "unit 1" (blocks 4..8); Y has no hint (a 1-block unit), and its
+    /// miss on block 1 is also "unit 1" by index alone. Racing them exercises
+    /// the in-flight map keyed by actual fetch geometry, not just that index.
+    #[test]
+    fn concurrent_misses_with_different_units_never_cross_wires() {
+        let (s, _d) = temp_storage();
+        let body = pattern(8 * BS, 9);
+        let map = MapSource::with(&[("f", body.clone())]);
+        let gate = Arc::new(Gate::default());
+        let src_x = Arc::new(Slow {
+            inner: map.clone(),
+            reads: AtomicU64::new(0),
+            max_read: usize::MAX,
+            gate: Some(gate.clone()),
+            preferred_block: Some((4 * BS) as u32),
+        });
+        let src_y = Arc::new(Slow {
+            inner: map,
+            reads: AtomicU64::new(0),
+            max_read: usize::MAX,
+            gate: Some(gate.clone()),
+            preferred_block: None,
+        });
+        let x = s.cached(src_x.clone(), key());
+        let y = s.cached(src_y.clone(), key());
+        let (hx, _, _) = x.open(VPath::at_default("f"), OPEN_READ).unwrap();
+        let (hy, _, _) = y.open(VPath::at_default("f"), OPEN_READ).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let tx = {
+            let (x, barrier) = (x.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                let mut buf = vec![0u8; BS];
+                x.read_at(hx, 5 * BS as u64, &mut buf).unwrap();
+                x.close(hx).unwrap();
+                buf
+            })
+        };
+        let ty = {
+            let (y, barrier) = (y.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                let mut buf = vec![0u8; BS];
+                y.read_at(hy, BS as u64, &mut buf).unwrap();
+                y.close(hy).unwrap();
+                buf
+            })
+        };
+        // Released only once both misses are inside their source, so the
+        // in-flight map holds both cells at once.
+        while src_x.reads() < 1 || src_y.reads() < 1 {
+            std::thread::yield_now();
+        }
+        gate.release();
+        let got_x = tx.join().unwrap();
+        let got_y = ty.join().unwrap();
+        assert_eq!(got_x[..], body[5 * BS..6 * BS], "X got its own block 5");
+        assert_eq!(got_y[..], body[BS..2 * BS], "Y got its own block 1, not X's block 4");
+        assert_eq!(src_x.reads(), 1);
+        assert_eq!(src_y.reads(), 1);
     }
 }
