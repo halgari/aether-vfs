@@ -108,11 +108,13 @@ pub fn installed_dirs(root: &Root) -> io::Result<Vec<(String, std::path::PathBuf
         Err(e) => return Err(e),
     };
     for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+        let path = entry?.path();
+        // `metadata`, not `DirEntry::file_type`: the latter does not follow
+        // symlinks, so a runtime linked in from elsewhere (Steam's
+        // `compatibilitytools.d`) was skipped. A dangling link is skipped too.
+        if !std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
             continue;
         }
-        let path = entry.path();
         if let Ok(tag) = verify_ge(&path) {
             found.push((tag, path));
         }
@@ -195,6 +197,25 @@ mod tests {
         assert_eq!(
             installed(&root).unwrap(),
             vec!["GE-Proton11-6".to_string(), "GE-Proton9-1".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_runtime_directory_is_listed_under_its_link() {
+        let base = tmpdir("symlinked");
+        let root = crate::layout::Root::at(base.join("home"));
+        std::fs::create_dir_all(root.runtimes()).unwrap();
+        let real = base.join("elsewhere").join("GE-Proton11-7-x86_64");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("version"), "1 GE-Proton11-7\n").unwrap();
+        let link = root.runtimes().join("GE-Proton11-7-x86_64");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        std::os::unix::fs::symlink(base.join("gone"), root.runtimes().join("dangling")).unwrap();
+        assert_eq!(
+            installed_dirs(&root).unwrap(),
+            vec![("GE-Proton11-7".to_string(), link)],
+            "listed at the link (never canonicalized); the dangling link is skipped"
         );
     }
 }
