@@ -102,6 +102,11 @@ pub(crate) struct FileCell {
     /// block write after the resize (a disk-full `write_blocks`).
     #[cfg(test)]
     pub fail_after_set_len: std::sync::atomic::AtomicBool,
+    /// Test hook: the next commit that resizes the store flushes the store
+    /// right before its first block write after the resize (what the block
+    /// store's auto-flush can do there).
+    #[cfg(test)]
+    pub flush_after_set_len: std::sync::atomic::AtomicBool,
 }
 
 /// The bytes of block `b` of a file of `len` bytes that the store holds.
@@ -140,6 +145,8 @@ impl FileCell {
             fail_commit: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_after_set_len: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            flush_after_set_len: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -504,7 +511,7 @@ impl FileCell {
     /// Writes `blocks` (ascending) of a file of `len` bytes from `src`, in
     /// runs of consecutive blocks; a block `src` lacks is zeros, and each is
     /// padded or cut to its length at `len`. `after_resize` arms the
-    /// `fail_after_set_len` test hook.
+    /// `fail_after_set_len` and `flush_after_set_len` test hooks.
     fn write_runs(
         &self,
         s: &Storage,
@@ -527,6 +534,10 @@ impl FileCell {
             #[cfg(test)]
             if after_resize && self.fail_after_set_len.swap(false, Ordering::SeqCst) {
                 return Err(map_io_err());
+            }
+            #[cfg(test)]
+            if after_resize && self.flush_after_set_len.swap(false, Ordering::SeqCst) {
+                s.store.flush().map_err(|_| map_io_err())?;
             }
             s.store
                 .write_blocks(&self.id, first, run)

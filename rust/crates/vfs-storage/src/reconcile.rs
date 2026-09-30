@@ -945,6 +945,43 @@ mod tests {
         assert_eq!(read_file(&p, "f.bin"), body);
     }
 
+    /// Deferred: `sync`, and the flush of a rewrite of a durable file (which
+    /// makes a durable point at once), wait for a commit that holds the
+    /// durability gate, as under `OnEveryClose`.
+    #[test]
+    fn a_deferred_durable_point_waits_for_in_flight_commits() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("l").unwrap();
+        write_file(&p, "f", b"old");
+        s.sync().unwrap();
+        let (h, _, _) = p.open(at("f"), OPEN_WRITE).unwrap();
+        p.write_at(h, 0, b"abc").unwrap();
+        for via_flush in [false, true] {
+            let in_flight = s.gate_shared(); // another layer's commit, mid-way
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (s2, p2) = (Arc::clone(&s), Arc::clone(&p));
+            let t = std::thread::spawn(move || {
+                if via_flush {
+                    p2.flush(h).unwrap();
+                } else {
+                    p2.write_at(h, 3, b"d").unwrap();
+                    s2.sync().unwrap();
+                }
+                tx.send(()).unwrap();
+            });
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_millis(300))
+                    .is_err(),
+                "the durable point ran while a commit held the gate (flush: {via_flush})"
+            );
+            drop(in_flight);
+            rx.recv().unwrap();
+            t.join().unwrap();
+        }
+        p.close(h).unwrap();
+    }
+
     /// A durable point waits for a commit that holds the durability gate, so
     /// no row can land between its store flush and its catalog commit.
     #[test]

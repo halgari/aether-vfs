@@ -24,6 +24,7 @@
 //! makes one on its own initiative.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use redb::{
     Database, Durability, ReadableDatabase, ReadableTable, Table, TableDefinition, WriteTransaction,
@@ -111,6 +112,10 @@ pub struct CacheRec {
 /// its read-modify-write sequences with a per-layer lock.
 pub struct Catalog {
     db: Database,
+    /// Non-durable commits since the last durable one (approximate upward:
+    /// a commit racing a durable one may be counted after it made it
+    /// durable). redb holds memory for them until a durable commit.
+    unflushed: AtomicU64,
 }
 
 fn db_err(e: impl std::fmt::Display) -> StorageError {
@@ -134,7 +139,10 @@ impl Catalog {
             .set_cache_size(CACHE_BYTES)
             .create(path)
             .map_err(db_err)?;
-        let c = Self { db };
+        let c = Self {
+            db,
+            unflushed: AtomicU64::new(0),
+        };
         // Create every table so read transactions can always open them.
         c.write(false, |txn| {
             txn.open_table(LAYERS).map_err(db_err)?;
@@ -160,7 +168,23 @@ impl Catalog {
         })
         .map_err(db_err)?;
         let r = f(&txn)?;
+        // Counted before a durable commit covers them, so a commit that
+        // lands meanwhile is at worst counted again.
+        let covered = if durable {
+            self.unflushed.load(Ordering::Acquire)
+        } else {
+            0
+        };
         txn.commit().map_err(db_err)?;
+        if durable {
+            let _ = self
+                .unflushed
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                    Some(n.saturating_sub(covered))
+                });
+        } else {
+            self.unflushed.fetch_add(1, Ordering::AcqRel);
+        }
         Ok(r)
     }
 
@@ -526,6 +550,12 @@ impl Catalog {
     /// `Durability::Immediate` commit).
     pub fn commit_durable(&self) -> Result<(), StorageError> {
         self.write(true, |_| Ok(()))
+    }
+
+    /// Non-durable commits made since the last durable one; 0 when a durable
+    /// commit would have nothing to make durable. May overcount.
+    pub(crate) fn unflushed_commits(&self) -> u64 {
+        self.unflushed.load(Ordering::Acquire)
     }
 }
 

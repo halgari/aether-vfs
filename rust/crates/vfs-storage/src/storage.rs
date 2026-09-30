@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,8 @@ use vfs_provider::Provider;
 use crate::cached::{lock, CacheState};
 use crate::catalog::Catalog;
 use crate::config::{Durability, StorageConfig};
-use crate::layer::{durable_point_over, LayerProvider};
+use crate::ids::Guid;
+use crate::layer::LayerProvider;
 use crate::ram::RamTier;
 use crate::reconcile::{reconcile, ReconcileReport};
 
@@ -147,17 +148,16 @@ pub struct Storage {
     ///
     /// **Lock order**, outermost first:
     /// - layers: a file cell's `state` → `gate` → the layer's `ns` → the
-    ///   layer's leaf locks (`cells`, `handles`, `doomed`, a cell's `path`
-    ///   and `mtime_override`);
+    ///   layer's leaf locks (`cells`, `handles`, `fresh`, a cell's `path`
+    ///   and `mtime_override`) and the storage's `doomed`;
     /// - the `layers` registry → `gate` (a new layer is made durable while
     ///   the registry is held; nothing holding the gate takes the registry);
     /// - cache: `gate` → `open_counts` → `access`.
     ///
     /// The gate is never taken recursively (shared or exclusive) by a thread
     /// that holds it. The exclusive holder takes nothing else during the
-    /// fsyncs (a durable point takes each covered layer's `ns` only briefly,
-    /// before them, to collect its doomed files). [`Storage::sync`] and a
-    /// deferred durable point release the registry before taking the gate.
+    /// fsyncs (a durable point takes `doomed` only briefly, before them, and
+    /// no layer lock at all).
     pub(crate) gate: RwLock<()>,
     /// Every layer with a provider, by name: live, or dropped and still
     /// inside its `Drop` (a last commit and durable point). A provider removes
@@ -171,6 +171,11 @@ pub struct Storage {
     pub(crate) reconciled: ReconcileReport,
     /// When durable points happen, under [`Durability::Deferred`].
     pub(crate) clock: DurableClock,
+    /// GUIDs of layer files (any layer's) whose rows are gone, durably or
+    /// not, and that no handle has open: deleted from the store by the next
+    /// durable point, after its catalog commit. A leaf lock, pushed to under
+    /// a layer's `ns` right after the row's removal committed.
+    pub(crate) doomed: Mutex<Vec<Guid>>,
     /// Test hook: `import_layer` fails when it reaches this layer path.
     #[cfg(test)]
     pub(crate) fail_import_at: Mutex<Option<String>>,
@@ -181,33 +186,41 @@ pub struct Storage {
     pub(crate) drop_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
-/// When the last durable point happened, for [`Durability::Deferred`].
+/// The default for [`DurableClock::max_commits`].
+pub(crate) const DEFERRED_MAX_COMMITS: u64 = 10_000;
+
+/// When durable points happen, for [`Durability::Deferred`].
 pub(crate) struct DurableClock {
     /// When the last durable point completed (or, while one is claimed as
     /// due, when it was claimed).
     last: Mutex<Instant>,
-    /// Changes were committed non-durably since the last durable point
-    /// started. Set after such a change, cleared under the exclusive gate
-    /// before a durable point's fsyncs, so it can be set spuriously but never
-    /// cleared while a change is still unflushed.
-    pub(crate) dirty: AtomicBool,
+    /// Durable points completed since open, counting ones that found nothing
+    /// to make durable. Read by a layer file create under the shared gate
+    /// and bumped under the exclusive gate, so a file whose create saw the
+    /// current epoch has a row that no durable point has published yet.
+    epoch: AtomicU64,
+    /// A deferred change finds a durable point due once the catalog holds
+    /// this many non-durable commits (redb keeps their bookkeeping in memory
+    /// until a durable commit), whatever `max_interval` says.
+    max_commits: AtomicU64,
     /// Test hook: time added to the real clock.
     #[cfg(test)]
     skew: Mutex<Duration>,
-    /// Test hook: durable points completed since open.
+    /// Test hook: durable points that fsynced, since open.
     #[cfg(test)]
-    points: std::sync::atomic::AtomicU64,
+    points: AtomicU64,
 }
 
 impl DurableClock {
     fn new() -> Self {
         DurableClock {
             last: Mutex::new(Instant::now()),
-            dirty: AtomicBool::new(false),
+            epoch: AtomicU64::new(0),
+            max_commits: AtomicU64::new(DEFERRED_MAX_COMMITS),
             #[cfg(test)]
             skew: Mutex::new(Duration::ZERO),
             #[cfg(test)]
-            points: std::sync::atomic::AtomicU64::new(0),
+            points: AtomicU64::new(0),
         }
     }
 
@@ -218,12 +231,20 @@ impl DurableClock {
         Instant::now()
     }
 
-    /// If the last durable point is at least `max` old, claims the next one
-    /// (restarting the interval) and returns true.
-    fn claim_if_due(&self, max: Duration) -> bool {
+    /// The current epoch (see [`DurableClock::epoch`]).
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    /// If the last durable point is at least `max` old, or `commits`
+    /// non-durable catalog commits have piled up, claims the next durable
+    /// point (restarting the interval) and returns true.
+    fn claim_if_due(&self, max: Duration, commits: u64) -> bool {
         let now = self.now();
         let mut last = lock(&self.last);
-        if now.saturating_duration_since(*last) >= max {
+        if now.saturating_duration_since(*last) >= max
+            || commits >= self.max_commits.load(Ordering::Acquire)
+        {
             *last = now;
             true
         } else {
@@ -242,17 +263,17 @@ impl DurableClock {
             .unwrap_or(*last);
     }
 
-    /// A durable point is about to fsync: under the exclusive gate, so every
-    /// change marked dirty so far is covered by it.
-    pub(crate) fn starting(&self) {
-        self.dirty.store(false, Ordering::Release);
-    }
-
-    /// A durable point completed.
-    pub(crate) fn reached(&self) {
+    /// A durable point completed (`fsynced`), or found nothing to make
+    /// durable. Under the exclusive gate.
+    fn reached(&self, fsynced: bool) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
         *lock(&self.last) = self.now();
         #[cfg(test)]
-        self.points.fetch_add(1, Ordering::AcqRel);
+        if fsynced {
+            self.points.fetch_add(1, Ordering::AcqRel);
+        }
+        #[cfg(not(test))]
+        let _ = fsynced;
     }
 
     /// Test hook: moves this clock `by` into the future.
@@ -261,10 +282,16 @@ impl DurableClock {
         *lock(&self.skew) += by;
     }
 
-    /// Test hook: durable points completed since open.
+    /// Test hook: durable points that fsynced, since open.
     #[cfg(test)]
     pub(crate) fn points(&self) -> u64 {
         self.points.load(Ordering::Acquire)
+    }
+
+    /// Test hook: sets [`DurableClock::max_commits`].
+    #[cfg(test)]
+    pub(crate) fn set_max_commits(&self, n: u64) {
+        self.max_commits.store(n, Ordering::Release);
     }
 }
 
@@ -309,6 +336,7 @@ impl Storage {
             layers_gone: Condvar::new(),
             reconciled,
             clock: DurableClock::new(),
+            doomed: Mutex::new(Vec::new()),
             #[cfg(test)]
             fail_import_at: Mutex::new(None),
             #[cfg(test)]
@@ -362,70 +390,79 @@ impl Storage {
         self.gate.write().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// `store.flush()` then `catalog.commit_durable()`, under the exclusive
-    /// gate. Leaves layers' deferred deletions alone (see [`Storage::sync`]);
-    /// safe with the `layers` registry held.
+    /// A durable point: [`Storage::durable_point`]. Safe with the `layers`
+    /// registry held.
     pub(crate) fn flush_durably(&self) -> Result<(), StorageError> {
-        let _gate = self.gate_exclusive();
-        self.clock.starting();
-        let flushed = self
-            .store
-            .flush()
-            .map_err(StorageError::from)
-            .and_then(|()| self.catalog.commit_durable());
-        if flushed.is_err() {
-            self.clock.dirty.store(true, Ordering::Release);
-        } else {
-            self.clock.reached();
+        self.durable_point()
+    }
+
+    /// Store flush, then the durable catalog commit, then the store deletes
+    /// that commit made safe (every layer's removed or replaced files that no
+    /// handle has open, see [`Storage::doomed`]).
+    ///
+    /// The flush and the commit run under the exclusive durability gate
+    /// ([`Storage::gate`]), so no layer's or cache's row can land between
+    /// them ahead of its data. Every GUID in the doomed list had its row
+    /// removal committed before it was pushed, so the commit makes the
+    /// removal durable before the store delete (spec §6). GUIDs doomed later
+    /// wait for the next durable point.
+    ///
+    /// When neither the store nor the catalog holds anything non-durable,
+    /// the fsyncs are skipped (the doomed files' removals are then already
+    /// durable, and they are deleted all the same).
+    pub(crate) fn durable_point(&self) -> Result<(), StorageError> {
+        let doomed = {
+            let _gate = self.gate_exclusive();
+            let doomed = std::mem::take(&mut *lock(&self.doomed));
+            let fsync = self.store.has_unflushed() || self.catalog.unflushed_commits() > 0;
+            if fsync {
+                let flushed = self
+                    .store
+                    .flush()
+                    .map_err(StorageError::from)
+                    .and_then(|()| self.catalog.commit_durable());
+                if let Err(e) = flushed {
+                    lock(&self.doomed).extend(doomed);
+                    return Err(e);
+                }
+            }
+            self.clock.reached(fsync);
+            doomed
+        };
+        for g in doomed {
+            let id = crate::ids::layer_file_id(&g);
+            self.ram.invalidate_file(&id);
+            match self.store.delete(&id) {
+                Ok(()) | Err(vfs_block_store::Error::NotFound) => {}
+                // Left for reconciliation, which deletes unreferenced ids.
+                Err(e) => tracing::warn!(error = %e, "layer file delete failed"),
+            }
         }
-        flushed
+        Ok(())
     }
 
     /// Makes everything written so far durable: commits the cache's batched
     /// access times, then runs one durable point (store flush, then the
-    /// catalog's durable commit) that covers every layer, and deletes the
-    /// store data of every live layer's removed or replaced files that were
-    /// waiting for it. Under [`Durability::Deferred`] this is how a host makes
+    /// catalog's durable commit), which covers every layer and the cache and
+    /// deletes the store data of removed or replaced layer files that were
+    /// waiting for it. Skips the fsyncs when nothing changed since the last
+    /// durable point. Under [`Durability::Deferred`] this is how a host makes
     /// a batch of writes durable without waiting for `max_interval`; under
     /// either policy it is what [`Storage::close`] does first.
-    ///
-    /// Must not be called from inside a `Provider` call on one of this
-    /// storage's layers (no provider does).
     pub fn sync(&self) -> Result<(), StorageError> {
-        self.sync_including(None)
-    }
-
-    /// [`Storage::sync`], also covering `extra` (a layer that may not be in
-    /// the registry: one that is being dropped, or a test's own provider).
-    pub(crate) fn sync_including(&self, extra: Option<&LayerProvider>) -> Result<(), StorageError> {
         self.commit_access()?;
-        // Upgraded, then the registry is released before the gate is taken
-        // (the registry comes before the gate in the lock order, and a
-        // provider's `Drop` takes the gate). The `Arc`s drop after the
-        // durable point, so a provider whose last reference this was runs its
-        // own `Drop` with nothing held.
-        let live: Vec<Arc<LayerProvider>> = lock(&self.layers)
-            .values()
-            .filter_map(Weak::upgrade)
-            .collect();
-        let mut over: Vec<&LayerProvider> = live.iter().map(|p| &**p).collect();
-        if let Some(extra) = extra {
-            if !over.iter().any(|p| std::ptr::eq(*p, extra)) {
-                over.push(extra);
-            }
-        }
-        durable_point_over(self, &over)
+        self.durable_point()
     }
 
     /// Under [`Durability::Deferred`], called after a layer change that
-    /// [`Durability::OnEveryClose`] would make durable at once: marks the
-    /// storage dirty and returns whether a durable point is due (the last one
-    /// is at least `max_interval` old). A due point is claimed by the caller,
-    /// so concurrent writers do not all run one; if it fails, the caller
-    /// calls [`DurableClock::retry`].
+    /// [`Durability::OnEveryClose`] would make durable at once: whether a
+    /// durable point is due (the last one is at least `max_interval` old, or
+    /// the catalog holds [`DurableClock::max_commits`] non-durable commits).
+    /// A due point is claimed by the caller, so concurrent writers do not
+    /// all run one; if it fails, the caller calls [`DurableClock::retry`].
     pub(crate) fn deferred_point_due(&self, max_interval: Duration) -> bool {
-        self.clock.dirty.store(true, Ordering::Release);
-        self.clock.claim_if_due(max_interval)
+        self.clock
+            .claim_if_due(max_interval, self.catalog.unflushed_commits())
     }
 
     /// The block store's block size in bytes.

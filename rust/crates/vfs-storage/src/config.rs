@@ -17,20 +17,34 @@ use vfs_block_store::StoreConfig;
 ///
 /// Durable points happen, in both modes, at [`crate::Storage::sync`],
 /// [`crate::Storage::close`], when a layer's last provider drops, when a layer
-/// is created, imported or deleted, and when reconciliation runs at open.
+/// is created, imported or deleted, and when reconciliation runs at open. One
+/// that finds nothing non-durable skips the fsyncs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Durability {
     /// A handle's `close` (of a handle that wrote), its `flush`, and every
     /// namespace change (`mkdir`, `remove`, `rename`, a size change by
-    /// `set_attr`) commit without fsyncs; a real durable point piggybacks on
-    /// such an operation only once the last one is at least `max_interval`
-    /// old. No background thread runs, so a store that stops changing stays
+    /// `set_attr`) commit without fsyncs; a real durable point piggybacks
+    /// on such an operation once the last one is at least `max_interval`
+    /// old, or once the catalog holds 10,000 non-durable commits (redb keeps
+    /// their bookkeeping in memory until a durable commit).
+    ///
+    /// One exception: the `close`, `flush` or `set_attr` size change after
+    /// writing to a file that **already existed at the last durable point**
+    /// (a rewrite in place) makes a durable point at once, as
+    /// [`Durability::OnEveryClose`] does. Files created since the last
+    /// durable point, and namespace changes, stay deferred; so the cheap path
+    /// is creating files, or writing a temporary file and renaming it over
+    /// the real one.
+    ///
+    /// No background thread runs, so a store that stops changing stays
     /// non-durable until the next change, [`crate::Storage::sync`],
     /// [`crate::Storage::close`] or a layer provider's drop: a host that
     /// wants a batch durable calls `sync` when the batch is done.
     ///
-    /// **After a crash** the store reopens as of its last durable point, and
-    /// reconciliation at open repairs the rest (spec §6):
+    /// **After a crash** — a process kill as much as a power loss: the
+    /// catalog's non-durable commits live only in the process — the store
+    /// reopens as of its last durable point, and reconciliation at open
+    /// repairs the rest (spec §6):
     ///
     /// - a file created since then is gone whole (its row was never durable,
     ///   so its store data is an orphan and is deleted); it is never visible
@@ -39,12 +53,12 @@ pub enum Durability {
     ///   or the new one;
     /// - a removal, rename or `mkdir` since then is undone: a removed or
     ///   replaced file comes back with its data, since its store data is
-    ///   deleted only after a durable point;
-    /// - a file that existed at the last durable point and was rewritten in
-    ///   place since can come back with its old bytes or its new ones; if the
-    ///   block store's own auto-flush landed in the middle of that rewrite, a
-    ///   mix, which reconciliation reports like a file that was open at a
-    ///   crash under [`Durability::OnEveryClose`].
+    ///   deleted only after a durable point. Until then that data takes
+    ///   space: a rename over a file holds both versions (about twice the
+    ///   file) until the next durable point;
+    /// - a rewrite in place of an older file was made durable when its
+    ///   handle closed; one still open at the crash can come back old, new
+    ///   or mixed, exactly as under [`Durability::OnEveryClose`].
     Deferred {
         /// The longest a change waits for a durable point, provided anything
         /// changes after it (see above).

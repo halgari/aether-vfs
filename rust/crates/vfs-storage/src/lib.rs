@@ -9,10 +9,12 @@
 //! a *durable point* (store fsync + durable index commit, then the catalog's
 //! durable commit) publishes them. [`StorageConfig::durability`] chooses when
 //! one runs: by default ([`Durability::Deferred`]) at most every five minutes
-//! while layers change, plus at [`Storage::sync`], [`Storage::close`] and a
-//! layer provider's drop; [`Durability::OnEveryClose`] runs one at every
-//! close, flush and namespace change. A crash loses at most the changes since
-//! the last durable point, and the store always reopens consistent.
+//! (or 10,000 catalog commits) while layers change, at once after a rewrite in
+//! place of a file that was already durable, and at [`Storage::sync`],
+//! [`Storage::close`] and a layer provider's drop; [`Durability::OnEveryClose`]
+//! runs one at every close, flush and namespace change. A crash loses at most
+//! the changes since the last durable point, and the store always reopens
+//! consistent.
 
 mod cached;
 mod catalog;

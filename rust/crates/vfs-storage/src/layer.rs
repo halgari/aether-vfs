@@ -29,21 +29,30 @@
 //!   wrote, and every namespace change (`mkdir`, `remove`, `rename`, a size
 //!   change by `set_attr`) commit and then run one before returning;
 //! - under `Deferred { max_interval }` (the default), the same operations
-//!   commit exactly as above but skip the fsyncs, unless the last durable
-//!   point is `max_interval` old: then the operation runs one covering every
-//!   live layer ([`Storage::sync`]);
+//!   commit exactly as above but skip the fsyncs, unless a durable point is
+//!   due (the last is `max_interval` old, or the catalog holds
+//!   [`crate::storage::DEFERRED_MAX_COMMITS`] non-durable commits) — with one
+//!   exception: the `close`, `flush` or `set_attr` size change of a file that
+//!   wrote to a file whose row is already durable (it existed at the last
+//!   durable point) runs one at once. Rewriting such a file in place changes
+//!   store data a durable row describes; left non-durable, a store
+//!   auto-flush in the middle of the rewrite could publish a store state the
+//!   durable row does not match, and a crash would leave the file emptied or
+//!   torn. Files created since the last durable point (tracked per layer in
+//!   `fresh`) stay deferred, and so do namespace changes;
 //! - under both, [`Storage::sync`], [`Storage::close`] and a provider's `Drop`
-//!   always run one, as do layer creation, import and deletion.
+//!   always run one (skipping the fsyncs when nothing is non-durable), as do
+//!   layer creation, import and deletion.
 //!
 //! A file whose row is removed or replaced is deleted from the store only
 //! after a durable point has made the row's removal durable (catalog first,
 //! store second), and only once no handle has it open: until then its GUID
-//! waits in the layer's `doomed` list, for as long as the policy defers.
+//! waits in the storage's `doomed` list, for as long as the policy defers.
 //! A crash therefore loses at most the changes since the last durable point,
 //! and reconciliation at the next open repairs the store to match
 //! (see [`crate::Durability`] for what a deferred crash leaves).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
@@ -54,7 +63,6 @@ use vfs_provider::{
     OPEN_EXCL, OPEN_TRUNC, OPEN_WRITE,
 };
 
-use crate::cached::lock as cached_lock;
 use crate::catalog::EntryRec;
 use crate::config::Durability;
 use crate::ids::{layer_file_id, new_guid, Guid};
@@ -120,9 +128,11 @@ pub(crate) struct LayerProvider {
     cells: Mutex<HashMap<Guid, Weak<FileCell>>>,
     handles: Mutex<HashMap<Handle, Arc<OpenFile>>>,
     next: AtomicU64,
-    /// GUIDs whose rows are gone and that no handle has open: deleted from the
-    /// store at the next durable point.
-    doomed: Mutex<Vec<Guid>>,
+    /// Files created since the last durable point: the durability epoch
+    /// ([`crate::storage::DurableClock::epoch`]) their creates saw, and their
+    /// GUIDs. A set whose epoch is not the current one is stale (a durable
+    /// point has published those rows since) and counts as empty.
+    fresh: Mutex<(u64, HashSet<Guid>)>,
     /// Test hook: the next file create fails at the store.
     #[cfg(test)]
     pub(crate) fail_store_create: AtomicBool,
@@ -138,7 +148,7 @@ impl LayerProvider {
             cells: Mutex::new(HashMap::new()),
             handles: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
-            doomed: Mutex::new(Vec::new()),
+            fresh: Mutex::new((0, HashSet::new())),
             #[cfg(test)]
             fail_store_create: AtomicBool::new(false),
         }
@@ -280,7 +290,7 @@ impl LayerProvider {
         let _ns = lock(&self.ns)?;
         let last = cell.opens.fetch_sub(1, Ordering::AcqRel) == 1;
         if last && lock(&cell.path)?.is_none() {
-            lock(&self.doomed)?.push(cell.guid);
+            lock(&self.storage.doomed)?.push(cell.guid);
             return Ok(true);
         }
         Ok(false)
@@ -295,7 +305,7 @@ impl LayerProvider {
                 return Ok(()); // its last `release` dooms it
             }
         }
-        lock(&self.doomed)?.push(guid);
+        lock(&self.storage.doomed)?.push(guid);
         Ok(())
     }
 
@@ -328,6 +338,7 @@ impl LayerProvider {
                 .set_len(&id, 0)
                 .map_err(|e| self.st_err("store create", e.into()))?;
             stored = true;
+            self.created_fresh(guid)?;
             self.acquire(&rec, &p.folded)
         })();
         if made.is_err() {
@@ -385,48 +396,55 @@ impl LayerProvider {
         Ok(())
     }
 
-    /// A durable point for this layer: store flush, then the durable catalog
-    /// commit, then the store deletes that commit made safe. See
-    /// [`durable_point_over`].
+    /// A durable point ([`Storage::durable_point`]).
     pub(crate) fn durable_point(&self) -> Result<(), i32> {
-        durable_point_over(&self.storage, &[self]).map_err(|e| self.st_err("durable point", e))
+        self.storage
+            .durable_point()
+            .map_err(|e| self.st_err("durable point", e))
+    }
+
+    /// Records that the file `guid` was created in the current durability
+    /// epoch. Under the shared gate (a create's), so no durable point runs
+    /// between the row's put and this.
+    fn created_fresh(&self, guid: Guid) -> Result<(), i32> {
+        let epoch = self.storage.clock.epoch();
+        let mut fresh = lock(&self.fresh)?;
+        if fresh.0 != epoch {
+            *fresh = (epoch, HashSet::new());
+        }
+        fresh.1.insert(guid);
+        Ok(())
+    }
+
+    /// Whether no durable point has published the row of `guid` since its
+    /// create (so its whole content is still non-durable). A race with a
+    /// durable point answers false, which only costs an extra one.
+    fn is_fresh(&self, guid: &Guid) -> bool {
+        let epoch = self.storage.clock.epoch();
+        self.fresh
+            .lock()
+            .is_ok_and(|f| f.0 == epoch && f.1.contains(guid))
     }
 
     /// Called after a change that [`Durability::OnEveryClose`] makes durable
-    /// before it returns: under that policy, a [`Self::durable_point`]. Under
-    /// [`Durability::Deferred`] the change stays non-durable (and a removed
-    /// file's store data stays, doomed) unless the last durable point is
-    /// `max_interval` old; then this runs one for every live layer
-    /// ([`Storage::sync`]). Called with no lock held.
-    fn changed(&self) -> Result<(), i32> {
+    /// before it returns: under that policy, a [`Self::durable_point`].
+    /// Under [`Durability::Deferred`] the change stays non-durable (and a
+    /// removed file's store data stays, doomed) unless a durable point is
+    /// due, or `rewrote` names a file whose row is already durable (see the
+    /// module docs): then this runs one. Called with no lock held.
+    fn changed(&self, rewrote: Option<&Guid>) -> Result<(), i32> {
         let max_interval = match self.storage.durability() {
             Durability::OnEveryClose => return self.durable_point(),
             Durability::Deferred { max_interval } => max_interval,
         };
+        if rewrote.is_some_and(|g| !self.is_fresh(g)) {
+            return self.durable_point();
+        }
         if !self.storage.deferred_point_due(max_interval) {
             return Ok(());
         }
-        self.storage.sync_including(Some(self)).map_err(|e| {
-            self.storage.clock.retry();
-            self.st_err("durable point", e)
-        })
-    }
-
-    /// Deletes the store data of `doomed`, whose rows' removal a durable
-    /// point has just made durable.
-    fn delete_doomed(&self, doomed: Vec<Guid>) {
-        let s = &self.storage;
-        for g in doomed {
-            let id = layer_file_id(&g);
-            s.ram.invalidate_file(&id);
-            match s.store.delete(&id) {
-                Ok(()) | Err(vfs_block_store::Error::NotFound) => {}
-                // Left for reconciliation, which deletes unreferenced ids.
-                Err(e) => {
-                    tracing::warn!(layer = %self.name, error = %e, "layer file delete failed")
-                }
-            }
-        }
+        self.durable_point()
+            .inspect_err(|_| self.storage.clock.retry())
     }
 
     fn handle(&self, h: Handle) -> Result<Arc<OpenFile>, i32> {
@@ -451,52 +469,6 @@ impl LayerProvider {
         cell.truncate(&self.storage, &self.name, &mut st, len)?;
         self.commit(cell, &mut st)
     }
-}
-
-/// Store flush, then the durable catalog commit, then the store deletes that
-/// commit made safe for each of `layers`.
-///
-/// The flush and the commit run under the exclusive durability gate
-/// ([`Storage::gate`]), so no layer's or cache's row can land between them
-/// ahead of its data. Each layer's `ns` is held only while its doomed list is
-/// taken (before the fsyncs): every GUID in it had its row removed before the
-/// commit, which therefore makes the removal durable before the store delete
-/// (spec §6). GUIDs doomed later wait for the next durable point. The commit
-/// covers every layer's rows; layers not in `layers` keep their doomed lists
-/// for their own next durable point.
-pub(crate) fn durable_point_over(
-    s: &Storage,
-    layers: &[&LayerProvider],
-) -> Result<(), StorageError> {
-    let doomed = {
-        let _gate = s.gate_exclusive();
-        let doomed: Vec<Vec<Guid>> = layers
-            .iter()
-            .map(|l| {
-                let _ns = cached_lock(&l.ns);
-                std::mem::take(&mut *cached_lock(&l.doomed))
-            })
-            .collect();
-        s.clock.starting();
-        let flushed = s
-            .store
-            .flush()
-            .map_err(StorageError::from)
-            .and_then(|()| s.catalog.commit_durable());
-        if let Err(e) = flushed {
-            s.clock.dirty.store(true, Ordering::Release);
-            for (l, d) in layers.iter().zip(doomed) {
-                cached_lock(&l.doomed).extend(d);
-            }
-            return Err(e);
-        }
-        s.clock.reached();
-        doomed
-    };
-    for (l, d) in layers.iter().zip(doomed) {
-        l.delete_doomed(d);
-    }
-    Ok(())
 }
 
 impl Provider for LayerProvider {
@@ -601,7 +573,7 @@ impl Provider for LayerProvider {
         let doomed = self.release(cell);
         committed?;
         if doomed? || durable {
-            self.changed()?;
+            self.changed(durable.then_some(&cell.guid))?;
         }
         Ok(())
     }
@@ -634,11 +606,13 @@ impl Provider for LayerProvider {
         let Some(cell) = &of.cell else {
             return Ok(());
         };
-        {
+        let wrote = {
             let mut st = lock(&cell.state)?;
+            let wrote = of.wrote.load(Ordering::Acquire) || st.is_dirty();
             self.commit(cell, &mut st)?;
-        }
-        self.changed()
+            wrote
+        };
+        self.changed(wrote.then_some(&cell.guid))
     }
 
     fn mkdir(&self, p: VPath) -> Result<(), i32> {
@@ -669,7 +643,7 @@ impl Provider for LayerProvider {
             }
             made?;
         }
-        self.changed()
+        self.changed(None)
     }
 
     fn remove(&self, p: VPath) -> Result<(), i32> {
@@ -691,7 +665,7 @@ impl Provider for LayerProvider {
         // Durable now (or, deferred, at the next durable point), and the
         // durable point deletes the file's data (unless a handle still has it
         // open).
-        self.changed()
+        self.changed(None)
     }
 
     fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
@@ -708,7 +682,7 @@ impl Provider for LayerProvider {
         // the real one: the save is only safe once the rename is durable
         // (under `OnEveryClose` at once; deferred, at the next durable
         // point). The durable point also deletes a replaced file's data.
-        self.changed()
+        self.changed(None)
     }
 
     fn set_attr(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
@@ -783,7 +757,7 @@ impl LayerProvider {
             let doomed = self.release(&cell);
             resized?;
             doomed?;
-            self.changed()?;
+            self.changed(Some(&cell.guid))?;
         }
         if let Some(mtime) = attr.mtime {
             let _ns = lock(&self.ns)?;
@@ -1423,15 +1397,42 @@ mod tests {
                 },
             )
             .unwrap();
+            // (`OnEveryClose`: the close after the flush had nothing left to
+            // make durable, so it skipped the fsyncs.)
             assert_eq!(
                 s.clock.points() - before,
-                11 * per_op,
+                10 * per_op,
                 "{durability:?} namespace changes"
             );
-            // An explicit sync is a durable point under both.
+            // A sync with changes pending is a durable point (under
+            // `OnEveryClose` none are).
             s.sync().unwrap();
-            assert_eq!(s.clock.points() - before, 11 * per_op + 1);
+            assert_eq!(s.clock.points() - before, 10 * per_op + (1 - per_op));
         }
+    }
+
+    /// `sync` (which `close` runs) and a provider's drop skip the fsyncs
+    /// when nothing changed since the last durable point.
+    #[test]
+    fn an_idle_sync_drop_or_close_makes_no_durable_point() {
+        let (s, _d) = temp_storage();
+        let p = s.layer("l").unwrap();
+        write_file(&p, "gone", 0, b"x");
+        p.remove(at("gone")).unwrap();
+        s.sync().unwrap();
+        // The removed file's store delete ran after that commit, so one
+        // more durable point has something to publish; after it, nothing.
+        s.sync().unwrap();
+        let settled = s.clock.points();
+        let (h, _, _) = p.open(at(""), OPEN_READ).unwrap(); // reads change nothing
+        p.close(h).unwrap();
+        s.sync().unwrap();
+        drop(p);
+        assert_eq!(s.clock.points(), settled, "idle sync and drop");
+        let q = s.layer("l").unwrap();
+        write_file(&q, "f", 0, b"y");
+        s.sync().unwrap();
+        assert_eq!(s.clock.points(), settled + 1, "a change makes it count");
     }
 
     /// Once the last durable point is `max_interval` old, the next change
@@ -1449,10 +1450,8 @@ mod tests {
         s.clock.advance(max_interval / 2);
         write_file(&p, "c", 0, b"c");
         assert_eq!(s.clock.points(), before + 1, "due: the close made one");
-        assert!(!s.clock.dirty.load(std::sync::atomic::Ordering::Acquire));
         write_file(&p, "d", 0, b"d");
         assert_eq!(s.clock.points(), before + 1, "the interval restarted");
-        assert!(s.clock.dirty.load(std::sync::atomic::Ordering::Acquire));
         s.clock.advance(max_interval);
         p.mkdir(at("x")).unwrap();
         assert_eq!(s.clock.points(), before + 2, "a namespace change too");
@@ -1576,6 +1575,142 @@ mod tests {
         let s = Storage::open(d.path(), cfg()).unwrap();
         assert_eq!(*s.last_reconcile(), Default::default());
         assert_eq!(read_file(&s.layer("l").unwrap(), "a"), b"after no sync");
+    }
+
+    /// Deferred: rewriting a file that is already durable, in place, with
+    /// the block store flushing in the middle (its auto-flush), then a crash
+    /// after the close: the file comes back whole (the close made a durable
+    /// point), never emptied or torn.
+    #[cfg(not(windows))]
+    #[test]
+    fn deferred_rewrite_of_a_durable_file_survives_a_mid_rewrite_store_flush() {
+        let (s, d) = temp_storage();
+        let lp = s.layer_provider("l", true).unwrap();
+        let p: Arc<dyn Provider> = lp.clone();
+        let old: Vec<u8> = (0..(3 * BS + 10)).map(|i| (i % 251) as u8).collect();
+        let new: Vec<u8> = (0..(5 * BS + 3)).map(|i| (i % 13) as u8).collect();
+        write_file(&p, "trunc.bin", 0, &old);
+        write_file(&p, "grow.bin", 0, &old[..(BS + 10) as usize]);
+        s.sync().unwrap();
+
+        // Truncate on open (commits the store's resize to 0), store flush,
+        // then the new content.
+        let (h, _, _) = p.open(at("trunc.bin"), OPEN_WRITE | OPEN_TRUNC).unwrap();
+        s.store.flush().unwrap();
+        p.write_at(h, 0, &new).unwrap();
+        p.close(h).unwrap();
+
+        // Grow: the close's commit resizes the store, which flushes before
+        // the block writes.
+        let (h, _, _) = p.open(at("grow.bin"), OPEN_WRITE).unwrap();
+        p.write_at(h, 0, &new).unwrap();
+        let lid = s.catalog.layer_id("l").unwrap().unwrap();
+        let guid = s.catalog.get(lid, "grow.bin").unwrap().unwrap().guid;
+        lp.live_cell(&guid)
+            .unwrap()
+            .flush_after_set_len
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        p.close(h).unwrap();
+
+        let (k, kp, _kd) = killed_copy(d.path(), "l");
+        assert_no_file_repaired(k.last_reconcile());
+        for f in ["trunc.bin", "grow.bin"] {
+            let got = read_file(&kp, f);
+            assert!(got == new, "{f}: {} bytes, not the new content", got.len());
+        }
+    }
+
+    /// Deferred: a new file renamed over a durable one, the store flushed,
+    /// then a crash: the durable file is there, old or new, and whole.
+    #[cfg(not(windows))]
+    #[test]
+    fn deferred_rename_over_a_durable_file_then_a_crash_keeps_a_whole_file() {
+        let (s, d) = temp_storage();
+        let p = s.layer("l").unwrap();
+        let old = vec![0x11u8; 2 * BS as usize + 5];
+        let new = vec![0x22u8; 3 * BS as usize + 7];
+        write_file(&p, "save.ess", 0, &old);
+        s.sync().unwrap();
+        write_file(&p, "save.tmp", 0, &new);
+        p.rename(at("save.tmp"), at("save.ess")).unwrap();
+        s.store.flush().unwrap();
+
+        let (k, kp, _kd) = killed_copy(d.path(), "l");
+        assert_no_file_repaired(k.last_reconcile());
+        assert_eq!(names(&kp, ""), ["save.ess"]);
+        let got = read_file(&kp, "save.ess");
+        assert!(got == old || got == new, "{} bytes", got.len());
+    }
+
+    /// Deferred: a durable point is also due once the catalog holds
+    /// `max_commits` non-durable commits, whatever `max_interval` says.
+    #[test]
+    fn deferred_changes_make_a_durable_point_at_the_commit_bound() {
+        let (s, _d) = temp_storage();
+        s.clock.set_max_commits(20);
+        let p = s.layer("l").unwrap();
+        let before = s.clock.points();
+        for i in 0..50 {
+            write_file(&p, &format!("f{i}"), 0, b"x");
+        }
+        let made = s.clock.points() - before;
+        assert!(
+            (1..50).contains(&made),
+            "{made} durable points for 50 closes"
+        );
+        assert!(s.catalog.unflushed_commits() < 20 + 10);
+    }
+
+    /// `sync` never holds a layer's provider: a dropped provider's layer
+    /// can be deleted at once while other threads sync.
+    #[test]
+    fn delete_layer_after_drop_is_not_refused_while_syncing() {
+        let (s, _d) = temp_storage();
+        let other = s.layer("other").unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let syncer = {
+            let (s, other, stop) = (Arc::clone(&s), Arc::clone(&other), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                let mut i = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                    write_file(&other, "o", 0, &i.to_le_bytes());
+                    s.sync().unwrap();
+                    i += 1;
+                }
+            })
+        };
+        for i in 0..100 {
+            let p = s.layer("x").unwrap();
+            write_file(&p, "f", 0, b"x");
+            drop(p);
+            if let Err(e) = s.delete_layer("x") {
+                stop.store(true, std::sync::atomic::Ordering::Release);
+                syncer.join().unwrap();
+                panic!("iteration {i}: {e}");
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        syncer.join().unwrap();
+        drop(other);
+    }
+
+    /// Deferred: a file removed while open keeps its store data past its
+    /// last close, until a durable point.
+    #[test]
+    fn deferred_remove_while_open_deletes_the_data_at_the_durable_point() {
+        let (s, _d) = temp_storage();
+        let p = s.layer("l").unwrap();
+        write_file(&p, "gone.txt", 0, b"still readable");
+        let lid = s.catalog.layer_id("l").unwrap().unwrap();
+        let id = layer_file_id(&s.catalog.get(lid, "gone.txt").unwrap().unwrap().guid);
+        let (h, _, _) = p.open(at("gone.txt"), OPEN_READ).unwrap();
+        p.remove(at("gone.txt")).unwrap();
+        assert!(p.getattr(at("gone.txt")).unwrap().is_none());
+        assert_eq!(read_range(&p, h, 0, 14), b"still readable");
+        p.close(h).unwrap();
+        assert!(s.store.stat(&id).unwrap().is_some(), "deferred past close");
+        s.sync().unwrap();
+        assert!(s.store.stat(&id).unwrap().is_none(), "deleted by sync");
     }
 
     /// Many deferred closes: no durable point at all, and cheap.

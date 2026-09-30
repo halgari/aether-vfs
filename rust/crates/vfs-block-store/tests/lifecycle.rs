@@ -62,6 +62,22 @@ fn flush_makes_writes_durable_without_close() {
 }
 
 #[test]
+fn has_unflushed_tracks_writes_since_the_last_flush() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    assert!(!store.has_unflushed(), "fresh store");
+    store.set_len(b"f", 99).unwrap();
+    assert!(store.has_unflushed(), "after set_len");
+    store.flush().unwrap();
+    assert!(!store.has_unflushed(), "after flush");
+    store.write_blocks(b"f", 0, &[1u8; 99]).unwrap();
+    assert!(store.has_unflushed(), "after write_blocks");
+    store.flush().unwrap();
+    store.delete(b"f").unwrap();
+    assert!(store.has_unflushed(), "after delete");
+}
+
+#[test]
 fn second_open_is_locked() {
     let dir = tempfile::tempdir().unwrap();
     let _store = open(dir.path());

@@ -146,6 +146,15 @@ impl BlockStore {
         self.durable_commit(|_| Ok(()))
     }
 
+    /// Whether anything was written since the last durable flush: records
+    /// appended, or index changes (`set_len`, `delete`, block writes)
+    /// committed non-durably. When false, [`BlockStore::flush`] has nothing
+    /// to make durable.
+    pub fn has_unflushed(&self) -> bool {
+        self.unflushed.load(Ordering::Relaxed) > 0
+            || self.unflushed_commits.load(Ordering::Relaxed) > 0
+    }
+
     /// Syncs pack data, then commits `f` with `Durability::Immediate`. The writer lock is held
     /// throughout, so no record can be appended between the sync and the durable commit.
     pub(crate) fn durable_commit<R>(
