@@ -164,10 +164,10 @@ the session whose ring it reads through).
 
 One live session per name: a second `vfs up` of the same config is refused
 until the first is down, and a config that fails half-way leaves no session
-behind. `vfs down` is refused while a launch in that session is still running.
-The one-shot `vfs launch` takes its session down once a waited launch returns,
-and a daemon stopped with Ctrl-C / SIGTERM takes every session down before it
-exits.
+behind. `vfs down` is refused while a waited launch in that session is still
+running; a detached one is stopped first instead. The one-shot `vfs launch`
+takes its session down once a waited launch returns, and a daemon stopped
+with Ctrl-C / SIGTERM takes every session down before it exits.
 
 A named session keeps a persistent Wine prefix at
 `$VFS_HOME/sessions/<name>/prefix`, so later `vfs exec` calls reuse it; an

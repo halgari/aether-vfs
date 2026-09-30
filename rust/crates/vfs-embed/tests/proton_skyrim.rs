@@ -210,6 +210,8 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
 
     let root0 = tmp("root0");
     let upper = tmp("upper");
+    let state = tmp("state");
+    let overlay = tmp("overlay");
     let location = root0_location();
     let provider = Arc::new(Recording {
         inner: Arc::new(ReadOnlyProvider::new(Arc::new(DiskProvider::new(&game)))),
@@ -219,8 +221,8 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
     let mut s = Session::new();
     s.set_home(&home);
     s.set_root(&root0);
-    s.set_state_dir(tmp("state"));
-    s.set_overlay(tmp("overlay"));
+    s.set_state_dir(&state);
+    s.set_overlay(&overlay);
     s.declare_root(0, &location);
     s.set_prefix_name("skyrim-e2e").unwrap();
     s.set_prefix_init(PrefixInit::Proton { steam_client: steam, app_id: Some(489830) });
@@ -297,7 +299,7 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
     }
     s.stop_serve();
     drop(s);
-    for d in [&home, &root0, &upper] {
+    for d in [&home, &root0, &upper, &state, &overlay] {
         let _ = std::fs::remove_dir_all(d);
     }
 }

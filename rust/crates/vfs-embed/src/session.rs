@@ -402,6 +402,21 @@ pub struct Session {
     /// drops (which stops it).
     #[cfg(unix)]
     detached: Mutex<Option<LaunchHandle>>,
+    /// Set for the span of a [`Session::launch_detached`] call, from just
+    /// after it refuses a second launch to just before it returns — the
+    /// window in which neither `detached` nor `waiting` yet holds the
+    /// handle, so [`Session::stop_launch`] has nothing to act on directly.
+    /// Doubles as the second half of that refusal: a `launch_detached` that
+    /// finds it already set (another one is mid-flight) refuses too.
+    #[cfg(unix)]
+    starting: std::sync::atomic::AtomicBool,
+    /// Set by [`Session::stop_launch`] when it finds `starting` set but
+    /// nothing in `detached`/`waiting` yet — a stop requested while a launch
+    /// is between spawning and being recorded. `launch_detached` checks this
+    /// the moment it has a handle, right after spawning, so the request is
+    /// honoured instead of silently lost to that race.
+    #[cfg(unix)]
+    stop_pending: std::sync::atomic::AtomicBool,
     /// The most recent staged launch directory, held here because
     /// [`StagedDir`]'s `Drop` removes the staged files — not the virtual root
     /// they now live in — and Windows keeps the image file mapped for as long
@@ -457,6 +472,10 @@ impl Session {
             waiting: Mutex::new(None),
             #[cfg(unix)]
             detached: Mutex::new(None),
+            #[cfg(unix)]
+            starting: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(unix)]
+            stop_pending: std::sync::atomic::AtomicBool::new(false),
             staged: Mutex::new(None),
         }
     }
@@ -1694,7 +1713,7 @@ impl Session {
     /// returns `Ok(`[`STOPPED_EXIT_CODE`]`)`.
     #[cfg(unix)]
     pub fn launch(&self, opts: &LaunchOpts) -> Result<i32, String> {
-        let handle = self.launch_detached(opts)?;
+        let mut handle = self.launch_detached(opts)?;
         if !opts.wait {
             *self
                 .detached
@@ -1707,10 +1726,22 @@ impl Session {
             .waiting
             .lock()
             .map_err(|_| "waiting launch lock poisoned".to_string())? = Some(stopper);
-        let exit = handle.wait();
+        // Not `handle.wait()`: that consumes `handle`, so its `_prefix_lock`
+        // (and the prefix it guards) is free the instant it returns — before
+        // this function regains control to clear `waiting` below. A
+        // `stop_launch` or a new `launch` landing in that gap would see a
+        // stale `waiting` for a launch whose prefix may already be a later
+        // one's. Driving the child directly keeps `handle`, and so the lock,
+        // alive until `waiting` is cleared first.
+        let exit = handle
+            .child
+            .wait()
+            .map_err(|e| format!("launch: {e}"))
+            .and_then(|status| handle.conclude(status));
         if let Ok(mut w) = self.waiting.lock() {
             *w = None;
         }
+        drop(handle);
         Ok(match exit? {
             LaunchExit::Exited(code) => code,
             LaunchExit::Stopped => STOPPED_EXIT_CODE,
@@ -1745,6 +1776,32 @@ impl Session {
         }
         // A detached launch that has ended still holds the prefix lock.
         self.reap_detached();
+        // Refused up front, before `resolve_launch_image` can stage anything:
+        // staging replaces `self.staged`, and the old `StagedDir`'s `Drop`
+        // deletes the running launch's staged files out from under it —
+        // `prefix.lock()` further down would refuse this launch anyway, but
+        // only after that damage is done. `starting.swap` both checks and
+        // claims "a launch_detached is in flight" in one step, so two calls
+        // racing each other (neither yet recorded in `detached`/`waiting`)
+        // can't both pass.
+        if self
+            .detached
+            .lock()
+            .map_err(|_| "detached launch lock poisoned".to_string())?
+            .is_some()
+            || self
+                .waiting
+                .lock()
+                .map_err(|_| "waiting launch lock poisoned".to_string())?
+                .is_some()
+            || self.starting.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(
+                "launch: a launch is already running in this session — stop_launch() first"
+                    .to_string(),
+            );
+        }
+        let _starting = StartingGuard { starting: &self.starting, stop_pending: &self.stop_pending };
 
         // Before the runtime lookup: a bad image fails fast, and staging
         // behaves as on Windows.
@@ -1867,23 +1924,45 @@ impl Session {
         };
 
         let child = vfs_proton::launch::spawn(&wine).map_err(|e| format!("launch: {e}"))?;
-        Ok(LaunchHandle {
+        let handle = LaunchHandle {
             child,
             stopper: LaunchStopper(Arc::new(StopInner {
                 prefix,
                 runtime,
                 requested: std::sync::atomic::AtomicBool::new(false),
+                ended: Mutex::new(false),
             })),
             wine,
             _prefix_lock: prefix_lock,
-        })
+        };
+        if self.stop_pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            // `stop_launch` ran while this launch was still between spawning
+            // and being recorded in `detached`/`waiting`, found nothing to
+            // act on, and left this instead of losing the request — honour
+            // it now rather than handing back a handle for a program that
+            // was supposed to never run.
+            let _ = handle.stop();
+            return Err(
+                "launch: stopped during startup (stop_launch was called before the launch \
+                 finished starting)"
+                    .to_string(),
+            );
+        }
+        Ok(handle)
     }
 
     /// Unix: stops the session's running launch — the one a `wait: false`
     /// [`Session::launch`] started, or the one a waiting `launch` on another
     /// thread is blocked on — by stopping its prefix's `wineserver`, which
     /// ends every Wine process in the prefix. `Ok(false)` when nothing is
-    /// running. The waiting `launch` then returns `Ok(`[`STOPPED_EXIT_CODE`]`)`.
+    /// recorded as running. The waiting `launch` then returns
+    /// `Ok(`[`STOPPED_EXIT_CODE`]`)`.
+    ///
+    /// A launch between spawning and being recorded here (inside
+    /// [`Session::launch_detached`], before it returns) has no handle yet for
+    /// this to reach: that window returns `Ok(false)` too, but leaves a
+    /// pending-cancel flag `launch_detached` checks right after spawning, so
+    /// the request still lands rather than being silently lost to the race.
     #[cfg(unix)]
     pub fn stop_launch(&self) -> Result<bool, String> {
         let detached = self
@@ -1902,10 +1981,13 @@ impl Session {
             .lock()
             .map_err(|_| "waiting launch lock poisoned".to_string())?
             .clone();
-        match waiting {
-            Some(stopper) => stopper.stop().map(|()| true),
-            None => Ok(false),
+        if let Some(stopper) = waiting {
+            return stopper.stop().map(|()| true);
         }
+        if self.starting.load(std::sync::atomic::Ordering::SeqCst) {
+            self.stop_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(false)
     }
 
     /// Drops a detached launch that has ended, releasing its prefix lock.
@@ -2027,6 +2109,16 @@ struct StopInner {
     prefix: Prefix,
     runtime: PathBuf,
     requested: std::sync::atomic::AtomicBool,
+    /// Set once this launch has been reaped — by [`LaunchHandle::conclude`]
+    /// or its `Drop` — **before** `_prefix_lock` releases. A stopper kept
+    /// past that point (the caller's own, or one handed out and forgotten)
+    /// must not run `wineserver -k` on the prefix: once the lock is free, a
+    /// later launch can be running there instead, and `wineserver -k` cannot
+    /// tell the two apart. [`LaunchStopper::stop`]'s check-then-act and this
+    /// flag share one mutex, so the two can never race past each other: if
+    /// `stop` gets there first the launch is still this one's and the kill
+    /// is real; if reaping gets there first `stop` sees `ended` and no-ops.
+    ended: Mutex<bool>,
 }
 
 /// How long [`LaunchHandle::stop`] waits for `wine` after stopping the
@@ -2040,17 +2132,63 @@ impl LaunchStopper {
     /// every Wine process in the prefix — the program, anything it started,
     /// and the injector. The prefix is locked to this launch, so nothing
     /// else is running there.
+    ///
+    /// A no-op, `Ok(())`, once the launch has already ended — see
+    /// [`StopInner::ended`]. Without that check, a stopper kept past its
+    /// launch's life (the fixed window `Session::launch` publishes one in
+    /// `self.waiting` for, or simply a clone a caller held onto) could run
+    /// `wineserver -k` against whatever the same prefix runs next.
     pub fn stop(&self) -> Result<(), String> {
+        let ended = self
+            .0
+            .ended
+            .lock()
+            .map_err(|_| "stop: launch-ended lock poisoned".to_string())?;
+        if *ended {
+            return Ok(());
+        }
         self.0.requested.store(true, std::sync::atomic::Ordering::SeqCst);
-        self.0
+        let result = self
+            .0
             .prefix
             .stop_wineserver(&self.0.runtime)
-            .map_err(|e| format!("stop: {e}"))
+            .map_err(|e| format!("stop: {e}"));
+        drop(ended);
+        result
     }
 
     /// Whether [`LaunchStopper::stop`] has been called.
     pub fn was_stopped(&self) -> bool {
         self.0.requested.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Marks the launch ended — see [`StopInner::ended`]. Idempotent.
+    fn mark_ended(&self) {
+        if let Ok(mut ended) = self.0.ended.lock() {
+            *ended = true;
+        }
+    }
+}
+
+/// Resets [`Session::starting`] to `false` when a
+/// [`Session::launch_detached`] call ends, on every path — success or an
+/// early `?` return alike. Clears [`Session::stop_pending`] the same way:
+/// a `stop_launch` landing while this call is in flight but before it
+/// reaches the spawn checkpoint (an early error — a bad image, a prefix
+/// that won't `ensure`) would otherwise leave that flag set with nothing
+/// left to consume it, and the *next*, unrelated `launch_detached` would
+/// spawn its program only to stop it immediately.
+#[cfg(unix)]
+struct StartingGuard<'a> {
+    starting: &'a std::sync::atomic::AtomicBool,
+    stop_pending: &'a std::sync::atomic::AtomicBool,
+}
+
+#[cfg(unix)]
+impl Drop for StartingGuard<'_> {
+    fn drop(&mut self) {
+        self.starting.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.stop_pending.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -2107,8 +2245,13 @@ impl LaunchHandle {
         self.conclude(status)
     }
 
+    /// The child has just been reaped (`status` is its exit status): decide
+    /// how the launch ended, and mark it ended — see [`StopInner::ended`] —
+    /// before `self` (and so `_prefix_lock`) can drop.
     fn conclude(&self, status: std::process::ExitStatus) -> Result<LaunchExit, String> {
-        if self.stopper.was_stopped() {
+        let was_stopped = self.stopper.was_stopped();
+        self.stopper.mark_ended();
+        if was_stopped {
             return Ok(LaunchExit::Stopped);
         }
         vfs_proton::launch::finish(&self.wine, status)
@@ -2120,13 +2263,16 @@ impl LaunchHandle {
 #[cfg(unix)]
 impl Drop for LaunchHandle {
     /// A handle dropped while its program runs stops it: nothing could stop
-    /// it afterwards, and the prefix lock it held is released here.
+    /// it afterwards, and the prefix lock it held is released here. Marks
+    /// the launch ended either way (idempotent if [`Self::conclude`] already
+    /// did), before that release — see [`StopInner::ended`].
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.stopper.stop();
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+        self.stopper.mark_ended();
     }
 }
 

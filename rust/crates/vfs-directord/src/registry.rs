@@ -854,14 +854,25 @@ impl SessionRegistry {
                 .get(id)
                 .ok_or_else(|| format!("unknown session {id}"))?;
             match entry.live.try_lock() {
-                Ok(mut live) => live.session.stop_serve(),
+                Ok(mut live) => {
+                    // A detached (`wait: false`) launch holds no lock on
+                    // `live` — stop it before the ring it reads through goes.
+                    #[cfg(unix)]
+                    let _ = live.session.stop_launch();
+                    live.session.stop_serve();
+                }
                 Err(std::sync::TryLockError::WouldBlock) => {
                     return Err(format!(
                         "session {id} is running a launch; it can be torn down once the \
                          program exits"
                     ))
                 }
-                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().session.stop_serve(),
+                Err(std::sync::TryLockError::Poisoned(p)) => {
+                    let mut live = p.into_inner();
+                    #[cfg(unix)]
+                    let _ = live.session.stop_launch();
+                    live.session.stop_serve();
+                }
             }
             guard.remove(id)
         };
@@ -886,6 +897,8 @@ impl SessionRegistry {
         let n = entries.len();
         for entry in entries {
             if let Ok(mut live) = entry.live.try_lock() {
+                #[cfg(unix)]
+                let _ = live.session.stop_launch();
                 live.session.stop_serve();
             }
             drop(entry);

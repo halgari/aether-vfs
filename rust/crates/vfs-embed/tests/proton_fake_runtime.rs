@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use vfs_embed::{LaunchExit, LaunchOpts, PrefixInit, Session, STOPPED_EXIT_CODE};
+use vfs_embed::{DiskProvider, LaunchExit, LaunchOpts, PrefixInit, Session, STOPPED_EXIT_CODE};
 
 const ROOT0: &str = r"C:\Games\Fake";
 
@@ -26,6 +26,23 @@ fn tmp(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
+}
+
+/// Minimal PE: MZ header, e_lfanew, PE32+ optional header, no imports — the
+/// same shape `vfs_director::stage`'s own tests and `launch_vfs_content.rs`
+/// use. Good enough for [`vfs_director::stage::stage_launch_into`] to accept
+/// and stage; nothing here ever actually runs it (the fake `wine` doesn't
+/// read it).
+fn bare_pe() -> Vec<u8> {
+    let mut pe = vec![0u8; 0x400];
+    pe[0] = b'M';
+    pe[1] = b'Z';
+    pe[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+    pe[0x84..0x86].copy_from_slice(&0x8664u16.to_le_bytes());
+    pe[0x94..0x96].copy_from_slice(&240u16.to_le_bytes());
+    pe[0x98..0x9A].copy_from_slice(&0x20Bu16.to_le_bytes());
+    pe
 }
 
 fn script(path: &Path, body: &str) {
@@ -58,12 +75,25 @@ exit 0"#,
     );
     script(
         &rt.join("files").join("bin").join("wineserver"),
-        r#"if [ "$1" = "-k" ] && [ -f "$WINEPREFIX/fake-wine.pid" ]; then
-  kill "$(cat "$WINEPREFIX/fake-wine.pid")" 2>/dev/null
+        r#"if [ "$1" = "-k" ]; then
+  echo "$WINEPREFIX" >> "$WINEPREFIX/fake-wineserver-k.log"
+  if [ -f "$WINEPREFIX/fake-wine.pid" ]; then
+    kill "$(cat "$WINEPREFIX/fake-wine.pid")" 2>/dev/null
+  fi
 fi
 exit 0"#,
     );
     home
+}
+
+/// Whether the fake `wineserver -k` ran **in this prefix** — proof that a
+/// stop reached the real mechanism (`Prefix::stop_wineserver` with this
+/// prefix's own `WINEPREFIX`), not just that `stop`/`stop_launch` returned
+/// `Ok`.
+fn wineserver_was_killed(pfx: &Path) -> bool {
+    std::fs::read_to_string(pfx.join("fake-wineserver-k.log"))
+        .map(|s| s.lines().any(|l| Path::new(l) == pfx))
+        .unwrap_or(false)
 }
 
 /// A served session in `home`, with a Proton-initialized named prefix, root 0
@@ -194,9 +224,57 @@ fn a_detached_launch_is_held_by_the_session_and_stopped_by_stop_launch() {
     let t = Instant::now();
     assert!(s.stop_launch().unwrap());
     assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+    assert!(wineserver_was_killed(&pfx), "the stop must reach this prefix's own wineserver");
     assert!(!s.stop_launch().unwrap(), "already stopped");
     // The prefix lock went with it: another launch can start.
     assert_eq!(s.launch(&opts(&shim, "ok", true)).unwrap(), 0);
+}
+
+#[test]
+fn a_second_launch_while_one_is_running_is_refused_before_staging_can_clobber_it() {
+    let home = fake_home("second");
+    let mut s = Session::new();
+    s.set_home(&home);
+    s.set_root(tmp("second-root"));
+    s.set_state_dir(tmp("second-state"));
+    s.set_overlay(tmp("second-overlay"));
+    s.declare_root(0, ROOT0);
+    s.set_prefix_name("fake").unwrap();
+    s.set_prefix_init(PrefixInit::Proton {
+        steam_client: tmp("second-steam"),
+        app_id: Some(489830),
+    });
+    // `game.exe` is VFS content only — no real file under the virtual root —
+    // so launching it stages it out: the path finding #1 was about. A real
+    // on-disk file (as `session()` uses for the other tests) never stages,
+    // so it could not reproduce the bug this guards against.
+    let content = tmp("second-content");
+    std::fs::write(content.join("game.exe"), bare_pe()).unwrap();
+    s.mount("", Arc::new(DiskProvider::new(&content))).unwrap();
+    let art = tmp("second-art");
+    for f in ["vfs-injector.exe", "vfs_shim_dll.dll", "vfs_payload.dll"] {
+        std::fs::write(art.join(f), b"MZ").unwrap();
+    }
+    s.serve().unwrap();
+    let shim = art.join("vfs_shim_dll.dll").to_string_lossy().into_owned();
+    let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
+
+    assert_eq!(s.launch(&opts(&shim, "sleep", false)).unwrap(), 0);
+    wait_for(&pfx.join("fake-wine.pid"));
+    let pid: u32 = std::fs::read_to_string(pfx.join("fake-wine.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let staged = s.virtual_root().join("game.exe");
+    assert!(staged.is_file(), "the first launch staged game.exe");
+
+    let e = s.launch(&opts(&shim, "ok", true)).unwrap_err();
+    assert!(e.contains("already running"), "{e}");
+    assert!(Path::new(&format!("/proc/{pid}")).exists(), "the first launch is still running");
+    assert!(staged.is_file(), "the refused second launch must not delete the running one's staging");
+
+    assert!(s.stop_launch().unwrap());
 }
 
 #[test]
@@ -211,6 +289,7 @@ fn a_waiting_launch_is_stopped_from_another_thread() {
     wait_for(&pfx.join("fake-wine.pid"));
     assert!(s.stop_launch().unwrap());
     assert_eq!(launcher.join().unwrap().unwrap(), STOPPED_EXIT_CODE);
+    assert!(wineserver_was_killed(&pfx), "the stop must reach this prefix's own wineserver");
 }
 
 #[test]
@@ -227,10 +306,38 @@ fn a_launch_handle_reports_its_end_and_stops_when_dropped() {
     let pid = h.pid();
     drop(h);
     assert!(!Path::new(&format!("/proc/{pid}")).exists(), "dropping a running handle stops it");
-    assert_eq!(
-        s.launch_detached(&opts(&shim, "sleep", true)).unwrap().stop().unwrap(),
-        LaunchExit::Stopped
-    );
+
+    // Remove the stale pid file and wait for the *new* launch's own pid
+    // before stopping it — otherwise `stop` could observe the old (already
+    // dead) pid still on disk and report success without the new process
+    // ever having been reached.
+    std::fs::remove_file(pfx.join("fake-wine.pid")).unwrap();
+    let h = s.launch_detached(&opts(&shim, "sleep", true)).unwrap();
+    wait_for(&pfx.join("fake-wine.pid"));
+    assert_eq!(h.stop().unwrap(), LaunchExit::Stopped);
+}
+
+/// A stopper kept past its own launch's life must be a no-op instead of
+/// reaching whatever the same prefix runs next — the [`Session::stop_launch`]
+/// half of this is covered by the `Session`-level tests above; this is the
+/// bare [`vfs_embed::LaunchStopper`] a caller might hold directly (from
+/// [`vfs_embed::LaunchHandle::stopper`]).
+#[test]
+fn a_stale_stopper_cannot_reach_a_later_launch_in_the_same_prefix() {
+    let home = fake_home("stale");
+    let (s, pfx, shim) = session("stale", &home);
+    let h = s.launch_detached(&opts(&shim, "ok", true)).unwrap();
+    let stale = h.stopper();
+    assert_eq!(h.wait().unwrap(), LaunchExit::Exited(0));
+
+    std::fs::remove_file(pfx.join("fake-wine.pid")).unwrap();
+    let mut h2 = s.launch_detached(&opts(&shim, "sleep", true)).unwrap();
+    wait_for(&pfx.join("fake-wine.pid"));
+
+    stale.stop().unwrap();
+    assert_eq!(h2.try_wait().unwrap(), None, "the second launch keeps running");
+
+    assert_eq!(h2.stop().unwrap(), LaunchExit::Stopped);
 }
 
 /// `Session` is shared with a launcher thread (`Arc<Session>`), so it must be
