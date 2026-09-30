@@ -365,6 +365,10 @@ pub struct Session {
     /// Ring serve threads [`Session::serve`] starts; `None` is
     /// `vfs_director::ipc::DEFAULT_IO_WORKERS`.
     io_workers: Option<usize>,
+    /// The aether-vfs home [`Session::set_home`] chose; `None` resolves it
+    /// from the environment at launch.
+    #[cfg(unix)]
+    home: Option<PathBuf>,
     /// The most recent staged launch directory, held here because
     /// [`StagedDir`]'s `Drop` removes the staged files — not the virtual root
     /// they now live in — and Windows keeps the image file mapped for as long
@@ -412,6 +416,8 @@ impl Session {
             #[cfg(unix)]
             prefix_links: Mutex::new(Vec::new()),
             io_workers: None,
+            #[cfg(unix)]
+            home: None,
             staged: Mutex::new(None),
         }
     }
@@ -435,6 +441,26 @@ impl Session {
         vfs_director::ipc::clamp_workers(
             self.io_workers.unwrap_or(vfs_director::ipc::DEFAULT_IO_WORKERS),
         )
+    }
+
+    /// Unix: the aether-vfs home `launch` takes GE-Proton runtimes
+    /// (`<home>/runtimes`) and prefixes (`<home>/sessions`) from, instead of
+    /// `VFS_HOME` / `XDG_DATA_HOME` / `HOME` — so a host needs no process
+    /// environment to choose it.
+    #[cfg(unix)]
+    pub fn set_home(&mut self, home: impl Into<PathBuf>) {
+        self.home = Some(home.into());
+    }
+
+    /// The aether-vfs home `launch` uses: [`Session::set_home`]'s, else the
+    /// environment's (`vfs_proton::layout::Root::from_env`).
+    #[cfg(unix)]
+    fn proton_home(&self) -> Result<ProtonRoot, String> {
+        match &self.home {
+            Some(h) => Ok(ProtonRoot::at(h.clone())),
+            None => ProtonRoot::from_env()
+                .map_err(|e| format!("launch: no aether-vfs home (set_home, or VFS_HOME): {e}")),
+        }
     }
 
     pub fn kernel(&self) -> &Arc<Director> {
@@ -1584,9 +1610,10 @@ impl Session {
     /// ## What a Wine launch needs that a Windows one does not
     ///
     /// 1. **A runtime.** The newest verified GE-Proton under this host's
-    ///    aether-vfs home (`VFS_HOME`, else `XDG_DATA_HOME`, else `$HOME` —
-    ///    `vfs_proton::layout::Root::from_env`). Never a fallback to stock
-    ///    Proton: `vfs_proton::launch::run` re-verifies before it spawns.
+    ///    aether-vfs home ([`Session::set_home`], else `VFS_HOME`, else
+    ///    `XDG_DATA_HOME`, else `$HOME` — `vfs_proton::layout::Root::from_env`).
+    ///    Never a fallback to stock Proton: `vfs_proton::launch::run`
+    ///    re-verifies before it spawns.
     /// 2. **A prefix**: the persistent one [`Session::set_prefix_name`]
     ///    selected, else an anonymous one keyed by `state_dir`
     ///    ([`Session::wine_session_id`]) that this session deletes when it
@@ -1642,8 +1669,7 @@ impl Session {
         // behaves as on Windows.
         let resolved = self.resolve_launch_image(opts)?;
 
-        let home = ProtonRoot::from_env()
-            .map_err(|e| format!("launch: no aether-vfs home (set VFS_HOME): {e}"))?;
+        let home = self.proton_home()?;
         // `installed_dirs`, not `installed` + `runtime_dir`: the tag comes from
         // the tree's `version` file and the directory name from the release it
         // was installed from, and re-joining the tag onto `runtimes()` assumes
@@ -2358,6 +2384,15 @@ mod launch_image_tests {
             assert!(s.set_prefix_name(bad).is_err(), "{bad:?} must be refused");
         }
         s.set_prefix_name("skyrim").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_home_replaces_the_environments_home() {
+        let mut s = Session::new();
+        let home = scratch("home");
+        s.set_home(&home);
+        assert_eq!(s.proton_home().unwrap(), ProtonRoot::at(home));
     }
 
     #[cfg(unix)]
