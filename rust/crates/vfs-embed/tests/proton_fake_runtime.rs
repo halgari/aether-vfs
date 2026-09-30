@@ -14,9 +14,10 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use vfs_embed::{LaunchOpts, PrefixInit, Session};
+use vfs_embed::{LaunchExit, LaunchOpts, PrefixInit, Session, STOPPED_EXIT_CODE};
 
 const ROOT0: &str = r"C:\Games\Fake";
 
@@ -173,4 +174,70 @@ fn the_injectors_reason_reaches_the_caller() {
     let (s, _pfx, shim) = session("fail", &home);
     let e = s.launch(&opts(&shim, "fail", true)).unwrap_err();
     assert!(e.contains("0xc0000135") && e.contains("STATUS_DLL_NOT_FOUND"), "{e}");
+}
+
+fn wait_for(p: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !p.exists() {
+        assert!(Instant::now() < deadline, "{} never appeared", p.display());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_detached_launch_is_held_by_the_session_and_stopped_by_stop_launch() {
+    let home = fake_home("detach");
+    let (s, pfx, shim) = session("detach", &home);
+    assert!(!s.stop_launch().unwrap(), "nothing running yet");
+    assert_eq!(s.launch(&opts(&shim, "sleep", false)).unwrap(), 0);
+    wait_for(&pfx.join("fake-wine.pid"));
+    let t = Instant::now();
+    assert!(s.stop_launch().unwrap());
+    assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+    assert!(!s.stop_launch().unwrap(), "already stopped");
+    // The prefix lock went with it: another launch can start.
+    assert_eq!(s.launch(&opts(&shim, "ok", true)).unwrap(), 0);
+}
+
+#[test]
+fn a_waiting_launch_is_stopped_from_another_thread() {
+    let home = fake_home("waiting");
+    let (s, pfx, shim) = session("waiting", &home);
+    let s = Arc::new(s);
+    let launcher = {
+        let (s, o) = (Arc::clone(&s), opts(&shim, "sleep", true));
+        std::thread::spawn(move || s.launch(&o))
+    };
+    wait_for(&pfx.join("fake-wine.pid"));
+    assert!(s.stop_launch().unwrap());
+    assert_eq!(launcher.join().unwrap().unwrap(), STOPPED_EXIT_CODE);
+}
+
+#[test]
+fn a_launch_handle_reports_its_end_and_stops_when_dropped() {
+    let home = fake_home("handle");
+    let (s, pfx, shim) = session("handle", &home);
+    let h = s.launch_detached(&opts(&shim, "ok", true)).unwrap();
+    assert_eq!(h.wait().unwrap(), LaunchExit::Exited(0));
+
+    std::fs::remove_file(pfx.join("fake-wine.pid")).unwrap();
+    let mut h = s.launch_detached(&opts(&shim, "sleep", true)).unwrap();
+    wait_for(&pfx.join("fake-wine.pid"));
+    assert_eq!(h.try_wait().unwrap(), None);
+    let pid = h.pid();
+    drop(h);
+    assert!(!Path::new(&format!("/proc/{pid}")).exists(), "dropping a running handle stops it");
+    assert_eq!(
+        s.launch_detached(&opts(&shim, "sleep", true)).unwrap().stop().unwrap(),
+        LaunchExit::Stopped
+    );
+}
+
+/// `Session` is shared with a launcher thread (`Arc<Session>`), so it must be
+/// `Send + Sync` — a `LaunchHandle` inside it included.
+#[test]
+fn session_is_send_and_sync() {
+    fn check<T: Send + Sync>() {}
+    check::<Session>();
+    check::<vfs_embed::LaunchStopper>();
 }

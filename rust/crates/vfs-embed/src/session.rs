@@ -27,7 +27,7 @@ use vfs_director::{Director, DiskProvider, MountGraph};
 use vfs_proton::{
     launch::WineLaunch,
     layout::Root as ProtonRoot,
-    prefix::{Prefix, PrefixInit},
+    prefix::{Prefix, PrefixInit, PrefixLock},
 };
 use vfs_provider::{
     bad_request, exists, map_io_err, overlay_layer_dir, Access, DirEntry, Provider, RootId, Stat,
@@ -74,6 +74,10 @@ pub struct LaunchOpts {
     pub image: String,
     pub args: Vec<String>,
     /// Wait for process exit (false = detach; session must stay alive).
+    ///
+    /// On the Proton path a detached launch is held by the session: stop it
+    /// with [`Session::stop_launch`] (dropping the session also stops it). A
+    /// host that wants the handle itself calls [`Session::launch_detached`].
     pub wait: bool,
     /// Extra images to stage beside a graph-resolved `image`, by vpath, each
     /// with its own PE import closure. Ignored when nothing is staged.
@@ -390,6 +394,14 @@ pub struct Session {
     /// How `launch` sets up the prefix — see [`Session::set_prefix_init`].
     #[cfg(unix)]
     prefix_init: PrefixInit,
+    /// The launch `launch` is waiting on, for [`Session::stop_launch`].
+    #[cfg(unix)]
+    waiting: Mutex<Option<LaunchStopper>>,
+    /// The launch a `wait: false` `launch` started, held until it is
+    /// stopped, replaced by a later launch after it ended, or the session
+    /// drops (which stops it).
+    #[cfg(unix)]
+    detached: Mutex<Option<LaunchHandle>>,
     /// The most recent staged launch directory, held here because
     /// [`StagedDir`]'s `Drop` removes the staged files — not the virtual root
     /// they now live in — and Windows keeps the image file mapped for as long
@@ -441,6 +453,10 @@ impl Session {
             home: None,
             #[cfg(unix)]
             prefix_init: PrefixInit::default(),
+            #[cfg(unix)]
+            waiting: Mutex::new(None),
+            #[cfg(unix)]
+            detached: Mutex::new(None),
             staged: Mutex::new(None),
         }
     }
@@ -1671,11 +1687,43 @@ impl Session {
     ///    and fails only at 4 MiB — measured, see `vfs_proton::launch`.
     ///    Nothing here may pass a default in their place.
     ///
-    /// `wait: false` is **refused rather than ignored**: nothing here can
-    /// detach (`run` waits), and returning after the wait while reporting a
-    /// detach would be a launch that lied about when it finished.
+    /// `wait: false` returns `Ok(0)` once the program is started, and the
+    /// session holds the launch: [`Session::stop_launch`] stops it, and
+    /// dropping the session stops it. A launch that is waited on can be
+    /// stopped from another thread with [`Session::stop_launch`] too; it then
+    /// returns `Ok(`[`STOPPED_EXIT_CODE`]`)`.
     #[cfg(unix)]
     pub fn launch(&self, opts: &LaunchOpts) -> Result<i32, String> {
+        let handle = self.launch_detached(opts)?;
+        if !opts.wait {
+            *self
+                .detached
+                .lock()
+                .map_err(|_| "detached launch lock poisoned".to_string())? = Some(handle);
+            return Ok(0);
+        }
+        let stopper = handle.stopper();
+        *self
+            .waiting
+            .lock()
+            .map_err(|_| "waiting launch lock poisoned".to_string())? = Some(stopper);
+        let exit = handle.wait();
+        if let Ok(mut w) = self.waiting.lock() {
+            *w = None;
+        }
+        Ok(match exit? {
+            LaunchExit::Exited(code) => code,
+            LaunchExit::Stopped => STOPPED_EXIT_CODE,
+        })
+    }
+
+    /// Unix: [`Session::launch`] without waiting, handing the running launch
+    /// back. `opts.wait` is ignored. The handle holds the prefix's lock until
+    /// the launch ends, and dropping it while the program runs stops it —
+    /// keep it (and this session, whose ring the program reads through) for
+    /// as long as the program should run.
+    #[cfg(unix)]
+    pub fn launch_detached(&self, opts: &LaunchOpts) -> Result<LaunchHandle, String> {
         let ipc = self
             .ipc
             .as_ref()
@@ -1695,13 +1743,8 @@ impl Session {
         if opts.image.trim().is_empty() {
             return Err("LaunchOpts.image is empty — name the image to launch".to_string());
         }
-        if !opts.wait {
-            return Err("launch: wait: false (detach) is not supported on the Proton path — \
-                        vfs_proton::launch::run waits for the child and returns its exit \
-                        code. Returning after the wait while reporting a detach would be a \
-                        launch that lied about when it finished."
-                .to_string());
-        }
+        // A detached launch that has ended still holds the prefix lock.
+        self.reap_detached();
 
         // Before the runtime lookup: a bad image fails fast, and staging
         // behaves as on Windows.
@@ -1751,7 +1794,7 @@ impl Session {
         };
         let prefix = vfs_proton::prefix::ensure_with(&home, &runtime, &prefix_id, &self.prefix_init)
             .map_err(|e| format!("launch: wine prefix: {e}"))?;
-        let _prefix_lock = prefix.lock().map_err(|e| format!("launch: {e}"))?;
+        let prefix_lock = prefix.lock().map_err(|e| format!("launch: {e}"))?;
 
         let (wine_overlay, wine_state) = self.link_into_prefix(&prefix)?;
         let roots = self.root_locations();
@@ -1798,7 +1841,7 @@ impl Session {
         let (injector, shim_dll, payload_dll) = locate_wine_artifacts(opts)?;
 
         let wine = WineLaunch {
-            runtime,
+            runtime: runtime.clone(),
             prefix: prefix.dir.clone(),
             injector,
             shim_dll,
@@ -1823,7 +1866,56 @@ impl Session {
             ready_timeout_secs: opts.ready_timeout.map(|d| d.as_secs().max(1)),
         };
 
-        vfs_proton::launch::run(&wine).map_err(|e| format!("launch: {e}"))
+        let child = vfs_proton::launch::spawn(&wine).map_err(|e| format!("launch: {e}"))?;
+        Ok(LaunchHandle {
+            child,
+            stopper: LaunchStopper(Arc::new(StopInner {
+                prefix,
+                runtime,
+                requested: std::sync::atomic::AtomicBool::new(false),
+            })),
+            wine,
+            _prefix_lock: prefix_lock,
+        })
+    }
+
+    /// Unix: stops the session's running launch — the one a `wait: false`
+    /// [`Session::launch`] started, or the one a waiting `launch` on another
+    /// thread is blocked on — by stopping its prefix's `wineserver`, which
+    /// ends every Wine process in the prefix. `Ok(false)` when nothing is
+    /// running. The waiting `launch` then returns `Ok(`[`STOPPED_EXIT_CODE`]`)`.
+    #[cfg(unix)]
+    pub fn stop_launch(&self) -> Result<bool, String> {
+        let detached = self
+            .detached
+            .lock()
+            .map_err(|_| "detached launch lock poisoned".to_string())?
+            .take();
+        if let Some(mut h) = detached {
+            if h.is_running() {
+                h.stop()?;
+                return Ok(true);
+            }
+        }
+        let waiting = self
+            .waiting
+            .lock()
+            .map_err(|_| "waiting launch lock poisoned".to_string())?
+            .clone();
+        match waiting {
+            Some(stopper) => stopper.stop().map(|()| true),
+            None => Ok(false),
+        }
+    }
+
+    /// Drops a detached launch that has ended, releasing its prefix lock.
+    #[cfg(unix)]
+    fn reap_detached(&self) {
+        if let Ok(mut d) = self.detached.lock() {
+            if d.as_mut().is_some_and(|h| !h.is_running()) {
+                *d = None;
+            }
+        }
     }
 
     pub fn stop_serve(&mut self) {
@@ -1849,6 +1941,14 @@ impl Drop for Session {
     fn drop(&mut self) {
         #[cfg(unix)]
         {
+            // Before the ring goes: a detached program still reads through it.
+            let detached = match self.detached.get_mut() {
+                Ok(d) => d.take(),
+                Err(p) => p.into_inner().take(),
+            };
+            if let Some(h) = detached {
+                let _ = h.stop();
+            }
             self.stop_serve();
             let links = match self.prefix_links.get_mut() {
                 Ok(l) => std::mem::take(l),
@@ -1886,6 +1986,148 @@ struct AnonPrefix {
     runtime: PathBuf,
     /// Where the prefix is under `home` for the session's `PrefixInit`.
     prefix_dir: PathBuf,
+}
+
+/// What a waited-on Proton [`Session::launch`] returns when
+/// [`Session::stop_launch`] ended it: 128 + `SIGKILL`, the shell's
+/// convention. Stopping kills the prefix's processes, and `wine` does not
+/// report that reliably (it can exit 0), so the session says so instead.
+pub const STOPPED_EXIT_CODE: i32 = 128 + 9;
+
+/// How a Proton launch ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchExit {
+    /// The program exited by itself, with this code.
+    Exited(i32),
+    /// [`LaunchStopper::stop`] (or [`LaunchHandle::stop`]) ended it.
+    Stopped,
+}
+
+/// A running Proton launch, from [`Session::launch_detached`].
+///
+/// Holds the prefix's lock until the launch ends. Dropping it while the
+/// program runs stops the program.
+#[cfg(unix)]
+pub struct LaunchHandle {
+    child: std::process::Child,
+    wine: WineLaunch,
+    stopper: LaunchStopper,
+    _prefix_lock: PrefixLock,
+}
+
+/// Stops a running Proton launch from any thread: see
+/// [`LaunchHandle::stopper`].
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+pub struct LaunchStopper(Arc<StopInner>);
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct StopInner {
+    prefix: Prefix,
+    runtime: PathBuf,
+    requested: std::sync::atomic::AtomicBool,
+}
+
+/// How long [`LaunchHandle::stop`] waits for `wine` after stopping the
+/// prefix's `wineserver` before killing it.
+#[cfg(unix)]
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(unix)]
+impl LaunchStopper {
+    /// Stops the launch: stops its prefix's `wineserver` (bounded), which ends
+    /// every Wine process in the prefix — the program, anything it started,
+    /// and the injector. The prefix is locked to this launch, so nothing
+    /// else is running there.
+    pub fn stop(&self) -> Result<(), String> {
+        self.0.requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.0
+            .prefix
+            .stop_wineserver(&self.0.runtime)
+            .map_err(|e| format!("stop: {e}"))
+    }
+
+    /// Whether [`LaunchStopper::stop`] has been called.
+    pub fn was_stopped(&self) -> bool {
+        self.0.requested.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(unix)]
+impl LaunchHandle {
+    /// The pid of the `wine` process running `vfs-injector.exe`, which lives
+    /// as long as the program does. Not the program's own pid.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// A stopper for this launch, to stop it from another thread while this
+    /// handle is being waited on.
+    pub fn stopper(&self) -> LaunchStopper {
+        self.stopper.clone()
+    }
+
+    /// Whether the launch is still running.
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// How the launch ended, if it has.
+    pub fn try_wait(&mut self) -> Result<Option<LaunchExit>, String> {
+        match self.child.try_wait().map_err(|e| format!("launch: {e}"))? {
+            Some(status) => self.conclude(status).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Waits for the launch to end.
+    pub fn wait(mut self) -> Result<LaunchExit, String> {
+        let status = self.child.wait().map_err(|e| format!("launch: {e}"))?;
+        self.conclude(status)
+    }
+
+    /// Stops the launch ([`LaunchStopper::stop`]) and waits for it to end,
+    /// killing `wine` if it outlives its prefix's `wineserver` by
+    /// [`STOP_WAIT`].
+    pub fn stop(mut self) -> Result<LaunchExit, String> {
+        let stopped = self.stopper.stop();
+        let deadline = std::time::Instant::now() + STOP_WAIT;
+        let status = loop {
+            if let Some(status) = self.child.try_wait().map_err(|e| format!("stop: {e}"))? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = self.child.kill();
+                break self.child.wait().map_err(|e| format!("stop: {e}"))?;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        stopped?;
+        self.conclude(status)
+    }
+
+    fn conclude(&self, status: std::process::ExitStatus) -> Result<LaunchExit, String> {
+        if self.stopper.was_stopped() {
+            return Ok(LaunchExit::Stopped);
+        }
+        vfs_proton::launch::finish(&self.wine, status)
+            .map(LaunchExit::Exited)
+            .map_err(|e| format!("launch: {e}"))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LaunchHandle {
+    /// A handle dropped while its program runs stops it: nothing could stop
+    /// it afterwards, and the prefix lock it held is released here.
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.stopper.stop();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
 
 /// The working directory a Proton launch starts `target` in: `requested` as

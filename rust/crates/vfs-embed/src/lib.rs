@@ -121,7 +121,9 @@ pub mod image;
 mod session;
 mod sources;
 
-pub use session::{compose_root, LaunchOpts, Session, StageOpts};
+pub use session::{compose_root, LaunchExit, LaunchOpts, Session, StageOpts, STOPPED_EXIT_CODE};
+#[cfg(unix)]
+pub use session::{LaunchHandle, LaunchStopper};
 /// How a Proton launch sets up its Wine prefix — see [`Session::set_prefix_init`].
 #[cfg(unix)]
 pub use vfs_proton::prefix::{PrefixInit, PROTON_GRAPHICS_OVERRIDES};

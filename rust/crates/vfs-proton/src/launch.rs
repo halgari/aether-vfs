@@ -387,6 +387,15 @@ pub fn describe_injector_error(raw: &str) -> String {
 /// GE is verified first: `PROTONPATH` pointing at a non-GE runtime is a hard
 /// error ([`LaunchError::NotGe`]), never a fallback.
 pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
+    let mut child = spawn(l)?;
+    let status = child.wait()?;
+    finish(l, status)
+}
+
+/// Spawns the launch and returns without waiting: every check [`run`]
+/// makes, then `wine`. [`finish`] turns the child's exit status into
+/// [`run`]'s result.
+pub fn spawn(l: &WineLaunch) -> Result<std::process::Child, LaunchError> {
     check_extra_env(&l.extra_env)?;
     verify_ge(&l.runtime).map_err(|e| LaunchError::NotGe(e.to_string()))?;
     check_geometry(l)?;
@@ -421,14 +430,12 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
             cmd.env_remove(stale);
         }
     }
-    let status = cmd
-        .status()
-        .map_err(|e| LaunchError::Spawn(format!("{prog}: {e}")))?;
-    finish(l, status)
+    cmd.spawn()
+        .map_err(|e| LaunchError::Spawn(format!("{prog}: {e}")))
 }
 
-/// How a launch ended: the target's exit code, or why the injector never ran
-/// it (its report, if it wrote one, else its exit code).
+/// How a launch [`spawn`] started ended: the target's exit code, or why the
+/// injector never ran it (its report, if it wrote one, else its exit code).
 pub fn finish(l: &WineLaunch, status: std::process::ExitStatus) -> Result<i32, LaunchError> {
     match status.code() {
         // 2 and 3 are the injector's own "the target never ran" exits.

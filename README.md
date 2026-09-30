@@ -158,8 +158,9 @@ under a named root), an absolute path (resolved to the root that contains it,
 and staged to real disk if only the composed graph serves it), or a path
 relative to root 0. A path containing `..` is refused in every form — on
 Windows too, where an absolute image with `..` used to be launched as given.
-On Windows `--no-wait` returns once the program has started; on Linux it is
-refused, because a Proton launch always waits for the program to exit.
+`--no-wait` returns once the program has started. On Linux the session holds
+the running program, and `vfs down` stops it (a Proton launch cannot outlive
+the session whose ring it reads through).
 
 One live session per name: a second `vfs up` of the same config is refused
 until the first is down, and a config that fails half-way leaves no session
