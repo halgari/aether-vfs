@@ -161,9 +161,23 @@ just small files in the layer) and rename-by-copy-up are unchanged.
 - **Rename** changes catalog rows only; the GUID moves, no data is copied.
   **Remove** deletes the catalog row, then the GUID in the store.
 - **Durability.** `Provider::flush`, and `close` of a handle that wrote,
-  commit the handle's dirty blocks, `BlockStore::flush()`, then commit the
-  catalog durably. A game's save is durable when it closes the file; a crash
-  loses only writes on handles still open.
+  commit the handle's dirty blocks (non-durably). A *durable point* is
+  `BlockStore::flush()`, then the catalog's durable commit.
+  `StorageConfig::durability` picks when one runs (amended 2026-09-30, after
+  per-close fsyncs measured ~25 ms per closed file on btrfs with no parallel
+  speedup):
+  - `Durability::Deferred { max_interval }`, **the default** (5 minutes):
+    closes, flushes and namespace changes make no durable point unless the
+    last one is `max_interval` old; then the operation runs one for every
+    live layer. `Storage::sync()`, `Storage::close()`, a layer provider's
+    drop, and layer create/import/delete always run one. A crash loses the
+    changes since the last durable point: files created since are gone
+    whole, removals and renames are undone (a removed file's data is
+    deleted only after a durable point), and a file rewritten in place may
+    come back old, new or mixed. Game-save durability is a later concern.
+  - `Durability::OnEveryClose`: the original rule — flush, the close of a
+    handle that wrote, and every namespace change run a durable point before
+    returning; a crash loses only writes on handles still open.
 - **Corruption.** A missing block in a layer file cannot be refetched, so it is
   corruption: the read returns `ST_IO_ERROR` and the event is logged with the
   layer, path and block. It is never served as zeros.
@@ -179,7 +193,9 @@ reconciliation carry consistency:
   store `set_len`s it.
 - **Flush:** `BlockStore::flush()` completes before the catalog's durable
   commit, so every durable catalog row references durable store data.
-- **Delete:** catalog row first, store delete second.
+- **Delete:** catalog row first, durably (a durable point), store delete
+  second. Under deferred durability the store delete waits for the next
+  durable point.
 - **At `Storage::open`, reconcile:**
   - a catalog file whose GUID the store lacks → recreated as an empty file,
     logged (its data was lost in a crash before a flush);
