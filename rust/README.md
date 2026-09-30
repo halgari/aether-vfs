@@ -78,4 +78,4 @@ workspace and carries its own profile; `vfs-protocol/tests/unwind.rs` pins both.
 
 ## License
 
-Private / unlicensed for external use unless otherwise stated.
+GPL-3.0-or-later. See [LICENSE](LICENSE).
