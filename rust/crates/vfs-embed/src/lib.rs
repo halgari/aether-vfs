@@ -90,12 +90,14 @@
 //!   `python.exe` — neither anywhere near the shipped DLLs. A binding must
 //!   resolve both from its own module path and set them; they are effectively
 //!   mandatory outside this workspace's own binaries.
-//! * **Keep its threads away from `std::env`.** The child inherits its ring
-//!   coordinates, so [`Session::serve`] and [`Session::launch`] write
-//!   process-global `VFS_*` variables under a lock. The lock orders *our*
-//!   writers and cannot order a host's: `std::env::set_var` is unsound in a
-//!   multi-threaded process, and a Node or Python host is multi-threaded by
-//!   construction. See [`Session::launch`] for what removing the hazard takes.
+//! * **Keep its threads away from `std::env` — Windows only.** There,
+//!   `CreateProcessW` inherits by null environment, so [`Session::serve`] and
+//!   [`Session::launch`] write process-global `VFS_*` variables under a lock.
+//!   The lock orders *our* writers and cannot order a host's:
+//!   `std::env::set_var` is unsound in a multi-threaded process, and a Node
+//!   or Python host is multi-threaded by construction. On unix `Session::serve`
+//!   and `Session::launch` never write process env: a Wine child's
+//!   environment block is built explicitly by `vfs_proton::launch::launch_env`.
 //! * **Its own [`Storage`], if it wants caching or persistent layers.** A
 //!   `Session` owns none: a host opens one per storage directory (the store
 //!   allows one process per directory), wraps each slow source with

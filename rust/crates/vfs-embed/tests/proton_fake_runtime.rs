@@ -123,3 +123,32 @@ fn a_launch_sets_up_and_uses_a_proton_prefix() {
         "root 0 is linked into the Proton prefix"
     );
 }
+
+#[test]
+fn the_launch_environment_is_the_childs_alone() {
+    assert!(std::env::var_os("SteamAppId").is_none(), "run without SteamAppId in the test env");
+    let home = fake_home("env");
+    let (s, pfx, shim) = session("env", &home);
+    let mut o = opts(&shim, "ok", true);
+    o.env.insert("SteamAppId".into(), "489830".into());
+    o.env.insert("WINEDLLOVERRIDES".into(), "d3dx9_42=n,b".into());
+    assert_eq!(s.launch(&o).unwrap(), 0);
+
+    let env = child_env(&pfx);
+    assert_eq!(env["SteamAppId"], "489830");
+    assert_eq!(env["WINEDLLOVERRIDES"], "mscoree=d;mshtml=d;d3dx9_42=n,b");
+    assert_eq!(env["WINEDEBUG"], "-all");
+    assert!(std::env::var_os("SteamAppId").is_none(), "this process's environment is untouched");
+    let args = std::fs::read_to_string(pfx.join("fake-wine.args")).unwrap();
+    assert!(args.contains(r"C:\Games\Fake\game.exe"), "{args}");
+}
+
+#[test]
+fn a_reserved_name_in_the_launch_env_is_refused() {
+    let home = fake_home("reserved");
+    let (s, _pfx, shim) = session("reserved", &home);
+    let mut o = opts(&shim, "ok", true);
+    o.env.insert("VFS_VIRTUAL_DIR".into(), r"C:\elsewhere".into());
+    let e = s.launch(&o).unwrap_err();
+    assert!(e.contains("VFS_VIRTUAL_DIR"), "{e}");
+}

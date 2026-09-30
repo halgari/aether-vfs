@@ -87,7 +87,20 @@ pub struct WineLaunch {
     pub virtual_roots: Vec<(u32, String)>,
     /// Arguments for the target, passed after `--`.
     pub args: Vec<String>,
+    /// The host's own variables for the child, applied over [`launch_env`]'s:
+    /// `WINEDLLOVERRIDES` is merged with [`BASE_DLL_OVERRIDES`] (see
+    /// [`merge_dll_overrides`]), `WINEDEBUG` replaces [`DEFAULT_WINEDEBUG`],
+    /// and anything else is added. A name the launch's own handshake uses is
+    /// refused ([`LaunchError::ReservedEnv`]). Child-only: nothing here is
+    /// written into this process's environment.
+    pub extra_env: BTreeMap<String, String>,
 }
+
+/// `WINEDLLOVERRIDES` every launch carries: Mono and Gecko prompts would
+/// otherwise block a launch on a fresh prefix.
+pub const BASE_DLL_OVERRIDES: &str = "mscoree=d;mshtml=d";
+/// `WINEDEBUG` unless the host sets its own.
+pub const DEFAULT_WINEDEBUG: &str = "-all";
 
 /// Why a launch did not happen, or did not finish cleanly.
 #[derive(Debug)]
@@ -114,6 +127,8 @@ pub enum LaunchError {
     /// loses nothing — whereas reporting `Ok(3)` would hide an injection that
     /// never happened, which is the failure mode worth being loud about.
     NonZeroWine(i32),
+    /// [`WineLaunch::extra_env`] names a variable the launch sets itself.
+    ReservedEnv(String),
 }
 
 impl std::fmt::Display for LaunchError {
@@ -127,6 +142,11 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "vfs-injector exited {c} without running the target \
                  (2 = bad argv, 3 = injection failed)"
+            ),
+            LaunchError::ReservedEnv(k) => write!(
+                f,
+                "{k} is part of the launch's own handshake and cannot be set through the \
+                 launch environment"
             ),
         }
     }
@@ -208,8 +228,8 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
     // UMU-Proton (stock Valve Proton), and that downgrade produces no error.
     env.insert("PROTONPATH".to_string(), path_string(&absolute(&l.runtime)));
     // Mono and Gecko prompts would otherwise block a launch on a fresh prefix.
-    env.insert("WINEDLLOVERRIDES".to_string(), "mscoree=d;mshtml=d".to_string());
-    env.insert("WINEDEBUG".to_string(), "-all".to_string());
+    env.insert("WINEDLLOVERRIDES".to_string(), BASE_DLL_OVERRIDES.to_string());
+    env.insert("WINEDEBUG".to_string(), DEFAULT_WINEDEBUG.to_string());
 
     env.insert(vfs_env::RING_PATH.to_string(), path_string(&l.ring_path));
     env.insert(vfs_env::RING_BYTES.to_string(), l.ring_bytes.to_string());
@@ -226,7 +246,78 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
             .join(";");
         env.insert(vfs_env::VIRTUAL_ROOTS.to_string(), spec);
     }
+
+    for (k, v) in &l.extra_env {
+        if is_reserved_env(k) {
+            continue; // refused by `check_extra_env` before any spawn
+        }
+        let v = if k == "WINEDLLOVERRIDES" {
+            merge_dll_overrides(BASE_DLL_OVERRIDES, v)
+        } else {
+            v.clone()
+        };
+        env.insert(k.clone(), v);
+    }
     env
+}
+
+/// Whether `name` is one the launch sets (or clears) itself, and so one
+/// [`WineLaunch::extra_env`] may not: the prefix, the runtime, and every
+/// handshake name the shim or injector reads to find this session.
+pub fn is_reserved_env(name: &str) -> bool {
+    matches!(name, "WINEPREFIX" | "PROTONPATH")
+        || [
+            vfs_env::RING_PATH,
+            vfs_env::RING_SECTION,
+            vfs_env::RING_BYTES,
+            vfs_env::RING_PAYLOAD_CAP,
+            vfs_env::ARENA_OFFSET,
+            vfs_env::ARENA_LEN,
+            vfs_env::SERVER_EV,
+            vfs_env::CLIENT_EV,
+            vfs_env::VIRTUAL_DIR,
+            vfs_env::VIRTUAL_ROOTS,
+        ]
+        .contains(&name)
+}
+
+/// Refuses an `extra_env` that names a reserved variable ([`is_reserved_env`]).
+pub fn check_extra_env(extra: &BTreeMap<String, String>) -> Result<(), LaunchError> {
+    match extra.keys().find(|k| is_reserved_env(k)) {
+        Some(k) => Err(LaunchError::ReservedEnv(k.clone())),
+        None => Ok(()),
+    }
+}
+
+/// `base` and `extra` as one `WINEDLLOVERRIDES` value, `extra` winning per
+/// DLL. Entries are `;`-separated `names=mode`, where `names` may list
+/// several DLLs with `,` and `mode` may itself contain `,` (`n,b`); each DLL
+/// becomes its own `dll=mode` entry, in first-seen order, matched ASCII
+/// case-insensitively. An entry without `=` is kept verbatim. Wine gives no
+/// order guarantee between two entries for one DLL, so the merge must leave
+/// exactly one.
+pub fn merge_dll_overrides(base: &str, extra: &str) -> String {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut put = |name: &str, entry: String| {
+        let key = name.to_ascii_lowercase();
+        match out.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = entry,
+            None => out.push((key, entry)),
+        }
+    };
+    for src in [base, extra] {
+        for entry in src.split(';').map(str::trim).filter(|e| !e.is_empty()) {
+            match entry.split_once('=') {
+                Some((names, mode)) => {
+                    for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                        put(name, format!("{name}={}", mode.trim()));
+                    }
+                }
+                None => put(entry, entry.to_string()),
+            }
+        }
+    }
+    out.into_iter().map(|(_, e)| e).collect::<Vec<_>>().join(";")
 }
 
 /// Spawns the launch, waits for it, and returns the target's exit code.
@@ -234,6 +325,7 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
 /// GE is verified first: `PROTONPATH` pointing at a non-GE runtime is a hard
 /// error ([`LaunchError::NotGe`]), never a fallback.
 pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
+    check_extra_env(&l.extra_env)?;
     verify_ge(&l.runtime).map_err(|e| LaunchError::NotGe(e.to_string()))?;
     check_geometry(l)?;
 
@@ -399,6 +491,7 @@ mod tests {
             virtual_dir: r"C:\probe\managed".to_string(),
             virtual_roots: vec![],
             args: vec!["-arg1".to_string(), "arg2".to_string()],
+            extra_env: BTreeMap::new(),
         }
     }
 
@@ -510,6 +603,53 @@ mod tests {
             env.get("WINEDLLOVERRIDES").map(String::as_str),
             Some("mscoree=d;mshtml=d"),
         );
+        assert_eq!(env.get("WINEDEBUG").map(String::as_str), Some("-all"));
+    }
+
+    #[test]
+    fn dll_overrides_merge_with_the_caller_winning_per_dll() {
+        assert_eq!(merge_dll_overrides(BASE_DLL_OVERRIDES, ""), "mscoree=d;mshtml=d");
+        assert_eq!(
+            merge_dll_overrides(BASE_DLL_OVERRIDES, "d3dx9_42=n,b"),
+            "mscoree=d;mshtml=d;d3dx9_42=n,b",
+            "a mode with a comma is one mode"
+        );
+        assert_eq!(
+            merge_dll_overrides(BASE_DLL_OVERRIDES, "MSHTML=n;dxgi,d3d11=n; ;"),
+            "mscoree=d;MSHTML=n;dxgi=n;d3d11=n",
+            "the caller's entry replaces ours in place; a group splits per DLL"
+        );
+        assert_eq!(merge_dll_overrides("a=d", "winemenubuilder"), "a=d;winemenubuilder");
+    }
+
+    #[test]
+    fn extra_env_reaches_the_child_env_with_overrides_merged() {
+        let mut l = sample();
+        l.extra_env = BTreeMap::from([
+            ("WINEDLLOVERRIDES".to_string(), "d3dx9_42=n,b".to_string()),
+            ("WINEDEBUG".to_string(), "+loaddll".to_string()),
+            ("SteamAppId".to_string(), "489830".to_string()),
+        ]);
+        let env = launch_env(&l);
+        assert_eq!(env["WINEDLLOVERRIDES"], "mscoree=d;mshtml=d;d3dx9_42=n,b");
+        assert_eq!(env["WINEDEBUG"], "+loaddll");
+        assert_eq!(env["SteamAppId"], "489830");
+    }
+
+    #[test]
+    fn a_reserved_name_in_extra_env_is_refused_before_anything_else() {
+        for k in ["WINEPREFIX", "PROTONPATH", vfs_env::RING_PATH, vfs_env::VIRTUAL_DIR] {
+            assert!(is_reserved_env(k), "{k}");
+        }
+        assert!(!is_reserved_env("VFS_FIXTURE_PATH"), "a fixture's own switches pass through");
+        assert!(!is_reserved_env(vfs_env::READY_TIMEOUT_SECS));
+        let mut l = sample(); // its runtime does not exist: NotGe would come first
+        l.extra_env.insert(vfs_env::RING_PATH.to_string(), "C:\\elsewhere".to_string());
+        match run(&l) {
+            Err(LaunchError::ReservedEnv(k)) => assert_eq!(k, vfs_env::RING_PATH),
+            other => panic!("expected ReservedEnv, got {other:?}"),
+        }
+        assert!(!launch_env(&l)[vfs_env::RING_PATH].contains("elsewhere"));
     }
 
     #[test]

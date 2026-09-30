@@ -51,13 +51,11 @@ use vfs_provider::{
 /// is to stop touching process env at all and hand `CreateProcessW` an
 /// explicit environment block built for the child (see [`Session::launch`]).
 ///
-/// Held on both targets, by different writers. On Windows: `serve`'s
-/// `apply_env_roots` and `launch`'s `opts.env` save/set/restore. On unix only
-/// the latter — a Wine child is handed an explicit environment block built by
-/// `vfs_proton::launch::launch_env`, so this session's ring coordinates never
-/// travel through this process's environment there. `opts.env` still does,
-/// because `Command::envs` adds to the parent environment and `LaunchOpts` has
-/// no per-child block of its own.
+/// Windows-only: `serve`'s `apply_env_roots` and `launch`'s `opts.env`
+/// save/set/restore. The unix bodies never write process env: a Wine child's
+/// environment block is built by `vfs_proton::launch::launch_env`, `opts.env`
+/// included.
+#[cfg(windows)]
 static LAUNCH_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Options for [`Session::launch`].
@@ -120,7 +118,13 @@ pub struct LaunchOpts {
     pub payload_dll: Option<String>,
     /// Extra environment variables for the child.
     ///
-    /// **Not child-only.** `CreateProcessW` is called with a null environment
+    /// **Proton path: child-only.** They go into the environment block the
+    /// `wine` child is spawned with and nowhere else; `WINEDLLOVERRIDES` is
+    /// merged with the launch's own (the caller wins per DLL,
+    /// `vfs_proton::launch::merge_dll_overrides`), `WINEDEBUG` replaces the
+    /// default `-all`, and a name the launch's handshake uses is refused.
+    ///
+    /// **Windows: not child-only.** `CreateProcessW` is called with a null environment
     /// block — inheritance *is* the mechanism — so [`Session::launch`] writes
     /// each one into **this process's** environment with `std::env::set_var`,
     /// launches, and restores the previous value. [`LAUNCH_ENV_LOCK`] serializes
@@ -1800,31 +1804,12 @@ impl Session {
             virtual_dir: root0,
             virtual_roots: extra,
             args: opts.args.clone(),
+            // Child-only: the spawned `wine` gets these in its environment
+            // block, and this process's environment is never written.
+            extra_env: opts.env.clone(),
         };
 
-        // `opts.env` reaches the child by inheritance here too: `run` builds the
-        // child's `VFS_*`/Wine block explicitly but adds it *to* this process's
-        // environment (`Command::envs`). Same lock and same restore as the
-        // Windows body, for the same reason — see [`LAUNCH_ENV_LOCK`].
-        let _guard = LAUNCH_ENV_LOCK
-            .lock()
-            .map_err(|_| "launch env lock poisoned".to_string())?;
-        let mut saved: Vec<(String, Option<String>)> = Vec::with_capacity(opts.env.len());
-        for (k, v) in &opts.env {
-            saved.push((k.clone(), std::env::var(k).ok()));
-            std::env::set_var(k, v);
-        }
-
-        let exit = vfs_proton::launch::run(&wine);
-
-        for (k, old) in saved {
-            match old {
-                Some(v) => std::env::set_var(&k, v),
-                None => std::env::remove_var(&k),
-            }
-        }
-
-        exit.map_err(|e| format!("launch: {e}"))
+        vfs_proton::launch::run(&wine).map_err(|e| format!("launch: {e}"))
     }
 
     pub fn stop_serve(&mut self) {

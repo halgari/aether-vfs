@@ -29,7 +29,10 @@ pub use install::{
     extract_tar_gz, install_release, parse_sha512sum, partial_path, verify_digest, InstallError,
     Installed,
 };
-pub use launch::{command_line, launch_env, wine_binary, LaunchError, WineLaunch};
+pub use launch::{
+    check_extra_env, command_line, is_reserved_env, launch_env, merge_dll_overrides, wine_binary,
+    LaunchError, WineLaunch, BASE_DLL_OVERRIDES, DEFAULT_WINEDEBUG,
+};
 pub use layout::Root;
 pub use prefix::{ensure, ensure_with, Prefix, PrefixError, PrefixInit};
 #[cfg(feature = "acquire")]
