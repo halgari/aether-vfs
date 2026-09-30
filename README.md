@@ -186,6 +186,26 @@ default `wineboot` prefix is enough for console programs), and
 `LaunchHandle` a host can poll and stop. `crates/vfs-embed/tests/proton_skyrim.rs`
 is the whole shape end to end.
 
+A Proton launch runs for as long as anything runs in the session's Wine
+prefix, not just the program it started: a launcher that starts the game and
+exits (`skse64_loader.exe` → `SkyrimSE.exe`) keeps the launch — its
+`LaunchHandle`, a waited `launch`, and the prefix lock — alive until the game
+exits (plus `wineserver`'s few seconds of persistence), and `stop_launch`
+stops the game. The exit code reported is the launcher's. A handle kept from
+`launch_detached` counts as the session's running launch: a second launch is
+refused, and `stop_launch` or dropping the session stops it.
+
+**Upgrade notes (this branch):**
+
+- `vfs-injector`'s default ready timeout is now **180 s** (was 20 s), on
+  Windows too; `VFS_READY_TIMEOUT_SECS` or `LaunchOpts::ready_timeout`
+  overrides it.
+- `vfs_inject::InjectError` has a new variant, `TargetExited(code)`: the
+  target exited before the shim reported ready. An exhaustive `match` on it
+  needs an arm.
+- `LaunchOpts` has new fields (`cwd`, `ready_timeout`); build it with
+  `..Default::default()` so later additions do not break the build.
+
 #### Storage: the source cache and named layers
 
 The daemon keeps one storage directory, a deduplicating, compressing block

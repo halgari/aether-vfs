@@ -34,6 +34,15 @@
 //! (default `SkyrimSE.exe`; `skse64_loader.exe` tries the SKSE path),
 //! `VFS_TEST_SKYRIM_DXVK=1` (launch with Proton's DXVK/vkd3d overrides).
 //! The game directory is never written: root 0 has a write layer of its own.
+//!
+//! The launch's liveness is the **prefix's**, not the launched image's: with
+//! `VFS_TEST_SKYRIM_IMAGE=skse64_loader.exe` the loader starts `SkyrimSE.exe`
+//! and exits, and the handle must still report the launch running while the
+//! game does (`try_wait` is `None` throughout the alive window) and stop it
+//! afterwards. After the stop no process is left in the prefix.
+//!
+//! Scratch lives under Cargo's `CARGO_TARGET_TMPDIR`, not `/tmp`, and is
+//! removed by a guard that runs on a panic too.
 #![cfg(unix)]
 
 use std::collections::BTreeMap;
@@ -110,11 +119,41 @@ fn artifacts() -> (String, String) {
     (shim.to_string_lossy().into_owned(), payload.to_string_lossy().into_owned())
 }
 
+/// This run's scratch root, under the target directory.
+fn scratch_root() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("vfs-skyrim-{}", std::process::id()))
+}
+
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("vfs-skyrim-{}-{name}", std::process::id()));
+    let d = scratch_root().join(name);
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
+}
+
+/// Removes this run's scratch when dropped — after the session (declared
+/// later, so dropped first) has stopped the game and let go of the prefix,
+/// and on a panic as much as on success.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Pids of processes whose environment names `prefix` as their
+/// `WINEPREFIX`: every Wine process of the launch inherits it.
+fn prefix_processes(prefix: &Path) -> Vec<u32> {
+    let want = format!("WINEPREFIX={}", prefix.display()).into_bytes();
+    let Ok(rd) = std::fs::read_dir("/proc") else { return Vec::new() };
+    rd.flatten()
+        .filter_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let env = std::fs::read(e.path().join("environ")).ok()?;
+            env.split(|b| *b == 0).any(|kv| kv == want.as_slice()).then_some(pid)
+        })
+        .collect()
 }
 
 /// The environment's aether home, as `Session` resolves it without `set_home`.
@@ -201,6 +240,7 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
             PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(".local/share/Steam")
         });
     let (shim, payload) = artifacts();
+    let _scratch = Scratch(scratch_root());
 
     // An aether home of this run's own, whose one runtime is a symlink.
     let home = tmp("home");
@@ -297,9 +337,9 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
         assert!(gone.elapsed() < Duration::from_secs(30), "SkyrimSE.exe outlived the stop");
         std::thread::sleep(Duration::from_millis(250));
     }
+    // `Stopped` is reported only once the prefix is quiet.
+    let pfx = home.join("sessions").join("skyrim-e2e").join("compat").join("pfx");
+    let left = prefix_processes(&pfx);
+    assert!(left.is_empty(), "processes left in the prefix after the stop: {left:?}");
     s.stop_serve();
-    drop(s);
-    for d in [&home, &root0, &upper, &state, &overlay] {
-        let _ = std::fs::remove_dir_all(d);
-    }
 }
