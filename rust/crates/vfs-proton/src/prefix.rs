@@ -226,6 +226,12 @@ fn run_proton_init(
     let log = std::fs::File::create(&log_path)?;
     let app = app_id.to_string();
     let mut cmd = std::process::Command::new(&proton);
+    // The host's own Proton knobs (`PROTON_USE_WINED3D`, `PROTON_LOG`, …) and
+    // DLL overrides would shape the prefix this builds for every later launch;
+    // it is set up from this runtime's defaults alone.
+    for name in inherited_proton_env(std::env::vars_os().map(|(k, _)| k)) {
+        cmd.env_remove(name);
+    }
     cmd.args(["run", "cmd", "/c", "exit"])
         .env("STEAM_COMPAT_DATA_PATH", compat)
         .env("STEAM_COMPAT_CLIENT_INSTALL_PATH", steam_client)
@@ -264,6 +270,20 @@ fn run_proton_init(
             log_tail(&log_path)
         ))),
     }
+}
+
+/// The names among `inherited` that Proton's prefix setup must not see:
+/// `WINEDLLOVERRIDES` and every `PROTON_*` variable. [`run_proton_init`] sets
+/// its own after removing these, so none of them is its own.
+fn inherited_proton_env(
+    inherited: impl Iterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+    inherited
+        .filter(|k| {
+            k.to_str()
+                .is_some_and(|k| k == "WINEDLLOVERRIDES" || k.starts_with("PROTON_"))
+        })
+        .collect()
 }
 
 /// The last lines of `log`, formatted to follow an error message.
@@ -698,7 +718,7 @@ fn run_bounded_status(
     cmd: &mut std::process::Command,
     timeout: std::time::Duration,
 ) -> io::Result<Option<std::process::ExitStatus>> {
-    let mut child = cmd.spawn()?;
+    let mut child = spawn_retrying_busy(cmd)?;
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait()? {
@@ -710,6 +730,28 @@ fn run_bounded_status(
             return Ok(None);
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// `cmd.spawn()`, retried briefly on `ETXTBSY`.
+///
+/// A script written just before it is run can still be open for writing in a
+/// child another thread of this process forked in the meantime (the write
+/// descriptor is close-on-exec, so it lives only until that child execs), and
+/// exec of a file open for writing fails with `ETXTBSY`. The window is
+/// microseconds, so a few short retries close it.
+pub(crate) fn spawn_retrying_busy(
+    cmd: &mut std::process::Command,
+) -> io::Result<std::process::Child> {
+    let mut attempt = 0;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == io::ErrorKind::ExecutableFileBusy && attempt < 10 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10 * attempt));
+            }
+            r => return r,
+        }
     }
 }
 
@@ -976,9 +1018,13 @@ mod tests {
              mkdir -p \"$STEAM_COMPAT_DATA_PATH/pfx/drive_c/windows/system32\"\n\
              awk '{{print $2}}' \"$(dirname \"$0\")/version\" > \"$STEAM_COMPAT_DATA_PATH/version\"\n"
         );
-        let p = rt.join("proton");
-        std::fs::write(&p, script).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Written under a temporary name and renamed into place, so `proton`
+        // never exists half-written; `spawn_retrying_busy` covers the other
+        // half of `ETXTBSY` (a write descriptor another thread's fork holds).
+        let tmp = rt.join("proton.tmp");
+        std::fs::write(&tmp, script).unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&tmp, rt.join("proton")).unwrap();
         rt
     }
 
@@ -986,6 +1032,20 @@ mod tests {
     fn calls(root: &Root, session: &str) -> Vec<String> {
         let f = root.try_session_dir(session).unwrap().join("compat").join("calls");
         std::fs::read_to_string(f).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn proton_setup_drops_the_hosts_proton_knobs_and_dll_overrides() {
+        let names = [
+            "PATH",
+            "WINEDLLOVERRIDES",
+            "PROTON_USE_WINED3D",
+            "PROTON_LOG",
+            "PROTONFIXES_DISABLE",
+            "proton_x",
+        ];
+        let cleared = inherited_proton_env(names.iter().map(std::ffi::OsString::from));
+        assert_eq!(cleared, ["WINEDLLOVERRIDES", "PROTON_USE_WINED3D", "PROTON_LOG"]);
     }
 
     #[test]

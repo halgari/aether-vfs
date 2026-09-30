@@ -286,22 +286,28 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
 /// Whether `name` is one the launch sets (or clears) itself, and so one
 /// [`WineLaunch::extra_env`] may not: the prefix, the runtime, and every
 /// handshake name the shim or injector reads to find this session.
+///
+/// ASCII case-insensitive: Wine hands the Windows side an environment whose
+/// names compare without case, so `vfs_virtual_dir` would reach the shim as
+/// the same variable.
 pub fn is_reserved_env(name: &str) -> bool {
-    matches!(name, "WINEPREFIX" | "PROTONPATH")
-        || [
-            vfs_env::RING_PATH,
-            vfs_env::RING_SECTION,
-            vfs_env::RING_BYTES,
-            vfs_env::RING_PAYLOAD_CAP,
-            vfs_env::ARENA_OFFSET,
-            vfs_env::ARENA_LEN,
-            vfs_env::SERVER_EV,
-            vfs_env::CLIENT_EV,
-            vfs_env::VIRTUAL_DIR,
-            vfs_env::VIRTUAL_ROOTS,
-            vfs_env::INJECT_CWD,
-        ]
-        .contains(&name)
+    [
+        "WINEPREFIX",
+        "PROTONPATH",
+        vfs_env::RING_PATH,
+        vfs_env::RING_SECTION,
+        vfs_env::RING_BYTES,
+        vfs_env::RING_PAYLOAD_CAP,
+        vfs_env::ARENA_OFFSET,
+        vfs_env::ARENA_LEN,
+        vfs_env::SERVER_EV,
+        vfs_env::CLIENT_EV,
+        vfs_env::VIRTUAL_DIR,
+        vfs_env::VIRTUAL_ROOTS,
+        vfs_env::INJECT_CWD,
+    ]
+    .iter()
+    .any(|r| r.eq_ignore_ascii_case(name))
 }
 
 /// Refuses an `extra_env` that names a reserved variable ([`is_reserved_env`]).
@@ -430,7 +436,7 @@ pub fn spawn(l: &WineLaunch) -> Result<std::process::Child, LaunchError> {
             cmd.env_remove(stale);
         }
     }
-    cmd.spawn()
+    crate::prefix::spawn_retrying_busy(&mut cmd)
         .map_err(|e| LaunchError::Spawn(format!("{prog}: {e}")))
 }
 
@@ -798,6 +804,8 @@ mod tests {
         ] {
             assert!(is_reserved_env(k), "{k}");
         }
+        assert!(is_reserved_env("vfs_virtual_dir"), "Wine's environment names ignore case");
+        assert!(is_reserved_env("WinePrefix"));
         assert!(!is_reserved_env("VFS_FIXTURE_PATH"), "a fixture's own switches pass through");
         assert!(!is_reserved_env(vfs_env::READY_TIMEOUT_SECS));
         let mut l = sample(); // its runtime does not exist: NotGe would come first
