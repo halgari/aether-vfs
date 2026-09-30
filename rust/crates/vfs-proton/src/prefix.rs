@@ -643,6 +643,23 @@ impl Prefix {
         }
     }
 
+    /// Starts `wineserver -w` for this prefix, with `runtime`'s own
+    /// `wineserver`, and returns without waiting: the child exits once this
+    /// prefix's server has — that is, once no Wine process is left in the
+    /// prefix (plus the server's few seconds of persistence). With no server
+    /// running it exits at once. Unbounded by design: it lasts as long as
+    /// whatever runs in the prefix, so a caller polls it (`try_wait`) or
+    /// waits on it where blocking for that long is the point.
+    pub fn spawn_wineserver_wait(&self, runtime: &Path) -> io::Result<std::process::Child> {
+        let mut cmd = std::process::Command::new(runtime.join("files").join("bin").join("wineserver"));
+        cmd.arg("-w")
+            .env("WINEPREFIX", &self.dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        spawn_retrying_busy(&mut cmd)
+    }
+
     /// `<prefix>/drive_c`, the root of the Windows-visible filesystem.
     pub fn drive_c(&self) -> PathBuf {
         self.dir.join("drive_c")
@@ -971,7 +988,20 @@ mod tests {
         let held = p.lock().unwrap();
         assert!(matches!(p.lock(), Err(PrefixError::Busy(_))));
         drop(held);
-        p.lock().expect("the lock must be released on drop");
+        // A child another test thread is forking in this instant holds a
+        // copy of the lock's descriptor (close-on-exec, so only until it
+        // execs), and `flock` stays held while any copy is open: retry
+        // briefly rather than read that window as a leak.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match p.lock() {
+                Ok(_) => break,
+                Err(PrefixError::Busy(_)) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("the lock must be released on drop: {e}"),
+            }
+        }
     }
 
     #[cfg(unix)]

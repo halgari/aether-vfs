@@ -417,6 +417,14 @@ pub struct Session {
     /// honoured instead of silently lost to that race.
     #[cfg(unix)]
     stop_pending: std::sync::atomic::AtomicBool,
+    /// The most recent Proton launch's stop state, weakly: whoever holds the
+    /// launch — `detached`, a waiting `launch`, or a caller of
+    /// [`Session::launch_detached`] that kept its [`LaunchHandle`] — this
+    /// sees it while it runs. A new launch is refused while it has not
+    /// ended, [`Session::stop_launch`] stops it, and dropping the session
+    /// stops it before the ring goes.
+    #[cfg(unix)]
+    latest: Mutex<std::sync::Weak<StopInner>>,
     /// The most recent staged launch directory, held here because
     /// [`StagedDir`]'s `Drop` removes the staged files — not the virtual root
     /// they now live in — and Windows keeps the image file mapped for as long
@@ -472,6 +480,8 @@ impl Session {
             waiting: Mutex::new(None),
             #[cfg(unix)]
             detached: Mutex::new(None),
+            #[cfg(unix)]
+            latest: Mutex::new(std::sync::Weak::new()),
             #[cfg(unix)]
             starting: std::sync::atomic::AtomicBool::new(false),
             #[cfg(unix)]
@@ -1731,13 +1741,9 @@ impl Session {
         // this function regains control to clear `waiting` below. A
         // `stop_launch` or a new `launch` landing in that gap would see a
         // stale `waiting` for a launch whose prefix may already be a later
-        // one's. Driving the child directly keeps `handle`, and so the lock,
-        // alive until `waiting` is cleared first.
-        let exit = handle
-            .child
-            .wait()
-            .map_err(|e| format!("launch: {e}"))
-            .and_then(|status| handle.conclude(status));
+        // one's. Blocking in place keeps `handle`, and so the lock, alive
+        // until `waiting` is cleared first.
+        let exit = handle.block();
         if let Ok(mut w) = self.waiting.lock() {
             *w = None;
         }
@@ -1794,6 +1800,9 @@ impl Session {
                 .lock()
                 .map_err(|_| "waiting launch lock poisoned".to_string())?
                 .is_some()
+            // A handle `launch_detached` handed back and its caller kept is
+            // in neither slot above; `latest` still sees it.
+            || self.latest_running().is_some()
             || self.starting.swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             return Err(
@@ -1828,30 +1837,34 @@ impl Session {
 
         let prefix_id = match &self.prefix_name {
             Some(name) => name.clone(),
-            None => {
-                // Recorded before `ensure`, so a boot that fails half-way is
-                // still deleted on drop.
-                // With the home and runtime used here, so `Drop` deletes this
-                // prefix from where it is rather than wherever the environment
-                // points by then.
-                let id = self.wine_session_id();
-                let prefix_dir = vfs_proton::prefix::prefix_dir(&home, &id, &self.prefix_init)
-                    .map_err(|e| format!("launch: wine prefix: {e}"))?;
-                *self
-                    .anon
-                    .lock()
-                    .map_err(|_| "anon prefix lock poisoned".to_string())? = Some(AnonPrefix {
-                    id: id.clone(),
-                    home: home.clone(),
-                    runtime: runtime.clone(),
-                    prefix_dir,
-                });
-                id
-            }
+            None => self.wine_session_id(),
         };
+        let prefix_dir = vfs_proton::prefix::prefix_dir(&home, &prefix_id, &self.prefix_init)
+            .map_err(|e| format!("launch: wine prefix: {e}"))?;
+        if self.prefix_name.is_none() {
+            // Recorded before `ensure`, so a boot that fails half-way is
+            // still deleted on drop.
+            // With the home and runtime used here, so `Drop` deletes this
+            // prefix from where it is rather than wherever the environment
+            // points by then.
+            *self
+                .anon
+                .lock()
+                .map_err(|_| "anon prefix lock poisoned".to_string())? = Some(AnonPrefix {
+                id: prefix_id.clone(),
+                home: home.clone(),
+                runtime: runtime.clone(),
+                prefix_dir: prefix_dir.clone(),
+            });
+        }
+        // Locked before `ensure_with`: setting a prefix up — and a Proton
+        // prefix recorded by another runtime is set up *again* — must not
+        // run under a program another process is running in it.
+        let prefix_lock = Prefix { dir: prefix_dir }
+            .lock()
+            .map_err(|e| format!("launch: {e}"))?;
         let prefix = vfs_proton::prefix::ensure_with(&home, &runtime, &prefix_id, &self.prefix_init)
             .map_err(|e| format!("launch: wine prefix: {e}"))?;
-        let prefix_lock = prefix.lock().map_err(|e| format!("launch: {e}"))?;
 
         let (wine_overlay, wine_state) = self.link_into_prefix(&prefix)?;
         let roots = self.root_locations();
@@ -1933,8 +1946,18 @@ impl Session {
                 ended: Mutex::new(false),
             })),
             wine,
+            wine_status: None,
+            quiet: None,
+            outcome: None,
             _prefix_lock: prefix_lock,
         };
+        // Before `starting` clears (the guard drops on return), so there is
+        // no moment in which a second launch sees neither.
+        *self
+            .latest
+            .lock()
+            .map_err(|_| "latest launch lock poisoned".to_string())? =
+            Arc::downgrade(&handle.stopper.0);
         if self.stop_pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
             // `stop_launch` ran while this launch was still between spawning
             // and being recorded in `detached`/`waiting`, found nothing to
@@ -1984,10 +2007,22 @@ impl Session {
         if let Some(stopper) = waiting {
             return stopper.stop().map(|()| true);
         }
+        // A handle the caller of `launch_detached` kept.
+        if let Some(stopper) = self.latest_running() {
+            return stopper.stop().map(|()| true);
+        }
         if self.starting.load(std::sync::atomic::Ordering::SeqCst) {
             self.stop_pending.store(true, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(false)
+    }
+
+    /// The most recent launch, if it has not ended — see [`Session::latest`].
+    #[cfg(unix)]
+    fn latest_running(&self) -> Option<LaunchStopper> {
+        let inner = self.latest.lock().ok()?.upgrade()?;
+        let stopper = LaunchStopper(inner);
+        (!stopper.has_ended()).then_some(stopper)
     }
 
     /// Drops a detached launch that has ended, releasing its prefix lock.
@@ -2030,6 +2065,11 @@ impl Drop for Session {
             };
             if let Some(h) = detached {
                 let _ = h.stop();
+            }
+            // A launch whose handle the caller kept reads through this ring
+            // too.
+            if let Some(stopper) = self.latest_running() {
+                let _ = stopper.stop();
             }
             self.stop_serve();
             let links = match self.prefix_links.get_mut() {
@@ -2087,6 +2127,20 @@ pub enum LaunchExit {
 
 /// A running Proton launch, from [`Session::launch_detached`].
 ///
+/// **Liveness follows the prefix, not the first process.** A launch runs
+/// until no Wine process is left in the session's own prefix — its
+/// `wineserver` has exited — not merely until the `wine` process running the
+/// injector's target exits. A launcher that starts the game and exits
+/// (`skse64_loader.exe` starts `SkyrimSE.exe`) therefore stays running for as
+/// long as the game does: [`LaunchHandle::try_wait`] and
+/// [`LaunchHandle::is_running`] (non-blocking) and [`LaunchHandle::wait`]
+/// (blocking) all see the prefix, and [`LaunchHandle::stop`] and
+/// [`Session::stop_launch`] still stop it after the launcher is gone. The
+/// exit code reported is the launcher's (the injector's target's);
+/// [`LaunchExit::Stopped`] when a stop was requested. The prefix is locked to
+/// this launch, so nothing else runs there; the prefix going quiet includes
+/// `wineserver`'s few seconds of persistence after the last process.
+///
 /// Holds the prefix's lock until the launch ends. Dropping it while the
 /// program runs stops the program.
 #[cfg(unix)]
@@ -2094,6 +2148,13 @@ pub struct LaunchHandle {
     child: std::process::Child,
     wine: WineLaunch,
     stopper: LaunchStopper,
+    /// `child`'s exit status, once reaped.
+    wine_status: Option<std::process::ExitStatus>,
+    /// `wineserver -w` for this prefix, started once `child` has exited: the
+    /// launch runs until it returns.
+    quiet: Option<std::process::Child>,
+    /// How the launch ended, once the prefix is quiet.
+    outcome: Option<Result<LaunchExit, String>>,
     _prefix_lock: PrefixLock,
 }
 
@@ -2128,6 +2189,11 @@ const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(unix)]
 impl LaunchStopper {
+    /// Whether the launch has ended — see [`StopInner::ended`].
+    fn has_ended(&self) -> bool {
+        self.0.ended.lock().map(|e| *e).unwrap_or(true)
+    }
+
     /// Stops the launch: stops its prefix's `wineserver` (bounded), which ends
     /// every Wine process in the prefix — the program, anything it started,
     /// and the injector. The prefix is locked to this launch, so nothing
@@ -2195,7 +2261,8 @@ impl Drop for StartingGuard<'_> {
 #[cfg(unix)]
 impl LaunchHandle {
     /// The pid of the `wine` process running `vfs-injector.exe`, which lives
-    /// as long as the program does. Not the program's own pid.
+    /// as long as the injector's target does — not necessarily as long as the
+    /// launch (see [`LaunchHandle`]). Not the program's own pid.
     pub fn pid(&self) -> u32 {
         self.child.id()
     }
@@ -2206,71 +2273,138 @@ impl LaunchHandle {
         self.stopper.clone()
     }
 
-    /// Whether the launch is still running.
+    /// Whether the launch is still running: a Wine process is left in its
+    /// prefix. Never blocks.
     pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        matches!(self.poll(), Ok(None))
     }
 
-    /// How the launch ended, if it has.
+    /// How the launch ended, if it has — see [`LaunchHandle`]. Never blocks.
     pub fn try_wait(&mut self) -> Result<Option<LaunchExit>, String> {
-        match self.child.try_wait().map_err(|e| format!("launch: {e}"))? {
-            Some(status) => self.conclude(status).map(Some),
-            None => Ok(None),
-        }
+        self.poll()
     }
 
-    /// Waits for the launch to end.
+    /// Waits for the launch to end: for the prefix to be quiet, which is as
+    /// long as the program (and anything it started) runs.
     pub fn wait(mut self) -> Result<LaunchExit, String> {
-        let status = self.child.wait().map_err(|e| format!("launch: {e}"))?;
-        self.conclude(status)
+        self.block()
     }
 
     /// Stops the launch ([`LaunchStopper::stop`]) and waits for it to end,
-    /// killing `wine` if it outlives its prefix's `wineserver` by
-    /// [`STOP_WAIT`].
+    /// killing `wine` and the prefix watch if they outlive the prefix's
+    /// `wineserver` by [`STOP_WAIT`].
     pub fn stop(mut self) -> Result<LaunchExit, String> {
         let stopped = self.stopper.stop();
         let deadline = std::time::Instant::now() + STOP_WAIT;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().map_err(|e| format!("stop: {e}"))? {
-                break status;
+        let exit = loop {
+            if let Some(exit) = self.poll().transpose() {
+                break exit;
             }
             if std::time::Instant::now() >= deadline {
-                let _ = self.child.kill();
-                break self.child.wait().map_err(|e| format!("stop: {e}"))?;
+                self.abandon();
+                break self.conclude();
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
         stopped?;
-        self.conclude(status)
+        exit
     }
 
-    /// The child has just been reaped (`status` is its exit status): decide
-    /// how the launch ended, and mark it ended — see [`StopInner::ended`] —
-    /// before `self` (and so `_prefix_lock`) can drop.
-    fn conclude(&self, status: std::process::ExitStatus) -> Result<LaunchExit, String> {
+    /// One non-blocking step: reap `wine` if it has exited, then watch the
+    /// prefix, and conclude once it is quiet.
+    fn poll(&mut self) -> Result<Option<LaunchExit>, String> {
+        if let Some(outcome) = &self.outcome {
+            return outcome.clone().map(Some);
+        }
+        if self.wine_status.is_none() {
+            match self.child.try_wait().map_err(|e| format!("launch: {e}"))? {
+                Some(status) => self.wine_status = Some(status),
+                None => return Ok(None),
+            }
+        }
+        if !self.prefix_quiet(false)? {
+            return Ok(None);
+        }
+        self.conclude().map(Some)
+    }
+
+    /// [`Self::poll`], blocking until the launch has ended.
+    fn block(&mut self) -> Result<LaunchExit, String> {
+        if let Some(outcome) = &self.outcome {
+            return outcome.clone();
+        }
+        if self.wine_status.is_none() {
+            self.wine_status = Some(self.child.wait().map_err(|e| format!("launch: {e}"))?);
+        }
+        self.prefix_quiet(true)?;
+        self.conclude()
+    }
+
+    /// Whether no Wine process is left in the prefix, once `wine` itself has
+    /// exited: `wineserver -w` for it, started on first call, has returned
+    /// (`block`: waited for). A watch that cannot be started counts as quiet
+    /// — there is then nothing to observe the prefix with, and holding the
+    /// launch open forever would be worse than ending it with `wine`.
+    fn prefix_quiet(&mut self, block: bool) -> Result<bool, String> {
+        if self.quiet.is_none() {
+            match self.stopper.0.prefix.spawn_wineserver_wait(&self.stopper.0.runtime) {
+                Ok(watch) => self.quiet = Some(watch),
+                Err(_) => return Ok(true),
+            }
+        }
+        let watch = self.quiet.as_mut().expect("started above");
+        if block {
+            watch.wait().map_err(|e| format!("launch: {e}"))?;
+            return Ok(true);
+        }
+        Ok(watch.try_wait().map_err(|e| format!("launch: {e}"))?.is_some())
+    }
+
+    /// Kills and reaps whatever of the launch this handle still has a
+    /// process for: `wine`, and the prefix watch.
+    fn abandon(&mut self) {
+        if self.wine_status.is_none() {
+            let _ = self.child.kill();
+            self.wine_status = self.child.wait().ok();
+        }
+        if let Some(watch) = &mut self.quiet {
+            let _ = watch.kill();
+            let _ = watch.wait();
+        }
+    }
+
+    /// The prefix is quiet (or abandoned) and `wine` reaped: decide how the
+    /// launch ended, record it, and mark it ended — see
+    /// [`StopInner::ended`] — before `self` (and so `_prefix_lock`) can drop.
+    fn conclude(&mut self) -> Result<LaunchExit, String> {
         let was_stopped = self.stopper.was_stopped();
         self.stopper.mark_ended();
-        if was_stopped {
-            return Ok(LaunchExit::Stopped);
-        }
-        vfs_proton::launch::finish(&self.wine, status)
-            .map(LaunchExit::Exited)
-            .map_err(|e| format!("launch: {e}"))
+        let outcome = if was_stopped {
+            Ok(LaunchExit::Stopped)
+        } else {
+            match self.wine_status {
+                Some(status) => vfs_proton::launch::finish(&self.wine, status)
+                    .map(LaunchExit::Exited)
+                    .map_err(|e| format!("launch: {e}")),
+                None => Err("launch: wine could not be reaped".to_string()),
+            }
+        };
+        self.outcome = Some(outcome.clone());
+        outcome
     }
 }
 
 #[cfg(unix)]
 impl Drop for LaunchHandle {
-    /// A handle dropped while its program runs stops it: nothing could stop
-    /// it afterwards, and the prefix lock it held is released here. Marks
-    /// the launch ended either way (idempotent if [`Self::conclude`] already
+    /// A handle dropped while its launch runs — `wine`, or anything left in
+    /// its prefix after `wine` exited — stops it: nothing could stop it
+    /// afterwards, and the prefix lock it held is released here. Marks the
+    /// launch ended either way (idempotent if [`Self::conclude`] already
     /// did), before that release — see [`StopInner::ended`].
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
+        if matches!(self.poll(), Ok(None)) {
             let _ = self.stopper.stop();
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            self.abandon();
         }
         self.stopper.mark_ended();
     }
