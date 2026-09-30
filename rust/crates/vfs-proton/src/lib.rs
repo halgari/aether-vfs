@@ -31,7 +31,7 @@ pub use install::{
 };
 pub use launch::{command_line, launch_env, wine_binary, LaunchError, WineLaunch};
 pub use layout::Root;
-pub use prefix::{ensure, Prefix, PrefixError};
+pub use prefix::{ensure, ensure_with, Prefix, PrefixError, PrefixInit};
 #[cfg(feature = "acquire")]
 pub use release::{fetch_releases, parse_releases, pick, Release, ResolveError};
 pub use runtime::{cmp_tags, installed, installed_dirs, verify_ge, VerifyError};

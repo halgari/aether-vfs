@@ -24,7 +24,11 @@ use vfs_director::{Director, DiskProvider, MountGraph};
 // and the injector's positional argv plus the shim's env handshake. Gated in
 // the manifest too (`[target.'cfg(unix)'.dependencies]`).
 #[cfg(unix)]
-use vfs_proton::{launch::WineLaunch, layout::Root as ProtonRoot, prefix::Prefix};
+use vfs_proton::{
+    launch::WineLaunch,
+    layout::Root as ProtonRoot,
+    prefix::{Prefix, PrefixInit},
+};
 use vfs_provider::{
     bad_request, exists, map_io_err, overlay_layer_dir, Access, DirEntry, Provider, RootId, Stat,
     OPEN_READ,
@@ -369,6 +373,9 @@ pub struct Session {
     /// from the environment at launch.
     #[cfg(unix)]
     home: Option<PathBuf>,
+    /// How `launch` sets up the prefix — see [`Session::set_prefix_init`].
+    #[cfg(unix)]
+    prefix_init: PrefixInit,
     /// The most recent staged launch directory, held here because
     /// [`StagedDir`]'s `Drop` removes the staged files — not the virtual root
     /// they now live in — and Windows keeps the image file mapped for as long
@@ -418,6 +425,8 @@ impl Session {
             io_workers: None,
             #[cfg(unix)]
             home: None,
+            #[cfg(unix)]
+            prefix_init: PrefixInit::default(),
             staged: Mutex::new(None),
         }
     }
@@ -461,6 +470,20 @@ impl Session {
             None => ProtonRoot::from_env()
                 .map_err(|e| format!("launch: no aether-vfs home (set_home, or VFS_HOME): {e}")),
         }
+    }
+
+    /// Unix: how `launch` creates (and upgrades) the Wine prefix. The default,
+    /// [`PrefixInit::Wineboot`], is `wineboot -u` into
+    /// `sessions/<name>/prefix`. [`PrefixInit::Proton`] runs the runtime's
+    /// own `proton` setup into `sessions/<name>/compat/pfx`, which is what a
+    /// game needs (DXVK and vkd3d-proton, the DirectX and Visual C++
+    /// redistributables, Steam's `lsteamclient.dll`) — see
+    /// `vfs_proton::prefix::ensure_with`. The two live in different
+    /// directories, so switching one named prefix between them starts a new
+    /// prefix rather than converting the old one.
+    #[cfg(unix)]
+    pub fn set_prefix_init(&mut self, init: PrefixInit) {
+        self.prefix_init = init;
     }
 
     pub fn kernel(&self) -> &Arc<Director> {
@@ -1697,6 +1720,8 @@ impl Session {
                 // prefix from where it is rather than wherever the environment
                 // points by then.
                 let id = self.wine_session_id();
+                let prefix_dir = vfs_proton::prefix::prefix_dir(&home, &id, &self.prefix_init)
+                    .map_err(|e| format!("launch: wine prefix: {e}"))?;
                 *self
                     .anon
                     .lock()
@@ -1704,11 +1729,12 @@ impl Session {
                     id: id.clone(),
                     home: home.clone(),
                     runtime: runtime.clone(),
+                    prefix_dir,
                 });
                 id
             }
         };
-        let prefix = vfs_proton::prefix::ensure(&home, &runtime, &prefix_id)
+        let prefix = vfs_proton::prefix::ensure_with(&home, &runtime, &prefix_id, &self.prefix_init)
             .map_err(|e| format!("launch: wine prefix: {e}"))?;
         let _prefix_lock = prefix.lock().map_err(|e| format!("launch: {e}"))?;
 
@@ -1841,13 +1867,11 @@ impl Drop for Session {
                 Ok(a) => a.take(),
                 Err(p) => p.into_inner().take(),
             };
-            if let Some(AnonPrefix { id, home, runtime }) = anon {
+            if let Some(AnonPrefix { id, home, runtime, prefix_dir }) = anon {
                 // `wineserver` lingers after the child and rewrites the
                 // registry into the prefix as it exits; stop it first (bounded)
                 // or the deleted prefix comes back.
-                if let Ok(dir) = home.try_session_dir(&id) {
-                    let _ = Prefix { dir: dir.join("prefix") }.stop_wineserver(&runtime);
-                }
+                let _ = Prefix { dir: prefix_dir }.stop_wineserver(&runtime);
                 let _ = vfs_proton::prefix::remove_session(&home, &id);
             }
         }
@@ -1861,6 +1885,8 @@ struct AnonPrefix {
     id: String,
     home: ProtonRoot,
     runtime: PathBuf,
+    /// Where the prefix is under `home` for the session's `PrefixInit`.
+    prefix_dir: PathBuf,
 }
 
 /// What [`Session::resolve_launch_image`] resolved an image to.
@@ -2528,6 +2554,7 @@ mod launch_image_tests {
                 home: root.clone(),
                 // No `wineserver` here: stopping it fails fast and is ignored.
                 runtime: home.join("no-runtime"),
+                prefix_dir: anon_dir.clone(),
             });
             let mut n = Session::new();
             n.set_prefix_name("named-x").unwrap();

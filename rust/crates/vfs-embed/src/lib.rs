@@ -120,6 +120,9 @@ mod session;
 mod sources;
 
 pub use session::{compose_root, LaunchOpts, Session, StageOpts};
+/// How a Proton launch sets up its Wine prefix — see [`Session::set_prefix_init`].
+#[cfg(unix)]
+pub use vfs_proton::prefix::{PrefixInit, PROTON_GRAPHICS_OVERRIDES};
 // `RootMounts` stays for the same reason `CacheStats` does below: it is
 // `RootSources::mounts()`'s return type and `Session::set_root_mounts`'s
 // argument type, so a host writing either signature needs the name. It has no
