@@ -7,9 +7,12 @@
 //! `file_id`). A changed file therefore gets a new id and can never be served
 //! from the old one's blocks.
 //!
-//! A read goes RAM tier → block store → source, block by block. A block fetched
-//! from the source is written to the store and the RAM tier, and concurrent
-//! misses on the same `(file id, block)` wait on one fetch.
+//! A read goes RAM tier → block store → source, block by block. A miss
+//! fetches the source's whole **fetch unit** — its `preferred_block`, rounded
+//! up to whole store blocks, or one block without a hint — in one span of
+//! source reads, stores the blocks of it the store lacked, and puts all of
+//! them in the RAM tier. Concurrent misses anywhere in one `(file id, unit)`
+//! wait on one fetch.
 //!
 //! Bookkeeping shared by every `CachedSource` of one [`Storage`] lives in
 //! [`CacheState`]: open-handle counts (eviction skips a file with a live
@@ -69,9 +72,29 @@ pub struct CacheStats {
     pub bypassed_opens: u64,
 }
 
-/// One in-flight fetch: the block, and whether it came from the store after
-/// all (a fetch that finished just before this one started).
-type Fetch = Arc<OnceLock<Result<(Arc<[u8]>, bool), i32>>>;
+/// One in-flight fetch of a fetch unit: the unit's blocks in order, and
+/// whether they all came from the store after all (a fetch that finished just
+/// before this one started).
+type Fetch = Arc<OnceLock<Result<Unit, i32>>>;
+
+/// A fetched unit's blocks in order, and whether all came from the store.
+type Unit = (Arc<[Arc<[u8]>]>, bool);
+
+/// The most bytes one fetch unit may span. A source's `preferred_block`
+/// above this is clamped: a unit is one buffer, held whole in memory for the
+/// length of a miss.
+const MAX_UNIT_BYTES: u64 = 64 << 20;
+
+/// Blocks per fetch unit for a source that prefers `preferred`-byte reads,
+/// over a store of `bs`-byte blocks: `preferred` rounded up to whole blocks
+/// and clamped to [`MAX_UNIT_BYTES`]. One block when there is no hint, or the
+/// hint is no larger than a block.
+pub(crate) fn unit_blocks(preferred: Option<u32>, bs: u64) -> u64 {
+    match preferred {
+        Some(p) if u64::from(p) > bs => u64::from(p).min(MAX_UNIT_BYTES).div_ceil(bs).max(1),
+        _ => 1,
+    }
+}
 
 /// Access times not yet committed to the catalog.
 struct AccessLog {
@@ -90,6 +113,7 @@ pub(crate) struct CacheState {
     /// Open handles per cache file id. Also the lock under which a file is
     /// created in the store (by its first fetch) or evicted.
     open_counts: Mutex<HashMap<[u8; 17], usize>>,
+    /// In-flight fetches by `(cache file id, fetch unit index)`.
     inflight: Mutex<HashMap<([u8; 17], u64), Fetch>>,
     access: Mutex<AccessLog>,
     touch_seq: AtomicU64,
@@ -213,6 +237,7 @@ impl Storage {
             return source;
         }
         Arc::new(CachedSource {
+            unit: unit_blocks(caps.preferred_block, self.block_size()),
             storage: Arc::clone(self),
             inner: source,
             key,
@@ -449,6 +474,8 @@ struct CachedFile {
 /// A pull-through cache over one immutable, slow source. Built by
 /// [`Storage::cached`].
 struct CachedSource {
+    /// Blocks per fetch unit: see [`unit_blocks`].
+    unit: u64,
     storage: Arc<Storage>,
     inner: Arc<dyn Provider>,
     key: SourceKey,
@@ -466,8 +493,9 @@ impl CachedSource {
         }
     }
 
-    /// Block `b` of `f`: RAM tier, else store, else one (coalesced) fetch.
-    /// The flag is true if the block came from RAM or the store.
+    /// Block `b` of `f`: RAM tier, else store, else one (coalesced) fetch of
+    /// the fetch unit holding it. The flag is true if the block came from RAM
+    /// or the store.
     fn block(&self, f: &CachedFile, inner: Handle, b: u64) -> Result<(Arc<[u8]>, bool), i32> {
         let s = &*self.storage;
         if let Some(d) = s.ram.get(&f.id, b) {
@@ -477,7 +505,8 @@ impl CachedSource {
         if let Some(d) = self.read_stored(f, b) {
             return Ok((d, true));
         }
-        let key = (f.id, b);
+        let u = b / self.unit;
+        let key = (f.id, u);
         let cell = {
             let mut inflight = lock(&s.cache.inflight);
             match inflight.get(&key) {
@@ -492,12 +521,18 @@ impl CachedSource {
                 }
             }
         };
-        let got = cell.get_or_init(|| self.fetch(f, inner, b)).clone();
+        let got = cell.get_or_init(|| self.fetch(f, inner, u)).clone();
         let mut inflight = lock(&s.cache.inflight);
         if inflight.get(&key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
             inflight.remove(&key);
         }
-        got
+        drop(inflight);
+        let (blocks, hit) = got?;
+        let d = blocks
+            .get((b - u * self.unit) as usize)
+            .cloned()
+            .ok_or_else(map_io_err)?;
+        Ok((d, hit))
     }
 
     /// Block `b` of `f` from the store, if it holds it. A store that fails
@@ -540,59 +575,119 @@ impl CachedSource {
         Some(d)
     }
 
-    /// Fetches block `b` whole from the source, stores it and returns it. Runs
-    /// once per concurrent miss.
-    fn fetch(&self, f: &CachedFile, inner: Handle, b: u64) -> Result<(Arc<[u8]>, bool), i32> {
-        // A fetch that finished between our store miss and our joining the
-        // in-flight map has already stored the block.
-        if let Some(d) = self.read_stored(f, b) {
-            return Ok((d, true));
+    /// Reads `buf.len()` bytes of `f` at `start` out of the store into `buf`,
+    /// and returns the byte ranges (whole blocks) it does not hold: all of
+    /// them when the file is not stored yet or the store fails the read (a
+    /// damaged store is a miss, as in [`Self::read_stored`]).
+    fn stored_span(&self, f: &CachedFile, start: u64, buf: &mut [u8]) -> Vec<std::ops::Range<u64>> {
+        let s = &*self.storage;
+        let whole = start..start + buf.len() as u64;
+        #[cfg(test)]
+        let r = if s.cache.fail_store_reads.load(Ordering::SeqCst) {
+            Err(vfs_block_store::Error::Corrupt(
+                "injected read failure".into(),
+            ))
+        } else {
+            s.store.read(&f.id, start, buf)
+        };
+        #[cfg(not(test))]
+        let r = s.store.read(&f.id, start, buf);
+        match r {
+            Ok(r) if r.bytes == buf.len() => r.missing,
+            Ok(_) | Err(vfs_block_store::Error::NotFound) => vec![whole],
+            Err(e) => {
+                s.cache.store_read_errors.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    error = %e, offset = start,
+                    "reading a cached span failed; fetching it from the source"
+                );
+                vec![whole]
+            }
         }
+    }
+
+    /// Fetches fetch unit `u` of `f`: the blocks of it the store does not
+    /// hold, from the source in one span (first missing byte to last), then
+    /// stores exactly those and returns every block of the unit. Runs once
+    /// per concurrent miss on the unit.
+    fn fetch(
+        &self,
+        f: &CachedFile,
+        inner: Handle,
+        u: u64,
+    ) -> Result<Unit, i32> {
         let s = &*self.storage;
         let bs = s.block_size();
-        let start = b * bs;
-        let len = bs.min(f.size - start) as usize;
-        let mut buf = vec![0u8; len];
-        let mut filled = 0;
-        while filled < len {
-            let n = self
-                .inner
-                .read_at(inner, start + filled as u64, &mut buf[filled..])?;
-            if n == 0 {
-                tracing::warn!(
-                    offset = start + filled as u64,
-                    size = f.size,
-                    "cached source ended before the size it reported at open"
-                );
-                return Err(map_io_err());
+        let start = u * self.unit * bs;
+        let end = f.size.min(start + self.unit * bs);
+        let mut buf = vec![0u8; (end - start) as usize];
+        // A fetch that finished between our miss and our joining the
+        // in-flight map has stored the unit already; an earlier reader with a
+        // smaller unit (or none) may have stored part of it.
+        let missing = self.stored_span(f, start, &mut buf);
+        let from_store = missing.is_empty();
+        if from_store {
+            s.cache.store_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            let (lo, hi) = (missing[0].start, missing[missing.len() - 1].end);
+            let mut filled = lo;
+            while filled < hi {
+                let n = self.inner.read_at(
+                    inner,
+                    filled,
+                    &mut buf[(filled - start) as usize..(hi - start) as usize],
+                )?;
+                if n == 0 {
+                    tracing::warn!(
+                        offset = filled,
+                        size = f.size,
+                        "cached source ended before the size it reported at open"
+                    );
+                    return Err(map_io_err());
+                }
+                filled += n as u64;
             }
-            filled += n;
-        }
-        s.cache.misses.fetch_add(1, Ordering::Relaxed);
-        s.cache
-            .bytes_from_source
-            .fetch_add(len as u64, Ordering::Relaxed);
-        // The source read succeeded, so a store failure costs only caching.
-        // The block and the logical bytes a later row commit records for it
-        // go in under one shared hold of the durability gate, so a durable
-        // commit never counts a block its store flush did not cover.
-        {
+            let blocks: u64 = missing.iter().map(|r| (r.end - r.start).div_ceil(bs)).sum();
+            s.cache.misses.fetch_add(blocks, Ordering::Relaxed);
+            s.cache
+                .bytes_from_source
+                .fetch_add(hi - lo, Ordering::Relaxed);
+            // Only the missing ranges are written, so a block already stored
+            // is neither rewritten nor counted twice. The blocks and the
+            // logical bytes a later row commit records for them go in under
+            // one shared hold of the durability gate, so a durable commit
+            // never counts a block its store flush did not cover.
             let _gate = s.gate_shared();
-            let stored = s
-                .ensure_cache_file(&f.hash, f.size)
-                .and_then(|()| Ok(s.store.write_blocks(&f.id, b, &buf)?));
-            match stored {
-                Ok(()) => s.touch(&f.hash, len as u64, f.size),
-                Err(e) => {
-                    s.cache.store_write_errors.fetch_add(1, Ordering::Relaxed);
-                    tracing::warn!(error = %e, "writing a fetched block to the store failed");
+            let mut stored = 0u64;
+            let mut failed = s.ensure_cache_file(&f.hash, f.size).err();
+            if failed.is_none() {
+                for r in &missing {
+                    let bytes = &buf[(r.start - start) as usize..(r.end - start) as usize];
+                    if let Err(e) = s.store.write_blocks(&f.id, r.start / bs, bytes) {
+                        failed = Some(e.into());
+                        break;
+                    }
+                    stored += r.end - r.start;
                 }
             }
+            if stored > 0 {
+                s.touch(&f.hash, stored, f.size);
+            }
+            if let Some(e) = failed {
+                // The source read succeeded, so a store failure costs only
+                // caching: the unit is still served.
+                s.cache.store_write_errors.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(error = %e, "writing a fetched unit to the store failed");
+            }
         }
-        let d: Arc<[u8]> = buf.into();
-        s.ram.put(&f.id, b, Arc::clone(&d));
-        crate::evict::maybe_evict(&self.storage);
-        Ok((d, false))
+        let blocks: Vec<Arc<[u8]>> = buf.chunks(bs as usize).map(Arc::from).collect();
+        for (i, d) in blocks.iter().enumerate() {
+            s.ram.put(&f.id, u * self.unit + i as u64, Arc::clone(d));
+        }
+        if !from_store {
+            crate::evict::maybe_evict(&self.storage);
+        }
+        Ok((blocks.into(), from_store))
     }
 
     fn rec(&self, h: Handle) -> Result<(Handle, Option<CachedFile>), i32> {
@@ -787,6 +882,8 @@ mod tests {
         reads: AtomicU64,
         max_read: usize,
         gate: Option<Arc<Gate>>,
+        /// Declared as `preferred_block`: `CachedSource`'s fetch unit.
+        preferred_block: Option<u32>,
     }
 
     impl Slow {
@@ -801,7 +898,7 @@ mod tests {
                 access: Access::Read,
                 immutable: true,
                 slow: true,
-                preferred_block: None,
+                preferred_block: self.preferred_block,
                 case: self.inner.capabilities().case,
             }
         }
@@ -833,6 +930,18 @@ mod tests {
             reads: AtomicU64::new(0),
             max_read: usize::MAX,
             gate: None,
+            preferred_block: None,
+        })
+    }
+
+    /// [`slow`], declaring a `preferred_block` of `unit` bytes.
+    fn hinted(inner: Arc<dyn Provider>, unit: usize) -> Arc<Slow> {
+        Arc::new(Slow {
+            inner,
+            reads: AtomicU64::new(0),
+            max_read: usize::MAX,
+            gate: None,
+            preferred_block: Some(unit as u32),
         })
     }
 
@@ -974,6 +1083,7 @@ mod tests {
             reads: AtomicU64::new(0),
             max_read: 1000, // every block needs several source reads
             gate: None,
+            preferred_block: None,
         });
         let p = s.cached(src.clone(), key());
         assert_eq!(read_all(&p, "big.bin"), body);
@@ -1304,6 +1414,7 @@ mod tests {
             reads: AtomicU64::new(0),
             max_read: usize::MAX,
             gate: Some(gate.clone()),
+            preferred_block: None,
         });
         let p = s.cached(src.clone(), key());
         let barrier = Arc::new(Barrier::new(READERS));
@@ -1469,5 +1580,138 @@ mod tests {
         assert_eq!(s.enforce_cache_budget().unwrap(), 0);
         let before = s.cache_stats();
         assert_eq!(before.cached_logical_bytes, 5);
+    }
+
+    #[test]
+    fn unit_blocks_rounds_the_hint_up_to_whole_blocks_and_clamps_it() {
+        assert_eq!(unit_blocks(None, 4096), 1);
+        assert_eq!(unit_blocks(Some(1000), 4096), 1, "a hint below a block is one block");
+        assert_eq!(unit_blocks(Some(4096), 4096), 1);
+        assert_eq!(unit_blocks(Some(4 * 4096), 4096), 4);
+        assert_eq!(unit_blocks(Some(4 * 4096 + 1), 4096), 5, "rounded up, never down");
+        assert_eq!(unit_blocks(Some(4 << 20), 64 << 10), 64, "a 4 MiB frame over 64 KiB blocks");
+        assert_eq!(unit_blocks(Some(u32::MAX), 64 << 10), 1024, "clamped to 64 MiB");
+    }
+
+    #[test]
+    fn conformance_through_a_hinted_cache() {
+        let (s, _d) = temp_storage();
+        let src = hinted(Arc::new(vfs_provider::conformance::MemFixture::new()), 4 * BS);
+        vfs_provider::assert_conformance(s.cached(src, key()));
+    }
+
+    /// One miss fills the whole unit the source prefers, in one source read,
+    /// and every block of it is then served without the source — including
+    /// the short tail unit at the end of the file.
+    #[test]
+    fn a_miss_fetches_the_whole_preferred_unit_in_one_source_read() {
+        let (s, _d) = temp_storage();
+        let body = pattern(10 * BS + 100, 4);
+        let src = hinted(MapSource::with(&[("f", body.clone())]), 4 * BS);
+        let p = s.cached(src.clone(), key());
+        let (h, _, _) = p.open(VPath::at_default("f"), OPEN_READ).unwrap();
+        let mut buf = [0u8; 10];
+
+        p.read_at(h, BS as u64 + 5, &mut buf).unwrap();
+        assert_eq!(buf[..], body[BS + 5..BS + 15]);
+        assert_eq!(src.reads(), 1, "one source read for the unit");
+        let st = s.cache_stats();
+        assert_eq!(st.misses, 4, "four blocks fetched");
+        assert_eq!(st.bytes_from_source, 4 * BS as u64);
+        assert_eq!(st.cached_logical_bytes, 4 * BS as u64, "all four stored");
+
+        for b in [0u64, 2, 3] {
+            p.read_at(h, b * BS as u64, &mut buf).unwrap();
+            assert_eq!(buf[..], body[b as usize * BS..b as usize * BS + 10]);
+        }
+        assert_eq!(src.reads(), 1, "the rest of the unit came from the cache");
+
+        p.read_at(h, 4 * BS as u64, &mut buf).unwrap();
+        assert_eq!(src.reads(), 2, "the next unit is its own fetch");
+        let mut tail = [0u8; 100];
+        assert_eq!(p.read_at(h, 10 * BS as u64, &mut tail).unwrap(), 100);
+        assert_eq!(tail[..], body[10 * BS..]);
+        assert_eq!(src.reads(), 3, "the tail unit: blocks 8, 9 and the short 10");
+        assert_eq!(s.cache_stats().cached_logical_bytes, 8 * BS as u64 + 2 * BS as u64 + 100);
+        p.close(h).unwrap();
+        assert_eq!(read_all(&p, "f"), body);
+        assert_eq!(src.reads(), 3, "the whole file is cached");
+    }
+
+    /// A unit partly stored by an earlier reader (here one with no hint) is
+    /// completed with one source read spanning its missing blocks, and a
+    /// block stored twice is counted once against the budget.
+    #[test]
+    fn a_partly_stored_unit_fetches_only_its_missing_span_and_counts_each_block_once() {
+        let (s, _d) = temp_storage();
+        let body = pattern(4 * BS, 6);
+        let map = MapSource::with(&[("f", body.clone())]);
+        let plain = s.cached(slow(map.clone()), key());
+        let (h, _, _) = plain.open(VPath::at_default("f"), OPEN_READ).unwrap();
+        plain.read_at(h, 0, &mut [0u8; 8]).unwrap();
+        plain.read_at(h, BS as u64, &mut [0u8; 8]).unwrap();
+        plain.close(h).unwrap();
+        assert_eq!(s.cache_stats().cached_logical_bytes, 2 * BS as u64);
+        let before = s.cache_stats().bytes_from_source;
+
+        // Same key and path, so the same cache file; a 4-block unit.
+        let src = hinted(map, 4 * BS);
+        let p = s.cached(src.clone(), key());
+        let (h, _, _) = p.open(VPath::at_default("f"), OPEN_READ).unwrap();
+        let mut buf = [0u8; 10];
+        p.read_at(h, 3 * BS as u64, &mut buf).unwrap();
+        assert_eq!(buf[..], body[3 * BS..3 * BS + 10]);
+        assert_eq!(src.reads(), 1);
+        assert_eq!(
+            s.cache_stats().bytes_from_source - before,
+            2 * BS as u64,
+            "only blocks 2 and 3 were read from the source"
+        );
+        assert_eq!(s.cache_stats().cached_logical_bytes, 4 * BS as u64);
+        p.close(h).unwrap();
+        assert_eq!(read_all(&p, "f"), body);
+        assert_eq!(src.reads(), 1);
+    }
+
+    /// Readers of *different* blocks of one unit share one fetch.
+    #[test]
+    fn concurrent_misses_on_one_unit_fetch_once() {
+        const READERS: usize = 8;
+        let (s, _d) = temp_storage();
+        let body = pattern(READERS * BS, 8);
+        let gate = Arc::new(Gate::default());
+        let src = Arc::new(Slow {
+            inner: MapSource::with(&[("f", body.clone())]),
+            reads: AtomicU64::new(0),
+            max_read: usize::MAX,
+            gate: Some(gate.clone()),
+            preferred_block: Some((READERS * BS) as u32),
+        });
+        let p = s.cached(src.clone(), key());
+        let barrier = Arc::new(Barrier::new(READERS));
+        let threads: Vec<_> = (0..READERS)
+            .map(|i| {
+                let (p, barrier) = (p.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let (h, _, _) = p.open(VPath::at_default("f"), OPEN_READ).unwrap();
+                    barrier.wait();
+                    let mut buf = vec![0u8; BS];
+                    let n = p.read_at(h, (i * BS) as u64, &mut buf).unwrap();
+                    p.close(h).unwrap();
+                    buf.truncate(n);
+                    (i, buf)
+                })
+            })
+            .collect();
+        while src.reads() < 1 || s.cache.coalesced_waits.load(Ordering::SeqCst) < 7 {
+            std::thread::yield_now();
+        }
+        gate.release();
+        for t in threads {
+            let (i, got) = t.join().unwrap();
+            assert_eq!(got, body[i * BS..(i + 1) * BS]);
+        }
+        assert_eq!(src.reads(), 1, "one source fetch for eight blocks of one unit");
+        assert_eq!(s.cache_stats().misses, READERS as u64);
     }
 }

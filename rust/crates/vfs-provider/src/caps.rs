@@ -56,7 +56,10 @@ pub struct Capabilities {
     pub immutable: bool,
     /// Reads are expensive; this provider should sit behind a cache.
     pub slow: bool,
-    /// Block-size hint for `cached`. `None` means "caller decides".
+    /// Preferred read unit, in bytes, for `cached`: a miss fetches the whole
+    /// aligned unit holding the missed block (rounded up to whole store
+    /// blocks, at most 64 MiB) and stores all of it. `None` means one store
+    /// block per miss.
     pub preferred_block: Option<u32>,
     /// How names are matched. See [`CaseMatch`]; `Insensitive` is what a
     /// Windows-facing VFS must provide.
