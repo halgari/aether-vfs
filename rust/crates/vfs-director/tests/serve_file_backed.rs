@@ -5,14 +5,18 @@
 //! puts the client inside Wine; this pins the server side first.
 #![cfg(unix)]
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
-use vfs_director::{Director, DiskProvider, IpcServe, RootId};
+use vfs_director::ipc::{clamp_workers, DEFAULT_IO_WORKERS};
+use vfs_director::{DirEntry, Director, DiskProvider, Handle, IpcServe, Provider, RootId, Stat};
 use vfs_ipc::{RingClient, SpinNotifier};
 use vfs_protocol::{
     decode_getattr_resp, decode_open_resp, decode_read_resp, encode_open_req, encode_path_req,
     encode_read_req, ReadReq, OP_GETATTR, OP_OPEN, OP_READ, OPEN_READ, ST_OK,
 };
+use vfs_provider::{Capabilities, VPath};
 use vfs_unix::FileMapping;
 
 /// The vpath the client asks for, and the bytes behind it. Both sides of the
@@ -115,5 +119,136 @@ fn starting_twice_on_one_path_does_not_truncate_the_first_ring() {
     assert_eq!(std::fs::metadata(&ring).unwrap().len(), len_a);
     drop(b);
     drop(a);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn worker_counts_are_clamped_to_what_the_ring_can_use() {
+    assert_eq!(DEFAULT_IO_WORKERS, 4, "the default is unchanged");
+    assert_eq!(clamp_workers(0), 1);
+    assert_eq!(clamp_workers(12), 12);
+    assert_eq!(clamp_workers(1000), 32, "no more workers than ring slots");
+
+    let dir = std::env::temp_dir().join(format!("vfs-serve-fb3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ring = dir.join("ring.bin");
+    let d = IpcServe::start_file_backed(Arc::new(Director::new()), &ring, 4096).unwrap();
+    assert_eq!(d.worker_count(), DEFAULT_IO_WORKERS);
+    drop(d);
+    let w = IpcServe::start_file_backed_with_workers(Arc::new(Director::new()), &ring, 4096, 12)
+        .unwrap();
+    assert_eq!(w.worker_count(), 12);
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Opens under `block/` wait on a gate the test opens; everything else is a
+/// `DiskProvider`. `blocked` counts opens parked on the gate.
+struct Blocking {
+    disk: DiskProvider,
+    open: Mutex<bool>,
+    cv: Condvar,
+    blocked: AtomicUsize,
+}
+
+impl Blocking {
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.cv.notify_all();
+    }
+}
+
+impl Provider for Blocking {
+    fn capabilities(&self) -> Capabilities {
+        self.disk.capabilities()
+    }
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        self.disk.getattr(p)
+    }
+    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+        self.disk.readdir(p)
+    }
+    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+        if p.rel.starts_with("block/") {
+            self.blocked.fetch_add(1, Ordering::SeqCst);
+            let mut g = self.open.lock().unwrap();
+            while !*g {
+                g = self.cv.wait(g).unwrap();
+            }
+        }
+        self.disk.open(p, flags)
+    }
+    fn close(&self, h: Handle) -> Result<(), i32> {
+        self.disk.close(h)
+    }
+    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        self.disk.read_at(h, offset, buf)
+    }
+}
+
+/// Four requests stuck in a slow provider hold four workers. With the
+/// default four that is every worker, and nothing else is answered; with
+/// six, a fifth request still is.
+#[test]
+fn requests_blocked_in_a_provider_do_not_stall_the_ring_when_workers_outnumber_them() {
+    const BLOCKERS: usize = 4;
+    let dir = std::env::temp_dir().join(format!("vfs-serve-fb4-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("data")).unwrap();
+    std::fs::create_dir_all(dir.join("block")).unwrap();
+    std::fs::write(dir.join("data").join("hello.txt"), CONTENT).unwrap();
+    for i in 0..BLOCKERS {
+        std::fs::write(dir.join("block").join(format!("{i}")), b"x").unwrap();
+    }
+    let ring = dir.join("ring.bin");
+    let provider = Arc::new(Blocking {
+        disk: DiskProvider::new(&dir),
+        open: Mutex::new(false),
+        cv: Condvar::new(),
+        blocked: AtomicUsize::new(0),
+    });
+    let kernel = Arc::new(Director::new());
+    kernel.mount(RootId::DEFAULT, provider.clone()).unwrap();
+    let serve =
+        IpcServe::start_file_backed_with_workers(kernel, &ring, 4096, BLOCKERS + 2).unwrap();
+    let map_bytes = serve.map_bytes;
+
+    let blockers: Vec<_> = (0..BLOCKERS)
+        .map(|i| {
+            let ring = ring.clone();
+            std::thread::spawn(move || {
+                let mapping = FileMapping::open(&ring, map_bytes).unwrap();
+                let client = RingClient::new(mapping.seg(), SpinNotifier).unwrap();
+                let path = format!("block/{i}");
+                let o = client.submit(OP_OPEN, 0, &encode_open_req(0, OPEN_READ, &path)).unwrap();
+                o.status
+            })
+        })
+        .collect();
+    while provider.blocked.load(Ordering::SeqCst) < BLOCKERS {
+        std::thread::yield_now();
+    }
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ring2 = ring.clone();
+    std::thread::spawn(move || {
+        let mapping = FileMapping::open(&ring2, map_bytes).unwrap();
+        let client = RingClient::new(mapping.seg(), SpinNotifier).unwrap();
+        let g = client.submit(OP_GETATTR, 0, &encode_path_req(0, VPATH)).unwrap();
+        let _ = tx.send(g.status);
+    });
+    let answered = rx.recv_timeout(Duration::from_secs(10));
+    provider.release();
+    for b in blockers {
+        assert_eq!(b.join().unwrap(), ST_OK);
+    }
+    assert_eq!(
+        answered,
+        Ok(ST_OK),
+        "a getattr must be answered while {BLOCKERS} opens hold {BLOCKERS} of {} workers",
+        BLOCKERS + 2
+    );
+    drop(serve);
     let _ = std::fs::remove_dir_all(&dir);
 }
