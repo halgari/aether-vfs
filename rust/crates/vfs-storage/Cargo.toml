@@ -2,7 +2,7 @@
 name = "vfs-storage"
 version = "0.1.0"
 edition = "2021"
-license = "GPL-3.0-or-later"
+license = "GPL-3.0-only"
 publish = false
 description = "The block store as pull-through cache and layer storage: catalog, RAM tier and Storage"
 
