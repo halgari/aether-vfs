@@ -480,6 +480,7 @@ fn main() {
         shim_dll: None,
         payload_dll: None,
         env: Default::default(),
+        ..Default::default()
     });
 
     match exit {

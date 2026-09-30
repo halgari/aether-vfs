@@ -94,6 +94,10 @@ pub struct WineLaunch {
     /// refused ([`LaunchError::ReservedEnv`]). Child-only: nothing here is
     /// written into this process's environment.
     pub extra_env: BTreeMap<String, String>,
+    /// The target's working directory as it sees it (`C:\…`), sent to the
+    /// injector as [`vfs_env::INJECT_CWD`]. `None`: the target inherits the
+    /// injector's directory, which is `wine`'s host cwd seen through `Z:`.
+    pub cwd: Option<String>,
 }
 
 /// `WINEDLLOVERRIDES` every launch carries: Mono and Gecko prompts would
@@ -247,6 +251,10 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
         env.insert(vfs_env::VIRTUAL_ROOTS.to_string(), spec);
     }
 
+    if let Some(cwd) = &l.cwd {
+        env.insert(vfs_env::INJECT_CWD.to_string(), cwd.clone());
+    }
+
     for (k, v) in &l.extra_env {
         if is_reserved_env(k) {
             continue; // refused by `check_extra_env` before any spawn
@@ -277,6 +285,7 @@ pub fn is_reserved_env(name: &str) -> bool {
             vfs_env::CLIENT_EV,
             vfs_env::VIRTUAL_DIR,
             vfs_env::VIRTUAL_ROOTS,
+            vfs_env::INJECT_CWD,
         ]
         .contains(&name)
 }
@@ -343,7 +352,13 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
     // point the child's root map somewhere this session never chose. That is
     // the same stale-value hazard `IpcServe::apply_env_roots` clears with
     // `remove_var`, and it applies here for the same reason.
-    for stale in ["VFS_RING_SECTION", "VFS_SERVER_EV", "VFS_CLIENT_EV", "VFS_VIRTUAL_ROOTS"] {
+    for stale in [
+        "VFS_RING_SECTION",
+        "VFS_SERVER_EV",
+        "VFS_CLIENT_EV",
+        "VFS_VIRTUAL_ROOTS",
+        "VFS_INJECT_CWD",
+    ] {
         if !env.contains_key(stale) {
             cmd.env_remove(stale);
         }
@@ -492,6 +507,7 @@ mod tests {
             virtual_roots: vec![],
             args: vec!["-arg1".to_string(), "arg2".to_string()],
             extra_env: BTreeMap::new(),
+            cwd: None,
         }
     }
 
@@ -604,6 +620,7 @@ mod tests {
             Some("mscoree=d;mshtml=d"),
         );
         assert_eq!(env.get("WINEDEBUG").map(String::as_str), Some("-all"));
+        assert!(!env.contains_key(vfs_env::INJECT_CWD));
     }
 
     #[test]
@@ -637,8 +654,21 @@ mod tests {
     }
 
     #[test]
+    fn a_cwd_travels_to_the_injector() {
+        let mut l = sample();
+        l.cwd = Some(r"C:\Games\Skyrim".to_string());
+        assert_eq!(launch_env(&l)[vfs_env::INJECT_CWD], r"C:\Games\Skyrim");
+    }
+
+    #[test]
     fn a_reserved_name_in_extra_env_is_refused_before_anything_else() {
-        for k in ["WINEPREFIX", "PROTONPATH", vfs_env::RING_PATH, vfs_env::VIRTUAL_DIR] {
+        for k in [
+            "WINEPREFIX",
+            "PROTONPATH",
+            vfs_env::RING_PATH,
+            vfs_env::VIRTUAL_DIR,
+            vfs_env::INJECT_CWD,
+        ] {
             assert!(is_reserved_env(k), "{k}");
         }
         assert!(!is_reserved_env("VFS_FIXTURE_PATH"), "a fixture's own switches pass through");

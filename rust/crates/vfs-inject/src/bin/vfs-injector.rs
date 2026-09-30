@@ -27,11 +27,12 @@ fn main() {
         target_args: args,
     } = parsed;
 
-    eprintln!("[vfs-injector] target={target} shim={dll} payload={payload}");
+    let current_dir = vfs_env::text(vfs_env::INJECT_CWD).filter(|d| !d.is_empty());
+    eprintln!("[vfs-injector] target={target} shim={dll} payload={payload} cwd={current_dir:?}");
     let exit = run_target_with_shim(RunConfig {
         target_exe: target,
         args,
-        current_dir: None,
+        current_dir,
         dll_path: dll,
         config_path: config,
         ready_path: ready,

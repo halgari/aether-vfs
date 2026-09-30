@@ -117,6 +117,10 @@ pub const LAUNCH_IMAGE: &str = "VFS_LAUNCH_IMAGE";
 pub const DISCOVERY_PATH: &str = "VFS_DISCOVERY_PATH";
 /// Seconds to wait for the child's hooks to report ready before giving up.
 pub const READY_TIMEOUT_SECS: &str = "VFS_READY_TIMEOUT_SECS";
+/// Working directory `vfs-injector` starts its target in, as the target sees
+/// it (`C:\…`). Set by the Proton launch; unset, the target inherits the
+/// injector's own directory.
+pub const INJECT_CWD: &str = "VFS_INJECT_CWD";
 
 // ─── injection handshake ─────────────────────────────────────────────────────
 
@@ -359,6 +363,7 @@ pub const ALL: &[Var] = &[
     Var { name: LAUNCH_IMAGE, kind: Kind::Handshake, default: "none; staging derives it" },
     Var { name: DISCOVERY_PATH, kind: Kind::Handshake, default: "platform default" },
     Var { name: READY_TIMEOUT_SECS, kind: Kind::Behaviour, default: "built-in timeout" },
+    Var { name: INJECT_CWD, kind: Kind::Handshake, default: "the injector's own directory" },
     Var { name: SHIM_CONFIG, kind: Kind::Handshake, default: "required by the shim" },
     Var { name: SHIM_READY, kind: Kind::Handshake, default: "no ready signal" },
     Var { name: PAYLOAD_PATH, kind: Kind::Handshake, default: "resolved beside the shim" },

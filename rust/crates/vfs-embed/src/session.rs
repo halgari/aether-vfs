@@ -134,6 +134,11 @@ pub struct LaunchOpts {
     /// environment. See [`Session::launch`]'s "Process-global environment"
     /// section for the costed fix.
     pub env: BTreeMap<String, String>,
+    /// **Proton path only**: the working directory the program starts in, as
+    /// it sees it — a `C:\…` path, or a path relative to root 0's location.
+    /// `None` is the image's own directory. On Windows the child starts in
+    /// root 0's directory, as before, whatever this says.
+    pub cwd: Option<String>,
 }
 
 impl Default for LaunchOpts {
@@ -154,6 +159,7 @@ impl Default for LaunchOpts {
             shim_dll: None,
             payload_dll: None,
             env: BTreeMap::new(),
+            cwd: None,
         }
     }
 }
@@ -1764,6 +1770,7 @@ impl Session {
             ResolvedImage::Outside(p) => p,
         };
         let root0 = roots[0].location.clone();
+        let cwd = wine_cwd(opts.cwd.as_deref(), &root0, &target)?;
         let extra: Vec<(u32, String)> =
             roots[1..].iter().map(|r| (r.id, r.location.clone())).collect();
 
@@ -1807,6 +1814,7 @@ impl Session {
             // Child-only: the spawned `wine` gets these in its environment
             // block, and this process's environment is never written.
             extra_env: opts.env.clone(),
+            cwd: Some(cwd),
         };
 
         vfs_proton::launch::run(&wine).map_err(|e| format!("launch: {e}"))
@@ -1872,6 +1880,29 @@ struct AnonPrefix {
     runtime: PathBuf,
     /// Where the prefix is under `home` for the session's `PrefixInit`.
     prefix_dir: PathBuf,
+}
+
+/// The working directory a Proton launch starts `target` in: `requested` as
+/// given when it is a Windows absolute path, joined onto root 0's location
+/// when it is relative, and `target`'s own directory when it is `None`.
+#[cfg(unix)]
+fn wine_cwd(requested: Option<&str>, root0: &str, target: &str) -> Result<String, String> {
+    match requested {
+        Some(c) if c.trim().is_empty() => Err(
+            "launch: LaunchOpts.cwd is empty — leave it None for the image's own directory"
+                .to_string(),
+        ),
+        Some(c) if c.split(['\\', '/']).any(|part| part == "..") => Err(format!(
+            "launch: LaunchOpts.cwd {c:?} contains '..'; name the directory directly"
+        )),
+        Some(c) if image::is_windows_absolute(c) => Ok(c.to_string()),
+        Some(c) => Ok(image::join_location(root0, c.trim_matches(['\\', '/']))),
+        None => Ok(match target.rfind(['\\', '/']) {
+            Some(i) if target[..i].ends_with(':') => format!("{}\\", &target[..i]),
+            Some(i) => target[..i].to_string(),
+            None => root0.to_string(),
+        }),
+    }
 }
 
 /// What [`Session::resolve_launch_image`] resolved an image to.
@@ -2560,5 +2591,30 @@ mod launch_image_tests {
         s.serve().unwrap();
         assert_eq!(s.ipc().unwrap().worker_count(), 12);
         s.stop_serve();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wine_cwd_defaults_to_the_image_directory() {
+        assert_eq!(wine_cwd(None, r"C:\G", r"C:\G\bin\x.exe").unwrap(), r"C:\G\bin");
+        assert_eq!(wine_cwd(None, r"C:\G", r"C:\x.exe").unwrap(), r"C:\");
+        assert_eq!(wine_cwd(None, r"C:\G", "C:/tools/probe.exe").unwrap(), "C:/tools");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wine_cwd_takes_absolute_paths_as_given_and_relative_ones_under_root_zero() {
+        assert_eq!(wine_cwd(Some(r"D:\x"), r"C:\G", r"C:\G\a.exe").unwrap(), r"D:\x");
+        assert_eq!(wine_cwd(Some("Data/SKSE/"), r"C:\G", r"C:\G\a.exe").unwrap(), r"C:\G\Data\SKSE");
+        assert_eq!(wine_cwd(Some(r"\Data"), r"C:\G\", r"C:\G\a.exe").unwrap(), r"C:\G\Data");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wine_cwd_refuses_empty_and_dot_dot() {
+        for bad in ["", "  ", r"..\x", r"C:\G\..\Windows"] {
+            let e = wine_cwd(Some(bad), r"C:\G", r"C:\G\a.exe").unwrap_err();
+            assert!(e.contains("cwd"), "{bad:?}: {e}");
+        }
     }
 }

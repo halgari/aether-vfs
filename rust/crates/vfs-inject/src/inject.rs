@@ -533,9 +533,15 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
     std::env::set_var(vfs_env::DUAL_LAYER, "1");
     std::env::set_var(vfs_env::PAYLOAD_CFG_FILE, &cfg_file);
     let _ = std::fs::remove_file(&cfg_file);
-    // The managed root, so the child's fuse client matches the session root.
+    // The managed root, so the child's fuse client matches the session root —
+    // unless the caller already named it. The Proton launch sets
+    // `VFS_VIRTUAL_DIR` to root 0 and a working directory that may be below
+    // it; every Windows caller passes its root as `current_dir` and sets the
+    // same value (or none), so for them nothing changes.
     if let Some(ref d) = cfg.current_dir {
-        std::env::set_var(vfs_env::VIRTUAL_DIR, d);
+        if std::env::var_os(vfs_env::VIRTUAL_DIR).is_none() {
+            std::env::set_var(vfs_env::VIRTUAL_DIR, d);
+        }
     }
     let _ = std::fs::remove_file(&cfg.ready_path);
 

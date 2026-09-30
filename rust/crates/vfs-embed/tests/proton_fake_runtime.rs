@@ -138,6 +138,7 @@ fn the_launch_environment_is_the_childs_alone() {
     assert_eq!(env["SteamAppId"], "489830");
     assert_eq!(env["WINEDLLOVERRIDES"], "mscoree=d;mshtml=d;d3dx9_42=n,b");
     assert_eq!(env["WINEDEBUG"], "-all");
+    assert_eq!(env["VFS_INJECT_CWD"], ROOT0, "the image's directory is the default cwd");
     assert!(std::env::var_os("SteamAppId").is_none(), "this process's environment is untouched");
     let args = std::fs::read_to_string(pfx.join("fake-wine.args")).unwrap();
     assert!(args.contains(r"C:\Games\Fake\game.exe"), "{args}");
@@ -151,4 +152,14 @@ fn a_reserved_name_in_the_launch_env_is_refused() {
     o.env.insert("VFS_VIRTUAL_DIR".into(), r"C:\elsewhere".into());
     let e = s.launch(&o).unwrap_err();
     assert!(e.contains("VFS_VIRTUAL_DIR"), "{e}");
+}
+
+#[test]
+fn a_relative_cwd_is_under_root_zero() {
+    let home = fake_home("cwd");
+    let (s, pfx, shim) = session("cwd", &home);
+    let mut o = opts(&shim, "ok", true);
+    o.cwd = Some("Data/SKSE".into());
+    s.launch(&o).unwrap();
+    assert_eq!(child_env(&pfx)["VFS_INJECT_CWD"], r"C:\Games\Fake\Data\SKSE");
 }
