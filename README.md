@@ -231,13 +231,16 @@ store (`vfs-storage`), which holds two things:
   layer instead of a directory. The session's writes (saves, edited INIs,
   copied-up files) land in the store under that name and survive `vfs down`
   and a daemon restart. Layer data never counts against the cache budget and
-  is never evicted. Writes reach disk durably (fsynced) in batches, not on
-  every file close: when the session ends, when the daemon stops, and
-  otherwise at most every five minutes while the layer keeps changing. A
-  crash or power loss can therefore undo up to the last few minutes of
-  changes, but the store always reopens consistent: a file written since the
-  last durable point is gone whole rather than left half-written (a file
-  rewritten in place can come back old, new, or mixed).
+  is never evicted. New files and namespace changes reach disk durably
+  (fsynced) in batches, not on every file close: when the session ends, when
+  the daemon stops, and otherwise at most every five minutes while the layer
+  keeps changing. A crash (a killed daemon as much as a power loss) can
+  therefore undo up to the last few minutes of those changes, but the store
+  always reopens consistent: a file created since the last durable point is
+  gone whole rather than left half-written, and a removed or replaced file
+  comes back. Rewriting an existing file in place is made durable when the
+  program closes it. Replaced files keep their space until the next durable
+  point.
 
 ```toml
 [[source]]

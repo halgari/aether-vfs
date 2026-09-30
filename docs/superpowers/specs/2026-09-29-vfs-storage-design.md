@@ -168,13 +168,19 @@ just small files in the layer) and rename-by-copy-up are unchanged.
   speedup):
   - `Durability::Deferred { max_interval }`, **the default** (5 minutes):
     closes, flushes and namespace changes make no durable point unless the
-    last one is `max_interval` old; then the operation runs one for every
-    live layer. `Storage::sync()`, `Storage::close()`, a layer provider's
-    drop, and layer create/import/delete always run one. A crash loses the
-    changes since the last durable point: files created since are gone
-    whole, removals and renames are undone (a removed file's data is
-    deleted only after a durable point), and a file rewritten in place may
-    come back old, new or mixed. Game-save durability is a later concern.
+    last one is `max_interval` old or the catalog holds 10,000 non-durable
+    commits; then the operation runs one (it covers every layer). Except:
+    closing, flushing or resizing a file that was written and already
+    existed at the last durable point runs one at once, since a store
+    auto-flush mid-rewrite would otherwise leave a durable row describing
+    torn store data. `Storage::sync()`, `Storage::close()`, a layer
+    provider's drop, and layer create/import/delete always run one (without
+    fsyncs if nothing is non-durable). A crash — process kill or power
+    loss — loses the changes since the last durable point: files created
+    since are gone whole, removals and renames are undone (a removed or
+    replaced file's data is deleted only after a durable point, so a rename
+    over a file holds both versions until then). Game-save durability is a
+    later concern.
   - `Durability::OnEveryClose`: the original rule — flush, the close of a
     handle that wrote, and every namespace change run a durable point before
     returning; a crash loses only writes on handles still open.
