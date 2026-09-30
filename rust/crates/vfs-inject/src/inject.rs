@@ -31,6 +31,19 @@ use crate::stub::build_stub;
 use crate::{InjectError, PreinitConfig, PreinitRedirect, RunConfig};
 
 
+/// The exit code of `process` if it has already exited.
+///
+/// # Safety
+/// `process` must be a live process handle with `SYNCHRONIZE` and
+/// `PROCESS_QUERY_LIMITED_INFORMATION` access (a `CreateProcessW` handle).
+unsafe fn exited(process: HANDLE) -> Option<u32> {
+    if WaitForSingleObject(process, 0) != 0 {
+        return None;
+    }
+    let mut code = 0u32;
+    (GetExitCodeProcess(process, &mut code) != 0).then_some(code)
+}
+
 /// Build the early redirect table: config-file static imports first, then any
 /// explicit `extra` rows (caller overrides). Caps at [`MAX_REDIRECTS`].
 pub fn merge_preinit_redirects(config_path: &str, extra: &[PreinitRedirect]) -> Vec<PreinitRedirect> {
@@ -629,6 +642,11 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
             if ok != 0 && n == 4 && u32::from_le_bytes(word) == 0xC0DE {
                 break;
             }
+            if let Some(code) = exited(pi.hProcess) {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                return Err(InjectError::TargetExited(code));
+            }
             if Instant::now() >= deadline {
                 CloseHandle(pi.hThread);
                 CloseHandle(pi.hProcess);
@@ -675,6 +693,11 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
                 }
                 Ok(content) if content == vfs_env::READY_OK => break,
                 _ => {}
+            }
+            if let Some(code) = exited(pi.hProcess) {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                return Err(InjectError::TargetExited(code));
             }
             if Instant::now() >= deadline {
                 let one = 1u32.to_le_bytes();

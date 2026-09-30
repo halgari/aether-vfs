@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use vfs_embed::{LaunchOpts, PrefixInit, Session};
 
@@ -132,6 +133,7 @@ fn the_launch_environment_is_the_childs_alone() {
     let mut o = opts(&shim, "ok", true);
     o.env.insert("SteamAppId".into(), "489830".into());
     o.env.insert("WINEDLLOVERRIDES".into(), "d3dx9_42=n,b".into());
+    o.ready_timeout = Some(Duration::from_secs(240));
     assert_eq!(s.launch(&o).unwrap(), 0);
 
     let env = child_env(&pfx);
@@ -139,6 +141,7 @@ fn the_launch_environment_is_the_childs_alone() {
     assert_eq!(env["WINEDLLOVERRIDES"], "mscoree=d;mshtml=d;d3dx9_42=n,b");
     assert_eq!(env["WINEDEBUG"], "-all");
     assert_eq!(env["VFS_INJECT_CWD"], ROOT0, "the image's directory is the default cwd");
+    assert_eq!(env["VFS_READY_TIMEOUT_SECS"], "240");
     assert!(std::env::var_os("SteamAppId").is_none(), "this process's environment is untouched");
     let args = std::fs::read_to_string(pfx.join("fake-wine.args")).unwrap();
     assert!(args.contains(r"C:\Games\Fake\game.exe"), "{args}");
@@ -162,4 +165,12 @@ fn a_relative_cwd_is_under_root_zero() {
     o.cwd = Some("Data/SKSE".into());
     s.launch(&o).unwrap();
     assert_eq!(child_env(&pfx)["VFS_INJECT_CWD"], r"C:\Games\Fake\Data\SKSE");
+}
+
+#[test]
+fn the_injectors_reason_reaches_the_caller() {
+    let home = fake_home("fail");
+    let (s, _pfx, shim) = session("fail", &home);
+    let e = s.launch(&opts(&shim, "fail", true)).unwrap_err();
+    assert!(e.contains("0xc0000135") && e.contains("STATUS_DLL_NOT_FOUND"), "{e}");
 }

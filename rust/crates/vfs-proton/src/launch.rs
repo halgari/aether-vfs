@@ -98,6 +98,10 @@ pub struct WineLaunch {
     /// injector as [`vfs_env::INJECT_CWD`]. `None`: the target inherits the
     /// injector's directory, which is `wine`'s host cwd seen through `Z:`.
     pub cwd: Option<String>,
+    /// Seconds the injector waits for the shim to report ready, sent as
+    /// [`vfs_env::READY_TIMEOUT_SECS`]. `None`: the injector's default (180),
+    /// or whatever this process's environment already says.
+    pub ready_timeout_secs: Option<u64>,
 }
 
 /// `WINEDLLOVERRIDES` every launch carries: Mono and Gecko prompts would
@@ -133,6 +137,9 @@ pub enum LaunchError {
     NonZeroWine(i32),
     /// [`WineLaunch::extra_env`] names a variable the launch sets itself.
     ReservedEnv(String),
+    /// The injector failed and said why (its report beside the ready file);
+    /// carries [`describe_injector_error`]'s rendering of it.
+    Injector(String),
 }
 
 impl std::fmt::Display for LaunchError {
@@ -152,6 +159,7 @@ impl std::fmt::Display for LaunchError {
                 "{k} is part of the launch's own handshake and cannot be set through the \
                  launch environment"
             ),
+            LaunchError::Injector(s) => write!(f, "vfs-injector did not run the target: {s}"),
         }
     }
 }
@@ -266,6 +274,12 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
         };
         env.insert(k.clone(), v);
     }
+
+    // After `extra_env`: an explicit timeout on the launch beats an inherited
+    // or host-supplied one.
+    if let Some(secs) = l.ready_timeout_secs {
+        env.insert(vfs_env::READY_TIMEOUT_SECS.to_string(), secs.max(1).to_string());
+    }
     env
 }
 
@@ -329,6 +343,45 @@ pub fn merge_dll_overrides(base: &str, extra: &str) -> String {
     out.into_iter().map(|(_, e)| e).collect::<Vec<_>>().join(";")
 }
 
+/// Where the injector reports why it failed: the ready file's path plus
+/// [`vfs_env::INJECTOR_ERROR_SUFFIX`].
+pub fn injector_error_path(ready_file: &Path) -> PathBuf {
+    let mut s = ready_file.as_os_str().to_owned();
+    s.push(vfs_env::INJECTOR_ERROR_SUFFIX);
+    PathBuf::from(s)
+}
+
+/// A readable account of the injector's one-line failure report.
+pub fn describe_injector_error(raw: &str) -> String {
+    let raw = raw.trim();
+    if let Some(code) = raw.strip_prefix(vfs_env::INJECTOR_TARGET_EXITED_PREFIX) {
+        let hint = match u32::from_str_radix(code.trim_start_matches("0x"), 16) {
+            Ok(0xC000_0135) => {
+                " (STATUS_DLL_NOT_FOUND: a DLL the program imports is missing — stage it \
+                 (stage_also / stage_fallback_dirs), or launch in a Proton-initialized prefix, \
+                 which carries the DirectX and Visual C++ redistributables)"
+            }
+            Ok(0xC000_007B) => {
+                " (STATUS_INVALID_IMAGE_FORMAT: an imported DLL is not a PE of the right \
+                 architecture)"
+            }
+            Ok(0xC000_0142) => " (STATUS_DLL_INIT_FAILED: a DLL failed to initialise)",
+            _ => "",
+        };
+        return format!("the target exited with {code}{hint} before the shim reported ready");
+    }
+    if let Some(secs) = raw.strip_prefix(vfs_env::INJECTOR_READY_TIMEOUT_PREFIX) {
+        return format!(
+            "the shim did not report ready within {secs} s — the target is hung or still \
+             starting; raise the ready timeout if a cold prefix is this slow"
+        );
+    }
+    format!(
+        "injection failed: {}",
+        raw.strip_prefix(vfs_env::INJECTOR_FAILED_PREFIX).unwrap_or(raw)
+    )
+}
+
 /// Spawns the launch, waits for it, and returns the target's exit code.
 ///
 /// GE is verified first: `PROTONPATH` pointing at a non-GE runtime is a hard
@@ -337,6 +390,11 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
     check_extra_env(&l.extra_env)?;
     verify_ge(&l.runtime).map_err(|e| LaunchError::NotGe(e.to_string()))?;
     check_geometry(l)?;
+    // A report left by an earlier launch would be read as this one's.
+    match std::fs::remove_file(injector_error_path(&l.ready_file)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
 
     let (prog, argv) = command_line(l);
     let mut cmd = std::process::Command::new(&prog);
@@ -366,13 +424,26 @@ pub fn run(l: &WineLaunch) -> Result<i32, LaunchError> {
     let status = cmd
         .status()
         .map_err(|e| LaunchError::Spawn(format!("{prog}: {e}")))?;
+    finish(l, status)
+}
 
+/// How a launch ended: the target's exit code, or why the injector never ran
+/// it (its report, if it wrote one, else its exit code).
+pub fn finish(l: &WineLaunch, status: std::process::ExitStatus) -> Result<i32, LaunchError> {
     match status.code() {
         // 2 and 3 are the injector's own "the target never ran" exits.
-        Some(code @ (2 | 3)) => Err(LaunchError::NonZeroWine(code)),
+        Some(code @ (2 | 3)) => {
+            match std::fs::read_to_string(injector_error_path(&l.ready_file)) {
+                Ok(raw) if !raw.trim().is_empty() => {
+                    Err(LaunchError::Injector(describe_injector_error(&raw)))
+                }
+                _ => Err(LaunchError::NonZeroWine(code)),
+            }
+        }
         Some(code) => Ok(code),
         None => Err(LaunchError::Spawn(format!(
-            "{prog} exited without a code (signalled): {status}"
+            "{} exited without a code (signalled): {status}",
+            wine_binary(&l.runtime).display()
         ))),
     }
 }
@@ -508,6 +579,7 @@ mod tests {
             args: vec!["-arg1".to_string(), "arg2".to_string()],
             extra_env: BTreeMap::new(),
             cwd: None,
+            ready_timeout_secs: None,
         }
     }
 
@@ -621,6 +693,7 @@ mod tests {
         );
         assert_eq!(env.get("WINEDEBUG").map(String::as_str), Some("-all"));
         assert!(!env.contains_key(vfs_env::INJECT_CWD));
+        assert!(!env.contains_key(vfs_env::READY_TIMEOUT_SECS));
     }
 
     #[test]
@@ -658,6 +731,53 @@ mod tests {
         let mut l = sample();
         l.cwd = Some(r"C:\Games\Skyrim".to_string());
         assert_eq!(launch_env(&l)[vfs_env::INJECT_CWD], r"C:\Games\Skyrim");
+    }
+
+    #[test]
+    fn a_ready_timeout_travels_to_the_injector_and_beats_extra_env() {
+        let mut l = sample();
+        l.ready_timeout_secs = Some(0);
+        l.extra_env.insert(vfs_env::READY_TIMEOUT_SECS.to_string(), "5".to_string());
+        assert_eq!(launch_env(&l)[vfs_env::READY_TIMEOUT_SECS], "1", "the field wins, and 0 means 1");
+    }
+
+    #[test]
+    fn injector_reports_are_described() {
+        let dll = describe_injector_error("target-exited:0xc0000135\n");
+        assert!(dll.contains("0xc0000135") && dll.contains("STATUS_DLL_NOT_FOUND"), "{dll}");
+        let other = describe_injector_error("target-exited:0x1");
+        assert!(other.contains("0x1") && other.contains("before the shim reported ready"), "{other}");
+        let t = describe_injector_error("ready-timeout:180");
+        assert!(t.contains("180 s"), "{t}");
+        assert_eq!(describe_injector_error("inject:CreateProcess"), "injection failed: CreateProcess");
+        assert_eq!(
+            injector_error_path(Path::new("/s/ready.flag")),
+            Path::new("/s/ready.flag.injector-error")
+        );
+    }
+
+    #[cfg(unix)]
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        std::process::Command::new("sh").arg("-c").arg(format!("exit {code}")).status().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finish_maps_exits_and_reads_the_injector_report() {
+        let dir = std::env::temp_dir().join(format!("vfs-launch-finish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut l = sample();
+        l.ready_file = dir.join("ready.flag");
+        assert_eq!(finish(&l, exit_status(0)).unwrap(), 0);
+        assert_eq!(finish(&l, exit_status(7)).unwrap(), 7, "a target's own code is Ok");
+        assert!(matches!(finish(&l, exit_status(3)), Err(LaunchError::NonZeroWine(3))));
+        std::fs::write(injector_error_path(&l.ready_file), "target-exited:0xc0000135").unwrap();
+        match finish(&l, exit_status(3)) {
+            Err(LaunchError::Injector(m)) => assert!(m.contains("STATUS_DLL_NOT_FOUND"), "{m}"),
+            other => panic!("expected Injector, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

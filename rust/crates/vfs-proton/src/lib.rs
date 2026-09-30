@@ -30,8 +30,9 @@ pub use install::{
     Installed,
 };
 pub use launch::{
-    check_extra_env, command_line, is_reserved_env, launch_env, merge_dll_overrides, wine_binary,
-    LaunchError, WineLaunch, BASE_DLL_OVERRIDES, DEFAULT_WINEDEBUG,
+    check_extra_env, command_line, describe_injector_error, finish, injector_error_path,
+    is_reserved_env, launch_env, merge_dll_overrides, wine_binary, LaunchError, WineLaunch,
+    BASE_DLL_OVERRIDES, DEFAULT_WINEDEBUG,
 };
 pub use layout::Root;
 pub use prefix::{ensure, ensure_with, Prefix, PrefixError, PrefixInit};

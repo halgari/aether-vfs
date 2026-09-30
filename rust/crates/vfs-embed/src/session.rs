@@ -139,6 +139,9 @@ pub struct LaunchOpts {
     /// `None` is the image's own directory. On Windows the child starts in
     /// root 0's directory, as before, whatever this says.
     pub cwd: Option<String>,
+    /// How long the injector waits for the shim to report ready. `None`:
+    /// `VFS_READY_TIMEOUT_SECS` from this process's environment, else 180 s.
+    pub ready_timeout: Option<std::time::Duration>,
 }
 
 impl Default for LaunchOpts {
@@ -160,6 +163,7 @@ impl Default for LaunchOpts {
             payload_dll: None,
             env: BTreeMap::new(),
             cwd: None,
+            ready_timeout: None,
         }
     }
 }
@@ -1594,11 +1598,12 @@ impl Session {
             std::env::set_var(k, v);
         }
 
-        let ready_timeout = vfs_env::text(vfs_env::READY_TIMEOUT_SECS).ok_or(())
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(180));
+        let ready_timeout = opts.ready_timeout.unwrap_or_else(|| {
+            vfs_env::text(vfs_env::READY_TIMEOUT_SECS)
+                .and_then(|s| s.parse().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_secs(180))
+        });
 
         let exit = vfs_inject::run_target_with_shim(vfs_inject::RunConfig {
             target_exe: target.to_string_lossy().into_owned(),
@@ -1815,6 +1820,7 @@ impl Session {
             // block, and this process's environment is never written.
             extra_env: opts.env.clone(),
             cwd: Some(cwd),
+            ready_timeout_secs: opts.ready_timeout.map(|d| d.as_secs().max(1)),
         };
 
         vfs_proton::launch::run(&wine).map_err(|e| format!("launch: {e}"))

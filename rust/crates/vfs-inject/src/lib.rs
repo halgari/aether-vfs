@@ -86,6 +86,11 @@ pub enum InjectError {
     /// loaded at all (no injection happened) — that is not a FUSE failure and
     /// must not be reported as one.
     FuseInit(String),
+    /// The target exited — with this exit code, an `NTSTATUS` such as
+    /// `0xC0000135` (a DLL it imports is missing) when the loader killed it —
+    /// before the shim reported ready. Reported as soon as it is seen rather
+    /// than after the ready timeout, which is what a dead target used to cost.
+    TargetExited(u32),
 }
 
 pub use artifacts::{ensure_payload_beside_shim, find_near, resolve_payload_for_run};

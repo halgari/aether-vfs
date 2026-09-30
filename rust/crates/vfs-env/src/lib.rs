@@ -158,6 +158,23 @@ pub const READY_OK: &str = "ready";
 /// opens falls straight through to the real filesystem, unnoticed.
 pub const READY_FUSE_FAILED_PREFIX: &str = "fuse-failed:";
 
+// ─── injector failure report ─────────────────────────────────────────────────
+// Also not switch names. `vfs-injector` exits 3 for every injection failure,
+// and an exit code carries no reason; so before exiting it writes one line to
+// `<ready file>` + [`INJECTOR_ERROR_SUFFIX`], which the Proton launch reads
+// back into its error.
+
+/// Appended to the ready file's path to name the injector's failure report.
+pub const INJECTOR_ERROR_SUFFIX: &str = ".injector-error";
+/// Report prefix: the target exited before the shim reported ready, followed
+/// by its exit code in hex (`0xc0000135`).
+pub const INJECTOR_TARGET_EXITED_PREFIX: &str = "target-exited:";
+/// Report prefix: the shim did not report ready in time, followed by the
+/// timeout in seconds.
+pub const INJECTOR_READY_TIMEOUT_PREFIX: &str = "ready-timeout:";
+/// Report prefix: any other injection failure, followed by its description.
+pub const INJECTOR_FAILED_PREFIX: &str = "inject:";
+
 // ─── behaviour switches (booleans) ───────────────────────────────────────────
 
 /// Allow an under-root miss to fall through to whatever is really on disk.
@@ -362,7 +379,7 @@ pub const ALL: &[Var] = &[
     Var { name: STORAGE_DIR, kind: Kind::Behaviour, default: "$VFS_HOME/storage" },
     Var { name: LAUNCH_IMAGE, kind: Kind::Handshake, default: "none; staging derives it" },
     Var { name: DISCOVERY_PATH, kind: Kind::Handshake, default: "platform default" },
-    Var { name: READY_TIMEOUT_SECS, kind: Kind::Behaviour, default: "built-in timeout" },
+    Var { name: READY_TIMEOUT_SECS, kind: Kind::Behaviour, default: "180" },
     Var { name: INJECT_CWD, kind: Kind::Handshake, default: "the injector's own directory" },
     Var { name: SHIM_CONFIG, kind: Kind::Handshake, default: "required by the shim" },
     Var { name: SHIM_READY, kind: Kind::Handshake, default: "no ready signal" },
