@@ -362,6 +362,9 @@ pub struct Session {
     /// survives.
     #[cfg(unix)]
     prefix_links: Mutex<Vec<(PathBuf, PathBuf, PathBuf)>>,
+    /// Ring serve threads [`Session::serve`] starts; `None` is
+    /// `vfs_director::ipc::DEFAULT_IO_WORKERS`.
+    io_workers: Option<usize>,
     /// The most recent staged launch directory, held here because
     /// [`StagedDir`]'s `Drop` removes the staged files — not the virtual root
     /// they now live in — and Windows keeps the image file mapped for as long
@@ -408,8 +411,30 @@ impl Session {
             anon: Mutex::new(None),
             #[cfg(unix)]
             prefix_links: Mutex::new(Vec::new()),
+            io_workers: None,
             staged: Mutex::new(None),
         }
+    }
+
+    /// The number of ring serve threads [`Session::serve`] starts, from the
+    /// next `serve` on. The default is `vfs_director::ipc::DEFAULT_IO_WORKERS`
+    /// (4); the count is clamped to 1..=32 (the ring's slot count).
+    ///
+    /// A serve thread answers one request at a time, so a request whose
+    /// provider blocks — a cold miss behind a network-backed cache — holds a
+    /// thread until it returns, and once every thread is held the program's
+    /// I/O stops, cache hits included. Raise this above the number of slow
+    /// misses a host expects at once. Each idle thread costs a little CPU:
+    /// it spins briefly after activity before it sleeps.
+    pub fn set_io_workers(&mut self, n: usize) {
+        self.io_workers = Some(n);
+    }
+
+    /// The serve thread count the next [`Session::serve`] uses, clamped.
+    pub fn io_workers(&self) -> usize {
+        vfs_director::ipc::clamp_workers(
+            self.io_workers.unwrap_or(vfs_director::ipc::DEFAULT_IO_WORKERS),
+        )
     }
 
     pub fn kernel(&self) -> &Arc<Director> {
@@ -1081,7 +1106,8 @@ impl Session {
                 .map(|d| d.as_millis())
                 .unwrap_or(0)
         );
-        let ipc = IpcServe::start(Arc::clone(&self.kernel), section)?;
+        let ipc =
+            IpcServe::start_with_workers(Arc::clone(&self.kernel), section, self.io_workers())?;
         let root_s = self.virtual_root.to_string_lossy().into_owned();
         let thin = self.state_dir.join("fuse.cfg");
         ipc.write_thin_config(&thin, &root_s)?;
@@ -1148,10 +1174,11 @@ impl Session {
         // fresh inode and leaves such a reader on the old one, where it fails
         // visibly instead of racing us for slots.
         let _ = std::fs::remove_file(&ring);
-        let ipc = IpcServe::start_file_backed(
+        let ipc = IpcServe::start_file_backed_with_workers(
             Arc::clone(&self.kernel),
             &ring,
             PROTON_PAYLOAD_CAP,
+            self.io_workers(),
         )?;
 
         self.ipc = Some(ipc);
@@ -2472,5 +2499,19 @@ mod launch_image_tests {
         }
         assert!(!anon_dir.exists(), "anonymous prefix must be deleted on drop");
         assert!(named_dir.exists(), "a named prefix is persistent");
+    }
+
+    #[test]
+    fn io_workers_default_clamp_and_reach_the_ring() {
+        let mut s = Session::new();
+        assert_eq!(s.io_workers(), 4, "the default is unchanged");
+        s.set_io_workers(0);
+        assert_eq!(s.io_workers(), 1);
+        s.set_io_workers(500);
+        assert_eq!(s.io_workers(), 32);
+        s.set_io_workers(12);
+        s.serve().unwrap();
+        assert_eq!(s.ipc().unwrap().worker_count(), 12);
+        s.stop_serve();
     }
 }

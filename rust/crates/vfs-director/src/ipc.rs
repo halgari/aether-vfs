@@ -41,6 +41,16 @@ pub const DEFAULT_SLOT_COUNT: u32 = 32;
 /// Re-export for callers; keep in sync with [`vfs_ipc::DEFAULT_ARENA_BYTES`].
 pub const DEFAULT_ARENA_BYTES: usize = vfs_ipc::DEFAULT_ARENA_BYTES;
 
+/// Serve workers a ring gets unless its host asks for another count
+/// ([`IpcServe::start_file_backed_with_workers`], [`IpcServe::start_with_workers`]).
+pub const DEFAULT_IO_WORKERS: usize = DEFAULT_WORKER_COUNT;
+
+/// `n` serve workers as a ring can use them: at least one, and no more than
+/// it has slots — a worker beyond that could never hold a request.
+pub fn clamp_workers(n: usize) -> usize {
+    n.clamp(1, DEFAULT_SLOT_COUNT as usize)
+}
+
 struct Inner {
     mapping: RingMapping,
     kernel: Arc<Director>,
@@ -113,6 +123,18 @@ pub struct IpcServe {
 impl IpcServe {
     #[cfg(windows)]
     pub fn start(kernel: Arc<Director>, section_name: String) -> Result<Self, String> {
+        Self::start_with_workers(kernel, section_name, DEFAULT_IO_WORKERS)
+    }
+
+    /// [`Self::start`] with `workers` serve threads instead of
+    /// [`DEFAULT_IO_WORKERS`], clamped by [`clamp_workers`] — see
+    /// [`Self::start_file_backed_with_workers`] for why a host raises it.
+    #[cfg(windows)]
+    pub fn start_with_workers(
+        kernel: Arc<Director>,
+        section_name: String,
+        workers: usize,
+    ) -> Result<Self, String> {
         let payload_cap = DEFAULT_PAYLOAD_CAP;
         let slot_count = DEFAULT_SLOT_COUNT;
         let stride = ((32 + payload_cap as usize) + 7) & !7;
@@ -145,7 +167,7 @@ impl IpcServe {
         });
 
 
-        let workers = DEFAULT_WORKER_COUNT.max(1);
+        let workers = clamp_workers(workers);
         let mut joins = Vec::with_capacity(workers);
         for _ in 0..workers {
             let inner2 = inner.clone();
@@ -215,6 +237,26 @@ impl IpcServe {
         ring_path: &std::path::Path,
         payload_cap: u32,
     ) -> Result<Self, String> {
+        Self::start_file_backed_with_workers(kernel, ring_path, payload_cap, DEFAULT_IO_WORKERS)
+    }
+
+    /// [`Self::start_file_backed`] with `workers` serve threads instead of
+    /// [`DEFAULT_IO_WORKERS`], clamped by [`clamp_workers`].
+    ///
+    /// A worker runs one request at a time, start to finish, so a request
+    /// whose provider blocks (a cold network fetch behind a cache) holds its
+    /// worker for as long as it blocks, and with every worker held **no**
+    /// request is answered — not even one the RAM tier could serve at once.
+    /// More workers than a host expects concurrent slow misses is the
+    /// remedy. The cost is idle CPU: each worker spins for a short window
+    /// after activity before it sleeps (see [`AdaptiveNotifier`]).
+    #[cfg(unix)]
+    pub fn start_file_backed_with_workers(
+        kernel: Arc<Director>,
+        ring_path: &std::path::Path,
+        payload_cap: u32,
+        workers: usize,
+    ) -> Result<Self, String> {
         let slot_count = DEFAULT_SLOT_COUNT;
         let stride = ((32 + payload_cap as usize) + 7) & !7;
         let ring_bytes = 40 + slot_count as usize * stride;
@@ -239,7 +281,7 @@ impl IpcServe {
             arena_len,
         });
 
-        let workers = DEFAULT_WORKER_COUNT.max(1);
+        let workers = clamp_workers(workers);
         let mut joins = Vec::with_capacity(workers);
         for _ in 0..workers {
             let inner2 = inner.clone();
@@ -261,6 +303,11 @@ impl IpcServe {
     /// on a named section instead.
     pub fn ring_path(&self) -> Option<&std::path::Path> {
         self.ring_path.as_deref()
+    }
+
+    /// How many serve threads this server runs.
+    pub fn worker_count(&self) -> usize {
+        self.joins.len()
     }
 
     pub fn client(&self) -> Result<RingClient<'_, SpinNotifier>, String> {
