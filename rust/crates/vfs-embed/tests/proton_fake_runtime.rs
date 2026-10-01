@@ -12,6 +12,9 @@
 //! `game` is `skse64_loader.exe`: it starts a detached "game" that outlives
 //! it (running while `fake-game.run` exists in the prefix) and exits 5.
 //!
+//! It also writes one line to stdout and one to stderr, which is what
+//! `LaunchOpts::log_file` captures.
+//!
 //! The fake `wineserver` models the prefix: `-k` kills the fake `wine` and
 //! the game, and `-w` returns once the game is gone.
 #![cfg(unix)]
@@ -26,8 +29,10 @@ use vfs_embed::{DiskProvider, LaunchExit, LaunchOpts, PrefixInit, Session, STOPP
 
 const ROOT0: &str = r"C:\Games\Fake";
 
+/// Scratch under Cargo's `CARGO_TARGET_TMPDIR`, not `/tmp`.
 fn tmp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("vfs-fake-rt-{}-{tag}", std::process::id()));
+    let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("vfs-fake-rt-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -70,6 +75,8 @@ echo GE-Proton99-1 > "$STEAM_COMPAT_DATA_PATH/version""#,
     script(
         &rt.join("files").join("bin").join("wine"),
         r#"env > "$WINEPREFIX/fake-wine.env"
+echo "fake wine stdout"
+echo "fake wine stderr" >&2
 echo "$@" > "$WINEPREFIX/fake-wine.args"
 echo $$ > "$WINEPREFIX/fake-wine.pid"
 case "$FAKE_WINE_MODE" in
@@ -194,6 +201,45 @@ fn the_launch_environment_is_the_childs_alone() {
     assert!(std::env::var_os("SteamAppId").is_none(), "this process's environment is untouched");
     let args = std::fs::read_to_string(pfx.join("fake-wine.args")).unwrap();
     assert!(args.contains(r"C:\Games\Fake\game.exe"), "{args}");
+}
+
+#[test]
+fn a_log_file_receives_wines_stdout_and_stderr() {
+    let home = fake_home("log");
+    let (s, _pfx, shim) = session("log", &home);
+    let log = tmp("log-out").join("lists").join("tpf").join("wine.log");
+    let mut o = opts(&shim, "ok", true);
+    o.log_file = Some(log.clone());
+    assert_eq!(s.launch(&o).unwrap(), 0);
+    let out = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(out, "fake wine stdout\nfake wine stderr\n");
+
+    // The next launch replaces it rather than appending.
+    assert_eq!(s.launch(&o).unwrap(), 0);
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), out);
+}
+
+#[test]
+fn a_detached_launch_writes_its_log_file_too() {
+    let home = fake_home("log-detach");
+    let (s, pfx, shim) = session("log-detach", &home);
+    let log = tmp("log-detach-out").join("wine.log");
+    let mut o = opts(&shim, "game", false);
+    o.log_file = Some(log.clone());
+    let h = s.launch_detached(&o).unwrap();
+    wait_for(&pfx.join("fake-wine.exited"));
+    let out = std::fs::read_to_string(&log).unwrap();
+    assert!(out.contains("fake wine stderr"), "{out}");
+    h.stop().unwrap();
+}
+
+#[test]
+fn without_a_log_file_nothing_is_written_beside_the_launch() {
+    let home = fake_home("nolog");
+    let (s, pfx, shim) = session("nolog", &home);
+    assert_eq!(s.launch(&opts(&shim, "ok", true)).unwrap(), 0);
+    assert!(opts(&shim, "ok", true).log_file.is_none());
+    assert!(pfx.join("fake-wine.env").is_file(), "wine ran");
 }
 
 #[test]

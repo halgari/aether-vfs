@@ -146,6 +146,18 @@ pub struct LaunchOpts {
     /// How long the injector waits for the shim to report ready. `None`:
     /// `VFS_READY_TIMEOUT_SECS` from this process's environment, else 180 s.
     pub ready_timeout: Option<std::time::Duration>,
+    /// **Proton path only**: a host file that receives the `wine` child's
+    /// stdout and stderr — and so those of everything it starts, which
+    /// inherit them: `wineserver` (when this launch starts it), the injector,
+    /// the game and its own children. Created with its parent directories and
+    /// truncated at launch. Wine writes nothing useful there under the
+    /// default `WINEDEBUG=-all`; set `WINEDEBUG` in [`env`](Self::env) (for
+    /// example `err+all,warn+seh,fixme-all`) to get its error channels and
+    /// unhandled-exception reports. The `wineserver -w` a launch uses to
+    /// learn the prefix is quiet keeps its output discarded — it prints
+    /// nothing worth keeping. `None`: the child inherits this process's
+    /// stdout and stderr, as before. Ignored on Windows.
+    pub log_file: Option<PathBuf>,
 }
 
 impl Default for LaunchOpts {
@@ -168,6 +180,7 @@ impl Default for LaunchOpts {
             env: BTreeMap::new(),
             cwd: None,
             ready_timeout: None,
+            log_file: None,
         }
     }
 }
@@ -1934,6 +1947,7 @@ impl Session {
             extra_env: opts.env.clone(),
             cwd: Some(cwd),
             ready_timeout_secs: opts.ready_timeout.map(|d| d.as_secs().max(1)),
+            log_file: opts.log_file.clone(),
         };
 
         let child = vfs_proton::launch::spawn(&wine).map_err(|e| format!("launch: {e}"))?;

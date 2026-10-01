@@ -102,6 +102,17 @@ pub struct WineLaunch {
     /// [`vfs_env::READY_TIMEOUT_SECS`]. `None`: the injector's default (180),
     /// or whatever this process's environment already says.
     pub ready_timeout_secs: Option<u64>,
+    /// Host path the `wine` child's stdout **and** stderr are written to.
+    /// Created (parent directories too) and truncated by [`spawn`], before
+    /// `wine` starts; an error doing so fails the launch
+    /// ([`LaunchError::Io`]). Everything `wine` starts inherits the two
+    /// descriptors — `wineserver` when this launch starts it, the injector,
+    /// the target and whatever the target spawns — so Wine's own `err:`/`warn:`
+    /// channels ([`DEFAULT_WINEDEBUG`] silences them; set `WINEDEBUG` in
+    /// [`extra_env`](Self::extra_env)) and its unhandled-exception report land
+    /// here, including output written after `wine` itself has exited.
+    /// `None`: both streams are inherited from this process, as before.
+    pub log_file: Option<PathBuf>,
 }
 
 /// `WINEDLLOVERRIDES` every launch carries: Mono and Gecko prompts would
@@ -415,6 +426,13 @@ pub fn spawn(l: &WineLaunch) -> Result<std::process::Child, LaunchError> {
     let mut cmd = std::process::Command::new(&prog);
     let env = launch_env(l);
     cmd.args(&argv).envs(&env);
+    if let Some(log) = &l.log_file {
+        let file = open_log(log)
+            .map_err(|e| io::Error::new(e.kind(), format!("wine log {}: {e}", log.display())))?;
+        // One open file description for both streams, so their writes share
+        // an offset and interleave instead of overwriting each other.
+        cmd.stdout(file.try_clone()?).stderr(file);
+    }
     // Explicitly unset the transport variables this launch does not use.
     //
     // `Command::envs` *adds to* the parent environment, so a host process that
@@ -438,6 +456,15 @@ pub fn spawn(l: &WineLaunch) -> Result<std::process::Child, LaunchError> {
     }
     crate::prefix::spawn_retrying_busy(&mut cmd)
         .map_err(|e| LaunchError::Spawn(format!("{prog}: {e}")))
+}
+
+/// Creates `path` (and its parent directories) for a launch's output,
+/// truncating whatever an earlier launch left there.
+fn open_log(path: &Path) -> io::Result<std::fs::File> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::File::create(path)
 }
 
 /// How a launch [`spawn`] started ended: the target's exit code, or why the
@@ -593,6 +620,7 @@ mod tests {
             extra_env: BTreeMap::new(),
             cwd: None,
             ready_timeout_secs: None,
+            log_file: None,
         }
     }
 

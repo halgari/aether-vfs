@@ -195,6 +195,18 @@ stops the game. The exit code reported is the launcher's. A handle kept from
 `launch_detached` counts as the session's running launch: a second launch is
 refused, and `stop_launch` or dropping the session stops it.
 
+Wine's own output — its `err:`/`warn:` channels, and the "Unhandled
+exception" report it prints when the game crashes — goes to the `wine`
+child's stdout and stderr, which a launch inherits from the host. A host that
+draws its own terminal UI loses it there; `LaunchOpts::log_file` sends both
+streams of the `wine` child (and so of `wineserver`, the injector, the game
+and anything it starts, which inherit them) to a file instead, created and
+truncated at launch. A launch runs with `WINEDEBUG=-all` unless
+`LaunchOpts::env` sets `WINEDEBUG`, so a host that wants crash reports in the
+file sets both, e.g. `WINEDEBUG=err+all,warn+seh,fixme-all`. The internal
+`wineserver -w` a launch uses to wait for the prefix to go quiet keeps its
+output discarded.
+
 **Upgrade notes (this branch):**
 
 - `vfs-injector`'s default ready timeout is now **180 s** (was 20 s), on
@@ -203,7 +215,8 @@ refused, and `stop_launch` or dropping the session stops it.
 - `vfs_inject::InjectError` has a new variant, `TargetExited(code)`: the
   target exited before the shim reported ready. An exhaustive `match` on it
   needs an arm.
-- `LaunchOpts` has new fields (`cwd`, `ready_timeout`); build it with
+- `LaunchOpts` has new fields (`cwd`, `ready_timeout`, `log_file`), and
+  `vfs_proton::launch::WineLaunch` has `log_file`; build `LaunchOpts` with
   `..Default::default()` so later additions do not break the build.
 
 #### Storage: the source cache and named layers
