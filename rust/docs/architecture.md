@@ -179,16 +179,34 @@ FREE → CLAIMED → SUBMITTED → PROCESSING → COMPLETED → FREE
 
 - A director worker runs one request start to finish, so a read blocked in its
   provider (a block still coming from the network) holds its worker. The shim
-  therefore counts reads and writes against a gate (`vfs_ipc::DataGate`) sized
-  at three quarters of the worker count the director publishes in the ring
-  header. The remaining workers are always free for opens, stats, listings and
-  closes, which are not counted. The gate is process-local `std`
-  synchronisation; nothing about it crosses the ring.
+  therefore counts reads, writes, truncates and write-opens against a gate
+  (`vfs_ipc::DataGate`) sized at three quarters of the worker count the
+  director publishes in the ring header. The remaining workers are always free
+  for read-opens, stats, listings and closes, which are not counted. The gate
+  is process-local `std` synchronisation; nothing about it crosses the ring.
+  A permit stands for a worker a data request may be holding, which gives the
+  gate three rules:
+  - **A permit outlives a timeout.** A read the client gave up on is still
+    inside its worker, so its permit stays out until the director has finished
+    with the slot. A provider that stops answering can therefore hold at most
+    the gate's share of the workers, however many reads time out.
+  - **One call cannot take the gate.** A pipelined read holds at most half the
+    permits, and takes permits beyond its first only while more than a quarter
+    stay free. With 16 workers (12 permits) two deep reads of slow content
+    hold 6 and 3, and three permits remain for other threads' reads.
+  - **First come, first served.** A permit returned while callers are waiting
+    is handed to the one at the front of the line, so a pipeline asking again
+    for its next batch goes behind a caller already waiting.
+
+  A wait at the gate is bounded by the same deadline as a wait for a response,
+  and fails the read when it runs out.
 - A client waits for its response by spinning, with no system call, for the
   first millisecond — every request the ring alone can answer is back long
   before that. After it, the shim yields, and after 20 ms sleeps a millisecond
   at a time (`Notifier::idle_client`), so a thread waiting on a fetch does not
   hold a core.
+- A full ring is waited for the same way, and for no longer. A pipelined batch
+  has one deadline for all of its requests.
 - A client that gives up after `RESPONSE_DEADLINE` (60 s) does not free a slot
   the director is still processing: it marks it `ABANDONED`, and the worker
   frees it when it finishes. Until then nobody can claim the slot or its arena
@@ -201,7 +219,8 @@ machine as well as the payload layouts: a shim and a director built from
 different versions refuse each other at attach.
 
 On Linux the ring file is named `state_dir/ring.bin`, but when
-`$XDG_RUNTIME_DIR` is a tmpfs that name is a symlink to a file there, so the
+`$XDG_RUNTIME_DIR` is a tmpfs owned by the user and closed to everyone else,
+that name is a symlink to a file there (mode 0600, in a 0700 directory), so the
 ring's pages are never written to disk.
 
 ### 3.5 The shim — `vfs-shim`, `vfs-redirect`

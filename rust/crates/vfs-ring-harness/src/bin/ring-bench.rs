@@ -15,7 +15,10 @@
 //!   worker count and `vfs_ipc::read_fragmented` does the read. This is what
 //!   `FuseClient` does now, by calling the same two things.
 //!
-//! Usage: `ring-bench <scratch-dir> [locked|gated|both] [workers] [seconds]`
+//! Usage: `ring-bench <scratch-dir> [locked|gated|both|repro] [workers] [seconds]`
+//!
+//! `repro` runs the two cases the gate is there for: a small read beside two
+//! deep reads of streamed content, and a stat after reads that timed out.
 //!
 //! The scratch directory holds the ring file, so pointing it at a tmpfs
 //! (`/dev/shm/...`) or at a disk filesystem measures that choice too.
@@ -38,10 +41,17 @@ mod imp {
 
     const FAST: &str = "data/fast.bin";
     const SLOW: &str = "data/slow.bin";
+    /// A file whose every read takes [`STREAM_READ`]: content being streamed.
+    const STREAM: &str = "data/stream.bin";
+    /// A file whose every read takes [`STUCK_READ`]: a provider that has
+    /// stopped answering, for longer than the client is willing to wait.
+    const STUCK: &str = "data/stuck.bin";
     const FILE_LEN: u64 = 64 << 20;
     /// What one read of the slow file costs the worker that serves it: a
     /// stand-in for a block fetched from the network.
     const SLOW_READ: Duration = Duration::from_millis(200);
+    const STREAM_READ: Duration = Duration::from_millis(40);
+    const STUCK_READ: Duration = Duration::from_millis(1500);
     /// How long the slow requester stays off the ring between its reads.
     const SLOW_GAP: Duration = Duration::from_millis(5);
     const PAYLOAD_CAP: u32 = 1_048_576;
@@ -49,7 +59,8 @@ mod imp {
     /// Two files of pseudo-random bytes, one of which sleeps on every read.
     struct Mem {
         data: Vec<u8>,
-        opens: Mutex<HashMap<u64, bool>>,
+        /// Open handles, and how long each read of one blocks.
+        opens: Mutex<HashMap<u64, Duration>>,
         next: AtomicU64,
     }
 
@@ -83,7 +94,7 @@ mod imp {
         }
         fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
             Ok(match p.rel.to_ascii_lowercase().as_str() {
-                FAST | SLOW => Some(Stat {
+                FAST | SLOW | STREAM | STUCK => Some(Stat {
                     kind: KIND_FILE,
                     size: FILE_LEN,
                     mtime: 0,
@@ -101,8 +112,10 @@ mod imp {
         }
         fn open(&self, p: VPath, _flags: u32) -> Result<(Handle, u64, bool), i32> {
             let slow = match p.rel.to_ascii_lowercase().as_str() {
-                FAST => false,
-                SLOW => true,
+                FAST => Duration::ZERO,
+                SLOW => SLOW_READ,
+                STREAM => STREAM_READ,
+                STUCK => STUCK_READ,
                 _ => return Err(vfs_provider::not_found()),
             };
             let h = self.next.fetch_add(1, Ordering::Relaxed);
@@ -124,8 +137,8 @@ mod imp {
                 .unwrap()
                 .get(&h)
                 .ok_or_else(vfs_provider::bad_fh)?;
-            if slow {
-                std::thread::sleep(SLOW_READ);
+            if !slow.is_zero() {
+                std::thread::sleep(slow);
             }
             if offset >= FILE_LEN {
                 return Ok(0);
@@ -347,6 +360,93 @@ mod imp {
         }
     }
 
+    /// **Two deep reads of streamed content, and a small read beside them.**
+    ///
+    /// One thread reads 32 MiB at a time and another just under 4 MiB at a
+    /// time from a file whose every 1 MiB takes [`STREAM_READ`]; a third reads
+    /// one byte of the fast file every 2 ms. What is measured is how long that
+    /// byte takes: it is served at once, so any wait is a wait for a permit.
+    fn repro_stream(seg: &SharedSeg) {
+        let c = Gated::new(seg);
+        let stream = c.open(STREAM);
+        let fast = c.open(FAST);
+        let stop = AtomicBool::new(false);
+        let mut waits: Vec<f64> = Vec::new();
+        let started = Instant::now();
+        std::thread::scope(|s| {
+            for len in [32usize << 20, (4 << 20) - 4096] {
+                let (c, stop) = (&c, &stop);
+                s.spawn(move || {
+                    let mut buf = vec![0u8; len];
+                    while !stop.load(Ordering::Relaxed) {
+                        assert_eq!(c.read(stream, 0, &mut buf), len);
+                    }
+                });
+            }
+            // Both pipelines in flight before the first small read.
+            std::thread::sleep(Duration::from_millis(15));
+            let mut one = [0u8; 1];
+            while started.elapsed() < Duration::from_secs(3) {
+                let t = Instant::now();
+                assert_eq!(c.read(fast, 7, &mut one), 1);
+                waits.push(t.elapsed().as_secs_f64() * 1e3);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            stop.store(true, Ordering::Relaxed);
+        });
+        let first = waits[0];
+        waits.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "\n== two deep reads of streamed content (1 MiB per {} ms) + a 1-byte read every 2 ms ==\n  \
+             1-byte reads: {}   first waited {first:.3} ms   p50 {:.3} ms   max {:.3} ms   over 30 ms: {}",
+            STREAM_READ.as_millis(),
+            waits.len(),
+            pct(&waits, 0.5),
+            waits[waits.len() - 1],
+            waits.iter().filter(|&&ms| ms > 30.0).count()
+        );
+    }
+
+    /// **Reads that time out, then a stat.**
+    ///
+    /// Six 4 MiB reads, one after another, of a file whose reads take
+    /// [`STUCK_READ`], by a client that gives up after 40 ms. Each fails. Then
+    /// one stat from a client with the ordinary deadline. What is measured is
+    /// how long that stat takes: it needs a worker that is not still inside
+    /// one of the reads the client gave up on.
+    fn repro_timeouts(seg: &SharedSeg, workers: usize) {
+        let mut c = Gated::new(seg);
+        let stuck = c.open(STUCK);
+        c.c = RingClient::new(seg, ShimNotifier)
+            .unwrap()
+            .with_deadline(Duration::from_millis(40));
+        let mut buf = vec![0u8; 4 << 20];
+        let mut failed = 0;
+        for _ in 0..6 {
+            if vfs_ipc::read_fragmented(&c.c, &c.gate, &c.plan, stuck, 0, &mut buf).is_err() {
+                failed += 1;
+            }
+        }
+        let geom = c.c.geom();
+        let abandoned = (0..geom.slot_count)
+            .filter(|&slot| {
+                vfs_ipc::ring::slot_state(seg, &geom, slot) == Some(vfs_ipc::layout::ST_ABANDONED)
+            })
+            .count();
+        let patient = Gated::new(seg);
+        let t = Instant::now();
+        assert!(patient.getattr(FAST));
+        let stat_ms = t.elapsed().as_secs_f64() * 1e3;
+        println!(
+            "\n== six 4 MiB reads that time out (provider stuck {} ms, client gives up at 40 ms), then a stat ==\n  \
+             reads failed: {failed} of 6   requests the director still holds: {abandoned} (of {workers} workers)   \
+             stat took {stat_ms:.3} ms",
+            STUCK_READ.as_millis()
+        );
+        // Let the director finish what it holds before the ring goes away.
+        std::thread::sleep(STUCK_READ);
+    }
+
     /// `stat` threads of GETATTR for `secs` beside `readers` threads that each
     /// read 4 MiB of the slow file over and over: more blocked reads than the
     /// director has workers. What is measured is whether a request that is not
@@ -534,6 +634,10 @@ mod imp {
                 lock: Mutex::new(()),
             };
             suite("locked (one process-wide lock)", &c, secs);
+        }
+        if which == "repro" {
+            repro_stream(ipc.shared_seg());
+            repro_timeouts(ipc.shared_seg(), ipc.worker_count());
         }
         if which == "gated" || which == "both" {
             let c = Gated::new(ipc.shared_seg());
