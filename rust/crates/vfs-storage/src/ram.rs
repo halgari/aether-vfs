@@ -36,6 +36,14 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 /// A cached block payload. Cloning is a refcount bump, never a copy.
 type Block = Arc<[u8]>;
 
+/// A zero-filled block of `len` bytes with one owner, for a caller to decode
+/// into (through `Arc::get_mut`) and then [`RamTier::put`]: one allocation,
+/// and no copy of the block on its way into the tier.
+pub(crate) fn zeroed_block(len: usize) -> Block {
+    // An exact-size iterator collects into one allocation, filled in place.
+    std::iter::repeat_n(0u8, len).collect()
+}
+
 /// Store file id + block index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Key {

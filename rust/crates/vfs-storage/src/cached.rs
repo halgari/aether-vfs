@@ -602,17 +602,20 @@ impl CachedSource {
         let s = &*self.storage;
         let bs = s.block_size();
         let len = bs.min(f.size - b * bs) as usize;
-        let mut buf = vec![0u8; len];
+        // Decoded straight into the allocation the RAM tier keeps (see
+        // `FileCell::committed_block`).
+        let mut d = crate::ram::zeroed_block(len);
+        let buf = Arc::get_mut(&mut d).expect("a new block has one owner");
         #[cfg(test)]
         let r = if s.cache.fail_store_reads.load(Ordering::SeqCst) {
             Err(vfs_block_store::Error::Corrupt(
                 "injected read failure".into(),
             ))
         } else {
-            s.store.read(&f.id, b * bs, &mut buf)
+            s.store.read(&f.id, b * bs, buf)
         };
         #[cfg(not(test))]
-        let r = s.store.read(&f.id, b * bs, &mut buf);
+        let r = s.store.read(&f.id, b * bs, buf);
         let r = match r {
             Ok(r) => r,
             // Not stored yet: the first fetch creates it.
@@ -629,7 +632,6 @@ impl CachedSource {
         if !r.missing.is_empty() || r.bytes != len {
             return None;
         }
-        let d: Arc<[u8]> = buf.into();
         s.cache.store_hits.fetch_add(1, Ordering::Relaxed);
         s.ram.put(&f.id, b, Arc::clone(&d));
         Some(d)

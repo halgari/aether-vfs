@@ -194,10 +194,13 @@ impl FileCell {
         }
         let bs = s.block_size();
         let want = block_len(st.committed_len, bs, b);
-        let mut buf = vec![0u8; want];
-        match s.store.read(&self.id, b * bs, &mut buf) {
+        // Decoded straight into the allocation the RAM tier keeps: a `Vec`
+        // turned into an `Arc<[u8]>` afterwards is a second allocation and a
+        // copy of the whole block.
+        let mut data = crate::ram::zeroed_block(want);
+        let buf = Arc::get_mut(&mut data).expect("a new block has one owner");
+        match s.store.read(&self.id, b * bs, buf) {
             Ok(r) if r.missing.is_empty() && r.bytes == want => {
-                let data: Arc<[u8]> = Arc::from(buf);
                 s.ram.put(&self.id, b, Arc::clone(&data));
                 Ok(data)
             }
