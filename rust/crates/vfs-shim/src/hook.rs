@@ -516,6 +516,11 @@ const SYNTH_FILETIME: i64 = 133_485_408_000_000_000;
 /// The volume every synthetic handle says it is on, where a volume serial
 /// number is asked for together with a file id: two ids are only comparable
 /// on one volume, and every virtual file is on this one.
+///
+/// Fits 32 bits, because the same number is what `FileFsVolumeInformation`
+/// reports — and so what `GetFileInformationByHandle` puts in
+/// `dwVolumeSerialNumber` — and the two must not disagree about which volume
+/// one handle is on.
 const SYNTH_VOLUME_SERIAL: u64 = 0x5646_5300;
 
 static mut TRAMP_CREATE_SECTION: Option<NtCreateSectionFn> = None;
@@ -950,6 +955,11 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     if !qobj_installed {
         note_skipped_detour("NtQueryObject");
     }
+    // Decided here, once, rather than inside the first name query: its
+    // fallback asks the loader for a module, and a hook that takes the loader
+    // lock while holding this `OnceLock` can deadlock against a thread that
+    // holds the loader lock and makes a name query of its own.
+    let _ = host_name_convention();
 
     d_qdir.enable().map_err(|_| InstallError::Detour)?;
     d_delete.enable().map_err(|_| InstallError::Detour)?;
@@ -1733,7 +1743,19 @@ unsafe fn try_fuse_create(
     // `FILE_OPEN`/`FILE_OPEN_IF` was *opened*, never created or overwritten.
     let mut write = write;
     let mut opened = if write {
-        client.open_write(root, vp, create_flags)
+        // A write-open can create the name, and a name is stored as it is
+        // created: so this one request carries the caller's spelling, not the
+        // folded path every other request sends. See
+        // `FuseClient::vpath_as_spelled`.
+        let spelled = client.vpath_as_spelled(&path).map(|(_, v)| v);
+        let created_as = match spelled.as_deref() {
+            Some("") | None => vp,
+            Some(v) => v,
+        };
+        let opened = client.open_write(root, created_as, create_flags);
+        // Whatever was remembered about this name may no longer be so.
+        client.names_changed(root, vp);
+        opened
     } else {
         client.open(root, vp)
     };
@@ -2020,8 +2042,11 @@ unsafe fn try_fuse_mkdir(
     }
     let client = crate::fuse_client::global()?;
     let path = path?;
-    let (root, vpath) = client.vpath_under_root(path)?;
+    // A directory is named as it is created: the caller's spelling, not the
+    // folded path. See `FuseClient::vpath_as_spelled`.
+    let (root, vpath) = client.vpath_as_spelled(path)?;
     let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+    client.names_changed(root, &vfs_core::fold(vp));
     match client.mkdir(root, vp, 0o755) {
         Ok(()) => {
             // Synthesize a virtual directory handle directly — do NOT OP_OPEN the
@@ -2559,6 +2584,14 @@ unsafe fn qibn_hook_body(
             match res {
                 Ok((is_dir, size, _mtime)) => {
                     if let Some(n) = fill_by_name(class_raw, info, length, is_dir, size) {
+                        // Classes 68 and 77 open with the file id. By handle
+                        // it is the path's id; by name it must be the same
+                        // number, not zero.
+                        if matches!(class_raw, 68 | 77) {
+                            if let Some(id) = path_file_id(&path) {
+                                core::ptr::write_unaligned(info as *mut i64, id);
+                            }
+                        }
                         crate::hookstats::note_stat(&path, &format!("byname{class_raw}-ok"));
                         if !iosb.is_null() {
                             let q = iosb as *mut u8;
@@ -2903,6 +2936,7 @@ unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
     if let Some(client) = crate::fuse_client::global() {
         if let Some((root, vpath)) = client.vpath_under_root(path) {
             let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
+            client.names_changed(root, vp);
             return match client.delete(root, vp) {
                 Ok(()) => STATUS_SUCCESS,
                 Err(st) => delete_status_for(st),
@@ -3149,12 +3183,16 @@ unsafe fn setinfo_hook_body(
             if let (Some(nt), Some(c)) = (nt, crate::fuse_client::global()) {
                 if let Some((root, vpath)) = c.vpath_under_root(&nt) {
                     let src = if vpath.is_empty() { ".".to_string() } else { vpath };
+                    c.names_changed(root, &src);
                     let ok = if is_delete {
                         c.delete(root, &src).is_ok()
                     } else {
-                        match parse_rename_target(info, length)
-                            .and_then(|t| c.vpath_under_root(&t))
-                        {
+                        // The destination is a name being created, so it goes
+                        // as the caller spelled it — which is also how a
+                        // rename that changes only the letter case says what
+                        // the new case is. See `FuseClient::vpath_as_spelled`.
+                        let target = parse_rename_target(info, length);
+                        match target.as_deref().and_then(|t| c.vpath_as_spelled(t)) {
                             // A rename whose target lands under a *different*
                             // root is refused rather than guessed at: the
                             // wire carries one root for both sides, and the
@@ -3172,7 +3210,21 @@ unsafe fn setinfo_hook_body(
                             // branch now fails closed the same way.
                             Some((dst_root, dstv)) if dst_root == root => {
                                 let dst = if dstv.is_empty() { ".".to_string() } else { dstv };
-                                c.rename(root, &src, &dst).is_ok()
+                                c.names_changed(root, &vfs_core::fold(&dst));
+                                let renamed = c.rename(root, &src, &dst).is_ok();
+                                if renamed {
+                                    // The handle follows the file: what it is
+                                    // finally named, and its id, are the new
+                                    // path's from here on.
+                                    if let Some(t) = target {
+                                        let nt = to_nt_path(&t);
+                                        if let Ok(mut table) = PATH_TABLE.lock() {
+                                            table.insert(handle as isize, nt.clone());
+                                        }
+                                        crate::fuse_synth::set_abs_path(handle as isize, nt);
+                                    }
+                                }
+                                renamed
                             }
                             _ => false,
                         }
@@ -3353,12 +3405,16 @@ fn synth_final_path(handle: HANDLE) -> Option<String> {
 /// gives one id, and no director round trip is spent on a query as common as
 /// `GetFileInformationByHandle`.
 fn synth_file_id(handle: HANDLE) -> i64 {
-    let located = crate::fuse_synth::abs_path(handle as isize)
-        .and_then(|opened| crate::fuse_client::global().and_then(|c| c.vpath_under_root(&opened)));
-    match located {
-        Some((root, vpath)) => vfs_core::finalname::path_id(&format!("{}:{vpath}", root.0)) as i64,
-        None => handle as i64,
-    }
+    crate::fuse_synth::abs_path(handle as isize)
+        .and_then(|opened| path_file_id(&opened))
+        .unwrap_or(handle as i64)
+}
+
+/// The file id of whatever is at `path` under a managed root — the number a
+/// handle to it reports. `None` for a path under no root.
+fn path_file_id(path: &str) -> Option<i64> {
+    let (root, vpath) = crate::fuse_client::global()?.vpath_under_root(path)?;
+    Some(vfs_core::finalname::path_id(&format!("{}:{vpath}", root.0)) as i64)
 }
 
 /// Whether this host names file objects `\??\C:\…` (Wine) or
@@ -3552,17 +3608,33 @@ unsafe fn fuse_query_information(
             let Some(path) = synth_final_path(handle) else {
                 return STATUS_INVALID_HANDLE;
             };
-            let buf = core::slice::from_raw_parts_mut(info as *mut u8, length as usize);
-            let r = write_file_name_info(vfs_core::finalname::volume_relative(&path), buf);
-            let status = match r.status {
-                DirStatus::Success => STATUS_SUCCESS,
-                _ if (length as usize) < 4 => STATUS_INFO_LENGTH_MISMATCH,
-                _ => STATUS_BUFFER_OVERFLOW,
+            // `FILE_NAME_INFORMATION` is a u32 byte length and then the name.
+            // NT refuses a buffer smaller than the structure (8 bytes with
+            // its one-character name field) outright; given one too small
+            // for the whole name it writes the full length, as much of the
+            // name as fits, and says overflow. A caller sizing a buffer
+            // reads the length.
+            if (length as usize) < 8 {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            let name: Vec<u16> = vfs_core::finalname::volume_relative(&path)
+                .encode_utf16()
+                .collect();
+            let fits = name.len().min((length as usize - 4) / 2);
+            let p = info as *mut u8;
+            core::ptr::write_unaligned(p as *mut u32, (name.len() * 2) as u32);
+            for (i, unit) in name[..fits].iter().enumerate() {
+                core::ptr::write_unaligned(p.add(4 + i * 2) as *mut u16, *unit);
+            }
+            let status = if fits == name.len() {
+                STATUS_SUCCESS
+            } else {
+                STATUS_BUFFER_OVERFLOW
             };
             if !iosb.is_null() {
-                let p = iosb as *mut u8;
-                core::ptr::write_unaligned(p as *mut u32, status as u32);
-                core::ptr::write_unaligned(p.add(8) as *mut usize, r.bytes);
+                let q = iosb as *mut u8;
+                core::ptr::write_unaligned(q as *mut u32, status as u32);
+                core::ptr::write_unaligned(q.add(8) as *mut usize, 4 + fits * 2);
             }
             status
         }
@@ -3673,6 +3745,16 @@ unsafe fn qvol_hook_body(
         // Soft-success for other volume classes (size/attr) with zeros.
         if !info.is_null() && length > 0 {
             core::ptr::write_bytes(info as *mut u8, 0, length as usize);
+        }
+        // `FileFsVolumeInformation` (class 1): VolumeCreationTime 0 |
+        // VolumeSerialNumber 8 | VolumeLabelLength 12 | SupportsObjects 16 |
+        // label. Zeros but for the serial number, which is the one
+        // `FileIdInformation` reports for the same handle.
+        if class == 1 && !info.is_null() && length >= 12 {
+            core::ptr::write_unaligned(
+                (info as *mut u8).add(8) as *mut u32,
+                SYNTH_VOLUME_SERIAL as u32,
+            );
         }
         synth_iosb_ok(iosb, length as usize);
         return STATUS_SUCCESS;

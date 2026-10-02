@@ -15,10 +15,10 @@ use vfs_ipc::{DataGate, Geom, ReadPlan, RingClient};
 use vfs_redirect::{RootId, RootMap};
 use vfs_protocol::{
     decode_getattr_resp, decode_open_resp, decode_readdir_resp, decode_write_resp,
-    encode_close_req, encode_mkdir_req, encode_open_req, encode_path_req, encode_rename_req,
-    encode_setattr_req, encode_write_req, AttrResp, DirEntryWire, OpenResp, SetattrReq, WriteReq,
-    OPEN_READ, OPEN_WRITE, OP_CLOSE, OP_DELETE, OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN,
-    OP_READDIR, OP_RENAME, OP_SETATTR, OP_WRITE, ST_OK,
+    encode_close_req, encode_mkdir_req, encode_names_req, encode_open_req, encode_path_req,
+    encode_rename_req, encode_setattr_req, encode_write_req, AttrResp, DirEntryWire, OpenResp,
+    SetattrReq, WriteReq, OPEN_READ, OPEN_WRITE, OP_CLOSE, OP_DELETE, OP_GETATTR, OP_HEARTBEAT,
+    OP_MKDIR, OP_OPEN, OP_READDIR, OP_RENAME, OP_SETATTR, OP_STORED_NAMES, OP_WRITE, ST_OK,
 };
 use vfs_win::SharedMapping;
 use windows_sys::Win32::Foundation::HANDLE;
@@ -175,6 +175,10 @@ const PIPELINE_DEPTH: usize = 4;
 const BULK_THRESHOLD: u32 = 64 * 1024;
 /// Deep pipeline for multi‑MiB sequential streams (CreateSection fill).
 const PIPELINE_DEPTH_STREAM: usize = 8;
+/// How long a remembered spelling is used without asking again.
+const NAME_TTL_MS: u64 = 2_000;
+/// How many spellings are remembered.
+const NAME_CACHE_ENTRIES: usize = 8_192;
 /// A read at least this long gets [`PIPELINE_DEPTH_STREAM`].
 const STREAM_BYTES: usize = 4 * 1024 * 1024;
 /// How long a wait for a response may yield the processor before it sleeps.
@@ -282,6 +286,18 @@ pub struct FuseClient {
     /// ([`FuseClient::final_path`]). `roots` keeps the same paths folded,
     /// for matching; this keeps them as written, for answering.
     declared: Vec<(RootId, String)>,
+    /// How directories and files this process asked about are spelled, so a
+    /// name query for something under a directory already asked about costs
+    /// one round trip for the last component, and a repeated one none.
+    ///
+    /// Entries are dropped when this process creates, renames or deletes at
+    /// or above them ([`FuseClient::names_changed`]), and are not used past
+    /// [`NAME_TTL_MS`], which bounds what a change made by anyone else — the
+    /// host, another process on the same session — can cost: a stale
+    /// spelling for that long.
+    names: std::sync::Mutex<vfs_core::finalname::NameCache>,
+    /// What the cache's clock counts from.
+    started: std::time::Instant,
     arena_len: usize,
     /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened —
     /// the ring still works, just with the old timer-tick latency — and null
@@ -406,6 +422,11 @@ impl FuseClient {
             payload_cap,
             roots,
             declared: decls,
+            names: std::sync::Mutex::new(vfs_core::finalname::NameCache::new(
+                NAME_TTL_MS,
+                NAME_CACHE_ENTRIES,
+            )),
+            started: std::time::Instant::now(),
             arena_len,
             server_ev,
             gate,
@@ -662,17 +683,20 @@ impl FuseClient {
     }
 
     /// The final DOS path of something under a managed root that was opened
-    /// as `nt_path`: the root as it was declared, then each component as its
-    /// parent's listing spells it — see `vfs_core::finalname`. `None` for a
-    /// path under no root.
+    /// as `nt_path`: the root as it was declared, then each component as it
+    /// is stored — see `vfs_core::finalname`. `None` for a path under no
+    /// root.
     ///
     /// This is what `GetFinalPathNameByHandleW` must answer for a virtual
     /// handle, file or directory alike, so that `canonical(dir)` is a prefix
     /// of `canonical(dir/file)` whatever case either was opened in.
     ///
-    /// One listing per component, asked of the director each time. Not
-    /// cached: a name query is rare (a `canonical` call, not a read), and a
-    /// cached spelling would outlive a rename.
+    /// The spellings come from the director's one-name lookup
+    /// (`OP_STORED_NAMES`): at most one round trip per query, asking only
+    /// about the components this client does not already know, and none at
+    /// all when it knows them all ([`Self::names`]). No directory is listed
+    /// on this side of the ring. If the director cannot be asked, the
+    /// caller's own spelling stands.
     pub fn final_path(&self, nt_path: &str) -> Option<String> {
         let (path, stream) = vfs_redirect::split_stream_suffix(nt_path);
         let (root, under) = self.roots.resolve(path)?;
@@ -682,11 +706,9 @@ impl FuseClient {
             .filter(|(id, _)| *id == root)
             .map(|(_, p)| p.as_str())
             .collect();
-        let mut name = vfs_core::finalname::final_dos_path(path, &under, &spellings, |dir| {
-            let dir = if dir.is_empty() { "." } else { dir };
-            self.readdir(root, dir)
-                .ok()
-                .map(|entries| entries.into_iter().map(|e| e.name).collect())
+        let stored = self.stored_names(root, &under);
+        let mut name = vfs_core::finalname::final_dos_path(path, &under, &spellings, |i| {
+            stored.get(i).cloned()
         });
         // A named stream is part of what was opened, not of where the file
         // lives; it is carried through as the caller spelled it.
@@ -694,6 +716,80 @@ impl FuseClient {
             name.push_str(stream);
         }
         Some(name)
+    }
+
+    /// How each component of `under` is spelled where it is stored: from
+    /// what this client remembers, and for the rest from the director. Fewer
+    /// names than components (none, even) if the director could not say.
+    fn stored_names(&self, root: RootId, under: &[String]) -> Vec<String> {
+        crate::hookstats::note_name_query();
+        let now = self.started.elapsed().as_millis() as u64;
+        let mut known = match self.names.lock() {
+            Ok(names) => names.leading(root.0, under, now),
+            Err(_) => Vec::new(),
+        };
+        if known.len() == under.len() {
+            crate::hookstats::note_name_query_cached();
+            return known;
+        }
+        crate::hookstats::note_name_lookup();
+        let asked = self
+            .client()
+            .submit(
+                OP_STORED_NAMES,
+                0,
+                &encode_names_req(root.0, known.len() as u32, &under.join("/")),
+            )
+            .ok()
+            .filter(|r| r.status == ST_OK)
+            .and_then(|r| String::from_utf8(r.payload).ok());
+        let Some(rest) = asked else {
+            return known;
+        };
+        let rest: Vec<String> = rest.split('/').map(str::to_string).collect();
+        // One name per component asked about, or the reply is not an answer
+        // to this question (an older director, say) and nothing is learned.
+        if rest.len() != under.len() - known.len() {
+            return known;
+        }
+        if let Ok(mut names) = self.names.lock() {
+            names.remember(root.0, under, known.len(), &rest, now);
+        }
+        known.extend(rest);
+        known
+    }
+
+    /// Something this process did may have changed how `vpath` (folded,
+    /// under `root`) or anything beneath it is spelled — a create, a rename,
+    /// a delete. What was remembered about it is dropped.
+    pub fn names_changed(&self, root: RootId, vpath: &str) {
+        if let Ok(mut names) = self.names.lock() {
+            names.forget(root.0, vpath);
+        }
+    }
+
+    /// [`Self::vpath_under_root`] with the part under the root **as the
+    /// caller spelled it**, not folded: what a request that *creates* a name
+    /// sends, so that the name is stored as it was created — a save file, a
+    /// log, a directory — and a listing gives it back that way, as NTFS
+    /// does. Every other request sends the folded path.
+    ///
+    /// The providers resolve either spelling to the same entry (the provider
+    /// contract's case rule), so this changes what a new name is called and
+    /// nothing about what an existing one resolves to. A path whose spelling
+    /// cannot be read off it (a short name under the root) is sent folded,
+    /// as before.
+    pub fn vpath_as_spelled(&self, path: &str) -> Option<(RootId, String)> {
+        let (root, folded) = self.vpath_under_root(path)?;
+        let (plain, stream) = vfs_redirect::split_stream_suffix(path);
+        if stream.is_some() {
+            return Some((root, folded));
+        }
+        let (_, under) = self.roots.resolve(plain)?;
+        match vfs_core::finalname::opened_tail(plain, &under) {
+            Some(tail) => Some((root, tail.join("/"))),
+            None => Some((root, folded)),
+        }
     }
 
     /// Map an absolute path into the virtual namespace: **which root** it

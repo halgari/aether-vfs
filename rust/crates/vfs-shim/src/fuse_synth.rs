@@ -84,6 +84,17 @@ pub fn abs_path(handle: isize) -> Option<String> {
     g.get(&(handle as usize))?.abs_path.clone()
 }
 
+/// Record that the file behind `handle` is now at `abs_path`: it was renamed
+/// through this handle, and what the handle is finally named, and its file
+/// id, follow the file.
+pub fn set_abs_path(handle: isize, abs_path: String) {
+    if let Ok(mut g) = TABLE.lock() {
+        if let Some(e) = g.get_mut(&(handle as usize)) {
+            e.abs_path = Some(abs_path);
+        }
+    }
+}
+
 pub fn set_position(handle: isize, pos: u64) {
     if let Ok(mut g) = TABLE.lock() {
         if let Some(e) = g.get_mut(&(handle as usize)) {

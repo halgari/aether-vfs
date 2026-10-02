@@ -181,6 +181,9 @@ struct Snapshot {
     outcome_counts: [u64; OUTCOME_N],
     outcome_paths: [HashMap<String, u64>; OUTCOME_N],
     unrouted_director_opens: u64,
+    name_queries: u64,
+    name_queries_cached: u64,
+    name_lookups: u64,
     copy_up_counts: [u64; COPYUP_N],
     copy_up_bytes: u64,
     copy_ups: HashMap<String, u64>,
@@ -246,6 +249,9 @@ fn snapshot() -> Snapshot {
         outcome_counts,
         outcome_paths,
         unrouted_director_opens: UNROUTED_DIRECTOR_OPENS.load(Ordering::Relaxed),
+        name_queries: NAME_QUERIES.load(Ordering::Relaxed),
+        name_queries_cached: NAME_QUERIES_CACHED.load(Ordering::Relaxed),
+        name_lookups: NAME_LOOKUPS.load(Ordering::Relaxed),
         copy_up_counts: std::array::from_fn(|i| copy_up_count(ALL_COPY_UPS[i])),
         copy_up_bytes: COPYUP_BYTES.load(Ordering::Relaxed),
         copy_ups: accumulated(&COPYUPS),
@@ -475,6 +481,50 @@ pub fn note_fill_end(bytes: usize, nanos: u64, ok: bool) {
     FILL_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
     FILL_NANOS.fetch_add(nanos, Ordering::Relaxed);
     FILL_MAX_NANOS.fetch_max(nanos, Ordering::Relaxed);
+}
+
+/// Final-path name queries on synthetic handles: `NtQueryObject` for an
+/// object name and `NtQueryInformationFile` for either file-name class.
+///
+/// Each can cost a director round trip, so how many a launch makes is what
+/// decides whether that matters. `cached` were answered from what the shim
+/// already knew; `lookups` asked the director (one `OP_STORED_NAMES` each).
+static NAME_QUERIES: AtomicU64 = AtomicU64::new(0);
+static NAME_QUERIES_CACHED: AtomicU64 = AtomicU64::new(0);
+static NAME_LOOKUPS: AtomicU64 = AtomicU64::new(0);
+
+/// A name query on a synthetic handle is being answered.
+pub fn note_name_query() {
+    if enabled() {
+        NAME_QUERIES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// ... wholly from what the shim remembered.
+pub fn note_name_query_cached() {
+    if enabled() {
+        NAME_QUERIES_CACHED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// ... by asking the director.
+pub fn note_name_lookup() {
+    if enabled() {
+        NAME_LOOKUPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The label of the name-query row, for anything that parses the report.
+pub const NAME_QUERY_LABEL: &str = "final-path name queries";
+
+fn render_name_queries(snap: &Snapshot) -> String {
+    if snap.name_queries == 0 {
+        return String::new();
+    }
+    format!(
+        "\n{NAME_QUERY_LABEL}:\n  {} queries / {} answered from the shim's cache / {} director lookups\n",
+        snap.name_queries, snap.name_queries_cached, snap.name_lookups
+    )
 }
 
 fn render_fills(snap: &Snapshot) -> String {
@@ -1547,12 +1597,13 @@ fn banner() -> String {
 fn render_report() -> String {
     let snap = snapshot();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         banner(),
         render_hook_panics(&snap),
         render(&snap),
         render_async(&snap),
         render_fills(&snap),
+        render_name_queries(&snap),
         render_stats(&snap),
         render_trace(&snap),
         render_undecodable(&snap),
@@ -2001,6 +2052,9 @@ mod tests {
             fill_nanos: 0,
             fill_max_nanos: 0,
             unrouted_director_opens: 0,
+            name_queries: 0,
+            name_queries_cached: 0,
+            name_lookups: 0,
             setinfo_noop: HashMap::new(),
             synth_locks: HashMap::new(),
             passthrough: HashMap::new(),
