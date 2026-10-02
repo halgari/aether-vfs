@@ -3,7 +3,98 @@
 //! intercept it), and asserts its length/content. Exit 0 iff it matches.
 //! If `VFS_FIXTURE_WRITE_PATH` is set, after a successful read it also writes
 //! `VFS_FIXTURE_WRITE_DATA` (default `written`) there, exiting 1 on error.
+//!
+//! If `VFS_FIXTURE_SLOW_PATH` is set, it then reads that file on one thread
+//! while `VFS_FIXTURE_THREADS` (default 4) others each read `VFS_FIXTURE_PATH`
+//! `VFS_FIXTURE_ROUNDS` (default 50) times, and exits 1 unless every one of
+//! those reads was right **and finished while the slow read was still in
+//! flight**. The host makes the slow file slow; this asserts that one thread's
+//! file operation does not make the others wait.
 use std::process::exit;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+/// How long the fast threads give the slow read to get in flight.
+const SLOW_HEAD_START: Duration = Duration::from_millis(300);
+
+fn env_num(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
+/// See the module docs. Returns only if the phase passed.
+fn concurrent_phase(path: &str, slow_path: &str, expect_len: usize, fill: Option<u8>) {
+    let threads = env_num("VFS_FIXTURE_THREADS", 4);
+    let rounds = env_num("VFS_FIXTURE_ROUNDS", 50);
+    let slow_done = AtomicBool::new(false);
+    let started = Instant::now();
+    let (fast_ms, slow_was_done) = std::thread::scope(|s| {
+        let slow = s.spawn(|| {
+            let r = std::fs::read(slow_path);
+            slow_done.store(true, Ordering::SeqCst);
+            r
+        });
+        std::thread::sleep(SLOW_HEAD_START);
+        let fast: Vec<_> = (0..threads)
+            .map(|t| {
+                s.spawn(move || {
+                    for i in 0..rounds {
+                        let data = match std::fs::read(path) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                eprintln!("FIXTURE FAIL: thread {t} read {i} of {path}: {e}");
+                                exit(1);
+                            }
+                        };
+                        if data.len() != expect_len
+                            || fill.is_some_and(|b| data.iter().any(|&x| x != b))
+                        {
+                            eprintln!(
+                                "FIXTURE FAIL: thread {t} read {i} of {path}: wrong bytes ({} of them)",
+                                data.len()
+                            );
+                            exit(1);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in fast {
+            h.join().unwrap();
+        }
+        let fast_ms = started.elapsed().as_millis();
+        // Sampled the moment the last fast read returned, before the slow
+        // thread is joined: this is the whole assertion.
+        let slow_was_done = slow_done.load(Ordering::SeqCst);
+        match slow.join().unwrap() {
+            Ok(d) if !d.is_empty() => {}
+            Ok(_) => {
+                eprintln!("FIXTURE FAIL: slow read of {slow_path} came back empty");
+                exit(1);
+            }
+            Err(e) => {
+                eprintln!("FIXTURE FAIL: slow read of {slow_path}: {e}");
+                exit(1);
+            }
+        }
+        (fast_ms, slow_was_done)
+    });
+    if slow_was_done {
+        eprintln!(
+            "FIXTURE FAIL: the slow read finished before the {} fast reads did ({fast_ms} ms): \
+             they waited for it",
+            threads * rounds
+        );
+        exit(1);
+    }
+    println!(
+        "FIXTURE CONCURRENT OK: {} reads on {threads} threads done at {fast_ms} ms, slow read at {} ms",
+        threads * rounds,
+        started.elapsed().as_millis()
+    );
+}
 
 fn main() {
     let path = std::env::var("VFS_FIXTURE_PATH").unwrap_or_else(|_| {
@@ -34,6 +125,9 @@ fn main() {
             exit(1);
         }
         println!("FIXTURE WROTE: {wpath}");
+    }
+    if let Ok(slow_path) = std::env::var("VFS_FIXTURE_SLOW_PATH") {
+        concurrent_phase(&path, &slow_path, expect_len, fill);
     }
     println!("FIXTURE OK: {} bytes", data.len());
     exit(0);
