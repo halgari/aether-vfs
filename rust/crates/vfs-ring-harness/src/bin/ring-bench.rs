@@ -360,6 +360,144 @@ mod imp {
         }
     }
 
+    /// **What one final-path name query costs**, for a font five levels down
+    /// a `Data` of 3,000 entries, and for a file directly in `Data`.
+    ///
+    /// - *by listing*: what the shim did first — one `READDIR` per component
+    ///   across the ring, each listing decoded and searched on the client.
+    /// - *one lookup*: `OP_STORED_NAMES`, one round trip for the whole path.
+    ///   Against a base that has no index of names the director still lists
+    ///   each directory, on its own side; against one that has (a storage
+    ///   layer), it does not list at all.
+    /// - *directories known*: the shim's cache holds the directories, so only
+    ///   the last component is asked about.
+    /// - *all known*: the shim's cache answers; no round trip.
+    fn names(dir: &Path) {
+        use vfs_core::finalname::{final_dos_path, final_dos_path_by_listing, NameCache};
+
+        const ROOT: &str = r"C:\Game";
+        const FONT: &str = "Data/Interface/CommunityShaders/Fonts/Jost/Jost-Regular.ttf";
+        const IN_DATA: &str = "Data/Plugin Number 01234.esp";
+        let mut files: Vec<(String, Vec<u8>)> = (0..3_000)
+            .map(|i| (format!("Data/Plugin Number {i:05}.esp"), b"x".to_vec()))
+            .collect();
+        files.push((FONT.to_string(), b"font".to_vec()));
+
+        // Root 0: names in a tree, found by listing. Root 1: names in an index.
+        let tree: Arc<dyn Provider> = Arc::new(vfs_compose::MemoryProvider::from_files(
+            files.iter().map(|(p, b)| (p.as_str(), b.as_slice())),
+        ));
+        let store_dir = dir.join("names-storage");
+        let _ = std::fs::remove_dir_all(&store_dir);
+        let storage =
+            vfs_storage::Storage::open(&store_dir, vfs_storage::StorageConfig::default()).unwrap();
+        let layer = storage.layer("base").unwrap();
+        for (p, b) in &files {
+            let mut at = String::new();
+            for comp in p.split('/').take(p.split('/').count() - 1) {
+                if !at.is_empty() {
+                    at.push('/');
+                }
+                at.push_str(comp);
+                let _ = layer.mkdir(VPath::at_default(&at));
+            }
+            let (h, _, _) = layer
+                .open(
+                    VPath::at_default(p),
+                    P::OPEN_WRITE | vfs_provider::OPEN_CREATE,
+                )
+                .unwrap();
+            layer.write_at(h, 0, b).unwrap();
+            layer.close(h).unwrap();
+        }
+        let d = Arc::new(Director::new());
+        d.mount(RootId(0), tree).unwrap();
+        d.mount(RootId(1), layer).unwrap();
+        let ring = dir.join("ring-names.bin");
+        let _ = std::fs::remove_file(&ring);
+        let ipc = IpcServe::start_file_backed_with_workers(Arc::clone(&d), &ring, PAYLOAD_CAP, 16)
+            .unwrap();
+        let c = ipc.client().unwrap();
+
+        let fold_all = |p: &str| -> Vec<String> { p.split('/').map(vfs_core::fold).collect() };
+        let listing = |root: u32, dir: &str| -> Option<Vec<String>> {
+            let dir = if dir.is_empty() { "." } else { dir };
+            let r = c
+                .submit(P::OP_READDIR, 0, &P::encode_path_req(root, dir))
+                .ok()?;
+            Some(
+                P::decode_readdir_resp(&r.payload)?
+                    .into_iter()
+                    .map(|e| e.name)
+                    .collect(),
+            )
+        };
+        let lookup = |root: u32, under: &[String], skip: usize| -> Vec<String> {
+            let r = c
+                .submit(
+                    P::OP_STORED_NAMES,
+                    0,
+                    &P::encode_names_req(root, skip as u32, &under.join("/")),
+                )
+                .unwrap();
+            assert_eq!(r.status, P::ST_OK);
+            String::from_utf8(r.payload)
+                .unwrap()
+                .split('/')
+                .map(str::to_string)
+                .collect()
+        };
+
+        println!("\n== one final-path name query ==");
+        for (what, path) in [("font, 6 deep", FONT), ("file in Data", IN_DATA)] {
+            let opened = format!(r"\??\{ROOT}\{}", path.to_lowercase().replace('/', "\\"));
+            let under = fold_all(path);
+            let want = format!(r"{ROOT}\{}", path.replace('/', "\\"));
+            let n = if path == FONT { 2_000 } else { 1_000 };
+
+            let v = time_n(n, n / 10, || {
+                let got =
+                    final_dos_path_by_listing(&opened, &under, &[ROOT], |dir| listing(0, dir));
+                assert_eq!(got, want);
+            });
+            line(&format!("{what}: by listing"), v);
+
+            for (root, base) in [(0u32, "tree base"), (1, "indexed base")] {
+                let v = time_n(n, n / 10, || {
+                    let names = lookup(root, &under, 0);
+                    let got = final_dos_path(&opened, &under, &[ROOT], |i| names.get(i).cloned());
+                    assert_eq!(got, want);
+                });
+                line(&format!("{what}: one lookup, {base}"), v);
+            }
+
+            let mut cache = NameCache::new(u64::MAX, 8_192);
+            let dirs = under.len() - 1;
+            cache.remember(0, &under[..dirs], 0, &lookup(0, &under[..dirs], 0), 0);
+            let v = time_n(n, n / 10, || {
+                let mut names = cache.leading(0, &under, 0);
+                assert_eq!(names.len(), dirs);
+                names.extend(lookup(0, &under, dirs));
+                let got = final_dos_path(&opened, &under, &[ROOT], |i| names.get(i).cloned());
+                assert_eq!(got, want);
+            });
+            line(&format!("{what}: directories known, tree base"), v);
+
+            let rest = lookup(0, &under, dirs);
+            cache.remember(0, &under, dirs, &rest, 0);
+            let v = time_n(n * 10, n, || {
+                let names = cache.leading(0, &under, 0);
+                let got = final_dos_path(&opened, &under, &[ROOT], |i| names.get(i).cloned());
+                assert_eq!(got, want);
+            });
+            line(&format!("{what}: all known"), v);
+        }
+        ipc.stop();
+        let _ = std::fs::remove_file(&ring);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(&store_dir);
+    }
+
     /// **Two deep reads of streamed content, and a small read beside them.**
     ///
     /// One thread reads 32 MiB at a time and another just under 4 MiB at a
@@ -634,6 +772,9 @@ mod imp {
                 lock: Mutex::new(()),
             };
             suite("locked (one process-wide lock)", &c, secs);
+        }
+        if which == "names" {
+            names(dir);
         }
         if which == "repro" {
             repro_stream(ipc.shared_seg());

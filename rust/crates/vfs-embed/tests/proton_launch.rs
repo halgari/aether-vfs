@@ -700,6 +700,12 @@ fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
     let image = root.join("fixture.exe");
     std::fs::copy(&art["vfs-fixture-read.exe"], &image).expect("copy the fixture into the root");
 
+    // A write layer like a host's: what the fixture creates lands here, and
+    // the providers below stay read-only.
+    let storage_dir = tmp("n-storage");
+    let storage = vfs_embed::Storage::open(&storage_dir, vfs_embed::StorageConfig::default())
+        .expect("open storage");
+
     let mut s = Session::new();
     s.set_root(&root);
     s.declare_root(0, NAMES_ROOT);
@@ -709,6 +715,8 @@ fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
         s.mount("", Arc::new(DiskProvider::new(dir)) as Arc<dyn Provider>)
             .expect("mount a provider over root 0");
     }
+    s.set_write_layer(storage.layer("write").expect("a write layer"))
+        .expect("set the write layer");
     s.serve().expect("serve");
 
     let at = |rel: &str| format!(r"{NAMES_ROOT}\{rel}");
@@ -745,11 +753,37 @@ fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
         (fonts.to_uppercase(), font.to_lowercase()),
         (NAMES_ROOT.to_lowercase(), at(r"Data\hello.txt")),
         (at("realonly"), at(r"RealOnly\r.txt")),
+        // A directory named before a write under it, a file named after.
+        (
+            at("DATA"),
+            at(r"data\interface\communityshaders\fonts\new font.ttf"),
+        ),
+        (fonts.to_lowercase(), font.clone()),
+    ];
+    // Written by the fixture after it has named the prefix directories:
+    // under directories the providers have, spelled in lower case the way
+    // nothing on disk is (that is how `Data` became `data`); a directory and
+    // a file of the game's own; a long save name; and a rename of one to
+    // another letter case and of another to a new name.
+    const SAVE: &str = "Save12_ABCDEF01_0_4E6F726420486572_Tamriel_000123_20261002150000_1_1.ess";
+    let creates = [
+        at(r"data\interface\communityshaders\fonts\New Font.TTF"),
+        at(r"data\SKSE\"),
+        at(r"Data\SKSE\CommunityShaders.log"),
+        at(r"Saves\"),
+        at(&format!(r"Saves\{SAVE}")),
+        at(r"Saves\quicksave.ESS"),
+        at(r"Saves\Old Name.ess"),
+    ];
+    let renames = [
+        (at(r"Saves\quicksave.ESS"), at(r"Saves\QuickSave.ess")),
+        (at(r"Saves\Old Name.ess"), at(r"Saves\New Name.ESS")),
     ];
     let lists = [
         (fonts.clone(), "Jost,Other.ttf"),
         (NAMES_ROOT.to_string(), "Data,RealOnly,fixture.exe"),
-        (at("DATA"), "Interface,OnlyInLower,hello.txt"),
+        (at("DATA"), "Interface,OnlyInLower,hello.txt,SKSE"),
+        (NAMES_ROOT.to_string(), "Data,RealOnly,fixture.exe,Saves"),
     ];
 
     let mut env = BTreeMap::new();
@@ -769,6 +803,15 @@ fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
         prefixes
             .iter()
             .map(|(d, f)| format!("{d}|{f}"))
+            .collect::<Vec<_>>()
+            .join(";"),
+    );
+    env.insert("VFS_FIXTURE_NAME_CREATES".to_string(), creates.join(";"));
+    env.insert(
+        "VFS_FIXTURE_NAME_RENAMES".to_string(),
+        renames
+            .iter()
+            .map(|(f, t)| format!("{f}|{t}"))
             .collect::<Vec<_>>()
             .join(";"),
     );
@@ -798,7 +841,9 @@ fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
     );
 
     s.stop_serve();
-    for d in [&root, &state, &overlay, &upper, &lower] {
+    drop(s);
+    drop(storage);
+    for d in [&root, &state, &overlay, &upper, &lower, &storage_dir] {
         let _ = std::fs::remove_dir_all(d);
     }
 }

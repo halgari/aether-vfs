@@ -2252,6 +2252,8 @@ dependencies = [
 name = "vfs-ring-harness"
 version = "0.1.0"
 dependencies = [
+ "vfs-compose",
+ "vfs-core",
  "vfs-director",
  "vfs-env",
  "vfs-ipc",
@@ -2259,6 +2261,7 @@ dependencies = [
  "vfs-provider",
  "vfs-shared",
  "vfs-shim",
+ "vfs-storage",
  "vfs-unix",
  "vfs-win",
 ]

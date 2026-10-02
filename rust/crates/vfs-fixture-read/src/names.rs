@@ -17,6 +17,15 @@
 //!   separator must be a byte prefix of `canonical(file)`.
 //! - `VFS_FIXTURE_NAME_LISTS`: `dir|child,child…`. A listing of `dir` must
 //!   contain each child, spelled exactly so.
+//! - `VFS_FIXTURE_NAME_CREATES`: paths to create, in order, each spelled as
+//!   it is to be stored; one ending in a separator is a directory. Done
+//!   after `canonical` of every prefix directory has been taken and before
+//!   anything else is checked, so the checks see the tree *after* writes and
+//!   the prefix pairs compare a directory named before them with a file
+//!   named after.
+//! - `VFS_FIXTURE_NAME_RENAMES`: `from|to`, done after the creates. Each
+//!   created or renamed name must then be listed, and named by `canonical`
+//!   asked in another letter case, exactly as it was spelled.
 
 use std::ffi::c_void;
 use std::process::exit;
@@ -296,12 +305,25 @@ fn check(kind: &str, opened: &str, want: &str, real: &Opened) {
             "{opened} and {flipped} report different file indexes: one file is not equal to itself"
         ));
     }
-    if let (Ok(a), Ok(b)) = (h.ex(FILE_ID_INFO, 24), other.ex(FILE_ID_INFO, 24)) {
-        if a != b {
-            fail(format!(
-                "{opened} and {flipped} report different FileIdInfo"
-            ));
+    match (h.ex(FILE_ID_INFO, 24), other.ex(FILE_ID_INFO, 24)) {
+        (Ok(a), Ok(b)) if a == b => {
+            // The volume in it is the volume the by-handle query names.
+            let serial = u64::from_le_bytes(a[0..8].try_into().unwrap());
+            if serial != info.volume_serial as u64 {
+                fail(format!(
+                    "{opened}: FileIdInfo says volume {serial:#x}, GetFileInformationByHandle {:#x}",
+                    info.volume_serial
+                ));
+            }
         }
+        (Ok(_), Ok(_)) => fail(format!(
+            "{opened} and {flipped} report different FileIdInfo"
+        )),
+        (a, b) => fail(format!(
+            "{opened}: FileIdInfo failed: {:?} / {:?}",
+            a.err(),
+            b.err()
+        )),
     }
     println!("FIXTURE NAMES: {kind} {opened} -> {want}");
 }
@@ -320,8 +342,83 @@ pub fn run() {
     let names = entries("VFS_FIXTURE_NAMES");
     let prefixes = entries("VFS_FIXTURE_NAME_PREFIXES");
     let lists = entries("VFS_FIXTURE_NAME_LISTS");
-    if names.is_empty() && prefixes.is_empty() && lists.is_empty() {
+    let creates = entries("VFS_FIXTURE_NAME_CREATES");
+    let renames = entries("VFS_FIXTURE_NAME_RENAMES");
+    if [&names, &prefixes, &lists, &creates, &renames]
+        .iter()
+        .all(|v| v.is_empty())
+    {
         return;
+    }
+    // The directories' names, taken before anything is written.
+    let dirs_before: Vec<String> = prefixes
+        .iter()
+        .map(|e| match std::fs::canonicalize(&e[0]) {
+            Ok(d) => d.to_string_lossy().into_owned(),
+            Err(err) => fail(format!("canonicalize {} before the writes: {err}", e[0])),
+        })
+        .collect();
+    let mut made: Vec<String> = Vec::new();
+    for e in &creates {
+        let path = &e[0];
+        let made_ok = if let Some(dir) = path.strip_suffix('\\') {
+            made.push(dir.to_string());
+            std::fs::create_dir(dir)
+        } else {
+            made.push(path.clone());
+            std::fs::write(path, b"created")
+        };
+        if let Err(err) = made_ok {
+            fail(format!("create {path}: {err}"));
+        }
+    }
+    for e in &renames {
+        let [from, to] = e.as_slice() else {
+            fail(format!(
+                "VFS_FIXTURE_NAME_RENAMES entry {e:?} is not from|to"
+            ));
+        };
+        if let Err(err) = std::fs::rename(from, to) {
+            fail(format!("rename {from} -> {to}: {err}"));
+        }
+        made.retain(|m| !m.eq_ignore_ascii_case(from));
+        made.push(to.clone());
+    }
+    for path in &made {
+        let p = std::path::Path::new(path);
+        let (parent, name) = (
+            p.parent().unwrap(),
+            p.file_name().unwrap().to_string_lossy(),
+        );
+        let listed: Vec<String> = match std::fs::read_dir(parent) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect(),
+            Err(err) => fail(format!("read_dir {}: {err}", parent.display())),
+        };
+        if !listed.iter().any(|l| *l == name) {
+            fail(format!(
+                "{path} was created as {name:?}, but {} lists {listed:?}",
+                parent.display()
+            ));
+        }
+        // Named, whatever case it is asked in, as its directory is named and
+        // then exactly as it was created. (The directories above it keep
+        // their own stored spelling, which need not be how the creating path
+        // spelled them.)
+        let asked = format!("{}{}", &path[..2], other_case(&path[2..]));
+        let want = match std::fs::canonicalize(parent) {
+            Ok(dir) => format!(r"{}\{name}", dir.to_string_lossy()),
+            Err(err) => fail(format!("canonicalize {}: {err}", parent.display())),
+        };
+        match std::fs::canonicalize(&asked) {
+            Ok(c) if c.to_string_lossy() == want => {}
+            other => fail(format!(
+                "canonicalize({asked}) gave {other:?}, want {want}: {path} is not named as it was created"
+            )),
+        }
+        println!("FIXTURE NAMES: created {path}, listed and named as such");
     }
     let windir = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\windows".to_string());
     let real = Opened::at(&windir);
@@ -359,7 +456,7 @@ pub fn run() {
         }
     }
 
-    for e in &prefixes {
+    for (e, before) in prefixes.iter().zip(&dirs_before) {
         let [dir, file] = e.as_slice() else {
             fail(format!(
                 "VFS_FIXTURE_NAME_PREFIXES entry {e:?} is not dir|file"
@@ -373,6 +470,13 @@ pub fn run() {
             d.to_string_lossy().into_owned(),
             f.to_string_lossy().into_owned(),
         );
+        // A plugin that takes its directory's name at start-up and checks a
+        // file against it later: the writes in between must not respell it.
+        if d != *before {
+            fail(format!(
+                "canonical({dir}) was {before} before the writes and is {d} after them"
+            ));
+        }
         // Byte for byte, and at a component boundary: what a containment
         // check does.
         if !f.starts_with(&format!(r"{d}\")) {
