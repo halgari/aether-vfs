@@ -495,6 +495,7 @@ fn install_from_partial(
                 top.display()
             )))
         }
+        Err(e @ VerifyError::MissingLib(_)) => return Err(InstallError::NotGe(e.to_string())),
         Err(VerifyError::Unreadable(e)) => return Err(InstallError::Io(e)),
     }
 

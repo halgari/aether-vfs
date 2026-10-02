@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::runtime::verify_ge;
+use crate::runtime::{runtime_lib_env, verify_ge};
 use crate::steam::{SteamSide, STEAM_HELPER, STEAM_HELPER_OVERRIDE};
 
 /// Everything one Wine launch needs, with the ring geometry carried
@@ -274,7 +274,29 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
     env.insert("WINEPREFIX".to_string(), path_string(&l.prefix));
     // Absolutized, not passed through: a relative `PROTONPATH` resolves to
     // UMU-Proton (stock Valve Proton), and that downgrade produces no error.
-    env.insert("PROTONPATH".to_string(), path_string(&absolute(&l.runtime)));
+    let runtime_abs = absolute(&l.runtime);
+    env.insert("PROTONPATH".to_string(), path_string(&runtime_abs));
+    // What `proton`'s `init_wine` sets and a direct `files/bin/wine` run lacks:
+    // without Proton's lib dirs `winedmo.so` cannot load its FFmpeg and no mp4
+    // opens. An `extra_env` `LD_LIBRARY_PATH` goes after the runtime dirs, in
+    // front of the host's value, so it can never displace them.
+    let host_ld = std::env::var_os("LD_LIBRARY_PATH");
+    let ld_in = match (l.extra_env.get("LD_LIBRARY_PATH"), &host_ld) {
+        (Some(x), Some(h)) if !h.is_empty() => Some(std::ffi::OsString::from(format!(
+            "{x}:{}",
+            h.to_string_lossy()
+        ))),
+        (Some(x), _) => Some(std::ffi::OsString::from(x)),
+        (None, h) => h.clone(),
+    };
+    for (k, v) in runtime_lib_env(
+        &runtime_abs,
+        ld_in.as_deref(),
+        std::env::var_os("ORIG_LD_LIBRARY_PATH").as_deref(),
+        std::env::var_os("WINEDLLPATH").as_deref(),
+    ) {
+        env.insert(k, v);
+    }
     // Mono and Gecko prompts would otherwise block a launch on a fresh prefix.
     let base_overrides = match &l.steam {
         SteamSide::Helper(_) => merge_dll_overrides(BASE_DLL_OVERRIDES, STEAM_HELPER_OVERRIDE),
@@ -329,6 +351,9 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
     for (k, v) in &l.extra_env {
         if is_reserved_env(k) {
             continue; // refused by `check_extra_env` before any spawn
+        }
+        if k == "LD_LIBRARY_PATH" {
+            continue; // merged after the runtime dirs above
         }
         let v = if k == "WINEDLLOVERRIDES" {
             merge_dll_overrides(&base_overrides, v)
@@ -693,6 +718,34 @@ mod tests {
             steam: SteamSide::Untouched,
             notes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn launch_env_puts_the_runtime_libs_first_on_ld_library_path() {
+        let l = sample();
+        let env = launch_env(&l);
+        let rt = path_string(&l.runtime);
+        assert!(
+            env["LD_LIBRARY_PATH"].starts_with(&format!(
+                "{rt}/files/lib/x86_64-linux-gnu:{rt}/files/lib/i386-linux-gnu"
+            )),
+            "{}",
+            env["LD_LIBRARY_PATH"]
+        );
+        assert!(env["WINEDLLPATH"].starts_with(&format!("{rt}/files/lib/vkd3d:{rt}/files/lib/wine")));
+        assert!(env.contains_key("ORIG_LD_LIBRARY_PATH") || std::env::var_os("ORIG_LD_LIBRARY_PATH").is_some());
+    }
+
+    #[test]
+    fn an_extra_env_ld_library_path_goes_after_the_runtime_dirs() {
+        let mut l = sample();
+        l.extra_env.insert("LD_LIBRARY_PATH".to_string(), "/mine/lib".to_string());
+        let ld = launch_env(&l).remove("LD_LIBRARY_PATH").unwrap();
+        let rt = path_string(&l.runtime);
+        let rt_dirs = format!("{rt}/files/lib/x86_64-linux-gnu:{rt}/files/lib/i386-linux-gnu");
+        assert!(ld.starts_with(&rt_dirs), "{ld}");
+        let rest = &ld[rt_dirs.len()..];
+        assert!(rest.starts_with(":/mine/lib"), "{ld}");
     }
 
     #[test]
