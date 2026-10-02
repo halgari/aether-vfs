@@ -277,6 +277,11 @@ pub struct FuseClient {
     /// real disk. Stage 2b task 5 replaced the strings with the real thing, so
     /// there is now one predicate rather than two that can drift.
     roots: RootMap,
+    /// Every root's path as it was declared, aliases included, root first:
+    /// the spelling a handle under that root is finally named with
+    /// ([`FuseClient::final_path`]). `roots` keeps the same paths folded,
+    /// for matching; this keeps them as written, for answering.
+    declared: Vec<(RootId, String)>,
     arena_len: usize,
     /// Director wake event (`VFS_SERVER_EV`), null when it could not be opened —
     /// the ring still works, just with the old timer-tick latency — and null
@@ -400,6 +405,7 @@ impl FuseClient {
             geom,
             payload_cap,
             roots,
+            declared: decls,
             arena_len,
             server_ev,
             gate,
@@ -653,6 +659,41 @@ impl FuseClient {
             return Err(r.status);
         }
         Ok(())
+    }
+
+    /// The final DOS path of something under a managed root that was opened
+    /// as `nt_path`: the root as it was declared, then each component as its
+    /// parent's listing spells it — see `vfs_core::finalname`. `None` for a
+    /// path under no root.
+    ///
+    /// This is what `GetFinalPathNameByHandleW` must answer for a virtual
+    /// handle, file or directory alike, so that `canonical(dir)` is a prefix
+    /// of `canonical(dir/file)` whatever case either was opened in.
+    ///
+    /// One listing per component, asked of the director each time. Not
+    /// cached: a name query is rare (a `canonical` call, not a read), and a
+    /// cached spelling would outlive a rename.
+    pub fn final_path(&self, nt_path: &str) -> Option<String> {
+        let (path, stream) = vfs_redirect::split_stream_suffix(nt_path);
+        let (root, under) = self.roots.resolve(path)?;
+        let spellings: Vec<&str> = self
+            .declared
+            .iter()
+            .filter(|(id, _)| *id == root)
+            .map(|(_, p)| p.as_str())
+            .collect();
+        let mut name = vfs_core::finalname::final_dos_path(path, &under, &spellings, |dir| {
+            let dir = if dir.is_empty() { "." } else { dir };
+            self.readdir(root, dir)
+                .ok()
+                .map(|entries| entries.into_iter().map(|e| e.name).collect())
+        });
+        // A named stream is part of what was opened, not of where the file
+        // lives; it is carried through as the caller spelled it.
+        if let Some(stream) = stream {
+            name.push_str(stream);
+        }
+        Some(name)
     }
 
     /// Map an absolute path into the virtual namespace: **which root** it

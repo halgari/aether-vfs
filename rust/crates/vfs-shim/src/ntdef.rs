@@ -360,6 +360,8 @@ pub const FILE_ALL_INFORMATION: u32 = 18;
 pub const FILE_NETWORK_OPEN_INFORMATION: u32 = 34;
 /// `FileAttributeTagInformation` (class 35): attributes and reparse tag.
 pub const FILE_ATTRIBUTE_TAG_INFORMATION: u32 = 35;
+/// `FileIdInformation` (class 59): volume serial number and 128-bit file id.
+pub const FILE_ID_INFORMATION: u32 = 59;
 /// `FileStatInformation` (class 68): id, times, sizes, attributes, links.
 pub const FILE_STAT_INFORMATION: u32 = 68;
 

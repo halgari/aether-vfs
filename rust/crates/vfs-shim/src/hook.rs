@@ -449,7 +449,7 @@ use crate::ntdef::{
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
     NtWriteFileFn, NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_NORMAL, FILE_ALL_INFORMATION,
-    FILE_ATTRIBUTE_TAG_INFORMATION, FILE_STAT_INFORMATION,
+    FILE_ATTRIBUTE_TAG_INFORMATION, FILE_STAT_INFORMATION, FILE_ID_INFORMATION,
     FILE_BASIC_INFORMATION, FILE_CREATED, FILE_DEVICE_DISK, FILE_DIRECTORY_FILE,
     FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION,
     FILE_DISPOSITION_INFORMATION_EX, FILE_END_OF_FILE_INFORMATION, FILE_FS_DEVICE_INFORMATION,
@@ -513,6 +513,10 @@ static mut TRAMP_WRITE: Option<NtWriteFileFn> = None;
 ///
 /// 2024-01-01T00:00:00Z, in 100 ns ticks since 1601.
 const SYNTH_FILETIME: i64 = 133_485_408_000_000_000;
+/// The volume every synthetic handle says it is on, where a volume serial
+/// number is asked for together with a file id: two ids are only comparable
+/// on one volume, and every virtual file is on this one.
+const SYNTH_VOLUME_SERIAL: u64 = 0x5646_5300;
 
 static mut TRAMP_CREATE_SECTION: Option<NtCreateSectionFn> = None;
 static mut TRAMP_MAP_VIEW: Option<NtMapViewOfSectionFn> = None;
@@ -3320,6 +3324,115 @@ unsafe fn synth_iosb_ok(iosb: *mut c_void, bytes: usize) {
     }
 }
 
+/// The final DOS path (`C:\dir\file`, stored spelling) of a synthetic handle:
+/// the path it was opened as, re-spelled by [`FuseClient::final_path`]. Falls
+/// back to the opened path itself, without its NT prefix, if the director
+/// cannot be asked — a name in the caller's own spelling is still the right
+/// file, where no name at all fails `GetFinalPathNameByHandleW` outright.
+///
+/// `None` only for a handle with no recorded path, which no open produces.
+///
+/// [`FuseClient::final_path`]: crate::fuse_client::FuseClient::final_path
+fn synth_final_path(handle: HANDLE) -> Option<String> {
+    let opened = crate::fuse_synth::abs_path(handle as isize)?;
+    let named = crate::fuse_client::global().and_then(|c| c.final_path(&opened));
+    Some(named.unwrap_or_else(|| {
+        crate::fuse_client::strip_nt_device(&opened)
+            .trim_end_matches('\\')
+            .to_string()
+    }))
+}
+
+/// The file id a synthetic handle reports: one per *file*, so that two
+/// handles to one file agree (`std::filesystem::equivalent` and every "is
+/// this the same file" check compare ids). It used to be the handle's own
+/// value, which made a file unequal to itself.
+///
+/// From the root and the folded path under it — what the ring is asked for —
+/// so every spelling of one file, through an alias of the root included,
+/// gives one id, and no director round trip is spent on a query as common as
+/// `GetFileInformationByHandle`.
+fn synth_file_id(handle: HANDLE) -> i64 {
+    let located = crate::fuse_synth::abs_path(handle as isize)
+        .and_then(|opened| crate::fuse_client::global().and_then(|c| c.vpath_under_root(&opened)));
+    match located {
+        Some((root, vpath)) => vfs_core::finalname::path_id(&format!("{}:{vpath}", root.0)) as i64,
+        None => handle as i64,
+    }
+}
+
+/// Whether this host names file objects `\??\C:\…` (Wine) or
+/// `\Device\HarddiskVolumeN\…` (Windows), as the literal prefix
+/// [`spoofed_object_name`] keys on.
+///
+/// A redirected *real* handle answers this itself: its own
+/// `NtQueryObject` reply is consulted for the convention. A synthetic handle
+/// is not a kernel object and has no reply to consult, so the question is put
+/// once to a handle that is: the process's current-directory handle, which
+/// the OS itself opened. If that cannot be asked, the host is identified
+/// instead — Wine's ntdll exports `wine_get_version`, Windows' does not.
+fn host_name_convention() -> &'static str {
+    static CONVENTION: OnceLock<&'static str> = OnceLock::new();
+    CONVENTION.get_or_init(|| {
+        // SAFETY: reads this process's own PEB, and hands the trampoline a
+        // buffer of the length it is told.
+        #[allow(unsafe_code)]
+        let probed = unsafe {
+            match (TRAMP_QOBJ, cwd_from_peb()) {
+                (Some(tramp), Some((cwd, _))) => {
+                    let mut scratch = vec![0u8; 2048];
+                    let mut need = 0u32;
+                    let st = tramp(
+                        cwd as HANDLE,
+                        OBJECT_NAME_INFORMATION,
+                        scratch.as_mut_ptr().cast(),
+                        scratch.len() as u32,
+                        &mut need,
+                    );
+                    let n = u16::from_le_bytes([scratch[0], scratch[1]]) as usize;
+                    let hdr = OBJECT_NAME_INFORMATION_HEADER;
+                    if st >= 0 && n >= 8 && hdr + n <= scratch.len() {
+                        let units: Vec<u16> = scratch[hdr..hdr + 16]
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|c| u16::from_le_bytes(*c))
+                            .collect();
+                        Some(String::from_utf16_lossy(&units))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+        match probed {
+            Some(name) if name.starts_with(r"\??\") => r"\??\",
+            Some(name) if name.starts_with(r"\Device\") => r"\Device\",
+            _ if host_is_wine() => r"\??\",
+            _ => r"\Device\",
+        }
+    })
+}
+
+/// Whether ntdll is Wine's: it exports `wine_get_version`.
+fn host_is_wine() -> bool {
+    // SAFETY: both names are NUL-terminated; a missing module or export is a
+    // null return, not a fault.
+    #[allow(unsafe_code)]
+    unsafe {
+        let ntdll = windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(
+            c"ntdll.dll".as_ptr().cast(),
+        );
+        !ntdll.is_null()
+            && windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+                ntdll,
+                c"wine_get_version".as_ptr().cast(),
+            )
+            .is_some()
+    }
+}
+
 /// Answer handle-based information queries for director FUSE synth handles.
 unsafe fn fuse_query_information(
     handle: HANDLE,
@@ -3370,7 +3483,7 @@ unsafe fn fuse_query_information(
             if (length as usize) < core::mem::size_of::<FileInternalInformation>() {
                 return STATUS_BUFFER_OVERFLOW;
             }
-            (*(info as *mut FileInternalInformation)).index_number = handle as i64;
+            (*(info as *mut FileInternalInformation)).index_number = synth_file_id(handle);
             synth_iosb_ok(iosb, core::mem::size_of::<FileInternalInformation>());
             STATUS_SUCCESS
         }
@@ -3420,10 +3533,53 @@ unsafe fn fuse_query_information(
             // Standard.Directory (BOOLEAN) @ 61
             *p.add(61) = if is_dir { 1 } else { 0 };
             // Internal.IndexNumber @ 64
-            core::ptr::write_unaligned(p.add(64) as *mut i64, handle as i64);
+            core::ptr::write_unaligned(p.add(64) as *mut i64, synth_file_id(handle));
             // Position.CurrentByteOffset @ 80
             core::ptr::write_unaligned(p.add(80) as *mut i64, pos as i64);
             synth_iosb_ok(iosb, PREFIX);
+            STATUS_SUCCESS
+        }
+        FILE_NAME_INFORMATION | FILE_NORMALIZED_NAME_INFORMATION => {
+            // The volume-relative name, for a file and for a directory alike,
+            // in the stored spelling. `GetFinalPathNameByHandleW` builds its
+            // answer from these two and from `NtQueryObject`'s name
+            // (`qobj_hook_body`), and all three must describe one path — see
+            // `qif_hook_body`. They are all cut from `synth_final_path`.
+            //
+            // There used to be no arm for either, on the reasoning that only
+            // redirected real handles were ever asked for a name. They fell to
+            // the catch-all below: success, nothing written.
+            let Some(path) = synth_final_path(handle) else {
+                return STATUS_INVALID_HANDLE;
+            };
+            let buf = core::slice::from_raw_parts_mut(info as *mut u8, length as usize);
+            let r = write_file_name_info(vfs_core::finalname::volume_relative(&path), buf);
+            let status = match r.status {
+                DirStatus::Success => STATUS_SUCCESS,
+                _ if (length as usize) < 4 => STATUS_INFO_LENGTH_MISMATCH,
+                _ => STATUS_BUFFER_OVERFLOW,
+            };
+            if !iosb.is_null() {
+                let p = iosb as *mut u8;
+                core::ptr::write_unaligned(p as *mut u32, status as u32);
+                core::ptr::write_unaligned(p.add(8) as *mut usize, r.bytes);
+            }
+            status
+        }
+        FILE_ID_INFORMATION => {
+            // VolumeSerialNumber u64 @0 | FileId (128 bits) @8 = 24. What
+            // `GetFileInformationByHandleEx(FileIdInfo)` asks, which is how
+            // `std::filesystem::equivalent` tells whether two paths are one
+            // file. Unanswered, it compared two uninitialised buffers.
+            const LEN: usize = 24;
+            if (length as usize) < LEN {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            let p = info as *mut u8;
+            core::ptr::write_bytes(p, 0, LEN);
+            core::ptr::write_unaligned(p as *mut u64, SYNTH_VOLUME_SERIAL);
+            core::ptr::write_unaligned(p.add(8) as *mut i64, synth_file_id(handle));
+            synth_iosb_ok(iosb, LEN);
             STATUS_SUCCESS
         }
         FILE_STAT_INFORMATION => {
@@ -3452,7 +3608,7 @@ unsafe fn fuse_query_information(
             } else {
                 FILE_ATTRIBUTE_NORMAL
             };
-            core::ptr::write_unaligned(p as *mut i64, handle as i64);
+            core::ptr::write_unaligned(p as *mut i64, synth_file_id(handle));
             for off in [8, 16, 24, 32] {
                 core::ptr::write_unaligned(p.add(off) as *mut i64, SYNTH_FILETIME);
             }
@@ -3894,6 +4050,27 @@ unsafe fn qobj_hook_body(
     if class != OBJECT_NAME_INFORMATION {
         return tramp(handle, class, info, length, ret_len);
     }
+    // A synthetic handle — every file and directory the director serves — is
+    // not a kernel object: the host has no name for it and the trampoline
+    // fails on it. This used to fall through to exactly that failure, on the
+    // reasoning that a convention must be measured, not guessed; and so
+    // `GetFinalPathNameByHandleW`, which on Wine is this call and nothing
+    // else, failed for every virtual file and directory, and
+    // `std::filesystem::canonical` threw on them. The name is the handle's
+    // final path, in the convention the host uses for real files.
+    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        let Some(path) = synth_final_path(handle) else {
+            return STATUS_INVALID_HANDLE;
+        };
+        return match spoofed_object_name(host_name_convention(), &path, device_for_drive)
+            .and_then(|name| emit_object_name(&name, info, length, ret_len))
+        {
+            Some(status) => status,
+            // A path with no drive letter to name a device for, or too long
+            // for a UNICODE_STRING: there is no honest name to give.
+            None => STATUS_OBJECT_PATH_NOT_FOUND,
+        };
+    }
     // An untracked handle must cost nothing but this map lookup — no
     // allocation, no scratch call. It may be an event, a mutex, a section or a
     // registry key, and we have nothing true to say about any of them.
@@ -3907,9 +4084,7 @@ unsafe fn qobj_hook_body(
 
     // The host's own answer, for its prefix convention. Sized generously so
     // the common case is one call; grown once if some path is longer than that.
-    // Note this is deliberately NOT served from a fuse-synthetic handle — those
-    // are not kernel objects, the trampoline fails on them, and we fall through
-    // to letting the host answer rather than guessing a convention.
+    // (A synthetic handle never gets here: it was answered above.)
     let mut scratch = vec![0u8; 2048];
     let mut need: u32 = 0;
     let mut st = tramp(
@@ -3961,12 +4136,28 @@ unsafe fn qobj_hook_body(
         return tramp(handle, class, info, length, ret_len);
     };
 
+    match emit_object_name(&name, info, length, ret_len) {
+        Some(status) => status,
+        None => tramp(handle, class, info, length, ret_len),
+    }
+}
+
+/// Write `name` as an `OBJECT_NAME_INFORMATION` into the caller's buffer,
+/// following the too-small-buffer contract in [`qobj_hook_body`]'s doc.
+/// `None` if the name cannot be described at all (it does not fit a
+/// `UNICODE_STRING`), in which case nothing was written.
+unsafe fn emit_object_name(
+    name: &str,
+    info: *mut c_void,
+    length: u32,
+    ret_len: *mut u32,
+) -> Option<NTSTATUS> {
     let name16: Vec<u16> = name.encode_utf16().collect();
     let name_bytes = name16.len() * 2;
     // `UNICODE_STRING::MaximumLength` is a u16 and must cover the NUL. A name
     // that cannot be described in that field is one we must not try to emit.
     if name_bytes + 2 > u16::MAX as usize {
-        return tramp(handle, class, info, length, ret_len);
+        return None;
     }
     let required = OBJECT_NAME_INFORMATION_HEADER + name_bytes + 2;
     // Set unconditionally and before any short-buffer return: both hosts fill
@@ -3975,10 +4166,10 @@ unsafe fn qobj_hook_body(
         core::ptr::write_unaligned(ret_len, required as u32);
     }
     if info.is_null() || (length as usize) < OBJECT_NAME_INFORMATION_HEADER {
-        return STATUS_INFO_LENGTH_MISMATCH;
+        return Some(STATUS_INFO_LENGTH_MISMATCH);
     }
     if (length as usize) < required {
-        return STATUS_BUFFER_OVERFLOW;
+        return Some(STATUS_BUFFER_OVERFLOW);
     }
     // SAFETY: `info` is non-null and the caller declared `length` writable
     // bytes, and `length >= required` was just checked, so every write below
@@ -3999,7 +4190,7 @@ unsafe fn qobj_hook_body(
         }
         core::ptr::write_unaligned(dst.add(name_bytes) as *mut u16, 0u16);
     }
-    STATUS_SUCCESS
+    Some(STATUS_SUCCESS)
 }
 
 /// `NtWriteFile` hook. For synthetic (fuse) write handles, forward the game's
