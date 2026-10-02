@@ -13,7 +13,10 @@
 //! it (running while `fake-game.run` exists in the prefix) and exits 5.
 //!
 //! It also writes one line to stdout and one to stderr, which is what
-//! `LaunchOpts::log_file` captures.
+//! `LaunchOpts::log_file` captures. When the launch asks the injector about
+//! the Steam helper, it writes the report a current injector would
+//! (`cleared`, or a started helper), or `FAKE_STEAM_REPORT` instead (`none`:
+//! no report, as an injector that predates the helper writes).
 //!
 //! The fake `wineserver` models the prefix: `-k` kills the fake `wine` and
 //! the game, and `-w` returns once the game is gone.
@@ -30,7 +33,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use vfs_embed::{DiskProvider, LaunchExit, LaunchOpts, PrefixInit, Session, STOPPED_EXIT_CODE};
+use vfs_embed::{
+    DiskProvider, HelperStatus, LaunchExit, LaunchOpts, PrefixInit, Session, STOPPED_EXIT_CODE,
+};
 
 const ROOT0: &str = r"C:\Games\Fake";
 
@@ -80,6 +85,14 @@ echo GE-Proton99-1 > "$STEAM_COMPAT_DATA_PATH/version""#,
     script(
         &rt.join("files").join("bin").join("wine"),
         r#"env > "$WINEPREFIX/fake-wine.env"
+if [ -n "$VFS_INJECT_STEAM_HELPER" ]; then
+  case "$FAKE_STEAM_REPORT" in
+    none) ;;
+    "") if [ "$VFS_INJECT_STEAM_HELPER" = off ]; then r=cleared; else r=started:236:300; fi
+        printf '%s' "$r" > "$6.steam-helper" ;;
+    *) printf '%s' "$FAKE_STEAM_REPORT" > "$6.steam-helper" ;;
+  esac
+fi
 echo "fake wine stdout"
 echo "fake wine stderr" >&2
 echo "$@" > "$WINEPREFIX/fake-wine.args"
@@ -324,13 +337,10 @@ fn spawn_retrying_busy(cmd: &mut std::process::Command) -> std::process::Child {
     }
 }
 
-const STEAM_NAMES: [&str; 6] = [
+const STEAM_NAMES: [&str; 3] = [
     "SteamAppId",
     "SteamGameId",
-    "STEAM_COMPAT_APP_ID",
     "STEAM_COMPAT_CLIENT_INSTALL_PATH",
-    "STEAM_COMPAT_DATA_PATH",
-    "VFS_INJECT_STEAM_HELPER",
 ];
 
 #[test]
@@ -351,23 +361,24 @@ fn with_a_running_steam_client_the_launch_asks_for_the_helper_and_sets_steams_en
     o.env
         .insert("WINEDLLOVERRIDES".into(), "d3dx9_42=n,b".into());
     o.log_file = Some(log.clone());
-    let h = s.launch_detached(&o).unwrap();
+    let mut h = s.launch_detached(&o).unwrap();
     assert!(h.steam_helper());
+    ended(&mut h);
+    assert_eq!(
+        h.steam_helper_status(),
+        HelperStatus::Started { pid: 236, ms: 300 }
+    );
     assert!(h.notes().is_empty(), "{:?}", h.notes());
     assert_eq!(h.wait().unwrap(), LaunchExit::Exited(0));
 
     let env = child_env(&pfx);
-    for name in ["SteamAppId", "SteamGameId", "STEAM_COMPAT_APP_ID"] {
+    for name in ["SteamAppId", "SteamGameId"] {
         assert_eq!(env[name], "489830", "{name}");
     }
     let client = &env["STEAM_COMPAT_CLIENT_INSTALL_PATH"];
     assert!(
         Path::new(client).is_dir() && client.ends_with("steam-on-steam"),
         "the client directory the prefix was set up with: {client}"
-    );
-    assert_eq!(
-        Path::new(&env["STEAM_COMPAT_DATA_PATH"]),
-        pfx.parent().unwrap()
     );
     assert_eq!(
         env["VFS_INJECT_STEAM_HELPER"],
@@ -382,6 +393,8 @@ fn with_a_running_steam_client_the_launch_asks_for_the_helper_and_sets_steams_en
         "SteamEnv",
         "SteamOverlayGameId",
         "SteamUser",
+        "STEAM_COMPAT_APP_ID",
+        "STEAM_COMPAT_DATA_PATH",
     ] {
         assert!(
             !env.contains_key(name),
@@ -423,9 +436,11 @@ fn without_a_running_steam_client_the_launch_is_as_before_and_says_so_once() {
     let log = tmp("steam-off-log").join("wine.log");
     let mut o = opts(&shim, "ok", true);
     o.log_file = Some(log.clone());
-    let h = s.launch_detached(&o).unwrap();
+    let mut h = s.launch_detached(&o).unwrap();
     assert!(!h.steam_helper());
-    let notes = h.notes().to_vec();
+    ended(&mut h);
+    assert_eq!(h.steam_helper_status(), HelperStatus::Cleared);
+    let notes = h.notes();
     assert_eq!(h.wait().unwrap(), LaunchExit::Exited(0), "no new failure");
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(
@@ -439,6 +454,10 @@ fn without_a_running_steam_client_the_launch_is_as_before_and_says_so_once() {
     for name in STEAM_NAMES {
         assert!(!env.contains_key(name), "{name}");
     }
+    assert_eq!(
+        env["VFS_INJECT_STEAM_HELPER"], "off",
+        "the injector clears the pid an earlier helper left"
+    );
     assert_eq!(env["WINEDLLOVERRIDES"], "mscoree=d;mshtml=d");
     assert_eq!(
         std::fs::read_to_string(&log).unwrap(),
@@ -457,7 +476,7 @@ fn the_steam_helper_can_be_turned_off_and_needs_an_app_id() {
     let h = s.launch_detached(&opts(&shim, "ok", true)).unwrap();
     assert!(!h.steam_helper() && h.notes().is_empty());
     h.wait().unwrap();
-    assert!(!child_env(&pfx).contains_key("VFS_INJECT_STEAM_HELPER"));
+    assert_eq!(child_env(&pfx)["VFS_INJECT_STEAM_HELPER"], "off");
 
     // On, but the launch is not a Steam game's: no app id anywhere.
     s.set_steam_helper(true);
@@ -478,6 +497,56 @@ fn the_steam_helper_can_be_turned_off_and_needs_an_app_id() {
     let env = child_env(&pfx);
     assert_eq!(env["SteamAppId"], "72850");
     assert_eq!(env["SteamGameId"], "72850");
+}
+
+#[test]
+fn a_helper_that_is_not_running_or_an_injector_that_does_not_report_is_noted() {
+    let home = fake_home("steam-report");
+    let (mut s, _pfx, shim) = session("steam-report", &home);
+    let steam = FakeSteam::start("steam-report");
+    s.set_steam_helper(true);
+    s.set_steam_state_dir(&steam.state);
+
+    let mut o = opts(&shim, "ok", true);
+    o.env.insert(
+        "FAKE_STEAM_REPORT".into(),
+        "failed:it (process 236) exited before publishing itself".into(),
+    );
+    let mut h = s.launch_detached(&o).unwrap();
+    ended(&mut h);
+    assert_eq!(
+        h.steam_helper_status(),
+        HelperStatus::NotRunning("it (process 236) exited before publishing itself".into())
+    );
+    let notes = h.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("exited before publishing itself") && notes[0].contains("without Steam"),
+        "{notes:?}"
+    );
+    h.wait().unwrap();
+
+    // An injector built before the helper existed says nothing at all.
+    o.env.insert("FAKE_STEAM_REPORT".into(), "none".into());
+    let mut h = s.launch_detached(&o).unwrap();
+    ended(&mut h);
+    assert_eq!(h.steam_helper_status(), HelperStatus::Unreported);
+    let notes = h.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("Windows artifacts are older") && notes[0].contains("rebuild"),
+        "{notes:?}"
+    );
+    h.wait().unwrap();
+}
+
+/// Polls `h` until `wine` has exited, so the injector's report is final.
+fn ended(h: &mut vfs_embed::LaunchHandle) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.is_running() {
+        assert!(Instant::now() < deadline, "the launch did not end");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn wait_for(p: &Path) {

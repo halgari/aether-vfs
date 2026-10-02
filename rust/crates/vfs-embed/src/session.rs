@@ -28,6 +28,7 @@ use vfs_proton::{
     launch::WineLaunch,
     layout::Root as ProtonRoot,
     prefix::{Prefix, PrefixInit, PrefixLock},
+    steam::SteamSide,
 };
 use vfs_provider::{
     bad_request, exists, map_io_err, overlay_layer_dir, Access, DirEntry, Provider, RootId, Stat,
@@ -578,7 +579,11 @@ impl Session {
     /// [`LaunchOpts::env`]) and the Steam client is running; when the client
     /// is not, the launch goes ahead exactly as with this off and says so in
     /// one line ([`LaunchHandle::notes`], and at the top of
-    /// [`LaunchOpts::log_file`]).
+    /// [`LaunchOpts::log_file`]). Without the helper, a launch in a
+    /// [`PrefixInit::Proton`] prefix still asks the injector to clear the pid
+    /// an earlier helper left there, so the program's Steam API does not find
+    /// a client by coincidence of Wine's pid numbering.
+    /// [`LaunchHandle::steam_helper_status`] says what the injector did.
     #[cfg(unix)]
     pub fn set_steam_helper(&mut self, on: bool) {
         self.steam_helper = on;
@@ -595,24 +600,23 @@ impl Session {
     /// The Steam side of a launch with `env` as its [`LaunchOpts::env`], and
     /// the lines the launch should say about it: the helper when this
     /// session's prefix is Proton's, the launch has an app id and the Steam
-    /// client is running; a note instead when only the client is missing.
+    /// client is running; otherwise, in a Proton prefix, only clearing the
+    /// pid an earlier helper left, with a note when the client is what is
+    /// missing.
     #[cfg(unix)]
-    fn steam_launch(
-        &self,
-        env: &BTreeMap<String, String>,
-    ) -> (Option<vfs_proton::SteamLaunch>, Vec<String>) {
+    fn steam_launch(&self, env: &BTreeMap<String, String>) -> (SteamSide, Vec<String>) {
         let PrefixInit::Proton {
             steam_client,
             app_id,
         } = &self.prefix_init
         else {
-            return (None, Vec::new());
+            return (SteamSide::Untouched, Vec::new());
         };
         let app_id = app_id
             .or_else(|| env.get("SteamAppId").and_then(|v| v.trim().parse().ok()))
             .filter(|id| *id != 0);
         let (true, Some(app_id)) = (self.steam_helper, app_id) else {
-            return (None, Vec::new());
+            return (SteamSide::Off, Vec::new());
         };
         let Some(state) = self
             .steam_state_dir
@@ -620,7 +624,7 @@ impl Session {
             .or_else(vfs_proton::steam::state_dir)
         else {
             return (
-                None,
+                SteamSide::Off,
                 vec![
                     "aether-vfs: HOME is not set, so no Steam client can be found and the \
                       program runs without Steam"
@@ -630,13 +634,16 @@ impl Session {
         };
         match vfs_proton::steam::running_client(&state) {
             Some(_) => (
-                Some(vfs_proton::SteamLaunch {
+                SteamSide::Helper(vfs_proton::SteamLaunch {
                     client: steam_client.clone(),
                     app_id,
                 }),
                 Vec::new(),
             ),
-            None => (None, vec![vfs_proton::steam::not_running_note(&state)]),
+            None => (
+                SteamSide::Off,
+                vec![vfs_proton::steam::not_running_note(&state)],
+            ),
         }
     }
 
@@ -1816,8 +1823,8 @@ impl Session {
     ///    carries what Steam's own launcher sets
     ///    (`vfs_proton::launch::launch_env`), so the program's Steam API
     ///    finds the client. Without a running client the launch is the same
-    ///    as before, plus one line saying so — see
-    ///    [`Session::set_steam_helper`].
+    ///    as before, plus one line saying so, except that the injector clears
+    ///    a stale helper pid — see [`Session::set_steam_helper`].
     ///
     /// `wait: false` returns `Ok(0)` once the program is started, and the
     /// session holds the launch: [`Session::stop_launch`] stops it, and
@@ -2374,18 +2381,40 @@ impl LaunchHandle {
         self.child.id()
     }
 
-    /// What the launch had to say before it started, one line each — today,
-    /// that the Steam client is not running and the program therefore runs
-    /// without Steam ([`Session::set_steam_helper`]). Also written at the top
-    /// of [`LaunchOpts::log_file`], or to stderr without one.
-    pub fn notes(&self) -> &[String] {
-        &self.wine.notes
+    /// What the launch has to say, one line each: what it said before it
+    /// started (the Steam client is not running — also written at the top of
+    /// [`LaunchOpts::log_file`], or to stderr without one), then, once the
+    /// injector has reported, why the Steam helper is not running or that
+    /// the Windows artifacts are too old to start it
+    /// ([`LaunchHandle::steam_helper_status`]). Call it again after the
+    /// program has started for the second part.
+    pub fn notes(&self) -> Vec<String> {
+        let mut notes = self.wine.notes.clone();
+        notes.extend(vfs_proton::steam::helper_note(
+            &self.wine.steam,
+            &self.steam_helper_status(),
+        ));
+        notes
+    }
+
+    /// What became of Proton's Steam helper
+    /// ([`Session::set_steam_helper`]): not asked for, still pending,
+    /// started, cleared, not running and why, or not reported by an injector
+    /// that predates it. Read from the injector's report beside the ready
+    /// file; final once the program has started or `wine` has exited.
+    pub fn steam_helper_status(&self) -> vfs_proton::HelperStatus {
+        vfs_proton::steam::helper_status(
+            &self.wine.steam,
+            &self.wine.ready_file,
+            self.wine_status.is_some() || self.outcome.is_some(),
+        )
     }
 
     /// Whether the launch asked the injector to start Proton's Steam helper
-    /// ([`Session::set_steam_helper`]).
+    /// ([`Session::set_steam_helper`]); [`LaunchHandle::steam_helper_status`]
+    /// says whether it did.
     pub fn steam_helper(&self) -> bool {
-        self.wine.steam.is_some()
+        matches!(self.wine.steam, SteamSide::Helper(_))
     }
 
     /// A stopper for this launch, to stop it from another thread while this

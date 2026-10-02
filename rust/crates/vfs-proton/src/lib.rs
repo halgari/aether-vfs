@@ -40,4 +40,4 @@ pub use prefix::{ensure, ensure_with, Prefix, PrefixError, PrefixInit};
 #[cfg(feature = "acquire")]
 pub use release::{fetch_releases, parse_releases, pick, Release, ResolveError};
 pub use runtime::{cmp_tags, installed, installed_dirs, verify_ge, VerifyError};
-pub use steam::{SteamLaunch, STEAM_HELPER, STEAM_HELPER_OVERRIDE};
+pub use steam::{HelperStatus, SteamLaunch, SteamSide, STEAM_HELPER, STEAM_HELPER_OVERRIDE};
