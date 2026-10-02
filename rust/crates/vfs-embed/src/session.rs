@@ -1313,20 +1313,26 @@ impl Session {
         // fresh inode and leaves such a reader on the old one, where it fails
         // visibly instead of racing us for slots.
         let _ = std::fs::remove_file(&named);
-        let backing = ring_in_memory(&self.state_dir, &named);
-        let ring = backing.as_deref().unwrap_or(&named);
-        let ipc = IpcServe::start_file_backed_with_workers(
-            Arc::clone(&self.kernel),
-            ring,
-            PROTON_PAYLOAD_CAP,
-            self.io_workers(),
-        );
-        let ipc = match ipc {
-            Ok(ipc) => ipc,
-            Err(e) => {
-                remove_memory_ring(backing.as_deref(), &named);
-                return Err(e);
+        let mut backing = ring_in_memory(&self.state_dir, &named);
+        let start = |ring: &Path| {
+            IpcServe::start_file_backed_with_workers(
+                Arc::clone(&self.kernel),
+                ring,
+                PROTON_PAYLOAD_CAP,
+                self.io_workers(),
+            )
+        };
+        let ipc = match backing.as_deref().map(start) {
+            Some(Ok(ipc)) => ipc,
+            // The memory-backed ring could not be started (the tmpfs is
+            // full, say). That is an optimisation failing, not the session:
+            // take the link away and serve from the state directory.
+            Some(Err(_)) => {
+                remove_memory_ring(backing.take().as_deref(), &named);
+                let _ = std::fs::remove_file(&named);
+                start(&named)?
             }
+            None => start(&named)?,
         };
 
         self.ring_backing = backing;
@@ -2674,45 +2680,88 @@ fn memory_fs_in(mountinfo: &str, dir: &Path) -> bool {
     best.is_some_and(|(_, in_memory)| in_memory)
 }
 
+/// Whether `dir` is this user's alone: owned by the user this process runs
+/// as, with no access for group or others.
+///
+/// The effective uid is read as the owner of `/proc/self`, which the kernel
+/// reports as exactly that; this crate has no `libc` to ask with.
+#[cfg(unix)]
+fn is_private_dir(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(d), Ok(me)) = (
+        std::fs::symlink_metadata(dir),
+        std::fs::metadata("/proc/self"),
+    ) else {
+        return false;
+    };
+    d.is_dir() && d.uid() == me.uid() && d.mode() & 0o077 == 0
+}
+
 /// Give the ring a home in memory, and make `named` a symlink to it.
 ///
 /// Returns the ring's real path — `$XDG_RUNTIME_DIR/aether-vfs/ring-<id>/` +
 /// the same file name as `named`, so the name a Wine child is given does not
 /// change — or `None` when the ring should be created at `named` itself:
-/// there is no `$XDG_RUNTIME_DIR`, it is not a memory filesystem, or anything
-/// about setting the link up failed.
+/// there is no `$XDG_RUNTIME_DIR`, it is not a memory filesystem, it is not
+/// private to this user, or anything about setting the file and the link up
+/// failed.
 ///
-/// Only `$XDG_RUNTIME_DIR`, not `/dev/shm`: it is the user's own (mode 0700
-/// by specification), where a world-writable directory would let another user
-/// put a directory of their own where this ring is about to be created.
+/// **The directory is checked, not trusted.** `$XDG_RUNTIME_DIR` is the
+/// user's own and mode 0700 by specification, but it is only an environment
+/// variable: set to `/tmp` (a tmpfs on many systems, and what some sessions
+/// without logind do) it is a place where another user can create
+/// `aether-vfs` first, own the directory the ring is about to be made in,
+/// and swap the file. So both it and `aether-vfs` must be owned by this
+/// user with no access for anyone else, and the ring file is created
+/// exclusively (never opened if it exists, never through a link) with mode
+/// 0600. `/dev/shm` is not considered at all.
 ///
-/// The directory is named for `state_dir`, so a session that died without
-/// [`Session::stop_serve`] has its file replaced by the next one on the same
-/// state directory rather than left to accumulate.
+/// The directory is named for the *canonical* `state_dir` — two processes
+/// that spell one state directory differently must share a ring name, and
+/// two that spell different ones alike (the same relative path from
+/// different working directories) must not. So a session that died without
+/// [`Session::stop_serve`] has its file replaced by the next one on the
+/// same state directory rather than left to accumulate.
+///
+/// The file is sparse: its pages are taken from the tmpfs as they are first
+/// touched, as they were from the disk before. A runtime directory with less
+/// than a ring's worth of room left (64 MiB; the usual quota is a tenth of
+/// RAM) can therefore fault the director or the game when it fills. Reserving
+/// the pages up front needs `posix_fallocate`, which this crate cannot call
+/// without `libc`; not done.
 #[cfg(unix)]
 fn ring_in_memory(state_dir: &Path, named: &Path) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
-    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
     let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
-    if !runtime.is_absolute() || !is_memory_fs(&runtime) {
+    if !runtime.is_absolute() || !is_memory_fs(&runtime) || !is_private_dir(&runtime) {
+        return None;
+    }
+    let ours = runtime.join("aether-vfs");
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&ours);
+    if !is_private_dir(&ours) {
         return None;
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    state_dir.hash(&mut h);
-    let dir = runtime
-        .join("aether-vfs")
-        .join(format!("ring-{:016x}", h.finish()));
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)
-        .ok()?;
+    state_dir.canonicalize().ok()?.hash(&mut h);
+    let dir = ours.join(format!("ring-{:016x}", h.finish()));
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&dir);
+    if !is_private_dir(&dir) {
+        return None;
+    }
     let file = dir.join(named.file_name()?);
     // The same fresh-inode rule as the file in `state_dir`: see `serve`.
     let _ = std::fs::remove_file(&file);
-    if std::os::unix::fs::symlink(&file, named).is_err() {
-        let _ = std::fs::remove_dir(&dir);
+    let made = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&file)
+        .is_ok()
+        && std::os::unix::fs::symlink(&file, named).is_ok();
+    if !made {
+        remove_memory_ring(Some(&file), named);
         return None;
     }
     Some(file)
@@ -2967,6 +3016,65 @@ mod ring_location_tests {
         assert!(!memory_fs_in("", Path::new("/run")), "no table, no claim");
     }
 
+    /// A runtime directory is used only if it is this user's and nobody
+    /// else's. A directory anyone can write to — what `XDG_RUNTIME_DIR=/tmp`
+    /// would be — is refused, and so is one with any group or other access.
+    #[test]
+    fn only_a_directory_private_to_this_user_may_hold_the_ring() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("vfs-ringpriv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let set = |mode: u32| {
+            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        set(0o700);
+        assert!(is_private_dir(&base));
+        for open in [0o1777, 0o755, 0o750, 0o701] {
+            set(open);
+            assert!(!is_private_dir(&base), "mode {open:o} is not private");
+        }
+        set(0o700);
+        // Not ours: the root directory belongs to root (unless we are root).
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::metadata("/proc/self").unwrap().uid() != 0 {
+            assert!(!is_private_dir(Path::new("/")));
+        }
+        // A link to a private directory is not a directory of ours.
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&base, &link).unwrap();
+        assert!(!is_private_dir(&link));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The ring's directory is named for where the state directory *is*, not
+    /// for how its path was spelled: one directory spelled two ways gets one
+    /// ring name, so a second session there replaces the first's file.
+    #[test]
+    fn the_ring_directory_is_named_for_the_canonical_state_directory() {
+        let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) else {
+            return;
+        };
+        if !is_memory_fs(&runtime) || !is_private_dir(&runtime) {
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("vfs-ringname-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let state = base.join("state");
+        std::fs::create_dir_all(state.join("sub")).unwrap();
+        let direct = ring_in_memory(&state, &state.join("a.bin")).unwrap();
+        let roundabout =
+            ring_in_memory(&state.join("sub").join(".."), &state.join("b.bin")).unwrap();
+        assert_eq!(direct.parent(), roundabout.parent());
+        let other = ring_in_memory(&state.join("sub"), &state.join("c.bin")).unwrap();
+        assert_ne!(direct.parent(), other.parent());
+        remove_memory_ring(Some(&direct), &state.join("a.bin"));
+        remove_memory_ring(Some(&roundabout), &state.join("b.bin"));
+        remove_memory_ring(Some(&other), &state.join("c.bin"));
+        assert!(!direct.parent().unwrap().exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// `serve` on a host with a tmpfs `$XDG_RUNTIME_DIR` (any desktop Linux;
     /// skipped elsewhere): the ring's pages are in memory, the name in
     /// `state_dir` still opens it, and `stop_serve` leaves nothing behind.
@@ -3007,6 +3115,12 @@ mod ring_location_tests {
         // Serving again while serving changes nothing.
         s.serve().unwrap();
         assert_eq!(s.ipc().unwrap().ring_path().unwrap(), real);
+
+        // Nobody else can read the ring or put another in its place.
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&real).unwrap().mode() & 0o777, 0o600);
+        assert!(is_private_dir(real.parent().unwrap()));
+        assert!(is_private_dir(&runtime.join("aether-vfs")));
 
         s.stop_serve();
         assert!(!real.exists(), "the ring file must not outlive its session");
