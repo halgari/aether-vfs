@@ -1,0 +1,11 @@
+[package]
+name = "vfs-fixture-steam"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+description = "Steam API probe: reports what a launched program sees of the Steam client"
+
+[[bin]]
+name = "vfs-fixture-steam"
+path = "src/main.rs"
