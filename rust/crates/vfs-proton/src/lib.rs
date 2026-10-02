@@ -39,5 +39,7 @@ pub use layout::Root;
 pub use prefix::{ensure, ensure_with, Prefix, PrefixError, PrefixInit};
 #[cfg(feature = "acquire")]
 pub use release::{fetch_releases, parse_releases, pick, Release, ResolveError};
-pub use runtime::{cmp_tags, installed, installed_dirs, verify_ge, VerifyError};
+pub use runtime::{
+    cmp_tags, installed, installed_dirs, runtime_lib_env, runtime_lib_env_host, verify_ge, VerifyError,
+};
 pub use steam::{HelperStatus, SteamLaunch, SteamSide, STEAM_HELPER, STEAM_HELPER_OVERRIDE};

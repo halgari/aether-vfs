@@ -310,6 +310,8 @@ fn run_wineboot(runtime: &Path, prefix_dir: &Path) -> Result<(), PrefixError> {
         .env("WINEPREFIX", prefix_dir)
         .env("WINEDLLOVERRIDES", "mscoree=d;mshtml=d")
         .env("WINEDEBUG", "-all");
+    let runtime_abs = std::path::absolute(runtime).unwrap_or_else(|_| runtime.to_path_buf());
+    cmd.envs(crate::runtime::runtime_lib_env_host(&runtime_abs));
     own_process_group(&mut cmd);
     let output = cmd.output()?;
 

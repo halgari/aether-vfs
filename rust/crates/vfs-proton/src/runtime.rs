@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 
@@ -19,6 +20,11 @@ pub enum VerifyError {
     /// The `version` file names a build that is not GE-Proton. Carries the
     /// file's trimmed contents so the caller can show what it actually got.
     NotGe(String),
+    /// Wine's FFmpeg demuxer (`winedmo.so`) is present but the FFmpeg
+    /// library it links against is not beside it in `files/lib/x86_64-linux-gnu`.
+    /// Carries the missing library's name pattern. Without it Media Foundation
+    /// fails with `0xc000007a` on every mp4, so refuse the tree up front.
+    MissingLib(String),
 }
 
 impl std::fmt::Display for VerifyError {
@@ -27,6 +33,10 @@ impl std::fmt::Display for VerifyError {
             VerifyError::Missing => write!(f, "no version file: not an installed runtime"),
             VerifyError::Unreadable(e) => write!(f, "version file unreadable: {e}"),
             VerifyError::NotGe(s) => write!(f, "not a GE-Proton runtime: version says {s:?}"),
+            VerifyError::MissingLib(l) => write!(
+                f,
+                "incomplete runtime: files/lib/wine/x86_64-unix/winedmo.so is present but {l} is missing from files/lib/x86_64-linux-gnu"
+            ),
         }
     }
 }
@@ -55,10 +65,78 @@ pub fn verify_ge(dir: &Path) -> Result<String, VerifyError> {
         Err(e) => return Err(VerifyError::Unreadable(e)),
     };
     let trimmed = contents.trim();
-    match trimmed.split_whitespace().find(|tok| tok.starts_with("GE-Proton")) {
-        Some(tag) => Ok(tag.to_string()),
-        None => Err(VerifyError::NotGe(trimmed.to_string())),
+    let tag = match trimmed.split_whitespace().find(|tok| tok.starts_with("GE-Proton")) {
+        Some(tag) => tag.to_string(),
+        None => return Err(VerifyError::NotGe(trimmed.to_string())),
+    };
+    check_ffmpeg(dir)?;
+    Ok(tag)
+}
+
+/// `winedmo.so` links `libavformat.so.N` and friends with no RPATH; they live in
+/// `files/lib/x86_64-linux-gnu` and are found only through [`runtime_lib_env`].
+/// A tree with the demuxer but no `libavformat.so.*` cannot open any mp4.
+fn check_ffmpeg(dir: &Path) -> Result<(), VerifyError> {
+    let files = dir.join("files");
+    if !files.join("lib/wine/x86_64-unix/winedmo.so").exists() {
+        return Ok(());
     }
+    let has = std::fs::read_dir(files.join("lib/x86_64-linux-gnu"))
+        .map(|rd| {
+            rd.flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with("libavformat.so."))
+        })
+        .unwrap_or(false);
+    if has {
+        Ok(())
+    } else {
+        Err(VerifyError::MissingLib("libavformat.so.*".to_string()))
+    }
+}
+
+/// The library environment Proton's `proton` script (`init_wine`) gives Wine:
+/// `files/lib/{x86_64,i386}-linux-gnu` prepended to `LD_LIBRARY_PATH` (the
+/// inherited value kept after them), `ORIG_LD_LIBRARY_PATH` set to the inherited
+/// value unless the host already has one, and `WINEDLLPATH` =
+/// `lib/vkd3d:lib/wine[:inherited]`. Pure: the host values are arguments.
+/// `runtime` must be absolute.
+pub fn runtime_lib_env(
+    runtime: &Path,
+    inherited_ld: Option<&OsStr>,
+    inherited_orig_ld: Option<&OsStr>,
+    inherited_dllpath: Option<&OsStr>,
+) -> Vec<(String, String)> {
+    let lib = runtime.join("files").join("lib");
+    let p = |sub: &str| lib.join(sub).to_string_lossy().into_owned();
+    let inh = |v: Option<&OsStr>| v.map(|v| v.to_string_lossy().into_owned());
+    let mut ld = format!("{}:{}", p("x86_64-linux-gnu"), p("i386-linux-gnu"));
+    let ld_in = inh(inherited_ld);
+    if let Some(v) = ld_in.as_deref().filter(|v| !v.is_empty()) {
+        ld.push(':');
+        ld.push_str(v);
+    }
+    let mut dll = format!("{}:{}", p("vkd3d"), p("wine"));
+    if let Some(v) = inh(inherited_dllpath).filter(|v| !v.is_empty()) {
+        dll.push(':');
+        dll.push_str(&v);
+    }
+    let mut out = Vec::new();
+    if inherited_orig_ld.is_none() {
+        out.push(("ORIG_LD_LIBRARY_PATH".to_string(), ld_in.unwrap_or_default()));
+    }
+    out.push(("LD_LIBRARY_PATH".to_string(), ld));
+    out.push(("WINEDLLPATH".to_string(), dll));
+    out
+}
+
+/// [`runtime_lib_env`] with the host's own environment as the inherited values.
+pub fn runtime_lib_env_host(runtime: &Path) -> Vec<(String, String)> {
+    runtime_lib_env(
+        runtime,
+        std::env::var_os("LD_LIBRARY_PATH").as_deref(),
+        std::env::var_os("ORIG_LD_LIBRARY_PATH").as_deref(),
+        std::env::var_os("WINEDLLPATH").as_deref(),
+    )
 }
 
 /// Orders two `GE-ProtonN-M` tags numerically by `(N, M)`, not lexically:
@@ -166,6 +244,71 @@ mod tests {
         let d = tmpdir("loose");
         std::fs::write(d.join("version"), "1787951532 GE-Proton11-6 extra").unwrap();
         assert_eq!(verify_ge(&d).unwrap(), "GE-Proton11-6");
+    }
+
+    fn fake_rt(tag: &str, with_dmo: bool, with_av: bool) -> std::path::PathBuf {
+        let d = tmpdir(tag);
+        std::fs::write(d.join("version"), "1 GE-Proton11-7\n").unwrap();
+        let unix = d.join("files/lib/wine/x86_64-unix");
+        let gnu = d.join("files/lib/x86_64-linux-gnu");
+        std::fs::create_dir_all(&unix).unwrap();
+        std::fs::create_dir_all(&gnu).unwrap();
+        if with_dmo {
+            std::fs::write(unix.join("winedmo.so"), "").unwrap();
+        }
+        if with_av {
+            std::fs::write(gnu.join("libavformat.so.62.12.100"), "").unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn verify_ge_requires_ffmpeg_beside_winedmo() {
+        let d = fake_rt("dmo-noav", true, false);
+        match verify_ge(&d) {
+            Err(e @ VerifyError::MissingLib(_)) => {
+                assert!(e.to_string().contains("libavformat.so"), "{e}")
+            }
+            other => panic!("expected MissingLib, got {other:?}"),
+        }
+        assert!(verify_ge(&fake_rt("dmo-av", true, true)).is_ok());
+        assert!(verify_ge(&fake_rt("nodmo", false, false)).is_ok());
+    }
+
+    #[test]
+    fn runtime_lib_env_prepends_and_keeps_inherited() {
+        let rt = Path::new("/rt");
+        let m: std::collections::HashMap<_, _> = runtime_lib_env(
+            rt,
+            Some(OsStr::new("/host/lib")),
+            None,
+            Some(OsStr::new("/host/dll")),
+        )
+        .into_iter()
+        .collect();
+        assert_eq!(
+            m["LD_LIBRARY_PATH"],
+            "/rt/files/lib/x86_64-linux-gnu:/rt/files/lib/i386-linux-gnu:/host/lib"
+        );
+        assert_eq!(m["ORIG_LD_LIBRARY_PATH"], "/host/lib");
+        assert_eq!(m["WINEDLLPATH"], "/rt/files/lib/vkd3d:/rt/files/lib/wine:/host/dll");
+    }
+
+    #[test]
+    fn runtime_lib_env_without_host_values_and_with_orig_present() {
+        let m: std::collections::HashMap<_, _> =
+            runtime_lib_env(Path::new("/rt"), None, None, None).into_iter().collect();
+        assert_eq!(
+            m["LD_LIBRARY_PATH"],
+            "/rt/files/lib/x86_64-linux-gnu:/rt/files/lib/i386-linux-gnu"
+        );
+        assert_eq!(m["ORIG_LD_LIBRARY_PATH"], "");
+        assert_eq!(m["WINEDLLPATH"], "/rt/files/lib/vkd3d:/rt/files/lib/wine");
+        let m: std::collections::HashMap<_, _> =
+            runtime_lib_env(Path::new("/rt"), Some(OsStr::new("/x")), Some(OsStr::new("/o")), None)
+                .into_iter()
+                .collect();
+        assert!(!m.contains_key("ORIG_LD_LIBRARY_PATH"));
     }
 
     #[test]
