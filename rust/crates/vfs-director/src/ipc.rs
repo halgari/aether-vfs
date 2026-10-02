@@ -168,6 +168,10 @@ impl IpcServe {
 
 
         let workers = clamp_workers(workers);
+        // Published before any client can attach: a client bounds its reads
+        // below this, so that a worker is always left for a request that is
+        // not one (`vfs_ipc::concurrent`).
+        ring::set_worker_hint(inner.mapping.seg(), workers as u32);
         let mut joins = Vec::with_capacity(workers);
         for _ in 0..workers {
             let inner2 = inner.clone();
@@ -250,6 +254,11 @@ impl IpcServe {
     /// More workers than a host expects concurrent slow misses is the
     /// remedy. The cost is idle CPU: each worker spins for a short window
     /// after activity before it sleeps (see [`AdaptiveNotifier`]).
+    ///
+    /// The count is published in the ring header, and the shim keeps its
+    /// reads and writes in flight below it (`vfs_ipc::data_limit`: three
+    /// quarters of the workers), so the rest stay free for opens, stats and
+    /// listings however many reads are blocked.
     #[cfg(unix)]
     pub fn start_file_backed_with_workers(
         kernel: Arc<Director>,
@@ -282,6 +291,10 @@ impl IpcServe {
         });
 
         let workers = clamp_workers(workers);
+        // Published before the ring path is handed to anyone: the shim bounds
+        // its reads below this, so that a worker is always left for a request
+        // that is not one (`vfs_ipc::concurrent`).
+        ring::set_worker_hint(inner.mapping.seg(), workers as u32);
         let mut joins = Vec::with_capacity(workers);
         for _ in 0..workers {
             let inner2 = inner.clone();

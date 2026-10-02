@@ -47,6 +47,19 @@ pub trait Provider: Send + Sync {
     fn set_attr(&self, _p: VPath, _attr: SetAttr) -> Result<(), i32> {
         Err(not_supported())
     }
+
+    /// The spelling this provider stores for the last component of `p` — the
+    /// name a listing of its parent shows — or `None` if it has no such
+    /// entry. `p` may be in any case; the answer is the stored one.
+    ///
+    /// What a final-path query needs: one name, without listing the
+    /// directory it is in. A provider that can answer from an index should;
+    /// the default says it cannot, and callers then find the name in a
+    /// listing instead (`vfs_compose::stored_name`), which costs the whole
+    /// directory every time.
+    fn stored_name(&self, _p: VPath) -> Result<Option<String>, i32> {
+        Err(not_supported())
+    }
 }
 
 #[cfg(test)]

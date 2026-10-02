@@ -21,6 +21,7 @@
 
 mod casefold;
 mod cachekey;
+pub mod finalname;
 mod model;
 mod path;
 mod source;

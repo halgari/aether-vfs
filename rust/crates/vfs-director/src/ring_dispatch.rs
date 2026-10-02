@@ -2,11 +2,11 @@
 
 use vfs_protocol::{
     decode_close_req, decode_mkdir_req, decode_open_req, decode_path_req, decode_read_req,
-    decode_rename_req, decode_setattr_req, decode_write_req, encode_getattr_resp,
-    encode_open_resp, encode_read_resp, encode_read_resp_bulk, encode_readdir_resp,
-    encode_write_resp, AttrResp, DirEntryWire, OpenResp, RootId, FLAG_READ_BULK, OP_CLOSE,
-    OP_DELETE, OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN, OP_READ, OP_READDIR, OP_RENAME,
-    OP_SETATTR, OP_WRITE, ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
+    decode_rename_req, decode_setattr_req, decode_write_req, encode_getattr_resp, encode_open_resp,
+    encode_read_resp, encode_read_resp_bulk, encode_readdir_resp, encode_write_resp, AttrResp,
+    DirEntryWire, OpenResp, RootId, FLAG_READ_BULK, OP_CLOSE, OP_DELETE, OP_GETATTR, OP_HEARTBEAT,
+    OP_MKDIR, OP_OPEN, OP_READ, OP_READDIR, OP_RENAME, OP_SETATTR, OP_STORED_NAMES, OP_WRITE,
+    ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
 };
 use vfs_ipc::DataArena;
 
@@ -225,6 +225,15 @@ pub fn dispatch_director(
             },
             None => (ST_BAD_REQUEST, Vec::new()),
         },
+        OP_STORED_NAMES => match vfs_protocol::decode_names_req(payload) {
+            Some((root, skip, path)) => {
+                match director.stored_names(RootId(root), &path, skip as usize) {
+                    Ok(names) => (ST_OK, names.join("/").into_bytes()),
+                    Err(st) => (st, Vec::new()),
+                }
+            }
+            None => (ST_BAD_REQUEST, Vec::new()),
+        },
         OP_MKDIR => match decode_mkdir_req(payload) {
             Some((root, _mode, path)) => match director.mkdir(RootId(root), &path) {
                 Ok(()) => (ST_OK, Vec::new()),
@@ -263,6 +272,51 @@ mod tests {
 
         assert_eq!(std::fs::read(dir.join("w.txt")).unwrap(), b"hello");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `OP_STORED_NAMES`: the stored spelling of a path's components in one
+    /// round trip, from the `skip`-th on, with a component nothing has
+    /// answered as it was asked.
+    #[test]
+    fn stored_names_opcode_answers_the_spelling_of_each_component() {
+        use vfs_protocol::{encode_names_req, OP_STORED_NAMES, ST_OK};
+        let d = Director::new();
+        d.mount(
+            RootId::DEFAULT,
+            std::sync::Arc::new(vfs_compose::InlineProvider::from_files([(
+                "Data/Interface/Fonts/Jost-Regular.ttf",
+                b"x".as_slice(),
+            )])),
+        )
+        .unwrap();
+        let ask = |skip: u32, path: &str| {
+            let (st, payload) = dispatch_director(
+                &d,
+                OP_STORED_NAMES,
+                &encode_names_req(0, skip, path),
+                0,
+                4096,
+                None,
+            );
+            assert_eq!(st, ST_OK, "{path}");
+            String::from_utf8(payload).unwrap()
+        };
+        assert_eq!(
+            ask(0, "data/interface/fonts/jost-regular.ttf"),
+            "Data/Interface/Fonts/Jost-Regular.ttf"
+        );
+        assert_eq!(
+            ask(2, "DATA/INTERFACE/FONTS/JOST-REGULAR.TTF"),
+            "Fonts/Jost-Regular.ttf"
+        );
+        assert_eq!(ask(4, "data/interface/fonts/jost-regular.ttf"), "");
+        // What nothing has keeps the caller's spelling, and what is above it
+        // is still the stored one.
+        assert_eq!(
+            ask(0, "data/INTERFACE/New Dir/New.TXT"),
+            "Data/Interface/New Dir/New.TXT"
+        );
+        assert_eq!(ask(0, ""), "");
     }
 
     #[test]

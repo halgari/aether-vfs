@@ -17,15 +17,31 @@ pub const MAGIC: u32 = 0x5646_4950;
 ///   plausible-looking garbage, never an error. Bumping this turns that into
 ///   a loud failure at attach.
 ///
-/// **Bump this whenever a payload layout changes.** Opcode numbers are a
-/// separate contract and must never be renumbered.
-pub const VERSION: u32 = 2;
+/// - **3** — concurrent clients: the slot state machine gained
+///   [`ST_ABANDONED`], the server echoes the request id it answered into
+///   [`SlotHeader::ack`], and the ring header carries the server's worker
+///   count ([`RingHeader::worker_hint`]). No payload changed shape, but the
+///   two ends must agree on who frees a slot whose client stopped waiting: a
+///   version-2 server would publish `COMPLETED` over `ABANDONED` and the slot
+///   would never be freed, and a version-2 client frees a slot its server is
+///   still writing. So the pair is refused at attach, like a payload change.
+///
+/// **Bump this whenever a payload layout or the slot state machine changes.**
+/// Opcode numbers are a separate contract and must never be renumbered.
+pub const VERSION: u32 = 3;
 
 pub const ST_FREE: u32 = 0;
 pub const ST_CLAIMED: u32 = 1;
 pub const ST_SUBMITTED: u32 = 2;
 pub const ST_PROCESSING: u32 = 3;
 pub const ST_COMPLETED: u32 = 4;
+/// The client stopped waiting for a request a server is still processing.
+///
+/// The slot stays the server's: nobody may claim it, and its payload and its
+/// arena bank may still be written. The server frees it when it finishes
+/// (see `ring::server_complete`), which is what keeps a late reply from being
+/// read by a later request.
+pub const ST_ABANDONED: u32 = 5;
 
 // Opcode catalog — reference values; the ring never interprets these.
 pub const OP_GETATTR: u32 = 1;
@@ -41,6 +57,7 @@ pub const OP_MKDIR: u32 = 10;
 pub const OP_CLOSE: u32 = 11;
 pub const OP_REGISTER_PROCESS: u32 = 12;
 pub const OP_HEARTBEAT: u32 = 13;
+pub const OP_STORED_NAMES: u32 = 14;
 
 #[repr(C)]
 pub struct RingHeader {
@@ -49,7 +66,10 @@ pub struct RingHeader {
     pub slot_count: u32,
     pub slot_stride: u32,
     pub payload_cap: u32,
-    pub _pad: u32,
+    /// How many threads serve this ring, written by the server after `init`;
+    /// 0 when it did not say. A client bounds its slow requests below this so
+    /// that some worker is always left for a fast one.
+    pub worker_hint: u32,
     pub req_seq: u64,
     pub submit_seq: u32,
     pub _pad2: u32,
@@ -62,7 +82,10 @@ pub struct SlotHeader {
     pub flags: u32,
     pub payload_len: u32,
     pub status: i32,
-    pub _pad: u32,
+    /// Low 32 bits of the request id this slot's response answers, written by
+    /// the server with the response. The client compares it with the id it
+    /// published.
+    pub ack: u32,
     pub req_id: u64,
 }
 
@@ -77,6 +100,7 @@ pub const RH_VERSION: usize = offset_of!(RingHeader, version);
 pub const RH_SLOT_COUNT: usize = offset_of!(RingHeader, slot_count);
 pub const RH_SLOT_STRIDE: usize = offset_of!(RingHeader, slot_stride);
 pub const RH_PAYLOAD_CAP: usize = offset_of!(RingHeader, payload_cap);
+pub const RH_WORKER_HINT: usize = offset_of!(RingHeader, worker_hint);
 pub const RH_REQ_SEQ: usize = offset_of!(RingHeader, req_seq);
 pub const RH_SUBMIT_SEQ: usize = offset_of!(RingHeader, submit_seq);
 
@@ -85,6 +109,7 @@ pub const SH_OPCODE: usize = offset_of!(SlotHeader, opcode);
 pub const SH_FLAGS: usize = offset_of!(SlotHeader, flags);
 pub const SH_PAYLOAD_LEN: usize = offset_of!(SlotHeader, payload_len);
 pub const SH_STATUS: usize = offset_of!(SlotHeader, status);
+pub const SH_ACK: usize = offset_of!(SlotHeader, ack);
 pub const SH_REQ_ID: usize = offset_of!(SlotHeader, req_id);
 
 /// Round `n` up to a multiple of 8.
@@ -98,6 +123,7 @@ mod tests {
 
     #[test]
     fn header_offsets() {
+        assert_eq!(RH_WORKER_HINT, 20);
         assert_eq!(RH_REQ_SEQ, 24);
         assert_eq!(RH_SUBMIT_SEQ, 32);
         assert_eq!(RING_HEADER_SIZE, 40);
@@ -107,6 +133,7 @@ mod tests {
     fn slot_offsets() {
         assert_eq!(SH_STATE, 0);
         assert_eq!(SH_STATUS, 16);
+        assert_eq!(SH_ACK, 20);
         assert_eq!(SH_REQ_ID, 24);
         assert_eq!(SLOT_HEADER_SIZE, 32);
     }

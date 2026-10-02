@@ -41,6 +41,36 @@ pub fn sorted_by_folded_name(by_folded: HashMap<String, DirEntry>) -> Vec<DirEnt
     keyed.into_iter().map(|(_, e)| e).collect()
 }
 
+/// The stored spelling of the last component of `p` in `provider`, or `None`
+/// if it has no such entry: [`Provider::stored_name`], and for a provider
+/// that does not implement it, the matching name from a listing of the
+/// parent.
+///
+/// The provider's root has no name of its own; it answers `None`.
+pub fn stored_name(provider: &dyn Provider, p: vfs_provider::VPath) -> Result<Option<String>, i32> {
+    match provider.stored_name(p) {
+        Err(e) if e == vfs_provider::not_supported() => {}
+        answered => return answered,
+    }
+    let rel = p.rel.trim_matches('/');
+    if rel.is_empty() {
+        return Ok(None);
+    }
+    let (parent, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let entries = match provider.readdir(vfs_provider::VPath::new(p.root, parent)) {
+        Ok(entries) => entries,
+        Err(e) if e == vfs_provider::not_found() || e == vfs_provider::not_a_dir() => {
+            return Ok(None)
+        }
+        Err(e) => return Err(e),
+    };
+    let folded = vfs_core::fold(name);
+    Ok(entries
+        .into_iter()
+        .map(|e| e.name)
+        .find(|n| vfs_core::fold(n) == folded))
+}
+
 /// Stack providers bottom→top so the last entry wins on conflicts (layer order).
 ///
 /// Empty input is rejected. A single entry is returned as-is.

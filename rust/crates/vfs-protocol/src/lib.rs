@@ -31,6 +31,8 @@ pub const OP_MKDIR: u32 = 10;
 pub const OP_CLOSE: u32 = 11;
 pub const OP_REGISTER_PROCESS: u32 = 12;
 pub const OP_HEARTBEAT: u32 = 13;
+/// The stored spelling of a path's components: see [`encode_names_req`].
+pub const OP_STORED_NAMES: u32 = 14;
 
 /// Ring/request flag: prefer bulk-arena READ (data in shared arena, not ring payload).
 pub const FLAG_READ_BULK: u32 = 0x1;
@@ -366,6 +368,30 @@ pub fn decode_mkdir_req(p: &[u8]) -> Option<(u32, u32, String)> {
     let mode = u32::from_le_bytes(p[4..8].try_into().ok()?);
     let path = core::str::from_utf8(&p[8..]).ok()?.to_string();
     Some((root, mode, path))
+}
+
+/// STORED_NAMES req: `root:u32 | skip:u32 | path_utf8`. Asks how the
+/// components of `path` from the `skip`-th on are spelled where they are
+/// stored. The reply is those names joined by `/`, one per component asked
+/// about (a name has no `/` in it); a component nothing has comes back as it
+/// was sent.
+pub fn encode_names_req(root: u32, skip: u32, path: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(8 + path.len());
+    b.extend_from_slice(&root.to_le_bytes());
+    b.extend_from_slice(&skip.to_le_bytes());
+    b.extend_from_slice(path.as_bytes());
+    b
+}
+
+/// Returns `(root, skip, path)`.
+pub fn decode_names_req(p: &[u8]) -> Option<(u32, u32, String)> {
+    if p.len() < 8 {
+        return None;
+    }
+    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    let skip = u32::from_le_bytes(p[4..8].try_into().ok()?);
+    let path = core::str::from_utf8(&p[8..]).ok()?.to_string();
+    Some((root, skip, path))
 }
 
 /// RENAME req: `root:u32 | from_len:u32 | from_utf8 | to_utf8`

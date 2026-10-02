@@ -9,6 +9,16 @@ pub trait Notifier {
     fn wait_server(&self) {}
     fn notify_client(&self, _slot: u32) {}
     fn wait_client(&self, _slot: u32) {}
+    /// [`Self::wait_client`] for a response that has not come within
+    /// `endpoint::CLIENT_SPIN_BUDGET`; `waited` is how long it has been.
+    ///
+    /// By now the request is waiting on its provider, not on the ring, so this
+    /// is where a client gives the processor up — yield, then sleep — instead
+    /// of spinning a core for as long as a network fetch takes. Never reached
+    /// on the hot path. The default keeps doing what `wait_client` does.
+    fn idle_client(&self, slot: u32, _waited: core::time::Duration) {
+        self.wait_client(slot);
+    }
     fn notify_slot_free(&self) {}
 }
 

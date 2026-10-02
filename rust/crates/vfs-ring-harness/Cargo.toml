@@ -27,6 +27,17 @@ vfs-env = { path = "../vfs-env" }
 
 [target.'cfg(unix)'.dependencies]
 vfs-unix = { path = "../vfs-unix" }
+# `ring-bench` drives the real Director and its serve workers, not a
+# hand-written server: the worker loop and its notifier are half of what a
+# round trip costs.
+vfs-director = { path = "../vfs-director" }
+vfs-provider = { path = "../vfs-provider" }
+# `ring-bench names`: a base whose names are in a tree (`vfs-compose`) and one
+# whose names are in an index (a `vfs-storage` layer), and the shim's own
+# final-path code (`vfs-core`).
+vfs-compose = { path = "../vfs-compose" }
+vfs-storage = { path = "../vfs-storage" }
+vfs-core = { path = "../vfs-core" }
 
 [[bin]]
 name = "vfs-ring-harness"
@@ -48,3 +59,9 @@ path = "src/bin/ring-file-client.rs"
 [[bin]]
 name = "shim-ring-client"
 path = "src/bin/shim-ring-client.rs"
+
+# Native on both ends: latency of one requester and throughput of several,
+# under the shim's client discipline before and after `ring_lock` went.
+[[bin]]
+name = "ring-bench"
+path = "src/bin/ring-bench.rs"
