@@ -76,7 +76,22 @@ pub struct OverlayProvider {
     /// the same step. A process outside this provider mutating the upper's
     /// markers underneath us is already outside the contract — the upper is
     /// the overlay's private store.
-    whiteouts: RwLock<HashMap<u32, HashMap<String, HashSet<String>>>>,
+    ///
+    /// The index also carries a generation, bumped by every marker change
+    /// this provider makes: a directory's first scan runs outside the lock,
+    /// and its result is stored only if no marker changed meanwhile (see
+    /// [`Self::whiteout_walk`]).
+    whiteouts: RwLock<WhiteoutIndex>,
+}
+
+/// [`OverlayProvider::whiteouts`].
+#[derive(Default)]
+struct WhiteoutIndex {
+    /// Bumped whenever a marker is written or cleared, or a scanned
+    /// directory is dropped for a rescan.
+    generation: u64,
+    /// Root → folded directory → the folded names its markers hide.
+    dirs: HashMap<u32, HashMap<String, HashSet<String>>>,
 }
 
 /// Removes `path` from the in-flight set on drop, including on early return —
@@ -126,7 +141,7 @@ impl OverlayProvider {
             next: AtomicU64::new(1),
             opens: Mutex::new(HashMap::new()),
             copying: Mutex::new(HashSet::new()),
-            whiteouts: RwLock::new(HashMap::new()),
+            whiteouts: RwLock::new(WhiteoutIndex::default()),
         })
     }
 
@@ -226,10 +241,11 @@ impl OverlayProvider {
         let folded = fold(p.rel);
         loop {
             // The directory the walk reached that has not been scanned yet,
-            // in the caller's spelling and folded.
-            let (raw_dir, fol_dir) = {
+            // in the caller's spelling and folded, and the index's generation
+            // when the walk found it so.
+            let (raw_dir, fol_dir, generation) = {
                 let index = self.whiteouts.read().map_err(|_| map_io_err())?;
-                let dirs = index.get(&p.root.0);
+                let dirs = index.dirs.get(&p.root.0);
                 let (mut raw, mut fol) = (p.rel, folded.as_str());
                 let mut check = own;
                 loop {
@@ -239,7 +255,7 @@ impl OverlayProvider {
                         match dirs.and_then(|d| d.get(fol_parent)) {
                             Some(hidden) if hidden.contains(fol_name) => return Ok(true),
                             Some(_) => {}
-                            None => break (raw_parent, fol_parent),
+                            None => break (raw_parent, fol_parent, index.generation),
                         }
                     }
                     if !ancestors || !raw.contains('/') {
@@ -254,25 +270,36 @@ impl OverlayProvider {
             // through it. Not under the lock: it is a call into the upper.
             // The walk then starts over, and finds this directory scanned.
             let hidden = self.scan_whiteouts(VPath::new(p.root, raw_dir))?;
-            self.whiteouts
-                .write()
-                .map_err(|_| map_io_err())?
-                .entry(p.root.0)
-                .or_default()
-                .insert(fol_dir.to_owned(), hidden);
+            let mut index = self.whiteouts.write().map_err(|_| map_io_err())?;
+            // A marker written or cleared since the walk released the lock
+            // may be missing from this scan, and `note_whiteout` could not
+            // record it in a directory that was not scanned yet. Storing the
+            // scan would then hide the change until something dropped the
+            // directory. Throw it away; the walk starts over and scans again.
+            if index.generation == generation {
+                index
+                    .dirs
+                    .entry(p.root.0)
+                    .or_default()
+                    .insert(fol_dir.to_owned(), hidden);
+            }
         }
     }
 
     /// Record that `p`'s marker now exists (`hidden`) or no longer does, in
     /// whichever directory entry the index has already scanned. A directory
-    /// not yet scanned needs nothing: its first scan will see the marker's
-    /// real state on disk.
+    /// not yet scanned has no entry to update: its first scan will see the
+    /// marker's real state on disk — and a scan already under way, which may
+    /// have read the directory before this change, is discarded by the
+    /// generation bump.
     fn note_whiteout(&self, p: VPath, hidden: bool) {
         let (parent, name) = Self::split_parent(p.rel);
         let Ok(mut g) = self.whiteouts.write() else {
             return;
         };
-        if let Some(set) = g.get_mut(&p.root.0).and_then(|d| d.get_mut(&fold(parent))) {
+        g.generation += 1;
+        let scanned = g.dirs.get_mut(&p.root.0);
+        if let Some(set) = scanned.and_then(|d| d.get_mut(&fold(parent))) {
             if hidden {
                 set.insert(fold(name));
             } else {
@@ -297,7 +324,9 @@ impl OverlayProvider {
             return;
         }
         if let Ok(mut g) = self.whiteouts.write() {
-            if let Some(dirs) = g.get_mut(&p.root.0) {
+            // Also discards a scan of this directory already under way.
+            g.generation += 1;
+            if let Some(dirs) = g.dirs.get_mut(&p.root.0) {
                 dirs.remove(&fold(parent));
             }
         }
@@ -1045,6 +1074,10 @@ pub(crate) mod tests {
         inner: MemUpper,
         getattrs: AtomicU64,
         readdirs: AtomicU64,
+        /// Runs once, after the next `readdir` has read the directory and
+        /// before it returns: what another thread could do in that window.
+        #[allow(clippy::type_complexity)]
+        after_readdir: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     impl Provider for CountingUpper {
@@ -1057,7 +1090,12 @@ pub(crate) mod tests {
         }
         fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
             self.readdirs.fetch_add(1, Ordering::Relaxed);
-            self.inner.readdir(p)
+            let entries = self.inner.readdir(p);
+            let hook = self.after_readdir.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+            entries
         }
         fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
             self.inner.open(p, flags)
@@ -1501,6 +1539,62 @@ pub(crate) mod tests {
             assert_eq!(ask("top.txt"), (true, false, true));
             assert_eq!(ask("absent"), (false, false, false));
             assert_eq!(ask(""), (false, false, false));
+        }
+    }
+
+    /// A directory's first scan runs outside the index lock. A whiteout
+    /// written in that window is in neither the scan (already read) nor the
+    /// index (the directory was not scanned yet, so there was no entry to
+    /// update); storing the scan afterwards would leave the removed file
+    /// visible to `getattr` and `open` for good. The remove is run from
+    /// inside the scan here, so the window is hit every time.
+    #[test]
+    fn a_whiteout_written_during_a_directorys_first_scan_still_hides() {
+        use vfs_provider::{Provider, VPath};
+        for clear in [false, true] {
+            let base = Arc::new(InlineProvider::from_files([
+                ("dir/a.txt", b"BASE".as_slice()),
+                ("dir/b.txt", b"KEEP".as_slice()),
+            ]));
+            let upper = Arc::new(CountingUpper::default());
+            let a = VPath::at_default("dir/a.txt");
+            if clear {
+                // The mirror image: the marker exists, and is cleared (by a
+                // create over it) while the scan that saw it is in flight.
+                let (h, _, _) = upper
+                    .open(VPath::at_default("dir/.wh.a.txt"), OPEN_WRITE | OPEN_CREATE)
+                    .unwrap();
+                upper.close(h).unwrap();
+            }
+            let ov = Arc::new(OverlayProvider::from_arcs(base, upper.clone()).unwrap());
+            let other = Arc::clone(&ov);
+            *upper.after_readdir.lock().unwrap() = Some(Box::new(move || {
+                if clear {
+                    let (h, _, _) = other.open(a, OPEN_WRITE | OPEN_CREATE).unwrap();
+                    other.close(h).unwrap();
+                } else {
+                    other.remove(a).unwrap();
+                }
+            }));
+            // This lookup scans `dir`; the change lands mid-scan.
+            let _ = ov.getattr(a).unwrap();
+            assert!(
+                upper.after_readdir.lock().unwrap().is_none(),
+                "the scan ran"
+            );
+            // Whatever that lookup answered, the change is complete now.
+            assert_eq!(ov.getattr(a).unwrap().is_some(), clear, "clear={clear}");
+            assert_eq!(
+                ov.open(a, OPEN_READ).map(|(h, _, _)| ov.close(h).unwrap()),
+                if clear { Ok(()) } else { Err(not_found()) },
+                "clear={clear}"
+            );
+            assert!(ov
+                .getattr(VPath::at_default("dir/b.txt"))
+                .unwrap()
+                .is_some());
+            // Break the test's reference cycle (upper → hook → overlay).
+            drop(ov);
         }
     }
 
