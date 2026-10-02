@@ -121,6 +121,24 @@ impl LPath {
     }
 }
 
+/// The folded path [`LPath::parse`] gives for `rel`, without the components:
+/// what a lookup that creates nothing needs. `getattr` runs for every
+/// metadata question the overlay above passes down — nearly always for a
+/// path this layer does not hold — so it is kept to two allocations.
+fn folded_path(rel: &str) -> Result<String, i32> {
+    let mut joined = String::with_capacity(rel.len());
+    for c in rel.split(['/', '\\']).filter(|c| !c.is_empty()) {
+        if c == "." || c == ".." {
+            return Err(bad_request());
+        }
+        if !joined.is_empty() {
+            joined.push('/');
+        }
+        joined.push_str(c);
+    }
+    Ok(fold(&joined))
+}
+
 /// One open handle.
 struct OpenFile {
     /// `None` for a directory handle.
@@ -493,8 +511,8 @@ impl Provider for LayerProvider {
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
-        let p = LPath::parse(p.rel)?;
-        Ok(self.get(&p.folded)?.map(|r| self.stat_of(&r)))
+        let folded = folded_path(p.rel)?;
+        Ok(self.get(&folded)?.map(|r| self.stat_of(&r)))
     }
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
@@ -839,7 +857,7 @@ mod tests {
     use crate::ids::layer_file_id;
     use crate::storage::Storage;
 
-    use super::LayerProvider;
+    use super::{folded_path, LPath, LayerProvider};
     #[cfg(not(windows))]
     use crate::test_util::snapshot;
 
@@ -910,6 +928,31 @@ mod tests {
         p.mkdir(at("sub")).unwrap();
         for (rel, body) in FIXTURE_FILES {
             write_file(p, rel, 0, body);
+        }
+    }
+
+    #[test]
+    fn folded_path_is_the_parsed_paths_fold() {
+        for rel in [
+            "",
+            "a",
+            "Data/Meshes/Actor.NIF",
+            "Data\\SKSE\\Plugins/x.ini",
+            "/lead//double///and/trail/",
+            "\\\\server\\share",
+            "ÄÖ/İstanbul/\u{212A}.txt",
+            "a/./b",
+            "a/../b",
+            "..",
+            ".",
+            "a/.../b",
+            "a/.hidden/..b",
+        ] {
+            assert_eq!(
+                folded_path(rel),
+                LPath::parse(rel).map(|p| p.folded),
+                "{rel:?}"
+            );
         }
     }
 
