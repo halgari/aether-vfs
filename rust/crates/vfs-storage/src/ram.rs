@@ -257,6 +257,43 @@ impl RamTier {
         g.ring.push_back(key);
     }
 
+    /// Inserts a block a reader just read on a miss, unless the tier already
+    /// holds that block, and returns the one the tier holds (or `data` itself
+    /// if the tier refused it).
+    ///
+    /// For callers whose concurrent readers can miss the same block and each
+    /// read it: they all hold the same bytes, so the first to arrive is kept
+    /// and the rest are dropped. That skips [`Self::put`]'s replace path,
+    /// which sweeps the shard's ring under its exclusive lock. A caller that
+    /// must overwrite — a write's new bytes — uses `put`.
+    pub fn fill(&self, file_id: &[u8; 17], block: u64, data: Arc<[u8]>) -> Arc<[u8]> {
+        let key = Key {
+            file_id: *file_id,
+            block,
+        };
+        let len = data.len() as u64;
+        if len > self.shard_budget {
+            self.oversized_rejects.fetch_add(1, Ordering::Relaxed);
+            self.warn_oversized(len);
+            return data;
+        }
+        let mut g = write(self.shard(file_id, block));
+        if let Some(e) = g.map.get(&key) {
+            return Block::clone(&e.data);
+        }
+        self.evict_to_fit(&mut g, len);
+        g.bytes += len;
+        g.map.insert(
+            key,
+            RamEntry {
+                data: Block::clone(&data),
+                referenced: AtomicBool::new(false),
+            },
+        );
+        g.ring.push_back(key);
+        data
+    }
+
     /// Drops every block of a file. Cold path: a sweep of every shard.
     ///
     /// Infallible: a poisoned shard is cleared through its poison, because a
@@ -584,6 +621,35 @@ mod tests {
         );
         assert!(s.evicts > 0);
         assert!(s.blocks > 0, "sharding evicted everything");
+    }
+
+    /// `fill` keeps the block the tier already holds and hands it back; the
+    /// map and ring stay 1:1 and the bytes are counted once.
+    #[test]
+    fn fill_keeps_the_block_already_resident() {
+        let c = RamTier::with_geometry(256, 64);
+        assert_eq!(c.shard_count(), 1);
+        let first = blk(1, 64);
+        let kept = c.fill(&FID, 0, Arc::clone(&first));
+        assert!(Arc::ptr_eq(&kept, &first), "an absent block is inserted");
+        let again = c.fill(&FID, 0, blk(1, 64));
+        assert!(Arc::ptr_eq(&again, &first), "a resident block is kept");
+        assert_eq!(c.stats().blocks, 1);
+        assert_eq!(c.stats().bytes, 64);
+        // `put` still replaces.
+        c.put(&FID, 0, blk(2, 64));
+        assert_eq!(c.get(&FID, 0).unwrap()[0], 2);
+        // A full shard evicts to make room for a fill, as for a put.
+        for i in 1..10u64 {
+            c.fill(&FID, i, blk(3, 64));
+        }
+        let s = c.stats();
+        assert!(s.bytes <= 256 && s.bytes == s.blocks * 64 && s.evicts >= 1);
+        // A tier that is off hands the block back and holds nothing.
+        let off = RamTier::new(0);
+        let d = blk(4, 16);
+        assert!(Arc::ptr_eq(&off.fill(&FID, 0, Arc::clone(&d)), &d));
+        assert_eq!(off.stats().blocks, 0);
     }
 
     /// A hit hands back a handle to the *same* allocation, not a copy of it.

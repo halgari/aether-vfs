@@ -633,8 +633,9 @@ impl CachedSource {
             return None;
         }
         s.cache.store_hits.fetch_add(1, Ordering::Relaxed);
-        s.ram.put(&f.id, b, Arc::clone(&d));
-        Some(d)
+        // The content is immutable: a block another reader filled meanwhile
+        // holds the same bytes, and the tier keeps it.
+        Some(s.ram.fill(&f.id, b, d))
     }
 
     /// Reads `buf.len()` bytes of `f` at `start` out of the store into `buf`,

@@ -189,6 +189,12 @@ pub struct Storage {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     pub(crate) layer_read_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Test hook: runs inside a layer file read's RAM-tier fill, after the
+    /// block was read from the store and before it is put into the tier
+    /// (still under the file's state lock).
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) layer_fill_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// The default for [`DurableClock::max_commits`].
@@ -348,6 +354,8 @@ impl Storage {
             drop_hook: Mutex::new(None),
             #[cfg(test)]
             layer_read_hook: Mutex::new(None),
+            #[cfg(test)]
+            layer_fill_hook: Mutex::new(None),
         }))
     }
 

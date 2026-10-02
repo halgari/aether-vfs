@@ -17,6 +17,17 @@
 //! block store's read path, a cell's `path` for a log line), never `gate` or
 //! `ns`, so sharing it adds no lock-order edge.
 //!
+//! **Writers and a steady stream of reads.** A save's `write_at` or `close`
+//! must not wait forever behind a game that keeps reading the file. The lock
+//! is `std::sync::RwLock`, whose documentation leaves the priority policy to
+//! the platform. The implementation std uses on Linux stops admitting new
+//! readers once a writer is waiting, so a writer waits only for the reads
+//! already inside; that is observed behaviour (and what a stress run of
+//! eight continuous readers against one writer showed), not a documented
+//! guarantee, and it has not been checked on other platforms. If std ever
+//! changes it, replace the lock with one that documents writer preference
+//! rather than rely on this note.
+//!
 //! The `state` lock is taken before the layer's namespace lock, never after
 //! it (the layer updates the catalog row while it still holds the state lock
 //! after a commit). Everything the namespace side needs from a cell without
@@ -30,8 +41,9 @@
 //! a reader cannot put a block it read before a commit back in after it (the
 //! stale-refill race documented on [`crate::RamTier::invalidate_file`]): the
 //! commit cannot start until every read that filled from the old store copy
-//! has finished its `put`. Two concurrent readers may fill the same block;
-//! both put the same committed bytes, and [`crate::RamTier::put`] keeps one.
+//! has finished its fill. Two concurrent readers may fill the same block:
+//! each decodes it, both hold the same committed bytes, and
+//! [`crate::RamTier::fill`] keeps the first.
 //! A commit also puts the blocks it wrote, so the next read of a just-written
 //! block is a RAM hit.
 
@@ -201,8 +213,17 @@ impl FileCell {
         let buf = Arc::get_mut(&mut data).expect("a new block has one owner");
         match s.store.read(&self.id, b * bs, buf) {
             Ok(r) if r.missing.is_empty() && r.bytes == want => {
-                s.ram.put(&self.id, b, Arc::clone(&data));
-                Ok(data)
+                #[cfg(test)]
+                {
+                    let hook = crate::cached::lock(&s.layer_fill_hook).clone();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
+                // Another read of this block may have filled it meanwhile
+                // (reads share the state lock): the tier keeps that one, the
+                // same committed bytes.
+                Ok(s.ram.fill(&self.id, b, data))
             }
             Ok(r) => {
                 tracing::error!(
