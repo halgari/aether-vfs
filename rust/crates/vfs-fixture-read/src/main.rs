@@ -4,18 +4,47 @@
 //! If `VFS_FIXTURE_WRITE_PATH` is set, after a successful read it also writes
 //! `VFS_FIXTURE_WRITE_DATA` (default `written`) there, exiting 1 on error.
 //!
-//! If `VFS_FIXTURE_SLOW_PATH` is set, it then reads that file on one thread
-//! while `VFS_FIXTURE_THREADS` (default 4) others each read `VFS_FIXTURE_PATH`
-//! `VFS_FIXTURE_ROUNDS` (default 50) times, and exits 1 unless every one of
-//! those reads was right **and finished while the slow read was still in
-//! flight**. The host makes the slow file slow; this asserts that one thread's
-//! file operation does not make the others wait.
+//! If `VFS_FIXTURE_SLOW_PATH` is set, it then reads that file — each read one
+//! `ReadFile` for the whole of it — on `VFS_FIXTURE_SLOW_THREADS` (default 1)
+//! threads, while `VFS_FIXTURE_THREADS` (default 4) others each read
+//! `VFS_FIXTURE_PATH` `VFS_FIXTURE_ROUNDS` (default 50) times, and exits 1
+//! unless every one of those reads was right **and finished while the slow
+//! reads were all still in flight**. The host makes the slow file slow; this
+//! asserts that one thread's file operation does not make the others wait.
+//!
+//! Two more paths take the timing out of that, when the host serves them:
+//! `VFS_FIXTURE_SLOW_STARTED` is waited for (until it exists) before the fast
+//! threads start, in place of a fixed head start, and
+//! `VFS_FIXTURE_SLOW_RELEASE` is looked up once they have all finished, which
+//! is the host's cue to let the slow reads go.
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// How long the fast threads give the slow read to get in flight.
+/// How long the fast threads give the slow read to get in flight, when the
+/// host does not say when it is (`VFS_FIXTURE_SLOW_STARTED`).
 const SLOW_HEAD_START: Duration = Duration::from_millis(300);
+/// How long to wait for the host to say so before giving up.
+const SLOW_START_PATIENCE: Duration = Duration::from_secs(60);
+
+/// Read all of `path` with a single read call for its whole length, so the
+/// shim sees one large `NtReadFile` (and pipelines it) rather than whatever
+/// sizes `std::fs::read` chooses.
+fn read_in_one_call(path: &str) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len() as usize;
+    let mut buf = vec![0u8; len];
+    let mut got = 0;
+    while got < len {
+        match f.read(&mut buf[got..])? {
+            0 => break,
+            n => got += n,
+        }
+    }
+    buf.truncate(got);
+    Ok(buf)
+}
 
 fn env_num(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -28,15 +57,31 @@ fn env_num(name: &str, default: usize) -> usize {
 fn concurrent_phase(path: &str, slow_path: &str, expect_len: usize, fill: Option<u8>) {
     let threads = env_num("VFS_FIXTURE_THREADS", 4);
     let rounds = env_num("VFS_FIXTURE_ROUNDS", 50);
+    let slow_threads = env_num("VFS_FIXTURE_SLOW_THREADS", 1);
     let slow_done = AtomicBool::new(false);
     let started = Instant::now();
     let (fast_ms, slow_was_done) = std::thread::scope(|s| {
-        let slow = s.spawn(|| {
-            let r = std::fs::read(slow_path);
-            slow_done.store(true, Ordering::SeqCst);
-            r
-        });
-        std::thread::sleep(SLOW_HEAD_START);
+        let slow: Vec<_> = (0..slow_threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let r = read_in_one_call(slow_path);
+                    slow_done.store(true, Ordering::SeqCst);
+                    r
+                })
+            })
+            .collect();
+        match std::env::var("VFS_FIXTURE_SLOW_STARTED") {
+            Ok(marker) => {
+                while !std::path::Path::new(&marker).exists() {
+                    if started.elapsed() > SLOW_START_PATIENCE {
+                        eprintln!("FIXTURE FAIL: {marker} never appeared: the slow reads did not all start");
+                        exit(1);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            Err(_) => std::thread::sleep(SLOW_HEAD_START),
+        }
         let fast: Vec<_> = (0..threads)
             .map(|t| {
                 s.spawn(move || {
@@ -68,22 +113,28 @@ fn concurrent_phase(path: &str, slow_path: &str, expect_len: usize, fill: Option
         // Sampled the moment the last fast read returned, before the slow
         // thread is joined: this is the whole assertion.
         let slow_was_done = slow_done.load(Ordering::SeqCst);
-        match slow.join().unwrap() {
-            Ok(d) if !d.is_empty() => {}
-            Ok(_) => {
-                eprintln!("FIXTURE FAIL: slow read of {slow_path} came back empty");
-                exit(1);
-            }
-            Err(e) => {
-                eprintln!("FIXTURE FAIL: slow read of {slow_path}: {e}");
-                exit(1);
+        if let Ok(release) = std::env::var("VFS_FIXTURE_SLOW_RELEASE") {
+            // The lookup is the message; the path need not exist.
+            let _ = std::fs::metadata(release);
+        }
+        for h in slow {
+            match h.join().unwrap() {
+                Ok(d) if !d.is_empty() => {}
+                Ok(_) => {
+                    eprintln!("FIXTURE FAIL: slow read of {slow_path} came back empty");
+                    exit(1);
+                }
+                Err(e) => {
+                    eprintln!("FIXTURE FAIL: slow read of {slow_path}: {e}");
+                    exit(1);
+                }
             }
         }
         (fast_ms, slow_was_done)
     });
     if slow_was_done {
         eprintln!(
-            "FIXTURE FAIL: the slow read finished before the {} fast reads did ({fast_ms} ms): \
+            "FIXTURE FAIL: a slow read finished before the {} fast reads did ({fast_ms} ms): \
              they waited for it",
             threads * rounds
         );

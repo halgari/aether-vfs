@@ -381,24 +381,64 @@ fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider(
 // Concurrent file operations across the Wine boundary
 // ---------------------------------------------------------------------------
 
-/// The slow file, as the child names it and as the graph does.
+/// The file the fast threads read, as the child names it. Two bulk chunks
+/// and an inline tail, so every read is a pipeline through the arena.
+const BIG_CHILD_PATH: &str = r"C:\vfs-session\root\data\big.bin";
+const BIG_LEN: usize = 2 * 1024 * 1024 + 4096;
+/// The slow file, as the child names it and as the graph does. Eight 1 MiB
+/// chunks: a read of it is the deepest pipeline the shim runs.
 const SLOW_CHILD_PATH: &str = r"C:\vfs-session\root\data\slow.bin";
 const SLOW_VPATH: &str = "data/slow.bin";
-/// How long every read of the slow file holds its Director worker: a stand-in
-/// for a block still coming from the network. Long against the fixture's fast
-/// phase (a few hundred round trips), short against a test run.
-const SLOW_READ: Duration = Duration::from_secs(4);
+const SLOW_LEN: usize = 8 * 1024 * 1024;
+/// Appears, in the provider's directory, once the slow reads are all inside
+/// the provider; the fixture waits for it before it starts its fast threads.
+const STARTED_CHILD_PATH: &str = r"C:\vfs-session\root\data\slow.started";
+const STARTED_VPATH: &str = "data/slow.started";
+/// Looked up by the fixture once its fast threads have finished: the cue to
+/// let the slow reads go. It never exists.
+const RELEASE_CHILD_PATH: &str = r"C:\vfs-session\root\data\release.slow";
+const RELEASE_VPATH: &str = "data/release.slow";
+/// Two threads read the slow file at once.
+const SLOW_THREADS: usize = 2;
+/// Sixteen workers give the shim twelve data permits. One read may hold six
+/// and may not take the last three beyond its first, so two eight-chunk
+/// reads have 6 + 3 requests in flight — not 8 + 4, which is every permit.
+const IO_WORKERS: usize = 16;
+const SLOW_IN_FLIGHT: usize = 9;
+/// How long the provider holds the slow reads if the fixture never gives the
+/// cue. Only a failing run waits this long.
+const SLOW_PATIENCE: Duration = Duration::from_secs(40);
 const FAST_THREADS: usize = 4;
 const FAST_ROUNDS: usize = 50;
 
-/// A [`DiskProvider`] whose reads of [`SLOW_VPATH`] block, and which counts
-/// the reads of anything else that it served while one was blocked.
+/// A [`DiskProvider`] whose reads of [`SLOW_VPATH`] block until the fixture
+/// looks [`RELEASE_VPATH`] up, and which counts what it serves meanwhile.
 struct Stalling {
     disk: DiskProvider,
+    /// Where [`STARTED_VPATH`] is created: the provider's own directory.
+    content: PathBuf,
     slow_handles: Mutex<Vec<Handle>>,
-    slow_in_flight: AtomicBool,
-    slow_reads: AtomicUsize,
+    released: Mutex<bool>,
+    release: std::sync::Condvar,
+    /// Slow reads blocked in here now, and the most there ever were.
+    slow_held: AtomicUsize,
+    slow_peak: AtomicUsize,
+    /// Reads of anything else that arrived while slow reads were blocked.
     reads_during_slow: AtomicUsize,
+    cue_seen: AtomicBool,
+}
+
+impl Stalling {
+    /// Let the slow reads go if `p` is the path the fixture looks up to say
+    /// so. A lookup reaches a provider as a stat or as an open, depending on
+    /// how the caller's runtime asks.
+    fn cue(&self, p: VPath) {
+        if p.rel.eq_ignore_ascii_case(RELEASE_VPATH) {
+            self.cue_seen.store(true, Ordering::SeqCst);
+            *self.released.lock().unwrap() = true;
+            self.release.notify_all();
+        }
+    }
 }
 
 impl Provider for Stalling {
@@ -406,12 +446,14 @@ impl Provider for Stalling {
         self.disk.capabilities()
     }
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        self.cue(p);
         self.disk.getattr(p)
     }
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
         self.disk.readdir(p)
     }
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+        self.cue(p);
         let r = self.disk.open(p, flags)?;
         if p.rel.eq_ignore_ascii_case(SLOW_VPATH) {
             self.slow_handles.lock().unwrap().push(r.0);
@@ -423,12 +465,20 @@ impl Provider for Stalling {
         self.disk.close(h)
     }
     fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-        if self.slow_handles.lock().unwrap().contains(&h) {
-            self.slow_reads.fetch_add(1, Ordering::SeqCst);
-            self.slow_in_flight.store(true, Ordering::SeqCst);
-            std::thread::sleep(SLOW_READ);
-            self.slow_in_flight.store(false, Ordering::SeqCst);
-        } else if self.slow_in_flight.load(Ordering::SeqCst) {
+        let slow = self.slow_handles.lock().unwrap().contains(&h);
+        if slow {
+            let held = self.slow_held.fetch_add(1, Ordering::SeqCst) + 1;
+            self.slow_peak.fetch_max(held, Ordering::SeqCst);
+            if held == SLOW_IN_FLIGHT {
+                let _ = std::fs::write(self.content.join(STARTED_VPATH), b"started");
+            }
+            let released = self.released.lock().unwrap();
+            let _ = self
+                .release
+                .wait_timeout_while(released, SLOW_PATIENCE, |released| !*released)
+                .unwrap();
+            self.slow_held.fetch_sub(1, Ordering::SeqCst);
+        } else if self.slow_held.load(Ordering::SeqCst) > 0 {
             self.reads_during_slow.fetch_add(1, Ordering::SeqCst);
         }
         self.disk.read_at(h, offset, buf)
@@ -438,31 +488,41 @@ impl Provider for Stalling {
     }
 }
 
-/// **One game thread's stalled read does not freeze the others**, across the
-/// real boundary: the shipped shim inside Wine, this native Director, the
+/// **Stalled reads on two threads do not freeze the others**, across the real
+/// boundary: the shipped shim inside Wine, this native Director, the
 /// file-backed ring between them.
 ///
-/// The fixture reads a file whose every read blocks its Director worker for
-/// [`SLOW_READ`], and meanwhile four other threads each read `hello.txt` fifty
-/// times. Two witnesses again:
+/// Two fixture threads each read 8 MiB of a file whose reads block in the
+/// provider. Once those are all inside it, four other threads each read a
+/// 2 MiB file fifty times — pipelined, through the arena. Only when they
+/// have finished does the fixture give the cue that lets the slow reads go.
+/// Nothing here is timed: the slow reads are held until the fast ones are
+/// done, however long that takes.
+///
+/// Witnesses:
 ///
 /// * the **fixture** exits 0 only if all two hundred reads were right and had
-///   returned while the slow read was still in flight;
-/// * the **provider** counted those reads arriving while it was blocked in the
-///   slow one.
+///   returned while both slow reads were still in flight;
+/// * the **provider** saw those reads arrive while it was holding the slow
+///   ones, saw the fixture's cue, and never held more than nine slow requests.
 ///
-/// With one process-wide lock around every ring round trip in the shim — what
-/// it had — the fast threads sit behind the slow read for all of
-/// [`SLOW_READ`], the fixture reports that the slow read finished first, and
-/// the provider's count is 0.
+/// What it fails on:
+///
+/// * One process-wide lock around every round trip, which the shim had: the
+///   second slow read never starts, so the fixture never sees the start
+///   marker.
+/// * A gate that lets two deep reads take every permit (8 + 4 of 12): the
+///   provider holds twelve slow requests, not nine, and the fast reads wait
+///   at the gate until the provider's patience runs out.
 ///
 /// It also runs the pieces a native test cannot: the shim's thread-local slot
-/// hint, its permit gate and its yield-then-sleep wait, in an injected DLL on
+/// hint, its permit gate with callers waiting in line (four fast threads on
+/// three free permits), and its yield-then-sleep wait, in an injected DLL on
 /// Wine threads.
 #[test]
 #[ignore = "needs a GE-Proton runtime under $VFS_HOME/runtimes, a bootable Wine prefix, and \
             Windows-built artifacts beside the test binary — see bin/build-windows"]
-fn a_stalled_read_on_one_thread_does_not_hold_up_file_operations_on_others_under_proton() {
+fn stalled_reads_on_two_threads_do_not_hold_up_file_operations_on_others_under_proton() {
     let _one = ONE_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
     let art = windows_artifacts();
     assert!(
@@ -475,37 +535,50 @@ fn a_stalled_read_on_one_thread_does_not_hold_up_file_operations_on_others_under
     let overlay = tmp("c-overlay");
     let content = tmp("c-content");
     std::fs::create_dir_all(content.join("data")).unwrap();
-    std::fs::write(content.join("data").join("hello.txt"), [FILL; LEN]).unwrap();
-    std::fs::write(content.join("data").join("slow.bin"), [0xA5u8; LEN]).unwrap();
+    std::fs::write(content.join("data").join("big.bin"), vec![FILL; BIG_LEN]).unwrap();
+    std::fs::write(
+        content.join("data").join("slow.bin"),
+        vec![0xA5u8; SLOW_LEN],
+    )
+    .unwrap();
     let image = root.join("fixture.exe");
     std::fs::copy(&art["vfs-fixture-read.exe"], &image).expect("copy the fixture into the root");
 
     let provider = Arc::new(Stalling {
         disk: DiskProvider::new(&content),
+        content: content.clone(),
         slow_handles: Mutex::new(Vec::new()),
-        slow_in_flight: AtomicBool::new(false),
-        slow_reads: AtomicUsize::new(0),
+        released: Mutex::new(false),
+        release: std::sync::Condvar::new(),
+        slow_held: AtomicUsize::new(0),
+        slow_peak: AtomicUsize::new(0),
         reads_during_slow: AtomicUsize::new(0),
+        cue_seen: AtomicBool::new(false),
     });
 
     let mut s = Session::new();
     s.set_root(&root);
     s.set_state_dir(&state);
     s.set_overlay(&overlay);
+    s.set_io_workers(IO_WORKERS);
     s.mount("", Arc::clone(&provider) as Arc<dyn Provider>)
         .expect("mount the provider over root 0");
     s.serve().expect("serve");
 
     let mut env = BTreeMap::new();
-    env.insert("VFS_FIXTURE_PATH".to_string(), CHILD_PATH.to_string());
-    env.insert("VFS_FIXTURE_EXPECT".to_string(), LEN.to_string());
-    env.insert("VFS_FIXTURE_FILL".to_string(), FILL.to_string());
-    env.insert(
-        "VFS_FIXTURE_SLOW_PATH".to_string(),
-        SLOW_CHILD_PATH.to_string(),
-    );
-    env.insert("VFS_FIXTURE_THREADS".to_string(), FAST_THREADS.to_string());
-    env.insert("VFS_FIXTURE_ROUNDS".to_string(), FAST_ROUNDS.to_string());
+    for (name, value) in [
+        ("VFS_FIXTURE_PATH", BIG_CHILD_PATH.to_string()),
+        ("VFS_FIXTURE_EXPECT", BIG_LEN.to_string()),
+        ("VFS_FIXTURE_FILL", FILL.to_string()),
+        ("VFS_FIXTURE_SLOW_PATH", SLOW_CHILD_PATH.to_string()),
+        ("VFS_FIXTURE_SLOW_THREADS", SLOW_THREADS.to_string()),
+        ("VFS_FIXTURE_SLOW_STARTED", STARTED_CHILD_PATH.to_string()),
+        ("VFS_FIXTURE_SLOW_RELEASE", RELEASE_CHILD_PATH.to_string()),
+        ("VFS_FIXTURE_THREADS", FAST_THREADS.to_string()),
+        ("VFS_FIXTURE_ROUNDS", FAST_ROUNDS.to_string()),
+    ] {
+        env.insert(name.to_string(), value);
+    }
 
     let code = s
         .launch(&LaunchOpts {
@@ -518,27 +591,33 @@ fn a_stalled_read_on_one_thread_does_not_hold_up_file_operations_on_others_under
         })
         .unwrap_or_else(|e| panic!("launch: {e}"));
 
-    let slow_reads = provider.slow_reads.load(Ordering::SeqCst);
+    let peak = provider.slow_peak.load(Ordering::SeqCst);
     let during = provider.reads_during_slow.load(Ordering::SeqCst);
+    let cue = provider.cue_seen.load(Ordering::SeqCst);
     eprintln!(
-        "DIRECTOR: {slow_reads} slow read(s); {during} other reads served while one was blocked"
+        "DIRECTOR: at most {peak} slow requests held; {during} other reads served meanwhile; \
+         release cue seen: {cue}"
     );
     assert_eq!(
         code,
         0,
         "the fixture exits 0 only if its {} fast reads all returned, with the right bytes, \
-         while its slow read was still in flight. The Director served {during} reads during \
-         the slow one.",
+         while its slow reads were still in flight. The Director held at most {peak} slow \
+         requests and served {during} reads meanwhile.",
         FAST_THREADS * FAST_ROUNDS
     );
     assert!(
-        slow_reads >= 1,
-        "the slow file was never read through this provider"
+        cue,
+        "the slow reads were let go by the provider's patience, not by the fixture's cue"
+    );
+    assert_eq!(
+        peak, SLOW_IN_FLIGHT,
+        "two eight-chunk reads must have 6 + 3 requests with the Director at once"
     );
     assert!(
         during >= FAST_THREADS * FAST_ROUNDS,
-        "only {during} of the {} fast reads reached the Director while the slow read was \
-         blocked: the shim made the rest wait for it",
+        "only {during} reads reached the Director while the slow reads were held, of {} \
+         fast reads of several chunks each: the shim made them wait",
         FAST_THREADS * FAST_ROUNDS
     );
 
