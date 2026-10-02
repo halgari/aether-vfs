@@ -17,6 +17,9 @@
 //! threads start, in place of a fixed head start, and
 //! `VFS_FIXTURE_SLOW_RELEASE` is looked up once they have all finished, which
 //! is the host's cue to let the slow reads go.
+//!
+//! `VFS_FIXTURE_NAMES` and its companions run the names phase first: see
+//! `names.rs`. Windows only — it calls Win32 directly.
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -45,6 +48,9 @@ fn read_in_one_call(path: &str) -> std::io::Result<Vec<u8>> {
     buf.truncate(got);
     Ok(buf)
 }
+
+#[cfg(windows)]
+mod names;
 
 fn env_num(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -148,6 +154,8 @@ fn concurrent_phase(path: &str, slow_path: &str, expect_len: usize, fill: Option
 }
 
 fn main() {
+    #[cfg(windows)]
+    names::run();
     let path = std::env::var("VFS_FIXTURE_PATH").unwrap_or_else(|_| {
         eprintln!("VFS_FIXTURE_PATH unset"); exit(2);
     });
