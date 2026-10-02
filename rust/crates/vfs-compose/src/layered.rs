@@ -111,9 +111,7 @@ impl Provider for LayeredProvider {
         for e in top_entries {
             seen.insert(fold(&e.name), e);
         }
-        let mut out: Vec<DirEntry> = seen.into_values().collect();
-        out.sort_by_key(|a| fold(&a.name));
-        Ok(out)
+        Ok(crate::sorted_by_folded_name(seen))
     }
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {

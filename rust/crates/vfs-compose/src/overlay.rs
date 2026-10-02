@@ -544,9 +544,7 @@ impl Provider for OverlayProvider {
             }
         }
 
-        let mut out: Vec<DirEntry> = map.into_values().collect();
-        out.sort_by_key(|a| fold(&a.name));
-        Ok(out)
+        Ok(crate::sorted_by_folded_name(map))
     }
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {

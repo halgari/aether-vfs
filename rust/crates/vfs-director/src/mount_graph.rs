@@ -212,9 +212,7 @@ impl Provider for MountGraph {
             }
             return Err(not_found());
         }
-        let mut out: Vec<DirEntry> = map.into_values().collect();
-        out.sort_by_key(|a| vfs_core::fold(&a.name));
-        Ok(out)
+        Ok(vfs_compose::sorted_by_folded_name(map))
     }
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
