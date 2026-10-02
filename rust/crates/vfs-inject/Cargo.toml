@@ -51,6 +51,10 @@ name = "vfs-spawn-child"
 path = "src/bin/vfs-spawn-child.rs"
 
 [[bin]]
+name = "vfs-fake-steam-helper"
+path = "src/bin/vfs-fake-steam-helper.rs"
+
+[[bin]]
 name = "compare_map"
 path = "src/bin/compare_map.rs"
 

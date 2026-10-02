@@ -122,11 +122,17 @@ pub const READY_TIMEOUT_SECS: &str = "VFS_READY_TIMEOUT_SECS";
 /// injector's own directory.
 pub const INJECT_CWD: &str = "VFS_INJECT_CWD";
 /// The command line of Proton's Steam helper, as `vfs-injector` runs it
-/// (`C:\windows\system32\steam.exe <a program>`). Set by the Proton launch
-/// when the Steam client is running: the injector starts it and waits for it
-/// to publish itself as the running Steam client before it creates the
-/// target. Unset, no helper is started.
+/// (`C:\windows\system32\steam.exe <a program>`), or
+/// [`INJECT_STEAM_HELPER_OFF`]. Set by the Proton launch: with a command
+/// line, the injector starts the helper and waits for it to publish itself as
+/// the running Steam client before it creates the target; with `off`, it only
+/// clears the pid an earlier helper left. Either way it reports what it did
+/// in `<ready file>` + [`STEAM_HELPER_REPORT_SUFFIX`]. Unset, it does
+/// neither. Honoured only under Wine.
 pub const INJECT_STEAM_HELPER: &str = "VFS_INJECT_STEAM_HELPER";
+/// The [`INJECT_STEAM_HELPER`] value that asks for no helper, only for the
+/// stale pid to be cleared.
+pub const INJECT_STEAM_HELPER_OFF: &str = "off";
 
 // ─── injection handshake ─────────────────────────────────────────────────────
 
@@ -180,6 +186,24 @@ pub const INJECTOR_TARGET_EXITED_PREFIX: &str = "target-exited:";
 pub const INJECTOR_READY_TIMEOUT_PREFIX: &str = "ready-timeout:";
 /// Report prefix: any other injection failure, followed by its description.
 pub const INJECTOR_FAILED_PREFIX: &str = "inject:";
+
+// ─── Steam helper report ─────────────────────────────────────────────────────
+// Also not switch names: what `vfs-injector` did with [`INJECT_STEAM_HELPER`],
+// one line in `<ready file>` + [`STEAM_HELPER_REPORT_SUFFIX`], written before
+// the target is created. Its absence once the target is running means an
+// injector that predates the helper.
+
+/// Appended to the ready file's path to name the injector's helper report.
+pub const STEAM_HELPER_REPORT_SUFFIX: &str = ".steam-helper";
+/// The helper published itself: `started:<pid>:<milliseconds>`.
+pub const STEAM_HELPER_STARTED_PREFIX: &str = "started:";
+/// No helper was asked for, and the stale pid was cleared.
+pub const STEAM_HELPER_CLEARED: &str = "cleared";
+/// The helper was not started: `disabled:<why>`.
+pub const STEAM_HELPER_DISABLED_PREFIX: &str = "disabled:";
+/// The helper was started and failed (did not start, exited early, timed out
+/// and was stopped): `failed:<why>`.
+pub const STEAM_HELPER_FAILED_PREFIX: &str = "failed:";
 
 // ─── behaviour switches (booleans) ───────────────────────────────────────────
 
