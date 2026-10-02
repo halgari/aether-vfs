@@ -392,7 +392,11 @@ impl OverlayProvider {
             return Ok(());
         }
 
-        let path = p.rel.to_string();
+        // Folded: two callers that spell one file differently must wait for
+        // each other. Keyed by the spelling, each would copy the file up on
+        // its own, and the second copy's rename would replace the file the
+        // first caller had already opened for writing.
+        let path = fold(p.rel);
         loop {
             let mut inflight = self.copying.lock().map_err(|_| map_io_err())?;
             if inflight.insert(path.clone()) {
@@ -597,7 +601,22 @@ impl Provider for OverlayProvider {
                     if e.name.starts_with(".cu.") {
                         continue;
                     }
-                    map.insert(fold(&e.name), e);
+                    // The upper's entry is the live one — its size, its time,
+                    // its kind — but a name the base also has keeps the
+                    // base's spelling. The upper's spelling of such a name is
+                    // an accident of whoever wrote there first (a directory
+                    // created as a parent is spelled as that caller's path
+                    // was, which from the shim is lower case), and letting it
+                    // win renamed `Data` to `data` for every caller the first
+                    // time anything was written beneath it.
+                    match map.entry(fold(&e.name)) {
+                        std::collections::hash_map::Entry::Occupied(mut base) => {
+                            base.get_mut().stat = e.stat;
+                        }
+                        std::collections::hash_map::Entry::Vacant(free) => {
+                            free.insert(e);
+                        }
+                    }
                 }
             }
             Err(e) if e == not_found() => {}
@@ -721,6 +740,22 @@ impl Provider for OverlayProvider {
         if self.hidden_by_whiteout(from)? {
             return Err(not_found());
         }
+        if fold(from.rel) == fold(to.rel) {
+            // A change of letter case only: the same entry under a new
+            // spelling. Nothing moves, so nothing is copied up and — above
+            // all — nothing is whited out: the whiteout a real rename leaves
+            // at `from` would hide the file itself.
+            //
+            // The upper respells an entry it holds. One only the base holds
+            // keeps the base's spelling, as every name the base has does
+            // (see `readdir`); the rename succeeds, as it would on a
+            // filesystem that folded the two names together.
+            return match self.upper.getattr(from)? {
+                Some(_) => self.upper.rename(from, to),
+                None if self.base.getattr(from)?.is_some() => Ok(()),
+                None => Err(not_found()),
+            };
+        }
         self.copy_up_if_needed(from)?;
         let from_in_base = self.base.getattr(from)?.is_some();
         self.upper.rename(from, to)?;
@@ -739,6 +774,18 @@ impl Provider for OverlayProvider {
         }
         self.copy_up_if_needed(p)?;
         self.upper.set_attr(p, attr)
+    }
+
+    /// The same rule as `readdir`, for one name: the base's spelling if the
+    /// base has the name, the upper's otherwise.
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        if p.rel.is_empty() || self.hidden_by_whiteout(p)? {
+            return Ok(None);
+        }
+        if let Some(name) = crate::stored_name(self.base.as_ref(), p)? {
+            return Ok(Some(name));
+        }
+        crate::stored_name(self.upper.as_ref(), p)
     }
 }
 
