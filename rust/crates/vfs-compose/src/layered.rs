@@ -103,7 +103,8 @@ impl Provider for LayeredProvider {
         // components before they cross the ring. An ASCII-only key lets two
         // spellings of one Unicode name survive as two entries, so a
         // top-layer override of a non-ASCII-cased file stops overriding.
-        let mut seen: HashMap<String, DirEntry> = HashMap::new();
+        let mut seen: HashMap<String, DirEntry> =
+            HashMap::with_capacity(bottom_entries.len() + top_entries.len());
         // Bottom first, top overwrites.
         for e in bottom_entries {
             seen.insert(fold(&e.name), e);
@@ -111,9 +112,7 @@ impl Provider for LayeredProvider {
         for e in top_entries {
             seen.insert(fold(&e.name), e);
         }
-        let mut out: Vec<DirEntry> = seen.into_values().collect();
-        out.sort_by_key(|a| fold(&a.name));
-        Ok(out)
+        Ok(crate::sorted_by_folded_name(seen))
     }
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {

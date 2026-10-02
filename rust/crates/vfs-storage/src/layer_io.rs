@@ -6,23 +6,50 @@
 //! before either closes. [`FileCell::commit`] turns the buffer into whole-block
 //! `write_blocks` calls.
 //!
-//! **Locking.** A cell's `state` lock is taken before the layer's namespace
-//! lock, never after it (the layer updates the catalog row while it still
-//! holds the state lock after a commit). Everything the namespace side needs
-//! from a cell without taking `state` is mirrored outside it: `live_len`,
-//! `path`, `opens`. A commit runs under the storage's durability gate, taken
-//! after `state` and before `ns` (the full order is on [`Storage::gate`]).
+//! **Locking.** A cell's `state` is a reader-writer lock. A read
+//! ([`FileCell::read`], which takes `&FileState`) holds it **shared**, so any
+//! number of reads of one file — on one handle or many — run at once; a game
+//! issues eight 1 MiB reads of one plugin together, and a mutex here made
+//! them finish one after another. Everything that changes the state — a
+//! write, a truncate, a commit, a close's commit — holds it **exclusive**, so
+//! a read sees the state before or after such a change, never part of it.
+//! A shared holder takes nothing but leaf locks (the RAM tier's shards, the
+//! block store's read path, a cell's `path` for a log line), never `gate` or
+//! `ns`, so sharing it adds no lock-order edge.
+//!
+//! **Writers and a steady stream of reads.** A save's `write_at` or `close`
+//! must not wait forever behind a game that keeps reading the file. The lock
+//! is `std::sync::RwLock`, whose documentation leaves the priority policy to
+//! the platform. The implementation std uses on Linux stops admitting new
+//! readers once a writer is waiting, so a writer waits only for the reads
+//! already inside; that is observed behaviour (and what a stress run of
+//! eight continuous readers against one writer showed), not a documented
+//! guarantee, and it has not been checked on other platforms. If std ever
+//! changes it, replace the lock with one that documents writer preference
+//! rather than rely on this note.
+//!
+//! The `state` lock is taken before the layer's namespace lock, never after
+//! it (the layer updates the catalog row while it still holds the state lock
+//! after a commit). Everything the namespace side needs from a cell without
+//! taking `state` is mirrored outside it: `live_len`, `path`, `opens`. A
+//! commit runs under the storage's durability gate, taken after `state` and
+//! before `ns` (the full order is on [`Storage::gate`]).
 //!
 //! **RAM tier.** A layer file's blocks enter the RAM tier only from this module
-//! and only under the cell's `state` lock — a read's fill and a commit's
-//! invalidate-and-put are serialised, so a reader cannot put a block it read
-//! before a commit back in after it (the stale-refill race documented on
-//! [`crate::RamTier::invalidate_file`]). A commit also puts the blocks it wrote,
-//! so the next read of a just-written block is a RAM hit.
+//! and only under the cell's `state` lock — shared for a read's fill,
+//! exclusive for a commit's invalidate-and-put. The two exclude each other, so
+//! a reader cannot put a block it read before a commit back in after it (the
+//! stale-refill race documented on [`crate::RamTier::invalidate_file`]): the
+//! commit cannot start until every read that filled from the old store copy
+//! has finished its fill. Two concurrent readers may fill the same block:
+//! each decodes it, both hold the same committed bytes, and
+//! [`crate::RamTier::fill`] keeps the first.
+//! A commit also puts the blocks it wrote, so the next read of a just-written
+//! block is a RAM hit.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use vfs_provider::{bad_request, map_io_err, ST_NO_SPACE};
 
@@ -83,7 +110,8 @@ impl FileState {
 pub(crate) struct FileCell {
     pub guid: Guid,
     pub id: [u8; 17],
-    pub state: Mutex<FileState>,
+    /// Shared for reads, exclusive for every change (see the module docs).
+    pub state: RwLock<FileState>,
     /// `state.len`, readable without the state lock (getattr, readdir).
     pub live_len: AtomicU64,
     /// The folded path of the file's catalog row; `None` once the row is gone
@@ -131,7 +159,7 @@ impl FileCell {
         FileCell {
             guid,
             id: layer_file_id(&guid),
-            state: Mutex::new(FileState {
+            state: RwLock::new(FileState {
                 len,
                 committed_len: len,
                 valid_len: len,
@@ -178,12 +206,24 @@ impl FileCell {
         }
         let bs = s.block_size();
         let want = block_len(st.committed_len, bs, b);
-        let mut buf = vec![0u8; want];
-        match s.store.read(&self.id, b * bs, &mut buf) {
+        // Decoded straight into the allocation the RAM tier keeps: a `Vec`
+        // turned into an `Arc<[u8]>` afterwards is a second allocation and a
+        // copy of the whole block.
+        let mut data = crate::ram::zeroed_block(want);
+        let buf = Arc::get_mut(&mut data).expect("a new block has one owner");
+        match s.store.read(&self.id, b * bs, buf) {
             Ok(r) if r.missing.is_empty() && r.bytes == want => {
-                let data: Arc<[u8]> = Arc::from(buf);
-                s.ram.put(&self.id, b, Arc::clone(&data));
-                Ok(data)
+                #[cfg(test)]
+                {
+                    let hook = crate::cached::lock(&s.layer_fill_hook).clone();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
+                // Another read of this block may have filled it meanwhile
+                // (reads share the state lock): the tier keeps that one, the
+                // same committed bytes.
+                Ok(s.ram.fill(&self.id, b, data))
             }
             Ok(r) => {
                 tracing::error!(
@@ -219,6 +259,13 @@ impl FileCell {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, i32> {
+        #[cfg(test)]
+        {
+            let hook = crate::cached::lock(&s.layer_read_hook).clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         if offset >= st.len || buf.is_empty() {
             return Ok(0);
         }
