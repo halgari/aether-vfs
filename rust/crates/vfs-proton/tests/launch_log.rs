@@ -64,6 +64,8 @@ fn launch(dir: &Path, log_file: Option<PathBuf>) -> WineLaunch {
         cwd: None,
         ready_timeout_secs: None,
         log_file,
+        steam: None,
+        notes: Vec::new(),
     }
 }
 
@@ -103,6 +105,21 @@ fn a_log_file_is_truncated_at_launch() {
     assert_eq!(run(&launch(&dir, Some(log.clone()))).unwrap(), 0);
     let s = wait_for_line(&log, "fake child after wine exited");
     assert!(!s.contains("previous run"), "{s:?}");
+}
+
+#[test]
+fn a_launchs_notes_lead_the_log_file() {
+    let dir = scratch("notes");
+    let log = dir.join("wine.log");
+    let mut l = launch(&dir, Some(log.clone()));
+    l.notes = vec!["first note".to_string(), "second note".to_string()];
+    assert_eq!(run(&l).unwrap(), 0);
+    let s = wait_for_line(&log, "fake child after wine exited");
+    assert!(s.starts_with("first note\nsecond note\n"), "{s:?}");
+    assert!(
+        s.contains("fake wine stdout") && s.contains("fake wine stderr"),
+        "{s:?}"
+    );
 }
 
 #[test]

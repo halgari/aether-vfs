@@ -38,6 +38,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::runtime::verify_ge;
+use crate::steam::{SteamLaunch, STEAM_HELPER, STEAM_HELPER_OVERRIDE};
 
 /// Everything one Wine launch needs, with the ring geometry carried
 /// explicitly.
@@ -113,6 +114,18 @@ pub struct WineLaunch {
     /// here, including output written after `wine` itself has exited.
     /// `None`: both streams are inherited from this process, as before.
     pub log_file: Option<PathBuf>,
+    /// The Steam side of the launch (see [`crate::steam`]): the injector
+    /// starts Proton's Steam helper before the target, and the environment
+    /// carries the app id and the client's install path, so the target's
+    /// Steam API finds the running client. `None`: none of that, as before.
+    /// Set it only when the client is running
+    /// ([`crate::steam::running_client`]) and the prefix is one Proton set up
+    /// ([`PrefixInit::Proton`](crate::prefix::PrefixInit::Proton)).
+    pub steam: Option<SteamLaunch>,
+    /// Lines [`spawn`] writes before `wine` starts, each on its own line: at
+    /// the top of [`log_file`](Self::log_file), or to this process's stderr
+    /// when there is none — where the launch's own output goes.
+    pub notes: Vec<String>,
 }
 
 /// `WINEDLLOVERRIDES` every launch carries: Mono and Gecko prompts would
@@ -239,6 +252,18 @@ pub fn command_line(l: &WineLaunch) -> (String, Vec<String>) {
 ///
 /// `VFS_VIRTUAL_ROOTS` is set iff there are extra roots.
 ///
+/// With [`WineLaunch::steam`], also what Steam's own launcher gives a game
+/// and something in the launch reads: `SteamAppId` and `SteamGameId`
+/// (`steam_api64.dll`, `lsteamclient` and the helper), `STEAM_COMPAT_APP_ID`,
+/// `STEAM_COMPAT_CLIENT_INSTALL_PATH` (the helper), `STEAM_COMPAT_DATA_PATH`
+/// (the directory holding a `pfx` prefix), [`vfs_env::INJECT_STEAM_HELPER`]
+/// for the injector, and [`STEAM_HELPER_OVERRIDE`] in `WINEDLLOVERRIDES`.
+/// [`WineLaunch::extra_env`] still wins for the `Steam*` and `STEAM_*` names.
+/// Deliberately **not** set: `SteamClientLaunch` and `SteamEnv` (they say the
+/// client started the program, and it did not), `SteamOverlayGameId` (no
+/// overlay is loaded), and `SteamUser`/`SteamAppUser` (the account name is in
+/// the client's own files, which nothing here reads).
+///
 /// `VFS_ARENA_OFFSET` *is* exported even though today's client derives the
 /// offset from the ring header: it is what the working `vfs-serve-fb` run
 /// published, it is what the Windows `IpcServe::apply_env` sets, and a
@@ -251,7 +276,11 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
     // UMU-Proton (stock Valve Proton), and that downgrade produces no error.
     env.insert("PROTONPATH".to_string(), path_string(&absolute(&l.runtime)));
     // Mono and Gecko prompts would otherwise block a launch on a fresh prefix.
-    env.insert("WINEDLLOVERRIDES".to_string(), BASE_DLL_OVERRIDES.to_string());
+    let base_overrides = match &l.steam {
+        Some(_) => merge_dll_overrides(BASE_DLL_OVERRIDES, STEAM_HELPER_OVERRIDE),
+        None => BASE_DLL_OVERRIDES.to_string(),
+    };
+    env.insert("WINEDLLOVERRIDES".to_string(), base_overrides.clone());
     env.insert("WINEDEBUG".to_string(), DEFAULT_WINEDEBUG.to_string());
 
     env.insert(vfs_env::RING_PATH.to_string(), path_string(&l.ring_path));
@@ -274,12 +303,35 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
         env.insert(vfs_env::INJECT_CWD.to_string(), cwd.clone());
     }
 
+    if let Some(steam) = &l.steam {
+        let app = steam.app_id.to_string();
+        env.insert("SteamAppId".to_string(), app.clone());
+        env.insert("SteamGameId".to_string(), app.clone());
+        env.insert("STEAM_COMPAT_APP_ID".to_string(), app);
+        env.insert(
+            "STEAM_COMPAT_CLIENT_INSTALL_PATH".to_string(),
+            path_string(&absolute(&steam.client)),
+        );
+        // Proton keeps a prefix at `<compat data>/pfx`; any other prefix has
+        // no compat data directory to name.
+        if let Some(compat) = l.prefix.parent().filter(|_| l.prefix.ends_with("pfx")) {
+            env.insert(
+                "STEAM_COMPAT_DATA_PATH".to_string(),
+                path_string(&absolute(compat)),
+            );
+        }
+        env.insert(
+            vfs_env::INJECT_STEAM_HELPER.to_string(),
+            STEAM_HELPER.to_string(),
+        );
+    }
+
     for (k, v) in &l.extra_env {
         if is_reserved_env(k) {
             continue; // refused by `check_extra_env` before any spawn
         }
         let v = if k == "WINEDLLOVERRIDES" {
-            merge_dll_overrides(BASE_DLL_OVERRIDES, v)
+            merge_dll_overrides(&base_overrides, v)
         } else {
             v.clone()
         };
@@ -316,6 +368,7 @@ pub fn is_reserved_env(name: &str) -> bool {
         vfs_env::VIRTUAL_DIR,
         vfs_env::VIRTUAL_ROOTS,
         vfs_env::INJECT_CWD,
+        vfs_env::INJECT_STEAM_HELPER,
     ]
     .iter()
     .any(|r| r.eq_ignore_ascii_case(name))
@@ -427,11 +480,21 @@ pub fn spawn(l: &WineLaunch) -> Result<std::process::Child, LaunchError> {
     let env = launch_env(l);
     cmd.args(&argv).envs(&env);
     if let Some(log) = &l.log_file {
-        let file = open_log(log)
+        let mut file = open_log(log)
             .map_err(|e| io::Error::new(e.kind(), format!("wine log {}: {e}", log.display())))?;
+        for note in &l.notes {
+            use io::Write;
+            writeln!(file, "{note}").map_err(|e| {
+                io::Error::new(e.kind(), format!("wine log {}: {e}", log.display()))
+            })?;
+        }
         // One open file description for both streams, so their writes share
         // an offset and interleave instead of overwriting each other.
         cmd.stdout(file.try_clone()?).stderr(file);
+    } else {
+        for note in &l.notes {
+            eprintln!("{note}");
+        }
     }
     // Explicitly unset the transport variables this launch does not use.
     //
@@ -449,6 +512,7 @@ pub fn spawn(l: &WineLaunch) -> Result<std::process::Child, LaunchError> {
         "VFS_CLIENT_EV",
         "VFS_VIRTUAL_ROOTS",
         "VFS_INJECT_CWD",
+        "VFS_INJECT_STEAM_HELPER",
     ] {
         if !env.contains_key(stale) {
             cmd.env_remove(stale);
@@ -621,6 +685,8 @@ mod tests {
             cwd: None,
             ready_timeout_secs: None,
             log_file: None,
+            steam: None,
+            notes: Vec::new(),
         }
     }
 
@@ -765,6 +831,98 @@ mod tests {
         assert_eq!(env["WINEDLLOVERRIDES"], "mscoree=d;mshtml=d;d3dx9_42=n,b");
         assert_eq!(env["WINEDEBUG"], "+loaddll");
         assert_eq!(env["SteamAppId"], "489830");
+    }
+
+    fn steam_sample() -> WineLaunch {
+        let mut l = sample();
+        l.prefix = abs("compat/pfx");
+        l.steam = Some(SteamLaunch {
+            client: abs("Steam"),
+            app_id: 489830,
+        });
+        l
+    }
+
+    #[test]
+    fn a_steam_launch_carries_the_helper_and_what_steams_launcher_sets() {
+        let l = steam_sample();
+        let env = launch_env(&l);
+        for name in ["SteamAppId", "SteamGameId", "STEAM_COMPAT_APP_ID"] {
+            assert_eq!(env[name], "489830", "{name}");
+        }
+        assert_eq!(
+            env["STEAM_COMPAT_CLIENT_INSTALL_PATH"],
+            path_string(&abs("Steam"))
+        );
+        assert_eq!(env["STEAM_COMPAT_DATA_PATH"], path_string(&abs("compat")));
+        assert_eq!(
+            env[vfs_env::INJECT_STEAM_HELPER],
+            r"C:\windows\system32\steam.exe C:\windows\system32\rundll32.exe",
+            "the helper sets nothing up unless it is given a program to run"
+        );
+        assert_eq!(env["WINEDLLOVERRIDES"], "mscoree=d;mshtml=d;steam.exe=b");
+        // The client did not start the program, no overlay is loaded, and the
+        // account name is not this crate's to read.
+        for name in [
+            "SteamClientLaunch",
+            "SteamEnv",
+            "SteamOverlayGameId",
+            "SteamUser",
+        ] {
+            assert!(!env.contains_key(name), "{name}");
+        }
+        // The helper is started by the injector, so `wine` still runs the
+        // injector with its positional argv and nothing else.
+        assert_eq!(command_line(&l), command_line(&sample()));
+    }
+
+    #[test]
+    fn a_prefix_that_is_not_protons_names_no_compat_data_path() {
+        let mut l = steam_sample();
+        l.prefix = abs("probe-prefix");
+        assert!(!launch_env(&l).contains_key("STEAM_COMPAT_DATA_PATH"));
+    }
+
+    #[test]
+    fn without_steam_the_environment_is_what_it_was() {
+        let env = launch_env(&sample());
+        for name in [
+            "SteamAppId",
+            "SteamGameId",
+            "STEAM_COMPAT_APP_ID",
+            "STEAM_COMPAT_CLIENT_INSTALL_PATH",
+            "STEAM_COMPAT_DATA_PATH",
+            vfs_env::INJECT_STEAM_HELPER,
+        ] {
+            assert!(!env.contains_key(name), "{name}");
+        }
+        assert_eq!(env["WINEDLLOVERRIDES"], BASE_DLL_OVERRIDES);
+    }
+
+    #[test]
+    fn the_hosts_steam_names_and_overrides_win_over_the_steam_launchs() {
+        let mut l = steam_sample();
+        l.extra_env = BTreeMap::from([
+            ("SteamGameId".to_string(), "12345".to_string()),
+            ("WINEDLLOVERRIDES".to_string(), "dxgi=n".to_string()),
+        ]);
+        let env = launch_env(&l);
+        assert_eq!(env["SteamGameId"], "12345");
+        assert_eq!(env["SteamAppId"], "489830");
+        assert_eq!(
+            env["WINEDLLOVERRIDES"],
+            "mscoree=d;mshtml=d;steam.exe=b;dxgi=n"
+        );
+        l.extra_env
+            .insert("WINEDLLOVERRIDES".to_string(), "steam.exe=n".to_string());
+        assert_eq!(
+            launch_env(&l)["WINEDLLOVERRIDES"],
+            "mscoree=d;mshtml=d;steam.exe=n"
+        );
+        assert!(
+            is_reserved_env(vfs_env::INJECT_STEAM_HELPER),
+            "only the launch asks for the helper"
+        );
     }
 
     #[test]

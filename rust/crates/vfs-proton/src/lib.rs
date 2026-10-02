@@ -23,6 +23,7 @@ pub mod prefix;
 #[cfg(feature = "acquire")]
 pub mod release;
 pub mod runtime;
+pub mod steam;
 
 #[cfg(feature = "acquire")]
 pub use install::{
@@ -39,3 +40,4 @@ pub use prefix::{ensure, ensure_with, Prefix, PrefixError, PrefixInit};
 #[cfg(feature = "acquire")]
 pub use release::{fetch_releases, parse_releases, pick, Release, ResolveError};
 pub use runtime::{cmp_tags, installed, installed_dirs, verify_ge, VerifyError};
+pub use steam::{SteamLaunch, STEAM_HELPER, STEAM_HELPER_OVERRIDE};
