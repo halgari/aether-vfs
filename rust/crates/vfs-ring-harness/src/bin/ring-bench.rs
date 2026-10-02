@@ -11,8 +11,9 @@
 //!
 //! - `locked` — one process-wide lock held across every round trip. This is
 //!   what `FuseClient` did while it carried `ring_lock`.
-//! - `gated` — no lock; `vfs_ipc::shared` bounds the slow class of request
-//!   below the worker count. This is what `FuseClient` does now.
+//! - `gated` — no lock; `vfs_ipc::DataGate` bounds reads in flight below the
+//!   worker count and `vfs_ipc::read_fragmented` does the read. This is what
+//!   `FuseClient` does now, by calling the same two things.
 //!
 //! Usage: `ring-bench <scratch-dir> [locked|gated|both] [workers] [seconds]`
 //!
@@ -28,11 +29,11 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use vfs_director::{Director, IpcServe};
-    use vfs_ipc::{RingClient, SharedSeg, SpinNotifier};
+    use vfs_ipc::{DataGate, Notifier, ReadPlan, RingClient, SharedSeg, SpinNotifier};
     use vfs_protocol as P;
     use vfs_provider::{
-        Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId, Stat, VPath,
-        KIND_DIR, KIND_FILE,
+        Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId, Stat, VPath, KIND_DIR,
+        KIND_FILE,
     };
 
     const FAST: &str = "data/fast.bin";
@@ -224,6 +225,73 @@ mod imp {
         }
     }
 
+    /// The shim's client notifier in file-backed mode, in native calls: spin
+    /// for the response, and once it is late yield, then sleep a millisecond
+    /// at a time (`WakeServerSpinClient` in `vfs-shim`).
+    struct ShimNotifier;
+
+    impl Notifier for ShimNotifier {
+        fn wait_client(&self, _slot: u32) {
+            core::hint::spin_loop();
+        }
+        fn idle_client(&self, _slot: u32, waited: Duration) {
+            if waited < Duration::from_millis(20) {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    /// The shim now: no lock, reads counted against a gate sized from the
+    /// worker count the director published.
+    struct Gated<'a> {
+        c: RingClient<'a, ShimNotifier>,
+        gate: DataGate,
+        plan: ReadPlan,
+    }
+
+    impl<'a> Gated<'a> {
+        fn new(seg: &'a SharedSeg) -> Self {
+            let c = RingClient::new(seg, ShimNotifier).unwrap();
+            let gate = DataGate::for_ring(seg, &c.geom());
+            Gated {
+                c,
+                gate,
+                // `FuseClient::read_fragmented`'s plan for this geometry.
+                plan: ReadPlan {
+                    bulk_threshold: 64 * 1024,
+                    bulk_chunk: 1 << 20,
+                    inline_chunk: PAYLOAD_CAP as usize - 8,
+                    depth: 4,
+                    depth_stream: 8,
+                    stream_bytes: 4 << 20,
+                },
+            }
+        }
+    }
+
+    impl Client for Gated<'_> {
+        fn getattr(&self, p: &str) -> bool {
+            let r = self
+                .c
+                .submit(P::OP_GETATTR, 0, &P::encode_path_req(0, p))
+                .unwrap();
+            P::decode_getattr_resp(&r.payload).unwrap().found
+        }
+        fn open(&self, p: &str) -> u64 {
+            let r = self
+                .c
+                .submit(P::OP_OPEN, 0, &P::encode_open_req(0, P::OPEN_READ, p))
+                .unwrap();
+            assert_eq!(r.status, P::ST_OK);
+            P::decode_open_resp(&r.payload).unwrap().fh
+        }
+        fn read(&self, fh: u64, offset: u64, buf: &mut [u8]) -> usize {
+            vfs_ipc::read_fragmented(&self.c, &self.gate, &self.plan, fh, offset, buf).unwrap()
+        }
+    }
+
     fn pct(v: &[f64], q: f64) -> f64 {
         v[((v.len() as f64 * q) as usize).min(v.len() - 1)]
     }
@@ -277,6 +345,59 @@ mod imp {
             });
             line(name, v);
         }
+    }
+
+    /// `stat` threads of GETATTR for `secs` beside `readers` threads that each
+    /// read 4 MiB of the slow file over and over: more blocked reads than the
+    /// director has workers. What is measured is whether a request that is not
+    /// a read still gets a worker.
+    fn stats_beside_blocked_readers(c: &dyn Client, readers: usize, stat: usize, secs: f64) {
+        let stop = AtomicBool::new(false);
+        let sfh = c.open(SLOW);
+        let mut all: Vec<f64> = Vec::new();
+        std::thread::scope(|s| {
+            for _ in 0..readers {
+                s.spawn(|| {
+                    let mut buf = vec![0u8; 4 << 20];
+                    while !stop.load(Ordering::Relaxed) {
+                        assert_eq!(c.read(sfh, 0, &mut buf), buf.len());
+                    }
+                });
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            let hs: Vec<_> = (0..stat)
+                .map(|_| {
+                    let stop = &stop;
+                    s.spawn(move || {
+                        let mut lat = Vec::with_capacity(1 << 20);
+                        while !stop.load(Ordering::Relaxed) {
+                            let t = Instant::now();
+                            assert!(c.getattr(FAST));
+                            lat.push(t.elapsed().as_nanos() as f64 / 1000.0);
+                        }
+                        lat
+                    })
+                })
+                .collect();
+            std::thread::sleep(Duration::from_secs_f64(secs));
+            stop.store(true, Ordering::Relaxed);
+            for h in hs {
+                all.extend(h.join().unwrap());
+            }
+        });
+        all.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let label = format!("{readers} blocked readers + {stat} stat threads");
+        if all.is_empty() {
+            println!("  {label:<34} no stat completed");
+            return;
+        }
+        println!(
+            "  {label:<34} {:>9.0} stats/s      p50={:>7.2} p99={:>10.2} max={:>10.2} (us)",
+            all.len() as f64 / secs,
+            pct(&all, 0.5),
+            pct(&all, 0.99),
+            all[all.len() - 1]
+        );
     }
 
     /// `fast` threads of 4 KiB reads for `secs`, beside an optional thread that
@@ -373,6 +494,8 @@ mod imp {
                 concurrent(c, n - 1, true, secs);
             }
         }
+        println!(" stats while more reads are blocked than there are workers");
+        stats_beside_blocked_readers(c, 8, 2, secs);
     }
 
     pub fn main() {
@@ -407,6 +530,11 @@ mod imp {
                 lock: Mutex::new(()),
             };
             suite("locked (one process-wide lock)", &c, secs);
+        }
+        if which == "gated" || which == "both" {
+            let c = Gated::new(ipc.shared_seg());
+            println!("\ngate: {} data requests in flight at most", c.gate.limit());
+            suite("gated (no lock, reads bounded below the workers)", &c, secs);
         }
         ipc.stop();
         let _ = std::fs::remove_file(&ring);
