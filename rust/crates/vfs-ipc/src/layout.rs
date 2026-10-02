@@ -57,6 +57,7 @@ pub const OP_MKDIR: u32 = 10;
 pub const OP_CLOSE: u32 = 11;
 pub const OP_REGISTER_PROCESS: u32 = 12;
 pub const OP_HEARTBEAT: u32 = 13;
+pub const OP_STORED_NAMES: u32 = 14;
 
 #[repr(C)]
 pub struct RingHeader {

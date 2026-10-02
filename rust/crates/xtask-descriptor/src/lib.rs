@@ -40,6 +40,7 @@ fn descriptor_body() -> String {
         ("setattr", P::OP_SETATTR), ("rename", P::OP_RENAME), ("delete", P::OP_DELETE),
         ("mkdir", P::OP_MKDIR), ("close", P::OP_CLOSE),
         ("register-process", P::OP_REGISTER_PROCESS), ("heartbeat", P::OP_HEARTBEAT),
+        ("stored-names", P::OP_STORED_NAMES),
     ] {
         let _ = write!(s, ":{name} {v} ");
     }

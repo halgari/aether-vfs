@@ -128,6 +128,37 @@ impl Director {
         }
     }
 
+    /// The stored spelling of each component of `path` from the `skip`-th on
+    /// — the names a listing of each parent shows. A component nothing has is
+    /// answered as it was asked, so the reply always has one name per
+    /// component asked for.
+    ///
+    /// For final-path queries: one call names a whole path with no listing
+    /// crossing the ring, and `skip` lets a caller that already knows how the
+    /// leading directories are spelled ask only about the rest.
+    pub fn stored_names(&self, root: RootId, path: &str, skip: usize) -> Result<Vec<String>, i32> {
+        let path = normalize(path).map_err(|_| bad_request())?;
+        let provider = self.provider_for(root)?.ok_or_else(not_found)?;
+        let mut names = Vec::new();
+        let mut end = 0;
+        for (i, comp) in path.split('/').filter(|c| !c.is_empty()).enumerate() {
+            // `normalize` leaves single separators, so the prefix ending at
+            // this component is a slice of `path`.
+            end = if i == 0 {
+                comp.len()
+            } else {
+                end + 1 + comp.len()
+            };
+            if i < skip {
+                continue;
+            }
+            let stored =
+                vfs_compose::stored_name(provider.as_ref(), VPath::new(root, &path[..end]))?;
+            names.push(stored.unwrap_or_else(|| comp.to_string()));
+        }
+        Ok(names)
+    }
+
     /// Returns `(fh, size, is_dir)`.
     pub fn open(&self, root: RootId, path: &str, flags: u32) -> Result<(u64, u64, bool), i32> {
         let path = normalize(path).map_err(|_| bad_request())?;

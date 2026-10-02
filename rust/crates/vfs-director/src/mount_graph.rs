@@ -148,6 +148,36 @@ impl Provider for MountGraph {
         Ok(None)
     }
 
+    /// The name the merged listing shows for `p`'s last component: the last
+    /// mount that has it wins, as in `readdir`; and a component that exists
+    /// only as part of a deeper mount's prefix is spelled as that prefix is.
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        let path = normalize(p.rel).map_err(|_| bad_request())?;
+        if path.is_empty() {
+            return Ok(None);
+        }
+        for m in self.mounts.iter().rev() {
+            let Some(rel) = strip_prefix(&path, &m.prefix) else {
+                continue;
+            };
+            if rel.is_empty() {
+                continue;
+            }
+            if let Some(name) =
+                vfs_compose::stored_name(m.backend.as_ref(), VPath::new(p.root, &rel))?
+            {
+                return Ok(Some(name));
+            }
+        }
+        let (parent, last) = path.rsplit_once('/').unwrap_or(("", &path));
+        let last = vfs_core::fold(last);
+        Ok(self
+            .mounts
+            .iter()
+            .filter_map(|m| mount_child_name(parent, &m.prefix))
+            .find(|name| vfs_core::fold(name) == last))
+    }
+
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
         let path = normalize(p.rel).map_err(|_| bad_request())?;
         let mut map: HashMap<String, DirEntry> = HashMap::new();
@@ -362,6 +392,63 @@ mod tests {
 
     fn graph(mounts: Vec<(&str, Arc<dyn Provider>)>) -> MountGraph {
         MountGraph::new(mounts.into_iter().map(|(p, b)| (p.to_string(), b)).collect()).unwrap()
+    }
+
+    /// One name, without a listing: the spelling the merged listing shows.
+    /// The last mount that has the name wins, as it does in `readdir`; a
+    /// component that is only part of a deeper mount's prefix is spelled as
+    /// the prefix; and a name nothing has is `None`.
+    #[test]
+    fn stored_name_agrees_with_the_merged_listing() {
+        let g = graph(vec![
+            (
+                "",
+                Arc::new(vfs_compose::InlineProvider::from_files([
+                    ("Data/Interface/a.swf", b"x".as_slice()),
+                    ("Data/Skyrim.esm", b"x".as_slice()),
+                ])),
+            ),
+            (
+                "",
+                Arc::new(vfs_compose::InlineProvider::from_files([(
+                    "DATA/interface/b.swf",
+                    b"x".as_slice(),
+                )])),
+            ),
+            (
+                "Data/Mods/Deep",
+                Arc::new(vfs_compose::InlineProvider::from_files([(
+                    "f",
+                    b"x".as_slice(),
+                )])),
+            ),
+        ]);
+        let name = |p: &str| g.stored_name(VPath::at_default(p)).unwrap();
+        for (asked, dir) in [
+            ("data", ""),
+            ("DATA/INTERFACE", "data"),
+            ("data/interface/A.SWF", "data/interface"),
+            ("data/skyrim.ESM", "data"),
+            ("data/mods", "data"),
+            ("data/mods/deep", "data/mods"),
+            ("data/mods/deep/F", "data/mods/deep"),
+        ] {
+            let listed: Vec<String> = g
+                .readdir(VPath::at_default(dir))
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            let last = vfs_core::fold(asked.rsplit('/').next().unwrap());
+            let want = listed.iter().find(|n| vfs_core::fold(n) == last).cloned();
+            assert!(
+                want.is_some(),
+                "{asked} is not in the listing of {dir:?}: {listed:?}"
+            );
+            assert_eq!(name(asked), want, "{asked}");
+        }
+        assert_eq!(name("data/nothing.here"), None);
+        assert_eq!(name(""), None, "the root has no name of its own");
     }
 
     #[test]
