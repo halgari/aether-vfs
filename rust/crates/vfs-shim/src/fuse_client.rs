@@ -9,21 +9,20 @@
 #![allow(unsafe_code)]
 
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
-use vfs_ipc::{Geom, RingClient};
+use vfs_ipc::{DataGate, Geom, ReadPlan, RingClient};
 use vfs_redirect::{RootId, RootMap};
 use vfs_protocol::{
-    decode_getattr_resp, decode_open_resp, decode_readdir_resp, decode_read_bulk_resp,
-    decode_read_resp_into, decode_write_resp, encode_close_req, encode_mkdir_req, encode_open_req,
-    encode_path_req, encode_read_req, encode_rename_req, encode_setattr_req, encode_write_req,
-    is_read_resp_bulk, AttrResp, DirEntryWire, OpenResp, ReadReq, SetattrReq, WriteReq,
-    FLAG_READ_BULK, OP_CLOSE, OP_DELETE, OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN, OP_READ,
-    OP_READDIR, OP_RENAME, OP_SETATTR, OP_WRITE, OPEN_READ, OPEN_WRITE, ST_OK,
+    decode_getattr_resp, decode_open_resp, decode_readdir_resp, decode_write_resp,
+    encode_close_req, encode_mkdir_req, encode_open_req, encode_path_req, encode_rename_req,
+    encode_setattr_req, encode_write_req, AttrResp, DirEntryWire, OpenResp, SetattrReq, WriteReq,
+    OPEN_READ, OPEN_WRITE, OP_CLOSE, OP_DELETE, OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN,
+    OP_READDIR, OP_RENAME, OP_SETATTR, OP_WRITE, ST_OK,
 };
 use vfs_win::SharedMapping;
 use windows_sys::Win32::Foundation::HANDLE;
-use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent};
+use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, Sleep, SwitchToThread};
 
 /// `EVENT_MODIFY_STATE` — all we need is `SetEvent`.
 const EVENT_MODIFY_STATE: u32 = 0x0002;
@@ -168,11 +167,23 @@ pub fn try_init_from_env() -> Result<(), FuseInitError> {
 /// Concurrent bulk READs in flight (each uses its own arena bank via slot id).
 /// Keep modest: deep pipelines + large banks correlated with early 0xC0000409
 /// under the sealed director path (working director-only used depth 4 / 1 MiB).
+///
+/// That is per call. Calls on other threads have pipelines of their own, and
+/// what bounds them all together is [`FuseClient::gate`].
 const PIPELINE_DEPTH: usize = 4;
 /// Prefer shared-section bulk over inline ring payload above this size.
 const BULK_THRESHOLD: u32 = 64 * 1024;
 /// Deep pipeline for multi‑MiB sequential streams (CreateSection fill).
 const PIPELINE_DEPTH_STREAM: usize = 8;
+/// A read at least this long gets [`PIPELINE_DEPTH_STREAM`].
+const STREAM_BYTES: usize = 4 * 1024 * 1024;
+/// How long a wait for a response may yield the processor before it sleeps.
+///
+/// A read served from the local store is back within this (its 1 MiB chunks
+/// take 1-15 ms), so it never pays a sleep's overshoot. What is still
+/// unanswered after it is waiting on the network, where a millisecond more is
+/// nothing and a core spun for 300 ms is not.
+const IDLE_YIELD: core::time::Duration = core::time::Duration::from_millis(20);
 
 /// Wakes the director on submit, then spins for the response.
 ///
@@ -183,8 +194,11 @@ const PIPELINE_DEPTH_STREAM: usize = 8;
 /// stalled that way and owned ~93% of that hook's total time, with a 15.2 ms
 /// worst case.
 ///
-/// Spinning for the *response* stays right: it arrives in 20–209 µs, far below
-/// the cost of sleeping for it.
+/// Spinning for the *response* stays right: it arrives in microseconds, far
+/// below the cost of sleeping for it. Only a response that has **not** come
+/// within `vfs_ipc::CLIENT_SPIN_BUDGET` stops spinning (`idle_client` below):
+/// by then the request is waiting on its provider, and since `ring_lock` went
+/// there can be one such waiter per game thread rather than one per process.
 ///
 /// **A null `server_ev` makes both notifications no-ops**, and that is the
 /// whole of [`RingSource::File`] mode. Under Wine a `SetEvent` targets a *Wine*
@@ -212,6 +226,26 @@ impl vfs_ipc::Notifier for WakeServerSpinClient {
     }
     fn wait_client(&self, _slot: u32) {
         core::hint::spin_loop();
+    }
+    /// Off the hot path: give the processor to whatever else the game wants
+    /// to run, first by yielding and, for a wait long enough to be a network
+    /// fetch, by sleeping a millisecond at a time.
+    ///
+    /// Both are in-process under Wine — `NtYieldExecution` is `sched_yield`
+    /// and a non-alertable `NtDelayExecution` is a host sleep; neither asks
+    /// wineserver — and neither is a call this shim hooks. `Sleep` directly,
+    /// not `std::thread::sleep`: std builds a high-resolution waitable timer
+    /// for it, which is four handle operations (one of them the hooked
+    /// `NtClose`) to wait a millisecond.
+    fn idle_client(&self, _slot: u32, waited: core::time::Duration) {
+        // SAFETY: both take no pointers and may be called from any thread.
+        unsafe {
+            if waited < IDLE_YIELD {
+                SwitchToThread();
+            } else {
+                Sleep(1);
+            }
+        }
     }
     fn notify_slot_free(&self) {
         // A full ring can leave the director blocked; wake it on release too.
@@ -249,8 +283,21 @@ pub struct FuseClient {
     /// *by design* for a [`RingSource::File`] ring, where the director is a
     /// native Linux process no Wine event can reach.
     server_ev: HANDLE,
-    /// Serializes ring claim/submit — not safe for concurrent clients on one ring.
-    ring_lock: Mutex<()>,
+    /// Bounds the reads and writes this process has in flight below the
+    /// director's worker count, so that a worker is always left for an open,
+    /// a stat or a listing — see `vfs_ipc::concurrent`.
+    ///
+    /// **There is no lock around a round trip.** There used to be
+    /// (`ring_lock`, held from claim to release by every method here), on the
+    /// belief that the ring was not safe for concurrent clients. It is: a slot
+    /// is claimed by compare-and-swap, its response is awaited on that slot
+    /// alone, and each slot has its own arena bank. What the lock actually did
+    /// was make every file operation of every game thread wait behind
+    /// whichever one was in flight — so one read stalled on the network froze
+    /// all the game's file I/O, and the director's workers sat idle. Each
+    /// thread now has its own requests in flight; only data requests are
+    /// counted, and only against this gate.
+    gate: DataGate,
 }
 
 // SAFETY: `server_ev` is only ever passed to SetEvent, which is thread-safe.
@@ -319,6 +366,9 @@ impl FuseClient {
             }
         };
         let geom = vfs_ipc::ring::open(mapping.seg()).map_err(|e| format!("ring open: {e:?}"))?;
+        // Sized from the worker count the director published in the ring
+        // header (a ring that names none is taken to have the default four).
+        let gate = DataGate::for_ring(mapping.seg(), &geom);
 
         // The staged launch directory is a second spelling of root 0, not a
         // root of its own: a staged game resolves `Data\` relative to its own
@@ -351,7 +401,7 @@ impl FuseClient {
             roots,
             arena_len,
             server_ev,
-            ring_lock: Mutex::new(()),
+            gate,
         })
     }
 
@@ -374,7 +424,6 @@ impl FuseClient {
     }
 
     pub fn heartbeat(&self) -> Result<(), String> {
-        let _g = self.ring_lock.lock().map_err(|_| "ring lock poisoned".to_string())?;
         let c = self.client();
         let r = c
             .submit(OP_HEARTBEAT, 0, &[])
@@ -386,7 +435,6 @@ impl FuseClient {
     }
 
     pub fn getattr(&self, root: RootId, vpath: &str) -> Result<AttrResp, i32> {
-        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_GETATTR, 0, &encode_path_req(root.0, vpath))
@@ -398,7 +446,6 @@ impl FuseClient {
     }
 
     pub fn readdir(&self, root: RootId, vpath: &str) -> Result<Vec<DirEntryWire>, i32> {
-        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_READDIR, 0, &encode_path_req(root.0, vpath))
@@ -410,7 +457,6 @@ impl FuseClient {
     }
 
     pub fn open(&self, root: RootId, vpath: &str) -> Result<OpenResp, i32> {
-        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_OPEN, 0, &encode_open_req(root.0, OPEN_READ, vpath))
@@ -432,7 +478,6 @@ impl FuseClient {
         vpath: &str,
         create_flags: u32,
     ) -> Result<OpenResp, i32> {
-        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(
@@ -453,13 +498,16 @@ impl FuseClient {
         if data.is_empty() {
             return Ok(0);
         }
-        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let chunk = (self.payload_cap as usize).saturating_sub(24).max(1);
         let c = self.client();
         let mut written = 0usize;
         while written < data.len() {
             let end = (written + chunk).min(data.len());
             let piece = &data[written..end];
+            // A data request like a read: counted against the gate, one chunk
+            // at a time, so a long write does not sit on a permit between
+            // chunks.
+            let _permit = self.gate.acquire(1);
             let r = c
                 .submit(
                     OP_WRITE,
@@ -502,129 +550,37 @@ impl FuseClient {
     ///
     /// Large fragments use the **shared bulk arena** (control ring only carries
     /// length+offset); small use inline ring payload. Data never rides as a
-    /// multi‑MiB ring blob.
+    /// multi-MiB ring blob.
+    ///
+    /// The chunking, the pipeline and the arena copy are
+    /// `vfs_ipc::read_fragmented` — there rather than here so the code a game
+    /// thread runs is the code the native tests and `ring-bench` run. This
+    /// only says how this ring is to be cut up.
     pub fn read_fragmented(
         &self,
         fh: u64,
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, i32> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
-        let bulk_chunk = self.bulk_bank_bytes();
-        let inline_chunk = self.payload_cap.saturating_sub(8) as usize;
-        // Deep pipeline for multi‑MiB sequential streams (section fill / BSA).
-        let pipeline = if buf.len() >= 4 * 1024 * 1024 {
-            PIPELINE_DEPTH_STREAM.min(self.geom.slot_count as usize).max(1)
-        } else {
-            PIPELINE_DEPTH.min(self.geom.slot_count as usize).max(1)
+        let plan = ReadPlan {
+            // Prefer the arena from `BULK_THRESHOLD` up; a ring with no arena
+            // has nothing to prefer.
+            bulk_threshold: if self.arena_len > 0 {
+                BULK_THRESHOLD as usize
+            } else {
+                usize::MAX
+            },
+            bulk_chunk: self.bulk_bank_bytes(),
+            inline_chunk: self.payload_cap.saturating_sub(8) as usize,
+            depth: PIPELINE_DEPTH,
+            depth_stream: PIPELINE_DEPTH_STREAM,
+            stream_bytes: STREAM_BYTES,
         };
-        let c = self.client();
-        let mut filled = 0usize;
-
-        while filled < buf.len() {
-            let mut reqs: Vec<(u32, u32, Vec<u8>)> = Vec::new();
-            let mut wants: Vec<usize> = Vec::new();
-            let mut batch_off = filled;
-            while reqs.len() < pipeline && batch_off < buf.len() {
-                let rem = buf.len() - batch_off;
-                let bulk = rem as u32 >= BULK_THRESHOLD && self.arena_len > 0;
-                let chunk = if bulk {
-                    rem.min(bulk_chunk)
-                } else {
-                    rem.min(inline_chunk)
-                } as u32;
-                if chunk == 0 {
-                    break;
-                }
-                let flags = if bulk { FLAG_READ_BULK } else { 0 };
-                reqs.push((
-                    OP_READ,
-                    flags,
-                    encode_read_req(&ReadReq {
-                        fh,
-                        offset: offset + batch_off as u64,
-                        len: chunk,
-                    }),
-                ));
-                wants.push(chunk as usize);
-                batch_off += chunk as usize;
-            }
-            if reqs.is_empty() {
-                break;
-            }
-
-            // Hold slots until bulk arena banks are copied — free-before-copy
-            // races with bank reuse and can corrupt BSA streams (game then dies
-            // with 0xC0000409 / bad archive parse after ~full Animations.bsa).
-            let (responses, held) = c
-                .submit_many_held(&reqs)
-                .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
-
-            let mut batch_filled = 0usize;
-            let mut eof = false;
-            let mut copy_err: Option<i32> = None;
-            for (resp, want) in responses.iter().zip(wants.iter()) {
-                if resp.status != ST_OK {
-                    copy_err = Some(resp.status);
-                    break;
-                }
-                let frag_start = filled + batch_filled;
-                let dest = &mut buf[frag_start..frag_start + *want];
-                let n = if is_read_resp_bulk(&resp.payload) {
-                    let (bn, aoff) = match decode_read_bulk_resp(&resp.payload) {
-                        Some(x) => x,
-                        None => {
-                            copy_err = Some(vfs_protocol::ST_BAD_REQUEST);
-                            break;
-                        }
-                    };
-                    let n = (bn as usize).min(dest.len());
-                    if n > 0 {
-                        // Shared arena → destination (one memcpy; not via ring).
-                        if self
-                            .mapping
-                            .seg()
-                            .copy_to(aoff as usize, &mut dest[..n])
-                            .is_none()
-                        {
-                            copy_err = Some(vfs_protocol::ST_IO_ERROR);
-                            break;
-                        }
-                    }
-                    n
-                } else {
-                    match decode_read_resp_into(&resp.payload, dest) {
-                        Some(n) => n,
-                        None => {
-                            copy_err = Some(vfs_protocol::ST_BAD_REQUEST);
-                            break;
-                        }
-                    }
-                };
-                batch_filled += n;
-                if n < *want {
-                    eof = true;
-                    break;
-                }
-            }
-            c.release_slots(&held);
-            if let Some(st) = copy_err {
-                return Err(st);
-            }
-            filled += batch_filled;
-            if eof || batch_filled == 0 {
-                break;
-            }
-        }
-        Ok(filled)
+        vfs_ipc::read_fragmented(&self.client(), &self.gate, &plan, fh, offset, buf)
     }
 
     /// Delete (whiteout) a virtual path via the JVM overlay (`OP_DELETE`).
     pub fn delete(&self, root: RootId, vpath: &str) -> Result<(), i32> {
-        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_DELETE, 0, &encode_path_req(root.0, vpath))
@@ -642,7 +598,6 @@ impl FuseClient {
     /// roots must not route the rename here at all — see `hook.rs`'s
     /// rename/delete arm, which declines rather than guessing.
     pub fn rename(&self, root: RootId, from: &str, to: &str) -> Result<(), i32> {
-        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_RENAME, 0, &encode_rename_req(root.0, from, to))
@@ -655,7 +610,6 @@ impl FuseClient {
 
     /// Create a virtual directory via the JVM overlay (`OP_MKDIR`).
     pub fn mkdir(&self, root: RootId, vpath: &str, mode: u32) -> Result<(), i32> {
-        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_MKDIR, 0, &encode_mkdir_req(root.0, mode, vpath))
@@ -668,7 +622,6 @@ impl FuseClient {
 
     /// Truncate/extend a virtual write handle to `size` bytes (`OP_SETATTR`).
     pub fn truncate(&self, fh: u64, size: u64) -> Result<(), i32> {
-        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_SETATTR, 0, &encode_setattr_req(&SetattrReq { fh, size }))
@@ -680,7 +633,6 @@ impl FuseClient {
     }
 
     pub fn close(&self, fh: u64) -> Result<(), i32> {
-        let _g = self.ring_lock.lock().map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         let c = self.client();
         let r = c
             .submit(OP_CLOSE, 0, &encode_close_req(fh))
@@ -819,6 +771,7 @@ pub fn normalize_path_for_root(p: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     /// The unified predicate, exercised the way `FuseClient::vpath_under_root`
     /// exercises it (`RootMap::resolve` then join), without needing a live
