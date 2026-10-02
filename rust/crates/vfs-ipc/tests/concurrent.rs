@@ -7,6 +7,7 @@
 //! threads; only the handler is the test's own.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -23,9 +24,19 @@ const OP_ECHO: u32 = 900;
 /// Sleep for the payload's `u64` milliseconds, then answer `b"slept"`.
 const OP_SLEEP: u32 = 901;
 
+/// Block until the test opens the latch ([`Fixture::open_latch`]), then
+/// answer `b"released"`.
+const OP_HOLD: u32 = 902;
+
 /// Reads of this handle take [`SLOW_READ`] each; every other handle is instant.
 const FH_SLOW: u64 = 99;
 const SLOW_READ: Duration = Duration::from_millis(300);
+/// Reads of this handle block until the test opens the latch: a provider
+/// that has stopped answering, for exactly as long as the test says.
+const FH_HELD: u64 = 98;
+/// How long a test waits for something that must happen before it calls the
+/// run a failure. Never part of a passing run's logic.
+const GIVE_UP: Duration = Duration::from_secs(20);
 
 const PAYLOAD_CAP: u32 = 4096;
 const BANK: usize = 64 * 1024;
@@ -45,6 +56,12 @@ struct Fixture {
     /// Slow reads inside the handler right now, and the most there ever were.
     slow_now: AtomicU32,
     slow_peak: AtomicU32,
+    /// Closed until the test opens it; held requests wait on it.
+    latch: Mutex<bool>,
+    latch_opened: Condvar,
+    /// Requests inside the handler waiting on the latch, and the most ever.
+    held_now: AtomicU32,
+    held_peak: AtomicU32,
 }
 
 impl Fixture {
@@ -62,7 +79,48 @@ impl Fixture {
             stop: AtomicBool::new(false),
             slow_now: AtomicU32::new(0),
             slow_peak: AtomicU32::new(0),
+            latch: Mutex::new(false),
+            latch_opened: Condvar::new(),
+            held_now: AtomicU32::new(0),
+            held_peak: AtomicU32::new(0),
         }
+    }
+
+    /// Server side: wait until the test opens the latch.
+    fn hold(&self) {
+        let now = self.held_now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.held_peak.fetch_max(now, Ordering::SeqCst);
+        let mut open = self.latch.lock().unwrap();
+        while !*open {
+            open = self.latch_opened.wait(open).unwrap();
+        }
+        drop(open);
+        self.held_now.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Let every held request, now and later, go.
+    fn open_latch(&self) {
+        *self.latch.lock().unwrap() = true;
+        self.latch_opened.notify_all();
+    }
+
+    /// Wait until `ready` holds. Panics, naming `what`, if it never does.
+    fn until(&self, what: &str, ready: impl Fn() -> bool) {
+        let t = Instant::now();
+        while !ready() {
+            assert!(t.elapsed() < GIVE_UP, "never happened: {what}");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn held(&self) -> u32 {
+        self.held_now.load(Ordering::SeqCst)
+    }
+
+    fn slots_in(&self, state: u32) -> usize {
+        (0..self.geom.slot_count)
+            .filter(|&s| self.state(s) == state)
+            .count()
     }
 
     fn seg(&self) -> &SharedSeg {
@@ -102,6 +160,10 @@ impl Fixture {
                     thread::sleep(Duration::from_millis(ms));
                     (P::ST_OK, b"slept".to_vec())
                 }
+                OP_HOLD => {
+                    self.hold();
+                    (P::ST_OK, b"released".to_vec())
+                }
                 P::OP_READ => {
                     let r = P::decode_read_req(&req.payload).unwrap();
                     if r.fh == FH_SLOW {
@@ -109,6 +171,9 @@ impl Fixture {
                         self.slow_peak.fetch_max(now, Ordering::SeqCst);
                         thread::sleep(SLOW_READ);
                         self.slow_now.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    if r.fh == FH_HELD {
+                        self.hold();
                     }
                     let len = r.len as usize;
                     if req.flags & P::FLAG_READ_BULK != 0 {
@@ -135,13 +200,22 @@ impl Fixture {
 
     /// Run `body` with `workers` server threads serving the ring.
     fn with_workers<R>(&self, workers: usize, body: impl FnOnce() -> R) -> R {
+        /// Lets the server threads go when `body` ends — or panics: a failed
+        /// assertion must fail the test, not leave the scope waiting on
+        /// workers that are still holding requests.
+        struct Stop<'a>(&'a Fixture);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.open_latch();
+                self.0.stop.store(true, Ordering::Relaxed);
+            }
+        }
         thread::scope(|s| {
             for _ in 0..workers {
                 s.spawn(|| self.serve());
             }
-            let out = body();
-            self.stop.store(true, Ordering::Relaxed);
-            out
+            let _stop = Stop(self);
+            body()
         })
     }
 
@@ -209,43 +283,25 @@ fn concurrent_reads_from_many_threads_each_get_their_own_bytes() {
     }
 }
 
-/// One thread's request takes 400 ms. Another thread's requests, made while
-/// it is in flight, are answered as if it were not there.
+/// One thread's request is held by the server for as long as the test likes.
+/// Another thread's requests, made meanwhile, are answered as if it were not
+/// there: all five hundred return while the first is still held.
 #[test]
 fn a_slow_request_does_not_hold_up_a_fast_one() {
     let fx = Fixture::new(8);
     fx.with_workers(4, || {
-        let slow_done = AtomicBool::new(false);
         thread::scope(|s| {
-            s.spawn(|| {
-                let r = fx
-                    .client()
-                    .submit(OP_SLEEP, 0, &400u64.to_le_bytes())
-                    .unwrap();
-                assert_eq!(r.payload, b"slept");
-                slow_done.store(true, Ordering::SeqCst);
-            });
-            thread::sleep(Duration::from_millis(50));
+            let slow = s.spawn(|| fx.client().submit(OP_HOLD, 0, b"").unwrap().payload);
+            fx.until("the held request reached the server", || fx.held() == 1);
             let c = fx.client();
-            let t = Instant::now();
-            let mut worst = Duration::ZERO;
             for i in 0..500u32 {
                 let payload = i.to_le_bytes();
-                let one = Instant::now();
-                let r = c.submit(OP_ECHO, 0, &payload).unwrap();
-                worst = worst.max(one.elapsed());
-                assert_eq!(r.payload, payload);
+                assert_eq!(c.submit(OP_ECHO, 0, &payload).unwrap().payload, payload);
             }
-            assert!(
-                !slow_done.load(Ordering::SeqCst),
-                "the slow request finished first: the fast ones were made to wait for it \
-                 ({:?} for 500, worst {worst:?})",
-                t.elapsed()
-            );
-            assert!(
-                worst < Duration::from_millis(150),
-                "a fast request took {worst:?} while a slow one was in flight"
-            );
+            assert_eq!(fx.held(), 1, "the held request is still held");
+            assert!(!slow.is_finished());
+            fx.open_latch();
+            assert_eq!(slow.join().unwrap(), b"released");
         });
     });
 }
@@ -267,35 +323,159 @@ fn reads_held_at_the_gate_leave_a_worker_for_other_requests() {
                 s.spawn(move || {
                     let c = fx.client();
                     let mut buf = vec![0u8; 100];
-                    let n = read_fragmented(&c, gate, plan, FH_SLOW, t, &mut buf).unwrap();
+                    let n = read_fragmented(&c, gate, plan, FH_HELD, t, &mut buf).unwrap();
                     assert_eq!(n, 100);
-                    assert_bytes(FH_SLOW, t, &buf);
+                    assert_bytes(FH_HELD, t, &buf);
                 });
             }
-            thread::sleep(Duration::from_millis(60));
-            assert_eq!(
-                gate.in_flight(),
-                3,
-                "three slow reads in flight, three parked"
-            );
+            fx.until("three reads with the server, three in line", || {
+                fx.held() == 3 && gate.waiting() == 3
+            });
+            assert_eq!(gate.in_flight(), 3);
 
             let c = fx.client();
-            let t = Instant::now();
             for i in 0..200u32 {
                 let payload = i.to_le_bytes();
                 assert_eq!(c.submit(OP_ECHO, 0, &payload).unwrap().payload, payload);
             }
-            assert!(
-                t.elapsed() < SLOW_READ - Duration::from_millis(100),
-                "200 echoes took {:?}: they waited for a slow read",
-                t.elapsed()
-            );
+            assert_eq!(fx.held(), 3, "the reads are all still blocked");
+            fx.open_latch();
         });
     });
     assert_eq!(
-        fx.slow_peak.load(Ordering::SeqCst),
+        fx.held_peak.load(Ordering::SeqCst),
         3,
-        "the server must never have held more slow reads than the gate admits"
+        "the server must never have held more reads than the gate admits"
+    );
+    assert_eq!(gate.in_flight(), 0);
+    assert_eq!(gate.waiting(), 0);
+}
+
+/// **A read that timed out still holds its worker, and the gate knows.**
+///
+/// Four workers, so three data requests at once. A provider stops answering.
+/// Three reads time out one after another; the director is still inside all
+/// three. A fourth read must not be sent — it would take the last worker —
+/// and a request that is not data must still be answered.
+///
+/// The gate used to give a timed-out read's permit straight back. Then the
+/// fourth read was sent, every worker was held, and the echo below got no
+/// answer for as long as the provider stayed stuck.
+#[test]
+fn reads_that_timed_out_keep_their_permits_until_the_director_is_done() {
+    let fx = Fixture::new(8);
+    let gate = DataGate::new(vfs_ipc::data_limit(4, 8));
+    let plan = fx.plan();
+    fx.with_workers(4, || {
+        let impatient = fx.client().with_deadline(Duration::from_millis(40));
+        let mut buf = vec![0u8; 100];
+        for sent in 1..=3u32 {
+            let r = read_fragmented(&impatient, &gate, &plan, FH_HELD, 0, &mut buf);
+            assert_eq!(r, Err(P::ST_IO_ERROR));
+            assert_eq!(fx.held(), sent, "the director is still inside read {sent}");
+            assert_eq!(gate.in_flight(), sent, "so its permit is still out");
+            assert_eq!(gate.retired(), sent);
+        }
+        assert_eq!(fx.slots_in(ST_ABANDONED), 3);
+
+        // The fourth: refused at the gate, never sent.
+        let r = read_fragmented(&impatient, &gate, &plan, FH_HELD, 0, &mut buf);
+        assert_eq!(r, Err(P::ST_IO_ERROR));
+        assert_eq!(
+            fx.slots_in(ST_ABANDONED),
+            3,
+            "a fourth request reached the ring"
+        );
+        assert_eq!(fx.held(), 3);
+        assert_eq!(gate.waiting(), 0, "it left the line when it gave up");
+
+        // So the fourth worker is free, with the provider still stuck.
+        let c = fx.client().with_deadline(GIVE_UP);
+        assert_eq!(c.submit(OP_ECHO, 0, b"stat").unwrap().payload, b"stat");
+        assert_eq!(fx.held(), 3);
+
+        // The provider answers at last. The director drains the three slots,
+        // and the next read that finds no permit takes theirs back.
+        fx.open_latch();
+        fx.until("the retired slots were drained", || {
+            fx.slots_in(ST_ABANDONED) == 0
+        });
+        for i in 0..4u64 {
+            let patient = fx.client().with_deadline(GIVE_UP);
+            let n = read_fragmented(&patient, &gate, &plan, 7, i, &mut buf).unwrap();
+            assert_eq!(n, 100);
+            assert_bytes(7, i, &buf);
+        }
+        assert_eq!(
+            gate.reclaim(fx.seg(), &fx.geom),
+            0,
+            "nothing left to take back"
+        );
+        assert_eq!(gate.retired(), 0);
+        assert_eq!(gate.in_flight(), 0);
+    });
+    assert_eq!(fx.held_peak.load(Ordering::SeqCst), 3);
+    assert_eq!(fx.slots_in(ST_FREE), 8);
+}
+
+/// **Two deep reads of content that is not coming do not take the gate.**
+///
+/// Sixteen workers, so twelve data requests at once. One thread reads eight
+/// chunks of a blocked file and another four. Then a third thread reads one
+/// byte of a file that is served at once.
+///
+/// The two pipelines used to be given 8 and 4 permits — all twelve — and the
+/// third thread's read waited at the gate for as long as they ran. Now one
+/// call holds at most half the gate and stops at the reserve, so they hold 6
+/// and 3, and the small read goes straight through while both are still
+/// blocked.
+#[test]
+fn two_deep_reads_of_blocked_content_leave_room_for_a_small_read() {
+    let fx = Fixture::new(32);
+    let gate = DataGate::new(vfs_ipc::data_limit(16, 32));
+    assert_eq!((gate.limit(), gate.per_call(), gate.reserve()), (12, 6, 3));
+    let plan = fx.plan();
+    fx.with_workers(16, || {
+        thread::scope(|s| {
+            for chunks in [8usize, 4] {
+                let (fx, gate, plan) = (&fx, &gate, &plan);
+                s.spawn(move || {
+                    let c = fx.client();
+                    let mut buf = vec![0u8; chunks * BANK];
+                    let n = read_fragmented(&c, gate, plan, FH_HELD, 0, &mut buf).unwrap();
+                    assert_eq!(n, buf.len());
+                    assert_bytes(FH_HELD, 0, &buf);
+                });
+                // One at a time, so which pipeline asked first is not left to
+                // the scheduler: the eight-chunk read, then the four.
+                let want = if chunks == 8 { 6 } else { 9 };
+                fx.until("the pipeline's first batch reached the server", || {
+                    fx.held() == want
+                });
+            }
+            assert_eq!(
+                gate.in_flight(),
+                9,
+                "6 for the first pipeline, 3 for the second"
+            );
+            assert_eq!(gate.waiting(), 0);
+
+            // Both blocked. A zero-length wait at the gate would fail this
+            // read, so that it succeeds is the assertion; the deadline only
+            // bounds a failing run.
+            let c = fx.client().with_deadline(GIVE_UP);
+            let mut one = [0u8; 1];
+            for i in 0..50u64 {
+                let n = read_fragmented(&c, &gate, &plan, 7, i, &mut one).unwrap();
+                assert_eq!((n, one[0]), (1, byte(7, i)));
+                assert_eq!(fx.held(), 9, "both pipelines are still blocked");
+            }
+            fx.open_latch();
+        });
+    });
+    assert!(
+        fx.held_peak.load(Ordering::SeqCst) <= 9,
+        "the pipelines held more than nine workers between them"
     );
     assert_eq!(gate.in_flight(), 0);
 }
@@ -317,7 +497,12 @@ fn a_timed_out_request_retires_its_slot_until_the_late_reply_is_drained() {
         let r = read_fragmented(&impatient, &gate, &plan, FH_SLOW, 0, &mut buf);
         assert_eq!(r, Err(P::ST_IO_ERROR), "the read must fail, not hang");
         assert!(t.elapsed() < SLOW_READ, "it gave up at its deadline");
-        assert_eq!(gate.in_flight(), 0, "a failed read returns its permit");
+        assert_eq!(
+            gate.in_flight(),
+            1,
+            "the director still has the request, so its permit stays out"
+        );
+        assert_eq!(gate.retired(), 1);
 
         // The server still has the request: the slot is out of use.
         let retired = (0..2).find(|&s| fx.state(s) == ST_ABANDONED);
@@ -349,6 +534,8 @@ fn a_timed_out_request_retires_its_slot_until_the_late_reply_is_drained() {
         assert_eq!(resps[0].payload, b"first");
         assert_eq!(resps[1].payload, b"second");
         c.release_slots(&held);
+        assert_eq!(gate.reclaim(fx.seg(), &fx.geom), 1, "its permit comes back");
+        assert_eq!(gate.in_flight(), 0);
     });
     assert_eq!(fx.state(0), ST_FREE);
     assert_eq!(fx.state(1), ST_FREE);
@@ -444,6 +631,50 @@ fn a_late_response_is_waited_for_off_the_processor() {
         w.least_waited_us.load(Ordering::Relaxed) as u128 >= CLIENT_SPIN_BUDGET.as_micros(),
         "idle_client was called before the spin budget was spent"
     );
+}
+
+/// A full ring is waited for the way a response is — spin, then idle — and
+/// for no longer than the deadline. It used to be fifty million bare passes:
+/// seconds of a core at full tilt.
+#[test]
+fn a_full_ring_is_waited_for_off_the_processor_and_not_for_ever() {
+    let fx = Fixture::new(2);
+    // Every slot claimed by requests that never complete; nobody serves.
+    assert!(ring::claim_free(fx.seg(), &fx.geom).is_some());
+    assert!(ring::claim_free(fx.seg(), &fx.geom).is_some());
+    let w = Watching {
+        idle_calls: AtomicU32::new(0),
+        least_waited_us: AtomicU32::new(u32::MAX),
+    };
+    let c = RingClient::with_geom(fx.seg(), fx.geom, &w).with_deadline(Duration::from_millis(30));
+    assert_eq!(c.submit(OP_ECHO, 0, b"x").err(), Some(IpcError::RingFull));
+    let batch = c.submit_many_held(&[(OP_ECHO, 0, b"x".to_vec())]);
+    assert_eq!(batch.err(), Some(IpcError::RingFull));
+    assert!(
+        w.idle_calls.load(Ordering::Relaxed) > 0,
+        "the wait for a slot never left the spin"
+    );
+    assert!(w.least_waited_us.load(Ordering::Relaxed) as u128 >= CLIENT_SPIN_BUDGET.as_micros());
+}
+
+/// One deadline for a whole batch. Three requests served one after another,
+/// each taking 25 ms, against a 60 ms deadline: the third answers at 75 ms.
+/// With a clock per request, started when its turn to be awaited came, each
+/// was "on time" and the call ran past its deadline without noticing.
+#[test]
+fn a_batch_has_one_deadline_not_one_per_request() {
+    let fx = Fixture::new(4);
+    fx.with_workers(1, || {
+        let c = fx.client().with_deadline(Duration::from_millis(60));
+        let nap = 25u64.to_le_bytes().to_vec();
+        let r = c.submit_many_held(&[
+            (OP_SLEEP, 0, nap.clone()),
+            (OP_SLEEP, 0, nap.clone()),
+            (OP_SLEEP, 0, nap),
+        ]);
+        assert_eq!(r.err(), Some(IpcError::Timeout));
+        fx.until("every slot came back", || fx.slots_in(ST_FREE) == 4);
+    });
 }
 
 /// Slots are reused: far more requests than slots, from more threads than

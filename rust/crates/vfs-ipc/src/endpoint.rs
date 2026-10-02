@@ -14,6 +14,24 @@ pub struct Response {
     pub payload: Vec<u8>,
 }
 
+/// Why a request got no response, and which of its slots the server still
+/// has: retired ([`ring::Abandon::Retired`]), their workers still held. A
+/// caller that counts workers — `concurrent::DataGate` — needs the second.
+#[derive(Debug)]
+pub struct Unanswered {
+    pub error: IpcError,
+    pub retired: Vec<u32>,
+}
+
+impl From<IpcError> for Unanswered {
+    fn from(error: IpcError) -> Self {
+        Unanswered {
+            error,
+            retired: Vec::new(),
+        }
+    }
+}
+
 pub struct Request {
     pub slot: u32,
     pub opcode: u32,
@@ -92,26 +110,56 @@ impl<'a, N: Notifier> RingClient<'a, N> {
         self
     }
 
-    /// Claim a slot, looking at `start` first.
+    /// How long this client waits for a slot or for a response.
+    pub fn deadline(&self) -> std::time::Duration {
+        self.deadline
+    }
+
+    /// Claim a slot, looking at `start` first, waiting while the ring is full
+    /// — the way a response is waited for, and for no longer than one.
+    ///
+    /// This used to be fifty million bare passes over the slots: seven
+    /// seconds of one core at full tilt, measured, and then `RingFull`. A
+    /// full ring was unreachable while one lock let a single call's pipeline
+    /// in at a time; it is reachable now (gated data slots, retired slots, a
+    /// slot per thread doing metadata), and what fills it is slow requests,
+    /// so the wait is spin, then [`Notifier::idle_client`], bounded by the
+    /// deadline.
     fn claim_slot_from(&self, start: u32) -> Result<u32, IpcError> {
+        let began = std::time::Instant::now();
         let mut tries: u32 = 0;
+        let mut idle = false;
         loop {
             if let Some(s) = ring::claim_free_from(self.seg, &self.geom, start) {
                 return Ok(s);
             }
+            if idle {
+                let waited = began.elapsed();
+                if waited > self.deadline {
+                    return Err(IpcError::RingFull);
+                }
+                self.notifier
+                    .idle_client(start % self.geom.slot_count.max(1), waited);
+                continue;
+            }
             tries = tries.wrapping_add(1);
-            if tries > 50_000_000 {
-                return Err(IpcError::RingFull);
+            if tries.is_multiple_of(256) {
+                let waited = began.elapsed();
+                if waited > self.deadline {
+                    return Err(IpcError::RingFull);
+                }
+                idle = waited >= CLIENT_SPIN_BUDGET;
             }
             core::hint::spin_loop();
         }
     }
 
-    /// Wait for the response to `req_id` in `slot`, bounded by this client's
-    /// deadline ([`crate::RESPONSE_DEADLINE`] by default).
+    /// Wait for the response to `req_id` in `slot`, until this client's
+    /// deadline ([`crate::RESPONSE_DEADLINE`] by default) has passed since
+    /// `start` — when the request, or the batch it belongs to, was published.
     ///
-    /// A **time** bound, not a try count like `claim_slot`'s: `wait_client` is
-    /// advisory and its cost varies enormously by implementation. The shim's
+    /// A **time** bound, not a try count: `wait_client` is advisory and its
+    /// cost varies enormously by implementation. The shim's
     /// spins (a try count would expire in well under a second), while
     /// `EventNotifier`'s sleeps 1 ms per call (where the same count would be
     /// thirteen hours). Only wall-clock means the same thing to both.
@@ -121,8 +169,12 @@ impl<'a, N: Notifier> RingClient<'a, N> {
     /// [`CLIENT_SPIN_BUDGET`] the wait is no longer on the hot path: the clock
     /// is read every turn and the notifier is told how long it has been
     /// ([`Notifier::idle_client`]) so it can stop burning a core.
-    fn await_response(&self, slot: u32, req_id: u64) -> Result<(i32, Vec<u8>), IpcError> {
-        let start = std::time::Instant::now();
+    fn await_response(
+        &self,
+        slot: u32,
+        req_id: u64,
+        start: std::time::Instant,
+    ) -> Result<(i32, Vec<u8>), IpcError> {
         let mut tries: u32 = 0;
         let mut idle = false;
         loop {
@@ -149,29 +201,46 @@ impl<'a, N: Notifier> RingClient<'a, N> {
         }
     }
 
-    /// Give up on every slot in `slots`, whatever state each is in.
+    /// Give up on every slot in `slots`, whatever state each is in. Returns
+    /// the ones a server is still processing: retired, not freed.
     ///
     /// Never a plain free: a slot whose request a server is still processing
     /// is retired until that server finishes, so its late reply cannot be read
     /// by the next request to claim the slot. See [`ring::abandon`].
-    fn abandon_slots(&self, slots: &[u32]) {
+    fn abandon_slots(&self, slots: &[u32]) -> Vec<u32> {
+        let mut retired = Vec::new();
         for &slot in slots {
-            let _ = ring::abandon(self.seg, &self.geom, slot);
+            if ring::abandon(self.seg, &self.geom, slot) == Ok(ring::Abandon::Retired) {
+                retired.push(slot);
+            }
         }
         self.notifier.notify_slot_free();
+        retired
     }
 
     /// Submit a request and block (via the notifier / spin) until the response.
     pub fn submit(&self, opcode: u32, flags: u32, payload: &[u8]) -> Result<Response, IpcError> {
+        self.submit_reporting(opcode, flags, payload)
+            .map_err(|u| u.error)
+    }
+
+    /// [`Self::submit`], whose error also says which slot (none or one) was
+    /// left with the server.
+    pub fn submit_reporting(
+        &self,
+        opcode: u32,
+        flags: u32,
+        payload: &[u8],
+    ) -> Result<Response, Unanswered> {
         if payload.len() > self.geom.payload_cap as usize {
-            return Err(IpcError::PayloadTooLarge);
+            return Err(IpcError::PayloadTooLarge.into());
         }
         let slot = self.claim_slot_from(SLOT_HINT.with(|h| h.get()))?;
         SLOT_HINT.with(|h| h.set(slot));
         let outcome = ring::publish_request(self.seg, &self.geom, slot, opcode, flags, payload)
             .and_then(|req_id| {
                 self.notifier.notify_server();
-                self.await_response(slot, req_id)
+                self.await_response(slot, req_id, std::time::Instant::now())
             });
         let (status, payload) = match outcome {
             Ok(r) => r,
@@ -179,8 +248,10 @@ impl<'a, N: Notifier> RingClient<'a, N> {
                 // Give the slot up even on timeout, or a stalled director
                 // costs the ring a slot permanently and the next request sees
                 // RingFull — but never by freeing a slot the server still has.
-                self.abandon_slots(&[slot]);
-                return Err(e);
+                return Err(Unanswered {
+                    error: e,
+                    retired: self.abandon_slots(&[slot]),
+                });
             }
         };
         ring::free_slot(self.seg, &self.geom, slot)?;
@@ -213,12 +284,25 @@ impl<'a, N: Notifier> RingClient<'a, N> {
         &self,
         reqs: &[(u32, u32, Vec<u8>)],
     ) -> Result<(Vec<Response>, Vec<u32>), IpcError> {
+        self.submit_many_held_reporting(reqs).map_err(|u| u.error)
+    }
+
+    /// [`Self::submit_many_held`], whose error also lists the slots left with
+    /// the server (retired, their workers still held).
+    ///
+    /// The whole batch has one deadline, counted from when it was published.
+    /// A clock per request, awaited in order, let eight requests that each
+    /// answered just inside the deadline keep one call for eight deadlines.
+    pub fn submit_many_held_reporting(
+        &self,
+        reqs: &[(u32, u32, Vec<u8>)],
+    ) -> Result<(Vec<Response>, Vec<u32>), Unanswered> {
         if reqs.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
         for (_, _, p) in reqs {
             if p.len() > self.geom.payload_cap as usize {
-                return Err(IpcError::PayloadTooLarge);
+                return Err(IpcError::PayloadTooLarge.into());
             }
         }
         let mut slots = Vec::with_capacity(reqs.len());
@@ -235,21 +319,26 @@ impl<'a, N: Notifier> RingClient<'a, N> {
                 Ok(id) => ids.push(id),
                 Err(e) => {
                     // The requests already published are with the server.
-                    self.abandon_slots(&slots);
-                    return Err(e);
+                    return Err(Unanswered {
+                        error: e,
+                        retired: self.abandon_slots(&slots),
+                    });
                 }
             }
         }
         SLOT_HINT.with(|h| h.set(slots[0]));
         self.notifier.notify_server();
+        let published = std::time::Instant::now();
         let mut out = Vec::with_capacity(reqs.len());
         for (&slot, &req_id) in slots.iter().zip(&ids) {
-            let (status, payload) = match self.await_response(slot, req_id) {
+            let (status, payload) = match self.await_response(slot, req_id, published) {
                 Ok(r) => r,
                 Err(e) => {
                     // Every slot this call holds must go back, not just this one.
-                    self.abandon_slots(&slots);
-                    return Err(e);
+                    return Err(Unanswered {
+                        error: e,
+                        retired: self.abandon_slots(&slots),
+                    });
                 }
             };
             out.push(Response { status, payload });

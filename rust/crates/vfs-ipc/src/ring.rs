@@ -120,9 +120,13 @@ pub fn claim_free_from(seg: &SharedSeg, geom: &Geom, start: u32) -> Option<u32> 
     for i in 0..n {
         let s = (start.wrapping_add(i)) % n;
         if let Some(st) = state(seg, geom, s) {
-            if st
-                .compare_exchange(ST_FREE, ST_CLAIMED, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
+            // Looked at before it is swapped: a failed compare-and-swap still
+            // takes the slot's cache line exclusively, and a caller waiting on
+            // a full ring makes one per slot per pass.
+            if st.load(Ordering::Relaxed) == ST_FREE
+                && st
+                    .compare_exchange(ST_FREE, ST_CLAIMED, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
             {
                 return Some(s);
             }
