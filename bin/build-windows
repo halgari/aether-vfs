@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Cross-build the Windows half of the Proton path from Linux: the injector, the
-# shim DLL, the payload DLL and the read fixture. They run inside Wine; the
-# Director that serves them is native Linux and is built by plain `cargo`.
+# shim DLL, the payload DLL, the read fixture and the Steam probe. They run
+# inside Wine; the Director that serves them is native Linux and is built by
+# plain `cargo`.
 #
 # The artifacts are copied beside the Linux binaries in target/<profile>/,
 # which is where `Session::launch` (and the proton_launch e2e test) looks for
@@ -40,7 +41,7 @@ export XWIN_ACCEPT_LICENSE=1
 # Bash cannot export a hyphenated name, so it goes in through `env`.
 cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declaration")
 "${cross[@]}" cargo xwin build "${flags[@]}" --target "$target" \
-  -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read
+  -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-steam
 # vfs-payload is its own workspace (panic=abort, no CRT), so it builds apart.
 "${cross[@]}" cargo xwin build "${flags[@]}" --target "$target" \
   --manifest-path crates/vfs-payload/Cargo.toml --target-dir target
@@ -48,7 +49,8 @@ cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declarati
 src="target/$target/$profile"
 dst="target/$profile"
 mkdir -p "$dst"
-for f in vfs-injector.exe vfs_shim_dll.dll vfs_payload.dll vfs-fixture-read.exe; do
+for f in vfs-injector.exe vfs_shim_dll.dll vfs_payload.dll vfs-fixture-read.exe \
+  vfs-fixture-steam.exe; do
   cp -f "$src/$f" "$dst/$f"
   echo "  $dst/$f"
 done

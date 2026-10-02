@@ -13,10 +13,18 @@
 //! it (running while `fake-game.run` exists in the prefix) and exits 5.
 //!
 //! It also writes one line to stdout and one to stderr, which is what
-//! `LaunchOpts::log_file` captures.
+//! `LaunchOpts::log_file` captures. When the launch asks the injector about
+//! the Steam helper, it writes the report a current injector would
+//! (`cleared`, or a started helper), or `FAKE_STEAM_REPORT` instead (`none`:
+//! no report, as an injector that predates the helper writes).
 //!
 //! The fake `wineserver` models the prefix: `-k` kills the fake `wine` and
 //! the game, and `-w` returns once the game is gone.
+//!
+//! The Steam client is faked too, where a test wants one: a process named
+//! `steam` and a state directory whose `steam.pid` names it
+//! ([`FakeSteam`]). Every other test turns the Steam helper off, so none of
+//! them depends on whether a real client is running on the machine.
 #![cfg(unix)]
 
 use std::collections::BTreeMap;
@@ -25,7 +33,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use vfs_embed::{DiskProvider, LaunchExit, LaunchOpts, PrefixInit, Session, STOPPED_EXIT_CODE};
+use vfs_embed::{
+    DiskProvider, HelperStatus, LaunchExit, LaunchOpts, PrefixInit, Session, STOPPED_EXIT_CODE,
+};
 
 const ROOT0: &str = r"C:\Games\Fake";
 
@@ -75,6 +85,14 @@ echo GE-Proton99-1 > "$STEAM_COMPAT_DATA_PATH/version""#,
     script(
         &rt.join("files").join("bin").join("wine"),
         r#"env > "$WINEPREFIX/fake-wine.env"
+if [ -n "$VFS_INJECT_STEAM_HELPER" ]; then
+  case "$FAKE_STEAM_REPORT" in
+    none) ;;
+    "") if [ "$VFS_INJECT_STEAM_HELPER" = off ]; then r=cleared; else r=started:236:300; fi
+        printf '%s' "$r" > "$6.steam-helper" ;;
+    *) printf '%s' "$FAKE_STEAM_REPORT" > "$6.steam-helper" ;;
+  esac
+fi
 echo "fake wine stdout"
 echo "fake wine stderr" >&2
 echo "$@" > "$WINEPREFIX/fake-wine.args"
@@ -136,6 +154,8 @@ fn session(tag: &str, home: &Path) -> (Session, PathBuf, String) {
         steam_client: tmp(&format!("{tag}-steam")),
         app_id: Some(489830),
     });
+    // Off unless a test asks: a real Steam client may or may not be running.
+    s.set_steam_helper(false);
     std::fs::write(s.virtual_root().join("game.exe"), b"MZ").unwrap();
     let art = tmp(&format!("{tag}-art"));
     for f in ["vfs-injector.exe", "vfs_shim_dll.dll", "vfs_payload.dll"] {
@@ -268,6 +288,265 @@ fn the_injectors_reason_reaches_the_caller() {
     let (s, _pfx, shim) = session("fail", &home);
     let e = s.launch(&opts(&shim, "fail", true)).unwrap_err();
     assert!(e.contains("0xc0000135") && e.contains("STATUS_DLL_NOT_FOUND"), "{e}");
+}
+
+/// A running "Steam client": a process named `steam`, and the state
+/// directory whose `steam.pid` names it. Killed on drop.
+struct FakeSteam {
+    child: std::process::Child,
+    state: PathBuf,
+}
+
+impl FakeSteam {
+    fn start(tag: &str) -> Self {
+        let dir = tmp(&format!("{tag}-fake-steam"));
+        // A script's process is named after the script, and `read` holds it
+        // on the pipe this keeps open.
+        let exe = dir.join("steam");
+        script(&exe, "read _");
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.stdin(std::process::Stdio::piped());
+        let child = spawn_retrying_busy(&mut cmd);
+        let state = dir.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(state.join("steam.pid"), format!("{}\n", child.id())).unwrap();
+        FakeSteam { child, state }
+    }
+}
+
+impl Drop for FakeSteam {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// `cmd.spawn()`, retried while the script it runs is still open for writing
+/// in a child another test thread forked (`ETXTBSY`).
+fn spawn_retrying_busy(cmd: &mut std::process::Command) -> std::process::Child {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match cmd.spawn() {
+            Ok(c) => return c,
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                assert!(Instant::now() < deadline, "{e}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("spawn: {e}"),
+        }
+    }
+}
+
+const STEAM_NAMES: [&str; 3] = [
+    "SteamAppId",
+    "SteamGameId",
+    "STEAM_COMPAT_CLIENT_INSTALL_PATH",
+];
+
+#[test]
+fn with_a_running_steam_client_the_launch_asks_for_the_helper_and_sets_steams_environment() {
+    for name in STEAM_NAMES {
+        assert!(
+            std::env::var_os(name).is_none(),
+            "run without {name} in the test env"
+        );
+    }
+    let home = fake_home("steam-on");
+    let (mut s, pfx, shim) = session("steam-on", &home);
+    let steam = FakeSteam::start("steam-on");
+    s.set_steam_helper(true);
+    s.set_steam_state_dir(&steam.state);
+    let log = tmp("steam-on-log").join("wine.log");
+    let mut o = opts(&shim, "ok", true);
+    o.env
+        .insert("WINEDLLOVERRIDES".into(), "d3dx9_42=n,b".into());
+    o.log_file = Some(log.clone());
+    let mut h = s.launch_detached(&o).unwrap();
+    assert!(h.steam_helper());
+    ended(&mut h);
+    assert_eq!(
+        h.steam_helper_status(),
+        HelperStatus::Started { pid: 236, ms: 300 }
+    );
+    assert!(h.notes().is_empty(), "{:?}", h.notes());
+    assert_eq!(h.wait().unwrap(), LaunchExit::Exited(0));
+
+    let env = child_env(&pfx);
+    for name in ["SteamAppId", "SteamGameId"] {
+        assert_eq!(env[name], "489830", "{name}");
+    }
+    let client = &env["STEAM_COMPAT_CLIENT_INSTALL_PATH"];
+    assert!(
+        Path::new(client).is_dir() && client.ends_with("steam-on-steam"),
+        "the client directory the prefix was set up with: {client}"
+    );
+    assert_eq!(
+        env["VFS_INJECT_STEAM_HELPER"],
+        r"C:\windows\system32\steam.exe C:\windows\system32\rundll32.exe"
+    );
+    assert_eq!(
+        env["WINEDLLOVERRIDES"],
+        "mscoree=d;mshtml=d;steam.exe=b;d3dx9_42=n,b"
+    );
+    for name in [
+        "SteamClientLaunch",
+        "SteamEnv",
+        "SteamOverlayGameId",
+        "SteamUser",
+        "STEAM_COMPAT_APP_ID",
+        "STEAM_COMPAT_DATA_PATH",
+    ] {
+        assert!(
+            !env.contains_key(name),
+            "{name} is not this launch's to claim"
+        );
+    }
+
+    // `wine` still runs the injector, with its positional argv: the helper
+    // is the injector's to start, not a wrapper around it.
+    let args = std::fs::read_to_string(pfx.join("fake-wine.args")).unwrap();
+    let args: Vec<&str> = args.split_whitespace().collect();
+    assert_eq!(args.len(), 6, "{args:?}");
+    assert!(args[0].ends_with("vfs-injector.exe"), "{args:?}");
+    assert_eq!(args[1], r"C:\Games\Fake\game.exe");
+    assert!(args[2].ends_with("vfs_shim_dll.dll"), "{args:?}");
+    assert!(args[3].ends_with("vfs_payload.dll"), "{args:?}");
+    assert!(args[4].ends_with("shim.cfg"), "{args:?}");
+    assert!(args[5].ends_with("ready.flag"), "{args:?}");
+
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "fake wine stdout\nfake wine stderr\n",
+        "nothing is said when the helper is asked for"
+    );
+}
+
+#[test]
+fn without_a_running_steam_client_the_launch_is_as_before_and_says_so_once() {
+    let home = fake_home("steam-off");
+    let (mut s, pfx, shim) = session("steam-off", &home);
+    // A Steam client that is not running: its pid file names a process that
+    // has exited.
+    let state = {
+        let steam = FakeSteam::start("steam-off");
+        steam.state.clone()
+    };
+    s.set_steam_helper(true);
+    s.set_steam_state_dir(&state);
+    let log = tmp("steam-off-log").join("wine.log");
+    let mut o = opts(&shim, "ok", true);
+    o.log_file = Some(log.clone());
+    let mut h = s.launch_detached(&o).unwrap();
+    assert!(!h.steam_helper());
+    ended(&mut h);
+    assert_eq!(h.steam_helper_status(), HelperStatus::Cleared);
+    let notes = h.notes();
+    assert_eq!(h.wait().unwrap(), LaunchExit::Exited(0), "no new failure");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("the Steam client is not running")
+            && notes[0].contains("runs without Steam")
+            && notes[0].contains(&*state.join("steam.pid").to_string_lossy()),
+        "{notes:?}"
+    );
+
+    let env = child_env(&pfx);
+    for name in STEAM_NAMES {
+        assert!(!env.contains_key(name), "{name}");
+    }
+    assert_eq!(
+        env["VFS_INJECT_STEAM_HELPER"], "off",
+        "the injector clears the pid an earlier helper left"
+    );
+    assert_eq!(env["WINEDLLOVERRIDES"], "mscoree=d;mshtml=d");
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        format!("{}\nfake wine stdout\nfake wine stderr\n", notes[0]),
+        "the note leads the log"
+    );
+}
+
+#[test]
+fn the_steam_helper_can_be_turned_off_and_needs_an_app_id() {
+    let home = fake_home("steam-none");
+    let (mut s, pfx, shim) = session("steam-none", &home);
+    let steam = FakeSteam::start("steam-none");
+    s.set_steam_state_dir(&steam.state);
+    // Off (as `session` leaves it), with a client running.
+    let h = s.launch_detached(&opts(&shim, "ok", true)).unwrap();
+    assert!(!h.steam_helper() && h.notes().is_empty());
+    h.wait().unwrap();
+    assert_eq!(child_env(&pfx)["VFS_INJECT_STEAM_HELPER"], "off");
+
+    // On, but the launch is not a Steam game's: no app id anywhere.
+    s.set_steam_helper(true);
+    s.set_prefix_init(PrefixInit::Proton {
+        steam_client: tmp("steam-none-client"),
+        app_id: None,
+    });
+    let h = s.launch_detached(&opts(&shim, "ok", true)).unwrap();
+    assert!(!h.steam_helper() && h.notes().is_empty());
+    h.wait().unwrap();
+
+    // The host's own `SteamAppId` is an app id.
+    let mut o = opts(&shim, "ok", true);
+    o.env.insert("SteamAppId".into(), "72850".into());
+    let h = s.launch_detached(&o).unwrap();
+    assert!(h.steam_helper());
+    h.wait().unwrap();
+    let env = child_env(&pfx);
+    assert_eq!(env["SteamAppId"], "72850");
+    assert_eq!(env["SteamGameId"], "72850");
+}
+
+#[test]
+fn a_helper_that_is_not_running_or_an_injector_that_does_not_report_is_noted() {
+    let home = fake_home("steam-report");
+    let (mut s, _pfx, shim) = session("steam-report", &home);
+    let steam = FakeSteam::start("steam-report");
+    s.set_steam_helper(true);
+    s.set_steam_state_dir(&steam.state);
+
+    let mut o = opts(&shim, "ok", true);
+    o.env.insert(
+        "FAKE_STEAM_REPORT".into(),
+        "failed:it (process 236) exited before publishing itself".into(),
+    );
+    let mut h = s.launch_detached(&o).unwrap();
+    ended(&mut h);
+    assert_eq!(
+        h.steam_helper_status(),
+        HelperStatus::NotRunning("it (process 236) exited before publishing itself".into())
+    );
+    let notes = h.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("exited before publishing itself") && notes[0].contains("without Steam"),
+        "{notes:?}"
+    );
+    h.wait().unwrap();
+
+    // An injector built before the helper existed says nothing at all.
+    o.env.insert("FAKE_STEAM_REPORT".into(), "none".into());
+    let mut h = s.launch_detached(&o).unwrap();
+    ended(&mut h);
+    assert_eq!(h.steam_helper_status(), HelperStatus::Unreported);
+    let notes = h.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("Windows artifacts are older") && notes[0].contains("rebuild"),
+        "{notes:?}"
+    );
+    h.wait().unwrap();
+}
+
+/// Polls `h` until `wine` has exited, so the injector's report is final.
+fn ended(h: &mut vfs_embed::LaunchHandle) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.is_running() {
+        assert!(Instant::now() < deadline, "the launch did not end");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn wait_for(p: &Path) {

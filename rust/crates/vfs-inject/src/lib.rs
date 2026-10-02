@@ -15,6 +15,7 @@ mod inject;
 mod map;
 mod payload_cfg;
 mod static_imports;
+mod steam_helper;
 mod stub;
 
 pub use pe::{is_system_import_dll, map_image_from_pe_bytes_local, pe_looks_like_image};
@@ -100,3 +101,7 @@ pub use inject::{
     merge_preinit_redirects, run_target_with_preinit, run_target_with_shim, PreinitArm,
 };
 pub use static_imports::StaticImport as ConfigStaticImport;
+pub use steam_helper::{
+    active_process_pid, check_helper_command, clear_active_process_pid, running_under_wine,
+    start_steam_helper, SteamHelper, SteamHelperError, ACTIVE_PROCESS_KEY,
+};

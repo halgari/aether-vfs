@@ -2171,6 +2171,10 @@ name = "vfs-fixture-staticimp"
 version = "0.1.0"
 
 [[package]]
+name = "vfs-fixture-steam"
+version = "0.1.0"
+
+[[package]]
 name = "vfs-fixture-vproxy"
 version = "0.1.0"
 

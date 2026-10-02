@@ -121,6 +121,18 @@ pub const READY_TIMEOUT_SECS: &str = "VFS_READY_TIMEOUT_SECS";
 /// it (`C:\…`). Set by the Proton launch; unset, the target inherits the
 /// injector's own directory.
 pub const INJECT_CWD: &str = "VFS_INJECT_CWD";
+/// The command line of Proton's Steam helper, as `vfs-injector` runs it
+/// (`C:\windows\system32\steam.exe <a program>`), or
+/// [`INJECT_STEAM_HELPER_OFF`]. Set by the Proton launch: with a command
+/// line, the injector starts the helper and waits for it to publish itself as
+/// the running Steam client before it creates the target; with `off`, it only
+/// clears the pid an earlier helper left. Either way it reports what it did
+/// in `<ready file>` + [`STEAM_HELPER_REPORT_SUFFIX`]. Unset, it does
+/// neither. Honoured only under Wine.
+pub const INJECT_STEAM_HELPER: &str = "VFS_INJECT_STEAM_HELPER";
+/// The [`INJECT_STEAM_HELPER`] value that asks for no helper, only for the
+/// stale pid to be cleared.
+pub const INJECT_STEAM_HELPER_OFF: &str = "off";
 
 // ─── injection handshake ─────────────────────────────────────────────────────
 
@@ -174,6 +186,24 @@ pub const INJECTOR_TARGET_EXITED_PREFIX: &str = "target-exited:";
 pub const INJECTOR_READY_TIMEOUT_PREFIX: &str = "ready-timeout:";
 /// Report prefix: any other injection failure, followed by its description.
 pub const INJECTOR_FAILED_PREFIX: &str = "inject:";
+
+// ─── Steam helper report ─────────────────────────────────────────────────────
+// Also not switch names: what `vfs-injector` did with [`INJECT_STEAM_HELPER`],
+// one line in `<ready file>` + [`STEAM_HELPER_REPORT_SUFFIX`], written before
+// the target is created. Its absence once the target is running means an
+// injector that predates the helper.
+
+/// Appended to the ready file's path to name the injector's helper report.
+pub const STEAM_HELPER_REPORT_SUFFIX: &str = ".steam-helper";
+/// The helper published itself: `started:<pid>:<milliseconds>`.
+pub const STEAM_HELPER_STARTED_PREFIX: &str = "started:";
+/// No helper was asked for, and the stale pid was cleared.
+pub const STEAM_HELPER_CLEARED: &str = "cleared";
+/// The helper was not started: `disabled:<why>`.
+pub const STEAM_HELPER_DISABLED_PREFIX: &str = "disabled:";
+/// The helper was started and failed (did not start, exited early, timed out
+/// and was stopped): `failed:<why>`.
+pub const STEAM_HELPER_FAILED_PREFIX: &str = "failed:";
 
 // ─── behaviour switches (booleans) ───────────────────────────────────────────
 
@@ -335,6 +365,16 @@ pub const FIXTURE_INI_WRITE: &str = "VFS_FIXTURE_INI_WRITE";
 pub const FIXTURE_INI_SECTION: &str = "VFS_FIXTURE_INI_SECTION";
 /// The INI key `vfs-fixture-prefs` reads/writes.
 pub const FIXTURE_INI_KEY: &str = "VFS_FIXTURE_INI_KEY";
+/// `vfs-fixture-steam`: the `steam_api64.dll` to load (default: by name, in
+/// the loader's search order).
+pub const FIXTURE_STEAM_API_DLL: &str = "VFS_FIXTURE_STEAM_API_DLL";
+/// `vfs-fixture-steam`: a file that receives the report it prints.
+pub const FIXTURE_STEAM_OUT: &str = "VFS_FIXTURE_STEAM_OUT";
+/// `vfs-fixture-steam`: `0` skips the controller and Steam Input calls.
+pub const FIXTURE_STEAM_INPUT: &str = "VFS_FIXTURE_STEAM_INPUT";
+/// `vfs-fixture-steam`: an action manifest path to hand Steam Input, the call
+/// that waits for the client's controller mapping.
+pub const FIXTURE_STEAM_MANIFEST: &str = "VFS_FIXTURE_STEAM_MANIFEST";
 
 /// What a switch is for, so the surface can be listed and reviewed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,6 +421,7 @@ pub const ALL: &[Var] = &[
     Var { name: DISCOVERY_PATH, kind: Kind::Handshake, default: "platform default" },
     Var { name: READY_TIMEOUT_SECS, kind: Kind::Behaviour, default: "180" },
     Var { name: INJECT_CWD, kind: Kind::Handshake, default: "the injector's own directory" },
+    Var { name: INJECT_STEAM_HELPER, kind: Kind::Handshake, default: "no Steam helper" },
     Var { name: SHIM_CONFIG, kind: Kind::Handshake, default: "required by the shim" },
     Var { name: SHIM_READY, kind: Kind::Handshake, default: "no ready signal" },
     Var { name: PAYLOAD_PATH, kind: Kind::Handshake, default: "resolved beside the shim" },
@@ -436,6 +477,10 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_INI_WRITE, kind: Kind::Fixture, default: "unset (read-only run)" },
     Var { name: FIXTURE_INI_SECTION, kind: Kind::Fixture, default: "Display" },
     Var { name: FIXTURE_INI_KEY, kind: Kind::Fixture, default: "sTest" },
+    Var { name: FIXTURE_STEAM_API_DLL, kind: Kind::Fixture, default: "steam_api64.dll" },
+    Var { name: FIXTURE_STEAM_OUT, kind: Kind::Fixture, default: "unset (stdout only)" },
+    Var { name: FIXTURE_STEAM_INPUT, kind: Kind::Fixture, default: "on" },
+    Var { name: FIXTURE_STEAM_MANIFEST, kind: Kind::Fixture, default: "unset (not called)" },
 ];
 
 /// Is `name` a known switch?

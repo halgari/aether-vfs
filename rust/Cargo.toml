@@ -50,6 +50,9 @@ members = [
   "crates/vfs-fixture-prefs",
   "crates/vfs-fixture-vproxy",
   "crates/vfs-fixture-staticimp",
+  # Steam API probe for the Proton launch path: loads a game's own
+  # steam_api64.dll and reports what it sees of the Steam client.
+  "crates/vfs-fixture-steam",
   "crates/vfs-ring-harness",
   "crates/xtask-descriptor",
 ]
