@@ -23,8 +23,23 @@ pub use router::{Route, RouterProvider};
 pub use seekable::SeekableProvider;
 pub use subdir::SubdirProvider;
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use vfs_provider::Provider;
+use vfs_provider::{DirEntry, Provider};
+
+/// The entries of a merged directory listing, ordered by folded name.
+///
+/// `by_folded` maps `vfs_core::fold(entry.name)` to the entry — the map every
+/// merging `readdir` here (and `vfs-director`'s `MountGraph`) already builds
+/// to make one spelling win. Sorting on those keys gives the order
+/// `sort_by_key(|e| fold(&e.name))` gives, without folding two names on every
+/// comparison: that cost 33 ms for a 3,000-entry directory. The keys are
+/// distinct, so the order is total and no tie-break is involved.
+pub fn sorted_by_folded_name(by_folded: HashMap<String, DirEntry>) -> Vec<DirEntry> {
+    let mut keyed: Vec<(String, DirEntry)> = by_folded.into_iter().collect();
+    keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    keyed.into_iter().map(|(_, e)| e).collect()
+}
 
 /// Stack providers bottom→top so the last entry wins on conflicts (layer order).
 ///
@@ -47,6 +62,50 @@ pub fn stack_layers(
 mod stack_tests {
     use super::*;
     use vfs_provider::{VPath, OPEN_READ};
+
+    #[test]
+    fn sorted_by_folded_name_matches_a_sort_on_the_folded_name() {
+        use vfs_provider::{DirEntry, Stat, KIND_FILE};
+        // Mixed case, non-ASCII, a name whose fold changes its length (`İ`),
+        // and names that differ only past a shared prefix.
+        let names = [
+            "Zebra.esp",
+            "apple.esp",
+            "Mango.ESP",
+            "ÄÖÜ.txt",
+            "äpfel.txt",
+            "İstanbul",
+            "istanbul2",
+            "a",
+            "B",
+            "_x",
+            "Data",
+            "data2",
+            "DATA1",
+            "meshes",
+            "Meshes2",
+            "é",
+            "E",
+            "z",
+        ];
+        let entry = |n: &str| DirEntry {
+            name: n.to_string(),
+            stat: Stat {
+                kind: KIND_FILE,
+                size: n.len() as u64,
+                mtime: 0,
+            },
+        };
+        let mut want: Vec<DirEntry> = names.iter().map(|n| entry(n)).collect();
+        want.sort_by_key(|e| vfs_core::fold(&e.name));
+        let map = names
+            .iter()
+            .map(|n| (vfs_core::fold(n), entry(n)))
+            .collect();
+        let got = sorted_by_folded_name(map);
+        let names_of = |v: &[DirEntry]| v.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names_of(&got), names_of(&want));
+    }
 
     #[test]
     fn stack_layers_rejects_empty() {

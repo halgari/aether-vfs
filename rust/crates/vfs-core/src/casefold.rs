@@ -31,7 +31,22 @@
 ///    case-insensitive, therefore the folded spelling names the same file" is
 ///    **not** a sound argument, and must not be used to wave through a change
 ///    to any spelling that reaches the filesystem.
+///
+/// **The ASCII path is the same function, faster.** `char::to_lowercase` of an
+/// ASCII character is its ASCII lowercase, so an all-ASCII string — nearly
+/// every path a game asks for — folds with one pass over its bytes instead of
+/// a decode and a Unicode table lookup per character. The output is identical
+/// (`ascii_fast_path_matches_the_unicode_fold` holds it to that), so this is
+/// not the wire-visible kind of change the paragraph above warns about.
 pub fn fold(s: &str) -> String {
+    if s.is_ascii() {
+        return s.to_ascii_lowercase();
+    }
+    fold_unicode(s)
+}
+
+/// [`fold`]'s definition: `char::to_lowercase` of every character.
+fn fold_unicode(s: &str) -> String {
     s.chars().flat_map(char::to_lowercase).collect()
 }
 
@@ -51,6 +66,32 @@ mod tests {
     fn folds_ascii_and_unicode() {
         assert_eq!(fold("FooBAR.ESP"), "foobar.esp");
         assert_eq!(fold("ÄÖÜ"), "äöü");
+    }
+
+    #[test]
+    fn ascii_fast_path_matches_the_unicode_fold() {
+        // Every ASCII character, alone and inside a string, folds to what the
+        // definition gives.
+        let all: String = (0u8..128).map(char::from).collect();
+        assert_eq!(fold(&all), fold_unicode(&all));
+        for c in (0u8..128).map(char::from) {
+            let one = c.to_string();
+            assert_eq!(fold(&one), fold_unicode(&one), "{c:?}");
+        }
+        for s in [
+            "",
+            "Data/Meshes/Actors/Character/FaceGenData/FaceGeom/Skyrim.esm/0001A696.NIF",
+            "Plugin Number 00042.ESP",
+            "data\\SKSE\\Plugins\\Version-1-5-97-0.BIN",
+        ] {
+            assert!(s.is_ascii());
+            assert_eq!(fold(s), fold_unicode(s), "{s:?}");
+        }
+        // One non-ASCII character anywhere takes the definition's path.
+        for s in ["Data/ÜBER/a.ESP", "İstanbul", "ASCII then Ä", "ǅ"] {
+            assert_eq!(fold(s), fold_unicode(s), "{s:?}");
+        }
+        assert_eq!(fold("İ"), "i\u{307}");
     }
 
     #[test]
