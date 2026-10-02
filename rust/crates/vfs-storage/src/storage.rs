@@ -184,6 +184,11 @@ pub struct Storage {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     pub(crate) drop_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Test hook: runs inside every layer file read, while the read holds the
+    /// file's state lock (so a test can hold reads there and count them).
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) layer_read_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// The default for [`DurableClock::max_commits`].
@@ -341,6 +346,8 @@ impl Storage {
             fail_import_at: Mutex::new(None),
             #[cfg(test)]
             drop_hook: Mutex::new(None),
+            #[cfg(test)]
+            layer_read_hook: Mutex::new(None),
         }))
     }
 

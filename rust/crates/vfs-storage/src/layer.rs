@@ -54,7 +54,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 
 use vfs_core::fold;
 use vfs_provider::{
@@ -71,6 +71,16 @@ use crate::storage::{Storage, StorageError};
 
 fn lock<T>(m: &Mutex<T>) -> Result<MutexGuard<'_, T>, i32> {
     m.lock().map_err(|_| map_io_err())
+}
+
+/// A file cell's state, shared: a read (see `layer_io`'s locking notes).
+fn read_state(m: &RwLock<FileState>) -> Result<RwLockReadGuard<'_, FileState>, i32> {
+    m.read().map_err(|_| map_io_err())
+}
+
+/// A file cell's state, exclusive: a write, truncate or commit.
+fn write_state(m: &RwLock<FileState>) -> Result<RwLockWriteGuard<'_, FileState>, i32> {
+    m.write().map_err(|_| map_io_err())
 }
 
 fn now() -> i64 {
@@ -465,7 +475,7 @@ impl LayerProvider {
 
     /// `set_len` on `cell` with its commit.
     fn resize(&self, cell: &FileCell, len: u64) -> Result<(), i32> {
-        let mut st = lock(&cell.state)?;
+        let mut st = write_state(&cell.state)?;
         cell.truncate(&self.storage, &self.name, &mut st, len)?;
         self.commit(cell, &mut st)
     }
@@ -562,7 +572,7 @@ impl Provider for LayerProvider {
             return Ok(());
         };
         let mut durable = of.wrote.load(Ordering::Acquire);
-        let committed = lock(&cell.state).and_then(|mut st| {
+        let committed = write_state(&cell.state).and_then(|mut st| {
             if durable || st.is_dirty() {
                 durable = true;
                 self.commit(cell, &mut st)
@@ -580,13 +590,15 @@ impl Provider for LayerProvider {
 
     fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let (_of, cell) = self.file_of(h)?;
-        let st = lock(&cell.state)?;
+        // Shared: reads of one file run concurrently. Every change to the
+        // state holds it exclusive, so this read sees it whole.
+        let st = read_state(&cell.state)?;
         cell.read(&self.storage, &self.name, &st, offset, buf)
     }
 
     fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
         let (of, cell) = self.file_of(h)?;
-        let mut st = lock(&cell.state)?;
+        let mut st = write_state(&cell.state)?;
         cell.write(&self.storage, &self.name, &mut st, offset, buf)?;
         of.wrote.store(true, Ordering::Release);
         if st.dirty.len() > 4 {
@@ -607,7 +619,7 @@ impl Provider for LayerProvider {
             return Ok(());
         };
         let wrote = {
-            let mut st = lock(&cell.state)?;
+            let mut st = write_state(&cell.state)?;
             let wrote = of.wrote.load(Ordering::Acquire) || st.is_dirty();
             self.commit(cell, &mut st)?;
             wrote
@@ -793,7 +805,7 @@ impl Drop for LayerProvider {
             Err(_) => Vec::new(),
         };
         for cell in open {
-            if let Ok(mut st) = cell.state.lock() {
+            if let Ok(mut st) = cell.state.write() {
                 let _ = self.commit(&cell, &mut st);
             }
         }
@@ -814,7 +826,9 @@ impl Drop for LayerProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
 
     use vfs_provider::{
         Provider, SetAttr, VPath, FIXTURE_FILES, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_READ,
@@ -1812,6 +1826,223 @@ mod tests {
         );
         p.close(r).unwrap();
         p.close(h).unwrap();
+    }
+
+    /// Installs a gate as the storage's layer read hook: every read that
+    /// enters waits there — holding the file's state lock — until `want`
+    /// reads are inside at once. Reads that exclude each other never get
+    /// there; the first to wait `patience` gives up for all of them, so the
+    /// caller's assertion on the returned peak fails instead of the test
+    /// hanging. Returns the gate: `(inside, peak, gave_up)`.
+    #[allow(clippy::type_complexity)]
+    fn gate_reads(
+        s: &Storage,
+        want: usize,
+        patience: Duration,
+    ) -> Arc<(Mutex<(usize, usize, bool)>, Condvar)> {
+        let gate = Arc::new((Mutex::new((0usize, 0usize, false)), Condvar::new()));
+        let g = Arc::clone(&gate);
+        *s.layer_read_hook.lock().unwrap() = Some(Arc::new(move || {
+            let (m, cv) = &*g;
+            let mut st = m.lock().unwrap();
+            st.0 += 1;
+            st.1 = st.1.max(st.0);
+            cv.notify_all();
+            let (mut st, timeout) = cv
+                .wait_timeout_while(st, patience, |st| st.1 < want && !st.2)
+                .unwrap();
+            if timeout.timed_out() {
+                st.2 = true;
+                cv.notify_all();
+            }
+            st.0 -= 1;
+        }));
+        gate
+    }
+
+    #[test]
+    fn reads_of_one_file_run_concurrently() {
+        // The game issues eight 1 MiB reads of one plugin at once. Each read
+        // holds the file's state lock shared, so all eight are inside the
+        // read together — on one handle or several.
+        const N: usize = 8;
+        let (s, _d) = temp_storage();
+        let p = s.layer("l").unwrap();
+        let body: Vec<u8> = (0..N * BS as usize)
+            .map(|i| (i / BS as usize) as u8 + 1)
+            .collect();
+        write_file(&p, "big.bin", 0, &body);
+        let (h1, _, _) = p.open(at("big.bin"), OPEN_READ).unwrap();
+        let (h2, _, _) = p.open(at("big.bin"), OPEN_READ).unwrap();
+
+        let gate = gate_reads(&s, N, Duration::from_secs(5));
+        std::thread::scope(|sc| {
+            for i in 0..N {
+                let p = &p;
+                sc.spawn(move || {
+                    let h = if i % 2 == 0 { h1 } else { h2 };
+                    let mut buf = vec![0u8; BS as usize];
+                    let n = p.read_at(h, i as u64 * BS, &mut buf).unwrap();
+                    assert_eq!(n, BS as usize);
+                    assert!(buf.iter().all(|&b| b == i as u8 + 1), "block {i}");
+                });
+            }
+        });
+        *s.layer_read_hook.lock().unwrap() = None;
+        let (_, peak, gave_up) = *gate.0.lock().unwrap();
+        assert!(!gave_up, "reads of one file excluded each other");
+        assert_eq!(peak, N, "all {N} reads were inside the read at once");
+        p.close(h1).unwrap();
+        p.close(h2).unwrap();
+    }
+
+    #[test]
+    fn a_change_waits_for_a_read_in_flight() {
+        // A read holds the state shared; a write, a truncate and a flush's
+        // commit each take it exclusive, so none of them lands while a read
+        // is inside — the read returns the bytes from before the change.
+        type Change = fn(&Arc<dyn Provider>, u64);
+        let changes: [(&str, Change, &[u8]); 3] = [
+            (
+                "write_at",
+                |p, w| {
+                    p.write_at(w, 0, &[2u8; 4]).unwrap();
+                },
+                &[2, 2, 2, 2, 1, 1],
+            ),
+            ("set_len", |p, w| p.set_len(w, 3).unwrap(), &[1, 1, 1]),
+            ("flush", |p, w| p.flush(w).unwrap(), &[1, 1, 1, 1, 1, 1]),
+        ];
+        for (what, change, after) in changes {
+            let (s, _d) = temp_storage();
+            let p = s.layer("l").unwrap();
+            write_file(&p, "f.bin", 0, &[1u8; 6]);
+            let (w, _, _) = p.open(at("f.bin"), OPEN_WRITE).unwrap();
+            let (r, _, _) = p.open(at("f.bin"), OPEN_READ).unwrap();
+            // Unflushed bytes, so the flush has a commit to run.
+            p.write_at(w, 5, &[1u8]).unwrap();
+
+            // The reader's first read parks inside the read until released.
+            let parked = Arc::new((Mutex::new((false, false)), Condvar::new()));
+            let g = Arc::clone(&parked);
+            let first = AtomicBool::new(true);
+            *s.layer_read_hook.lock().unwrap() = Some(Arc::new(move || {
+                if !first.swap(false, Ordering::SeqCst) {
+                    return;
+                }
+                let (m, cv) = &*g;
+                let mut st = m.lock().unwrap();
+                st.0 = true; // inside
+                cv.notify_all();
+                let _released = cv.wait_while(st, |st| !st.1).unwrap();
+            }));
+            let changed = AtomicBool::new(false);
+            std::thread::scope(|sc| {
+                let reader = sc.spawn(|| read_range(&p, r, 0, 6));
+                {
+                    let (m, cv) = &*parked;
+                    let _inside = cv.wait_while(m.lock().unwrap(), |st| !st.0).unwrap();
+                }
+                sc.spawn(|| {
+                    change(&p, w);
+                    changed.store(true, Ordering::SeqCst);
+                });
+                // The change cannot finish while the read is parked. (A sleep
+                // can only miss a change that wrongly got through late, never
+                // fail a correct run.)
+                std::thread::sleep(Duration::from_millis(100));
+                assert!(
+                    !changed.load(Ordering::SeqCst),
+                    "{what} landed while a read held the file's state"
+                );
+                let (m, cv) = &*parked;
+                m.lock().unwrap().1 = true;
+                cv.notify_all();
+                assert_eq!(reader.join().unwrap(), [1u8; 6], "{what}: the read");
+            });
+            *s.layer_read_hook.lock().unwrap() = None;
+            assert!(changed.load(Ordering::SeqCst));
+            assert_eq!(read_range(&p, r, 0, 16), after, "after {what}");
+            p.close(r).unwrap();
+            p.close(w).unwrap();
+        }
+    }
+
+    #[test]
+    fn concurrent_reads_see_whole_changes_and_never_an_older_one() {
+        // Readers race a writer that rewrites, truncates, flushes and
+        // reopens one file. Every version is one byte value repeated, so a
+        // read that saw part of a change shows two values; and a read that
+        // began after a change completed must not see an older version (a
+        // reader's stale RAM-tier refill landing after a commit would).
+        const LEN: usize = 5 * BS as usize + 100; // 6 dirty blocks: write_at commits
+        const SHORT: usize = BS as usize / 2;
+        const LAST: u8 = 150;
+        let (s, _d) = temp_storage();
+        let p = s.layer("l").unwrap();
+        write_file(&p, "v.bin", 0, &vec![1u8; LEN]);
+        // The newest version whose write has completed.
+        let floor = AtomicU8::new(1);
+        let done = AtomicBool::new(false);
+        std::thread::scope(|sc| {
+            for t in 0..6u64 {
+                let (p, floor, done) = (&p, &floor, &done);
+                sc.spawn(move || {
+                    let (h, _, _) = p.open(at("v.bin"), OPEN_READ).unwrap();
+                    // Readers start at different offsets: 0, mid-block and a
+                    // block boundary, the last two past the truncated length.
+                    let off = [0, 0, BS + 10, BS + 10, 2 * BS, 0][t as usize];
+                    let mut buf = vec![0u8; LEN + BS as usize];
+                    let mut reads = 0u64;
+                    while !done.load(Ordering::SeqCst) || reads < 50 {
+                        let before = floor.load(Ordering::SeqCst);
+                        let n = p.read_at(h, off, &mut buf).unwrap();
+                        reads += 1;
+                        let full = LEN - off as usize;
+                        let short = SHORT.saturating_sub(off as usize);
+                        assert!(n == full || n == short, "read of {n} bytes at {off}");
+                        if n == 0 {
+                            continue;
+                        }
+                        let v = buf[0];
+                        assert!(
+                            buf[..n].iter().all(|&b| b == v),
+                            "a read at {off} saw two versions"
+                        );
+                        assert!(v >= before, "read version {v} after {before} completed");
+                    }
+                    p.close(h).unwrap();
+                });
+            }
+            let (mut w, _, _) = p.open(at("v.bin"), OPEN_WRITE).unwrap();
+            for v in 2..=LAST {
+                // Shrink first, so the rewrite below never leaves old bytes
+                // past a shorter length; a reader in between sees the old
+                // version cut short, which is a whole state.
+                if v % 3 == 0 {
+                    p.set_len(w, SHORT as u64).unwrap();
+                }
+                // One call replaces the whole file: exclusive, so atomic to
+                // readers. From a truncated file it also regrows it.
+                let len = if v % 5 == 0 { SHORT } else { LEN };
+                if len == SHORT {
+                    // A short rewrite of a long file would keep the old tail.
+                    p.set_len(w, SHORT as u64).unwrap();
+                }
+                p.write_at(w, 0, &vec![v; len]).unwrap();
+                floor.store(v, Ordering::SeqCst);
+                if v % 4 == 0 {
+                    p.flush(w).unwrap();
+                }
+                if v % 7 == 0 {
+                    p.close(w).unwrap();
+                    w = p.open(at("v.bin"), OPEN_WRITE).unwrap().0;
+                }
+            }
+            p.close(w).unwrap();
+            done.store(true, Ordering::SeqCst);
+        });
+        assert_eq!(read_file(&p, "v.bin"), vec![LAST; SHORT]);
     }
 
     #[test]
