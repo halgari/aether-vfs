@@ -135,10 +135,18 @@ fn worker_counts_are_clamped_to_what_the_ring_can_use() {
     let ring = dir.join("ring.bin");
     let d = IpcServe::start_file_backed(Arc::new(Director::new()), &ring, 4096).unwrap();
     assert_eq!(d.worker_count(), DEFAULT_IO_WORKERS);
+    // The count is in the ring header, where a client reads it to bound its
+    // reads in flight below it: four workers leave three for data.
+    assert_eq!(vfs_ipc::ring::worker_hint(d.shared_seg()), 4);
+    let gate = vfs_ipc::DataGate::for_ring(d.shared_seg(), &d.client().unwrap().geom());
+    assert_eq!(gate.limit(), 3);
     drop(d);
     let w = IpcServe::start_file_backed_with_workers(Arc::new(Director::new()), &ring, 4096, 12)
         .unwrap();
     assert_eq!(w.worker_count(), 12);
+    assert_eq!(vfs_ipc::ring::worker_hint(w.shared_seg()), 12);
+    let gate = vfs_ipc::DataGate::for_ring(w.shared_seg(), &w.client().unwrap().geom());
+    assert_eq!(gate.limit(), 9);
     drop(w);
     let _ = std::fs::remove_dir_all(&dir);
 }
