@@ -105,7 +105,45 @@ pub fn set_size(handle: isize, size: u64) {
     }
 }
 
+/// Raise the cached size to at least `end` after a write that reached there.
+///
+/// Not [`set_size`]: two writes on one handle can be in flight at once, each
+/// having read the size before either finished, and whichever stores last
+/// would win — the earlier-ending write shrinking the file under the other,
+/// so that reads past it report end of file and the position is pulled back
+/// for the next append to overwrite. The maximum, taken under the table
+/// lock, does not depend on the order they finish in.
+pub fn grow_size(handle: isize, end: u64) {
+    if let Ok(mut g) = TABLE.lock() {
+        if let Some(e) = g.get_mut(&(handle as usize)) {
+            e.size = e.size.max(end);
+        }
+    }
+}
+
 pub fn close_fuse(handle: isize) -> Option<u64> {
     let mut g = TABLE.lock().ok()?;
     g.remove(&(handle as usize)).map(|e| e.fh)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two writes on one handle that both read the size before either
+    /// finished: [0, 100) and [100, 200). Whichever reports last, the file
+    /// is 200 bytes long and the position has not been pulled back.
+    #[test]
+    fn the_size_after_overlapping_writes_is_the_furthest_end_in_either_order() {
+        for ends in [[100u64, 200], [200, 100]] {
+            let h = open_fuse_at_ex(77, 0, false, None, false).unwrap();
+            set_position(h, 200);
+            for end in ends {
+                grow_size(h, end);
+            }
+            let (_, size, _, position, _) = lookup(h).unwrap();
+            assert_eq!((size, position), (200, 200), "ends reported as {ends:?}");
+            close_fuse(h);
+        }
+    }
 }

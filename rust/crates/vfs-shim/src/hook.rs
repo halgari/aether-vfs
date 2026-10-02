@@ -3440,7 +3440,10 @@ unsafe fn fuse_query_information(
             // | ReparseTag 60 | NumberOfLinks 64 | EffectiveAccess 68 = 72.
             const LEN: usize = 72;
             if (length as usize) < LEN {
-                return STATUS_BUFFER_OVERFLOW;
+                // What NT answers for a fixed-size class. `BUFFER_OVERFLOW`
+                // means "the fixed part was written", which some callers
+                // take as success — and nothing was.
+                return STATUS_INFO_LENGTH_MISMATCH;
             }
             let p = info as *mut u8;
             core::ptr::write_bytes(p, 0, LEN);
@@ -3466,7 +3469,7 @@ unsafe fn fuse_query_information(
             // FileAttributes 0 | ReparseTag 4 = 8. Never a reparse point.
             const LEN: usize = 8;
             if (length as usize) < LEN {
-                return STATUS_BUFFER_OVERFLOW;
+                return STATUS_INFO_LENGTH_MISMATCH;
             }
             let p = info as *mut u8;
             let attrs = if is_dir {
@@ -4075,7 +4078,7 @@ unsafe fn write_hook_body(
             // would have tracked this for free).
             let end = off + n as u64;
             if end > size {
-                crate::fuse_synth::set_size(handle as isize, end);
+                crate::fuse_synth::grow_size(handle as isize, end);
             }
             if !iosb.is_null() {
                 let p = iosb as *mut u8;

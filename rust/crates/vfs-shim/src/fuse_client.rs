@@ -295,8 +295,9 @@ pub struct FuseClient {
     /// was make every file operation of every game thread wait behind
     /// whichever one was in flight — so one read stalled on the network froze
     /// all the game's file I/O, and the director's workers sat idle. Each
-    /// thread now has its own requests in flight; only data requests are
-    /// counted, and only against this gate.
+    /// thread now has its own requests in flight; only data requests (reads,
+    /// writes, truncates and write-opens) are counted, and only against this
+    /// gate.
     gate: DataGate,
 }
 
@@ -478,14 +479,19 @@ impl FuseClient {
         vpath: &str,
         create_flags: u32,
     ) -> Result<OpenResp, i32> {
+        // Counted against the gate, unlike a read-open: opening a base file
+        // for writing copies the whole of it up inside this one request, and
+        // on content that is not cached yet that is a download holding a
+        // worker.
         let c = self.client();
-        let r = c
-            .submit(
-                OP_OPEN,
-                0,
-                &encode_open_req(root.0, OPEN_WRITE | create_flags, vpath),
-            )
-            .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
+        let r = vfs_ipc::submit_data(
+            &c,
+            &self.gate,
+            OP_OPEN,
+            0,
+            &encode_open_req(root.0, OPEN_WRITE | create_flags, vpath),
+        )
+        .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
         }
@@ -507,21 +513,21 @@ impl FuseClient {
             // A data request like a read: counted against the gate, one chunk
             // at a time, so a long write does not sit on a permit between
             // chunks.
-            let _permit = self.gate.acquire(1);
-            let r = c
-                .submit(
-                    OP_WRITE,
-                    0,
-                    &encode_write_req(
-                        &WriteReq {
-                            fh,
-                            offset: offset + written as u64,
-                            len: piece.len() as u32,
-                        },
-                        piece,
-                    ),
-                )
-                .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
+            let r = vfs_ipc::submit_data(
+                &c,
+                &self.gate,
+                OP_WRITE,
+                0,
+                &encode_write_req(
+                    &WriteReq {
+                        fh,
+                        offset: offset + written as u64,
+                        len: piece.len() as u32,
+                    },
+                    piece,
+                ),
+            )
+            .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
             if r.status != ST_OK {
                 return Err(r.status);
             }
@@ -622,10 +628,16 @@ impl FuseClient {
 
     /// Truncate/extend a virtual write handle to `size` bytes (`OP_SETATTR`).
     pub fn truncate(&self, fh: u64, size: u64) -> Result<(), i32> {
+        // A data request: it rewrites the file's blocks.
         let c = self.client();
-        let r = c
-            .submit(OP_SETATTR, 0, &encode_setattr_req(&SetattrReq { fh, size }))
-            .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
+        let r = vfs_ipc::submit_data(
+            &c,
+            &self.gate,
+            OP_SETATTR,
+            0,
+            &encode_setattr_req(&SetattrReq { fh, size }),
+        )
+        .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
         if r.status != ST_OK {
             return Err(r.status);
         }
