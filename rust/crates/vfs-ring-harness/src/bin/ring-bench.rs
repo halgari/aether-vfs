@@ -392,11 +392,13 @@ mod imp {
             return;
         }
         println!(
-            "  {label:<34} {:>9.0} stats/s      p50={:>7.2} p99={:>10.2} max={:>10.2} (us)",
+            "  {label:<34} {:>9.0} stats/s      p50={:>7.2} p99={:>8.2} p99.99={:>10.2} max={:>10.2} (us)  over 10 ms: {}",
             all.len() as f64 / secs,
             pct(&all, 0.5),
             pct(&all, 0.99),
-            all[all.len() - 1]
+            pct(&all, 0.9999),
+            all[all.len() - 1],
+            all.iter().filter(|&&us| us > 10_000.0).count()
         );
     }
 
@@ -462,11 +464,13 @@ mod imp {
             return;
         }
         println!(
-            "  {label:<34} {:>9.0} fast ops/s   p50={:>7.2} p99={:>10.2} max={:>10.2} (us){}",
+            "  {label:<34} {:>9.0} fast ops/s   p50={:>7.2} p99={:>8.2} p99.99={:>10.2} max={:>10.2} (us)  over 10 ms: {}{}",
             all.len() as f64 / secs,
             pct(&all, 0.5),
             pct(&all, 0.99),
+            pct(&all, 0.9999),
             all[all.len() - 1],
+            all.iter().filter(|&&us| us > 10_000.0).count(),
             if slow {
                 format!(
                     "   slow 4 MiB reads done: {} in {el:.1}s",

@@ -168,6 +168,42 @@ without a lock — necessary because a game issues file I/O from many threads at
 once. `vfs-ipc` imports no OS API at all; the mapping and the event objects live
 in `vfs-win`. All `unsafe` is confined to the segment accessor.
 
+**Concurrency.** Each game thread claims its own slot and waits on that slot
+alone, so file operations on different threads do not wait for each other; the
+shim holds no lock across a round trip. A slot's life is
+
+```
+FREE → CLAIMED → SUBMITTED → PROCESSING → COMPLETED → FREE
+                                  └────→ ABANDONED → FREE
+```
+
+- A director worker runs one request start to finish, so a read blocked in its
+  provider (a block still coming from the network) holds its worker. The shim
+  therefore counts reads and writes against a gate (`vfs_ipc::DataGate`) sized
+  at three quarters of the worker count the director publishes in the ring
+  header. The remaining workers are always free for opens, stats, listings and
+  closes, which are not counted. The gate is process-local `std`
+  synchronisation; nothing about it crosses the ring.
+- A client waits for its response by spinning, with no system call, for the
+  first millisecond — every request the ring alone can answer is back long
+  before that. After it, the shim yields, and after 20 ms sleeps a millisecond
+  at a time (`Notifier::idle_client`), so a thread waiting on a fetch does not
+  hold a core.
+- A client that gives up after `RESPONSE_DEADLINE` (60 s) does not free a slot
+  the director is still processing: it marks it `ABANDONED`, and the worker
+  frees it when it finishes. Until then nobody can claim the slot or its arena
+  bank, so a late reply can never be read by a later request. The worker also
+  echoes the request id it answered into the slot header, and the client checks
+  it.
+
+The ring's wire version (`vfs_ipc::layout::VERSION`, now 3) covers this state
+machine as well as the payload layouts: a shim and a director built from
+different versions refuse each other at attach.
+
+On Linux the ring file is named `state_dir/ring.bin`, but when
+`$XDG_RUNTIME_DIR` is a tmpfs that name is a symlink to a file there, so the
+ring's pages are never written to disk.
+
 ### 3.5 The shim — `vfs-shim`, `vfs-redirect`
 
 Detours on ntdll, installed inside the game. For each intercepted call it
