@@ -449,6 +449,7 @@ use crate::ntdef::{
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
     NtWriteFileFn, NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_NORMAL, FILE_ALL_INFORMATION,
+    FILE_ATTRIBUTE_TAG_INFORMATION, FILE_STAT_INFORMATION,
     FILE_BASIC_INFORMATION, FILE_CREATED, FILE_DEVICE_DISK, FILE_DIRECTORY_FILE,
     FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION,
     FILE_DISPOSITION_INFORMATION_EX, FILE_END_OF_FILE_INFORMATION, FILE_FS_DEVICE_INFORMATION,
@@ -3423,6 +3424,59 @@ unsafe fn fuse_query_information(
             // Position.CurrentByteOffset @ 80
             core::ptr::write_unaligned(p.add(80) as *mut i64, pos as i64);
             synth_iosb_ok(iosb, PREFIX);
+            STATUS_SUCCESS
+        }
+        FILE_STAT_INFORMATION => {
+            // What `GetFileInformationByHandle` asks under current Wine
+            // (GE-Proton 10), where it used to ask `FileAllInformation` — so
+            // this is what Rust's `File::metadata` and `std::fs::read`'s size
+            // hint now reach. Unanswered, it fell to the arm below, which
+            // reports success without writing the buffer: the caller read its
+            // own uninitialised stack as a file size and, in `fs::read`,
+            // failed "out of memory" reserving that many bytes.
+            //
+            // Layout: FileId 0 | Creation 8 | LastAccess 16 | LastWrite 24 |
+            // Change 32 | AllocationSize 40 | EndOfFile 48 | FileAttributes 56
+            // | ReparseTag 60 | NumberOfLinks 64 | EffectiveAccess 68 = 72.
+            const LEN: usize = 72;
+            if (length as usize) < LEN {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let p = info as *mut u8;
+            core::ptr::write_bytes(p, 0, LEN);
+            let attrs = if is_dir {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                FILE_ATTRIBUTE_NORMAL
+            };
+            core::ptr::write_unaligned(p as *mut i64, handle as i64);
+            for off in [8, 16, 24, 32] {
+                core::ptr::write_unaligned(p.add(off) as *mut i64, SYNTH_FILETIME);
+            }
+            core::ptr::write_unaligned(p.add(40) as *mut i64, size as i64);
+            core::ptr::write_unaligned(p.add(48) as *mut i64, size as i64);
+            core::ptr::write_unaligned(p.add(56) as *mut u32, attrs);
+            core::ptr::write_unaligned(p.add(64) as *mut u32, 1);
+            // FILE_GENERIC_READ.
+            core::ptr::write_unaligned(p.add(68) as *mut u32, 0x0012_0089);
+            synth_iosb_ok(iosb, LEN);
+            STATUS_SUCCESS
+        }
+        FILE_ATTRIBUTE_TAG_INFORMATION => {
+            // FileAttributes 0 | ReparseTag 4 = 8. Never a reparse point.
+            const LEN: usize = 8;
+            if (length as usize) < LEN {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            let p = info as *mut u8;
+            let attrs = if is_dir {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                FILE_ATTRIBUTE_NORMAL
+            };
+            core::ptr::write_unaligned(p as *mut u32, attrs);
+            core::ptr::write_unaligned(p.add(4) as *mut u32, 0);
+            synth_iosb_ok(iosb, LEN);
             STATUS_SUCCESS
         }
         _ => {
