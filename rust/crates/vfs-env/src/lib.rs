@@ -121,6 +121,12 @@ pub const READY_TIMEOUT_SECS: &str = "VFS_READY_TIMEOUT_SECS";
 /// it (`C:\…`). Set by the Proton launch; unset, the target inherits the
 /// injector's own directory.
 pub const INJECT_CWD: &str = "VFS_INJECT_CWD";
+/// The command line of Proton's Steam helper, as `vfs-injector` runs it
+/// (`C:\windows\system32\steam.exe <a program>`). Set by the Proton launch
+/// when the Steam client is running: the injector starts it and waits for it
+/// to publish itself as the running Steam client before it creates the
+/// target. Unset, no helper is started.
+pub const INJECT_STEAM_HELPER: &str = "VFS_INJECT_STEAM_HELPER";
 
 // ─── injection handshake ─────────────────────────────────────────────────────
 
@@ -335,6 +341,16 @@ pub const FIXTURE_INI_WRITE: &str = "VFS_FIXTURE_INI_WRITE";
 pub const FIXTURE_INI_SECTION: &str = "VFS_FIXTURE_INI_SECTION";
 /// The INI key `vfs-fixture-prefs` reads/writes.
 pub const FIXTURE_INI_KEY: &str = "VFS_FIXTURE_INI_KEY";
+/// `vfs-fixture-steam`: the `steam_api64.dll` to load (default: by name, in
+/// the loader's search order).
+pub const FIXTURE_STEAM_API_DLL: &str = "VFS_FIXTURE_STEAM_API_DLL";
+/// `vfs-fixture-steam`: a file that receives the report it prints.
+pub const FIXTURE_STEAM_OUT: &str = "VFS_FIXTURE_STEAM_OUT";
+/// `vfs-fixture-steam`: `0` skips the controller and Steam Input calls.
+pub const FIXTURE_STEAM_INPUT: &str = "VFS_FIXTURE_STEAM_INPUT";
+/// `vfs-fixture-steam`: an action manifest path to hand Steam Input, the call
+/// that waits for the client's controller mapping.
+pub const FIXTURE_STEAM_MANIFEST: &str = "VFS_FIXTURE_STEAM_MANIFEST";
 
 /// What a switch is for, so the surface can be listed and reviewed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -381,6 +397,7 @@ pub const ALL: &[Var] = &[
     Var { name: DISCOVERY_PATH, kind: Kind::Handshake, default: "platform default" },
     Var { name: READY_TIMEOUT_SECS, kind: Kind::Behaviour, default: "180" },
     Var { name: INJECT_CWD, kind: Kind::Handshake, default: "the injector's own directory" },
+    Var { name: INJECT_STEAM_HELPER, kind: Kind::Handshake, default: "no Steam helper" },
     Var { name: SHIM_CONFIG, kind: Kind::Handshake, default: "required by the shim" },
     Var { name: SHIM_READY, kind: Kind::Handshake, default: "no ready signal" },
     Var { name: PAYLOAD_PATH, kind: Kind::Handshake, default: "resolved beside the shim" },
@@ -436,6 +453,10 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_INI_WRITE, kind: Kind::Fixture, default: "unset (read-only run)" },
     Var { name: FIXTURE_INI_SECTION, kind: Kind::Fixture, default: "Display" },
     Var { name: FIXTURE_INI_KEY, kind: Kind::Fixture, default: "sTest" },
+    Var { name: FIXTURE_STEAM_API_DLL, kind: Kind::Fixture, default: "steam_api64.dll" },
+    Var { name: FIXTURE_STEAM_OUT, kind: Kind::Fixture, default: "unset (stdout only)" },
+    Var { name: FIXTURE_STEAM_INPUT, kind: Kind::Fixture, default: "on" },
+    Var { name: FIXTURE_STEAM_MANIFEST, kind: Kind::Fixture, default: "unset (not called)" },
 ];
 
 /// Is `name` a known switch?

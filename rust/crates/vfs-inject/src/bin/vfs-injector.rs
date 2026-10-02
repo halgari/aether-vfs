@@ -9,18 +9,30 @@
 //!
 //! Environment: `VFS_READY_TIMEOUT_SECS` (default 180) bounds the wait for the
 //! shim's ready report; `VFS_INJECT_CWD` is the target's working directory
-//! (default: this process's). On an injection failure it exits 3 after
+//! (default: this process's); `VFS_INJECT_STEAM_HELPER` is the command line
+//! of Proton's Steam helper, run before the target so the target's Steam API
+//! finds a running Steam client (default: none). A helper that cannot be
+//! started is reported on stderr and the target runs without it.
+//!
+//! On an injection failure it exits 3 after
 //! writing one line — `target-exited:<code>`, `ready-timeout:<secs>` or
 //! `inject:<error>` — to `<ready_file>.injector-error`
 //! (`vfs_env::INJECTOR_ERROR_SUFFIX`), so a caller that only sees the exit
 //! code can still say why.
 use std::time::Duration;
-use vfs_inject::{parse_injector_args, run_target_with_shim, InjectError, RunConfig};
+use vfs_inject::{
+    parse_injector_args, run_target_with_shim, start_steam_helper, InjectError, RunConfig,
+};
 
 /// The ready wait when `VFS_READY_TIMEOUT_SECS` is unset: what a Windows
 /// `Session::launch` has always defaulted to. A cold first launch in a fresh
 /// Wine prefix can take well over the 20 s this used to be.
 const DEFAULT_READY_TIMEOUT_SECS: u64 = 180;
+
+/// How long the Steam helper may take to publish itself before the target is
+/// started without it. It takes well under a second; the bound is for a
+/// prefix in which it never will.
+const STEAM_HELPER_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -46,6 +58,19 @@ fn main() {
     let current_dir = vfs_env::text(vfs_env::INJECT_CWD).filter(|d| !d.is_empty());
     let report = format!("{ready}{}", vfs_env::INJECTOR_ERROR_SUFFIX);
     let _ = std::fs::remove_file(&report);
+
+    if let Some(helper) = vfs_env::text(vfs_env::INJECT_STEAM_HELPER).filter(|h| !h.is_empty()) {
+        match start_steam_helper(&helper, STEAM_HELPER_TIMEOUT) {
+            Ok(h) => eprintln!(
+                "[vfs-injector] steam helper ({helper}) is process {} ({} ms)",
+                h.pid,
+                h.waited.as_millis()
+            ),
+            Err(e) => {
+                eprintln!("[vfs-injector] steam helper ({helper}): {e}; the target runs without it")
+            }
+        }
+    }
 
     eprintln!("[vfs-injector] target={target} shim={dll} payload={payload} cwd={current_dir:?}");
     let exit = run_target_with_shim(RunConfig {
