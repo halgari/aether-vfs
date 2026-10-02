@@ -160,6 +160,7 @@ impl Provider for MountGraph {
             match m.backend.readdir(VPath::new(p.root, &rel)) {
                 Ok(entries) => {
                     saw_dir = true;
+                    map.reserve(entries.len());
                     for e in entries {
                         map.insert(vfs_core::fold(&e.name), e);
                     }

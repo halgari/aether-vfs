@@ -103,7 +103,8 @@ impl Provider for LayeredProvider {
         // components before they cross the ring. An ASCII-only key lets two
         // spellings of one Unicode name survive as two entries, so a
         // top-layer override of a non-ASCII-cased file stops overriding.
-        let mut seen: HashMap<String, DirEntry> = HashMap::new();
+        let mut seen: HashMap<String, DirEntry> =
+            HashMap::with_capacity(bottom_entries.len() + top_entries.len());
         // Bottom first, top overwrites.
         for e in bottom_entries {
             seen.insert(fold(&e.name), e);

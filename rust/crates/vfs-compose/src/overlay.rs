@@ -544,6 +544,7 @@ impl Provider for OverlayProvider {
             match self.base.readdir(p) {
                 Ok(entries) => {
                     base_is_dir = true;
+                    map.reserve(entries.len());
                     for e in entries {
                         map.insert(fold(&e.name), e);
                     }
