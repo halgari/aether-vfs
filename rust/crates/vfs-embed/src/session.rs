@@ -1131,6 +1131,23 @@ impl Session {
         Ok(exe)
     }
 
+    /// Proxy DLLs the last staging found beside its images
+    /// ([`vfs_director::stage::PROXY_DLL_NAMES`], lower case) — empty when
+    /// nothing has been staged.
+    ///
+    /// For a Wine/Proton host: Wine prefers its builtin for most of these
+    /// names, so a staged native `dinput8.dll` or `version.dll` loads only if
+    /// `WINEDLLOVERRIDES` names it `n,b`. Stage first
+    /// ([`Session::stage_launch`]), read this, then build the child's
+    /// environment.
+    pub fn staged_proxies(&self) -> Vec<String> {
+        self.staged
+            .lock()
+            .ok()
+            .and_then(|s| s.as_ref().map(|d| d.proxies().to_vec()))
+            .unwrap_or_default()
+    }
+
     /// Drop all of root 0's mounts before rebuilding composition. Its write
     /// layer, if any, is dropped with them — it is part of the same
     /// composition. **Other roots are untouched**, which is why this is

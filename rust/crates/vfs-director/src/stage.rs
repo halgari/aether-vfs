@@ -22,6 +22,30 @@
 //! hand-replicated all of that over a substitute host image; staging removed
 //! the need (see `architecture.md` §4.2).
 //!
+//! # Proxy DLLs beside the EXE
+//!
+//! The import walk skips system DLLs: they resolve from `System32`, and
+//! parsing them is not ours to do. But Windows searches the **application
+//! directory before `System32`** for every DLL that is not a KnownDLL, and a
+//! whole class of mods depends on exactly that: ReShade ships as `dxgi.dll` /
+//! `d3d11.dll` / `d3d9.dll` / `opengl32.dll`, ENB as `d3d11.dll` (plus its
+//! `d3dcompiler_46e.dll`), plugin loaders as `dinput8.dll` / `version.dll` /
+//! `winmm.dll` / `winhttp.dll`, and so on. A proxy like that is often reached
+//! not from the EXE's import table at all but through a system DLL we never
+//! parse — under Proton, DXVK's `d3d11.dll` imports `dxgi.dll`, and the loader
+//! resolves that at process init, before the shim exists. If the proxy is not
+//! on real disk in the EXE's directory then, the loader silently falls back to
+//! `System32` and the mod never loads (no `ReShade.log`, no open of
+//! `game\dxgi.dll` in the shim trace).
+//!
+//! So [`stage_into`] also probes the VFS for every name in
+//! [`PROXY_DLL_NAMES`] beside each staged image, independent of any import
+//! table, stages what it finds, and walks *those* images' imports too. The
+//! set deliberately excludes [`KNOWN_DLLS`]: Windows never loads those from
+//! the app directory, and a game shipping a stray copy of one (`msvcp140.dll`,
+//! `kernel32.dll`) must keep today's behaviour rather than have Wine load it
+//! from the game folder.
+//!
 //! # Where it lands, and why that is not a detail
 //!
 //! Images keep their vpath position, and [`stage_launch_into`] puts them
@@ -60,6 +84,110 @@ pub const STAGE_PREFIX: &str = "vfs-stage-";
 /// launch into an unbounded extraction.
 const MAX_STAGED_FILES: usize = 64;
 
+/// DLL names a game may carry beside its EXE as a **proxy** — a replacement
+/// for a system DLL that the loader picks up from the application directory
+/// because the app directory is searched before `System32` for anything that
+/// is not a KnownDLL.
+///
+/// Each is probed in the VFS beside every staged image and staged when
+/// present, whether or not anything's import table names it (see the module
+/// docs: the import is often made by a system DLL staging does not parse).
+///
+/// Two groups, one rule — "what a real install's app directory would supply
+/// to the loader at init":
+///
+/// * Every name [`vfs_pe::is_system_import_dll`] classifies as system that is
+///   **not** in [`KNOWN_DLLS`]. These are the ones the import walk skips, so
+///   without the probe they could never be staged.
+/// * Proxy names that are not system-classified but are commonly reached
+///   through a system DLL rather than the EXE (`d3d9`, `opengl32`, `dsound`,
+///   the other Direct3D and DirectInput/XInput versions, ENB's
+///   `d3dcompiler_46e`). A direct import of one of these was already staged
+///   by the walk; the probe covers the indirect case.
+///
+/// Lower-case: VFS lookups are case-insensitive, and the staged file takes
+/// this spelling (Wine's file lookups are case-insensitive too).
+pub const PROXY_DLL_NAMES: &[&str] = &[
+    // System-classified (vfs_pe::is_system_import_dll) and not KnownDLLs.
+    "d3d11.dll",
+    "dxgi.dll",
+    "dinput8.dll",
+    "version.dll",
+    "winmm.dll",
+    "winhttp.dll",
+    "dbghelp.dll",
+    "xinput1_3.dll",
+    "xinput1_4.dll",
+    "x3daudio1_7.dll",
+    "hid.dll",
+    "dwmapi.dll",
+    "uxtheme.dll",
+    "wintrust.dll",
+    "userenv.dll",
+    // Common proxy names the import walk would stage only on a direct import.
+    "d3d8.dll",
+    "d3d9.dll",
+    "d3d10.dll",
+    "d3d10_1.dll",
+    "d3d10core.dll",
+    "d3d12.dll",
+    "ddraw.dll",
+    "opengl32.dll",
+    "dsound.dll",
+    "dinput.dll",
+    "xinput1_1.dll",
+    "xinput1_2.dll",
+    "xinput9_1_0.dll",
+    "wininet.dll",
+    "d3dcompiler_46e.dll",
+];
+
+/// True KnownDLLs (and the CRT/API-set DLLs treated the same way): Windows
+/// maps these from `System32` regardless of what sits in the app directory, so
+/// they are **never** proxies and never probed. A game folder carrying a copy
+/// of one keeps today's behaviour: the import walk skips it as a system DLL
+/// and the probe never asks for it. Loading one of these from the game folder
+/// under Wine could break the process outright.
+///
+/// Kept beside [`PROXY_DLL_NAMES`] so a test can prove the two are disjoint.
+pub const KNOWN_DLLS: &[&str] = &[
+    "kernel32.dll",
+    "kernelbase.dll",
+    "ntdll.dll",
+    "user32.dll",
+    "gdi32.dll",
+    "gdi32full.dll",
+    "advapi32.dll",
+    "shell32.dll",
+    "ole32.dll",
+    "oleaut32.dll",
+    "sechost.dll",
+    "rpcrt4.dll",
+    "combase.dll",
+    "shlwapi.dll",
+    "imm32.dll",
+    "ws2_32.dll",
+    "setupapi.dll",
+    "bcrypt.dll",
+    "bcryptprimitives.dll",
+    "crypt32.dll",
+    "psapi.dll",
+    "ucrtbase.dll",
+    "msvcp140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+];
+
+/// Whether `name` must never be staged as a proxy: a KnownDLL, a CRT DLL in
+/// the same position, or an API set (`api-ms-*` / `ext-ms-*`).
+fn is_known_dll(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.starts_with("api-ms-")
+        || n.starts_with("ext-ms-")
+        || n.starts_with("vcruntime140")
+        || KNOWN_DLLS.contains(&n.as_str())
+}
+
 /// A staged launch directory.
 ///
 /// Two ownership modes, because there are two places staging can land:
@@ -76,6 +204,8 @@ pub struct StagedDir {
     /// Absolute path of the staged EXE (the `CreateProcess` image).
     exe: PathBuf,
     staged: Vec<String>,
+    /// The subset of `staged` that is in [`PROXY_DLL_NAMES`], in order.
+    proxies: Vec<String>,
     /// Absolute paths written, for the non-owning cleanup path.
     files: Vec<PathBuf>,
     /// Absolute paths of directories created, deepest last so pruning can walk
@@ -96,6 +226,17 @@ impl StagedDir {
     /// Names staged, in the order they were resolved (EXE first).
     pub fn staged(&self) -> &[String] {
         &self.staged
+    }
+
+    /// Proxy DLLs ([`PROXY_DLL_NAMES`]) the VFS carries beside a staged image,
+    /// lower case, whether this staging wrote them or a same-named file was
+    /// already on disk in the caller's directory.
+    ///
+    /// A Wine/Proton launcher needs these: Wine loads a native `dinput8.dll`
+    /// or `version.dll` from the app directory only when `WINEDLLOVERRIDES`
+    /// asks for native first, so these are the candidates for `name=n,b`.
+    pub fn proxies(&self) -> &[String] {
+        &self.proxies
     }
 
     /// Delete now instead of at drop, reporting failure.
@@ -290,13 +431,44 @@ pub fn stage_launch_into(
 /// and then deleted them on cleanup, so the *second* launch of a loadout
 /// failed with "VFS has no X3DAudio1_7.dll". Staging must never remove a file
 /// it did not create.
+///
+/// "Already exists" is case-insensitive: the host filesystem is not, but the
+/// loader's is, and a caller's `DXGI.dll` next to a staged `dxgi.dll` would be
+/// two files that Wine sees as one name.
 fn write_staged(dest: &Path, bytes: &[u8], staged_dir: &mut StagedDir) -> Result<(), String> {
-    if !staged_dir.owns_dir && dest.exists() {
+    if !staged_dir.owns_dir && exists_ignoring_case(dest) {
         return Ok(());
     }
     std::fs::write(dest, bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
     staged_dir.files.push(dest.to_path_buf());
     Ok(())
+}
+
+fn exists_ignoring_case(path: &Path) -> bool {
+    if path.exists() {
+        return true;
+    }
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+    else {
+        return false;
+    };
+    let Ok(rd) = std::fs::read_dir(parent) else {
+        return false;
+    };
+    rd.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    })
+}
+
+/// The vpath of `name` beside `exe_vpath` — how the import walk and the proxy
+/// probe both address an image's siblings.
+fn sibling_vpath(exe_vpath: &str, name: &str) -> String {
+    match Path::new(exe_vpath).parent().and_then(|p| p.to_str()) {
+        Some(p) if !p.is_empty() => format!("{}/{name}", p.replace('\\', "/")),
+        _ => name.to_string(),
+    }
 }
 
 /// Create `base/rel` level by level, recording only the levels that did not
@@ -326,6 +498,7 @@ fn new_staged_dir(dir: &Path, exe_vpath: &str, owns_dir: bool) -> Result<StagedD
         dir: dir.to_path_buf(),
         exe: dir.join(safe_parent(exe_vpath)?).join(&exe_name),
         staged: Vec::new(),
+        proxies: Vec::new(),
         files: Vec::new(),
         created_dirs: Vec::new(),
         owns_dir,
@@ -375,6 +548,36 @@ fn stage_into(
     // Already-staged names carry across calls, so a second image does not
     // restage shared dependencies.
     let mut seen: Vec<String> = staged.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let mut proxies: Vec<String> = std::mem::take(&mut staged_dir.proxies);
+
+    // Proxy DLLs beside the image, whatever imports them (module docs). Only
+    // the image's own directory: that is the loader's application directory,
+    // so a proxy anywhere else would not be picked up by a real install
+    // either. Each one found joins `pending`, so its own non-system imports
+    // are staged by the walk below.
+    for &name in PROXY_DLL_NAMES {
+        // The constants are disjoint (tested); this keeps it so at runtime
+        // if one list is edited without the other.
+        if is_known_dll(name) || seen.iter().any(|s| s == name) {
+            continue;
+        }
+        let Some(bytes) = source.read(&sibling_vpath(exe_vpath, name)) else {
+            continue;
+        };
+        if !vfs_pe::pe_looks_like_image(&bytes) {
+            continue;
+        }
+        if staged.len() >= MAX_STAGED_FILES {
+            return Err(format!(
+                "import closure exceeded {MAX_STAGED_FILES} files at {name}"
+            ));
+        }
+        seen.push(name.to_string());
+        writes.push((target_dir.join(name), bytes.clone()));
+        staged.push(name.to_string());
+        proxies.push(name.to_string());
+        pending.push(bytes);
+    }
 
     // Breadth-first over the import graph: a staged DLL can itself import
     // another game-local DLL, and the loader needs the whole closure present.
@@ -394,10 +597,7 @@ fn stage_into(
             }
             seen.push(key);
             // Siblings of the EXE inside the VFS.
-            let vpath = match Path::new(exe_vpath).parent().and_then(|p| p.to_str()) {
-                Some(p) if !p.is_empty() => format!("{}/{base}", p.replace('\\', "/")),
-                _ => base.clone(),
-            };
+            let vpath = sibling_vpath(exe_vpath, &base);
             let from_disk = || {
                 fallback_dirs.iter().find_map(|d| {
                     // Case-insensitive: archives and redist packages disagree
@@ -441,6 +641,7 @@ fn stage_into(
     }
 
     staged_dir.staged = staged;
+    staged_dir.proxies = proxies;
     for (dest, bytes) in writes {
         write_staged(&dest, &bytes, staged_dir)?;
     }
@@ -468,10 +669,39 @@ mod tests {
         pe
     }
 
+    /// Minimal PE32+ whose import table names `imports`, so the walk has
+    /// something to follow. No sections: headers span the whole image, and
+    /// the descriptors and names live in them.
+    fn pe_importing(imports: &[&str]) -> Vec<u8> {
+        let mut pe = bare_pe();
+        pe.resize(0x1000, 0);
+        // SizeOfImage and SizeOfHeaders (optional header +56 / +60).
+        pe[0xD0..0xD4].copy_from_slice(&0x1000u32.to_le_bytes());
+        pe[0xD4..0xD8].copy_from_slice(&0x1000u32.to_le_bytes());
+        let desc_base = 0x200usize;
+        let mut name_at = 0x800usize;
+        for (i, name) in imports.iter().enumerate() {
+            let d = desc_base + i * 20;
+            pe[d + 12..d + 16].copy_from_slice(&(name_at as u32).to_le_bytes());
+            pe[name_at..name_at + name.len()].copy_from_slice(name.as_bytes());
+            name_at += name.len() + 1;
+        }
+        // DataDirectory[IMPORT]: PE32+ data directories start at opt + 112.
+        let size = (imports.len() as u32 + 1) * 20;
+        pe[0x110..0x114].copy_from_slice(&(desc_base as u32).to_le_bytes());
+        pe[0x114..0x118].copy_from_slice(&size.to_le_bytes());
+        pe
+    }
+
+    /// Lookups are case-insensitive, as the VFS's are: providers resolve a
+    /// vpath without regard to case, and staging relies on that.
     struct Fake(HashMap<String, Vec<u8>>);
     impl ImageSource for Fake {
         fn read(&self, vpath: &str) -> Option<Vec<u8>> {
-            self.0.get(vpath).cloned()
+            self.0
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(vpath))
+                .map(|(_, v)| v.clone())
         }
     }
 
@@ -678,6 +908,249 @@ mod tests {
         assert_eq!(sweep_stale(&root), 1);
         assert!(!stale.exists());
         assert!(other.exists(), "sweep must only touch staging dirs");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_test_pe_builder_round_trips_through_the_import_parser() {
+        let names = vfs_pe::import_dll_names_of_pe(&pe_importing(&["a.dll", "kernel32.dll"]));
+        assert_eq!(
+            names.unwrap(),
+            vec!["a.dll".to_string(), "kernel32.dll".to_string()]
+        );
+    }
+
+    /// A proxy name must never also be a KnownDLL: Windows would ignore an
+    /// app-directory copy of a KnownDLL, and loading one from the game folder
+    /// under Wine can break the process.
+    #[test]
+    fn proxy_names_and_known_dlls_are_disjoint() {
+        for name in PROXY_DLL_NAMES {
+            assert!(!is_known_dll(name), "{name} is a KnownDLL");
+            assert_eq!(
+                *name,
+                name.to_ascii_lowercase(),
+                "{name} must be lower case"
+            );
+        }
+        for name in KNOWN_DLLS {
+            assert!(!PROXY_DLL_NAMES.contains(name), "{name} in both lists");
+        }
+        assert!(is_known_dll("API-MS-WIN-CRT-RUNTIME-L1-1-0.dll"));
+        assert!(is_known_dll("vcruntime140_1.dll"));
+    }
+
+    /// Journals of Jyggalag's "DLSS 5" is ReShade as `dxgi.dll` in the game
+    /// root. `SkyrimSE.exe` does not import dxgi; DXVK's `d3d11.dll` does, and
+    /// staging never parses that. The proxy must be on disk anyway.
+    #[test]
+    fn stages_a_proxy_dll_beside_the_exe_that_nothing_staged_imports() {
+        let root = tmp_root("proxy-dxgi");
+        let mut m = HashMap::new();
+        m.insert(
+            "SkyrimSE.exe".to_string(),
+            pe_importing(&["d3d11.dll", "kernel32.dll"]),
+        );
+        m.insert("dxgi.dll".to_string(), bare_pe());
+        let src = Fake(m);
+
+        let staged = stage_launch_into(&src, "SkyrimSE.exe", &[], &root, &[]).expect("stage");
+        assert!(
+            root.join("dxgi.dll").is_file(),
+            "proxy dxgi.dll must be staged"
+        );
+        assert!(staged.staged().iter().any(|s| s == "dxgi.dll"));
+        assert_eq!(staged.proxies(), ["dxgi.dll".to_string()]);
+        // d3d11.dll is imported but the VFS does not carry it: System32's.
+        assert!(!root.join("d3d11.dll").exists());
+
+        drop(staged);
+        assert!(
+            !root.join("dxgi.dll").exists(),
+            "staged proxy must be cleaned up"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same for a nested EXE: the probe looks in the EXE's own directory,
+    /// and the proxy lands there.
+    #[test]
+    fn probes_the_exe_directory_not_the_root() {
+        let root = tmp_root("proxy-nested");
+        let mut m = HashMap::new();
+        m.insert("bin/x64/game.exe".to_string(), bare_pe());
+        m.insert("bin/x64/dinput8.dll".to_string(), bare_pe());
+        // At the root, not beside the EXE: not the loader's app directory.
+        m.insert("version.dll".to_string(), bare_pe());
+        let src = Fake(m);
+
+        let staged = stage_launch_into(&src, "bin/x64/game.exe", &[], &root, &[]).expect("stage");
+        assert!(root.join("bin/x64/dinput8.dll").is_file());
+        assert!(!root.join("version.dll").exists());
+        assert!(!root.join("bin/x64/version.dll").exists());
+        drop(staged);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A game folder carrying a KnownDLL keeps today's behaviour: not staged.
+    #[test]
+    fn does_not_stage_a_known_dll_beside_the_exe() {
+        let root = tmp_root("proxy-known");
+        let mut m = HashMap::new();
+        m.insert("SkyrimSE.exe".to_string(), pe_importing(&["kernel32.dll"]));
+        m.insert("kernel32.dll".to_string(), bare_pe());
+        m.insert("msvcp140.dll".to_string(), bare_pe());
+        let src = Fake(m);
+
+        let staged = stage_launch_into(&src, "SkyrimSE.exe", &[], &root, &[]).expect("stage");
+        assert!(!root.join("kernel32.dll").exists());
+        assert!(!root.join("msvcp140.dll").exists());
+        assert!(staged.proxies().is_empty());
+        drop(staged);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A proxy already on disk in the caller's root — whatever its casing —
+    /// is the caller's: not overwritten, not a second file, not deleted.
+    #[test]
+    fn leaves_a_proxy_the_caller_already_had_on_disk() {
+        for on_disk in ["dxgi.dll", "DXGI.dll"] {
+            let root = tmp_root("proxy-preexisting");
+            std::fs::write(root.join(on_disk), b"MZ caller's own").unwrap();
+
+            let mut m = HashMap::new();
+            m.insert("SkyrimSE.exe".to_string(), bare_pe());
+            m.insert("dxgi.dll".to_string(), bare_pe());
+            let src = Fake(m);
+
+            for launch in 1..=2 {
+                let staged = stage_launch_into(&src, "SkyrimSE.exe", &[], &root, &[])
+                    .unwrap_or_else(|e| panic!("{on_disk} launch {launch}: {e}"));
+                assert_eq!(staged.proxies(), ["dxgi.dll".to_string()]);
+                let dlls: Vec<_> = std::fs::read_dir(&root)
+                    .unwrap()
+                    .flatten()
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case("dxgi.dll")
+                    })
+                    .collect();
+                assert_eq!(dlls.len(), 1, "{on_disk}: a second casing was written");
+                drop(staged);
+                assert_eq!(
+                    std::fs::read(root.join(on_disk)).unwrap(),
+                    b"MZ caller's own",
+                    "{on_disk} launch {launch}: caller's file overwritten or deleted"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// ENB's `d3d11.dll` imports `d3dcompiler_46e.dll`; the proxy's own
+    /// non-system imports are part of the closure the loader needs.
+    #[test]
+    fn stages_a_proxys_own_non_system_imports() {
+        let root = tmp_root("proxy-closure");
+        let mut m = HashMap::new();
+        m.insert("SkyrimSE.exe".to_string(), pe_importing(&["d3d11.dll"]));
+        m.insert(
+            "d3d11.dll".to_string(),
+            pe_importing(&["enbhelper.dll", "kernel32.dll", "dxgi.dll"]),
+        );
+        m.insert("enbhelper.dll".to_string(), bare_pe());
+        let src = Fake(m);
+
+        let staged = stage_launch_into(&src, "SkyrimSE.exe", &[], &root, &[]).expect("stage");
+        assert!(root.join("d3d11.dll").is_file(), "proxy staged");
+        assert!(
+            root.join("enbhelper.dll").is_file(),
+            "proxy's import staged"
+        );
+        // dxgi is imported by the proxy but the VFS has none: System32's.
+        assert!(!root.join("dxgi.dll").exists());
+        assert_eq!(staged.proxies(), ["d3d11.dll".to_string()]);
+        drop(staged);
+        assert!(!root.join("enbhelper.dll").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// VFS lookups ignore case; the proxy is found as `DXGI.DLL` and staged.
+    #[test]
+    fn finds_a_proxy_whatever_its_case_in_the_vfs() {
+        let root = tmp_root("proxy-case");
+        let mut m = HashMap::new();
+        m.insert("SkyrimSE.exe".to_string(), bare_pe());
+        m.insert("DXGI.DLL".to_string(), bare_pe());
+        let src = Fake(m);
+
+        let staged = stage_launch_into(&src, "SkyrimSE.exe", &[], &root, &[]).expect("stage");
+        assert!(root.join("dxgi.dll").is_file());
+        assert_eq!(staged.proxies(), ["dxgi.dll".to_string()]);
+        drop(staged);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Haskill launches `skse64_loader.exe` with `SkyrimSE.exe` as an extra
+    /// image. Proxies are probed beside each, once.
+    #[test]
+    fn proxies_are_staged_once_for_a_launcher_and_its_target() {
+        let root = tmp_root("proxy-launcher");
+        let mut m = HashMap::new();
+        m.insert("skse64_loader.exe".to_string(), bare_pe());
+        m.insert("SkyrimSE.exe".to_string(), bare_pe());
+        m.insert("dxgi.dll".to_string(), bare_pe());
+        m.insert("tools/other.exe".to_string(), bare_pe());
+        m.insert("tools/version.dll".to_string(), bare_pe());
+        let src = Fake(m);
+
+        let staged = stage_launch_into(
+            &src,
+            "skse64_loader.exe",
+            &["SkyrimSE.exe", "tools/other.exe"],
+            &root,
+            &[],
+        )
+        .expect("stage");
+        assert!(root.join("dxgi.dll").is_file());
+        assert!(root.join("tools/version.dll").is_file());
+        assert_eq!(
+            staged.proxies(),
+            ["dxgi.dll".to_string(), "version.dll".to_string()]
+        );
+        assert_eq!(
+            staged.staged().iter().filter(|s| *s == "dxgi.dll").count(),
+            1
+        );
+        drop(staged);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The cap still bounds what probing can add: once the closure is full, a
+    /// proxy found beside the next image is an error, not a silent extra file.
+    #[test]
+    fn proxy_probing_respects_the_staged_file_cap() {
+        let root = tmp_root("proxy-cap");
+        let mut m = HashMap::new();
+        // The first image plus its imports fill the cap exactly.
+        let deps: Vec<String> = (1..MAX_STAGED_FILES)
+            .map(|i| format!("dep{i}.dll"))
+            .collect();
+        let refs: Vec<&str> = deps.iter().map(String::as_str).collect();
+        m.insert("a.exe".to_string(), pe_importing(&refs));
+        for d in &deps {
+            m.insert(d.clone(), bare_pe());
+        }
+        m.insert("sub/b.exe".to_string(), bare_pe());
+        m.insert("sub/dxgi.dll".to_string(), bare_pe());
+        let src = Fake(m);
+
+        let err = stage_launch_into(&src, "a.exe", &["sub/b.exe"], &root, &[]).unwrap_err();
+        assert!(
+            err.contains("exceeded") && err.contains("dxgi.dll"),
+            "got: {err}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
