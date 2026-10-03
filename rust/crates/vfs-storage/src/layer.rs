@@ -460,18 +460,32 @@ impl LayerProvider {
             .is_ok_and(|f| f.0 == epoch && f.1.contains(guid))
     }
 
+    /// Whether `cell`'s file is in one of the storage's scratch directories
+    /// ([`crate::StorageConfig::scratch_dirs`]): a temporary its host
+    /// deletes after a crash, so a rewrite of it never needs a durable point.
+    fn is_scratch(&self, cell: &FileCell) -> bool {
+        let dirs = &self.storage.cfg.scratch_dirs;
+        if dirs.is_empty() {
+            return false;
+        }
+        let path = cell.path.lock().unwrap_or_else(|e| e.into_inner());
+        path.as_deref()
+            .and_then(|p| p.split_once('/'))
+            .is_some_and(|(top, _)| dirs.iter().any(|d| fold(d) == top))
+    }
+
     /// Called after a change that [`Durability::OnEveryClose`] makes durable
     /// before it returns: under that policy, a [`Self::durable_point`].
     /// Under [`Durability::Deferred`] the change stays non-durable (and a
     /// removed file's store data stays, doomed) unless a durable point is
     /// due, or `rewrote` names a file whose row is already durable (see the
     /// module docs): then this runs one. Called with no lock held.
-    fn changed(&self, rewrote: Option<&Guid>) -> Result<(), i32> {
+    fn changed(&self, rewrote: Option<&FileCell>) -> Result<(), i32> {
         let max_interval = match self.storage.durability() {
             Durability::OnEveryClose => return self.durable_point(),
             Durability::Deferred { max_interval } => max_interval,
         };
-        if rewrote.is_some_and(|g| !self.is_fresh(g)) {
+        if rewrote.is_some_and(|c| !self.is_fresh(&c.guid) && !self.is_scratch(c)) {
             return self.durable_point();
         }
         if !self.storage.deferred_point_due(max_interval) {
@@ -607,7 +621,7 @@ impl Provider for LayerProvider {
         let doomed = self.release(cell);
         committed?;
         if doomed? || durable {
-            self.changed(durable.then_some(&cell.guid))?;
+            self.changed(durable.then_some(&**cell))?;
         }
         Ok(())
     }
@@ -648,7 +662,7 @@ impl Provider for LayerProvider {
             self.commit(cell, &mut st)?;
             wrote
         };
-        self.changed(wrote.then_some(&cell.guid))
+        self.changed(wrote.then_some(&**cell))
     }
 
     fn mkdir(&self, p: VPath) -> Result<(), i32> {
@@ -902,7 +916,7 @@ impl LayerProvider {
             let doomed = self.release(&cell);
             resized?;
             doomed?;
-            self.changed(Some(&cell.guid))?;
+            self.changed(Some(&cell))?;
         }
         if let Some(mtime) = attr.mtime {
             let _ns = lock(&self.ns)?;
@@ -1676,6 +1690,60 @@ mod tests {
         write_file(&q, "f", 0, b"y");
         s.sync().unwrap();
         assert_eq!(s.clock.points(), settled + 1, "a change makes it count");
+    }
+
+    /// A file open across a durable point makes one at its close (its row
+    /// is durable now); in a scratch directory it does not, so many large
+    /// temporaries written at once do not chain durable points.
+    #[test]
+    fn a_scratch_file_open_across_a_durable_point_makes_none_at_close() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Storage::open(
+            d.path(),
+            StorageConfig {
+                scratch_dirs: vec!["Tmp".into()],
+                ..cfg()
+            },
+        )
+        .unwrap();
+        let p = s.layer("l").unwrap();
+        p.mkdir(at("tmp")).unwrap();
+        p.mkdir(at("keep")).unwrap();
+        s.sync().unwrap();
+        let (t, _, _) = p.open(at("TMP/a"), OPEN_WRITE | OPEN_CREATE).unwrap();
+        let (k, _, _) = p.open(at("keep/a"), OPEN_WRITE | OPEN_CREATE).unwrap();
+        p.write_at(t, 0, &[1; 3 * BS as usize]).unwrap();
+        p.write_at(k, 0, &[2; 3 * BS as usize]).unwrap();
+        s.sync().unwrap();
+        let before = s.clock.points();
+        p.write_at(t, 3 * BS, &[3; BS as usize]).unwrap();
+        p.write_at(k, 3 * BS, &[4; BS as usize]).unwrap();
+        p.close(t).unwrap();
+        assert_eq!(
+            s.clock.points(),
+            before,
+            "a scratch file's close is deferred"
+        );
+        p.close(k).unwrap();
+        assert_eq!(
+            s.clock.points(),
+            before + 1,
+            "any other file's close is not"
+        );
+        // Both read back whole, and do after a reopen.
+        let mut buf = vec![0u8; 4 * BS as usize];
+        let (h, _, _) = p.open(at("tmp/a"), OPEN_READ).unwrap();
+        assert_eq!(p.read_at(h, 0, &mut buf).unwrap(), buf.len());
+        assert_eq!(buf[3 * BS as usize], 3);
+        p.close(h).unwrap();
+        drop(p);
+        drop(s);
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("l").unwrap();
+        let (h, _, _) = p.open(at("tmp/a"), OPEN_READ).unwrap();
+        assert_eq!(p.read_at(h, 0, &mut buf).unwrap(), buf.len());
+        assert_eq!((buf[0], buf[3 * BS as usize]), (1, 3));
+        p.close(h).unwrap();
     }
 
     /// Once the last durable point is `max_interval` old, the next change

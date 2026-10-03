@@ -110,6 +110,19 @@ pub struct StorageConfig {
     /// at a time, so a catalog much larger than this (hundreds of thousands
     /// of files) costs many small writes and reads.
     pub catalog_cache_bytes: usize,
+    /// Top-level directories (in every layer) whose files are temporaries:
+    /// the host removes them after a crash, before it uses the layer. Under
+    /// [`Durability::Deferred`] a file there never makes a durable point of
+    /// its own when it is closed or flushed after one passed while it was
+    /// being written (the rewrite rule above): its partial content after a
+    /// crash is harmless, since the host deletes it.
+    ///
+    /// Without this, a host that writes many large files at once into a
+    /// temporary directory and renames them (as an installer does) pays a
+    /// chain of durable points: every file open across one makes another at
+    /// its close, which every other open file then spans. Names compare
+    /// case-insensitively.
+    pub scratch_dirs: Vec<String>,
 }
 
 impl Default for StorageConfig {
@@ -121,6 +134,7 @@ impl Default for StorageConfig {
             durability: Durability::default(),
             max_deferred_commits: crate::storage::DEFERRED_MAX_COMMITS,
             catalog_cache_bytes: crate::catalog::CACHE_BYTES,
+            scratch_dirs: Vec::new(),
         }
     }
 }
