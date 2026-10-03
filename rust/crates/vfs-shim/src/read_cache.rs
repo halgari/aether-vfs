@@ -22,15 +22,41 @@
 
 use std::sync::OnceLock;
 
-use vfs_ipc::{CacheStats, FileRef, ReadCache};
+use vfs_ipc::{CacheConfig, CacheStats, FileRef, FileReport, ReadCache};
 
 static CACHE: OnceLock<Option<ReadCache>> = OnceLock::new();
 
-/// The cache, unless `VFS_SHIM_READ_CACHE` turned it off.
+/// The cache, unless `VFS_SHIM_READ_CACHE` turned it off, with the budget
+/// `VFS_SHIM_READ_CACHE_MIB` sets.
 pub fn get() -> Option<&'static ReadCache> {
     CACHE
-        .get_or_init(|| vfs_env::opt_out(vfs_env::SHIM_READ_CACHE).then(ReadCache::default))
+        .get_or_init(|| {
+            vfs_env::opt_out(vfs_env::SHIM_READ_CACHE).then(|| {
+                ReadCache::new(config(
+                    vfs_env::text(vfs_env::SHIM_READ_CACHE_MIB).as_deref(),
+                ))
+            })
+        })
         .as_ref()
+}
+
+/// The configuration for a `VFS_SHIM_READ_CACHE_MIB` value: the default
+/// budget for one that is absent, not a number, or zero; and never less
+/// than 1 MiB, the most a single fetch reserves.
+fn config(mib: Option<&str>) -> CacheConfig {
+    let mut cfg = CacheConfig::default();
+    if let Some(m) = mib
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&m| m > 0)
+    {
+        cfg.max_bytes = m.saturating_mul(1 << 20);
+    }
+    cfg
+}
+
+/// The busiest files, for the stats report.
+pub fn top_files(n: usize) -> Vec<FileReport> {
+    get().map(|c| c.top_files(n)).unwrap_or_default()
 }
 
 /// Register a file handle the director just opened. `None` when the cache is
@@ -71,4 +97,19 @@ pub fn invalidate_path(root: u32, vpath: &str) {
 /// For the stats report: `None` when the cache is off.
 pub fn stats() -> Option<CacheStats> {
     get().map(ReadCache::stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_budget_comes_from_the_switch_in_mib_or_defaults() {
+        assert_eq!(config(None).max_bytes, 256 << 20);
+        assert_eq!(config(Some("512")).max_bytes, 512 << 20);
+        assert_eq!(config(Some(" 64 ")).max_bytes, 64 << 20);
+        for bad in ["", "lots", "0", "-3"] {
+            assert_eq!(config(Some(bad)).max_bytes, 256 << 20, "{bad:?}");
+        }
+    }
 }
