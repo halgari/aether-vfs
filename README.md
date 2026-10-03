@@ -215,6 +215,13 @@ output discarded.
 - `vfs_inject::InjectError` has a new variant, `TargetExited(code)`: the
   target exited before the shim reported ready. An exhaustive `match` on it
   needs an arm.
+- The shim caches small reads of files the director serves immutable
+  (`VFS_SHIM_READ_CACHE=0` turns it off; see the architecture overview,
+  §3.5). A provider says which handles qualify through
+  `Provider::is_immutable(h)`, which defaults to its `immutable` capability;
+  a composition that maps handles to children should forward it.
+  `vfs_protocol::OpenResp` has two new fields (`immutable`, `mount_gen`), so
+  a struct literal of it needs them or `..Default::default()`.
 - `LaunchOpts` has new fields (`cwd`, `ready_timeout`, `log_file`), and
   `vfs_proton::launch::WineLaunch` has `log_file`; build `LaunchOpts` with
   `..Default::default()` so later additions do not break the build.

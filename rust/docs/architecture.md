@@ -233,6 +233,48 @@ is untouched.
 `vfs-redirect` holds the pure decision logic — path in, decision out — so the
 policy is unit-testable away from the hooks.
 
+#### The read cache
+
+A game makes huge numbers of tiny reads (one launch of a 3,472-mod list read
+`Skyrim.esm` 838,643 times in 4 KiB pieces, and `plugins.txt` a byte per
+call), and over the ring each is a round trip. So the shim keeps a block
+cache in front of the director for **small reads of immutable files**
+(`vfs_ipc::readcache`, OS-free so native tests and `ring-bench` run the same
+code; wired in by `vfs-shim`'s `read_cache.rs`):
+
+- A synchronous `NtReadFile` shorter than 64 KiB is served from aligned
+  1 MiB blocks; a missing block is fetched with one bulk read through the
+  same `read_fragmented`, gate and deadline as any other read. Larger reads,
+  and reads asking for completion by APC or event, take the uncached path
+  unchanged. Anything the cache does not serve falls back to that path, so
+  the bytes, the `IO_STATUS_BLOCK` and the file position are always what it
+  would give.
+- Blocks are per **file** (root and folded path), shared by every handle on
+  it, versioned by its size and the director's **mount generation**: 8 per
+  file with LRU, 64 MiB process-wide with global LRU. Per-file locks, none
+  held across a fetch, one fetch per block however many threads miss it,
+  and bytes reserved before a fetch starts, so memory stays bounded.
+- **Coherence rule: only what cannot change is cached.** The director's
+  open reply says whether the handle is immutable (`Provider::is_immutable`,
+  which an overlay answers for the child holding the handle: a base file of
+  an immutable base is, anything in the write layer is not). Only such
+  handles are served. A write open, an open reported mutable, a write, a
+  truncate, or a delete or rename (source and target, everything under them)
+  through this process drops the file for the rest of the process. Because
+  writable files are excluded rather than invalidated, another process
+  writing the same write layer cannot make the cache stale: what it writes
+  is never cached, and a file it copies up is reported mutable at its next
+  open here.
+- A file read at random across more blocks than it may hold goes *cold*:
+  after 16 misses averaging under 8 hits each it is read uncached for a while
+  instead of turning every small read into a block fetch.
+
+`VFS_SHIM_READ_CACHE=0` turns it off, and the `VFS_SHIM_STATS_LOG` report has
+a section for it (hits, misses, declined, fetches and bytes, evictions,
+invalidations). The open reply's `immutable` flag and generation sit in what
+was padding, so the wire version did not change: an older director's reply
+reads as mutable and is never cached.
+
 ### 3.6 Process creation — `vfs-payload`, `vfs-inject`, `vfs-director::stage`
 
 Getting the shim into the process before the process needs the VFS. This is the
@@ -576,6 +618,8 @@ Because failures are silent, the shim carries instrumentation that can be turned
 on with `VFS_SHIM_STATS_LOG` and answers questions counters normally cannot:
 
 - per-hook calls, total and **max** time, and a `>1 ms` stall count;
+- what the **read cache** did (§3.5): hits, misses, block fetches, evictions
+  and invalidations;
 - **open paths by frequency** — a retry loop reopens one path thousands of
   times, and a deduplicated list hides exactly the path that matters;
 - **every directory enumeration** with its filter, entry count, and which
