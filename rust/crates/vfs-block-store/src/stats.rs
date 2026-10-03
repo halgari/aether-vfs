@@ -127,6 +127,8 @@ impl ClassWriteStats {
 pub struct WriteStats {
     pub foreground: ClassWriteStats,
     pub bulk: ClassWriteStats,
+    /// The index's write transactions.
+    pub index: crate::index::IndexStats,
     /// The GPU compressor's counters, when bulk writes use it.
     #[cfg(feature = "gpu-zstd")]
     pub gpu: Option<crate::gpu::GpuStats>,
@@ -148,7 +150,10 @@ pub struct Usage {
 impl BlockStore {
     /// What writes stored since the store opened, per write class.
     pub fn write_stats(&self) -> WriteStats {
-        self.codec.stats()
+        WriteStats {
+            index: self.index.stats(),
+            ..self.codec.stats()
+        }
     }
 
     /// What compresses `class` writes, for logs: `zstd:6`, `GPU opt16p1`, or

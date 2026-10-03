@@ -40,7 +40,9 @@ const CACHE_FILES: TableDefinition<[u8; 16], (u64, u64)> = TableDefinition::new(
 
 const META_NEXT_LAYER_ID: &str = "next_layer_id";
 /// redb page cache. The catalog is small next to the store's index.
-const CACHE_BYTES: usize = 16 << 20;
+/// The catalog's redb page cache unless [`crate::StorageConfig::catalog_cache_bytes`]
+/// says otherwise.
+pub(crate) const CACHE_BYTES: usize = 16 << 20;
 /// First byte of an encoded [`EntryRec`].
 const ENTRY_VERSION: u8 = 1;
 /// version + kind + guid + len + mtime, then the name.
@@ -135,8 +137,13 @@ fn dir_prefix(folded_dir: &str) -> String {
 impl Catalog {
     /// Opens or creates the catalog at `path`.
     pub fn open(path: &Path) -> Result<Self, StorageError> {
+        Self::open_with_cache(path, CACHE_BYTES)
+    }
+
+    /// [`Catalog::open`] with a redb page cache of `cache_bytes`.
+    pub fn open_with_cache(path: &Path, cache_bytes: usize) -> Result<Self, StorageError> {
         let db = Database::builder()
-            .set_cache_size(CACHE_BYTES)
+            .set_cache_size(cache_bytes)
             .create(path)
             .map_err(db_err)?;
         let c = Self {

@@ -186,7 +186,16 @@ impl BlockStore {
         &self,
         f: impl FnOnce(&mut Tables<'_>) -> Result<R>,
     ) -> Result<R> {
-        let mut w = self.writer.lock().unwrap();
+        let w = self.writer.lock().unwrap();
+        self.durable_commit_locked(w, f)
+    }
+
+    /// [`BlockStore::durable_commit`] with the writer lock already taken.
+    fn durable_commit_locked<R>(
+        &self,
+        mut w: std::sync::MutexGuard<'_, Writer>,
+        f: impl FnOnce(&mut Tables<'_>) -> Result<R>,
+    ) -> Result<R> {
         w.packs.sync()?;
         crash::point("flush_before_commit");
         // Commits counted after this load may or may not be covered; counting them again is safe.
@@ -206,15 +215,28 @@ impl BlockStore {
         Ok(r)
     }
 
+    /// Whether `auto_flush_bytes` bytes or `auto_flush_commits` non-durable commits have piled
+    /// up since the last durable flush.
+    fn auto_flush_due(&self) -> bool {
+        self.unflushed.load(Ordering::Relaxed) >= self.cfg.auto_flush_bytes
+            || self.unflushed_commits.load(Ordering::Relaxed) >= self.cfg.auto_flush_commits
+    }
+
     /// Flushes once `auto_flush_bytes` bytes or `auto_flush_commits` non-durable commits have
     /// piled up, since redb holds memory for non-durable commits until the next durable one.
+    ///
+    /// Every writer that crosses the threshold gets here at about the same time; the condition
+    /// is checked again under the writer lock, so only the first of them flushes and the rest
+    /// find nothing due (before, each ran a durable flush of its own: dozens back to back).
     pub(crate) fn maybe_auto_flush(&self) -> Result<()> {
-        if self.unflushed.load(Ordering::Relaxed) >= self.cfg.auto_flush_bytes
-            || self.unflushed_commits.load(Ordering::Relaxed) >= self.cfg.auto_flush_commits
-        {
-            self.flush()?;
+        if !self.auto_flush_due() {
+            return Ok(());
         }
-        Ok(())
+        let w = self.writer.lock().unwrap();
+        if !self.auto_flush_due() {
+            return Ok(());
+        }
+        self.durable_commit_locked(w, |_| Ok(()))
     }
 
     /// Appends (header, payload) records to the active pack, starting new packs as needed.
@@ -482,6 +504,47 @@ pub(crate) mod tests {
     pub(crate) fn put(store: &BlockStore, id: &[u8], data: &[u8]) -> Result<()> {
         store.set_len(id, data.len() as u64)?;
         store.write_blocks(id, 0, data)
+    }
+
+    /// Writers that cross the auto-flush threshold together make one durable flush between
+    /// them, not one each.
+    #[test]
+    fn writers_crossing_the_flush_threshold_together_flush_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let threshold = 256 << 10;
+        let store = BlockStore::open(
+            dir.path(),
+            StoreConfig {
+                max_pack_size: 1 << 30,
+                auto_flush_bytes: threshold,
+                auto_flush_commits: u64::MAX,
+                ..test_config()
+            },
+        )
+        .unwrap();
+        let before = store.index.stats().durable_commits;
+        let (threads, files, size) = (16u64, 32u64, 4 * BS);
+        let barrier = std::sync::Barrier::new(threads as usize);
+        std::thread::scope(|s| {
+            for t in 0..threads {
+                let (store, barrier) = (&store, &barrier);
+                s.spawn(move || {
+                    barrier.wait();
+                    for f in 0..files {
+                        let id = format!("t{t}f{f}");
+                        put(store, id.as_bytes(), &random_bytes(t * 1000 + f, size)).unwrap();
+                    }
+                });
+            }
+        });
+        let durable = store.index.stats().durable_commits - before;
+        // Each flush needs `threshold` new bytes after the one before it.
+        let most = (threads * files) * (size as u64 + 64) / threshold + 1;
+        assert!(
+            durable >= 1 && durable <= most,
+            "{durable} durable flushes, at most {most}"
+        );
+        assert!(store.verify().unwrap().is_ok());
     }
 
     #[test]

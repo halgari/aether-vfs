@@ -3,6 +3,8 @@
 use std::cell::OnceCell;
 use std::ops::Deref;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use redb::{
     AccessGuard, Database, Durability, Key, ReadOnlyTable, ReadTransaction, ReadableDatabase,
@@ -117,6 +119,29 @@ impl Deref for SegmentRef<'_> {
 
 pub struct Index {
     db: Database,
+    counters: IndexCounters,
+}
+
+/// What [`Index::update`] has cost since the index opened.
+#[derive(Default)]
+struct IndexCounters {
+    commits: AtomicU64,
+    durable: AtomicU64,
+    wait_ns: AtomicU64,
+    held_ns: AtomicU64,
+}
+
+/// Index transactions since the store opened (see [`crate::WriteStats::index`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexStats {
+    /// Write transactions committed, durable ones included.
+    pub commits: u64,
+    /// Of them, durable commits (each an fsync of the index).
+    pub durable_commits: u64,
+    /// Time writers waited for the index's one write transaction, ns summed over writers.
+    pub wait_ns: u64,
+    /// Time write transactions were open, commit included, ns.
+    pub held_ns: u64,
 }
 
 impl Index {
@@ -124,7 +149,10 @@ impl Index {
         let db = Database::builder()
             .set_cache_size(cache_bytes)
             .create(path)?;
-        let index = Self { db };
+        let index = Self {
+            db,
+            counters: IndexCounters::default(),
+        };
         // Create all tables so read transactions can always open them.
         index.update(true, |_| Ok(()))?;
         Ok(index)
@@ -159,7 +187,16 @@ impl Index {
         durable: bool,
         f: impl FnOnce(&mut Tables<'_>) -> Result<R>,
     ) -> Result<R> {
+        let t0 = Instant::now();
         let mut txn = self.db.begin_write()?;
+        let t1 = Instant::now();
+        let c = &self.counters;
+        c.wait_ns
+            .fetch_add((t1 - t0).as_nanos() as u64, Ordering::Relaxed);
+        let held = scopeguard(|| {
+            c.held_ns
+                .fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        });
         txn.set_durability(if durable {
             Durability::Immediate
         } else {
@@ -176,8 +213,36 @@ impl Index {
             f(&mut tables)?
         };
         txn.commit()?;
+        drop(held);
+        c.commits.fetch_add(1, Ordering::Relaxed);
+        if durable {
+            c.durable.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(result)
     }
+
+    pub fn stats(&self) -> IndexStats {
+        let c = &self.counters;
+        IndexStats {
+            commits: c.commits.load(Ordering::Relaxed),
+            durable_commits: c.durable.load(Ordering::Relaxed),
+            wait_ns: c.wait_ns.load(Ordering::Relaxed),
+            held_ns: c.held_ns.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Runs `f` when dropped.
+fn scopeguard(f: impl FnOnce()) -> impl Drop {
+    struct Guard<F: FnOnce()>(Option<F>);
+    impl<F: FnOnce()> Drop for Guard<F> {
+        fn drop(&mut self) {
+            if let Some(f) = self.0.take() {
+                f()
+            }
+        }
+    }
+    Guard(Some(f))
 }
 
 /// A read snapshot of the index. Tables are opened on first use, so a snapshot that only

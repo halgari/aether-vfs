@@ -27,7 +27,19 @@ fn setup(store: &BlockStore) {
 }
 
 fn scenario(name: &str, dir: &Path) {
-    let store = open(dir);
+    let store = if name == "autoflush" {
+        // Any write past a block makes the store flush on its own.
+        BlockStore::open(
+            dir,
+            vfs_block_store::StoreConfig {
+                auto_flush_bytes: 2 * BS as u64,
+                ..test_config()
+            },
+        )
+        .unwrap()
+    } else {
+        open(dir)
+    };
     setup(&store);
     // SAFETY: the child runs a single test thread and no other thread reads the environment
     // concurrently; crash points only read this variable.
@@ -43,6 +55,12 @@ fn scenario(name: &str, dir: &Path) {
             store.set_len(b"b", b.len() as u64).unwrap();
             store.write_blocks(b"b", 0, &b).unwrap();
             store.flush().unwrap();
+        }
+        "autoflush" => {
+            // The flush comes from `maybe_auto_flush` (lock, check again, flush).
+            let b = random_bytes(2, 3 * BS);
+            store.set_len(b"b", b.len() as u64).unwrap();
+            store.write_blocks(b"b", 0, &b).unwrap();
         }
         "compact" => {
             // Fill several packs, delete most of it, compact.
@@ -133,6 +151,13 @@ fn crash_during_flush_before_durable_commit() {
     let dir = crash_child("flush", "flush_before_commit");
     let store = check_after_crash(dir.path());
     // The durable commit never happened, so "b" is not there.
+    assert!(store.stat(b"b").unwrap().is_none());
+}
+
+#[test]
+fn crash_during_an_auto_flush_before_its_durable_commit() {
+    let dir = crash_child("autoflush", "flush_before_commit");
+    let store = check_after_crash(dir.path());
     assert!(store.stat(b"b").unwrap().is_none());
 }
 

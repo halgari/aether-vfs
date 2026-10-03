@@ -468,6 +468,39 @@ mod tests {
         assert!(store.stat(b"x").unwrap().is_none());
     }
 
+    /// In one batch, files take a block that another file of the batch lets go of (it
+    /// replaces its old content). Refcounts are netted over the batch, so nothing is freed
+    /// that is still referenced.
+    #[test]
+    fn put_files_keeps_a_block_another_file_of_the_batch_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlockStore::open(dir.path(), test_config()).unwrap();
+        let bs = store.cfg.block_size as usize;
+        let shared = random_bytes(1, bs);
+        let mut old_b = shared.clone();
+        old_b.extend_from_slice(&random_bytes(2, bs));
+        store.put_files(&[(b"b", &old_b)]).unwrap();
+        // "a" and "c" take `shared`, which only "b" holds and drops in the same batch.
+        let mut a = random_bytes(3, bs);
+        a.extend_from_slice(&shared);
+        let new_b = random_bytes(4, bs + 5);
+        store
+            .put_files(&[(b"a", &a), (b"b", &new_b), (b"c", &a)])
+            .unwrap();
+        assert_eq!(read_all(&store, b"a"), a);
+        assert_eq!(read_all(&store, b"b"), new_b);
+        assert_eq!(read_all(&store, b"c"), a);
+        let report = store.verify().unwrap();
+        assert!(report.is_ok(), "{:?}", report.problems);
+        store.delete(b"a").unwrap();
+        store.delete(b"c").unwrap();
+        assert!(store.verify().unwrap().is_ok());
+        store.close().unwrap();
+        let store = BlockStore::open(dir.path(), test_config()).unwrap();
+        assert_eq!(read_all(&store, b"b"), new_b);
+        assert!(store.verify().unwrap().is_ok());
+    }
+
     #[test]
     fn pack_accepts_records_only_for_live_packs() {
         let dir = tempfile::tempdir().unwrap();
