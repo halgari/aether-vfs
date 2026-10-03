@@ -774,6 +774,9 @@ impl LayerProvider {
                 .store
                 .put_files(&batch)
                 .map_err(|e| self.st_err("store put", e.into()))?;
+            // Set once the rows are committed: from then on the data is
+            // theirs, whatever fails after.
+            let mut committed = false;
             let rows = (|| {
                 let _ns = lock(&self.ns)?;
                 let mut rows = Vec::with_capacity(files.len());
@@ -800,6 +803,7 @@ impl LayerProvider {
                     .catalog
                     .put_many(self.id, &rows, false)
                     .map_err(|e| self.st_err("catalog put", e))?;
+                committed = true;
                 for g in replaced {
                     self.doom(g)?;
                 }
@@ -809,10 +813,12 @@ impl LayerProvider {
                 Ok(())
             })();
             if let Err(e) = rows {
-                // No row names them: their data goes now (or, if this
-                // fails too, at the next open's reconciliation).
-                for id in &ids {
-                    let _ = self.storage.store.delete(id);
+                if !committed {
+                    // No row names them: their data goes now (or, if this
+                    // fails too, at the next open's reconciliation).
+                    for id in &ids {
+                        let _ = self.storage.store.delete(id);
+                    }
                 }
                 return Err(e);
             }
