@@ -798,6 +798,13 @@ impl Provider for CountingProvider {
         self.inner.close(h)
     }
 
+    /// Handles are the inner provider's own, so it answers — without this
+    /// the shim's read cache would see the wrapper's aggregate (an overlay:
+    /// mutable) and cache nothing under this harness.
+    fn is_immutable(&self, h: Handle) -> bool {
+        self.inner.is_immutable(h)
+    }
+
     fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let r = self.inner.read_at(h, offset, buf);
         if let Ok(n) = r {

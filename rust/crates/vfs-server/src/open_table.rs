@@ -84,6 +84,7 @@ impl OpenTable {
                     fh,
                     size: 0,
                     is_dir: true,
+                    ..Default::default()
                 })
             }
             Resolution::File {
@@ -131,6 +132,7 @@ impl OpenTable {
                     fh,
                     size,
                     is_dir: false,
+                    ..Default::default()
                 })
             }
         }
@@ -153,6 +155,7 @@ impl OpenTable {
                             fh,
                             size: 0,
                             is_dir: true,
+                            ..Default::default()
                         });
                     }
                 }

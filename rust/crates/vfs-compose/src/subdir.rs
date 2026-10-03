@@ -111,6 +111,10 @@ impl Provider for SubdirProvider {
         self.inner.close(h)
     }
 
+    fn is_immutable(&self, h: Handle) -> bool {
+        self.inner.is_immutable(h)
+    }
+
     // Handle-keyed ops need no path rewrite: `open` already resolved and
     // stashed the rewritten path with `inner`'s own handle.
     fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {

@@ -20,6 +20,10 @@
 //!
 //! `VFS_FIXTURE_NAMES` and its companions run the names phase first: see
 //! `names.rs`. Windows only — it calls Win32 directly.
+//!
+//! `VFS_FIXTURE_CACHE_PATH` and its companions run the read-cache phase after
+//! the first read: see `cache.rs`. `VFS_FIXTURE_LINGER_MS` keeps the process
+//! alive that long after it, so a shim stats report covers the run.
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -49,6 +53,8 @@ fn read_in_one_call(path: &str) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+#[cfg(windows)]
+mod cache;
 #[cfg(windows)]
 mod names;
 
@@ -177,6 +183,8 @@ fn main() {
             eprintln!("FIXTURE FAIL: content byte != {b}"); exit(1);
         }
     }
+    #[cfg(windows)]
+    cache::run();
     if let Ok(wpath) = std::env::var("VFS_FIXTURE_WRITE_PATH") {
         let data = std::env::var("VFS_FIXTURE_WRITE_DATA").unwrap_or_else(|_| "written".into());
         if let Err(e) = std::fs::write(&wpath, data.as_bytes()) {

@@ -1787,6 +1787,12 @@ unsafe fn try_fuse_create(
                 Some(path.clone()),
                 append_only,
             )?;
+            // Every file handle joins the read cache's view of its file: a
+            // write or mutable open drops what it holds of it; an immutable
+            // read open may be served from it.
+            if let Some(cache) = crate::read_cache::register(root.0, vp, &resp, write) {
+                crate::fuse_synth::set_cache(h, cache);
+            }
             if !file_handle.is_null() {
                 *file_handle = h as HANDLE;
             }
@@ -2937,6 +2943,7 @@ unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
         if let Some((root, vpath)) = client.vpath_under_root(path) {
             let vp = if vpath.is_empty() { "." } else { vpath.as_str() };
             client.names_changed(root, vp);
+            crate::read_cache::invalidate_path(root.0, vp);
             return match client.delete(root, vp) {
                 Ok(()) => STATUS_SUCCESS,
                 Err(st) => delete_status_for(st),
@@ -3159,6 +3166,9 @@ unsafe fn setinfo_hook_body(
             && length as usize >= core::mem::size_of::<FileEndOfFileInformation>()
         {
             let eof = (*(info as *const FileEndOfFileInformation)).end_of_file;
+            if let Some(f) = crate::fuse_synth::cache(handle as isize) {
+                crate::read_cache::invalidate(&f);
+            }
             if let (Some((fh, _, _, _, _)), Some(c)) = (
                 crate::fuse_synth::lookup(handle as isize),
                 crate::fuse_client::global(),
@@ -3184,6 +3194,7 @@ unsafe fn setinfo_hook_body(
                 if let Some((root, vpath)) = c.vpath_under_root(&nt) {
                     let src = if vpath.is_empty() { ".".to_string() } else { vpath };
                     c.names_changed(root, &src);
+                    crate::read_cache::invalidate_path(root.0, &src);
                     let ok = if is_delete {
                         c.delete(root, &src).is_ok()
                     } else {
@@ -3211,6 +3222,7 @@ unsafe fn setinfo_hook_body(
                             Some((dst_root, dstv)) if dst_root == root => {
                                 let dst = if dstv.is_empty() { ".".to_string() } else { dstv };
                                 c.names_changed(root, &vfs_core::fold(&dst));
+                                crate::read_cache::invalidate_path(root.0, &vfs_core::fold(&dst));
                                 let renamed = c.rename(root, &src, &dst).is_ok();
                                 if renamed {
                                     // The handle follows the file: what it is
@@ -4316,6 +4328,13 @@ unsafe fn write_hook_body(
             // enforces this itself; ours has to do it here.
             let off = if append_only { pos } else { explicit.unwrap_or(pos) };
             let want = length as usize;
+            // The file is changing: the read cache drops it. (A write handle
+            // already dropped it at open; this keeps the rule local.)
+            if want > 0 {
+                if let Some(f) = crate::fuse_synth::cache(handle as isize) {
+                    crate::read_cache::invalidate(&f);
+                }
+            }
             let n = if want == 0 || buffer.is_null() {
                 0usize
             } else {
@@ -4408,9 +4427,8 @@ unsafe fn read_hook_body(
                 Some(v as u64)
             }
         };
-        if let Some((fh, size, _is_dir, pos, _append_only)) =
-            crate::fuse_synth::lookup(handle as isize)
-        {
+        if let Some(view) = crate::fuse_synth::lookup_read(handle as isize) {
+            let (fh, size, pos) = (view.fh, view.size, view.position);
             let off = explicit.unwrap_or(pos);
             let want = length as usize;
             if off >= size {
@@ -4429,10 +4447,23 @@ unsafe fn read_hook_body(
                 // SAFETY: NtReadFile contract — buffer is writable for `length` bytes.
                 let slice =
                     unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, max) };
-                match crate::fuse_client::global()
-                    .ok_or(vfs_protocol::ST_IO_ERROR)
-                    .and_then(|c| c.read_fragmented(fh, off, slice))
-                {
+                // A small synchronous read of an immutable file is offered to
+                // the read cache first. Not one that asked for completion by
+                // APC or event (those keep exactly the path they had), and not
+                // one whose handle's size has moved from what the cache was
+                // told at open. A cache answer is `max` bytes, as the ring's
+                // would be; `None` is the uncached read below, unchanged.
+                let cached = match &view.cache {
+                    Some(f) if apc.is_null() && event.is_null() && f.size() == Some(size) => {
+                        crate::fuse_client::global().and_then(|c| c.read_cached(f, fh, off, slice))
+                    }
+                    _ => None,
+                };
+                match cached.ok_or(()).or_else(|()| {
+                    crate::fuse_client::global()
+                        .ok_or(vfs_protocol::ST_IO_ERROR)
+                        .and_then(|c| c.read_fragmented(fh, off, slice))
+                }) {
                     Ok(n) => n,
                     Err(_) => {
                         if !iosb.is_null() {

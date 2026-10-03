@@ -94,6 +94,15 @@ impl Provider for RouterProvider {
         provider.read_at(inner, offset, buf)
     }
 
+    /// The route that opened the handle answers.
+    fn is_immutable(&self, h: Handle) -> bool {
+        let routed = match self.opens.lock() {
+            Ok(g) => g.get(&h).map(|(b, i)| (Arc::clone(b), *i)),
+            Err(_) => None,
+        };
+        routed.is_some_and(|(provider, inner)| provider.is_immutable(inner))
+    }
+
     fn close(&self, h: Handle) -> Result<(), i32> {
         let (provider, inner) = {
             let mut g = self.opens.lock().map_err(|_| map_io_err())?;

@@ -612,6 +612,24 @@ impl FuseClient {
         vfs_ipc::read_fragmented(&self.client(), &self.gate, &plan, fh, offset, buf)
     }
 
+    /// Serve a small read of `fh` from the read cache (`crate::read_cache`),
+    /// fetching a block it lacks with [`Self::read_fragmented`] — so a block
+    /// fetch is an ordinary bulk read: the same gate, deadline and slot
+    /// rules. `None` when the cache does not serve it (off, too large, not
+    /// cacheable, changed, no room, a failed fetch); the caller then reads
+    /// uncached.
+    pub fn read_cached(
+        &self,
+        cache: &vfs_ipc::FileRef,
+        fh: u64,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Option<usize> {
+        crate::read_cache::get()?.read(cache, offset, buf, |at, block| {
+            self.read_fragmented(fh, at, block)
+        })
+    }
+
     /// Delete (whiteout) a virtual path via the JVM overlay (`OP_DELETE`).
     pub fn delete(&self, root: RootId, vpath: &str) -> Result<(), i32> {
         let c = self.client();

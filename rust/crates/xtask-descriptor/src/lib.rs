@@ -125,7 +125,7 @@ pub fn golden_vectors() -> Vec<(&'static str, Vec<u8>)> {
          ])),
         ("close-req-99", P::encode_close_req(99)),
         ("open-resp-fh42-size1000",
-         P::encode_open_resp(&vfs_protocol::OpenResp { fh: 42, size: 1000, is_dir: false })),
+         P::encode_open_resp(&vfs_protocol::OpenResp { fh: 42, size: 1000, is_dir: false, ..Default::default() })),
         ("read-resp-bulk-len5-off65536",
          P::encode_read_resp_bulk(5, 65536)),
         ("write-req-fh7-off10-abc",

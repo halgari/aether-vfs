@@ -74,6 +74,12 @@ impl Provider for ReadOnlyProvider {
         self.inner.close(h)
     }
 
+    /// Refusing writes through this wrapper does not stop the inner provider
+    /// changing, so the inner provider answers.
+    fn is_immutable(&self, h: Handle) -> bool {
+        self.inner.is_immutable(h)
+    }
+
     fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         self.inner.read_at(h, offset, buf)
     }

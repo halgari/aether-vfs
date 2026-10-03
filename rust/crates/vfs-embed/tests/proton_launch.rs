@@ -847,3 +847,216 @@ fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The shim's read cache
+// ---------------------------------------------------------------------------
+
+/// The immutable file the fixture reads in small pieces, as the child names
+/// it: three blocks and a ragged tail, so reads straddle blocks and the last
+/// block is short.
+const CACHE_CHILD_PATH: &str = r"C:\vfs-session\root\data\cached.esm";
+const CACHE_VPATH: &str = "data/cached.esm";
+const CACHE_LEN: usize = 3 * 1024 * 1024 + 12_345;
+/// A base file the fixture reads, rewrites through another handle, and reads
+/// again. The rewrite is the same size, so the file's version (size, mount
+/// generation) does not change: what keeps the old bytes from being served
+/// is the cache dropping the file, not a new key.
+const RW_CHILD_PATH: &str = r"C:\vfs-session\root\data\plugins.txt";
+const RW_VPATH: &str = "data/plugins.txt";
+const RW_BEFORE: &[u8] = b"*Skyrim.esm\n*Update.esm\n";
+const RW_AFTER: &str = "*Skyrim.esm\n*Dragon.esm\n";
+/// Where the shim's stats report lands: the session's state directory, which
+/// the child sees as `C:\vfs-session\state`.
+const STATS_CHILD_PATH: &str = r"C:\vfs-session\state\shim-stats.txt";
+
+/// An immutable in-memory provider that counts the reads of each path that
+/// reach it — what says the small reads were not each a round trip.
+struct CountingImmutable {
+    inner: vfs_embed::InlineProvider,
+    handles: Mutex<BTreeMap<Handle, String>>,
+    reads: Mutex<BTreeMap<String, (usize, usize)>>,
+}
+
+impl CountingImmutable {
+    /// `(read_at calls, bytes)` that reached the provider for `vpath`.
+    fn reads_of(&self, vpath: &str) -> (usize, usize) {
+        self.reads
+            .lock()
+            .unwrap()
+            .get(vpath)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+impl Provider for CountingImmutable {
+    fn capabilities(&self) -> Capabilities {
+        let caps = self.inner.capabilities();
+        assert!(caps.immutable, "the test relies on an immutable base");
+        caps
+    }
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        self.inner.getattr(p)
+    }
+    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+        self.inner.readdir(p)
+    }
+    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+        let r = self.inner.open(p, flags)?;
+        self.handles
+            .lock()
+            .unwrap()
+            .insert(r.0, p.rel.to_ascii_lowercase());
+        Ok(r)
+    }
+    fn close(&self, h: Handle) -> Result<(), i32> {
+        self.handles.lock().unwrap().remove(&h);
+        self.inner.close(h)
+    }
+    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        let r = self.inner.read_at(h, offset, buf);
+        if let Some(path) = self.handles.lock().unwrap().get(&h).cloned() {
+            let mut reads = self.reads.lock().unwrap();
+            let e = reads.entry(path).or_default();
+            e.0 += 1;
+            e.1 += *r.as_ref().unwrap_or(&0);
+        }
+        r
+    }
+}
+
+/// **The read cache, across the real boundary.** The fixture reads a 3 MiB
+/// immutable file once in one call and then some hundred thousand times in
+/// small pieces — explicit offsets of every size around the threshold, its
+/// own position a byte at a time, seeks, six threads on shared and private
+/// handles — and every piece must equal the big read. It then rewrites a
+/// base file through another handle (a copy-up into the write layer) and
+/// must read the new bytes back in small pieces.
+///
+/// Witnesses:
+///
+/// * the **fixture** exits 0 only if every small read agreed and the rewrite
+///   read back fresh;
+/// * the **provider** saw a few hundred reads of the cached file, not the
+///   hundred thousand the fixture made;
+/// * the shim's **stats report** shows read-cache hits.
+#[test]
+#[ignore = "needs a GE-Proton runtime under $VFS_HOME/runtimes, a bootable Wine prefix, and \
+            Windows-built artifacts beside the test binary — see bin/build-windows"]
+fn small_reads_of_an_immutable_file_are_served_by_the_shim_read_cache_under_proton() {
+    let _one = ONE_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
+    let art = windows_artifacts();
+    assert!(
+        std::env::var_os("VFS_HOME").is_some(),
+        "set VFS_HOME to the aether-vfs home holding runtimes/GE-Proton…"
+    );
+
+    let root = tmp("rc-root");
+    let state = tmp("rc-state");
+    let overlay = tmp("rc-overlay");
+    let storage_dir = tmp("rc-storage");
+    let image = root.join("fixture.exe");
+    std::fs::copy(&art["vfs-fixture-read.exe"], &image).expect("copy the fixture into the root");
+
+    let mut x = 0x0123_4567_89AB_CDEFu64;
+    let cached: Vec<u8> = (0..CACHE_LEN)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect();
+    let provider = Arc::new(CountingImmutable {
+        inner: vfs_embed::InlineProvider::from_files([
+            ("data/hello.txt", vec![FILL; LEN]),
+            (CACHE_VPATH, cached),
+            (RW_VPATH, RW_BEFORE.to_vec()),
+        ]),
+        handles: Mutex::new(BTreeMap::new()),
+        reads: Mutex::new(BTreeMap::new()),
+    });
+    let storage = vfs_embed::Storage::open(&storage_dir, vfs_embed::StorageConfig::default())
+        .expect("open storage");
+
+    let mut s = Session::new();
+    s.set_root(&root);
+    s.set_state_dir(&state);
+    s.set_overlay(&overlay);
+    s.mount("", Arc::clone(&provider) as Arc<dyn Provider>)
+        .expect("mount the provider over root 0");
+    s.set_write_layer(storage.layer("write").expect("a write layer"))
+        .expect("set the write layer");
+    s.serve().expect("serve");
+
+    let mut env = BTreeMap::new();
+    for (name, value) in [
+        ("VFS_FIXTURE_PATH", CHILD_PATH.to_string()),
+        ("VFS_FIXTURE_EXPECT", LEN.to_string()),
+        ("VFS_FIXTURE_FILL", FILL.to_string()),
+        ("VFS_FIXTURE_CACHE_PATH", CACHE_CHILD_PATH.to_string()),
+        ("VFS_FIXTURE_CACHE_RW_PATH", RW_CHILD_PATH.to_string()),
+        ("VFS_FIXTURE_CACHE_RW_DATA", RW_AFTER.to_string()),
+        ("VFS_FIXTURE_LINGER_MS", "600".to_string()),
+        ("VFS_SHIM_STATS_LOG", STATS_CHILD_PATH.to_string()),
+        ("VFS_SHIM_STATS_INTERVAL_MS", "100".to_string()),
+    ] {
+        env.insert(name.to_string(), value);
+    }
+
+    assert_eq!(RW_BEFORE.len(), RW_AFTER.len(), "a same-size rewrite");
+    let code = s
+        .launch(&LaunchOpts {
+            image: "fixture.exe".into(),
+            wait: true,
+            shim_dll: Some(art["vfs_shim_dll.dll"].to_string_lossy().into_owned()),
+            payload_dll: Some(art["vfs_payload.dll"].to_string_lossy().into_owned()),
+            env,
+            ..Default::default()
+        })
+        .unwrap_or_else(|e| panic!("launch: {e}"));
+
+    let (reads, bytes) = provider.reads_of(CACHE_VPATH);
+    let report = std::fs::read_to_string(state.join("shim-stats.txt")).unwrap_or_default();
+    let section: String = report
+        .lines()
+        .skip_while(|l| !l.starts_with("read cache"))
+        .take(4)
+        .collect::<Vec<_>>()
+        .join("\n");
+    eprintln!(
+        "DIRECTOR: {reads} reads ({bytes} bytes) of {CACHE_VPATH} reached the provider\n\
+         SHIM: {section}"
+    );
+    assert_eq!(
+        code, 0,
+        "the fixture exits 0 only if every small read equalled the big one and the rewritten \
+         file read back fresh; its `FIXTURE FAIL: cache:` line above says what differed"
+    );
+    // The fixture made well over 100,000 small reads of the file; uncached,
+    // each is at least one provider read. Cached, the provider sees one read
+    // per block fetch (a block is one bulk request) plus the large reads
+    // (whole-file and those at or over 64 KiB, a few per offset tried).
+    assert!(
+        reads < 30_000,
+        "{reads} reads of {CACHE_VPATH} reached the provider: the small reads were not cached"
+    );
+    let hits: u64 = section
+        .split_whitespace()
+        .skip_while(|w| *w != "hits")
+        .nth(1)
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        hits > 50_000,
+        "the shim's stats must show read-cache hits; report section:\n{section}\n\nfull report:\n{report}"
+    );
+
+    s.stop_serve();
+    drop(s);
+    drop(storage);
+    for d in [&root, &state, &overlay, &storage_dir] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}

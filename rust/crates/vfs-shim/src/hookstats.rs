@@ -191,6 +191,8 @@ struct Snapshot {
     overlay_fails: HashMap<String, u64>,
     hook_panics_total: u64,
     hook_panics: HashMap<&'static str, u64>,
+    /// `None` when `VFS_SHIM_READ_CACHE` turned the cache off.
+    read_cache: Option<vfs_ipc::CacheStats>,
 }
 
 /// Clone the contents of one of this module's `Mutex<Option<T>>` accumulators,
@@ -259,6 +261,7 @@ fn snapshot() -> Snapshot {
         overlay_fails: accumulated(&OVERLAY_FAILS),
         hook_panics_total: hook_panics_total(),
         hook_panics: accumulated(&HOOK_PANICS),
+        read_cache: crate::read_cache::stats(),
     }
 }
 
@@ -524,6 +527,53 @@ fn render_name_queries(snap: &Snapshot) -> String {
     format!(
         "\n{NAME_QUERY_LABEL}:\n  {} queries / {} answered from the shim's cache / {} director lookups\n",
         snap.name_queries, snap.name_queries_cached, snap.name_lookups
+    )
+}
+
+/// The label of the read-cache section, for anything that parses the report.
+pub const READ_CACHE_LABEL: &str = "read cache (small reads of immutable files)";
+
+/// What the read cache (`crate::read_cache`) did: whether small reads were
+/// answered from memory or still crossed the ring, and why files left it.
+///
+/// `hits` are reads that cost no round trip at all; `misses` fetched (or
+/// waited for) one block each and every hit after it is the saving.
+/// `declined` were small reads of cacheable files sent over the ring anyway —
+/// a file that changed, went cold, or a cache with no room. A launch whose
+/// `NtReadFile` row is large and whose hits are near zero is reading files the
+/// director did not call immutable: see `invalidations` and the open reply.
+fn render_read_cache(snap: &Snapshot) -> String {
+    let Some(c) = snap.read_cache else {
+        return format!("\n{READ_CACHE_LABEL}: OFF (VFS_SHIM_READ_CACHE)\n");
+    };
+    if c.hits + c.misses + c.declined + c.invalidations == 0 {
+        return String::new();
+    }
+    let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+    format!(
+        "\n{READ_CACHE_LABEL}:\n  \
+         hits {} / misses {} / declined {}   ({:.1}% of cached reads were hits)\n  \
+         fetches {} ({:.1} MiB fetched)   evictions {}   resident {:.1} MiB in {} files\n  \
+         invalidations {} ({} blocks dropped)   cold files {}\n  \
+         failed fetches {}   fetches given up on (past their deadline) {}\n",
+        c.hits,
+        c.misses,
+        c.declined,
+        if c.hits + c.misses == 0 {
+            0.0
+        } else {
+            100.0 * c.hits as f64 / (c.hits + c.misses) as f64
+        },
+        c.fetches,
+        mib(c.bytes_fetched),
+        c.evictions,
+        mib(c.resident_bytes),
+        c.files,
+        c.invalidations,
+        c.blocks_invalidated,
+        c.cold,
+        c.fetch_failures,
+        c.fetches_abandoned,
     )
 }
 
@@ -1597,10 +1647,11 @@ fn banner() -> String {
 fn render_report() -> String {
     let snap = snapshot();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         banner(),
         render_hook_panics(&snap),
         render(&snap),
+        render_read_cache(&snap),
         render_async(&snap),
         render_fills(&snap),
         render_name_queries(&snap),
@@ -2073,6 +2124,52 @@ mod tests {
             overlay_fails: HashMap::new(),
             hook_panics_total: 0,
             hook_panics: HashMap::new(),
+            read_cache: None,
         }
+    }
+
+    #[test]
+    fn the_read_cache_section_reports_hits_misses_fetches_evictions_and_invalidations() {
+        let snap = Snapshot {
+            read_cache: Some(vfs_ipc::CacheStats {
+                hits: 990,
+                misses: 10,
+                declined: 3,
+                fetches: 10,
+                bytes_fetched: 10 << 20,
+                evictions: 2,
+                invalidations: 1,
+                blocks_invalidated: 4,
+                cold: 0,
+                fetch_failures: 7,
+                fetches_abandoned: 1,
+                resident_bytes: 8 << 20,
+                files: 5,
+            }),
+            ..empty_snapshot()
+        };
+        let s = render_read_cache(&snap);
+        assert!(s.contains(READ_CACHE_LABEL), "{s}");
+        for want in [
+            "hits 990",
+            "misses 10",
+            "declined 3",
+            "99.0% of cached reads were hits",
+            "fetches 10 (10.0 MiB fetched)",
+            "evictions 2",
+            "invalidations 1 (4 blocks dropped)",
+            "failed fetches 7",
+            "given up on (past their deadline) 1",
+        ] {
+            assert!(s.contains(want), "missing {want:?} in:\n{s}");
+        }
+        // Off is said, not left as an absent section.
+        assert!(render_read_cache(&empty_snapshot()).contains("OFF"));
+        // On but idle: nothing.
+        let idle = Snapshot {
+            read_cache: Some(vfs_ipc::CacheStats::default()),
+            ..empty_snapshot()
+        };
+        assert_eq!(render_read_cache(&idle), "");
     }
 }

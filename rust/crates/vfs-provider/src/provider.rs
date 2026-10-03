@@ -60,6 +60,24 @@ pub trait Provider: Send + Sync {
     fn stored_name(&self, _p: VPath) -> Result<Option<String>, i32> {
         Err(not_supported())
     }
+
+    /// Whether the bytes behind the open handle `h` can never change while
+    /// it is open — the per-handle form of [`Capabilities::immutable`].
+    ///
+    /// A provider's own `immutable` is the answer for every handle it opens,
+    /// which is the default. A composition answers for the child that holds
+    /// the handle: an overlay's handle on a base file of an immutable base
+    /// is immutable even though the overlay as a whole (it can be written)
+    /// is not. That is what lets a client cache what it read through such a
+    /// handle — the director reports it in its open reply, and the shim's
+    /// read cache serves only handles it is true for. Answering `true` for a
+    /// handle whose content can change is a stale-read bug in that cache;
+    /// `false` only costs it a cache miss.
+    ///
+    /// [`Capabilities::immutable`]: crate::caps::Capabilities::immutable
+    fn is_immutable(&self, _h: Handle) -> bool {
+        self.capabilities().immutable
+    }
 }
 
 #[cfg(test)]
@@ -99,6 +117,34 @@ mod tests {
         assert_eq!(p.mkdir(VPath::at_default("d")), Err(ST_NOT_SUPPORTED));
         assert_eq!(p.read_next(0, &mut [0u8; 4]), Err(ST_NOT_SUPPORTED));
         assert_eq!(p.set_attr(VPath::at_default("f"), SetAttr::default()), Err(ST_NOT_SUPPORTED));
+    }
+
+    /// The default answer for a handle is the provider's own declaration.
+    #[test]
+    fn a_handle_is_as_immutable_as_its_provider_by_default() {
+        assert!(!Minimal.is_immutable(1), "read_only() is mutable");
+        struct Frozen;
+        impl Provider for Frozen {
+            fn capabilities(&self) -> Capabilities {
+                Capabilities {
+                    immutable: true,
+                    ..Capabilities::read_only()
+                }
+            }
+            fn getattr(&self, _p: VPath) -> Result<Option<Stat>, i32> {
+                Ok(None)
+            }
+            fn readdir(&self, _p: VPath) -> Result<Vec<DirEntry>, i32> {
+                Ok(Vec::new())
+            }
+            fn open(&self, _p: VPath, _flags: u32) -> Result<(Handle, u64, bool), i32> {
+                Err(crate::status::not_found())
+            }
+            fn close(&self, _h: Handle) -> Result<(), i32> {
+                Ok(())
+            }
+        }
+        assert!(Frozen.is_immutable(1));
     }
 
     #[test]

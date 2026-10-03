@@ -113,10 +113,19 @@ pub fn dispatch_director(
                 // `ST_READ_ONLY` when it can't. Gating here too would just
                 // duplicate that policy in a place that can't see it.
                 let flags = if oflags == 0 { OPEN_READ } else { oflags };
-                match director.open(RootId(root), &path, flags) {
-                    Ok((fh, size, is_dir)) => {
-                        io_stats::record_open(&path, Some(fh), size, false);
-                        (ST_OK, encode_open_resp(&OpenResp { fh, size, is_dir }))
+                match director.open_info(RootId(root), &path, flags) {
+                    Ok(o) => {
+                        io_stats::record_open(&path, Some(o.fh), o.size, false);
+                        (
+                            ST_OK,
+                            encode_open_resp(&OpenResp {
+                                fh: o.fh,
+                                size: o.size,
+                                is_dir: o.is_dir,
+                                immutable: o.immutable,
+                                mount_gen: o.mount_gen,
+                            }),
+                        )
                     }
                     Err(st) => {
                         io_stats::record_open(&path, None, 0, true);

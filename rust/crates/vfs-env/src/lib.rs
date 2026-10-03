@@ -228,6 +228,12 @@ pub const REJECT_FUSE_SECTION: &str = "VFS_REJECT_FUSE_SECTION";
 pub const REJECT_FUSE_DATA_SECTION: &str = "VFS_REJECT_FUSE_DATA_SECTION";
 /// Disable the vectored handler that demand-pages lazy sections.
 pub const LAZY_NO_VEH: &str = "VFS_LAZY_NO_VEH";
+/// The shim's block cache for small reads of immutable files
+/// (`vfs_ipc::readcache`). On unless set to `0`/`false`/`no`/`off`, which
+/// sends every read over the ring as before — what to do when capturing a
+/// provider-side trace of the program's own read pattern, which the cache
+/// otherwise turns into 1 MiB block fetches.
+pub const SHIM_READ_CACHE: &str = "VFS_SHIM_READ_CACHE";
 /// Wait for the launched process to exit instead of detaching.
 pub const WAIT: &str = "VFS_WAIT";
 /// Stop at the first rendered frame and print a benchmark row.
@@ -301,6 +307,18 @@ pub const FIXTURE_FILL: &str = "VFS_FIXTURE_FILL";
 pub const FIXTURE_WRITE_PATH: &str = "VFS_FIXTURE_WRITE_PATH";
 /// `vfs-fixture-read`: the bytes written to `FIXTURE_WRITE_PATH` (default `written`).
 pub const FIXTURE_WRITE_DATA: &str = "VFS_FIXTURE_WRITE_DATA";
+/// `vfs-fixture-read`: a file the director serves immutable, read in many
+/// small pieces by every route and compared with one big read (the shim's
+/// read cache).
+pub const FIXTURE_CACHE_PATH: &str = "VFS_FIXTURE_CACHE_PATH";
+/// `vfs-fixture-read`: a file read in small pieces, rewritten with
+/// `FIXTURE_CACHE_RW_DATA` through another handle, and read again.
+pub const FIXTURE_CACHE_RW_PATH: &str = "VFS_FIXTURE_CACHE_RW_PATH";
+/// `vfs-fixture-read`: what `FIXTURE_CACHE_RW_PATH` is rewritten with.
+pub const FIXTURE_CACHE_RW_DATA: &str = "VFS_FIXTURE_CACHE_RW_DATA";
+/// `vfs-fixture-read`: milliseconds to stay alive after the read-cache phase,
+/// so a `SHIM_STATS_LOG` report covers it.
+pub const FIXTURE_LINGER_MS: &str = "VFS_FIXTURE_LINGER_MS";
 // `VFS_FIXTURE_DATA` and `VFS_FIXTURE_DIR` lived here for `vfs-fixture-write`
 // and `vfs-fixture-writeset`. Both fixture crates were deleted in gate 4 task
 // 8 — no test harness had ever invoked either — so the switches went with
@@ -434,6 +452,7 @@ pub const ALL: &[Var] = &[
     Var { name: REJECT_FUSE_SECTION, kind: Kind::Behaviour, default: "false" },
     Var { name: REJECT_FUSE_DATA_SECTION, kind: Kind::Behaviour, default: "false" },
     Var { name: LAZY_NO_VEH, kind: Kind::Behaviour, default: "false (VEH installed)" },
+    Var { name: SHIM_READ_CACHE, kind: Kind::Behaviour, default: "on" },
     Var { name: WAIT, kind: Kind::Behaviour, default: "false (detach)" },
     Var { name: BENCH, kind: Kind::Behaviour, default: "false" },
     Var { name: SHIM_STATS_LOG, kind: Kind::Diagnostic, default: "off" },
@@ -460,6 +479,10 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_FILL, kind: Kind::Fixture, default: "none" },
     Var { name: FIXTURE_WRITE_PATH, kind: Kind::Fixture, default: "unset: no write" },
     Var { name: FIXTURE_WRITE_DATA, kind: Kind::Fixture, default: "written" },
+    Var { name: FIXTURE_CACHE_PATH, kind: Kind::Fixture, default: "unset: no cache phase" },
+    Var { name: FIXTURE_CACHE_RW_PATH, kind: Kind::Fixture, default: "unset: no rewrite" },
+    Var { name: FIXTURE_CACHE_RW_DATA, kind: Kind::Fixture, default: "fresh" },
+    Var { name: FIXTURE_LINGER_MS, kind: Kind::Fixture, default: "0" },
     Var {
         name: FIXTURE_COW_PATH,
         kind: Kind::Fixture,

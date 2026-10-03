@@ -8,6 +8,7 @@ pub mod concurrent;
 pub mod endpoint;
 pub mod layout;
 pub mod notifier;
+pub mod readcache;
 pub mod ring;
 pub mod seg;
 
@@ -15,6 +16,7 @@ pub use arena::{DataArena, DEFAULT_ARENA_BYTES, DEFAULT_PAYLOAD_CAP, DEFAULT_WOR
 pub use concurrent::{data_limit, read_fragmented, submit_data, DataGate, Permits, ReadPlan};
 pub use endpoint::{Request, Response, RingClient, RingServer, Unanswered, CLIENT_SPIN_BUDGET};
 pub use notifier::{AdaptiveNotifier, Notifier, SpinNotifier};
+pub use readcache::{CacheConfig, CacheStats, FileRef, ReadCache};
 pub use ring::{Geom, IpcError};
 pub use seg::{OwnedSeg, SharedSeg};
 

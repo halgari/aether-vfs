@@ -316,6 +316,12 @@ impl Provider for MountGraph {
         backend.close(bh)
     }
 
+    /// The mount that opened the handle answers, not the graph's weakest.
+    fn is_immutable(&self, h: Handle) -> bool {
+        self.lookup(h)
+            .is_ok_and(|(backend, bh)| backend.is_immutable(bh))
+    }
+
     fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
         let (backend, bh) = self.lookup(h)?;
         backend.write_at(bh, offset, buf)

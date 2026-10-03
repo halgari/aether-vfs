@@ -55,11 +55,22 @@ pub struct DirEntryWire {
     pub mtime: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenResp {
     pub fh: u64,
     pub size: u64,
     pub is_dir: bool,
+    /// The bytes behind `fh` cannot change while it is open (the provider
+    /// that serves it says so: `Provider::is_immutable`). A client may cache
+    /// what it reads through such a handle. Always `false` for a write open.
+    /// Carried in what was padding, so a director that predates it says
+    /// `false` and a client that predates it ignores it.
+    pub immutable: bool,
+    /// The director's mount generation when it opened `fh`: bumped whenever
+    /// a root's provider is replaced. Two immutable opens of one path with
+    /// the same generation (and size) are the same content; across a remount
+    /// they need not be. `0` from a director that predates it.
+    pub mount_gen: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,13 +193,23 @@ pub fn decode_open_req(p: &[u8]) -> Option<(u32, u32, String)> {
     Some((root, flags, path))
 }
 
-/// OPEN resp: `fh:u64 | size:u64 | is_dir:u8 | pad[7]`
+/// Bit 0 of an OPEN reply's flags byte: [`OpenResp::immutable`].
+pub const OPEN_RESP_IMMUTABLE: u8 = 0x01;
+
+/// OPEN resp: `fh:u64 | size:u64 | is_dir:u8 | flags:u8 | pad[2] | mount_gen:u32`
+///
+/// `flags` and `mount_gen` were padding (zero) until the shim's read cache
+/// needed them, so the layout and length are unchanged and either side may
+/// be older than the other: an old director's reply decodes as mutable,
+/// generation 0, which a cache never serves from.
 pub fn encode_open_resp(r: &OpenResp) -> Vec<u8> {
     let mut b = Vec::with_capacity(24);
     b.extend_from_slice(&r.fh.to_le_bytes());
     b.extend_from_slice(&r.size.to_le_bytes());
     b.push(r.is_dir as u8);
-    b.extend_from_slice(&[0u8; 7]);
+    b.push(if r.immutable { OPEN_RESP_IMMUTABLE } else { 0 });
+    b.extend_from_slice(&[0u8; 2]);
+    b.extend_from_slice(&r.mount_gen.to_le_bytes());
     b
 }
 
@@ -199,7 +220,15 @@ pub fn decode_open_resp(p: &[u8]) -> Option<OpenResp> {
     let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
     let size = u64::from_le_bytes(p[8..16].try_into().ok()?);
     let is_dir = p[16] != 0;
-    Some(OpenResp { fh, size, is_dir })
+    let immutable = p[17] & OPEN_RESP_IMMUTABLE != 0;
+    let mount_gen = u32::from_le_bytes(p[20..24].try_into().ok()?);
+    Some(OpenResp {
+        fh,
+        size,
+        is_dir,
+        immutable,
+        mount_gen,
+    })
 }
 
 /// READ req: `fh:u64 | offset:u64 | len:u32 | pad:u32`
@@ -533,8 +562,22 @@ mod tests {
             fh: 42,
             size: 1000,
             is_dir: false,
+            immutable: true,
+            mount_gen: 0xA1B2_C3D4,
         };
         assert_eq!(decode_open_resp(&encode_open_resp(&r)), Some(r));
+    }
+
+    /// A reply from a director that predates the flags byte has zeros there:
+    /// it must decode as mutable, generation 0 — never as cacheable.
+    #[test]
+    fn an_open_reply_with_zero_padding_is_mutable() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&7u64.to_le_bytes());
+        b.extend_from_slice(&9u64.to_le_bytes());
+        b.extend_from_slice(&[0u8; 8]);
+        let r = decode_open_resp(&b).unwrap();
+        assert_eq!((r.fh, r.size, r.immutable, r.mount_gen), (7, 9, false, 0));
     }
 
     #[test]

@@ -15,10 +15,13 @@
 //!   worker count and `vfs_ipc::read_fragmented` does the read. This is what
 //!   `FuseClient` does now, by calling the same two things.
 //!
-//! Usage: `ring-bench <scratch-dir> [locked|gated|both|repro] [workers] [seconds]`
+//! Usage: `ring-bench <scratch-dir> [locked|gated|both|repro|names|cache] [workers] [seconds]`
 //!
 //! `repro` runs the two cases the gate is there for: a small read beside two
 //! deep reads of streamed content, and a stat after reads that timed out.
+//!
+//! `cache` measures the shim's read cache (`vfs_ipc::ReadCache`, used exactly
+//! as `FuseClient::read_cached` uses it): small reads with and without it.
 //!
 //! The scratch directory holds the ring file, so pointing it at a tmpfs
 //! (`/dev/shm/...`) or at a disk filesystem measures that choice too.
@@ -46,6 +49,10 @@ mod imp {
     /// A file whose every read takes [`STUCK_READ`]: a provider that has
     /// stopped answering, for longer than the client is willing to wait.
     const STUCK: &str = "data/stuck.bin";
+    /// A fast file whose every byte is a function of its offset alone, as a
+    /// real file's is: what a cache of blocks can be checked against. (The
+    /// others answer a read from wherever suits its length.)
+    const POS: &str = "data/pos.bin";
     const FILE_LEN: u64 = 64 << 20;
     /// What one read of the slow file costs the worker that serves it: a
     /// stand-in for a block fetched from the network.
@@ -59,8 +66,9 @@ mod imp {
     /// Two files of pseudo-random bytes, one of which sleeps on every read.
     struct Mem {
         data: Vec<u8>,
-        /// Open handles, and how long each read of one blocks.
-        opens: Mutex<HashMap<u64, Duration>>,
+        /// Open handles, how long each read of one blocks, and whether it
+        /// is [`POS`].
+        opens: Mutex<HashMap<u64, (Duration, bool)>>,
         next: AtomicU64,
     }
 
@@ -94,7 +102,7 @@ mod imp {
         }
         fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
             Ok(match p.rel.to_ascii_lowercase().as_str() {
-                FAST | SLOW | STREAM | STUCK => Some(Stat {
+                FAST | SLOW | STREAM | STUCK | POS => Some(Stat {
                     kind: KIND_FILE,
                     size: FILE_LEN,
                     mtime: 0,
@@ -111,15 +119,16 @@ mod imp {
             Ok(Vec::new())
         }
         fn open(&self, p: VPath, _flags: u32) -> Result<(Handle, u64, bool), i32> {
-            let slow = match p.rel.to_ascii_lowercase().as_str() {
-                FAST => Duration::ZERO,
+            let rel = p.rel.to_ascii_lowercase();
+            let slow = match rel.as_str() {
+                FAST | POS => Duration::ZERO,
                 SLOW => SLOW_READ,
                 STREAM => STREAM_READ,
                 STUCK => STUCK_READ,
                 _ => return Err(vfs_provider::not_found()),
             };
             let h = self.next.fetch_add(1, Ordering::Relaxed);
-            self.opens.lock().unwrap().insert(h, slow);
+            self.opens.lock().unwrap().insert(h, (slow, rel == POS));
             Ok((h, FILE_LEN, false))
         }
         fn close(&self, h: Handle) -> Result<(), i32> {
@@ -131,7 +140,7 @@ mod imp {
                 .ok_or_else(vfs_provider::bad_fh)
         }
         fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-            let slow = *self
+            let (slow, positional) = *self
                 .opens
                 .lock()
                 .unwrap()
@@ -144,6 +153,16 @@ mod imp {
                 return Ok(0);
             }
             let n = buf.len().min((FILE_LEN - offset) as usize);
+            if positional {
+                let mut done = 0;
+                while done < n {
+                    let at = (offset as usize + done) % self.data.len();
+                    let k = (n - done).min(self.data.len() - at);
+                    buf[done..done + k].copy_from_slice(&self.data[at..at + k]);
+                    done += k;
+                }
+                return Ok(n);
+            }
             let o = (offset as usize) % (self.data.len() - n.max(1) + 1);
             buf[..n].copy_from_slice(&self.data[o..o + n]);
             Ok(n)
@@ -333,6 +352,100 @@ mod imp {
             out.push(t.elapsed().as_nanos() as f64 / 1000.0);
         }
         out
+    }
+
+    /// **Small reads with and without the shim's read cache**, one thread.
+    ///
+    /// The cached client is `vfs_ipc::ReadCache` with the shim's defaults,
+    /// fetching a missing block through `read_fragmented` exactly as
+    /// `FuseClient::read_cached` does, and registered from the open reply's
+    /// `immutable` flag and mount generation as `try_fuse_create` does.
+    ///
+    /// - 4 KiB at uniform random offsets across the 64 MiB file: the worst
+    ///   case, since 8 blocks of 1 MiB hold an eighth of it.
+    /// - 4 KiB at random offsets inside one 8 MiB region: what the measured
+    ///   game traffic looks like (Skyrim.esm: 838,643 reads, 237 fetches).
+    /// - 1 byte at a time, sequentially (`plugins.txt`).
+    fn cache_bench(seg: &SharedSeg) {
+        let c = Gated::new(seg);
+        let r =
+            c.c.submit(P::OP_OPEN, 0, &P::encode_open_req(0, P::OPEN_READ, POS))
+                .unwrap();
+        let open = P::decode_open_resp(&r.payload).unwrap();
+        assert!(open.immutable, "the bench file is served immutable");
+        let fh = open.fh;
+        let read_uncached = |off: u64, buf: &mut [u8]| {
+            vfs_ipc::read_fragmented(&c.c, &c.gate, &c.plan, fh, off, buf)
+        };
+        println!(
+            "\n== small reads, uncached vs the read cache (1 MiB blocks, 8 a file, 64 MiB) =="
+        );
+        type Pattern = (&'static str, usize, usize, fn(&mut u64, u64) -> u64);
+        let patterns: [Pattern; 3] = [
+            ("4 KiB, uniform random over 64 MiB", 4096, 20_000, |x, i| {
+                let _ = i;
+                xorshift(x) % (FILE_LEN - 4096)
+            }),
+            (
+                "4 KiB, random inside one 8 MiB region",
+                4096,
+                50_000,
+                |x, i| {
+                    let _ = i;
+                    (16 << 20) + xorshift(x) % ((8 << 20) - 4096)
+                },
+            ),
+            ("1 B, sequential", 1, 200_000, |_, i| i),
+        ];
+        for (name, len, n, at) in patterns {
+            let mut buf = vec![0u8; len];
+            let mut x = 0x9E37_79B9_7F4A_7C15u64;
+            let mut i = 0u64;
+            let plain = time_n(n, n / 10, || {
+                let off = at(&mut x, i);
+                i += 1;
+                assert_eq!(read_uncached(off, &mut buf).unwrap(), len);
+            });
+            let cache = vfs_ipc::ReadCache::default();
+            let f = cache.register(0, POS, open.size, open.mount_gen, open.immutable, false);
+            let mut x = 0x9E37_79B9_7F4A_7C15u64;
+            let mut i = 0u64;
+            let mut check = vec![0u8; len];
+            let cached = time_n(n, n / 10, || {
+                let off = at(&mut x, i);
+                i += 1;
+                let n = cache
+                    .read(&f, off, &mut buf, |o, b| read_uncached(o, b))
+                    .unwrap_or_else(|| read_uncached(off, &mut buf).unwrap());
+                assert_eq!(n, len);
+                if i.is_multiple_of(997) {
+                    read_uncached(off, &mut check).unwrap();
+                    assert_eq!(buf, check, "the cache must give the ring's bytes");
+                }
+            });
+            let st = cache.stats();
+            println!(" {name}");
+            line("  uncached", plain);
+            line("  read cache", cached);
+            println!(
+                "  {:<34} hits {} misses {} declined {} fetches {} ({} MiB) evictions {} cold {}",
+                "",
+                st.hits,
+                st.misses,
+                st.declined,
+                st.fetches,
+                st.bytes_fetched >> 20,
+                st.evictions,
+                st.cold
+            );
+        }
+    }
+
+    fn xorshift(x: &mut u64) -> u64 {
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        *x
     }
 
     /// One thread, hot ring: the cost the change must not raise.
@@ -743,7 +856,9 @@ mod imp {
     pub fn main() {
         let args: Vec<String> = std::env::args().collect();
         let dir = Path::new(args.get(1).map(String::as_str).unwrap_or_else(|| {
-            eprintln!("usage: ring-bench <scratch-dir> [locked|gated|both] [workers] [seconds]");
+            eprintln!(
+                "usage: ring-bench <scratch-dir> [locked|gated|both|repro|names|cache] [workers] [seconds]"
+            );
             std::process::exit(2);
         }));
         let which = args.get(2).map(String::as_str).unwrap_or("both");
@@ -775,6 +890,9 @@ mod imp {
         }
         if which == "names" {
             names(dir);
+        }
+        if which == "cache" {
+            cache_bench(ipc.shared_seg());
         }
         if which == "repro" {
             repro_stream(ipc.shared_seg());
