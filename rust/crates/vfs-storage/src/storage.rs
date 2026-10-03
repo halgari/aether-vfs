@@ -197,7 +197,8 @@ pub struct Storage {
     pub(crate) layer_fill_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
-/// The default for [`DurableClock::max_commits`].
+/// The default for [`DurableClock::max_commits`]
+/// ([`StorageConfig::max_deferred_commits`]).
 pub(crate) const DEFERRED_MAX_COMMITS: u64 = 10_000;
 
 /// When durable points happen, for [`Durability::Deferred`].
@@ -223,11 +224,11 @@ pub(crate) struct DurableClock {
 }
 
 impl DurableClock {
-    fn new() -> Self {
+    fn new(max_commits: u64) -> Self {
         DurableClock {
             last: Mutex::new(Instant::now()),
             epoch: AtomicU64::new(0),
-            max_commits: AtomicU64::new(DEFERRED_MAX_COMMITS),
+            max_commits: AtomicU64::new(max_commits.max(1)),
             #[cfg(test)]
             skew: Mutex::new(Duration::ZERO),
             #[cfg(test)]
@@ -336,6 +337,7 @@ impl Storage {
             .iter()
             .map(|(_, r)| r.logical_bytes)
             .sum();
+        let clock = DurableClock::new(cfg.max_deferred_commits);
         Ok(Arc::new(Storage {
             store,
             catalog,
@@ -346,7 +348,7 @@ impl Storage {
             layers: Mutex::new(HashMap::new()),
             layers_gone: Condvar::new(),
             reconciled,
-            clock: DurableClock::new(),
+            clock,
             doomed: Mutex::new(Vec::new()),
             #[cfg(test)]
             fail_import_at: Mutex::new(None),
@@ -519,6 +521,14 @@ impl Storage {
         let p = Arc::new(LayerProvider::new(Arc::clone(self), name.to_owned(), id));
         layers.insert(name.to_owned(), Arc::downgrade(&p));
         Ok(p)
+    }
+
+    /// [`LayerProvider::put_files`] on layer `name` (created if missing):
+    /// many whole files in one block-store and one catalog commit. The
+    /// status is a `vfs_provider` status, as a layer operation's.
+    pub fn put_files(self: &Arc<Self>, name: &str, files: &[(&str, &[u8])]) -> Result<(), i32> {
+        let layer = self.layer_provider(name, true).map_err(|e| e.to_status())?;
+        layer.put_files(files)
     }
 
     /// Creates layer `name` and makes it durable before any of its data can

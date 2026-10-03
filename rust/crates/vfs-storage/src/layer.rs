@@ -730,6 +730,96 @@ impl Provider for LayerProvider {
 }
 
 impl LayerProvider {
+    /// Creates (or replaces) every file of `files` (path, whole content):
+    /// all their data in one block-store commit, then all their rows in one
+    /// catalog commit, instead of the five commits a create, a write, a
+    /// close and a rename over the real name cost each. Each file appears
+    /// whole or not at all: its row is written after its data, as a
+    /// temporary file renamed over the real one would be, and a crash
+    /// before the next durable point loses the batch whole. Missing parent
+    /// directories are created; a path that is a directory, or listed
+    /// twice, fails the batch before anything is written.
+    pub fn put_files(&self, files: &[(&str, &[u8])]) -> Result<(), i32> {
+        let paths: Vec<LPath> = files
+            .iter()
+            .map(|(p, _)| LPath::parse(p))
+            .collect::<Result<_, _>>()?;
+        let mut seen = HashSet::new();
+        if paths
+            .iter()
+            .any(|p| p.is_root() || !seen.insert(p.folded.clone()))
+        {
+            return Err(bad_request());
+        }
+        let guids: Vec<Guid> = files.iter().map(|_| new_guid()).collect();
+        let ids: Vec<[u8; 17]> = guids.iter().map(layer_file_id).collect();
+        {
+            // Data, then rows, under one shared hold of the gate (as a
+            // layer commit): no durable point lands between them.
+            let _gate = self.storage.gate_shared();
+            {
+                let _ns = lock(&self.ns)?;
+                for p in &paths {
+                    if matches!(self.get(&p.folded)?, Some(r) if r.kind == KIND_DIR) {
+                        return Err(is_dir());
+                    }
+                }
+            }
+            let batch: Vec<(&[u8], &[u8])> = ids
+                .iter()
+                .zip(files)
+                .map(|(id, (_, data))| (id.as_slice(), *data))
+                .collect();
+            self.storage
+                .store
+                .put_files(&batch)
+                .map_err(|e| self.st_err("store put", e.into()))?;
+            let rows = (|| {
+                let _ns = lock(&self.ns)?;
+                let mut rows = Vec::with_capacity(files.len());
+                let mut replaced = Vec::new();
+                for ((p, guid), (_, data)) in paths.iter().zip(&guids).zip(files) {
+                    self.ensure_parents(p)?;
+                    match self.get(&p.folded)? {
+                        Some(r) if r.kind == KIND_DIR => return Err(is_dir()),
+                        Some(r) => replaced.push(r.guid),
+                        None => {}
+                    }
+                    rows.push((
+                        p.folded.clone(),
+                        EntryRec {
+                            name: p.name().to_owned(),
+                            kind: KIND_FILE,
+                            guid: *guid,
+                            len: data.len() as u64,
+                            mtime: now(),
+                        },
+                    ));
+                }
+                self.storage
+                    .catalog
+                    .put_many(self.id, &rows, false)
+                    .map_err(|e| self.st_err("catalog put", e))?;
+                for g in replaced {
+                    self.doom(g)?;
+                }
+                for g in &guids {
+                    self.created_fresh(*g)?;
+                }
+                Ok(())
+            })();
+            if let Err(e) = rows {
+                // No row names them: their data goes now (or, if this
+                // fails too, at the next open's reconciliation).
+                for id in &ids {
+                    let _ = self.storage.store.delete(id);
+                }
+                return Err(e);
+            }
+        }
+        self.changed(None)
+    }
+
     /// The namespace half of `rename`, under `ns`.
     fn rename_rows(&self, from: &LPath, to: &LPath) -> Result<(), i32> {
         let _ns = lock(&self.ns)?;
@@ -938,6 +1028,52 @@ mod tests {
         for (rel, body) in FIXTURE_FILES {
             write_file(p, rel, 0, body);
         }
+    }
+
+    #[test]
+    fn put_files_writes_a_batch_whole_and_replaces_files() {
+        let (s, d) = temp_storage();
+        let p = s.layer("batch").unwrap();
+        write_file(&p, "c/old", 0, b"the old bytes, long gone");
+        let big: Vec<u8> = (0..3 * BS as usize + 5).map(|i| (i % 251) as u8).collect();
+        s.put_files(
+            "batch",
+            &[
+                ("c/old", b"new"),
+                ("c/Big", &big),
+                ("deep/er/x", b"x"),
+                ("c/empty", b""),
+            ],
+        )
+        .unwrap();
+        assert_eq!(read_file(&p, "c/old"), b"new");
+        assert_eq!(read_file(&p, "c/big"), big);
+        assert_eq!(read_file(&p, "deep/er/x"), b"x");
+        assert_eq!(read_file(&p, "c/empty"), b"");
+        let st = p.getattr(at("c/Big")).unwrap().unwrap();
+        assert_eq!((st.kind, st.size), (KIND_FILE, big.len() as u64));
+        assert_eq!(
+            p.stored_name(at("c/big")).unwrap().as_deref(),
+            Some("Big"),
+            "the name as given"
+        );
+        // A directory in the way, or a path twice: nothing is written.
+        assert!(s
+            .put_files("batch", &[("c/new", b"1"), ("deep", b"2")])
+            .is_err());
+        assert!(s
+            .put_files("batch", &[("c/two", b"1"), ("C/TWO", b"2")])
+            .is_err());
+        assert!(p.getattr(at("c/new")).unwrap().is_none());
+        assert!(p.getattr(at("c/two")).unwrap().is_none());
+        // Durable at the next durable point, and whole after a reopen.
+        drop(p);
+        s.close().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("batch").unwrap();
+        assert_eq!(read_file(&p, "c/old"), b"new");
+        assert_eq!(read_file(&p, "c/big"), big);
+        assert!(s.store.verify().unwrap().is_ok());
     }
 
     #[test]

@@ -331,6 +331,24 @@ impl Catalog {
         })
     }
 
+    /// [`Self::put`] of every `(folded, rec)` of `rows`, in one commit.
+    pub fn put_many(
+        &self,
+        layer: u64,
+        rows: &[(String, EntryRec)],
+        durable: bool,
+    ) -> Result<(), StorageError> {
+        self.write(durable, |txn| {
+            let mut t = txn.open_table(ENTRIES).map_err(db_err)?;
+            for (folded, rec) in rows {
+                let key = vfs_core::fold(folded);
+                t.insert((layer, key.as_str()), rec.encode().as_slice())
+                    .map_err(db_err)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Removes the entry at `folded`: a file, or an **empty** directory.
     ///
     /// Refused, inside the transaction, with [`StorageError::NotEmpty`] when any

@@ -99,6 +99,12 @@ pub struct StorageConfig {
     /// When layer writes become durable; [`Durability::DEFAULT`] (deferred,
     /// at most five minutes) unless set.
     pub durability: Durability,
+    /// Under [`Durability::Deferred`], a durable point also comes due once
+    /// the catalog holds this many non-durable commits (redb keeps their
+    /// bookkeeping in memory until a durable commit). A bulk writer that
+    /// creates many small files (three catalog commits each) and makes its
+    /// own durable points ([`crate::Storage::sync`]) raises it. At least 1.
+    pub max_deferred_commits: u64,
 }
 
 impl Default for StorageConfig {
@@ -108,6 +114,7 @@ impl Default for StorageConfig {
             cache_max_bytes: 32 << 30,
             ram_tier_bytes: 256 << 20,
             durability: Durability::default(),
+            max_deferred_commits: crate::storage::DEFERRED_MAX_COMMITS,
         }
     }
 }
@@ -121,6 +128,7 @@ mod tests {
         let c = StorageConfig::default();
         assert_eq!(c.cache_max_bytes, 32 << 30);
         assert_eq!(c.ram_tier_bytes, 256 << 20);
+        assert_eq!(c.max_deferred_commits, 10_000);
         assert_eq!(c.store.block_size, StoreConfig::default().block_size);
         assert_eq!(
             c.durability,
