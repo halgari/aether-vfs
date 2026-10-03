@@ -165,9 +165,11 @@ pub struct LaunchOpts {
     /// Wine NGX DLLs are copied into the prefix (only those that changed) and
     /// the launch gets `DXVK_ENABLE_NVAPI=1`, `NVIDIA_WINE_DLL_DIR` and the
     /// `nvapi*` overrides, under [`env`](Self::env)'s; on any other machine
-    /// nothing changes. `false`: none of that, and `nvapi64.dll`/`nvapi.dll`
-    /// are removed from the prefix, as the script does with NVAPI disabled.
-    /// Ignored on Windows.
+    /// nothing changes. `false`, or `PROTON_DISABLE_NVAPI=1` in
+    /// [`env`](Self::env) or this process's environment: none of that, and
+    /// `nvapi64.dll`/`nvapi.dll` are removed from the prefix, as the script
+    /// does with NVAPI disabled. A DLL that cannot be copied or removed is a
+    /// [`LaunchHandle::notes`] line, not a failed launch. Ignored on Windows.
     pub nvapi: bool,
 }
 
@@ -2064,23 +2066,32 @@ impl Session {
         let _ = std::fs::remove_file(&ready_path);
 
         let (injector, shim_dll, payload_dll) = locate_wine_artifacts(opts)?;
-        let (steam, notes) = self.steam_launch(&opts.env);
+        let (steam, mut notes) = self.steam_launch(&opts.env);
         // Under the prefix lock taken above, like the rest of the prefix's
-        // setup.
-        let nvapi = if opts.nvapi {
+        // setup. `PROTON_DISABLE_NVAPI` turns it off as it does for the
+        // script: the launch's own value, else this process's. A file that
+        // cannot be put in place or taken out is a note, not a failed launch:
+        // the program runs without NVAPI, and the script only logs these too.
+        let host_disable = std::env::var("PROTON_DISABLE_NVAPI").ok();
+        let disable = opts
+            .env
+            .get("PROTON_DISABLE_NVAPI")
+            .map(String::as_str)
+            .or(host_disable.as_deref());
+        let nvapi = if opts.nvapi && !vfs_proton::nvapi::disabled_by(disable) {
             vfs_proton::nvapi::setup(&vfs_proton::nvapi::Host::real(), &runtime)
         } else {
-            vfs_proton::nvapi::remove(&prefix.dir)
-                .map_err(|e| format!("launch: removing NVAPI from the prefix: {e}"))?;
+            if let Err(e) = vfs_proton::nvapi::remove(&prefix.dir) {
+                notes.push(format!(
+                    "nvapi: could not remove NVAPI from the prefix: {e}"
+                ));
+            }
             None
         };
         if let Some(nv) = &nvapi {
-            nv.install(&prefix.dir).map_err(|e| {
-                format!(
-                    "launch: installing NVAPI into the prefix: {e} (LaunchOpts::nvapi = false \
-                     launches without it)"
-                )
-            })?;
+            for failed in nv.install(&prefix.dir).failed {
+                notes.push(format!("nvapi: could not install {failed}"));
+            }
         }
 
         let wine = WineLaunch {

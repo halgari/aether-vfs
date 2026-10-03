@@ -16,8 +16,9 @@
 //!   the rest (`nvngx_dlssg.dll`) when it cannot find a DriverStore. The
 //!   script finds the directory by `dlopen`ing `libGLX_nvidia.so.0` and going
 //!   to `<its real dir>/nvidia/wine`; [`find_ngx_dir`] looks in the same place
-//!   without loading the driver into this process, then in the usual fixed
-//!   locations.
+//!   without loading the driver into this process (in the usual library
+//!   directories and those the linker is configured for), and in fixed
+//!   locations only when no `libGLX_nvidia.so.0` exists.
 //! - The session sets `DXVK_ENABLE_NVAPI=1` (otherwise DXVK reports an NVIDIA
 //!   GPU as AMD and NVAPI finds no adapter) and, unless already set,
 //!   `DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS=DLSSIndicator=0,DLSSGIndicator=0,`.
@@ -27,7 +28,13 @@
 //! The script does the copies whatever the GPU is; this crate does them only
 //! when an NVIDIA driver is loaded, so a launch on any other machine is
 //! unchanged. Turning it off on an NVIDIA machine ([`remove`]) deletes the two
-//! NVAPI DLLs as the script does when NVAPI is disabled.
+//! NVAPI DLLs as the script does when NVAPI is disabled. Like the script,
+//! nothing is cleaned out of a prefix when the NVIDIA driver later goes away
+//! (another GPU, or nouveau): without `DXVK_ENABLE_NVAPI` the leftover DLLs
+//! find no adapter and do nothing.
+//!
+//! [`status`] is what a host asks before offering DLSS: NVAPI alone is not
+//! enough, DLSS also needs an RTX GPU and the driver's NGX DLLs.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -111,36 +118,180 @@ pub fn detect_gpu(host: &Host) -> Gpu {
 }
 
 /// Library directories searched for `libGLX_nvidia.so.0`, whose real
-/// directory's `nvidia/wine` is where the script finds the NGX DLLs.
-const GLX_LIB_DIRS: [&str; 6] = [
+/// directory's `nvidia/wine` is where the script finds the NGX DLLs; the
+/// directories `/etc/ld.so.conf` and `/etc/ld.so.conf.d/*.conf` list are
+/// searched after these.
+const GLX_LIB_DIRS: [&str; 7] = [
     "/usr/lib/x86_64-linux-gnu",
     "/usr/lib64",
     "/usr/lib",
     "/lib/x86_64-linux-gnu",
     "/lib64",
     "/usr/local/lib",
+    // NixOS.
+    "/run/opengl-driver/lib",
 ];
-/// Where distributions put the driver's Wine DLLs, when the library search
-/// finds nothing.
+/// Where distributions put the driver's Wine DLLs, looked at only when no
+/// `libGLX_nvidia.so.0` was found at all.
 const NGX_DIRS: [&str; 3] = [
     "/usr/lib/nvidia/wine",
     "/usr/lib64/nvidia/wine",
     "/usr/lib/x86_64-linux-gnu/nvidia/wine",
 ];
 
-/// The NVIDIA driver's Wine DLL directory: the first candidate holding
-/// `nvngx.dll` (the script's own test). `libGLX_nvidia.so.0`'s real directory
-/// plus `nvidia/wine` first, as the script resolves it, then [`NGX_DIRS`].
+/// The directories the dynamic linker's configuration names: every
+/// non-comment line of `/etc/ld.so.conf` and `/etc/ld.so.conf.d/*.conf` that
+/// is a path (`include` lines are what pull in the `.d` files).
+fn ld_conf_dirs(host: &Host) -> Vec<String> {
+    let mut files = vec![host.path("/etc/ld.so.conf")];
+    if let Ok(rd) = std::fs::read_dir(host.path("/etc/ld.so.conf.d")) {
+        let mut confs: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "conf"))
+            .collect();
+        confs.sort();
+        files.extend(confs);
+    }
+    files
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok())
+        .flat_map(|t| {
+            t.lines()
+                .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+                .filter(|l| l.starts_with('/'))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The loaded driver's version (`610.57.04`) from `/proc/driver/nvidia/version`.
+fn driver_version(host: &Host) -> Option<String> {
+    let v = std::fs::read_to_string(host.path("/proc/driver/nvidia/version")).ok()?;
+    let first = v.lines().next()?;
+    first
+        .split_whitespace()
+        .find(|t| t.contains('.') && t.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .map(str::to_string)
+}
+
+/// The NVIDIA driver's Wine DLL directory, holding `nvngx.dll` (the script's
+/// own test).
+///
+/// As the script resolves it: `nvidia/wine` beside the real file of
+/// `libGLX_nvidia.so.0`, looked for in [`GLX_LIB_DIRS`] and the linker's
+/// configured directories. When several are found, those whose real name
+/// carries the loaded driver's version are the only ones considered, so a
+/// leftover driver's directory is not paired with the running one. Only when
+/// no `libGLX_nvidia.so.0` exists anywhere are the fixed [`NGX_DIRS`] tried.
 /// The result is a path on this host (under [`Host::root`]).
 pub fn find_ngx_dir(host: &Host) -> Option<PathBuf> {
-    let from_glx = GLX_LIB_DIRS.iter().filter_map(|d| {
-        let lib = host.path(d).join("libGLX_nvidia.so.0");
-        let real = std::fs::canonicalize(&lib).ok()?;
-        Some(real.parent()?.join("nvidia").join("wine"))
-    });
-    from_glx
-        .chain(NGX_DIRS.iter().map(|d| host.path(d)))
-        .find(|d| d.join("nvngx.dll").is_file())
+    let mut libs: Vec<PathBuf> = Vec::new();
+    let dirs = GLX_LIB_DIRS
+        .iter()
+        .map(|d| d.to_string())
+        .chain(ld_conf_dirs(host));
+    for d in dirs {
+        let lib = host.path(&d).join("libGLX_nvidia.so.0");
+        if let Ok(real) = std::fs::canonicalize(&lib) {
+            if !libs.contains(&real) {
+                libs.push(real);
+            }
+        }
+    }
+    let ngx = |lib: &PathBuf| {
+        let d = lib.parent()?.join("nvidia").join("wine");
+        d.join("nvngx.dll").is_file().then_some(d)
+    };
+    if libs.is_empty() {
+        return NGX_DIRS
+            .iter()
+            .map(|d| host.path(d))
+            .find(|d| d.join("nvngx.dll").is_file());
+    }
+    if let Some(ver) = driver_version(host) {
+        let matching: Vec<&PathBuf> = libs
+            .iter()
+            .filter(|l| l.to_string_lossy().ends_with(&format!(".so.{ver}")))
+            .collect();
+        if !matching.is_empty() {
+            return matching.into_iter().find_map(ngx);
+        }
+    }
+    libs.iter().find_map(ngx)
+}
+
+/// One NVIDIA GPU, as `/proc/driver/nvidia/gpus/*/information` names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuModel {
+    /// The `Model:` line, e.g. `NVIDIA GeForce RTX 5090`.
+    pub name: String,
+    /// An RTX GPU (tensor cores): what DLSS runs on. GeForce GTX, GTX 16
+    /// (Turing without tensor cores) and compute cards without RTX in the
+    /// name are not.
+    pub rtx: bool,
+    /// The RTX generation by product series: 20 (Turing: GeForce RTX 20,
+    /// Quadro RTX, TITAN RTX), 30 (Ampere: GeForce RTX 30, RTX A-series), 40
+    /// (Ada: GeForce RTX 40, RTX … Ada Generation), 50 (Blackwell: GeForce
+    /// RTX 50, RTX PRO). `None` when not RTX or not recognised. DLSS frame
+    /// generation needs 40 or later, multi-frame generation 50.
+    pub rtx_generation: Option<u32>,
+}
+
+impl GpuModel {
+    /// Classifies a driver model name.
+    pub fn from_name(name: &str) -> GpuModel {
+        let up = name.to_ascii_uppercase();
+        let toks: Vec<&str> = up.split_whitespace().collect();
+        let rtx_at = toks.iter().position(|t| *t == "RTX");
+        let generation = rtx_at.and_then(|i| {
+            let next = toks.get(i + 1).copied().unwrap_or("");
+            if toks.contains(&"BLACKWELL") || next == "PRO" {
+                Some(50)
+            } else if toks.contains(&"ADA") {
+                Some(40)
+            } else if i > 0 && matches!(toks[i - 1], "QUADRO" | "TITAN") {
+                Some(20)
+            } else if next.len() > 1
+                && next.starts_with('A')
+                && next[1..].chars().all(|c| c.is_ascii_digit())
+            {
+                Some(30)
+            } else if next.len() == 4 && next.chars().all(|c| c.is_ascii_digit()) {
+                next.parse::<u32>().ok().map(|n| n / 100)
+            } else {
+                None
+            }
+        });
+        GpuModel {
+            name: name.to_string(),
+            rtx: rtx_at.is_some(),
+            rtx_generation: generation,
+        }
+    }
+}
+
+/// Every NVIDIA GPU the driver reports, in bus order.
+pub fn gpu_models(host: &Host) -> Vec<GpuModel> {
+    let Ok(rd) = std::fs::read_dir(host.path("/proc/driver/nvidia/gpus")) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    dirs.sort();
+    dirs.iter()
+        .filter_map(|d| std::fs::read_to_string(d.join("information")).ok())
+        .filter_map(|info| {
+            info.lines()
+                .find_map(|l| l.strip_prefix("Model:"))
+                .map(|m| GpuModel::from_name(m.trim()))
+        })
+        .collect()
+}
+
+/// Whether a `PROTON_DISABLE_NVAPI` value turns NVAPI off: set, non-empty and
+/// not `0`, as the script's `nonzero` reads it.
+pub fn disabled_by(proton_disable_nvapi: Option<&str>) -> bool {
+    proton_disable_nvapi.is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 /// One file to put into the prefix: from a host path to a path relative to
@@ -221,21 +372,24 @@ impl Setup {
     /// Copies every file into `prefix_dir` whose copy there is missing or
     /// differs, through a temporary file renamed into place, and leaves it
     /// writable as the script does. A destination whose directory does not
-    /// exist (a prefix with no `syswow64`) is skipped. Returns how many files
-    /// were written: `0` on a prefix already set up.
-    pub fn install(&self, prefix_dir: &Path) -> io::Result<usize> {
-        let mut written = 0;
+    /// exist (a prefix with no `syswow64`) is skipped. A file that cannot be
+    /// copied does not stop the others: NVAPI and NGX are optional for the
+    /// program, and the script only logs these failures too.
+    pub fn install(&self, prefix_dir: &Path) -> Installed {
+        let mut out = Installed::default();
         for c in &self.copies {
             let dst = prefix_dir.join(&c.to);
             let Some(dir) = dst.parent().filter(|d| d.is_dir()) else {
                 continue;
             };
-            if same_contents(&c.from, &dst)? {
-                continue;
-            }
-            let name = dst.file_name().unwrap_or_default().to_string_lossy();
-            let tmp = dir.join(format!(".{name}.aether-nvapi.tmp"));
+            let tmp = dir.join(format!(
+                ".{}.aether-nvapi.tmp",
+                dst.file_name().unwrap_or_default().to_string_lossy()
+            ));
             let res = (|| {
+                if same_contents(&c.from, &dst)? {
+                    return Ok(false);
+                }
                 std::fs::copy(&c.from, &tmp)?;
                 let mut perm = std::fs::metadata(&tmp)?.permissions();
                 #[cfg(unix)]
@@ -246,18 +400,20 @@ impl Setup {
                 #[cfg(not(unix))]
                 perm.set_readonly(false);
                 std::fs::set_permissions(&tmp, perm)?;
-                std::fs::rename(&tmp, &dst)
+                std::fs::rename(&tmp, &dst)?;
+                Ok::<_, io::Error>(true)
             })();
-            if let Err(e) = res {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(io::Error::new(
-                    e.kind(),
-                    format!("{} -> {}: {e}", c.from.display(), dst.display()),
-                ));
+            match res {
+                Ok(true) => out.written += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    out.failed
+                        .push(format!("{} -> {}: {e}", c.from.display(), dst.display()));
+                }
             }
-            written += 1;
         }
-        Ok(written)
+        out
     }
 
     /// The variables the script sets: `DXVK_ENABLE_NVAPI=1`, the driver's
@@ -280,6 +436,15 @@ impl Setup {
         }
         env
     }
+}
+
+/// What [`Setup::install`] did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Installed {
+    /// Files written: `0` on a prefix already set up.
+    pub written: usize,
+    /// One line per file that could not be copied, naming it and why.
+    pub failed: Vec<String>,
 }
 
 /// Whether `dst` exists with exactly `src`'s bytes.
@@ -312,34 +477,54 @@ pub fn remove(prefix_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Whether a launch on `runtime` gets NVAPI and DLSS, and if not, why.
+/// Whether something is available, and a sentence saying why or why not.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NvapiStatus {
-    /// Everything DLSS needs is in place: NVAPI will be enabled and the
-    /// driver's NGX DLLs were found. What a host checks before offering a
-    /// DLSS or DLAA option.
+pub struct Capability {
     pub available: bool,
-    /// NVAPI will be enabled at launch (true even when NGX is missing).
-    pub nvapi: bool,
-    /// The driver's Wine DLL directory, when found.
-    pub ngx_dir: Option<PathBuf>,
-    /// A sentence for the user: what was found, or what is missing.
     pub reason: String,
 }
 
-/// [`status_on`] for this machine.
+/// Whether a launch on `runtime` gets NVAPI and DLSS, and if not, why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NvapiStatus {
+    /// NVAPI will be enabled at launch: the NVIDIA driver is loaded, the
+    /// runtime has DXVK-NVAPI, and `PROTON_DISABLE_NVAPI` does not say no.
+    pub nvapi: Capability,
+    /// DLSS (and DLAA) can run: NVAPI as above, an RTX GPU, and the driver's
+    /// Wine NGX DLLs found. What a host checks before offering a DLSS or DLAA
+    /// option; [`GpuModel::rtx_generation`] says which DLSS features fit.
+    pub dlss: Capability,
+    /// The GPU DLSS would run on: the first RTX GPU the driver reports, else
+    /// its first GPU. `None` when the driver reports no model.
+    pub gpu: Option<GpuModel>,
+    /// The driver's Wine DLL directory, when found.
+    pub ngx_dir: Option<PathBuf>,
+}
+
+/// [`status_on`] for this machine, with this process's
+/// `PROTON_DISABLE_NVAPI`.
 pub fn status(runtime: &Path) -> NvapiStatus {
-    status_on(&Host::real(), runtime)
+    let env = std::env::var("PROTON_DISABLE_NVAPI").ok();
+    status_on(&Host::real(), runtime, disabled_by(env.as_deref()))
 }
 
 /// Whether a launch on `runtime` (default options) gets NVAPI and DLSS on
-/// `host`, and why not.
-pub fn status_on(host: &Host, runtime: &Path) -> NvapiStatus {
+/// `host`, and why not. `disabled`: `PROTON_DISABLE_NVAPI` is set
+/// ([`disabled_by`]).
+pub fn status_on(host: &Host, runtime: &Path, disabled: bool) -> NvapiStatus {
+    let models = gpu_models(host);
+    let gpu = models.iter().find(|m| m.rtx).or(models.first()).cloned();
     let no = |reason: String| NvapiStatus {
-        available: false,
-        nvapi: false,
+        nvapi: Capability {
+            available: false,
+            reason: reason.clone(),
+        },
+        dlss: Capability {
+            available: false,
+            reason,
+        },
+        gpu: gpu.clone(),
         ngx_dir: None,
-        reason,
     };
     match detect_gpu(host) {
         Gpu::None => return no("no NVIDIA GPU found".to_string()),
@@ -358,22 +543,51 @@ pub fn status_on(host: &Host, runtime: &Path) -> NvapiStatus {
             runtime_nvapi64(runtime).display()
         ));
     }
-    match find_ngx_dir(host) {
-        Some(d) => NvapiStatus {
-            available: true,
-            nvapi: true,
-            reason: format!("NVAPI and DLSS available (NGX from {})", d.display()),
-            ngx_dir: Some(d),
-        },
-        None => NvapiStatus {
-            available: false,
-            nvapi: true,
-            ngx_dir: None,
-            reason: "the NVIDIA driver's Wine NGX DLLs (nvngx.dll, in nvidia/wine beside \
-                     libGLX_nvidia.so.0) were not found, so DLSS cannot load; NVAPI alone \
-                     is still enabled"
+    if disabled {
+        return no("PROTON_DISABLE_NVAPI is set, so NVAPI and DLSS are off".to_string());
+    }
+    let nvapi = Capability {
+        available: true,
+        reason: "NVAPI available".to_string(),
+    };
+    let ngx_dir = find_ngx_dir(host);
+    let dlss = |available: bool, reason: String| Capability { available, reason };
+    let dlss = match (&gpu, &ngx_dir) {
+        (None, _) => dlss(
+            false,
+            "the GPU model could not be read from /proc/driver/nvidia/gpus, so DLSS support \
+             is unknown; NVAPI alone is enabled"
                 .to_string(),
-        },
+        ),
+        (Some(g), _) if !g.rtx => dlss(
+            false,
+            format!(
+                "the {} has no DLSS support (DLSS needs an NVIDIA RTX GPU); NVAPI alone is \
+                 enabled",
+                g.name
+            ),
+        ),
+        (Some(_), Some(d)) if NGX_DLLS.iter().all(|f| d.join(f).is_file()) => dlss(
+            true,
+            format!(
+                "DLSS available on the {} (NGX from {})",
+                gpu.as_ref().map(|g| g.name.as_str()).unwrap_or_default(),
+                d.display()
+            ),
+        ),
+        (Some(_), _) => dlss(
+            false,
+            "the NVIDIA driver's Wine NGX DLLs (_nvngx.dll and nvngx.dll, in nvidia/wine \
+             beside libGLX_nvidia.so.0) were not found, so DLSS cannot load; NVAPI alone is \
+             enabled"
+                .to_string(),
+        ),
+    };
+    NvapiStatus {
+        nvapi,
+        dlss,
+        gpu,
+        ngx_dir,
     }
 }
 
@@ -418,7 +632,19 @@ mod tests {
         for dll in ["_nvngx.dll", "nvngx.dll", "nvngx_dlssg.dll"] {
             write(&h.join("usr/lib/nvidia/wine").join(dll), dll);
         }
+        gpu_info(&h, "0000:01:00.0", "NVIDIA GeForce RTX 5090");
         Host { root: h }
+    }
+
+    /// A `/proc/driver/nvidia/gpus/<bus>/information` as the driver writes it.
+    fn gpu_info(host: &Path, bus: &str, model: &str) {
+        write(
+            &host
+                .join("proc/driver/nvidia/gpus")
+                .join(bus)
+                .join("information"),
+            &format!("Model: \t\t {model}\nIRQ:   \t\t 76\nBus Location: \t {bus}\n"),
+        );
     }
 
     fn fake_prefix(base: &Path) -> PathBuf {
@@ -467,33 +693,127 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ngx_dir_follows_libglx_first_then_the_fixed_places() {
+    fn ngx_dir_follows_libglx_and_uses_the_fixed_places_only_without_one() {
         let b = tmpdir("ngx");
         let h = b.join("host");
+        let host = Host { root: h.clone() };
+        // No libGLX anywhere: the fixed places, in order.
+        write(&h.join("usr/lib64/nvidia/wine/nvngx.dll"), "");
+        assert_eq!(find_ngx_dir(&host), Some(h.join("usr/lib64/nvidia/wine")));
+        write(&h.join("usr/lib/nvidia/wine/nvngx.dll"), "");
+        assert_eq!(find_ngx_dir(&host), Some(h.join("usr/lib/nvidia/wine")));
+
         // Debian-style driver install: the library is a symlink into a
         // versioned directory, and nvidia/wine sits beside the real file.
         let real = h.join("usr/lib/x86_64-linux-gnu/nvidia/current");
-        write(&real.join("libGLX_nvidia.so.610"), "");
+        write(&real.join("libGLX_nvidia.so.610.57.04"), "");
         write(&real.join("nvidia/wine/nvngx.dll"), "");
         std::os::unix::fs::symlink(
-            real.join("libGLX_nvidia.so.610"),
+            real.join("libGLX_nvidia.so.610.57.04"),
             h.join("usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.0"),
         )
         .unwrap();
-        write(&h.join("usr/lib/nvidia/wine/nvngx.dll"), "");
-        let host = Host { root: h.clone() };
+        let wine = std::fs::canonicalize(&real).unwrap().join("nvidia/wine");
+        assert_eq!(find_ngx_dir(&host), Some(wine.clone()));
+
+        // A libGLX without nvidia/wine beside it: not the fixed places, which
+        // may belong to another driver.
+        std::fs::remove_file(real.join("nvidia/wine/nvngx.dll")).unwrap();
+        assert_eq!(find_ngx_dir(&host), None);
+        write(&real.join("nvidia/wine/nvngx.dll"), "");
+
+        // A leftover driver in a directory the linker is configured for,
+        // listed after: with the loaded version known, only its library counts.
+        write(
+            &h.join("etc/ld.so.conf"),
+            "include /etc/ld.so.conf.d/*.conf\n",
+        );
+        write(
+            &h.join("etc/ld.so.conf.d/old.conf"),
+            "# old driver\n/opt/old\n",
+        );
+        let old = h.join("opt/old");
+        write(&old.join("libGLX_nvidia.so.550.1"), "");
+        write(&old.join("nvidia/wine/nvngx.dll"), "");
+        std::os::unix::fs::symlink(
+            old.join("libGLX_nvidia.so.550.1"),
+            old.join("libGLX_nvidia.so.0"),
+        )
+        .unwrap();
+        write(
+            &h.join("proc/driver/nvidia/version"),
+            "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  550.1  Release\n",
+        );
         assert_eq!(
             find_ngx_dir(&host),
-            Some(std::fs::canonicalize(&real).unwrap().join("nvidia/wine"))
+            Some(std::fs::canonicalize(&old).unwrap().join("nvidia/wine")),
+            "the loaded driver's library wins even when listed later"
         );
-
+        write(
+            &h.join("proc/driver/nvidia/version"),
+            "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  610.57.04  Release\n",
+        );
+        assert_eq!(find_ngx_dir(&host), Some(wine.clone()));
+        // The version-matched library has no NGX: nothing, not the other one.
         std::fs::remove_file(real.join("nvidia/wine/nvngx.dll")).unwrap();
-        assert_eq!(find_ngx_dir(&host), Some(h.join("usr/lib/nvidia/wine")));
-        std::fs::remove_file(h.join("usr/lib/nvidia/wine/nvngx.dll")).unwrap();
-        write(&h.join("usr/lib64/nvidia/wine/nvngx.dll"), "");
-        assert_eq!(find_ngx_dir(&host), Some(h.join("usr/lib64/nvidia/wine")));
-        std::fs::remove_file(h.join("usr/lib64/nvidia/wine/nvngx.dll")).unwrap();
         assert_eq!(find_ngx_dir(&host), None);
+        // Version unknown: the first library with NGX.
+        std::fs::remove_file(h.join("proc/driver/nvidia/version")).unwrap();
+        assert_eq!(
+            find_ngx_dir(&host),
+            Some(std::fs::canonicalize(&old).unwrap().join("nvidia/wine"))
+        );
+    }
+
+    #[test]
+    fn gpu_models_name_rtx_and_its_generation() {
+        let cases: [(&str, bool, Option<u32>); 16] = [
+            ("NVIDIA GeForce RTX 5090", true, Some(50)),
+            ("NVIDIA GeForce RTX 4070 Laptop GPU", true, Some(40)),
+            ("NVIDIA GeForce RTX 3060 Ti", true, Some(30)),
+            ("NVIDIA GeForce RTX 2080 SUPER", true, Some(20)),
+            ("NVIDIA GeForce RTX 2050", true, Some(20)),
+            ("NVIDIA TITAN RTX", true, Some(20)),
+            ("Quadro RTX 5000 with Max-Q Design", true, Some(20)),
+            ("NVIDIA RTX A6000", true, Some(30)),
+            ("NVIDIA RTX A2000 Laptop GPU", true, Some(30)),
+            ("NVIDIA RTX 5000 Ada Generation", true, Some(40)),
+            (
+                "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                true,
+                Some(50),
+            ),
+            ("NVIDIA GeForce GTX 1660 SUPER", false, None),
+            ("NVIDIA GeForce GTX 1080 Ti", false, None),
+            ("Tesla T4", false, None),
+            ("NVIDIA A100-SXM4-80GB", false, None),
+            ("NVIDIA RTX Future", true, None),
+        ];
+        for (name, rtx, generation) in cases {
+            let m = GpuModel::from_name(name);
+            assert_eq!((m.rtx, m.rtx_generation), (rtx, generation), "{name}");
+        }
+
+        let b = tmpdir("models");
+        gpu_info(&b, "0000:02:00.0", "NVIDIA GeForce RTX 4090");
+        gpu_info(&b, "0000:01:00.0", "NVIDIA GeForce GTX 1080");
+        let names: Vec<String> = gpu_models(&Host { root: b })
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(
+            names,
+            ["NVIDIA GeForce GTX 1080", "NVIDIA GeForce RTX 4090"]
+        );
+    }
+
+    #[test]
+    fn proton_disable_nvapi_reads_like_the_script() {
+        assert!(!disabled_by(None));
+        assert!(!disabled_by(Some("")));
+        assert!(!disabled_by(Some("0")));
+        assert!(disabled_by(Some("1")));
+        assert!(disabled_by(Some("yes")));
     }
 
     #[test]
@@ -552,7 +872,13 @@ mod tests {
         let h = nvidia_host(&b);
         let pfx = fake_prefix(&b);
         let s = setup(&h, &rt).unwrap();
-        assert_eq!(s.install(&pfx).unwrap(), 5);
+        assert_eq!(
+            s.install(&pfx),
+            Installed {
+                written: 5,
+                failed: vec![]
+            }
+        );
         let sys32 = pfx.join("drive_c/windows/system32");
         assert_eq!(
             std::fs::read_to_string(sys32.join("nvapi64.dll")).unwrap(),
@@ -570,7 +896,7 @@ mod tests {
             !sys32.join("nvngx_dlssg.dll").exists(),
             "the script copies only two NGX DLLs"
         );
-        assert_eq!(s.install(&pfx).unwrap(), 0, "a set-up prefix is left alone");
+        assert_eq!(s.install(&pfx).written, 0, "a set-up prefix is left alone");
 
         // A runtime update with a new nvapi64.dll of the same length, and a
         // stale copy someone edited, are both replaced.
@@ -579,12 +905,12 @@ mod tests {
             "NVAPI64",
         );
         std::fs::write(sys32.join("nvngx.dll"), "old").unwrap();
-        assert_eq!(s.install(&pfx).unwrap(), 2);
+        assert_eq!(s.install(&pfx).written, 2);
         assert_eq!(
             std::fs::read_to_string(sys32.join("nvapi64.dll")).unwrap(),
             "NVAPI64"
         );
-        assert_eq!(s.install(&pfx).unwrap(), 0);
+        assert_eq!(s.install(&pfx).written, 0);
         let leftovers = std::fs::read_dir(&sys32)
             .unwrap()
             .flatten()
@@ -605,7 +931,7 @@ mod tests {
         let pfx = fake_prefix(&b);
         let sys32 = pfx.join("drive_c/windows/system32");
         std::os::unix::fs::symlink(&src, sys32.join("nvapi64.dll")).unwrap();
-        setup(&h, &rt).unwrap().install(&pfx).unwrap();
+        assert!(setup(&h, &rt).unwrap().install(&pfx).failed.is_empty());
         let m = std::fs::symlink_metadata(sys32.join("nvapi64.dll")).unwrap();
         assert!(m.is_file(), "a regular file now, not the link");
         assert_eq!(m.permissions().mode() & 0o200, 0o200);
@@ -618,7 +944,7 @@ mod tests {
         let h = nvidia_host(&b);
         let pfx = b.join("pfx");
         std::fs::create_dir_all(pfx.join("drive_c/windows/system32")).unwrap();
-        assert_eq!(setup(&h, &rt).unwrap().install(&pfx).unwrap(), 4);
+        assert_eq!(setup(&h, &rt).unwrap().install(&pfx).written, 4);
         assert!(!pfx.join("drive_c/windows/syswow64").exists());
     }
 
@@ -627,7 +953,7 @@ mod tests {
         let b = tmpdir("remove");
         let rt = fake_runtime(&b);
         let pfx = fake_prefix(&b);
-        setup(&nvidia_host(&b), &rt).unwrap().install(&pfx).unwrap();
+        setup(&nvidia_host(&b), &rt).unwrap().install(&pfx);
         remove(&pfx).unwrap();
         let w = pfx.join("drive_c/windows");
         assert!(!w.join("system32/nvapi64.dll").exists());
@@ -639,43 +965,107 @@ mod tests {
         remove(&pfx).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn install_reports_a_file_it_cannot_copy_and_copies_the_rest() {
+        let b = tmpdir("fail");
+        let rt = fake_runtime(&b);
+        let h = nvidia_host(&b);
+        let s = setup(&h, &rt).unwrap();
+        // The driver package is mid-upgrade: one NGX DLL is gone.
+        std::fs::remove_file(h.root.join("usr/lib/nvidia/wine/_nvngx.dll")).unwrap();
+        let pfx = fake_prefix(&b);
+        let got = s.install(&pfx);
+        assert_eq!(got.written, 4);
+        assert_eq!(got.failed.len(), 1, "{:?}", got.failed);
+        assert!(got.failed[0].contains("_nvngx.dll"), "{:?}", got.failed);
+    }
+
     #[test]
     fn status_says_why() {
         let b = tmpdir("status");
         let rt = fake_runtime(&b);
         let h = nvidia_host(&b);
-        let s = status_on(&h, &rt);
-        assert!(s.available && s.nvapi, "{s:?}");
-        assert!(s.reason.contains("available"), "{}", s.reason);
+        let s = status_on(&h, &rt, false);
+        assert!(s.nvapi.available && s.dlss.available, "{s:?}");
+        assert!(
+            s.dlss.reason.contains("NVIDIA GeForce RTX 5090"),
+            "{}",
+            s.dlss.reason
+        );
+        assert_eq!(s.gpu.as_ref().and_then(|g| g.rtx_generation), Some(50));
+
+        let s = status_on(&h, &rt, true);
+        assert!(!s.nvapi.available && !s.dlss.available);
+        assert!(
+            s.nvapi.reason.contains("PROTON_DISABLE_NVAPI"),
+            "{}",
+            s.nvapi.reason
+        );
 
         let s = status_on(
             &Host {
                 root: b.join("plain"),
             },
             &rt,
+            false,
         );
-        assert!(!s.available && !s.nvapi);
-        assert_eq!(s.reason, "no NVIDIA GPU found");
+        assert!(!s.nvapi.available && !s.dlss.available);
+        assert_eq!(s.nvapi.reason, "no NVIDIA GPU found");
 
-        let s = status_on(&h, &b.join("no-runtime"));
+        let s = status_on(&h, &b.join("no-runtime"), false);
         assert!(
-            !s.available && s.reason.contains("DXVK-NVAPI"),
-            "{}",
-            s.reason
+            !s.nvapi.available && s.nvapi.reason.contains("DXVK-NVAPI"),
+            "{s:?}"
         );
 
         let n = b.join("nouveau");
         pci(&n, "0000:01:00.0", "0x10de", "0x030000");
-        let s = status_on(&Host { root: n }, &rt);
+        let s = status_on(&Host { root: n }, &rt, false);
         assert!(
-            !s.available && s.reason.contains("driver is not loaded"),
-            "{}",
-            s.reason
+            !s.nvapi.available && s.dlss.reason.contains("driver is not loaded"),
+            "{s:?}"
         );
 
+        // A GTX card: NVAPI yes, DLSS no, and the model says why.
+        let g = b.join("gtx");
+        std::fs::create_dir_all(&g).unwrap();
+        let gh = nvidia_host(&g);
+        gpu_info(&gh.root, "0000:01:00.0", "NVIDIA GeForce GTX 1660 SUPER");
+        let s = status_on(&gh, &rt, false);
+        assert!(s.nvapi.available && !s.dlss.available, "{s:?}");
+        assert!(
+            s.dlss.reason.contains("GTX 1660 SUPER has no DLSS"),
+            "{}",
+            s.dlss.reason
+        );
+        assert_eq!(s.gpu.as_ref().map(|g| g.rtx), Some(false));
+        // ... with an RTX card beside it, DLSS runs on that one.
+        gpu_info(&gh.root, "0000:02:00.0", "NVIDIA RTX A4000");
+        let s = status_on(&gh, &rt, false);
+        assert!(s.dlss.available, "{s:?}");
+        assert_eq!(s.gpu.as_ref().and_then(|g| g.rtx_generation), Some(30));
+
+        // No model readable: DLSS unknown, so not offered.
+        std::fs::remove_dir_all(gh.root.join("proc/driver/nvidia/gpus")).unwrap();
+        let s = status_on(&gh, &rt, false);
+        assert!(
+            s.nvapi.available && !s.dlss.available && s.gpu.is_none(),
+            "{s:?}"
+        );
+        assert!(
+            s.dlss.reason.contains("could not be read"),
+            "{}",
+            s.dlss.reason
+        );
+
+        // Both NGX DLLs are needed.
+        std::fs::remove_file(h.root.join("usr/lib/nvidia/wine/_nvngx.dll")).unwrap();
+        let s = status_on(&h, &rt, false);
+        assert!(s.nvapi.available && !s.dlss.available, "{s:?}");
+        assert!(s.dlss.reason.contains("_nvngx.dll"), "{}", s.dlss.reason);
         std::fs::remove_file(h.root.join("usr/lib/nvidia/wine/nvngx.dll")).unwrap();
-        let s = status_on(&h, &rt);
-        assert!(!s.available && s.nvapi && s.ngx_dir.is_none(), "{s:?}");
-        assert!(s.reason.contains("nvngx.dll"), "{}", s.reason);
+        let s = status_on(&h, &rt, false);
+        assert!(!s.dlss.available && s.ngx_dir.is_none(), "{s:?}");
     }
 }
