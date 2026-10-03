@@ -184,6 +184,7 @@ impl Codec {
         WriteStats {
             foreground: self.counters[0].get(),
             bulk: self.counters[1].get(),
+            index: Default::default(),
             #[cfg(feature = "gpu-zstd")]
             gpu: match &self.bulk {
                 Bulk::Gpu(g) => Some(g.stats()),
