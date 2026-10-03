@@ -243,15 +243,22 @@ cache in front of the director for **small reads of immutable files**
 code; wired in by `vfs-shim`'s `read_cache.rs`):
 
 - A synchronous `NtReadFile` shorter than 64 KiB is served from aligned
-  1 MiB blocks; a missing block is fetched with one bulk read through the
-  same `read_fragmented`, gate and deadline as any other read. Larger reads,
+  64 KiB units; a miss fetches one unit with one bulk read through the same
+  `read_fragmented`, gate and deadline as any other read, and while a file's
+  misses keep landing where its last fetch ended (a sequential reader) the
+  run doubles, up to 1 MiB in one request. A unit never extends past the
+  end of its file. Bytes are what a miss costs — a provider reading a
+  compressed store spends about a millisecond a MiB, a hundred small round
+  trips' worth — and the first design's fixed 1 MiB blocks fetched 3.3 GiB
+  for a launch whose small reads were 2 GiB. Larger reads,
   and reads asking for completion by APC or event, take the uncached path
   unchanged. Anything the cache does not serve falls back to that path, so
   the bytes, the `IO_STATUS_BLOCK` and the file position are always what it
   would give.
 - Blocks are per **file** (root and folded path), shared by every handle on
-  it, versioned by its size and the director's **mount generation**: 8 per
-  file with LRU, 64 MiB process-wide with global LRU. Per-file locks, none
+  it, versioned by its size and the director's **mount generation**: 16 MiB
+  per file with LRU, 256 MiB process-wide (`VFS_SHIM_READ_CACHE_MIB`) with
+  global LRU. Per-file locks, none
   held across a fetch, one fetch per block however many threads miss it,
   and bytes reserved before a fetch starts, so memory stays bounded.
 - **Coherence rule: only what cannot change is cached.** The director's
@@ -265,17 +272,26 @@ code; wired in by `vfs-shim`'s `read_cache.rs`):
   writing the same write layer cannot make the cache stale: what it writes
   is never cached, and a file it copies up is reported mutable at its next
   open here.
-- A file read at random across more blocks than it may hold goes *cold*:
-  after 16 misses averaging under 8 hits each it is read uncached for a while
-  instead of turning every small read into a block fetch.
+- A file read at random across more units than it may hold goes *cold*:
+  after 16 re-fetches of units its own LRU dropped, averaging under 8 hits
+  each, it is read uncached for a while instead of turning every small read
+  into a fetch. A file's first fetch of a unit, and a miss on a unit the
+  process-wide cap evicted, are not held against it.
 
-A provider that traces its reads sees the cache's 1 MiB block fetches, not
+The policy was tuned by replaying the provider-side traces of real launches
+(every handle's reads, in order) through the cache: against no cache and
+the first design, the launch above needs 52,811 small round trips (vs
+475,274 and 52,886) and fetches 2.13 GiB (vs 2.03 GiB read and 3.55 GiB).
+
+A provider that traces its reads sees the cache's unit fetches, not
 the program's own read pattern: capture an access trace (Haskill's replay
 numbers, for one) with the cache off.
 
 `VFS_SHIM_READ_CACHE=0` turns it off, and the `VFS_SHIM_STATS_LOG` report has
 a section for it (hits, misses, declined, fetches and bytes, evictions,
-invalidations). The open reply's `immutable` flag and generation sit in what
+invalidations, misses the cap caused) with the twenty busiest files: their
+small reads, hits, misses, bytes fetched, and whether they went cold and
+why. The open reply's `immutable` flag and generation sit in what
 was padding, so the wire version did not change: an older director's reply
 reads as mutable and is never cached.
 

@@ -5,12 +5,24 @@
 //! `plugins.txt` was read one byte per call. Over the ring each of those is a
 //! round trip (a few µs plus the provider) where Windows would have answered
 //! from its page cache. This cache sits in front of the ring for reads shorter
-//! than [`CacheConfig::threshold`]: it serves them from aligned blocks of
-//! [`CacheConfig::block`] bytes, fetching a missing block with one bulk read.
-//! Reads at or above the threshold never touch it.
+//! than [`CacheConfig::threshold`]: it serves them from aligned **units** of
+//! [`CacheConfig::block`] bytes (64 KiB), fetched from the director with one
+//! bulk read per miss. Reads at or above the threshold never touch it.
 //!
 //! OS-free and generic over how a block is fetched, so the shim, the native
 //! tests and `ring-bench` all run this same code.
+//!
+//! # How much a miss fetches
+//!
+//! Every byte fetched costs: a provider serving content from a compressed
+//! store spends about a millisecond a MiB (measured on a 3,472-mod list's
+//! traces), roughly what a hundred small round trips cost. A miss therefore
+//! fetches **one 64 KiB unit**, and the run grows — 2, 4, … up to
+//! [`CacheConfig::max_run`] units (1 MiB) in one request — only while a
+//! file's misses keep landing exactly where its last fetch ended, as a
+//! sequential reader's do. A random read costs 64 KiB, not 1 MiB; a read
+//! through a master file in 4 KiB pieces costs one round trip a MiB. A unit
+//! never extends past the end of its file, so a small file costs its size.
 //!
 //! # What is cached: the coherence rule
 //!
@@ -39,17 +51,18 @@
 //! Each file has its own lock, held only to look a block up or install one;
 //! bytes are copied out after it is released, and **no lock is held across a
 //! fetch**. Two threads missing the same block fetch it once: the first
-//! installs a *loading* slot and fetches, the second waits for that fetch
-//! (single flight) — but never past the fetch's own deadline
-//! ([`CacheConfig::wait`], counted from when it started). A fetch that
-//! outlives it is removed by whichever reader finds it, so a thread killed
-//! mid-fetch (which runs no cleanup) costs the survivors at most one
-//! deadline, once, as the ring's `DataGate` promises for its own permits. Memory is bounded under contention because a fetch
-//! reserves its block's bytes against [`CacheConfig::max_bytes`] **before** it
-//! starts, evicting the least recently used blocks of any file to make room;
-//! when nothing can be evicted (every block is mid-fetch) the read is simply
-//! served uncached. Lock order: registry → file → LRU index; the LRU index is
-//! never held while a file lock is taken.
+//! installs *loading* slots for the units it fetches and fetches, the second
+//! waits for that fetch (single flight) — but never past the fetch's own
+//! deadline ([`CacheConfig::wait`], counted from when it started). A fetch
+//! that outlives it is removed by whichever reader finds it, so a thread
+//! killed mid-fetch (which runs no cleanup) costs the survivors at most one
+//! deadline, once, as the ring's `DataGate` promises for its own permits.
+//! Memory is bounded under contention because a fetch reserves its bytes
+//! against [`CacheConfig::max_bytes`] **before** it starts, evicting the
+//! least recently used units of any file to make room; when nothing can be
+//! evicted (everything is mid-fetch) the read is simply served uncached.
+//! Lock order: registry → file → LRU index / retired diagnostics; neither of
+//! those is ever held while a file lock is taken.
 //!
 //! # What a caller must do
 //!
@@ -59,26 +72,34 @@
 //! without the cache. So a cache answer is always the bytes the director
 //! would have returned, or no answer at all.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-/// Bytes per cached block.
-pub const DEFAULT_BLOCK: usize = 1 << 20;
+/// Bytes per cached unit.
+pub const DEFAULT_BLOCK: usize = 64 * 1024;
+/// Most units one miss fetches (a sequential reader's run): 1 MiB.
+pub const DEFAULT_MAX_RUN: usize = 16;
 /// Reads shorter than this are served from the cache; others bypass it.
 pub const DEFAULT_THRESHOLD: usize = 64 * 1024;
-/// Blocks one file may hold at once.
-pub const DEFAULT_BLOCKS_PER_FILE: usize = 8;
-/// Bytes the whole cache may hold, in-flight fetches included.
-pub const DEFAULT_MAX_BYTES: usize = 64 << 20;
+/// Units one file may hold at once: 16 MiB.
+pub const DEFAULT_BLOCKS_PER_FILE: usize = 256;
+/// Bytes the whole cache may hold, in-flight fetches included. The shim
+/// takes it from `VFS_SHIM_READ_CACHE_MIB`.
+pub const DEFAULT_MAX_BYTES: usize = 256 << 20;
 
-/// A file goes cold after this many missing reads in a row of evaluation…
+/// A file goes cold after this many locality misses of evaluation…
 const COLD_AFTER_MISSES: u32 = 16;
-/// …if it averaged fewer hits than this per miss: a fetch costs a block, and
-/// a file read at random across more than [`CacheConfig::blocks_per_file`]
-/// blocks would otherwise turn every small read into one.
-const COLD_MIN_HITS_PER_MISS: u32 = 8;
+/// …if it averaged fewer hits than [`CacheConfig::cold_hits_per_miss`] per
+/// miss. Only re-fetches count (see [`CacheConfig::cold_counts_first_fetch`])
+/// and not misses the process-wide cap caused (see
+/// `State::pressure_evicted`), so this fires only on a file read at random
+/// across more units than it may hold, where each re-fetched 64 KiB unit
+/// (~80 µs with the provider) costs more than the ~5 uncached small reads
+/// (~14 µs each) it would have to save to pay for itself. Replaying a real
+/// launch's reads, it never fires.
+pub const DEFAULT_COLD_HITS_PER_MISS: u32 = 8;
 /// Reads a cold file is served uncached before it is tried again, doubling
 /// each time it goes cold again, up to [`COLD_MAX_READS`].
 const COLD_READS: u32 = 4096;
@@ -87,14 +108,33 @@ const COLD_MAX_READS: u32 = 1 << 16;
 /// goes cold too, rather than paying a failed block fetch before every
 /// uncached read.
 const COLD_AFTER_FAILED_FETCHES: u32 = 4;
+/// Units of one file remembered as evicted by the process-wide cap.
+const PRESSURE_MEMORY: usize = 4096;
+/// Files whose diagnostics are kept after nothing holds them any more.
+const RETIRED_DIAGS: usize = 4096;
 
 /// How the cache is cut up. [`Default`] is what the shim uses.
 #[derive(Debug, Clone, Copy)]
 pub struct CacheConfig {
+    /// Bytes per unit: what is stored, evicted and (at least) fetched.
     pub block: usize,
+    /// Most units one fetch brings in, when a file is being read
+    /// sequentially. `1` fetches exactly the missing unit every time.
+    pub max_run: usize,
     pub threshold: usize,
+    /// Most units one file holds at once.
     pub blocks_per_file: usize,
     pub max_bytes: usize,
+    /// A file whose locality misses average fewer hits than this goes cold
+    /// (see [`COLD_AFTER_MISSES`]); `0` never sends a file cold for that.
+    pub cold_hits_per_miss: u32,
+    /// Whether a file's first fetch of a unit counts against it. Off by
+    /// default: a file being read into the cache for the first time misses
+    /// on every unit it touches however good its locality, and judging it
+    /// on those misses sent a 4 KiB reader of an 8 MiB region cold before
+    /// it had warmed. Only a unit fetched **again** — after the file's own
+    /// LRU dropped it — then counts.
+    pub cold_counts_first_fetch: bool,
     /// How long a fetch is waited for, counted from when it started — the
     /// fetch's own deadline. A reader that finds another thread's fetch of
     /// its block waits at most what is left of this; a fetch older than it
@@ -107,9 +147,12 @@ impl Default for CacheConfig {
     fn default() -> Self {
         CacheConfig {
             block: DEFAULT_BLOCK,
+            max_run: DEFAULT_MAX_RUN,
             threshold: DEFAULT_THRESHOLD,
             blocks_per_file: DEFAULT_BLOCKS_PER_FILE,
             max_bytes: DEFAULT_MAX_BYTES,
+            cold_hits_per_miss: DEFAULT_COLD_HITS_PER_MISS,
+            cold_counts_first_fetch: false,
             wait: crate::RESPONSE_DEADLINE,
         }
     }
@@ -122,10 +165,13 @@ pub struct CacheStats {
     pub hits: u64,
     /// Small reads served after fetching (or waiting for) a block.
     pub misses: u64,
+    /// Of those, the ones whose block the process-wide cap had evicted from
+    /// this file: a capacity cost, not the file's access pattern.
+    pub pressure_misses: u64,
     /// Small reads on a cacheable file the cache declined (file gone cold,
     /// changed, no room, or a fetch that failed), and so read uncached.
     pub declined: u64,
-    /// Block fetches, and the bytes they brought in.
+    /// Block fetches (one round trip each), and the bytes they brought in.
     pub fetches: u64,
     pub bytes_fetched: u64,
     /// Block fetches that failed or came back short (each followed by an
@@ -133,23 +179,69 @@ pub struct CacheStats {
     /// [`CacheConfig::wait`].
     pub fetch_failures: u64,
     pub fetches_abandoned: u64,
-    /// Blocks dropped to make room (per file or process-wide).
+    /// Units dropped to make room (per file or process-wide).
     pub evictions: u64,
-    /// Files dropped because they changed or might have, and the blocks that
+    /// Files dropped because they changed or might have, and the units that
     /// held between them.
     pub invalidations: u64,
     pub blocks_invalidated: u64,
-    /// Times a file was found to be read too randomly to be worth caching.
+    /// Times a file went cold: read too randomly to be worth caching, or
+    /// its fetches kept failing.
     pub cold: u64,
-    /// Bytes held now (in-flight fetches included), and files known.
+    /// Bytes held now (in-flight fetches included), the cap, and files known.
     pub resident_bytes: u64,
+    pub max_bytes: u64,
     pub files: u64,
+}
+
+/// What the cache did for one file, for the stats report's per-file table.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FileDiag {
+    /// Small reads offered (served or declined).
+    pub reads: u64,
+    pub hits: u64,
+    pub misses: u64,
+    /// Misses on a unit the process-wide cap had evicted.
+    pub pressure_misses: u64,
+    pub declined: u64,
+    pub fetches: u64,
+    pub bytes_fetched: u64,
+    /// Times it went cold because its reads missed too often (`cold_guard`)
+    /// or because its fetches failed (`cold_failures`).
+    pub cold_guard: u32,
+    pub cold_failures: u32,
+}
+
+impl FileDiag {
+    fn add(&mut self, o: &FileDiag) {
+        self.reads += o.reads;
+        self.hits += o.hits;
+        self.misses += o.misses;
+        self.pressure_misses += o.pressure_misses;
+        self.declined += o.declined;
+        self.fetches += o.fetches;
+        self.bytes_fetched += o.bytes_fetched;
+        self.cold_guard += o.cold_guard;
+        self.cold_failures += o.cold_failures;
+    }
+}
+
+/// One row of [`ReadCache::top_files`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileReport {
+    pub root: u32,
+    pub path: String,
+    pub diag: FileDiag,
+    /// Cold now (being read uncached), and poisoned (never cached again).
+    pub cold_now: bool,
+    pub poisoned: bool,
 }
 
 #[derive(Default)]
 struct Counters {
     hits: AtomicU64,
     misses: AtomicU64,
+    pressure_misses: AtomicU64,
     declined: AtomicU64,
     fetches: AtomicU64,
     bytes_fetched: AtomicU64,
@@ -226,7 +318,7 @@ struct State {
     /// The version the blocks below hold.
     version: Option<Version>,
     slots: Vec<Slot>,
-    /// Since the file was last judged: reads that hit, and that missed.
+    /// Since the file was last judged: reads that hit, and locality misses.
     hits: u32,
     misses: u32,
     /// Reads left to serve uncached while cold, and the next cold spell.
@@ -234,6 +326,31 @@ struct State {
     cold_next: u32,
     /// Block fetches of this file that failed since it last went cold.
     failed_fetches: u32,
+    /// Where the last fetch ended, and how many units the next one takes if
+    /// it starts exactly there.
+    next_seq: Option<u64>,
+    run: usize,
+    /// Units the process-wide cap evicted from this file: a miss on one is
+    /// a capacity miss, not evidence of poor locality.
+    pressure_evicted: HashSet<u64>,
+    /// Units this file has fetched before (a bit each): a miss on one of
+    /// them is a re-fetch, which says something about locality; a first
+    /// fetch does not.
+    fetched_before: Vec<u64>,
+    diag: FileDiag,
+}
+
+impl State {
+    /// Mark `idx` fetched; whether it had been before.
+    fn refetch(&mut self, idx: u64) -> bool {
+        let (w, b) = ((idx / 64) as usize, idx % 64);
+        if self.fetched_before.len() <= w {
+            self.fetched_before.resize(w + 1, 0);
+        }
+        let was = self.fetched_before[w] & (1 << b) != 0;
+        self.fetched_before[w] |= 1 << b;
+        was
+    }
 }
 
 struct Slot {
@@ -252,9 +369,14 @@ enum SlotKind {
     Loading(Arc<Flight>),
 }
 
-/// One block fetch other readers of that block can wait for.
+/// What a finished fetch gives its waiters: the first unit's index and the
+/// run's bytes, or `None` if it failed.
+type Fetched = Option<(u64, Arc<[u8]>)>;
+
+/// One fetch of a run of units, which other readers of any of them can
+/// wait for.
 struct Flight {
-    done: Mutex<Option<Option<Arc<[u8]>>>>,
+    done: Mutex<Option<Fetched>>,
     cv: Condvar,
     started: Instant,
 }
@@ -274,7 +396,7 @@ impl Flight {
     }
 
     /// The first completion wins; later ones are ignored.
-    fn complete(&self, v: Option<Arc<[u8]>>) {
+    fn complete(&self, v: Fetched) {
         let mut g = lock(&self.done);
         if g.is_none() {
             *g = Some(v);
@@ -284,7 +406,7 @@ impl Flight {
 
     /// Wait until the fetch finishes or `deadline` after it started.
     /// `Err(())` if it had not finished by then.
-    fn wait(&self, deadline: Duration) -> Result<Option<Arc<[u8]>>, ()> {
+    fn wait(&self, deadline: Duration) -> Result<Fetched, ()> {
         let left = deadline.saturating_sub(self.started.elapsed());
         let g = lock(&self.done);
         let (g, _) = self
@@ -303,19 +425,35 @@ struct Registry {
 
 const SWEEP_MIN: usize = 1024;
 
+/// How a read came by one of its units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Got {
+    /// Already held.
+    Hit,
+    /// Fetched by this read: a locality miss (`counts`), or one that says
+    /// nothing about locality — the cap had evicted it (`pressure`), or it
+    /// is the file's first fetch of it.
+    Fetched { counts: bool, pressure: bool },
+    /// Fetched by another thread, which this read waited for.
+    Waited,
+}
+
 /// The cache. One per process in the shim; see the module docs.
 pub struct ReadCache {
     cfg: CacheConfig,
     files: Mutex<Registry>,
-    /// Ready blocks by the tick they were filed under, oldest first: the
-    /// process-wide LRU. A block read since it was filed carries a newer
+    /// Ready units by the tick they were filed under, oldest first: the
+    /// process-wide LRU. A unit read since it was filed carries a newer
     /// tick of its own and is re-filed when it reaches the front, rather
     /// than on every hit, so a hit takes only its file's lock.
     lru: Mutex<BTreeMap<u64, (Weak<Entry>, u64)>>,
-    /// Bytes held: ready blocks plus fetches in flight.
+    /// Bytes held: ready units plus fetches in flight.
     used: AtomicUsize,
     tick: AtomicU64,
     counters: Counters,
+    /// Diagnostics of files swept out of the registry, so the per-file
+    /// table covers the whole run.
+    retired: Mutex<HashMap<Name, FileDiag>>,
 }
 
 impl Default for ReadCache {
@@ -326,10 +464,13 @@ impl Default for ReadCache {
 
 impl ReadCache {
     pub fn new(cfg: CacheConfig) -> Self {
-        assert!(cfg.block > 0 && cfg.blocks_per_file > 0, "an empty cache");
+        assert!(
+            cfg.block > 0 && cfg.blocks_per_file > 0 && cfg.max_run > 0,
+            "an empty cache"
+        );
         assert!(
             cfg.threshold <= cfg.block,
-            "a read the cache serves must fit in two blocks"
+            "a read the cache serves must fit in two units"
         );
         ReadCache {
             cfg,
@@ -341,6 +482,7 @@ impl ReadCache {
             used: AtomicUsize::new(0),
             tick: AtomicU64::new(1),
             counters: Counters::default(),
+            retired: Mutex::new(HashMap::new()),
         }
     }
 
@@ -382,7 +524,7 @@ impl ReadCache {
         let entry = {
             let mut reg = lock(&self.files);
             if reg.by_name.len() >= reg.sweep_at {
-                Self::sweep(&mut reg);
+                self.sweep(&mut reg);
             }
             Arc::clone(reg.by_name.entry(name.clone()).or_insert_with(|| {
                 Arc::new(Entry {
@@ -413,6 +555,9 @@ impl ReadCache {
             // another file's. Handles still open on the old one stop being
             // served (their version no longer matches) and read uncached.
             self.clear_slots(&mut st);
+            st.pressure_evicted.clear();
+            st.fetched_before.clear();
+            st.next_seq = None;
             st.version = Some(version);
         }
         drop(st);
@@ -424,18 +569,86 @@ impl ReadCache {
 
     /// Drop entries nothing uses: no handle holds them, they hold no
     /// blocks, and they are not poisoned (a poisoned entry is what stops a
-    /// changed file being cached again).
-    fn sweep(reg: &mut Registry) {
-        reg.by_name.retain(|_, e| {
+    /// changed file being cached again). What they did is kept in
+    /// `retired` for the per-file table.
+    fn sweep(&self, reg: &mut Registry) {
+        let mut gone: Vec<(Name, FileDiag)> = Vec::new();
+        reg.by_name.retain(|name, e| {
             if Arc::strong_count(e) > 1 {
                 return true;
             }
             match e.state.try_lock() {
-                Ok(st) => st.poisoned || !st.slots.is_empty(),
+                Ok(st) => {
+                    let keep = st.poisoned || !st.slots.is_empty();
+                    if !keep && st.diag.reads > 0 {
+                        gone.push((name.clone(), st.diag));
+                    }
+                    keep
+                }
                 Err(_) => true,
             }
         });
         reg.sweep_at = (reg.by_name.len() * 2).max(SWEEP_MIN);
+        if !gone.is_empty() {
+            let mut retired = lock(&self.retired);
+            for (name, d) in gone {
+                retired.entry(name).or_default().add(&d);
+            }
+            if retired.len() > RETIRED_DIAGS {
+                // Keep the busiest half.
+                let mut reads: Vec<u64> = retired.values().map(|d| d.reads).collect();
+                reads.sort_unstable();
+                let cut = reads[reads.len() / 2];
+                retired.retain(|_, d| d.reads > cut);
+            }
+        }
+    }
+
+    /// The `n` files with the most small reads offered to the cache, busiest
+    /// first: live ones and ones already swept out. Holds the registry for
+    /// one pass over it (and each file only if it is free), so it is for a
+    /// periodic report, not a hot path.
+    pub fn top_files(&self, n: usize) -> Vec<FileReport> {
+        let mut all: HashMap<Name, FileReport> = HashMap::new();
+        {
+            let reg = lock(&self.files);
+            for e in reg.by_name.values() {
+                // A report must not wait on a file mid-read; one skipped
+                // file is a row short, not a stall.
+                let Ok(st) = e.state.try_lock() else {
+                    continue;
+                };
+                if st.diag.reads == 0 {
+                    continue;
+                }
+                all.insert(
+                    e.name.clone(),
+                    FileReport {
+                        root: e.name.root,
+                        path: e.name.path.clone(),
+                        diag: st.diag,
+                        cold_now: st.cold_left > 0,
+                        poisoned: st.poisoned,
+                    },
+                );
+            }
+        }
+        for (name, d) in lock(&self.retired).iter() {
+            all.entry(name.clone())
+                .or_insert_with(|| FileReport {
+                    root: name.root,
+                    path: name.path.clone(),
+                    diag: FileDiag::default(),
+                    cold_now: false,
+                    poisoned: false,
+                })
+                .diag
+                .add(d);
+        }
+        let mut rows: Vec<FileReport> = all.into_values().collect();
+        rows.sort_by(|a, b| b.diag.reads.cmp(&a.diag.reads).then(a.path.cmp(&b.path)));
+        rows.truncate(n);
+        rows
     }
 
     /// The file behind `f` was written, truncated or otherwise changed
@@ -500,10 +713,11 @@ impl ReadCache {
             .count();
         bump(&self.counters.blocks_invalidated, n as u64);
         self.clear_slots(st);
+        st.pressure_evicted.clear();
         st.version = None;
     }
 
-    /// Remove every slot: ready blocks give their bytes back; a fetch in
+    /// Remove every slot: ready units give their bytes back; a fetch in
     /// flight is told it is not wanted (its waiters read uncached) and gives
     /// its own reservation back when it finishes.
     fn clear_slots(&self, st: &mut State) {
@@ -519,9 +733,9 @@ impl ReadCache {
     }
 
     /// Serve a read of `buf.len()` bytes at `off` through `f` from the
-    /// cache, fetching missing blocks with `fetch(block_offset, block_buf)`,
-    /// which must read `block_buf.len()` bytes at `block_offset` (the block,
-    /// cut short at end of file) and return how many it read.
+    /// cache, fetching missing units with `fetch(offset, fetch_buf)`, which
+    /// must read `fetch_buf.len()` bytes at `offset` (one or more whole
+    /// units, cut short at end of file) and return how many it read.
     ///
     /// `Some(n)` when the read was served: `n` is `buf.len()` cut short at
     /// end of file, and `buf[..n]` holds the bytes. `None` when it was not —
@@ -539,57 +753,107 @@ impl ReadCache {
         let len = buf.len().min((ver.size - off) as usize);
         {
             let mut st = lock(&f.entry.state);
-            if st.poisoned || st.version != Some(ver) {
-                drop(st);
-                bump(&self.counters.declined, 1);
-                return None;
-            }
-            if st.cold_left > 0 {
+            st.diag.reads += 1;
+            let refuse = if st.poisoned || st.version != Some(ver) {
+                true
+            } else if st.cold_left > 0 {
                 st.cold_left -= 1;
+                true
+            } else {
+                false
+            };
+            if refuse {
+                st.diag.declined += 1;
                 drop(st);
                 bump(&self.counters.declined, 1);
                 return None;
             }
         }
-        let block = self.cfg.block as u64;
-        let first = off / block;
-        let last = (off + len as u64 - 1) / block;
-        let mut fetched = false;
+        let unit = self.cfg.block as u64;
+        let first = off / unit;
+        let last = (off + len as u64 - 1) / unit;
+        let mut how = Got::Hit;
         let mut done = 0usize;
         for idx in first..=last {
-            let Some((data, was_fetched)) = self.block(f, ver, idx, &mut fetch) else {
+            let Some((data, got)) = self.unit(f, ver, idx, &mut fetch) else {
                 bump(&self.counters.declined, 1);
+                lock(&f.entry.state).diag.declined += 1;
                 return None;
             };
-            fetched |= was_fetched;
+            how = match (how, got) {
+                (
+                    Got::Fetched {
+                        counts: c1,
+                        pressure: p1,
+                    },
+                    Got::Fetched {
+                        counts: c2,
+                        pressure: p2,
+                    },
+                ) => Got::Fetched {
+                    counts: c1 || c2,
+                    pressure: p1 || p2,
+                },
+                (f @ Got::Fetched { .. }, _) | (_, f @ Got::Fetched { .. }) => f,
+                (Got::Waited, _) | (_, Got::Waited) => Got::Waited,
+                _ => Got::Hit,
+            };
             let at = off + done as u64;
-            let from = (at - idx * block) as usize;
+            let from = (at - idx * unit) as usize;
             let n = (len - done).min(data.len() - from);
             buf[done..done + n].copy_from_slice(&data[from..from + n]);
             done += n;
         }
         debug_assert_eq!(done, len);
-        if fetched {
-            bump(&self.counters.misses, 1);
-        } else {
-            bump(&self.counters.hits, 1);
+        match how {
+            Got::Hit => bump(&self.counters.hits, 1),
+            Got::Fetched { pressure: true, .. } => {
+                bump(&self.counters.misses, 1);
+                bump(&self.counters.pressure_misses, 1);
+            }
+            _ => bump(&self.counters.misses, 1),
         }
-        self.judge(f, fetched);
+        self.judge(f, how);
         Some(len)
     }
 
     /// Count a served read toward deciding whether `f` is worth caching.
-    fn judge(&self, f: &FileRef, missed: bool) {
+    /// Only a **locality** miss counts against it: a unit fetched again
+    /// after the file's own LRU dropped it (and, if
+    /// [`CacheConfig::cold_counts_first_fetch`], a first fetch). A unit the
+    /// process-wide cap evicted, or one another thread fetched, says
+    /// nothing about how the file is read.
+    fn judge(&self, f: &FileRef, how: Got) {
         let mut st = lock(&f.entry.state);
-        if missed {
-            st.misses += 1;
-        } else {
-            st.hits = st.hits.saturating_add(1);
+        match how {
+            Got::Hit => {
+                st.hits = st.hits.saturating_add(1);
+                st.diag.hits += 1;
+                return;
+            }
+            Got::Waited => {
+                st.diag.misses += 1;
+                return;
+            }
+            Got::Fetched { pressure: true, .. } => {
+                st.diag.misses += 1;
+                st.diag.pressure_misses += 1;
+                return;
+            }
+            Got::Fetched { counts: false, .. } => {
+                st.diag.misses += 1;
+                return;
+            }
+            Got::Fetched { counts: true, .. } => {
+                st.diag.misses += 1;
+                st.misses += 1;
+            }
         }
         if st.misses < COLD_AFTER_MISSES {
             return;
         }
-        if st.hits < st.misses * COLD_MIN_HITS_PER_MISS {
+        if st.hits < st.misses * self.cfg.cold_hits_per_miss {
+            st.diag.cold_guard += 1;
             self.go_cold(&mut st);
         }
         st.hits = 0;
@@ -606,24 +870,26 @@ impl ReadCache {
         st.cold_left = spell;
         st.cold_next = (spell * 2).min(COLD_MAX_READS);
         st.failed_fetches = 0;
+        st.next_seq = None;
+        st.pressure_evicted.clear();
         bump(&self.counters.cold, 1);
-        // Its blocks are of no use while it is cold.
+        // Its units are of no use while it is cold.
         self.clear_slots(st);
     }
 
-    /// Block `idx` of `f`, and whether this call had to fetch (or wait for
-    /// a fetch of) it. `None` if it cannot be had from the cache.
-    fn block<F>(
+    /// Unit `idx` of `f`, and how this read came by it. `None` if it cannot
+    /// be had from the cache.
+    fn unit<F>(
         &self,
         f: &FileRef,
         ver: Version,
         idx: u64,
         fetch: &mut F,
-    ) -> Option<(Arc<[u8]>, bool)>
+    ) -> Option<(Arc<[u8]>, Got)>
     where
         F: FnMut(u64, &mut [u8]) -> Result<usize, i32>,
     {
-        let flight = {
+        let flight = loop {
             let mut st = lock(&f.entry.state);
             if st.poisoned || st.version != Some(ver) {
                 return None;
@@ -635,49 +901,44 @@ impl ReadCache {
                     ..
                 }) => {
                     *last = tick;
-                    return Some((Arc::clone(data), false));
+                    return Some((Arc::clone(data), Got::Hit));
                 }
                 Some(Slot {
                     kind: SlotKind::Loading(flight),
                     ..
-                }) if !flight.overdue(self.cfg.wait) => Arc::clone(flight),
-                Some(slot) => {
+                }) => {
+                    if !flight.overdue(self.cfg.wait) {
+                        break Arc::clone(flight);
+                    }
                     // A fetch that has outlived its deadline: its thread is
                     // gone (killed mid-fetch, which runs no cleanup) or its
                     // provider stopped answering. Waiting on it would cost
-                    // every reader of this block the whole deadline, again
-                    // and again; take the slot over and fetch it here.
-                    if let SlotKind::Loading(stale) = &slot.kind {
-                        stale.complete(None);
-                    }
+                    // every reader of these units the whole deadline, again
+                    // and again; drop it and fetch here.
+                    let stale = Arc::clone(flight);
+                    st.slots.retain(
+                        |s| !matches!(&s.kind, SlotKind::Loading(fl) if Arc::ptr_eq(fl, &stale)),
+                    );
+                    stale.complete(None);
                     bump(&self.counters.fetches_abandoned, 1);
-                    let flight = Arc::new(Flight::new());
-                    slot.kind = SlotKind::Loading(Arc::clone(&flight));
-                    drop(st);
-                    return self.load(f, ver, idx, flight, fetch);
+                    continue;
                 }
-                None => {
-                    if st.slots.len() >= self.cfg.blocks_per_file && !self.evict_in_file(&mut st) {
-                        // Every slot is mid-fetch.
-                        return None;
-                    }
-                    let flight = Arc::new(Flight::new());
-                    st.slots.push(Slot {
-                        idx,
-                        kind: SlotKind::Loading(Arc::clone(&flight)),
-                    });
-                    drop(st);
-                    return self.load(f, ver, idx, flight, fetch);
-                }
+                None => return self.miss(f, ver, idx, st, fetch),
             }
         };
         // Someone else is fetching it: wait for that, holding no lock, for
         // at most what is left of its deadline.
         match flight.wait(self.cfg.wait) {
-            Ok(data) => data.map(|d| (d, true)),
+            Ok(Some((base, run))) => {
+                let unit = self.cfg.block;
+                let from = (idx - base) as usize * unit;
+                let to = (from + unit).min(run.len());
+                Some((Arc::from(&run[from..to]), Got::Waited))
+            }
+            Ok(None) => None,
             Err(()) => {
-                // It never finished. Remove it — if the slot still holds this
-                // same fetch — so the next reader does not wait on it too.
+                // It never finished. Remove it — if the slots still hold
+                // this same fetch — so the next reader does not wait on it.
                 let mut st = lock(&f.entry.state);
                 let before = st.slots.len();
                 st.slots.retain(
@@ -693,7 +954,59 @@ impl ReadCache {
         }
     }
 
-    /// Drop the least recently used ready block of one file to make room
+    /// `idx` is not held: decide how many units to fetch, install loading
+    /// slots for them, and fetch. Called with the file locked.
+    fn miss<F>(
+        &self,
+        f: &FileRef,
+        ver: Version,
+        idx: u64,
+        mut st: MutexGuard<'_, State>,
+        fetch: &mut F,
+    ) -> Option<(Arc<[u8]>, Got)>
+    where
+        F: FnMut(u64, &mut [u8]) -> Result<usize, i32>,
+    {
+        let unit = self.cfg.block as u64;
+        let units = ver.size.div_ceil(unit);
+        let pressure = st.pressure_evicted.remove(&idx);
+        let counts = !pressure && (st.refetch(idx) || self.cfg.cold_counts_first_fetch);
+        // A run grows only while misses land where the last fetch ended.
+        let run = if st.next_seq == Some(idx) {
+            st.run.max(1)
+        } else {
+            1
+        };
+        let mut end = idx + 1;
+        while end < idx + run as u64 && end < units && !st.slots.iter().any(|s| s.idx == end) {
+            end += 1;
+        }
+        // Room in this file, from its own least recently used units.
+        while st.slots.len() + (end - idx) as usize > self.cfg.blocks_per_file {
+            if !self.evict_in_file(&mut st) {
+                if st.slots.len() < self.cfg.blocks_per_file {
+                    end = idx + (self.cfg.blocks_per_file - st.slots.len()) as u64;
+                    break;
+                }
+                // Every slot is mid-fetch.
+                return None;
+            }
+        }
+        st.next_seq = Some(end);
+        st.run = (run * 2).min(self.cfg.max_run);
+        let flight = Arc::new(Flight::new());
+        for j in idx..end {
+            st.slots.push(Slot {
+                idx: j,
+                kind: SlotKind::Loading(Arc::clone(&flight)),
+            });
+        }
+        drop(st);
+        let data = self.load(f, ver, idx, end, flight, fetch)?;
+        Some((data, Got::Fetched { counts, pressure }))
+    }
+
+    /// Drop the least recently used ready unit of one file to make room
     /// for another of it. `false` if it holds none.
     fn evict_in_file(&self, st: &mut State) -> bool {
         let oldest = st
@@ -716,20 +1029,23 @@ impl ReadCache {
         true
     }
 
-    /// Fetch block `idx` of `f` into the loading slot this thread installed.
+    /// Fetch units `[idx, end)` of `f` into the loading slots this thread
+    /// installed, and return unit `idx`.
     fn load<F>(
         &self,
         f: &FileRef,
         ver: Version,
         idx: u64,
+        end: u64,
         flight: Arc<Flight>,
         fetch: &mut F,
-    ) -> Option<(Arc<[u8]>, bool)>
+    ) -> Option<Arc<[u8]>>
     where
         F: FnMut(u64, &mut [u8]) -> Result<usize, i32>,
     {
-        let start = idx * self.cfg.block as u64;
-        let want = (ver.size - start).min(self.cfg.block as u64) as usize;
+        let unit = self.cfg.block as u64;
+        let start = idx * unit;
+        let want = ((end * unit).min(ver.size) - start) as usize;
         // Undoes everything this load set up, unless it is disarmed by a
         // successful install — including when `fetch` unwinds.
         let mut guard = LoadGuard {
@@ -744,7 +1060,7 @@ impl ReadCache {
         guard.reserved = want;
         let mut buf = vec![0u8; want];
         match fetch(start, &mut buf) {
-            // Short of the block means short of what the director said the
+            // Short of the run means short of what the director said the
             // file holds: not something to keep. The caller's uncached read
             // gets whatever the director answers now.
             Ok(n) if n == want => {}
@@ -753,6 +1069,7 @@ impl ReadCache {
                 let mut st = lock(&f.entry.state);
                 st.failed_fetches += 1;
                 if st.failed_fetches >= COLD_AFTER_FAILED_FETCHES && st.cold_left == 0 {
+                    st.diag.cold_failures += 1;
                     self.go_cold(&mut st);
                 }
                 return None;
@@ -760,36 +1077,51 @@ impl ReadCache {
         }
         bump(&self.counters.fetches, 1);
         bump(&self.counters.bytes_fetched, want as u64);
-        let data: Arc<[u8]> = buf.into();
+        let run: Arc<[u8]> = buf.into();
+        let mut first: Option<Arc<[u8]>> = None;
         {
             let mut st = lock(&f.entry.state);
+            st.diag.fetches += 1;
+            st.diag.bytes_fetched += want as u64;
             if st.poisoned || st.version != Some(ver) {
                 return None;
             }
-            let Some(slot) = st
-                .slots
-                .iter_mut()
-                .find(|s| matches!(&s.kind, SlotKind::Loading(fl) if Arc::ptr_eq(fl, &flight)))
-            else {
-                // Dropped meanwhile (the file went cold, or changed).
-                return None;
-            };
-            let tick = self.now();
-            slot.kind = SlotKind::Ready {
-                data: Arc::clone(&data),
-                last: tick,
-                lru_key: tick,
-            };
-            lock(&self.lru).insert(tick, (Arc::downgrade(&f.entry), idx));
+            let mut installed = 0usize;
+            for j in idx..end {
+                let Some(slot) = st.slots.iter_mut().find(|s| {
+                    s.idx == j
+                        && matches!(&s.kind, SlotKind::Loading(fl) if Arc::ptr_eq(fl, &flight))
+                }) else {
+                    // Dropped meanwhile (the file went cold, or changed).
+                    continue;
+                };
+                let from = (j - idx) as usize * unit as usize;
+                let to = (from + unit as usize).min(run.len());
+                let data: Arc<[u8]> = Arc::from(&run[from..to]);
+                let tick = self.now();
+                slot.kind = SlotKind::Ready {
+                    data: Arc::clone(&data),
+                    last: tick,
+                    lru_key: tick,
+                };
+                lock(&self.lru).insert(tick, (Arc::downgrade(&f.entry), j));
+                installed += data.len();
+                if j == idx {
+                    first = Some(data);
+                }
+            }
+            // What was reserved for units no longer wanted goes back.
+            self.used.fetch_sub(want - installed, Ordering::AcqRel);
             guard.reserved = 0;
+            first.as_ref()?;
         }
-        flight.complete(Some(Arc::clone(&data)));
+        flight.complete(Some((idx, run)));
         std::mem::forget(guard);
-        Some((data, true))
+        first
     }
 
     /// Take `n` bytes of the budget, evicting the least recently used
-    /// blocks of any file until they fit. `false` if they cannot.
+    /// units of any file until they fit. `false` if they cannot.
     fn reserve(&self, n: usize) -> bool {
         if n > self.cfg.max_bytes {
             return false;
@@ -812,8 +1144,9 @@ impl ReadCache {
         }
     }
 
-    /// Evict the process-wide least recently used ready block. `false` if
-    /// there is none.
+    /// Evict the process-wide least recently used ready unit. `false` if
+    /// there is none. The file remembers the unit went for capacity, so a
+    /// later miss on it is not held against the file's locality.
     fn evict_oldest(&self) -> bool {
         loop {
             let Some((key, (weak, idx))) = lock(&self.lru).pop_first() else {
@@ -843,6 +1176,9 @@ impl ReadCache {
                 self.used.fetch_sub(data.len(), Ordering::AcqRel);
                 bump(&self.counters.evictions, 1);
             }
+            if st.pressure_evicted.len() < PRESSURE_MEMORY {
+                st.pressure_evicted.insert(idx);
+            }
             return true;
         }
     }
@@ -853,6 +1189,7 @@ impl ReadCache {
         CacheStats {
             hits: get(&c.hits),
             misses: get(&c.misses),
+            pressure_misses: get(&c.pressure_misses),
             declined: get(&c.declined),
             fetches: get(&c.fetches),
             bytes_fetched: get(&c.bytes_fetched),
@@ -863,6 +1200,7 @@ impl ReadCache {
             fetch_failures: get(&c.fetch_failures),
             fetches_abandoned: get(&c.fetches_abandoned),
             resident_bytes: self.used.load(Ordering::Relaxed) as u64,
+            max_bytes: self.cfg.max_bytes as u64,
             files: self
                 .files
                 .try_lock()
@@ -907,6 +1245,9 @@ mod tests {
     fn tiny() -> ReadCache {
         ReadCache::new(CacheConfig {
             block: 16,
+            max_run: 1,
+            cold_hits_per_miss: DEFAULT_COLD_HITS_PER_MISS,
+            cold_counts_first_fetch: true,
             threshold: 8,
             blocks_per_file: 2,
             max_bytes: 64,
@@ -1095,6 +1436,9 @@ mod tests {
     fn a_block_larger_than_the_whole_budget_is_never_reserved() {
         let c = ReadCache::new(CacheConfig {
             block: 32,
+            max_run: 1,
+            cold_hits_per_miss: DEFAULT_COLD_HITS_PER_MISS,
+            cold_counts_first_fetch: true,
             threshold: 8,
             blocks_per_file: 2,
             max_bytes: 16,
@@ -1211,6 +1555,9 @@ mod tests {
     fn many_threads_reading_many_files_stay_correct_and_under_the_cap() {
         let c = ReadCache::new(CacheConfig {
             block: 4 * KIB,
+            max_run: 1,
+            cold_hits_per_miss: DEFAULT_COLD_HITS_PER_MISS,
+            cold_counts_first_fetch: true,
             threshold: KIB,
             blocks_per_file: 3,
             max_bytes: 40 * KIB,
@@ -1365,6 +1712,289 @@ mod tests {
         assert_eq!(st.resident_bytes, 0);
     }
 
+    // ---- runs, units, pressure, diagnostics ----------------------------------
+
+    /// A 16-byte-unit cache whose runs grow to 4 units.
+    fn runs() -> ReadCache {
+        ReadCache::new(CacheConfig {
+            block: 16,
+            max_run: 4,
+            threshold: 8,
+            blocks_per_file: 64,
+            max_bytes: 1 << 20,
+            cold_hits_per_miss: DEFAULT_COLD_HITS_PER_MISS,
+            cold_counts_first_fetch: true,
+            wait: Duration::from_secs(10),
+        })
+    }
+
+    #[test]
+    fn sequential_misses_fetch_growing_runs_and_random_ones_a_single_unit() {
+        let c = runs();
+        let s = Source::new(content(16 * 64));
+        let f = reg(&c, "seq", 16 * 64);
+        // A sequential reader: 1-byte reads straight through.
+        for off in 0..16 * 32u64 {
+            assert_eq!(
+                read(&c, &f, &s, off, 1).unwrap(),
+                &s.data[off as usize..off as usize + 1]
+            );
+        }
+        // Fetches of 1, 2, 4, 4, 4… units: offsets 0, 16, 48, 112, 176, …
+        let offs = lock(&s.offsets).clone();
+        assert_eq!(&offs[..5], &[0, 16, 48, 112, 176]);
+        assert_eq!(
+            c.stats().fetches,
+            2 + 8,
+            "32 units in runs of 1, 2, then 4s"
+        );
+        let before = c.stats().bytes_fetched;
+        // A random reader starts every run over at one unit.
+        let r = reg(&c, "rand", 16 * 64);
+        let s2 = Source::new(content(16 * 64));
+        for idx in [40u64, 3, 60, 17] {
+            read(&c, &r, &s2, idx * 16 + 5, 1).unwrap();
+        }
+        assert_eq!(c.stats().bytes_fetched - before, 4 * 16, "one unit each");
+    }
+
+    #[test]
+    fn a_run_stops_at_end_of_file_and_at_a_unit_already_held() {
+        let c = runs();
+        let s = Source::new(content(16 * 5 + 3));
+        let f = reg(&c, "f", 16 * 5 + 3);
+        read(&c, &f, &s, 48, 1).unwrap(); // unit 3 alone
+        read(&c, &f, &s, 0, 1).unwrap(); // unit 0
+        read(&c, &f, &s, 16, 1).unwrap(); // sequential: units 1, 2 — not 3, held
+        assert_eq!(*lock(&s.offsets), vec![48, 0, 16]);
+        assert_eq!(c.stats().bytes_fetched, 16 + 16 + 32);
+        read(&c, &f, &s, 64, 1).unwrap(); // unit 4: not where the last run ended
+        assert_eq!(c.stats().bytes_fetched, 16 + 16 + 32 + 16);
+        read(&c, &f, &s, 81, 1).unwrap(); // sequential, but only 3 bytes are left
+        assert_eq!(
+            c.stats().bytes_fetched,
+            16 + 16 + 32 + 16 + 3,
+            "never past EOF"
+        );
+        for off in 0..16 * 5 + 3u64 {
+            assert_eq!(
+                read(&c, &f, &s, off, 1).unwrap(),
+                &s.data[off as usize..off as usize + 1]
+            );
+        }
+        assert_eq!(s.calls(), 5);
+    }
+
+    /// A small file costs its size, never a whole unit, with the defaults.
+    #[test]
+    fn a_unit_is_never_larger_than_its_file() {
+        let c = ReadCache::default();
+        let s = Source::new(content(4096));
+        let f = reg(&c, "a.json", 4096);
+        for off in (0..4096u64).step_by(100) {
+            assert!(read(&c, &f, &s, off, 1).is_some());
+        }
+        let st = c.stats();
+        assert_eq!(
+            (st.fetches, st.bytes_fetched, st.resident_bytes),
+            (1, 4096, 4096)
+        );
+    }
+
+    #[test]
+    fn a_waiter_on_a_run_gets_its_own_unit() {
+        let c = runs();
+        let f = reg(&c, "f", 16 * 8);
+        let data = content(16 * 8);
+        let mut buf = [0u8; 1];
+        // Make the next miss a 2-unit run starting at unit 1.
+        c.read(&f, 0, &mut buf, |o, b| {
+            b.copy_from_slice(&data[o as usize..o as usize + b.len()]);
+            Ok(b.len())
+        })
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let rx = Mutex::new(rx);
+        std::thread::scope(|scope| {
+            let (c, f, data, rx) = (&c, &f, &data, &rx);
+            let loader = scope.spawn(move || {
+                let mut b1 = [0u8; 1];
+                c.read(f, 16, &mut b1, |o, b| {
+                    let _ = lock(rx).recv();
+                    b.copy_from_slice(&data[o as usize..o as usize + b.len()]);
+                    Ok(b.len())
+                })
+                .map(|_| b1[0])
+            });
+            while lock(&f.entry.state)
+                .slots
+                .iter()
+                .filter(|s| matches!(s.kind, SlotKind::Loading(_)))
+                .count()
+                < 2
+            {
+                std::thread::yield_now();
+            }
+            let waiter = scope.spawn(move || {
+                let mut b2 = [0u8; 3];
+                c.read(f, 37, &mut b2, |_, _| panic!("unit 2 is in the run"))
+                    .map(|_| b2)
+            });
+            std::thread::sleep(Duration::from_millis(20));
+            tx.send(()).unwrap();
+            assert_eq!(loader.join().unwrap(), Some(data[16]));
+            assert_eq!(waiter.join().unwrap().unwrap(), data[37..40]);
+        });
+    }
+
+    /// A miss on a unit the process-wide cap evicted is a capacity miss: it
+    /// is counted as such and never sends the file cold.
+    #[test]
+    fn misses_caused_by_the_global_cap_do_not_count_against_locality() {
+        let c = ReadCache::new(CacheConfig {
+            block: 16,
+            max_run: 1,
+            threshold: 8,
+            blocks_per_file: 64,
+            max_bytes: 32,
+            cold_hits_per_miss: 8,
+            cold_counts_first_fetch: true,
+            wait: Duration::from_secs(1),
+        });
+        let s = Source::new(content(16 * 40));
+        let a = reg(&c, "a", 16 * 40);
+        // `a` reads unit 0 and other files push it out, over and over: every
+        // miss of `a` after the first is the cap's doing.
+        for i in 0..100u64 {
+            read(&c, &a, &s, i % 16, 1).unwrap();
+            for k in 0..2 {
+                let other = reg(&c, &format!("b{i}-{k}"), 16 * 40);
+                read(&c, &other, &s, 0, 1).unwrap();
+            }
+        }
+        let top = c.top_files(10);
+        let da = top.iter().find(|r| r.path == "a").unwrap();
+        assert!(da.diag.pressure_misses >= 90, "{da:?}");
+        assert_eq!(
+            da.diag.cold_guard, 0,
+            "`a` reads one unit: not poor locality"
+        );
+        assert!(!da.cold_now);
+        assert!(c.stats().pressure_misses >= 90);
+    }
+
+    #[test]
+    fn the_per_file_table_names_the_busiest_files_and_why_they_went_cold() {
+        let c = tiny(); // 2 units a file, guard at 8 hits a miss
+        let s = Source::new(content(16 * 64));
+        let busy = reg(&c, "data/skyrim.esm", 16 * 64);
+        for off in 0..200u64 {
+            read(&c, &busy, &s, off % 16, 1).unwrap();
+        }
+        let rand = reg(&c, "data/random.bsa", 16 * 64);
+        for i in 0..20u64 {
+            let _ = read(&c, &rand, &s, (i * 7 % 64) * 16, 1);
+        }
+        let bad = reg(&c, "data/broken.dds", 100);
+        let mut buf = [0u8; 2];
+        for _ in 0..COLD_AFTER_FAILED_FETCHES {
+            let _ = c.read(&bad, 0, &mut buf, |_, _| Err(-5));
+        }
+        let top = c.top_files(2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].path, "data/skyrim.esm");
+        assert_eq!(
+            (
+                top[0].diag.reads,
+                top[0].diag.hits,
+                top[0].diag.misses,
+                top[0].diag.fetches
+            ),
+            (200, 199, 1, 1)
+        );
+        assert_eq!(top[0].diag.bytes_fetched, 16);
+        assert_eq!(top[1].path, "data/random.bsa");
+        assert_eq!(top[1].diag.cold_guard, 1);
+        assert!(top[1].cold_now);
+        let all = c.top_files(10);
+        let b = all.iter().find(|r| r.path == "data/broken.dds").unwrap();
+        assert_eq!((b.diag.cold_failures, b.diag.cold_guard), (1, 0));
+    }
+
+    #[test]
+    fn a_swept_files_diagnostics_stay_in_the_table() {
+        let c = tiny();
+        let s = Source::new(content(100));
+        {
+            let f = reg(&c, "gone.txt", 3);
+            read(&c, &f, &s, 0, 2).unwrap();
+            c.invalidate_path(0, "unrelated"); // nothing to do with it
+        }
+        // Evict its unit, then sweep it out with many other registrations.
+        for i in 0..8 {
+            let f = reg(&c, &format!("big{i}"), 100);
+            read(&c, &f, &s, 0, 1).unwrap();
+        }
+        for i in 0..SWEEP_MIN + 10 {
+            let _ = reg(&c, &format!("x{i}"), 100);
+        }
+        assert!(!lock(&c.files).by_name.contains_key(&Name {
+            root: 0,
+            path: "gone.txt".into()
+        }));
+        let top = c.top_files(100);
+        let g = top
+            .iter()
+            .find(|r| r.path == "gone.txt")
+            .expect("retired diag kept");
+        assert_eq!(
+            (g.diag.reads, g.diag.fetches, g.diag.bytes_fetched),
+            (1, 1, 3)
+        );
+    }
+
+    /// With the defaults, random 4 KiB reads inside a region the file may
+    /// hold warm up and stay cached — first fetches are not held against
+    /// it — while the same reads over a file far larger than it may hold
+    /// keep re-fetching what its own LRU dropped, and go cold.
+    #[test]
+    fn a_warming_region_stays_cached_and_a_file_read_at_random_goes_cold() {
+        let mib = 1u64 << 20;
+        let c = ReadCache::default();
+        let region = reg(&c, "region.esm", (64 * mib) as usize);
+        let wide = reg(&c, "wide.bsa", (64 * mib) as usize);
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut buf = vec![0u8; 4096];
+        let mut fetch = |_: u64, b: &mut [u8]| Ok(b.len());
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let off = 16 * mib + x % (8 * mib - 4096);
+            assert!(c.read(&region, off, &mut buf, &mut fetch).is_some());
+        }
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let _ = c.read(&wide, x % (64 * mib - 4096), &mut buf, &mut fetch);
+        }
+        let top = c.top_files(2);
+        let r = top.iter().find(|r| r.path == "region.esm").unwrap();
+        assert_eq!(r.diag.cold_guard, 0, "{r:?}");
+        assert!(r.diag.hits > 19_000, "{r:?}");
+        let w = top.iter().find(|r| r.path == "wide.bsa").unwrap();
+        assert!(w.diag.cold_guard >= 1, "{w:?}");
+    }
+
+    #[test]
+    fn the_defaults_are_64k_units_runs_to_1mib_and_256mib() {
+        let d = CacheConfig::default();
+        assert_eq!((d.block, d.max_run, d.threshold), (64 << 10, 16, 64 << 10));
+        assert_eq!((d.blocks_per_file, d.max_bytes), (256, 256 << 20));
+        assert_eq!(ReadCache::default().stats().max_bytes, 256 << 20);
+    }
+
     // ---- coherence ---------------------------------------------------------
 
     #[test]
@@ -1495,6 +2125,9 @@ mod tests {
     fn a_file_read_at_random_goes_cold_and_is_read_uncached_for_a_while() {
         let c = ReadCache::new(CacheConfig {
             block: 16,
+            max_run: 1,
+            cold_hits_per_miss: DEFAULT_COLD_HITS_PER_MISS,
+            cold_counts_first_fetch: true,
             threshold: 8,
             blocks_per_file: 2,
             max_bytes: 1 << 20,

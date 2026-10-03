@@ -378,7 +378,7 @@ mod imp {
             vfs_ipc::read_fragmented(&c.c, &c.gate, &c.plan, fh, off, buf)
         };
         println!(
-            "\n== small reads, uncached vs the read cache (1 MiB blocks, 8 a file, 64 MiB) =="
+            "\n== small reads, uncached vs the read cache (64 KiB units, runs to 1 MiB, 256 MiB) =="
         );
         type Pattern = (&'static str, usize, usize, fn(&mut u64, u64) -> u64);
         let patterns: [Pattern; 3] = [

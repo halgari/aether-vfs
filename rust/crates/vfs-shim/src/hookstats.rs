@@ -193,6 +193,8 @@ struct Snapshot {
     hook_panics: HashMap<&'static str, u64>,
     /// `None` when `VFS_SHIM_READ_CACHE` turned the cache off.
     read_cache: Option<vfs_ipc::CacheStats>,
+    /// The read cache's busiest files (empty when it is off).
+    read_cache_files: Vec<vfs_ipc::FileReport>,
 }
 
 /// Clone the contents of one of this module's `Mutex<Option<T>>` accumulators,
@@ -262,6 +264,7 @@ fn snapshot() -> Snapshot {
         hook_panics_total: hook_panics_total(),
         hook_panics: accumulated(&HOOK_PANICS),
         read_cache: crate::read_cache::stats(),
+        read_cache_files: crate::read_cache::top_files(READ_CACHE_FILES_SHOWN),
     }
 }
 
@@ -550,11 +553,11 @@ fn render_read_cache(snap: &Snapshot) -> String {
         return String::new();
     }
     let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
-    format!(
+    let mut s = format!(
         "\n{READ_CACHE_LABEL}:\n  \
          hits {} / misses {} / declined {}   ({:.1}% of cached reads were hits)\n  \
-         fetches {} ({:.1} MiB fetched)   evictions {}   resident {:.1} MiB in {} files\n  \
-         invalidations {} ({} blocks dropped)   cold files {}\n  \
+         fetches {} ({:.1} MiB fetched)   evictions {}   resident {:.1} of {:.0} MiB in {} files\n  \
+         misses on units the cap evicted {}   invalidations {} ({} blocks dropped)   cold files {}\n  \
          failed fetches {}   fetches given up on (past their deadline) {}\n",
         c.hits,
         c.misses,
@@ -568,13 +571,69 @@ fn render_read_cache(snap: &Snapshot) -> String {
         mib(c.bytes_fetched),
         c.evictions,
         mib(c.resident_bytes),
+        mib(c.max_bytes),
         c.files,
+        c.pressure_misses,
         c.invalidations,
         c.blocks_invalidated,
         c.cold,
         c.fetch_failures,
         c.fetches_abandoned,
-    )
+    );
+    s.push_str(&render_read_cache_files(&snap.read_cache_files));
+    s
+}
+
+/// How many files the read cache's per-file table shows.
+const READ_CACHE_FILES_SHOWN: usize = 20;
+
+/// The read cache's busiest files: small reads offered, how they were
+/// served, what fetching cost, and whether (and why) the file went cold —
+/// `guard` when its misses were too many for its hits, `failures` when its
+/// fetches kept failing. `capacity` misses are units the process-wide cap
+/// evicted, which a larger `VFS_SHIM_READ_CACHE_MIB` would have kept.
+fn render_read_cache_files(rows: &[vfs_ipc::FileReport]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let mut s = format!(
+        "  busiest files (top {}):\n  {:>9} {:>9} {:>7} {:>8} {:>8} {:>9}  {:<22} file\n",
+        rows.len(),
+        "reads",
+        "hits",
+        "misses",
+        "capacity",
+        "declined",
+        "fetched",
+        "cold"
+    );
+    for r in rows {
+        let d = &r.diag;
+        let cold = match (d.cold_guard, d.cold_failures) {
+            (0, 0) => "no".to_string(),
+            (g, 0) => format!("guard x{g}"),
+            (0, f) => format!("failures x{f}"),
+            (g, f) => format!("guard x{g}, failures x{f}"),
+        };
+        let cold = format!(
+            "{cold}{}{}",
+            if r.cold_now { " (now)" } else { "" },
+            if r.poisoned { " poisoned" } else { "" }
+        );
+        s.push_str(&format!(
+            "  {:>9} {:>9} {:>7} {:>8} {:>8} {:>7.1}Mi  {:<22} {}:{}\n",
+            d.reads,
+            d.hits,
+            d.misses,
+            d.pressure_misses,
+            d.declined,
+            d.bytes_fetched as f64 / (1024.0 * 1024.0),
+            cold,
+            r.root,
+            r.path
+        ));
+    }
+    s
 }
 
 fn render_fills(snap: &Snapshot) -> String {
@@ -2125,6 +2184,7 @@ mod tests {
             hook_panics_total: 0,
             hook_panics: HashMap::new(),
             read_cache: None,
+            read_cache_files: Vec::new(),
         }
     }
 
@@ -2143,9 +2203,37 @@ mod tests {
                 cold: 0,
                 fetch_failures: 7,
                 fetches_abandoned: 1,
+                pressure_misses: 4,
                 resident_bytes: 8 << 20,
+                max_bytes: 256 << 20,
                 files: 5,
             }),
+            read_cache_files: vec![
+                vfs_ipc::FileReport {
+                    root: 0,
+                    path: "data/skyrim.esm".into(),
+                    diag: vfs_ipc::FileDiag {
+                        reads: 838_643,
+                        hits: 838_400,
+                        misses: 243,
+                        bytes_fetched: 240 << 20,
+                        ..Default::default()
+                    },
+                    cold_now: false,
+                    poisoned: false,
+                },
+                vfs_ipc::FileReport {
+                    root: 0,
+                    path: "data/random.bsa".into(),
+                    diag: vfs_ipc::FileDiag {
+                        reads: 900,
+                        cold_guard: 2,
+                        ..Default::default()
+                    },
+                    cold_now: true,
+                    poisoned: false,
+                },
+            ],
             ..empty_snapshot()
         };
         let s = render_read_cache(&snap);
@@ -2160,6 +2248,11 @@ mod tests {
             "invalidations 1 (4 blocks dropped)",
             "failed fetches 7",
             "given up on (past their deadline) 1",
+            "resident 8.0 of 256 MiB",
+            "misses on units the cap evicted 4",
+            "busiest files (top 2)",
+            "0:data/skyrim.esm",
+            "guard x2 (now)",
         ] {
             assert!(s.contains(want), "missing {want:?} in:\n{s}");
         }
