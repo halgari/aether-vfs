@@ -105,6 +105,11 @@ pub struct StorageConfig {
     /// creates many small files (three catalog commits each) and makes its
     /// own durable points ([`crate::Storage::sync`]) raises it. At least 1.
     pub max_deferred_commits: u64,
+    /// The catalog's redb page cache, bytes. Half of it may hold pages
+    /// changed by non-durable commits; past that redb writes pages out one
+    /// at a time, so a catalog much larger than this (hundreds of thousands
+    /// of files) costs many small writes and reads.
+    pub catalog_cache_bytes: usize,
 }
 
 impl Default for StorageConfig {
@@ -115,6 +120,7 @@ impl Default for StorageConfig {
             ram_tier_bytes: 256 << 20,
             durability: Durability::default(),
             max_deferred_commits: crate::storage::DEFERRED_MAX_COMMITS,
+            catalog_cache_bytes: crate::catalog::CACHE_BYTES,
         }
     }
 }

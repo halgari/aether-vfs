@@ -320,7 +320,7 @@ impl Storage {
         // fails here, before it opens (and waits on) the catalog database.
         let store = BlockStore::open(dir, cfg.store.clone())?;
         let catalog_path = dir.join("catalog.redb");
-        let catalog = Catalog::open(&catalog_path)?;
+        let catalog = Catalog::open_with_cache(&catalog_path, cfg.catalog_cache_bytes)?;
         // Spec §6: repair what a crash between the two halves' commits left,
         // before the cache budget is summed and before any provider exists.
         let gate = RwLock::new(());
