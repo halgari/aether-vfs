@@ -9,7 +9,9 @@
 //! * `version` — `NvAPI_GetInterfaceVersionString`;
 //! * `gpus` and `gpu0` — `NvAPI_EnumPhysicalGPUs`' count and the first GPU's
 //!   `NvAPI_GPU_GetFullName`;
-//! * `nvngx` — whether `nvngx.dll` (the driver's NGX loader) loads.
+//! * `nvngx` — whether `nvngx.dll` (the driver's NGX loader) loads;
+//! * `nvidia_wine_dll_dir` — `NVIDIA_WINE_DLL_DIR` as the program sees it
+//!   (`unset` when it is not), where NGX looks for the driver's other DLLs.
 //!
 //! Exit code: 0 when NVAPI initialised, 10 when it did not, 11 when
 //! `nvapi64.dll` or its export is missing (not 2 or 3, which are
@@ -74,6 +76,10 @@ mod probe {
         // pointer is checked for null before it is transmuted and called with
         // the signature NVAPI's headers give it.
         unsafe {
+            line(
+                "nvidia_wine_dll_dir",
+                std::env::var("NVIDIA_WINE_DLL_DIR").unwrap_or_else(|_| "unset".to_string()),
+            );
             let ngx = LoadLibraryA(c"nvngx.dll".as_ptr());
             if ngx.is_null() {
                 line("nvngx", format!("error {}", GetLastError()));

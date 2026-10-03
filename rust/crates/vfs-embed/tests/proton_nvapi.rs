@@ -76,8 +76,8 @@ fn a_launched_program_initialises_nvapi_and_not_when_turned_off() {
         .1;
     let status = vfs_proton::nvapi::status(&runtime);
     eprintln!("nvapi status: {status:?}");
-    if !status.available {
-        eprintln!("skipping: {}", status.reason);
+    if !status.dlss.available {
+        eprintln!("skipping: {}", status.dlss.reason);
         return;
     }
     let Some(client) = steam_client() else {
@@ -126,6 +126,24 @@ fn a_launched_program_initialises_nvapi_and_not_when_turned_off() {
     );
     assert!(probe(&text)["nvapi64"].starts_with("error"), "{text}");
 
+    // Proton's setup also copied the NGX DLLs, and turning NVAPI off leaves
+    // them (so does the script): take them out, so "loaded" below can only be
+    // this launch's copy.
+    let home = PathBuf::from(std::env::var_os("VFS_HOME").unwrap());
+    let pfx = vfs_proton::prefix::prefix_dir(
+        &vfs_proton::Root::at(home),
+        "nvapi-probe",
+        &PrefixInit::Proton {
+            steam_client: steam_client().unwrap(),
+            app_id: None,
+        },
+    )
+    .unwrap();
+    let sys32 = pfx.join("drive_c/windows/system32");
+    for dll in vfs_proton::nvapi::NGX_DLLS {
+        let _ = std::fs::remove_file(sys32.join(dll));
+    }
+
     opts.nvapi = true;
     let code = s.launch(&opts).expect("launch with nvapi on");
     let text = std::fs::read_to_string(&log).unwrap();
@@ -140,6 +158,14 @@ fn a_launched_program_initialises_nvapi_and_not_when_turned_off() {
     assert_eq!(
         seen.get("nvngx").map(String::as_str),
         Some("loaded"),
+        "{text}"
+    );
+    for dll in vfs_proton::nvapi::NGX_DLLS {
+        assert!(sys32.join(dll).is_file(), "{dll} put back by the launch");
+    }
+    assert_eq!(
+        seen.get("nvidia_wine_dll_dir").map(PathBuf::from),
+        status.ngx_dir,
         "{text}"
     );
     assert!(
