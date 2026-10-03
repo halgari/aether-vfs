@@ -90,8 +90,9 @@ pub struct WineLaunch {
     pub args: Vec<String>,
     /// The host's own variables for the child, applied over [`launch_env`]'s:
     /// `WINEDLLOVERRIDES` is merged with [`BASE_DLL_OVERRIDES`] (see
-    /// [`merge_dll_overrides`]), `WINEDEBUG` replaces [`DEFAULT_WINEDEBUG`],
-    /// and anything else is added. A name the launch's own handshake uses is
+    /// [`merge_dll_overrides`]), `LD_LIBRARY_PATH` and `WINEDLLPATH` go after
+    /// the runtime's own directories, `WINEDEBUG` replaces
+    /// [`DEFAULT_WINEDEBUG`], and anything else is added. A name the launch's own handshake uses is
     /// refused ([`LaunchError::ReservedEnv`]). Child-only: nothing here is
     /// written into this process's environment.
     pub extra_env: BTreeMap<String, String>,
@@ -286,20 +287,15 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
     // without Proton's lib dirs `winedmo.so` cannot load its FFmpeg and no mp4
     // opens. An `extra_env` `LD_LIBRARY_PATH` goes after the runtime dirs, in
     // front of the host's value, so it can never displace them.
-    let host_ld = std::env::var_os("LD_LIBRARY_PATH");
-    let ld_in = match (l.extra_env.get("LD_LIBRARY_PATH"), &host_ld) {
-        (Some(x), Some(h)) if !h.is_empty() => Some(std::ffi::OsString::from(format!(
-            "{x}:{}",
-            h.to_string_lossy()
-        ))),
-        (Some(x), _) => Some(std::ffi::OsString::from(x)),
-        (None, h) => h.clone(),
-    };
+    // `WINEDLLPATH` the same way: an `extra_env` value goes after the
+    // runtime's (and wine-nvml's) directories, in front of the host's.
+    let ld_in = caller_then_host(l, "LD_LIBRARY_PATH");
+    let dll_in = caller_then_host(l, "WINEDLLPATH");
     for (k, v) in runtime_lib_env(
         &runtime_abs,
         ld_in.as_deref(),
         std::env::var_os("ORIG_LD_LIBRARY_PATH").as_deref(),
-        std::env::var_os("WINEDLLPATH").as_deref(),
+        dll_in.as_deref(),
     ) {
         env.insert(k, v);
     }
@@ -370,7 +366,7 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
         if is_reserved_env(k) {
             continue; // refused by `check_extra_env` before any spawn
         }
-        if k == "LD_LIBRARY_PATH" {
+        if k == "LD_LIBRARY_PATH" || k == "WINEDLLPATH" {
             continue; // merged after the runtime dirs above
         }
         let v = if k == "WINEDLLOVERRIDES" {
@@ -387,6 +383,20 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
         env.insert(vfs_env::READY_TIMEOUT_SECS.to_string(), secs.max(1).to_string());
     }
     env
+}
+
+/// A search-path variable's inherited part: [`WineLaunch::extra_env`]'s value
+/// in front of this process's, either alone when the other is unset or empty.
+fn caller_then_host(l: &WineLaunch, name: &str) -> Option<std::ffi::OsString> {
+    let host = std::env::var_os(name);
+    match (l.extra_env.get(name), &host) {
+        (Some(x), Some(h)) if !h.is_empty() => Some(std::ffi::OsString::from(format!(
+            "{x}:{}",
+            h.to_string_lossy()
+        ))),
+        (Some(x), _) => Some(std::ffi::OsString::from(x)),
+        (None, h) => h.clone(),
+    }
 }
 
 /// Whether `name` is one the launch sets (or clears) itself, and so one
@@ -940,6 +950,12 @@ mod tests {
             env["WINEDLLPATH"]
         );
         assert!(env["WINEDLLPATH"].ends_with(&plain["WINEDLLPATH"]));
+
+        // A caller's WINEDLLPATH keeps the runtime's and nvml's in front.
+        l.extra_env = BTreeMap::from([("WINEDLLPATH".to_string(), "/mine".to_string())]);
+        let dll = launch_env(&l)["WINEDLLPATH"].clone();
+        assert!(dll.starts_with("/rt/nvml/wine:"), "{dll}");
+        assert!(dll.contains("/files/lib/wine:/mine"), "{dll}");
 
         l.extra_env = BTreeMap::from([("DXVK_ENABLE_NVAPI".to_string(), "0".to_string())]);
         assert_eq!(
