@@ -12,7 +12,7 @@
 //! bytes. Each configuration writes every file into a fresh store (in `$TMPDIR`) from
 //! `--writers` threads as bulk writes, in runs of `--run-blocks` blocks (64 is what
 //! `vfs-storage`'s layers write at once, and what a 4 MiB cache fetch unit holds), and
-//! prints logical MB/s and the stored ratio. The GPU is opened (and warmed) before the clock
+//! prints logical MB/s, the stored ratio and the CPU time the writes took. The GPU is opened (and warmed) before the clock
 //! starts; its opening time is printed apart.
 
 use std::path::{Path, PathBuf};
@@ -149,6 +149,17 @@ fn synthetic(max: usize) -> Vec<Vec<u8>> {
     out
 }
 
+/// This process's CPU time so far (user + system), from `/proc/self/stat` on
+/// Linux; `None` elsewhere.
+fn cpu_seconds() -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // Fields after the command name (which may hold spaces) start after ')'.
+    let rest = &stat[stat.rfind(')')? + 2..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let ticks: f64 = f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?;
+    Some(ticks / 100.0)
+}
+
 fn config(name: &str) -> StoreConfig {
     let base = StoreConfig {
         block_size: BS as u32,
@@ -228,6 +239,7 @@ fn main() {
                 .unwrap();
         }
         let next = AtomicUsize::new(0);
+        let cpu0 = cpu_seconds();
         let t1 = Instant::now();
         std::thread::scope(|s| {
             for _ in 0..writers {
@@ -248,10 +260,13 @@ fn main() {
             }
         });
         let secs = t1.elapsed().as_secs_f64();
+        let cpu = cpu_seconds()
+            .zip(cpu0)
+            .map_or_else(|| "?".into(), |(b, a)| format!("{:.1}", b - a));
         let st = store.write_stats();
         let d = st.bulk.since(&before.bulk);
         println!(
-            "{name:>14}: {:>8.0} MB/s  ratio {:.4} (raw/stored, new blocks {:.2} GiB -> {:.2} GiB; {} raw)  {:.1}s  [{}; opening {:.2}s]",
+            "{name:>14}: {:>8.0} MB/s  ratio {:.4} (raw/stored, new blocks {:.2} GiB -> {:.2} GiB; {} raw)  {:.1}s, {cpu} CPU-s  [{}; opening {:.2}s]",
             d.logical_bytes as f64 / secs / 1e6,
             d.new_raw_bytes as f64 / d.stored_bytes as f64,
             d.new_raw_bytes as f64 / (1u64 << 30) as f64,
