@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use crate::compress::Codec;
 use crate::config::StoreConfig;
 use crate::error::{Error, Result};
 use crate::index::{
@@ -51,6 +52,8 @@ pub struct BlockStore {
     pub(crate) retired: Mutex<Vec<(u32, u64)>>,
     pub(crate) compact_lock: Mutex<()>,
     pub(crate) pool: Option<rayon::ThreadPool>,
+    /// Compresses new blocks per write class, and counts what writes stored.
+    pub(crate) codec: Codec,
     pub(crate) unflushed: AtomicU64,
     /// Non-durable index commits since the last durable commit.
     pub(crate) unflushed_commits: AtomicU64,
@@ -75,6 +78,24 @@ pub(crate) struct TestHooks {
 impl BlockStore {
     /// Opens or creates a store in directory `dir`.
     pub fn open(dir: impl AsRef<Path>, cfg: StoreConfig) -> Result<Self> {
+        Self::open_with(dir, cfg, Codec::new)
+    }
+
+    /// [`BlockStore::open`] with a stand-in for the GPU.
+    #[cfg(all(test, feature = "gpu-zstd"))]
+    pub(crate) fn open_with_engine(
+        dir: impl AsRef<Path>,
+        cfg: StoreConfig,
+        factory: crate::gpu::EngineFactory,
+    ) -> Result<Self> {
+        Self::open_with(dir, cfg, move |c| Codec::with_factory(c, factory))
+    }
+
+    fn open_with(
+        dir: impl AsRef<Path>,
+        cfg: StoreConfig,
+        codec: impl FnOnce(&StoreConfig) -> Codec,
+    ) -> Result<Self> {
         cfg.validate()?;
         let dir = dir.as_ref();
         let pack_dir = dir.join("packs");
@@ -118,6 +139,7 @@ impl BlockStore {
             retired: Mutex::new(Vec::new()),
             compact_lock: Mutex::new(()),
             pool,
+            codec: codec(&cfg),
             unflushed: AtomicU64::new(0),
             unflushed_commits: AtomicU64::new(0),
             healed: AtomicU64::new(0),
@@ -138,6 +160,9 @@ impl BlockStore {
         if self.shut_down.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        // No write can be running (close takes the store; drop has it alone), but stop the GPU
+        // service before the last durable commit all the same.
+        self.codec.shutdown();
         self.durable_commit(|t| t.put_meta(META_CLEAN_SHUTDOWN, 1))
     }
 

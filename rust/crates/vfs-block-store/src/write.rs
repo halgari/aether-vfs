@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
 
-use crate::codec::{EncodedBlock, HEADER_LEN, Hash128, encode_block, hash128};
+use crate::class::WriteClass;
+use crate::codec::{EncodedBlock, HEADER_LEN, Hash128, hash128};
 use crate::error::{Error, Result};
 use crate::index::{BlockLoc, PackState, Tables};
 use crate::manifest::{MISSING, block_count, block_len};
@@ -39,7 +40,21 @@ impl BlockStore {
     /// `block_size` bytes, except the file's final block, which must be exactly its remaining length.
     /// The file must exist (see [`BlockStore::set_len`]). Large writes are committed in chunks of
     /// about `write_txn_bytes`; if a later chunk fails the error is [`Error::PartialWrite`].
+    ///
+    /// New blocks are compressed as this thread's [`WriteClass::current`] says (see
+    /// [`crate::with_write_class`]).
     pub fn write_blocks(&self, file_id: &[u8], first_block: u64, data: &[u8]) -> Result<()> {
+        self.write_blocks_as(file_id, first_block, data, WriteClass::current())
+    }
+
+    /// [`BlockStore::write_blocks`] with an explicit write class.
+    pub fn write_blocks_as(
+        &self,
+        file_id: &[u8],
+        first_block: u64,
+        data: &[u8],
+        class: WriteClass,
+    ) -> Result<()> {
         self.check_id(file_id)?;
         let bs = self.cfg.block_size;
         let len = self.stat(file_id)?.ok_or(Error::NotFound)?.len;
@@ -49,8 +64,11 @@ impl BlockStore {
         let mut done = 0u64;
         for chunk in data.chunks(chunk_bytes) {
             let result = self
-                .write_chunk(file_id, first_block + done, chunk)
-                .map(|()| done += chunk.len().div_ceil(bs as usize) as u64)
+                .write_chunk(file_id, first_block + done, chunk, class)
+                .map(|()| {
+                    self.codec.wrote(class, chunk.len() as u64);
+                    done += chunk.len().div_ceil(bs as usize) as u64
+                })
                 .and_then(|()| self.maybe_auto_flush());
             if let Err(e) = result {
                 return Err(if done == 0 {
@@ -67,7 +85,13 @@ impl BlockStore {
     }
 
     /// Writes one chunk in one index transaction.
-    fn write_chunk(&self, file_id: &[u8], first: u64, chunk: &[u8]) -> Result<()> {
+    fn write_chunk(
+        &self,
+        file_id: &[u8],
+        first: u64,
+        chunk: &[u8],
+        class: WriteClass,
+    ) -> Result<()> {
         let bs = self.cfg.block_size;
         let blocks: Vec<&[u8]> = chunk.chunks(bs as usize).collect();
         let hashes: Vec<Hash128> = self.install(|| blocks.par_iter().map(|b| hash128(b)).collect());
@@ -87,7 +111,7 @@ impl BlockStore {
 
         let mut new_records: HashMap<Hash128, BlockLoc> = HashMap::new();
         loop {
-            self.encode_and_append(&blocks, &hashes, &need, &mut new_records)?;
+            self.encode_and_append(&blocks, &hashes, &need, &mut new_records, class)?;
             crash::point("write_after_append");
             #[cfg(test)]
             {
@@ -156,6 +180,7 @@ impl BlockStore {
         hashes: &[Hash128],
         need: &[usize],
         out: &mut HashMap<Hash128, BlockLoc>,
+        class: WriteClass,
     ) -> Result<()> {
         let mut seen = HashSet::new();
         let todo: Vec<usize> = need
@@ -166,12 +191,12 @@ impl BlockStore {
         if todo.is_empty() {
             return Ok(());
         }
-        let level = self.cfg.zstd_level;
-        let encoded: Vec<EncodedBlock> = self.install(|| {
-            todo.par_iter()
-                .map(|&i| encode_block(blocks[i], hashes[i], level))
-                .collect::<std::io::Result<_>>()
-        })?;
+        // Compressed before anything is appended or recorded, whichever compressor runs.
+        let todo_blocks: Vec<&[u8]> = todo.iter().map(|&i| blocks[i]).collect();
+        let todo_hashes: Vec<Hash128> = todo.iter().map(|&i| hashes[i]).collect();
+        let encoded: Vec<EncodedBlock> =
+            self.codec
+                .encode(self.pool.as_ref(), &todo_blocks, &todo_hashes, class)?;
         let headers: Vec<[u8; HEADER_LEN]> = encoded.iter().map(|e| e.header.encode()).collect();
         let locs = self.append_records(
             headers
