@@ -164,6 +164,10 @@ pub(crate) struct LayerProvider {
     /// Test hook: the next file create fails at the store.
     #[cfg(test)]
     pub(crate) fail_store_create: AtomicBool,
+    /// Test hook: the next `put_files` fails right after its rows are
+    /// committed (as a poisoned lock while dooming replaced files would).
+    #[cfg(test)]
+    pub(crate) fail_after_rows: AtomicBool,
 }
 
 impl LayerProvider {
@@ -179,6 +183,8 @@ impl LayerProvider {
             fresh: Mutex::new((0, HashSet::new())),
             #[cfg(test)]
             fail_store_create: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_after_rows: AtomicBool::new(false),
         }
     }
 
@@ -804,6 +810,10 @@ impl LayerProvider {
                     .put_many(self.id, &rows, false)
                     .map_err(|e| self.st_err("catalog put", e))?;
                 committed = true;
+                #[cfg(test)]
+                if self.fail_after_rows.swap(false, Ordering::SeqCst) {
+                    return Err(vfs_provider::ST_IO_ERROR);
+                }
                 for g in replaced {
                     self.doom(g)?;
                 }
@@ -1512,6 +1522,31 @@ mod tests {
         p.close(h).unwrap();
         assert!(read_file(&p, "f") == old[..100], "after close");
         assert_eq!(s.catalog.get(lid, "f").unwrap().unwrap().len, 100);
+    }
+
+    #[test]
+    fn put_files_failing_after_its_rows_keeps_their_data() {
+        let (s, d) = temp_storage();
+        let id = s.catalog.create_layer("l").unwrap();
+        let lp = LayerProvider::new(Arc::clone(&s), "l".into(), id);
+        let big: Vec<u8> = (0..2 * BS as usize + 3).map(|i| (i % 249) as u8).collect();
+        lp.fail_after_rows
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            lp.put_files(&[("c/a", b"alpha"), ("c/big", &big)]),
+            Err(ST_IO_ERROR)
+        );
+        // The rows were committed: their data is still there.
+        let p: Arc<dyn Provider> = Arc::new(lp);
+        assert_eq!(read_file(&p, "c/a"), b"alpha");
+        assert_eq!(read_file(&p, "c/big"), big);
+        drop(p);
+        s.close().unwrap();
+        let s = Storage::open(d.path(), cfg()).unwrap();
+        let p = s.layer("l").unwrap();
+        assert_eq!(read_file(&p, "c/a"), b"alpha");
+        assert_eq!(read_file(&p, "c/big"), big);
+        assert!(s.store.verify().unwrap().is_ok());
     }
 
     #[test]
