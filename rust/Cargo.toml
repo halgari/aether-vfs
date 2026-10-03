@@ -53,6 +53,8 @@ members = [
   # Steam API probe for the Proton launch path: loads a game's own
   # steam_api64.dll and reports what it sees of the Steam client.
   "crates/vfs-fixture-steam",
+  # NVAPI probe for the Proton launch path: initialises NVAPI and loads NGX.
+  "crates/vfs-fixture-nvapi",
   "crates/vfs-ring-harness",
   "crates/xtask-descriptor",
 ]
