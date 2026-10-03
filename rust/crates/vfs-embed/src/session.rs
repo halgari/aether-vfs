@@ -159,6 +159,16 @@ pub struct LaunchOpts {
     /// nothing worth keeping. `None`: the child inherits this process's
     /// stdout and stderr, as before. Ignored on Windows.
     pub log_file: Option<PathBuf>,
+    /// **Proton path only**: NVIDIA NVAPI and NGX (DLSS) the way the `proton`
+    /// script sets them up (`vfs_proton::nvapi`). `true` (the default): when
+    /// an NVIDIA driver is loaded, the runtime's DXVK-NVAPI and the driver's
+    /// Wine NGX DLLs are copied into the prefix (only those that changed) and
+    /// the launch gets `DXVK_ENABLE_NVAPI=1`, `NVIDIA_WINE_DLL_DIR` and the
+    /// `nvapi*` overrides, under [`env`](Self::env)'s; on any other machine
+    /// nothing changes. `false`: none of that, and `nvapi64.dll`/`nvapi.dll`
+    /// are removed from the prefix, as the script does with NVAPI disabled.
+    /// Ignored on Windows.
+    pub nvapi: bool,
 }
 
 impl Default for LaunchOpts {
@@ -182,6 +192,7 @@ impl Default for LaunchOpts {
             cwd: None,
             ready_timeout: None,
             log_file: None,
+            nvapi: true,
         }
     }
 }
@@ -2053,7 +2064,25 @@ impl Session {
         let _ = std::fs::remove_file(&ready_path);
 
         let (injector, shim_dll, payload_dll) = locate_wine_artifacts(opts)?;
-        let (steam, notes) = self.steam_launch(&opts.env);
+        let (steam, mut notes) = self.steam_launch(&opts.env);
+        // Under the prefix lock taken above, like the rest of the prefix's
+        // setup.
+        let nvapi = if opts.nvapi {
+            vfs_proton::nvapi::setup(&vfs_proton::nvapi::Host::real(), &runtime)
+        } else {
+            vfs_proton::nvapi::remove(&prefix.dir)
+                .map_err(|e| format!("launch: removing NVAPI from the prefix: {e}"))?;
+            None
+        };
+        if let Some(nv) = &nvapi {
+            nv.install(&prefix.dir).map_err(|e| {
+                format!(
+                    "launch: installing NVAPI into the prefix: {e} (LaunchOpts::nvapi = false \
+                     launches without it)"
+                )
+            })?;
+            notes.push(nv.note());
+        }
 
         let wine = WineLaunch {
             runtime: runtime.clone(),
@@ -2082,6 +2111,7 @@ impl Session {
             log_file: opts.log_file.clone(),
             steam,
             notes,
+            nvapi,
         };
 
         let child = vfs_proton::launch::spawn(&wine).map_err(|e| format!("launch: {e}"))?;
