@@ -34,3 +34,7 @@ gpu-zstd = ["dep:gzc-gpu"]
 [[bench]]
 name = "store"
 harness = false
+
+[[example]]
+name = "gpu_bench"
+required-features = ["gpu-zstd"]
