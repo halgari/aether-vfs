@@ -1,0 +1,11 @@
+[package]
+name = "vfs-fixture-nvapi"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+description = "NVAPI probe: whether a launched program can initialise NVAPI and load NGX"
+
+[[bin]]
+name = "vfs-fixture-nvapi"
+path = "src/main.rs"
