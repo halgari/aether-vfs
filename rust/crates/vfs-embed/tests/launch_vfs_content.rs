@@ -492,3 +492,62 @@ fn an_absolute_image_inside_root_zero_that_only_the_graph_holds_is_staged_and_la
     let _ = std::fs::remove_dir_all(&state);
     let _ = std::fs::remove_dir_all(&overlay);
 }
+
+/// Reads through the session's own composed graph, as `Session::launch`'s
+/// staging step does — so lookups are the real providers' (case-insensitive).
+struct GraphSource<'a>(&'a Session);
+impl ImageSource for GraphSource<'_> {
+    fn read(&self, vpath: &str) -> Option<Vec<u8>> {
+        self.0.read_file(vpath).ok()
+    }
+}
+
+/// The Haskill shape: `skse64_loader.exe` launched with `SkyrimSE.exe` staged
+/// beside it, and ReShade carried in the game root as `DXGI.DLL`. Nothing
+/// imports dxgi from either EXE — DXVK's `d3d11.dll` does at process init —
+/// so the proxy must reach disk beside them anyway, and the session must say
+/// so for a host building `WINEDLLOVERRIDES`.
+#[test]
+fn session_staging_puts_a_game_root_proxy_dll_on_disk() {
+    let state = tmp("proxy-state");
+
+    let mut s = Session::new();
+    s.set_state_dir(&state);
+    s.mount(
+        "",
+        inline(&[
+            ("skse64_loader.exe", &bare_pe(b"LOADER")),
+            ("SkyrimSE.exe", &bare_pe(b"GAME")),
+            ("DXGI.DLL", &bare_pe(b"RESHADE")),
+            ("kernel32.dll", &bare_pe(b"STRAY")),
+        ]),
+    )
+    .unwrap();
+    assert!(s.staged_proxies().is_empty());
+
+    let exe = s
+        .stage_launch(
+            &GraphSource(&s),
+            &StageOpts {
+                exe_vpath: "skse64_loader.exe",
+                also: &["SkyrimSE.exe"],
+                fallback_dirs: &[],
+            },
+        )
+        .expect("stage");
+    let game_dir = exe.parent().unwrap();
+    let staged = game_dir.join("dxgi.dll");
+    assert!(
+        staged.is_file(),
+        "proxy dxgi.dll must be on real disk beside the EXE"
+    );
+    assert_eq!(marker(&std::fs::read(&staged).unwrap()), "RESHADE");
+    assert!(
+        !game_dir.join("kernel32.dll").exists(),
+        "a KnownDLL in the game folder must not be staged"
+    );
+    assert_eq!(s.staged_proxies(), vec!["dxgi.dll".to_string()]);
+
+    drop(s);
+    let _ = std::fs::remove_dir_all(&state);
+}
