@@ -124,6 +124,12 @@ pub struct WineLaunch {
     /// the top of [`log_file`](Self::log_file), or to this process's stderr
     /// when there is none — where the launch's own output goes.
     pub notes: Vec<String>,
+    /// NVIDIA NVAPI/NGX for this launch ([`crate::nvapi::setup`]), already
+    /// installed into the prefix: [`launch_env`] adds its environment, puts
+    /// [`NVAPI_OVERRIDES`](crate::nvapi::NVAPI_OVERRIDES) under the caller's
+    /// `WINEDLLOVERRIDES` and wine-nvml first in `WINEDLLPATH`, as the
+    /// `proton` script does. `None`: none of that.
+    pub nvapi: Option<crate::nvapi::Setup>,
 }
 
 /// `WINEDLLOVERRIDES` every launch carries: Mono and Gecko prompts would
@@ -298,10 +304,22 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
         env.insert(k, v);
     }
     // Mono and Gecko prompts would otherwise block a launch on a fresh prefix.
-    let base_overrides = match &l.steam {
+    let mut base_overrides = match &l.steam {
         SteamSide::Helper(_) => merge_dll_overrides(BASE_DLL_OVERRIDES, STEAM_HELPER_OVERRIDE),
         SteamSide::Untouched | SteamSide::Off => BASE_DLL_OVERRIDES.to_string(),
     };
+    // NVAPI's own: part of the base, so a caller's entry for one of these
+    // DLLs still wins, and `extra_env` can turn any of it back off.
+    if let Some(nv) = &l.nvapi {
+        base_overrides = merge_dll_overrides(&base_overrides, crate::nvapi::NVAPI_OVERRIDES);
+        let inherited_debug = std::env::var_os("DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS").is_some();
+        for (k, v) in nv.env(inherited_debug) {
+            env.insert(k, v);
+        }
+        if let (Some(nvml), Some(dll)) = (&nv.nvml_dir, env.get_mut("WINEDLLPATH")) {
+            *dll = format!("{}:{dll}", nvml.to_string_lossy());
+        }
+    }
     env.insert("WINEDLLOVERRIDES".to_string(), base_overrides.clone());
     env.insert("WINEDEBUG".to_string(), DEFAULT_WINEDEBUG.to_string());
 
@@ -717,6 +735,7 @@ mod tests {
             log_file: None,
             steam: SteamSide::Untouched,
             notes: Vec::new(),
+            nvapi: None,
         }
     }
 
@@ -889,6 +908,45 @@ mod tests {
         assert_eq!(env["WINEDLLOVERRIDES"], "mscoree=d;mshtml=d;d3dx9_42=n,b");
         assert_eq!(env["WINEDEBUG"], "+loaddll");
         assert_eq!(env["SteamAppId"], "489830");
+    }
+
+    #[test]
+    fn nvapi_adds_protons_env_and_overrides_under_the_callers() {
+        let plain = launch_env(&sample());
+        for k in ["DXVK_ENABLE_NVAPI", "NVIDIA_WINE_DLL_DIR"] {
+            assert!(!plain.contains_key(k), "{k} without nvapi");
+        }
+        let mut l = sample();
+        l.nvapi = Some(crate::nvapi::Setup {
+            copies: Vec::new(),
+            ngx_dir: Some(PathBuf::from("/usr/lib/nvidia/wine")),
+            nvml_dir: Some(PathBuf::from("/rt/nvml/wine")),
+        });
+        l.extra_env = BTreeMap::from([(
+            "WINEDLLOVERRIDES".to_string(),
+            "dxgi=n;nvapi64=b".to_string(),
+        )]);
+        let env = launch_env(&l);
+        assert_eq!(
+            env["WINEDLLOVERRIDES"],
+            "mscoree=d;mshtml=d;nvapi64=b;nvofapi64=n;nvapi=n;nvcuda=b;dxgi=n",
+            "the caller's nvapi64 entry wins"
+        );
+        assert_eq!(env["DXVK_ENABLE_NVAPI"], "1");
+        assert_eq!(env["NVIDIA_WINE_DLL_DIR"], "/usr/lib/nvidia/wine");
+        assert!(
+            env["WINEDLLPATH"].starts_with("/rt/nvml/wine:"),
+            "{}",
+            env["WINEDLLPATH"]
+        );
+        assert!(env["WINEDLLPATH"].ends_with(&plain["WINEDLLPATH"]));
+
+        l.extra_env = BTreeMap::from([("DXVK_ENABLE_NVAPI".to_string(), "0".to_string())]);
+        assert_eq!(
+            launch_env(&l)["DXVK_ENABLE_NVAPI"],
+            "0",
+            "the caller can turn it off"
+        );
     }
 
     fn steam_sample() -> WineLaunch {

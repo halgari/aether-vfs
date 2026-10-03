@@ -19,6 +19,7 @@
 pub mod install;
 pub mod launch;
 pub mod layout;
+pub mod nvapi;
 pub mod prefix;
 #[cfg(feature = "acquire")]
 pub mod release;
