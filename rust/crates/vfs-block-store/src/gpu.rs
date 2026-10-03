@@ -856,12 +856,14 @@ pub(crate) mod tests {
         let fake = Arc::new(Fake::default());
         let enc = GpuEncoder::new(test_cfg(), fake_factory(Arc::clone(&fake)));
         let writers = 16;
+        let start = std::sync::Barrier::new(writers as usize);
         std::thread::scope(|s| {
             for w in 0..writers {
-                let enc = &enc;
+                let (enc, start) = (&enc, &start);
                 s.spawn(move || {
                     let blocks: Vec<Vec<u8>> = (0..4).map(|i| block(w * 4 + i, 4096)).collect();
                     let refs: Vec<&[u8]> = blocks.iter().map(Vec::as_slice).collect();
+                    start.wait();
                     check(&blocks, &enc.compress(&refs));
                 });
             }

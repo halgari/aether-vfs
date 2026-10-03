@@ -180,10 +180,12 @@ fn concurrent_bulk_writers_share_batches() {
             .set_len(format!("f{i}").as_bytes(), d.len() as u64)
             .unwrap();
     }
+    let start = std::sync::Barrier::new(files.len());
     std::thread::scope(|s| {
         for (i, d) in files.iter().enumerate() {
-            let store = &store;
+            let (store, start) = (&store, &start);
             s.spawn(move || {
+                start.wait();
                 with_write_class(WriteClass::Bulk, || {
                     store.write_blocks(format!("f{i}").as_bytes(), 0, d)
                 })
