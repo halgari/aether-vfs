@@ -111,19 +111,24 @@ impl Director {
     /// half it did not know about — copy-on-write, most damagingly, which
     /// nothing but a write test notices (gate 4, Task 6b).
     pub fn mount(&self, root: RootId, backend: Arc<dyn Provider>) -> Result<(), i32> {
-        self.roots
-            .lock()
-            .map_err(|_| map_io_err())?
-            .insert(root, backend);
+        let mut roots = self.roots.lock().map_err(|_| map_io_err())?;
+        roots.insert(root, backend);
+        // Bumped inside the critical section that swaps the provider, so an
+        // open (which reads both under the same lock: `provider_and_gen`)
+        // can never pair the new provider with the old generation.
         self.mount_gen.fetch_add(1, Ordering::AcqRel);
+        drop(roots);
         Ok(())
     }
 
     /// Remove whatever provider serves `root`, if any (used when a session
     /// rebuilds that root's composition).
     pub fn unmount(&self, root: RootId) -> Result<(), i32> {
-        self.roots.lock().map_err(|_| map_io_err())?.remove(&root);
+        let mut roots = self.roots.lock().map_err(|_| map_io_err())?;
+        roots.remove(&root);
+        // In the same critical section as the removal: see `mount`.
         self.mount_gen.fetch_add(1, Ordering::AcqRel);
+        drop(roots);
         Ok(())
     }
 
@@ -132,6 +137,16 @@ impl Director {
     /// [`Director::mount`].
     pub fn serves(&self, root: RootId) -> Result<bool, i32> {
         Ok(self.roots.lock().map_err(|_| map_io_err())?.contains_key(&root))
+    }
+
+    /// The provider serving `root` and the mount generation it belongs to,
+    /// read as one snapshot: `mount`/`unmount` change both under this lock.
+    fn provider_and_gen(&self, root: RootId) -> Result<(Option<Arc<dyn Provider>>, u32), i32> {
+        let roots = self.roots.lock().map_err(|_| map_io_err())?;
+        Ok((
+            roots.get(&root).cloned(),
+            self.mount_gen.load(Ordering::Acquire),
+        ))
     }
 
     fn provider_for(&self, root: RootId) -> Result<Option<Arc<dyn Provider>>, i32> {
@@ -196,12 +211,14 @@ impl Director {
     /// ring's open reply carries to the shim, whose read cache serves only
     /// immutable handles.
     pub fn open_info(&self, root: RootId, path: &str, flags: u32) -> Result<OpenInfo, i32> {
-        // Read before the provider is resolved, so a remount racing this
-        // open can only make the generation older than the content, which a
-        // client then treats as a different file from the next open's.
-        let mount_gen = self.mount_gen();
         let path = normalize(path).map_err(|_| bad_request())?;
-        let provider = self.provider_for(root)?.ok_or_else(not_found)?;
+        // The provider and its generation as one snapshot. Reading the
+        // generation apart from the provider (it used to be read first) let
+        // an open racing a remount label the new content with the old
+        // generation — the key under which the client had cached the old
+        // content, so it served the old bytes.
+        let (provider, mount_gen) = self.provider_and_gen(root)?;
+        let provider = provider.ok_or_else(not_found)?;
         if flags & OPEN_WRITE != 0 && provider.capabilities().access < Access::ReadWrite {
             // A configuration fact, not a caller mistake: this root has no
             // writable provider. Recorded by path so a later `vfs stats`
@@ -388,6 +405,75 @@ mod tests {
         for h in [a.fh, b.fh, b2.fh] {
             d.close(h).unwrap();
         }
+    }
+
+    /// **No generation ever names two contents**, however opens and
+    /// remounts interleave. Two providers with the same path at the same
+    /// size but different bytes are mounted in turn as fast as possible
+    /// while four threads open and read; every (generation → bytes) pairing
+    /// any open reports must be the only one for that generation. With the
+    /// generation read apart from the provider this found thousands of
+    /// generations tied to both contents in a few million opens.
+    #[test]
+    fn a_remount_racing_opens_never_pairs_new_content_with_an_old_generation() {
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicBool;
+        let a: Arc<dyn Provider> =
+            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"AAAA".as_slice())]));
+        let b: Arc<dyn Provider> =
+            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"BBBB".as_slice())]));
+        let d = Director::new();
+        d.mount(RootId::DEFAULT, Arc::clone(&a)).unwrap();
+        let stop = AtomicBool::new(false);
+        let seen: Mutex<HashMap<u32, u8>> = Mutex::new(HashMap::new());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let mut flip = false;
+                while !stop.load(Ordering::Relaxed) {
+                    let p = if flip { &a } else { &b };
+                    d.mount(RootId::DEFAULT, Arc::clone(p)).unwrap();
+                    flip = !flip;
+                }
+            });
+            let readers: Vec<_> = (0..4)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut local: Vec<(u32, u8)> = Vec::new();
+                        while std::time::Instant::now() < deadline {
+                            let o = d.open_info(RootId::DEFAULT, "f", OPEN_READ).unwrap();
+                            let mut buf = [0u8; 4];
+                            d.read(o.fh, 0, &mut buf).unwrap();
+                            d.close(o.fh).unwrap();
+                            local.push((o.mount_gen, buf[0]));
+                        }
+                        local
+                    })
+                })
+                .collect();
+            let all: Vec<(u32, u8)> = readers
+                .into_iter()
+                .flat_map(|r| r.join().unwrap())
+                .collect();
+            // Stop the remounts before asserting, or a failure never ends
+            // the scope.
+            stop.store(true, Ordering::Relaxed);
+            let mut seen = seen.lock().unwrap();
+            let mut both = 0usize;
+            for (gen, byte) in all {
+                if *seen.entry(gen).or_insert(byte) != byte {
+                    both += 1;
+                }
+            }
+            assert_eq!(
+                both, 0,
+                "{both} opens reported a generation already seen with other bytes"
+            );
+        });
+        assert!(
+            seen.lock().unwrap().len() > 1,
+            "the remounts must have interleaved"
+        );
     }
 
     /// A mutable provider's handles are mutable, and a remount moves the
