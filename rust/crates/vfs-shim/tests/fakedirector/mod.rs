@@ -360,7 +360,7 @@ impl Fake {
                     self.handles.lock().unwrap().insert(fh, vpath);
                     return (
                         P::ST_OK,
-                        P::encode_open_resp(&P::OpenResp { fh, size: 0, is_dir: true }),
+                        P::encode_open_resp(&P::OpenResp { fh, size: 0, is_dir: true, ..Default::default() }),
                     );
                 }
                 let mut files = self.files.lock().unwrap();
@@ -401,7 +401,7 @@ impl Fake {
                 self.handles.lock().unwrap().insert(fh, vpath);
                 (
                     P::ST_OK,
-                    P::encode_open_resp(&P::OpenResp { fh, size, is_dir: false }),
+                    P::encode_open_resp(&P::OpenResp { fh, size, is_dir: false, ..Default::default() }),
                 )
             }
             P::OP_WRITE => {

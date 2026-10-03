@@ -680,6 +680,17 @@ impl Provider for OverlayProvider {
         }
     }
 
+    /// A handle on a base file is as immutable as the base: base is never
+    /// written through this overlay (a write copies the file up and the
+    /// *path* then resolves to the upper), so what this handle reads cannot
+    /// change while it is open. A handle on the upper never is.
+    fn is_immutable(&self, h: Handle) -> bool {
+        match self.lookup(h) {
+            Ok((Layer::Base, inner)) => self.base.is_immutable(inner),
+            _ => false,
+        }
+    }
+
     fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
         match self.lookup(h)? {
             (Layer::Upper, inner) => self.upper.write_at(inner, offset, buf),

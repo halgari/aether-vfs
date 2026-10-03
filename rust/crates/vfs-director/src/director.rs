@@ -1,7 +1,7 @@
 //! Userspace FUSE kernel: one provider per root, global file handles.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::ops::{
@@ -47,6 +47,24 @@ pub struct Director {
     roots: Mutex<BTreeMap<RootId, Arc<dyn Provider>>>,
     opens: Mutex<HashMap<u64, OpenRec>>,
     next_fh: AtomicU64,
+    /// Bumped by every [`Director::mount`] and [`Director::unmount`], and
+    /// reported with every open ([`Director::open_info`]): what lets a
+    /// client tell an immutable file it has cached from the one a remount
+    /// put at the same path.
+    mount_gen: AtomicU32,
+}
+
+/// What [`Director::open_info`] says about a new handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenInfo {
+    pub fh: u64,
+    pub size: u64,
+    pub is_dir: bool,
+    /// The provider holding the handle says its bytes cannot change while it
+    /// is open ([`Provider::is_immutable`]). Never true for a write open.
+    pub immutable: bool,
+    /// [`Director::mount_gen`] when the handle was opened.
+    pub mount_gen: u32,
 }
 
 impl Default for Director {
@@ -61,7 +79,13 @@ impl Director {
             roots: Mutex::new(BTreeMap::new()),
             opens: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
+            mount_gen: AtomicU32::new(1),
         }
+    }
+
+    /// The current mount generation: see the field's docs.
+    pub fn mount_gen(&self) -> u32 {
+        self.mount_gen.load(Ordering::Acquire)
     }
 
     /// Set (or replace) the single provider serving `root`. Composition of
@@ -91,6 +115,7 @@ impl Director {
             .lock()
             .map_err(|_| map_io_err())?
             .insert(root, backend);
+        self.mount_gen.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -98,6 +123,7 @@ impl Director {
     /// rebuilds that root's composition).
     pub fn unmount(&self, root: RootId) -> Result<(), i32> {
         self.roots.lock().map_err(|_| map_io_err())?.remove(&root);
+        self.mount_gen.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -161,6 +187,19 @@ impl Director {
 
     /// Returns `(fh, size, is_dir)`.
     pub fn open(&self, root: RootId, path: &str, flags: u32) -> Result<(u64, u64, bool), i32> {
+        self.open_info(root, path, flags)
+            .map(|o| (o.fh, o.size, o.is_dir))
+    }
+
+    /// [`Director::open`], and also whether the new handle's bytes are
+    /// immutable and under which mount generation it was opened — what the
+    /// ring's open reply carries to the shim, whose read cache serves only
+    /// immutable handles.
+    pub fn open_info(&self, root: RootId, path: &str, flags: u32) -> Result<OpenInfo, i32> {
+        // Read before the provider is resolved, so a remount racing this
+        // open can only make the generation older than the content, which a
+        // client then treats as a different file from the next open's.
+        let mount_gen = self.mount_gen();
         let path = normalize(path).map_err(|_| bad_request())?;
         let provider = self.provider_for(root)?.ok_or_else(not_found)?;
         if flags & OPEN_WRITE != 0 && provider.capabilities().access < Access::ReadWrite {
@@ -171,6 +210,7 @@ impl Director {
             return Err(read_only());
         }
         let (bh, size, is_dir_flag) = provider.open(VPath::new(root, &path), flags)?;
+        let immutable = flags & OPEN_WRITE == 0 && !is_dir_flag && provider.is_immutable(bh);
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
         let cursor = if flags & OPEN_APPEND != 0 { Some(size) } else { None };
         self.opens.lock().map_err(|_| map_io_err())?.insert(
@@ -183,7 +223,13 @@ impl Director {
                 cursor,
             },
         );
-        Ok((fh, size, is_dir_flag))
+        Ok(OpenInfo {
+            fh,
+            size,
+            is_dir: is_dir_flag,
+            immutable,
+            mount_gen,
+        })
     }
 
     pub fn read(&self, fh: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
@@ -306,6 +352,72 @@ impl Director {
 mod tests {
     use super::*;
     use crate::ops::OPEN_READ;
+
+    /// What the shim's read cache relies on: a handle is reported immutable
+    /// only when the provider that holds it is, even inside an overlay whose
+    /// own capabilities say mutable — and never for a write open or a file
+    /// that has been copied up into the writable layer.
+    #[test]
+    fn open_info_reports_immutability_per_handle_through_an_overlay() {
+        let base = crate::mount_graph::MountGraph::new(vec![(
+            String::new(),
+            Arc::new(vfs_compose::InlineProvider::from_files([
+                ("a.esm", b"base-a".as_slice()),
+                ("b.ini", b"base-b".as_slice()),
+            ])) as Arc<dyn Provider>,
+        )])
+        .unwrap();
+        let upper = vfs_compose::MemoryProvider::new();
+        let overlay = vfs_compose::OverlayProvider::new(Arc::new(base), upper).unwrap();
+        let d = Director::new();
+        d.mount(RootId::DEFAULT, Arc::new(overlay)).unwrap();
+
+        let a = d.open_info(RootId::DEFAULT, "a.esm", OPEN_READ).unwrap();
+        assert!(a.immutable, "a base file of an immutable base is immutable");
+        let b = d.open_info(RootId::DEFAULT, "b.ini", OPEN_READ).unwrap();
+        assert!(b.immutable);
+
+        // A write open copies `b.ini` up; neither it nor any later read open
+        // of that path (now served by the upper) is immutable.
+        let w = d.open_info(RootId::DEFAULT, "b.ini", OPEN_WRITE).unwrap();
+        assert!(!w.immutable, "a write open is never immutable");
+        d.write(w.fh, 0, b"upper").unwrap();
+        d.close(w.fh).unwrap();
+        let b2 = d.open_info(RootId::DEFAULT, "b.ini", OPEN_READ).unwrap();
+        assert!(!b2.immutable, "a copied-up file is served by the mutable upper");
+        for h in [a.fh, b.fh, b2.fh] {
+            d.close(h).unwrap();
+        }
+    }
+
+    /// A mutable provider's handles are mutable, and a remount moves the
+    /// generation an open reports.
+    #[test]
+    fn open_info_reports_a_mutable_provider_and_the_mount_generation() {
+        let dir = std::env::temp_dir().join(format!("vfs-dirgen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f"), b"disk").unwrap();
+        let d = Director::new();
+        d.mount(RootId::DEFAULT, Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        let disk = d.open_info(RootId::DEFAULT, "f", OPEN_READ).unwrap();
+        assert!(!disk.immutable, "a real directory can change underneath us");
+
+        d.mount(
+            RootId::DEFAULT,
+            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+        )
+        .unwrap();
+        let inline = d.open_info(RootId::DEFAULT, "f", OPEN_READ).unwrap();
+        assert!(inline.immutable);
+        assert_ne!(
+            disk.mount_gen, inline.mount_gen,
+            "a remount must change the generation an open reports"
+        );
+        let again = d.open_info(RootId::DEFAULT, "f", OPEN_READ).unwrap();
+        assert_eq!(inline.mount_gen, again.mount_gen, "and nothing else may");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn open_for_write_against_a_read_only_provider_is_read_only_not_bad_request() {

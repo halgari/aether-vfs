@@ -148,6 +148,15 @@ impl Provider for LayeredProvider {
         self.routed(&layer).read_at(inner, offset, buf)
     }
 
+    /// The child holding the handle answers: an immutable layer's file is
+    /// immutable even when the stack beside it is not.
+    fn is_immutable(&self, h: Handle) -> bool {
+        match self.lookup(h) {
+            Ok((layer, inner)) => self.routed(&layer).is_immutable(inner),
+            Err(_) => false,
+        }
+    }
+
     fn close(&self, h: Handle) -> Result<(), i32> {
         let (layer, inner) = {
             let mut g = self.opens.lock().map_err(|_| map_io_err())?;
