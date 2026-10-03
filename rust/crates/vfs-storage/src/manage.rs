@@ -8,13 +8,13 @@ use std::path::{Component, Path};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use vfs_block_store::CompactOptions;
+use vfs_block_store::{ClassWriteStats, CompactOptions, Usage, WriteClass, WriteStats};
 use vfs_provider::{
     Provider, SetAttr, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_READ, OPEN_TRUNC, OPEN_WRITE,
 };
 
 use crate::cached::{lock, CacheStats};
-use crate::ids::layer_file_id;
+use crate::ids::{classify_store_id, layer_file_id, Guid, StoreIdKind};
 use crate::layer::LayerProvider;
 use crate::storage::{Storage, StorageError};
 
@@ -50,6 +50,19 @@ pub struct StorageStats {
     /// what compaction can reclaim.
     pub live_bytes: u64,
     pub layer_count: u64,
+}
+
+/// Stored against logical bytes, per kind of store file:
+/// [`Storage::space_usage`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpaceUsage {
+    /// Every pull-through cache file.
+    pub cache: Usage,
+    /// Every layer's files, by layer name.
+    pub layers: std::collections::BTreeMap<String, Usage>,
+    /// Store files that belong to no catalog row (layer files waiting for
+    /// deletion at the next durable point, orphans).
+    pub unlisted: Usage,
 }
 
 /// Names the overlay reserves in its upper; `export_layer` skips them.
@@ -216,6 +229,65 @@ impl Storage {
             }
         }
         Ok(())
+    }
+
+    /// Stored (compressed, deduplicated within a kind) against logical bytes
+    /// of the cache and of each layer. Reads every block row the store's
+    /// manifests reference: about a second per few million blocks.
+    pub fn space_usage(&self) -> Result<SpaceUsage, StorageError> {
+        let names: std::collections::HashMap<u64, String> = self
+            .catalog
+            .layer_names()?
+            .into_iter()
+            .map(|(n, id)| (id, n))
+            .collect();
+        let owner: std::collections::HashMap<Guid, String> = self
+            .catalog
+            .all_layer_guids()?
+            .into_iter()
+            .filter_map(|(layer, _, g)| names.get(&layer).map(|n| (g, n.clone())))
+            .collect();
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        enum Kind {
+            Cache,
+            Layer(String),
+            Unlisted,
+        }
+        let by = self.store.usage_by(|id| {
+            Some(match classify_store_id(id) {
+                StoreIdKind::Cache(_) => Kind::Cache,
+                StoreIdKind::Layer(g) => owner.get(&g).cloned().map_or(Kind::Unlisted, Kind::Layer),
+                StoreIdKind::Foreign => Kind::Unlisted,
+            })
+        })?;
+        let mut out = SpaceUsage::default();
+        for (k, u) in by {
+            match k {
+                Kind::Cache => out.cache = u,
+                Kind::Layer(n) => {
+                    out.layers.insert(n, u);
+                }
+                Kind::Unlisted => out.unlisted = u,
+            }
+        }
+        Ok(out)
+    }
+
+    /// What writes stored since open, per write class (see
+    /// [`vfs_block_store::BlockStore::write_stats`]).
+    pub fn write_stats(&self) -> WriteStats {
+        self.store.write_stats()
+    }
+
+    /// Both classes' [`Storage::write_stats`] together.
+    pub fn written(&self) -> ClassWriteStats {
+        let s = self.store.write_stats();
+        s.foreground.plus(&s.bulk)
+    }
+
+    /// What compresses `class` writes, for logs: `zstd:6`, `GPU opt16p1`, ...
+    pub fn compression(&self, class: WriteClass) -> String {
+        self.store.compression(class)
     }
 
     /// Cache counters, the store's pack space, and the number of layers.

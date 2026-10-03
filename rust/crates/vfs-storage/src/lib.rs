@@ -33,8 +33,16 @@ mod test_util;
 pub use cached::{CacheStats, SourceKey};
 pub use catalog::{CacheRec, Catalog, EntryRec};
 pub use config::{Durability, StorageConfig};
+pub use evict::ClearReport;
 pub use ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Guid, StoreIdKind};
-pub use manage::{LayerInfo, StorageStats};
+pub use manage::{LayerInfo, SpaceUsage, StorageStats};
 pub use ram::{RamStats, RamTier};
 pub use reconcile::ReconcileReport;
 pub use storage::{CloseOutcome, Storage, StorageError};
+// The block store's compression and accounting types, so a host configures
+// and reads them without depending on `vfs-block-store` itself.
+pub use vfs_block_store::{
+    with_write_class, BulkCompression, ClassWriteStats, StoreConfig, Usage, WriteClass, WriteStats,
+};
+#[cfg(feature = "gpu-zstd")]
+pub use vfs_block_store::{GpuConfig, GpuLevel, GpuStats, GPU_MAX_BLOCK};
