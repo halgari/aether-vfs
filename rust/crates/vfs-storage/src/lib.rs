@@ -32,7 +32,7 @@ mod test_util;
 
 pub use cached::{CacheStats, SourceKey};
 pub use catalog::{CacheRec, Catalog, EntryRec};
-pub use config::{Durability, StorageConfig};
+pub use config::{Durability, ScratchDir, StorageConfig};
 pub use evict::ClearReport;
 pub use ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Guid, StoreIdKind};
 pub use manage::{LayerInfo, SpaceUsage, StorageStats};

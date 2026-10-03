@@ -85,6 +85,17 @@ impl Default for Durability {
     }
 }
 
+/// A top-level directory of one layer whose files are temporaries (see
+/// [`StorageConfig::scratch_dirs`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScratchDir {
+    /// The layer's name, exactly as it is opened.
+    pub layer: String,
+    /// The directory, a single path component; it compares as paths do
+    /// (case-insensitively).
+    pub dir: String,
+}
+
 /// Configuration for [`crate::Storage::open`].
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
@@ -110,19 +121,20 @@ pub struct StorageConfig {
     /// at a time, so a catalog much larger than this (hundreds of thousands
     /// of files) costs many small writes and reads.
     pub catalog_cache_bytes: usize,
-    /// Top-level directories (in every layer) whose files are temporaries:
-    /// the host removes them after a crash, before it uses the layer. Under
-    /// [`Durability::Deferred`] a file there never makes a durable point of
-    /// its own when it is closed or flushed after one passed while it was
-    /// being written (the rewrite rule above): its partial content after a
-    /// crash is harmless, since the host deletes it.
+    /// Directories whose files are temporaries, each a top-level directory
+    /// of one named layer ([`ScratchDir`]): the host removes them after a
+    /// crash, before it uses the layer. Under [`Durability::Deferred`] a
+    /// file there never makes a durable point of its own when it is closed
+    /// or flushed after one passed while it was being written (the rewrite
+    /// rule above): its partial content after a crash is harmless, since
+    /// the host deletes it. Every other layer, and every other directory of
+    /// that layer, keeps the rule.
     ///
     /// Without this, a host that writes many large files at once into a
     /// temporary directory and renames them (as an installer does) pays a
     /// chain of durable points: every file open across one makes another at
-    /// its close, which every other open file then spans. Names compare
-    /// case-insensitively.
-    pub scratch_dirs: Vec<String>,
+    /// its close, which every other open file then spans.
+    pub scratch_dirs: Vec<ScratchDir>,
 }
 
 impl Default for StorageConfig {

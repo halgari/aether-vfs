@@ -460,18 +460,24 @@ impl LayerProvider {
             .is_ok_and(|f| f.0 == epoch && f.1.contains(guid))
     }
 
-    /// Whether `cell`'s file is in one of the storage's scratch directories
+    /// Whether `cell`'s file is in one of this layer's scratch directories
     /// ([`crate::StorageConfig::scratch_dirs`]): a temporary its host
     /// deletes after a crash, so a rewrite of it never needs a durable point.
     fn is_scratch(&self, cell: &FileCell) -> bool {
-        let dirs = &self.storage.cfg.scratch_dirs;
-        if dirs.is_empty() {
+        let mut dirs = self
+            .storage
+            .cfg
+            .scratch_dirs
+            .iter()
+            .filter(|d| d.layer == self.name)
+            .peekable();
+        if dirs.peek().is_none() {
             return false;
         }
         let path = cell.path.lock().unwrap_or_else(|e| e.into_inner());
         path.as_deref()
             .and_then(|p| p.split_once('/'))
-            .is_some_and(|(top, _)| dirs.iter().any(|d| fold(d) == top))
+            .is_some_and(|(top, _)| dirs.any(|d| fold(&d.dir) == top))
     }
 
     /// Called after a change that [`Durability::OnEveryClose`] makes durable
@@ -1692,58 +1698,127 @@ mod tests {
         assert_eq!(s.clock.points(), settled + 1, "a change makes it count");
     }
 
-    /// A file open across a durable point makes one at its close (its row
-    /// is durable now); in a scratch directory it does not, so many large
-    /// temporaries written at once do not chain durable points.
-    #[test]
-    fn a_scratch_file_open_across_a_durable_point_makes_none_at_close() {
-        let d = tempfile::tempdir().unwrap();
-        let s = Storage::open(
-            d.path(),
+    /// A storage whose layer "content" has the scratch directory `Tmp`.
+    fn scratch_storage(d: &std::path::Path) -> Arc<Storage> {
+        Storage::open(
+            d,
             StorageConfig {
-                scratch_dirs: vec!["Tmp".into()],
+                scratch_dirs: vec![crate::ScratchDir {
+                    layer: "content".into(),
+                    dir: "Tmp".into(),
+                }],
                 ..cfg()
             },
         )
-        .unwrap();
-        let p = s.layer("l").unwrap();
-        p.mkdir(at("tmp")).unwrap();
-        p.mkdir(at("keep")).unwrap();
+        .unwrap()
+    }
+
+    /// A file open across a durable point makes one at its close (its row
+    /// is durable now). In its layer's scratch directory it does not, so
+    /// many large temporaries written at once do not chain durable points;
+    /// the same directory in any other layer (a game's write layer) keeps
+    /// the rule, as does any other directory of the scratch layer.
+    #[test]
+    fn a_scratch_file_open_across_a_durable_point_makes_none_at_close() {
+        let d = tempfile::tempdir().unwrap();
+        let s = scratch_storage(d.path());
+        let c = s.layer("content").unwrap();
+        let w = s.layer("write").unwrap();
+        for (p, dir) in [(&c, "tmp"), (&c, "keep"), (&w, "tmp")] {
+            p.mkdir(at(dir)).unwrap();
+        }
         s.sync().unwrap();
-        let (t, _, _) = p.open(at("TMP/a"), OPEN_WRITE | OPEN_CREATE).unwrap();
-        let (k, _, _) = p.open(at("keep/a"), OPEN_WRITE | OPEN_CREATE).unwrap();
-        p.write_at(t, 0, &[1; 3 * BS as usize]).unwrap();
-        p.write_at(k, 0, &[2; 3 * BS as usize]).unwrap();
+        let (t, _, _) = c.open(at("TMP/a"), OPEN_WRITE | OPEN_CREATE).unwrap();
+        let (k, _, _) = c.open(at("keep/a"), OPEN_WRITE | OPEN_CREATE).unwrap();
+        let (g, _, _) = w.open(at("tmp/a"), OPEN_WRITE | OPEN_CREATE).unwrap();
+        for (p, h, v) in [(&c, t, 1u8), (&c, k, 2), (&w, g, 5)] {
+            p.write_at(h, 0, &[v; 3 * BS as usize]).unwrap();
+        }
         s.sync().unwrap();
+        for (p, h, v) in [(&c, t, 3u8), (&c, k, 4), (&w, g, 6)] {
+            p.write_at(h, 3 * BS, &[v; BS as usize]).unwrap();
+        }
         let before = s.clock.points();
-        p.write_at(t, 3 * BS, &[3; BS as usize]).unwrap();
-        p.write_at(k, 3 * BS, &[4; BS as usize]).unwrap();
-        p.close(t).unwrap();
+        c.close(t).unwrap();
         assert_eq!(
             s.clock.points(),
             before,
-            "a scratch file's close is deferred"
+            "the content layer's scratch file: deferred"
         );
-        p.close(k).unwrap();
+        c.close(k).unwrap();
         assert_eq!(
             s.clock.points(),
             before + 1,
-            "any other file's close is not"
+            "another directory of the content layer: a durable point"
         );
-        // Both read back whole, and do after a reopen.
+        w.close(g).unwrap();
+        assert_eq!(
+            s.clock.points(),
+            before + 2,
+            "tmp/ of another layer: a durable point"
+        );
+        // All read back whole, and do after a reopen.
         let mut buf = vec![0u8; 4 * BS as usize];
-        let (h, _, _) = p.open(at("tmp/a"), OPEN_READ).unwrap();
-        assert_eq!(p.read_at(h, 0, &mut buf).unwrap(), buf.len());
+        let (h, _, _) = c.open(at("tmp/a"), OPEN_READ).unwrap();
+        assert_eq!(c.read_at(h, 0, &mut buf).unwrap(), buf.len());
         assert_eq!(buf[3 * BS as usize], 3);
-        p.close(h).unwrap();
-        drop(p);
+        c.close(h).unwrap();
+        drop((c, w));
         drop(s);
         let s = Storage::open(d.path(), cfg()).unwrap();
-        let p = s.layer("l").unwrap();
-        let (h, _, _) = p.open(at("tmp/a"), OPEN_READ).unwrap();
-        assert_eq!(p.read_at(h, 0, &mut buf).unwrap(), buf.len());
+        let c = s.layer("content").unwrap();
+        let (h, _, _) = c.open(at("tmp/a"), OPEN_READ).unwrap();
+        assert_eq!(c.read_at(h, 0, &mut buf).unwrap(), buf.len());
         assert_eq!((buf[0], buf[3 * BS as usize]), (1, 3));
-        p.close(h).unwrap();
+        c.close(h).unwrap();
+    }
+
+    /// The hazard the rewrite rule guards against, for a scratch file: its
+    /// row is durable, the store alone is flushed in the middle of a
+    /// rewrite, it is closed (no durable point) and renamed onto its final
+    /// name, and the process is killed. The final name is absent or whole,
+    /// nothing outside the scratch directory is damaged, and the host can
+    /// clear the scratch directory. With a durable point after the rename,
+    /// the final name is whole.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_killed_scratch_rewrite_leaves_its_final_name_absent_or_whole() {
+        for sync_after_rename in [false, true] {
+            let d = tempfile::tempdir().unwrap();
+            let s = scratch_storage(d.path());
+            let c = s.layer("content").unwrap();
+            c.mkdir(at("tmp")).unwrap();
+            c.mkdir(at("c")).unwrap();
+            write_file(&c, "c/old", 0, b"kept");
+            let (h, _, _) = c.open(at("tmp/a"), OPEN_WRITE | OPEN_CREATE).unwrap();
+            c.write_at(h, 0, &[1; 2 * BS as usize]).unwrap();
+            s.sync().unwrap(); // tmp/a's row (two blocks) is durable now
+            c.set_len(h, 0).unwrap();
+            c.write_at(h, 0, &[2; 3 * BS as usize]).unwrap();
+            c.flush(h).unwrap(); // committed, not durable (scratch)
+            s.store.flush().unwrap(); // a store auto-flush mid-rewrite
+            c.write_at(h, 3 * BS, &[3; BS as usize]).unwrap();
+            c.close(h).unwrap();
+            c.rename(at("tmp/a"), at("c/k")).unwrap();
+            if sync_after_rename {
+                s.sync().unwrap();
+            }
+            let (k, kp, _killed) = killed_copy(d.path(), "content");
+            let mut want = vec![2u8; 3 * BS as usize];
+            want.extend_from_slice(&[3; BS as usize]);
+            match kp.getattr(at("c/k")).unwrap() {
+                Some(_) => assert_eq!(read_file(&kp, "c/k"), want, "c/k is whole"),
+                None => assert!(!sync_after_rename, "a synced rename is durable"),
+            }
+            assert_eq!(read_file(&kp, "c/old"), b"kept");
+            // The host clears its scratch directory, whatever is in it.
+            for n in names(&kp, "tmp") {
+                kp.remove(at(&format!("tmp/{n}"))).unwrap();
+            }
+            assert!(names(&kp, "tmp").is_empty());
+            k.sync().unwrap();
+            assert!(k.store.verify().unwrap().is_ok());
+        }
     }
 
     /// Once the last durable point is `max_interval` old, the next change
