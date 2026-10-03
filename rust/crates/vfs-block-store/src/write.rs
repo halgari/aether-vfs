@@ -84,6 +84,110 @@ impl BlockStore {
         Ok(())
     }
 
+    /// Creates (or replaces) each file of `files` (id, whole content) with
+    /// exactly that content, all of them in **one** index transaction: their
+    /// new blocks are compressed together (one GPU request for a bulk
+    /// write) and appended together. For many small files this replaces a
+    /// `set_len` and a `write_blocks` commit per file with one commit in
+    /// all. The batch should be modest (a few MiB): it is held in memory and
+    /// committed whole. A file id listed twice is refused.
+    ///
+    /// New blocks are compressed as this thread's [`WriteClass::current`] says.
+    pub fn put_files(&self, files: &[(&[u8], &[u8])]) -> Result<()> {
+        let class = WriteClass::current();
+        let bs = self.cfg.block_size;
+        let mut ids = HashSet::new();
+        for (id, data) in files {
+            self.check_id(id)?;
+            if !crate::manifest::len_fits(data.len() as u64, bs) {
+                return Err(Error::OutOfRange);
+            }
+            if !ids.insert(*id) {
+                return Err(Error::Config(format!(
+                    "put_files: file {:?} listed twice",
+                    String::from_utf8_lossy(id)
+                )));
+            }
+        }
+        // Every block of every file, and where each file's blocks start.
+        let mut blocks: Vec<&[u8]> = Vec::new();
+        let mut starts = Vec::with_capacity(files.len() + 1);
+        for (_, data) in files {
+            starts.push(blocks.len());
+            blocks.extend(data.chunks(bs as usize));
+        }
+        starts.push(blocks.len());
+        let hashes: Vec<Hash128> = self.install(|| blocks.par_iter().map(|b| hash128(b)).collect());
+        let mut need: Vec<usize> = {
+            let r = self.index.read()?;
+            let mut seen = HashSet::new();
+            let mut need = Vec::new();
+            for (i, h) in hashes.iter().enumerate() {
+                if seen.insert(*h) && r.dedup(h)?.is_none() {
+                    need.push(i);
+                }
+            }
+            need
+        };
+        let mut new_records: HashMap<Hash128, BlockLoc> = HashMap::new();
+        loop {
+            self.encode_and_append(&blocks, &hashes, &need, &mut new_records, class)?;
+            let retry = self.commit(|t| {
+                // As in `write_chunk`: a dedup hit freed since, or a new
+                // record whose pack was retired, is appended again.
+                let mut missing = Vec::new();
+                for (i, h) in hashes.iter().enumerate() {
+                    if t.dedup(h)?.is_some() {
+                        continue;
+                    }
+                    match new_records.get(h) {
+                        Some(loc) if pack_accepts_records(t, loc.pack)? => {}
+                        _ => missing.push(i),
+                    }
+                }
+                if !missing.is_empty() {
+                    return Ok(Some(missing));
+                }
+                for (k, (file_id, data)) in files.iter().enumerate() {
+                    let len = data.len() as u64;
+                    for id in files::resize(t, file_id, len, bs)? {
+                        t.decref(id)?;
+                    }
+                    let mut block_ids = Vec::with_capacity(starts[k + 1] - starts[k]);
+                    for h in &hashes[starts[k]..starts[k + 1]] {
+                        let id = match t.dedup(h)? {
+                            Some(id) => id,
+                            None => t.insert_block(new_records[h])?,
+                        };
+                        block_ids.push(id);
+                    }
+                    let old = files::set_slots(t, file_id, len, 0, &block_ids)?;
+                    for &id in &block_ids {
+                        t.incref(id)?;
+                    }
+                    for id in old {
+                        if id != MISSING {
+                            t.decref(id)?;
+                        }
+                    }
+                }
+                Ok(None)
+            })?;
+            match retry {
+                None => break,
+                Some(missing) => {
+                    for &i in &missing {
+                        new_records.remove(&hashes[i]);
+                    }
+                    need = missing;
+                }
+            }
+        }
+        let bytes: u64 = files.iter().map(|(_, d)| d.len() as u64).sum();
+        self.codec.wrote(class, bytes);
+        self.maybe_auto_flush()
+    }
+
     /// Writes one chunk in one index transaction.
     fn write_chunk(
         &self,
@@ -322,6 +426,46 @@ mod tests {
         let store = BlockStore::open(dir.path(), test_config()).unwrap();
         assert_eq!(read_all(&store, b"y"), n);
         assert!(store.verify().unwrap().is_ok());
+    }
+
+    #[test]
+    fn put_files_creates_and_replaces_files_in_one_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlockStore::open(dir.path(), test_config()).unwrap();
+        let bs = store.cfg.block_size as usize;
+        let a = random_bytes(1, 3 * bs + 17);
+        let b = random_bytes(2, 10);
+        let empty: Vec<u8> = Vec::new();
+        // `c` shares a block with `a`: stored once.
+        let mut c = a[..bs].to_vec();
+        c.extend_from_slice(&random_bytes(3, 5));
+        let before = store
+            .unflushed_commits
+            .load(std::sync::atomic::Ordering::Relaxed);
+        store
+            .put_files(&[(b"a", &a), (b"b", &b), (b"e", &empty), (b"c", &c)])
+            .unwrap();
+        let commits = store
+            .unflushed_commits
+            .load(std::sync::atomic::Ordering::Relaxed)
+            - before;
+        assert!(
+            commits <= 2,
+            "{commits} commits (one, plus a pack registration)"
+        );
+        assert_eq!(read_all(&store, b"a"), a);
+        assert_eq!(read_all(&store, b"b"), b);
+        assert_eq!(read_all(&store, b"c"), c);
+        assert_eq!(store.stat(b"e").unwrap().unwrap().len, 0);
+        // Replacing frees what is no longer referenced; the rest reads on.
+        let a2 = random_bytes(9, bs + 1);
+        store.put_files(&[(b"a", &a2)]).unwrap();
+        assert_eq!(read_all(&store, b"a"), a2);
+        assert_eq!(read_all(&store, b"c"), c);
+        assert!(store.verify().unwrap().is_ok());
+        // A file listed twice is refused before anything is written.
+        assert!(store.put_files(&[(b"x", &b), (b"x", &b)]).is_err());
+        assert!(store.stat(b"x").unwrap().is_none());
     }
 
     #[test]
