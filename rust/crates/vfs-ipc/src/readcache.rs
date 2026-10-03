@@ -40,7 +40,11 @@
 //! bytes are copied out after it is released, and **no lock is held across a
 //! fetch**. Two threads missing the same block fetch it once: the first
 //! installs a *loading* slot and fetches, the second waits for that fetch
-//! (single flight). Memory is bounded under contention because a fetch
+//! (single flight) — but never past the fetch's own deadline
+//! ([`CacheConfig::wait`], counted from when it started). A fetch that
+//! outlives it is removed by whichever reader finds it, so a thread killed
+//! mid-fetch (which runs no cleanup) costs the survivors at most one
+//! deadline, once, as the ring's `DataGate` promises for its own permits. Memory is bounded under contention because a fetch
 //! reserves its block's bytes against [`CacheConfig::max_bytes`] **before** it
 //! starts, evicting the least recently used blocks of any file to make room;
 //! when nothing can be evicted (every block is mid-fetch) the read is simply
@@ -58,7 +62,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Bytes per cached block.
 pub const DEFAULT_BLOCK: usize = 1 << 20;
@@ -79,6 +83,10 @@ const COLD_MIN_HITS_PER_MISS: u32 = 8;
 /// each time it goes cold again, up to [`COLD_MAX_READS`].
 const COLD_READS: u32 = 4096;
 const COLD_MAX_READS: u32 = 1 << 16;
+/// A file whose block fetches fail (or come back short) this many times
+/// goes cold too, rather than paying a failed block fetch before every
+/// uncached read.
+const COLD_AFTER_FAILED_FETCHES: u32 = 4;
 
 /// How the cache is cut up. [`Default`] is what the shim uses.
 #[derive(Debug, Clone, Copy)]
@@ -87,9 +95,11 @@ pub struct CacheConfig {
     pub threshold: usize,
     pub blocks_per_file: usize,
     pub max_bytes: usize,
-    /// Longest a reader waits for another thread's fetch of the block it
-    /// needs before reading uncached instead. A fetch is itself bounded by
-    /// the ring's deadline, so this only matters if that one hangs.
+    /// How long a fetch is waited for, counted from when it started — the
+    /// fetch's own deadline. A reader that finds another thread's fetch of
+    /// its block waits at most what is left of this; a fetch older than it
+    /// (its thread was killed, or its provider stopped answering) is given
+    /// up on: the reader removes it and fetches the block itself.
     pub wait: Duration,
 }
 
@@ -100,7 +110,7 @@ impl Default for CacheConfig {
             threshold: DEFAULT_THRESHOLD,
             blocks_per_file: DEFAULT_BLOCKS_PER_FILE,
             max_bytes: DEFAULT_MAX_BYTES,
-            wait: crate::RESPONSE_DEADLINE * 2,
+            wait: crate::RESPONSE_DEADLINE,
         }
     }
 }
@@ -118,6 +128,11 @@ pub struct CacheStats {
     /// Block fetches, and the bytes they brought in.
     pub fetches: u64,
     pub bytes_fetched: u64,
+    /// Block fetches that failed or came back short (each followed by an
+    /// uncached read), and fetches given up on because they outlived
+    /// [`CacheConfig::wait`].
+    pub fetch_failures: u64,
+    pub fetches_abandoned: u64,
     /// Blocks dropped to make room (per file or process-wide).
     pub evictions: u64,
     /// Files dropped because they changed or might have, and the blocks that
@@ -142,6 +157,8 @@ struct Counters {
     invalidations: AtomicU64,
     blocks_invalidated: AtomicU64,
     cold: AtomicU64,
+    fetch_failures: AtomicU64,
+    fetches_abandoned: AtomicU64,
 }
 
 fn bump(c: &AtomicU64, n: u64) {
@@ -215,6 +232,8 @@ struct State {
     /// Reads left to serve uncached while cold, and the next cold spell.
     cold_left: u32,
     cold_next: u32,
+    /// Block fetches of this file that failed since it last went cold.
+    failed_fetches: u32,
 }
 
 struct Slot {
@@ -237,6 +256,7 @@ enum SlotKind {
 struct Flight {
     done: Mutex<Option<Option<Arc<[u8]>>>>,
     cv: Condvar,
+    started: Instant,
 }
 
 impl Flight {
@@ -244,7 +264,13 @@ impl Flight {
         Flight {
             done: Mutex::new(None),
             cv: Condvar::new(),
+            started: Instant::now(),
         }
+    }
+
+    /// Whether the fetch has outlived `deadline` without finishing.
+    fn overdue(&self, deadline: Duration) -> bool {
+        self.started.elapsed() >= deadline
     }
 
     /// The first completion wins; later ones are ignored.
@@ -256,13 +282,16 @@ impl Flight {
         }
     }
 
-    fn wait(&self, patience: Duration) -> Option<Arc<[u8]>> {
+    /// Wait until the fetch finishes or `deadline` after it started.
+    /// `Err(())` if it had not finished by then.
+    fn wait(&self, deadline: Duration) -> Result<Option<Arc<[u8]>>, ()> {
+        let left = deadline.saturating_sub(self.started.elapsed());
         let g = lock(&self.done);
         let (g, _) = self
             .cv
-            .wait_timeout_while(g, patience, |d| d.is_none())
+            .wait_timeout_while(g, left, |d| d.is_none())
             .unwrap_or_else(|e| e.into_inner());
-        g.clone().flatten()
+        g.clone().ok_or(())
     }
 }
 
@@ -561,19 +590,25 @@ impl ReadCache {
             return;
         }
         if st.hits < st.misses * COLD_MIN_HITS_PER_MISS {
-            let spell = if st.cold_next == 0 {
-                COLD_READS
-            } else {
-                st.cold_next
-            };
-            st.cold_left = spell;
-            st.cold_next = (spell * 2).min(COLD_MAX_READS);
-            bump(&self.counters.cold, 1);
-            // Its blocks are of no use while it is cold.
-            self.clear_slots(&mut st);
+            self.go_cold(&mut st);
         }
         st.hits = 0;
         st.misses = 0;
+    }
+
+    /// Serve the file uncached for a spell, doubling with each one.
+    fn go_cold(&self, st: &mut State) {
+        let spell = if st.cold_next == 0 {
+            COLD_READS
+        } else {
+            st.cold_next
+        };
+        st.cold_left = spell;
+        st.cold_next = (spell * 2).min(COLD_MAX_READS);
+        st.failed_fetches = 0;
+        bump(&self.counters.cold, 1);
+        // Its blocks are of no use while it is cold.
+        self.clear_slots(st);
     }
 
     /// Block `idx` of `f`, and whether this call had to fetch (or wait for
@@ -605,7 +640,22 @@ impl ReadCache {
                 Some(Slot {
                     kind: SlotKind::Loading(flight),
                     ..
-                }) => Arc::clone(flight),
+                }) if !flight.overdue(self.cfg.wait) => Arc::clone(flight),
+                Some(slot) => {
+                    // A fetch that has outlived its deadline: its thread is
+                    // gone (killed mid-fetch, which runs no cleanup) or its
+                    // provider stopped answering. Waiting on it would cost
+                    // every reader of this block the whole deadline, again
+                    // and again; take the slot over and fetch it here.
+                    if let SlotKind::Loading(stale) = &slot.kind {
+                        stale.complete(None);
+                    }
+                    bump(&self.counters.fetches_abandoned, 1);
+                    let flight = Arc::new(Flight::new());
+                    slot.kind = SlotKind::Loading(Arc::clone(&flight));
+                    drop(st);
+                    return self.load(f, ver, idx, flight, fetch);
+                }
                 None => {
                     if st.slots.len() >= self.cfg.blocks_per_file && !self.evict_in_file(&mut st) {
                         // Every slot is mid-fetch.
@@ -621,8 +671,26 @@ impl ReadCache {
                 }
             }
         };
-        // Someone else is fetching it: wait for that, holding no lock.
-        flight.wait(self.cfg.wait).map(|d| (d, true))
+        // Someone else is fetching it: wait for that, holding no lock, for
+        // at most what is left of its deadline.
+        match flight.wait(self.cfg.wait) {
+            Ok(data) => data.map(|d| (d, true)),
+            Err(()) => {
+                // It never finished. Remove it — if the slot still holds this
+                // same fetch — so the next reader does not wait on it too.
+                let mut st = lock(&f.entry.state);
+                let before = st.slots.len();
+                st.slots.retain(
+                    |s| !matches!(&s.kind, SlotKind::Loading(fl) if Arc::ptr_eq(fl, &flight)),
+                );
+                if st.slots.len() != before {
+                    bump(&self.counters.fetches_abandoned, 1);
+                }
+                drop(st);
+                flight.complete(None);
+                None
+            }
+        }
     }
 
     /// Drop the least recently used ready block of one file to make room
@@ -680,7 +748,15 @@ impl ReadCache {
             // file holds: not something to keep. The caller's uncached read
             // gets whatever the director answers now.
             Ok(n) if n == want => {}
-            _ => return None,
+            _ => {
+                bump(&self.counters.fetch_failures, 1);
+                let mut st = lock(&f.entry.state);
+                st.failed_fetches += 1;
+                if st.failed_fetches >= COLD_AFTER_FAILED_FETCHES && st.cold_left == 0 {
+                    self.go_cold(&mut st);
+                }
+                return None;
+            }
         }
         bump(&self.counters.fetches, 1);
         bump(&self.counters.bytes_fetched, want as u64);
@@ -784,6 +860,8 @@ impl ReadCache {
             invalidations: get(&c.invalidations),
             blocks_invalidated: get(&c.blocks_invalidated),
             cold: get(&c.cold),
+            fetch_failures: get(&c.fetch_failures),
+            fetches_abandoned: get(&c.fetches_abandoned),
             resident_bytes: self.used.load(Ordering::Relaxed) as u64,
             files: self
                 .files
@@ -1175,6 +1253,116 @@ mod tests {
             "bounded memory under contention"
         );
         assert!(c.stats().hits > 0);
+    }
+
+    /// A fetch that never returns (its thread was killed mid-fetch, which
+    /// runs no cleanup) costs at most one reader its deadline: the reader
+    /// that times out removes it, and the next reader fetches afresh.
+    #[test]
+    fn a_fetch_that_never_returns_is_waited_for_once_and_then_replaced() {
+        let c = ReadCache::new(CacheConfig {
+            wait: Duration::from_millis(200),
+            ..tiny().cfg
+        });
+        let f = reg(&c, "a", 100);
+        let data = content(100);
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        std::thread::scope(|scope| {
+            // The "dead" fetcher: blocks until the end of the test.
+            let stuck = scope.spawn(|| {
+                let mut buf = [0u8; 4];
+                c.read(&f, 0, &mut buf, |_, _| {
+                    let _ = lock(&release_rx).recv();
+                    Err(-5)
+                })
+            });
+            while !lock(&f.entry.state)
+                .slots
+                .iter()
+                .any(|s| matches!(s.kind, SlotKind::Loading(_)))
+            {
+                std::thread::yield_now();
+            }
+            // The second reader waits — but only out the fetch's deadline.
+            let t = Instant::now();
+            let mut buf = [0u8; 4];
+            let second = c.read(&f, 0, &mut buf, |_, _| panic!("must wait, not fetch"));
+            let waited = t.elapsed();
+            assert_eq!(second, None);
+            assert!(waited < Duration::from_secs(2), "waited {waited:?}");
+            // The third must not wait at all: the dead slot is gone.
+            let t = Instant::now();
+            let third = c.read(&f, 0, &mut buf, |o, b| {
+                let o = o as usize;
+                b.copy_from_slice(&data[o..o + b.len()]);
+                Ok(b.len())
+            });
+            let took = t.elapsed();
+            assert_eq!(third, Some(4));
+            assert_eq!(&buf, &data[0..4]);
+            assert!(
+                took < Duration::from_millis(100),
+                "the third read waited {took:?}"
+            );
+            release_tx.send(()).unwrap();
+            assert_eq!(stuck.join().unwrap(), None, "the late fetch is discarded");
+        });
+        assert_eq!(c.stats().fetches_abandoned, 1);
+        let s = Source::new(content(100));
+        assert_eq!(read(&c, &f, &s, 1, 3).unwrap(), &s.data[1..4]);
+        assert_eq!(
+            s.calls(),
+            0,
+            "the block the third reader fetched is the one held"
+        );
+    }
+
+    /// A reader that finds a fetch already older than its deadline does not
+    /// wait on it at all: it takes the slot over.
+    #[test]
+    fn a_fetch_older_than_its_deadline_is_taken_over_without_waiting() {
+        let c = ReadCache::new(CacheConfig {
+            wait: Duration::from_millis(50),
+            ..tiny().cfg
+        });
+        let f = reg(&c, "a", 100);
+        // A loading slot whose thread is gone: nothing will ever complete it.
+        lock(&f.entry.state).slots.push(Slot {
+            idx: 0,
+            kind: SlotKind::Loading(Arc::new(Flight::new())),
+        });
+        std::thread::sleep(Duration::from_millis(60));
+        let s = Source::new(content(100));
+        let t = Instant::now();
+        assert_eq!(read(&c, &f, &s, 0, 4).unwrap(), &s.data[0..4]);
+        assert!(t.elapsed() < Duration::from_millis(40));
+        assert_eq!(s.calls(), 1);
+    }
+
+    /// Fetches that keep failing are counted, and after a few the file goes
+    /// cold instead of paying a failed block fetch before every read.
+    #[test]
+    fn a_file_whose_fetches_keep_failing_goes_cold() {
+        let c = tiny();
+        let f = reg(&c, "a", 100);
+        let calls = AtomicUsize::new(0);
+        let mut buf = [0u8; 4];
+        for _ in 0..100 {
+            let got = c.read(&f, 0, &mut buf, |_, b| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(b.len() - 1)
+            });
+            assert_eq!(got, None);
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            COLD_AFTER_FAILED_FETCHES as usize
+        );
+        let st = c.stats();
+        assert_eq!(st.fetch_failures, COLD_AFTER_FAILED_FETCHES as u64);
+        assert_eq!(st.cold, 1);
+        assert_eq!(st.resident_bytes, 0);
     }
 
     // ---- coherence ---------------------------------------------------------

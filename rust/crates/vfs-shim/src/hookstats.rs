@@ -554,7 +554,8 @@ fn render_read_cache(snap: &Snapshot) -> String {
         "\n{READ_CACHE_LABEL}:\n  \
          hits {} / misses {} / declined {}   ({:.1}% of cached reads were hits)\n  \
          fetches {} ({:.1} MiB fetched)   evictions {}   resident {:.1} MiB in {} files\n  \
-         invalidations {} ({} blocks dropped)   cold files {}\n",
+         invalidations {} ({} blocks dropped)   cold files {}\n  \
+         failed fetches {}   fetches given up on (past their deadline) {}\n",
         c.hits,
         c.misses,
         c.declined,
@@ -571,6 +572,8 @@ fn render_read_cache(snap: &Snapshot) -> String {
         c.invalidations,
         c.blocks_invalidated,
         c.cold,
+        c.fetch_failures,
+        c.fetches_abandoned,
     )
 }
 
@@ -2138,6 +2141,8 @@ mod tests {
                 invalidations: 1,
                 blocks_invalidated: 4,
                 cold: 0,
+                fetch_failures: 7,
+                fetches_abandoned: 1,
                 resident_bytes: 8 << 20,
                 files: 5,
             }),
@@ -2153,6 +2158,8 @@ mod tests {
             "fetches 10 (10.0 MiB fetched)",
             "evictions 2",
             "invalidations 1 (4 blocks dropped)",
+            "failed fetches 7",
+            "given up on (past their deadline) 1",
         ] {
             assert!(s.contains(want), "missing {want:?} in:\n{s}");
         }
