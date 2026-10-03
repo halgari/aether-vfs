@@ -228,6 +228,10 @@ pub const REJECT_FUSE_SECTION: &str = "VFS_REJECT_FUSE_SECTION";
 pub const REJECT_FUSE_DATA_SECTION: &str = "VFS_REJECT_FUSE_DATA_SECTION";
 /// Disable the vectored handler that demand-pages lazy sections.
 pub const LAZY_NO_VEH: &str = "VFS_LAZY_NO_VEH";
+/// The shim's block cache for small reads of immutable files
+/// (`vfs_ipc::readcache`). On unless set to `0`/`false`/`no`/`off`, which
+/// sends every read over the ring as before.
+pub const SHIM_READ_CACHE: &str = "VFS_SHIM_READ_CACHE";
 /// Wait for the launched process to exit instead of detaching.
 pub const WAIT: &str = "VFS_WAIT";
 /// Stop at the first rendered frame and print a benchmark row.
@@ -434,6 +438,7 @@ pub const ALL: &[Var] = &[
     Var { name: REJECT_FUSE_SECTION, kind: Kind::Behaviour, default: "false" },
     Var { name: REJECT_FUSE_DATA_SECTION, kind: Kind::Behaviour, default: "false" },
     Var { name: LAZY_NO_VEH, kind: Kind::Behaviour, default: "false (VEH installed)" },
+    Var { name: SHIM_READ_CACHE, kind: Kind::Behaviour, default: "on" },
     Var { name: WAIT, kind: Kind::Behaviour, default: "false (detach)" },
     Var { name: BENCH, kind: Kind::Behaviour, default: "false" },
     Var { name: SHIM_STATS_LOG, kind: Kind::Diagnostic, default: "off" },

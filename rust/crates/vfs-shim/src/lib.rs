@@ -17,6 +17,7 @@ mod lazy_section;
 mod ntdef;
 mod overlay;
 mod payload_abi;
+mod read_cache;
 mod zipserve;
 
 pub use bootstrap::{

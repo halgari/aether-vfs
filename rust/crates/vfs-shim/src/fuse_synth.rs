@@ -21,6 +21,20 @@ struct FuseOpen {
     append_only: bool,
     /// Absolute NT/Win path for relative-open resolution (esp. directories).
     abs_path: Option<String>,
+    /// This handle's file in the read cache (`crate::read_cache`), when the
+    /// cache is on and this is a file. Whether reads through it may be served
+    /// from the cache is the ref's to say ([`vfs_ipc::FileRef::cacheable`]);
+    /// a write handle holds one too, so a write or truncate through it can
+    /// drop the file.
+    cache: Option<vfs_ipc::FileRef>,
+}
+
+/// What a read through a handle needs, under one lock: see [`lookup_read`].
+pub struct ReadView {
+    pub fh: u64,
+    pub size: u64,
+    pub position: u64,
+    pub cache: Option<vfs_ipc::FileRef>,
 }
 
 static TABLE: Mutex<BTreeMap<usize, FuseOpen>> = Mutex::new(BTreeMap::new());
@@ -67,9 +81,38 @@ pub fn open_fuse_at_ex(
             position: if append_only { size } else { 0 },
             append_only,
             abs_path,
+            cache: None,
         },
     );
     Some(handle as isize)
+}
+
+/// Attach the handle's read-cache file (`crate::read_cache::register`).
+pub fn set_cache(handle: isize, cache: vfs_ipc::FileRef) {
+    if let Ok(mut g) = TABLE.lock() {
+        if let Some(e) = g.get_mut(&(handle as usize)) {
+            e.cache = Some(cache);
+        }
+    }
+}
+
+/// The handle's read-cache file, if it has one.
+pub fn cache(handle: isize) -> Option<vfs_ipc::FileRef> {
+    let g = TABLE.lock().ok()?;
+    g.get(&(handle as usize))?.cache.clone()
+}
+
+/// [`lookup`] for the read path: the director handle, size, position and
+/// read-cache file, taken under the one lock acquisition a read pays for.
+pub fn lookup_read(handle: isize) -> Option<ReadView> {
+    let g = TABLE.lock().ok()?;
+    let e = g.get(&(handle as usize))?;
+    Some(ReadView {
+        fh: e.fh,
+        size: e.size,
+        position: e.position,
+        cache: e.cache.clone(),
+    })
 }
 
 pub fn lookup(handle: isize) -> Option<(u64, u64, bool, u64, bool)> {
