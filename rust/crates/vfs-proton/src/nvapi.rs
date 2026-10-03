@@ -280,14 +280,6 @@ impl Setup {
         }
         env
     }
-
-    /// A line for the launch log saying what was enabled.
-    pub fn note(&self) -> String {
-        match &self.ngx_dir {
-            Some(d) => format!("nvapi: enabled, NGX from {}", d.display()),
-            None => "nvapi: enabled; no NVIDIA Wine NGX DLLs found, so no DLSS".to_string(),
-        }
-    }
 }
 
 /// Whether `dst` exists with exactly `src`'s bytes.

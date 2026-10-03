@@ -2064,7 +2064,7 @@ impl Session {
         let _ = std::fs::remove_file(&ready_path);
 
         let (injector, shim_dll, payload_dll) = locate_wine_artifacts(opts)?;
-        let (steam, mut notes) = self.steam_launch(&opts.env);
+        let (steam, notes) = self.steam_launch(&opts.env);
         // Under the prefix lock taken above, like the rest of the prefix's
         // setup.
         let nvapi = if opts.nvapi {
@@ -2081,7 +2081,6 @@ impl Session {
                      launches without it)"
                 )
             })?;
-            notes.push(nv.note());
         }
 
         let wine = WineLaunch {
