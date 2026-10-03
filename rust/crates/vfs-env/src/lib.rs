@@ -305,6 +305,18 @@ pub const FIXTURE_FILL: &str = "VFS_FIXTURE_FILL";
 pub const FIXTURE_WRITE_PATH: &str = "VFS_FIXTURE_WRITE_PATH";
 /// `vfs-fixture-read`: the bytes written to `FIXTURE_WRITE_PATH` (default `written`).
 pub const FIXTURE_WRITE_DATA: &str = "VFS_FIXTURE_WRITE_DATA";
+/// `vfs-fixture-read`: a file the director serves immutable, read in many
+/// small pieces by every route and compared with one big read (the shim's
+/// read cache).
+pub const FIXTURE_CACHE_PATH: &str = "VFS_FIXTURE_CACHE_PATH";
+/// `vfs-fixture-read`: a file read in small pieces, rewritten with
+/// `FIXTURE_CACHE_RW_DATA` through another handle, and read again.
+pub const FIXTURE_CACHE_RW_PATH: &str = "VFS_FIXTURE_CACHE_RW_PATH";
+/// `vfs-fixture-read`: what `FIXTURE_CACHE_RW_PATH` is rewritten with.
+pub const FIXTURE_CACHE_RW_DATA: &str = "VFS_FIXTURE_CACHE_RW_DATA";
+/// `vfs-fixture-read`: milliseconds to stay alive after the read-cache phase,
+/// so a `SHIM_STATS_LOG` report covers it.
+pub const FIXTURE_LINGER_MS: &str = "VFS_FIXTURE_LINGER_MS";
 // `VFS_FIXTURE_DATA` and `VFS_FIXTURE_DIR` lived here for `vfs-fixture-write`
 // and `vfs-fixture-writeset`. Both fixture crates were deleted in gate 4 task
 // 8 — no test harness had ever invoked either — so the switches went with
@@ -465,6 +477,10 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_FILL, kind: Kind::Fixture, default: "none" },
     Var { name: FIXTURE_WRITE_PATH, kind: Kind::Fixture, default: "unset: no write" },
     Var { name: FIXTURE_WRITE_DATA, kind: Kind::Fixture, default: "written" },
+    Var { name: FIXTURE_CACHE_PATH, kind: Kind::Fixture, default: "unset: no cache phase" },
+    Var { name: FIXTURE_CACHE_RW_PATH, kind: Kind::Fixture, default: "unset: no rewrite" },
+    Var { name: FIXTURE_CACHE_RW_DATA, kind: Kind::Fixture, default: "fresh" },
+    Var { name: FIXTURE_LINGER_MS, kind: Kind::Fixture, default: "0" },
     Var {
         name: FIXTURE_COW_PATH,
         kind: Kind::Fixture,
