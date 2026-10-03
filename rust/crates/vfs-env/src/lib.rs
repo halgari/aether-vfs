@@ -230,7 +230,9 @@ pub const REJECT_FUSE_DATA_SECTION: &str = "VFS_REJECT_FUSE_DATA_SECTION";
 pub const LAZY_NO_VEH: &str = "VFS_LAZY_NO_VEH";
 /// The shim's block cache for small reads of immutable files
 /// (`vfs_ipc::readcache`). On unless set to `0`/`false`/`no`/`off`, which
-/// sends every read over the ring as before.
+/// sends every read over the ring as before — what to do when capturing a
+/// provider-side trace of the program's own read pattern, which the cache
+/// otherwise turns into 1 MiB block fetches.
 pub const SHIM_READ_CACHE: &str = "VFS_SHIM_READ_CACHE";
 /// Wait for the launched process to exit instead of detaching.
 pub const WAIT: &str = "VFS_WAIT";

@@ -859,11 +859,13 @@ const CACHE_CHILD_PATH: &str = r"C:\vfs-session\root\data\cached.esm";
 const CACHE_VPATH: &str = "data/cached.esm";
 const CACHE_LEN: usize = 3 * 1024 * 1024 + 12_345;
 /// A base file the fixture reads, rewrites through another handle, and reads
-/// again.
+/// again. The rewrite is the same size, so the file's version (size, mount
+/// generation) does not change: what keeps the old bytes from being served
+/// is the cache dropping the file, not a new key.
 const RW_CHILD_PATH: &str = r"C:\vfs-session\root\data\plugins.txt";
 const RW_VPATH: &str = "data/plugins.txt";
 const RW_BEFORE: &[u8] = b"*Skyrim.esm\n*Update.esm\n";
-const RW_AFTER: &str = "*Skyrim.esm\n*Dawnguard.esm\n*Update.esm\n";
+const RW_AFTER: &str = "*Skyrim.esm\n*Dragon.esm\n";
 /// Where the shim's stats report lands: the session's state directory, which
 /// the child sees as `C:\vfs-session\state`.
 const STATS_CHILD_PATH: &str = r"C:\vfs-session\state\shim-stats.txt";
@@ -1003,6 +1005,7 @@ fn small_reads_of_an_immutable_file_are_served_by_the_shim_read_cache_under_prot
         env.insert(name.to_string(), value);
     }
 
+    assert_eq!(RW_BEFORE.len(), RW_AFTER.len(), "a same-size rewrite");
     let code = s
         .launch(&LaunchOpts {
             image: "fixture.exe".into(),

@@ -269,6 +269,10 @@ code; wired in by `vfs-shim`'s `read_cache.rs`):
   after 16 misses averaging under 8 hits each it is read uncached for a while
   instead of turning every small read into a block fetch.
 
+A provider that traces its reads sees the cache's 1 MiB block fetches, not
+the program's own read pattern: capture an access trace (Haskill's replay
+numbers, for one) with the cache off.
+
 `VFS_SHIM_READ_CACHE=0` turns it off, and the `VFS_SHIM_STATS_LOG` report has
 a section for it (hits, misses, declined, fetches and bytes, evictions,
 invalidations). The open reply's `immutable` flag and generation sit in what
