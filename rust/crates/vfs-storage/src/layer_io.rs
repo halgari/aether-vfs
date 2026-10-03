@@ -59,6 +59,11 @@ use crate::storage::Storage;
 /// Blocks per `write_blocks` call when a commit writes a long run.
 const RUN_BLOCKS: u64 = 64;
 
+/// [`RUN_BLOCKS`] for a bulk write ([`vfs_block_store::WriteClass::Bulk`]):
+/// its blocks may be compressed on the GPU, where each call waits for a
+/// batch, so a commit hands over more at once (16 MiB of 64 KiB blocks).
+const BULK_RUN_BLOCKS: u64 = 256;
+
 /// The most store blocks a commit reads back before a resize so it can put
 /// them back if a later block write fails (see [`FileCell::commit`]).
 pub(crate) const MAX_CAPTURE_BLOCKS: u64 = 64;
@@ -570,6 +575,10 @@ impl FileCell {
     ) -> Result<(), i32> {
         let _ = after_resize;
         let bs = s.block_size();
+        let run_blocks = match vfs_block_store::WriteClass::current() {
+            vfs_block_store::WriteClass::Bulk => BULK_RUN_BLOCKS,
+            vfs_block_store::WriteClass::Foreground => RUN_BLOCKS,
+        };
         let zeros = vec![0u8; bs as usize];
         let mut run: Vec<u8> = Vec::new();
         let mut run_first = 0u64;
@@ -594,7 +603,7 @@ impl FileCell {
             Ok(())
         };
         for b in blocks {
-            if run_count > 0 && (b != run_first + run_count || run_count == RUN_BLOCKS) {
+            if run_count > 0 && (b != run_first + run_count || run_count == run_blocks) {
                 flush_run(&mut run, run_first, &mut run_count)?;
             }
             if run_count == 0 {

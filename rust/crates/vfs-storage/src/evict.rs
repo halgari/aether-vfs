@@ -20,7 +20,7 @@ use std::sync::Arc;
 use vfs_block_store::CompactOptions;
 
 use crate::cached::{lock, now_minute, sub_logical};
-use crate::ids::cache_file_id;
+use crate::ids::{cache_file_id, classify_store_id, StoreIdKind};
 use crate::storage::{Storage, StorageError};
 
 /// Eviction stops once cached logical bytes are at or below this share of the
@@ -116,6 +116,59 @@ impl Storage {
         }
     }
 
+    /// Drops every pull-through cache file that has no open handle: its
+    /// catalog row, then its store data (the order eviction uses), and any
+    /// cache file the store holds without a row. Layers are untouched. Then
+    /// compacts the store and makes it all durable. The next read of a
+    /// dropped file fetches it from its source again.
+    pub fn clear_cache(&self) -> Result<ClearReport, StorageError> {
+        let _serial = lock(&self.cache.evict_lock);
+        let (recs, _, _) = self.budget_snapshot(u64::MAX)?;
+        let mut report = ClearReport::default();
+        for (hash, rec) in recs {
+            let id = cache_file_id(&hash);
+            let counts = self.open_counts();
+            if counts.get(&id).is_some_and(|&n| n > 0) {
+                report.open_skipped += 1;
+                continue;
+            }
+            let held = self.remove_cache_row(&hash)?.unwrap_or(rec.logical_bytes);
+            self.ram.invalidate_file(&id);
+            match self.store.delete(&id) {
+                Ok(()) | Err(vfs_block_store::Error::NotFound) => {}
+                Err(e) => return Err(e.into()),
+            }
+            drop(counts);
+            sub_logical(&self.cache.cached_logical, held);
+            report.files += 1;
+            report.logical_bytes += held;
+        }
+        // Store files of the cache with no row (a crash between a row's
+        // removal and the store delete; reconciliation at open drops these
+        // too).
+        for id in self.store.file_ids()? {
+            let StoreIdKind::Cache(hash) = classify_store_id(&id) else {
+                continue;
+            };
+            let id = cache_file_id(&hash);
+            let counts = self.open_counts();
+            if counts.get(&id).is_some_and(|&n| n > 0) {
+                continue;
+            }
+            self.ram.invalidate_file(&id);
+            match self.store.delete(&id) {
+                Ok(()) => report.orphans += 1,
+                Err(vfs_block_store::Error::NotFound) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if report.files + report.orphans > 0 {
+            self.store.compact(CompactOptions::default())?;
+        }
+        self.sync()?;
+        Ok(report)
+    }
+
     /// Waits for every background eviction started so far.
     pub(crate) fn wait_for_eviction(&self) {
         let threads = std::mem::take(&mut *lock(&self.cache.evict_threads));
@@ -123,6 +176,18 @@ impl Storage {
             let _ = h.join();
         }
     }
+}
+
+/// What [`Storage::clear_cache`] dropped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClearReport {
+    /// Cache files dropped, and the logical bytes they held.
+    pub files: u64,
+    pub logical_bytes: u64,
+    /// Cache files the store held without a catalog row, dropped too.
+    pub orphans: u64,
+    /// Cache files left alone because a handle has them open.
+    pub open_skipped: u64,
 }
 
 /// Starts a background eviction if the cache is over budget, none is running,

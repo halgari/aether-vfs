@@ -18,3 +18,7 @@ tracing = "0.1"
 [dev-dependencies]
 tempfile = "3"
 vfs-compose = { path = "../vfs-compose" }
+
+[features]
+# Compress bulk writes on the GPU (`vfs_block_store::BulkCompression::Gpu`).
+gpu-zstd = ["vfs-block-store/gpu-zstd"]

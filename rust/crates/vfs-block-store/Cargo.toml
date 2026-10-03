@@ -14,6 +14,9 @@ thiserror = "2"
 tracing = "0.1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.14"
+# GPU zstd for bulk writes (feature `gpu-zstd`). Pinned: the crate has no releases (and no
+# LICENSE file, so nothing of it is copied here; it is only linked when the feature is on).
+gzc-gpu = { git = "https://github.com/halgari/gpu-zstd-comp", rev = "655fb68b77b9ad01cd402817a526c2a2ebf4ace2", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
@@ -24,7 +27,14 @@ tempfile = "3.27"
 [features]
 # Enables crash_point() calls that abort the process when BLOCK_STORE_CRASH_AT matches.
 crash-points = []
+# Bulk writes (`WriteClass::Bulk`) can be compressed on the GPU (`BulkCompression::Gpu`), through
+# `gzc-gpu`. Off by default: without it the store builds and runs with no GPU stack at all.
+gpu-zstd = ["dep:gzc-gpu"]
 
 [[bench]]
 name = "store"
 harness = false
+
+[[example]]
+name = "gpu_bench"
+required-features = ["gpu-zstd"]

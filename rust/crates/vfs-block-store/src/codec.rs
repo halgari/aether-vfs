@@ -95,12 +95,18 @@ pub fn encode_block(data: &[u8], hash: Hash128, level: i32) -> io::Result<Encode
         }
         c.as_mut().unwrap().1.compress(data)
     })?;
-    let (flags, payload) = if compressed.len() < data.len() {
-        (FLAG_COMPRESSED, compressed)
+    Ok(from_frame(data, hash, compressed))
+}
+
+/// Builds the record for `data` from `frame`, a zstd frame of exactly `data` (from any encoder):
+/// the frame if it is smaller than `data`, else `data` raw.
+pub fn from_frame(data: &[u8], hash: Hash128, frame: Vec<u8>) -> EncodedBlock {
+    let (flags, payload) = if frame.len() < data.len() {
+        (FLAG_COMPRESSED, frame)
     } else {
         (0, data.to_vec())
     };
-    Ok(EncodedBlock {
+    EncodedBlock {
         header: RecordHeader {
             flags,
             raw_len: data.len() as u32,
@@ -109,7 +115,7 @@ pub fn encode_block(data: &[u8], hash: Hash128, level: i32) -> io::Result<Encode
             checksum: checksum(&payload),
         },
         payload,
-    })
+    }
 }
 
 /// Verifies `payload` against `header` and writes the uncompressed block into `out`.

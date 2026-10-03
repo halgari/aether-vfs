@@ -1877,4 +1877,117 @@ mod tests {
         assert!(s.cached_coverage(&*src, &key(), VPath::at_default("")).unwrap().is_empty(), "a directory");
         assert_eq!(src.reads(), reads, "coverage never reads the source");
     }
+
+    fn write_layer_file(s: &Arc<Storage>, layer: &str, rel: &str, body: &[u8]) {
+        use vfs_provider::{OPEN_CREATE, OPEN_WRITE};
+        let l = s.layer(layer).unwrap();
+        let (h, _, _) = l
+            .open(VPath::at_default(rel), OPEN_CREATE | OPEN_WRITE | OPEN_READ)
+            .unwrap();
+        let mut off = 0;
+        while off < body.len() {
+            off += l.write_at(h, off as u64, &body[off..]).unwrap();
+        }
+        l.close(h).unwrap();
+    }
+
+    #[test]
+    fn clear_cache_drops_cache_files_and_keeps_layers() {
+        let (s, _d) = temp_storage();
+        let (a, b, c) = (pattern(5 * BS + 7, 1), pattern(3 * BS, 2), pattern(BS, 3));
+        let src = slow(MapSource::with(&[
+            ("a", a.clone()),
+            ("b", b.clone()),
+            ("c", c.clone()),
+        ]));
+        let p = s.cached(src.clone(), key());
+        assert_eq!(read_all(&p, "a"), a);
+        assert_eq!(read_all(&p, "b"), b);
+        // "c" stays open across the clear: it is left alone.
+        let (hc, _, _) = p.open(VPath::at_default("c"), OPEN_READ).unwrap();
+        let mut buf = vec![0u8; c.len()];
+        assert_eq!(p.read_at(hc, 0, &mut buf).unwrap(), c.len());
+        let body = pattern(4 * BS + 1, 9);
+        write_layer_file(&s, "saves", "save1.ess", &body);
+        let before = s.space_usage().unwrap();
+        assert_eq!(before.cache.files, 3);
+        assert_eq!(
+            before.cache.logical_bytes,
+            (a.len() + b.len() + c.len()) as u64
+        );
+        assert_eq!(before.layers["saves"].logical_bytes, body.len() as u64);
+
+        let r = s.clear_cache().unwrap();
+        assert_eq!((r.files, r.open_skipped), (2, 1));
+        assert_eq!(r.logical_bytes, (a.len() + b.len()) as u64);
+        assert_eq!(s.cache_stats().cached_logical_bytes, c.len() as u64);
+        let after = s.space_usage().unwrap();
+        assert_eq!(after.cache.files, 1);
+        assert_eq!(after.cache.logical_bytes, c.len() as u64);
+        assert_eq!(after.layers["saves"], before.layers["saves"]);
+        p.close(hc).unwrap();
+
+        // The next read fetches from the source again; the layer is intact.
+        let reads = src.reads();
+        assert_eq!(read_all(&p, "a"), a);
+        assert!(src.reads() > reads);
+        let l = s.layer("saves").unwrap();
+        assert_eq!(read_all(&l, "save1.ess"), body);
+        drop((p, l));
+        s.close().unwrap();
+    }
+
+    #[test]
+    fn clear_cache_survives_a_reopen() {
+        let d = tempfile::tempdir().unwrap();
+        let a = pattern(6 * BS, 4);
+        let body = pattern(2 * BS + 3, 5);
+        {
+            let s = Storage::open(d.path(), small_cfg()).unwrap();
+            let p = s.cached(slow(MapSource::with(&[("a", a.clone())])), key());
+            assert_eq!(read_all(&p, "a"), a);
+            write_layer_file(&s, "content", "c/1", &body);
+            drop(p);
+            s.close().unwrap();
+        }
+        {
+            let s = Storage::open(d.path(), small_cfg()).unwrap();
+            assert_eq!(s.clear_cache().unwrap().files, 1);
+            s.close().unwrap();
+        }
+        let s = Storage::open(d.path(), small_cfg()).unwrap();
+        let u = s.space_usage().unwrap();
+        assert_eq!(u.cache, Default::default());
+        assert_eq!(u.layers["content"].logical_bytes, body.len() as u64);
+        assert_eq!(s.cache_stats().cached_logical_bytes, 0);
+        let src = slow(MapSource::with(&[("a", a.clone())]));
+        let p = s.cached(src.clone(), key());
+        assert_eq!(read_all(&p, "a"), a);
+        assert!(src.reads() > 0, "fetched again");
+    }
+
+    #[test]
+    fn the_callers_write_class_reaches_the_store() {
+        use vfs_block_store::{with_write_class, WriteClass};
+        let (s, _d) = temp_storage();
+        let (a, b) = (pattern(3 * BS, 6), pattern(2 * BS + 5, 7));
+        let p = s.cached(
+            slow(MapSource::with(&[("a", a.clone()), ("b", b.clone())])),
+            key(),
+        );
+        with_write_class(WriteClass::Bulk, || assert_eq!(read_all(&p, "a"), a));
+        assert_eq!(read_all(&p, "b"), b);
+        let body = pattern(5 * BS, 8);
+        with_write_class(WriteClass::Bulk, || {
+            write_layer_file(&s, "content", "x", &body)
+        });
+        let st = s.write_stats();
+        assert_eq!(st.bulk.logical_bytes, (a.len() + body.len()) as u64);
+        assert_eq!(st.foreground.logical_bytes, b.len() as u64);
+        assert_eq!(
+            s.written().logical_bytes,
+            (a.len() + b.len() + body.len()) as u64
+        );
+        assert_eq!(s.compression(WriteClass::Bulk), "zstd:6");
+    }
 }

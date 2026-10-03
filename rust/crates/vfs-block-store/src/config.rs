@@ -5,8 +5,11 @@ use crate::error::{Error, Result};
 pub struct StoreConfig {
     /// Block size in bytes. Fixed at creation and saved in the index.
     pub block_size: u32,
-    /// zstd compression level for new writes.
+    /// zstd compression level for new writes of [`crate::WriteClass::Foreground`] (and of
+    /// bulk writes under [`BulkCompression::Foreground`]).
     pub zstd_level: i32,
+    /// How new blocks of [`crate::WriteClass::Bulk`] writes are compressed.
+    pub bulk: BulkCompression,
     /// A pack is sealed once appending another record would exceed this size.
     pub max_pack_size: u64,
     /// redb page cache size.
@@ -38,8 +41,26 @@ impl Default for StoreConfig {
             auto_flush_commits: 10_000,
             max_file_id_len: 256,
             compression_threads: None,
+            bulk: BulkCompression::Foreground,
         }
     }
+}
+
+/// How the new blocks of bulk writes ([`crate::WriteClass::Bulk`]) are compressed. Whatever is
+/// chosen, every block is stored as one zstd frame (or raw, when the frame would not be
+/// smaller) and read back the same way.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum BulkCompression {
+    /// As foreground writes: CPU zstd at [`StoreConfig::zstd_level`].
+    #[default]
+    Foreground,
+    /// CPU zstd at this level.
+    Zstd(i32),
+    /// On the GPU, in batches shared by every concurrent bulk writer (see
+    /// [`crate::GpuConfig`]). Falls back to CPU zstd at [`StoreConfig::zstd_level`] when the
+    /// GPU cannot be used. Needs blocks of at most 64 KiB.
+    #[cfg(feature = "gpu-zstd")]
+    Gpu(crate::gpu::GpuConfig),
 }
 
 impl StoreConfig {
@@ -51,6 +72,16 @@ impl StoreConfig {
         }
         if !zstd::compression_level_range().contains(&self.zstd_level) {
             return Err(Error::Config("zstd_level out of range".into()));
+        }
+        match &self.bulk {
+            BulkCompression::Foreground => {}
+            BulkCompression::Zstd(l) => {
+                if !zstd::compression_level_range().contains(l) {
+                    return Err(Error::Config("bulk zstd level out of range".into()));
+                }
+            }
+            #[cfg(feature = "gpu-zstd")]
+            BulkCompression::Gpu(g) => g.validate(self.block_size).map_err(Error::Config)?,
         }
         if self.max_pack_size < self.block_size as u64 * 2 {
             return Err(Error::Config(
@@ -123,6 +154,10 @@ mod tests {
             },
             StoreConfig {
                 auto_flush_commits: 0,
+                ..StoreConfig::default()
+            },
+            StoreConfig {
+                bulk: BulkCompression::Zstd(99),
                 ..StoreConfig::default()
             },
         ];
