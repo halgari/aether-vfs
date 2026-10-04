@@ -548,6 +548,15 @@ impl Storage {
         self.shut.store(true, Ordering::Release);
     }
 
+    /// Test hook for other crates (feature `test-hooks`): when the last
+    /// reference goes, the drop does nothing more, as a crash: no sync, no
+    /// clean-close mark, so what no durable point made durable is lost and the
+    /// next open reconciles.
+    #[cfg(feature = "test-hooks")]
+    pub fn crash_on_drop_for_tests(&self) {
+        self.shut.store(true, Ordering::Release);
+    }
+
     /// The durability gate, shared: see [`Storage::gate`]. A panic while it
     /// is held may leave a write pair half done (and a reader's panic does
     /// not poison an `RwLock`), so the guard marks the session dirty then.

@@ -22,3 +22,5 @@ vfs-compose = { path = "../vfs-compose" }
 [features]
 # Compress bulk writes on the GPU (`vfs_block_store::BulkCompression::Gpu`).
 gpu-zstd = ["vfs-block-store/gpu-zstd"]
+# Hooks other crates' tests use (a crash at drop).
+test-hooks = []
