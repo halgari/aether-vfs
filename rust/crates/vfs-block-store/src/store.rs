@@ -19,6 +19,12 @@ use crate::pack::{PackFiles, PackWriter, list_pack_ids, remove_pack_file, sync_d
 use crate::tracker::ReadTracker;
 use crate::{crash, files};
 
+/// The clean-shutdown value of a plain clean shutdown, and the only one builds before
+/// [`BlockStore::shutdown_with_token`] read as clean: they read a token as a crash (and so only
+/// seal the active pack rather than resume it) and overwrite it with 0 at open and 1 at their
+/// own clean shutdown.
+const CLEAN_PLAIN: u64 = 1;
+
 /// Metadata of a stored file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileInfo {
@@ -59,6 +65,9 @@ pub struct BlockStore {
     pub(crate) unflushed_commits: AtomicU64,
     pub(crate) healed: AtomicU64,
     shut_down: AtomicBool,
+    /// The clean-shutdown value the previous open left: 0 after a crash (or for a new store),
+    /// 1 after a plain clean shutdown, a token after [`BlockStore::shutdown_with_token`].
+    previous_shutdown: u64,
     _lock: File,
     #[cfg(test)]
     pub(crate) hooks: TestHooks,
@@ -115,7 +124,11 @@ impl BlockStore {
         }
 
         let index = Index::open(&dir.join("index.redb"), cfg.index_cache_bytes)?;
-        let (resume, next_pack_id) = index.update(true, |t| recover(t, &pack_dir, &cfg))?;
+        let Recovered {
+            resume,
+            next_pack_id,
+            previous_shutdown,
+        } = index.update(true, |t| recover(t, &pack_dir, &cfg))?;
 
         let mut packs = PackWriter::new(pack_dir.clone(), cfg.max_pack_size);
         if let Some(id) = resume {
@@ -144,6 +157,7 @@ impl BlockStore {
             unflushed_commits: AtomicU64::new(0),
             healed: AtomicU64::new(0),
             shut_down: AtomicBool::new(false),
+            previous_shutdown,
             _lock: lock,
             cfg,
             #[cfg(test)]
@@ -156,14 +170,56 @@ impl BlockStore {
         self.shutdown()
     }
 
-    fn shutdown(&self) -> Result<()> {
+    /// What [`BlockStore::close`] does, for an owner that holds the store by reference: makes
+    /// every completed write durable and marks the store cleanly closed, durably. The store
+    /// stays readable, but **nothing may be written to it afterwards** (a later write would be
+    /// covered by a clean-shutdown mark it did not earn). Only the first call, of this,
+    /// [`BlockStore::shutdown_with_token`], `close` or the drop, does anything.
+    pub fn shutdown(&self) -> Result<()> {
+        self.shutdown_as(CLEAN_PLAIN)
+    }
+
+    /// [`BlockStore::shutdown`], recording `token` (at least 2) as the clean-shutdown value, so
+    /// the next open reports it in [`BlockStore::clean_shutdown_token`]. An owner that keeps the
+    /// same token in a database of its own can tell at the next open that nothing (this build
+    /// or an older one) opened the store since: every open overwrites the value durably before
+    /// it returns, and a later clean shutdown without a token writes 1.
+    pub fn shutdown_with_token(&self, token: u64) -> Result<()> {
+        if token <= CLEAN_PLAIN {
+            return Err(Error::Config(format!(
+                "a clean-shutdown token must be at least 2, not {token}"
+            )));
+        }
+        self.shutdown_as(token)
+    }
+
+    /// Whether a panic poisoned the writer lock. The store then cannot shut down cleanly; its
+    /// shutdown (and so its drop) fails with an error instead of panicking.
+    pub fn is_poisoned(&self) -> bool {
+        self.writer.is_poisoned()
+    }
+
+    fn shutdown_as(&self, value: u64) -> Result<()> {
         if self.shut_down.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
         // No write can be running (close takes the store; drop has it alone), but stop the GPU
         // service before the last durable commit all the same.
         self.codec.shutdown();
-        self.durable_commit(|t| t.put_meta(META_CLEAN_SHUTDOWN, 1))
+        self.durable_commit(|t| t.put_meta(META_CLEAN_SHUTDOWN, value))
+    }
+
+    /// Whether the previous open ended in a clean shutdown ([`BlockStore::close`],
+    /// [`BlockStore::shutdown`], [`BlockStore::shutdown_with_token`] or a drop that completed
+    /// one), rather than a crash. A store created by this open counts as not clean.
+    pub fn opened_after_clean_shutdown(&self) -> bool {
+        self.previous_shutdown != 0
+    }
+
+    /// The token the previous open's [`BlockStore::shutdown_with_token`] recorded, if that is
+    /// how it ended: `None` after a crash, a plain clean shutdown, or for a new store.
+    pub fn clean_shutdown_token(&self) -> Option<u64> {
+        (self.previous_shutdown > CLEAN_PLAIN).then_some(self.previous_shutdown)
     }
 
     /// Makes every write that completed before this call durable.
@@ -186,7 +242,12 @@ impl BlockStore {
         &self,
         f: impl FnOnce(&mut Tables<'_>) -> Result<R>,
     ) -> Result<R> {
-        let w = self.writer.lock().unwrap();
+        // A poisoned writer (a panic mid-append) fails the flush, and so a shutdown in a drop,
+        // rather than panicking again.
+        let w = self
+            .writer
+            .lock()
+            .map_err(|_| Error::Io(std::io::Error::other("block store writer lock poisoned")))?;
         self.durable_commit_locked(w, f)
     }
 
@@ -393,10 +454,18 @@ pub(crate) fn push_range(out: &mut Vec<Range<u64>>, r: Range<u64>) {
     out.push(r);
 }
 
+/// What [`recover`] found and set up.
+struct Recovered {
+    /// The pack to resume appending to.
+    resume: Option<u32>,
+    next_pack_id: u32,
+    /// The clean-shutdown value the previous open left (0: not clean).
+    previous_shutdown: u64,
+}
+
 /// Runs in the first transaction after opening. Validates metadata, reconciles pack files with the
 /// `packs` table and marks the store as not cleanly shut down.
-/// Returns (pack to resume appending to, next pack id).
-fn recover(t: &mut Tables<'_>, pack_dir: &Path, cfg: &StoreConfig) -> Result<(Option<u32>, u32)> {
+fn recover(t: &mut Tables<'_>, pack_dir: &Path, cfg: &StoreConfig) -> Result<Recovered> {
     match t.meta(META_BLOCK_SIZE)? {
         None => {
             t.put_meta(META_BLOCK_SIZE, cfg.block_size as u64)?;
@@ -412,7 +481,9 @@ fn recover(t: &mut Tables<'_>, pack_dir: &Path, cfg: &StoreConfig) -> Result<(Op
     if t.meta(META_SCHEMA_VERSION)? != Some(SCHEMA_VERSION) {
         return Err(Error::Config("unsupported index schema version".into()));
     }
-    let clean = t.meta(META_CLEAN_SHUTDOWN)? == Some(1);
+    // Any non-zero value is a clean shutdown: 1, or a token (`shutdown_with_token`).
+    let previous_shutdown = t.meta(META_CLEAN_SHUTDOWN)?.unwrap_or(0);
+    let clean = previous_shutdown != 0;
     t.put_meta(META_CLEAN_SHUTDOWN, 0)?;
 
     let on_disk: HashSet<u32> = list_pack_ids(pack_dir)?.into_iter().collect();
@@ -465,7 +536,11 @@ fn recover(t: &mut Tables<'_>, pack_dir: &Path, cfg: &StoreConfig) -> Result<(Op
         .max()
         .unwrap_or(0);
     let next = (t.meta(META_NEXT_PACK_ID)?.unwrap_or(1) as u32).max(max_seen + 1);
-    Ok((resume, next))
+    Ok(Recovered {
+        resume,
+        next_pack_id: next,
+        previous_shutdown,
+    })
 }
 
 #[cfg(test)]
@@ -545,6 +620,30 @@ pub(crate) mod tests {
             "{durable} durable flushes, at most {most}"
         );
         assert!(store.verify().unwrap().is_ok());
+    }
+
+    /// A panic that poisoned the writer lock makes shutdown (and so the drop) fail with an
+    /// error rather than panic again; the next open finds no clean shutdown.
+    #[test]
+    fn a_poisoned_writer_fails_shutdown_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlockStore::open(dir.path(), test_config()).unwrap();
+        put(&store, b"a", &random_bytes(1, BS)).unwrap();
+        store.flush().unwrap();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let _w = store.writer.lock().unwrap();
+                panic!("mid-append");
+            })
+            .join()
+            .unwrap_err();
+        });
+        assert!(store.is_poisoned());
+        assert!(store.shutdown_with_token(9).is_err());
+        drop(store); // already tried: nothing more, no panic
+        let store = BlockStore::open(dir.path(), test_config()).unwrap();
+        assert!(!store.opened_after_clean_shutdown());
+        assert_eq!(read_all(&store, b"a"), random_bytes(1, BS));
     }
 
     #[test]

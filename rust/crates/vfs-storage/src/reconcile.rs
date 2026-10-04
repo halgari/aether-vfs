@@ -33,6 +33,16 @@
 //!
 //! Store ids of any other shape are not `vfs-storage`'s: they are logged and
 //! left alone.
+//!
+//! None of this can follow a clean close ([`Storage::close`], or the drop of
+//! the last reference) of a session that left nothing for this pass: every
+//! write is then durable on both sides, in order, and the catalog and the
+//! block store hold the same random clean-close token. A session that left a
+//! repair here (a store delete that failed, a failed commit, a write that
+//! panicked, corruption found: see `Storage::needs_reconcile`) leaves no
+//! token. An open that finds matching tokens removes the catalog's durably
+//! before anything else and skips this pass
+//! ([`ReconcileReport::skipped_after_clean_close`]).
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -70,6 +80,9 @@ pub struct ReconcileReport {
     /// Repairs that failed and were skipped (logged at error level); the
     /// next open tries them again. Each is a one-line description.
     pub failed_repairs: Vec<String>,
+    /// Reconciliation did not run: the storage was closed cleanly, so there
+    /// was nothing to repair (every other field is then empty).
+    pub skipped_after_clean_close: bool,
 }
 
 #[cfg(test)]
@@ -347,7 +360,8 @@ fn zero_fill(
 }
 
 impl Storage {
-    /// What reconciliation did when this `Storage` was opened.
+    /// What reconciliation did when this `Storage` was opened, or that it was
+    /// skipped after a clean close.
     pub fn last_reconcile(&self) -> &ReconcileReport {
         &self.reconciled
     }
@@ -445,7 +459,7 @@ mod tests {
             mtime: 7,
         };
         s.catalog.put(lid, "lost.txt", &rec, false).unwrap();
-        s.close().unwrap();
+        s.close_unclean(); // a crash: no clean-close mark
 
         let s = Storage::open(d.path(), cfg()).unwrap();
         let r = s.last_reconcile();
@@ -460,7 +474,7 @@ mod tests {
         assert_eq!(read_file(&p, "LOST.TXT"), b"");
         assert_consistent(&s);
         drop(p);
-        s.close().unwrap();
+        s.close_unclean(); // a crash: no clean-close mark
 
         // The repair was durable: nothing left to do.
         let s = Storage::open(d.path(), cfg()).unwrap();
@@ -492,7 +506,7 @@ mod tests {
         s.store.set_len(&orphan_l, 10).unwrap();
         s.store.set_len(&orphan_c, 10).unwrap();
         s.store.set_len(b"foreign", 3).unwrap();
-        s.close().unwrap();
+        s.close_unclean(); // a crash: no clean-close mark
 
         let s = Storage::open(d.path(), cfg()).unwrap();
         assert_eq!(s.last_reconcile().orphans_deleted, 2);
@@ -531,7 +545,7 @@ mod tests {
                 ),
             ])
             .unwrap();
-        s.close().unwrap();
+        s.close_unclean(); // a crash: no clean-close mark
 
         let s = Storage::open(d.path(), cfg()).unwrap();
         assert_eq!(s.last_reconcile().cache_rows_dropped, 1);
@@ -564,7 +578,7 @@ mod tests {
             )])
             .unwrap();
         s.store.set_len(&cache_file_id(&h), 4000).unwrap();
-        s.close().unwrap();
+        s.close_unclean(); // a crash: no clean-close mark
 
         let s = Storage::open(d.path(), cfg()).unwrap();
         assert_eq!(s.last_reconcile().cache_rows_dropped, 1);
@@ -668,7 +682,7 @@ mod tests {
         let id = layer_file_id(&rec.guid);
         let len = 5 * BS + 100;
         s.store.set_len(&id, len).unwrap(); // blocks 2..6 now missing
-        s.close().unwrap();
+        s.close_unclean(); // a crash: no clean-close mark
 
         let s = Storage::open(d.path(), cfg()).unwrap();
         let r = s.last_reconcile();
@@ -711,7 +725,7 @@ mod tests {
         s.store
             .write_blocks(&id, 3, &body[3 * BS as usize..])
             .unwrap();
-        s.close().unwrap();
+        s.close_unclean(); // a crash: no clean-close mark
 
         for round in 0..2 {
             let s = Storage::open(d.path(), cfg()).unwrap();
@@ -761,7 +775,7 @@ mod tests {
         let lid = s.catalog.layer_id("l").unwrap().unwrap();
         let id = layer_file_id(&s.catalog.get(lid, "f.bin").unwrap().unwrap().guid);
         s.store.set_len(&id, 2 * BS + 7).unwrap(); // block 2 dropped
-        s.close().unwrap();
+        s.close_unclean(); // a crash: no clean-close mark
 
         for round in 0..2 {
             let s = Storage::open(d.path(), cfg()).unwrap();
@@ -866,7 +880,7 @@ mod tests {
         };
         s.catalog.put(lid, "lost.bin", &lost, false).unwrap(); // to recreate empty
         s.store.set_len(&layer_file_id(&new_guid()), 5).unwrap(); // an orphan: compaction
-        s.close().unwrap();
+        s.close_unclean(); // a crash: no clean-close mark
 
         super::FAIL_REPAIRS.with(|f| f.set(true));
         let s = Storage::open(d.path(), cfg());
@@ -927,7 +941,7 @@ mod tests {
         let mut rec = s.catalog.get(lid, "f.bin").unwrap().unwrap();
         rec.len = 100;
         s.catalog.put(lid, "f.bin", &rec, false).unwrap();
-        s.close().unwrap();
+        s.close_unclean(); // a crash: no clean-close mark
 
         let s = Storage::open(d.path(), cfg()).unwrap();
         let r = s.last_reconcile();

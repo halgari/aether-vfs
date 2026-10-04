@@ -83,6 +83,7 @@ impl Storage {
                 Ok(()) | Err(vfs_block_store::Error::NotFound) => {}
                 Err(e) => {
                     tracing::warn!(error = %e, "evicting a cache file: store delete failed");
+                    self.needs_reconcile("an evicted cache file's store delete failed");
                     first_err.get_or_insert(e.into());
                 }
             }
@@ -136,7 +137,13 @@ impl Storage {
             self.ram.invalidate_file(&id);
             match self.store.delete(&id) {
                 Ok(()) | Err(vfs_block_store::Error::NotFound) => {}
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    // The row is gone and the file stays: an orphan for reconcile.
+                    self.needs_reconcile(
+                        "clear_cache: store delete failed after the row was removed",
+                    );
+                    return Err(e.into());
+                }
             }
             drop(counts);
             sub_logical(&self.cache.cached_logical, held);
@@ -159,7 +166,10 @@ impl Storage {
             match self.store.delete(&id) {
                 Ok(()) => report.orphans += 1,
                 Err(vfs_block_store::Error::NotFound) => {}
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    self.needs_reconcile("deleting an orphan cache file failed");
+                    return Err(e.into());
+                }
             }
         }
         if report.files + report.orphans > 0 {

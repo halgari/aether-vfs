@@ -745,6 +745,9 @@ impl CachedSource {
                 // caching: the unit is still served.
                 s.cache.store_write_errors.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(error = %e, "writing a fetched unit to the store failed");
+                // The cache file may now exist with a row that counts no
+                // bytes, or with blocks its row does not count.
+                s.needs_reconcile("writing a fetched unit to the store failed");
             }
         }
         let blocks: Vec<Arc<[u8]>> = buf.chunks(bs as usize).map(Arc::from).collect();

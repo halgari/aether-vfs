@@ -11,6 +11,8 @@
 //!   root, and case-folded with [`vfs_core::fold`]; the original case is kept in
 //!   [`EntryRec::name`].
 //! - `cache_files`: cache identity hash → `(last access minute, logical bytes)`.
+//! - `meta`: counters, and `clean_close` (present only from a clean close to
+//!   the next open: see [`crate::Storage::open`]).
 //!
 //! ## Durability
 //!
@@ -39,6 +41,10 @@ const ENTRIES: TableDefinition<(u64, &str), &[u8]> = TableDefinition::new("entri
 const CACHE_FILES: TableDefinition<[u8; 16], (u64, u64)> = TableDefinition::new("cache_files");
 
 const META_NEXT_LAYER_ID: &str = "next_layer_id";
+/// Present only between a clean close and the next open: the random token
+/// that close also left as the block store's clean-shutdown value. See
+/// [`crate::Storage::close`].
+const META_CLEAN_CLOSE: &str = "clean_close";
 /// redb page cache. The catalog is small next to the store's index.
 /// The catalog's redb page cache unless [`crate::StorageConfig::catalog_cache_bytes`]
 /// says otherwise.
@@ -575,6 +581,36 @@ impl Catalog {
     /// `Durability::Immediate` commit).
     pub fn commit_durable(&self) -> Result<(), StorageError> {
         self.write(true, |_| Ok(()))
+    }
+
+    /// Records, durably, that the storage closed cleanly, with the random
+    /// `token` the block store's clean shutdown recorded too: see
+    /// [`crate::Storage::close`]. The last write of a clean close.
+    pub(crate) fn mark_clean_close(&self, token: u64) -> Result<(), StorageError> {
+        self.write(true, |txn| {
+            let mut meta = txn.open_table(META).map_err(db_err)?;
+            meta.insert(META_CLEAN_CLOSE, token).map_err(db_err)?;
+            Ok(())
+        })
+    }
+
+    /// Removes the clean-close mark, durably, and returns the token it
+    /// held (`None`, and no commit, when there was none). The first write of
+    /// an open: no later write can be covered by a mark it did not earn.
+    pub(crate) fn take_clean_close(&self) -> Result<Option<u64>, StorageError> {
+        let held = {
+            let txn = self.db.begin_read().map_err(db_err)?;
+            let t = txn.open_table(META).map_err(db_err)?;
+            t.get(META_CLEAN_CLOSE).map_err(db_err)?.map(|g| g.value())
+        };
+        if held.is_some() {
+            self.write(true, |txn| {
+                let mut meta = txn.open_table(META).map_err(db_err)?;
+                meta.remove(META_CLEAN_CLOSE).map_err(db_err)?;
+                Ok(())
+            })?;
+        }
+        Ok(held)
     }
 
     /// Non-durable commits made since the last durable one; 0 when a durable

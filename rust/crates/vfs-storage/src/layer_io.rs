@@ -239,6 +239,7 @@ impl FileCell {
                     want,
                     "layer block missing: corruption"
                 );
+                s.needs_reconcile("a layer block is missing from the store");
                 Err(map_io_err())
             }
             Err(e) => {

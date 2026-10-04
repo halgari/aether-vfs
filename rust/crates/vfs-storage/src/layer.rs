@@ -296,6 +296,8 @@ impl LayerProvider {
                                 layer = %self.name, path = folded, row = rec.len, store = info.len,
                                 "layer file length differs between catalog and store; using the store's"
                             );
+                            self.storage
+                                .needs_reconcile("a layer file's row and store lengths differ");
                         }
                         info.len
                     }
@@ -304,6 +306,8 @@ impl LayerProvider {
                             layer = %self.name, path = folded,
                             "layer file missing from the store: corruption"
                         );
+                        self.storage
+                            .needs_reconcile("a layer file is missing from the store");
                         rec.len
                     }
                     Err(e) => return Err(self.st_err("store stat", e.into())),
@@ -376,11 +380,16 @@ impl LayerProvider {
             self.acquire(&rec, &p.folded)
         })();
         if made.is_err() {
-            if row {
-                let _ = self.storage.catalog.remove(self.id, &p.folded, false);
-            }
-            if stored {
-                let _ = self.storage.store.delete(&id);
+            let unrow = !row
+                || self
+                    .storage
+                    .catalog
+                    .remove(self.id, &p.folded, false)
+                    .is_ok();
+            let unstore = !stored || self.storage.store.delete(&id).is_ok();
+            if !(unrow && unstore) {
+                self.storage
+                    .needs_reconcile("rolling back a failed layer file create failed");
             }
             self.rollback(&parents);
         }
@@ -399,7 +408,7 @@ impl LayerProvider {
     fn commit(&self, cell: &FileCell, st: &mut FileState) -> Result<(), i32> {
         let _gate = self.storage.gate_shared();
         let before = st.committed_len;
-        match cell.commit(&self.storage, &self.name, st) {
+        let r = match cell.commit(&self.storage, &self.name, st) {
             Ok(true) => self.update_row(cell, st.len, true),
             Ok(false) => Ok(()),
             Err(e) => {
@@ -408,7 +417,13 @@ impl LayerProvider {
                 }
                 Err(e)
             }
+        };
+        // A failed commit may leave the store's blocks or length and the row
+        // apart (a later commit may mend it, but nothing ensures one runs).
+        if r.is_err() {
+            self.storage.needs_reconcile("a layer commit failed");
         }
+        r
     }
 
     /// Sets `cell`'s row length to `len` (and its mtime, if `stamp`), if the
@@ -847,7 +862,11 @@ impl LayerProvider {
                     // No row names them: their data goes now (or, if this
                     // fails too, at the next open's reconciliation).
                     for id in &ids {
-                        let _ = self.storage.store.delete(id);
+                        if self.storage.store.delete(id).is_err() {
+                            self.storage.needs_reconcile(
+                                "rolling back a failed batch's store files failed",
+                            );
+                        }
                     }
                 }
                 return Err(e);
@@ -1950,16 +1969,23 @@ mod tests {
     }
 
     /// Deferred, dropped without `Storage::close`: the provider's drop is a
-    /// durable point, so nothing closed is lost.
+    /// durable point, so nothing closed is lost, even if the process dies
+    /// right after it; and the storage's own drop is a clean close.
     #[test]
     fn deferred_writes_survive_a_drop_without_close() {
         let (s, d) = temp_storage();
         let p = s.layer("l").unwrap();
         write_file(&p, "a", 0, b"after no sync");
         drop(p);
+        #[cfg(not(windows))]
+        {
+            let (k, kp, _kd) = killed_copy(d.path(), "l");
+            assert_eq!(*k.last_reconcile(), Default::default());
+            assert_eq!(read_file(&kp, "a"), b"after no sync");
+        }
         drop(s);
         let s = Storage::open(d.path(), cfg()).unwrap();
-        assert_eq!(*s.last_reconcile(), Default::default());
+        assert!(s.last_reconcile().skipped_after_clean_close);
         assert_eq!(read_file(&s.layer("l").unwrap(), "a"), b"after no sync");
     }
 

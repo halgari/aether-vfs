@@ -286,3 +286,71 @@ fn file_ids_lists_every_file_once() {
         vec![b"a-small".to_vec(), b"b-big".to_vec()]
     );
 }
+
+/// Copies a store directory as it is on disk: what a process killed now leaves.
+fn snapshot(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let dest = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            snapshot(&e.path(), &dest);
+        } else {
+            std::fs::copy(e.path(), dest).unwrap();
+        }
+    }
+}
+
+/// Only a completed close, `shutdown` or drop counts as a clean shutdown for the next open; a
+/// token recorded by `shutdown_with_token` is reported by the next open only, and any later
+/// open or plain shutdown replaces it.
+#[test]
+fn clean_shutdown_and_its_token_are_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path());
+    assert!(!store.opened_after_clean_shutdown(), "a new store");
+    assert_eq!(store.clean_shutdown_token(), None);
+    store.set_len(b"f", 10).unwrap();
+    store.close().unwrap();
+
+    let store = open(dir.path());
+    assert!(store.opened_after_clean_shutdown());
+    assert_eq!(store.clean_shutdown_token(), None, "a plain close");
+    assert!(matches!(
+        store.shutdown_with_token(1),
+        Err(Error::Config(_))
+    ));
+    assert!(matches!(
+        store.shutdown_with_token(0),
+        Err(Error::Config(_))
+    ));
+    store.shutdown_with_token(0xfeed_beef).unwrap();
+    store.shutdown().unwrap(); // only the first does anything
+    assert_eq!(store.stat(b"f").unwrap().unwrap().len, 10, "still readable");
+    drop(store);
+
+    let store = open(dir.path());
+    assert!(store.opened_after_clean_shutdown());
+    assert_eq!(store.clean_shutdown_token(), Some(0xfeed_beef));
+    drop(store); // a plain clean shutdown replaces the token
+
+    let store = open(dir.path());
+    assert!(store.opened_after_clean_shutdown());
+    assert_eq!(store.clean_shutdown_token(), None);
+    store.set_len(b"g", 5).unwrap();
+    store.shutdown_with_token(77).unwrap();
+    drop(store);
+    #[cfg(not(windows))]
+    {
+        // Killed while open: the token is gone (the open overwrote it), not clean.
+        let store = open(dir.path());
+        assert_eq!(store.clean_shutdown_token(), Some(77));
+        store.flush().unwrap();
+        let killed = tempfile::tempdir().unwrap();
+        snapshot(dir.path(), killed.path());
+        let k = open(killed.path());
+        assert!(!k.opened_after_clean_shutdown());
+        assert_eq!(k.clean_shutdown_token(), None);
+        assert_eq!(k.stat(b"g").unwrap().unwrap().len, 5);
+    }
+}

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 use std::time::{Duration, Instant};
 
@@ -167,8 +167,17 @@ pub struct Storage {
     pub(crate) layers: Mutex<HashMap<String, Weak<LayerProvider>>>,
     /// Signalled whenever a provider leaves `layers`.
     pub(crate) layers_gone: Condvar,
-    /// What reconciliation at open repaired.
+    /// What reconciliation at open repaired, or that it was skipped after a
+    /// clean close.
     pub(crate) reconciled: ReconcileReport,
+    /// Set once a clean close has been tried (by [`Storage::close`] or the
+    /// drop), or, in tests, once a crash is simulated: the drop then does
+    /// nothing more.
+    pub(crate) shut: AtomicBool,
+    /// Set when this session left something for reconciliation at the next
+    /// open (see [`Storage::needs_reconcile`]): the close then leaves no
+    /// clean-close mark.
+    pub(crate) dirty: AtomicBool,
     /// When durable points happen, under [`Durability::Deferred`].
     pub(crate) clock: DurableClock,
     /// GUIDs of layer files (any layer's) whose rows are gone, durably or
@@ -184,6 +193,14 @@ pub struct Storage {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     pub(crate) drop_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Test hook: every [`Storage::store_delete`] fails while set.
+    #[cfg(test)]
+    pub(crate) fail_deletes: AtomicBool,
+    /// Test hook: run by a clean close after the block store's shutdown and
+    /// before the catalog's clean-close mark.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) before_mark_hook: Mutex<Option<Box<dyn FnOnce(&Storage) + Send>>>,
     /// Test hook: runs inside every layer file read, while the read holds the
     /// file's state lock (so a test can hold reads there and count them).
     #[cfg(test)]
@@ -313,6 +330,18 @@ impl Storage {
     ///
     /// Fails with `Store(Locked)` while another `Storage` (in any process) has
     /// the directory open.
+    ///
+    /// After a clean close ([`Storage::close`], or the drop of the last
+    /// reference) nothing can disagree between the catalog and the store, so
+    /// reconciliation (a lookup per file, slow on a large store) is skipped
+    /// and [`Storage::last_reconcile`] says so. The close left the same
+    /// random token in the catalog and as the block store's clean-shutdown
+    /// value; the skip needs the catalog to have existed before this open and
+    /// the two tokens to match exactly. The catalog's token is removed,
+    /// durably, before anything else is written, and every block store open
+    /// (of any build) overwrites the store's at once, so a crash of this
+    /// open, or anything else that opened the store since, makes the next
+    /// open reconcile. So does a store from before the token existed.
     pub fn open(dir: impl AsRef<Path>, cfg: StorageConfig) -> Result<Arc<Storage>, StorageError> {
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir)?;
@@ -320,17 +349,40 @@ impl Storage {
         // fails here, before it opens (and waits on) the catalog database.
         let store = BlockStore::open(dir, cfg.store.clone())?;
         let catalog_path = dir.join("catalog.redb");
+        // A catalog created by this open holds no token, but a skip must
+        // never stand in for reconciliation's refusal of a lost catalog.
+        let catalog_existed = catalog_path.exists();
         let catalog = Catalog::open_with_cache(&catalog_path, cfg.catalog_cache_bytes)?;
-        // Spec §6: repair what a crash between the two halves' commits left,
-        // before the cache budget is summed and before any provider exists.
+        // The first write: from here on, a crash leaves no mark.
+        let marked = catalog.take_clean_close()?;
+        // The store's clean-shutdown token is the one its last close left
+        // (any open since, by any build, replaced it), so a match means the
+        // catalog and the store were closed together and not opened since.
+        let clean = catalog_existed && marked.is_some() && marked == store.clean_shutdown_token();
         let gate = RwLock::new(());
-        let reconciled = reconcile(
-            &store,
-            &catalog,
-            &catalog_path,
-            &gate,
-            u64::from(cfg.store.block_size),
-        )?;
+        let reconciled = if clean {
+            ReconcileReport {
+                skipped_after_clean_close: true,
+                ..ReconcileReport::default()
+            }
+        } else {
+            if marked.is_some() {
+                tracing::warn!(
+                    store_clean = store.opened_after_clean_shutdown(),
+                    "the catalog's clean-close mark does not match the block store's; reconciling"
+                );
+            }
+            // Spec §6: repair what a crash between the two halves' commits
+            // left, before the cache budget is summed and before any
+            // provider exists.
+            reconcile(
+                &store,
+                &catalog,
+                &catalog_path,
+                &gate,
+                u64::from(cfg.store.block_size),
+            )?
+        };
         let ram = RamTier::with_geometry(cfg.ram_tier_bytes, u64::from(cfg.store.block_size));
         let cached_logical = catalog
             .cache_all()?
@@ -338,6 +390,9 @@ impl Storage {
             .map(|(_, r)| r.logical_bytes)
             .sum();
         let clock = DurableClock::new(cfg.max_deferred_commits);
+        // Corruption found, or a repair that failed: the next open reports
+        // and retries it, as before.
+        let dirty = !reconciled.corrupt_files.is_empty() || !reconciled.failed_repairs.is_empty();
         Ok(Arc::new(Storage {
             store,
             catalog,
@@ -348,12 +403,18 @@ impl Storage {
             layers: Mutex::new(HashMap::new()),
             layers_gone: Condvar::new(),
             reconciled,
+            shut: AtomicBool::new(false),
+            dirty: AtomicBool::new(dirty),
             clock,
             doomed: Mutex::new(Vec::new()),
             #[cfg(test)]
             fail_import_at: Mutex::new(None),
             #[cfg(test)]
             drop_hook: Mutex::new(None),
+            #[cfg(test)]
+            fail_deletes: AtomicBool::new(false),
+            #[cfg(test)]
+            before_mark_hook: Mutex::new(None),
             #[cfg(test)]
             layer_read_hook: Mutex::new(None),
             #[cfg(test)]
@@ -366,6 +427,15 @@ impl Storage {
     /// in that order, so every durable catalog row references durable store
     /// data — then live layers' deferred deletions), then closes the store and
     /// releases the directory.
+    ///
+    /// When this is the last reference, the close is **clean**: after the
+    /// block store's final durable commit, the catalog records durably that
+    /// the two agree, and the next [`Storage::open`] skips reconciliation —
+    /// unless this session left something for it ([`Storage::needs_reconcile`]).
+    /// Dropping the last reference does the same (logging errors), unless the
+    /// thread is panicking. A process that exits without either (say through
+    /// `std::process::exit`, which runs no destructors) leaves no mark, and
+    /// its next open reconciles, as after a crash.
     ///
     /// If other references to this `Storage` are still alive, everything is
     /// flushed the same way and `Ok(StillShared)` is returned, but the store
@@ -380,9 +450,9 @@ impl Storage {
         self.sync()?;
         match Arc::try_unwrap(self) {
             Ok(s) => {
-                let Storage { store, catalog, .. } = s;
-                store.close()?;
-                drop(catalog);
+                s.close_cleanly()?;
+                // The drop finds `shut` set: it only closes the files.
+                drop(s);
                 Ok(CloseOutcome::Released)
             }
             Err(still_shared) => {
@@ -397,9 +467,95 @@ impl Storage {
         }
     }
 
-    /// The durability gate, shared: see [`Storage::gate`].
-    pub(crate) fn gate_shared(&self) -> RwLockReadGuard<'_, ()> {
-        self.gate.read().unwrap_or_else(|e| e.into_inner())
+    /// The clean close, by the holder of the only reference (so no provider,
+    /// cached source or eviction can write any more): a last
+    /// [`Storage::sync`] (cheap when [`Storage::close`] just ran one), the
+    /// block store's own clean shutdown recording a fresh random token (its
+    /// final durable commit, which also covers the deletions that sync made),
+    /// then the same token as the catalog's clean-close mark, in one durable
+    /// commit. Each step durable before the next, so a crash anywhere in
+    /// between leaves no matching mark.
+    ///
+    /// Tried once: `shut` is set first. No mark is left (and the reason is
+    /// logged) when the session is dirty ([`Storage::needs_reconcile`]: a
+    /// repair left for the next open, a write that panicked, corruption found
+    /// at open), when the durability gate is poisoned, or when the block
+    /// store's writer is (then nothing is attempted at all: the next open
+    /// reconciles).
+    fn close_cleanly(&self) -> Result<(), StorageError> {
+        if self.shut.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        if self.store.is_poisoned() {
+            self.needs_reconcile("the block store's writer lock is poisoned (a write panicked)");
+            tracing::warn!("storage not closed cleanly: the next open reconciles");
+            return Ok(());
+        }
+        self.sync()?;
+        if self.gate.is_poisoned() {
+            self.needs_reconcile("a durable point panicked");
+        }
+        if self.dirty.load(Ordering::Acquire) {
+            self.store.shutdown()?;
+            tracing::warn!(
+                "storage closed without a clean-close mark: this session left repairs \
+                 for reconciliation, which the next open runs"
+            );
+            return Ok(());
+        }
+        let token = clean_close_token();
+        self.store.shutdown_with_token(token)?;
+        #[cfg(test)]
+        if let Some(hook) = lock(&self.before_mark_hook).take() {
+            hook(self);
+        }
+        self.catalog.mark_clean_close(token)
+    }
+
+    /// Records that this session left something only reconciliation repairs
+    /// (an orphan store file, a row whose length disagrees with the store, a
+    /// cache row that counts no bytes...), so the close leaves no clean-close
+    /// mark and the next open reconciles. Cheap; logged once per session.
+    pub(crate) fn needs_reconcile(&self, why: &str) {
+        if !self.dirty.swap(true, Ordering::AcqRel) {
+            tracing::warn!(
+                reason = why,
+                "storage left a repair for reconciliation at the next open"
+            );
+        }
+    }
+
+    /// The block store's delete of a removed layer file, with the test hook
+    /// applied.
+    pub(crate) fn store_delete(&self, id: &[u8]) -> Result<(), vfs_block_store::Error> {
+        #[cfg(test)]
+        if self.fail_deletes.load(Ordering::SeqCst) {
+            return Err(vfs_block_store::Error::Io(std::io::Error::other(
+                "injected delete failure",
+            )));
+        }
+        self.store.delete(id)
+    }
+
+    /// Test hook: what a crash right after a [`Storage::sync`] leaves. The
+    /// sync runs, then this reference is dropped without the clean-close
+    /// mark, so the next open reconciles (the block store still shuts down
+    /// cleanly, as a drop does).
+    #[cfg(test)]
+    pub(crate) fn close_unclean(self: Arc<Self>) {
+        self.wait_for_eviction();
+        self.sync().unwrap();
+        self.shut.store(true, Ordering::Release);
+    }
+
+    /// The durability gate, shared: see [`Storage::gate`]. A panic while it
+    /// is held may leave a write pair half done (and a reader's panic does
+    /// not poison an `RwLock`), so the guard marks the session dirty then.
+    pub(crate) fn gate_shared(&self) -> SharedGate<'_> {
+        SharedGate {
+            _guard: self.gate.read().unwrap_or_else(|e| e.into_inner()),
+            storage: self,
+        }
     }
 
     /// The durability gate, exclusive: see [`Storage::gate`].
@@ -449,10 +605,13 @@ impl Storage {
         for g in doomed {
             let id = crate::ids::layer_file_id(&g);
             self.ram.invalidate_file(&id);
-            match self.store.delete(&id) {
+            match self.store_delete(&id) {
                 Ok(()) | Err(vfs_block_store::Error::NotFound) => {}
                 // Left for reconciliation, which deletes unreferenced ids.
-                Err(e) => tracing::warn!(error = %e, "layer file delete failed"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "layer file delete failed");
+                    self.needs_reconcile("a removed layer file's store delete failed");
+                }
             }
         }
         Ok(())
@@ -569,6 +728,56 @@ impl Storage {
     }
 }
 
+/// A shared hold of the durability gate: see [`Storage::gate_shared`].
+pub(crate) struct SharedGate<'a> {
+    _guard: RwLockReadGuard<'a, ()>,
+    storage: &'a Storage,
+}
+
+impl Drop for SharedGate<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.storage
+                .needs_reconcile("a write panicked while holding the durability gate");
+        }
+    }
+}
+
+/// A random clean-close token: never 0 (not clean) or 1 (a plain clean
+/// shutdown, which builds before the token write).
+fn clean_close_token() -> u64 {
+    loop {
+        let t = uuid::Uuid::new_v4().as_u64_pair().0;
+        if t > 1 {
+            return t;
+        }
+    }
+}
+
+impl Drop for Storage {
+    /// The last reference is gone, so nothing else can write: a clean close
+    /// (see [`Storage::close`]), unless one was already tried or this thread
+    /// is panicking (whatever it was doing may be half done: the next open
+    /// reconciles). It runs a sync and up to three fsyncs on whichever thread
+    /// drops the last reference (possibly a background eviction's); a process
+    /// that exits before it finishes leaves no mark, which is safe. It never
+    /// panics out: a panic inside is caught and logged.
+    fn drop(&mut self) {
+        if self.shut.load(Ordering::Acquire) || std::thread::panicking() {
+            return;
+        }
+        let this = std::panic::AssertUnwindSafe(&*self);
+        match std::panic::catch_unwind(move || this.close_cleanly()) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(
+                error = %e,
+                "closing the storage cleanly failed; the next open reconciles"
+            ),
+            Err(_) => tracing::error!("closing the storage panicked; the next open reconciles"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,6 +819,342 @@ mod tests {
         let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
         assert_eq!(s.close().unwrap(), CloseOutcome::Released);
         Storage::open(dir.path(), StorageConfig::default()).unwrap();
+    }
+
+    /// A store with one layer file, closed by `close`.
+    fn closed_store_with_a_file(dir: &Path) {
+        let s = Storage::open(dir, StorageConfig::default()).unwrap();
+        s.put_files("l", &[("a/b.txt", b"kept")]).unwrap();
+        assert_eq!(s.close().unwrap(), CloseOutcome::Released);
+    }
+
+    fn read_b(s: &Arc<Storage>) -> Vec<u8> {
+        let p = s.layer("l").unwrap();
+        let (h, size, _) = p
+            .open(
+                vfs_provider::VPath::at_default("a/b.txt"),
+                vfs_provider::OPEN_READ,
+            )
+            .unwrap();
+        let mut buf = vec![0u8; size as usize];
+        assert_eq!(p.read_at(h, 0, &mut buf).unwrap(), buf.len());
+        p.close(h).unwrap();
+        buf
+    }
+
+    /// An orphan store file: what reconciliation would delete.
+    fn plant_orphan(s: &Storage) -> [u8; 17] {
+        let id = crate::ids::layer_file_id(&crate::ids::new_guid());
+        s.store.set_len(&id, 10).unwrap();
+        id
+    }
+
+    #[test]
+    fn a_clean_close_skips_reconciliation_at_the_next_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert!(
+            !first.last_reconcile().skipped_after_clean_close,
+            "a new store reconciles"
+        );
+        first.close().unwrap();
+        closed_store_with_a_file(dir.path());
+
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        let r = s.last_reconcile().clone();
+        assert_eq!(
+            r,
+            ReconcileReport {
+                skipped_after_clean_close: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(read_b(&s), b"kept");
+        // Proof that no pass ran: an orphan planted before a clean close
+        // (which no write path makes) is still there after the open.
+        let orphan = plant_orphan(&s);
+        s.close().unwrap();
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert!(s.last_reconcile().skipped_after_clean_close);
+        assert!(s.store.stat(&orphan).unwrap().is_some());
+        // Dropping the last reference is a clean close too.
+        drop(s);
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert!(s.last_reconcile().skipped_after_clean_close);
+        assert_eq!(read_b(&s), b"kept");
+    }
+
+    /// A crash (no clean close) reconciles at the next open, and so does a
+    /// crash of a session that itself opened after a clean close: the open
+    /// removed the mark durably before anything else.
+    #[test]
+    fn a_crash_reconciles_even_after_a_clean_open() {
+        let dir = tempfile::tempdir().unwrap();
+        closed_store_with_a_file(dir.path());
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert!(s.last_reconcile().skipped_after_clean_close);
+        assert!(s.catalog.take_clean_close().unwrap().is_none(), "cleared");
+
+        // Killed while open, after its writes reached the store but before
+        // the catalog's durable point (as reconcile's kill tests).
+        #[cfg(not(windows))]
+        {
+            let p = s.layer("l").unwrap();
+            let (h, _, _) = p
+                .open(
+                    vfs_provider::VPath::at_default("new.bin"),
+                    vfs_provider::OPEN_WRITE | vfs_provider::OPEN_CREATE,
+                )
+                .unwrap();
+            p.write_at(h, 0, &[7u8; 100_000]).unwrap();
+            s.store.flush().unwrap();
+            let killed = tempfile::tempdir().unwrap();
+            crate::test_util::snapshot(dir.path(), killed.path());
+            p.close(h).unwrap();
+            drop(p);
+            let k = Storage::open(killed.path(), StorageConfig::default()).unwrap();
+            let r = k.last_reconcile();
+            assert!(!r.skipped_after_clean_close, "{r:?}");
+            assert!(r.orphans_deleted >= 1, "{r:?}");
+            assert_eq!(read_b(&k), b"kept");
+        }
+
+        // A crash right after a sync: the next open reconciles.
+        let orphan = plant_orphan(&s);
+        s.close_unclean();
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        let r = s.last_reconcile();
+        assert!(!r.skipped_after_clean_close);
+        assert_eq!(r.orphans_deleted, 1);
+        assert!(s.store.stat(&orphan).unwrap().is_none());
+        assert_eq!(read_b(&s), b"kept");
+    }
+
+    /// A store from before the mark existed (a catalog without it)
+    /// reconciles, and its clean close then lets the next open skip.
+    #[test]
+    fn a_store_without_the_mark_reconciles() {
+        let dir = tempfile::tempdir().unwrap();
+        closed_store_with_a_file(dir.path());
+        {
+            let c = Catalog::open(&dir.path().join("catalog.redb")).unwrap();
+            assert!(c.take_clean_close().unwrap().is_some());
+        }
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert_eq!(*s.last_reconcile(), ReconcileReport::default());
+        assert_eq!(read_b(&s), b"kept");
+        s.close().unwrap();
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert!(s.last_reconcile().skipped_after_clean_close);
+    }
+
+    /// The mark is the token the block store's clean shutdown also holds:
+    /// if anything opened the store after the clean close (any open replaces
+    /// the store's token), or the catalog is an older copy, the open
+    /// reconciles.
+    #[test]
+    fn a_mark_that_does_not_match_the_store_reconciles() {
+        let dir = tempfile::tempdir().unwrap();
+        closed_store_with_a_file(dir.path());
+        let cat = dir.path().join("catalog.redb");
+        let old_catalog = dir.path().join("catalog.old");
+        std::fs::copy(&cat, &old_catalog).unwrap();
+        {
+            // Another program opens the store alone and writes to it.
+            let store = BlockStore::open(dir.path(), StorageConfig::default().store).unwrap();
+            store
+                .set_len(&crate::ids::layer_file_id(&crate::ids::new_guid()), 5)
+                .unwrap();
+            store.close().unwrap();
+        }
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        let r = s.last_reconcile();
+        assert!(!r.skipped_after_clean_close);
+        assert_eq!(r.orphans_deleted, 1);
+        s.close().unwrap();
+
+        // A catalog restored from before that close.
+        std::fs::rename(&old_catalog, &cat).unwrap();
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert!(!s.last_reconcile().skipped_after_clean_close);
+        assert_eq!(read_b(&s), b"kept");
+    }
+
+    /// A catalog mark with a token other than the store's reconciles.
+    #[test]
+    fn a_mismatched_token_reconciles() {
+        let dir = tempfile::tempdir().unwrap();
+        closed_store_with_a_file(dir.path());
+        {
+            let c = Catalog::open(&dir.path().join("catalog.redb")).unwrap();
+            let t = c.take_clean_close().unwrap().unwrap();
+            assert!(t > 1, "a token, never 0 or 1: {t}");
+            c.mark_clean_close(t ^ 0x10).unwrap();
+        }
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert!(!s.last_reconcile().skipped_after_clean_close);
+        assert_eq!(read_b(&s), b"kept");
+    }
+
+    /// What a build from before the token does with the store after a clean
+    /// close: its block store open writes 0 over the token, and its clean
+    /// shutdown (a `close`, or the drop of a storage it never closed, which
+    /// loses the catalog's non-durable rows) writes 1. Either way the next
+    /// open reconciles.
+    #[test]
+    fn a_session_by_an_older_build_reconciles() {
+        for via_drop in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            closed_store_with_a_file(dir.path());
+            let orphan = crate::ids::layer_file_id(&crate::ids::new_guid());
+            {
+                // The old `Storage`: a block store and a catalog, with the
+                // old block store's clean shutdown (`close`, or its drop:
+                // both write 1).
+                let store = BlockStore::open(dir.path(), StorageConfig::default().store).unwrap();
+                assert!(store.clean_shutdown_token().is_some());
+                let catalog = Catalog::open(&dir.path().join("catalog.redb")).unwrap();
+                // A file created, its row never made durable.
+                store.set_len(&orphan, 5).unwrap();
+                if via_drop {
+                    drop(catalog);
+                    drop(store);
+                } else {
+                    store.flush().unwrap();
+                    catalog.commit_durable().unwrap();
+                    store.close().unwrap();
+                }
+            }
+            let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+            let r = s.last_reconcile();
+            assert!(!r.skipped_after_clean_close, "via drop: {via_drop}");
+            assert_eq!(r.orphans_deleted, 1, "via drop: {via_drop}");
+            assert!(s.store.stat(&orphan).unwrap().is_none());
+            assert_eq!(read_b(&s), b"kept");
+        }
+    }
+
+    /// A write that panics while holding the durability gate shared (every
+    /// write pair does; a reader's panic does not poison the lock) may be
+    /// half done: the close leaves no mark. So does a panic in a durable
+    /// point (exclusive, which poisons it).
+    #[test]
+    fn a_panic_under_the_gate_leaves_no_mark() {
+        for exclusive in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            closed_store_with_a_file(dir.path());
+            let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+            let orphan = plant_orphan(&s); // what the half-done pair left
+            let s2 = Arc::clone(&s);
+            std::thread::spawn(move || {
+                if exclusive {
+                    let _gate = s2.gate_exclusive();
+                    panic!("mid-durable-point");
+                }
+                let _gate = s2.gate_shared();
+                panic!("mid-write");
+            })
+            .join()
+            .unwrap_err();
+            assert_eq!(s.close().unwrap(), CloseOutcome::Released);
+            let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+            let r = s.last_reconcile();
+            assert!(!r.skipped_after_clean_close, "exclusive: {exclusive}");
+            assert_eq!(r.orphans_deleted, 1, "exclusive: {exclusive}");
+            assert!(s.store.stat(&orphan).unwrap().is_none());
+            assert_eq!(read_b(&s), b"kept");
+        }
+    }
+
+    /// A store delete that fails in a session (a removed layer file's, or a
+    /// deleted layer's) leaves an orphan for reconciliation: the clean close
+    /// leaves no mark, and the next open deletes it.
+    #[test]
+    fn a_failed_delete_leaves_no_mark() {
+        for whole_layer in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            closed_store_with_a_file(dir.path());
+            let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+            s.put_files("gone", &[("x.bin", b"doomed")]).unwrap();
+            let lid = s.catalog.layer_id("gone").unwrap().unwrap();
+            let id = crate::ids::layer_file_id(&s.catalog.get(lid, "x.bin").unwrap().unwrap().guid);
+            s.sync().unwrap();
+            s.fail_deletes.store(true, Ordering::SeqCst);
+            if whole_layer {
+                s.delete_layer("gone").unwrap();
+            } else {
+                let p = s.layer("gone").unwrap();
+                p.remove(vfs_provider::VPath::at_default("x.bin")).unwrap();
+                drop(p);
+                s.sync().unwrap();
+            }
+            s.fail_deletes.store(false, Ordering::SeqCst);
+            assert!(s.store.stat(&id).unwrap().is_some(), "the delete failed");
+            assert_eq!(s.close().unwrap(), CloseOutcome::Released);
+            let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+            let r = s.last_reconcile();
+            assert!(!r.skipped_after_clean_close, "whole layer: {whole_layer}");
+            assert_eq!(r.orphans_deleted, 1, "whole layer: {whole_layer}");
+            assert!(s.store.stat(&id).unwrap().is_none());
+            assert_eq!(read_b(&s), b"kept");
+            // That open's close is clean again.
+            s.close().unwrap();
+            let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+            assert!(s.last_reconcile().skipped_after_clean_close);
+        }
+    }
+
+    /// Killed after the block store's clean shutdown recorded the token and
+    /// before the catalog's mark: the next open reconciles.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_kill_between_the_store_shutdown_and_the_mark_reconciles() {
+        let dir = tempfile::tempdir().unwrap();
+        closed_store_with_a_file(dir.path());
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        let killed = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().to_owned(), killed.path().to_owned());
+        *lock(&s.before_mark_hook) = Some(Box::new(move |_: &Storage| {
+            crate::test_util::snapshot(&from, &to);
+        }));
+        s.close().unwrap();
+        let k = Storage::open(killed.path(), StorageConfig::default()).unwrap();
+        assert!(!k.last_reconcile().skipped_after_clean_close);
+        assert_eq!(read_b(&k), b"kept");
+        // The original completed its close.
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert!(s.last_reconcile().skipped_after_clean_close);
+    }
+
+    /// An open that fails after the block store opened (here: an unreadable
+    /// catalog) consumed the store's token, so the next open reconciles even
+    /// with the catalog's mark back in place.
+    #[test]
+    fn an_open_that_fails_midway_makes_the_next_reconcile() {
+        let dir = tempfile::tempdir().unwrap();
+        closed_store_with_a_file(dir.path());
+        let cat = dir.path().join("catalog.redb");
+        let aside = dir.path().join("catalog.aside");
+        std::fs::rename(&cat, &aside).unwrap();
+        std::fs::write(&cat, b"not a redb database").unwrap();
+        assert!(Storage::open(dir.path(), StorageConfig::default()).is_err());
+        std::fs::rename(&aside, &cat).unwrap();
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        assert!(!s.last_reconcile().skipped_after_clean_close);
+        assert_eq!(read_b(&s), b"kept");
+    }
+
+    /// A missing catalog never skips: reconciliation refuses it as before,
+    /// even right after a clean close.
+    #[test]
+    fn a_missing_catalog_after_a_clean_close_still_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        closed_store_with_a_file(dir.path());
+        std::fs::remove_file(dir.path().join("catalog.redb")).unwrap();
+        let e = Storage::open(dir.path(), StorageConfig::default())
+            .err()
+            .expect("must refuse");
+        assert!(e.to_string().contains("catalog.redb"), "{e}");
     }
 
     #[test]

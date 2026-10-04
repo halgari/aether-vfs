@@ -208,19 +208,26 @@ impl Storage {
             self.catalog.drop_layer(id)?
         };
         // Every durable catalog row must reference durable store data, and the
-        // commit makes other layers' pending rows durable too.
-        self.flush_durably()?;
+        // commit makes other layers' pending rows durable too. If it fails, the
+        // rows may be gone while the files stay: only reconcile finds those.
+        if let Err(e) = self.flush_durably() {
+            self.needs_reconcile("delete_layer: durable point failed after the rows were dropped");
+            return Err(e);
+        }
         let mut deleted = false;
         for g in guids {
             let id = layer_file_id(&g);
             self.ram.invalidate_file(&id);
-            match self.store.delete(&id) {
+            match self.store_delete(&id) {
                 Ok(()) => deleted = true,
                 Err(vfs_block_store::Error::NotFound) => {}
-                Err(e) => tracing::warn!(
-                    layer = name, error = %e,
-                    "layer file delete failed; reconciliation will retry"
-                ),
+                Err(e) => {
+                    tracing::warn!(
+                        layer = name, error = %e,
+                        "layer file delete failed; reconciliation at the next open will retry"
+                    );
+                    self.needs_reconcile("a deleted layer's store delete failed");
+                }
             }
         }
         if deleted {
