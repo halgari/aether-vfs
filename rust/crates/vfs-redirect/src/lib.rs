@@ -703,6 +703,45 @@ pub enum Decision {
     Deny,
 }
 
+/// The timestamp reported for every VFS-backed file.
+///
+/// Not zero, and that is the whole point. A `FILETIME` of 0 is 1 January
+/// 1601, and Cyberpunk 2077 refuses to start against it: it stats
+/// `r6/cache/final.redscripts`, gets 1601, and puts up "encountered an error
+/// caused by a corrupted or missing scripts file". Reporting a plausible date
+/// instead takes it from that dialog to a running game window. Skyrim SE never
+/// looked at a stat's time, which is why this survived until a second game
+/// existed.
+///
+/// The value is arbitrary but must be **stable across runs** and **not in the
+/// future**. Stability matters more than accuracy: a timestamp that moved every
+/// launch would invalidate exactly the caches this exists to satisfy, and a
+/// game that recompiles its script cache on every boot is no better off than
+/// one that refuses to boot.
+///
+/// Not every provider has times: a Steam depot manifest has none, so ocm's
+/// depot provider supplies `mtime: 0` honestly. A directory listing reports a
+/// provider's own time where it has one and this where it has none
+/// ([`write_dir_info`]); a stat, whose reply carries no time, always reports
+/// this.
+///
+/// 2024-01-01T00:00:00Z, in 100 ns ticks since 1601.
+pub const SYNTH_FILETIME: i64 = 133_485_408_000_000_000;
+
+/// A provider's `mtime` (seconds since the Unix epoch) as a `FILETIME` (100 ns
+/// ticks since 1601), or [`SYNTH_FILETIME`] when it has none (0 or less).
+pub fn filetime_of(mtime: i64) -> i64 {
+    /// Seconds from 1601-01-01 to 1970-01-01.
+    const UNIX_EPOCH_IN_FILETIME_SECS: i64 = 11_644_473_600;
+    if mtime <= 0 {
+        return SYNTH_FILETIME;
+    }
+    mtime
+        .checked_add(UNIX_EPOCH_IN_FILETIME_SECS)
+        .and_then(|s| s.checked_mul(10_000_000))
+        .unwrap_or(SYNTH_FILETIME)
+}
+
 /// The directory-info `FILE_INFORMATION_CLASS` values the shim marshals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirInfoClass {
@@ -803,6 +842,11 @@ pub fn write_dir_info(
             *b = 0;
         }
         if class.has_metadata() {
+            // CreationTime, LastAccessTime, LastWriteTime, ChangeTime.
+            let time = filetime_of(it.mtime);
+            for t in [8, 16, 24, 32] {
+                buf[off + t..off + t + 8].copy_from_slice(&time.to_le_bytes());
+            }
             let eof = it.size as i64;
             buf[off + 40..off + 48].copy_from_slice(&eof.to_le_bytes());
             buf[off + 48..off + 56].copy_from_slice(&eof.to_le_bytes());
@@ -1353,6 +1397,57 @@ mod tests {
         assert_eq!(rname(&buf, next, 68, 6), "sub");
         assert_eq!(ru32(&buf, next, 0), 0); // last record: NextEntryOffset 0
         assert_eq!(r.bytes, 80 + 68 + 6);
+    }
+
+    /// Every timestamp of a listed entry is its provider's mtime, as a
+    /// `FILETIME`. They used to be left zero, 1 January 1601 for every file
+    /// `FindFirstFile` found: Skyrim, listing its saves so, offered no
+    /// Continue or Load over the saves the last session wrote and numbered
+    /// the next one `Save1` again. Listed with their real times, it offers
+    /// both.
+    #[test]
+    fn listed_entries_carry_the_providers_mtime() {
+        // 2026-10-03T21:13:45Z.
+        let mtime = 1_791_062_025;
+        let want = (mtime + 11_644_473_600) * 10_000_000;
+        let save = DirItem { name: "Save1.ess".into(), is_dir: false, size: 9, mtime };
+        for class in [
+            DirInfoClass::Directory,
+            DirInfoClass::FullDirectory,
+            DirInfoClass::BothDirectory,
+            DirInfoClass::IdBothDirectory,
+            DirInfoClass::IdFullDirectory,
+        ] {
+            let mut buf = vec![0u8; 512];
+            let r = write_dir_info(class, std::slice::from_ref(&save), &mut buf, false);
+            assert_eq!(r.count, 1);
+            // CreationTime, LastAccessTime, LastWriteTime, ChangeTime.
+            for off in [8, 16, 24, 32] {
+                assert_eq!(ri64(&buf, 0, off), want, "{class:?} at {off}");
+            }
+            assert_eq!(ri64(&buf, 0, 40), 9, "{class:?}: EndOfFile");
+        }
+    }
+
+    /// A provider with no time (`mtime` 0: a depot manifest has none) is
+    /// listed at [`SYNTH_FILETIME`], the time a stat of it reports, never
+    /// at 1601.
+    #[test]
+    fn an_entry_without_a_time_is_listed_at_the_synthetic_time() {
+        let mut buf = vec![0u8; 512];
+        let r = write_dir_info(
+            DirInfoClass::BothDirectory,
+            &[ditem("a.esp", false, 1), ditem("sub", true, 0)],
+            &mut buf,
+            false,
+        );
+        assert_eq!(r.count, 2);
+        let next = ru32(&buf, 0, 0) as usize;
+        for rec in [0, next] {
+            for off in [8, 16, 24, 32] {
+                assert_eq!(ri64(&buf, rec, off), SYNTH_FILETIME);
+            }
+        }
     }
 
     #[test]

@@ -425,7 +425,7 @@ fn child_cwd_root() -> bool {
 use retour::RawDetour;
 use vfs_redirect::{
     nt_to_volume_relative, write_dir_info, write_file_name_info,
-    Decision, DirInfoClass, DirItem, DirStatus,
+    Decision, DirInfoClass, DirItem, DirStatus, SYNTH_FILETIME,
 };
 use windows_sys::Win32::Foundation::{ERROR_INTERNAL_ERROR, HANDLE, HMODULE, NTSTATUS};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
@@ -491,28 +491,6 @@ static mut TRAMP_QOBJ: Option<NtQueryObjectFn> = None;
 static mut TRAMP_SETINFO: Option<NtSetInformationFileFn> = None;
 static mut TRAMP_READ: Option<NtReadFileFn> = None;
 static mut TRAMP_WRITE: Option<NtWriteFileFn> = None;
-/// The timestamp reported for every VFS-backed file.
-///
-/// Not zero, and that is the whole point. A `FILETIME` of 0 is 1 January
-/// 1601, and Cyberpunk 2077 refuses to start against it: it stats
-/// `r6/cache/final.redscripts`, gets 1601, and puts up "encountered an error
-/// caused by a corrupted or missing scripts file". Reporting a plausible date
-/// instead takes it from that dialog to a running game window. Skyrim SE never
-/// looked, which is why this survived until a second game existed.
-///
-/// The value is arbitrary but must be **stable across runs** and **not in the
-/// future**. Stability matters more than accuracy: a timestamp that moved every
-/// launch would invalidate exactly the caches this exists to satisfy, and a
-/// game that recompiles its script cache on every boot is no better off than
-/// one that refuses to boot.
-///
-/// Providers carry no real timestamps to plumb through instead — a Steam depot
-/// manifest has none, so ocm's depot provider supplies `mtime: 0` honestly.
-/// Should a provider ever have real times, they belong here in place of the
-/// constant.
-///
-/// 2024-01-01T00:00:00Z, in 100 ns ticks since 1601.
-const SYNTH_FILETIME: i64 = 133_485_408_000_000_000;
 /// The volume every synthetic handle says it is on, where a volume serial
 /// number is asked for together with a file id: two ids are only comparable
 /// on one volume, and every virtual file is on this one.
