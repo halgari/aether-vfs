@@ -66,7 +66,6 @@ fn launch(dir: &Path, log_file: Option<PathBuf>) -> WineLaunch {
         log_file,
         steam: vfs_proton::SteamSide::Untouched,
         notes: Vec::new(),
-        wrapper: Vec::new(),
         nvapi: None,
     }
 }

@@ -171,11 +171,6 @@ pub struct LaunchOpts {
     /// does with NVAPI disabled. A DLL that cannot be copied or removed is a
     /// [`LaunchHandle::notes`] line, not a failed launch. Ignored on Windows.
     pub nvapi: bool,
-    /// A program to run the Proton launch under, with its arguments
-    /// (`["gamescope", "-W", "2560", "-H", "1440", "--"]`): the spawned
-    /// command is the wrapper's, ending in the `wine` command line. Empty
-    /// (the default) runs `wine` directly. Ignored on Windows.
-    pub wrapper: Vec<String>,
 }
 
 impl Default for LaunchOpts {
@@ -200,7 +195,6 @@ impl Default for LaunchOpts {
             ready_timeout: None,
             log_file: None,
             nvapi: true,
-            wrapper: Vec::new(),
         }
     }
 }
@@ -2145,7 +2139,6 @@ impl Session {
             steam,
             notes,
             nvapi,
-            wrapper: opts.wrapper.clone(),
         };
 
         let child = vfs_proton::launch::spawn(&wine).map_err(|e| format!("launch: {e}"))?;
