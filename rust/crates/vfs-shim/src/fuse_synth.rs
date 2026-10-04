@@ -27,6 +27,9 @@ struct FuseOpen {
     /// a write handle holds one too, so a write or truncate through it can
     /// drop the file.
     cache: Option<vfs_ipc::FileRef>,
+    /// This handle's file in the access timeline (`crate::access_log`); zero
+    /// when the timeline is off.
+    access: u32,
 }
 
 /// What a read through a handle needs, under one lock: see [`lookup_read`].
@@ -35,6 +38,8 @@ pub struct ReadView {
     pub size: u64,
     pub position: u64,
     pub cache: Option<vfs_ipc::FileRef>,
+    /// See `FuseOpen::access`.
+    pub access: u32,
 }
 
 static TABLE: Mutex<BTreeMap<usize, FuseOpen>> = Mutex::new(BTreeMap::new());
@@ -82,6 +87,7 @@ pub fn open_fuse_at_ex(
             append_only,
             abs_path,
             cache: None,
+            access: 0,
         },
     );
     Some(handle as isize)
@@ -92,6 +98,15 @@ pub fn set_cache(handle: isize, cache: vfs_ipc::FileRef) {
     if let Ok(mut g) = TABLE.lock() {
         if let Some(e) = g.get_mut(&(handle as usize)) {
             e.cache = Some(cache);
+        }
+    }
+}
+
+/// Attach the handle's access-timeline id (`crate::access_log::note_open`).
+pub fn set_access(handle: isize, id: u32) {
+    if let Ok(mut g) = TABLE.lock() {
+        if let Some(e) = g.get_mut(&(handle as usize)) {
+            e.access = id;
         }
     }
 }
@@ -112,6 +127,7 @@ pub fn lookup_read(handle: isize) -> Option<ReadView> {
         size: e.size,
         position: e.position,
         cache: e.cache.clone(),
+        access: e.access,
     })
 }
 
@@ -175,9 +191,10 @@ pub fn grow_size(handle: isize, end: u64) {
     }
 }
 
-pub fn close_fuse(handle: isize) -> Option<u64> {
+/// Forget `handle`: its director handle, and its access-timeline id.
+pub fn close_fuse(handle: isize) -> Option<(u64, u32)> {
     let mut g = TABLE.lock().ok()?;
-    g.remove(&(handle as usize)).map(|e| e.fh)
+    g.remove(&(handle as usize)).map(|e| (e.fh, e.access))
 }
 
 #[cfg(test)]

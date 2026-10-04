@@ -1661,7 +1661,7 @@ fn render_copy_ups(snap: &Snapshot) -> String {
 /// overrides the interval for exactly that case — a short-lived test child
 /// can opt into a fast tick for just itself; unset, every existing caller
 /// keeps the same 250ms cadence.
-fn report_interval() -> std::time::Duration {
+pub(crate) fn report_interval() -> std::time::Duration {
     std::time::Duration::from_millis(vfs_env::parsed_or(vfs_env::SHIM_STATS_INTERVAL_MS, 250))
 }
 
@@ -1729,7 +1729,7 @@ fn render_report() -> String {
 
 /// Write `body` to the report path via a temp + rename, so a reader never sees
 /// a half file.
-fn write_report(path: &std::ffi::OsStr, body: &str) {
+pub(crate) fn write_report(path: &std::ffi::OsStr, body: &str) {
     let tmp = std::path::PathBuf::from(path).with_extension("tmp");
     if std::fs::write(&tmp, body.as_bytes()).is_ok() {
         let _ = std::fs::rename(&tmp, path);

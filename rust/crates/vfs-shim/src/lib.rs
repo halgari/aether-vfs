@@ -4,6 +4,7 @@
 //! backing files. Supports standalone in-process install and dual-layer
 //! install_late (early payload owns the four path/attr stubs).
 
+mod access_log;
 mod bootstrap;
 mod engine;
 pub mod fuse_client;

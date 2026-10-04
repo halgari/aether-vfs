@@ -252,6 +252,11 @@ pub const SHIM_STATS_LOG: &str = "VFS_SHIM_STATS_LOG";
 /// session — produces no report file at all; this lets such a caller shorten
 /// the interval for just its own child instead of guessing at a longer sleep.
 pub const SHIM_STATS_INTERVAL_MS: &str = "VFS_SHIM_STATS_INTERVAL_MS";
+/// Per-file access timeline: for every file the director serves through a
+/// synthetic handle, first open, first and last read, last close, read count,
+/// bytes and reader threads, as TSV. Rewritten on the stats interval
+/// ([`SHIM_STATS_INTERVAL_MS`]); independent of [`SHIM_STATS_LOG`].
+pub const SHIM_ACCESS_LOG: &str = "VFS_SHIM_ACCESS_LOG";
 /// Every file the director serves, with its size.
 pub const DIRECTOR_OPEN_LOG: &str = "VFS_DIRECTOR_OPEN_LOG";
 /// Opens of the game EXE, for tracing DRM behaviour.
@@ -461,6 +466,7 @@ pub const ALL: &[Var] = &[
     Var { name: BENCH, kind: Kind::Behaviour, default: "false" },
     Var { name: SHIM_STATS_LOG, kind: Kind::Diagnostic, default: "off" },
     Var { name: SHIM_STATS_INTERVAL_MS, kind: Kind::Diagnostic, default: "250" },
+    Var { name: SHIM_ACCESS_LOG, kind: Kind::Diagnostic, default: "off" },
     Var { name: DIRECTOR_OPEN_LOG, kind: Kind::Diagnostic, default: "off" },
     Var { name: DRM_EXE_LOG, kind: Kind::Diagnostic, default: "off" },
     Var { name: SECTION_FILL_LOG, kind: Kind::Diagnostic, default: "off" },

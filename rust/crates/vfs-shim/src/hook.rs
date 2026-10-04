@@ -617,6 +617,7 @@ pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
     // once hooks are installed that I/O re-enters them.
     crate::breadcrumb::init();
     crate::hookstats::start_reporter();
+    crate::access_log::init();
     ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
     // SAFETY: ntdll lookup + detour install; each hook matches its ABI.
     unsafe { install_all_detours(true) }
@@ -727,6 +728,7 @@ pub unsafe fn install_late(
     // once hooks are installed that I/O re-enters them.
     crate::breadcrumb::init();
     crate::hookstats::start_reporter();
+    crate::access_log::init();
     ENGINE.set(engine).map_err(|_| InstallError::AlreadyInstalled)?;
 
     // SAFETY: cfg is the live early Config in this process; tramp addresses
@@ -1771,6 +1773,14 @@ unsafe fn try_fuse_create(
             if let Some(cache) = crate::read_cache::register(root.0, vp, &resp, write) {
                 crate::fuse_synth::set_cache(h, cache);
             }
+            // The access timeline keys by the read cache's `root:vpath`; zero
+            // (nothing to attach) whenever it is off.
+            if !resp.is_dir {
+                let access = crate::access_log::note_open(root.0, vp);
+                if access != 0 {
+                    crate::fuse_synth::set_access(h, access);
+                }
+            }
             if !file_handle.is_null() {
                 *file_handle = h as HANDLE;
             }
@@ -2778,7 +2788,8 @@ unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
         crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_TABLE);
-        if let Some(fh) = crate::fuse_synth::close_fuse(handle as isize) {
+        if let Some((fh, access)) = crate::fuse_synth::close_fuse(handle as isize) {
+            crate::access_log::note_close(access);
             crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_CLIENT);
             if let Some(c) = crate::fuse_client::global() {
                 crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_RING);
@@ -4410,6 +4421,7 @@ unsafe fn read_hook_body(
             let off = explicit.unwrap_or(pos);
             let want = length as usize;
             if off >= size {
+                crate::access_log::note_read(view.access, 0);
                 if !iosb.is_null() {
                     let p = iosb as *mut u8;
                     core::ptr::write_unaligned(p as *mut u32, STATUS_END_OF_FILE as u32);
@@ -4454,6 +4466,9 @@ unsafe fn read_hook_body(
                 }
             };
             {
+                // Every read the handle served, whichever way: cache hit,
+                // cache miss, or the ring.
+                crate::access_log::note_read(view.access, n as u64);
                 if explicit.is_none() {
                     crate::fuse_synth::set_position(handle as isize, off + n as u64);
                 }
