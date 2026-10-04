@@ -125,6 +125,11 @@ pub struct WineLaunch {
     /// the top of [`log_file`](Self::log_file), or to this process's stderr
     /// when there is none — where the launch's own output goes.
     pub notes: Vec<String>,
+    /// A program the launch runs `wine` under, with its arguments, e.g.
+    /// `["gamescope", "-W", "2560", "-H", "1440", "--"]`: the spawned
+    /// command is the wrapper's, ending in the `wine` command line. Empty
+    /// runs `wine` directly.
+    pub wrapper: Vec<String>,
     /// NVIDIA NVAPI/NGX for this launch ([`crate::nvapi::setup`]), already
     /// installed into the prefix: [`launch_env`] adds its environment, puts
     /// [`NVAPI_OVERRIDES`](crate::nvapi::NVAPI_OVERRIDES) under the caller's
@@ -236,7 +241,15 @@ pub fn command_line(l: &WineLaunch) -> (String, Vec<String>) {
         argv.push("--".to_string());
         argv.extend(l.args.iter().cloned());
     }
-    (prog, argv)
+    match l.wrapper.split_first() {
+        Some((wrapper, wrapper_args)) => {
+            let mut all = wrapper_args.to_vec();
+            all.push(prog);
+            all.extend(argv);
+            (wrapper.clone(), all)
+        }
+        None => (prog, argv),
+    }
 }
 
 /// The environment for a launch: Wine's own three, plus exactly the `VFS_*`
@@ -745,6 +758,7 @@ mod tests {
             log_file: None,
             steam: SteamSide::Untouched,
             notes: Vec::new(),
+            wrapper: Vec::new(),
             nvapi: None,
         }
     }
@@ -806,6 +820,18 @@ mod tests {
         assert_eq!(argv[3], sample().payload_dll.to_string_lossy());
         assert_eq!(argv[4], sample().config_file.to_string_lossy());
         assert_eq!(argv[5], sample().ready_file.to_string_lossy());
+    }
+
+    #[test]
+    fn a_wrapper_runs_wine_with_the_injector_contract_unchanged() {
+        let plain = command_line(&sample());
+        let mut l = sample();
+        l.wrapper = vec!["gamescope".into(), "-W".into(), "2560".into(), "--".into()];
+        let (prog, argv) = command_line(&l);
+        assert_eq!(prog, "gamescope");
+        assert_eq!(&argv[..3], ["-W", "2560", "--"]);
+        assert_eq!(argv[3], plain.0);
+        assert_eq!(&argv[4..], plain.1.as_slice());
     }
 
     #[test]
