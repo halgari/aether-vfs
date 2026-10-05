@@ -17,6 +17,8 @@ vfs-win = { path = "../vfs-win" }
 # Dual-layer vehicle (reflective map + RIP-redirect + spin gate) for children.
 vfs-env = { path = "../vfs-env" }
 vfs-inject = { path = "../vfs-inject" }
+# Names of the on-disk copies backing image sections.
+vfs-pe = { path = "../vfs-pe" }
 retour = { version = "0.3", default-features = false }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",

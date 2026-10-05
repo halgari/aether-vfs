@@ -215,6 +215,39 @@ pub fn export_rva(img: &[u8], e_lfanew: usize, name: &[u8]) -> Result<u32, &'sta
     Err("export not found")
 }
 
+/// File name for a cached on-disk copy of a VFS-served PE image (the shim
+/// backs image sections with such a copy, because the kernel builds an image
+/// section only from a real file).
+///
+/// It depends on the vpath (ASCII case folded), the length **and every byte**:
+/// two different builds of a DLL of the same size (a one-byte patch, an update
+/// that kept the size) must never share a copy, or the process silently runs
+/// the stale one. The content hash is not cryptographic; it only has to tell
+/// files apart, and reads 8 bytes per step so hashing the plugin DLLs of a
+/// large load order costs milliseconds.
+pub fn image_cache_name(vpath: &str, pe: &[u8]) -> String {
+    let mut path_hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in vpath.bytes().map(|b| b.to_ascii_lowercase()) {
+        path_hash ^= b as u64;
+        path_hash = path_hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    let mut content: u64 = 0x9e37_79b9_7f4a_7c15 ^ pe.len() as u64;
+    let words = pe.chunks_exact(8);
+    let rest = words.remainder();
+    for w in words {
+        let v = u64::from_le_bytes(w.try_into().expect("8-byte chunk"));
+        content = (content ^ v)
+            .wrapping_mul(0xff51_afd7_ed55_8ccd)
+            .rotate_left(29);
+    }
+    let mut tail = [0u8; 8];
+    tail[..rest.len()].copy_from_slice(rest);
+    content = (content ^ u64::from_le_bytes(tail) ^ ((rest.len() as u64) << 56))
+        .wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    content ^= content >> 33;
+    format!("{path_hash:016x}-{content:016x}-{:x}.bin", pe.len())
+}
+
 pub fn is_system_import_dll(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     // Not `Path::file_name()`: that treats `\` as a separator only on Windows,
@@ -281,6 +314,43 @@ pub fn import_dll_names_of_pe(raw: &[u8]) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn image_cache_names_follow_every_byte_and_the_path() {
+        let a = vec![7u8; 4096 + 5];
+        let mut b = a.clone();
+        b[1234] ^= 1;
+        let mut c = a.clone();
+        c[4096 + 4] ^= 0x80;
+        let p = r"C:\Game\Data\SKSE\Plugins\X.dll";
+        assert_eq!(image_cache_name(p, &a), image_cache_name(p, &a));
+        assert_ne!(
+            image_cache_name(p, &a),
+            image_cache_name(p, &b),
+            "one byte in a word"
+        );
+        assert_ne!(
+            image_cache_name(p, &a),
+            image_cache_name(p, &c),
+            "one byte in the tail"
+        );
+        assert_ne!(
+            image_cache_name(p, &a),
+            image_cache_name(p, &a[..4096]),
+            "length"
+        );
+        assert_ne!(
+            image_cache_name(p, &a),
+            image_cache_name(r"C:\Game\Y.dll", &a),
+            "path"
+        );
+        assert_eq!(
+            image_cache_name(p, &a),
+            image_cache_name(&p.to_uppercase(), &a),
+            "case"
+        );
+        assert!(image_cache_name(p, &a).ends_with(".bin"));
+    }
+
     use super::*;
 
     /// A 64-byte buffer starting "MZ" is the minimum this predicate accepts.

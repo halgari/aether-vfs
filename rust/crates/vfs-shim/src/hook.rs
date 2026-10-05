@@ -4485,9 +4485,11 @@ unsafe fn read_hook_body(
 /// `None` means the backing file could not be produced, and the caller should
 /// fall back to the manual mapper.
 ///
-/// The cache is keyed on the vpath and size, so an assembly loaded repeatedly
-/// materialises once. Files live under the shim's own temp directory and are
-/// left for the OS to reclaim; they are content, not secrets, and the process
+/// The cache is keyed on the vpath and the image's bytes
+/// ([`vfs_pe::image_cache_name`]), so an assembly loaded repeatedly
+/// materialises once and a changed build of the same size never reuses it.
+/// Files live under the shim's own temp directory and are left for the OS to
+/// reclaim; they are content, not secrets, and the process
 /// may still have sections open on them at exit.
 #[allow(clippy::too_many_arguments)]
 unsafe fn real_image_section(
@@ -4507,22 +4509,18 @@ unsafe fn real_image_section(
     let _io = ShimIoGuard::enter();
 
     let vpath = crate::fuse_synth::abs_path(file_handle as isize)?;
-    // FNV-1a over the vpath and length: stable across runs, and distinct for
-    // two builds of the same assembly.
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in vpath.to_ascii_lowercase().bytes().chain(pe.len().to_le_bytes()) {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x1000_0000_01b3);
-    }
+    // Named by the vpath and the image's bytes: a same-size different build
+    // (a patch, an update) never reuses a stale copy.
+    let name = vfs_pe::image_cache_name(&vpath, pe);
     let dir = std::env::temp_dir().join("vfs-pe-cache");
     std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!("{h:016x}.bin"));
+    let path = dir.join(&name);
 
     // Write once. A concurrent writer would be writing identical bytes, but a
     // reader must never see a half-written image, so build beside it and rename.
     let good = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.len()).ok() == Some(pe.len() as u64);
     if !good(&path) {
-        let tmp = dir.join(format!("{h:016x}.{}.tmp", std::process::id()));
+        let tmp = dir.join(format!("{name}.{}.tmp", std::process::id()));
         std::fs::write(&tmp, pe).ok()?;
         // Rename is atomic within a directory; an existing good file wins.
         if std::fs::rename(&tmp, &path).is_err() {
