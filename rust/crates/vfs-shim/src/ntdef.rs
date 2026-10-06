@@ -632,3 +632,148 @@ pub const STATUS_CANNOT_DELETE: NTSTATUS = 0xC000_0121u32 as i32;
 pub const STATUS_INSUFFICIENT_RESOURCES: NTSTATUS = 0xC000_009Au32 as i32;
 /// `STATUS_INVALID_INFO_CLASS`.
 pub const STATUS_INVALID_INFO_CLASS: NTSTATUS = 0xC000_0003u32 as i32;
+
+// ---- Registry: notifications, security, handle flags, out-of-scope calls (Task 12) ----
+
+/// `ntdll!NtNotifyChangeKey`. `WatchTree` and `Asynchronous` are `BOOLEAN`s.
+pub type NtNotifyChangeKeyFn = unsafe extern "system" fn(
+    HANDLE,        // KeyHandle
+    HANDLE,        // Event
+    *const c_void, // ApcRoutine
+    *const c_void, // ApcContext
+    *mut c_void,   // IoStatusBlock
+    u32,           // CompletionFilter
+    u8,            // WatchTree
+    *mut c_void,   // Buffer
+    u32,           // BufferSize
+    u8,            // Asynchronous
+) -> NTSTATUS;
+
+/// `ntdll!NtNotifyChangeMultipleKeys`: `NtNotifyChangeKey` plus subordinate keys.
+pub type NtNotifyChangeMultipleKeysFn = unsafe extern "system" fn(
+    HANDLE,                  // MasterKeyHandle
+    u32,                     // Count
+    *const ObjectAttributes, // SubordinateObjects
+    HANDLE,                  // Event
+    *const c_void,           // ApcRoutine
+    *const c_void,           // ApcContext
+    *mut c_void,             // IoStatusBlock
+    u32,                     // CompletionFilter
+    u8,                      // WatchTree
+    *mut c_void,             // Buffer
+    u32,                     // BufferSize
+    u8,                      // Asynchronous
+) -> NTSTATUS;
+
+/// `ntdll!NtQuerySecurityObject`.
+pub type NtQuerySecurityObjectFn = unsafe extern "system" fn(
+    HANDLE,      // Handle
+    u32,         // SecurityInformation
+    *mut c_void, // SecurityDescriptor
+    u32,         // Length
+    *mut u32,    // LengthNeeded
+) -> NTSTATUS;
+
+/// `ntdll!NtSetSecurityObject`.
+pub type NtSetSecurityObjectFn = unsafe extern "system" fn(
+    HANDLE,        // Handle
+    u32,           // SecurityInformation
+    *const c_void, // SecurityDescriptor
+) -> NTSTATUS;
+
+/// `ntdll!NtSetInformationObject`.
+pub type NtSetInformationObjectFn = unsafe extern "system" fn(
+    HANDLE,        // Handle
+    u32,           // ObjectInformationClass
+    *const c_void, // ObjectInformation
+    u32,           // Length
+) -> NTSTATUS;
+
+/// `ntdll!NtCreateKeyTransacted`: `NtCreateKey` with a transaction before `Disposition`.
+pub type NtCreateKeyTransactedFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    u32,                  // TitleIndex
+    *const UnicodeString, // Class
+    u32,                  // CreateOptions
+    HANDLE,               // TransactionHandle
+    *mut u32,             // Disposition
+) -> NTSTATUS;
+
+/// `ntdll!NtOpenKeyTransacted`.
+pub type NtOpenKeyTransactedFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    HANDLE, // TransactionHandle
+) -> NTSTATUS;
+
+/// `ntdll!NtOpenKeyTransactedEx`.
+pub type NtOpenKeyTransactedExFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    u32,    // OpenOptions
+    HANDLE, // TransactionHandle
+) -> NTSTATUS;
+
+/// `ntdll!NtLoadKey(TargetKey, SourceFile)`.
+pub type NtLoadKeyFn =
+    unsafe extern "system" fn(*const ObjectAttributes, *const ObjectAttributes) -> NTSTATUS;
+
+/// `ntdll!NtLoadKey2(TargetKey, SourceFile, Flags)`.
+pub type NtLoadKey2Fn =
+    unsafe extern "system" fn(*const ObjectAttributes, *const ObjectAttributes, u32) -> NTSTATUS;
+
+/// `ntdll!NtLoadKeyEx` and `ntdll!NtLoadKey3`: eight arguments, the target key first. Only the
+/// target is read; the other six are passed on untouched, so one pointer-sized shape serves both.
+pub type NtLoadKey8Fn = unsafe extern "system" fn(
+    *const ObjectAttributes, // TargetKey
+    *const ObjectAttributes, // SourceFile
+    u32,                     // Flags
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+) -> NTSTATUS;
+
+/// `ntdll!NtUnloadKey(TargetKey)`.
+pub type NtUnloadKeyFn = unsafe extern "system" fn(*const ObjectAttributes) -> NTSTATUS;
+
+/// `ntdll!NtUnloadKey2(TargetKey, Flags)` and `ntdll!NtUnloadKeyEx(TargetKey, Event)`: the
+/// target, then one pointer-sized argument passed on untouched.
+pub type NtUnloadKey2Fn = unsafe extern "system" fn(*const ObjectAttributes, usize) -> NTSTATUS;
+
+/// `ntdll!NtSaveKey(KeyHandle, FileHandle)`.
+pub type NtSaveKeyFn = unsafe extern "system" fn(HANDLE, HANDLE) -> NTSTATUS;
+
+/// `ntdll!NtSaveKeyEx(KeyHandle, FileHandle, Format)`.
+pub type NtSaveKeyExFn = unsafe extern "system" fn(HANDLE, HANDLE, u32) -> NTSTATUS;
+
+/// `ntdll!NtSaveMergedKeys(HighPrecedenceKey, LowPrecedenceKey, FileHandle)`.
+pub type NtSaveMergedKeysFn = unsafe extern "system" fn(HANDLE, HANDLE, HANDLE) -> NTSTATUS;
+
+/// `ntdll!NtReplaceKey(NewFile, TargetHandle, OldFile)`.
+pub type NtReplaceKeyFn =
+    unsafe extern "system" fn(*const ObjectAttributes, HANDLE, *const ObjectAttributes) -> NTSTATUS;
+
+/// `ntdll!NtRestoreKey(KeyHandle, FileHandle, Flags)`.
+pub type NtRestoreKeyFn = unsafe extern "system" fn(HANDLE, HANDLE, u32) -> NTSTATUS;
+
+/// `ntdll!NtCompressKey(Key)` and `ntdll!NtLockRegistryKey(KeyHandle)`.
+pub type NtKeyOnlyFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
+
+/// `STATUS_PENDING`: an asynchronous registry notification was registered.
+pub const STATUS_PENDING: NTSTATUS = 0x0000_0103;
+/// `STATUS_NOTIFY_CLEANUP`: a pending notification ended by closing its key handle.
+pub const STATUS_NOTIFY_CLEANUP: NTSTATUS = 0x0000_010B;
+/// `STATUS_NOTIFY_ENUM_DIR`: what a registry notification completes with when the key changed.
+pub const STATUS_NOTIFY_ENUM_DIR: NTSTATUS = 0x0000_010C;
+/// `STATUS_INVALID_BUFFER_SIZE`: `NtSetInformationObject` with a short buffer (Wine's answer).
+pub const STATUS_INVALID_BUFFER_SIZE: NTSTATUS = 0xC000_0206u32 as i32;
+/// `STATUS_HANDLE_NOT_CLOSABLE`: `NtClose` of a handle protected from close.
+pub const STATUS_HANDLE_NOT_CLOSABLE: NTSTATUS = 0xC000_0235u32 as i32;
+/// `STATUS_INVALID_SECURITY_DESCR`.
+pub const STATUS_INVALID_SECURITY_DESCR: NTSTATUS = 0xC000_0079u32 as i32;

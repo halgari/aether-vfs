@@ -36,13 +36,15 @@ use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 use crate::ntdef::{
     NtCloseFn, NtDuplicateObjectFn, NtEnumerateKeyFn, NtEnumerateValueKeyFn, NtOpenKeyExFn,
-    NtQueryKeyFn, NtQueryMultipleValueKeyFn, NtQueryObjectFn, NtQueryValueKeyFn, ObjectAttributes,
-    UnicodeString, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DUPLICATE_SAME_ATTRIBUTES,
-    KEY_NAME_INFORMATION, OBJECT_BASIC_INFORMATION, OBJECT_HANDLE_FLAG_INFORMATION,
-    OBJECT_TYPE_INFORMATION, OBJ_CASE_INSENSITIVE, REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY,
-    REG_OPTION_BACKUP_RESTORE, REG_OPTION_CREATE_LINK, REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE,
-    STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
-    STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER,
+    NtQueryKeyFn, NtQueryMultipleValueKeyFn, NtQueryObjectFn, NtQuerySecurityObjectFn,
+    NtQueryValueKeyFn, ObjectAttributes, UnicodeString, DUPLICATE_CLOSE_SOURCE,
+    DUPLICATE_SAME_ACCESS, DUPLICATE_SAME_ATTRIBUTES, KEY_NAME_INFORMATION,
+    OBJECT_BASIC_INFORMATION, OBJECT_HANDLE_FLAG_INFORMATION, OBJECT_TYPE_INFORMATION,
+    OBJ_CASE_INSENSITIVE, REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY, REG_OPTION_BACKUP_RESTORE,
+    REG_OPTION_CREATE_LINK, REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE, STATUS_ACCESS_DENIED,
+    STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_HANDLE_NOT_CLOSABLE,
+    STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_HANDLE,
+    STATUS_INVALID_PARAMETER, STATUS_INVALID_SECURITY_DESCR, STATUS_KEY_DELETED,
     STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
     STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
@@ -99,6 +101,9 @@ pub struct SynthKey {
     /// The key was deleted through this handle (or a handle it was duplicated from):
     /// everything but `NtClose` answers `STATUS_KEY_DELETED`, as on Windows.
     pub deleted: bool,
+    /// Protected from close (`NtSetInformationObject(ObjectHandleFlagInformation)`): `NtClose`
+    /// answers `STATUS_HANDLE_NOT_CLOSABLE` and keeps the handle, as for a kernel handle.
+    pub protect: bool,
 }
 
 /// `OBJ_INHERIT`: the only handle attribute a key handle keeps.
@@ -148,7 +153,9 @@ pub(crate) fn lock_for_close<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 pub fn insert_synthetic(rec: SynthKey) -> Option<isize> {
     let slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed) & SLOT_MASK;
     let h = (REG_TAG | (slot << 2)) as isize;
-    SYNTH.lock().ok()?.insert(h, rec);
+    let mut t = SYNTH.lock().ok()?;
+    t.insert(h, rec);
+    crate::hookstats::note_reg_virtual_handles(t.len());
     Some(h)
 }
 
@@ -162,13 +169,17 @@ pub fn synthetic(h: isize) -> Option<SynthKey> {
 
 /// Remove a synthetic key handle's record (the caller closes its private real handle).
 fn remove_synthetic(h: isize) -> Option<SynthKey> {
-    lock_for_close(&SYNTH)?.remove(&h)
+    let mut t = lock_for_close(&SYNTH)?;
+    let k = t.remove(&h);
+    crate::hookstats::note_reg_virtual_handles(t.len());
+    k
 }
 
 /// Record a pass-through key handle.
 pub fn track(h: isize, rec: KeyRec) {
     if let Ok(mut t) = PASS.lock() {
         t.insert(h, rec);
+        crate::hookstats::note_reg_passthrough_handles(t.len());
     }
 }
 
@@ -177,11 +188,16 @@ pub fn tracked(h: isize) -> Option<KeyRec> {
     PASS.lock().ok()?.get(&h).cloned()
 }
 
+/// Drop a real handle's records: it is being closed (or closed as a duplicate's source). A
+/// notification pending on it ends with `STATUS_NOTIFY_CLEANUP`.
 fn untrack(h: isize) {
     if let Some(mut t) = lock_for_close(&PASS) {
-        t.remove(&h);
+        if t.remove(&h).is_some() {
+            crate::hookstats::note_reg_passthrough_handles(t.len());
+        }
     }
     forget_not_ours(h);
+    crate::regnotify::cleanup(h);
 }
 
 /// Mark a key handle's record deleted (`NtDeleteKey` through it succeeded).
@@ -805,6 +821,7 @@ impl Key<'_> {
             requested: self.access,
             attributes: (*self.oa).attributes & OBJ_INHERIT,
             deleted: false,
+            protect: false,
         }) {
             Some(h) => {
                 *self.out = h as HANDLE;
@@ -963,19 +980,26 @@ pub fn open_options_of_create(options: u32) -> u32 {
 /// private real handle closed); `None` for anything else, whose pass-through record (if any)
 /// is dropped before the caller closes it for real.
 pub unsafe fn close(real: &Real, h: isize) -> Option<NTSTATUS> {
-    // Whatever the handle was, an enumeration snapshot kept for it goes with it.
-    crate::regquery::forget(h);
+    // Whatever the handle was, an enumeration snapshot kept for it goes with it, and so do the
+    // notifications pending on it (`STATUS_NOTIFY_CLEANUP`). A synthetic handle protected from
+    // close stays, all of it.
     if is_synthetic(h) {
+        if synthetic(h).is_some_and(|k| k.protect) {
+            return Some(STATUS_HANDLE_NOT_CLOSABLE);
+        }
+        crate::regquery::forget(h);
         return Some(match remove_synthetic(h) {
             Some(k) => {
                 if let Some(r) = k.real {
                     close_real(real, r);
                 }
+                crate::regnotify::cleanup(h);
                 STATUS_SUCCESS
             }
             None => STATUS_INVALID_HANDLE,
         });
     }
+    crate::regquery::forget(h);
     untrack(h);
     None
 }
@@ -1007,9 +1031,8 @@ unsafe fn type_donor(real: &Real) -> Option<isize> {
 ///   the host's exactly.
 /// - `ObjectBasicInformation`: the same, with `Attributes` and `GrantedAccess` replaced by this
 ///   handle's own.
-/// - `ObjectHandleFlagInformation`: `Inherit` from the record, `ProtectFromClose` false.
-///   `NtSetInformationObject` is not hooked, so neither flag can be changed on a synthetic
-///   handle.
+/// - `ObjectHandleFlagInformation`: `Inherit` and `ProtectFromClose` from the record, as
+///   [`set_handle_flags`] last stored them.
 /// - anything else: the host's answer for the handle, which is `STATUS_INVALID_HANDLE`.
 ///
 /// # Safety
@@ -1036,7 +1059,7 @@ pub unsafe fn query_object(
             }
             let p = info as *mut u8;
             *p = u8::from(rec.attributes & OBJ_INHERIT != 0);
-            *p.add(1) = 0;
+            *p.add(1) = u8::from(rec.protect);
             STATUS_SUCCESS
         }
         OBJECT_BASIC_INFORMATION | OBJECT_TYPE_INFORMATION => {
@@ -1132,6 +1155,7 @@ pub unsafe fn duplicate(
                         attributes & OBJ_INHERIT
                     },
                     deleted: rec.deleted,
+                    protect: options & DUPLICATE_SAME_ATTRIBUTES != 0 && rec.protect,
                 }) {
                     Some(h) => {
                         *dst = h as HANDLE;
@@ -1184,6 +1208,263 @@ pub unsafe fn duplicate(
     Some(st)
 }
 
+/// `NtSetInformationObject(ObjectHandleFlagInformation)` on a synthetic key handle: the
+/// `Inherit` and `ProtectFromClose` flags (two `BOOLEAN`s) are kept in its record, where
+/// [`query_object`] and [`close`] read them. `None` for any other handle or class (the real call
+/// answers). A short buffer gets Wine's `STATUS_INVALID_BUFFER_SIZE`.
+///
+/// # Safety
+/// `info` is the caller's buffer of `length` bytes.
+pub unsafe fn set_handle_flags(
+    h: isize,
+    class: u32,
+    info: *const c_void,
+    length: u32,
+) -> Option<NTSTATUS> {
+    if !is_synthetic(h) || class != OBJECT_HANDLE_FLAG_INFORMATION {
+        return None;
+    }
+    if length < 2 {
+        return Some(STATUS_INVALID_BUFFER_SIZE);
+    }
+    if info.is_null() {
+        return Some(STATUS_ACCESS_VIOLATION);
+    }
+    let p = info as *const u8;
+    let (inherit, protect) = (*p != 0, *p.add(1) != 0);
+    let Ok(mut t) = SYNTH.lock() else {
+        return Some(STATUS_UNSUCCESSFUL);
+    };
+    let Some(k) = t.get_mut(&h) else {
+        return Some(STATUS_INVALID_HANDLE);
+    };
+    k.attributes = if inherit { OBJ_INHERIT } else { 0 };
+    k.protect = protect;
+    Some(STATUS_SUCCESS)
+}
+
+/// `ACCESS_SYSTEM_SECURITY`: the right a SACL needs.
+const ACCESS_SYSTEM_SECURITY: u32 = 0x0100_0000;
+// `SECURITY_INFORMATION` bits.
+const OWNER_SECURITY_INFORMATION: u32 = 0x1;
+const GROUP_SECURITY_INFORMATION: u32 = 0x2;
+const DACL_SECURITY_INFORMATION: u32 = 0x4;
+const SACL_SECURITY_INFORMATION: u32 = 0x8;
+const LABEL_SECURITY_INFORMATION: u32 = 0x10;
+
+/// The rights reading the parts `info` names needs (as the Wine server and Windows check them):
+/// the SACL needs `ACCESS_SYSTEM_SECURITY`, everything else `READ_CONTROL`.
+pub fn query_security_rights(info: u32) -> u32 {
+    let mut need = 0;
+    if info & SACL_SECURITY_INFORMATION != 0 {
+        need |= ACCESS_SYSTEM_SECURITY;
+    }
+    if info & !SACL_SECURITY_INFORMATION != 0 {
+        need |= READ_CONTROL;
+    }
+    need
+}
+
+/// The rights writing the parts `info` names needs: owner, group and label need `WRITE_OWNER`,
+/// the DACL `WRITE_DAC`, the SACL `ACCESS_SYSTEM_SECURITY`.
+pub fn set_security_rights(info: u32) -> u32 {
+    let mut need = 0;
+    if info & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)
+        != 0
+    {
+        need |= WRITE_OWNER;
+    }
+    if info & DACL_SECURITY_INFORMATION != 0 {
+        need |= WRITE_DAC;
+    }
+    if info & SACL_SECURITY_INFORMATION != 0 {
+        need |= ACCESS_SYSTEM_SECURITY;
+    }
+    need
+}
+
+/// A private handle to the real key at `path` with exactly `rights` (plus the WOW64 flags in
+/// `wow64`), through the unhooked `NtOpenKeyEx`.
+unsafe fn open_real_rights(
+    real: &Real,
+    canonical: &str,
+    rights: u32,
+    wow64: u32,
+) -> Result<isize, NTSTATUS> {
+    let Some(open) = real.open_ex else {
+        return Err(STATUS_UNSUCCESSFUL);
+    };
+    let name = AbsName::new(canonical, None);
+    let mut h: HANDLE = core::ptr::null_mut();
+    let st = open(&mut h, rights | (wow64 & WOW64_MASK), &name.oa, 0);
+    if st < 0 {
+        Err(st)
+    } else {
+        Ok(h as isize)
+    }
+}
+
+/// `NtQuerySecurityObject` on a synthetic key handle (spec 3.6): the descriptor of the real key,
+/// or, for a key with no real counterpart (created here, renamed, or gone), of its nearest real
+/// ancestor, read through a private handle opened with just the rights the query needs. The
+/// caller's handle must hold those rights itself.
+///
+/// # Safety
+/// The arguments are the caller's NT arguments; `tramp` is the unhooked `NtQuerySecurityObject`.
+pub unsafe fn query_security(
+    real: &Real,
+    tramp: NtQuerySecurityObjectFn,
+    h: isize,
+    info: u32,
+    sd: *mut c_void,
+    length: u32,
+    needed: *mut u32,
+) -> NTSTATUS {
+    let Some(rec) = synthetic(h) else {
+        return STATUS_INVALID_HANDLE;
+    };
+    let need = query_security_rights(info);
+    if rec.access & need != need {
+        return STATUS_ACCESS_DENIED;
+    }
+    if rec.deleted {
+        return STATUS_KEY_DELETED;
+    }
+    // A key with a private real handle has a real counterpart; any other starts at its parent
+    // (an overlay-created key inherits its parent's descriptor).
+    let mut cur = if rec.real.is_some() {
+        Some(rec.path.as_str())
+    } else {
+        path::parent(&rec.path)
+    };
+    while let Some(p) = cur {
+        if !path::is_virtualised(p) {
+            break;
+        }
+        match open_real_rights(real, p, need, rec.requested) {
+            Ok(k) => {
+                let st = tramp(k as HANDLE, info, sd, length, needed);
+                close_real(real, k);
+                return st;
+            }
+            Err(st) if not_found(st) => cur = path::parent(p),
+            Err(st) => return st,
+        }
+    }
+    STATUS_UNSUCCESSFUL
+}
+
+/// `NtSetSecurityObject` on a key the overlay serves (spec 3.6 and section 6): checked as the
+/// real call checks it (the descriptor, then the rights the parts written need), then accepted
+/// and ignored, because changing it would be a write to the real registry. That holds for a
+/// pass-through handle on a virtualised path too. `None`: not a key the overlay serves (the real
+/// call).
+///
+/// # Safety
+/// `sd` is the caller's security descriptor; `h` a caller's handle.
+pub unsafe fn set_security(
+    real: &Real,
+    h: isize,
+    info: u32,
+    sd: *const c_void,
+) -> Option<NTSTATUS> {
+    let (access, deleted) = if is_synthetic(h) {
+        match synthetic(h) {
+            Some(k) => (k.access, k.deleted),
+            None => return Some(STATUS_INVALID_HANDLE),
+        }
+    } else {
+        let r = resolve_handle(real, h)?;
+        (r.access, r.deleted)
+    };
+    Some(check_set_security(access, deleted, info, sd))
+}
+
+unsafe fn check_set_security(access: u32, deleted: bool, info: u32, sd: *const c_void) -> NTSTATUS {
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorGroup, GetSecurityDescriptorOwner, IsValidSecurityDescriptor,
+    };
+    if sd.is_null() {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    let psd = sd as windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
+    if IsValidSecurityDescriptor(psd) == 0 {
+        return STATUS_INVALID_SECURITY_DESCR;
+    }
+    let mut sid: windows_sys::Win32::Security::PSID = core::ptr::null_mut();
+    let mut defaulted = 0;
+    if info & OWNER_SECURITY_INFORMATION != 0
+        && (GetSecurityDescriptorOwner(psd, &mut sid, &mut defaulted) == 0 || sid.is_null())
+    {
+        return STATUS_INVALID_SECURITY_DESCR;
+    }
+    sid = core::ptr::null_mut();
+    if info & GROUP_SECURITY_INFORMATION != 0
+        && (GetSecurityDescriptorGroup(psd, &mut sid, &mut defaulted) == 0 || sid.is_null())
+    {
+        return STATUS_INVALID_SECURITY_DESCR;
+    }
+    let need = set_security_rights(info);
+    if access & need != need {
+        return STATUS_ACCESS_DENIED;
+    }
+    if deleted {
+        return STATUS_KEY_DELETED;
+    }
+    STATUS_SUCCESS
+}
+
+/// Whether a key handle is one the overlay serves: synthetic, or a real key on a virtualised
+/// path (spec 3.6: the calls that would change the real registry are refused on both).
+///
+/// # Safety
+/// `h` is a caller's handle; it is only passed to the real `NtQueryKey` and `NtQueryObject`.
+pub unsafe fn serves_handle(real: &Real, h: isize) -> bool {
+    is_synthetic(h) || resolve_handle(real, h).is_some()
+}
+
+/// Whether the key an `OBJECT_ATTRIBUTES` names (resolved as an open resolves it) is one the
+/// overlay serves: under a synthetic root, or on a virtualised path. A name that cannot be
+/// resolved (an unnamed root, a bad relative name) is left to the real call.
+///
+/// # Safety
+/// `oa` is the caller's `OBJECT_ATTRIBUTES` (nullable).
+pub unsafe fn serves_target(real: &Real, oa: *const ObjectAttributes) -> bool {
+    if oa.is_null() {
+        return false;
+    }
+    let oa_ref = &*oa;
+    let root = oa_ref.root_directory as isize;
+    if is_synthetic(root) {
+        return true;
+    }
+    let name = if oa_ref.object_name.is_null() {
+        String::new()
+    } else {
+        let us = &*oa_ref.object_name;
+        if us.buffer.is_null() || us.length == 0 {
+            String::new()
+        } else {
+            String::from_utf16_lossy(core::slice::from_raw_parts(
+                us.buffer,
+                us.length as usize / 2,
+            ))
+        }
+    };
+    let base = if root == 0 {
+        None
+    } else {
+        match root_path(real, root) {
+            Ok(p) => Some(p),
+            Err(()) => return false,
+        }
+    };
+    match compose(base.as_deref(), &name, user_sid()) {
+        Resolved::Path(p) => path::is_virtualised(&p),
+        Resolved::NotOurs | Resolved::Invalid => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1197,6 +1478,7 @@ mod tests {
             requested: KEY_READ,
             attributes: 0,
             deleted: false,
+            protect: false,
         })
         .unwrap();
         assert!(is_synthetic(h));

@@ -30,7 +30,8 @@ use vfs_protocol::{
     decode_reg_version_reply, encode_reg_changed, encode_reg_create_key, encode_reg_delete_value,
     encode_reg_path, encode_reg_rename_key, encode_reg_set_value, OP_REG_CHANGED,
     OP_REG_CREATE_KEY, OP_REG_DELETE_KEY, OP_REG_DELETE_VALUE, OP_REG_KEY, OP_REG_LOOKUP,
-    OP_REG_RENAME_KEY, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_IO_ERROR, ST_NOT_SUPPORTED,
+    OP_REG_RENAME_KEY, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_EXISTS, ST_IO_ERROR, ST_NOT_FOUND,
+    ST_NOT_SUPPORTED,
 };
 use vfs_registry::{path::fold, Lookup, Node};
 
@@ -156,10 +157,36 @@ pub fn changed(path: &str, subtree: bool, since: u64) -> Result<(bool, u64), i32
         .changed(path, subtree, since)
 }
 
-/// Count a failed read as a fallback to the real registry, and return its status.
+/// Count a failed read as a fallback to the real registry, and return its status. A read made
+/// for a write ([`WriteScope`]) is not served from the real registry: the write is refused, and
+/// counted as such.
 fn read_failed<T>(status: i32) -> Result<T, i32> {
-    crate::hookstats::note_reg_read_fallback();
+    if IN_WRITE.with(|w| w.get()) {
+        crate::hookstats::note_reg_write_refused();
+    } else {
+        crate::hookstats::note_reg_read_fallback();
+    }
     Err(status)
+}
+
+thread_local! {
+    static IN_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While held, this thread is answering a registry write: a director request that fails is
+/// counted as a refused write, never as a read fallback (the write hooks hold one for the call).
+pub struct WriteScope(bool);
+
+impl WriteScope {
+    pub fn enter() -> WriteScope {
+        WriteScope(IN_WRITE.with(|w| w.replace(true)))
+    }
+}
+
+impl Drop for WriteScope {
+    fn drop(&mut self) {
+        IN_WRITE.with(|w| w.set(self.0));
+    }
 }
 
 /// The cached answers of one registry generation.
@@ -304,10 +331,18 @@ impl<'a> RegClient<'a> {
     /// A write. Nothing to invalidate here: the director moves the published generation
     /// before it replies, which makes every cached answer, this client's included, unusable.
     fn write(&self, opcode: u32, payload: &[u8]) -> Result<(), i32> {
-        let r = self.request(opcode, payload)?;
+        let r = self.request(opcode, payload).inspect_err(|&st| {
+            // The director's own answers (over a limit, exists, deleted) are not failures to
+            // reach it.
+            if !matches!(st, ST_BAD_REQUEST | ST_EXISTS | ST_NOT_FOUND) {
+                crate::hookstats::note_reg_write_refused();
+            }
+        })?;
         // A reply that does not decode says nothing about the request: a failed write
         // (`STATUS_UNSUCCESSFUL`), not a bad request (`STATUS_INVALID_PARAMETER`).
-        decode_reg_version_reply(&r).ok_or(ST_IO_ERROR)?;
+        decode_reg_version_reply(&r)
+            .ok_or(ST_IO_ERROR)
+            .inspect_err(|_| crate::hookstats::note_reg_write_refused())?;
         Ok(())
     }
 

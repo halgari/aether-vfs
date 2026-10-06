@@ -479,6 +479,151 @@ hook_entry_points! {
     fn flush_key_hook = flush_key_hook_body(key: HANDLE) -> NTSTATUS
         as "NtFlushKey", on_panic STATUS_HOOK_PANICKED;
 
+    fn notify_key_hook = notify_key_hook_body(
+        key: HANDLE,
+        event: HANDLE,
+        apc: *const c_void,
+        apc_ctx: *const c_void,
+        iosb: *mut c_void,
+        filter: u32,
+        subtree: u8,
+        buffer: *mut c_void,
+        buffer_len: u32,
+        asynchronous: u8,
+    ) -> NTSTATUS as "NtNotifyChangeKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn notify_multiple_hook = notify_multiple_hook_body(
+        key: HANDLE,
+        count: u32,
+        subordinates: *const ObjectAttributes,
+        event: HANDLE,
+        apc: *const c_void,
+        apc_ctx: *const c_void,
+        iosb: *mut c_void,
+        filter: u32,
+        subtree: u8,
+        buffer: *mut c_void,
+        buffer_len: u32,
+        asynchronous: u8,
+    ) -> NTSTATUS as "NtNotifyChangeMultipleKeys", on_panic STATUS_HOOK_PANICKED;
+
+    fn query_security_hook = query_security_hook_body(
+        handle: HANDLE,
+        info: u32,
+        sd: *mut c_void,
+        length: u32,
+        needed: *mut u32,
+    ) -> NTSTATUS as "NtQuerySecurityObject", on_panic STATUS_HOOK_PANICKED;
+
+    fn set_security_hook = set_security_hook_body(
+        handle: HANDLE,
+        info: u32,
+        sd: *const c_void,
+    ) -> NTSTATUS as "NtSetSecurityObject", on_panic STATUS_HOOK_PANICKED;
+
+    fn set_info_object_hook = set_info_object_hook_body(
+        handle: HANDLE,
+        class: u32,
+        info: *const c_void,
+        length: u32,
+    ) -> NTSTATUS as "NtSetInformationObject", on_panic STATUS_HOOK_PANICKED;
+
+    fn create_key_tx_hook = create_key_tx_hook_body(
+        key: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        title_index: u32,
+        class: *const UnicodeString,
+        options: u32,
+        transaction: HANDLE,
+        disposition: *mut u32,
+    ) -> NTSTATUS as "NtCreateKeyTransacted", on_panic STATUS_HOOK_PANICKED;
+
+    fn open_key_tx_hook = open_key_tx_hook_body(
+        key: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        transaction: HANDLE,
+    ) -> NTSTATUS as "NtOpenKeyTransacted", on_panic STATUS_HOOK_PANICKED;
+
+    fn open_key_tx_ex_hook = open_key_tx_ex_hook_body(
+        key: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        options: u32,
+        transaction: HANDLE,
+    ) -> NTSTATUS as "NtOpenKeyTransactedEx", on_panic STATUS_HOOK_PANICKED;
+
+    fn load_key_hook = load_key_hook_body(
+        target: *const ObjectAttributes,
+        source: *const ObjectAttributes,
+    ) -> NTSTATUS as "NtLoadKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn load_key2_hook = load_key2_hook_body(
+        target: *const ObjectAttributes,
+        source: *const ObjectAttributes,
+        flags: u32,
+    ) -> NTSTATUS as "NtLoadKey2", on_panic STATUS_HOOK_PANICKED;
+
+    fn load_key_ex_hook = load_key_ex_hook_body(
+        target: *const ObjectAttributes,
+        source: *const ObjectAttributes,
+        flags: u32,
+        a4: usize,
+        a5: usize,
+        a6: usize,
+        a7: usize,
+        a8: usize,
+    ) -> NTSTATUS as "NtLoadKeyEx", on_panic STATUS_HOOK_PANICKED;
+
+    fn load_key3_hook = load_key3_hook_body(
+        target: *const ObjectAttributes,
+        source: *const ObjectAttributes,
+        flags: u32,
+        a4: usize,
+        a5: usize,
+        a6: usize,
+        a7: usize,
+        a8: usize,
+    ) -> NTSTATUS as "NtLoadKey3", on_panic STATUS_HOOK_PANICKED;
+
+    fn unload_key_hook = unload_key_hook_body(target: *const ObjectAttributes) -> NTSTATUS
+        as "NtUnloadKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn unload_key2_hook = unload_key2_hook_body(
+        target: *const ObjectAttributes,
+        a2: usize,
+    ) -> NTSTATUS as "NtUnloadKey2", on_panic STATUS_HOOK_PANICKED;
+
+    fn unload_key_ex_hook = unload_key_ex_hook_body(
+        target: *const ObjectAttributes,
+        a2: usize,
+    ) -> NTSTATUS as "NtUnloadKeyEx", on_panic STATUS_HOOK_PANICKED;
+
+    fn save_key_hook = save_key_hook_body(key: HANDLE, file: HANDLE) -> NTSTATUS
+        as "NtSaveKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn save_key_ex_hook = save_key_ex_hook_body(key: HANDLE, file: HANDLE, format: u32)
+        -> NTSTATUS as "NtSaveKeyEx", on_panic STATUS_HOOK_PANICKED;
+
+    fn save_merged_hook = save_merged_hook_body(high: HANDLE, low: HANDLE, file: HANDLE)
+        -> NTSTATUS as "NtSaveMergedKeys", on_panic STATUS_HOOK_PANICKED;
+
+    fn replace_key_hook = replace_key_hook_body(
+        new_file: *const ObjectAttributes,
+        key: HANDLE,
+        old_file: *const ObjectAttributes,
+    ) -> NTSTATUS as "NtReplaceKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn restore_key_hook = restore_key_hook_body(key: HANDLE, file: HANDLE, flags: u32)
+        -> NTSTATUS as "NtRestoreKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn compress_key_hook = compress_key_hook_body(key: HANDLE) -> NTSTATUS
+        as "NtCompressKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn lock_registry_key_hook = lock_registry_key_hook_body(key: HANDLE) -> NTSTATUS
+        as "NtLockRegistryKey", on_panic STATUS_HOOK_PANICKED;
+
     /// The one entry point here that is **not** an ntdll `NTSTATUS` call, and
     /// the one place a uniform `STATUS_UNSUCCESSFUL` would be actively
     /// dangerous. `CreateProcessInternalW` returns a Win32 `BOOL`, in which
@@ -558,6 +703,11 @@ use crate::ntdef::{
     NtDeleteKeyFn, NtDeleteValueKeyFn, NtEnumerateKeyFn, NtEnumerateValueKeyFn, NtFlushKeyFn,
     NtQueryMultipleValueKeyFn, NtQueryValueKeyFn, NtRenameKeyFn, NtSetInformationKeyFn,
     NtSetValueKeyFn,
+    NtNotifyChangeKeyFn, NtNotifyChangeMultipleKeysFn, NtQuerySecurityObjectFn,
+    NtSetSecurityObjectFn, NtSetInformationObjectFn, NtCreateKeyTransactedFn,
+    NtOpenKeyTransactedFn, NtOpenKeyTransactedExFn, NtLoadKeyFn, NtLoadKey2Fn, NtLoadKey8Fn,
+    NtUnloadKeyFn, NtUnloadKey2Fn, NtSaveKeyFn, NtSaveKeyExFn, NtSaveMergedKeysFn,
+    NtReplaceKeyFn, NtRestoreKeyFn, NtKeyOnlyFn, STATUS_NOT_SUPPORTED,
     STATUS_OBJECT_NAME_INVALID,
     NtQueryFullAttributesFileFn,
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
@@ -641,6 +791,29 @@ static mut TRAMP_DELETE_KEY: Option<NtDeleteKeyFn> = None;
 static mut TRAMP_RENAME_KEY: Option<NtRenameKeyFn> = None;
 static mut TRAMP_SET_INFO_KEY: Option<NtSetInformationKeyFn> = None;
 static mut TRAMP_FLUSH_KEY: Option<NtFlushKeyFn> = None;
+// Registry notifications, security, handle flags and the out-of-scope calls (spec 3.4, 3.6).
+static mut TRAMP_NOTIFY_KEY: Option<NtNotifyChangeKeyFn> = None;
+static mut TRAMP_NOTIFY_MULTIPLE: Option<NtNotifyChangeMultipleKeysFn> = None;
+static mut TRAMP_QUERY_SECURITY: Option<NtQuerySecurityObjectFn> = None;
+static mut TRAMP_SET_SECURITY: Option<NtSetSecurityObjectFn> = None;
+static mut TRAMP_SET_INFO_OBJECT: Option<NtSetInformationObjectFn> = None;
+static mut TRAMP_CREATE_KEY_TX: Option<NtCreateKeyTransactedFn> = None;
+static mut TRAMP_OPEN_KEY_TX: Option<NtOpenKeyTransactedFn> = None;
+static mut TRAMP_OPEN_KEY_TX_EX: Option<NtOpenKeyTransactedExFn> = None;
+static mut TRAMP_LOAD_KEY: Option<NtLoadKeyFn> = None;
+static mut TRAMP_LOAD_KEY2: Option<NtLoadKey2Fn> = None;
+static mut TRAMP_LOAD_KEY_EX: Option<NtLoadKey8Fn> = None;
+static mut TRAMP_LOAD_KEY3: Option<NtLoadKey8Fn> = None;
+static mut TRAMP_UNLOAD_KEY: Option<NtUnloadKeyFn> = None;
+static mut TRAMP_UNLOAD_KEY2: Option<NtUnloadKey2Fn> = None;
+static mut TRAMP_UNLOAD_KEY_EX: Option<NtUnloadKey2Fn> = None;
+static mut TRAMP_SAVE_KEY: Option<NtSaveKeyFn> = None;
+static mut TRAMP_SAVE_KEY_EX: Option<NtSaveKeyExFn> = None;
+static mut TRAMP_SAVE_MERGED: Option<NtSaveMergedKeysFn> = None;
+static mut TRAMP_REPLACE_KEY: Option<NtReplaceKeyFn> = None;
+static mut TRAMP_RESTORE_KEY: Option<NtRestoreKeyFn> = None;
+static mut TRAMP_COMPRESS_KEY: Option<NtKeyOnlyFn> = None;
+static mut TRAMP_LOCK_REGISTRY_KEY: Option<NtKeyOnlyFn> = None;
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
 /// 12 params; only `flags` and `pi` are inspected/modified by the hook.
@@ -1141,6 +1314,24 @@ unsafe fn optional_detour(
     false
 }
 
+/// [`optional_detour`] for an export this ntdll may lack altogether (Wine has no `NtCompressKey`,
+/// `NtLockRegistryKey`, `NtSaveKeyEx`, ...). An export that does not exist cannot be called, so
+/// nothing goes unvirtualised without it: it is skipped silently and reads as installed. One that
+/// exists but cannot be detoured is reported as `optional_detour` reports it (`false`).
+unsafe fn detour_if_present(
+    ntdll: HMODULE,
+    name: &'static core::ffi::CStr,
+    label: &'static str,
+    hookfn: *const (),
+    detours: &mut Vec<RawDetour>,
+    store: &mut dyn FnMut(Option<*const ()>),
+) -> bool {
+    if GetProcAddress(ntdll, name.as_ptr().cast()).is_none() {
+        return true;
+    }
+    optional_detour(ntdll, name, label, hookfn, detours, store)
+}
+
 /// The registry overlay's detours (spec section 3.1: open, create, duplicate; `NtClose` and
 /// `NtQueryObject` are the file hooks'). Installed whether or not the overlay is on: each
 /// checks `regclient::enabled()` first and goes straight to its trampoline when it is off.
@@ -1370,11 +1561,182 @@ unsafe fn install_registry_detours(
         ),
         "NtDuplicateObject",
     );
+    // Notifications, security, handle flags and the out-of-scope calls (spec 3.4, 3.6). Each
+    // export this ntdll has must be detoured like the rest; one it lacks is simply skipped.
+    macro_rules! if_present {
+        ($export:literal, $label:literal, $hook:ident, $tramp:ident, $ty:ty) => {
+            reg(
+                detour_if_present(
+                    ntdll,
+                    $export,
+                    $label,
+                    $hook as *const (),
+                    detours,
+                    &mut |t| $tramp = t.map(|t| core::mem::transmute::<*const (), $ty>(t)),
+                ),
+                $label,
+            )
+        };
+    }
+    if_present!(
+        c"NtNotifyChangeKey",
+        "NtNotifyChangeKey",
+        notify_key_hook,
+        TRAMP_NOTIFY_KEY,
+        NtNotifyChangeKeyFn
+    );
+    if_present!(
+        c"NtNotifyChangeMultipleKeys",
+        "NtNotifyChangeMultipleKeys",
+        notify_multiple_hook,
+        TRAMP_NOTIFY_MULTIPLE,
+        NtNotifyChangeMultipleKeysFn
+    );
+    if_present!(
+        c"NtQuerySecurityObject",
+        "NtQuerySecurityObject",
+        query_security_hook,
+        TRAMP_QUERY_SECURITY,
+        NtQuerySecurityObjectFn
+    );
+    if_present!(
+        c"NtSetSecurityObject",
+        "NtSetSecurityObject",
+        set_security_hook,
+        TRAMP_SET_SECURITY,
+        NtSetSecurityObjectFn
+    );
+    if_present!(
+        c"NtSetInformationObject",
+        "NtSetInformationObject",
+        set_info_object_hook,
+        TRAMP_SET_INFO_OBJECT,
+        NtSetInformationObjectFn
+    );
+    if_present!(
+        c"NtCreateKeyTransacted",
+        "NtCreateKeyTransacted",
+        create_key_tx_hook,
+        TRAMP_CREATE_KEY_TX,
+        NtCreateKeyTransactedFn
+    );
+    if_present!(
+        c"NtOpenKeyTransacted",
+        "NtOpenKeyTransacted",
+        open_key_tx_hook,
+        TRAMP_OPEN_KEY_TX,
+        NtOpenKeyTransactedFn
+    );
+    if_present!(
+        c"NtOpenKeyTransactedEx",
+        "NtOpenKeyTransactedEx",
+        open_key_tx_ex_hook,
+        TRAMP_OPEN_KEY_TX_EX,
+        NtOpenKeyTransactedExFn
+    );
+    if_present!(
+        c"NtLoadKey",
+        "NtLoadKey",
+        load_key_hook,
+        TRAMP_LOAD_KEY,
+        NtLoadKeyFn
+    );
+    if_present!(
+        c"NtLoadKey2",
+        "NtLoadKey2",
+        load_key2_hook,
+        TRAMP_LOAD_KEY2,
+        NtLoadKey2Fn
+    );
+    if_present!(
+        c"NtLoadKeyEx",
+        "NtLoadKeyEx",
+        load_key_ex_hook,
+        TRAMP_LOAD_KEY_EX,
+        NtLoadKey8Fn
+    );
+    if_present!(
+        c"NtLoadKey3",
+        "NtLoadKey3",
+        load_key3_hook,
+        TRAMP_LOAD_KEY3,
+        NtLoadKey8Fn
+    );
+    if_present!(
+        c"NtUnloadKey",
+        "NtUnloadKey",
+        unload_key_hook,
+        TRAMP_UNLOAD_KEY,
+        NtUnloadKeyFn
+    );
+    if_present!(
+        c"NtUnloadKey2",
+        "NtUnloadKey2",
+        unload_key2_hook,
+        TRAMP_UNLOAD_KEY2,
+        NtUnloadKey2Fn
+    );
+    if_present!(
+        c"NtUnloadKeyEx",
+        "NtUnloadKeyEx",
+        unload_key_ex_hook,
+        TRAMP_UNLOAD_KEY_EX,
+        NtUnloadKey2Fn
+    );
+    if_present!(
+        c"NtSaveKey",
+        "NtSaveKey",
+        save_key_hook,
+        TRAMP_SAVE_KEY,
+        NtSaveKeyFn
+    );
+    if_present!(
+        c"NtSaveKeyEx",
+        "NtSaveKeyEx",
+        save_key_ex_hook,
+        TRAMP_SAVE_KEY_EX,
+        NtSaveKeyExFn
+    );
+    if_present!(
+        c"NtSaveMergedKeys",
+        "NtSaveMergedKeys",
+        save_merged_hook,
+        TRAMP_SAVE_MERGED,
+        NtSaveMergedKeysFn
+    );
+    if_present!(
+        c"NtReplaceKey",
+        "NtReplaceKey",
+        replace_key_hook,
+        TRAMP_REPLACE_KEY,
+        NtReplaceKeyFn
+    );
+    if_present!(
+        c"NtRestoreKey",
+        "NtRestoreKey",
+        restore_key_hook,
+        TRAMP_RESTORE_KEY,
+        NtRestoreKeyFn
+    );
+    if_present!(
+        c"NtCompressKey",
+        "NtCompressKey",
+        compress_key_hook,
+        TRAMP_COMPRESS_KEY,
+        NtKeyOnlyFn
+    );
+    if_present!(
+        c"NtLockRegistryKey",
+        "NtLockRegistryKey",
+        lock_registry_key_hook,
+        TRAMP_LOCK_REGISTRY_KEY,
+        NtKeyOnlyFn
+    );
     crate::regclient::detours_installed(&missing);
 }
 
 /// The unhooked registry entry points, for `regkeys`.
-unsafe fn reg_real() -> crate::regkeys::Real {
+pub(crate) unsafe fn reg_real() -> crate::regkeys::Real {
     crate::regkeys::Real {
         open_ex: TRAMP_OPEN_KEY_EX,
         query: TRAMP_QUERY_KEY,
@@ -1719,6 +2081,7 @@ unsafe fn set_value_key_hook_body(
     let Some(_io) = reg_write_guard() else {
         return STATUS_UNSUCCESSFUL;
     };
+    let _ws = crate::regclient::WriteScope::enter();
     match crate::regwrite::set_value_key(&reg_real(), key as isize, name, ty, data, size) {
         crate::regwrite::Write::Done(st) => st,
         crate::regwrite::Write::Pass => tramp(key, name, title_index, ty, data, size),
@@ -1737,6 +2100,7 @@ unsafe fn delete_value_key_hook_body(key: HANDLE, name: *const UnicodeString) ->
     let Some(_io) = reg_write_guard() else {
         return STATUS_UNSUCCESSFUL;
     };
+    let _ws = crate::regclient::WriteScope::enter();
     match crate::regwrite::delete_value_key(&reg_real(), key as isize, name) {
         crate::regwrite::Write::Done(st) => st,
         crate::regwrite::Write::Pass => tramp(key, name),
@@ -1755,6 +2119,7 @@ unsafe fn delete_key_hook_body(key: HANDLE) -> NTSTATUS {
     let Some(_io) = reg_write_guard() else {
         return STATUS_UNSUCCESSFUL;
     };
+    let _ws = crate::regclient::WriteScope::enter();
     match crate::regwrite::delete_key(&reg_real(), key as isize) {
         crate::regwrite::Write::Done(st) => st,
         crate::regwrite::Write::Pass => tramp(key),
@@ -1773,6 +2138,7 @@ unsafe fn rename_key_hook_body(key: HANDLE, new_name: *const UnicodeString) -> N
     let Some(_io) = reg_write_guard() else {
         return STATUS_UNSUCCESSFUL;
     };
+    let _ws = crate::regclient::WriteScope::enter();
     match crate::regwrite::rename_key(&reg_real(), key as isize, new_name) {
         crate::regwrite::Write::Done(st) => st,
         crate::regwrite::Write::Pass => tramp(key, new_name),
@@ -1796,6 +2162,7 @@ unsafe fn set_info_key_hook_body(
     let Some(_io) = reg_write_guard() else {
         return STATUS_UNSUCCESSFUL;
     };
+    let _ws = crate::regclient::WriteScope::enter();
     match crate::regwrite::set_information_key(&reg_real(), key as isize, class, info, length) {
         crate::regwrite::Write::Done(st) => st,
         crate::regwrite::Write::Pass => tramp(key, class, info, length),
@@ -1815,10 +2182,351 @@ unsafe fn flush_key_hook_body(key: HANDLE) -> NTSTATUS {
     let Some(_io) = ShimIoGuard::enter() else {
         return tramp(key);
     };
+    let _ws = crate::regclient::WriteScope::enter();
     match crate::regwrite::flush_key(&reg_real(), key as isize) {
         crate::regwrite::Write::Done(st) => st,
         crate::regwrite::Write::Pass => tramp(key),
     }
+}
+
+/// `NtNotifyChangeKey` hook. A key the overlay serves gets an overlay waiter
+/// (`regnotify::notify`); anything else the real call.
+#[allow(clippy::too_many_arguments)]
+unsafe fn notify_key_hook_body(
+    key: HANDLE,
+    event: HANDLE,
+    apc: *const c_void,
+    apc_ctx: *const c_void,
+    iosb: *mut c_void,
+    filter: u32,
+    subtree: u8,
+    buffer: *mut c_void,
+    buffer_len: u32,
+    asynchronous: u8,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::NotifyChangeKey);
+    let Some(tramp) = TRAMP_NOTIFY_KEY else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    let pass = || {
+        tramp(
+            key,
+            event,
+            apc,
+            apc_ctx,
+            iosb,
+            filter,
+            subtree,
+            buffer,
+            buffer_len,
+            asynchronous,
+        )
+    };
+    if reg_bypass() {
+        return pass();
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return pass();
+    };
+    let args = crate::regnotify::Args {
+        event,
+        apc,
+        apc_ctx,
+        iosb,
+        subtree: subtree != 0,
+        asynchronous: asynchronous != 0,
+        count: 0,
+    };
+    match crate::regnotify::notify(&reg_real(), key as isize, &args) {
+        crate::regnotify::Notify::Done(st) => st,
+        crate::regnotify::Notify::Pass => pass(),
+    }
+}
+
+/// `NtNotifyChangeMultipleKeys` hook: as `NtNotifyChangeKey` for the master key; subordinate
+/// keys on a key the overlay serves are `STATUS_NOT_SUPPORTED`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn notify_multiple_hook_body(
+    key: HANDLE,
+    count: u32,
+    subordinates: *const ObjectAttributes,
+    event: HANDLE,
+    apc: *const c_void,
+    apc_ctx: *const c_void,
+    iosb: *mut c_void,
+    filter: u32,
+    subtree: u8,
+    buffer: *mut c_void,
+    buffer_len: u32,
+    asynchronous: u8,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::NotifyChangeMultipleKeys);
+    let Some(tramp) = TRAMP_NOTIFY_MULTIPLE else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    let pass = || {
+        tramp(
+            key,
+            count,
+            subordinates,
+            event,
+            apc,
+            apc_ctx,
+            iosb,
+            filter,
+            subtree,
+            buffer,
+            buffer_len,
+            asynchronous,
+        )
+    };
+    if reg_bypass() {
+        return pass();
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return pass();
+    };
+    let args = crate::regnotify::Args {
+        event,
+        apc,
+        apc_ctx,
+        iosb,
+        subtree: subtree != 0,
+        asynchronous: asynchronous != 0,
+        count,
+    };
+    match crate::regnotify::notify(&reg_real(), key as isize, &args) {
+        crate::regnotify::Notify::Done(st) => st,
+        crate::regnotify::Notify::Pass => pass(),
+    }
+}
+
+/// `NtQuerySecurityObject` hook: a synthetic key answers the real key's (or nearest real
+/// ancestor's) descriptor (`regkeys::query_security`); every other handle, real keys included,
+/// gets the real call.
+unsafe fn query_security_hook_body(
+    handle: HANDLE,
+    info: u32,
+    sd: *mut c_void,
+    length: u32,
+    needed: *mut u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QuerySecurityObject);
+    let Some(tramp) = TRAMP_QUERY_SECURITY else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if !crate::regkeys::is_synthetic(handle as isize) || reg_bypass() {
+        return tramp(handle, info, sd, length, needed);
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return tramp(handle, info, sd, length, needed);
+    };
+    crate::regkeys::query_security(
+        &reg_real(),
+        tramp,
+        handle as isize,
+        info,
+        sd,
+        length,
+        needed,
+    )
+}
+
+/// `NtSetSecurityObject` hook: on a key the overlay serves (synthetic, or a real key on a
+/// virtualised path) the change is checked, accepted and ignored (`regkeys::set_security`);
+/// anything else gets the real call.
+unsafe fn set_security_hook_body(handle: HANDLE, info: u32, sd: *const c_void) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetSecurityObject);
+    let Some(tramp) = TRAMP_SET_SECURITY else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if reg_bypass() {
+        return tramp(handle, info, sd);
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return tramp(handle, info, sd);
+    };
+    match crate::regkeys::set_security(&reg_real(), handle as isize, info, sd) {
+        Some(st) => st,
+        None => tramp(handle, info, sd),
+    }
+}
+
+/// `NtSetInformationObject` hook: a synthetic key keeps its handle flags in its record
+/// (`regkeys::set_handle_flags`); anything else gets the real call.
+unsafe fn set_info_object_hook_body(
+    handle: HANDLE,
+    class: u32,
+    info: *const c_void,
+    length: u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetInformationObject);
+    let Some(tramp) = TRAMP_SET_INFO_OBJECT else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if !crate::regkeys::is_synthetic(handle as isize) || reg_bypass() {
+        return tramp(handle, class, info, length);
+    }
+    match crate::regkeys::set_handle_flags(handle as isize, class, info, length) {
+        Some(st) => st,
+        None => tramp(handle, class, info, length),
+    }
+}
+
+/// The body of a spec 3.6 hook: the overlay off, or the shim's own call, goes to the real call;
+/// otherwise `refuse` decides between `STATUS_NOT_SUPPORTED` and the real call.
+macro_rules! out_of_scope_body {
+    ($(#[$attr:meta])* fn $body:ident($($arg:ident: $ty:ty),* $(,)?), $hook:ident, $tramp:ident,
+     refuse = $refuse:expr;) => {
+        $(#[$attr])*
+        unsafe fn $body($($arg: $ty),*) -> NTSTATUS {
+            let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::$hook);
+            let Some(tramp) = $tramp else {
+                return STATUS_UNSUCCESSFUL;
+            };
+            if reg_bypass() {
+                return tramp($($arg),*);
+            }
+            let Some(_io) = ShimIoGuard::enter() else {
+                return tramp($($arg),*);
+            };
+            if $refuse {
+                return STATUS_NOT_SUPPORTED;
+            }
+            tramp($($arg),*)
+        }
+    };
+}
+
+/// A synthetic key handle: none of the spec 3.6 calls can act on it.
+fn synthetic_key(key: HANDLE) -> bool {
+    crate::regkeys::is_synthetic(key as isize)
+}
+
+/// A key the overlay serves (synthetic, or real on a virtualised path): a call that would change
+/// the real key through it is refused.
+unsafe fn served_key(key: HANDLE) -> bool {
+    crate::regkeys::serves_handle(&reg_real(), key as isize)
+}
+
+/// A key name the overlay serves: a transacted open of it, or a hive loaded over or unloaded
+/// from it, is refused.
+unsafe fn served_target(oa: *const ObjectAttributes) -> bool {
+    crate::regkeys::serves_target(&reg_real(), oa)
+}
+
+out_of_scope_body! {
+    #[allow(clippy::too_many_arguments)]
+    fn create_key_tx_hook_body(
+        key: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        title_index: u32,
+        class: *const UnicodeString,
+        options: u32,
+        transaction: HANDLE,
+        disposition: *mut u32,
+    ), CreateKeyTransacted, TRAMP_CREATE_KEY_TX, refuse = served_target(oa);
+}
+out_of_scope_body! {
+    fn open_key_tx_hook_body(
+        key: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        transaction: HANDLE,
+    ), OpenKeyTransacted, TRAMP_OPEN_KEY_TX, refuse = served_target(oa);
+}
+out_of_scope_body! {
+    fn open_key_tx_ex_hook_body(
+        key: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        options: u32,
+        transaction: HANDLE,
+    ), OpenKeyTransactedEx, TRAMP_OPEN_KEY_TX_EX, refuse = served_target(oa);
+}
+out_of_scope_body! {
+    fn load_key_hook_body(target: *const ObjectAttributes, source: *const ObjectAttributes),
+        LoadKey, TRAMP_LOAD_KEY, refuse = served_target(target);
+}
+out_of_scope_body! {
+    fn load_key2_hook_body(
+        target: *const ObjectAttributes,
+        source: *const ObjectAttributes,
+        flags: u32,
+    ), LoadKey2, TRAMP_LOAD_KEY2, refuse = served_target(target);
+}
+out_of_scope_body! {
+    #[allow(clippy::too_many_arguments)]
+    fn load_key_ex_hook_body(
+        target: *const ObjectAttributes,
+        source: *const ObjectAttributes,
+        flags: u32,
+        a4: usize,
+        a5: usize,
+        a6: usize,
+        a7: usize,
+        a8: usize,
+    ), LoadKeyEx, TRAMP_LOAD_KEY_EX, refuse = served_target(target);
+}
+out_of_scope_body! {
+    #[allow(clippy::too_many_arguments)]
+    fn load_key3_hook_body(
+        target: *const ObjectAttributes,
+        source: *const ObjectAttributes,
+        flags: u32,
+        a4: usize,
+        a5: usize,
+        a6: usize,
+        a7: usize,
+        a8: usize,
+    ), LoadKey3, TRAMP_LOAD_KEY3, refuse = served_target(target);
+}
+out_of_scope_body! {
+    fn unload_key_hook_body(target: *const ObjectAttributes),
+        UnloadKey, TRAMP_UNLOAD_KEY, refuse = served_target(target);
+}
+out_of_scope_body! {
+    fn unload_key2_hook_body(target: *const ObjectAttributes, a2: usize),
+        UnloadKey2, TRAMP_UNLOAD_KEY2, refuse = served_target(target);
+}
+out_of_scope_body! {
+    fn unload_key_ex_hook_body(target: *const ObjectAttributes, a2: usize),
+        UnloadKeyEx, TRAMP_UNLOAD_KEY_EX, refuse = served_target(target);
+}
+// Saving, compressing and locking a real key read it or touch only the hive file: passed
+// through on real keys, refused on synthetic ones only.
+out_of_scope_body! {
+    fn save_key_hook_body(key: HANDLE, file: HANDLE),
+        SaveKey, TRAMP_SAVE_KEY, refuse = synthetic_key(key);
+}
+out_of_scope_body! {
+    fn save_key_ex_hook_body(key: HANDLE, file: HANDLE, format: u32),
+        SaveKeyEx, TRAMP_SAVE_KEY_EX, refuse = synthetic_key(key);
+}
+out_of_scope_body! {
+    fn save_merged_hook_body(high: HANDLE, low: HANDLE, file: HANDLE),
+        SaveMergedKeys, TRAMP_SAVE_MERGED, refuse = synthetic_key(high) || synthetic_key(low);
+}
+out_of_scope_body! {
+    fn compress_key_hook_body(key: HANDLE),
+        CompressKey, TRAMP_COMPRESS_KEY, refuse = synthetic_key(key);
+}
+out_of_scope_body! {
+    fn lock_registry_key_hook_body(key: HANDLE),
+        LockRegistryKey, TRAMP_LOCK_REGISTRY_KEY, refuse = synthetic_key(key);
+}
+// Replacing and restoring write the real key: refused on every key the overlay serves.
+out_of_scope_body! {
+    fn replace_key_hook_body(
+        new_file: *const ObjectAttributes,
+        key: HANDLE,
+        old_file: *const ObjectAttributes,
+    ), ReplaceKey, TRAMP_REPLACE_KEY, refuse = served_key(key);
+}
+out_of_scope_body! {
+    fn restore_key_hook_body(key: HANDLE, file: HANDLE, flags: u32),
+        RestoreKey, TRAMP_RESTORE_KEY, refuse = served_key(key);
 }
 
 /// Decode ObjectName as UTF-16 (no root resolution).

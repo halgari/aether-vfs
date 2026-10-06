@@ -55,9 +55,31 @@ pub enum Hook {
     RenameKey = 32,
     SetInformationKey = 33,
     FlushKey = 34,
+    NotifyChangeKey = 35,
+    NotifyChangeMultipleKeys = 36,
+    QuerySecurityObject = 37,
+    SetSecurityObject = 38,
+    SetInformationObject = 39,
+    CreateKeyTransacted = 40,
+    OpenKeyTransacted = 41,
+    OpenKeyTransactedEx = 42,
+    LoadKey = 43,
+    LoadKey2 = 44,
+    LoadKeyEx = 45,
+    LoadKey3 = 46,
+    UnloadKey = 47,
+    UnloadKey2 = 48,
+    UnloadKeyEx = 49,
+    SaveKey = 50,
+    SaveKeyEx = 51,
+    SaveMergedKeys = 52,
+    ReplaceKey = 53,
+    RestoreKey = 54,
+    CompressKey = 55,
+    LockRegistryKey = 56,
 }
 
-const N: usize = 35;
+const N: usize = 57;
 
 const NAMES: [&str; N] = [
     "NtCreateFile",
@@ -95,6 +117,28 @@ const NAMES: [&str; N] = [
     "NtRenameKey",
     "NtSetInformationKey",
     "NtFlushKey",
+    "NtNotifyChangeKey",
+    "NtNotifyChangeMultipleKeys",
+    "NtQuerySecurityObject",
+    "NtSetSecurityObject",
+    "NtSetInformationObject",
+    "NtCreateKeyTransacted",
+    "NtOpenKeyTransacted",
+    "NtOpenKeyTransactedEx",
+    "NtLoadKey",
+    "NtLoadKey2",
+    "NtLoadKeyEx",
+    "NtLoadKey3",
+    "NtUnloadKey",
+    "NtUnloadKey2",
+    "NtUnloadKeyEx",
+    "NtSaveKey",
+    "NtSaveKeyEx",
+    "NtSaveMergedKeys",
+    "NtReplaceKey",
+    "NtRestoreKey",
+    "NtCompressKey",
+    "NtLockRegistryKey",
 ];
 
 static CALLS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
@@ -217,6 +261,7 @@ struct Snapshot {
     reg_read_fallbacks: u64,
     reg_unresolved: u64,
     reg_close_lock_given_up: u64,
+    reg: RegCounters,
     copy_up_counts: [u64; COPYUP_N],
     copy_up_bytes: u64,
     copy_ups: HashMap<String, u64>,
@@ -292,6 +337,7 @@ fn snapshot() -> Snapshot {
         reg_read_fallbacks: reg_read_fallback_count(),
         reg_unresolved: reg_unresolved_count(),
         reg_close_lock_given_up: reg_close_lock_given_up_count(),
+        reg: reg_counters(),
         copy_up_counts: std::array::from_fn(|i| copy_up_count(ALL_COPY_UPS[i])),
         copy_up_bytes: COPYUP_BYTES.load(Ordering::Relaxed),
         copy_ups: accumulated(&COPYUPS),
@@ -615,8 +661,107 @@ pub fn reg_overlay_disabled_by() -> Option<&'static str> {
     REG_OVERLAY_DISABLED.get().copied()
 }
 
+/// Registry overlay writes refused because the director could not be asked (a lookup the write
+/// needed failed, or the write request itself did not reach it): each one returned
+/// `STATUS_UNSUCCESSFUL` and wrote nothing, real registry included (spec section 6). Kept apart
+/// from [`REG_READ_FALLBACKS`], which are reads served from the real registry. Counted whether or
+/// not stats are on.
+static REG_WRITE_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// A registry overlay write was refused for want of the director.
+pub fn note_reg_write_refused() {
+    REG_WRITE_REFUSED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// How many registry overlay writes were refused for want of the director so far.
+pub fn reg_write_refused_count() -> u64 {
+    REG_WRITE_REFUSED.load(Ordering::Relaxed)
+}
+
+/// What happened to registry change notifications served by the overlay (`regnotify`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum RegNotify {
+    /// A notification was registered as an overlay waiter.
+    Registered = 0,
+    /// A waiter completed because the overlay changed under its key.
+    Completed = 1,
+    /// A waiter ended with `STATUS_NOTIFY_CLEANUP` because its key handle was closed.
+    CleanedUp = 2,
+    /// A notifier poll (`REG_CHANGED`) the director did not answer; its waiters kept waiting.
+    PollError = 3,
+}
+
+/// [`RegNotify`] counts. Counted whether or not stats are on.
+static REG_NOTIFY: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+pub fn note_reg_notify(e: RegNotify) {
+    REG_NOTIFY[e as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn reg_notify_count(e: RegNotify) -> u64 {
+    REG_NOTIFY[e as usize].load(Ordering::Relaxed)
+}
+
+/// Live registry key handles the shim tracks, and the most there have been at once: synthetic
+/// (virtual) and pass-through (spec section 6). Updated by `regkeys` whenever a table changes,
+/// so the report reads atomics rather than the tables' locks.
+static REG_HANDLES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+/// The synthetic key handle table now holds `n` handles.
+pub fn note_reg_virtual_handles(n: usize) {
+    REG_HANDLES[0].store(n as u64, Ordering::Relaxed);
+    REG_HANDLES[1].fetch_max(n as u64, Ordering::Relaxed);
+}
+
+/// The pass-through key handle table now holds `n` handles.
+pub fn note_reg_passthrough_handles(n: usize) {
+    REG_HANDLES[2].store(n as u64, Ordering::Relaxed);
+    REG_HANDLES[3].fetch_max(n as u64, Ordering::Relaxed);
+}
+
+/// The registry overlay's own counters, read once per report.
+#[derive(Clone, Copy, Debug, Default)]
+struct RegCounters {
+    write_refused: u64,
+    notify: [u64; 4],
+    /// Live virtual, peak virtual, live pass-through, peak pass-through.
+    handles: [u64; 4],
+}
+
+fn reg_counters() -> RegCounters {
+    RegCounters {
+        write_refused: reg_write_refused_count(),
+        notify: std::array::from_fn(|i| REG_NOTIFY[i].load(Ordering::Relaxed)),
+        handles: std::array::from_fn(|i| REG_HANDLES[i].load(Ordering::Relaxed)),
+    }
+}
+
 fn render_reg_fallbacks(snap: &Snapshot) -> String {
     let mut out = String::new();
+    let r = &snap.reg;
+    if r.handles[1] != 0 || r.handles[3] != 0 {
+        out.push_str(&format!(
+            "\nregistry key handles: {} virtual (peak {}), {} pass-through (peak {})\n",
+            r.handles[0], r.handles[1], r.handles[2], r.handles[3]
+        ));
+    }
+    if r.notify.iter().any(|&n| n != 0) {
+        out.push_str(&format!(
+            "\nregistry notifications: {} registered, {} completed, {} cleaned up, {} poll \
+             errors\n",
+            r.notify[RegNotify::Registered as usize],
+            r.notify[RegNotify::Completed as usize],
+            r.notify[RegNotify::CleanedUp as usize],
+            r.notify[RegNotify::PollError as usize]
+        ));
+    }
+    if r.write_refused != 0 {
+        out.push_str(&format!(
+            "\nregistry overlay writes refused after a director failure: {}\n",
+            r.write_refused
+        ));
+    }
     if let Some(name) = reg_overlay_disabled_by() {
         out.push_str(&format!(
             "\nregistry overlay disabled: detour {name} not installed\n"
@@ -1937,7 +2082,9 @@ mod tests {
         assert_eq!(NAMES.len(), N);
         // The last variant must index the last name, or a hook silently
         // reports under a neighbour's label.
-        assert_eq!(Hook::FlushKey as usize, N - 1);
+        assert_eq!(Hook::LockRegistryKey as usize, N - 1);
+        assert_eq!(NAMES[Hook::FlushKey as usize], "NtFlushKey");
+        assert_eq!(NAMES[Hook::NotifyChangeKey as usize], "NtNotifyChangeKey");
         assert_eq!(
             NAMES[Hook::QueryMultipleValueKey as usize],
             "NtQueryMultipleValueKey"
@@ -2297,6 +2444,7 @@ mod tests {
             reg_read_fallbacks: 0,
             reg_unresolved: 0,
             reg_close_lock_given_up: 0,
+            reg: RegCounters::default(),
             setinfo_noop: HashMap::new(),
             synth_locks: HashMap::new(),
             passthrough: HashMap::new(),

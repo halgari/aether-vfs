@@ -21,6 +21,7 @@ mod read_cache;
 /// The registry hooks' client for the director's registry overlay.
 pub mod regclient;
 mod regkeys;
+mod regnotify;
 mod regquery;
 mod regwrite;
 mod zipserve;
@@ -55,9 +56,9 @@ pub use hook::contain_panic;
 /// [`hookstats::outcome_count`]. A class nobody asserts on is a class that can
 /// quietly start (or stop) counting again.
 pub use hookstats::{
-    hook_panic_count, hook_panics_total, outcome_count, overlay_fail_count,
+    hook_panic_count, hook_panics_total, outcome_count, overlay_fail_count, reg_notify_count,
     reg_overlay_disabled_by, reg_read_fallback_count, reg_unresolved_count,
-    unrouted_director_opens, OpenOutcome, OverlayFail,
+    reg_write_refused_count, unrouted_director_opens, OpenOutcome, OverlayFail, RegNotify,
 };
 
 /// The canonical path the registry hooks recorded for a key handle (synthetic or
@@ -80,6 +81,11 @@ pub fn registry_enum_states() -> usize {
 /// Handles the registry hooks remember as not keys they serve. For tests and diagnostics.
 pub fn registry_not_ours_count() -> usize {
     regkeys::not_ours_count()
+}
+
+/// Registry change notifications waiting on the overlay. For tests and diagnostics.
+pub fn registry_notify_pending() -> usize {
+    regnotify::pending()
 }
 
 /// Whether a handle value is one of the registry hooks' synthetic key handles.
