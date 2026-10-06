@@ -53,7 +53,8 @@ fn descriptor_body() -> String {
         ("ok", P::ST_OK), ("not-found", P::ST_NOT_FOUND), ("not-a-directory", P::ST_NOT_A_DIRECTORY),
         ("bad-request", P::ST_BAD_REQUEST), ("io-error", P::ST_IO_ERROR), ("is-dir", P::ST_IS_DIR),
         ("bad-fh", P::ST_BAD_FH), ("no-space", P::ST_NO_SPACE),
-        ("reply-too-large", P::ST_REPLY_TOO_LARGE),
+        ("not-supported", P::ST_NOT_SUPPORTED), ("read-only", P::ST_READ_ONLY),
+        ("exists", P::ST_EXISTS), ("reply-too-large", P::ST_REPLY_TOO_LARGE),
     ] {
         let _ = write!(s, ":{name} {v} ");
     }
@@ -189,6 +190,9 @@ mod tests {
         assert!(edn.contains(":size 48"), "ring header size");
         assert!(edn.contains(":reg-gen 40"));
         assert!(edn.contains(":reply-too-large -11"));
+        assert!(edn.contains(":not-supported -8"));
+        assert!(edn.contains(":read-only -9"));
+        assert!(edn.contains(":exists -10"));
         assert!(edn.contains(":req-seq 24"));
         assert!(edn.contains(":submit-seq 32"));
         assert!(edn.contains(":read 5"));      // OP_READ

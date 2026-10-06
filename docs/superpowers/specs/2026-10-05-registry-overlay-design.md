@@ -1,7 +1,9 @@
 # aether-vfs — Registry overlay: per-profile copy-on-write of registry keys
 
 Date: 2026-10-05
-Status: design approved by the owner in conversation (sections 1–3); this document awaits review.
+Status: implemented on the `registry-overlay` branch. This document describes what was built; the
+rulings made during implementation are recorded in the plan ledger
+(`.superpowers/sdd/2026-10-05-registry-overlay/progress.md`).
 
 ## 1. Purpose
 
@@ -43,7 +45,9 @@ The overlay is a tree of key nodes. Each node holds:
 - **child entries:** names of subkeys present in the overlay, each either *present* (a node) or
   *tombstoned* (hides the real subkey and everything below it);
 - **origin:** *created here* (no real counterpart required) or *overlays a real key*;
-- **last-write time:** reported by `NtQueryKey`;
+- **last-write time:** reported by `NtQueryKey`, set by every overlay write to the key.
+  `NtSetInformationKey` on a virtualised key succeeds and changes nothing (no ring operation
+  carries a last-write time);
 - **volatile:** volatile keys and their subtrees are kept in memory only (never saved), as on
   Windows.
 
@@ -65,14 +69,24 @@ Paths are canonical NT paths, compared case-insensitively:
 
 ### 3.1 Hooked calls
 
-- **Open and create:** `NtOpenKey`, `NtOpenKeyEx`, `NtCreateKey`.
+- **Open and create:** `NtOpenKey`, `NtOpenKeyEx`, `NtCreateKey`. With the overlay on, the real
+  `NtCreateKey` is never called: a key that exists for real is opened (`NtOpenKeyEx`, reported as
+  `REG_OPENED_EXISTING_KEY`), and a missing one is created in the overlay. `TitleIndex` and
+  `Class` are ignored for overlay keys.
 - **Query:** `NtQueryKey`, `NtEnumerateKey`, `NtQueryValueKey`, `NtEnumerateValueKey`,
   `NtQueryMultipleValueKey`.
 - **Write:** `NtSetValueKey`, `NtDeleteValueKey`, `NtDeleteKey`, `NtRenameKey`,
   `NtSetInformationKey` (last-write time), `NtFlushKey` (no-op for virtual keys).
 - **Notification:** `NtNotifyChangeKey`, `NtNotifyChangeMultipleKeys`.
 - **Handles:** `NtClose` and `NtQueryObject` (already hooked) learn about key handles;
-  `NtDuplicateObject` is hooked so duplicates of tracked key handles stay tracked.
+  `NtDuplicateObject` is hooked so duplicates of tracked key handles stay tracked;
+  `NtSetInformationObject` keeps a synthetic key's handle flags.
+- **Security and out of scope:** `NtQuerySecurityObject`, `NtSetSecurityObject`, and the calls of
+  section 3.6.
+
+The registry detours are installed only when the host turned the overlay on (`VFS_REGISTRY`, see
+section 5). With it off, a process carries none of them; `NtClose` and `NtQueryObject` are the
+file hooks' and then never touch the registry tables.
 
 ### 3.2 Handle model
 
@@ -81,11 +95,15 @@ its handle table, or by asking the real key for its name) plus the relative name
 
 - **Pass-through (fast path):** if the overlay has nothing at or below the path, the caller gets
   the real handle unchanged. The shim records only its path in a handle table, so writes through
-  it can be intercepted. Reads cost nothing extra.
+  it can be intercepted. A read through it costs one `REG_LOOKUP`, answered from the shim's cache
+  (section 3.5); after any registry write in the session, the first such read is a ring round
+  trip.
 - **Virtual:** if the overlay touches the path or anything below it, if the key exists only in the
   overlay, or if its real counterpart is tombstoned, the caller gets a synthetic handle (like the
   shim's synthetic file handles). Every query on it is answered by merging the real key (opened
-  privately through the unhooked call, when it exists) with the overlay node.
+  privately through the unhooked call, when it exists) with the overlay node. A node *created
+  here* hides the real key's contents: such nodes exist only for keys deleted then recreated, or
+  with no real counterpart, so real contents showing through would resurrect deleted data.
 - **Copy-on-write on a pass-through handle:** a write through a real handle goes to the director,
   never to the real key. From then on the path counts as virtual, and later queries on the same
   handle are routed through the merge using the handle table. The caller keeps its handle.
@@ -95,6 +113,14 @@ its handle table, or by asking the real key for its name) plus the relative name
   fails with `STATUS_ACCESS_DENIED` and the requested access includes write rights, the shim opens
   the real key read-only and returns a virtual handle with the requested access. On Windows,
   injected processes therefore need no administrator rights to change HKLM.
+- **Handles opened elsewhere:** a key handle the tables do not hold (opened before the hooks, or
+  handed in) is resolved on first sight from the real key's name. Only "not a key" or "not a
+  handle" (`STATUS_OBJECT_TYPE_MISMATCH`, `STATUS_INVALID_HANDLE`) makes it *not ours*; any other
+  failure leaves it *unresolvable* (section 6).
+- **All or nothing per process:** registry virtualisation is on in a process only if every
+  registry detour was installed. If any is missing, every registry hook passes through for the
+  life of the process (logged, and flagged in the shim stats): a missing write hook would
+  otherwise let writes through a virtual view reach the real registry.
 
 ### 3.3 Merge rules
 
@@ -106,7 +132,10 @@ its handle table, or by asking the real key for its name) plus the relative name
   count, longest names, longest data) are computed over the merged view.
 - **Layouts:** query results use the exact NT layout of every information class, including
   alignment and the `STATUS_BUFFER_OVERFLOW` (partial data) versus `STATUS_BUFFER_TOO_SMALL` (no
-  data) distinction, and the required length in `ResultLength`.
+  data) distinction, and the required length in `ResultLength`. Where Wine and Windows x64
+  differ, the Windows layout is used, with one exception: an empty value's `DataOffset` is the
+  end of its name, as Wine reports it, not `0xFFFFFFFF` (Wine's `RegEnumValueW` derives a length
+  from the offset; Windows reads `DataLength` 0 and never uses it).
 - **Information classes:**
   - `NtQueryKey`: Basic, Node, Full, Name, Cached, Flags, Virtualization, HandleTags,
     Trust (where the platform supports it; otherwise pass the real call through);
@@ -116,25 +145,40 @@ its handle table, or by asking the real key for its name) plus the relative name
 
 ### 3.4 Notifications
 
-`NtNotifyChangeKey` / `NtNotifyChangeMultipleKeys` on a virtual key complete when the overlay
-changes at the key (or below it, with `WatchTree`), using `REG_WAIT_CHANGE`. Changes made to the
-real registry by other processes are not watched for virtual keys in this version; nothing else
-writes those keys during a game. On pass-through keys, the real call is made.
+`NtNotifyChangeKey` / `NtNotifyChangeMultipleKeys` on any key on a virtualised path (synthetic or
+pass-through) wait on the overlay only: they complete when the overlay changes at the key (or
+below it, with `WatchTree`), which the shim learns by polling `REG_CHANGED` every 250 ms. Changes
+made to the real registry by other processes are not watched on virtualised paths in this
+version; nothing else writes those keys during a game. Keys outside HKLM and HKU get the real
+call.
+
+- `NtNotifyChangeMultipleKeys` with subordinate keys (`Count` > 0) on a served key returns
+  `STATUS_NOT_SUPPORTED`.
+- An asynchronous notify with an event and no APC gets no write to its `IO_STATUS_BLOCK` (Wine's
+  kernelbase passes a stack block for that form).
+- Closing a key ends its pending notifies with `STATUS_NOTIFY_CLEANUP`.
 
 ### 3.5 Caching
 
-The shim caches `REG_LOOKUP` and `REG_KEY` results per path, tagged with the overlay version.
-Every write bumps the version, so no injected process uses a stale entry. A cache hit costs no
-ring round trip; a miss costs one.
+The shim caches `REG_LOOKUP` and `REG_KEY` results per path, tagged with the director's registry
+generation. The director publishes the generation in the header of every ring of the session
+(`reg_gen`; ring `VERSION` 4) and moves it on every registry write, before the writer gets its
+reply, and on every attach or detach of a layer. An answer is tagged with the generation read
+before asking, and used only while the published generation still equals it, so no injected
+process uses a stale entry. A cache hit costs one atomic load and no ring round trip; a miss costs
+one.
 
 ### 3.6 Out of scope
 
-Registry transactions (`NtCreateKeyTransacted`, `NtOpenKeyTransacted(Ex)`), `NtLoadKey*`,
-`NtSaveKey*`, `NtReplaceKey`, `NtRestoreKey`, `NtCompressKey` and `NtLockRegistryKey` on virtual
-keys return `STATUS_NOT_SUPPORTED`; on pass-through keys they are passed through. Key security
-descriptors are those of the real key, or the parent's for overlay-created keys
-(`NtQuerySecurityObject` / `NtSetSecurityObject` on virtual keys: query returns the inherited
-descriptor; set is accepted and ignored).
+The calls that would change the real registry — `NtRestoreKey`, `NtReplaceKey`, `NtLoadKey*`,
+`NtUnloadKey*`, and transacted create and open (`NtCreateKeyTransacted`,
+`NtOpenKeyTransacted(Ex)`) — return `STATUS_NOT_SUPPORTED` on every virtualised path, even through
+pass-through handles. The harmless ones — `NtSaveKey*`, `NtCompressKey`, `NtLockRegistryKey` —
+return `STATUS_NOT_SUPPORTED` on synthetic handles and pass through on real ones. An export the
+platform lacks is simply not hooked. Key security descriptors are those of the real key, or the
+nearest real ancestor's for overlay-created keys: `NtQuerySecurityObject` on a synthetic key
+returns that descriptor, and `NtSetSecurityObject` on any key on a virtualised path is checked
+(access, descriptor validity), accepted and ignored.
 
 ## 4. Ring protocol
 
@@ -148,25 +192,45 @@ All paths are canonical NT paths (section 2.2).
 | `REG_DELETE_VALUE` | path, name | version |
 | `REG_CREATE_KEY` | path, volatile | version; missing ancestor nodes are created |
 | `REG_DELETE_KEY` | path | version; tombstones the key and drops its overlay subtree |
-| `REG_RENAME_KEY` | path, new leaf name | version |
-| `REG_WAIT_CHANGE` | path, subtree flag, version | completes when the overlay changes under the path after that version |
+| `REG_RENAME_KEY` | path, new leaf name | version; moves overlay nodes only |
+| `REG_CHANGED` | path, subtree flag, version | whether the overlay changed under the path after that version, and the current version (answered at once) |
 
-Reads are concurrent. Writes are serialised in the director, and each write bumps a single
-overlay version.
+Opcodes 15–22, in this order. Reads are concurrent. Writes are serialised in the director, and
+each write bumps a single overlay version.
+
+- **Rename.** `REG_RENAME_KEY` moves overlay nodes only. The shim renames a key with real content
+  by a bounded copy of the merged subtree to created-here nodes, then tombstones the source (not
+  atomic). Other handles on the old key, and handles on its subkeys, then get
+  `STATUS_KEY_DELETED`.
+- **Delete.** `NtDeleteKey` of a key whose merged view has subkeys returns
+  `STATUS_CANNOT_DELETE`.
+- **Statuses.** Besides the shared ring statuses, a `REG_KEY` reply larger than the ring payload
+  gets "reply too large" (-11); the shim treats it as a director read failure (section 6).
 
 ## 5. Director and storage
 
-- **In memory:** the session's tree, plus a log of writes since the last durable point.
+- **In memory:** the session's tree.
+- **Saves:** the whole non-volatile tree is written as one file (`overlay.reg.tmp`, renamed over
+  `overlay.reg`), at most once a second while it is dirty, and at every flush (session stop,
+  detach or replacement of the layer, and the host's drop). Registry layers are small, so
+  whole-file saves are simpler than logs.
 - **Durability:** the fsync policy: deferred, with a durable point at session end and at least
-  every few minutes. At a durable point the whole non-volatile tree is written as one file
-  (write-then-rename). Registry layers are small, so whole-file saves are simpler than logs.
+  every few minutes. A save is an ordinary write to the layer, which a deferred store does not
+  make durable by itself, so the host passes its store's sync as the layer's sync hook
+  (`Session::set_registry_layer(layer, Some(sync))`; `registry_sync_for(&storage)` for a
+  `Storage`). The session calls it after the final save when it stops serving and when the layer
+  is detached or replaced; while a save is not yet covered by it, the saver calls it at most once
+  every five minutes. Without a hook, durability is the store's own policy.
 - **Format:** a small versioned binary encoding of the tree. Values keep the types they were
   written with (`REG_SZ`, `REG_EXPAND_SZ`, `REG_BINARY`, `REG_DWORD`, `REG_QWORD`,
   `REG_MULTI_SZ`, and any other type number as raw bytes), so later tooling can export `.reg`
   files.
 - **Location:** a file in the session's storage, in the profile's write-layer area. A new session
-  setting names it: the registry layer of the session. Without the setting, registry
-  virtualisation is off and the hooks pass everything through.
+  setting names it: the registry layer of the session. While a layer is attached, launches set
+  `VFS_REGISTRY=1`; without it, registry virtualisation is off and the registry detours are not
+  installed. Attaching and detaching take effect for new launches only: a process running when
+  the layer is detached keeps its hooks, its registry writes fail and its overlay disappears, so
+  hosts change the layer only between launches.
 - **Limits** (as Windows): key names up to 255 characters, value names up to 16,383 characters,
   values up to 1 MiB in this version, less the request's path and name overhead, because a
   request must fit one ring payload. Larger requests fail with `STATUS_INVALID_PARAMETER`.
@@ -174,9 +238,15 @@ overlay version.
 ## 6. Errors and safety
 
 - **Writes never fall back to the real registry.** If the director is unreachable or a write
-  fails, the call returns `STATUS_UNSUCCESSFUL`.
+  fails, the call returns `STATUS_UNSUCCESSFUL`. So does a write through a key handle whose real
+  name cannot be read (an *unresolvable* handle, section 3.2: it may be on a virtualised path), and
+  a real-modifying call (a write, `NtSetSecurityObject`, or a section 3.6 call that changes the
+  real registry) made while the hook is bypassed (the shim's own work) with the overlay on.
+- **All or nothing per process** (section 3.2): a process missing any registry detour does not
+  virtualise its registry at all.
 - **Reads fall back to the real registry only.** If the director is unreachable, the shim serves
-  pass-through, so a broken director never blocks a game from starting. The shim stats count
+  pass-through, so a broken director never blocks a game from starting. A read through an
+  unresolvable handle passes through too (it is not remembered as not ours). The shim stats count
   every fallback.
 - **Hook panics** return `STATUS_HOOK_PANICKED`, as the file hooks do.
 - **Shim stats:** per-call registry counts and times, and the number of virtual versus

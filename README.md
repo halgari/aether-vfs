@@ -48,7 +48,21 @@ cd rust && cargo run -p vfs-proton -- install   # verified GE-Proton under ~/.lo
 
 # end to end: a Windows fixture under Proton reads a file only the Linux Director serves
 cargo test -p vfs-embed --test proton_launch -- --ignored
+
+# end to end: the registry overlay (the same scripted registry run with and without a
+# registry layer gives the same transcript, and the real registry is left unchanged).
+# The test looks for the Windows artefacts in its own profile's directory, so build
+# both in the same profile:
+bin/build-windows --release
+cd rust && cargo test --release -p vfs-embed --test proton_registry -- --ignored
 ```
+
+The Proton tests skip silently (they print why on stderr and pass) when the
+Windows artefacts or a verified GE-Proton runtime are missing; a `cargo test`
+whose profile differs from the last `bin/build-windows` finds no artefacts and
+skips. The ring layout is versioned (ring `VERSION` 4 since the registry
+overlay added the `reg_gen` header field), and a shim built against another
+version does not attach: rerun `bin/build-windows` after pulling a ring change.
 
 The first `bin/build-windows` downloads the MSVC CRT and Windows SDK via
 `cargo-xwin` (accepting Microsoft's license). Wine also needs a 32-bit loader

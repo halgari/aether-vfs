@@ -327,6 +327,48 @@ A gRPC contract plus a declarative config schema, a daemon that can hold many
 sessions, and CLIs. The control plane is language-agnostic; the data plane is
 the ring.
 
+### 3.9 Registry overlay — `vfs-registry`, `vfs-director::registry`, the shim's `reg*` modules
+
+Injected processes see the real registry, but none of their registry writes
+reach it: they go to a per-profile **registry layer** that persists between
+runs (spec: `docs/superpowers/specs/2026-10-05-registry-overlay-design.md`).
+
+- **Switch.** A host attaches a layer with `Session::set_registry_layer`;
+  while one is attached, launches set `VFS_REGISTRY=1`. Without it the shim
+  installs **no** registry detours at all, so a process with the overlay off
+  carries none of them.
+- **Director.** `RegistryHost` holds the session's overlay tree
+  (`vfs-registry::Overlay`: values, value tombstones, present or tombstoned
+  child entries, created-here or overlaying-real origin) and saves it whole as
+  `overlay.reg` in the layer (write `overlay.reg.tmp`, rename), at most once a
+  second while dirty and at every flush.
+- **Durable point.** A save is an ordinary layer write, so under a deferred
+  store it is not durable by itself. The host passes its store's sync as the
+  layer's `RegistrySync` hook (`registry_sync_for(&storage)` for a `Storage`);
+  the session calls it after the final save at stop and at detach, and the
+  saver calls it at most every five minutes while a save is not yet durable.
+- **Ring.** Opcodes 15–22: `REG_LOOKUP`, `REG_KEY`, `REG_SET_VALUE`,
+  `REG_DELETE_VALUE`, `REG_CREATE_KEY`, `REG_DELETE_KEY`, `REG_RENAME_KEY`,
+  `REG_CHANGED`. The director publishes a registry generation in the ring
+  header (`reg_gen`, ring `VERSION` 4), bumped by every registry write and
+  every attach or detach.
+- **Shim.** Hooks the NT registry calls (open/create, query, write, notify,
+  security, handle flags, and the out-of-scope hive and transaction calls). A
+  key the overlay does not touch is served by the real handle unchanged; one
+  it touches gets a synthetic handle whose queries merge the real key with the
+  overlay node in the exact NT layouts. `REG_LOOKUP`/`REG_KEY` answers are
+  cached per path, tagged with the generation read before asking, and used
+  only while the published generation still equals it — a cache hit is one
+  atomic load.
+- **All or nothing per process.** If any registry detour cannot be installed,
+  the process does not virtualise its registry at all (every hook passes
+  through), because a missing write hook would let writes through a virtual
+  view reach the real registry.
+- **Fail closed.** Writes never fall back to the real registry: a director
+  failure, a key handle whose name cannot be read, or a real-modifying call
+  made while the hook is bypassed returns `STATUS_UNSUCCESSFUL`. Reads fall
+  back to the real registry, counted in the shim stats.
+
 ---
 
 ## 4. The hard parts, and how they are solved
@@ -676,6 +718,7 @@ observer before concluding the process is idle.
 | `vfs-block-store` | deduplicating, compressing block store (redb index + zstd packs) |
 | `vfs-source` | declarative spec → provider, incl. `RemoteProvider` gRPC plugins |
 | `vfs-director` | FUSE kernel, session, staging, launch |
+| `vfs-registry` | registry overlay tree, its file format, the merge with a real key, NT query layouts |
 | `vfs-directord` | daemon + CLI; `skyrim-live` harness |
 | `vfs-control` | gRPC contract + config schema |
 | `vfs-env` | every `VFS_*` switch, defined once, with a drift test |
