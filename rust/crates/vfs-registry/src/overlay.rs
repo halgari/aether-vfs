@@ -10,9 +10,9 @@
 use crate::path::{self, fold};
 use std::collections::BTreeMap;
 
-const MAX_KEY_NAME: usize = 255;
-const MAX_VALUE_NAME: usize = 16383;
-const MAX_DATA: usize = 1 << 20;
+pub(crate) const MAX_KEY_NAME: usize = 255;
+pub(crate) const MAX_VALUE_NAME: usize = 16383;
+pub(crate) const MAX_DATA: usize = 1 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Value {
