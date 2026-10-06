@@ -11,5 +11,5 @@ pub mod path;
 
 pub use format::{decode, encode, FormatError, MAGIC};
 pub use merge::{merge, MergedKey, RealKey};
-pub use overlay::{Child, Lookup, Node, Overlay, RegError, Value};
+pub use overlay::{utf16_len, Child, Lookup, Node, Overlay, RegError, Value};
 pub use path::PathError;

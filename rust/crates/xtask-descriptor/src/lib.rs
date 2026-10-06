@@ -41,6 +41,10 @@ fn descriptor_body() -> String {
         ("mkdir", P::OP_MKDIR), ("close", P::OP_CLOSE),
         ("register-process", P::OP_REGISTER_PROCESS), ("heartbeat", P::OP_HEARTBEAT),
         ("stored-names", P::OP_STORED_NAMES),
+        ("reg-lookup", P::OP_REG_LOOKUP), ("reg-key", P::OP_REG_KEY),
+        ("reg-set-value", P::OP_REG_SET_VALUE), ("reg-delete-value", P::OP_REG_DELETE_VALUE),
+        ("reg-create-key", P::OP_REG_CREATE_KEY), ("reg-delete-key", P::OP_REG_DELETE_KEY),
+        ("reg-rename-key", P::OP_REG_RENAME_KEY), ("reg-changed", P::OP_REG_CHANGED),
     ] {
         let _ = write!(s, ":{name} {v} ");
     }
@@ -183,6 +187,7 @@ mod tests {
         assert!(edn.contains(":submit-seq 32"));
         assert!(edn.contains(":read 5"));      // OP_READ
         assert!(edn.contains(":open-write 2"));
+        assert!(edn.contains(":reg-lookup 15") && edn.contains(":reg-changed 22"));
         assert!(edn.contains(":not-found -1"));
     }
 

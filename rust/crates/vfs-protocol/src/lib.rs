@@ -1,5 +1,5 @@
 //! Pure FUSE contracts for the VFS stack: wire codecs, status/opcodes, and
-//! the provider contract (re-exported from `vfs-provider`). No OS I/O and no `vfs-core`.
+//! the provider contract (re-exported from `vfs-provider`). No OS I/O. Registry ops use `vfs-registry`'s portable node model.
 #![forbid(unsafe_code)]
 
 pub mod ops;
@@ -33,6 +33,16 @@ pub const OP_REGISTER_PROCESS: u32 = 12;
 pub const OP_HEARTBEAT: u32 = 13;
 /// The stored spelling of a path's components: see [`encode_names_req`].
 pub const OP_STORED_NAMES: u32 = 14;
+/// Registry overlay ops (15-22). Requests are built by the `encode_reg_*`
+/// functions below; every reply starts with the overlay version (`u64 LE`).
+pub const OP_REG_LOOKUP: u32 = 15;
+pub const OP_REG_KEY: u32 = 16;
+pub const OP_REG_SET_VALUE: u32 = 17;
+pub const OP_REG_DELETE_VALUE: u32 = 18;
+pub const OP_REG_CREATE_KEY: u32 = 19;
+pub const OP_REG_DELETE_KEY: u32 = 20;
+pub const OP_REG_RENAME_KEY: u32 = 21;
+pub const OP_REG_CHANGED: u32 = 22;
 
 /// Ring/request flag: prefer bulk-arena READ (data in shared arena, not ring payload).
 pub const FLAG_READ_BULK: u32 = 0x1;
@@ -495,6 +505,303 @@ fn take_u8(p: &[u8], off: &mut usize) -> Option<u8> {
     Some(v)
 }
 
+// ---------------------------------------------------------------------------
+// Registry overlay codecs. Strings are `len:u32 LE | utf8`; booleans are one
+// byte, 0 or 1. Every decoder consumes its input exactly and returns `None`
+// for anything else (truncation, trailing bytes, bad UTF-8, out-of-range
+// flags or lengths); none of them can panic or over-allocate.
+// ---------------------------------------------------------------------------
+
+use vfs_registry::overlay::{MAX_DATA, MAX_KEY_NAME, MAX_VALUE_NAME};
+use vfs_registry::{utf16_len, Child, Node, Value};
+
+fn put_str(b: &mut Vec<u8>, s: &str) {
+    b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+    b.extend_from_slice(s.as_bytes());
+}
+
+/// Bounds-checked cursor over a payload.
+struct Rd<'a>(&'a [u8]);
+
+impl<'a> Rd<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        if self.0.len() < n {
+            return None;
+        }
+        let (h, t) = self.0.split_at(n);
+        self.0 = t;
+        Some(h)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
+    fn bool(&mut self) -> Option<bool> {
+        match self.u8()? {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
+    }
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+    fn bytes(&mut self, max: usize) -> Option<&'a [u8]> {
+        let n = self.u32()? as usize;
+        if n > max {
+            return None;
+        }
+        self.take(n)
+    }
+    fn str(&mut self) -> Option<&'a str> {
+        let n = self.u32()? as usize;
+        core::str::from_utf8(self.take(n)?).ok()
+    }
+    /// A string whose length in UTF-16 units is at most `max_units`.
+    fn str_max(&mut self, max_units: usize) -> Option<&'a str> {
+        let s = self.str()?;
+        (utf16_len(s) <= max_units).then_some(s)
+    }
+    fn done(&self) -> Option<()> {
+        self.0.is_empty().then_some(())
+    }
+}
+
+/// A request that is only a path (also `REG_KEY`, `REG_LOOKUP`, `REG_DELETE_KEY`).
+pub fn encode_reg_path(path: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(4 + path.len());
+    put_str(&mut b, path);
+    b
+}
+
+pub fn decode_reg_path(b: &[u8]) -> Option<&str> {
+    let mut r = Rd(b);
+    let p = r.str()?;
+    r.done()?;
+    Some(p)
+}
+
+/// `REG_SET_VALUE` req: `path | name | ty:u32 | data_len:u32 | data`.
+pub fn encode_reg_set_value(path: &str, name: &str, ty: u32, data: &[u8]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(16 + path.len() + name.len() + data.len());
+    put_str(&mut b, path);
+    put_str(&mut b, name);
+    b.extend_from_slice(&ty.to_le_bytes());
+    b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    b.extend_from_slice(data);
+    b
+}
+
+/// Returns `(path, name, ty, data)`.
+pub fn decode_reg_set_value(b: &[u8]) -> Option<(&str, &str, u32, &[u8])> {
+    let mut r = Rd(b);
+    let path = r.str()?;
+    let name = r.str_max(MAX_VALUE_NAME)?;
+    let ty = r.u32()?;
+    let data = r.bytes(MAX_DATA)?;
+    r.done()?;
+    Some((path, name, ty, data))
+}
+
+/// `REG_DELETE_VALUE` req: `path | name`.
+pub fn encode_reg_delete_value(path: &str, name: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(8 + path.len() + name.len());
+    put_str(&mut b, path);
+    put_str(&mut b, name);
+    b
+}
+
+pub fn decode_reg_delete_value(b: &[u8]) -> Option<(&str, &str)> {
+    let mut r = Rd(b);
+    let path = r.str()?;
+    let name = r.str_max(MAX_VALUE_NAME)?;
+    r.done()?;
+    Some((path, name))
+}
+
+/// `REG_CREATE_KEY` req: `path | volatile:u8`.
+pub fn encode_reg_create_key(path: &str, volatile: bool) -> Vec<u8> {
+    let mut b = encode_reg_path(path);
+    b.push(volatile as u8);
+    b
+}
+
+pub fn decode_reg_create_key(b: &[u8]) -> Option<(&str, bool)> {
+    let mut r = Rd(b);
+    let path = r.str()?;
+    let v = r.bool()?;
+    r.done()?;
+    Some((path, v))
+}
+
+/// `REG_RENAME_KEY` req: `path | new_leaf`.
+pub fn encode_reg_rename_key(path: &str, new_leaf: &str) -> Vec<u8> {
+    let mut b = Vec::with_capacity(8 + path.len() + new_leaf.len());
+    put_str(&mut b, path);
+    put_str(&mut b, new_leaf);
+    b
+}
+
+pub fn decode_reg_rename_key(b: &[u8]) -> Option<(&str, &str)> {
+    let mut r = Rd(b);
+    let path = r.str()?;
+    let leaf = r.str_max(MAX_KEY_NAME)?;
+    r.done()?;
+    Some((path, leaf))
+}
+
+/// `REG_CHANGED` req: `path | subtree:u8 | since:u64`.
+pub fn encode_reg_changed(path: &str, subtree: bool, version: u64) -> Vec<u8> {
+    let mut b = encode_reg_path(path);
+    b.push(subtree as u8);
+    b.extend_from_slice(&version.to_le_bytes());
+    b
+}
+
+/// Returns `(path, subtree, since)`.
+pub fn decode_reg_changed(b: &[u8]) -> Option<(&str, bool, u64)> {
+    let mut r = Rd(b);
+    let path = r.str()?;
+    let subtree = r.bool()?;
+    let since = r.u64()?;
+    r.done()?;
+    Some((path, subtree, since))
+}
+
+/// `REG_CHANGED` reply: `version:u64 | changed:u8`.
+pub fn encode_reg_changed_reply(changed: bool, version: u64) -> Vec<u8> {
+    let mut b = version.to_le_bytes().to_vec();
+    b.push(changed as u8);
+    b
+}
+
+/// Returns `(changed, version)`.
+pub fn decode_reg_changed_reply(b: &[u8]) -> Option<(bool, u64)> {
+    let mut r = Rd(b);
+    let version = r.u64()?;
+    let changed = r.bool()?;
+    r.done()?;
+    Some((changed, version))
+}
+
+/// Reply of the mutating ops: just the overlay version after the change.
+pub fn encode_reg_version_reply(version: u64) -> Vec<u8> {
+    version.to_le_bytes().to_vec()
+}
+
+pub fn decode_reg_version_reply(b: &[u8]) -> Option<u64> {
+    let mut r = Rd(b);
+    let v = r.u64()?;
+    r.done()?;
+    Some(v)
+}
+
+/// `REG_LOOKUP` reply: `version:u64 | state:u8 | below:u8`. State is 0 absent,
+/// 1 present, 2 present-created, 3 tombstoned; `below` says the overlay has
+/// anything underneath the key.
+pub fn encode_reg_lookup_reply(state: u8, below: bool, version: u64) -> Vec<u8> {
+    let mut b = version.to_le_bytes().to_vec();
+    b.push(state);
+    b.push(below as u8);
+    b
+}
+
+/// Returns `(state, below, version)`.
+pub fn decode_reg_lookup_reply(b: &[u8]) -> Option<(u8, bool, u64)> {
+    let mut r = Rd(b);
+    let version = r.u64()?;
+    let state = r.u8()?;
+    if state > 3 {
+        return None;
+    }
+    let below = r.bool()?;
+    r.done()?;
+    Some((state, below, version))
+}
+
+/// `REG_KEY` reply: `version:u64 | has_node:u8 | node?`, where a node is
+/// `created:u8 | volatile:u8 | last_write:u64 | nvalues:u32 | values |
+/// ntombstones:u32 | names | nchildren:u32 | children`; a value is
+/// `name | ty:u32 | data_len:u32 | data`, a child `folded | spelling | state:u8`
+/// (0 present, 1 tombstone).
+pub fn encode_reg_key_reply(node: Option<&Node>, version: u64) -> Vec<u8> {
+    let mut b = version.to_le_bytes().to_vec();
+    let Some(n) = node else {
+        b.push(0);
+        return b;
+    };
+    b.push(1);
+    b.push(n.created as u8);
+    b.push(n.volatile as u8);
+    b.extend_from_slice(&n.last_write.to_le_bytes());
+    b.extend_from_slice(&(n.values.len() as u32).to_le_bytes());
+    for v in &n.values {
+        put_str(&mut b, &v.name);
+        b.extend_from_slice(&v.ty.to_le_bytes());
+        b.extend_from_slice(&(v.data.len() as u32).to_le_bytes());
+        b.extend_from_slice(&v.data);
+    }
+    b.extend_from_slice(&(n.value_tombstones.len() as u32).to_le_bytes());
+    for t in &n.value_tombstones {
+        put_str(&mut b, t);
+    }
+    b.extend_from_slice(&(n.children.len() as u32).to_le_bytes());
+    for (folded, (spelling, state)) in &n.children {
+        put_str(&mut b, folded);
+        put_str(&mut b, spelling);
+        b.push(match state {
+            Child::Present => 0,
+            Child::Tombstone => 1,
+        });
+    }
+    b
+}
+
+/// Returns `(node, version)`; the node is `None` for a "no node" reply.
+pub fn decode_reg_key_reply(b: &[u8]) -> Option<(Option<Node>, u64)> {
+    let mut r = Rd(b);
+    let version = r.u64()?;
+    if !r.bool()? {
+        r.done()?;
+        return Some((None, version));
+    }
+    let mut n = Node {
+        created: r.bool()?,
+        volatile: r.bool()?,
+        last_write: r.u64()?,
+        ..Node::default()
+    };
+    // Counts are not trusted for allocation: every element takes at least
+    // 4 bytes, so a count beyond the remaining input fails on the way.
+    let count = r.u32()?;
+    for _ in 0..count {
+        let name = r.str_max(MAX_VALUE_NAME)?.to_string();
+        let ty = r.u32()?;
+        let data = r.bytes(MAX_DATA)?.to_vec();
+        n.values.push(Value { name, ty, data });
+    }
+    let count = r.u32()?;
+    for _ in 0..count {
+        n.value_tombstones
+            .push(r.str_max(MAX_VALUE_NAME)?.to_string());
+    }
+    let count = r.u32()?;
+    for _ in 0..count {
+        let folded = r.str_max(MAX_KEY_NAME)?.to_string();
+        let spelling = r.str_max(MAX_KEY_NAME)?.to_string();
+        let state = match r.u8()? {
+            0 => Child::Present,
+            1 => Child::Tombstone,
+            _ => return None,
+        };
+        n.children.insert(folded, (spelling, state));
+    }
+    r.done()?;
+    Some((Some(n), version))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,5 +1001,244 @@ mod tests {
             decode_readdir_resp(&encode_readdir_resp(&entries)),
             Some(entries)
         );
+    }
+
+    // ---- registry ops (15-22) ----
+
+    fn sample_node() -> vfs_registry::Node {
+        use vfs_registry::{Child, Node, Value};
+        let mut n = Node {
+            values: vec![
+                Value {
+                    name: "Path".into(),
+                    ty: 1,
+                    data: vec![1, 2, 3],
+                },
+                Value {
+                    name: String::new(),
+                    ty: 4,
+                    data: vec![],
+                },
+            ],
+            value_tombstones: vec!["gone".into()],
+            created: true,
+            volatile: true,
+            last_write: 0x0123_4567_89ab_cdef,
+            ..Node::default()
+        };
+        n.children
+            .insert("sub".into(), ("Sub".into(), Child::Present));
+        n.children
+            .insert("dead".into(), ("Dead".into(), Child::Tombstone));
+        n
+    }
+
+    #[test]
+    fn reg_opcodes_are_15_to_22() {
+        assert_eq!(
+            [
+                OP_REG_LOOKUP,
+                OP_REG_KEY,
+                OP_REG_SET_VALUE,
+                OP_REG_DELETE_VALUE,
+                OP_REG_CREATE_KEY,
+                OP_REG_DELETE_KEY,
+                OP_REG_RENAME_KEY,
+                OP_REG_CHANGED
+            ],
+            [15, 16, 17, 18, 19, 20, 21, 22]
+        );
+    }
+
+    #[test]
+    fn reg_path_roundtrip_and_malformed() {
+        let p = encode_reg_path("\\Registry\\Machine\\Sóftware");
+        assert_eq!(decode_reg_path(&p), Some("\\Registry\\Machine\\Sóftware"));
+        assert_eq!(decode_reg_path(&encode_reg_path("")), Some(""));
+        assert_eq!(decode_reg_path(&[]), None);
+        assert_eq!(decode_reg_path(&[1, 0, 0]), None);
+        assert_eq!(
+            decode_reg_path(&[5, 0, 0, 0, b'a']),
+            None,
+            "length past end"
+        );
+        let mut t = encode_reg_path("a");
+        t.push(0);
+        assert_eq!(decode_reg_path(&t), None, "trailing bytes");
+        assert_eq!(decode_reg_path(&[1, 0, 0, 0, 0xff]), None, "bad utf8");
+        assert_eq!(
+            decode_reg_path(&[0xff, 0xff, 0xff, 0xff]),
+            None,
+            "huge length"
+        );
+    }
+
+    #[test]
+    fn reg_set_value_roundtrip_and_malformed() {
+        let b = encode_reg_set_value("\\Registry\\A", "Name", 3, &[9, 8, 7]);
+        assert_eq!(
+            decode_reg_set_value(&b),
+            Some(("\\Registry\\A", "Name", 3, &[9u8, 8, 7][..]))
+        );
+        let e = encode_reg_set_value("p", "", 0, &[]);
+        assert_eq!(decode_reg_set_value(&e), Some(("p", "", 0, &[][..])));
+        for n in 0..b.len() {
+            assert_eq!(decode_reg_set_value(&b[..n]), None, "truncated at {n}");
+        }
+        let mut t = b.clone();
+        t.push(0);
+        assert_eq!(decode_reg_set_value(&t), None);
+        // data length larger than the registry allows
+        let mut big = encode_reg_set_value("p", "n", 1, &[]);
+        let at = big.len() - 4;
+        big[at..].copy_from_slice(&((1u32 << 20) + 1).to_le_bytes());
+        assert_eq!(decode_reg_set_value(&big), None);
+    }
+
+    #[test]
+    fn reg_delete_value_and_rename_roundtrip() {
+        let b = encode_reg_delete_value("p", "v");
+        assert_eq!(decode_reg_delete_value(&b), Some(("p", "v")));
+        assert_eq!(decode_reg_delete_value(&b[..b.len() - 1]), None);
+        let r = encode_reg_rename_key("\\Registry\\A", "B");
+        assert_eq!(decode_reg_rename_key(&r), Some(("\\Registry\\A", "B")));
+        assert_eq!(decode_reg_rename_key(&r[..3]), None);
+        let mut t = r.clone();
+        t.push(1);
+        assert_eq!(decode_reg_rename_key(&t), None);
+    }
+
+    #[test]
+    fn reg_create_key_roundtrip_and_malformed() {
+        for v in [false, true] {
+            let b = encode_reg_create_key("p", v);
+            assert_eq!(decode_reg_create_key(&b), Some(("p", v)));
+        }
+        let mut b = encode_reg_create_key("p", true);
+        *b.last_mut().unwrap() = 2;
+        assert_eq!(decode_reg_create_key(&b), None, "flag must be 0 or 1");
+        assert_eq!(decode_reg_create_key(&b[..b.len() - 1]), None);
+    }
+
+    #[test]
+    fn reg_changed_roundtrip_and_malformed() {
+        let b = encode_reg_changed("p", true, 77);
+        assert_eq!(decode_reg_changed(&b), Some(("p", true, 77)));
+        let b = encode_reg_changed("p", false, u64::MAX);
+        assert_eq!(decode_reg_changed(&b), Some(("p", false, u64::MAX)));
+        for n in 0..b.len() {
+            assert_eq!(decode_reg_changed(&b[..n]), None);
+        }
+        let r = encode_reg_changed_reply(true, 5);
+        assert_eq!(decode_reg_changed_reply(&r), Some((true, 5)));
+        assert_eq!(decode_reg_changed_reply(&r[..r.len() - 1]), None);
+        let mut bad = r.clone();
+        bad[8] = 7;
+        assert_eq!(decode_reg_changed_reply(&bad), None);
+    }
+
+    #[test]
+    fn reg_version_and_lookup_reply_roundtrip() {
+        assert_eq!(
+            decode_reg_version_reply(&encode_reg_version_reply(9)),
+            Some(9)
+        );
+        assert_eq!(decode_reg_version_reply(&[0; 7]), None);
+        assert_eq!(decode_reg_version_reply(&[0; 9]), None);
+        for state in 0..=3u8 {
+            for below in [false, true] {
+                let b = encode_reg_lookup_reply(state, below, 42);
+                assert_eq!(decode_reg_lookup_reply(&b), Some((state, below, 42)));
+            }
+        }
+        let mut b = encode_reg_lookup_reply(1, false, 1);
+        b[8] = 4;
+        assert_eq!(decode_reg_lookup_reply(&b), None, "state out of range");
+        let mut b = encode_reg_lookup_reply(1, false, 1);
+        b[9] = 2;
+        assert_eq!(decode_reg_lookup_reply(&b), None, "bool out of range");
+        assert_eq!(decode_reg_lookup_reply(&b[..9]), None);
+    }
+
+    #[test]
+    fn reg_key_reply_roundtrip() {
+        let n = sample_node();
+        let b = encode_reg_key_reply(Some(&n), 12);
+        assert_eq!(decode_reg_key_reply(&b), Some((Some(n), 12)));
+        let none = encode_reg_key_reply(None, 13);
+        assert_eq!(decode_reg_key_reply(&none), Some((None, 13)));
+        let empty = vfs_registry::Node::default();
+        let b = encode_reg_key_reply(Some(&empty), 0);
+        assert_eq!(decode_reg_key_reply(&b), Some((Some(empty), 0)));
+    }
+
+    #[test]
+    fn reg_key_reply_malformed_is_none_never_panics() {
+        let b = encode_reg_key_reply(Some(&sample_node()), 12);
+        for n in 0..b.len() {
+            assert_eq!(decode_reg_key_reply(&b[..n]), None, "truncated at {n}");
+        }
+        let mut t = b.clone();
+        t.push(0);
+        assert_eq!(decode_reg_key_reply(&t), None, "trailing bytes");
+        let mut bad_tag = b.clone();
+        bad_tag[8] = 9;
+        assert_eq!(decode_reg_key_reply(&bad_tag), None);
+        // a "no node" reply with trailing bytes
+        let mut none = encode_reg_key_reply(None, 1);
+        none.push(0);
+        assert_eq!(decode_reg_key_reply(&none), None);
+        // every single-byte corruption and a huge count must not panic
+        for i in 0..b.len() {
+            let mut c = b.clone();
+            c[i] = 0xff;
+            let _ = decode_reg_key_reply(&c);
+        }
+        let mut huge = encode_reg_key_reply(Some(&vfs_registry::Node::default()), 0);
+        // values count sits after tag, created, volatile, last_write
+        let at = 8 + 1 + 1 + 1 + 8;
+        huge[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(decode_reg_key_reply(&huge), None);
+    }
+
+    #[test]
+    fn reg_key_reply_enforces_registry_limits() {
+        use vfs_registry::{Child, Node, Value};
+        let long_value = Node {
+            values: vec![Value {
+                name: "x".repeat(16384),
+                ty: 1,
+                data: vec![],
+            }],
+            ..Node::default()
+        };
+        let b = encode_reg_key_reply(Some(&long_value), 1);
+        assert_eq!(decode_reg_key_reply(&b), None, "value name over limit");
+        let mut long_child = Node::default();
+        long_child
+            .children
+            .insert("k".into(), ("y".repeat(256), Child::Present));
+        let b = encode_reg_key_reply(Some(&long_child), 1);
+        assert_eq!(decode_reg_key_reply(&b), None, "child name over limit");
+        let ok_value = Node {
+            values: vec![Value {
+                name: "x".repeat(16383),
+                ty: 1,
+                data: vec![0; 1 << 20],
+            }],
+            ..Node::default()
+        };
+        let b = encode_reg_key_reply(Some(&ok_value), 1);
+        assert!(decode_reg_key_reply(&b).is_some());
+        let too_big = Node {
+            values: vec![Value {
+                name: "a".into(),
+                ty: 1,
+                data: vec![0; (1 << 20) + 1],
+            }],
+            ..Node::default()
+        };
+        let b = encode_reg_key_reply(Some(&too_big), 1);
+        assert_eq!(decode_reg_key_reply(&b), None, "data over limit");
     }
 }

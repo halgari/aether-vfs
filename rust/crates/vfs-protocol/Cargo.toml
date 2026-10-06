@@ -6,3 +6,4 @@ license = "GPL-3.0-only"
 
 [dependencies]
 vfs-provider = { path = "../vfs-provider" }
+vfs-registry = { path = "../vfs-registry" }

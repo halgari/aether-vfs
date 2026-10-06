@@ -10,9 +10,9 @@
 use crate::path::{self, fold};
 use std::collections::BTreeMap;
 
-pub(crate) const MAX_KEY_NAME: usize = 255;
-pub(crate) const MAX_VALUE_NAME: usize = 16383;
-pub(crate) const MAX_DATA: usize = 1 << 20;
+pub const MAX_KEY_NAME: usize = 255;
+pub const MAX_VALUE_NAME: usize = 16383;
+pub const MAX_DATA: usize = 1 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Value {
@@ -95,7 +95,8 @@ pub struct Overlay {
     version: u64,
 }
 
-fn utf16_len(s: &str) -> usize {
+/// Length in UTF-16 code units, the unit the registry limits are in.
+pub fn utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
 }
 

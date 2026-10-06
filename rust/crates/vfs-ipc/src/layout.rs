@@ -58,6 +58,14 @@ pub const OP_CLOSE: u32 = 11;
 pub const OP_REGISTER_PROCESS: u32 = 12;
 pub const OP_HEARTBEAT: u32 = 13;
 pub const OP_STORED_NAMES: u32 = 14;
+pub const OP_REG_LOOKUP: u32 = 15;
+pub const OP_REG_KEY: u32 = 16;
+pub const OP_REG_SET_VALUE: u32 = 17;
+pub const OP_REG_DELETE_VALUE: u32 = 18;
+pub const OP_REG_CREATE_KEY: u32 = 19;
+pub const OP_REG_DELETE_KEY: u32 = 20;
+pub const OP_REG_RENAME_KEY: u32 = 21;
+pub const OP_REG_CHANGED: u32 = 22;
 
 #[repr(C)]
 pub struct RingHeader {

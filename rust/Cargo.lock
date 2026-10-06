@@ -2795,6 +2795,7 @@ name = "vfs-protocol"
 version = "0.1.0"
 dependencies = [
  "vfs-provider",
+ "vfs-registry",
 ]
 
 [[package]]
