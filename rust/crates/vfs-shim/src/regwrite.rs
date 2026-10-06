@@ -512,25 +512,40 @@ unsafe fn real_volatile(real: &Real, h: isize) -> bool {
     st == STATUS_SUCCESS && buf[1] & REG_FLAG_VOLATILE != 0
 }
 
+/// How much a rename may copy.
+#[derive(Clone, Copy)]
+struct Limits {
+    keys: usize,
+    bytes: usize,
+}
+
+const COPY_LIMITS: Limits = Limits {
+    keys: MAX_COPY_KEYS,
+    bytes: MAX_COPY_BYTES,
+};
+
+/// One key of the subtree, read for [`collect`]: `(path, whether a real key may show at it)` to
+/// the key's overlay node and, when one shows, the real key with its volatile flag.
+type KeyRead<'a> = dyn FnMut(&str, bool) -> KeyReadResult + 'a;
+
+/// What a [`KeyRead`] returns.
+type KeyReadResult = Result<(Option<Node>, Option<(RealKey, bool)>), NTSTATUS>;
+
 /// The merged view of the subtree at `root`, parents before children, each key's subkeys in
-/// merged order. Bounded by [`MAX_COPY_KEYS`] and [`MAX_COPY_BYTES`].
-unsafe fn collect(real: &Real, root: &str, wow64: u32) -> Result<Vec<Copied>, NTSTATUS> {
+/// merged order. Bounded by `limits` (for a rename, [`MAX_COPY_KEYS`] and [`MAX_COPY_BYTES`]):
+/// past either, `STATUS_INSUFFICIENT_RESOURCES` before anything is written.
+fn collect(root: &str, limits: Limits, read: &mut KeyRead<'_>) -> Result<Vec<Copied>, NTSTATUS> {
     let mut out = Vec::new();
     let mut bytes = 0usize;
     // (relative path, whether a real key may show at it)
     let mut stack = vec![(String::new(), true)];
     while let Some((rel, real_may_show)) = stack.pop() {
-        if out.len() >= MAX_COPY_KEYS {
+        if out.len() >= limits.keys {
             return Err(STATUS_INSUFFICIENT_RESOURCES);
         }
-        let p = format!("{root}{rel}");
-        let node = regclient::key(&p).map_err(|_| STATUS_UNSUCCESSFUL)?;
+        let (node, rk) = read(&format!("{root}{rel}"), real_may_show)?;
         let created = node.as_ref().is_some_and(|n| n.created);
-        let rk = if real_may_show && !created {
-            read_real_key(real, &p, wow64)?
-        } else {
-            None
-        };
+        let rk = rk.filter(|_| !created);
         let Some(m) = merge(rk.as_ref().map(|r| &r.0), node.as_ref(), false) else {
             if rel.is_empty() {
                 return Err(STATUS_KEY_DELETED);
@@ -546,7 +561,7 @@ unsafe fn collect(real: &Real, root: &str, wow64: u32) -> Result<Vec<Copied>, NT
                 .map(|v| v.data.len() + v.name.len() * 2)
                 .sum::<usize>(),
         );
-        if bytes > MAX_COPY_BYTES {
+        if bytes > limits.bytes {
             return Err(STATUS_INSUFFICIENT_RESOURCES);
         }
         let real_names: HashSet<String> = rk
@@ -572,7 +587,16 @@ unsafe fn collect(real: &Real, root: &str, wow64: u32) -> Result<Vec<Copied>, NT
 /// half-copied stays visible; if even that fails, the partial copy stays (writes are not
 /// transactional).
 unsafe fn copy_rename(real: &Real, t: &Target, dest: &str) -> Result<(), NTSTATUS> {
-    let tree = collect(real, &t.path, t.wow64)?;
+    let mut read = |p: &str, real_may_show: bool| {
+        let node = regclient::key(p).map_err(|_| STATUS_UNSUCCESSFUL)?;
+        let rk = if real_may_show && !node.as_ref().is_some_and(|n| n.created) {
+            read_real_key(real, p, t.wow64)?
+        } else {
+            None
+        };
+        Ok((node, rk))
+    };
+    let tree = collect(&t.path, COPY_LIMITS, &mut read)?;
     let Some(root) = tree.first() else {
         return Err(STATUS_KEY_DELETED);
     };
@@ -681,6 +705,120 @@ mod tests {
         assert_eq!(write_status(ST_NOT_FOUND), STATUS_KEY_DELETED);
         assert_eq!(write_status(ST_EXISTS), STATUS_CANNOT_DELETE);
         assert_eq!(write_status(vfs_protocol::ST_IO_ERROR), STATUS_UNSUCCESSFUL);
+    }
+
+    /// A [`KeyRead`] over an overlay alone: every key's node, and no real keys.
+    fn created_tree(o: &vfs_registry::Overlay) -> impl FnMut(&str, bool) -> KeyReadResult + '_ {
+        move |p: &str, _| Ok((o.node(p).cloned(), None))
+    }
+
+    const P: &str = r"\Registry\Machine\Software\Copy";
+
+    /// Keys created here under `P` (`""` is `P` itself), each with one 10-byte value `v`.
+    fn overlay_of(keys: &[&str]) -> vfs_registry::Overlay {
+        let mut o = vfs_registry::Overlay::new();
+        for (i, k) in keys.iter().enumerate() {
+            let p = if k.is_empty() {
+                P.to_string()
+            } else {
+                format!(r"{P}\{k}")
+            };
+            o.create_key(&p, false, false, i as u64).unwrap();
+            o.set_value(&p, "v", 3, &[0; 10], i as u64).unwrap();
+        }
+        o
+    }
+
+    #[test]
+    fn the_copy_stops_at_its_key_bound_before_anything_is_written() {
+        let o = overlay_of(&["", "a", r"a\b", "c"]);
+        let lim = |keys, bytes| Limits { keys, bytes };
+        let r = collect(P, lim(3, 1 << 20), &mut created_tree(&o));
+        assert_eq!(r.err(), Some(STATUS_INSUFFICIENT_RESOURCES));
+        let all = collect(P, lim(4, 1 << 20), &mut created_tree(&o)).unwrap();
+        let rels: Vec<&str> = all.iter().map(|c| c.rel.as_str()).collect();
+        assert_eq!(
+            rels,
+            ["", r"\a", r"\a\b", r"\c"],
+            "parents first, merged order"
+        );
+    }
+
+    #[test]
+    fn the_copy_stops_at_its_byte_bound() {
+        let o = overlay_of(&["", "a", "b"]);
+        // Each value is 10 data bytes plus a 2-byte name.
+        let ok = collect(
+            P,
+            Limits {
+                keys: 10,
+                bytes: 36,
+            },
+            &mut created_tree(&o),
+        );
+        assert_eq!(ok.map(|t| t.len()), Ok(3));
+        let r = collect(
+            P,
+            Limits {
+                keys: 10,
+                bytes: 35,
+            },
+            &mut created_tree(&o),
+        );
+        assert_eq!(r.err(), Some(STATUS_INSUFFICIENT_RESOURCES));
+    }
+
+    #[test]
+    fn the_copy_merges_real_keys_with_the_overlay() {
+        // The root overlays a real key: an overlay value of the same name wins, the real
+        // default value and a deleted real subkey's absence carry over, and the volatile flag
+        // comes from the real key.
+        let mut o = vfs_registry::Overlay::new();
+        o.set_value(P, "same", 1, b"o\0", 1).unwrap();
+        o.delete_key(&format!(r"{P}\Gone"), 2).unwrap();
+        let real_root = RealKey {
+            subkeys: vec!["Kept".into(), "Gone".into()],
+            values: vec![
+                Value {
+                    name: "same".into(),
+                    ty: 4,
+                    data: vec![1, 0, 0, 0],
+                },
+                Value {
+                    name: "".into(),
+                    ty: 1,
+                    data: b"d\0".to_vec(),
+                },
+            ],
+            ..RealKey::default()
+        };
+        let mut read = |p: &str, may: bool| {
+            let rk = match (p == P, may) {
+                (true, _) => Some((real_root.clone(), true)),
+                (false, true) => Some((RealKey::default(), false)),
+                (false, false) => None,
+            };
+            Ok((o.node(p).cloned(), rk))
+        };
+        let t = collect(P, COPY_LIMITS, &mut read).unwrap();
+        assert_eq!(t.len(), 2);
+        assert!(t[0].volatile);
+        assert_eq!(
+            t[0].values,
+            vec![
+                Value {
+                    name: "same".into(),
+                    ty: 1,
+                    data: b"o\0".to_vec()
+                },
+                Value {
+                    name: "".into(),
+                    ty: 1,
+                    data: b"d\0".to_vec()
+                },
+            ]
+        );
+        assert_eq!(t[1].rel, r"\Kept");
     }
 
     #[test]

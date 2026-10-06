@@ -30,7 +30,7 @@ use vfs_protocol::{
     decode_reg_version_reply, encode_reg_changed, encode_reg_create_key, encode_reg_delete_value,
     encode_reg_path, encode_reg_rename_key, encode_reg_set_value, OP_REG_CHANGED,
     OP_REG_CREATE_KEY, OP_REG_DELETE_KEY, OP_REG_DELETE_VALUE, OP_REG_KEY, OP_REG_LOOKUP,
-    OP_REG_RENAME_KEY, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_NOT_SUPPORTED,
+    OP_REG_RENAME_KEY, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_IO_ERROR, ST_NOT_SUPPORTED,
 };
 use vfs_registry::{path::fold, Lookup, Node};
 
@@ -42,10 +42,48 @@ use crate::fuse_client::{self, FuseClient};
 const CACHE_ENTRIES: usize = 4096;
 
 /// Registry virtualisation is on for this process: the host set [`vfs_env::REGISTRY`] (it does
-/// so only while a registry layer is attached) and the shim has a director to ask.
+/// so only while a registry layer is attached), every registry detour was installed
+/// ([`detours_installed`]), and the shim has a director to ask.
+///
+/// **All or nothing.** Until the install has recorded its outcome this is false, so every
+/// registry hook passes straight through; once recorded, the outcome never changes. A process
+/// where any registry detour is missing never virtualises its registry at all: a missing write
+/// hook would otherwise let writes through a virtual view reach the real registry.
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| vfs_env::opt_in(vfs_env::REGISTRY)) && fuse_client::global().is_some()
+    DETOURS.get() == Some(&Ok(()))
+        && *ON.get_or_init(|| vfs_env::opt_in(vfs_env::REGISTRY))
+        && fuse_client::global().is_some()
+}
+
+/// The outcome of installing the registry detours: `Err(label)` names one that is missing.
+/// Set once, after the last registry detour is in.
+static DETOURS: OnceLock<Result<(), &'static str>> = OnceLock::new();
+
+/// Whether registry virtualisation may run, given the registry detours that could not be
+/// installed: only when none is missing. `Err` names the first one.
+pub fn decide(missing: &[&'static str]) -> Result<(), &'static str> {
+    match missing.first() {
+        Some(m) => Err(m),
+        None => Ok(()),
+    }
+}
+
+/// Record the registry detours' install outcome (once per process; a later call changes
+/// nothing). Called by the install after its last registry detour, so no hook sees
+/// [`enabled`] go from true to false. A disabled overlay that the host asked for is reported:
+/// a log line and the stats flag.
+pub fn detours_installed(missing: &[&'static str]) {
+    let outcome = decide(missing);
+    if DETOURS.set(outcome).is_err() {
+        return;
+    }
+    if let Err(name) = outcome {
+        crate::hookstats::note_reg_overlay_disabled(name);
+        if vfs_env::opt_in(vfs_env::REGISTRY) {
+            eprintln!("vfs-shim: registry overlay disabled: detour {name} not installed");
+        }
+    }
 }
 
 /// The process's registry client, over [`fuse_client::global`].
@@ -267,7 +305,9 @@ impl<'a> RegClient<'a> {
     /// before it replies, which makes every cached answer, this client's included, unusable.
     fn write(&self, opcode: u32, payload: &[u8]) -> Result<(), i32> {
         let r = self.request(opcode, payload)?;
-        decode_reg_version_reply(&r).ok_or(ST_BAD_REQUEST)?;
+        // A reply that does not decode says nothing about the request: a failed write
+        // (`STATUS_UNSUCCESSFUL`), not a bad request (`STATUS_INVALID_PARAMETER`).
+        decode_reg_version_reply(&r).ok_or(ST_IO_ERROR)?;
         Ok(())
     }
 
@@ -321,6 +361,16 @@ fn insert_bounded<K: Eq + Hash, V>(m: &mut HashMap<K, V>, k: K, v: V) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_overlay_runs_only_when_every_registry_detour_is_in() {
+        assert_eq!(decide(&[]), Ok(()));
+        assert_eq!(decide(&["NtRenameKey"]), Err("NtRenameKey"));
+        assert_eq!(
+            decide(&["NtSetValueKey", "NtFlushKey"]),
+            Err("NtSetValueKey")
+        );
+    }
 
     #[test]
     fn a_request_fits_up_to_the_payload_cap_and_not_beyond() {

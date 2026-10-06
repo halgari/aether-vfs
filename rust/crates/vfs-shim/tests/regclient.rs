@@ -41,6 +41,9 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         // What the host sets while a registry layer is attached; read once by `enabled`.
         std::env::set_var(vfs_env::REGISTRY, "1");
         let fake = fakedirector::install(&root, Fake::new().with_registry(), 0);
+        // This binary drives the client without installing the hooks; record the outcome an
+        // install with every registry detour in would, which `enabled` requires.
+        regclient::detours_installed(&[]);
         Fixture { fake, root }
     });
     (guard, f)

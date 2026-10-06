@@ -601,8 +601,27 @@ pub fn reg_close_lock_given_up_count() -> u64 {
     REG_CLOSE_LOCK_GIVEN_UP.load(Ordering::Relaxed)
 }
 
+/// The registry detour whose absence turned the registry overlay off for the process (see
+/// `regclient::detours_installed`). Recorded whether or not stats are on.
+static REG_OVERLAY_DISABLED: OnceLock<&'static str> = OnceLock::new();
+
+/// The registry overlay is off because the detour `name` could not be installed.
+pub fn note_reg_overlay_disabled(name: &'static str) {
+    let _ = REG_OVERLAY_DISABLED.set(name);
+}
+
+/// The registry detour whose absence turned the registry overlay off, if one did.
+pub fn reg_overlay_disabled_by() -> Option<&'static str> {
+    REG_OVERLAY_DISABLED.get().copied()
+}
+
 fn render_reg_fallbacks(snap: &Snapshot) -> String {
     let mut out = String::new();
+    if let Some(name) = reg_overlay_disabled_by() {
+        out.push_str(&format!(
+            "\nregistry overlay disabled: detour {name} not installed\n"
+        ));
+    }
     if snap.reg_read_fallbacks != 0 {
         out.push_str(&format!(
             "\nregistry overlay reads served from the real registry after a director failure: {}\n",

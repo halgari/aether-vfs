@@ -290,6 +290,23 @@ fn real_key(rel: &str, values: &[(&str, u32)]) {
     unsafe { RegCloseKey(k) };
 }
 
+/// Set a value of any type on the real key `HKCU\BASE\<rel>` (before the hooks).
+fn real_raw(rel: &str, name: &str, ty: u32, data: &[u8]) {
+    let k = reg_create(&format!(r"{BASE}\{rel}"));
+    let st = unsafe {
+        RegSetValueExW(
+            k,
+            wide(name).as_ptr(),
+            0,
+            ty,
+            data.as_ptr(),
+            data.len() as u32,
+        )
+    };
+    assert_eq!(st, 0);
+    unsafe { RegCloseKey(k) };
+}
+
 fn user_sid() -> String {
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
@@ -388,7 +405,9 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         real_key(r"Del\Leaf", &[("x", 1)]);
         real_key(r"Del\Dead", &[]);
         real_key(r"Del\Tree\Sub", &[]);
-        real_key(r"Ren\Real", &[("a", 1)]);
+        real_key(r"Ren\Real", &[("a", 1), ("ov", 5)]);
+        real_raw(r"Ren\Real", "", REG_SZ, &[b'd', 0, 0, 0]);
+        real_raw(r"Ren\Real", "bin", REG_BINARY, &[1, 2, 3]);
         real_key(r"Ren\Real\S1", &[("b", 2)]);
         real_key(r"Ren\Real\S1\Deep", &[("d", 4)]);
         real_key(r"Ren\Real\S2", &[]);
@@ -437,6 +456,11 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         };
         let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
         std::mem::forget(install(engine).expect("install"));
+        assert_eq!(
+            vfs_shim::reg_overlay_disabled_by(),
+            None,
+            "every registry detour is in"
+        );
         assert!(regclient::enabled());
         Fixture {
             fake,
@@ -722,6 +746,8 @@ fn rename_of_a_real_key_copies_its_merged_subtree() {
     // Overlay changes in the subtree before the rename: a value, a deleted subkey, a volatile
     // created subkey.
     regclient::set_value(&f.canon(r"Ren\Real"), "c", REG_DWORD, &3u32.to_le_bytes()).unwrap();
+    // An overlay value overriding a real one of the same name, with another type.
+    regclient::set_value(&f.canon(r"Ren\Real"), "OV", REG_SZ, &[b'o', 0, 0, 0]).unwrap();
     regclient::delete_key(&f.canon(r"Ren\Real\S2")).unwrap();
     regclient::create_key(&f.canon(r"Ren\Real\Vol"), true).unwrap();
 
@@ -739,6 +765,21 @@ fn rename_of_a_real_key_copies_its_merged_subtree() {
     assert!(key_name(h).unwrap().ends_with(r"\Ren\RealNew"));
     assert_eq!(query_dword(h, "a"), Ok(1));
     assert_eq!(query_dword(h, "c"), Ok(3));
+    assert_eq!(
+        query(h, "ov"),
+        Ok((REG_SZ, vec![b'o', 0, 0, 0])),
+        "the overlay value wins under the new name"
+    );
+    assert_eq!(
+        query(h, ""),
+        Ok((REG_SZ, vec![b'd', 0, 0, 0])),
+        "the default value is copied"
+    );
+    assert_eq!(
+        query(h, "bin"),
+        Ok((REG_BINARY, vec![1, 2, 3])),
+        "a non-DWORD type is kept"
+    );
 
     assert_eq!(
         f.open(r"Ren\Real", NT_KEY_READ).0,

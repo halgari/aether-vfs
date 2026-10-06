@@ -56,8 +56,8 @@ pub use hook::contain_panic;
 /// quietly start (or stop) counting again.
 pub use hookstats::{
     hook_panic_count, hook_panics_total, outcome_count, overlay_fail_count,
-    reg_read_fallback_count, reg_unresolved_count, unrouted_director_opens, OpenOutcome,
-    OverlayFail,
+    reg_overlay_disabled_by, reg_read_fallback_count, reg_unresolved_count,
+    unrouted_director_opens, OpenOutcome, OverlayFail,
 };
 
 /// The canonical path the registry hooks recorded for a key handle (synthetic or

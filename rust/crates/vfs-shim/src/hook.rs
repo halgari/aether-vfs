@@ -1092,7 +1092,7 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
         d_unmap, d_qvol, d_lock, d_unlock, d_flush,
     ]);
 
-    install_registry_detours(ntdll, &mut detours);
+    install_registry_detours(ntdll, &mut detours, qobj_installed);
 
     // Best-effort child-process propagation + virtual image path spoof.
     if let Some(dll) = self_dll_path() {
@@ -1128,165 +1128,249 @@ unsafe fn optional_detour(
     hookfn: *const (),
     detours: &mut Vec<RawDetour>,
     store: &mut dyn FnMut(Option<*const ()>),
-) {
+) -> bool {
     if let Ok(d) = make_detour(ntdll, name, hookfn) {
         store(Some(d.trampoline() as *const ()));
         if d.enable().is_ok() {
             detours.push(d);
-            return;
+            return true;
         }
         store(None);
     }
     note_skipped_detour(label);
+    false
 }
 
 /// The registry overlay's detours (spec section 3.1: open, create, duplicate; `NtClose` and
 /// `NtQueryObject` are the file hooks'). Installed whether or not the overlay is on: each
 /// checks `regclient::enabled()` first and goes straight to its trampoline when it is off.
 /// Optional in the style of `NtQueryObject`, so a host without one still gets the file VFS.
-unsafe fn install_registry_detours(ntdll: HMODULE, detours: &mut Vec<RawDetour>) {
+///
+/// `qobj_installed`: the file hooks' `NtQueryObject` detour is in. The registry needs it (names
+/// and types of synthetic keys, the access of pre-hook handles), so its absence turns the
+/// registry overlay off like a missing registry detour.
+unsafe fn install_registry_detours(
+    ntdll: HMODULE,
+    detours: &mut Vec<RawDetour>,
+    qobj_installed: bool,
+) {
     let raw_query_key = GetProcAddress(ntdll, c"NtQueryKey".as_ptr().cast())
         .map(|p| core::mem::transmute::<unsafe extern "system" fn() -> isize, NtQueryKeyFn>(p));
     TRAMP_QUERY_KEY = raw_query_key;
+    // Registry virtualisation is all or nothing (`regclient::enabled`): every detour that could
+    // not be installed is collected, and the outcome is recorded once, after the last one.
+    let mut missing: Vec<&'static str> = Vec::new();
+    if !qobj_installed {
+        missing.push("NtQueryObject");
+    }
+    let mut reg = |installed: bool, label: &'static str| {
+        if !installed {
+            missing.push(label);
+        }
+    };
     // The query hooks (spec 3.1). Each trampoline is stored before its detour is enabled.
-    optional_detour(
-        ntdll,
-        c"NtQueryKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtQueryKey",
+            "NtQueryKey",
+            query_key_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_QUERY_KEY = t
+                    .map(|t| core::mem::transmute::<*const (), NtQueryKeyFn>(t))
+                    .or(raw_query_key)
+            },
+        ),
         "NtQueryKey",
-        query_key_hook as *const (),
-        detours,
-        &mut |t| {
-            TRAMP_QUERY_KEY = t
-                .map(|t| core::mem::transmute::<*const (), NtQueryKeyFn>(t))
-                .or(raw_query_key)
-        },
     );
-    optional_detour(
-        ntdll,
-        c"NtEnumerateKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtEnumerateKey",
+            "NtEnumerateKey",
+            enum_key_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_ENUM_KEY = t.map(|t| core::mem::transmute::<*const (), NtEnumerateKeyFn>(t))
+            },
+        ),
         "NtEnumerateKey",
-        enum_key_hook as *const (),
-        detours,
-        &mut |t| TRAMP_ENUM_KEY = t.map(|t| core::mem::transmute::<*const (), NtEnumerateKeyFn>(t)),
     );
-    optional_detour(
-        ntdll,
-        c"NtQueryValueKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtQueryValueKey",
+            "NtQueryValueKey",
+            query_value_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_QUERY_VALUE =
+                    t.map(|t| core::mem::transmute::<*const (), NtQueryValueKeyFn>(t))
+            },
+        ),
         "NtQueryValueKey",
-        query_value_hook as *const (),
-        detours,
-        &mut |t| {
-            TRAMP_QUERY_VALUE = t.map(|t| core::mem::transmute::<*const (), NtQueryValueKeyFn>(t))
-        },
     );
-    optional_detour(
-        ntdll,
-        c"NtEnumerateValueKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtEnumerateValueKey",
+            "NtEnumerateValueKey",
+            enum_value_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_ENUM_VALUE =
+                    t.map(|t| core::mem::transmute::<*const (), NtEnumerateValueKeyFn>(t))
+            },
+        ),
         "NtEnumerateValueKey",
-        enum_value_hook as *const (),
-        detours,
-        &mut |t| {
-            TRAMP_ENUM_VALUE =
-                t.map(|t| core::mem::transmute::<*const (), NtEnumerateValueKeyFn>(t))
-        },
     );
-    optional_detour(
-        ntdll,
-        c"NtQueryMultipleValueKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtQueryMultipleValueKey",
+            "NtQueryMultipleValueKey",
+            query_multiple_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_QUERY_MULTIPLE =
+                    t.map(|t| core::mem::transmute::<*const (), NtQueryMultipleValueKeyFn>(t))
+            },
+        ),
         "NtQueryMultipleValueKey",
-        query_multiple_hook as *const (),
-        detours,
-        &mut |t| {
-            TRAMP_QUERY_MULTIPLE =
-                t.map(|t| core::mem::transmute::<*const (), NtQueryMultipleValueKeyFn>(t))
-        },
     );
     // The write hooks (spec 3.1).
-    optional_detour(
-        ntdll,
-        c"NtSetValueKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtSetValueKey",
+            "NtSetValueKey",
+            set_value_key_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_SET_VALUE = t.map(|t| core::mem::transmute::<*const (), NtSetValueKeyFn>(t))
+            },
+        ),
         "NtSetValueKey",
-        set_value_key_hook as *const (),
-        detours,
-        &mut |t| TRAMP_SET_VALUE = t.map(|t| core::mem::transmute::<*const (), NtSetValueKeyFn>(t)),
     );
-    optional_detour(
-        ntdll,
-        c"NtDeleteValueKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtDeleteValueKey",
+            "NtDeleteValueKey",
+            delete_value_key_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_DELETE_VALUE =
+                    t.map(|t| core::mem::transmute::<*const (), NtDeleteValueKeyFn>(t))
+            },
+        ),
         "NtDeleteValueKey",
-        delete_value_key_hook as *const (),
-        detours,
-        &mut |t| {
-            TRAMP_DELETE_VALUE = t.map(|t| core::mem::transmute::<*const (), NtDeleteValueKeyFn>(t))
-        },
     );
-    optional_detour(
-        ntdll,
-        c"NtDeleteKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtDeleteKey",
+            "NtDeleteKey",
+            delete_key_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_DELETE_KEY = t.map(|t| core::mem::transmute::<*const (), NtDeleteKeyFn>(t))
+            },
+        ),
         "NtDeleteKey",
-        delete_key_hook as *const (),
-        detours,
-        &mut |t| TRAMP_DELETE_KEY = t.map(|t| core::mem::transmute::<*const (), NtDeleteKeyFn>(t)),
     );
-    optional_detour(
-        ntdll,
-        c"NtRenameKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtRenameKey",
+            "NtRenameKey",
+            rename_key_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_RENAME_KEY = t.map(|t| core::mem::transmute::<*const (), NtRenameKeyFn>(t))
+            },
+        ),
         "NtRenameKey",
-        rename_key_hook as *const (),
-        detours,
-        &mut |t| TRAMP_RENAME_KEY = t.map(|t| core::mem::transmute::<*const (), NtRenameKeyFn>(t)),
     );
-    optional_detour(
-        ntdll,
-        c"NtSetInformationKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtSetInformationKey",
+            "NtSetInformationKey",
+            set_info_key_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_SET_INFO_KEY =
+                    t.map(|t| core::mem::transmute::<*const (), NtSetInformationKeyFn>(t))
+            },
+        ),
         "NtSetInformationKey",
-        set_info_key_hook as *const (),
-        detours,
-        &mut |t| {
-            TRAMP_SET_INFO_KEY =
-                t.map(|t| core::mem::transmute::<*const (), NtSetInformationKeyFn>(t))
-        },
     );
-    optional_detour(
-        ntdll,
-        c"NtFlushKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtFlushKey",
+            "NtFlushKey",
+            flush_key_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_FLUSH_KEY = t.map(|t| core::mem::transmute::<*const (), NtFlushKeyFn>(t))
+            },
+        ),
         "NtFlushKey",
-        flush_key_hook as *const (),
-        detours,
-        &mut |t| TRAMP_FLUSH_KEY = t.map(|t| core::mem::transmute::<*const (), NtFlushKeyFn>(t)),
     );
-    optional_detour(
-        ntdll,
-        c"NtOpenKeyEx",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtOpenKeyEx",
+            "NtOpenKeyEx",
+            open_key_ex_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_OPEN_KEY_EX = t.map(|t| core::mem::transmute::<*const (), NtOpenKeyExFn>(t))
+            },
+        ),
         "NtOpenKeyEx",
-        open_key_ex_hook as *const (),
-        detours,
-        &mut |t| TRAMP_OPEN_KEY_EX = t.map(|t| core::mem::transmute::<*const (), NtOpenKeyExFn>(t)),
     );
-    optional_detour(
-        ntdll,
-        c"NtOpenKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtOpenKey",
+            "NtOpenKey",
+            open_key_hook as *const (),
+            detours,
+            &mut |t| TRAMP_OPEN_KEY = t.map(|t| core::mem::transmute::<*const (), NtOpenKeyFn>(t)),
+        ),
         "NtOpenKey",
-        open_key_hook as *const (),
-        detours,
-        &mut |t| TRAMP_OPEN_KEY = t.map(|t| core::mem::transmute::<*const (), NtOpenKeyFn>(t)),
     );
-    optional_detour(
-        ntdll,
-        c"NtCreateKey",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtCreateKey",
+            "NtCreateKey",
+            create_key_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_CREATE_KEY = t.map(|t| core::mem::transmute::<*const (), NtCreateKeyFn>(t))
+            },
+        ),
         "NtCreateKey",
-        create_key_hook as *const (),
-        detours,
-        &mut |t| TRAMP_CREATE_KEY = t.map(|t| core::mem::transmute::<*const (), NtCreateKeyFn>(t)),
     );
-    optional_detour(
-        ntdll,
-        c"NtDuplicateObject",
+    reg(
+        optional_detour(
+            ntdll,
+            c"NtDuplicateObject",
+            "NtDuplicateObject",
+            dup_hook as *const (),
+            detours,
+            &mut |t| {
+                TRAMP_DUP = t.map(|t| core::mem::transmute::<*const (), NtDuplicateObjectFn>(t))
+            },
+        ),
         "NtDuplicateObject",
-        dup_hook as *const (),
-        detours,
-        &mut |t| TRAMP_DUP = t.map(|t| core::mem::transmute::<*const (), NtDuplicateObjectFn>(t)),
     );
+    crate::regclient::detours_installed(&missing);
 }
 
 /// The unhooked registry entry points, for `regkeys`.
