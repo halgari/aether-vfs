@@ -53,6 +53,7 @@ fn descriptor_body() -> String {
         ("ok", P::ST_OK), ("not-found", P::ST_NOT_FOUND), ("not-a-directory", P::ST_NOT_A_DIRECTORY),
         ("bad-request", P::ST_BAD_REQUEST), ("io-error", P::ST_IO_ERROR), ("is-dir", P::ST_IS_DIR),
         ("bad-fh", P::ST_BAD_FH), ("no-space", P::ST_NO_SPACE),
+        ("reply-too-large", P::ST_REPLY_TOO_LARGE),
     ] {
         let _ = write!(s, ":{name} {v} ");
     }
@@ -69,9 +70,9 @@ fn descriptor_body() -> String {
     );
     let _ = writeln!(
         s,
-        " :ring-header {{:size {} :align 8 :fields {{:magic {} :version {} :slot-count {} :slot-stride {} :payload-cap {} :worker-hint {} :req-seq {} :submit-seq {}}}}}",
+        " :ring-header {{:size {} :align 8 :fields {{:magic {} :version {} :slot-count {} :slot-stride {} :payload-cap {} :worker-hint {} :req-seq {} :submit-seq {} :reg-gen {}}}}}",
         L::RING_HEADER_SIZE, L::RH_MAGIC, L::RH_VERSION, L::RH_SLOT_COUNT, L::RH_SLOT_STRIDE,
-        L::RH_PAYLOAD_CAP, L::RH_WORKER_HINT, L::RH_REQ_SEQ, L::RH_SUBMIT_SEQ
+        L::RH_PAYLOAD_CAP, L::RH_WORKER_HINT, L::RH_REQ_SEQ, L::RH_SUBMIT_SEQ, L::RH_REG_GEN
     );
     let _ = writeln!(
         s,
@@ -143,7 +144,10 @@ pub fn golden_vectors() -> Vec<(&'static str, Vec<u8>)> {
             use vfs_ipc::seg::OwnedSeg;
             let owned = OwnedSeg::new(4096);
             vfs_ipc::ring::init(owned.seg(), 4, 256).unwrap();
-            owned.seg().read_bytes(0, 40).unwrap()
+            owned
+                .seg()
+                .read_bytes(0, vfs_ipc::layout::RING_HEADER_SIZE)
+                .unwrap()
         }),
         ("empty-tree-snapshot", {
             use vfs_core::{build, Layer, LayerId};
@@ -182,7 +186,9 @@ mod tests {
     #[test]
     fn descriptor_has_stable_layout_facts() {
         let edn = descriptor_edn();
-        assert!(edn.contains(":size 40"), "ring header size");
+        assert!(edn.contains(":size 48"), "ring header size");
+        assert!(edn.contains(":reg-gen 40"));
+        assert!(edn.contains(":reply-too-large -11"));
         assert!(edn.contains(":req-seq 24"));
         assert!(edn.contains(":submit-seq 32"));
         assert!(edn.contains(":read 5"));      // OP_READ

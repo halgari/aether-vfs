@@ -18,6 +18,8 @@ mod ntdef;
 mod overlay;
 mod payload_abi;
 mod read_cache;
+/// The registry hooks' client for the director's registry overlay.
+pub mod regclient;
 mod zipserve;
 
 pub use bootstrap::{
@@ -51,7 +53,7 @@ pub use hook::contain_panic;
 /// quietly start (or stop) counting again.
 pub use hookstats::{
     hook_panic_count, hook_panics_total, outcome_count, overlay_fail_count,
-    unrouted_director_opens, OpenOutcome, OverlayFail,
+    reg_read_fallback_count, unrouted_director_opens, OpenOutcome, OverlayFail,
 };
 pub use overlay::overlay_layer_dir;
 pub use payload_abi::PayloadConfig;

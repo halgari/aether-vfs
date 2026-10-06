@@ -259,7 +259,7 @@ pub fn dispatch_director(
             None => (ST_BAD_REQUEST, Vec::new()),
         },
         OP_REG_LOOKUP..=OP_REG_CHANGED => match director.registry() {
-            Some(host) => dispatch_registry(&host, opcode, payload, payload_cap),
+            Some(host) => dispatch_registry(director, &host, opcode, payload, payload_cap),
             None => (ST_NOT_SUPPORTED, Vec::new()),
         },
         _ => (ST_BAD_REQUEST, Vec::new()),
@@ -270,7 +270,12 @@ pub fn dispatch_director(
 /// does not decode, or a path that is not a canonical `\Registry\...` key path, is
 /// `ST_BAD_REQUEST`; overlay errors map through [`crate::registry::reg_status`]. A `REG_KEY`
 /// reply larger than an inline reply can carry (`payload_cap - 8`) is `ST_REPLY_TOO_LARGE`.
+///
+/// A write that succeeds bumps and publishes the director's registry generation
+/// ([`Director::registry_changed`]) before its reply is returned, so no process can be told of
+/// the write while another can still use a cached answer from before it.
 fn dispatch_registry(
+    director: &Director,
     host: &RegistryHost,
     opcode: u32,
     payload: &[u8],
@@ -280,7 +285,12 @@ fn dispatch_registry(
         Ok(b) => (ST_OK, b),
         Err(st) => (st, Vec::new()),
     };
-    let version = |r: Result<u64, i32>| reply(r.map(encode_reg_version_reply));
+    let version = |r: Result<u64, i32>| {
+        if r.is_ok() {
+            director.registry_changed();
+        }
+        reply(r.map(encode_reg_version_reply))
+    };
     let bad = (ST_BAD_REQUEST, Vec::new());
     match opcode {
         OP_REG_LOOKUP => match decode_reg_path(payload) {
@@ -589,6 +599,95 @@ mod tests {
 
         fn version(d: &Director, op: u32, payload: &[u8]) -> u64 {
             decode_reg_version_reply(&ok(d, op, payload)).unwrap()
+        }
+
+        /// A sink that records what was published to it, as a ring header would hold it.
+        #[derive(Default)]
+        struct Published(std::sync::atomic::AtomicU64);
+
+        impl crate::RegistryGenSink for Published {
+            fn publish_reg_generation(&self, generation: u64) {
+                self.0
+                    .fetch_max(generation, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        impl Published {
+            fn get(&self) -> u64 {
+                self.0.load(std::sync::atomic::Ordering::SeqCst)
+            }
+        }
+
+        fn sink(d: &Director) -> Arc<Published> {
+            let p = Arc::new(Published::default());
+            let weak: std::sync::Weak<dyn crate::RegistryGenSink> =
+                Arc::downgrade(&(p.clone() as Arc<dyn crate::RegistryGenSink>));
+            d.add_registry_sink(weak);
+            p
+        }
+
+        /// Every successful registry write publishes a new generation before its reply is
+        /// returned; reads and refused writes publish nothing; attaching and detaching a layer
+        /// publish too. This is what the shim's cache relies on across processes.
+        #[test]
+        fn a_write_publishes_a_new_generation_before_it_replies() {
+            let d = Director::new();
+            let p = sink(&d);
+            let g0 = p.get();
+            assert_ne!(g0, 0, "a sink gets the current generation when added");
+            assert_eq!(g0, d.registry_generation());
+
+            let host = RegistryHost::open(Arc::new(vfs_provider::RwMemFixture::new())).unwrap();
+            d.set_registry(Some(host));
+            let g1 = p.get();
+            assert!(g1 > g0, "attaching a layer publishes");
+
+            // Reads do not move it.
+            ok(&d, OP_REG_LOOKUP, &encode_reg_path(K));
+            ok(&d, OP_REG_KEY, &encode_reg_path(K));
+            ok(&d, OP_REG_CHANGED, &encode_reg_changed(K, true, 0));
+            assert_eq!(p.get(), g1);
+
+            // Each kind of write moves it, and it is visible as soon as dispatch returns.
+            let sub = format!(r"{K}\Sub");
+            let writes: Vec<(u32, Vec<u8>)> = vec![
+                (
+                    OP_REG_SET_VALUE,
+                    encode_reg_set_value(K, "v", 4, &1u32.to_le_bytes()),
+                ),
+                (OP_REG_DELETE_VALUE, encode_reg_delete_value(K, "v")),
+                (OP_REG_CREATE_KEY, encode_reg_create_key(&sub, false)),
+                (OP_REG_RENAME_KEY, encode_reg_rename_key(&sub, "Moved")),
+                (OP_REG_DELETE_KEY, encode_reg_path(&format!(r"{K}\Moved"))),
+            ];
+            let mut last = g1;
+            for (op, payload) in writes {
+                ok(&d, op, &payload);
+                let now = p.get();
+                assert!(now > last, "op {op} must publish a new generation");
+                assert_eq!(now, d.registry_generation());
+                last = now;
+            }
+
+            // A refused write changes nothing and publishes nothing.
+            assert_eq!(
+                call(&d, OP_REG_CREATE_KEY, &encode_reg_create_key(K, false)).0,
+                ST_EXISTS
+            );
+            assert_eq!(
+                call(
+                    &d,
+                    OP_REG_SET_VALUE,
+                    &encode_reg_set_value("bad", "v", 4, &[])
+                )
+                .0,
+                ST_BAD_REQUEST
+            );
+            assert_eq!(p.get(), last);
+
+            // Detaching publishes: an answer cached under the layer is stale without it.
+            d.set_registry(None);
+            assert!(p.get() > last);
         }
 
         #[test]

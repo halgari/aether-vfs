@@ -19,6 +19,8 @@ vfs-env = { path = "../vfs-env" }
 vfs-inject = { path = "../vfs-inject" }
 # Names of the on-disk copies backing image sections.
 vfs-pe = { path = "../vfs-pe" }
+# `Lookup`, `Node` and `fold` for the registry client (`regclient.rs`).
+vfs-registry = { path = "../vfs-registry" }
 retour = { version = "0.3", default-features = false }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
@@ -35,3 +37,6 @@ windows-sys = { version = "0.61", features = [
 # `bridge` (test-only) provides `flatten` for building snapshot fixtures.
 vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+# `tests/regclient.rs`: the fake director answers the registry opcodes with the real
+# `dispatch_director` over a real `RegistryHost`.
+vfs-director = { path = "../vfs-director" }

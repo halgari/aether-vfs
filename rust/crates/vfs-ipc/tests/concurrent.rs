@@ -67,7 +67,7 @@ struct Fixture {
 impl Fixture {
     fn new(slots: u32) -> Self {
         let stride = (32 + PAYLOAD_CAP as usize + 7) & !7;
-        let arena_off = 40 + slots as usize * stride;
+        let arena_off = vfs_ipc::layout::RING_HEADER_SIZE + slots as usize * stride;
         let arena_len = slots as usize * BANK;
         let owned = OwnedSeg::new(arena_off + arena_len);
         let geom = ring::init(owned.seg(), slots, PAYLOAD_CAP).unwrap();

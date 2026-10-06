@@ -66,6 +66,7 @@ pub fn init(seg: &SharedSeg, slot_count: u32, payload_cap: u32) -> Result<Geom, 
     seg.write_u32(RH_WORKER_HINT, 0);
     seg.write_u64(RH_REQ_SEQ, 0);
     seg.write_u32(RH_SUBMIT_SEQ, 0);
+    seg.write_u64(RH_REG_GEN, 0);
     let geom = Geom { slot_count, slot_stride: stride as u32, payload_cap };
     for s in 0..slot_count {
         seg.write_u32(geom.slot_off(s) + SH_STATE, ST_FREE);
@@ -103,6 +104,22 @@ pub fn set_worker_hint(seg: &SharedSeg, workers: u32) {
 /// Client: the server's worker count, or 0 if it did not say.
 pub fn worker_hint(seg: &SharedSeg) -> u32 {
     seg.read_u32(RH_WORKER_HINT).unwrap_or(0)
+}
+
+/// Server: publish registry generation `generation` ([`RingHeader::reg_gen`])
+/// to every client of this ring. Never moves the word backwards, so two
+/// publishers racing leave the larger value whatever order their stores land in.
+pub fn publish_reg_generation(seg: &SharedSeg, generation: u64) {
+    if let Some(w) = seg.atomic_u64(RH_REG_GEN) {
+        w.fetch_max(generation, Ordering::AcqRel);
+    }
+}
+
+/// Client: the registry generation the server last published, or 0 if none.
+pub fn reg_generation(seg: &SharedSeg) -> u64 {
+    seg.atomic_u64(RH_REG_GEN)
+        .map(|w| w.load(Ordering::Acquire))
+        .unwrap_or(0)
 }
 
 /// Claim a FREE slot → CLAIMED. Returns the slot index, or None if the ring is full.
@@ -453,6 +470,23 @@ mod tests {
         free_slot(seg, &geom, slot).unwrap();
         // Slot is FREE again → claimable.
         assert_eq!(claim_free(seg, &geom).unwrap(), 0);
+    }
+
+    #[test]
+    fn the_registry_generation_is_zero_until_published_and_never_goes_back() {
+        let owned = OwnedSeg::new(4096);
+        init(owned.seg(), 4, 256).unwrap();
+        assert_eq!(reg_generation(owned.seg()), 0);
+        publish_reg_generation(owned.seg(), 7);
+        assert_eq!(reg_generation(owned.seg()), 7);
+        // A publisher that lost a race lands its older value late: ignored.
+        publish_reg_generation(owned.seg(), 5);
+        assert_eq!(reg_generation(owned.seg()), 7);
+        publish_reg_generation(owned.seg(), 8);
+        assert_eq!(reg_generation(owned.seg()), 8);
+        // A re-initialised ring starts over.
+        init(owned.seg(), 4, 256).unwrap();
+        assert_eq!(reg_generation(owned.seg()), 0);
     }
 
     #[test]

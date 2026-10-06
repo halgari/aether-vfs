@@ -25,10 +25,14 @@ pub const MAGIC: u32 = 0x5646_4950;
 ///   version-2 server would publish `COMPLETED` over `ABANDONED` and the slot
 ///   would never be freed, and a version-2 client frees a slot its server is
 ///   still writing. So the pair is refused at attach, like a payload change.
+/// - **4** — registry overlay: the ring header grew [`RingHeader::reg_gen`]
+///   (8 bytes, so the slots start 8 bytes later) and the registry opcodes
+///   15-22 joined the catalog. A version-3 shim would read its slots 8 bytes
+///   off the director's.
 ///
 /// **Bump this whenever a payload layout or the slot state machine changes.**
 /// Opcode numbers are a separate contract and must never be renumbered.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 pub const ST_FREE: u32 = 0;
 pub const ST_CLAIMED: u32 = 1;
@@ -81,6 +85,13 @@ pub struct RingHeader {
     pub req_seq: u64,
     pub submit_seq: u32,
     pub _pad2: u32,
+    /// The registry overlay's generation, published by the director for every
+    /// process on this ring: it changes on every registry write and whenever
+    /// a registry layer is attached or detached, and never goes backwards. 0
+    /// means nothing was published. A client may use a registry answer it
+    /// cached only while this still reads what it read before asking
+    /// (`ring::reg_generation`).
+    pub reg_gen: u64,
 }
 
 #[repr(C)]
@@ -100,7 +111,7 @@ pub struct SlotHeader {
 pub const RING_HEADER_SIZE: usize = size_of::<RingHeader>();
 pub const SLOT_HEADER_SIZE: usize = size_of::<SlotHeader>();
 
-const _: () = assert!(RING_HEADER_SIZE == 40 && align_of::<RingHeader>() == 8);
+const _: () = assert!(RING_HEADER_SIZE == 48 && align_of::<RingHeader>() == 8);
 const _: () = assert!(SLOT_HEADER_SIZE == 32 && align_of::<SlotHeader>() == 8);
 
 pub const RH_MAGIC: usize = offset_of!(RingHeader, magic);
@@ -111,6 +122,7 @@ pub const RH_PAYLOAD_CAP: usize = offset_of!(RingHeader, payload_cap);
 pub const RH_WORKER_HINT: usize = offset_of!(RingHeader, worker_hint);
 pub const RH_REQ_SEQ: usize = offset_of!(RingHeader, req_seq);
 pub const RH_SUBMIT_SEQ: usize = offset_of!(RingHeader, submit_seq);
+pub const RH_REG_GEN: usize = offset_of!(RingHeader, reg_gen);
 
 pub const SH_STATE: usize = offset_of!(SlotHeader, state);
 pub const SH_OPCODE: usize = offset_of!(SlotHeader, opcode);
@@ -134,7 +146,8 @@ mod tests {
         assert_eq!(RH_WORKER_HINT, 20);
         assert_eq!(RH_REQ_SEQ, 24);
         assert_eq!(RH_SUBMIT_SEQ, 32);
-        assert_eq!(RING_HEADER_SIZE, 40);
+        assert_eq!(RH_REG_GEN, 40);
+        assert_eq!(RING_HEADER_SIZE, 48);
     }
 
     #[test]

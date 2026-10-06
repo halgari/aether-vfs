@@ -320,6 +320,9 @@ pub struct FuseClient {
     /// writes, truncates and write-opens) are counted, and only against this
     /// gate.
     gate: DataGate,
+    /// How long a request waits for its answer before giving up:
+    /// [`vfs_ipc::RESPONSE_DEADLINE`] unless [`FuseClient::with_deadline`] said otherwise.
+    deadline: core::time::Duration,
 }
 
 // SAFETY: `server_ev` is only ever passed to SetEvent, which is thread-safe.
@@ -430,7 +433,16 @@ impl FuseClient {
             arena_len,
             server_ev,
             gate,
+            deadline: vfs_ipc::RESPONSE_DEADLINE,
         })
+    }
+
+    /// This client, giving up on an unanswered request after `deadline` instead of
+    /// [`vfs_ipc::RESPONSE_DEADLINE`]. For a test that needs a director that never answers to
+    /// fail in less than a minute.
+    pub fn with_deadline(mut self, deadline: core::time::Duration) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     /// Test-only constructor for the predicate alone: no ring, no OS volume
@@ -449,6 +461,26 @@ impl FuseClient {
                 server_ev: self.server_ev,
             },
         )
+        .with_deadline(self.deadline)
+    }
+
+    /// The registry generation the director last published in the ring header (0 if none):
+    /// what [`crate::regclient`] checks a cached answer against.
+    pub fn reg_generation(&self) -> u64 {
+        vfs_ipc::ring::reg_generation(self.mapping.seg())
+    }
+
+    /// One registry request (opcodes 15-22): the reply payload, or the director's status. A
+    /// request that could not be sent or was never answered is `ST_IO_ERROR`.
+    pub fn reg_request(&self, opcode: u32, payload: &[u8]) -> Result<Vec<u8>, i32> {
+        let r = self
+            .client()
+            .submit(opcode, 0, payload)
+            .map_err(|_| vfs_protocol::ST_IO_ERROR)?;
+        if r.status != ST_OK {
+            return Err(r.status);
+        }
+        Ok(r.payload)
     }
 
     pub fn heartbeat(&self) -> Result<(), String> {

@@ -260,3 +260,46 @@ fn requests_blocked_in_a_provider_do_not_stall_the_ring_when_workers_outnumber_t
     drop(serve);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The registry generation reaches the ring header every client maps: published when the ring
+/// starts, and moved by a registry write before the writer gets its reply. A second client on
+/// the same file (another injected process) sees it without asking.
+#[test]
+fn a_registry_write_moves_the_generation_in_the_ring_header() {
+    use vfs_director::registry::RegistryHost;
+    use vfs_protocol::{encode_reg_set_value, OP_REG_SET_VALUE};
+
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("vfs-serve-fb-reg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ring = dir.join("ring.bin");
+    let kernel = Arc::new(Director::new());
+    let serve = IpcServe::start_file_backed(kernel.clone(), &ring, 4096).unwrap();
+
+    let other = FileMapping::open(&ring, serve.map_bytes).unwrap();
+    let g0 = vfs_ipc::ring::reg_generation(other.seg());
+    assert_ne!(g0, 0, "published before the ring is handed out");
+
+    kernel.set_registry(Some(
+        RegistryHost::open(Arc::new(vfs_provider::RwMemFixture::new())).unwrap(),
+    ));
+    let g1 = vfs_ipc::ring::reg_generation(other.seg());
+    assert!(g1 > g0, "attaching a layer publishes");
+
+    let client = serve.client().unwrap();
+    let r = client
+        .submit(
+            OP_REG_SET_VALUE,
+            0,
+            &encode_reg_set_value(r"\Registry\Machine\Software\Mod", "v", 4, &[1, 0, 0, 0]),
+        )
+        .unwrap();
+    assert_eq!(r.status, ST_OK);
+    assert!(
+        vfs_ipc::ring::reg_generation(other.seg()) > g1,
+        "visible to every process by the time the writer has its reply"
+    );
+    drop(serve);
+    let _ = std::fs::remove_dir_all(&dir);
+}

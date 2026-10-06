@@ -21,7 +21,7 @@ use vfs_ipc::{Notifier, DEFAULT_PAYLOAD_CAP};
 #[cfg(windows)]
 use vfs_win::{EventNotifier, SharedMapping};
 
-use crate::director::Director;
+use crate::director::{Director, RegistryGenSink};
 
 use crate::ring_dispatch::dispatch_director;
 
@@ -69,6 +69,21 @@ struct Inner {
     server_ev_name: String,
     #[cfg(windows)]
     client_ev_name: String,
+}
+
+/// The ring header is where every injected process of the session reads the registry
+/// generation: they all map this one ring.
+impl RegistryGenSink for Inner {
+    fn publish_reg_generation(&self, generation: u64) {
+        ring::publish_reg_generation(self.mapping.seg(), generation);
+    }
+}
+
+/// Register `inner`'s ring header with its director for the registry generation. Called before
+/// the ring is handed to anyone, so no client reads it unpublished.
+fn publish_registry_to(inner: &Arc<Inner>) {
+    let sink: Arc<dyn RegistryGenSink> = inner.clone();
+    inner.kernel.add_registry_sink(Arc::downgrade(&sink));
 }
 
 impl Inner {
@@ -138,7 +153,7 @@ impl IpcServe {
         let payload_cap = DEFAULT_PAYLOAD_CAP;
         let slot_count = DEFAULT_SLOT_COUNT;
         let stride = ((32 + payload_cap as usize) + 7) & !7;
-        let ring_bytes = 40 + slot_count as usize * stride;
+        let ring_bytes = vfs_ipc::layout::RING_HEADER_SIZE + slot_count as usize * stride;
         let arena_len = DEFAULT_ARENA_BYTES;
         let map_size = ((ring_bytes + arena_len + 0xFFFF) & !0xFFFF).max(2 * 1024 * 1024);
 
@@ -172,6 +187,7 @@ impl IpcServe {
         // below this, so that a worker is always left for a request that is
         // not one (`vfs_ipc::concurrent`).
         ring::set_worker_hint(inner.mapping.seg(), workers as u32);
+        publish_registry_to(&inner);
         let mut joins = Vec::with_capacity(workers);
         for _ in 0..workers {
             let inner2 = inner.clone();
@@ -268,7 +284,7 @@ impl IpcServe {
     ) -> Result<Self, String> {
         let slot_count = DEFAULT_SLOT_COUNT;
         let stride = ((32 + payload_cap as usize) + 7) & !7;
-        let ring_bytes = 40 + slot_count as usize * stride;
+        let ring_bytes = vfs_ipc::layout::RING_HEADER_SIZE + slot_count as usize * stride;
         let arena_len = DEFAULT_ARENA_BYTES;
         let map_size = ((ring_bytes + arena_len + 0xFFFF) & !0xFFFF).max(2 * 1024 * 1024);
 
@@ -295,6 +311,7 @@ impl IpcServe {
         // its reads below this, so that a worker is always left for a request
         // that is not one (`vfs_ipc::concurrent`).
         ring::set_worker_hint(inner.mapping.seg(), workers as u32);
+        publish_registry_to(&inner);
         let mut joins = Vec::with_capacity(workers);
         for _ in 0..workers {
             let inner2 = inner.clone();

@@ -184,6 +184,7 @@ struct Snapshot {
     name_queries: u64,
     name_queries_cached: u64,
     name_lookups: u64,
+    reg_read_fallbacks: u64,
     copy_up_counts: [u64; COPYUP_N],
     copy_up_bytes: u64,
     copy_ups: HashMap<String, u64>,
@@ -256,6 +257,7 @@ fn snapshot() -> Snapshot {
         name_queries: NAME_QUERIES.load(Ordering::Relaxed),
         name_queries_cached: NAME_QUERIES_CACHED.load(Ordering::Relaxed),
         name_lookups: NAME_LOOKUPS.load(Ordering::Relaxed),
+        reg_read_fallbacks: reg_read_fallback_count(),
         copy_up_counts: std::array::from_fn(|i| copy_up_count(ALL_COPY_UPS[i])),
         copy_up_bytes: COPYUP_BYTES.load(Ordering::Relaxed),
         copy_ups: accumulated(&COPYUPS),
@@ -518,6 +520,31 @@ pub fn note_name_lookup() {
     if enabled() {
         NAME_LOOKUPS.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Registry overlay reads the director did not answer (unreachable, no registry attached, a
+/// reply too large for the ring, a refused request): each one left the caller to serve the
+/// real key alone (spec section 6). Counted whether or not stats are on, so a test can see it.
+static REG_READ_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
+/// A registry overlay read failed; the caller falls back to the real registry.
+pub fn note_reg_read_fallback() {
+    REG_READ_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// How many registry overlay reads fell back to the real registry so far.
+pub fn reg_read_fallback_count() -> u64 {
+    REG_READ_FALLBACKS.load(Ordering::Relaxed)
+}
+
+fn render_reg_fallbacks(snap: &Snapshot) -> String {
+    if snap.reg_read_fallbacks == 0 {
+        return String::new();
+    }
+    format!(
+        "\nregistry overlay reads served from the real registry after a director failure: {}\n",
+        snap.reg_read_fallbacks
+    )
 }
 
 /// The label of the name-query row, for anything that parses the report.
@@ -1706,7 +1733,7 @@ fn banner() -> String {
 fn render_report() -> String {
     let snap = snapshot();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         banner(),
         render_hook_panics(&snap),
         render(&snap),
@@ -1714,6 +1741,7 @@ fn render_report() -> String {
         render_async(&snap),
         render_fills(&snap),
         render_name_queries(&snap),
+        render_reg_fallbacks(&snap),
         render_stats(&snap),
         render_trace(&snap),
         render_undecodable(&snap),
@@ -2165,6 +2193,7 @@ mod tests {
             name_queries: 0,
             name_queries_cached: 0,
             name_lookups: 0,
+            reg_read_fallbacks: 0,
             setinfo_noop: HashMap::new(),
             synth_locks: HashMap::new(),
             passthrough: HashMap::new(),

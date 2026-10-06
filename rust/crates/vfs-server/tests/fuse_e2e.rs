@@ -186,7 +186,7 @@ fn client_bulk_read_into_arena() {
     const SLOTS: u32 = 4;
     const ARENA: usize = 512 * 1024;
     let stride = ((32 + 65_536) + 7) & !7;
-    let ring_bytes = 40 + SLOTS as usize * stride;
+    let ring_bytes = vfs_ipc::layout::RING_HEADER_SIZE + SLOTS as usize * stride;
     let owned = OwnedSeg::new(ring_bytes + ARENA);
     init(owned.seg(), SLOTS, 65_536).unwrap();
     let seg = owned.seg();

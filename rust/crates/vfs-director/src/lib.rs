@@ -41,7 +41,7 @@ pub mod ring_dispatch;
 pub mod bench;
 pub mod stage;
 
-pub use director::{Director, OpenInfo};
+pub use director::{Director, OpenInfo, RegistryGenSink};
 pub use disk::DiskProvider;
 pub use ipc::IpcServe;
 pub use io_stats::{mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report};

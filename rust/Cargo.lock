@@ -2876,6 +2876,7 @@ version = "0.1.0"
 dependencies = [
  "retour",
  "vfs-core",
+ "vfs-director",
  "vfs-env",
  "vfs-inject",
  "vfs-ipc",
@@ -2883,6 +2884,7 @@ dependencies = [
  "vfs-protocol",
  "vfs-provider",
  "vfs-redirect",
+ "vfs-registry",
  "vfs-shared",
  "vfs-win",
  "windows-sys 0.61.2",

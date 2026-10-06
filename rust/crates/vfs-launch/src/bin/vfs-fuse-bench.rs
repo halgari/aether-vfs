@@ -144,7 +144,7 @@ fn main() {
     const SLOT_COUNT: u32 = 8;
     const ARENA_LEN: usize = 8 * 1024 * 1024; // 8 MiB → 1 MiB banks @ 8 slots
     let stride = ((32 + payload_cap as usize) + 7) & !7;
-    let ring_bytes = 40 + SLOT_COUNT as usize * stride;
+    let ring_bytes = vfs_ipc::layout::RING_HEADER_SIZE + SLOT_COUNT as usize * stride;
     let arena_offset = ring_bytes;
     let map_len = ring_bytes + ARENA_LEN;
     let owned = OwnedSeg::new(map_len);

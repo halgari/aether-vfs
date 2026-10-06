@@ -32,6 +32,13 @@
 //! `OPEN_EXCL`). [`Fake::writable_under`] draws the line between the first two;
 //! anything served but outside a writable prefix answers the third.
 //!
+//! **The registry half** (opcodes 15-22) is not faked at all: [`Fake::with_registry`] puts a
+//! real `vfs_director::Director` with a real `RegistryHost` behind the ring and answers those
+//! opcodes with the director's own `dispatch_director`, and [`install`] registers the ring
+//! header for the director's registry generation exactly as `IpcServe` does. What the shim's
+//! registry client is tested against is therefore the director's code, not this file's idea
+//! of it.
+//!
 //! **Both transports.** A READ is answered inline (data in the ring payload)
 //! or in **bulk** (data written into the shared arena, ring carries only
 //! length + offset), chosen exactly the way `dispatch_director` chooses: the
@@ -45,7 +52,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use vfs_ipc::{DataArena, RingServer, SpinNotifier};
 use vfs_protocol as P;
@@ -74,7 +81,7 @@ pub const ARENA_LEN: usize = SLOTS as usize * 256 * 1024;
 /// same layout `IpcServe::start` uses (`arena_offset = ring_bytes`).
 fn ring_bytes() -> usize {
     let stride = (32 + PAYLOAD_CAP as usize).next_multiple_of(8);
-    40 + SLOTS as usize * stride
+    vfs_ipc::layout::RING_HEADER_SIZE + SLOTS as usize * stride
 }
 
 /// How the fake answers READ for one file.
@@ -113,6 +120,8 @@ pub struct Tally {
     writes: Mutex<HashMap<String, u64>>,
     deletes: Mutex<HashMap<String, u64>>,
     renames: Mutex<HashMap<String, u64>>,
+    /// Registry requests, keyed by `"<opcode> <path>"`.
+    reg: Mutex<HashMap<String, u64>>,
 }
 
 impl Tally {
@@ -155,6 +164,17 @@ impl Tally {
     pub fn renames(&self, vpath: &str) -> u64 {
         Self::get(&self.renames, vpath)
     }
+    /// Registry requests with `opcode` for `path` (as sent) that reached the server: zero for
+    /// a read means it was answered from the shim's cache.
+    pub fn reg(&self, opcode: u32, path: &str) -> u64 {
+        Self::get(&self.reg, &format!("{opcode} {path}"))
+    }
+}
+
+/// The path every registry request leads with (`len:u32 | utf8`).
+fn reg_request_path(payload: &[u8]) -> Option<&str> {
+    let n = u32::from_le_bytes(payload.get(..4)?.try_into().ok()?) as usize;
+    core::str::from_utf8(payload.get(4..4 + n)?).ok()
 }
 
 pub struct Fake {
@@ -168,6 +188,8 @@ pub struct Fake {
     handles: Mutex<HashMap<u64, String>>,
     next_fh: AtomicU64,
     writable: Vec<String>,
+    /// Answers the registry opcodes when set ([`Fake::with_registry`]).
+    director: Option<Arc<vfs_director::Director>>,
     pub tally: Tally,
 }
 
@@ -179,10 +201,28 @@ impl Fake {
             handles: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             writable: Vec::new(),
+            director: None,
             tally: Tally::default(),
         }
     }
 
+    /// Serve the registry opcodes from a real director with an empty registry layer attached
+    /// (an in-memory provider). Without this they answer `ST_NOT_SUPPORTED`, as a director
+    /// with no registry layer does.
+    pub fn with_registry(mut self) -> Fake {
+        let d = vfs_director::Director::new();
+        let layer = Arc::new(vfs_provider::RwMemFixture::new());
+        d.set_registry(Some(
+            vfs_director::registry::RegistryHost::open(layer).expect("registry host"),
+        ));
+        self.director = Some(Arc::new(d));
+        self
+    }
+
+    /// The director behind the registry opcodes, for a test that attaches or detaches layers.
+    pub fn director(&self) -> &vfs_director::Director {
+        self.director.as_ref().expect("Fake::with_registry")
+    }
     /// Add a directory to the provider graph.
     ///
     /// It answers a write open the way a real provider graph does, and that
@@ -512,6 +552,22 @@ impl Fake {
                 }
                 (P::ST_OK, Vec::new())
             }
+            P::OP_REG_LOOKUP..=P::OP_REG_CHANGED => match &self.director {
+                Some(d) => {
+                    if let Some(path) = reg_request_path(payload) {
+                        Tally::bump(&self.tally.reg, &format!("{opcode} {path}"));
+                    }
+                    vfs_director::ring_dispatch::dispatch_director(
+                        d,
+                        opcode,
+                        payload,
+                        flags,
+                        PAYLOAD_CAP,
+                        None,
+                    )
+                }
+                None => (P::ST_NOT_SUPPORTED, Vec::new()),
+            },
             // Nothing else is part of copy-up. Answering "not supported"
             // rather than silently succeeding keeps an unexpected opcode from
             // looking like a healthy exchange.
@@ -539,15 +595,22 @@ pub fn install(virtual_dir: &std::path::Path, fake: Fake, arena_len: usize) -> &
     static FAKE: OnceLock<&'static Fake> = OnceLock::new();
     FAKE.get_or_init(|| {
         let fake: &'static Fake = Box::leak(Box::new(fake));
-        let name = format!("Local\\vfs-shim-cowseed-{}", std::process::id());
+        let name = section_name();
         let arena_offset = ring_bytes();
         // Whole section, ring first then arena — `VFS_RING_BYTES` names the
         // whole thing because the shim maps all of it and a bulk response's
         // offset is section-absolute.
         let map_bytes = ((arena_offset + arena_len + 0xFFFF) & !0xFFFF).max(256 * 1024);
-        let mapping: &'static SharedMapping =
-            Box::leak(Box::new(SharedMapping::create(&name, map_bytes).expect("section")));
+        let mapping: &'static SharedMapping = Box::leak(Box::new(
+            SharedMapping::create(&name, map_bytes).expect("section"),
+        ));
         vfs_ipc::ring::init(mapping.seg(), SLOTS, PAYLOAD_CAP).expect("ring init");
+        if let Some(d) = &fake.director {
+            // What `IpcServe` does with its ring header, before any client attaches.
+            let sink: Arc<dyn vfs_director::RegistryGenSink> = Arc::new(HeaderSink(mapping));
+            d.add_registry_sink(Arc::downgrade(&sink));
+            std::mem::forget(sink);
+        }
 
         std::thread::Builder::new()
             .name("fake-director".into())
@@ -587,6 +650,63 @@ pub fn install(virtual_dir: &std::path::Path, fake: Fake, arena_len: usize) -> &
         vfs_shim::fuse_client::try_init_from_env().expect("fuse client");
         fake
     })
+}
+
+/// The ring header as the director's registry-generation sink.
+struct HeaderSink(&'static SharedMapping);
+
+impl vfs_director::RegistryGenSink for HeaderSink {
+    fn publish_reg_generation(&self, generation: u64) {
+        vfs_ipc::ring::publish_reg_generation(self.0.seg(), generation);
+    }
+}
+
+/// The section [`install`] serves.
+fn section_name() -> String {
+    format!("Local\\vfs-shim-cowseed-{}", std::process::id())
+}
+
+/// Another client on the ring [`install`] serves, as a second injected process of the session
+/// would have: its own mapping of the section, its own `FuseClient`.
+pub fn second_client(virtual_dir: &std::path::Path) -> vfs_shim::fuse_client::FuseClient {
+    let bytes: usize = std::env::var(vfs_env::RING_BYTES).unwrap().parse().unwrap();
+    vfs_shim::fuse_client::FuseClient::connect(
+        &section_name(),
+        &[(
+            vfs_redirect::RootId::DEFAULT,
+            virtual_dir.to_string_lossy().into_owned(),
+        )],
+        PAYLOAD_CAP,
+        bytes,
+        0,
+    )
+    .expect("second client")
+}
+
+/// A client on a ring nobody serves (a director that died), giving up on each request after
+/// `deadline`.
+pub fn unserved_client(
+    virtual_dir: &std::path::Path,
+    deadline: std::time::Duration,
+) -> vfs_shim::fuse_client::FuseClient {
+    let name = format!("Local\\vfs-shim-dead-{}", std::process::id());
+    let bytes = 256 * 1024;
+    let mapping: &'static SharedMapping = Box::leak(Box::new(
+        SharedMapping::create(&name, bytes).expect("section"),
+    ));
+    vfs_ipc::ring::init(mapping.seg(), SLOTS, PAYLOAD_CAP).expect("ring init");
+    vfs_shim::fuse_client::FuseClient::connect(
+        &name,
+        &[(
+            vfs_redirect::RootId::DEFAULT,
+            virtual_dir.to_string_lossy().into_owned(),
+        )],
+        PAYLOAD_CAP,
+        bytes,
+        0,
+    )
+    .expect("client on an unserved ring")
+    .with_deadline(deadline)
 }
 
 /// A byte pattern no accidental fill can imitate, and whose every position is
