@@ -519,6 +519,13 @@ pub const REG_OPTION_OPEN_LINK: u32 = 0x8;
 /// `DUPLICATE_CLOSE_SOURCE` / `DUPLICATE_SAME_ACCESS`.
 pub const DUPLICATE_CLOSE_SOURCE: u32 = 0x1;
 pub const DUPLICATE_SAME_ACCESS: u32 = 0x2;
+/// `DUPLICATE_SAME_ATTRIBUTES`.
+pub const DUPLICATE_SAME_ATTRIBUTES: u32 = 0x4;
+
+/// `NtQueryObject` classes answered for synthetic key handles besides the name.
+pub const OBJECT_BASIC_INFORMATION: u32 = 0;
+pub const OBJECT_TYPE_INFORMATION: u32 = 2;
+pub const OBJECT_HANDLE_FLAG_INFORMATION: u32 = 4;
 
 /// `OBJ_CASE_INSENSITIVE`, for the shim's own absolute key opens.
 pub const OBJ_CASE_INSENSITIVE: u32 = 0x40;

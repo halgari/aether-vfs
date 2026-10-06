@@ -39,16 +39,20 @@ const STATUS_INVALID_HANDLE: i32 = 0xC000_0008u32 as i32;
 const STATUS_OBJECT_NAME_NOT_FOUND: i32 = 0xC000_0034u32 as i32;
 const STATUS_NOT_SUPPORTED: i32 = 0xC000_00BBu32 as i32;
 const STATUS_BUFFER_OVERFLOW: i32 = 0x8000_0005u32 as i32;
+const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004u32 as i32;
 
 const NT_KEY_READ: u32 = 0x2_0019;
 const NT_KEY_SET_VALUE: u32 = 0x2;
+const NT_KEY_QUERY_VALUE: u32 = 0x1;
 const NT_KEY_ALL_ACCESS: u32 = 0xF_003F;
 const REG_OPTION_VOLATILE: u32 = 1;
 const REG_CREATED_NEW_KEY: u32 = 1;
 const REG_OPENED_EXISTING_KEY: u32 = 2;
 const DUPLICATE_CLOSE_SOURCE: u32 = 1;
 const DUPLICATE_SAME_ACCESS: u32 = 2;
+const OBJECT_BASIC_INFORMATION: u32 = 0;
 const OBJECT_NAME_INFORMATION: u32 = 1;
+const OBJECT_HANDLE_FLAG_INFORMATION: u32 = 4;
 const OBJECT_TYPE_INFORMATION: u32 = 2;
 const OBJ_CASE_INSENSITIVE: u32 = 0x40;
 const CURRENT_PROCESS: isize = -1;
@@ -211,12 +215,14 @@ struct Fixture {
     checker: Mutex<Checker>,
     /// The restrictive DACL refused a write open before the hooks went in.
     locked_refuses_write: bool,
+    /// `ReadLimited` refused KEY_READ and granted KEY_QUERY_VALUE before the hooks went in.
+    read_limited_refuses_key_read: bool,
 }
 
 impl Fixture {
     /// `HKCU\Software\AetherVfsRegKeysTest\<rel>` as an absolute NT name.
     fn nt(&self, rel: &str) -> String {
-        format!(r"\Registry\User\{}\{BASE}\{rel}", self.sid)
+        format!(r"\REGISTRY\USER\{}\{BASE}\{rel}", self.sid)
     }
 
     /// ... and as the canonical path the overlay stores.
@@ -260,7 +266,42 @@ const REAL_KEYS: &[&str] = &[
     r"Parent\Gone2",
     "DirectorDown",
     "Dup",
+    "ReadLimited",
 ];
+
+/// Set `HKCU\<sub>`'s DACL from SDDL.
+fn set_dacl(sub: &str, sddl: &str) {
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+    let k = reg_create(sub);
+    unsafe {
+        let mut sd: *mut c_void = std::ptr::null_mut();
+        assert_ne!(
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide(sddl).as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                std::ptr::null_mut(),
+            ),
+            0
+        );
+        assert_eq!(RegSetKeySecurity(k, DACL_SECURITY_INFORMATION, sd), 0);
+        LocalFree(sd);
+        RegCloseKey(k);
+    }
+}
+
+/// Whether a Win32 open of `HKCU\<sub>` with `access` is refused (before the hooks).
+fn refused(sub: &str, access: u32) -> bool {
+    let mut k: HKEY = std::ptr::null_mut();
+    let st = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, wide(sub).as_ptr(), 0, access, &mut k) };
+    if st == 0 {
+        unsafe { RegCloseKey(k) };
+    }
+    st == 5 // ERROR_ACCESS_DENIED
+}
 
 fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -271,42 +312,12 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
             unsafe { RegCloseKey(reg_create(&format!(r"{BASE}\{k}"))) };
         }
         // Everyone may read `Locked`, nobody may write it.
-        let locked = reg_create(&format!(r"{BASE}\Locked"));
-        unsafe {
-            use windows_sys::Win32::Security::Authorization::{
-                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-            };
-            use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
-            let mut sd: *mut c_void = std::ptr::null_mut();
-            assert_ne!(
-                ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    wide("D:P(A;;KR;;;WD)").as_ptr(),
-                    SDDL_REVISION_1,
-                    &mut sd,
-                    std::ptr::null_mut(),
-                ),
-                0
-            );
-            assert_eq!(RegSetKeySecurity(locked, DACL_SECURITY_INFORMATION, sd), 0);
-            LocalFree(sd);
-            RegCloseKey(locked);
-        }
-        let locked_refuses_write = {
-            let mut k: HKEY = std::ptr::null_mut();
-            let st = unsafe {
-                RegOpenKeyExW(
-                    HKEY_CURRENT_USER,
-                    wide(&format!(r"{BASE}\Locked")).as_ptr(),
-                    0,
-                    NT_KEY_SET_VALUE,
-                    &mut k,
-                )
-            };
-            if st == 0 {
-                unsafe { RegCloseKey(k) };
-            }
-            st == 5 // ERROR_ACCESS_DENIED
-        };
+        set_dacl(&format!(r"{BASE}\Locked"), "D:P(A;;KR;;;WD)");
+        let locked_refuses_write = refused(&format!(r"{BASE}\Locked"), NT_KEY_SET_VALUE);
+        // `ReadLimited` grants only KEY_QUERY_VALUE: a KEY_READ open is refused.
+        set_dacl(&format!(r"{BASE}\ReadLimited"), "D:P(A;;0x1;;;WD)");
+        let read_limited_refuses_key_read = refused(&format!(r"{BASE}\ReadLimited"), NT_KEY_READ)
+            && !refused(&format!(r"{BASE}\ReadLimited"), NT_KEY_QUERY_VALUE);
 
         // The checker: started now, so it has no hooks.
         let mut child = Command::new(std::env::current_exe().unwrap())
@@ -353,6 +364,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
                 stdout,
             }),
             locked_refuses_write,
+            read_limited_refuses_key_read,
         }
     });
     (guard, f)
@@ -699,11 +711,13 @@ fn the_object_name_of_a_synthetic_key_is_its_nt_name() {
         object_string(s, OBJECT_NAME_INFORMATION),
         Ok(f.nt("Overlaid"))
     );
-    // The real key's own name has the same shape (the host's capitalisation aside).
+    // The real key's own name has the same shape. The hive's capitalisation is the host's:
+    // Windows reports `\REGISTRY\USER`, which the shim uses; Wine reports `\REGISTRY\User`.
     let (_, r) = f.open("Untouched", NT_KEY_READ);
     let real_name = object_string(r, OBJECT_NAME_INFORMATION).unwrap();
     assert!(
-        real_name.eq_ignore_ascii_case(&f.nt("Untouched")),
+        real_name.eq_ignore_ascii_case(&f.nt("Untouched"))
+            && real_name.starts_with(r"\REGISTRY\"),
         "{real_name}"
     );
     // A short buffer: the required length, and no data.
@@ -772,4 +786,147 @@ fn a_failing_director_reads_the_real_registry_and_refuses_creates() {
         fell_back >= 3,
         "every failed lookup is counted: {fell_back}"
     );
+}
+
+#[test]
+fn an_overlay_node_with_no_real_key_opens_and_takes_children() {
+    let (_g, f) = fixture();
+    // A value written to a key that does not exist for real: an overlay node that overlays a
+    // real key (created:false) whose real key is missing. It exists in the merged view.
+    regclient::set_value(&f.canon("Phantom"), "v", 4, &1u32.to_le_bytes()).unwrap();
+    assert_eq!(
+        regclient::lookup(&f.canon("Phantom")),
+        Ok((Lookup::Present { created: false }, false))
+    );
+    assert!(!f.really_exists("Phantom"));
+    let (st, h) = f.open("Phantom", NT_KEY_READ);
+    assert_eq!(st, STATUS_SUCCESS);
+    assert!(is_synthetic_key_handle(h));
+    close(h);
+    let (st, h, disp) = f.create(r"Phantom\Child", 0);
+    assert_eq!((st, disp), (STATUS_SUCCESS, REG_CREATED_NEW_KEY));
+    assert!(is_synthetic_key_handle(h));
+    close(h);
+    assert!(!f.really_exists(r"Phantom\Child"));
+}
+
+#[test]
+fn a_key_that_refuses_key_read_is_read_with_the_callers_own_rights() {
+    let (_g, f) = fixture();
+    assert!(
+        f.read_limited_refuses_key_read,
+        "the DACL did not refuse KEY_READ (or refused KEY_QUERY_VALUE) before the hooks"
+    );
+    regclient::set_value(&f.canon("ReadLimited"), "v", 4, &1u32.to_le_bytes()).unwrap();
+    let (st, h) = f.open("ReadLimited", NT_KEY_QUERY_VALUE);
+    assert_eq!(
+        st, STATUS_SUCCESS,
+        "the private open retried with KEY_QUERY_VALUE"
+    );
+    assert!(is_synthetic_key_handle(h));
+    // Its duplicate opens its own private handle the same way.
+    let mut d = 0isize;
+    let st = unsafe {
+        NtDuplicateObject(
+            CURRENT_PROCESS,
+            h,
+            CURRENT_PROCESS,
+            &mut d,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    assert_eq!(st, STATUS_SUCCESS);
+    close(h);
+    assert_eq!(
+        object_string(d, OBJECT_TYPE_INFORMATION).as_deref(),
+        Ok("Key")
+    );
+    close(d);
+}
+
+/// `NtQueryObject` classes beside the name on a synthetic key: the type, the basic information
+/// with this handle's own access and attributes, and the handle flags.
+#[test]
+fn a_synthetic_key_answers_type_basic_and_handle_flag_queries() {
+    let (_g, f) = fixture();
+    regclient::set_value(&f.canon("Overlaid"), "Fov", 4, &90u32.to_le_bytes()).unwrap();
+    regclient::create_key(&f.canon("TypeOnlyHere"), false).ok();
+    for rel in ["Overlaid", "TypeOnlyHere"] {
+        let (st, h) = f.open(rel, NT_KEY_READ | NT_KEY_SET_VALUE);
+        assert_eq!(st, STATUS_SUCCESS);
+        assert!(is_synthetic_key_handle(h));
+        assert_eq!(
+            object_string(h, OBJECT_TYPE_INFORMATION).as_deref(),
+            Ok("Key"),
+            "{rel}"
+        );
+
+        let mut basic = [0u32; 14];
+        let mut need = 0u32;
+        let st = unsafe {
+            NtQueryObject(
+                h,
+                OBJECT_BASIC_INFORMATION,
+                basic.as_mut_ptr().cast(),
+                56,
+                &mut need,
+            )
+        };
+        assert_eq!(st, STATUS_SUCCESS, "{rel}");
+        assert_eq!(need, 56);
+        assert_eq!(basic[0], 0, "attributes: not inheritable");
+        assert_eq!(
+            basic[1],
+            NT_KEY_READ | NT_KEY_SET_VALUE,
+            "granted access is the handle's"
+        );
+        // Too short: the host's own refusal for this class.
+        let st = unsafe {
+            NtQueryObject(
+                h,
+                OBJECT_BASIC_INFORMATION,
+                basic.as_mut_ptr().cast(),
+                8,
+                &mut need,
+            )
+        };
+        assert_eq!(st, STATUS_INFO_LENGTH_MISMATCH);
+
+        let mut flags = [0xAAu8; 2];
+        let st = unsafe {
+            NtQueryObject(
+                h,
+                OBJECT_HANDLE_FLAG_INFORMATION,
+                flags.as_mut_ptr(),
+                2,
+                &mut need,
+            )
+        };
+        assert_eq!((st, flags, need), (STATUS_SUCCESS, [0, 0], 2));
+        close(h);
+    }
+}
+
+#[test]
+fn a_failed_duplicate_with_close_source_drops_the_record() {
+    let (_g, f) = fixture();
+    let (_, r) = f.open("Untouched", NT_KEY_READ);
+    assert!(registry_handle_path(r).is_some());
+    let mut d = 0isize;
+    // No target process: the duplication fails, and NT closes the source anyway.
+    let st = unsafe {
+        NtDuplicateObject(
+            CURRENT_PROCESS,
+            r,
+            0,
+            &mut d,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE,
+        )
+    };
+    assert!(st < 0, "{st:#x}");
+    assert_eq!(registry_handle_path(r), None);
 }

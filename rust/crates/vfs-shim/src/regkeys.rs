@@ -24,6 +24,7 @@
 //! [`crate::regclient::enabled`] first and go straight to the trampoline.
 #![allow(unsafe_code)]
 
+use core::ffi::c_void;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
@@ -34,14 +35,15 @@ use vfs_registry::Lookup;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 use crate::ntdef::{
-    NtCloseFn, NtDuplicateObjectFn, NtOpenKeyExFn, NtQueryKeyFn, ObjectAttributes, UnicodeString,
-    DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, KEY_NAME_INFORMATION, OBJ_CASE_INSENSITIVE,
-    REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY, REG_OPTION_BACKUP_RESTORE,
-    REG_OPTION_CREATE_LINK, REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE, STATUS_ACCESS_DENIED,
-    STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_HANDLE,
-    STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_INVALID,
-    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS,
-    STATUS_UNSUCCESSFUL,
+    NtCloseFn, NtDuplicateObjectFn, NtOpenKeyExFn, NtQueryKeyFn, NtQueryObjectFn, ObjectAttributes,
+    UnicodeString, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DUPLICATE_SAME_ATTRIBUTES,
+    KEY_NAME_INFORMATION, OBJECT_BASIC_INFORMATION, OBJECT_HANDLE_FLAG_INFORMATION,
+    OBJECT_TYPE_INFORMATION, OBJ_CASE_INSENSITIVE, REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY,
+    REG_OPTION_BACKUP_RESTORE, REG_OPTION_CREATE_LINK, REG_OPTION_OPEN_LINK, REG_OPTION_VOLATILE,
+    STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
+    STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER,
+    STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+    STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 
 /// Tag bit of a synthetic key handle. Real kernel handles never reach this magnitude; the sign
@@ -88,7 +90,15 @@ pub struct SynthKey {
     /// The shim's private read-only handle to the real key, when there is one to merge.
     /// `None` for a key created here (no real counterpart may show through).
     pub real: Option<isize>,
+    /// The access exactly as the caller asked for it, WOW64 flags included: what a private real
+    /// handle for this key is opened with again ([`open_private`]), for a duplicate.
+    pub requested: u32,
+    /// Handle attributes (`OBJ_INHERIT`), as `NtQueryObject` reports them.
+    pub attributes: u32,
 }
+
+/// `OBJ_INHERIT`: the only handle attribute a key handle keeps.
+pub const OBJ_INHERIT: u32 = 0x2;
 
 /// A pass-through (real) key handle's record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,10 +127,11 @@ fn lock_for_close<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
     for _ in 0..10_000 {
         match m.try_lock() {
             Ok(g) => return Some(g),
-            Err(TryLockError::Poisoned(_)) => return None,
+            Err(TryLockError::Poisoned(_)) => break,
             Err(TryLockError::WouldBlock) => std::thread::yield_now(),
         }
     }
+    crate::hookstats::note_reg_close_lock_given_up();
     None
 }
 
@@ -384,18 +395,35 @@ unsafe fn root_path(real: &Real, root: isize) -> Result<String, ()> {
     path::canonical(&nt, user_sid()).map_err(|_| ())
 }
 
-/// The shim's private read-only handle to the real key at `path`. `Err` is the open's status.
-unsafe fn open_private(real: &Real, canonical: &str, wow64: u32) -> Result<isize, NTSTATUS> {
+/// The shim's private read-only handle to the real key at `path`, opened `KEY_READ` with the
+/// WOW64 flags of `access` (the caller's access). A key that refuses `KEY_READ` is tried again
+/// with only the read rights the caller itself asked for, which it may grant. `Err` is the
+/// open's status.
+unsafe fn open_private(real: &Real, canonical: &str, access: u32) -> Result<isize, NTSTATUS> {
     let Some(open) = real.open_ex else {
         return Err(STATUS_UNSUCCESSFUL);
     };
     let name = AbsName::new(canonical, None);
-    let mut h: HANDLE = core::ptr::null_mut();
-    let st = open(&mut h, KEY_READ | (wow64 & WOW64_MASK), &name.oa, 0);
-    if st < 0 {
-        Err(st)
-    } else {
-        Ok(h as isize)
+    let wow64 = access & WOW64_MASK;
+    let try_open = |rights: u32| {
+        let mut h: HANDLE = core::ptr::null_mut();
+        let st = open(&mut h, rights | wow64, &name.oa, 0);
+        if st < 0 {
+            Err(st)
+        } else {
+            Ok(h as isize)
+        }
+    };
+    match try_open(KEY_READ) {
+        Err(STATUS_ACCESS_DENIED) => {
+            let reads = map_generic(access) & KEY_READ;
+            if reads != 0 && reads != KEY_READ {
+                try_open(reads)
+            } else {
+                Err(STATUS_ACCESS_DENIED)
+            }
+        }
+        r => r,
     }
 }
 
@@ -411,7 +439,7 @@ unsafe fn close_real(real: &Real, h: isize) {
 
 /// Whether the real key at `path` exists (a key that refuses even a read-only open exists).
 unsafe fn real_exists(real: &Real, canonical: &str, wow64: u32) -> bool {
-    match open_private(real, canonical, wow64) {
+    match open_private(real, canonical, wow64 & WOW64_MASK) {
         Ok(h) => {
             close_real(real, h);
             true
@@ -439,17 +467,17 @@ fn below_created(canonical: &str) -> bool {
     false
 }
 
-/// Whether the parent of `path` exists in the merged view, as `NtCreateKey` requires: a key
-/// created here, or a real key that is neither tombstoned nor hidden below a key created here.
-/// An overlay node that only overlays a real key is not proof the real key exists.
+/// Whether the parent of `path` exists in the merged view, as `NtCreateKey` requires: a node
+/// in the overlay, or a real key that is neither tombstoned nor hidden below a key created here.
 unsafe fn parent_exists(real: &Real, canonical: &str, wow64: u32) -> Result<bool, NTSTATUS> {
     let Some(parent) = path::parent(canonical) else {
         return Ok(false);
     };
     match crate::regclient::lookup(parent) {
-        Ok((Lookup::Present { created: true }, _)) => Ok(true),
+        // An overlay node exists in the merged view whatever the real key is, as `virtual_open`
+        // has it.
+        Ok((Lookup::Present { .. }, _)) => Ok(true),
         Ok((Lookup::Tombstoned, _)) => Ok(false),
-        Ok((Lookup::Present { created: false }, _)) => Ok(real_exists(real, parent, wow64)),
         Ok((Lookup::Absent, _)) => Ok(!below_created(parent) && real_exists(real, parent, wow64)),
         Err(_) => Err(STATUS_UNSUCCESSFUL),
     }
@@ -609,6 +637,8 @@ impl Key<'_> {
             path: self.canonical.clone(),
             access: map_generic(self.access),
             real: real_key,
+            requested: self.access,
+            attributes: (*self.oa).attributes & OBJ_INHERIT,
         }) {
             Some(h) => {
                 *self.out = h as HANDLE;
@@ -637,7 +667,7 @@ impl Key<'_> {
         if st != STATUS_ACCESS_DENIED || !wants_write(self.access) {
             return st;
         }
-        match open_private(self.real, &self.canonical, self.wow64()) {
+        match open_private(self.real, &self.canonical, self.access) {
             Ok(r) => self.synthetic(Some(r), REG_OPENED_EXISTING_KEY).status,
             Err(_) => st,
         }
@@ -650,7 +680,7 @@ impl Key<'_> {
             // Created here: no real key may show through.
             Some(true) => None,
             // Overlays a real key, which may be gone; the node exists either way.
-            Some(false) => match open_private(self.real, &self.canonical, self.wow64()) {
+            Some(false) => match open_private(self.real, &self.canonical, self.access) {
                 Ok(r) => Some(r),
                 Err(st) if st == STATUS_ACCESS_DENIED => return Err(st),
                 Err(_) => None,
@@ -660,7 +690,7 @@ impl Key<'_> {
                 if below_created(&self.canonical) {
                     return Err(STATUS_OBJECT_NAME_NOT_FOUND);
                 }
-                Some(open_private(self.real, &self.canonical, self.wow64())?)
+                Some(open_private(self.real, &self.canonical, self.access)?)
             }
         };
         Ok(self.synthetic(real_key, REG_OPENED_EXISTING_KEY))
@@ -787,6 +817,69 @@ pub fn object_name(h: isize) -> Option<String> {
     synthetic(h).map(|k| path::to_nt(&k.path, user_sid()))
 }
 
+/// A real key handle to ask the host about a key's object type when a synthetic key has no
+/// private real handle of its own: `\Registry\Machine`, opened read-only once for the process.
+unsafe fn type_donor(real: &Real) -> Option<isize> {
+    static DONOR: OnceLock<Option<isize>> = OnceLock::new();
+    *DONOR.get_or_init(|| open_private(real, r"\Registry\Machine", 0).ok())
+}
+
+/// `NtQueryObject` on a synthetic key handle, for every class but the name (which the hook
+/// answers with [`object_name`]).
+/// - `ObjectTypeInformation`: the host's own answer for a real key handle (the key's private
+///   one, else [`type_donor`]), so the layout, the `"Key"` name and the short-buffer rules are
+///   the host's exactly.
+/// - `ObjectBasicInformation`: the same, with `Attributes` and `GrantedAccess` replaced by this
+///   handle's own.
+/// - `ObjectHandleFlagInformation`: `Inherit` from the record, `ProtectFromClose` false.
+///   `NtSetInformationObject` is not hooked, so neither flag can be changed on a synthetic
+///   handle.
+/// - anything else: the host's answer for the handle, which is `STATUS_INVALID_HANDLE`.
+///
+/// # Safety
+/// The arguments are the caller's NT arguments; `tramp` is the unhooked `NtQueryObject`.
+pub unsafe fn query_object(
+    real: &Real,
+    tramp: NtQueryObjectFn,
+    h: isize,
+    class: u32,
+    info: *mut c_void,
+    length: u32,
+    ret_len: *mut u32,
+) -> NTSTATUS {
+    let Some(rec) = synthetic(h) else {
+        return STATUS_INVALID_HANDLE;
+    };
+    match class {
+        OBJECT_HANDLE_FLAG_INFORMATION => {
+            if !ret_len.is_null() {
+                core::ptr::write_unaligned(ret_len, 2);
+            }
+            if info.is_null() || length < 2 {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            let p = info as *mut u8;
+            *p = u8::from(rec.attributes & OBJ_INHERIT != 0);
+            *p.add(1) = 0;
+            STATUS_SUCCESS
+        }
+        OBJECT_BASIC_INFORMATION | OBJECT_TYPE_INFORMATION => {
+            let Some(donor) = rec.real.or_else(|| type_donor(real)) else {
+                return STATUS_UNSUCCESSFUL;
+            };
+            let st = tramp(donor as HANDLE, class, info, length, ret_len);
+            if st >= 0 && class == OBJECT_BASIC_INFORMATION && length >= 8 {
+                // `OBJECT_BASIC_INFORMATION` opens with `Attributes`, then `GrantedAccess`.
+                let p = info as *mut u32;
+                core::ptr::write_unaligned(p, rec.attributes & OBJ_INHERIT);
+                core::ptr::write_unaligned(p.add(1), rec.access);
+            }
+            st
+        }
+        _ => tramp(h as HANDLE, class, info, length, ret_len),
+    }
+}
+
 /// `NtCurrentProcess()`.
 const CURRENT_PROCESS: isize = -1;
 
@@ -839,23 +932,15 @@ pub unsafe fn duplicate(
         } else if !is_self(dst_process) {
             STATUS_NOT_SUPPORTED
         } else {
-            // The duplicate owns its own private real handle, so each closes independently.
+            // The duplicate owns a fresh private real handle of its own, opened the way the
+            // source's was, so each closes independently.
             let mut real_dup = None;
             let mut st = STATUS_SUCCESS;
-            if let (Some(r), Some(dup)) = (rec.real, real.dup) {
-                let mut h: HANDLE = core::ptr::null_mut();
-                st = dup(
-                    CURRENT_PROCESS as HANDLE,
-                    r as HANDLE,
-                    CURRENT_PROCESS as HANDLE,
-                    &mut h,
-                    0,
-                    0,
-                    DUPLICATE_SAME_ACCESS,
-                );
-                real_dup = Some(h as isize);
-            } else if rec.real.is_some() {
-                st = STATUS_UNSUCCESSFUL;
+            if rec.real.is_some() {
+                match open_private(real, &rec.path, rec.requested) {
+                    Ok(r) => real_dup = Some(r),
+                    Err(e) => st = e,
+                }
             }
             if st < 0 {
                 st
@@ -864,6 +949,12 @@ pub unsafe fn duplicate(
                     path: rec.path.clone(),
                     access: new_access(rec.access),
                     real: real_dup,
+                    requested: rec.requested,
+                    attributes: if options & DUPLICATE_SAME_ATTRIBUTES != 0 {
+                        rec.attributes
+                    } else {
+                        attributes & OBJ_INHERIT
+                    },
                 }) {
                     Some(h) => {
                         *dst = h as HANDLE;
@@ -888,6 +979,11 @@ pub unsafe fn duplicate(
     }
     let rec = tracked(sh)?;
     let dup = real.dup?;
+    // NT closes the source even when the duplication fails, so its record goes first: the
+    // handle value may be reused the moment the call returns.
+    if close_source {
+        untrack(sh);
+    }
     let st = dup(
         src_process,
         src,
@@ -897,9 +993,6 @@ pub unsafe fn duplicate(
         attributes,
         options,
     );
-    if close_source {
-        untrack(sh);
-    }
     if st >= 0 && !dst.is_null() && is_self(dst_process) {
         track(
             *dst as isize,
@@ -922,6 +1015,8 @@ mod tests {
             path: r"\Registry\Machine\X".into(),
             access: KEY_READ,
             real: None,
+            requested: KEY_READ,
+            attributes: 0,
         })
         .unwrap();
         assert!(is_synthetic(h));

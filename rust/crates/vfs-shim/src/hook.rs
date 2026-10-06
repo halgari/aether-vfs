@@ -1182,11 +1182,16 @@ unsafe fn create_key_hook_body(
     let Some(tramp) = TRAMP_CREATE_KEY else {
         return STATUS_UNSUCCESSFUL;
     };
-    if reg_bypass() {
+    if !crate::regclient::enabled() {
         return tramp(key, access, oa, title_index, class, options, disposition);
     }
+    // With the overlay on the real create is never made, not even for the shim's own work: a
+    // create that cannot be examined here is refused.
+    if in_hook_reenter() {
+        return STATUS_UNSUCCESSFUL;
+    }
     let Some(_io) = ShimIoGuard::enter() else {
-        return tramp(key, access, oa, title_index, class, options, disposition);
+        return STATUS_UNSUCCESSFUL;
     };
     let Some(open_ex) = TRAMP_OPEN_KEY_EX else {
         // No way to open an existing key without the real create: refuse rather than write.
@@ -4398,16 +4403,28 @@ unsafe fn qobj_hook_body(
     };
     // Cheapest rejections first, in order of how much of the world they let
     // past untouched. A class we do not answer is most of the traffic.
-    if class != OBJECT_NAME_INFORMATION {
-        return tramp(handle, class, info, length, ret_len);
-    }
-    // A synthetic registry key: its NT name, as the real key would report it.
+    // A synthetic registry key: its NT name, as the real key would report it, and the other
+    // classes from `regkeys::query_object`.
     if crate::regkeys::is_synthetic(handle as isize) && crate::regclient::enabled() {
+        if class != OBJECT_NAME_INFORMATION {
+            return crate::regkeys::query_object(
+                &reg_real(),
+                tramp,
+                handle as isize,
+                class,
+                info,
+                length,
+                ret_len,
+            );
+        }
         let Some(name) = crate::regkeys::object_name(handle as isize) else {
             return STATUS_INVALID_HANDLE;
         };
         return emit_object_name(&name, info, length, ret_len)
             .unwrap_or(STATUS_OBJECT_NAME_INVALID);
+    }
+    if class != OBJECT_NAME_INFORMATION {
+        return tramp(handle, class, info, length, ret_len);
     }
     // A synthetic handle — every file and directory the director serves — is
     // not a kernel object: the host has no name for it and the trampoline

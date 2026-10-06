@@ -71,29 +71,30 @@ fn sid_to_symbol(part: &str, user_sid: Option<&str>) -> String {
 }
 
 /// The reverse of [`canonical`], for names handed back to the process
-/// (`NtQueryKey` `KeyNameInformation`). With no SID the symbol is left as is.
+/// (`NtQueryKey` `KeyNameInformation`, `NtQueryObject`): `\REGISTRY\MACHINE` and
+/// `\REGISTRY\USER`, as Windows spells them, and the user's SID for the symbol. With no SID
+/// the symbol is left as is.
 pub fn to_nt(canonical: &str, user_sid: Option<&str>) -> String {
-    let Some(sid) = user_sid else {
-        return canonical.to_string();
-    };
-    let mut out = String::with_capacity(canonical.len() + sid.len());
-    for (i, part) in canonical.split('\\').enumerate() {
+    let parts: Vec<&str> = canonical.split('\\').collect();
+    // `\Registry\User\<sid>`: split gives ["", "Registry", "User", <sid>, ...].
+    let user_hive = parts.get(2).is_some_and(|p| fold(p) == "user");
+    let mut out = String::with_capacity(canonical.len() + user_sid.map_or(0, str::len));
+    for (i, part) in parts.iter().enumerate() {
         if i > 0 {
             out.push('\\');
         }
-        // `\Registry\User\<sid>`: split gives ["", "Registry", "User", <sid>, ...].
-        if i == 3 && fold(canonical.split('\\').nth(2).unwrap_or("")) == "user" {
-            if part == CURRENT_USER {
-                out.push_str(sid);
-                continue;
-            }
-            if part == format!("{CURRENT_USER}{CLASSES}") {
+        match (i, user_sid) {
+            // The spelling Windows itself reports in key names.
+            (1, _) if fold(part) == "registry" => out.push_str("REGISTRY"),
+            (2, _) if fold(part) == "machine" => out.push_str("MACHINE"),
+            (2, _) if fold(part) == "user" => out.push_str("USER"),
+            (3, Some(sid)) if user_hive && *part == CURRENT_USER => out.push_str(sid),
+            (3, Some(sid)) if user_hive && *part == format!("{CURRENT_USER}{CLASSES}") => {
                 out.push_str(sid);
                 out.push_str(CLASSES);
-                continue;
             }
+            _ => out.push_str(part),
         }
-        out.push_str(part);
     }
     out
 }
@@ -163,12 +164,12 @@ mod tests {
 
     #[test]
     fn sid_replaced_both_ways_including_classes() {
-        let nt = format!(r"\Registry\User\{A}\Software\Bethesda");
+        let nt = format!(r"\REGISTRY\USER\{A}\Software\Bethesda");
         let c = canonical(&nt, Some(A)).unwrap();
         assert_eq!(c, r"\Registry\User\<CurrentUser>\Software\Bethesda");
         assert_eq!(to_nt(&c, Some(A)), nt);
 
-        let nt = format!(r"\Registry\User\{A}_Classes\CLSID");
+        let nt = format!(r"\REGISTRY\USER\{A}_Classes\CLSID");
         let c = canonical(&nt, Some(A)).unwrap();
         assert_eq!(c, r"\Registry\User\<CurrentUser>_Classes\CLSID");
         assert_eq!(to_nt(&c, Some(A)), nt);
@@ -196,10 +197,18 @@ mod tests {
         assert_eq!(written, from_b);
         assert_eq!(
             to_nt(&written, Some(B)),
-            format!(r"\Registry\User\{B}\Software\Mod")
+            format!(r"\REGISTRY\USER\{B}\Software\Mod")
         );
         // No SID known: left symbolic.
-        assert_eq!(to_nt(&written, None), written);
+        assert_eq!(
+            to_nt(&written, None),
+            r"\REGISTRY\USER\<CurrentUser>\Software\Mod"
+        );
+        // HKLM, and the case of everything below the hive kept.
+        assert_eq!(
+            to_nt(r"\Registry\Machine\Software\Bethesda", Some(A)),
+            r"\REGISTRY\MACHINE\Software\Bethesda"
+        );
     }
 
     #[test]

@@ -194,6 +194,7 @@ struct Snapshot {
     name_lookups: u64,
     reg_read_fallbacks: u64,
     reg_unresolved: u64,
+    reg_close_lock_given_up: u64,
     copy_up_counts: [u64; COPYUP_N],
     copy_up_bytes: u64,
     copy_ups: HashMap<String, u64>,
@@ -268,6 +269,7 @@ fn snapshot() -> Snapshot {
         name_lookups: NAME_LOOKUPS.load(Ordering::Relaxed),
         reg_read_fallbacks: reg_read_fallback_count(),
         reg_unresolved: reg_unresolved_count(),
+        reg_close_lock_given_up: reg_close_lock_given_up_count(),
         copy_up_counts: std::array::from_fn(|i| copy_up_count(ALL_COPY_UPS[i])),
         copy_up_bytes: COPYUP_BYTES.load(Ordering::Relaxed),
         copy_ups: accumulated(&COPYUPS),
@@ -562,12 +564,33 @@ pub fn reg_unresolved_count() -> u64 {
     REG_UNRESOLVED.load(Ordering::Relaxed)
 }
 
+/// Times a registry handle-table removal on the close path gave up waiting for its lock
+/// (`regkeys::lock_for_close`): each one left a record behind for a handle that was closed.
+/// Counted whether or not stats are on.
+static REG_CLOSE_LOCK_GIVEN_UP: AtomicU64 = AtomicU64::new(0);
+
+/// A registry handle-table removal gave up on its lock.
+pub fn note_reg_close_lock_given_up() {
+    REG_CLOSE_LOCK_GIVEN_UP.fetch_add(1, Ordering::Relaxed);
+}
+
+/// How many registry handle-table removals gave up on their lock so far.
+pub fn reg_close_lock_given_up_count() -> u64 {
+    REG_CLOSE_LOCK_GIVEN_UP.load(Ordering::Relaxed)
+}
+
 fn render_reg_fallbacks(snap: &Snapshot) -> String {
     let mut out = String::new();
     if snap.reg_read_fallbacks != 0 {
         out.push_str(&format!(
             "\nregistry overlay reads served from the real registry after a director failure: {}\n",
             snap.reg_read_fallbacks
+        ));
+    }
+    if snap.reg_close_lock_given_up != 0 {
+        out.push_str(&format!(
+            "\nregistry key handle records left behind because their table stayed locked: {}\n",
+            snap.reg_close_lock_given_up
         ));
     }
     if snap.reg_unresolved != 0 {
@@ -2228,6 +2251,7 @@ mod tests {
             name_lookups: 0,
             reg_read_fallbacks: 0,
             reg_unresolved: 0,
+            reg_close_lock_given_up: 0,
             setinfo_noop: HashMap::new(),
             synth_locks: HashMap::new(),
             passthrough: HashMap::new(),
