@@ -4346,12 +4346,15 @@ unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
         return STATUS_SUCCESS;
     }
     // Registry key handles: a synthetic one is answered here, a pass-through one loses its
-    // record and is closed for real below.
-    if crate::regclient::enabled() {
-        if let Some(st) = crate::regkeys::close(&reg_real(), handle as isize) {
-            return st;
+    // record and is closed for real below (then `after_real_close`).
+    let reg_close = if crate::regclient::enabled() {
+        match crate::regkeys::close(&reg_real(), handle as isize) {
+            crate::regkeys::Close::Done(st) => return st,
+            crate::regkeys::Close::Real(rec) => Some(rec),
         }
-    }
+    } else {
+        None
+    };
     // **`try_lock`, never `lock`.** This is best-effort reclamation, and a
     // blocking acquisition here hangs the process permanently.
     //
@@ -4396,6 +4399,9 @@ unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP);
     let r = tramp(handle);
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP_DONE);
+    if let Some(rec) = reg_close {
+        crate::regkeys::after_real_close(handle as isize, rec, r);
+    }
     r
 }
 

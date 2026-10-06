@@ -447,6 +447,9 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
             "Sec",
             "SecReal",
             "Flags",
+            "EvGone",
+            "Protect",
+            "Loader",
         ] {
             real_key(k, &[("v", 1)]);
         }
@@ -1253,4 +1256,109 @@ fn the_stats_report_has_the_registry_rows() {
             "no {w:?} in the stats report:\n{report}"
         );
     }
+}
+
+#[test]
+fn a_caller_that_closes_its_event_first_gets_nothing_else_signalled() {
+    let (_g, f) = fixture();
+    let h = f.open("EvGone", NT_KEY_READ | NT_KEY_SET_VALUE);
+    let ev = event();
+    let mut io = iosb();
+    assert_eq!(notify_event(h, ev, false, &mut io), STATUS_PENDING);
+    let completed = reg_notify_count(RegNotify::Completed);
+    // The caller lets go of its event; a new, unsignalled event may well get the same value.
+    unsafe { CloseHandle(ev as HANDLE) };
+    let other = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) as isize };
+    assert_eq!(set_dword(h, "x", 1), STATUS_SUCCESS);
+    let end = Instant::now() + Duration::from_millis(FIRES as u64);
+    while reg_notify_count(RegNotify::Completed) == completed && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        reg_notify_count(RegNotify::Completed),
+        completed + 1,
+        "it completed"
+    );
+    assert_eq!(
+        wait(other, 0),
+        WAIT_TIMEOUT,
+        "the completion signalled the shim's own duplicate, not whatever the value names now \
+         (same value: {})",
+        other == ev
+    );
+    close(h);
+    unsafe { CloseHandle(other as HANDLE) };
+}
+
+#[test]
+fn a_real_handle_protected_from_close_keeps_its_notification() {
+    let (_g, f) = fixture();
+    let h = f.open("Protect", NT_KEY_READ | NT_KEY_SET_VALUE);
+    assert!(!is_synthetic_key_handle(h));
+    let hh = h as HANDLE;
+    let ev = event();
+    let mut io = iosb();
+    assert_eq!(notify_event(h, ev, false, &mut io), STATUS_PENDING);
+    assert_ne!(
+        unsafe {
+            SetHandleInformation(
+                hh,
+                HANDLE_FLAG_PROTECT_FROM_CLOSE,
+                HANDLE_FLAG_PROTECT_FROM_CLOSE,
+            )
+        },
+        0
+    );
+    assert_eq!(close(h), STATUS_HANDLE_NOT_CLOSABLE);
+    assert_eq!(
+        wait(ev, 0),
+        WAIT_TIMEOUT,
+        "not cleaned up: the handle is still open"
+    );
+    assert!(registry_handle_path(h).is_some(), "its record is back");
+    assert_eq!(set_dword(h, "still", 1), STATUS_SUCCESS);
+    assert_eq!(
+        wait(ev, FIRES),
+        WAIT_OBJECT_0,
+        "and its notification still fires"
+    );
+    assert_ne!(
+        unsafe { SetHandleInformation(hh, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0) },
+        0
+    );
+    assert_eq!(close(h), STATUS_SUCCESS);
+    unsafe { CloseHandle(ev as HANDLE) };
+}
+
+#[test]
+fn a_synchronous_notify_under_the_loader_lock_is_refused() {
+    const STATUS_POSSIBLE_DEADLOCK: i32 = 0xC000_0194u32 as i32;
+    let (_g, f) = fixture();
+    let h = f.open("Loader", NT_KEY_READ);
+    let lock: unsafe extern "system" fn(u32, *mut u32, *mut usize) -> i32 =
+        ntfn("LdrLockLoaderLock");
+    let unlock: unsafe extern "system" fn(u32, usize) -> i32 = ntfn("LdrUnlockLoaderLock");
+    let mut cookie = 0usize;
+    assert_eq!(
+        unsafe { lock(0, std::ptr::null_mut(), &mut cookie) },
+        STATUS_SUCCESS
+    );
+    let mut io = iosb();
+    let st = unsafe {
+        nt_notify()(
+            h,
+            0,
+            None,
+            std::ptr::null_mut(),
+            &mut io,
+            REG_NOTIFY_CHANGE_LAST_SET,
+            0,
+            std::ptr::null_mut(),
+            0,
+            0,
+        )
+    };
+    assert_eq!(unsafe { unlock(0, cookie) }, STATUS_SUCCESS);
+    assert_eq!(st, STATUS_POSSIBLE_DEADLOCK);
+    close(h);
 }

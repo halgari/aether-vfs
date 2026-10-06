@@ -1,21 +1,24 @@
 //! Registry change notifications on keys the overlay serves: `NtNotifyChangeKey` and
 //! `NtNotifyChangeMultipleKeys` (registry overlay spec section 3.4, ruling R1).
 //!
-//! **Which calls are served here.** Every notification on a key the overlay serves: a synthetic
-//! handle, and a real (pass-through) handle on a virtualised path, touched by the overlay or
-//! not. Each becomes an *overlay waiter* that completes when the overlay changes at the key (or
-//! below it, with `WatchTree`). No real notification is registered for those keys, so a change
-//! another process makes to the real registry does not complete them; spec 3.4 accepts that,
-//! because nothing else writes those keys during a game. A handle the overlay does not serve
-//! (not a key, or a key outside `\Registry\Machine` and `\Registry\User`) gets the real call.
+//! **Scope: overlay changes only, on every key the overlay serves.** This is a deliberate scope
+//! choice. Every notification on a key the overlay serves (a synthetic handle, or a real
+//! pass-through handle on a virtualised path, touched by the overlay or not) becomes an *overlay
+//! waiter*, completed when the overlay changes at the key (or below it, with `WatchTree`). No
+//! real notification is registered for those keys, so a change another process makes to the
+//! real registry does not complete them; spec 3.4 accepts that, because nothing else writes
+//! those keys during a game. What it buys: the game's own writes, which all go to the overlay,
+//! always wake its watchers, whichever handle they were made through, and every waiter has
+//! exactly one completion. A handle the overlay does not serve (not a key, or a key outside
+//! `\Registry\Machine` and `\Registry\User`) gets the real call.
 //!
-//! Why a real handle on an untouched virtualised path does not get the real call as well: every
-//! write the game makes through it goes to the overlay, so the real notification would never
-//! fire for the game's own writes. A "shadow" waiter beside the real notification, completing
-//! whichever fires first, is not safe: the real completion writes the caller's I/O status block
-//! and queues its APC asynchronously, and cannot be withdrawn, so it would land a second time
-//! after the caller had already seen the notification complete and reused (or freed) that
-//! memory. An overlay-only waiter has one completion, always.
+//! Passing the caller's own arguments to the real call as well (a "shadow" waiter beside it,
+//! first completion wins) is not safe: the real completion writes the caller's status block and
+//! queues its APC asynchronously and cannot be withdrawn, so it would land a second time after
+//! the caller had already seen the notification complete. A safe way to also watch the real
+//! registry, left as a possible follow-up: one shim-owned real notification per served handle,
+//! made with a duplicated event and a status block from a shim pool (never the caller's), whose
+//! event the notifier checks on each poll and turns into an ordinary overlay-style completion.
 //!
 //! **The notifier.** One thread, started when the first waiter is registered and gone once none
 //! is left, wakes every [`POLL`] (R1), and asks the director `REG_CHANGED` for each waiter. It
@@ -90,6 +93,7 @@ pub struct Args {
 /// How a waiter tells its caller.
 enum Done {
     Async {
+        /// The shim's own duplicate of the caller's event (owned), or 0.
         event: isize,
         apc: usize,
         apc_ctx: usize,
@@ -230,15 +234,39 @@ pub unsafe fn notify(real: &Real, h: isize, a: &Args) -> Notify {
             return Notify::Done(st);
         }
     }
+    // The waiter owns a duplicate of the caller's event, never the caller's handle value: the
+    // caller may close its handle before the notification completes, and the value may by then
+    // name some other object.
+    let event = if a.event.is_null() {
+        0
+    } else {
+        match duplicate(real, a.event as isize, 0, DUPLICATE_SAME_ACCESS) {
+            Ok(e) => e,
+            Err(st) => return Notify::Done(st),
+        }
+    };
     let apc = a.apc as usize;
-    let thread = if apc != 0 { current_thread() } else { 0 };
+    // The calling thread, for the APC. A waiter whose APC could never be queued is refused.
+    let thread = if apc == 0 {
+        0
+    } else {
+        match duplicate(real, CURRENT_THREAD, THREAD_SET_CONTEXT, 0) {
+            Ok(t) => t,
+            Err(st) => {
+                if event != 0 {
+                    regkeys::close_real(real, event);
+                }
+                return Notify::Done(st);
+            }
+        }
+    };
     let iosb = if apc != 0 || a.event.is_null() {
         a.iosb as usize
     } else {
         0
     };
     let done = Done::Async {
-        event: a.event as isize,
+        event,
         apc,
         apc_ctx: a.apc_ctx as usize,
         iosb,
@@ -253,9 +281,78 @@ pub unsafe fn notify(real: &Real, h: isize, a: &Args) -> Notify {
     }
 }
 
+/// `NtCurrentThread()`.
+const CURRENT_THREAD: isize = -2;
+/// `NtCurrentProcess()`.
+const CURRENT_PROCESS: isize = -1;
+/// `THREAD_SET_CONTEXT`: the right `NtQueueApcThread` needs.
+const THREAD_SET_CONTEXT: u32 = 0x0010;
+const DUPLICATE_SAME_ACCESS: u32 = 0x2;
+/// `STATUS_POSSIBLE_DEADLOCK`: a synchronous notification on a thread holding the loader lock.
+const STATUS_POSSIBLE_DEADLOCK: NTSTATUS = 0xC000_0194u32 as i32;
+
+/// A handle of this process duplicated into it through the unhooked `NtDuplicateObject`.
+unsafe fn duplicate(real: &Real, h: isize, access: u32, options: u32) -> Result<isize, NTSTATUS> {
+    let Some(dup) = real.dup else {
+        return Err(STATUS_UNSUCCESSFUL);
+    };
+    let mut out: HANDLE = core::ptr::null_mut();
+    let st = dup(
+        CURRENT_PROCESS as HANDLE,
+        h as HANDLE,
+        CURRENT_PROCESS as HANDLE,
+        &mut out,
+        access,
+        0,
+        options,
+    );
+    if st < 0 {
+        Err(st)
+    } else {
+        Ok(out as isize)
+    }
+}
+
+/// Whether this thread holds the loader lock (`PEB->LoaderLock`). A synchronous wait there
+/// could never end if the notifier has to be started: a new thread cannot run until the lock is
+/// released.
+fn holds_loader_lock() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        type Locked = unsafe extern "system" fn(*mut c_void) -> u32;
+        static F: OnceLock<Option<Locked>> = OnceLock::new();
+        let f = F.get_or_init(|| {
+            use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+            // SAFETY: an ntdll export cast to its documented signature.
+            unsafe {
+                let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+                GetProcAddress(ntdll, c"RtlIsCriticalSectionLockedByThread".as_ptr().cast()).map(
+                    |p| core::mem::transmute::<unsafe extern "system" fn() -> isize, Locked>(p),
+                )
+            }
+        });
+        let Some(f) = f else {
+            return false;
+        };
+        // SAFETY: x64 `gs:[0x60]` is the PEB, whose `LoaderLock` (offset 0x110) is the loader's
+        // critical section; both are valid for the life of the process.
+        unsafe {
+            let peb: *const u8;
+            core::arch::asm!("mov {}, gs:[0x60]", out(reg) peb, options(nostack, readonly));
+            let lock = *(peb.add(0x110) as *const *mut c_void);
+            !lock.is_null() && f(lock) != 0
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    false
+}
+
 /// A synchronous notification: block until the waiter completes, and answer its status.
 unsafe fn wait_sync(real: &Real, h: isize, path: String, a: &Args, since: Option<u64>) -> NTSTATUS {
     use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+    if holds_loader_lock() {
+        return STATUS_POSSIBLE_DEADLOCK;
+    }
     let event = CreateEventW(core::ptr::null(), 1, 0, core::ptr::null()) as isize;
     if event == 0 {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -276,17 +373,11 @@ unsafe fn wait_sync(real: &Real, h: isize, path: String, a: &Args, since: Option
     st
 }
 
-/// A handle to the calling thread an APC can be queued to, or 0.
-fn current_thread() -> isize {
-    use windows_sys::Win32::System::Threading::{
-        GetCurrentThreadId, OpenThread, THREAD_SET_CONTEXT,
-    };
-    // SAFETY: opens this thread by id; `NtOpenThread` is not hooked.
-    unsafe { OpenThread(THREAD_SET_CONTEXT, 0, GetCurrentThreadId()) as isize }
-}
-
-/// Add a waiter, and start the notifier if it is not running. On failure the waiter's `Done`
-/// comes back for the caller to release.
+/// Add a waiter, and start the notifier if it is not running. The notifier is started under the
+/// table lock (creating a thread takes no lock of ours), so no other registration can slip in
+/// while it is being started: if it cannot be started, this waiter is taken out again and the
+/// call fails, and no waiter is ever left with no thread to complete it. On failure the
+/// waiter's `Done` comes back for the caller to release.
 fn register(
     h: isize,
     path: String,
@@ -294,35 +385,32 @@ fn register(
     since: Option<u64>,
     done: Done,
 ) -> Result<(), (NTSTATUS, Done)> {
-    let start = {
-        let Ok(mut s) = STATE.lock() else {
-            return Err((STATUS_UNSUCCESSFUL, done));
-        };
-        if s.waiters.len() >= MAX_WAITERS {
+    let Ok(mut s) = STATE.lock() else {
+        return Err((STATUS_UNSUCCESSFUL, done));
+    };
+    if s.waiters.len() >= MAX_WAITERS {
+        return Err((STATUS_INSUFFICIENT_RESOURCES, done));
+    }
+    if !s.running {
+        if !spawn_notifier() {
+            note_reg_notify(RegNotify::PollError);
             return Err((STATUS_INSUFFICIENT_RESOURCES, done));
         }
-        let id = s.next_id;
-        s.next_id += 1;
-        s.waiters.push(Waiter {
-            id,
-            handle: h,
-            path,
-            subtree,
-            since,
-            done,
-        });
-        PENDING.store(s.waiters.len(), Ordering::Relaxed);
-        !std::mem::replace(&mut s.running, true)
-    };
-    note_reg_notify(RegNotify::Registered);
-    if start && !spawn_notifier() {
-        // No thread: the waiters stay (a close still ends them), and the next registration
-        // tries again.
-        note_reg_notify(RegNotify::PollError);
-        if let Ok(mut s) = STATE.lock() {
-            s.running = false;
-        }
+        s.running = true;
     }
+    let id = s.next_id;
+    s.next_id += 1;
+    s.waiters.push(Waiter {
+        id,
+        handle: h,
+        path,
+        subtree,
+        since,
+        done,
+    });
+    PENDING.store(s.waiters.len(), Ordering::Relaxed);
+    drop(s);
+    note_reg_notify(RegNotify::Registered);
     Ok(())
 }
 
@@ -396,9 +484,10 @@ fn notifier() {
             fired
         };
         for w in fired {
+            // Counted before the caller can see it, so a count read after the wake includes it.
+            note_reg_notify(RegNotify::Completed);
             // SAFETY: the waiter's caller registered these handles and addresses for this.
             unsafe { complete(&real, w.done, STATUS_NOTIFY_ENUM_DIR) };
-            note_reg_notify(RegNotify::Completed);
         }
     }
 }
@@ -430,9 +519,9 @@ pub fn cleanup(h: isize) {
     // SAFETY: the trampolines, for closing the handles completions own.
     let real = unsafe { crate::hook::reg_real() };
     for w in gone {
+        note_reg_notify(RegNotify::CleanedUp);
         // SAFETY: as in the notifier.
         unsafe { complete(&real, w.done, STATUS_NOTIFY_CLEANUP) };
-        note_reg_notify(RegNotify::CleanedUp);
     }
 }
 
@@ -467,8 +556,10 @@ unsafe fn complete(real: &Real, done: Done, status: NTSTATUS) {
             if apc != 0 && thread != 0 {
                 (api.queue_apc)(thread as HANDLE, apc as *const c_void, apc_ctx, iosb, 0);
             }
-            if thread != 0 {
-                regkeys::close_real(real, thread);
+            for owned in [event, thread] {
+                if owned != 0 {
+                    regkeys::close_real(real, owned);
+                }
             }
         }
     }
@@ -476,9 +567,11 @@ unsafe fn complete(real: &Real, done: Done, status: NTSTATUS) {
 
 /// Release what a waiter that was never registered owns.
 unsafe fn release(real: &Real, done: Done) {
-    if let Done::Async { thread, .. } = done {
-        if thread != 0 {
-            regkeys::close_real(real, thread);
+    if let Done::Async { event, thread, .. } = done {
+        for owned in [event, thread] {
+            if owned != 0 {
+                regkeys::close_real(real, owned);
+            }
         }
     }
 }

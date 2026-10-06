@@ -188,16 +188,59 @@ pub fn tracked(h: isize) -> Option<KeyRec> {
     PASS.lock().ok()?.get(&h).cloned()
 }
 
-/// Drop a real handle's records: it is being closed (or closed as a duplicate's source). A
-/// notification pending on it ends with `STATUS_NOTIFY_CLEANUP`.
-fn untrack(h: isize) {
-    if let Some(mut t) = lock_for_close(&PASS) {
-        if t.remove(&h).is_some() {
+/// Drop a real handle's records: it is about to be closed (or closed as a duplicate's source).
+/// The record goes *before* the real close, because the handle value may be reused the moment
+/// that returns; it comes back for [`after_real_close`] to restore if the close fails.
+fn untrack(h: isize) -> Option<KeyRec> {
+    let rec = lock_for_close(&PASS).and_then(|mut t| {
+        let r = t.remove(&h);
+        if r.is_some() {
             crate::hookstats::note_reg_passthrough_handles(t.len());
         }
-    }
+        r
+    });
     forget_not_ours(h);
-    crate::regnotify::cleanup(h);
+    rec
+}
+
+/// After the real `NtClose` of a real key handle that [`close`] answered `Close::Real` for:
+/// once it succeeded, the notifications pending on the handle end (`STATUS_NOTIFY_CLEANUP`);
+/// if the handle is protected from close it is still open, so its record comes back and its
+/// notifications keep waiting.
+pub fn after_real_close(h: isize, rec: Option<KeyRec>, status: NTSTATUS) {
+    if status >= 0 {
+        crate::regnotify::cleanup(h);
+    } else if status == STATUS_HANDLE_NOT_CLOSABLE {
+        if let Some(r) = rec {
+            track(h, r);
+        }
+    }
+}
+
+/// Whether a real handle is protected from close (`ObjectHandleFlagInformation`).
+unsafe fn real_protected(real: &Real, h: isize) -> bool {
+    let Some(q) = real.query_object else {
+        return false;
+    };
+    let mut flags = [0u8; 2];
+    let mut need = 0u32;
+    let st = q(
+        h as HANDLE,
+        OBJECT_HANDLE_FLAG_INFORMATION,
+        flags.as_mut_ptr().cast(),
+        2,
+        &mut need,
+    );
+    st >= 0 && flags[1] != 0
+}
+
+/// What [`close`] did with a key handle.
+pub enum Close {
+    /// A synthetic handle, answered here.
+    Done(NTSTATUS),
+    /// Not synthetic: closed for real by the caller, then [`after_real_close`] with this record
+    /// (the pass-through record, if the handle had one).
+    Real(Option<KeyRec>),
 }
 
 /// Mark a key handle's record deleted (`NtDeleteKey` through it succeeded).
@@ -976,19 +1019,20 @@ pub fn open_options_of_create(options: u32) -> u32 {
     options & (REG_OPTION_BACKUP_RESTORE | REG_OPTION_OPEN_LINK)
 }
 
-/// `NtClose` of a key handle. `Some(status)` for a synthetic handle (answered here, its
-/// private real handle closed); `None` for anything else, whose pass-through record (if any)
-/// is dropped before the caller closes it for real.
-pub unsafe fn close(real: &Real, h: isize) -> Option<NTSTATUS> {
+/// `NtClose` of a key handle. `Close::Done` for a synthetic handle (answered here, its private
+/// real handle closed, its notifications ended); `Close::Real` for anything else, whose
+/// pass-through record (if any) is dropped before the caller closes it for real and calls
+/// [`after_real_close`].
+pub unsafe fn close(real: &Real, h: isize) -> Close {
     // Whatever the handle was, an enumeration snapshot kept for it goes with it, and so do the
-    // notifications pending on it (`STATUS_NOTIFY_CLEANUP`). A synthetic handle protected from
-    // close stays, all of it.
+    // notifications pending on it (`STATUS_NOTIFY_CLEANUP`; a real handle's once its real close
+    // succeeded). A synthetic handle protected from close stays, all of it.
     if is_synthetic(h) {
         if synthetic(h).is_some_and(|k| k.protect) {
-            return Some(STATUS_HANDLE_NOT_CLOSABLE);
+            return Close::Done(STATUS_HANDLE_NOT_CLOSABLE);
         }
         crate::regquery::forget(h);
-        return Some(match remove_synthetic(h) {
+        return Close::Done(match remove_synthetic(h) {
             Some(k) => {
                 if let Some(r) = k.real {
                     close_real(real, r);
@@ -1000,8 +1044,7 @@ pub unsafe fn close(real: &Real, h: isize) -> Option<NTSTATUS> {
         });
     }
     crate::regquery::forget(h);
-    untrack(h);
-    None
+    Close::Real(untrack(h))
 }
 
 /// The NT name of a synthetic key handle, for `NtQueryObject(ObjectNameInformation)`.
@@ -1171,7 +1214,7 @@ pub unsafe fn duplicate(
             }
         };
         if close_source {
-            close(real, sh);
+            let _ = close(real, sh);
         }
         return Some(status);
     }
@@ -1179,8 +1222,10 @@ pub unsafe fn duplicate(
         return None;
     }
     // NT closes the source even when the duplication fails, so its records go first: the
-    // handle value may be reused the moment the call returns.
+    // handle value may be reused the moment the call returns. A source protected from close is
+    // not closed, so it keeps them (and its pending notifications).
     let rec = tracked(sh);
+    let close_source = close_source && !real_protected(real, sh);
     if close_source {
         untrack(sh);
         crate::regquery::forget(sh);
@@ -1196,6 +1241,11 @@ pub unsafe fn duplicate(
         attributes,
         options,
     );
+    // The real call closed the source (whatever its outcome): its notifications end now, before
+    // the duplicate (which may reuse the source's value) is recorded.
+    if close_source {
+        crate::regnotify::cleanup(sh);
+    }
     if st >= 0 && !dst.is_null() && is_self(dst_process) {
         track(
             *dst as isize,
