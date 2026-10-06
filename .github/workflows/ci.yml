@@ -140,7 +140,7 @@ jobs:
       # non-ignored tests run on any Linux box; its one Wine test is
       # `#[ignore]`d and run by `proton-linux`.
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord -p vfs-block-store -p vfs-storage
+        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-server -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord -p vfs-block-store -p vfs-storage -p vfs-registry
         working-directory: rust
       # The block store's own gates, carried over from its repository:
       # `crash-points` compiles in the abort hooks its subprocess crash tests

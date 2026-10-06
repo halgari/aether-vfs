@@ -2825,6 +2825,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vfs-registry"
+version = "0.1.0"
+dependencies = [
+ "vfs-core",
+]
+
+[[package]]
 name = "vfs-ring-harness"
 version = "0.1.0"
 dependencies = [

@@ -14,6 +14,9 @@ members = [
   "crates/vfs-control",
   "crates/vfs-source",
   "crates/vfs-compose",
+  # Registry overlay model (paths, copy-on-write tree). Portable: depends only on
+  # vfs-core. See docs/superpowers/specs/2026-10-05-registry-overlay-design.md.
+  "crates/vfs-registry",
   # Deduplicating, compressing block store (redb index + zstd packs),
   # imported with its history from aether-vfs-block-store. vfs-storage below
   # is its one consumer. Edition 2024 and MIT OR Apache-2.0, as it was
