@@ -151,13 +151,16 @@ impl<'a> RegClient<'a> {
             path,
             |c| &mut c.lookups,
             || {
-                let r = self.fc.reg_request(OP_REG_LOOKUP, &encode_reg_path(path))?;
+                let r = self.request(OP_REG_LOOKUP, &encode_reg_path(path))?;
                 let (state, below, _) = decode_reg_lookup_reply(&r).ok_or(ST_BAD_REQUEST)?;
                 let l = match state {
                     0 => Lookup::Absent,
                     1 => Lookup::Present { created: false },
                     2 => Lookup::Present { created: true },
-                    _ => Lookup::Tombstoned,
+                    3 => Lookup::Tombstoned,
+                    // Not an answer this client understands: a read failure, so the caller
+                    // serves the real key rather than a guess.
+                    _ => return Err(ST_BAD_REQUEST),
                 };
                 Ok((l, below))
             },
@@ -169,7 +172,7 @@ impl<'a> RegClient<'a> {
             path,
             |c| &mut c.keys,
             || {
-                let r = self.fc.reg_request(OP_REG_KEY, &encode_reg_path(path))?;
+                let r = self.request(OP_REG_KEY, &encode_reg_path(path))?;
                 Ok(decode_reg_key_reply(&r).ok_or(ST_BAD_REQUEST)?.0)
             },
         )
@@ -199,16 +202,24 @@ impl<'a> RegClient<'a> {
     }
 
     pub fn changed(&self, path: &str, subtree: bool, since: u64) -> Result<(bool, u64), i32> {
-        let r = self
-            .fc
-            .reg_request(OP_REG_CHANGED, &encode_reg_changed(path, subtree, since))?;
+        let r = self.request(OP_REG_CHANGED, &encode_reg_changed(path, subtree, since))?;
         decode_reg_changed_reply(&r).ok_or(ST_BAD_REQUEST)
+    }
+
+    /// Send one request. One that cannot fit the ring's payload is refused here with
+    /// `ST_BAD_REQUEST` and never submitted (the hooks answer `STATUS_INVALID_PARAMETER`, as
+    /// for anything over the spec's limits).
+    fn request(&self, opcode: u32, payload: &[u8]) -> Result<Vec<u8>, i32> {
+        if !fits(payload.len(), self.fc.payload_cap()) {
+            return Err(ST_BAD_REQUEST);
+        }
+        self.fc.reg_request(opcode, payload)
     }
 
     /// A write. Nothing to invalidate here: the director moves the published generation
     /// before it replies, which makes every cached answer, this client's included, unusable.
     fn write(&self, opcode: u32, payload: &[u8]) -> Result<(), i32> {
-        let r = self.fc.reg_request(opcode, payload)?;
+        let r = self.request(opcode, payload)?;
         decode_reg_version_reply(&r).ok_or(ST_BAD_REQUEST)?;
         Ok(())
     }
@@ -248,9 +259,30 @@ impl<'a> RegClient<'a> {
     }
 }
 
+/// A request of `len` bytes fits one ring payload of `cap` bytes.
+fn fits(len: usize, cap: u32) -> bool {
+    len <= cap as usize
+}
+
 fn insert_bounded<K: Eq + Hash, V>(m: &mut HashMap<K, V>, k: K, v: V) {
     if m.len() >= CACHE_ENTRIES {
         m.clear();
     }
     m.insert(k, v);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_fits_up_to_the_payload_cap_and_not_beyond() {
+        assert!(fits(0, 4096));
+        assert!(fits(4096, 4096));
+        assert!(!fits(4097, 4096));
+        // The set-value request for a value of exactly the spec's 1 MiB limit does not fit
+        // a 1 MiB payload: its path and name come on top.
+        let req = encode_reg_set_value(r"\Registry\Machine\K", "v", 3, &vec![0; 1 << 20]);
+        assert!(!fits(req.len(), 1 << 20));
+    }
 }

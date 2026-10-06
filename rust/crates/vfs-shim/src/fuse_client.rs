@@ -464,6 +464,11 @@ impl FuseClient {
         .with_deadline(self.deadline)
     }
 
+    /// The largest request (and reply) payload the ring carries, from its header.
+    pub fn payload_cap(&self) -> u32 {
+        self.geom.payload_cap
+    }
+
     /// The registry generation the director last published in the ring header (0 if none):
     /// what [`crate::regclient`] checks a cached answer against.
     pub fn reg_generation(&self) -> u64 {

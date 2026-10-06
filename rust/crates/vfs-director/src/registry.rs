@@ -26,7 +26,8 @@
 //! level, and the session starts from an empty overlay. If even the rename fails, `open` fails:
 //! carrying on would overwrite the damaged file at the first save.
 
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -100,6 +101,71 @@ pub fn lookup_state(l: Lookup) -> u8 {
     }
 }
 
+/// Somewhere a [`RegistryGeneration`] is published so every injected process of the session can
+/// read it without a round trip: in practice the header of a ring the director serves
+/// (`vfs_ipc::ring::publish_reg_generation`). The shim uses a cached registry answer only while
+/// the generation it reads there is the one it read before asking.
+pub trait RegistryGenSink: Send + Sync {
+    /// Publish `generation`. Must never move what readers see backwards.
+    fn publish_reg_generation(&self, generation: u64);
+}
+
+/// A director's registry generation and where it is published.
+///
+/// It starts at 1 and is bumped by every successful write of an attached [`RegistryHost`] and
+/// by every attach or detach (`Director::set_registry`). It is not the overlay's own version,
+/// which a newly attached layer restarts from its saved value: a generation never repeats, so
+/// an answer cached under one layer can never look current under the next.
+pub struct RegistryGeneration {
+    generation: AtomicU64,
+    /// Held weakly, as a ring holds the director; a sink that is gone is dropped at the next
+    /// publish.
+    sinks: Mutex<Vec<Weak<dyn RegistryGenSink>>>,
+}
+
+impl Default for RegistryGeneration {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RegistryGeneration {
+    pub fn new() -> Self {
+        RegistryGeneration {
+            generation: AtomicU64::new(1),
+            sinks: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn current(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Publish to `sink` now and after every change.
+    pub fn add_sink(&self, sink: Weak<dyn RegistryGenSink>) {
+        let mut sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = sink.upgrade() {
+            s.publish_reg_generation(self.current());
+            sinks.push(sink);
+        }
+    }
+
+    /// Bump the generation and publish it to every sink before returning, so whoever is told
+    /// of the change (a writer's reply) is told only after every reader can see it.
+    pub fn changed(&self) {
+        let mut sinks = self.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        // Bumped under the lock, so publishes reach the sinks in generation order.
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        sinks.retain(|w| match w.upgrade() {
+            Some(s) => {
+                s.publish_reg_generation(generation);
+                true
+            }
+            None => false,
+        });
+    }
+}
+
 #[derive(Default)]
 struct SaverState {
     /// A write happened since the saver last looked.
@@ -120,6 +186,9 @@ struct Inner {
 pub struct RegistryHost {
     inner: Arc<Inner>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    /// The generation every successful write moves, set by the director the host is attached
+    /// to ([`RegistryHost::publish_to`]).
+    generation: Mutex<Option<Arc<RegistryGeneration>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> Result<MutexGuard<'_, T>, i32> {
@@ -293,6 +362,7 @@ impl RegistryHost {
         Ok(Arc::new(RegistryHost {
             inner,
             thread: Mutex::new(Some(thread)),
+            generation: Mutex::new(None),
         }))
     }
 
@@ -300,6 +370,12 @@ impl RegistryHost {
     /// and wait for it. Waits for a save already in progress first.
     pub fn flush(&self) -> Result<(), i32> {
         self.inner.save_if_dirty()
+    }
+
+    /// From now on every successful write bumps and publishes `generation` after it is applied
+    /// and before it returns. The director calls this when it attaches the host.
+    pub fn publish_to(&self, generation: Arc<RegistryGeneration>) {
+        *self.generation.lock().unwrap_or_else(|e| e.into_inner()) = Some(generation);
     }
 
     /// The overlay version: bumped once by every successful write.
@@ -347,6 +423,15 @@ impl RegistryHost {
             let mut o = self.inner.write()?;
             f(&mut o, filetime_now()).map_err(reg_status)?
         };
+        // Applied; published before the caller (and through it the writer) hears of it.
+        let generation = self
+            .generation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(g) = generation {
+            g.changed();
+        }
         self.inner.kick();
         Ok(v)
     }

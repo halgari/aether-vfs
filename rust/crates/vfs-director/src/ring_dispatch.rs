@@ -259,7 +259,7 @@ pub fn dispatch_director(
             None => (ST_BAD_REQUEST, Vec::new()),
         },
         OP_REG_LOOKUP..=OP_REG_CHANGED => match director.registry() {
-            Some(host) => dispatch_registry(director, &host, opcode, payload, payload_cap),
+            Some(host) => dispatch_registry(&host, opcode, payload, payload_cap),
             None => (ST_NOT_SUPPORTED, Vec::new()),
         },
         _ => (ST_BAD_REQUEST, Vec::new()),
@@ -271,11 +271,10 @@ pub fn dispatch_director(
 /// `ST_BAD_REQUEST`; overlay errors map through [`crate::registry::reg_status`]. A `REG_KEY`
 /// reply larger than an inline reply can carry (`payload_cap - 8`) is `ST_REPLY_TOO_LARGE`.
 ///
-/// A write that succeeds bumps and publishes the director's registry generation
-/// ([`Director::registry_changed`]) before its reply is returned, so no process can be told of
-/// the write while another can still use a cached answer from before it.
+/// A write that succeeds has already published the director's registry generation when the
+/// host returns ([`RegistryHost::publish_to`]), so its reply cannot reach the writer while
+/// another process can still use a cached answer from before it.
 fn dispatch_registry(
-    director: &Director,
     host: &RegistryHost,
     opcode: u32,
     payload: &[u8],
@@ -285,12 +284,7 @@ fn dispatch_registry(
         Ok(b) => (ST_OK, b),
         Err(st) => (st, Vec::new()),
     };
-    let version = |r: Result<u64, i32>| {
-        if r.is_ok() {
-            director.registry_changed();
-        }
-        reply(r.map(encode_reg_version_reply))
-    };
+    let version = |r: Result<u64, i32>| reply(r.map(encode_reg_version_reply));
     let bad = (ST_BAD_REQUEST, Vec::new());
     match opcode {
         OP_REG_LOOKUP => match decode_reg_path(payload) {
@@ -664,7 +658,7 @@ mod tests {
             for (op, payload) in writes {
                 ok(&d, op, &payload);
                 let now = p.get();
-                assert!(now > last, "op {op} must publish a new generation");
+                assert_eq!(now, last + 1, "op {op} must publish exactly once");
                 assert_eq!(now, d.registry_generation());
                 last = now;
             }
@@ -688,6 +682,23 @@ mod tests {
             // Detaching publishes: an answer cached under the layer is stale without it.
             d.set_registry(None);
             assert!(p.get() > last);
+        }
+
+        /// The host publishes, not the ring: a write made on the host directly (a host-side
+        /// writer that never goes through `dispatch_director`) moves the generation too.
+        #[test]
+        fn a_host_write_outside_the_ring_publishes() {
+            let d = director();
+            let p = sink(&d);
+            let g = p.get();
+            let host = d.registry().unwrap();
+            host.set_value(K, "v", 4, &[1, 0, 0, 0]).unwrap();
+            assert_eq!(p.get(), g + 1);
+            host.create_key(&format!(r"{K}\Sub"), false).unwrap();
+            assert_eq!(p.get(), g + 2);
+            // A refused write publishes nothing.
+            assert!(host.create_key(&format!(r"{K}\Sub"), false).is_err());
+            assert_eq!(p.get(), g + 2);
         }
 
         #[test]

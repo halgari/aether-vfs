@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use fakedirector::Fake;
 use vfs_protocol::{
-    OP_REG_KEY, OP_REG_LOOKUP, ST_EXISTS, ST_IO_ERROR, ST_NOT_SUPPORTED, ST_REPLY_TOO_LARGE,
+    OP_REG_KEY, OP_REG_LOOKUP, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_EXISTS, ST_IO_ERROR,
+    ST_NOT_SUPPORTED, ST_REPLY_TOO_LARGE,
 };
 use vfs_registry::{Child, Lookup};
 use vfs_shim::regclient::{self, RegClient};
@@ -239,4 +240,22 @@ fn a_dead_director_fails_reads_and_writes() {
     assert_eq!(c.delete_key(&k), Err(ST_IO_ERROR));
     assert_eq!(c.rename_key(&k, "Other"), Err(ST_IO_ERROR));
     assert_eq!(c.changed(&k, false, 0), Err(ST_IO_ERROR));
+}
+
+/// A write whose request cannot fit one ring payload is refused by the client with
+/// `ST_BAD_REQUEST` and never sent; one that exactly fits is sent and applied.
+#[test]
+fn a_request_too_large_for_the_ring_is_refused_unsent() {
+    let (_g, f) = fixture();
+    let k = key_path("Oversize");
+    // `path | name | ty | len | data`, each string with a 4-byte length.
+    let overhead = 4 + k.len() + 4 + 1 + 4 + 4;
+    let fits = vec![0x11u8; fakedirector::PAYLOAD_CAP as usize - overhead];
+    let over = vec![0x22u8; fits.len() + 1];
+
+    assert_eq!(regclient::set_value(&k, "v", 3, &over), Err(ST_BAD_REQUEST));
+    assert_eq!(f.fake.tally.reg(OP_REG_SET_VALUE, &k), 0, "never submitted");
+
+    regclient::set_value(&k, "v", 3, &fits).unwrap();
+    assert_eq!(f.fake.tally.reg(OP_REG_SET_VALUE, &k), 1);
 }

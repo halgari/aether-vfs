@@ -168,7 +168,8 @@ overlay version.
   setting names it: the registry layer of the session. Without the setting, registry
   virtualisation is off and the hooks pass everything through.
 - **Limits** (as Windows): key names up to 255 characters, value names up to 16,383 characters,
-  values up to 1 MiB in this version. Larger requests fail with `STATUS_INVALID_PARAMETER`.
+  values up to 1 MiB in this version, less the request's path and name overhead, because a
+  request must fit one ring payload. Larger requests fail with `STATUS_INVALID_PARAMETER`.
 
 ## 6. Errors and safety
 

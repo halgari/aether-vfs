@@ -9,18 +9,8 @@ use crate::ops::{
     RootId, SetAttr, Stat, VPath, OPEN_WRITE,
 };
 use crate::path::normalize;
-use crate::registry::RegistryHost;
+use crate::registry::{RegistryGenSink, RegistryGeneration, RegistryHost};
 use vfs_provider::OPEN_APPEND;
-
-/// Somewhere the director publishes the registry generation
-/// ([`Director::registry_generation`]) so every injected process of the session can read it
-/// without a round trip: in practice the header of a ring it serves
-/// (`vfs_ipc::ring::publish_reg_generation`). The shim uses a cached registry answer only while
-/// the generation it reads there is the one it read before asking.
-pub trait RegistryGenSink: Send + Sync {
-    /// Publish `generation`. Must never move what readers see backwards.
-    fn publish_reg_generation(&self, generation: u64);
-}
 
 struct OpenRec {
     backend: Arc<dyn Provider>,
@@ -66,15 +56,9 @@ pub struct Director {
     /// The session's registry overlay, when registry virtualisation is on: what the ring's
     /// registry opcodes (15-22) answer from. `None` answers them `ST_NOT_SUPPORTED`.
     registry: RwLock<Option<Arc<RegistryHost>>>,
-    /// The registry generation: starts at 1 and is bumped by every registry write served
-    /// through [`crate::ring_dispatch`] and by every [`Director::set_registry`]. Not the
-    /// overlay's own version, which a newly attached layer restarts from its saved value: a
-    /// generation never repeats within this director, so an answer cached under one layer can
-    /// never look current under the next.
-    reg_gen: AtomicU64,
-    /// Where [`Self::reg_gen`] is published: every ring this director serves. Held weakly, as
-    /// a ring holds the director; a ring that is gone is dropped at the next publish.
-    reg_sinks: Mutex<Vec<Weak<dyn RegistryGenSink>>>,
+    /// The registry generation every ring of this director publishes ([`RegistryGeneration`]).
+    /// Shared with each attached [`RegistryHost`], whose writes move it.
+    reg_gen: Arc<RegistryGeneration>,
 }
 
 /// What [`Director::open_info`] says about a new handle.
@@ -104,8 +88,7 @@ impl Director {
             next_fh: AtomicU64::new(1),
             mount_gen: AtomicU32::new(1),
             registry: RwLock::new(None),
-            reg_gen: AtomicU64::new(1),
-            reg_sinks: Mutex::new(Vec::new()),
+            reg_gen: Arc::new(RegistryGeneration::new()),
         }
     }
 
@@ -113,6 +96,9 @@ impl Director {
     /// flush: the host saves on its own, and when its last reference drops (which, if this
     /// held it, happens here, outside the lock).
     pub fn set_registry(&self, host: Option<Arc<RegistryHost>>) {
+        if let Some(h) = &host {
+            h.publish_to(self.reg_gen.clone());
+        }
         let old = {
             let mut r = self.registry.write().unwrap_or_else(|e| e.into_inner());
             std::mem::replace(&mut *r, host)
@@ -121,35 +107,21 @@ impl Director {
         drop(old);
     }
 
-    /// The current registry generation: see [`RegistryGenSink`].
+    /// The current registry generation: see [`RegistryGeneration`].
     pub fn registry_generation(&self) -> u64 {
-        self.reg_gen.load(Ordering::Acquire)
+        self.reg_gen.current()
     }
 
     /// Publish the registry generation to `sink` now and after every change. A ring server
     /// calls this before it hands its ring to anyone.
     pub fn add_registry_sink(&self, sink: Weak<dyn RegistryGenSink>) {
-        let mut sinks = self.reg_sinks.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(s) = sink.upgrade() {
-            s.publish_reg_generation(self.registry_generation());
-            sinks.push(sink);
-        }
+        self.reg_gen.add_sink(sink);
     }
 
-    /// The registry overlay changed (a write, or a layer attached or detached): bump the
-    /// generation and publish it to every sink before returning, so that whoever is told the
-    /// change happened (the writer's reply) can only be told after every reader can see it.
+    /// The registry overlay changed outside a host write (a layer attached or detached): bump
+    /// and publish the generation. Host writes publish on their own ([`RegistryHost`]).
     pub fn registry_changed(&self) {
-        let mut sinks = self.reg_sinks.lock().unwrap_or_else(|e| e.into_inner());
-        // Bumped under the lock, so publishes reach the sinks in generation order.
-        let generation = self.reg_gen.fetch_add(1, Ordering::AcqRel) + 1;
-        sinks.retain(|w| match w.upgrade() {
-            Some(s) => {
-                s.publish_reg_generation(generation);
-                true
-            }
-            None => false,
-        });
+        self.reg_gen.changed();
     }
 
     /// The attached registry overlay, if any.

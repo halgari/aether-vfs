@@ -41,12 +41,13 @@ pub mod ring_dispatch;
 pub mod bench;
 pub mod stage;
 
-pub use director::{Director, OpenInfo, RegistryGenSink};
+pub use director::{Director, OpenInfo};
 pub use disk::DiskProvider;
 pub use ipc::IpcServe;
 pub use io_stats::{mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report};
 pub use mount_graph::MountGraph;
 pub use ops::{Provider, Handle, DirEntry, RootId, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
+pub use registry::{RegistryGenSink, RegistryGeneration};
 // Free-function form: `write_steam_appid` (skyrim-live.rs) writes the overlay
 // copy before a `vfs_embed::Session` exists, so it needs this without an
 // instance to call `Session::overlay_layer_dir` on — see that method's doc

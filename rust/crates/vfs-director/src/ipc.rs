@@ -21,7 +21,8 @@ use vfs_ipc::{Notifier, DEFAULT_PAYLOAD_CAP};
 #[cfg(windows)]
 use vfs_win::{EventNotifier, SharedMapping};
 
-use crate::director::{Director, RegistryGenSink};
+use crate::director::Director;
+use crate::registry::RegistryGenSink;
 
 use crate::ring_dispatch::dispatch_director;
 
