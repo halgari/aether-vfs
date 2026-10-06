@@ -21,8 +21,10 @@
 //!
 //! Needs, and cannot provide for itself: a verified GE-Proton runtime under the aether-vfs
 //! home's `runtimes` (`VFS_HOME`, else `$XDG_DATA_HOME/aether-vfs`), and the Windows
-//! artifacts from `bin/build-windows` beside the test binary. Without either it says so on
-//! stderr and passes without checking anything.
+//! artifacts from `bin/build-windows` beside the test binary, in the same profile:
+//! `bin/build-windows --release`, then
+//! `cargo test --release -p vfs-embed --test proton_registry -- --ignored`. Without either it
+//! says so on stderr and passes without checking anything.
 //!
 //! Nothing it creates is outside this workspace's target directory: the test gets its own
 //! aether-vfs home there, whose `runtimes` links to the real one, so the Wine prefix
@@ -32,6 +34,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use vfs_embed::{DiskProvider, LaunchOpts, MemoryProvider, Provider, Session, VPath};
@@ -211,15 +214,20 @@ fn has(lines: &[String], needle: &str) -> bool {
 
 #[test]
 #[ignore = "needs a GE-Proton runtime in the aether-vfs home and the Windows artifacts from \
-            bin/build-windows (including vfs-fixture-registry.exe) beside the test binary"]
+            bin/build-windows (including vfs-fixture-registry.exe) beside the test binary, in \
+            the same profile: bin/build-windows --release, then cargo test --release"]
 fn registry_writes_look_the_same_through_the_overlay_and_never_reach_the_real_registry() {
     let art = match windows_artifacts() {
         Ok(a) => a,
         Err(missing) => {
             eprintln!(
-                "skipping: Windows artifacts missing beside the test binary: {} \
-                 (cross-build them with `bin/build-windows`)",
-                missing.join(", ")
+                "skipping: Windows artifacts missing beside the test binary ({}): {} \
+                 (cross-build them with `bin/build-windows{}` for this test's profile; \
+                 the usual run is `bin/build-windows --release` then \
+                 `cargo test --release -p vfs-embed --test proton_registry -- --ignored`)",
+                profile_dir().display(),
+                missing.join(", "),
+                if cfg!(debug_assertions) { "" } else { " --release" },
             );
             return;
         }
@@ -261,7 +269,14 @@ fn registry_writes_look_the_same_through_the_overlay_and_never_reach_the_real_re
 
     // 3. Run B, through the overlay.
     let layer = Arc::new(MemoryProvider::new());
-    s.set_registry_layer(Some(Arc::clone(&layer) as Arc<dyn Provider>))
+    // The layer's durable point: counted, and called when the layer is detached.
+    let syncs = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&syncs);
+    let sync: vfs_embed::RegistrySync = Arc::new(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    });
+    s.set_registry_layer(Some(Arc::clone(&layer) as Arc<dyn Provider>), Some(sync))
         .expect("attach the registry layer");
     let b = rig.fixture(&s, "run");
     eprintln!("transcript: {} lines", a.len());
@@ -276,8 +291,12 @@ fn registry_writes_look_the_same_through_the_overlay_and_never_reach_the_real_re
     );
 
     // 5. Nothing reached the real registry.
-    s.set_registry_layer(None)
+    s.set_registry_layer(None, None)
         .expect("detach the registry layer");
+    assert!(
+        syncs.load(Ordering::SeqCst) >= 1,
+        "detaching reaches the layer's durable point"
+    );
     assert!(
         layer
             .getattr(VPath::at_default("overlay.reg"))
@@ -289,18 +308,18 @@ fn registry_writes_look_the_same_through_the_overlay_and_never_reach_the_real_re
     assert_same("the real registry after run B", &p0, &real);
 
     // 6. The layer persists: re-attached here, and loaded by a new session.
-    s.set_registry_layer(Some(Arc::clone(&layer) as Arc<dyn Provider>))
+    s.set_registry_layer(Some(Arc::clone(&layer) as Arc<dyn Provider>), None)
         .unwrap();
     let reattached = rig.fixture(&s, "probe");
     assert_same("probe after re-attaching the layer", &pa, &reattached);
     drop(s);
 
     let s2 = rig.session("two");
-    s2.set_registry_layer(Some(Arc::clone(&layer) as Arc<dyn Provider>))
+    s2.set_registry_layer(Some(Arc::clone(&layer) as Arc<dyn Provider>), None)
         .unwrap();
     let loaded = rig.fixture(&s2, "probe");
     assert_same("probe in a new session with the same layer", &pa, &loaded);
-    s2.set_registry_layer(None).unwrap();
+    s2.set_registry_layer(None, None).unwrap();
     // Leave the prefix's real registry as it was found.
     rig.fixture(&s2, "cleanup");
     let gone = rig.fixture(&s2, "probe");

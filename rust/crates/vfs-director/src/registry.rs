@@ -17,6 +17,12 @@
 //! the saved file is follows the provider's own policy (for a storage layer, the deferred fsync
 //! policy and the host's sync at close).
 //!
+//! **Durable points (spec section 5).** A save alone is not durable under a deferred policy. A
+//! host that can make its store durable passes a [`DurableSync`] hook at
+//! [`RegistryHost::open_with_sync`]: [`RegistryHost::durable`] (session stop, detach) saves and
+//! then calls it, and while a save is not yet covered by one the saver calls it at most once
+//! every [`SYNC_INTERVAL`] (five minutes). Without a hook, durability is the provider's alone.
+//!
 //! **Drop flushes.** Dropping the host stops and joins the saver thread, then saves once more if
 //! anything is unsaved (errors are logged, there is no caller to return them to). The debounce
 //! leaves up to a second of writes unsaved at any moment; a host that forgets `flush` should not
@@ -47,6 +53,16 @@ pub const TMP_FILE: &str = "overlay.reg.tmp";
 pub const CORRUPT_PREFIX: &str = "overlay.reg.corrupt-";
 /// The background saver saves at most this often.
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
+/// While a save is not yet durable, the saver calls the [`DurableSync`] hook at most this often
+/// (spec section 5: a durable point at least every few minutes).
+pub const SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
+/// A host's durable point for the store the registry layer lives in: everything written to the
+/// layer so far is durable when it returns `Ok`. For a `vfs_storage` layer it is the owning
+/// storage's `Storage::sync` (its error mapped to a ring status with `StorageError::to_status`).
+/// Called from the saver thread and from [`RegistryHost::durable`]; it must not call back into
+/// the host.
+pub type DurableSync = Arc<dyn Fn() -> Result<(), i32> + Send + Sync>;
 
 /// Seconds between 1601-01-01 (FILETIME epoch) and 1970-01-01.
 const FILETIME_UNIX_EPOCH: u64 = 11_644_473_600;
@@ -178,6 +194,12 @@ struct Inner {
     store: Arc<dyn Provider>,
     /// Serialises saves, and holds the overlay version the last good save captured.
     saved: Mutex<u64>,
+    /// The host's durable point, if it gave one.
+    sync: Option<DurableSync>,
+    /// A save wrote the layer since the last successful [`DurableSync`] call.
+    unsynced: std::sync::atomic::AtomicBool,
+    /// [`SYNC_INTERVAL`], shorter in tests.
+    sync_interval: Duration,
     saver: Mutex<SaverState>,
     wake: Condvar,
 }
@@ -215,11 +237,32 @@ impl Inner {
             }
             (vfs_registry::encode(&o), o.version())
         };
+        // Marked before the write: a save that fails half way has still touched the layer.
+        self.unsynced.store(true, Ordering::Release);
         write_whole(&*self.store, TMP_FILE, &bytes)?;
         self.store
             .rename(VPath::at_default(TMP_FILE), VPath::at_default(OVERLAY_FILE))?;
         *saved = version;
         Ok(())
+    }
+
+    /// Call the [`DurableSync`] hook if a save is not yet covered by one. Holds `saved`, so no
+    /// save runs between the hook and the flag it clears.
+    fn sync_if_unsynced(&self) -> Result<(), i32> {
+        let Some(sync) = &self.sync else {
+            return Ok(());
+        };
+        let _saves = lock(&self.saved)?;
+        if !self.unsynced.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+        sync().inspect_err(|_| self.unsynced.store(true, Ordering::Release))
+    }
+
+    /// Save, then make the save durable through the hook.
+    fn durable(&self) -> Result<(), i32> {
+        self.save_if_dirty()?;
+        self.sync_if_unsynced()
     }
 
     fn kick(&self) {
@@ -230,42 +273,64 @@ impl Inner {
     }
 
     /// The saver thread: waits for a write, saves, then lets at least [`SAVE_INTERVAL`] pass
-    /// before the next save. A failed save is logged and retried after the interval.
+    /// before the next save. A failed save is logged and retried after the interval. While a
+    /// save is not yet durable (and the host gave a [`DurableSync`]), it also calls the hook
+    /// once [`SYNC_INTERVAL`] has passed since the last call (or since the host opened).
     fn run_saver(&self) {
         let mut last: Option<Instant> = None;
+        let mut last_sync = Instant::now();
         loop {
             let Ok(mut s) = self.saver.lock() else { return };
-            loop {
+            let (save, sync) = loop {
                 if s.stop {
                     return;
                 }
-                let due = last.map(|t| t + SAVE_INTERVAL);
-                match due {
-                    Some(due) if s.kicked && Instant::now() < due => {
-                        let wait = due - Instant::now();
-                        s = match self.wake.wait_timeout(s, wait) {
-                            Ok((g, _)) => g,
-                            Err(_) => return,
-                        };
-                    }
-                    _ if s.kicked => break,
-                    _ => {
-                        s = match self.wake.wait(s) {
-                            Ok(g) => g,
-                            Err(_) => return,
-                        };
-                    }
+                let now = Instant::now();
+                let save_due = last.map_or(now, |t| t + SAVE_INTERVAL);
+                let sync_due = (self.sync.is_some() && self.unsynced.load(Ordering::Acquire))
+                    .then_some(last_sync + self.sync_interval);
+                let save = s.kicked && now >= save_due;
+                let sync = sync_due.is_some_and(|d| now >= d);
+                if save || sync {
+                    break (save, sync);
+                }
+                let next = [s.kicked.then_some(save_due), sync_due]
+                    .into_iter()
+                    .flatten()
+                    .min();
+                s = match next {
+                    Some(due) => match self.wake.wait_timeout(s, due - now) {
+                        Ok((g, _)) => g,
+                        Err(_) => return,
+                    },
+                    None => match self.wake.wait(s) {
+                        Ok(g) => g,
+                        Err(_) => return,
+                    },
+                };
+            };
+            if save {
+                s.kicked = false;
+            }
+            drop(s);
+            if save {
+                last = Some(Instant::now());
+                if let Err(st) = self.save_if_dirty() {
+                    tracing::error!(
+                        status = st,
+                        "registry overlay: background save failed; retrying"
+                    );
+                    self.kick();
                 }
             }
-            s.kicked = false;
-            drop(s);
-            last = Some(Instant::now());
-            if let Err(st) = self.save_if_dirty() {
-                tracing::error!(
-                    status = st,
-                    "registry overlay: background save failed; retrying"
-                );
-                self.kick();
+            if sync {
+                last_sync = Instant::now();
+                if let Err(st) = self.sync_if_unsynced() {
+                    tracing::error!(
+                        status = st,
+                        "registry overlay: periodic durable point failed; retrying"
+                    );
+                }
             }
         }
     }
@@ -316,8 +381,26 @@ fn read_whole(store: &dyn Provider, name: &str) -> Result<Option<Vec<u8>>, i32> 
 impl RegistryHost {
     /// Loads [`OVERLAY_FILE`] from `store`: an absent file is an empty overlay; a corrupt one is
     /// renamed to `overlay.reg.corrupt-<unix time>`, logged at error level, and an empty overlay
-    /// is used. Starts the saver thread.
+    /// is used. Starts the saver thread. No durable point of its own: see [`Self::open_with_sync`].
     pub fn open(store: Arc<dyn Provider>) -> Result<Arc<Self>, i32> {
+        Self::open_with_sync(store, None)
+    }
+
+    /// [`Self::open`] with the host's durable point for the layer's store (see [`DurableSync`]):
+    /// [`Self::durable`] calls it after saving, and the saver calls it at most every
+    /// [`SYNC_INTERVAL`] while a save is not yet durable.
+    pub fn open_with_sync(
+        store: Arc<dyn Provider>,
+        sync: Option<DurableSync>,
+    ) -> Result<Arc<Self>, i32> {
+        Self::open_inner(store, sync, SYNC_INTERVAL)
+    }
+
+    fn open_inner(
+        store: Arc<dyn Provider>,
+        sync: Option<DurableSync>,
+        sync_interval: Duration,
+    ) -> Result<Arc<Self>, i32> {
         let overlay = match read_whole(&*store, OVERLAY_FILE)? {
             None => Overlay::new(),
             Some(bytes) => match vfs_registry::decode(&bytes) {
@@ -351,6 +434,9 @@ impl RegistryHost {
             overlay: RwLock::new(overlay),
             store,
             saved: Mutex::new(saved),
+            sync,
+            unsynced: std::sync::atomic::AtomicBool::new(false),
+            sync_interval,
             saver: Mutex::new(SaverState::default()),
             wake: Condvar::new(),
         });
@@ -370,6 +456,14 @@ impl RegistryHost {
     /// and wait for it. Waits for a save already in progress first.
     pub fn flush(&self) -> Result<(), i32> {
         self.inner.save_if_dirty()
+    }
+
+    /// A durable point (spec section 5): [`Self::flush`], then the host's [`DurableSync`] if a
+    /// save since its last call is not yet covered by it. Without a hook this is
+    /// [`Self::flush`]. The session calls it when it stops serving and when it detaches the
+    /// layer.
+    pub fn durable(&self) -> Result<(), i32> {
+        self.inner.durable()
     }
 
     /// From now on every successful write bumps and publishes `generation` after it is applied
@@ -650,6 +744,78 @@ mod tests {
             }
             r
         }
+    }
+
+    /// A [`DurableSync`] that counts its calls.
+    fn counting_sync() -> (DurableSync, Arc<std::sync::atomic::AtomicUsize>) {
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = n.clone();
+        let sync: DurableSync = Arc::new(move || {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        });
+        (sync, n)
+    }
+
+    #[test]
+    fn durable_saves_then_calls_the_sync_hook_once_per_new_save() {
+        let p = mem();
+        let (sync, calls) = counting_sync();
+        let h = RegistryHost::open_with_sync(p.clone(), Some(sync)).unwrap();
+        // Nothing saved yet: no durable point is needed.
+        h.durable().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        h.set_value(K, "v", 1, b"x\0").unwrap();
+        h.durable().unwrap();
+        assert!(read_file(&p, OVERLAY_FILE).is_some(), "saved before the sync");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Already durable.
+        h.durable().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // A save by the background saver is made durable by the next durable point too.
+        h.set_value(K, "v", 1, b"y\0").unwrap();
+        h.flush().unwrap();
+        h.durable().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_failed_sync_is_retried_at_the_next_durable_point() {
+        let fail = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let f = fail.clone();
+        let sync: DurableSync = Arc::new(move || {
+            if f.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(ST_IO_ERROR)
+            } else {
+                Ok(())
+            }
+        });
+        let h = RegistryHost::open_with_sync(mem(), Some(sync)).unwrap();
+        h.set_value(K, "v", 1, b"x\0").unwrap();
+        assert_eq!(h.durable(), Err(ST_IO_ERROR));
+        fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(h.inner.unsynced.load(Ordering::SeqCst), "still owed a durable point");
+        h.durable().unwrap();
+        assert!(!h.inner.unsynced.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_saver_calls_the_sync_hook_periodically_only_while_a_save_is_not_durable() {
+        let (sync, calls) = counting_sync();
+        let h = RegistryHost::open_inner(mem(), Some(sync), Duration::from_millis(300)).unwrap();
+        // Nothing written: no periodic call.
+        std::thread::sleep(Duration::from_millis(700));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        h.set_value(K, "v", 1, b"x\0").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            assert!(Instant::now() < deadline, "the saver never reached a durable point");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Durable now, and nothing new: no more calls.
+        std::thread::sleep(Duration::from_millis(900));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(SYNC_INTERVAL, Duration::from_secs(300));
     }
 
     #[test]

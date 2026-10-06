@@ -121,7 +121,10 @@ pub mod image;
 mod session;
 mod sources;
 
-pub use session::{compose_root, LaunchExit, LaunchOpts, Session, StageOpts, STOPPED_EXIT_CODE};
+pub use session::{
+    compose_root, registry_sync_for, LaunchExit, LaunchOpts, RegistrySync, Session, StageOpts,
+    STOPPED_EXIT_CODE,
+};
 #[cfg(unix)]
 pub use session::{LaunchHandle, LaunchStopper};
 /// How a Proton launch sets up its Wine prefix — see [`Session::set_prefix_init`].
