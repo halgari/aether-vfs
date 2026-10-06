@@ -24,8 +24,9 @@ use vfs_registry::Lookup;
 use vfs_shim::{install, is_synthetic_key_handle, regclient, registry_handle_path, Engine};
 use windows_sys::Win32::Foundation::{LocalFree, HANDLE};
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegSetKeySecurity, HKEY,
-    HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ, REG_OPTION_NON_VOLATILE,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegSetKeySecurity, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ, KEY_SET_VALUE, REG_DWORD,
+    REG_OPTION_NON_VOLATILE,
 };
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -267,6 +268,7 @@ const REAL_KEYS: &[&str] = &[
     "DirectorDown",
     "Dup",
     "ReadLimited",
+    "PerFrame",
 ];
 
 /// Set `HKCU\<sub>`'s DACL from SDDL.
@@ -930,4 +932,56 @@ fn a_failed_duplicate_with_close_source_drops_the_record() {
     };
     assert!(st < 0, "{st:#x}");
     assert_eq!(registry_handle_path(r), None);
+}
+
+/// The pattern a game's per-frame registry write makes through advapi32: open (or create) the
+/// key, set a value, `RegCloseKey`. Wine's `RegCloseKey` treats every handle at or above
+/// `0x80000000` as a predefined key and returns without calling `NtClose`, so a synthetic
+/// handle up there would never reach the close hook and its record (and private real handle)
+/// would leak, one per frame.
+#[test]
+fn reg_close_key_releases_synthetic_handles() {
+    let (_g, f) = fixture();
+    regclient::set_value(&f.canon("PerFrame"), "Seed", 4, &0u32.to_le_bytes()).unwrap();
+    let before = vfs_shim::registry_handle_counts();
+    let sub = wide(&format!(r"{BASE}\PerFrame"));
+    let name = wide("Frame");
+    for i in 0..500u32 {
+        let mut k: HKEY = std::ptr::null_mut();
+        let st = if i % 2 == 0 {
+            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_SET_VALUE, &mut k) }
+        } else {
+            unsafe {
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    sub.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_ALL_ACCESS,
+                    std::ptr::null(),
+                    &mut k,
+                    std::ptr::null_mut(),
+                )
+            }
+        };
+        assert_eq!(st, 0, "open {i}");
+        let h = k as isize;
+        assert!(is_synthetic_key_handle(h), "{h:#x}");
+        let data = i.to_le_bytes();
+        let st = unsafe { RegSetValueExW(k, name.as_ptr(), 0, REG_DWORD, data.as_ptr(), 4) };
+        assert_eq!(st, 0, "set {i}");
+        assert_eq!(unsafe { RegCloseKey(k) }, 0);
+        assert_eq!(
+            registry_handle_path(h),
+            None,
+            "RegCloseKey left {h:#x} open"
+        );
+    }
+    assert_eq!(vfs_shim::registry_handle_counts(), before);
+    // The write went to the overlay.
+    assert_eq!(
+        regclient::lookup(&f.canon("PerFrame")).map(|(l, _)| l),
+        Ok(Lookup::Present { created: false })
+    );
 }

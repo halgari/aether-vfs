@@ -104,6 +104,10 @@ its handle table, or by asking the real key for its name) plus the relative name
   privately through the unhooked call, when it exists) with the overlay node. A node *created
   here* hides the real key's contents: such nodes exist only for keys deleted then recreated, or
   with no real counterpart, so real contents showing through would resurrect deleted data.
+  Synthetic key handle values are `0x6000_0000 | slot << 2`: below `0x80000000`, because Wine's
+  `RegCloseKey` returns without calling `NtClose` for any handle at or above it (it takes them
+  for predefined keys), and clear of Wine's local (below `0x0400_0000`) and global (XOR
+  `0x544a4def`) handles.
 - **Copy-on-write on a pass-through handle:** a write through a real handle goes to the director,
   never to the real key. From then on the path counts as virtual, and later queries on the same
   handle are routed through the merge using the handle table. The caller keeps its handle.

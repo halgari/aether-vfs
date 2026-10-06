@@ -2,8 +2,9 @@
 //! sections 2.2, 3.1, 3.2 and 6).
 //!
 //! **Two handle tables.**
-//! - *Synthetic* key handles carry [`REG_TAG`] (2^46), between `zipserve`'s section tag (2^45)
-//!   and `fuse_synth`'s file tag (2^47), and are never kernel objects. Each holds the key's
+//! - *Synthetic* key handles are `REG_TAG | slot << 2` with [`REG_TAG`] = `0x6000_0000`: below
+//!   `0x80000000`, where Wine's `RegCloseKey` stops treating a handle as a predefined key (see
+//!   [`REG_TAG`]), and never kernel objects. Each holds the key's
 //!   canonical path, the access the caller was granted, and the shim's own private handle to the
 //!   real key (opened read-only through the unhooked `NtOpenKeyEx`) when one exists. Queries on
 //!   them merge that real key with the overlay node (Task 10).
@@ -50,12 +51,25 @@ use crate::ntdef::{
     STATUS_UNSUCCESSFUL,
 };
 
-/// Tag bit of a synthetic key handle. Real kernel handles never reach this magnitude; the sign
-/// bit stays clear, so the value is never a pseudo-handle.
-pub const REG_TAG: usize = 1 << 46;
+/// Tag bits of a synthetic key handle: bits 29 and 30, nothing above them.
+///
+/// **Below `0x80000000`, on purpose.** Wine's `RegCloseKey` (kernelbase) returns
+/// `ERROR_SUCCESS` without calling `NtClose` for any `hkey >= (HKEY)0x80000000`, taking it for a
+/// predefined key. A synthetic handle up there (they were once tagged 2^46) never reached the
+/// close hook through `RegCloseKey`, so every key a program opened and closed through advapi32
+/// leaked its record and its private real handle: 180k of them in ten minutes of a game that
+/// writes a key every frame. Kernelbase's other predefined-key tests take the low 32 bits
+/// (`HandleToUlong`), which here never fall in `0x80000000..=0x80000006` either, and a handle
+/// truncated to 32 bits stays itself.
+///
+/// **Clear of real handles.** Wine's process-local handles are `(index + 1) << 2` with fewer
+/// than 2^24 entries, so below `0x0400_0000`; its global handles are a local one XOR
+/// `0x544a4def`, whose bit 29 is clear. The sign bit is clear, so the value is never a
+/// pseudo-handle, and none of `zipserve`'s (2^45) or `fuse_synth`'s (2^47) tag bits is set.
+pub const REG_TAG: usize = 0x6000_0000;
 /// Slot bits below the tag (shifted left by 2, so handles stay multiples of 4 as kernel handles
-/// are). Kept clear of 2^45 so a key handle never reads as a synthetic section.
-const SLOT_MASK: usize = (1 << 42) - 1;
+/// are): 2^27 slots, reused once they wrap (a live handle's slot is skipped).
+const SLOT_MASK: usize = (1 << 27) - 1;
 
 /// `STATUS_ACCESS_VIOLATION`, for a NULL `KeyHandle` out-pointer.
 const STATUS_ACCESS_VIOLATION: NTSTATUS = 0xC000_0005u32 as i32;
@@ -131,7 +145,7 @@ static NEXT_SLOT: AtomicUsize = AtomicUsize::new(1);
 
 /// Whether `h` is a synthetic key handle.
 pub fn is_synthetic(h: isize) -> bool {
-    h > 0 && (h as usize) & REG_TAG != 0
+    h > 0 && (h as usize) >> 29 == REG_TAG >> 29
 }
 
 /// Lock a table for a removal on the close path. Never blocks for good: a thread killed while
@@ -152,9 +166,19 @@ pub(crate) fn lock_for_close<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 
 /// Register a synthetic key handle and return its value.
 pub fn insert_synthetic(rec: SynthKey) -> Option<isize> {
-    let slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed) & SLOT_MASK;
-    let h = (REG_TAG | (slot << 2)) as isize;
     let mut t = SYNTH.lock().ok()?;
+    if t.len() >= SLOT_MASK {
+        return None;
+    }
+    // Slots wrap after 2^27 handles; one still live (a key held open since) is skipped, as is
+    // slot 0 (the tag alone).
+    let h = loop {
+        let slot = NEXT_SLOT.fetch_add(1, Ordering::Relaxed) & SLOT_MASK;
+        let h = (REG_TAG | (slot << 2)) as isize;
+        if slot != 0 && !t.contains_key(&h) {
+            break h;
+        }
+    };
     t.insert(h, rec);
     crate::hookstats::note_reg_virtual_handles(t.len());
     Some(h)
@@ -1714,6 +1738,17 @@ pub(crate) mod tests {
         assert_eq!(h as usize & (1 << 47), 0, "would read as a synthetic file");
         assert!(!is_synthetic(-1), "a pseudo-handle is not a key handle");
         assert!(!is_synthetic(0x1234));
+        // Wine's `RegCloseKey` calls `NtClose` only below 0x80000000.
+        assert!((h as usize) < 0x8000_0000);
+        // Wine's largest local handle, and its global handles (local XOR 0x544a4def).
+        assert!(!is_synthetic(0x0400_0000 - 4));
+        assert!(!is_synthetic(0x544a_4def ^ 4));
+        assert!(!is_synthetic(0x544a_4def ^ (0x00ff_ffff << 2)));
+        // Other tags, and a synthetic value with a high bit set, are not key handles.
+        assert!(!is_synthetic((1 << 46) | 0x7c));
+        assert!(!is_synthetic((1 << 45) | (REG_TAG as isize)));
+        assert!(!is_synthetic(0x2000_0000));
+        assert!(!is_synthetic(0x4000_0000));
         assert_eq!(path_of(h).as_deref(), Some(r"\Registry\Machine\X"));
         assert!(remove_synthetic(h).is_some());
         assert!(synthetic(h).is_none());
