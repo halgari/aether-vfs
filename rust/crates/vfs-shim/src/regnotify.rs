@@ -197,7 +197,7 @@ pub unsafe fn notify(real: &Real, h: isize, a: &Args) -> Notify {
             None => return Notify::Done(STATUS_INVALID_HANDLE),
         }
     } else {
-        match regkeys::resolve_handle(real, h) {
+        match regkeys::resolve_for_read(real, h) {
             Some(r) => (r.path, r.access, r.deleted),
             None => return Notify::Pass,
         }

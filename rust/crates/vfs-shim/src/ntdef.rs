@@ -290,6 +290,9 @@ pub const STATUS_END_OF_FILE: NTSTATUS = 0xC000_0011u32 as i32;
 pub const STATUS_INVALID_FILE_FOR_SECTION: NTSTATUS = 0xC000_0124u32 as i32;
 /// `STATUS_INVALID_HANDLE`.
 pub const STATUS_INVALID_HANDLE: NTSTATUS = 0xC000_0008u32 as i32;
+/// `STATUS_OBJECT_TYPE_MISMATCH` — the handle is not an object of the type the call takes
+/// (e.g. `NtQueryKey` on a file handle).
+pub const STATUS_OBJECT_TYPE_MISMATCH: NTSTATUS = 0xC000_0024u32 as i32;
 /// `STATUS_OBJECT_NAME_COLLISION` — maps to `ERROR_ALREADY_EXISTS`; what a
 /// `FILE_CREATE` of an existing name must report so the standard
 /// create-and-ignore-ALREADY_EXISTS idiom works.

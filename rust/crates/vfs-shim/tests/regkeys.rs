@@ -354,6 +354,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
         std::mem::forget(install(engine).expect("install"));
         assert!(regclient::enabled());
+        assert!(vfs_shim::registry_detours_installed() > 0);
         Fixture {
             fake,
             sid: user_sid(),

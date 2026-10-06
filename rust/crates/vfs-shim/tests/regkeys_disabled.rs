@@ -1,6 +1,6 @@
-//! With the registry overlay off (`VFS_REGISTRY` unset), the registry detours are installed but
+//! With the registry overlay off (`VFS_REGISTRY` unset), no registry detour is installed and
 //! every call goes straight to the real registry: real handles, nothing tracked, and a create
-//! creates the real key.
+//! creates the real key. The shared `NtClose` / `NtQueryObject` hooks keep working.
 //!
 //! Its own binary: `regclient::enabled` is decided once per process, and `install` is one-shot.
 #![cfg(windows)]
@@ -32,6 +32,7 @@ struct ObjectAttributes {
 extern "system" {
     fn NtOpenKeyEx(key: *mut isize, access: u32, oa: *const ObjectAttributes, options: u32) -> i32;
     fn NtClose(h: isize) -> i32;
+    fn NtQueryObject(h: isize, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
 }
 
 fn with_oa<R>(name: &str, f: impl FnOnce(*const ObjectAttributes) -> R) -> R {
@@ -68,6 +69,17 @@ fn every_registry_call_is_the_real_one() {
     };
     let _hooks = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
     assert!(!vfs_shim::regclient::enabled());
+    assert_eq!(
+        vfs_shim::registry_detours_installed(),
+        0,
+        "no registry detour goes in with the overlay off"
+    );
+    assert_eq!(
+        vfs_shim::regclient::detours_outcome(),
+        Some(Err(vfs_shim::regclient::OFF)),
+        "the off outcome is recorded"
+    );
+    assert_eq!(vfs_shim::reg_overlay_disabled_by(), None, "off is not a disabled overlay");
 
     let name = r"\Registry\Machine\Software";
     let mut h = 0isize;
@@ -77,6 +89,22 @@ fn every_registry_call_is_the_real_one() {
     );
     assert!(!is_synthetic_key_handle(h));
     assert_eq!(registry_handle_path(h), None, "nothing is tracked");
+    // The shared `NtQueryObject` hook answers a real key's name from the real call.
+    let mut buf = [0u64; 128];
+    let mut ret = 0u32;
+    assert_eq!(
+        unsafe { NtQueryObject(h, 1, buf.as_mut_ptr().cast(), 1024, &mut ret) },
+        0,
+        "object name of a real key"
+    );
+    let name_len = (buf[0] & 0xffff) as usize / 2;
+    let name_ptr = buf[1] as *const u16;
+    let real_name =
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(name_ptr, name_len) });
+    assert!(
+        real_name.to_ascii_uppercase().starts_with(r"\REGISTRY\MACHINE\SOFTWARE"),
+        "{real_name}"
+    );
 
     // A volatile scratch key under HKCU, through Win32 (so through `NtCreateKey`): created
     // for real, then deleted for real.

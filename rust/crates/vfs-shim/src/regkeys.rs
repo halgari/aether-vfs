@@ -46,7 +46,8 @@ use crate::ntdef::{
     STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_BUFFER_SIZE, STATUS_INVALID_HANDLE,
     STATUS_INVALID_PARAMETER, STATUS_INVALID_SECURITY_DESCR, STATUS_KEY_DELETED,
     STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
-    STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    STATUS_OBJECT_PATH_NOT_FOUND, STATUS_OBJECT_TYPE_MISMATCH, STATUS_SUCCESS,
+    STATUS_UNSUCCESSFUL,
 };
 
 /// Tag bit of a synthetic key handle. Real kernel handles never reach this magnitude; the sign
@@ -477,9 +478,12 @@ impl AbsName {
     }
 }
 
-/// The name `NtQueryKey(KeyNameInformation)` reports for a real key handle.
-unsafe fn real_key_name(real: &Real, h: isize) -> Option<String> {
-    let q = real.query?;
+/// The name `NtQueryKey(KeyNameInformation)` reports for a real key handle. `Err` is the
+/// failing status (`STATUS_UNSUCCESSFUL` when there is no trampoline or the answer is malformed).
+unsafe fn real_key_name(real: &Real, h: isize) -> Result<String, NTSTATUS> {
+    let Some(q) = real.query else {
+        return Err(STATUS_UNSUCCESSFUL);
+    };
     let mut buf = vec![0u32; 256];
     for _ in 0..3 {
         let mut need = 0u32;
@@ -497,20 +501,26 @@ unsafe fn real_key_name(real: &Real, h: isize) -> Option<String> {
             continue;
         }
         if st < 0 {
-            return None;
+            return Err(st);
         }
         let n = buf[0] as usize;
         if !n.is_multiple_of(2) || 4 + n > buf.len() * 4 {
-            return None;
+            return Err(STATUS_UNSUCCESSFUL);
         }
         let units =
             core::slice::from_raw_parts((buf.as_ptr() as *const u8).add(4) as *const u16, n / 2);
-        return Some(String::from_utf16_lossy(units));
+        return Ok(String::from_utf16_lossy(units));
     }
-    None
+    Err(STATUS_UNSUCCESSFUL)
 }
 
-/// Handles [`resolve_handle`] found are not keys the overlay serves (not a key, or a key outside
+/// Whether a failed [`real_key_name`] proves the handle is not a key the overlay serves: only
+/// "not a key" and "not a handle" do. Any other failure leaves the handle unresolvable.
+fn not_a_key(st: NTSTATUS) -> bool {
+    st == STATUS_OBJECT_TYPE_MISMATCH || st == STATUS_INVALID_HANDLE
+}
+
+/// Handles [`resolve`] found are not keys the overlay serves (not a key, or a key outside
 /// `\Registry\Machine` and `\Registry\User`), so asking again costs one lookup here instead of
 /// a syscall. Bounded: it starts over when full. An entry goes with its handle's `NtClose` (or
 /// `DUPLICATE_CLOSE_SOURCE`), so a recycled handle value never inherits it.
@@ -564,30 +574,55 @@ unsafe fn granted_access(real: &Real, h: isize) -> Option<u32> {
     (st >= 0).then_some(buf[1])
 }
 
+/// What [`resolve`] learned about a caller's handle.
+#[derive(Debug)]
+pub enum Resolution {
+    /// A real key on a virtualised path: its record (now tracked as pass-through).
+    Ours(KeyRec),
+    /// Not a key the overlay serves: a synthetic handle, a handle that is not a key, or a key
+    /// outside the virtualised hives (remembered, so the next ask is cheap).
+    NotOurs,
+    /// The real key's name could not be read for another reason: the handle may be
+    /// one the overlay serves. Not remembered. Writes through it fail closed
+    /// (`STATUS_UNSUCCESSFUL`, spec section 6); reads pass through as a counted fallback.
+    Unresolvable,
+}
+
 /// The record of a real key handle the overlay serves: from the pass-through table, or, for a
 /// handle neither table holds (opened before the hooks, or handed in from elsewhere), resolved
 /// once from the real key's name and the access the kernel granted it, and recorded as
-/// pass-through from then on. `None` for a synthetic handle, a handle that is not a key, or a
-/// key outside the virtualised hives (remembered, so the next ask is cheap).
+/// pass-through from then on. See [`Resolution`]; only `STATUS_OBJECT_TYPE_MISMATCH` and
+/// `STATUS_INVALID_HANDLE` from the name query make a handle [`Resolution::NotOurs`].
 ///
 /// # Safety
 /// `h` is a caller's handle; it is only passed to the real `NtQueryKey` and `NtQueryObject`.
-pub unsafe fn resolve_handle(real: &Real, h: isize) -> Option<KeyRec> {
+pub unsafe fn resolve(real: &Real, h: isize) -> Resolution {
     if is_synthetic(h) || h <= 0 {
-        return None;
+        return Resolution::NotOurs;
     }
     if let Some(r) = tracked(h) {
-        return Some(r);
+        return Resolution::Ours(r);
     }
     if is_not_ours(h) {
-        return None;
+        return Resolution::NotOurs;
     }
-    let path = real_key_name(real, h)
-        .and_then(|nt| path::canonical(&nt, user_sid()).ok())
+    let nt = match real_key_name(real, h) {
+        Ok(nt) => nt,
+        Err(st) if not_a_key(st) => {
+            note_not_ours(h);
+            return Resolution::NotOurs;
+        }
+        Err(_) => {
+            crate::hookstats::note_reg_unresolved();
+            return Resolution::Unresolvable;
+        }
+    };
+    let path = path::canonical(&nt, user_sid())
+        .ok()
         .filter(|p| path::is_virtualised(p));
     let Some(path) = path else {
         note_not_ours(h);
-        return None;
+        return Resolution::NotOurs;
     };
     let rec = KeyRec {
         path,
@@ -597,20 +632,51 @@ pub unsafe fn resolve_handle(real: &Real, h: isize) -> Option<KeyRec> {
         renamed: false,
     };
     track(h, rec.clone());
-    Some(rec)
+    Resolution::Ours(rec)
+}
+
+/// [`resolve`] for a read: an unresolvable handle reads as not ours (the real call), counted as
+/// a read fallback (spec section 6).
+///
+/// # Safety
+/// As [`resolve`].
+pub unsafe fn resolve_for_read(real: &Real, h: isize) -> Option<KeyRec> {
+    match resolve(real, h) {
+        Resolution::Ours(r) => Some(r),
+        Resolution::NotOurs => None,
+        Resolution::Unresolvable => {
+            crate::hookstats::note_reg_read_fallback();
+            None
+        }
+    }
+}
+
+/// Why [`root_path`] could not name a root key handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootErr {
+    /// Not a key (or not a handle, or a synthetic handle that is gone), or a name that is not a
+    /// registry path.
+    NotKey,
+    /// The real key's name could not be read for another reason (see [`not_a_key`]).
+    Unresolvable,
 }
 
 /// The canonical path of a root key handle: from the tables, else from the real key's name.
-/// `Err(())` when the handle is not something this can name.
-unsafe fn root_path(real: &Real, root: isize) -> Result<String, ()> {
+unsafe fn root_path(real: &Real, root: isize) -> Result<String, RootErr> {
     if is_synthetic(root) {
-        return synthetic(root).map(|k| k.path).ok_or(());
+        return synthetic(root).map(|k| k.path).ok_or(RootErr::NotKey);
     }
     if let Some(r) = tracked(root) {
         return Ok(r.path);
     }
-    let nt = real_key_name(real, root).ok_or(())?;
-    path::canonical(&nt, user_sid()).map_err(|_| ())
+    let nt = real_key_name(real, root).map_err(|st| {
+        if not_a_key(st) {
+            RootErr::NotKey
+        } else {
+            RootErr::Unresolvable
+        }
+    })?;
+    path::canonical(&nt, user_sid()).map_err(|_| RootErr::NotKey)
 }
 
 /// The shim's private read-only handle to the real key at `path`, opened `KEY_READ` with the
@@ -777,8 +843,8 @@ pub unsafe fn open_or_create(
     } else {
         match root_path(real, root) {
             Ok(p) => Some(p),
-            Err(()) if root_synth => return Outcome::fail(STATUS_INVALID_HANDLE),
-            Err(()) => {
+            Err(_) if root_synth => return Outcome::fail(STATUS_INVALID_HANDLE),
+            Err(_) => {
                 crate::hookstats::note_reg_unresolved();
                 return passthrough(pass);
             }
@@ -1424,8 +1490,15 @@ pub unsafe fn set_security(
             None => return Some(STATUS_INVALID_HANDLE),
         }
     } else {
-        let r = resolve_handle(real, h)?;
-        (r.access, r.deleted)
+        match resolve(real, h) {
+            Resolution::Ours(r) => (r.access, r.deleted),
+            Resolution::NotOurs => return None,
+            // It may be a key the overlay serves: refuse rather than change the real key.
+            Resolution::Unresolvable => {
+                crate::hookstats::note_reg_write_refused();
+                return Some(STATUS_UNSUCCESSFUL);
+            }
+        }
     };
     Some(check_set_security(access, deleted, info, sd))
 }
@@ -1464,29 +1537,49 @@ unsafe fn check_set_security(access: u32, deleted: bool, info: u32, sd: *const c
     STATUS_SUCCESS
 }
 
+/// Whether a key (handle or name) is one the overlay serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Serves {
+    /// Synthetic, or a real key on a virtualised path.
+    Yes,
+    /// Not a key the overlay serves.
+    No,
+    /// It could not be told (the handle, or the name's root handle, is unresolvable): a call
+    /// that would change the real key is refused with `STATUS_UNSUCCESSFUL` (spec section 6).
+    Unresolvable,
+}
+
 /// Whether a key handle is one the overlay serves: synthetic, or a real key on a virtualised
 /// path (spec 3.6: the calls that would change the real registry are refused on both).
 ///
 /// # Safety
 /// `h` is a caller's handle; it is only passed to the real `NtQueryKey` and `NtQueryObject`.
-pub unsafe fn serves_handle(real: &Real, h: isize) -> bool {
-    is_synthetic(h) || resolve_handle(real, h).is_some()
+pub unsafe fn serves_handle(real: &Real, h: isize) -> Serves {
+    if is_synthetic(h) {
+        return Serves::Yes;
+    }
+    match resolve(real, h) {
+        Resolution::Ours(_) => Serves::Yes,
+        Resolution::NotOurs => Serves::No,
+        Resolution::Unresolvable => Serves::Unresolvable,
+    }
 }
 
 /// Whether the key an `OBJECT_ATTRIBUTES` names (resolved as an open resolves it) is one the
-/// overlay serves: under a synthetic root, or on a virtualised path. A name that cannot be
-/// resolved (an unnamed root, a bad relative name) is left to the real call.
+/// overlay serves: under a synthetic root, or on a virtualised path. A name that is not a
+/// registry path (an unnamed root, a bad relative name, a root that is not a key) is left to
+/// the real call; a root key whose name cannot be read is [`Serves::Unresolvable`].
 ///
 /// # Safety
 /// `oa` is the caller's `OBJECT_ATTRIBUTES` (nullable).
-pub unsafe fn serves_target(real: &Real, oa: *const ObjectAttributes) -> bool {
+pub unsafe fn serves_target(real: &Real, oa: *const ObjectAttributes) -> Serves {
     if oa.is_null() {
-        return false;
+        return Serves::No;
     }
     let oa_ref = &*oa;
     let root = oa_ref.root_directory as isize;
     if is_synthetic(root) {
-        return true;
+        return Serves::Yes;
     }
     let name = if oa_ref.object_name.is_null() {
         String::new()
@@ -1506,18 +1599,98 @@ pub unsafe fn serves_target(real: &Real, oa: *const ObjectAttributes) -> bool {
     } else {
         match root_path(real, root) {
             Ok(p) => Some(p),
-            Err(()) => return false,
+            Err(RootErr::NotKey) => return Serves::No,
+            Err(RootErr::Unresolvable) => {
+                crate::hookstats::note_reg_unresolved();
+                return Serves::Unresolvable;
+            }
         }
     };
     match compose(base.as_deref(), &name, user_sid()) {
-        Resolved::Path(p) => path::is_virtualised(&p),
-        Resolved::NotOurs | Resolved::Invalid => false,
+        Resolved::Path(p) if path::is_virtualised(&p) => Serves::Yes,
+        _ => Serves::No,
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    unsafe extern "system" fn name_query_fails(
+        _: HANDLE,
+        _: u32,
+        _: *mut c_void,
+        _: u32,
+        _: *mut u32,
+    ) -> NTSTATUS {
+        // STATUS_INSUFFICIENT_RESOURCES
+        crate::hook::contain_panic("name_query_fails", || 0xC000_009Au32 as i32, || -1)
+    }
+
+    unsafe extern "system" fn name_query_not_a_key(
+        _: HANDLE,
+        _: u32,
+        _: *mut c_void,
+        _: u32,
+        _: *mut u32,
+    ) -> NTSTATUS {
+        crate::hook::contain_panic("name_query_not_a_key", || STATUS_OBJECT_TYPE_MISMATCH, || -1)
+    }
+
+    /// Entry points whose `NtQueryKey` fails every name query: with `not_a_key`, as for a
+    /// handle that is not a key; otherwise with a status that tells nothing (S1).
+    pub(crate) fn real_whose_name_query_fails(not_a_key: bool) -> Real {
+        Real {
+            open_ex: None,
+            query: Some(if not_a_key {
+                name_query_not_a_key
+            } else {
+                name_query_fails
+            }),
+            close: None,
+            dup: None,
+            enum_key: None,
+            query_value: None,
+            enum_value: None,
+            query_multiple: None,
+            query_object: None,
+        }
+    }
+
+    #[test]
+    fn an_unresolvable_handle_fails_closed_and_is_not_remembered() {
+        let h = 0x0123_4560isize;
+        let real = real_whose_name_query_fails(false);
+        unsafe {
+            assert!(matches!(resolve(&real, h), Resolution::Unresolvable));
+            assert!(!is_not_ours(h), "an unresolvable handle is not cached as not ours");
+            assert_eq!(serves_handle(&real, h), Serves::Unresolvable);
+            assert!(resolve_for_read(&real, h).is_none(), "a read passes through");
+            assert_eq!(
+                set_security(&real, h, 0, core::ptr::null()),
+                Some(STATUS_UNSUCCESSFUL),
+                "a security change fails closed"
+            );
+            assert!(!is_not_ours(h));
+        }
+    }
+
+    #[test]
+    fn only_not_a_key_or_a_bad_handle_makes_a_handle_not_ours() {
+        assert!(not_a_key(STATUS_OBJECT_TYPE_MISMATCH));
+        assert!(not_a_key(STATUS_INVALID_HANDLE));
+        assert!(!not_a_key(STATUS_ACCESS_DENIED));
+        assert!(!not_a_key(STATUS_UNSUCCESSFUL));
+        let h = 0x0123_4570isize;
+        let real = real_whose_name_query_fails(true);
+        unsafe {
+            assert!(matches!(resolve(&real, h), Resolution::NotOurs));
+            assert!(is_not_ours(h), "remembered");
+            assert_eq!(serves_handle(&real, h), Serves::No);
+            assert_eq!(set_security(&real, h, 0, core::ptr::null()), None);
+        }
+        forget_not_ours(h);
+    }
 
     #[test]
     fn synthetic_key_handles_stay_clear_of_the_other_tags() {

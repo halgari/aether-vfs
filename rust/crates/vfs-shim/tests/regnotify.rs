@@ -1043,8 +1043,38 @@ fn the_out_of_scope_calls_are_refused_on_keys_the_overlay_serves() {
     // Saving reads the real key: passed through (Wine's own answer, whatever it is).
     let file = f.file("save-real.hiv");
     let save: SaveKeyFn = ntfn("NtSaveKey");
-    assert_ne!(unsafe { save(hp, file) }, STATUS_NOT_SUPPORTED);
+    let saved = unsafe { save(hp, file) };
+    assert_ne!(saved, STATUS_NOT_SUPPORTED);
     unsafe { CloseHandle(file as HANDLE) };
+
+    // With the hooks bypassed (the shim's own work on this thread) and the overlay on, the calls
+    // that would change the real key fail closed rather than reach it; a save still passes
+    // through.
+    let restore_file = f.file("restore-bypassed.hiv");
+    let save_file = f.file("save-bypassed.hiv");
+    let sd = sddl("O:BAG:BAD:(A;;KA;;;WD)");
+    let (restored, secured, saved_bypassed) = vfs_shim::as_shim_io_for_tests(|| unsafe {
+        let restore: RestoreKeyFn = ntfn("NtRestoreKey");
+        let set: SetSecurityFn = ntfn("NtSetSecurityObject");
+        (
+            restore(hp, restore_file, 0),
+            set(hp, 4 /* DACL_SECURITY_INFORMATION */, sd),
+            save(hp, save_file),
+        )
+    });
+    assert_eq!(restored, STATUS_UNSUCCESSFUL, "bypassed NtRestoreKey");
+    assert_eq!(secured, STATUS_UNSUCCESSFUL, "bypassed NtSetSecurityObject");
+    assert_eq!(saved_bypassed, saved, "a bypassed NtSaveKey is the real call");
+    unsafe {
+        windows_sys::Win32::Foundation::LocalFree(sd);
+        CloseHandle(restore_file as HANDLE);
+        CloseHandle(save_file as HANDLE);
+    }
+    assert_eq!(
+        f.real_info("UnsupReal"),
+        before,
+        "the real key is unchanged"
+    );
 
     // A handle that is not a key, and a name outside the virtualised hives, are not ours.
     let restore: RestoreKeyFn = ntfn("NtRestoreKey");

@@ -40,7 +40,11 @@ pub use vfs_protocol::shimcfg::{
     encode_config, encode_config_full, encode_config_with_overlay, StaticImport,
 };
 pub use engine::{Engine, EngineError, RenameOutcome};
-pub use hook::{install, install_late, skipped_detours, HookGuard, InstallError};
+pub use hook::{
+    install, install_late, registry_detours_installed, skipped_detours, HookGuard, InstallError,
+};
+#[doc(hidden)]
+pub use hook::as_shim_io_for_tests;
 /// Run one `extern "system"` entry point's body with its panic contained.
 ///
 /// Exported for `vfs-shim-dll`, which owns the injected DLL's two other

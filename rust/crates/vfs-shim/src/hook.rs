@@ -1265,7 +1265,21 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
         d_unmap, d_qvol, d_lock, d_unlock, d_flush,
     ]);
 
-    install_registry_detours(ntdll, &mut detours, qobj_installed);
+    // The registry overlay's detours go in only when the host asked for the overlay
+    // (`VFS_REGISTRY`): with it unset this process's registry calls, and its process-wide
+    // object calls (`NtDuplicateObject`, security, handle flags), are not detoured at all.
+    // `NtClose` and `NtQueryObject` above are the file hooks'; with the overlay off they never
+    // touch the registry tables (`regclient::enabled` is false).
+    if vfs_env::opt_in(vfs_env::REGISTRY) {
+        let before = detours.len();
+        install_registry_detours(ntdll, &mut detours, qobj_installed);
+        REG_DETOURS_INSTALLED.store(
+            detours.len() - before,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    } else {
+        crate::regclient::overlay_off();
+    }
 
     // Best-effort child-process propagation + virtual image path spoof.
     if let Some(dll) = self_dll_path() {
@@ -1332,9 +1346,20 @@ unsafe fn detour_if_present(
     optional_detour(ntdll, name, label, hookfn, detours, store)
 }
 
+/// Registry detours the install put in (0 with `VFS_REGISTRY` unset). For tests and diagnostics.
+static REG_DETOURS_INSTALLED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// How many registry overlay detours this process's install put in: 0 when the overlay is off
+/// (`VFS_REGISTRY` unset). For tests and diagnostics.
+pub fn registry_detours_installed() -> usize {
+    REG_DETOURS_INSTALLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The registry overlay's detours (spec section 3.1: open, create, duplicate; `NtClose` and
-/// `NtQueryObject` are the file hooks'). Installed whether or not the overlay is on: each
-/// checks `regclient::enabled()` first and goes straight to its trampoline when it is off.
+/// `NtQueryObject` are the file hooks'). Installed only when the host turned the overlay on
+/// (`VFS_REGISTRY`, see `install_all_detours`); each still checks `regclient::enabled()` first
+/// and goes straight to its trampoline when it is off (a missing detour turns it off).
 /// Optional in the style of `NtQueryObject`, so a host without one still gets the file VFS.
 ///
 /// `qobj_installed`: the file hooks' `NtQueryObject` detour is in. The registry needs it (names
@@ -1733,6 +1758,14 @@ unsafe fn install_registry_detours(
         NtKeyOnlyFn
     );
     crate::regclient::detours_installed(&missing);
+}
+
+/// Run `f` as the shim's own work on this thread (a [`ShimIoGuard`] held), so every hook it
+/// reaches is bypassed. For tests of the bypass paths only.
+#[doc(hidden)]
+pub fn as_shim_io_for_tests<R>(f: impl FnOnce() -> R) -> R {
+    let _io = ShimIoGuard::enter();
+    f()
 }
 
 /// The unhooked registry entry points, for `regkeys`.
@@ -2334,17 +2367,20 @@ unsafe fn query_security_hook_body(
 
 /// `NtSetSecurityObject` hook: on a key the overlay serves (synthetic, or a real key on a
 /// virtualised path) the change is checked, accepted and ignored (`regkeys::set_security`);
-/// anything else gets the real call.
+/// anything else gets the real call. A handle that cannot be resolved, or a call made while the
+/// hook is bypassed with the overlay on, gets `STATUS_UNSUCCESSFUL`.
 unsafe fn set_security_hook_body(handle: HANDLE, info: u32, sd: *const c_void) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetSecurityObject);
     let Some(tramp) = TRAMP_SET_SECURITY else {
         return STATUS_UNSUCCESSFUL;
     };
-    if reg_bypass() {
+    if !crate::regclient::enabled() {
         return tramp(handle, info, sd);
     }
-    let Some(_io) = ShimIoGuard::enter() else {
-        return tramp(handle, info, sd);
+    // With the overlay on, a security change this hook cannot examine (the shim's own call, or
+    // no guard) is refused, as the write hooks refuse theirs: it may be on a virtualised key.
+    let Some(_io) = reg_write_guard() else {
+        return STATUS_UNSUCCESSFUL;
     };
     match crate::regkeys::set_security(&reg_real(), handle as isize, info, sd) {
         Some(st) => st,
@@ -2373,25 +2409,33 @@ unsafe fn set_info_object_hook_body(
     }
 }
 
-/// The body of a spec 3.6 hook: the overlay off, or the shim's own call, goes to the real call;
-/// otherwise `refuse` decides between `STATUS_NOT_SUPPORTED` and the real call.
+/// The body of a spec 3.6 hook. The overlay off goes to the real call. With it on, `refuse`
+/// decides: `Some(status)` is returned, `None` makes the real call.
+///
+/// `modifies`: the call changes the real registry (Restore, Replace, Load*, Unload*, transacted
+/// create/open). When the hook is bypassed with the overlay on (the shim's own call, or no
+/// guard) such a call is refused with `STATUS_UNSUCCESSFUL`, as the write hooks refuse theirs
+/// (`reg_write_guard`); the harmless ones (Save, Compress, Lock) still get the real call.
 macro_rules! out_of_scope_body {
     ($(#[$attr:meta])* fn $body:ident($($arg:ident: $ty:ty),* $(,)?), $hook:ident, $tramp:ident,
-     refuse = $refuse:expr;) => {
+     modifies = $modifies:expr, refuse = $refuse:expr;) => {
         $(#[$attr])*
         unsafe fn $body($($arg: $ty),*) -> NTSTATUS {
             let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::$hook);
             let Some(tramp) = $tramp else {
                 return STATUS_UNSUCCESSFUL;
             };
-            if reg_bypass() {
+            if !crate::regclient::enabled() {
                 return tramp($($arg),*);
             }
-            let Some(_io) = ShimIoGuard::enter() else {
+            let Some(_io) = reg_write_guard() else {
+                if $modifies {
+                    return STATUS_UNSUCCESSFUL;
+                }
                 return tramp($($arg),*);
             };
-            if $refuse {
-                return STATUS_NOT_SUPPORTED;
+            if let Some(st) = $refuse {
+                return st;
             }
             tramp($($arg),*)
         }
@@ -2399,20 +2443,34 @@ macro_rules! out_of_scope_body {
 }
 
 /// A synthetic key handle: none of the spec 3.6 calls can act on it.
-fn synthetic_key(key: HANDLE) -> bool {
-    crate::regkeys::is_synthetic(key as isize)
+fn synthetic_key(key: HANDLE) -> Option<NTSTATUS> {
+    crate::regkeys::is_synthetic(key as isize).then_some(STATUS_NOT_SUPPORTED)
+}
+
+/// What a real-modifying spec 3.6 call gets for a key the overlay may serve: `NOT_SUPPORTED` on
+/// one it serves, `UNSUCCESSFUL` on one it cannot tell (fails closed, spec section 6), the real
+/// call (`None`) otherwise.
+fn refusal(serves: crate::regkeys::Serves) -> Option<NTSTATUS> {
+    match serves {
+        crate::regkeys::Serves::Yes => Some(STATUS_NOT_SUPPORTED),
+        crate::regkeys::Serves::No => None,
+        crate::regkeys::Serves::Unresolvable => {
+            crate::hookstats::note_reg_write_refused();
+            Some(STATUS_UNSUCCESSFUL)
+        }
+    }
 }
 
 /// A key the overlay serves (synthetic, or real on a virtualised path): a call that would change
 /// the real key through it is refused.
-unsafe fn served_key(key: HANDLE) -> bool {
-    crate::regkeys::serves_handle(&reg_real(), key as isize)
+unsafe fn served_key(key: HANDLE) -> Option<NTSTATUS> {
+    refusal(crate::regkeys::serves_handle(&reg_real(), key as isize))
 }
 
 /// A key name the overlay serves: a transacted open of it, or a hive loaded over or unloaded
 /// from it, is refused.
-unsafe fn served_target(oa: *const ObjectAttributes) -> bool {
-    crate::regkeys::serves_target(&reg_real(), oa)
+unsafe fn served_target(oa: *const ObjectAttributes) -> Option<NTSTATUS> {
+    refusal(crate::regkeys::serves_target(&reg_real(), oa))
 }
 
 out_of_scope_body! {
@@ -2426,7 +2484,7 @@ out_of_scope_body! {
         options: u32,
         transaction: HANDLE,
         disposition: *mut u32,
-    ), CreateKeyTransacted, TRAMP_CREATE_KEY_TX, refuse = served_target(oa);
+    ), CreateKeyTransacted, TRAMP_CREATE_KEY_TX, modifies = true, refuse = served_target(oa);
 }
 out_of_scope_body! {
     fn open_key_tx_hook_body(
@@ -2434,7 +2492,7 @@ out_of_scope_body! {
         access: u32,
         oa: *const ObjectAttributes,
         transaction: HANDLE,
-    ), OpenKeyTransacted, TRAMP_OPEN_KEY_TX, refuse = served_target(oa);
+    ), OpenKeyTransacted, TRAMP_OPEN_KEY_TX, modifies = true, refuse = served_target(oa);
 }
 out_of_scope_body! {
     fn open_key_tx_ex_hook_body(
@@ -2443,18 +2501,18 @@ out_of_scope_body! {
         oa: *const ObjectAttributes,
         options: u32,
         transaction: HANDLE,
-    ), OpenKeyTransactedEx, TRAMP_OPEN_KEY_TX_EX, refuse = served_target(oa);
+    ), OpenKeyTransactedEx, TRAMP_OPEN_KEY_TX_EX, modifies = true, refuse = served_target(oa);
 }
 out_of_scope_body! {
     fn load_key_hook_body(target: *const ObjectAttributes, source: *const ObjectAttributes),
-        LoadKey, TRAMP_LOAD_KEY, refuse = served_target(target);
+        LoadKey, TRAMP_LOAD_KEY, modifies = true, refuse = served_target(target);
 }
 out_of_scope_body! {
     fn load_key2_hook_body(
         target: *const ObjectAttributes,
         source: *const ObjectAttributes,
         flags: u32,
-    ), LoadKey2, TRAMP_LOAD_KEY2, refuse = served_target(target);
+    ), LoadKey2, TRAMP_LOAD_KEY2, modifies = true, refuse = served_target(target);
 }
 out_of_scope_body! {
     #[allow(clippy::too_many_arguments)]
@@ -2467,7 +2525,7 @@ out_of_scope_body! {
         a6: usize,
         a7: usize,
         a8: usize,
-    ), LoadKeyEx, TRAMP_LOAD_KEY_EX, refuse = served_target(target);
+    ), LoadKeyEx, TRAMP_LOAD_KEY_EX, modifies = true, refuse = served_target(target);
 }
 out_of_scope_body! {
     #[allow(clippy::too_many_arguments)]
@@ -2480,41 +2538,42 @@ out_of_scope_body! {
         a6: usize,
         a7: usize,
         a8: usize,
-    ), LoadKey3, TRAMP_LOAD_KEY3, refuse = served_target(target);
+    ), LoadKey3, TRAMP_LOAD_KEY3, modifies = true, refuse = served_target(target);
 }
 out_of_scope_body! {
     fn unload_key_hook_body(target: *const ObjectAttributes),
-        UnloadKey, TRAMP_UNLOAD_KEY, refuse = served_target(target);
+        UnloadKey, TRAMP_UNLOAD_KEY, modifies = true, refuse = served_target(target);
 }
 out_of_scope_body! {
     fn unload_key2_hook_body(target: *const ObjectAttributes, a2: usize),
-        UnloadKey2, TRAMP_UNLOAD_KEY2, refuse = served_target(target);
+        UnloadKey2, TRAMP_UNLOAD_KEY2, modifies = true, refuse = served_target(target);
 }
 out_of_scope_body! {
     fn unload_key_ex_hook_body(target: *const ObjectAttributes, a2: usize),
-        UnloadKeyEx, TRAMP_UNLOAD_KEY_EX, refuse = served_target(target);
+        UnloadKeyEx, TRAMP_UNLOAD_KEY_EX, modifies = true, refuse = served_target(target);
 }
 // Saving, compressing and locking a real key read it or touch only the hive file: passed
 // through on real keys, refused on synthetic ones only.
 out_of_scope_body! {
     fn save_key_hook_body(key: HANDLE, file: HANDLE),
-        SaveKey, TRAMP_SAVE_KEY, refuse = synthetic_key(key);
+        SaveKey, TRAMP_SAVE_KEY, modifies = false, refuse = synthetic_key(key);
 }
 out_of_scope_body! {
     fn save_key_ex_hook_body(key: HANDLE, file: HANDLE, format: u32),
-        SaveKeyEx, TRAMP_SAVE_KEY_EX, refuse = synthetic_key(key);
+        SaveKeyEx, TRAMP_SAVE_KEY_EX, modifies = false, refuse = synthetic_key(key);
 }
 out_of_scope_body! {
     fn save_merged_hook_body(high: HANDLE, low: HANDLE, file: HANDLE),
-        SaveMergedKeys, TRAMP_SAVE_MERGED, refuse = synthetic_key(high) || synthetic_key(low);
+        SaveMergedKeys, TRAMP_SAVE_MERGED, modifies = false,
+        refuse = synthetic_key(high).or_else(|| synthetic_key(low));
 }
 out_of_scope_body! {
     fn compress_key_hook_body(key: HANDLE),
-        CompressKey, TRAMP_COMPRESS_KEY, refuse = synthetic_key(key);
+        CompressKey, TRAMP_COMPRESS_KEY, modifies = false, refuse = synthetic_key(key);
 }
 out_of_scope_body! {
     fn lock_registry_key_hook_body(key: HANDLE),
-        LockRegistryKey, TRAMP_LOCK_REGISTRY_KEY, refuse = synthetic_key(key);
+        LockRegistryKey, TRAMP_LOCK_REGISTRY_KEY, modifies = false, refuse = synthetic_key(key);
 }
 // Replacing and restoring write the real key: refused on every key the overlay serves.
 out_of_scope_body! {
@@ -2522,11 +2581,11 @@ out_of_scope_body! {
         new_file: *const ObjectAttributes,
         key: HANDLE,
         old_file: *const ObjectAttributes,
-    ), ReplaceKey, TRAMP_REPLACE_KEY, refuse = served_key(key);
+    ), ReplaceKey, TRAMP_REPLACE_KEY, modifies = true, refuse = served_key(key);
 }
 out_of_scope_body! {
     fn restore_key_hook_body(key: HANDLE, file: HANDLE, flags: u32),
-        RestoreKey, TRAMP_RESTORE_KEY, refuse = served_key(key);
+        RestoreKey, TRAMP_RESTORE_KEY, modifies = true, refuse = served_key(key);
 }
 
 /// Decode ObjectName as UTF-16 (no root resolution).

@@ -87,6 +87,23 @@ pub fn detours_installed(missing: &[&'static str]) {
     }
 }
 
+/// The `Err` label [`overlay_off`] records: the host did not ask for the overlay.
+pub const OFF: &str = "VFS_REGISTRY unset";
+
+/// Record that the registry detours were not installed because the host did not turn the
+/// overlay on (`VFS_REGISTRY` unset): [`enabled`] stays false for the process. Not a disabled
+/// overlay, so nothing is logged and the stats flag stays clear.
+pub fn overlay_off() {
+    let _ = DETOURS.set(Err(OFF));
+}
+
+/// The recorded registry detour outcome: `None` before the install recorded one, `Err(OFF)`
+/// when the overlay was off, `Err(name)` when detour `name` was missing. For tests and
+/// diagnostics.
+pub fn detours_outcome() -> Option<Result<(), &'static str>> {
+    DETOURS.get().copied()
+}
+
 /// The process's registry client, over [`fuse_client::global`].
 pub fn global() -> Option<&'static RegClient<'static>> {
     static CLIENT: OnceLock<RegClient<'static>> = OnceLock::new();

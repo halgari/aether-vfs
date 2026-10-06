@@ -82,7 +82,8 @@ struct Target {
     deleted: bool,
 }
 
-/// The handle's record. `Err(Write::Pass)` for a handle the overlay does not serve.
+/// The handle's record. `Err(Write::Pass)` for a handle the overlay does not serve,
+/// `Err(Write::Done(STATUS_UNSUCCESSFUL))` for one that cannot be resolved.
 unsafe fn target(real: &Real, h: isize) -> Result<Target, Write> {
     if regkeys::is_synthetic(h) {
         let Some(k) = regkeys::synthetic(h) else {
@@ -97,8 +98,8 @@ unsafe fn target(real: &Real, h: isize) -> Result<Target, Write> {
             deleted: k.deleted,
         });
     }
-    match regkeys::resolve_handle(real, h) {
-        Some(r) => Ok(Target {
+    match regkeys::resolve(real, h) {
+        regkeys::Resolution::Ours(r) => Ok(Target {
             handle: h,
             path: r.path,
             access: r.access,
@@ -106,7 +107,12 @@ unsafe fn target(real: &Real, h: isize) -> Result<Target, Write> {
             wow64: 0,
             deleted: r.deleted,
         }),
-        None => Err(Write::Pass),
+        regkeys::Resolution::NotOurs => Err(Write::Pass),
+        // It may be a key the overlay serves: a write through it fails closed (spec section 6).
+        regkeys::Resolution::Unresolvable => {
+            crate::hookstats::note_reg_write_refused();
+            Err(Write::Done(STATUS_UNSUCCESSFUL))
+        }
     }
 }
 
@@ -697,6 +703,20 @@ mod tests {
         assert!(is_hive_root(r"\Registry\User\<CurrentUser>"));
         assert!(!is_hive_root(r"\Registry\User\<CurrentUser>\Software"));
         assert!(!is_hive_root(r"\Registry\Machine\Software\X"));
+    }
+
+    #[test]
+    fn a_write_through_an_unresolvable_handle_fails_closed() {
+        let real = crate::regkeys::tests::real_whose_name_query_fails(false);
+        assert!(matches!(
+            unsafe { target(&real, 0x0123_4580) },
+            Err(Write::Done(STATUS_UNSUCCESSFUL))
+        ));
+        let real = crate::regkeys::tests::real_whose_name_query_fails(true);
+        assert!(matches!(
+            unsafe { target(&real, 0x0123_4590) },
+            Err(Write::Pass)
+        ));
     }
 
     #[test]

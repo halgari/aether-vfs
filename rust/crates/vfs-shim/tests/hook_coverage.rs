@@ -24,6 +24,9 @@ use vfs_shim::{install, skipped_detours, Engine};
 
 #[test]
 fn a_successful_install_skips_no_detour_on_windows() {
+    // The registry overlay's detours go in only with `VFS_REGISTRY` set; set it so they are
+    // covered too. With no director attached the overlay stays off and they pass through.
+    std::env::set_var(vfs_env::REGISTRY, "1");
     let pid = std::process::id();
     let root = std::env::temp_dir().join(format!("vfs-shim-hookcov-{pid}"));
     let backing_dir = std::env::temp_dir().join(format!("vfs-shim-hookcov-backing-{pid}"));
@@ -53,6 +56,11 @@ fn a_successful_install_skips_no_detour_on_windows() {
     // Assert *after* a successful install: `SKIPPED_DETOURS` is only written by
     // `install`, so checking it before would pass vacuously.
     let guard = install(engine).expect("install");
+
+    assert!(
+        vfs_shim::registry_detours_installed() > 0,
+        "the registry detours are installed when VFS_REGISTRY is set"
+    );
 
     let skipped = skipped_detours();
     assert!(

@@ -6,7 +6,7 @@
 //! a write through a pass-through handle makes its path virtual (Task 11):
 //! - a synthetic handle: always merged (its private real handle, if any, plus the overlay node);
 //! - a pass-through handle, including a real key handle opened before the hooks (resolved and
-//!   recorded on first sight by `regkeys::resolve_handle`): straight to the real call while `regclient::lookup` says the overlay has
+//!   recorded on first sight by `regkeys::resolve_for_read`): straight to the real call while `regclient::lookup` says the overlay has
 //!   nothing at or below the path (a cached answer costs no round trip); merged otherwise, with
 //!   the caller's own handle as the real key;
 //! - a tombstoned path: `STATUS_KEY_DELETED`, as for a handle to a deleted key;
@@ -127,7 +127,7 @@ unsafe fn classify(real: &Real, h: isize, right: u32) -> Target {
         access,
         deleted,
         ..
-    }) = regkeys::resolve_handle(real, h)
+    }) = regkeys::resolve_for_read(real, h)
     else {
         return Target::Real(h);
     };
