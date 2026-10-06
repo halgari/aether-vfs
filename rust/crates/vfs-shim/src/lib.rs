@@ -22,6 +22,7 @@ mod read_cache;
 pub mod regclient;
 mod regkeys;
 mod regquery;
+mod regwrite;
 mod zipserve;
 
 pub use bootstrap::{

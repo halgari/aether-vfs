@@ -594,3 +594,41 @@ pub const STATUS_NO_MORE_ENTRIES: NTSTATUS = 0x8000_001Au32 as i32;
 pub const STATUS_KEY_DELETED: NTSTATUS = 0xC000_017Cu32 as i32;
 /// `STATUS_ACCESS_VIOLATION`, for a NULL buffer the caller said was non-empty.
 pub const STATUS_ACCESS_VIOLATION: NTSTATUS = 0xC000_0005u32 as i32;
+
+/// `ntdll!NtSetValueKey`.
+pub type NtSetValueKeyFn = unsafe extern "system" fn(
+    HANDLE,               // KeyHandle
+    *const UnicodeString, // ValueName
+    u32,                  // TitleIndex
+    u32,                  // Type
+    *const c_void,        // Data
+    u32,                  // DataSize
+) -> NTSTATUS;
+
+/// `ntdll!NtDeleteValueKey`.
+pub type NtDeleteValueKeyFn = unsafe extern "system" fn(HANDLE, *const UnicodeString) -> NTSTATUS;
+
+/// `ntdll!NtDeleteKey`.
+pub type NtDeleteKeyFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
+
+/// `ntdll!NtRenameKey`.
+pub type NtRenameKeyFn = unsafe extern "system" fn(HANDLE, *const UnicodeString) -> NTSTATUS;
+
+/// `ntdll!NtSetInformationKey`.
+pub type NtSetInformationKeyFn = unsafe extern "system" fn(
+    HANDLE,        // KeyHandle
+    u32,           // KeySetInformationClass
+    *const c_void, // KeySetInformation
+    u32,           // KeySetInformationLength
+) -> NTSTATUS;
+
+/// `ntdll!NtFlushKey`.
+pub type NtFlushKeyFn = unsafe extern "system" fn(HANDLE) -> NTSTATUS;
+
+/// `STATUS_CANNOT_DELETE`: `NtDeleteKey` of a key with subkeys; `NtRenameKey` to a name that
+/// exists.
+pub const STATUS_CANNOT_DELETE: NTSTATUS = 0xC000_0121u32 as i32;
+/// `STATUS_INSUFFICIENT_RESOURCES`: a rename whose copy is over the shim's bound.
+pub const STATUS_INSUFFICIENT_RESOURCES: NTSTATUS = 0xC000_009Au32 as i32;
+/// `STATUS_INVALID_INFO_CLASS`.
+pub const STATUS_INVALID_INFO_CLASS: NTSTATUS = 0xC000_0003u32 as i32;

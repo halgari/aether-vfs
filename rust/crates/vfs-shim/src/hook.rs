@@ -447,6 +447,38 @@ hook_entry_points! {
         required: *mut u32,
     ) -> NTSTATUS as "NtQueryMultipleValueKey", on_panic STATUS_HOOK_PANICKED;
 
+    fn set_value_key_hook = set_value_key_hook_body(
+        key: HANDLE,
+        name: *const UnicodeString,
+        title_index: u32,
+        ty: u32,
+        data: *const c_void,
+        size: u32,
+    ) -> NTSTATUS as "NtSetValueKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn delete_value_key_hook = delete_value_key_hook_body(
+        key: HANDLE,
+        name: *const UnicodeString,
+    ) -> NTSTATUS as "NtDeleteValueKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn delete_key_hook = delete_key_hook_body(key: HANDLE) -> NTSTATUS
+        as "NtDeleteKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn rename_key_hook = rename_key_hook_body(
+        key: HANDLE,
+        new_name: *const UnicodeString,
+    ) -> NTSTATUS as "NtRenameKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn set_info_key_hook = set_info_key_hook_body(
+        key: HANDLE,
+        class: u32,
+        info: *const c_void,
+        length: u32,
+    ) -> NTSTATUS as "NtSetInformationKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn flush_key_hook = flush_key_hook_body(key: HANDLE) -> NTSTATUS
+        as "NtFlushKey", on_panic STATUS_HOOK_PANICKED;
+
     /// The one entry point here that is **not** an ntdll `NTSTATUS` call, and
     /// the one place a uniform `STATUS_UNSUCCESSFUL` would be actively
     /// dangerous. `CreateProcessInternalW` returns a Win32 `BOOL`, in which
@@ -523,7 +555,9 @@ use crate::ntdef::{
     NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryDirectoryFileFn,
     NtQueryInformationByNameFn, NtQueryObjectFn, NtUnlockFileFn,
     NtCreateKeyFn, NtDuplicateObjectFn, NtOpenKeyExFn, NtOpenKeyFn, NtQueryKeyFn,
-    NtEnumerateKeyFn, NtEnumerateValueKeyFn, NtQueryMultipleValueKeyFn, NtQueryValueKeyFn,
+    NtDeleteKeyFn, NtDeleteValueKeyFn, NtEnumerateKeyFn, NtEnumerateValueKeyFn, NtFlushKeyFn,
+    NtQueryMultipleValueKeyFn, NtQueryValueKeyFn, NtRenameKeyFn, NtSetInformationKeyFn,
+    NtSetValueKeyFn,
     STATUS_OBJECT_NAME_INVALID,
     NtQueryFullAttributesFileFn,
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
@@ -601,6 +635,12 @@ static mut TRAMP_ENUM_KEY: Option<NtEnumerateKeyFn> = None;
 static mut TRAMP_QUERY_VALUE: Option<NtQueryValueKeyFn> = None;
 static mut TRAMP_ENUM_VALUE: Option<NtEnumerateValueKeyFn> = None;
 static mut TRAMP_QUERY_MULTIPLE: Option<NtQueryMultipleValueKeyFn> = None;
+static mut TRAMP_SET_VALUE: Option<NtSetValueKeyFn> = None;
+static mut TRAMP_DELETE_VALUE: Option<NtDeleteValueKeyFn> = None;
+static mut TRAMP_DELETE_KEY: Option<NtDeleteKeyFn> = None;
+static mut TRAMP_RENAME_KEY: Option<NtRenameKeyFn> = None;
+static mut TRAMP_SET_INFO_KEY: Option<NtSetInformationKeyFn> = None;
+static mut TRAMP_FLUSH_KEY: Option<NtFlushKeyFn> = None;
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
 /// 12 params; only `flags` and `pi` are inspected/modified by the hook.
@@ -1161,6 +1201,60 @@ unsafe fn install_registry_detours(ntdll: HMODULE, detours: &mut Vec<RawDetour>)
                 t.map(|t| core::mem::transmute::<*const (), NtQueryMultipleValueKeyFn>(t))
         },
     );
+    // The write hooks (spec 3.1).
+    optional_detour(
+        ntdll,
+        c"NtSetValueKey",
+        "NtSetValueKey",
+        set_value_key_hook as *const (),
+        detours,
+        &mut |t| TRAMP_SET_VALUE = t.map(|t| core::mem::transmute::<*const (), NtSetValueKeyFn>(t)),
+    );
+    optional_detour(
+        ntdll,
+        c"NtDeleteValueKey",
+        "NtDeleteValueKey",
+        delete_value_key_hook as *const (),
+        detours,
+        &mut |t| {
+            TRAMP_DELETE_VALUE = t.map(|t| core::mem::transmute::<*const (), NtDeleteValueKeyFn>(t))
+        },
+    );
+    optional_detour(
+        ntdll,
+        c"NtDeleteKey",
+        "NtDeleteKey",
+        delete_key_hook as *const (),
+        detours,
+        &mut |t| TRAMP_DELETE_KEY = t.map(|t| core::mem::transmute::<*const (), NtDeleteKeyFn>(t)),
+    );
+    optional_detour(
+        ntdll,
+        c"NtRenameKey",
+        "NtRenameKey",
+        rename_key_hook as *const (),
+        detours,
+        &mut |t| TRAMP_RENAME_KEY = t.map(|t| core::mem::transmute::<*const (), NtRenameKeyFn>(t)),
+    );
+    optional_detour(
+        ntdll,
+        c"NtSetInformationKey",
+        "NtSetInformationKey",
+        set_info_key_hook as *const (),
+        detours,
+        &mut |t| {
+            TRAMP_SET_INFO_KEY =
+                t.map(|t| core::mem::transmute::<*const (), NtSetInformationKeyFn>(t))
+        },
+    );
+    optional_detour(
+        ntdll,
+        c"NtFlushKey",
+        "NtFlushKey",
+        flush_key_hook as *const (),
+        detours,
+        &mut |t| TRAMP_FLUSH_KEY = t.map(|t| core::mem::transmute::<*const (), NtFlushKeyFn>(t)),
+    );
     optional_detour(
         ntdll,
         c"NtOpenKeyEx",
@@ -1508,6 +1602,139 @@ unsafe fn query_multiple_hook_body(
         buffer_len,
         required,
     )
+}
+
+/// Whether a registry *write* hook may go on with the overlay on: not when this thread is inside
+/// the shim's own work (ruling: such a write is refused, never made for real). `Some(guard)` to
+/// hold for the call.
+fn reg_write_guard() -> Option<ShimIoGuard> {
+    if in_hook_reenter() {
+        return None;
+    }
+    ShimIoGuard::enter()
+}
+
+/// `NtSetValueKey` hook. With the overlay on, a write on a virtualised key goes to the director
+/// (`regwrite::set_value_key`) and never to the real key; `TitleIndex` is ignored, as Windows
+/// ignores it.
+unsafe fn set_value_key_hook_body(
+    key: HANDLE,
+    name: *const UnicodeString,
+    title_index: u32,
+    ty: u32,
+    data: *const c_void,
+    size: u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetValueKey);
+    let Some(tramp) = TRAMP_SET_VALUE else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if !crate::regclient::enabled() {
+        return tramp(key, name, title_index, ty, data, size);
+    }
+    let Some(_io) = reg_write_guard() else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    match crate::regwrite::set_value_key(&reg_real(), key as isize, name, ty, data, size) {
+        crate::regwrite::Write::Done(st) => st,
+        crate::regwrite::Write::Pass => tramp(key, name, title_index, ty, data, size),
+    }
+}
+
+/// `NtDeleteValueKey` hook. See `regwrite::delete_value_key`.
+unsafe fn delete_value_key_hook_body(key: HANDLE, name: *const UnicodeString) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::DeleteValueKey);
+    let Some(tramp) = TRAMP_DELETE_VALUE else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if !crate::regclient::enabled() {
+        return tramp(key, name);
+    }
+    let Some(_io) = reg_write_guard() else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    match crate::regwrite::delete_value_key(&reg_real(), key as isize, name) {
+        crate::regwrite::Write::Done(st) => st,
+        crate::regwrite::Write::Pass => tramp(key, name),
+    }
+}
+
+/// `NtDeleteKey` hook. See `regwrite::delete_key`.
+unsafe fn delete_key_hook_body(key: HANDLE) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::DeleteKey);
+    let Some(tramp) = TRAMP_DELETE_KEY else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if !crate::regclient::enabled() {
+        return tramp(key);
+    }
+    let Some(_io) = reg_write_guard() else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    match crate::regwrite::delete_key(&reg_real(), key as isize) {
+        crate::regwrite::Write::Done(st) => st,
+        crate::regwrite::Write::Pass => tramp(key),
+    }
+}
+
+/// `NtRenameKey` hook. See `regwrite::rename_key`.
+unsafe fn rename_key_hook_body(key: HANDLE, new_name: *const UnicodeString) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::RenameKey);
+    let Some(tramp) = TRAMP_RENAME_KEY else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if !crate::regclient::enabled() {
+        return tramp(key, new_name);
+    }
+    let Some(_io) = reg_write_guard() else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    match crate::regwrite::rename_key(&reg_real(), key as isize, new_name) {
+        crate::regwrite::Write::Done(st) => st,
+        crate::regwrite::Write::Pass => tramp(key, new_name),
+    }
+}
+
+/// `NtSetInformationKey` hook. See `regwrite::set_information_key`.
+unsafe fn set_info_key_hook_body(
+    key: HANDLE,
+    class: u32,
+    info: *const c_void,
+    length: u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetInformationKey);
+    let Some(tramp) = TRAMP_SET_INFO_KEY else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if !crate::regclient::enabled() {
+        return tramp(key, class, info, length);
+    }
+    let Some(_io) = reg_write_guard() else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    match crate::regwrite::set_information_key(&reg_real(), key as isize, class, info, length) {
+        crate::regwrite::Write::Done(st) => st,
+        crate::regwrite::Write::Pass => tramp(key, class, info, length),
+    }
+}
+
+/// `NtFlushKey` hook. See `regwrite::flush_key`. A flush writes nothing the caller did not
+/// already write, so the shim's own (re-entrant) calls pass through like the read hooks'.
+unsafe fn flush_key_hook_body(key: HANDLE) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::FlushKey);
+    let Some(tramp) = TRAMP_FLUSH_KEY else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if reg_bypass() {
+        return tramp(key);
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return tramp(key);
+    };
+    match crate::regwrite::flush_key(&reg_real(), key as isize) {
+        crate::regwrite::Write::Done(st) => st,
+        crate::regwrite::Write::Pass => tramp(key),
+    }
 }
 
 /// Decode ObjectName as UTF-16 (no root resolution).
@@ -4666,14 +4893,27 @@ unsafe fn qobj_hook_body(
                 ret_len,
             );
         }
-        let Some(name) = crate::regkeys::object_name(handle as isize) else {
-            return STATUS_INVALID_HANDLE;
+        let name = match crate::regkeys::object_name(handle as isize) {
+            None => return STATUS_INVALID_HANDLE,
+            Some(Err(st)) => return st,
+            Some(Ok(n)) => n,
         };
         return emit_object_name(&name, info, length, ret_len)
             .unwrap_or(STATUS_OBJECT_NAME_INVALID);
     }
     if class != OBJECT_NAME_INFORMATION {
         return tramp(handle, class, info, length, ret_len);
+    }
+    // A real key handle deleted or renamed through the overlay: the real key no longer names it.
+    if crate::regclient::enabled() {
+        match crate::regkeys::passthrough_name(handle as isize) {
+            None => {}
+            Some(Err(st)) => return st,
+            Some(Ok(name)) => {
+                return emit_object_name(&name, info, length, ret_len)
+                    .unwrap_or(STATUS_OBJECT_NAME_INVALID)
+            }
+        }
     }
     // A synthetic handle — every file and directory the director serves — is
     // not a kernel object: the host has no name for it and the trampoline

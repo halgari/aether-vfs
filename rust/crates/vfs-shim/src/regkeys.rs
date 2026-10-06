@@ -96,6 +96,9 @@ pub struct SynthKey {
     pub requested: u32,
     /// Handle attributes (`OBJ_INHERIT`), as `NtQueryObject` reports them.
     pub attributes: u32,
+    /// The key was deleted through this handle (or a handle it was duplicated from):
+    /// everything but `NtClose` answers `STATUS_KEY_DELETED`, as on Windows.
+    pub deleted: bool,
 }
 
 /// `OBJ_INHERIT`: the only handle attribute a key handle keeps.
@@ -109,6 +112,11 @@ pub struct KeyRec {
     /// Requested access, generic rights mapped ([`map_generic`]). For `MAXIMUM_ALLOWED` this is
     /// [`KEY_ALL_ACCESS`], an upper bound on what the kernel granted.
     pub access: u32,
+    /// The key was deleted through this handle (or a handle it was duplicated from).
+    pub deleted: bool,
+    /// The key was renamed through this handle: `path` is its name now, and the real key the
+    /// handle still refers to no longer names it (queries for its name answer `path`).
+    pub renamed: bool,
 }
 
 static SYNTH: Mutex<BTreeMap<isize, SynthKey>> = Mutex::new(BTreeMap::new());
@@ -174,6 +182,59 @@ fn untrack(h: isize) {
         t.remove(&h);
     }
     forget_not_ours(h);
+}
+
+/// Mark a key handle's record deleted (`NtDeleteKey` through it succeeded).
+pub fn mark_deleted(h: isize) {
+    if is_synthetic(h) {
+        if let Ok(mut t) = SYNTH.lock() {
+            if let Some(k) = t.get_mut(&h) {
+                k.deleted = true;
+            }
+        }
+    } else if let Ok(mut t) = PASS.lock() {
+        if let Some(r) = t.get_mut(&h) {
+            r.deleted = true;
+        }
+    }
+}
+
+/// Point a key handle at `new_path` after `NtRenameKey` through it. The renamed key exists only
+/// in the overlay (created here), so a synthetic handle's private real handle is closed (after
+/// the table lock is released) and a pass-through handle is marked `renamed`.
+pub(crate) unsafe fn retarget(real: &Real, h: isize, new_path: &str) {
+    let mut stale = None;
+    if is_synthetic(h) {
+        if let Ok(mut t) = SYNTH.lock() {
+            if let Some(k) = t.get_mut(&h) {
+                k.path = new_path.to_string();
+                stale = k.real.take();
+            }
+        }
+    } else if let Ok(mut t) = PASS.lock() {
+        if let Some(r) = t.get_mut(&h) {
+            r.path = new_path.to_string();
+            r.renamed = true;
+        }
+    }
+    if let Some(r) = stale {
+        close_real(real, r);
+    }
+    crate::regquery::forget(h);
+}
+
+/// What `NtQueryObject(ObjectNameInformation)` must answer for a real key handle whose record
+/// says the real key no longer names it: `Err(STATUS_KEY_DELETED)` once deleted through it, the
+/// NT name of its new path once renamed through it. `None`: the real call answers.
+pub fn passthrough_name(h: isize) -> Option<Result<String, NTSTATUS>> {
+    if is_synthetic(h) || h <= 0 {
+        return None;
+    }
+    let r = tracked(h)?;
+    if r.deleted {
+        return Some(Err(crate::ntdef::STATUS_KEY_DELETED));
+    }
+    r.renamed.then(|| Ok(path::to_nt(&r.path, user_sid())))
 }
 
 /// The canonical path of a key handle from either table.
@@ -473,6 +534,8 @@ pub unsafe fn resolve_handle(real: &Real, h: isize) -> Option<KeyRec> {
         path,
         // Not readable (no `NtQueryObject` trampoline): the kernel still checks every real call.
         access: granted_access(real, h).unwrap_or(KEY_ALL_ACCESS),
+        deleted: false,
+        renamed: false,
     };
     track(h, rec.clone());
     Some(rec)
@@ -538,7 +601,7 @@ pub(crate) unsafe fn close_real(real: &Real, h: isize) {
 }
 
 /// Whether the real key at `path` exists (a key that refuses even a read-only open exists).
-unsafe fn real_exists(real: &Real, canonical: &str, wow64: u32) -> bool {
+pub(crate) unsafe fn real_exists(real: &Real, canonical: &str, wow64: u32) -> bool {
     match open_private(real, canonical, wow64 & WOW64_MASK) {
         Ok(h) => {
             close_real(real, h);
@@ -554,7 +617,7 @@ unsafe fn real_exists(real: &Real, canonical: &str, wow64: u32) -> bool {
 /// created-here when its parent is, and reviving a tombstoned key drops its old subtree), so
 /// the nearest ancestor the overlay holds decides: created-here or not. Lookups are cached; a
 /// failed one ends the walk as "no" (the real registry is the fallback for reads).
-fn below_created(canonical: &str) -> bool {
+pub(crate) fn below_created(canonical: &str) -> bool {
     let mut cur = path::parent(canonical);
     while let Some(p) = cur {
         match crate::regclient::lookup(p) {
@@ -725,6 +788,8 @@ impl Key<'_> {
                 KeyRec {
                     path: self.canonical.clone(),
                     access: map_generic(self.access),
+                    deleted: false,
+                    renamed: false,
                 },
             );
         }
@@ -739,6 +804,7 @@ impl Key<'_> {
             real: real_key,
             requested: self.access,
             attributes: (*self.oa).attributes & OBJ_INHERIT,
+            deleted: false,
         }) {
             Some(h) => {
                 *self.out = h as HANDLE;
@@ -915,8 +981,16 @@ pub unsafe fn close(real: &Real, h: isize) -> Option<NTSTATUS> {
 }
 
 /// The NT name of a synthetic key handle, for `NtQueryObject(ObjectNameInformation)`.
-pub fn object_name(h: isize) -> Option<String> {
-    synthetic(h).map(|k| path::to_nt(&k.path, user_sid()))
+/// `Err(STATUS_KEY_DELETED)` once the key was deleted through the handle (Windows answers a
+/// deleted key's name query so).
+pub fn object_name(h: isize) -> Option<Result<String, NTSTATUS>> {
+    synthetic(h).map(|k| {
+        if k.deleted {
+            Err(crate::ntdef::STATUS_KEY_DELETED)
+        } else {
+            Ok(path::to_nt(&k.path, user_sid()))
+        }
+    })
 }
 
 /// A real key handle to ask the host about a key's object type when a synthetic key has no
@@ -1057,6 +1131,7 @@ pub unsafe fn duplicate(
                     } else {
                         attributes & OBJ_INHERIT
                     },
+                    deleted: rec.deleted,
                 }) {
                     Some(h) => {
                         *dst = h as HANDLE;
@@ -1101,8 +1176,8 @@ pub unsafe fn duplicate(
         track(
             *dst as isize,
             KeyRec {
-                path: rec.path,
                 access: new_access(rec.access),
+                ..rec
             },
         );
     }
@@ -1121,6 +1196,7 @@ mod tests {
             real: None,
             requested: KEY_READ,
             attributes: 0,
+            deleted: false,
         })
         .unwrap();
         assert!(is_synthetic(h));

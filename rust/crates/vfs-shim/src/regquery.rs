@@ -100,6 +100,9 @@ unsafe fn classify(real: &Real, h: isize, right: u32) -> Target {
         let Some(rec) = regkeys::synthetic(h) else {
             return Target::Fail(STATUS_INVALID_HANDLE);
         };
+        if rec.deleted {
+            return Target::Deleted;
+        }
         return match regclient::lookup(&rec.path) {
             // The real key alone; a key that exists only in the overlay cannot be read.
             Err(_) if rec.access & right != right => Target::Fail(STATUS_ACCESS_DENIED),
@@ -119,9 +122,18 @@ unsafe fn classify(real: &Real, h: isize, right: u32) -> Target {
         };
     }
     // A handle opened before the hooks is resolved (and recorded) on first sight.
-    let Some(regkeys::KeyRec { path, access }) = regkeys::resolve_handle(real, h) else {
+    let Some(regkeys::KeyRec {
+        path,
+        access,
+        deleted,
+        ..
+    }) = regkeys::resolve_handle(real, h)
+    else {
         return Target::Real(h);
     };
+    if deleted {
+        return Target::Deleted;
+    }
     match regclient::lookup(&path) {
         // Untouched (the fast path), or the director cannot be asked: the real key.
         Err(_) | Ok((Lookup::Absent, false)) => Target::Real(h),
@@ -287,7 +299,7 @@ unsafe fn real_info(real: &Real, h: isize, full: bool) -> Result<RealInfo, NTSTA
 const MAX_ENTRIES: u32 = 1 << 24;
 
 /// The real key's subkey names, in its own order.
-unsafe fn real_subkeys(real: &Real, h: isize) -> Result<Vec<String>, NTSTATUS> {
+pub(crate) unsafe fn real_subkeys(real: &Real, h: isize) -> Result<Vec<String>, NTSTATUS> {
     let e = real.enum_key.ok_or(STATUS_UNSUCCESSFUL)?;
     let mut out = Vec::new();
     for i in 0..MAX_ENTRIES {
@@ -304,7 +316,11 @@ unsafe fn real_subkeys(real: &Real, h: isize) -> Result<Vec<String>, NTSTATUS> {
 }
 
 /// The real key's values in its own order: names and types, and the data with `data`.
-unsafe fn real_values(real: &Real, h: isize, data: bool) -> Result<Vec<Value>, NTSTATUS> {
+pub(crate) unsafe fn real_values(
+    real: &Real,
+    h: isize,
+    data: bool,
+) -> Result<Vec<Value>, NTSTATUS> {
     let e = real.enum_value.ok_or(STATUS_UNSUCCESSFUL)?;
     let class = if data {
         KEY_VALUE_FULL_INFORMATION
@@ -521,7 +537,9 @@ pub unsafe fn query_key(
     let kc = key_class(class);
     match kc {
         Some(KeyInfoClass::Name) => {
-            if !ctx.synthetic {
+            // A pass-through handle names its real key, unless the key it now stands for has no
+            // real counterpart (renamed through it, or created here): then its path does.
+            if !ctx.synthetic && ctx.real.is_some() {
                 return tramp(h as HANDLE, class, info, len, ret);
             }
             let name = path::to_nt(&ctx.path, regkeys::user_sid());

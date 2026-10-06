@@ -49,9 +49,15 @@ pub enum Hook {
     QueryValueKey = 26,
     EnumerateValueKey = 27,
     QueryMultipleValueKey = 28,
+    SetValueKey = 29,
+    DeleteValueKey = 30,
+    DeleteKey = 31,
+    RenameKey = 32,
+    SetInformationKey = 33,
+    FlushKey = 34,
 }
 
-const N: usize = 29;
+const N: usize = 35;
 
 const NAMES: [&str; N] = [
     "NtCreateFile",
@@ -83,6 +89,12 @@ const NAMES: [&str; N] = [
     "NtQueryValueKey",
     "NtEnumerateValueKey",
     "NtQueryMultipleValueKey",
+    "NtSetValueKey",
+    "NtDeleteValueKey",
+    "NtDeleteKey",
+    "NtRenameKey",
+    "NtSetInformationKey",
+    "NtFlushKey",
 ];
 
 static CALLS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
@@ -1906,7 +1918,11 @@ mod tests {
         assert_eq!(NAMES.len(), N);
         // The last variant must index the last name, or a hook silently
         // reports under a neighbour's label.
-        assert_eq!(Hook::QueryMultipleValueKey as usize, N - 1);
+        assert_eq!(Hook::FlushKey as usize, N - 1);
+        assert_eq!(
+            NAMES[Hook::QueryMultipleValueKey as usize],
+            "NtQueryMultipleValueKey"
+        );
         assert_eq!(NAMES[Hook::QObj as usize], "NtQueryObject");
         // Spot-check the middle of the table too: appending variants without
         // appending names in the same order is the failure this guards, and
