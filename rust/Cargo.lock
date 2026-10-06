@@ -2662,6 +2662,7 @@ dependencies = [
 name = "vfs-director"
 version = "0.1.0"
 dependencies = [
+ "tracing",
  "vfs-compose",
  "vfs-core",
  "vfs-env",
@@ -2670,6 +2671,7 @@ dependencies = [
  "vfs-protocol",
  "vfs-provider",
  "vfs-redirect",
+ "vfs-registry",
  "vfs-shim",
  "vfs-unix",
  "vfs-win",

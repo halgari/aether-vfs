@@ -39,6 +39,10 @@ vfs-ipc = { path = "../vfs-ipc" }
 # Pure PE parsing for staging. Was reached through `vfs-inject`, which is
 # Windows-only for its injection half; the parsing half is a file format.
 vfs-pe = { path = "../vfs-pe" }
+# The registry overlay model and its persistence format, held by `RegistryHost`.
+vfs-registry = { path = "../vfs-registry" }
+# `RegistryHost` logs a corrupt overlay file it moves aside, and failed saves.
+tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 # `ipc.rs` — FileMapping, the file-backed ring a Wine-hosted shim shares by path.

@@ -36,6 +36,7 @@ pub mod ipc;
 pub mod mount_graph;
 pub mod ops;
 pub mod path;
+pub mod registry;
 pub mod ring_dispatch;
 pub mod bench;
 pub mod stage;

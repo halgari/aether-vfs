@@ -19,6 +19,11 @@ pub const ST_NOT_SUPPORTED: i32 = -8;
 pub const ST_READ_ONLY: i32 = -9;
 /// `OPEN_EXCL` (create-new) refused because the path already exists.
 pub const ST_EXISTS: i32 = -10;
+/// The answer does not fit an inline ring reply (`payload_cap - 8` bytes).
+/// Used by the registry `REG_KEY` op for a key whose overlay data exceeds the
+/// ring's payload; the shim treats it like a failed director read and serves
+/// the real key.
+pub const ST_REPLY_TOO_LARGE: i32 = -11;
 
 pub fn ok() -> i32 { ST_OK }
 pub fn not_found() -> i32 { ST_NOT_FOUND }

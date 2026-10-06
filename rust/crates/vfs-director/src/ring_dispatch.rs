@@ -8,11 +8,19 @@ use vfs_protocol::{
     OP_MKDIR, OP_OPEN, OP_READ, OP_READDIR, OP_RENAME, OP_SETATTR, OP_STORED_NAMES, OP_WRITE,
     ST_BAD_REQUEST, ST_NOT_A_DIRECTORY, ST_NOT_FOUND, ST_OK,
 };
+use vfs_protocol::{
+    decode_reg_changed, decode_reg_create_key, decode_reg_delete_value, decode_reg_path,
+    decode_reg_rename_key, decode_reg_set_value, encode_reg_changed_reply, encode_reg_lookup_reply,
+    encode_reg_version_reply, OP_REG_CHANGED, OP_REG_CREATE_KEY, OP_REG_DELETE_KEY,
+    OP_REG_DELETE_VALUE, OP_REG_KEY, OP_REG_LOOKUP, OP_REG_RENAME_KEY, OP_REG_SET_VALUE,
+    ST_NOT_SUPPORTED, ST_REPLY_TOO_LARGE,
+};
 use vfs_ipc::DataArena;
 
 use crate::director::Director;
 use crate::io_stats;
 use crate::ops::{KIND_DIR, OPEN_READ};
+use crate::registry::{lookup_state, RegistryHost};
 
 const BULK_THRESHOLD: u32 = 64 * 1024;
 
@@ -250,7 +258,73 @@ pub fn dispatch_director(
             },
             None => (ST_BAD_REQUEST, Vec::new()),
         },
+        OP_REG_LOOKUP..=OP_REG_CHANGED => match director.registry() {
+            Some(host) => dispatch_registry(&host, opcode, payload, payload_cap),
+            None => (ST_NOT_SUPPORTED, Vec::new()),
+        },
         _ => (ST_BAD_REQUEST, Vec::new()),
+    }
+}
+
+/// The registry overlay opcodes (15-22) against an attached [`RegistryHost`]. A payload that
+/// does not decode, or a path that is not a canonical `\Registry\...` key path, is
+/// `ST_BAD_REQUEST`; overlay errors map through [`crate::registry::reg_status`]. A `REG_KEY`
+/// reply larger than an inline reply can carry (`payload_cap - 8`) is `ST_REPLY_TOO_LARGE`.
+fn dispatch_registry(
+    host: &RegistryHost,
+    opcode: u32,
+    payload: &[u8],
+    payload_cap: u32,
+) -> (i32, Vec<u8>) {
+    let reply = |r: Result<Vec<u8>, i32>| match r {
+        Ok(b) => (ST_OK, b),
+        Err(st) => (st, Vec::new()),
+    };
+    let version = |r: Result<u64, i32>| reply(r.map(encode_reg_version_reply));
+    let bad = (ST_BAD_REQUEST, Vec::new());
+    match opcode {
+        OP_REG_LOOKUP => match decode_reg_path(payload) {
+            Some(p) => reply(
+                host.lookup(p)
+                    .map(|(l, below, v)| encode_reg_lookup_reply(lookup_state(l), below, v)),
+            ),
+            None => bad,
+        },
+        OP_REG_KEY => match decode_reg_path(payload) {
+            Some(p) => match host.key_reply(p) {
+                Ok(b) if b.len() > max_read_data(payload_cap) => (ST_REPLY_TOO_LARGE, Vec::new()),
+                r => reply(r),
+            },
+            None => bad,
+        },
+        OP_REG_SET_VALUE => match decode_reg_set_value(payload) {
+            Some((p, name, ty, data)) => version(host.set_value(p, name, ty, data)),
+            None => bad,
+        },
+        OP_REG_DELETE_VALUE => match decode_reg_delete_value(payload) {
+            Some((p, name)) => version(host.delete_value(p, name)),
+            None => bad,
+        },
+        OP_REG_CREATE_KEY => match decode_reg_create_key(payload) {
+            Some((p, volatile)) => version(host.create_key(p, volatile)),
+            None => bad,
+        },
+        OP_REG_DELETE_KEY => match decode_reg_path(payload) {
+            Some(p) => version(host.delete_key(p)),
+            None => bad,
+        },
+        OP_REG_RENAME_KEY => match decode_reg_rename_key(payload) {
+            Some((p, leaf)) => version(host.rename_key(p, leaf)),
+            None => bad,
+        },
+        OP_REG_CHANGED => match decode_reg_changed(payload) {
+            Some((p, subtree, since)) => reply(
+                host.changed(p, subtree, since)
+                    .map(|(changed, v)| encode_reg_changed_reply(changed, v)),
+            ),
+            None => bad,
+        },
+        _ => bad,
     }
 }
 
@@ -482,5 +556,376 @@ mod tests {
         stale.extend_from_slice(b"a.txt");
         let (st, _) = dispatch_director(&d, OP_OPEN, &stale, 0, 4096, None);
         assert_ne!(st, ST_OK, "a pre-task-5 OPEN payload must not silently succeed");
+    }
+
+    // ---- registry overlay opcodes (15-22) ----
+
+    mod registry_ops {
+        use super::super::*;
+        use crate::registry::RegistryHost;
+        use std::sync::Arc;
+        use vfs_protocol::*;
+        use vfs_registry::Child;
+
+        const K: &str = r"\Registry\Machine\Software\Mod";
+        const CAP: u32 = 1 << 20;
+
+        fn director() -> Director {
+            let d = Director::new();
+            let host = RegistryHost::open(Arc::new(vfs_provider::RwMemFixture::new())).unwrap();
+            d.set_registry(Some(host));
+            d
+        }
+
+        fn call(d: &Director, op: u32, payload: &[u8]) -> (i32, Vec<u8>) {
+            dispatch_director(d, op, payload, 0, CAP, None)
+        }
+
+        fn ok(d: &Director, op: u32, payload: &[u8]) -> Vec<u8> {
+            let (st, r) = call(d, op, payload);
+            assert_eq!(st, ST_OK, "op {op}");
+            r
+        }
+
+        fn version(d: &Director, op: u32, payload: &[u8]) -> u64 {
+            decode_reg_version_reply(&ok(d, op, payload)).unwrap()
+        }
+
+        #[test]
+        fn no_registry_attached_is_not_supported() {
+            let d = Director::new();
+            assert!(d.registry().is_none());
+            for op in [
+                OP_REG_LOOKUP,
+                OP_REG_KEY,
+                OP_REG_SET_VALUE,
+                OP_REG_DELETE_VALUE,
+                OP_REG_CREATE_KEY,
+                OP_REG_DELETE_KEY,
+                OP_REG_RENAME_KEY,
+                OP_REG_CHANGED,
+            ] {
+                assert_eq!(
+                    call(&d, op, &encode_reg_path(K)).0,
+                    ST_NOT_SUPPORTED,
+                    "op {op}"
+                );
+            }
+            // Attach then detach.
+            let d = director();
+            assert!(d.registry().is_some());
+            d.set_registry(None);
+            assert_eq!(
+                call(&d, OP_REG_LOOKUP, &encode_reg_path(K)).0,
+                ST_NOT_SUPPORTED
+            );
+        }
+
+        #[test]
+        fn every_opcode_round_trips() {
+            let d = director();
+            // LOOKUP on nothing.
+            let r = ok(&d, OP_REG_LOOKUP, &encode_reg_path(K));
+            assert_eq!(decode_reg_lookup_reply(&r), Some((0, false, 0)));
+            // KEY on nothing.
+            let r = ok(&d, OP_REG_KEY, &encode_reg_path(K));
+            assert_eq!(decode_reg_key_reply(&r), Some((None, 0)));
+
+            // SET_VALUE.
+            assert_eq!(
+                version(
+                    &d,
+                    OP_REG_SET_VALUE,
+                    &encode_reg_set_value(K, "Val", 4, &7u32.to_le_bytes())
+                ),
+                1
+            );
+            let r = ok(&d, OP_REG_LOOKUP, &encode_reg_path(K));
+            assert_eq!(
+                decode_reg_lookup_reply(&r),
+                Some((1, false, 1)),
+                "present, not created"
+            );
+            let r = ok(&d, OP_REG_LOOKUP, &encode_reg_path(r"\Registry\Machine"));
+            assert_eq!(
+                decode_reg_lookup_reply(&r),
+                Some((1, true, 1)),
+                "something below"
+            );
+            let (node, v) = decode_reg_key_reply(&ok(&d, OP_REG_KEY, &encode_reg_path(K))).unwrap();
+            assert_eq!(v, 1);
+            let node = node.unwrap();
+            assert_eq!(node.values[0].name, "Val");
+            assert_eq!(node.values[0].ty, 4);
+            assert_eq!(node.values[0].data, 7u32.to_le_bytes());
+            assert!(node.last_write > 0, "FILETIME stamped");
+
+            // DELETE_VALUE.
+            assert_eq!(
+                version(&d, OP_REG_DELETE_VALUE, &encode_reg_delete_value(K, "VAL")),
+                2
+            );
+            let (node, _) = decode_reg_key_reply(&ok(&d, OP_REG_KEY, &encode_reg_path(K))).unwrap();
+            let node = node.unwrap();
+            assert!(node.values.is_empty());
+            assert_eq!(node.value_tombstones, vec!["val".to_string()]);
+
+            // CREATE_KEY: created here (the shim only creates what does not exist for real).
+            let sub = format!(r"{K}\Sub");
+            assert_eq!(
+                version(&d, OP_REG_CREATE_KEY, &encode_reg_create_key(&sub, false)),
+                3
+            );
+            let r = ok(&d, OP_REG_LOOKUP, &encode_reg_path(&sub));
+            assert_eq!(decode_reg_lookup_reply(&r), Some((2, false, 3)));
+            assert_eq!(
+                call(&d, OP_REG_CREATE_KEY, &encode_reg_create_key(&sub, false)).0,
+                ST_EXISTS
+            );
+            let vol = format!(r"{K}\Vol");
+            version(&d, OP_REG_CREATE_KEY, &encode_reg_create_key(&vol, true));
+            let (n, _) = decode_reg_key_reply(&ok(&d, OP_REG_KEY, &encode_reg_path(&vol))).unwrap();
+            assert!(n.unwrap().volatile);
+
+            // RENAME_KEY.
+            let v = version(&d, OP_REG_RENAME_KEY, &encode_reg_rename_key(&sub, "Moved"));
+            assert_eq!(v, 5);
+            let r = ok(&d, OP_REG_LOOKUP, &encode_reg_path(&sub));
+            assert_eq!(
+                decode_reg_lookup_reply(&r),
+                Some((3, false, 5)),
+                "old name tombstoned"
+            );
+            let (n, _) = decode_reg_key_reply(&ok(&d, OP_REG_KEY, &encode_reg_path(K))).unwrap();
+            assert_eq!(
+                n.unwrap().children["moved"],
+                ("Moved".to_string(), Child::Present)
+            );
+            assert_eq!(
+                call(
+                    &d,
+                    OP_REG_RENAME_KEY,
+                    &encode_reg_rename_key(&format!(r"{K}\Nope"), "X")
+                )
+                .0,
+                ST_NOT_FOUND
+            );
+
+            // DELETE_KEY.
+            let moved = format!(r"{K}\Moved");
+            assert_eq!(version(&d, OP_REG_DELETE_KEY, &encode_reg_path(&moved)), 6);
+            let r = ok(&d, OP_REG_LOOKUP, &encode_reg_path(&moved));
+            assert_eq!(decode_reg_lookup_reply(&r), Some((3, false, 6)));
+            assert_eq!(
+                call(&d, OP_REG_DELETE_KEY, &encode_reg_path(&moved)).0,
+                ST_NOT_FOUND
+            );
+            assert_eq!(
+                call(&d, OP_REG_DELETE_KEY, &encode_reg_path(r"\Registry")).0,
+                ST_BAD_REQUEST,
+                "the root cannot be deleted"
+            );
+
+            // CHANGED.
+            let r = ok(&d, OP_REG_CHANGED, &encode_reg_changed(K, false, 5));
+            assert_eq!(decode_reg_changed_reply(&r), Some((true, 6)));
+            let r = ok(&d, OP_REG_CHANGED, &encode_reg_changed(K, false, 6));
+            assert_eq!(decode_reg_changed_reply(&r), Some((false, 6)));
+        }
+
+        #[test]
+        fn changed_reports_subtree_and_version() {
+            let d = director();
+            let deep = format!(r"{K}\A\B");
+            let v1 = version(
+                &d,
+                OP_REG_SET_VALUE,
+                &encode_reg_set_value(&deep, "x", 1, b""),
+            );
+            let v2 = version(
+                &d,
+                OP_REG_SET_VALUE,
+                &encode_reg_set_value(&deep, "y", 1, b""),
+            );
+            let ask = |p: &str, sub: bool, since: u64| {
+                decode_reg_changed_reply(&ok(
+                    &d,
+                    OP_REG_CHANGED,
+                    &encode_reg_changed(p, sub, since),
+                ))
+                .unwrap()
+            };
+            assert_eq!(ask(K, false, v1), (false, v2), "only below K");
+            assert_eq!(ask(K, true, v1), (true, v2));
+            assert_eq!(ask(&deep, false, v1), (true, v2));
+            assert_eq!(ask(&deep, false, v2), (false, v2));
+            assert_eq!(ask(r"\Registry\Machine\Elsewhere", true, 0), (false, v2));
+            assert_eq!(
+                call(&d, OP_REG_CHANGED, &encode_reg_changed("nope", true, 0)).0,
+                ST_BAD_REQUEST
+            );
+        }
+
+        #[test]
+        fn malformed_payloads_and_bad_paths_are_bad_request() {
+            let d = director();
+            for op in OP_REG_LOOKUP..=OP_REG_CHANGED {
+                assert_eq!(call(&d, op, &[1, 2, 3]).0, ST_BAD_REQUEST, "op {op}");
+            }
+            for bad in [
+                "",
+                r"\Device\Foo",
+                r"\Registry\Machine\\X",
+                r"\Registry\Machine\..\X",
+            ] {
+                assert_eq!(
+                    call(&d, OP_REG_LOOKUP, &encode_reg_path(bad)).0,
+                    ST_BAD_REQUEST
+                );
+                assert_eq!(
+                    call(&d, OP_REG_KEY, &encode_reg_path(bad)).0,
+                    ST_BAD_REQUEST
+                );
+                assert_eq!(
+                    call(
+                        &d,
+                        OP_REG_SET_VALUE,
+                        &encode_reg_set_value(bad, "v", 1, b"")
+                    )
+                    .0,
+                    ST_BAD_REQUEST
+                );
+                assert_eq!(
+                    call(&d, OP_REG_CREATE_KEY, &encode_reg_create_key(bad, false)).0,
+                    ST_BAD_REQUEST
+                );
+            }
+            // Name too long (key component > 255 UTF-16 units).
+            let long = format!(r"{K}\{}", "k".repeat(256));
+            assert_eq!(
+                call(&d, OP_REG_CREATE_KEY, &encode_reg_create_key(&long, false)).0,
+                ST_BAD_REQUEST
+            );
+            // Nothing above bumped the version.
+            let r = ok(&d, OP_REG_LOOKUP, &encode_reg_path(K));
+            assert_eq!(decode_reg_lookup_reply(&r), Some((0, false, 0)));
+        }
+
+        #[test]
+        fn oversized_key_reply_is_reply_too_large() {
+            let d = director();
+            version(
+                &d,
+                OP_REG_SET_VALUE,
+                &encode_reg_set_value(K, "big", 3, &vec![0u8; 5000]),
+            );
+            let (st, r) = dispatch_director(&d, OP_REG_KEY, &encode_reg_path(K), 0, 4096, None);
+            assert_eq!(st, ST_REPLY_TOO_LARGE);
+            assert!(r.is_empty());
+            // It fits a larger ring.
+            let (st, _) = dispatch_director(&d, OP_REG_KEY, &encode_reg_path(K), 0, 8192, None);
+            assert_eq!(st, ST_OK);
+            // The boundary: a reply of exactly payload_cap - 8 bytes fits.
+            let len = ok(&d, OP_REG_KEY, &encode_reg_path(K)).len() as u32;
+            let at = |cap| dispatch_director(&d, OP_REG_KEY, &encode_reg_path(K), 0, cap, None).0;
+            assert_eq!(at(len + 8), ST_OK);
+            assert_eq!(at(len + 7), ST_REPLY_TOO_LARGE);
+        }
+
+        /// Readers on several workers see each write whole. Phase one has a single writer whose
+        /// write `n` stores `n` and gets version `n`, so a reply pairing a value with another
+        /// version is a torn read. Phase two adds a second writer on another key: the writes
+        /// are serialised, each bumping the version exactly once.
+        #[test]
+        fn concurrent_readers_during_writes_see_consistent_snapshots() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let d = Arc::new(director());
+            let k2 = format!(r"{K}\Other");
+            let set = |d: &Director, path: &str, n: u64| {
+                version(
+                    d,
+                    OP_REG_SET_VALUE,
+                    &encode_reg_set_value(path, "n", 11, &n.to_le_bytes()),
+                )
+            };
+            let readers = |d: &Arc<Director>, stop: &Arc<AtomicBool>, strict: bool| {
+                (0..4)
+                    .map(|_| {
+                        let d = d.clone();
+                        let stop = stop.clone();
+                        std::thread::spawn(move || {
+                            let mut last = 0u64;
+                            let mut reads = 0u64;
+                            while !stop.load(Ordering::Relaxed) || reads == 0 {
+                                let (node, v) =
+                                    decode_reg_key_reply(&ok(&d, OP_REG_KEY, &encode_reg_path(K)))
+                                        .unwrap();
+                                assert!(v >= last, "version went backwards");
+                                last = v;
+                                if let (true, Some(n)) = (strict, node) {
+                                    let got = u64::from_le_bytes(
+                                        n.values[0].data[..].try_into().unwrap(),
+                                    );
+                                    assert_eq!(got, v, "value and version from different states");
+                                }
+                                let r = ok(&d, OP_REG_LOOKUP, &encode_reg_path(K));
+                                let (_, _, lv) = decode_reg_lookup_reply(&r).unwrap();
+                                assert!(lv >= last);
+                                let r = ok(&d, OP_REG_CHANGED, &encode_reg_changed(K, true, 0));
+                                let (_, cv) = decode_reg_changed_reply(&r).unwrap();
+                                assert!(cv >= lv);
+                                last = cv;
+                                reads += 1;
+                            }
+                            reads
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            // Phase one: one writer.
+            let stop = Arc::new(AtomicBool::new(false));
+            let rs = readers(&d, &stop, true);
+            for n in 1..=300u64 {
+                assert_eq!(set(&d, K, n), n);
+            }
+            stop.store(true, Ordering::Relaxed);
+            for r in rs {
+                assert!(r.join().unwrap() > 0);
+            }
+
+            // Phase two: two writers on different keys.
+            let stop = Arc::new(AtomicBool::new(false));
+            let rs = readers(&d, &stop, false);
+            let ws: Vec<_> = [K.to_string(), k2.clone()]
+                .into_iter()
+                .map(|path| {
+                    let d = d.clone();
+                    std::thread::spawn(move || {
+                        let mut prev = 0;
+                        for n in 0..300u64 {
+                            let v = set(&d, &path, n);
+                            assert!(v > prev);
+                            prev = v;
+                        }
+                    })
+                })
+                .collect();
+            for w in ws {
+                w.join().unwrap();
+            }
+            stop.store(true, Ordering::Relaxed);
+            for r in rs {
+                assert!(r.join().unwrap() > 0);
+            }
+            let (_, _, v) =
+                decode_reg_lookup_reply(&ok(&d, OP_REG_LOOKUP, &encode_reg_path(K))).unwrap();
+            assert_eq!(v, 900, "every write bumped the version exactly once");
+            for p in [K, k2.as_str()] {
+                let (n, _) =
+                    decode_reg_key_reply(&ok(&d, OP_REG_KEY, &encode_reg_path(p))).unwrap();
+                assert_eq!(n.unwrap().values[0].data, 299u64.to_le_bytes());
+            }
+        }
     }
 }

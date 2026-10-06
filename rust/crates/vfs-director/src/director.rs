@@ -2,13 +2,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::ops::{
     bad_request, is_dir, map_io_err, not_found, read_only, Access, DirEntry, Handle, Provider,
     RootId, SetAttr, Stat, VPath, OPEN_WRITE,
 };
 use crate::path::normalize;
+use crate::registry::RegistryHost;
 use vfs_provider::OPEN_APPEND;
 
 struct OpenRec {
@@ -52,6 +53,9 @@ pub struct Director {
     /// client tell an immutable file it has cached from the one a remount
     /// put at the same path.
     mount_gen: AtomicU32,
+    /// The session's registry overlay, when registry virtualisation is on: what the ring's
+    /// registry opcodes (15-22) answer from. `None` answers them `ST_NOT_SUPPORTED`.
+    registry: RwLock<Option<Arc<RegistryHost>>>,
 }
 
 /// What [`Director::open_info`] says about a new handle.
@@ -80,7 +84,27 @@ impl Director {
             opens: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             mount_gen: AtomicU32::new(1),
+            registry: RwLock::new(None),
         }
+    }
+
+    /// Attach (`Some`) or detach (`None`) the session's registry overlay. Detaching does not
+    /// flush: the host saves on its own, and when its last reference drops (which, if this
+    /// held it, happens here, outside the lock).
+    pub fn set_registry(&self, host: Option<Arc<RegistryHost>>) {
+        let old = {
+            let mut r = self.registry.write().unwrap_or_else(|e| e.into_inner());
+            std::mem::replace(&mut *r, host)
+        };
+        drop(old);
+    }
+
+    /// The attached registry overlay, if any.
+    pub fn registry(&self) -> Option<Arc<RegistryHost>> {
+        self.registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The current mount generation: see the field's docs.
