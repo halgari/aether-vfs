@@ -403,6 +403,50 @@ hook_entry_points! {
         options: u32,
     ) -> NTSTATUS as "NtDuplicateObject", on_panic STATUS_HOOK_PANICKED;
 
+    fn query_key_hook = query_key_hook_body(
+        key: HANDLE,
+        class: u32,
+        info: *mut c_void,
+        length: u32,
+        ret_len: *mut u32,
+    ) -> NTSTATUS as "NtQueryKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn enum_key_hook = enum_key_hook_body(
+        key: HANDLE,
+        index: u32,
+        class: u32,
+        info: *mut c_void,
+        length: u32,
+        ret_len: *mut u32,
+    ) -> NTSTATUS as "NtEnumerateKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn query_value_hook = query_value_hook_body(
+        key: HANDLE,
+        name: *const UnicodeString,
+        class: u32,
+        info: *mut c_void,
+        length: u32,
+        ret_len: *mut u32,
+    ) -> NTSTATUS as "NtQueryValueKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn enum_value_hook = enum_value_hook_body(
+        key: HANDLE,
+        index: u32,
+        class: u32,
+        info: *mut c_void,
+        length: u32,
+        ret_len: *mut u32,
+    ) -> NTSTATUS as "NtEnumerateValueKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn query_multiple_hook = query_multiple_hook_body(
+        key: HANDLE,
+        entries: *mut c_void,
+        count: u32,
+        buffer: *mut c_void,
+        buffer_len: *mut u32,
+        required: *mut u32,
+    ) -> NTSTATUS as "NtQueryMultipleValueKey", on_panic STATUS_HOOK_PANICKED;
+
     /// The one entry point here that is **not** an ntdll `NTSTATUS` call, and
     /// the one place a uniform `STATUS_UNSUCCESSFUL` would be actively
     /// dangerous. `CreateProcessInternalW` returns a Win32 `BOOL`, in which
@@ -479,6 +523,7 @@ use crate::ntdef::{
     NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryDirectoryFileFn,
     NtQueryInformationByNameFn, NtQueryObjectFn, NtUnlockFileFn,
     NtCreateKeyFn, NtDuplicateObjectFn, NtOpenKeyExFn, NtOpenKeyFn, NtQueryKeyFn,
+    NtEnumerateKeyFn, NtEnumerateValueKeyFn, NtQueryMultipleValueKeyFn, NtQueryValueKeyFn,
     STATUS_OBJECT_NAME_INVALID,
     NtQueryFullAttributesFileFn,
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
@@ -549,9 +594,13 @@ static mut TRAMP_OPEN_KEY: Option<NtOpenKeyFn> = None;
 static mut TRAMP_OPEN_KEY_EX: Option<NtOpenKeyExFn> = None;
 static mut TRAMP_CREATE_KEY: Option<NtCreateKeyFn> = None;
 static mut TRAMP_DUP: Option<NtDuplicateObjectFn> = None;
-/// The real `NtQueryKey`. Not detoured yet, so this is ntdll's own export; the hook that
-/// detours it must store its trampoline here instead.
+/// The real `NtQueryKey`: the detour's trampoline, or ntdll's own export when the detour could
+/// not be installed (key names for `regkeys` are still read through it).
 static mut TRAMP_QUERY_KEY: Option<NtQueryKeyFn> = None;
+static mut TRAMP_ENUM_KEY: Option<NtEnumerateKeyFn> = None;
+static mut TRAMP_QUERY_VALUE: Option<NtQueryValueKeyFn> = None;
+static mut TRAMP_ENUM_VALUE: Option<NtEnumerateValueKeyFn> = None;
+static mut TRAMP_QUERY_MULTIPLE: Option<NtQueryMultipleValueKeyFn> = None;
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
 /// 12 params; only `flags` and `pi` are inspected/modified by the hook.
@@ -1056,8 +1105,62 @@ unsafe fn optional_detour(
 /// checks `regclient::enabled()` first and goes straight to its trampoline when it is off.
 /// Optional in the style of `NtQueryObject`, so a host without one still gets the file VFS.
 unsafe fn install_registry_detours(ntdll: HMODULE, detours: &mut Vec<RawDetour>) {
-    TRAMP_QUERY_KEY = GetProcAddress(ntdll, c"NtQueryKey".as_ptr().cast())
+    let raw_query_key = GetProcAddress(ntdll, c"NtQueryKey".as_ptr().cast())
         .map(|p| core::mem::transmute::<unsafe extern "system" fn() -> isize, NtQueryKeyFn>(p));
+    TRAMP_QUERY_KEY = raw_query_key;
+    // The query hooks (spec 3.1). Each trampoline is stored before its detour is enabled.
+    optional_detour(
+        ntdll,
+        c"NtQueryKey",
+        "NtQueryKey",
+        query_key_hook as *const (),
+        detours,
+        &mut |t| {
+            TRAMP_QUERY_KEY = t
+                .map(|t| core::mem::transmute::<*const (), NtQueryKeyFn>(t))
+                .or(raw_query_key)
+        },
+    );
+    optional_detour(
+        ntdll,
+        c"NtEnumerateKey",
+        "NtEnumerateKey",
+        enum_key_hook as *const (),
+        detours,
+        &mut |t| TRAMP_ENUM_KEY = t.map(|t| core::mem::transmute::<*const (), NtEnumerateKeyFn>(t)),
+    );
+    optional_detour(
+        ntdll,
+        c"NtQueryValueKey",
+        "NtQueryValueKey",
+        query_value_hook as *const (),
+        detours,
+        &mut |t| {
+            TRAMP_QUERY_VALUE = t.map(|t| core::mem::transmute::<*const (), NtQueryValueKeyFn>(t))
+        },
+    );
+    optional_detour(
+        ntdll,
+        c"NtEnumerateValueKey",
+        "NtEnumerateValueKey",
+        enum_value_hook as *const (),
+        detours,
+        &mut |t| {
+            TRAMP_ENUM_VALUE =
+                t.map(|t| core::mem::transmute::<*const (), NtEnumerateValueKeyFn>(t))
+        },
+    );
+    optional_detour(
+        ntdll,
+        c"NtQueryMultipleValueKey",
+        "NtQueryMultipleValueKey",
+        query_multiple_hook as *const (),
+        detours,
+        &mut |t| {
+            TRAMP_QUERY_MULTIPLE =
+                t.map(|t| core::mem::transmute::<*const (), NtQueryMultipleValueKeyFn>(t))
+        },
+    );
     optional_detour(
         ntdll,
         c"NtOpenKeyEx",
@@ -1099,6 +1202,10 @@ unsafe fn reg_real() -> crate::regkeys::Real {
         query: TRAMP_QUERY_KEY,
         close: TRAMP_CLOSE,
         dup: TRAMP_DUP,
+        enum_key: TRAMP_ENUM_KEY,
+        query_value: TRAMP_QUERY_VALUE,
+        enum_value: TRAMP_ENUM_VALUE,
+        query_multiple: TRAMP_QUERY_MULTIPLE,
     }
 }
 
@@ -1259,6 +1366,147 @@ unsafe fn dup_hook_body(
             options,
         ),
     }
+}
+
+/// `NtQueryKey` hook. See `regquery::query_key`.
+unsafe fn query_key_hook_body(
+    key: HANDLE,
+    class: u32,
+    info: *mut c_void,
+    length: u32,
+    ret_len: *mut u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QueryKey);
+    let Some(tramp) = TRAMP_QUERY_KEY else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if reg_bypass() {
+        return tramp(key, class, info, length, ret_len);
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return tramp(key, class, info, length, ret_len);
+    };
+    crate::regquery::query_key(&reg_real(), key as isize, class, info, length, ret_len)
+}
+
+/// `NtEnumerateKey` hook. See `regquery::enumerate_key`.
+unsafe fn enum_key_hook_body(
+    key: HANDLE,
+    index: u32,
+    class: u32,
+    info: *mut c_void,
+    length: u32,
+    ret_len: *mut u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::EnumerateKey);
+    let Some(tramp) = TRAMP_ENUM_KEY else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if reg_bypass() {
+        return tramp(key, index, class, info, length, ret_len);
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return tramp(key, index, class, info, length, ret_len);
+    };
+    crate::regquery::enumerate_key(
+        &reg_real(),
+        key as isize,
+        index,
+        class,
+        info,
+        length,
+        ret_len,
+    )
+}
+
+/// `NtQueryValueKey` hook. See `regquery::query_value_key`.
+unsafe fn query_value_hook_body(
+    key: HANDLE,
+    name: *const UnicodeString,
+    class: u32,
+    info: *mut c_void,
+    length: u32,
+    ret_len: *mut u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QueryValueKey);
+    let Some(tramp) = TRAMP_QUERY_VALUE else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if reg_bypass() {
+        return tramp(key, name, class, info, length, ret_len);
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return tramp(key, name, class, info, length, ret_len);
+    };
+    crate::regquery::query_value_key(
+        &reg_real(),
+        key as isize,
+        name,
+        class,
+        info,
+        length,
+        ret_len,
+    )
+}
+
+/// `NtEnumerateValueKey` hook. See `regquery::enumerate_value_key`.
+unsafe fn enum_value_hook_body(
+    key: HANDLE,
+    index: u32,
+    class: u32,
+    info: *mut c_void,
+    length: u32,
+    ret_len: *mut u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::EnumerateValueKey);
+    let Some(tramp) = TRAMP_ENUM_VALUE else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if reg_bypass() {
+        return tramp(key, index, class, info, length, ret_len);
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return tramp(key, index, class, info, length, ret_len);
+    };
+    crate::regquery::enumerate_value_key(
+        &reg_real(),
+        key as isize,
+        index,
+        class,
+        info,
+        length,
+        ret_len,
+    )
+}
+
+/// `NtQueryMultipleValueKey` hook. See `regquery::query_multiple_value_key`.
+unsafe fn query_multiple_hook_body(
+    key: HANDLE,
+    entries: *mut c_void,
+    count: u32,
+    buffer: *mut c_void,
+    buffer_len: *mut u32,
+    required: *mut u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QueryMultipleValueKey);
+    let Some(tramp) = TRAMP_QUERY_MULTIPLE else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if reg_bypass() {
+        return tramp(key, entries, count, buffer, buffer_len, required);
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return tramp(key, entries, count, buffer, buffer_len, required);
+    };
+    crate::regquery::query_multiple_value_key(
+        &reg_real(),
+        key as isize,
+        entries,
+        count,
+        buffer,
+        buffer_len,
+        required,
+    )
 }
 
 /// Decode ObjectName as UTF-16 (no root resolution).

@@ -21,6 +21,7 @@ mod read_cache;
 /// The registry hooks' client for the director's registry overlay.
 pub mod regclient;
 mod regkeys;
+mod regquery;
 mod zipserve;
 
 pub use bootstrap::{
@@ -67,6 +68,12 @@ pub fn registry_handle_path(handle: isize) -> Option<String> {
 /// Live key handles the registry hooks track: (synthetic, pass-through).
 pub fn registry_handle_counts() -> (usize, usize) {
     regkeys::counts()
+}
+
+/// Key handles with a kept enumeration snapshot (registry query hooks). For tests and
+/// diagnostics.
+pub fn registry_enum_states() -> usize {
+    regquery::states()
 }
 
 /// Whether a handle value is one of the registry hooks' synthetic key handles.

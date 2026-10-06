@@ -72,6 +72,22 @@ pub fn key(path: &str) -> Result<Option<Node>, i32> {
     }
 }
 
+/// `REG_KEY` through [`global`], with `f` run on the (cached) node in place instead of a clone.
+/// `f` runs under the cache lock: it must be pure (no trampolines, no director, no caller
+/// memory).
+pub fn with_key<R>(path: &str, f: impl FnOnce(Option<&Node>) -> R) -> Result<R, i32> {
+    match global() {
+        Some(c) => c.with_key(path, f),
+        None => read_failed(ST_NOT_SUPPORTED),
+    }
+}
+
+/// The registry generation the director last published (0: none, so nothing is cached). An
+/// answer read after this returned it is current for as long as it stays the same.
+pub fn generation() -> u64 {
+    fuse_client::global().map_or(0, |c| c.reg_generation())
+}
+
 pub fn set_value(path: &str, name: &str, ty: u32, data: &[u8]) -> Result<(), i32> {
     global()
         .ok_or(ST_NOT_SUPPORTED)?
@@ -176,6 +192,37 @@ impl<'a> RegClient<'a> {
                 Ok(decode_reg_key_reply(&r).ok_or(ST_BAD_REQUEST)?.0)
             },
         )
+    }
+
+    /// [`RegClient::key`] with `f` run on the cached node in place (under the cache lock).
+    pub fn with_key<R>(&self, path: &str, f: impl FnOnce(Option<&Node>) -> R) -> Result<R, i32> {
+        let generation = self.fc.reg_generation();
+        let k = fold(path);
+        if generation != 0 {
+            if let Ok(mut c) = self.cache.lock() {
+                if c.at(generation) {
+                    if let Some(v) = c.keys.get(&k) {
+                        return Ok(f(v.as_ref()));
+                    }
+                }
+            }
+        }
+        let v = match self
+            .request(OP_REG_KEY, &encode_reg_path(path))
+            .and_then(|r| decode_reg_key_reply(&r).map(|d| d.0).ok_or(ST_BAD_REQUEST))
+        {
+            Ok(v) => v,
+            Err(st) => return read_failed(st),
+        };
+        let r = f(v.as_ref());
+        if generation != 0 {
+            if let Ok(mut c) = self.cache.lock() {
+                if c.at(generation) {
+                    insert_bounded(&mut c.keys, k, v);
+                }
+            }
+        }
+        Ok(r)
     }
 
     pub fn set_value(&self, path: &str, name: &str, ty: u32, data: &[u8]) -> Result<(), i32> {

@@ -538,3 +538,59 @@ pub const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000_000Du32 as i32;
 pub const STATUS_OBJECT_NAME_INVALID: NTSTATUS = 0xC000_0033u32 as i32;
 /// `STATUS_BUFFER_TOO_SMALL`.
 pub const STATUS_BUFFER_TOO_SMALL: NTSTATUS = 0xC000_0023u32 as i32;
+
+/// `ntdll!NtEnumerateKey`.
+pub type NtEnumerateKeyFn = unsafe extern "system" fn(
+    HANDLE,      // KeyHandle
+    u32,         // Index
+    u32,         // KeyInformationClass
+    *mut c_void, // KeyInformation
+    u32,         // Length
+    *mut u32,    // ResultLength
+) -> NTSTATUS;
+
+/// `ntdll!NtQueryValueKey`.
+pub type NtQueryValueKeyFn = unsafe extern "system" fn(
+    HANDLE,               // KeyHandle
+    *const UnicodeString, // ValueName
+    u32,                  // KeyValueInformationClass
+    *mut c_void,          // KeyValueInformation
+    u32,                  // Length
+    *mut u32,             // ResultLength
+) -> NTSTATUS;
+
+/// `ntdll!NtEnumerateValueKey`.
+pub type NtEnumerateValueKeyFn = unsafe extern "system" fn(
+    HANDLE,      // KeyHandle
+    u32,         // Index
+    u32,         // KeyValueInformationClass
+    *mut c_void, // KeyValueInformation
+    u32,         // Length
+    *mut u32,    // ResultLength
+) -> NTSTATUS;
+
+/// `ntdll!NtQueryMultipleValueKey`. `ValueEntries` is an array of x64 `KEY_VALUE_ENTRY`
+/// (24 bytes each); `BufferLength` is in/out, `RequiredBufferLength` nullable.
+pub type NtQueryMultipleValueKeyFn = unsafe extern "system" fn(
+    HANDLE,      // KeyHandle
+    *mut c_void, // ValueEntries
+    u32,         // EntryCount
+    *mut c_void, // ValueBuffer
+    *mut u32,    // BufferLength
+    *mut u32,    // RequiredBufferLength
+) -> NTSTATUS;
+
+/// `KEY_INFORMATION_CLASS` values the query hooks read from real keys.
+pub const KEY_BASIC_INFORMATION: u32 = 0;
+pub const KEY_NODE_INFORMATION: u32 = 1;
+pub const KEY_FULL_INFORMATION: u32 = 2;
+/// `KEY_VALUE_INFORMATION_CLASS` values the query hooks read from real keys.
+pub const KEY_VALUE_BASIC_INFORMATION: u32 = 0;
+pub const KEY_VALUE_PARTIAL_INFORMATION: u32 = 2;
+
+/// `STATUS_NO_MORE_ENTRIES`: an enumeration index past the end.
+pub const STATUS_NO_MORE_ENTRIES: NTSTATUS = 0x8000_001Au32 as i32;
+/// `STATUS_KEY_DELETED`: a query through a handle whose key was deleted.
+pub const STATUS_KEY_DELETED: NTSTATUS = 0xC000_017Cu32 as i32;
+/// `STATUS_ACCESS_VIOLATION`, for a NULL buffer the caller said was non-empty.
+pub const STATUS_ACCESS_VIOLATION: NTSTATUS = 0xC000_0005u32 as i32;

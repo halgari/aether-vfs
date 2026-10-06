@@ -35,7 +35,8 @@ use vfs_registry::Lookup;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 use crate::ntdef::{
-    NtCloseFn, NtDuplicateObjectFn, NtOpenKeyExFn, NtQueryKeyFn, NtQueryObjectFn, ObjectAttributes,
+    NtCloseFn, NtDuplicateObjectFn, NtEnumerateKeyFn, NtEnumerateValueKeyFn, NtOpenKeyExFn,
+    NtQueryKeyFn, NtQueryMultipleValueKeyFn, NtQueryObjectFn, NtQueryValueKeyFn, ObjectAttributes,
     UnicodeString, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DUPLICATE_SAME_ATTRIBUTES,
     KEY_NAME_INFORMATION, OBJECT_BASIC_INFORMATION, OBJECT_HANDLE_FLAG_INFORMATION,
     OBJECT_TYPE_INFORMATION, OBJ_CASE_INSENSITIVE, REG_CREATED_NEW_KEY, REG_OPENED_EXISTING_KEY,
@@ -65,7 +66,7 @@ pub const KEY_NOTIFY: u32 = 0x0010;
 pub const KEY_CREATE_LINK: u32 = 0x0020;
 pub const KEY_WOW64_64KEY: u32 = 0x0100;
 pub const KEY_WOW64_32KEY: u32 = 0x0200;
-const WOW64_MASK: u32 = KEY_WOW64_64KEY | KEY_WOW64_32KEY;
+pub const WOW64_MASK: u32 = KEY_WOW64_64KEY | KEY_WOW64_32KEY;
 const DELETE: u32 = 0x0001_0000;
 const READ_CONTROL: u32 = 0x0002_0000;
 const WRITE_DAC: u32 = 0x0004_0000;
@@ -123,7 +124,7 @@ pub fn is_synthetic(h: isize) -> bool {
 /// holding a `std::sync::Mutex` leaves it locked and not poisoned (see `close_hook_body`), so
 /// this spins a bounded number of times and then gives up. A record lost that way belongs to a
 /// handle that is going away.
-fn lock_for_close<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+pub(crate) fn lock_for_close<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
     for _ in 0..10_000 {
         match m.try_lock() {
             Ok(g) => return Some(g),
@@ -306,6 +307,10 @@ pub struct Real {
     pub query: Option<NtQueryKeyFn>,
     pub close: Option<NtCloseFn>,
     pub dup: Option<NtDuplicateObjectFn>,
+    pub enum_key: Option<NtEnumerateKeyFn>,
+    pub query_value: Option<NtQueryValueKeyFn>,
+    pub enum_value: Option<NtEnumerateValueKeyFn>,
+    pub query_multiple: Option<NtQueryMultipleValueKeyFn>,
 }
 
 /// An absolute `OBJECT_ATTRIBUTES` the shim builds for its own opens. Boxed: the attributes
@@ -384,6 +389,19 @@ unsafe fn real_key_name(real: &Real, h: isize) -> Option<String> {
 
 /// The canonical path of a root key handle: from the tables, else from the real key's name.
 /// `Err(())` when the handle is not something this can name.
+/// The canonical path of a real key handle neither table holds (opened before the hooks, or
+/// handed in from elsewhere), from the real key's name. `None` when it names no key the overlay
+/// serves.
+///
+/// # Safety
+/// `h` is a caller's handle; it is only passed to the real `NtQueryKey`.
+pub unsafe fn untracked_path(real: &Real, h: isize) -> Option<String> {
+    let nt = real_key_name(real, h)?;
+    path::canonical(&nt, user_sid())
+        .ok()
+        .filter(|p| path::is_virtualised(p))
+}
+
 unsafe fn root_path(real: &Real, root: isize) -> Result<String, ()> {
     if is_synthetic(root) {
         return synthetic(root).map(|k| k.path).ok_or(());
@@ -399,7 +417,11 @@ unsafe fn root_path(real: &Real, root: isize) -> Result<String, ()> {
 /// WOW64 flags of `access` (the caller's access). A key that refuses `KEY_READ` is tried again
 /// with only the read rights the caller itself asked for, which it may grant. `Err` is the
 /// open's status.
-unsafe fn open_private(real: &Real, canonical: &str, access: u32) -> Result<isize, NTSTATUS> {
+pub(crate) unsafe fn open_private(
+    real: &Real,
+    canonical: &str,
+    access: u32,
+) -> Result<isize, NTSTATUS> {
     let Some(open) = real.open_ex else {
         return Err(STATUS_UNSUCCESSFUL);
     };
@@ -431,7 +453,7 @@ fn not_found(st: NTSTATUS) -> bool {
     st == STATUS_OBJECT_NAME_NOT_FOUND || st == STATUS_OBJECT_PATH_NOT_FOUND
 }
 
-unsafe fn close_real(real: &Real, h: isize) {
+pub(crate) unsafe fn close_real(real: &Real, h: isize) {
     if let Some(c) = real.close {
         c(h as HANDLE);
     }
@@ -797,6 +819,8 @@ pub fn open_options_of_create(options: u32) -> u32 {
 /// private real handle closed); `None` for anything else, whose pass-through record (if any)
 /// is dropped before the caller closes it for real.
 pub unsafe fn close(real: &Real, h: isize) -> Option<NTSTATUS> {
+    // Whatever the handle was, an enumeration snapshot kept for it goes with it.
+    crate::regquery::forget(h);
     if is_synthetic(h) {
         return Some(match remove_synthetic(h) {
             Some(k) => {
@@ -983,6 +1007,7 @@ pub unsafe fn duplicate(
     // handle value may be reused the moment the call returns.
     if close_source {
         untrack(sh);
+        crate::regquery::forget(sh);
     }
     let st = dup(
         src_process,
