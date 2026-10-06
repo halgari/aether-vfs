@@ -4,6 +4,7 @@
 //! persistence format, merged view and director logic build and test on Linux.
 
 pub mod format;
+pub mod layout;
 pub mod merge;
 pub mod overlay;
 pub mod path;

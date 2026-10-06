@@ -10,6 +10,9 @@ pub struct RealKey {
     pub values: Vec<Value>,
     pub class: Option<Vec<u16>>,
     pub last_write: u64,
+    /// `MaxClassLen` (bytes) from the real key's `KEY_FULL_INFORMATION`: the longest class of
+    /// any real subkey. Subkey classes are not otherwise visible to the merge.
+    pub max_subkey_class_len: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -18,6 +21,10 @@ pub struct MergedKey {
     pub values: Vec<Value>,
     pub class: Option<Vec<u16>>,
     pub last_write: u64,
+    /// The longest subkey class in bytes. Overlay-created keys have no class, so this is the
+    /// real key's value when the real key shows through, else 0. Like Windows (which keeps it
+    /// as a high-water mark), it is not lowered when a real subkey is hidden.
+    pub max_subkey_class_len: u32,
 }
 
 pub fn merge(real: Option<&RealKey>, node: Option<&Node>, tombstoned: bool) -> Option<MergedKey> {
@@ -29,6 +36,7 @@ pub fn merge(real: Option<&RealKey>, node: Option<&Node>, tombstoned: bool) -> O
     let mut out = MergedKey {
         class: real.and_then(|r| r.class.clone()),
         last_write: real.map_or(0, |r| r.last_write),
+        max_subkey_class_len: real.map_or(0, |r| r.max_subkey_class_len),
         ..MergedKey::default()
     };
     let Some(node) = node else {
@@ -97,6 +105,7 @@ mod tests {
             values: vals,
             class: Some(vec![1, 2]),
             last_write: lw,
+            max_subkey_class_len: 6,
         }
     }
 
@@ -116,6 +125,7 @@ mod tests {
         assert_eq!(m.values, r.values);
         assert_eq!(m.class, Some(vec![1, 2]));
         assert_eq!(m.last_write, 5);
+        assert_eq!(m.max_subkey_class_len, 6);
     }
 
     #[test]
@@ -191,6 +201,7 @@ mod tests {
         assert!(m.subkeys.is_empty() && m.values.is_empty());
         assert_eq!(m.class, None);
         assert_eq!(m.last_write, 5);
+        assert_eq!(m.max_subkey_class_len, 0);
     }
 
     #[test]
