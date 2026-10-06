@@ -237,6 +237,10 @@ pub const SHIM_READ_CACHE: &str = "VFS_SHIM_READ_CACHE";
 /// The read cache's process-wide budget in MiB (default 256): what the
 /// cached units of every file, and the fetches in flight, may hold at once.
 pub const SHIM_READ_CACHE_MIB: &str = "VFS_SHIM_READ_CACHE_MIB";
+/// Install the shim's registry hooks (the registry overlay). Set to `1` by the
+/// host only while the session has a registry layer attached; without it the
+/// registry is not virtualised.
+pub const REGISTRY: &str = "VFS_REGISTRY";
 /// Wait for the launched process to exit instead of detaching.
 pub const WAIT: &str = "VFS_WAIT";
 /// Stop at the first rendered frame and print a benchmark row.
@@ -457,6 +461,7 @@ pub const ALL: &[Var] = &[
     Var { name: LAZY_NO_VEH, kind: Kind::Behaviour, default: "false (VEH installed)" },
     Var { name: SHIM_READ_CACHE, kind: Kind::Behaviour, default: "on" },
     Var { name: SHIM_READ_CACHE_MIB, kind: Kind::Behaviour, default: "256" },
+    Var { name: REGISTRY, kind: Kind::Behaviour, default: "false (registry not virtualised)" },
     Var { name: WAIT, kind: Kind::Behaviour, default: "false (detach)" },
     Var { name: BENCH, kind: Kind::Behaviour, default: "false" },
     Var { name: SHIM_STATS_LOG, kind: Kind::Diagnostic, default: "off" },

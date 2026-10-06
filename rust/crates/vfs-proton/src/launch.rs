@@ -131,6 +131,9 @@ pub struct WineLaunch {
     /// `WINEDLLOVERRIDES` and wine-nvml first in `WINEDLLPATH`, as the
     /// `proton` script does. `None`: none of that.
     pub nvapi: Option<crate::nvapi::Setup>,
+    /// The session has a registry layer attached: [`launch_env`] sets
+    /// [`vfs_env::REGISTRY`] so the shim installs its registry hooks.
+    pub registry: bool,
 }
 
 /// `WINEDLLOVERRIDES` every launch carries: Mono and Gecko prompts would
@@ -333,6 +336,10 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
             .collect::<Vec<_>>()
             .join(";");
         env.insert(vfs_env::VIRTUAL_ROOTS.to_string(), spec);
+    }
+
+    if l.registry {
+        env.insert(vfs_env::REGISTRY.to_string(), "1".to_string());
     }
 
     if let Some(cwd) = &l.cwd {
@@ -746,6 +753,7 @@ mod tests {
             steam: SteamSide::Untouched,
             notes: Vec::new(),
             nvapi: None,
+            registry: false,
         }
     }
 
@@ -786,6 +794,14 @@ mod tests {
             env.get("VFS_VIRTUAL_ROOTS").map(String::as_str),
             Some(r"1=C:\users\steamuser\Saves;2=C:\x")
         );
+    }
+
+    #[test]
+    fn registry_flag_is_set_only_for_a_registry_launch() {
+        let mut l = sample();
+        assert!(!launch_env(&l).contains_key(vfs_env::REGISTRY));
+        l.registry = true;
+        assert_eq!(launch_env(&l).get("VFS_REGISTRY").map(String::as_str), Some("1"));
     }
 
     #[test]

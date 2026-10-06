@@ -32,6 +32,7 @@ vfs-compose = { path = "../vfs-compose" }
 # named write layers — re-exported for the same reason: a host opens its own
 # `Storage` and wraps its providers with it (vfs-storage spec §3).
 vfs-storage = { path = "../vfs-storage" }
+tracing = "0.1"
 vfs-env = { path = "../vfs-env" }
 vfs-zip = { path = "../vfs-zip", optional = true }
 

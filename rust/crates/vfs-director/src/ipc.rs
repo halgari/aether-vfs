@@ -368,7 +368,7 @@ impl IpcServe {
     /// name and both event names, none of which exist in the file-backed mode.
     #[cfg(windows)]
     pub fn apply_env(&self, virtual_root: &str, thin_cfg: &std::path::Path) {
-        self.apply_env_roots(virtual_root, &[], thin_cfg)
+        self.apply_env_roots(virtual_root, &[], thin_cfg, false)
     }
 
     /// [`Self::apply_env`] for a session that virtualizes more than one root.
@@ -384,6 +384,7 @@ impl IpcServe {
         virtual_root: &str,
         extra_roots: &[(u32, String)],
         thin_cfg: &std::path::Path,
+        registry: bool,
     ) {
         // Process-global env is for the injected child (and single-session hosts).
         std::env::set_var(vfs_env::RING_SECTION, &self.section_name);
@@ -404,6 +405,13 @@ impl IpcServe {
         std::env::set_var(vfs_env::CLIENT_EV, &self.client_ev_name);
         std::env::set_var(vfs_env::FUSE_CFG, thin_cfg.to_string_lossy().as_ref());
         std::env::set_var(vfs_env::VIRTUAL_DIR, virtual_root);
+        // Set only while a registry layer is attached; cleared otherwise so a
+        // stale value from an earlier session cannot turn the hooks on.
+        if registry {
+            std::env::set_var(vfs_env::REGISTRY, "1");
+        } else {
+            std::env::remove_var(vfs_env::REGISTRY);
+        }
         if extra_roots.is_empty() {
             // Cleared, not left alone: a previous single-session host in this
             // process may have set it, and inheriting a stale second root is

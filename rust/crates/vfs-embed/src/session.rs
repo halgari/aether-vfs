@@ -18,6 +18,7 @@ use std::time::Duration;
 use vfs_director::ipc::IpcServe;
 use crate::image::{self, ImageTarget, RootLocation};
 use vfs_director::stage::{stage_launch_into, ImageSource, StagedDir};
+use vfs_director::registry::RegistryHost;
 use vfs_director::{Director, DiskProvider, MountGraph};
 // The Proton delivery mechanism: the unix counterpart of the `vfs-inject` +
 // `vfs-shim` pair, carrying GE-Proton discovery, the per-session Wine prefix,
@@ -1038,6 +1039,62 @@ impl Session {
         self.recompose(root)
     }
 
+    /// Attach (`Some`) or detach (`None`) the session's registry layer: a
+    /// provider holding `overlay.reg`. While one is attached, launches set
+    /// [`vfs_env::REGISTRY`] (`VFS_REGISTRY=1`) so injected processes install
+    /// the registry hooks; without it virtualisation is off.
+    ///
+    /// Attaching opens a [`RegistryHost`] on the layer; a layer that is
+    /// already attached is flushed first, then replaced. Detaching flushes
+    /// the host here rather than leaving the save to whichever thread drops
+    /// its last reference. Errors are the host's status codes, as
+    /// [`Session::set_write_layer`]'s are.
+    ///
+    /// Takes effect for launches that start after it returns.
+    pub fn set_registry_layer(&self, layer: Option<Arc<dyn Provider>>) -> Result<(), i32> {
+        let host = layer.map(RegistryHost::open).transpose()?;
+        let attached = host.is_some();
+        let old = self.kernel.registry();
+        // Flushed before the swap: nothing of the old layer may be lost, and a
+        // failure leaves the old host attached.
+        if let Some(old) = &old {
+            old.flush()?;
+        }
+        self.kernel.set_registry(host);
+        // Windows children inherit this process's environment; a unix launch
+        // builds its own (`WineLaunch::registry`).
+        #[cfg(windows)]
+        {
+            let _guard = LAUNCH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            if attached {
+                std::env::set_var(vfs_env::REGISTRY, "1");
+            } else {
+                std::env::remove_var(vfs_env::REGISTRY);
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = attached;
+        // The old host is dropped here, already clean, so its drop-time save
+        // writes nothing.
+        drop(old);
+        Ok(())
+    }
+
+    /// Whether a registry layer is attached ([`Session::set_registry_layer`]).
+    fn registry_attached(&self) -> bool {
+        self.kernel.registry().is_some()
+    }
+
+    /// Flush the attached registry overlay, logging a failure: stop and drop
+    /// have no caller to report one to.
+    fn flush_registry(&self) {
+        if let Some(host) = self.kernel.registry() {
+            if let Err(st) = host.flush() {
+                tracing::error!(status = st, "registry overlay: flush failed");
+            }
+        }
+    }
+
     /// Rebuild `root`'s single provider from its accumulated mounts plus its
     /// optional write layer, and replace whatever `Director` currently serves
     /// for it — `Director` holds exactly one provider per root, so there is no
@@ -1368,7 +1425,12 @@ impl Session {
             let _guard = LAUNCH_ENV_LOCK
                 .lock()
                 .map_err(|_| "launch env lock poisoned".to_string())?;
-            ipc.apply_env_roots(&root_s, &self.extra_roots_env(), &thin);
+            ipc.apply_env_roots(
+            &root_s,
+            &self.extra_roots_env(),
+            &thin,
+            self.registry_attached(),
+        );
         }
 
         // Minimal shim.cfg (FUSE path is env-driven). The snapshot must still be a
@@ -1801,7 +1863,12 @@ impl Session {
         // Re-published here, not only in `serve`: the launch env lock is held
         // from this point, and a root declared after `serve` (or by another
         // session sharing this process's environment) must reach this child.
-        ipc.apply_env_roots(&root_s, &self.extra_roots_env(), &thin);
+        ipc.apply_env_roots(
+            &root_s,
+            &self.extra_roots_env(),
+            &thin,
+            self.registry_attached(),
+        );
 
         let mut saved: Vec<(String, Option<String>)> = Vec::with_capacity(opts.env.len());
         for (k, v) in &opts.env {
@@ -2139,6 +2206,7 @@ impl Session {
             steam,
             notes,
             nvapi,
+            registry: self.registry_attached(),
         };
 
         let child = vfs_proton::launch::spawn(&wine).map_err(|e| format!("launch: {e}"))?;
@@ -2244,6 +2312,8 @@ impl Session {
         if let Some(ipc) = self.ipc.take() {
             ipc.stop();
         }
+        // The workers are gone, so nothing writes registry state any more.
+        self.flush_registry();
         // After the workers are gone. A child that still maps the ring keeps
         // its pages until it exits; the name is what goes.
         #[cfg(unix)]
@@ -2267,6 +2337,9 @@ impl Drop for Session {
     /// ([`Session::set_prefix_name`]) is persistent and left alone. Best
     /// effort — a destructor has nowhere to report a failure.
     fn drop(&mut self) {
+        // Unix flushes inside `stop_serve`, below.
+        #[cfg(windows)]
+        self.stop_serve();
         #[cfg(unix)]
         {
             // Before the ring goes: a detached program still reads through it.
@@ -2307,6 +2380,79 @@ impl Drop for Session {
                 let _ = vfs_proton::prefix::remove_session(&home, &id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod registry_layer_tests {
+    use super::*;
+    use vfs_provider::VPath;
+
+    const KEY: &str = r"\Registry\Machine\Software\Mod";
+
+    fn read(p: &Arc<dyn Provider>, name: &str) -> Option<Vec<u8>> {
+        let (h, _, _) = p.open(VPath::at_default(name), OPEN_READ).ok()?;
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = p.read_at(h, out.len() as u64, &mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        p.close(h).unwrap();
+        Some(out)
+    }
+
+    fn storage_layer(tag: &str) -> (PathBuf, Arc<dyn Provider>) {
+        let dir = std::env::temp_dir().join(format!("vfs-reglayer-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let storage = crate::Storage::open(&dir, crate::StorageConfig::default()).unwrap();
+        (dir, storage.layer("registry").unwrap())
+    }
+
+    #[test]
+    fn attach_and_detach_toggle_the_registry_flag() {
+        let (dir, layer) = storage_layer("flag");
+        let s = Session::new();
+        assert!(!s.registry_attached());
+        s.set_registry_layer(Some(layer)).unwrap();
+        assert!(s.registry_attached());
+        assert!(s.kernel().registry().is_some());
+        s.set_registry_layer(None).unwrap();
+        assert!(!s.registry_attached());
+        assert!(s.kernel().registry().is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stop_flushes_and_a_second_save_replaces_the_first() {
+        let (dir, layer) = storage_layer("flush");
+        let mut s = Session::new();
+        s.set_registry_layer(Some(layer.clone())).unwrap();
+        let host = s.kernel().registry().unwrap();
+
+        host.set_value(KEY, "v", 1, b"one\0").unwrap();
+        s.stop_serve();
+        let first = read(&layer, "overlay.reg").expect("stop must leave overlay.reg in the layer");
+        assert!(first.windows(3).any(|w| w == b"one"));
+
+        // Rename onto an existing overlay.reg, on the provider sessions use.
+        host.set_value(KEY, "v", 1, b"two\0").unwrap();
+        s.stop_serve();
+        let second = read(&layer, "overlay.reg").unwrap();
+        assert!(second.windows(3).any(|w| w == b"two"));
+        assert!(!second.windows(3).any(|w| w == b"one"));
+        assert!(read(&layer, "overlay.reg.tmp").is_none(), "the temp file must be renamed away");
+
+        // Replacing the layer flushes the old one first.
+        host.set_value(KEY, "v", 1, b"six\0").unwrap();
+        let (dir2, other) = storage_layer("flush2");
+        s.set_registry_layer(Some(other)).unwrap();
+        assert!(read(&layer, "overlay.reg").unwrap().windows(3).any(|w| w == b"six"));
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
     }
 }
 
