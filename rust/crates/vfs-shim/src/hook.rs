@@ -1206,6 +1206,7 @@ unsafe fn reg_real() -> crate::regkeys::Real {
         query_value: TRAMP_QUERY_VALUE,
         enum_value: TRAMP_ENUM_VALUE,
         query_multiple: TRAMP_QUERY_MULTIPLE,
+        query_object: TRAMP_QOBJ,
     }
 }
 

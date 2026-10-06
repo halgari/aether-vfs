@@ -5,8 +5,8 @@
 //! **Which handles are merged.** Decided on every call, never remembered on the handle, because
 //! a write through a pass-through handle makes its path virtual (Task 11):
 //! - a synthetic handle: always merged (its private real handle, if any, plus the overlay node);
-//! - a pass-through handle, or a real key handle neither table holds (named through the real
-//!   `NtQueryKey`): straight to the real call while `regclient::lookup` says the overlay has
+//! - a pass-through handle, including a real key handle opened before the hooks (resolved and
+//!   recorded on first sight by `regkeys::resolve_handle`): straight to the real call while `regclient::lookup` says the overlay has
 //!   nothing at or below the path (a cached answer costs no round trip); merged otherwise, with
 //!   the caller's own handle as the real key;
 //! - a tombstoned path: `STATUS_KEY_DELETED`, as for a handle to a deleted key;
@@ -31,8 +31,8 @@
 //!
 //! **Access, as Windows checks it.** `KEY_QUERY_VALUE` for every class of `NtQueryKey` but the
 //! name, and for the value calls; `KEY_ENUMERATE_SUB_KEYS` for `NtEnumerateKey`. Checked against
-//! the access a tracked handle was opened with; a handle neither table holds is left to the real
-//! calls.
+//! the access a handle was granted (for a handle opened before the hooks, the kernel's own
+//! record of it).
 //!
 //! **Locks.** No lock is held across a real call or a director request, nor while caller memory
 //! is written.
@@ -79,8 +79,9 @@ struct Ctx {
     /// The caller's handle, which keys the enumeration state.
     handle: isize,
     path: String,
-    /// The access the handle was opened with; `None` for a handle neither table holds.
-    access: Option<u32>,
+    /// The access the handle was granted (for a handle opened before the hooks, what the
+    /// kernel reports).
+    access: u32,
     synthetic: bool,
     /// The real key to merge (a synthetic key's private handle, or the caller's pass-through
     /// handle). `None` when the key was created here or has no real counterpart.
@@ -89,14 +90,19 @@ struct Ctx {
     wow64: u32,
 }
 
-/// Decide who answers. Runs the cached `REG_LOOKUP` for every tracked handle.
-unsafe fn classify(real: &Real, h: isize) -> Target {
+/// Decide who answers. Runs the cached `REG_LOOKUP` for every key handle the overlay serves.
+///
+/// `right` is the access the query needs (0 for none). It is checked here only where the answer
+/// is the real call on a synthetic key's private handle, which was opened with rights the
+/// caller may not have; a merge checks it itself, after validating the class.
+unsafe fn classify(real: &Real, h: isize, right: u32) -> Target {
     if regkeys::is_synthetic(h) {
         let Some(rec) = regkeys::synthetic(h) else {
             return Target::Fail(STATUS_INVALID_HANDLE);
         };
         return match regclient::lookup(&rec.path) {
             // The real key alone; a key that exists only in the overlay cannot be read.
+            Err(_) if rec.access & right != right => Target::Fail(STATUS_ACCESS_DENIED),
             Err(_) => rec.real.map_or(Target::Deleted, Target::Real),
             Ok((Lookup::Tombstoned, _)) => Target::Deleted,
             Ok((state, _)) => {
@@ -104,7 +110,7 @@ unsafe fn classify(real: &Real, h: isize) -> Target {
                 Target::Merge(Ctx {
                     handle: h,
                     path: rec.path,
-                    access: Some(rec.access),
+                    access: rec.access,
                     synthetic: true,
                     real: if created { None } else { rec.real },
                     wow64: rec.requested & WOW64_MASK,
@@ -112,12 +118,9 @@ unsafe fn classify(real: &Real, h: isize) -> Target {
             }
         };
     }
-    let (path, access) = match regkeys::tracked(h) {
-        Some(r) => (r.path, Some(r.access)),
-        None => match regkeys::untracked_path(real, h) {
-            Some(p) => (p, None),
-            None => return Target::Real(h),
-        },
+    // A handle opened before the hooks is resolved (and recorded) on first sight.
+    let Some(regkeys::KeyRec { path, access }) = regkeys::resolve_handle(real, h) else {
+        return Target::Real(h);
     };
     match regclient::lookup(&path) {
         // Untouched (the fast path), or the director cannot be asked: the real key.
@@ -138,16 +141,19 @@ unsafe fn classify(real: &Real, h: isize) -> Target {
 }
 
 fn check(ctx: &Ctx, right: u32) -> Result<(), NTSTATUS> {
-    match ctx.access {
-        Some(a) if a & right == 0 => Err(STATUS_ACCESS_DENIED),
-        _ => Ok(()),
+    if ctx.access & right != right {
+        return Err(STATUS_ACCESS_DENIED);
     }
+    Ok(())
 }
 
 /// Run a read of the real key on its handle. A real key that is gone (deleted underneath, or
-/// never there) reads as `None`. A pass-through handle may lack a right the merge needs that
-/// the caller's own query does not (`NtQueryKey(KeyFullInformation)` lists subkeys and
-/// values): then the read is made on a private read-only handle.
+/// never there) reads as `None`. The handle may lack a right the merge needs that the caller's
+/// own query does not (`NtQueryKey(KeyFullInformation)` lists subkeys and values, and needs
+/// only `KEY_QUERY_VALUE` from the caller): a pass-through handle has the caller's rights, and
+/// a synthetic key's private handle may have been opened with only the caller's read rights
+/// when the key refuses `KEY_READ`. Then the read is made again on a private handle opened for
+/// just `KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS` when `KEY_READ` is refused.
 unsafe fn with_real<T>(
     real: &Real,
     ctx: &Ctx,
@@ -164,8 +170,9 @@ unsafe fn with_real<T>(
     match f(h) {
         Ok(v) => Ok(Some(v)),
         Err(st) if gone(st) => Ok(None),
-        Err(STATUS_ACCESS_DENIED) if !ctx.synthetic => {
-            let p = match regkeys::open_private(real, &ctx.path, ctx.wow64) {
+        Err(STATUS_ACCESS_DENIED) => {
+            let reads = KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | ctx.wow64;
+            let p = match regkeys::open_private(real, &ctx.path, reads) {
                 Ok(p) => p,
                 Err(st) if gone(st) => return Ok(None),
                 Err(st) => return Err(st),
@@ -194,8 +201,10 @@ unsafe fn grown(
         let cap = buf.len() * 8;
         let mut need = 0u32;
         let st = q(buf.as_mut_ptr().cast(), cap as u32, &mut need);
-        if (st == STATUS_BUFFER_OVERFLOW || st == STATUS_BUFFER_TOO_SMALL) && need as usize > cap {
-            buf = vec![0u64; (need as usize).div_ceil(8) + 1];
+        if st == STATUS_BUFFER_OVERFLOW || st == STATUS_BUFFER_TOO_SMALL {
+            // Always grow: a host can report a ResultLength the answer does not fit (Node's
+            // class padding on Windows), and an overflow is never handed on.
+            buf = vec![0u64; (need as usize).max(cap * 2).div_ceil(8)];
             continue;
         }
         if st != STATUS_SUCCESS {
@@ -490,7 +499,15 @@ pub unsafe fn query_key(
     let Some(tramp) = real.query else {
         return STATUS_UNSUCCESSFUL;
     };
-    let ctx = match classify(real, h) {
+    let ctx = match classify(
+        real,
+        h,
+        if class == KEY_NAME_INFORMATION {
+            0
+        } else {
+            KEY_QUERY_VALUE
+        },
+    ) {
         Target::Real(r) => return tramp(r as HANDLE, class, info, len, ret),
         Target::Deleted => return STATUS_KEY_DELETED,
         Target::Fail(st) => return st,
@@ -744,7 +761,7 @@ fn take_state<K: Kind>(h: isize, p: &str) -> Option<EnumState<K>> {
 
 /// Put a handle's state back, unless the handle was closed meanwhile.
 fn put_state<K: Kind>(ctx: &Ctx, s: EnumState<K>) {
-    if (ctx.access.is_some()) && regkeys::path_of(ctx.handle).as_deref() != Some(&ctx.path) {
+    if regkeys::path_of(ctx.handle).as_deref() != Some(&ctx.path) {
         return;
     }
     let Ok(mut t) = ENUMS.lock() else {
@@ -777,7 +794,12 @@ unsafe fn view<K: Kind>(real: &Real, ctx: &Ctx, index: u32) -> Result<Arc<Vec<K>
         Some(s) => s.real,
         None => with_real(real, ctx, |rh| K::read_names(real, rh))?,
     };
-    let node = node_of(&ctx.path)?;
+    let node = match node_of(&ctx.path) {
+        Ok(n) => n,
+        // The director cannot be asked (counted by `regclient`): the real list alone, for this
+        // call only, so the merge comes back as soon as the director does.
+        Err(_) => return Ok(Arc::new(K::entries(names.as_deref(), None))),
+    };
     let entries = Arc::new(K::entries(names.as_deref(), node.as_ref()));
     put_state(
         ctx,
@@ -808,7 +830,7 @@ pub unsafe fn enumerate_key(
     let Some(tramp) = real.enum_key else {
         return STATUS_UNSUCCESSFUL;
     };
-    let ctx = match classify(real, h) {
+    let ctx = match classify(real, h, KEY_ENUMERATE_SUB_KEYS) {
         Target::Real(r) => return tramp(r as HANDLE, index, class, info, len, ret),
         Target::Deleted => return STATUS_KEY_DELETED,
         Target::Fail(st) => return st,
@@ -836,7 +858,9 @@ pub unsafe fn enumerate_key(
         None => STATUS_NO_MORE_ENTRIES,
     };
     if !e.touched {
-        // An untouched real subkey: the real answer at its real index.
+        // An untouched real subkey: the real answer at its real index. The index is from the
+        // snapshot taken at index 0; if the real key itself changes meanwhile, later entries
+        // shift, as a live enumeration of the real key would.
         return e.real.map_or(STATUS_NO_MORE_ENTRIES, forward);
     }
     let child = format!("{}\\{}", ctx.path, e.name);
@@ -891,18 +915,19 @@ pub unsafe fn enumerate_value_key(
     let Some(tramp) = real.enum_value else {
         return STATUS_UNSUCCESSFUL;
     };
-    let ctx = match classify(real, h) {
+    let ctx = match classify(real, h, KEY_QUERY_VALUE) {
         Target::Real(r) => return tramp(r as HANDLE, index, class, info, len, ret),
         Target::Deleted => return STATUS_KEY_DELETED,
         Target::Fail(st) => return st,
         Target::Merge(c) => c,
     };
-    if let Err(st) = check(&ctx, KEY_QUERY_VALUE) {
-        return st;
-    }
+    // The class first, then the access (WRK).
     let Some(vc) = value_class(class) else {
         return STATUS_INVALID_PARAMETER;
     };
+    if let Err(st) = check(&ctx, KEY_QUERY_VALUE) {
+        return st;
+    }
     let entries = match view::<ValEntry>(real, &ctx, index) {
         Ok(e) => e,
         Err(st) => return st,
@@ -957,18 +982,19 @@ pub unsafe fn query_value_key(
     let Some(tramp) = real.query_value else {
         return STATUS_UNSUCCESSFUL;
     };
-    let ctx = match classify(real, h) {
+    let ctx = match classify(real, h, KEY_QUERY_VALUE) {
         Target::Real(r) => return tramp(r as HANDLE, name, class, info, len, ret),
         Target::Deleted => return STATUS_KEY_DELETED,
         Target::Fail(st) => return st,
         Target::Merge(c) => c,
     };
-    if let Err(st) = check(&ctx, KEY_QUERY_VALUE) {
-        return st;
-    }
+    // The class first, then the access (WRK).
     let Some(vc) = value_class(class) else {
         return STATUS_INVALID_PARAMETER;
     };
+    if let Err(st) = check(&ctx, KEY_QUERY_VALUE) {
+        return st;
+    }
     let Some(vname) = read_us(name) else {
         return STATUS_ACCESS_VIOLATION;
     };
@@ -1037,7 +1063,7 @@ pub unsafe fn query_multiple_value_key(
     let Some(tramp) = real.query_multiple else {
         return STATUS_UNSUCCESSFUL;
     };
-    let ctx = match classify(real, h) {
+    let ctx = match classify(real, h, KEY_QUERY_VALUE) {
         Target::Real(r) => return tramp(r as HANDLE, entries, count, buffer, buffer_len, required),
         Target::Deleted => return STATUS_KEY_DELETED,
         Target::Fail(st) => return st,
@@ -1224,6 +1250,33 @@ mod tests {
         o.create_key(&format!(r"{P}\kid"), false, false, 1).unwrap();
         agrees(&o, &["old"], &["x"]);
         assert!(val_entries(Some(&names(&["x"])), o.node(P)).is_empty());
+    }
+
+    /// An overflow that reports a length the buffer already has (Windows' Node padding) still
+    /// grows the buffer, and an overflow is never the answer.
+    #[test]
+    fn grown_grows_on_every_overflow() {
+        let mut calls = vec![];
+        let r = unsafe {
+            grown(|_, len, need| {
+                calls.push(len);
+                *need = len;
+                if len < 2048 {
+                    STATUS_BUFFER_OVERFLOW
+                } else {
+                    STATUS_SUCCESS
+                }
+            })
+        };
+        assert_eq!(r.map(|b| b.len()), Ok(2048));
+        assert_eq!(calls, [512, 1024, 2048]);
+        let r = unsafe {
+            grown(|_, _, need| {
+                *need = 8;
+                STATUS_BUFFER_OVERFLOW
+            })
+        };
+        assert_eq!(r, Err(STATUS_UNSUCCESSFUL));
     }
 
     #[test]

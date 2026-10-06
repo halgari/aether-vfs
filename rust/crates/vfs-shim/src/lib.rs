@@ -76,6 +76,11 @@ pub fn registry_enum_states() -> usize {
     regquery::states()
 }
 
+/// Handles the registry hooks remember as not keys they serve. For tests and diagnostics.
+pub fn registry_not_ours_count() -> usize {
+    regkeys::not_ours_count()
+}
+
 /// Whether a handle value is one of the registry hooks' synthetic key handles.
 pub fn is_synthetic_key_handle(handle: isize) -> bool {
     regkeys::is_synthetic(handle)

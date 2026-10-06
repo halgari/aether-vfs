@@ -25,7 +25,7 @@
 #![allow(unsafe_code)]
 
 use core::ffi::c_void;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
 
@@ -173,6 +173,7 @@ fn untrack(h: isize) {
     if let Some(mut t) = lock_for_close(&PASS) {
         t.remove(&h);
     }
+    forget_not_ours(h);
 }
 
 /// The canonical path of a key handle from either table.
@@ -311,6 +312,8 @@ pub struct Real {
     pub query_value: Option<NtQueryValueKeyFn>,
     pub enum_value: Option<NtEnumerateValueKeyFn>,
     pub query_multiple: Option<NtQueryMultipleValueKeyFn>,
+    /// The unhooked `NtQueryObject`, for the access a real handle was granted.
+    pub query_object: Option<NtQueryObjectFn>,
 }
 
 /// An absolute `OBJECT_ATTRIBUTES` the shim builds for its own opens. Boxed: the attributes
@@ -387,21 +390,96 @@ unsafe fn real_key_name(real: &Real, h: isize) -> Option<String> {
     None
 }
 
-/// The canonical path of a root key handle: from the tables, else from the real key's name.
-/// `Err(())` when the handle is not something this can name.
-/// The canonical path of a real key handle neither table holds (opened before the hooks, or
-/// handed in from elsewhere), from the real key's name. `None` when it names no key the overlay
-/// serves.
-///
-/// # Safety
-/// `h` is a caller's handle; it is only passed to the real `NtQueryKey`.
-pub unsafe fn untracked_path(real: &Real, h: isize) -> Option<String> {
-    let nt = real_key_name(real, h)?;
-    path::canonical(&nt, user_sid())
-        .ok()
-        .filter(|p| path::is_virtualised(p))
+/// Handles [`resolve_handle`] found are not keys the overlay serves (not a key, or a key outside
+/// `\Registry\Machine` and `\Registry\User`), so asking again costs one lookup here instead of
+/// a syscall. Bounded: it starts over when full. An entry goes with its handle's `NtClose` (or
+/// `DUPLICATE_CLOSE_SOURCE`), so a recycled handle value never inherits it.
+static NOT_OURS: Mutex<BTreeSet<isize>> = Mutex::new(BTreeSet::new());
+static NOT_OURS_COUNT: AtomicUsize = AtomicUsize::new(0);
+const MAX_NOT_OURS: usize = 1024;
+
+fn note_not_ours(h: isize) {
+    if let Ok(mut t) = NOT_OURS.lock() {
+        if t.len() >= MAX_NOT_OURS {
+            t.clear();
+        }
+        t.insert(h);
+        NOT_OURS_COUNT.store(t.len(), Ordering::Relaxed);
+    }
 }
 
+fn is_not_ours(h: isize) -> bool {
+    NOT_OURS_COUNT.load(Ordering::Relaxed) != 0 && NOT_OURS.lock().is_ok_and(|t| t.contains(&h))
+}
+
+/// Handles remembered as not ours. For tests and diagnostics.
+pub fn not_ours_count() -> usize {
+    NOT_OURS.lock().map_or(0, |t| t.len())
+}
+
+/// Forget that `h` was not ours: its handle value is being closed.
+fn forget_not_ours(h: isize) {
+    if NOT_OURS_COUNT.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    if let Some(mut t) = lock_for_close(&NOT_OURS) {
+        t.remove(&h);
+        NOT_OURS_COUNT.store(t.len(), Ordering::Relaxed);
+    }
+}
+
+/// The access a real handle was granted, from `NtQueryObject(ObjectBasicInformation)`.
+unsafe fn granted_access(real: &Real, h: isize) -> Option<u32> {
+    let q = real.query_object?;
+    let mut buf = [0u32; 14]; // OBJECT_BASIC_INFORMATION, 56 bytes
+    let mut need = 0u32;
+    let st = q(
+        h as HANDLE,
+        OBJECT_BASIC_INFORMATION,
+        buf.as_mut_ptr().cast(),
+        56,
+        &mut need,
+    );
+    // Attributes@0, GrantedAccess@4.
+    (st >= 0).then_some(buf[1])
+}
+
+/// The record of a real key handle the overlay serves: from the pass-through table, or, for a
+/// handle neither table holds (opened before the hooks, or handed in from elsewhere), resolved
+/// once from the real key's name and the access the kernel granted it, and recorded as
+/// pass-through from then on. `None` for a synthetic handle, a handle that is not a key, or a
+/// key outside the virtualised hives (remembered, so the next ask is cheap).
+///
+/// # Safety
+/// `h` is a caller's handle; it is only passed to the real `NtQueryKey` and `NtQueryObject`.
+pub unsafe fn resolve_handle(real: &Real, h: isize) -> Option<KeyRec> {
+    if is_synthetic(h) || h <= 0 {
+        return None;
+    }
+    if let Some(r) = tracked(h) {
+        return Some(r);
+    }
+    if is_not_ours(h) {
+        return None;
+    }
+    let path = real_key_name(real, h)
+        .and_then(|nt| path::canonical(&nt, user_sid()).ok())
+        .filter(|p| path::is_virtualised(p));
+    let Some(path) = path else {
+        note_not_ours(h);
+        return None;
+    };
+    let rec = KeyRec {
+        path,
+        // Not readable (no `NtQueryObject` trampoline): the kernel still checks every real call.
+        access: granted_access(real, h).unwrap_or(KEY_ALL_ACCESS),
+    };
+    track(h, rec.clone());
+    Some(rec)
+}
+
+/// The canonical path of a root key handle: from the tables, else from the real key's name.
+/// `Err(())` when the handle is not something this can name.
 unsafe fn root_path(real: &Real, root: isize) -> Result<String, ()> {
     if is_synthetic(root) {
         return synthetic(root).map(|k| k.path).ok_or(());
@@ -1001,14 +1079,15 @@ pub unsafe fn duplicate(
     if !is_self(src_process) {
         return None;
     }
-    let rec = tracked(sh)?;
-    let dup = real.dup?;
-    // NT closes the source even when the duplication fails, so its record goes first: the
+    // NT closes the source even when the duplication fails, so its records go first: the
     // handle value may be reused the moment the call returns.
+    let rec = tracked(sh);
     if close_source {
         untrack(sh);
         crate::regquery::forget(sh);
     }
+    let rec = rec?;
+    let dup = real.dup?;
     let st = dup(
         src_process,
         src,

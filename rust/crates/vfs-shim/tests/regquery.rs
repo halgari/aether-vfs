@@ -295,6 +295,61 @@ fn build_real_keys() {
     make(r"Live\A", None, &[]);
     make(r"Live\B", None, &[]);
     make("Down", None, &[val("r", REG_DWORD, &dword(1))]);
+    // Its overlay node is too large for a REG_KEY reply: the lookup answers, the node read fails.
+    make("TooBig", None, &[val("r", REG_DWORD, &dword(1))]);
+    make(r"TooBig\R1", None, &[]);
+    make(r"TooBig\R2", None, &[]);
+    // Opened before the hooks (an untracked handle).
+    make("Pre", None, &[val("p", REG_DWORD, &dword(1))]);
+    make(r"Pre\PreSub", None, &[]);
+    // Grants KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS only: KEY_READ is refused.
+    make("Limited", None, &[val("l", REG_DWORD, &dword(1))]);
+    make(r"Limited\LSub", None, &[]);
+    set_dacl(r"Limited", "D:P(A;;0x9;;;WD)");
+}
+
+/// Set `BASE\rel`'s DACL from SDDL.
+fn set_dacl(rel: &str, sddl: &str) {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+    use windows_sys::Win32::System::Registry::RegSetKeySecurity;
+    let k = reg_create(&format!(r"{BASE}\{rel}"), None);
+    unsafe {
+        let mut sd: *mut c_void = std::ptr::null_mut();
+        assert_ne!(
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide(sddl).as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                std::ptr::null_mut(),
+            ),
+            0
+        );
+        assert_eq!(RegSetKeySecurity(k, DACL_SECURITY_INFORMATION, sd), 0);
+        LocalFree(sd);
+        RegCloseKey(k);
+    }
+}
+
+/// Whether a Win32 open of `BASE\rel` with `access` succeeds (before the hooks).
+fn grants(rel: &str, access: u32) -> bool {
+    let mut k: HKEY = std::ptr::null_mut();
+    let st = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            wide(&format!(r"{BASE}\{rel}")).as_ptr(),
+            0,
+            access,
+            &mut k,
+        )
+    };
+    if st == 0 {
+        unsafe { RegCloseKey(k) };
+    }
+    st == 0
 }
 
 fn user_sid() -> String {
@@ -329,6 +384,11 @@ struct Fixture {
     sid: String,
     /// `M\Merge`'s real last-write time, read before the hooks.
     merge_real_lw: u64,
+    /// `Pre`, opened `KEY_ENUMERATE_SUB_KEYS` before the hooks: neither table knows it.
+    pre: isize,
+    /// `Limited` refused KEY_READ and granted KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS before
+    /// the hooks.
+    limited_as_expected: bool,
 }
 
 impl Fixture {
@@ -353,6 +413,14 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
     let f = F.get_or_init(|| {
         build_real_keys();
         let merge_real_lw = last_write_of(r"M\Merge");
+        let limited_as_expected = !grants("Limited", KEY_READ)
+            && grants("Limited", KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS);
+        let sid = user_sid();
+        let (st, pre) = open_abs(
+            &format!(r"\REGISTRY\USER\{sid}\{BASE}\Pre"),
+            KEY_ENUMERATE_SUB_KEYS,
+        );
+        assert_eq!(st, STATUS_SUCCESS);
         let root = std::env::temp_dir().join(format!("vfs-shim-regquery-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::env::set_var(vfs_env::REGISTRY, "1");
@@ -371,8 +439,10 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         assert!(regclient::enabled());
         let f = Fixture {
             fake,
-            sid: user_sid(),
+            sid,
             merge_real_lw,
+            pre,
+            limited_as_expected,
         };
         // The overlay's changes to `M\Merge`: a new value, a value shadowed in another case,
         // a tombstoned value, a tombstoned subkey, a subkey created here, and a value below a
@@ -390,9 +460,13 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         regclient::create_key(&r, false).unwrap();
         regclient::set_value(&r, "n", REG_DWORD, &dword(1)).unwrap();
         regclient::create_key(&format!(r"{r}\New"), false).unwrap();
-        for k in ["Doomed", "Access", "Live", "Down"] {
+        for k in ["Doomed", "Access", "Live", "Down", "Limited"] {
             regclient::set_value(&f.canon(k), "o", REG_DWORD, &dword(2)).unwrap();
         }
+        for name in ["a", "b", "c"] {
+            regclient::set_value(&f.canon("TooBig"), name, REG_BINARY, &[0x5a; 1500]).unwrap();
+        }
+        regclient::create_key(&f.canon(r"Pre\Added"), false).unwrap();
         f
     });
     (guard, f)
@@ -1013,6 +1087,9 @@ fn a_synthetic_handle_needs_the_right_for_each_query() {
     );
     assert_eq!(qval(e, "o", 2, 64).st, STATUS_ACCESS_DENIED);
     assert_eq!(eval(e, 0, 0, 64).st, STATUS_ACCESS_DENIED);
+    // The class is checked before the access, as Windows does.
+    assert_eq!(eval(e, 0, 5, 64).st, STATUS_INVALID_PARAMETER);
+    assert_eq!(qval(e, "o", 5, 64).st, STATUS_INVALID_PARAMETER);
     assert_eq!(qmulti(e, &["o"], 64).0, STATUS_ACCESS_DENIED);
     let q = f.open("Access", KEY_QUERY_VALUE);
     assert_eq!(ekey(q, 0, 0, 64).st, STATUS_ACCESS_DENIED);
@@ -1050,16 +1127,20 @@ fn enumeration_sees_live_overlay_changes_and_close_drops_its_snapshot() {
 fn a_failing_director_answers_from_the_real_key() {
     let (_g, f) = fixture();
     let d = f.open("Down", NT_KEY_READ);
+    let e = f.open("Down", KEY_ENUMERATE_SUB_KEYS);
     assert!(is_synthetic_key_handle(d));
     assert_eq!(value_names(d), ["o", "r"]);
     let host = f.fake.director().registry().unwrap();
     f.fake.director().set_registry(None);
     let names = value_names(d);
     let overlay_value = qval(d, "o", 2, 64).st;
+    // The real key's answer is the private handle's, but the access is still the caller's.
+    let denied = qval(e, "r", 2, 64).st;
     f.fake.director().set_registry(Some(host));
     assert_eq!(names, ["r"], "the real key alone");
     assert_eq!(overlay_value, STATUS_OBJECT_NAME_NOT_FOUND);
-    NtCloseAll(&[d]);
+    assert_eq!(denied, STATUS_ACCESS_DENIED);
+    NtCloseAll(&[d, e]);
 }
 
 #[test]
@@ -1085,4 +1166,66 @@ fn a_handle_opened_before_the_hooks_is_merged_too() {
     regclient::delete_value(root, "AetherVfsRegQueryRoot").unwrap();
     assert_eq!((st, ty, u32::from_le_bytes(data)), (0, REG_DWORD, 42));
     let _ = f;
+}
+
+#[test]
+fn a_node_too_large_to_read_enumerates_the_real_key_alone() {
+    let (_g, f) = fixture();
+    let h = f.open("TooBig", NT_KEY_READ);
+    assert!(is_synthetic_key_handle(h));
+    let states = registry_enum_states();
+    let fallbacks = vfs_shim::reg_read_fallback_count();
+    assert_eq!(subkey_names(h), ["R1", "R2"]);
+    assert_eq!(value_names(h), ["r"]);
+    assert_eq!(
+        registry_enum_states(),
+        states,
+        "a fallback list is not kept"
+    );
+    assert!(
+        vfs_shim::reg_read_fallback_count() > fallbacks,
+        "fallbacks are counted"
+    );
+    assert_eq!(qval(h, "r", 2, 64).bytes[12..16], dword(1)[..]);
+    NtCloseAll(&[h]);
+}
+
+#[test]
+fn a_handle_opened_before_the_hooks_is_recorded_with_its_granted_access() {
+    let (_g, f) = fixture();
+    // First sight: resolved from its name, recorded as pass-through with the kernel's access.
+    assert_eq!(vfs_shim::registry_handle_path(f.pre), None);
+    assert_eq!(subkey_names(f.pre), ["PreSub", "Added"]);
+    assert_eq!(vfs_shim::registry_handle_path(f.pre), Some(f.canon("Pre")));
+    assert_eq!(qval(f.pre, "p", 2, 64).st, STATUS_ACCESS_DENIED);
+    assert_eq!(qkey(f.pre, 0, 64).st, STATUS_ACCESS_DENIED);
+
+    // Not a key: remembered, so it costs no syscall next time, and forgotten on close.
+    use windows_sys::Win32::System::Threading::CreateEventW;
+    let ev = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) } as isize;
+    let before = vfs_shim::registry_not_ours_count();
+    let first = qkey(ev, 0, 64).st;
+    assert!(first < 0, "{first:#x}");
+    assert_eq!(vfs_shim::registry_not_ours_count(), before + 1);
+    assert_eq!(qkey(ev, 0, 64).st, first);
+    assert_eq!(vfs_shim::registry_not_ours_count(), before + 1);
+    NtCloseAll(&[ev]);
+    assert_eq!(vfs_shim::registry_not_ours_count(), before);
+}
+
+#[test]
+fn full_needs_only_query_value_even_when_the_key_refuses_key_read() {
+    let (_g, f) = fixture();
+    assert!(
+        f.limited_as_expected,
+        "the DACL did not refuse KEY_READ (or refused KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS)"
+    );
+    let h = f.open("Limited", KEY_QUERY_VALUE);
+    assert!(is_synthetic_key_handle(h));
+    let full = qkey(h, 2, 64);
+    assert_eq!(full.st, STATUS_SUCCESS);
+    let u = |o: usize| u32::from_le_bytes(full.bytes[o..o + 4].try_into().unwrap());
+    assert_eq!((u(20), u(32)), (1, 2), "SubKeys, Values");
+    assert_eq!(qkey(h, 4, 64).st, STATUS_SUCCESS);
+    NtCloseAll(&[h]);
 }
