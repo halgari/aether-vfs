@@ -352,7 +352,11 @@ pub fn write_value_info(class: ValueInfoClass, v: &Value, buf: &mut [u8]) -> Wri
         // KEY_VALUE_FULL_INFORMATION: TitleIndex@0 Type@4 DataOffset@8 DataLength@12
         // NameLength@16 Name@20. With data, the data is at ALIGN8(20 + NameLength) for both
         // Full and FullAlign64: the x64 kernel aligns both to 8 (WRK `_WIN64` branch). Without
-        // data, DataOffset is -1 and there is no padding.
+        // data there is no padding, and DataOffset is the end of the name, as Wine's ntdll
+        // reports it. Windows reports -1 there, but Wine's own `RegEnumValueW` takes the data
+        // length as ResultLength - DataOffset and copies that many bytes from DataOffset, so
+        // -1 makes it copy from far outside the buffer and fault. The end of the name gives a
+        // length of 0 to that reading and to every reader of DataLength alike.
         ValueInfoClass::Full | ValueInfoClass::FullAlign64 => {
             let name = utf16le(&v.name);
             let base = 20 + name.len();
@@ -371,12 +375,8 @@ pub fn write_value_info(class: ValueInfoClass, v: &Value, buf: &mut [u8]) -> Wri
             o.u32(12, len32(data.len()));
             o.u32(16, len32(name.len()));
             let mut fit = o.tail(20, &name);
-            if data.is_empty() {
-                o.u32(8, u32::MAX);
-            } else {
-                o.u32(8, len32(off));
-                fit &= o.tail(off, data);
-            }
+            o.u32(8, len32(off));
+            fit &= o.tail(off, data);
             Written {
                 status: status(fit),
                 result_length: len32(total),
@@ -979,7 +979,8 @@ mod tests {
     #[test]
     fn value_full_without_data() {
         let v = val("Abc", 1, &[]);
-        let expected = cat(&[&ZERO, &n(1), &NONE, &ZERO, &n(6), &w("Abc")]);
+        // DataOffset is the end of the name (26), not -1: see `write_value_info`.
+        let expected = cat(&[&ZERO, &n(1), &n(26), &ZERO, &n(6), &w("Abc")]);
         for class in [ValueInfoClass::Full, ValueInfoClass::FullAlign64] {
             let (r, b) = vq(class, &v, 26);
             assert_eq!(r, ok(26), "{class:?}");

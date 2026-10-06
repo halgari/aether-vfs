@@ -326,6 +326,29 @@ pub const FIXTURE_CACHE_RW_DATA: &str = "VFS_FIXTURE_CACHE_RW_DATA";
 /// `vfs-fixture-read`: milliseconds to stay alive after the read-cache phase,
 /// so a `SHIM_STATS_LOG` report covers it.
 pub const FIXTURE_LINGER_MS: &str = "VFS_FIXTURE_LINGER_MS";
+/// `vfs-fixture-read`: a file read on slow threads while others read
+/// `FIXTURE_PATH` (the concurrent-read e2e).
+pub const FIXTURE_SLOW_PATH: &str = "VFS_FIXTURE_SLOW_PATH";
+/// `vfs-fixture-read`: how many threads read `FIXTURE_SLOW_PATH`.
+pub const FIXTURE_SLOW_THREADS: &str = "VFS_FIXTURE_SLOW_THREADS";
+/// `vfs-fixture-read`: a file waited for before the fast reads start.
+pub const FIXTURE_SLOW_STARTED: &str = "VFS_FIXTURE_SLOW_STARTED";
+/// `vfs-fixture-read`: a path looked up once the fast reads have finished.
+pub const FIXTURE_SLOW_RELEASE: &str = "VFS_FIXTURE_SLOW_RELEASE";
+/// `vfs-fixture-read`: how many threads read `FIXTURE_PATH` alongside the slow ones.
+pub const FIXTURE_THREADS: &str = "VFS_FIXTURE_THREADS";
+/// `vfs-fixture-read`: how many times each fast thread reads `FIXTURE_PATH`.
+pub const FIXTURE_ROUNDS: &str = "VFS_FIXTURE_ROUNDS";
+/// `vfs-fixture-read` names phase: `kind|opened|final` entries.
+pub const FIXTURE_NAMES: &str = "VFS_FIXTURE_NAMES";
+/// `vfs-fixture-read` names phase: `dir|file` entries.
+pub const FIXTURE_NAME_PREFIXES: &str = "VFS_FIXTURE_NAME_PREFIXES";
+/// `vfs-fixture-read` names phase: `dir|child,child…` entries.
+pub const FIXTURE_NAME_LISTS: &str = "VFS_FIXTURE_NAME_LISTS";
+/// `vfs-fixture-read` names phase: paths to create.
+pub const FIXTURE_NAME_CREATES: &str = "VFS_FIXTURE_NAME_CREATES";
+/// `vfs-fixture-read` names phase: `from|to` renames.
+pub const FIXTURE_NAME_RENAMES: &str = "VFS_FIXTURE_NAME_RENAMES";
 // `VFS_FIXTURE_DATA` and `VFS_FIXTURE_DIR` lived here for `vfs-fixture-write`
 // and `vfs-fixture-writeset`. Both fixture crates were deleted in gate 4 task
 // 8 — no test harness had ever invoked either — so the switches went with
@@ -492,6 +515,17 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_CACHE_RW_PATH, kind: Kind::Fixture, default: "unset: no rewrite" },
     Var { name: FIXTURE_CACHE_RW_DATA, kind: Kind::Fixture, default: "fresh" },
     Var { name: FIXTURE_LINGER_MS, kind: Kind::Fixture, default: "0" },
+    Var { name: FIXTURE_SLOW_PATH, kind: Kind::Fixture, default: "unset: no slow reads" },
+    Var { name: FIXTURE_SLOW_THREADS, kind: Kind::Fixture, default: "1" },
+    Var { name: FIXTURE_SLOW_STARTED, kind: Kind::Fixture, default: "unset: no wait" },
+    Var { name: FIXTURE_SLOW_RELEASE, kind: Kind::Fixture, default: "unset: no cue" },
+    Var { name: FIXTURE_THREADS, kind: Kind::Fixture, default: "4" },
+    Var { name: FIXTURE_ROUNDS, kind: Kind::Fixture, default: "50" },
+    Var { name: FIXTURE_NAMES, kind: Kind::Fixture, default: "unset: no names phase" },
+    Var { name: FIXTURE_NAME_PREFIXES, kind: Kind::Fixture, default: "none" },
+    Var { name: FIXTURE_NAME_LISTS, kind: Kind::Fixture, default: "none" },
+    Var { name: FIXTURE_NAME_CREATES, kind: Kind::Fixture, default: "none" },
+    Var { name: FIXTURE_NAME_RENAMES, kind: Kind::Fixture, default: "none" },
     Var {
         name: FIXTURE_COW_PATH,
         kind: Kind::Fixture,
@@ -694,6 +728,9 @@ mod tests {
         while let Some(rel) = text[i..].find("VFS_") {
             let start = i + rel;
             let mut end = start + 4;
+            // Part of a longer identifier (`AETHER_VFS_…`), not a switch of ours.
+            let embedded = start > 0
+                && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
             while end < bytes.len()
                 && (bytes[end].is_ascii_uppercase() || bytes[end].is_ascii_digit() || bytes[end] == b'_')
             {
@@ -703,7 +740,7 @@ mod tests {
             // Prose writes families as `VFS_*` or `VFS_RING_*`. A bare prefix
             // is not a name, so require a suffix that does not end in `_`.
             let is_prefix = tok.len() == 4 || tok.ends_with('_');
-            if !is_prefix {
+            if !is_prefix && !embedded {
                 out.push(tok.to_string());
             }
             i = end;

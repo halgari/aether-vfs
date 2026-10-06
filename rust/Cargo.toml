@@ -58,6 +58,9 @@ members = [
   "crates/vfs-fixture-steam",
   # NVAPI probe for the Proton launch path: initialises NVAPI and loads NGX.
   "crates/vfs-fixture-nvapi",
+  # Registry probe for the registry overlay's end-to-end test: a scripted Win32
+  # registry sequence whose transcript must not change when the overlay is on.
+  "crates/vfs-fixture-registry",
   "crates/vfs-ring-harness",
   "crates/xtask-descriptor",
 ]
