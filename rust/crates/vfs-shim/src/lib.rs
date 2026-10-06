@@ -20,6 +20,7 @@ mod payload_abi;
 mod read_cache;
 /// The registry hooks' client for the director's registry overlay.
 pub mod regclient;
+mod regkeys;
 mod zipserve;
 
 pub use bootstrap::{
@@ -53,7 +54,24 @@ pub use hook::contain_panic;
 /// quietly start (or stop) counting again.
 pub use hookstats::{
     hook_panic_count, hook_panics_total, outcome_count, overlay_fail_count,
-    reg_read_fallback_count, unrouted_director_opens, OpenOutcome, OverlayFail,
+    reg_read_fallback_count, reg_unresolved_count, unrouted_director_opens, OpenOutcome,
+    OverlayFail,
 };
+
+/// The canonical path the registry hooks recorded for a key handle (synthetic or
+/// pass-through), if they track it. For tests and diagnostics.
+pub fn registry_handle_path(handle: isize) -> Option<String> {
+    regkeys::path_of(handle)
+}
+
+/// Live key handles the registry hooks track: (synthetic, pass-through).
+pub fn registry_handle_counts() -> (usize, usize) {
+    regkeys::counts()
+}
+
+/// Whether a handle value is one of the registry hooks' synthetic key handles.
+pub fn is_synthetic_key_handle(handle: isize) -> bool {
+    regkeys::is_synthetic(handle)
+}
 pub use overlay::overlay_layer_dir;
 pub use payload_abi::PayloadConfig;

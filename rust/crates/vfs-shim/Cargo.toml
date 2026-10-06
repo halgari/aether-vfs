@@ -36,7 +36,15 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 # `bridge` (test-only) provides `flatten` for building snapshot fixtures.
 vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  # `tests/regkeys*.rs`: scratch real keys, a restrictive DACL, the user SID.
+  "Win32_System_Registry",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Threading",
+] }
 # `tests/regclient.rs`: the fake director answers the registry opcodes with the real
 # `dispatch_director` over a real `RegistryHost`.
 vfs-director = { path = "../vfs-director" }

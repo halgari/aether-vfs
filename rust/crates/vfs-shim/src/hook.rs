@@ -370,6 +370,39 @@ hook_entry_points! {
         restart: u8,
     ) -> NTSTATUS as "NtQueryDirectoryFile", on_panic STATUS_HOOK_PANICKED;
 
+    fn open_key_hook = open_key_hook_body(
+        key: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+    ) -> NTSTATUS as "NtOpenKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn open_key_ex_hook = open_key_ex_hook_body(
+        key: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        options: u32,
+    ) -> NTSTATUS as "NtOpenKeyEx", on_panic STATUS_HOOK_PANICKED;
+
+    fn create_key_hook = create_key_hook_body(
+        key: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        title_index: u32,
+        class: *const UnicodeString,
+        options: u32,
+        disposition: *mut u32,
+    ) -> NTSTATUS as "NtCreateKey", on_panic STATUS_HOOK_PANICKED;
+
+    fn dup_hook = dup_hook_body(
+        src_process: HANDLE,
+        src: HANDLE,
+        dst_process: HANDLE,
+        dst: *mut HANDLE,
+        access: u32,
+        attributes: u32,
+        options: u32,
+    ) -> NTSTATUS as "NtDuplicateObject", on_panic STATUS_HOOK_PANICKED;
+
     /// The one entry point here that is **not** an ntdll `NTSTATUS` call, and
     /// the one place a uniform `STATUS_UNSUCCESSFUL` would be actively
     /// dangerous. `CreateProcessInternalW` returns a Win32 `BOOL`, in which
@@ -445,6 +478,8 @@ use crate::ntdef::{
     NtDeleteFileFn, NtFlushBuffersFileFn, NtLockFileFn, NtMapViewOfSectionFn,
     NtOpenFileFn, NtQueryAttributesFileFn, NtQueryDirectoryFileExFn, NtQueryDirectoryFileFn,
     NtQueryInformationByNameFn, NtQueryObjectFn, NtUnlockFileFn,
+    NtCreateKeyFn, NtDuplicateObjectFn, NtOpenKeyExFn, NtOpenKeyFn, NtQueryKeyFn,
+    STATUS_OBJECT_NAME_INVALID,
     NtQueryFullAttributesFileFn,
     NtQueryInformationFileFn, NtQueryVolumeInformationFileFn, NtReadFileFn, NtSetInformationFileFn,
     NtWriteFileFn, NtUnmapViewOfSectionFn, ObjectAttributes, UnicodeString, FILE_ATTRIBUTE_DIRECTORY,
@@ -509,6 +544,14 @@ static mut TRAMP_LOCK: Option<NtLockFileFn> = None;
 static mut TRAMP_UNLOCK: Option<NtUnlockFileFn> = None;
 static mut TRAMP_FLUSH: Option<NtFlushBuffersFileFn> = None;
 static mut TRAMP_CPIW: Option<CreateProcessInternalWFn> = None;
+// Registry overlay (registry_hooks below).
+static mut TRAMP_OPEN_KEY: Option<NtOpenKeyFn> = None;
+static mut TRAMP_OPEN_KEY_EX: Option<NtOpenKeyExFn> = None;
+static mut TRAMP_CREATE_KEY: Option<NtCreateKeyFn> = None;
+static mut TRAMP_DUP: Option<NtDuplicateObjectFn> = None;
+/// The real `NtQueryKey`. Not detoured yet, so this is ntdll's own export; the hook that
+/// detours it must store its trampoline here instead.
+static mut TRAMP_QUERY_KEY: Option<NtQueryKeyFn> = None;
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
 /// 12 params; only `flags` and `pi` are inspected/modified by the hook.
@@ -960,6 +1003,8 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
         d_unmap, d_qvol, d_lock, d_unlock, d_flush,
     ]);
 
+    install_registry_detours(ntdll, &mut detours);
+
     // Best-effort child-process propagation + virtual image path spoof.
     if let Some(dll) = self_dll_path() {
         let _ = SELF_DLL.set(dll);
@@ -982,6 +1027,233 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     }
 
     Ok(HookGuard { _detours: detours })
+}
+
+/// Detour one optional export: installed when ntdll has it, noted in [`SKIPPED_DETOURS`]
+/// otherwise. `store` receives the trampoline **before** the detour is enabled (and `None`
+/// again if enabling fails), so no call can reach the hook while its trampoline is unset.
+unsafe fn optional_detour(
+    ntdll: HMODULE,
+    name: &'static core::ffi::CStr,
+    label: &'static str,
+    hookfn: *const (),
+    detours: &mut Vec<RawDetour>,
+    store: &mut dyn FnMut(Option<*const ()>),
+) {
+    if let Ok(d) = make_detour(ntdll, name, hookfn) {
+        store(Some(d.trampoline() as *const ()));
+        if d.enable().is_ok() {
+            detours.push(d);
+            return;
+        }
+        store(None);
+    }
+    note_skipped_detour(label);
+}
+
+/// The registry overlay's detours (spec section 3.1: open, create, duplicate; `NtClose` and
+/// `NtQueryObject` are the file hooks'). Installed whether or not the overlay is on: each
+/// checks `regclient::enabled()` first and goes straight to its trampoline when it is off.
+/// Optional in the style of `NtQueryObject`, so a host without one still gets the file VFS.
+unsafe fn install_registry_detours(ntdll: HMODULE, detours: &mut Vec<RawDetour>) {
+    TRAMP_QUERY_KEY = GetProcAddress(ntdll, c"NtQueryKey".as_ptr().cast())
+        .map(|p| core::mem::transmute::<unsafe extern "system" fn() -> isize, NtQueryKeyFn>(p));
+    optional_detour(
+        ntdll,
+        c"NtOpenKeyEx",
+        "NtOpenKeyEx",
+        open_key_ex_hook as *const (),
+        detours,
+        &mut |t| TRAMP_OPEN_KEY_EX = t.map(|t| core::mem::transmute::<*const (), NtOpenKeyExFn>(t)),
+    );
+    optional_detour(
+        ntdll,
+        c"NtOpenKey",
+        "NtOpenKey",
+        open_key_hook as *const (),
+        detours,
+        &mut |t| TRAMP_OPEN_KEY = t.map(|t| core::mem::transmute::<*const (), NtOpenKeyFn>(t)),
+    );
+    optional_detour(
+        ntdll,
+        c"NtCreateKey",
+        "NtCreateKey",
+        create_key_hook as *const (),
+        detours,
+        &mut |t| TRAMP_CREATE_KEY = t.map(|t| core::mem::transmute::<*const (), NtCreateKeyFn>(t)),
+    );
+    optional_detour(
+        ntdll,
+        c"NtDuplicateObject",
+        "NtDuplicateObject",
+        dup_hook as *const (),
+        detours,
+        &mut |t| TRAMP_DUP = t.map(|t| core::mem::transmute::<*const (), NtDuplicateObjectFn>(t)),
+    );
+}
+
+/// The unhooked registry entry points, for `regkeys`.
+unsafe fn reg_real() -> crate::regkeys::Real {
+    crate::regkeys::Real {
+        open_ex: TRAMP_OPEN_KEY_EX,
+        query: TRAMP_QUERY_KEY,
+        close: TRAMP_CLOSE,
+        dup: TRAMP_DUP,
+    }
+}
+
+/// Whether a registry hook should go straight to its trampoline: the overlay is off (ruling:
+/// nothing but this check), or this thread is inside the shim's own work.
+fn reg_bypass() -> bool {
+    !crate::regclient::enabled() || in_hook_reenter()
+}
+
+/// `NtOpenKey` hook. See `regkeys::open_or_create`.
+unsafe fn open_key_hook_body(
+    key: *mut HANDLE,
+    access: u32,
+    oa: *const ObjectAttributes,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::OpenKey);
+    let Some(tramp) = TRAMP_OPEN_KEY else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if reg_bypass() {
+        return tramp(key, access, oa);
+    }
+    // Held for the whole call: a registry or file call this thread makes while the hook works
+    // (the shim's own) goes straight to ntdll.
+    let Some(_io) = ShimIoGuard::enter() else {
+        return tramp(key, access, oa);
+    };
+    crate::regkeys::open_or_create(
+        &reg_real(),
+        key,
+        access,
+        oa,
+        crate::regkeys::Call::Open,
+        &mut |oa| tramp(key, access, oa),
+    )
+    .status
+}
+
+/// `NtOpenKeyEx` hook. See `regkeys::open_or_create`.
+unsafe fn open_key_ex_hook_body(
+    key: *mut HANDLE,
+    access: u32,
+    oa: *const ObjectAttributes,
+    options: u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::OpenKeyEx);
+    let Some(tramp) = TRAMP_OPEN_KEY_EX else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if reg_bypass() {
+        return tramp(key, access, oa, options);
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return tramp(key, access, oa, options);
+    };
+    crate::regkeys::open_or_create(
+        &reg_real(),
+        key,
+        access,
+        oa,
+        crate::regkeys::Call::Open,
+        &mut |oa| tramp(key, access, oa, options),
+    )
+    .status
+}
+
+/// `NtCreateKey` hook. With the overlay on, the real `NtCreateKey` is never called: a key that
+/// exists for real is opened (`NtOpenKeyEx` trampoline, the caller's access and open options)
+/// and reported as `REG_OPENED_EXISTING_KEY`; one that does not is created in the overlay.
+/// `TitleIndex` and `Class` are not modelled by the overlay and are ignored for its keys.
+unsafe fn create_key_hook_body(
+    key: *mut HANDLE,
+    access: u32,
+    oa: *const ObjectAttributes,
+    title_index: u32,
+    class: *const UnicodeString,
+    options: u32,
+    disposition: *mut u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::CreateKey);
+    let Some(tramp) = TRAMP_CREATE_KEY else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if reg_bypass() {
+        return tramp(key, access, oa, title_index, class, options, disposition);
+    }
+    let Some(_io) = ShimIoGuard::enter() else {
+        return tramp(key, access, oa, title_index, class, options, disposition);
+    };
+    let Some(open_ex) = TRAMP_OPEN_KEY_EX else {
+        // No way to open an existing key without the real create: refuse rather than write.
+        return STATUS_UNSUCCESSFUL;
+    };
+    let open_options = crate::regkeys::open_options_of_create(options);
+    let out = crate::regkeys::open_or_create(
+        &reg_real(),
+        key,
+        access,
+        oa,
+        crate::regkeys::Call::Create { options },
+        &mut |oa| open_ex(key, access, oa, open_options),
+    );
+    if out.status >= 0 && !disposition.is_null() {
+        *disposition = out.disposition;
+    }
+    out.status
+}
+
+/// `NtDuplicateObject` hook: duplicates of tracked key handles stay tracked. See
+/// `regkeys::duplicate`.
+unsafe fn dup_hook_body(
+    src_process: HANDLE,
+    src: HANDLE,
+    dst_process: HANDLE,
+    dst: *mut HANDLE,
+    access: u32,
+    attributes: u32,
+    options: u32,
+) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::DuplicateObject);
+    let Some(tramp) = TRAMP_DUP else {
+        return STATUS_UNSUCCESSFUL;
+    };
+    if reg_bypass() {
+        return tramp(
+            src_process,
+            src,
+            dst_process,
+            dst,
+            access,
+            attributes,
+            options,
+        );
+    }
+    match crate::regkeys::duplicate(
+        &reg_real(),
+        src_process,
+        src,
+        dst_process,
+        dst,
+        access,
+        attributes,
+        options,
+    ) {
+        Some(st) => st,
+        None => tramp(
+            src_process,
+            src,
+            dst_process,
+            dst,
+            access,
+            attributes,
+            options,
+        ),
+    }
 }
 
 /// Decode ObjectName as UTF-16 (no root resolution).
@@ -2800,6 +3072,13 @@ unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
         crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_EXIT);
         return STATUS_SUCCESS;
     }
+    // Registry key handles: a synthetic one is answered here, a pass-through one loses its
+    // record and is closed for real below.
+    if crate::regclient::enabled() {
+        if let Some(st) = crate::regkeys::close(&reg_real(), handle as isize) {
+            return st;
+        }
+    }
     // **`try_lock`, never `lock`.** This is best-effort reclamation, and a
     // blocking acquisition here hangs the process permanently.
     //
@@ -4121,6 +4400,14 @@ unsafe fn qobj_hook_body(
     // past untouched. A class we do not answer is most of the traffic.
     if class != OBJECT_NAME_INFORMATION {
         return tramp(handle, class, info, length, ret_len);
+    }
+    // A synthetic registry key: its NT name, as the real key would report it.
+    if crate::regkeys::is_synthetic(handle as isize) && crate::regclient::enabled() {
+        let Some(name) = crate::regkeys::object_name(handle as isize) else {
+            return STATUS_INVALID_HANDLE;
+        };
+        return emit_object_name(&name, info, length, ret_len)
+            .unwrap_or(STATUS_OBJECT_NAME_INVALID);
     }
     // A synthetic handle — every file and directory the director serves — is
     // not a kernel object: the host has no name for it and the trampoline

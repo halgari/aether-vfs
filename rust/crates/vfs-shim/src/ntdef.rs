@@ -451,3 +451,83 @@ pub struct FilePositionInformation {
 pub struct FileEndOfFileInformation {
     pub end_of_file: i64,
 }
+
+// ---- Registry (spec 2026-10-05 registry overlay, section 3.1) ----
+
+/// `ntdll!NtOpenKey`.
+pub type NtOpenKeyFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+) -> NTSTATUS;
+
+/// `ntdll!NtOpenKeyEx`: `NtOpenKey` plus `OpenOptions` (`REG_OPTION_OPEN_LINK`,
+/// `REG_OPTION_BACKUP_RESTORE`).
+pub type NtOpenKeyExFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    u32, // OpenOptions
+) -> NTSTATUS;
+
+/// `ntdll!NtCreateKey`. `Class` is a nullable `PUNICODE_STRING`, `Disposition` a nullable
+/// `PULONG`.
+pub type NtCreateKeyFn = unsafe extern "system" fn(
+    *mut HANDLE, // KeyHandle
+    u32,         // DesiredAccess
+    *const ObjectAttributes,
+    u32,                  // TitleIndex
+    *const UnicodeString, // Class
+    u32,                  // CreateOptions
+    *mut u32,             // Disposition
+) -> NTSTATUS;
+
+/// `ntdll!NtQueryKey`.
+pub type NtQueryKeyFn = unsafe extern "system" fn(
+    HANDLE,      // KeyHandle
+    u32,         // KeyInformationClass
+    *mut c_void, // KeyInformation
+    u32,         // Length
+    *mut u32,    // ResultLength
+) -> NTSTATUS;
+
+/// `ntdll!NtDuplicateObject`. `TargetHandle` is nullable (a close-only call with
+/// `DUPLICATE_CLOSE_SOURCE`).
+pub type NtDuplicateObjectFn = unsafe extern "system" fn(
+    HANDLE,      // SourceProcessHandle
+    HANDLE,      // SourceHandle
+    HANDLE,      // TargetProcessHandle
+    *mut HANDLE, // TargetHandle
+    u32,         // DesiredAccess
+    u32,         // HandleAttributes
+    u32,         // Options
+) -> NTSTATUS;
+
+/// `KeyNameInformation`: a `KEY_NAME_INFORMATION` (`u32` NameLength in bytes, then the name).
+pub const KEY_NAME_INFORMATION: u32 = 3;
+
+/// `NtCreateKey` dispositions.
+pub const REG_CREATED_NEW_KEY: u32 = 1;
+pub const REG_OPENED_EXISTING_KEY: u32 = 2;
+
+/// `NtCreateKey` `CreateOptions` / `NtOpenKeyEx` `OpenOptions` bits.
+pub const REG_OPTION_VOLATILE: u32 = 0x1;
+pub const REG_OPTION_CREATE_LINK: u32 = 0x2;
+pub const REG_OPTION_BACKUP_RESTORE: u32 = 0x4;
+pub const REG_OPTION_OPEN_LINK: u32 = 0x8;
+
+/// `DUPLICATE_CLOSE_SOURCE` / `DUPLICATE_SAME_ACCESS`.
+pub const DUPLICATE_CLOSE_SOURCE: u32 = 0x1;
+pub const DUPLICATE_SAME_ACCESS: u32 = 0x2;
+
+/// `OBJ_CASE_INSENSITIVE`, for the shim's own absolute key opens.
+pub const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+
+/// `STATUS_NOT_SUPPORTED`.
+pub const STATUS_NOT_SUPPORTED: NTSTATUS = 0xC000_00BBu32 as i32;
+/// `STATUS_INVALID_PARAMETER`.
+pub const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000_000Du32 as i32;
+/// `STATUS_OBJECT_NAME_INVALID`.
+pub const STATUS_OBJECT_NAME_INVALID: NTSTATUS = 0xC000_0033u32 as i32;
+/// `STATUS_BUFFER_TOO_SMALL`.
+pub const STATUS_BUFFER_TOO_SMALL: NTSTATUS = 0xC000_0023u32 as i32;

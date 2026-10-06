@@ -40,9 +40,13 @@ pub enum Hook {
     FlushBuffers = 17,
     DeleteFile = 18,
     QObj = 19,
+    OpenKey = 20,
+    OpenKeyEx = 21,
+    CreateKey = 22,
+    DuplicateObject = 23,
 }
 
-const N: usize = 20;
+const N: usize = 24;
 
 const NAMES: [&str; N] = [
     "NtCreateFile",
@@ -65,6 +69,10 @@ const NAMES: [&str; N] = [
     "NtFlushBuffersFile",
     "NtDeleteFile",
     "NtQueryObject",
+    "NtOpenKey",
+    "NtOpenKeyEx",
+    "NtCreateKey",
+    "NtDuplicateObject",
 ];
 
 static CALLS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
@@ -185,6 +193,7 @@ struct Snapshot {
     name_queries_cached: u64,
     name_lookups: u64,
     reg_read_fallbacks: u64,
+    reg_unresolved: u64,
     copy_up_counts: [u64; COPYUP_N],
     copy_up_bytes: u64,
     copy_ups: HashMap<String, u64>,
@@ -258,6 +267,7 @@ fn snapshot() -> Snapshot {
         name_queries_cached: NAME_QUERIES_CACHED.load(Ordering::Relaxed),
         name_lookups: NAME_LOOKUPS.load(Ordering::Relaxed),
         reg_read_fallbacks: reg_read_fallback_count(),
+        reg_unresolved: reg_unresolved_count(),
         copy_up_counts: std::array::from_fn(|i| copy_up_count(ALL_COPY_UPS[i])),
         copy_up_bytes: COPYUP_BYTES.load(Ordering::Relaxed),
         copy_ups: accumulated(&COPYUPS),
@@ -537,14 +547,36 @@ pub fn reg_read_fallback_count() -> u64 {
     REG_READ_FALLBACKS.load(Ordering::Relaxed)
 }
 
+/// Registry opens whose root key handle the shim could not name (or whose name it could not
+/// compose), so the call went to the real registry unexamined. Counted whether or not stats
+/// are on, like [`REG_READ_FALLBACKS`].
+static REG_UNRESOLVED: AtomicU64 = AtomicU64::new(0);
+
+/// A registry open could not be resolved to a path and was passed through.
+pub fn note_reg_unresolved() {
+    REG_UNRESOLVED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// How many registry opens were passed through unresolved so far.
+pub fn reg_unresolved_count() -> u64 {
+    REG_UNRESOLVED.load(Ordering::Relaxed)
+}
+
 fn render_reg_fallbacks(snap: &Snapshot) -> String {
-    if snap.reg_read_fallbacks == 0 {
-        return String::new();
+    let mut out = String::new();
+    if snap.reg_read_fallbacks != 0 {
+        out.push_str(&format!(
+            "\nregistry overlay reads served from the real registry after a director failure: {}\n",
+            snap.reg_read_fallbacks
+        ));
     }
-    format!(
-        "\nregistry overlay reads served from the real registry after a director failure: {}\n",
-        snap.reg_read_fallbacks
-    )
+    if snap.reg_unresolved != 0 {
+        out.push_str(&format!(
+            "\nregistry opens passed through because their key path could not be resolved: {}\n",
+            snap.reg_unresolved
+        ));
+    }
+    out
 }
 
 /// The label of the name-query row, for anything that parses the report.
@@ -1841,7 +1873,8 @@ mod tests {
         assert_eq!(NAMES.len(), N);
         // The last variant must index the last name, or a hook silently
         // reports under a neighbour's label.
-        assert_eq!(Hook::QObj as usize, N - 1);
+        assert_eq!(Hook::DuplicateObject as usize, N - 1);
+        assert_eq!(NAMES[Hook::QObj as usize], "NtQueryObject");
         // Spot-check the middle of the table too: appending variants without
         // appending names in the same order is the failure this guards, and
         // only the *last* index is caught by the check above.
@@ -2194,6 +2227,7 @@ mod tests {
             name_queries_cached: 0,
             name_lookups: 0,
             reg_read_fallbacks: 0,
+            reg_unresolved: 0,
             setinfo_noop: HashMap::new(),
             synth_locks: HashMap::new(),
             passthrough: HashMap::new(),
