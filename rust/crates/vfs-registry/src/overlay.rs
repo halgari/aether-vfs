@@ -88,6 +88,10 @@ pub struct Overlay {
     entries: BTreeMap<String, Entry>,
     /// Folded path of a tombstoned key -> version it was deleted (or renamed away) at.
     tombs: BTreeMap<String, u64>,
+    /// Folded path -> newest version at which a key of that name was deleted or renamed away.
+    /// Unlike `tombs` it survives revival of the path, so `changed_since` still sees the
+    /// deletion of a former descendant after its ancestor is recreated or its name reused.
+    deleted_at: BTreeMap<String, u64>,
     version: u64,
 }
 
@@ -196,7 +200,7 @@ impl Overlay {
         let f = fold(path);
         for (cf, (_, st)) in &node.children {
             if *st == Child::Tombstone {
-                self.tombs.insert(format!("{f}\\{cf}"), changed);
+                self.tomb(format!("{f}\\{cf}"), changed);
             }
         }
         self.tombs.remove(&f);
@@ -319,7 +323,7 @@ impl Overlay {
         self.ensure_chain(parent, true, v, now);
         let f = fold(path);
         self.remove_subtree(&f);
-        self.tombs.insert(f.clone(), v);
+        self.tomb(f.clone(), v);
         let pe = self.entries.get_mut(&fold(parent)).expect("chain ensured");
         pe.node.children.insert(
             fold(path::leaf(path)),
@@ -385,7 +389,7 @@ impl Overlay {
             self.entries.insert(key, e);
         }
         for (k, _) in moved_tombs {
-            self.tombs.insert(format!("{new_f}{}", rest(&k, &old_f)), v);
+            self.tomb(format!("{new_f}{}", rest(&k, &old_f)), v);
         }
         self.entries.get_mut(&new_f).expect("moved").node.last_write = now;
         let pe = self
@@ -397,7 +401,7 @@ impl Overlay {
                 fold(path::leaf(path)),
                 (path::leaf(path).to_string(), Child::Tombstone),
             );
-            self.tombs.insert(old_f, v);
+            self.tomb(old_f, v);
         }
         let pe = self.entries.get_mut(&fold(parent)).expect("parent");
         pe.node
@@ -419,7 +423,7 @@ impl Overlay {
         }
         let mut cur = f.as_str();
         loop {
-            if self.tombs.get(cur).is_some_and(|t| *t > version) {
+            if self.deleted_at.get(cur).is_some_and(|t| *t > version) {
                 return true;
             }
             match path::parent(cur) {
@@ -427,6 +431,13 @@ impl Overlay {
                 None => return false,
             }
         }
+    }
+
+    /// Record a tombstone for `folded` at version `v` (and the surviving deletion mark).
+    fn tomb(&mut self, folded: String, v: u64) {
+        let hw = self.deleted_at.entry(folded.clone()).or_insert(0);
+        *hw = (*hw).max(v);
+        self.tombs.insert(folded, v);
     }
 
     fn bump(&mut self) -> u64 {
@@ -787,6 +798,40 @@ mod tests {
         let v4 = o.delete_value(K, "x", 4).unwrap();
         assert!(o.changed_since(K, false, v3));
         assert!(!o.changed_since(K, false, v4));
+    }
+
+    #[test]
+    fn changed_since_sees_deletions_after_revive() {
+        let mut o = Overlay::new();
+        let sub = format!(r"{K}\Sub");
+        let v1 = o.set_value(&sub, "v", REG_SZ, b"x", 1).unwrap();
+        let v2 = o.delete_key(K, 2).unwrap();
+        // Plain revive through set_value, then through create_key.
+        let v3 = o.set_value(K, "n", REG_SZ, b"y", 3).unwrap();
+        assert_eq!(o.lookup(&sub).0, Lookup::Absent);
+        assert!(o.changed_since(&sub, false, v1));
+        assert!(o.changed_since(&sub, true, v1));
+        assert!(o.changed_since(K, false, v2));
+        assert!(!o.changed_since(&sub, false, v3));
+        let v4 = o.delete_key(K, 4).unwrap();
+        o.create_key(K, false, true, 5).unwrap();
+        assert!(o.changed_since(&sub, true, v3));
+        assert!(!o.changed_since(&sub, true, v4));
+    }
+
+    #[test]
+    fn changed_since_sees_old_name_after_rename_and_reuse() {
+        let mut o = Overlay::new();
+        let a = format!(r"{K}\A");
+        let deep = format!(r"{a}\Deep");
+        let v1 = o.set_value(&deep, "v", REG_SZ, b"x", 1).unwrap();
+        let v2 = o.rename_key(&a, "B", 2).unwrap();
+        // Reuse the old name.
+        let v3 = o.set_value(&a, "w", REG_SZ, b"y", 3).unwrap();
+        assert!(o.changed_since(&deep, true, v1));
+        assert!(o.changed_since(&a, false, v2));
+        assert!(!o.changed_since(&deep, true, v3));
+        assert!(o.changed_since(&format!(r"{K}\B"), false, v1));
     }
 
     #[test]
