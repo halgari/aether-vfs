@@ -1426,11 +1426,11 @@ impl Session {
                 .lock()
                 .map_err(|_| "launch env lock poisoned".to_string())?;
             ipc.apply_env_roots(
-            &root_s,
-            &self.extra_roots_env(),
-            &thin,
-            self.registry_attached(),
-        );
+                &root_s,
+                &self.extra_roots_env(),
+                &thin,
+                self.registry_attached(),
+            );
         }
 
         // Minimal shim.cfg (FUSE path is env-driven). The snapshot must still be a
@@ -2405,6 +2405,39 @@ mod registry_layer_tests {
         Some(out)
     }
 
+    /// The launch environment for what the session currently says about its
+    /// registry layer (the same `registry_attached()` `launch` passes).
+    #[cfg(unix)]
+    fn launch_env_of(s: &Session) -> BTreeMap<String, String> {
+        let p = |n: &str| PathBuf::from(format!("/x/{n}"));
+        vfs_proton::launch::launch_env(&WineLaunch {
+            runtime: p("rt"),
+            prefix: p("pfx"),
+            injector: p("inj"),
+            shim_dll: p("shim"),
+            payload_dll: p("payload"),
+            target: r"C:\t.exe".to_string(),
+            config_file: p("cfg"),
+            ready_file: p("ready"),
+            ring_path: p("ring"),
+            ring_bytes: 1,
+            arena_offset: 1,
+            arena_len: 1,
+            payload_cap: 1,
+            virtual_dir: r"C:\m".to_string(),
+            virtual_roots: vec![],
+            args: vec![],
+            extra_env: BTreeMap::new(),
+            cwd: None,
+            ready_timeout_secs: None,
+            log_file: None,
+            steam: vfs_proton::SteamSide::Untouched,
+            notes: vec![],
+            nvapi: None,
+            registry: s.registry_attached(),
+        })
+    }
+
     fn storage_layer(tag: &str) -> (PathBuf, Arc<dyn Provider>) {
         let dir = std::env::temp_dir().join(format!("vfs-reglayer-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2420,9 +2453,13 @@ mod registry_layer_tests {
         s.set_registry_layer(Some(layer)).unwrap();
         assert!(s.registry_attached());
         assert!(s.kernel().registry().is_some());
+        #[cfg(unix)]
+        assert_eq!(launch_env_of(&s).get("VFS_REGISTRY").map(String::as_str), Some("1"));
         s.set_registry_layer(None).unwrap();
         assert!(!s.registry_attached());
         assert!(s.kernel().registry().is_none());
+        #[cfg(unix)]
+        assert!(!launch_env_of(&s).contains_key("VFS_REGISTRY"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

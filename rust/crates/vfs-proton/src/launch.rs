@@ -571,20 +571,30 @@ pub fn spawn(l: &WineLaunch) -> Result<std::process::Child, LaunchError> {
     // point the child's root map somewhere this session never chose. That is
     // the same stale-value hazard `IpcServe::apply_env_roots` clears with
     // `remove_var`, and it applies here for the same reason.
-    for stale in [
+    for stale in stale_env(&env) {
+        cmd.env_remove(stale);
+    }
+    crate::prefix::spawn_retrying_busy(&mut cmd)
+        .map_err(|e| LaunchError::Spawn(format!("{prog}: {e}")))
+}
+
+/// The inherited variables a launch clears because it did not set them itself,
+/// given the environment [`launch_env`] built. `VFS_REGISTRY` is here so a host
+/// that has it set cannot turn the registry hooks on for a launch with no
+/// registry layer.
+fn stale_env(env: &BTreeMap<String, String>) -> Vec<&'static str> {
+    [
         "VFS_RING_SECTION",
         "VFS_SERVER_EV",
         "VFS_CLIENT_EV",
         "VFS_VIRTUAL_ROOTS",
         "VFS_INJECT_CWD",
         "VFS_INJECT_STEAM_HELPER",
-    ] {
-        if !env.contains_key(stale) {
-            cmd.env_remove(stale);
-        }
-    }
-    crate::prefix::spawn_retrying_busy(&mut cmd)
-        .map_err(|e| LaunchError::Spawn(format!("{prog}: {e}")))
+        vfs_env::REGISTRY,
+    ]
+    .into_iter()
+    .filter(|n| !env.contains_key(*n))
+    .collect()
 }
 
 /// Creates `path` (and its parent directories) for a launch's output,
@@ -794,6 +804,14 @@ mod tests {
             env.get("VFS_VIRTUAL_ROOTS").map(String::as_str),
             Some(r"1=C:\users\steamuser\Saves;2=C:\x")
         );
+    }
+
+    #[test]
+    fn an_inherited_registry_flag_is_cleared_unless_the_launch_sets_it() {
+        let mut l = sample();
+        assert!(stale_env(&launch_env(&l)).contains(&"VFS_REGISTRY"));
+        l.registry = true;
+        assert!(!stale_env(&launch_env(&l)).contains(&"VFS_REGISTRY"));
     }
 
     #[test]
