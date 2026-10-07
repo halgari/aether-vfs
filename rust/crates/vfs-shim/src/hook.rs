@@ -78,9 +78,9 @@ impl Drop for ShimIoGuard {
 /// failure is the only answer that says "this operation did not happen" without
 /// also asserting why.
 ///
-/// It is uniform across all twenty ntdll entry points because a panic is the
+/// It is uniform across every ntdll entry point because a panic is the
 /// same event in each of them, and because a per-hook table of "best" statuses
-/// would be twenty more chances to pick one that a caller treats as benign.
+/// would be one more chance per hook to pick one that a caller treats as benign.
 /// `cpiw_hook` is the one exception and is not an exception to the principle:
 /// `CreateProcessInternalW` returns a Win32 `BOOL`, where this constant's bit
 /// pattern is *non-zero* and therefore reads as success. It returns `FALSE`
@@ -1098,8 +1098,8 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
 
     // Present since Win8, and optional for the same reason `NtQueryInformationByName`
     // below is: a host may not export it. Measured against GE-Proton11-6
-    // (Wine 11.0 Staging), whose ntdll exports 18 of the 20 functions installed
-    // here and omits exactly these two.
+    // (Wine 11.0 Staging), whose ntdll does not export exactly these two of the
+    // functions installed here.
     //
     // Skipping it costs no coverage on such a host. `make_detour` fails because
     // `GetProcAddress` found nothing, and a symbol absent from ntdll's export
@@ -1301,7 +1301,6 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
                     detours.push(d_cpiw);
                 }
             }
-            let _ = kb;
         }
     }
 
@@ -2608,16 +2607,6 @@ unsafe fn object_name_str(oa: *const ObjectAttributes) -> Option<String> {
     Some(String::from_utf16_lossy(units))
 }
 
-/// Fully-qualified NT/Win32 path for an open.
-///
-/// Absolute names work as before. **Relative** opens (`RootDirectory` set) only
-/// resolve when the root is a FUSE synthetic directory handle whose absolute
-/// path was recorded in `PATH_TABLE`. Real kernel roots return `None` so the
-/// caller can tramp. Without this, steam_api / CRT opens like
-/// `RootDirectory=<game dir FUSE handle>, Name=steam_appid.txt` hit the kernel
-/// with a fake handle → fail → **Steam Error**.
-/// The `ObjectAttributes` name field alone, ignoring `RootDirectory`. Used only
-/// to describe an open we could not resolve to a full path.
 /// The process's current-directory handle and its DOS path, read from the PEB.
 ///
 /// `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory` is the only place the handle
@@ -2727,6 +2716,8 @@ unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<(String, bool)> {
     Some((resolved, true))
 }
 
+/// The `ObjectAttributes` name field alone, ignoring `RootDirectory`. Used only
+/// to describe an open we could not resolve to a full path.
 unsafe fn oa_name_only(oa: *const ObjectAttributes) -> Option<String> {
     if oa.is_null() {
         return None;
@@ -2781,6 +2772,14 @@ unsafe fn path_of_tracked(oa: *const ObjectAttributes) -> Option<DecodedPath> {
     Some(DecodedPath { path, os_consulted })
 }
 
+/// Fully-qualified NT/Win32 path for an open.
+///
+/// Absolute names work as before. **Relative** opens (`RootDirectory` set) only
+/// resolve when the root is a FUSE synthetic directory handle whose absolute
+/// path was recorded in `PATH_TABLE`. Real kernel roots return `None` so the
+/// caller can tramp. Without this, steam_api / CRT opens like
+/// `RootDirectory=<game dir FUSE handle>, Name=steam_appid.txt` hit the kernel
+/// with a fake handle → fail → **Steam Error**.
 unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
     path_of_tracked(oa).map(|d| d.path)
 }
@@ -3308,27 +3307,20 @@ unsafe fn try_fuse_create(
     // to give. It claimed the crate builds with `panic = "abort"`; it does
     // not. `rust/Cargo.toml` sets `panic = "unwind"` for both profiles,
     // deliberately, so "a panic cannot unwind here" is simply false and
-    // nothing about poisoning is ruled out by the profile. Two independent
-    // reasons rule it out instead:
+    // nothing about poisoning is ruled out by the profile. What rules it out
+    // instead is that nothing inside those critical sections can unwind.
+    // `fuse_synth` holds `TABLE`/`NEXT` across `usize` arithmetic, `BTreeMap`
+    // insert/get/get_mut/remove keyed by `usize`, and `String` clone/drop --
+    // no `unwrap`, no slice indexing, no caller-supplied closure, no `Ord` or
+    // `Drop` impl that can panic. Allocation failure aborts rather than
+    // unwinding. Poisoning requires a panic to unwind *out of a held guard*,
+    // and there is no panic here to unwind.
     //
-    //  1. Nothing inside those critical sections can unwind. `fuse_synth`
-    //     holds `TABLE`/`NEXT` across `usize` arithmetic, `BTreeMap`
-    //     insert/get/get_mut/remove keyed by `usize`, and `String`
-    //     clone/drop — no `unwrap`, no slice indexing, no caller-supplied
-    //     closure, no `Ord` or `Drop` impl that can panic. Allocation failure
-    //     aborts rather than unwinding. Poisoning requires a panic to unwind
-    //     *out of a held guard*, and there is no panic here to unwind.
-    //  2. Even granting one, every production path into this code arrives
-    //     through an `unsafe extern "system"` hook, and rustc's forced
-    //     abort-on-unwind at a non-`-unwind` `extern` boundary tears the
-    //     process down while that unwind is still in flight. The guard's drop
-    //     would set the poison flag on the way out, but no later call would
-    //     be alive to observe it.
-    //
-    // Reason 1 is the one to re-check if `fuse_synth` ever grows a fallible
-    // or reentrant operation under those locks; reason 2 holds only for the
-    // injected process, not for in-process tests that drive these paths
-    // directly.
+    // Note that `contain_panic` does NOT make this safe by itself: it catches
+    // a panic at the hook boundary, but the guard's drop has already set the
+    // poison flag by then, so later calls would see it. Re-check the argument
+    // above if `fuse_synth` ever grows a fallible or reentrant operation
+    // under those locks.
     // (Primary stack is expanded to 16 MiB by vfs-inject; open is a shallow ring op.)
     // Only the three "conditional" dispositions need to know whether the
     // path pre-existed to report the right `IoStatusBlock.Information` (see
@@ -3673,7 +3665,7 @@ unsafe fn try_fuse_mkdir(
         Ok(()) => {
             // Synthesize a virtual directory handle directly — do NOT OP_OPEN the
             // new dir: the overlay opens paths as FileChannels, and a directory
-            // open throws. fh=0 is never a real JVM handle, so the NtClose-time
+            // open throws. fh=0 is never a real director handle, so the NtClose-time
             // close(0) is a harmless no-op. The caller (CreateDirectoryW) only
             // needs a handle to receive and immediately close; later metadata
             // reads are path-based (qattr/getattr), not through this handle.
@@ -3694,7 +3686,7 @@ unsafe fn try_fuse_mkdir(
         // mkdir under the root).
         Err(st) if st == vfs_protocol::ST_NOT_FOUND => Some(STATUS_OBJECT_NAME_NOT_FOUND),
         // mkdir failed — most often the directory already exists (the overlay
-        // raises :already-exists, which the JVM has no dedicated status for and
+        // raises :already-exists, which the director has no dedicated status for and
         // reports as a generic error). Probe: if a directory is really there,
         // honor the disposition — FILE_CREATE(2) must report a name collision
         // (ERROR_ALREADY_EXISTS, so the create-and-ignore idiom works), while
@@ -4824,8 +4816,11 @@ unsafe fn setinfo_ok_iosb(iosb: *mut c_void) {
     }
 }
 
+/// `FileCompletionInformation` — binds a handle to an I/O completion port.
+const FILE_COMPLETION_INFORMATION: u32 = 30;
+
 /// `NtSetInformationFile` hook. For director FUSE (pure-ring) virtual handles it
-/// routes truncate (`FileEndOfFileInformation`), delete, and rename to the JVM
+/// routes truncate (`FileEndOfFileInformation`), delete, and rename to the director
 /// overlay over the ring. For legacy local-overlay handles it converts a delete
 /// or rename of a tracked under-root handle into an overlay whiteout/rename and
 /// suppresses the real operation, so the mod backing / real file is preserved
@@ -4846,9 +4841,6 @@ unsafe fn setinfo_ok_iosb(iosb: *mut c_void) {
 /// the same root, and is routed, or it touches no root at all, and passes
 /// through. Everything else is refused, and a delete of an under-root path that
 /// nothing here absorbed is refused with it rather than reaching the kernel.
-/// `FileCompletionInformation` — binds a handle to an I/O completion port.
-const FILE_COMPLETION_INFORMATION: u32 = 30;
-
 unsafe fn setinfo_hook_body(
     handle: HANDLE,
     iosb: *mut c_void,
@@ -5233,11 +5225,10 @@ unsafe fn fuse_query_information(
     length: u32,
     class: u32,
 ) -> NTSTATUS {
-    let Some((fh, size, is_dir, pos, _append_only)) = crate::fuse_synth::lookup(handle as isize)
+    let Some((_, size, is_dir, pos, _append_only)) = crate::fuse_synth::lookup(handle as isize)
     else {
         return STATUS_INVALID_HANDLE;
     };
-    let _ = fh;
     if info.is_null() {
         return STATUS_UNSUCCESSFUL;
     }
@@ -6071,7 +6062,7 @@ unsafe fn emit_object_name(
 }
 
 /// `NtWriteFile` hook. For synthetic (fuse) write handles, forward the game's
-/// buffer to the JVM overlay over the ring and complete the IRP; real handles
+/// buffer to the director overlay over the ring and complete the IRP; real handles
 /// pass straight through. `ByteOffset` NULL / negative sentinel = current pos.
 #[allow(clippy::too_many_arguments)]
 unsafe fn write_hook_body(
@@ -6167,7 +6158,6 @@ unsafe fn write_hook_body(
             if !event.is_null() {
                 windows_sys::Win32::System::Threading::SetEvent(event);
             }
-            let _ = (apc, apc_ctx, key);
             return STATUS_SUCCESS;
         }
         // Tagged synth handle with no table entry — never hand it to the real
@@ -6190,10 +6180,6 @@ unsafe fn write_hook_body(
 /// `NtReadFile` hook. Synthetic (fuse) handles are answered from the director
 /// over the ring; real handles pass straight through. `ByteOffset` of NULL or
 /// the "use current position" sentinel (-1/-2) means "current position".
-///
-/// This doc comment used to describe a second synthetic case — copying bytes
-/// out of a mapped zip window — and used to sit, orphaned, above `write_hook`.
-/// Gate 4 task 7 deleted that case with the rest of the zip-window server.
 #[allow(clippy::too_many_arguments)]
 unsafe fn read_hook_body(
     handle: HANDLE,
@@ -6403,7 +6389,6 @@ unsafe fn fuse_create_section(
     file_handle: HANDLE,
     tramp: NtCreateSectionFn,
 ) -> NTSTATUS {
-    let _page_prot = page_prot;
     let Some((fh, size, is_dir, _, _)) = crate::fuse_synth::lookup(file_handle as isize) else {
         return STATUS_INVALID_HANDLE;
     };
@@ -6665,14 +6650,6 @@ unsafe fn map_view_hook_body(
                 if !section_offset.is_null() {
                     core::ptr::write_unaligned(section_offset, off as i64);
                 }
-                let _ = (
-                    process,
-                    zero_bits,
-                    commit_size,
-                    inherit,
-                    alloc_type,
-                    protect,
-                );
                 STATUS_SUCCESS
             }
             None => STATUS_UNSUCCESSFUL,
@@ -6708,7 +6685,6 @@ unsafe fn unmap_view_hook_body(process: HANDLE, base: *mut c_void) -> NTSTATUS {
         // slides views over one open section and must keep the others.
         crate::zipserve::unmap_view(b);
         crate::lazy_section::on_view_unmapped(b);
-        let _ = process;
         return STATUS_SUCCESS;
     }
     tramp(process, base)
@@ -7173,13 +7149,6 @@ unsafe fn serve_dir_query(
 mod tests {
     use super::*;
 
-    /// Offsets and sizes of the metadata classes we answer by path.
-    ///
-    /// These are ABI, not our choice: the caller allocated the buffer and reads
-    /// the fields at fixed offsets. Writing `EndOfFile` at the wrong offset does
-    /// not fail — it reports a file of the wrong size, or a size of zero, which
-    /// a caller is free to treat as "not worth opening". That is silent, so it
-    /// gets pinned down here.
     /// `spoofed_object_name` adopts the host's prefix rather than assuming one.
     /// Both forms are measured facts (2026-09-01): Windows answers
     /// `\Device\HarddiskVolumeN\...`, Wine answers `\??\C:\...`. A hook that
@@ -7356,6 +7325,13 @@ mod tests {
 
     /// The size a stat reports is the whole reason these classes are answered:
     /// a caller that sees zero bytes may skip the file without ever opening it.
+    /// Offsets and sizes of the metadata classes we answer by path.
+    ///
+    /// These are ABI, not our choice: the caller allocated the buffer and reads
+    /// the fields at fixed offsets. Writing `EndOfFile` at the wrong offset does
+    /// not fail — it reports a file of the wrong size, or a size of zero, which
+    /// a caller is free to treat as "not worth opening". That is silent, so it
+    /// gets pinned down here.
     #[test]
     fn size_lands_at_the_offset_each_class_defines() {
         const SIZE: u64 = 249_753_412; // Skyrim.esm, i.e. well past 32 bits.
@@ -7812,8 +7788,8 @@ mod tests {
     ///
     /// Requirement 1 of task 1 is that *every* entry point contains its panic,
     /// and the behaviour tests above can only ever demonstrate that for the hooks
-    /// they drive. This is what makes the claim total, and what stops hook number
-    /// twenty-two from being written the old way — which would compile, install,
+    /// they drive. This is what makes the claim total, and what stops the next hook
+    /// from being written the old way — which would compile, install,
     /// and abort the game exactly as before, with nothing in any test to say so.
     ///
     /// ## Its first version had a hole, and the hole was real
@@ -7935,12 +7911,12 @@ mod tests {
                      its body, so a panic in it unwinds out of an `extern` frame and \
                      aborts the game process (0xC0000409) instead of returning a failure. \
                      Wrap the body: `contain_panic(\"{name}\", || …, || <failure value>)`, \
-                     the same containment all twenty ntdll detours use. If it is an ntdll \
+                     the same containment all the ntdll detours use. If it is an ntdll \
                      detour, add it to `hook_entry_points!` and get the wrapper for free."
                 );
             }
         }
-        // 20 detours + 2 test hooks in this file's `hook_entry_points!` are all
+        // The detours and test hooks in this file's `hook_entry_points!` are all
         // one generated `$wrapper`, so the count is small on purpose: the macro,
         // `veh_handler`, `DllMain`, `vfs_shim_sync_bootstrap`.
         assert!(

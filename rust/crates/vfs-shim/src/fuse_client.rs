@@ -662,7 +662,7 @@ impl FuseClient {
         })
     }
 
-    /// Delete (whiteout) a virtual path via the JVM overlay (`OP_DELETE`).
+    /// Delete (whiteout) a virtual path via the director overlay (`OP_DELETE`).
     pub fn delete(&self, root: RootId, vpath: &str) -> Result<(), i32> {
         let c = self.client();
         let r = c
@@ -691,7 +691,7 @@ impl FuseClient {
         Ok(())
     }
 
-    /// Create a virtual directory via the JVM overlay (`OP_MKDIR`).
+    /// Create a virtual directory via the director overlay (`OP_MKDIR`).
     pub fn mkdir(&self, root: RootId, vpath: &str, mode: u32) -> Result<(), i32> {
         let c = self.client();
         let r = c

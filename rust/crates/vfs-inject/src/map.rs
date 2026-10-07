@@ -37,8 +37,6 @@ fn rd_u64(b: &[u8], o: usize) -> u64 {
 /// bases). Game-local DLLs (steam_api64, bink, …) that are only mapped in
 /// `remote` are resolved by walking the **remote** module's export table via
 /// `ReadProcessMemory` so IAT entries match the child's load addresses.
-///
-/// Call [`crate::ghostly::preload_remote_import_dlls`] first when `remote` is set.
 pub fn resolve_imports(img: &mut [u8], e_lfanew: usize) -> Result<(), &'static str> {
     resolve_imports_ex(img, e_lfanew, None)
 }

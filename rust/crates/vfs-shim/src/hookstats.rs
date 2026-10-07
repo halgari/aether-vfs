@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-/// Hooks worth attributing separately. Anything not listed lands in `Other`.
+/// Hooks attributed separately: one entry per instrumented hook (there is no catch-all variant).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Hook {
