@@ -599,7 +599,7 @@ mod tests {
         #[cfg(not(windows))]
         {
             let killed = tempfile::tempdir().unwrap();
-            crate::test_util::snapshot(d.path(), killed.path());
+            crate::test_util::snapshot_as_killed(d.path(), killed.path());
             let k = Storage::open(killed.path(), cfg()).unwrap();
             assert_eq!(*k.last_reconcile(), Default::default());
             let kp = k.layer("saves").unwrap();
@@ -634,7 +634,7 @@ mod tests {
         s.store.flush().unwrap(); // the store half reached disk, the catalog did not
 
         let killed = tempfile::tempdir().unwrap();
-        crate::test_util::snapshot(d.path(), killed.path());
+        crate::test_util::snapshot_as_killed(d.path(), killed.path());
         let k = Storage::open(killed.path(), cfg()).unwrap();
         assert_consistent(&k);
         assert!(k.last_reconcile().orphans_deleted >= 1);
@@ -851,7 +851,7 @@ mod tests {
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("fresh").unwrap();
         let killed = tempfile::tempdir().unwrap();
-        crate::test_util::snapshot(d.path(), killed.path());
+        crate::test_util::snapshot_as_killed(d.path(), killed.path());
         let k = Storage::open(killed.path(), cfg()).unwrap();
         assert!(k.catalog.layer_id("fresh").unwrap().is_some());
         drop(p);

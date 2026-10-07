@@ -174,6 +174,11 @@ pub struct Storage {
     /// drop), or, in tests, once a crash is simulated: the drop then does
     /// nothing more.
     pub(crate) shut: AtomicBool,
+    /// Set by [`Storage::crash_on_drop_for_tests`]: the process is "dead". No
+    /// durable point runs from then on, so a layer provider dropped after the
+    /// crash does not publish what the crash should have lost.
+    #[cfg(any(test, feature = "test-hooks"))]
+    crashed: AtomicBool,
     /// Set when this session left something for reconciliation at the next
     /// open (see [`Storage::needs_reconcile`]): the close then leaves no
     /// clean-close mark.
@@ -212,6 +217,13 @@ pub struct Storage {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     pub(crate) layer_fill_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// The directory as a crash left it, put back by the drop. **Declared
+    /// last, so it drops after every field above has released its files**: see
+    /// [`CrashImage`](crate::test_util::CrashImage).
+    #[cfg(all(any(test, feature = "test-hooks"), not(windows)))]
+    crash_image: Mutex<Option<crate::test_util::CrashImage>>,
+    #[cfg(all(any(test, feature = "test-hooks"), not(windows)))]
+    dir: std::path::PathBuf,
 }
 
 /// The default for [`DurableClock::max_commits`]
@@ -404,6 +416,8 @@ impl Storage {
             layers_gone: Condvar::new(),
             reconciled,
             shut: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-hooks"))]
+            crashed: AtomicBool::new(false),
             dirty: AtomicBool::new(dirty),
             clock,
             doomed: Mutex::new(Vec::new()),
@@ -419,6 +433,10 @@ impl Storage {
             layer_read_hook: Mutex::new(None),
             #[cfg(test)]
             layer_fill_hook: Mutex::new(None),
+            #[cfg(all(any(test, feature = "test-hooks"), not(windows)))]
+            crash_image: Mutex::new(None),
+            #[cfg(all(any(test, feature = "test-hooks"), not(windows)))]
+            dir: dir.to_path_buf(),
         }))
     }
 
@@ -548,12 +566,31 @@ impl Storage {
         self.shut.store(true, Ordering::Release);
     }
 
-    /// Test hook for other crates (feature `test-hooks`): when the last
-    /// reference goes, the drop does nothing more, as a crash: no sync, no
-    /// clean-close mark, so what no durable point made durable is lost and the
-    /// next open reconciles.
-    #[cfg(feature = "test-hooks")]
+    /// Test hook for other crates (feature `test-hooks`): the process "dies"
+    /// here. From now on no durable point runs, whoever asks: not a layer
+    /// provider's drop, not [`Storage::sync`], not the storage's own drop, which
+    /// also leaves no clean-close mark. What no durable point made durable
+    /// before this call is lost and the next open reconciles.
+    ///
+    /// The directory the storage is dropped over is put back as it was at this
+    /// call (redb would otherwise publish its non-durable commits as it closes),
+    /// except on Windows, where it cannot be copied while open. To look at a
+    /// crash while everything is still open, copy it with
+    /// [`snapshot_as_killed`](crate::snapshot_as_killed).
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn crash_on_drop_for_tests(&self) {
+        // The image first: nothing after this call may reach it.
+        #[cfg(not(windows))]
+        {
+            let mut image = lock(&self.crash_image);
+            if image.is_none() {
+                *image = Some(
+                    crate::test_util::CrashImage::take(&self.dir)
+                        .expect("copying the storage directory for the crash"),
+                );
+            }
+        }
+        self.crashed.store(true, Ordering::Release);
         self.shut.store(true, Ordering::Release);
     }
 
@@ -593,6 +630,10 @@ impl Storage {
     /// the fsyncs are skipped (the doomed files' removals are then already
     /// durable, and they are deleted all the same).
     pub(crate) fn durable_point(&self) -> Result<(), StorageError> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        if self.crashed.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let doomed = {
             let _gate = self.gate_exclusive();
             let doomed = std::mem::take(&mut *lock(&self.doomed));
@@ -792,6 +833,50 @@ mod tests {
     use super::*;
     use crate::config::StorageConfig;
 
+    /// One closed file in layer `l`, written under the default (deferred)
+    /// policy, so no durable point has run for it; then `end` ends the session.
+    /// Whether the file is there after a reopen.
+    fn survives(end: impl FnOnce(Arc<Storage>, Arc<dyn vfs_provider::Provider>)) -> bool {
+        use vfs_provider::{VPath, OPEN_CREATE, OPEN_WRITE};
+        let dir = tempfile::tempdir().unwrap();
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        let p = s.layer("l").unwrap();
+        let (h, _, _) = p
+            .open(VPath::at_default("f.bin"), OPEN_WRITE | OPEN_CREATE)
+            .unwrap();
+        p.write_at(h, 0, b"unsynced").unwrap();
+        p.close(h).unwrap();
+        end(s, p);
+        let s = Storage::open(dir.path(), StorageConfig::default()).unwrap();
+        let p = s.layer("l").unwrap();
+        p.getattr(VPath::at_default("f.bin")).unwrap().is_some()
+    }
+
+    #[test]
+    fn dropping_the_layer_provider_after_a_crash_makes_nothing_durable() {
+        // Control: the same drops without the crash publish the write.
+        assert!(survives(|s, p| {
+            drop(p);
+            drop(s);
+        }));
+        // The crash comes first, then the drops that would have published it.
+        assert!(!survives(|s, p| {
+            s.crash_on_drop_for_tests();
+            drop(p);
+            drop(s);
+        }));
+    }
+
+    #[test]
+    fn a_sync_after_a_crash_makes_nothing_durable() {
+        assert!(!survives(|s, p| {
+            s.crash_on_drop_for_tests();
+            s.sync().unwrap();
+            drop(p);
+            drop(s);
+        }));
+    }
+
     #[test]
     fn storage_opens_twice_in_sequence_but_not_concurrently() {
         let dir = tempfile::tempdir().unwrap();
@@ -918,7 +1003,7 @@ mod tests {
             p.write_at(h, 0, &[7u8; 100_000]).unwrap();
             s.store.flush().unwrap();
             let killed = tempfile::tempdir().unwrap();
-            crate::test_util::snapshot(dir.path(), killed.path());
+            crate::test_util::snapshot_as_killed(dir.path(), killed.path());
             p.close(h).unwrap();
             drop(p);
             let k = Storage::open(killed.path(), StorageConfig::default()).unwrap();
@@ -1124,7 +1209,7 @@ mod tests {
         let killed = tempfile::tempdir().unwrap();
         let (from, to) = (dir.path().to_owned(), killed.path().to_owned());
         *lock(&s.before_mark_hook) = Some(Box::new(move |_: &Storage| {
-            crate::test_util::snapshot(&from, &to);
+            crate::test_util::snapshot_as_killed(&from, &to);
         }));
         s.close().unwrap();
         let k = Storage::open(killed.path(), StorageConfig::default()).unwrap();

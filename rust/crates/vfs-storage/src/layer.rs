@@ -1013,7 +1013,7 @@ mod tests {
 
     use super::{folded_path, LPath, LayerProvider};
     #[cfg(not(windows))]
-    use crate::test_util::snapshot;
+    use crate::test_util::snapshot_as_killed;
 
     const BS: u64 = 4096;
 
@@ -1319,7 +1319,7 @@ mod tests {
         name: &str,
     ) -> (Arc<Storage>, Arc<dyn Provider>, tempfile::TempDir) {
         let killed = tempfile::tempdir().unwrap();
-        snapshot(d, killed.path());
+        snapshot_as_killed(d, killed.path());
         let k = Storage::open(killed.path(), cfg()).unwrap();
         let kp = k.layer(name).unwrap();
         (k, kp, killed)
@@ -1490,7 +1490,7 @@ mod tests {
         {
             s.store.flush().unwrap();
             let killed = tempfile::tempdir().unwrap();
-            snapshot(d.path(), killed.path());
+            snapshot_as_killed(d.path(), killed.path());
             let k = Storage::open(killed.path(), cfg()).unwrap();
             let r = k.last_reconcile();
             assert!(
@@ -1624,7 +1624,7 @@ mod tests {
         #[cfg(not(windows))]
         {
             let killed = tempfile::tempdir().unwrap();
-            snapshot(d.path(), killed.path());
+            snapshot_as_killed(d.path(), killed.path());
             let k = Storage::open(killed.path(), cfg()).unwrap();
             let kp = k.layer("saves").unwrap();
             assert_eq!(read_file(&kp, "saves/ONE.ess"), b"saved game");

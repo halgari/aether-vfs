@@ -27,7 +27,7 @@ mod manage;
 mod ram;
 mod reconcile;
 mod storage;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 mod test_util;
 
 pub use cached::{CacheStats, SourceKey};
@@ -35,6 +35,8 @@ pub use config::{Durability, ScratchDir, StorageConfig};
 pub use evict::ClearReport;
 pub use manage::{LayerInfo, SpaceUsage, StorageStats};
 pub use reconcile::ReconcileReport;
+#[cfg(all(feature = "test-hooks", not(windows)))]
+pub use test_util::snapshot_as_killed;
 pub use storage::{CloseOutcome, Storage, StorageError};
 // The block store's compression and accounting types, so a host configures
 // and reads them without depending on `vfs-block-store` itself.
