@@ -1,4 +1,5 @@
 //! Installing the detours: the trampoline slots, the install passes and their errors.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
     CreateProcessInternalWFn, ENGINE, SELF_DLL, close_hook, compress_key_hook, cpiw_hook,
@@ -157,9 +158,11 @@ impl Detour {
     /// Build the detour and store its trampoline. **The store comes before the enable**, so no
     /// call can reach the hook while its trampoline is unset.
     unsafe fn prepare(&self, lib: HMODULE) -> Result<RawDetour, InstallError> {
-        let d = make_detour(lib, self.export, self.hook)?;
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        let d = unsafe { make_detour(lib, self.export, self.hook) }?;
         // SAFETY: `d`'s trampoline calls this export, whose type the table gave the slot.
-        self.tramp.store(Some(d.trampoline() as *const ()));
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        unsafe { self.tramp.store(Some(d.trampoline() as *const ())) };
         Ok(d)
     }
 
@@ -167,12 +170,14 @@ impl Detour {
     /// `RawFallback` row (`regkeys` reads key names through it), else empty.
     unsafe fn reset(&self, lib: HMODULE) {
         let raw = if self.has(Flag::RawFallback) {
-            GetProcAddress(lib, self.export.as_ptr().cast()).map(|p| p as *const ())
+            // SAFETY: FFI call with valid arguments.
+            unsafe { GetProcAddress(lib, self.export.as_ptr().cast()) }.map(|p| p as *const ())
         } else {
             None
         };
         // SAFETY: ntdll's export has the signature the table gave the slot.
-        self.tramp.store(raw);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        unsafe { self.tramp.store(raw) };
     }
 
     /// `prepare` + enable for a row that may be skipped: `true` when it is in. A failure resets
@@ -181,17 +186,21 @@ impl Detour {
     /// [`SKIPPED_DETOURS`].
     unsafe fn install_soft(&self, lib: HMODULE, detours: &mut Vec<RawDetour>) -> bool {
         if self.install == Install::IfPresent
-            && GetProcAddress(lib, self.export.as_ptr().cast()).is_none()
+            // SAFETY: FFI call with valid arguments.
+            && unsafe { GetProcAddress(lib, self.export.as_ptr().cast()) }.is_none()
         {
             return true;
         }
-        if let Ok(d) = self.prepare(lib) {
-            if d.enable().is_ok() {
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        if let Ok(d) = unsafe { self.prepare(lib) } {
+            // SAFETY: FFI call with valid arguments.
+            if unsafe { d.enable() }.is_ok() {
                 detours.push(d);
                 return true;
             }
             if self.install != Install::BestEffort {
-                self.reset(lib);
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { self.reset(lib) };
             }
         }
         if self.install != Install::BestEffort {
@@ -240,8 +249,11 @@ unsafe fn make_detour(
     name: &core::ffi::CStr,
     hookfn: *const (),
 ) -> Result<RawDetour, InstallError> {
-    let proc = GetProcAddress(ntdll, name.as_ptr().cast()).ok_or(InstallError::ProcMissing)?;
-    RawDetour::new(proc as *const (), hookfn).map_err(|_| InstallError::Detour)
+    // SAFETY: FFI call with valid arguments.
+    let proc =
+        unsafe { GetProcAddress(ntdll, name.as_ptr().cast()) }.ok_or(InstallError::ProcMissing)?;
+    // SAFETY: FFI call with valid arguments.
+    unsafe { RawDetour::new(proc as *const (), hookfn) }.map_err(|_| InstallError::Detour)
 }
 
 /// Install all detours backed by `engine` (in-process / no early payload).
@@ -351,7 +363,8 @@ pub unsafe fn install_late(
 ///     enabled**; an `Optional` one is enabled at once (it may turn out absent);
 ///  3. `host_name_convention` is decided, then the `Required` rows from step 2 are enabled.
 unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, InstallError> {
-    let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
+    // SAFETY: FFI call with valid arguments.
+    let ntdll = unsafe { GetModuleHandleA(c"ntdll.dll".as_ptr().cast()) };
     if ntdll.is_null() {
         return Err(InstallError::NtdllMissing);
     }
@@ -365,10 +378,12 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
             .iter()
             .filter(|d| d.group == Group::File && d.has(Flag::Early))
         {
-            early.push(d.prepare(ntdll)?);
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            early.push(unsafe { d.prepare(ntdll) }?);
         }
         for d in &early {
-            d.enable().map_err(|_| InstallError::Detour)?;
+            // SAFETY: FFI call with valid arguments.
+            unsafe { d.enable() }.map_err(|_| InstallError::Detour)?;
         }
         detours.extend(early);
     }
@@ -381,8 +396,10 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
         .filter(|d| d.group == Group::File && !d.has(Flag::Early))
     {
         if d.install == Install::Required {
-            deferred.push(d.prepare(ntdll)?);
-        } else if !d.install_soft(ntdll, &mut detours) && d.has(Flag::NeededByRegistry) {
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            deferred.push(unsafe { d.prepare(ntdll) }?);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        } else if !unsafe { d.install_soft(ntdll, &mut detours) } && d.has(Flag::NeededByRegistry) {
             registry_missing.push(d.label());
         }
     }
@@ -393,7 +410,8 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     let _ = host_name_convention();
 
     for d in &deferred {
-        d.enable().map_err(|_| InstallError::Detour)?;
+        // SAFETY: FFI call with valid arguments.
+        unsafe { d.enable() }.map_err(|_| InstallError::Detour)?;
     }
     // Every enabled detour must be kept alive here: dropping one silently
     // un-patches it, which reads exactly like "the process never calls this".
@@ -406,7 +424,8 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     // touch the registry tables (`regclient::enabled` is false).
     if vfs_env::opt_in(vfs_env::REGISTRY) {
         let before = detours.len();
-        install_registry_detours(ntdll, &rows, &mut detours, registry_missing);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        unsafe { install_registry_detours(ntdll, &rows, &mut detours, registry_missing) };
         REG_DETOURS_INSTALLED.store(detours.len() - before, std::sync::atomic::Ordering::Relaxed);
     } else {
         crate::regclient::overlay_off();
@@ -415,14 +434,17 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     // Best-effort child-process propagation + virtual image path spoof.
     if let Some(dll) = self_dll_path() {
         let _ = SELF_DLL.set(dll);
-        let mut kb = GetModuleHandleA(c"kernelbase.dll".as_ptr().cast());
+        // SAFETY: FFI call with valid arguments.
+        let mut kb = unsafe { GetModuleHandleA(c"kernelbase.dll".as_ptr().cast()) };
         if kb.is_null() {
-            kb = GetModuleHandleA(c"kernel32.dll".as_ptr().cast());
+            // SAFETY: FFI call with valid arguments.
+            kb = unsafe { GetModuleHandleA(c"kernel32.dll".as_ptr().cast()) };
         }
         if !kb.is_null() {
             // `BestEffort`: a failure here costs only child-process propagation, silently.
             for d in rows.iter().filter(|d| d.group == Group::Process) {
-                d.install_soft(kb, &mut detours);
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { d.install_soft(kb, &mut detours) };
             }
         }
     }
@@ -460,11 +482,13 @@ unsafe fn install_registry_detours(
     let registry = || rows.iter().filter(|d| d.group == Group::Registry);
     // `regkeys` reads key names through the `RawFallback` slot even when its detour is not in.
     for d in registry().filter(|d| d.has(Flag::RawFallback)) {
-        d.reset(ntdll);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        unsafe { d.reset(ntdll) };
     }
     // Each trampoline is stored before its detour is enabled.
     for d in registry() {
-        if !d.install_soft(ntdll, detours) {
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        if !unsafe { d.install_soft(ntdll, detours) } {
             missing.push(d.label());
         }
     }
