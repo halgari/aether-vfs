@@ -66,7 +66,7 @@ pub const KEY_CREATE_LINK: u32 = 0x0020;
 pub const KEY_WOW64_64KEY: u32 = 0x0100;
 pub const KEY_WOW64_32KEY: u32 = 0x0200;
 pub const WOW64_MASK: u32 = KEY_WOW64_64KEY | KEY_WOW64_32KEY;
-const DELETE: u32 = 0x0001_0000;
+pub(crate) const DELETE: u32 = 0x0001_0000;
 const READ_CONTROL: u32 = 0x0002_0000;
 const WRITE_DAC: u32 = 0x0004_0000;
 const WRITE_OWNER: u32 = 0x0008_0000;
@@ -600,19 +600,163 @@ pub unsafe fn resolve(real: &Real, h: isize) -> Resolution {
     Resolution::Ours(rec)
 }
 
-/// [`resolve`] for a read: an unresolvable handle reads as not ours (the real call), counted as
-/// a read fallback (spec section 6).
+/// How a caller's key handle is going to be used, which decides what an unresolvable handle
+/// costs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// A read: an unresolvable handle reads as not ours (the real call), counted as a read
+    /// fallback (spec section 6). A pass-through handle merges through itself.
+    Read,
+    /// A write: an unresolvable handle fails closed, counted as a refused write (spec
+    /// section 6). A pass-through handle that was renamed has no real key to read.
+    Write,
+    /// Only whether the overlay serves it: an unresolvable handle is reported, not counted (the
+    /// caller counts the refusal it makes).
+    Probe,
+}
+
+/// A key handle the overlay serves, as one call sees it.
+#[derive(Debug, Clone)]
+pub struct KeyRef {
+    /// The caller's handle.
+    pub handle: isize,
+    /// Canonical path (spec 2.2).
+    pub path: String,
+    /// The access the handle was granted (generic rights mapped; for a handle opened before the
+    /// hooks, what the kernel reports).
+    pub access: u32,
+    /// A handle on the real key, for reading it: a synthetic key's private one, or the caller's
+    /// own pass-through handle. `None` when there is none (created here, or, for a write,
+    /// renamed).
+    pub real: Option<isize>,
+    /// WOW64 flags for the shim's own opens of this key and its subkeys.
+    pub wow64: u32,
+    /// The key was deleted through this handle (or a handle it was duplicated from).
+    pub deleted: bool,
+    /// The handle is a synthetic one.
+    pub synthetic: bool,
+}
+
+/// What [`key_handle`] made of a caller's handle.
+#[derive(Debug)]
+pub enum KeyHandle {
+    /// A key the overlay serves.
+    Key(KeyRef),
+    /// Not a key the overlay serves: the real call.
+    NotOurs,
+    /// A synthetic handle whose record is gone: `STATUS_INVALID_HANDLE`.
+    Invalid,
+    /// The real key's name could not be read ([`Mode::Write`] and [`Mode::Probe`] only): the
+    /// handle may be one the overlay serves, and a call that would change the real key through
+    /// it fails closed with `STATUS_UNSUCCESSFUL` (spec section 6).
+    Unresolvable,
+}
+
+impl KeyRef {
+    /// The record of a synthetic key handle.
+    pub fn synthetic(h: isize) -> Option<KeyRef> {
+        let k = synthetic(h)?;
+        Some(KeyRef {
+            handle: h,
+            path: k.path,
+            access: k.access,
+            real: k.real,
+            wow64: k.requested & WOW64_MASK,
+            deleted: k.deleted,
+            synthetic: true,
+        })
+    }
+
+    /// `STATUS_ACCESS_DENIED` unless the handle was granted every bit of `right`.
+    pub fn check(&self, right: u32) -> Result<(), NTSTATUS> {
+        if self.access & right != right {
+            return Err(STATUS_ACCESS_DENIED);
+        }
+        Ok(())
+    }
+
+    /// Run `f` on the real key behind this handle. A real key that is gone (deleted underneath,
+    /// or never there) is `None`. A handle that lacks a right `f` needs (a pass-through handle
+    /// opened for writing only; a synthetic key's private handle opened with the caller's read
+    /// rights when the key refuses `KEY_READ`) is replaced by a private handle opened for just
+    /// `rights` (plus the key's WOW64 flags), and `f` is run again on that.
+    pub(crate) unsafe fn with_real<T>(
+        &self,
+        real: &Real,
+        rights: u32,
+        mut f: impl FnMut(isize) -> Result<T, NTSTATUS>,
+    ) -> Result<Option<T>, NTSTATUS> {
+        let Some(h) = self.real else {
+            return Ok(None);
+        };
+        match f(h) {
+            Ok(v) => Ok(Some(v)),
+            Err(st) if gone(st) => Ok(None),
+            Err(STATUS_ACCESS_DENIED) => {
+                let p = match open_private(real, &self.path, rights | self.wow64) {
+                    Ok(p) => p,
+                    Err(st) if gone(st) => return Ok(None),
+                    Err(st) => return Err(st),
+                };
+                let r = f(p);
+                close_real(real, p);
+                match r {
+                    Ok(v) => Ok(Some(v)),
+                    Err(st) if gone(st) => Ok(None),
+                    Err(st) => Err(st),
+                }
+            }
+            Err(st) => Err(st),
+        }
+    }
+}
+
+/// A status that says the real key is gone.
+pub(crate) fn gone(st: NTSTATUS) -> bool {
+    st == STATUS_KEY_DELETED
+        || st == STATUS_OBJECT_NAME_NOT_FOUND
+        || st == STATUS_OBJECT_PATH_NOT_FOUND
+}
+
+/// The one place a caller's key handle is resolved for the hooks: a synthetic handle from its
+/// table, anything else through [`resolve`]. What an unresolvable handle costs is decided by
+/// `mode`.
 ///
 /// # Safety
-/// As [`resolve`].
-pub unsafe fn resolve_for_read(real: &Real, h: isize) -> Option<KeyRec> {
+/// `h` is a caller's handle; it is only passed to the real `NtQueryKey` and `NtQueryObject`.
+pub unsafe fn key_handle(real: &Real, h: isize, mode: Mode) -> KeyHandle {
+    if is_synthetic(h) {
+        return match KeyRef::synthetic(h) {
+            Some(k) => KeyHandle::Key(k),
+            None => KeyHandle::Invalid,
+        };
+    }
     match resolve(real, h) {
-        Resolution::Ours(r) => Some(r),
-        Resolution::NotOurs => None,
-        Resolution::Unresolvable => {
-            crate::hookstats::note_reg_read_fallback();
-            None
-        }
+        Resolution::Ours(r) => KeyHandle::Key(KeyRef {
+            handle: h,
+            path: r.path,
+            access: r.access,
+            real: if mode == Mode::Write && r.renamed {
+                None
+            } else {
+                Some(h)
+            },
+            wow64: 0,
+            deleted: r.deleted,
+            synthetic: false,
+        }),
+        Resolution::NotOurs => KeyHandle::NotOurs,
+        Resolution::Unresolvable => match mode {
+            Mode::Read => {
+                crate::hookstats::note_reg_read_fallback();
+                KeyHandle::NotOurs
+            }
+            Mode::Write => {
+                crate::hookstats::note_reg_write_refused();
+                KeyHandle::Unresolvable
+            }
+            Mode::Probe => KeyHandle::Unresolvable,
+        },
     }
 }
 
@@ -1397,12 +1541,12 @@ pub unsafe fn query_security(
     length: u32,
     needed: *mut u32,
 ) -> NTSTATUS {
-    let Some(rec) = synthetic(h) else {
+    let Some(rec) = KeyRef::synthetic(h) else {
         return STATUS_INVALID_HANDLE;
     };
     let need = query_security_rights(info);
-    if rec.access & need != need {
-        return STATUS_ACCESS_DENIED;
+    if let Err(st) = rec.check(need) {
+        return st;
     }
     if rec.deleted {
         return STATUS_KEY_DELETED;
@@ -1418,7 +1562,7 @@ pub unsafe fn query_security(
         if !path::is_virtualised(p) {
             break;
         }
-        match open_real_rights(real, p, need, rec.requested) {
+        match open_real_rights(real, p, need, rec.wow64) {
             Ok(k) => {
                 let st = tramp(k as HANDLE, info, sd, length, needed);
                 close_real(real, k);
@@ -1445,23 +1589,13 @@ pub unsafe fn set_security(
     info: u32,
     sd: *const c_void,
 ) -> Option<NTSTATUS> {
-    let (access, deleted) = if is_synthetic(h) {
-        match synthetic(h) {
-            Some(k) => (k.access, k.deleted),
-            None => return Some(STATUS_INVALID_HANDLE),
-        }
-    } else {
-        match resolve(real, h) {
-            Resolution::Ours(r) => (r.access, r.deleted),
-            Resolution::NotOurs => return None,
-            // It may be a key the overlay serves: refuse rather than change the real key.
-            Resolution::Unresolvable => {
-                crate::hookstats::note_reg_write_refused();
-                return Some(STATUS_UNSUCCESSFUL);
-            }
-        }
-    };
-    Some(check_set_security(access, deleted, info, sd))
+    match key_handle(real, h, Mode::Write) {
+        KeyHandle::Key(k) => Some(check_set_security(k.access, k.deleted, info, sd)),
+        KeyHandle::NotOurs => None,
+        KeyHandle::Invalid => Some(STATUS_INVALID_HANDLE),
+        // It may be a key the overlay serves: refuse rather than change the real key.
+        KeyHandle::Unresolvable => Some(STATUS_UNSUCCESSFUL),
+    }
 }
 
 unsafe fn check_set_security(access: u32, deleted: bool, info: u32, sd: *const c_void) -> NTSTATUS {
@@ -1522,10 +1656,10 @@ pub unsafe fn serves_handle(real: &Real, h: isize) -> Serves {
     if is_synthetic(h) {
         return Serves::Yes;
     }
-    match resolve(real, h) {
-        Resolution::Ours(_) => Serves::Yes,
-        Resolution::NotOurs => Serves::No,
-        Resolution::Unresolvable => Serves::Unresolvable,
+    match key_handle(real, h, Mode::Probe) {
+        KeyHandle::Key(_) => Serves::Yes,
+        KeyHandle::NotOurs | KeyHandle::Invalid => Serves::No,
+        KeyHandle::Unresolvable => Serves::Unresolvable,
     }
 }
 
@@ -1631,7 +1765,7 @@ pub(crate) mod tests {
             );
             assert_eq!(serves_handle(&real, h), Serves::Unresolvable);
             assert!(
-                resolve_for_read(&real, h).is_none(),
+                matches!(key_handle(&real, h, Mode::Read), KeyHandle::NotOurs),
                 "a read passes through"
             );
             assert_eq!(

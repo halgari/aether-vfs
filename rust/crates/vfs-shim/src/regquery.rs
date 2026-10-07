@@ -59,7 +59,12 @@ use crate::ntdef::{
     STATUS_UNSUCCESSFUL, UnicodeString,
 };
 use crate::regclient;
-use crate::regkeys::{self, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, Real, WOW64_MASK};
+use crate::regkeys::{
+    self, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KeyHandle, KeyRef, Mode, Real,
+};
+
+/// The rights a read of a real key needs on the private handle that replaces one lacking them.
+const READS: u32 = KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS;
 
 /// `KeyValueFullInformation`, read from real keys when a merge needs value data.
 const KEY_VALUE_FULL_INFORMATION: u32 = 1;
@@ -71,23 +76,7 @@ enum Target {
     /// The key is gone from the merged view.
     Deleted,
     Fail(NTSTATUS),
-    Merge(Ctx),
-}
-
-/// A query to answer from the merged view.
-struct Ctx {
-    /// The caller's handle, which keys the enumeration state.
-    handle: isize,
-    path: String,
-    /// The access the handle was granted (for a handle opened before the hooks, what the
-    /// kernel reports).
-    access: u32,
-    synthetic: bool,
-    /// The real key to merge (a synthetic key's private handle, or the caller's pass-through
-    /// handle). `None` when the key was created here or has no real counterpart.
-    real: Option<isize>,
-    /// WOW64 flags for the shim's own opens of this key and its subkeys.
-    wow64: u32,
+    Merge(KeyRef),
 }
 
 /// Decide who answers. Runs the cached `REG_LOOKUP` for every key handle the overlay serves.
@@ -96,108 +85,39 @@ struct Ctx {
 /// is the real call on a synthetic key's private handle, which was opened with rights the
 /// caller may not have; a merge checks it itself, after validating the class.
 unsafe fn classify(real: &Real, h: isize, right: u32) -> Target {
-    if regkeys::is_synthetic(h) {
-        let Some(rec) = regkeys::synthetic(h) else {
-            return Target::Fail(STATUS_INVALID_HANDLE);
-        };
-        if rec.deleted {
-            return Target::Deleted;
-        }
-        return match regclient::lookup(&rec.path) {
-            // The real key alone; a key that exists only in the overlay cannot be read.
-            Err(_) if rec.access & right != right => Target::Fail(STATUS_ACCESS_DENIED),
-            Err(_) => rec.real.map_or(Target::Deleted, Target::Real),
-            Ok((Lookup::Tombstoned, _)) => Target::Deleted,
-            Ok((state, _)) => {
-                let created = state == Lookup::Present { created: true };
-                Target::Merge(Ctx {
-                    handle: h,
-                    path: rec.path,
-                    access: rec.access,
-                    synthetic: true,
-                    real: if created { None } else { rec.real },
-                    wow64: rec.requested & WOW64_MASK,
-                })
-            }
-        };
-    }
-    // A handle opened before the hooks is resolved (and recorded) on first sight.
-    let Some(regkeys::KeyRec {
-        path,
-        access,
-        deleted,
-        ..
-    }) = regkeys::resolve_for_read(real, h)
-    else {
-        return Target::Real(h);
+    let k = match regkeys::key_handle(real, h, Mode::Read) {
+        KeyHandle::Key(k) => k,
+        KeyHandle::Invalid => return Target::Fail(STATUS_INVALID_HANDLE),
+        // A handle opened before the hooks that is not on a virtualised path (or cannot be
+        // resolved: counted as a read fallback).
+        KeyHandle::NotOurs | KeyHandle::Unresolvable => return Target::Real(h),
     };
-    if deleted {
+    if k.deleted {
         return Target::Deleted;
     }
-    match regclient::lookup(&path) {
+    if k.synthetic {
+        return match regclient::lookup(&k.path) {
+            // The real key alone; a key that exists only in the overlay cannot be read.
+            Err(_) if k.access & right != right => Target::Fail(STATUS_ACCESS_DENIED),
+            Err(_) => k.real.map_or(Target::Deleted, Target::Real),
+            Ok((Lookup::Tombstoned, _)) => Target::Deleted,
+            Ok((state, _)) => Target::Merge(merged(k, state)),
+        };
+    }
+    match regclient::lookup(&k.path) {
         // Untouched (the fast path), or the director cannot be asked: the real key.
         Err(_) | Ok((Lookup::Absent, false)) => Target::Real(h),
         Ok((Lookup::Tombstoned, _)) => Target::Deleted,
-        Ok((state, _)) => {
-            let created = state == Lookup::Present { created: true };
-            Target::Merge(Ctx {
-                handle: h,
-                path,
-                access,
-                synthetic: false,
-                real: if created { None } else { Some(h) },
-                wow64: 0,
-            })
-        }
+        Ok((state, _)) => Target::Merge(merged(k, state)),
     }
 }
 
-fn check(ctx: &Ctx, right: u32) -> Result<(), NTSTATUS> {
-    if ctx.access & right != right {
-        return Err(STATUS_ACCESS_DENIED);
-    }
-    Ok(())
-}
-
-/// Run a read of the real key on its handle. A real key that is gone (deleted underneath, or
-/// never there) reads as `None`. The handle may lack a right the merge needs that the caller's
-/// own query does not (`NtQueryKey(KeyFullInformation)` lists subkeys and values, and needs
-/// only `KEY_QUERY_VALUE` from the caller): a pass-through handle has the caller's rights, and
-/// a synthetic key's private handle may have been opened with only the caller's read rights
-/// when the key refuses `KEY_READ`. Then the read is made again on a private handle opened for
-/// just `KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS` when `KEY_READ` is refused.
-unsafe fn with_real<T>(
-    real: &Real,
-    ctx: &Ctx,
-    mut f: impl FnMut(isize) -> Result<T, NTSTATUS>,
-) -> Result<Option<T>, NTSTATUS> {
-    let Some(h) = ctx.real else {
-        return Ok(None);
-    };
-    let gone = |st: NTSTATUS| {
-        st == STATUS_KEY_DELETED
-            || st == STATUS_OBJECT_NAME_NOT_FOUND
-            || st == STATUS_OBJECT_PATH_NOT_FOUND
-    };
-    match f(h) {
-        Ok(v) => Ok(Some(v)),
-        Err(st) if gone(st) => Ok(None),
-        Err(STATUS_ACCESS_DENIED) => {
-            let reads = KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | ctx.wow64;
-            let p = match regkeys::open_private(real, &ctx.path, reads) {
-                Ok(p) => p,
-                Err(st) if gone(st) => return Ok(None),
-                Err(st) => return Err(st),
-            };
-            let r = f(p);
-            regkeys::close_real(real, p);
-            match r {
-                Ok(v) => Ok(Some(v)),
-                Err(st) if gone(st) => Ok(None),
-                Err(st) => Err(st),
-            }
-        }
-        Err(st) => Err(st),
+/// The key to merge: one created here has no real counterpart to show through.
+fn merged(k: KeyRef, state: Lookup) -> KeyRef {
+    let created = state == Lookup::Present { created: true };
+    KeyRef {
+        real: if created { None } else { k.real },
+        ..k
     }
 }
 
@@ -520,7 +440,7 @@ pub unsafe fn query_key(
         Target::Merge(c) => c,
     };
     if class != KEY_NAME_INFORMATION {
-        if let Err(st) = check(&ctx, KEY_QUERY_VALUE) {
+        if let Err(st) = ctx.check(KEY_QUERY_VALUE) {
             return st;
         }
     }
@@ -558,13 +478,13 @@ pub unsafe fn query_key(
 
 unsafe fn merged_key_info(
     real: &Real,
-    ctx: &Ctx,
+    ctx: &KeyRef,
     kc: KeyInfoClass,
     info: *mut c_void,
     len: u32,
     ret: *mut u32,
 ) -> NTSTATUS {
-    let read = match with_real(real, ctx, |rh| read_real(real, rh, Need::of(kc))) {
+    let read = match ctx.with_real(real, READS, |rh| read_real(real, rh, Need::of(kc))) {
         Ok(r) => r,
         Err(st) => return st,
     };
@@ -768,7 +688,7 @@ fn take_state<K: Kind>(h: isize, p: &str) -> Option<EnumState<K>> {
 }
 
 /// Put a handle's state back, unless the handle was closed meanwhile.
-fn put_state<K: Kind>(ctx: &Ctx, s: EnumState<K>) {
+fn put_state<K: Kind>(ctx: &KeyRef, s: EnumState<K>) {
     if regkeys::path_of(ctx.handle).as_deref() != Some(&ctx.path) {
         return;
     }
@@ -789,7 +709,7 @@ fn put_state<K: Kind>(ctx: &Ctx, s: EnumState<K>) {
 /// The merged list of kind `K` for the enumeration call at `index`. Index 0 (or no kept state)
 /// reads the real names afresh; a later index reuses the kept list while the registry
 /// generation is unchanged, and merges the kept real names with the current node otherwise.
-unsafe fn view<K: Kind>(real: &Real, ctx: &Ctx, index: u32) -> Result<Arc<Vec<K>>, NTSTATUS> {
+unsafe fn view<K: Kind>(real: &Real, ctx: &KeyRef, index: u32) -> Result<Arc<Vec<K>>, NTSTATUS> {
     let generation = regclient::generation();
     let kept = take_state::<K>(ctx.handle, &ctx.path)
         .filter(|s| index != 0 && s.real.is_some() == ctx.real.is_some());
@@ -800,7 +720,7 @@ unsafe fn view<K: Kind>(real: &Real, ctx: &Ctx, index: u32) -> Result<Arc<Vec<K>
             return Ok(entries);
         }
         Some(s) => s.real,
-        None => with_real(real, ctx, |rh| K::read_names(real, rh))?,
+        None => ctx.with_real(real, READS, |rh| K::read_names(real, rh))?,
     };
     let node = match node_of(&ctx.path) {
         Ok(n) => n,
@@ -851,7 +771,7 @@ pub unsafe fn enumerate_key(
         2 => KeyInfoClass::Full,
         _ => return STATUS_INVALID_PARAMETER,
     };
-    if let Err(st) = check(&ctx, KEY_ENUMERATE_SUB_KEYS) {
+    if let Err(st) = ctx.check(KEY_ENUMERATE_SUB_KEYS) {
         return st;
     }
     let entries = match view::<SubEntry>(real, &ctx, index) {
@@ -933,7 +853,7 @@ pub unsafe fn enumerate_value_key(
     let Some(vc) = value_class(class) else {
         return STATUS_INVALID_PARAMETER;
     };
-    if let Err(st) = check(&ctx, KEY_QUERY_VALUE) {
+    if let Err(st) = ctx.check(KEY_QUERY_VALUE) {
         return st;
     }
     let entries = match view::<ValEntry>(real, &ctx, index) {
@@ -1000,7 +920,7 @@ pub unsafe fn query_value_key(
     let Some(vc) = value_class(class) else {
         return STATUS_INVALID_PARAMETER;
     };
-    if let Err(st) = check(&ctx, KEY_QUERY_VALUE) {
+    if let Err(st) = ctx.check(KEY_QUERY_VALUE) {
         return st;
     }
     let vname = match read_us(name) {
@@ -1078,7 +998,7 @@ pub unsafe fn query_multiple_value_key(
         Target::Fail(st) => return st,
         Target::Merge(c) => c,
     };
-    if let Err(st) = check(&ctx, KEY_QUERY_VALUE) {
+    if let Err(st) = ctx.check(KEY_QUERY_VALUE) {
         return st;
     }
     if buffer_len.is_null() || (entries.is_null() && count != 0) {
@@ -1106,7 +1026,7 @@ pub unsafe fn query_multiple_value_key(
         let v = match found {
             Hit::Overlay(v) => Some(v),
             Hit::Hidden => None,
-            Hit::Real => match with_real(real, &ctx, |rh| real_value(real, rh, name)) {
+            Hit::Real => match ctx.with_real(real, READS, |rh| real_value(real, rh, name)) {
                 Ok(v) => v.flatten(),
                 Err(st) => return st,
             },

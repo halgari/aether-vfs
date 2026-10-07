@@ -191,16 +191,15 @@ fn nt() -> Option<&'static NtApi> {
 /// # Safety
 /// The arguments are the caller's NT arguments.
 pub unsafe fn notify(real: &Real, h: isize, a: &Args) -> Notify {
-    let (path, access, deleted) = if regkeys::is_synthetic(h) {
-        match regkeys::synthetic(h) {
-            Some(k) => (k.path, k.access, k.deleted),
-            None => return Notify::Done(STATUS_INVALID_HANDLE),
-        }
-    } else {
-        match regkeys::resolve_for_read(real, h) {
-            Some(r) => (r.path, r.access, r.deleted),
-            None => return Notify::Pass,
-        }
+    let regkeys::KeyRef {
+        path,
+        access,
+        deleted,
+        ..
+    } = match regkeys::key_handle(real, h, regkeys::Mode::Read) {
+        regkeys::KeyHandle::Key(k) => k,
+        regkeys::KeyHandle::Invalid => return Notify::Done(STATUS_INVALID_HANDLE),
+        regkeys::KeyHandle::NotOurs | regkeys::KeyHandle::Unresolvable => return Notify::Pass,
     };
     if a.count > 0 {
         return Notify::Done(STATUS_NOT_SUPPORTED);

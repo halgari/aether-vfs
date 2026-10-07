@@ -41,16 +41,14 @@ use crate::ntdef::{
     STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_CANNOT_DELETE,
     STATUS_INFO_LENGTH_MISMATCH, STATUS_INSUFFICIENT_RESOURCES, STATUS_INVALID_HANDLE,
     STATUS_INVALID_INFO_CLASS, STATUS_INVALID_PARAMETER, STATUS_KEY_DELETED,
-    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS,
-    STATUS_UNSUCCESSFUL, UnicodeString,
+    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL, UnicodeString,
 };
 use crate::regclient;
 use crate::regkeys::{
-    self, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WRITE, Real, WOW64_MASK,
+    self, DELETE, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WRITE, KeyHandle,
+    KeyRef, Mode, Real, gone,
 };
 
-/// `DELETE`, the right `NtDeleteKey` needs.
-const DELETE: u32 = 0x0001_0000;
 /// `KeyFlagsInformation`: `KeyFlags` (offset 4) has `REG_FLAG_VOLATILE` (bit 0).
 const KEY_FLAGS_INFORMATION: u32 = 5;
 const REG_FLAG_VOLATILE: u32 = 1;
@@ -68,65 +66,22 @@ pub enum Write {
     Done(NTSTATUS),
 }
 
-/// The key handle a write is made through.
-struct Target {
-    handle: isize,
-    path: String,
-    /// The access the handle was granted (generic rights mapped).
-    access: u32,
-    /// A handle on the real key, for reading it: a synthetic key's private one, or the caller's
-    /// own pass-through handle. `None` when there is none (created here, or renamed).
-    real: Option<isize>,
-    /// WOW64 flags for the shim's own opens of the key.
-    wow64: u32,
-    deleted: bool,
-}
-
 /// The handle's record. `Err(Write::Pass)` for a handle the overlay does not serve,
 /// `Err(Write::Done(STATUS_UNSUCCESSFUL))` for one that cannot be resolved.
-unsafe fn target(real: &Real, h: isize) -> Result<Target, Write> {
-    if regkeys::is_synthetic(h) {
-        let Some(k) = regkeys::synthetic(h) else {
-            return Err(Write::Done(STATUS_INVALID_HANDLE));
-        };
-        return Ok(Target {
-            handle: h,
-            path: k.path,
-            access: k.access,
-            real: k.real,
-            wow64: k.requested & WOW64_MASK,
-            deleted: k.deleted,
-        });
-    }
-    match regkeys::resolve(real, h) {
-        regkeys::Resolution::Ours(r) => Ok(Target {
-            handle: h,
-            path: r.path,
-            access: r.access,
-            real: (!r.renamed).then_some(h),
-            wow64: 0,
-            deleted: r.deleted,
-        }),
-        regkeys::Resolution::NotOurs => Err(Write::Pass),
+unsafe fn target(real: &Real, h: isize) -> Result<KeyRef, Write> {
+    match regkeys::key_handle(real, h, Mode::Write) {
+        KeyHandle::Key(k) => Ok(k),
+        KeyHandle::NotOurs => Err(Write::Pass),
+        KeyHandle::Invalid => Err(Write::Done(STATUS_INVALID_HANDLE)),
         // It may be a key the overlay serves: a write through it fails closed (spec section 6).
-        regkeys::Resolution::Unresolvable => {
-            crate::hookstats::note_reg_write_refused();
-            Err(Write::Done(STATUS_UNSUCCESSFUL))
-        }
+        KeyHandle::Unresolvable => Err(Write::Done(STATUS_UNSUCCESSFUL)),
     }
-}
-
-fn check(t: &Target, right: u32) -> Result<(), NTSTATUS> {
-    if t.access & right != right {
-        return Err(STATUS_ACCESS_DENIED);
-    }
-    Ok(())
 }
 
 /// The key's overlay state, for a write through `t`: `STATUS_KEY_DELETED` when it was deleted
 /// (through this handle, or its path or an ancestor is tombstoned), `STATUS_UNSUCCESSFUL` when
 /// the director cannot be asked.
-fn live(t: &Target) -> Result<Lookup, NTSTATUS> {
+fn live(t: &KeyRef) -> Result<Lookup, NTSTATUS> {
     if t.deleted {
         return Err(STATUS_KEY_DELETED);
     }
@@ -163,45 +118,6 @@ unsafe fn units<'a>(us: *const UnicodeString) -> Result<Option<&'a [u16]>, NTSTA
     crate::ntbuf::value_name_units(us)
 }
 
-fn gone(st: NTSTATUS) -> bool {
-    st == STATUS_KEY_DELETED
-        || st == STATUS_OBJECT_NAME_NOT_FOUND
-        || st == STATUS_OBJECT_PATH_NOT_FOUND
-}
-
-/// Run `f` on the real key behind `t`. A handle that lacks a right `f` needs (a pass-through
-/// handle opened for writing only) is replaced by a private handle opened for `rights`. `None`:
-/// there is no real key (or it is gone).
-unsafe fn with_real<T>(
-    real: &Real,
-    t: &Target,
-    rights: u32,
-    mut f: impl FnMut(isize) -> Result<T, NTSTATUS>,
-) -> Result<Option<T>, NTSTATUS> {
-    let Some(h) = t.real else {
-        return Ok(None);
-    };
-    match f(h) {
-        Ok(v) => Ok(Some(v)),
-        Err(st) if gone(st) => Ok(None),
-        Err(STATUS_ACCESS_DENIED) => {
-            let p = match regkeys::open_private(real, &t.path, rights | t.wow64) {
-                Ok(p) => p,
-                Err(st) if gone(st) => return Ok(None),
-                Err(st) => return Err(st),
-            };
-            let r = f(p);
-            regkeys::close_real(real, p);
-            match r {
-                Ok(v) => Ok(Some(v)),
-                Err(st) if gone(st) => Ok(None),
-                Err(st) => Err(st),
-            }
-        }
-        Err(st) => Err(st),
-    }
-}
-
 // ---- NtSetValueKey ----
 
 /// `NtSetValueKey` with the overlay on. The type and data go to the director unchanged (any type
@@ -233,7 +149,7 @@ pub unsafe fn set_value_key(
         if data.is_null() && size != 0 {
             return Err(STATUS_ACCESS_VIOLATION);
         }
-        check(&t, KEY_SET_VALUE)?;
+        t.check(KEY_SET_VALUE)?;
         live(&t)?;
         let bytes: &[u8] = if size == 0 {
             &[]
@@ -270,7 +186,7 @@ fn find_value(n: Option<&Node>, folded: &str) -> Found {
 }
 
 /// Whether the real key has a value of this name.
-unsafe fn real_has_value(real: &Real, t: &Target, name: &[u16]) -> Result<bool, NTSTATUS> {
+unsafe fn real_has_value(real: &Real, t: &KeyRef, name: &[u16]) -> Result<bool, NTSTATUS> {
     let q = real.query_value.ok_or(STATUS_UNSUCCESSFUL)?;
     let mut w = name.to_vec();
     let bytes = (w.len() * 2).min(u16::MAX as usize & !1) as u16;
@@ -279,7 +195,7 @@ unsafe fn real_has_value(real: &Real, t: &Target, name: &[u16]) -> Result<bool, 
         maximum_length: bytes,
         buffer: w.as_mut_ptr(),
     };
-    let found = with_real(real, t, KEY_QUERY_VALUE, |h| {
+    let found = t.with_real(real, KEY_QUERY_VALUE, |h| {
         let mut buf = [0u64; 2];
         let mut need = 0u32;
         match q(
@@ -314,7 +230,7 @@ pub unsafe fn delete_value_key(real: &Real, h: isize, name: *const UnicodeString
         if name.len() > MAX_VALUE_NAME {
             return Err(STATUS_OBJECT_NAME_NOT_FOUND);
         }
-        check(&t, KEY_SET_VALUE)?;
+        t.check(KEY_SET_VALUE)?;
         live(&t)?;
         let name_s = String::from_utf16_lossy(name);
         let f = fold(&name_s);
@@ -341,7 +257,7 @@ fn is_hive_root(p: &str) -> bool {
 }
 
 /// Whether the key has a subkey in the merged view (real minus tombstones, plus the overlay's).
-unsafe fn has_subkeys(real: &Real, t: &Target, state: Lookup) -> Result<bool, NTSTATUS> {
+unsafe fn has_subkeys(real: &Real, t: &KeyRef, state: Lookup) -> Result<bool, NTSTATUS> {
     let node = regclient::key(&t.path).map_err(|_| STATUS_UNSUCCESSFUL)?;
     if let Some(n) = &node {
         if n.children.values().any(|(_, c)| *c == Child::Present) {
@@ -353,10 +269,11 @@ unsafe fn has_subkeys(real: &Real, t: &Target, state: Lookup) -> Result<bool, NT
     if created {
         return Ok(false);
     }
-    let names = with_real(real, t, KEY_ENUMERATE_SUB_KEYS, |h| {
-        crate::regquery::real_subkeys(real, h)
-    })?
-    .unwrap_or_default();
+    let names = t
+        .with_real(real, KEY_ENUMERATE_SUB_KEYS, |h| {
+            crate::regquery::real_subkeys(real, h)
+        })?
+        .unwrap_or_default();
     Ok(names.iter().any(|s| {
         let dead = node
             .as_ref()
@@ -378,7 +295,7 @@ pub unsafe fn delete_key(real: &Real, h: isize) -> Write {
         Err(w) => return w,
     };
     done((|| {
-        check(&t, DELETE)?;
+        t.check(DELETE)?;
         let state = live(&t)?;
         if is_hive_root(&t.path) {
             return Err(STATUS_ACCESS_DENIED);
@@ -424,7 +341,7 @@ pub unsafe fn rename_key(real: &Real, h: isize, new_name: *const UnicodeString) 
         if name.is_empty() {
             return Err(STATUS_INVALID_PARAMETER);
         }
-        check(&t, KEY_WRITE)?;
+        t.check(KEY_WRITE)?;
         let leaf = String::from_utf16_lossy(name);
         if leaf.contains('\\') || utf16_len(&leaf) > MAX_KEY_NAME {
             return Err(STATUS_INVALID_PARAMETER);
@@ -581,7 +498,7 @@ fn collect(root: &str, limits: Limits, read: &mut KeyRead<'_>) -> Result<Vec<Cop
 /// before anything is written. A failure partway through tombstones `dest` again, so nothing
 /// half-copied stays visible; if even that fails, the partial copy stays (writes are not
 /// transactional).
-unsafe fn copy_rename(real: &Real, t: &Target, dest: &str) -> Result<(), NTSTATUS> {
+unsafe fn copy_rename(real: &Real, t: &KeyRef, dest: &str) -> Result<(), NTSTATUS> {
     let mut read = |p: &str, real_may_show: bool| {
         let node = regclient::key(p).map_err(|_| STATUS_UNSUCCESSFUL)?;
         let rk = if real_may_show && !node.as_ref().is_some_and(|n| n.created) {
@@ -654,13 +571,13 @@ pub unsafe fn set_information_key(
         if info.is_null() {
             return Err(STATUS_ACCESS_VIOLATION);
         }
-        check(&t, KEY_SET_VALUE)?;
+        t.check(KEY_SET_VALUE)?;
         not_deleted(&t)
     })())
 }
 
 /// The key is not deleted. Nothing is written, so a director that cannot be asked is no failure.
-fn not_deleted(t: &Target) -> Result<(), NTSTATUS> {
+fn not_deleted(t: &KeyRef) -> Result<(), NTSTATUS> {
     match live(t) {
         Err(STATUS_KEY_DELETED) => Err(STATUS_KEY_DELETED),
         _ => Ok(()),
