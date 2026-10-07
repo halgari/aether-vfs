@@ -58,6 +58,8 @@ pub(super) struct Snapshot {
     pub(super) reg: RegCounters,
     pub(super) hook_panics_total: u64,
     pub(super) hook_panics: HashMap<&'static str, u64>,
+    pub(super) child_inject_refused_total: u64,
+    pub(super) child_inject_refused: HashMap<&'static str, u64>,
     /// `None` when `VFS_SHIM_READ_CACHE` turned the cache off.
     pub(super) read_cache: Option<vfs_ipc::CacheStats>,
     /// The read cache's busiest files (empty when it is off).
@@ -136,6 +138,8 @@ pub(super) fn snapshot() -> Snapshot {
         reg: reg_counters(),
         hook_panics_total: hook_panics_total(),
         hook_panics: HOOK_PANICS.snapshot(),
+        child_inject_refused_total: child_inject_refused_total(),
+        child_inject_refused: CHILD_INJECT_REFUSED.snapshot(),
         read_cache: crate::read_cache::stats(),
         read_cache_files: crate::read_cache::top_files(READ_CACHE_FILES_SHOWN),
     }
@@ -259,9 +263,10 @@ pub(super) fn banner() -> String {
 pub(super) fn render_report() -> String {
     let snap = snapshot();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         banner(),
         render_hook_panics(&snap),
+        render_child_inject_refused(&snap),
         render(&snap),
         render_read_cache(&snap),
         render_async(&snap),

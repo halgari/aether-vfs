@@ -36,9 +36,10 @@ use super::{LaunchOpts, Session, check_image};
 static LAUNCH_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// How long the injector waits for the shim to report ready when neither
-/// [`LaunchOpts::ready_timeout`] nor `VFS_READY_TIMEOUT_SECS` says: the 180 s
-/// `vfs-injector.exe` itself defaults to.
-const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(180);
+/// [`LaunchOpts::ready_timeout`] nor `VFS_READY_TIMEOUT_SECS` says: the default
+/// `vfs-injector.exe` itself uses.
+const DEFAULT_READY_TIMEOUT: Duration =
+    Duration::from_secs(vfs_env::DEFAULT_READY_TIMEOUT_SECS);
 
 impl Session {
     /// The declared roots beyond root 0, as `apply_env_roots` wants them.

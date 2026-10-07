@@ -12,5 +12,6 @@ mod common;
 mod fakedirector;
 
 mod breadcrumb;
+mod child_inject_fails_closed;
 mod exit_stall_repro;
 mod hook_coverage;

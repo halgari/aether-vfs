@@ -18,6 +18,10 @@
 //! `VFS_FIXTURE_SLOW_RELEASE` is looked up once they have all finished, which
 //! is the host's cue to let the slow reads go.
 //!
+//! `VFS_FIXTURE_SPAWN_CHILD` runs a second copy of the fixture after the first
+//! read and exits 1 unless that copy, which the shim injects, also reads the
+//! file.
+//!
 //! `VFS_FIXTURE_NAMES` and its companions run the names phase first: see
 //! `names.rs`. Windows only — it calls Win32 directly.
 //!
@@ -159,6 +163,32 @@ fn concurrent_phase(path: &str, slow_path: &str, expect_len: usize, fill: Option
     );
 }
 
+/// Run a second copy of this fixture and exit 1 unless it exits 0. The copy
+/// repeats the read of `VFS_FIXTURE_PATH` (it inherits the environment, minus
+/// `VFS_FIXTURE_SPAWN_CHILD`, so it does not spawn again), which only succeeds
+/// if the process-creation hook injected it: the file exists only in the
+/// provider. A refused spawn (the hook failing closed) is a failure too.
+fn spawn_copy_of_self() {
+    let me = std::env::current_exe().unwrap_or_else(|e| {
+        eprintln!("FIXTURE FAIL: current_exe: {e}");
+        exit(1);
+    });
+    match std::process::Command::new(me)
+        .env_remove("VFS_FIXTURE_SPAWN_CHILD")
+        .status()
+    {
+        Ok(s) if s.success() => println!("FIXTURE CHILD OK"),
+        Ok(s) => {
+            eprintln!("FIXTURE FAIL: child exited with {s}");
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!("FIXTURE FAIL: could not spawn the child: {e}");
+            exit(1);
+        }
+    }
+}
+
 fn main() {
     #[cfg(windows)]
     names::run();
@@ -182,6 +212,9 @@ fn main() {
         if data.iter().any(|&x| x != b) {
             eprintln!("FIXTURE FAIL: content byte != {b}"); exit(1);
         }
+    }
+    if std::env::var_os("VFS_FIXTURE_SPAWN_CHILD").is_some() {
+        spawn_copy_of_self();
     }
     #[cfg(windows)]
     cache::run();

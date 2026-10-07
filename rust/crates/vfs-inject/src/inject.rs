@@ -601,6 +601,12 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
     std::env::set_var(vfs_env::PAYLOAD_PATH, &payload_path);
     let cfg_file = format!("{}.payload_cfg", cfg.ready_path);
     std::env::set_var(vfs_env::DUAL_LAYER, "1");
+    // The shim waits for each child process it injects as long as this launch
+    // waits for the shim: it reads the value back from the inherited environment.
+    std::env::set_var(
+        vfs_env::READY_TIMEOUT_SECS,
+        cfg.ready_timeout.as_secs().max(1).to_string(),
+    );
     std::env::set_var(vfs_env::PAYLOAD_CFG_FILE, &cfg_file);
     let _ = std::fs::remove_file(&cfg_file);
     // The managed root, so the child's fuse client matches the session root —

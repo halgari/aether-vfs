@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use self::tally::BoundedTally;
 
+mod children;
 mod io;
 mod open;
 mod panics;
@@ -27,6 +28,7 @@ mod tally;
 #[cfg(test)]
 mod tests;
 
+pub use children::*;
 pub use io::delete_on_close_refused_count;
 pub use io::link_refused_count;
 pub(crate) use io::*;

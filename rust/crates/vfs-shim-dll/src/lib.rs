@@ -86,13 +86,22 @@ pub extern "system" fn vfs_shim_sync_bootstrap(payload_cfg: *mut c_void) -> u32 
 /// would tell the stub that hooks are live when nothing is installed.
 pub const SYNC_BOOTSTRAP_PANICKED: u32 = 4;
 
-/// Classic async bootstrap (loader-lock safe: runs off DllMain).
+/// Classic async bootstrap (loader-lock safe: runs off DllMain). A failure also
+/// tells a parent that is waiting on this process (a shim-injected child's
+/// spawner) so it can kill us now instead of waiting out its timeout.
 fn bootstrap() {
+    if !bootstrap_inner() {
+        vfs_shim::signal_bootstrap_failed();
+    }
+}
+
+/// Whether the shim came up.
+fn bootstrap_inner() -> bool {
     let config = match vfs_env::text(vfs_env::SHIM_CONFIG).ok_or(()) {
         Ok(c) => c,
         Err(_) => {
             log_boot("VFS_SHIM_CONFIG unset");
-            return;
+            return false;
         }
     };
     match vfs_shim::bootstrap_from_config_path(&config) {
@@ -101,6 +110,7 @@ fn bootstrap() {
             if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
                 let _ = std::fs::write(&ready, vfs_env::READY_OK);
             }
+            true
         }
         // A director was configured and FUSE failed to attach — same
         // failure-spelling protocol as the dual-layer `sync_bootstrap` path,
@@ -114,6 +124,7 @@ fn bootstrap() {
                     format!("{}{msg}", vfs_env::READY_FUSE_FAILED_PREFIX),
                 );
             }
+            false
         }
         // Any other bootstrap failure (a config from another build, an unreadable
         // config, a hook that would not install): say so in the ready file as well as the
@@ -125,6 +136,7 @@ fn bootstrap() {
             if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
                 let _ = std::fs::write(&ready, vfs_shim::bootstrap_failed_content(&e));
             }
+            false
         }
     }
 }

@@ -45,6 +45,8 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
   # `tests/registry/regnotify.rs`: ntdll calls looked up at run time.
   "Win32_System_LibraryLoader",
+  # `tests/diagnostics/child_inject_fails_closed.rs`: the process list.
+  "Win32_System_Diagnostics_ToolHelp",
 ] }
 # `tests/registry/regclient.rs`: the fake director answers the registry opcodes with the real
 # `dispatch_director` over a real `RegistryHost`.

@@ -31,6 +31,7 @@ mod synth_file;
 mod synth_section;
 mod tramp;
 
+pub use child::signal_bootstrap_failed;
 pub use bootstrap::{
     BootstrapError, bootstrap_failed_content, bootstrap_from_config_path,
     bootstrap_from_config_path_with_payload, load_static_imports_from_config_path,
@@ -62,7 +63,8 @@ pub use hook::{
 /// [`hookstats::outcome_count`]. A class nobody asserts on is a class that can
 /// quietly start (or stop) counting again.
 pub use hookstats::{
-    OpenOutcome, RegNotify, delete_on_close_refused_count, hook_panic_count, hook_panics_total,
+    OpenOutcome, RegNotify, child_inject_refused_count, child_inject_refused_total,
+    delete_on_close_refused_count, hook_panic_count, hook_panics_total,
     link_refused_count, outcome_count, reg_notify_count, reg_overlay_disabled_by,
     reg_read_fallback_count, reg_unresolved_count, reg_write_refused_count,
     unrouted_director_opens,

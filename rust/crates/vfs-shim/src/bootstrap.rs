@@ -171,6 +171,16 @@ pub fn bootstrap_from_config_path_with_payload(
 /// `payload_cfg` must be null or a valid early-payload Config in this process
 /// (caller contract; not checked).
 pub fn sync_bootstrap(payload_cfg: *mut c_void) -> u32 {
+    let r = sync_bootstrap_inner(payload_cfg);
+    if r != 0 {
+        // A parent that force-suspended us is waiting for a signal; tell it
+        // now rather than let it wait out its timeout.
+        crate::child::signal_bootstrap_failed();
+    }
+    r
+}
+
+fn sync_bootstrap_inner(payload_cfg: *mut c_void) -> u32 {
     let Some(config) = vfs_env::text(vfs_env::SHIM_CONFIG) else {
         return 1;
     };

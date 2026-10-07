@@ -26,11 +26,6 @@ use vfs_inject::{
     running_under_wine, start_steam_helper, InjectError, RunConfig, ACTIVE_PROCESS_KEY,
 };
 
-/// The ready wait when `VFS_READY_TIMEOUT_SECS` is unset: what a Windows
-/// `Session::launch` has always defaulted to. A cold first launch in a fresh
-/// Wine prefix can take well over the 20 s this used to be.
-const DEFAULT_READY_TIMEOUT_SECS: u64 = 180;
-
 /// How long the Steam helper may take to publish itself before the target is
 /// started without it. It takes well under a second; the bound is for a
 /// prefix in which it never will.
@@ -54,9 +49,7 @@ fn main() {
         target_args: args,
     } = parsed;
 
-    let ready_timeout = Duration::from_secs(
-        vfs_env::parsed_or(vfs_env::READY_TIMEOUT_SECS, DEFAULT_READY_TIMEOUT_SECS).max(1),
-    );
+    let ready_timeout = Duration::from_secs(vfs_env::ready_timeout_secs());
     let current_dir = vfs_env::text(vfs_env::INJECT_CWD).filter(|d| !d.is_empty());
     let report = format!("{ready}{}", vfs_env::INJECTOR_ERROR_SUFFIX);
     let _ = std::fs::remove_file(&report);

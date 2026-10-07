@@ -15,7 +15,7 @@ use windows_sys::Win32::System::LibraryLoader::{
 use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx};
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateRemoteThread, GetCurrentProcessId, LPTHREAD_START_ROUTINE, ResumeThread,
-    SetEvent, SuspendThread, WaitForSingleObject,
+    SetEvent, SuspendThread, WaitForMultipleObjects, WaitForSingleObject,
 };
 
 use vfs_inject::{PreinitRedirect, arm_preinit_payload_ex};
@@ -33,6 +33,11 @@ pub(crate) fn payload_cfg_path_for_pid(pid: u32) -> PathBuf {
 /// The readiness event name for a given process id.
 fn ready_event_name(pid: u32) -> Vec<u16> {
     wide(&format!(r"Local\vfs_shim_ready_{pid}"))
+}
+
+/// The event a child's shim sets when its bootstrap failed.
+fn failed_event_name(pid: u32) -> Vec<u16> {
+    wide(&format!(r"Local\vfs_shim_failed_{pid}"))
 }
 
 /// Absolute path of `vfs_payload.dll` for dual-layer child inject.
@@ -116,45 +121,108 @@ pub(crate) fn inject_dll(process: HANDLE, dll_path: &str) -> bool {
     }
 }
 
-/// Dual-layer inject into a force-suspended child (same vehicle as the director):
+/// Why injecting into a child failed. Every one of these ends with the child
+/// killed and its `CreateProcess` call failing (see `hook::process`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChildInjectError {
+    /// This shim's own DLL path is unknown, so there is nothing to inject.
+    NoShimDll,
+    /// `vfs_payload.dll` could not be found beside the shim.
+    NoPayload,
+    /// The early payload could not be armed in the child.
+    Arm,
+    /// The per-pid payload-config file could not be written.
+    CfgFile,
+    /// The child's primary thread could not be resumed to run the stub.
+    Resume,
+    /// The early payload never reported installed.
+    SentinelTimeout,
+    /// The child exited before it reported ready.
+    ChildExited,
+    /// The remote `LoadLibrary` of the full shim could not be started.
+    InjectDll,
+    /// The child's shim bootstrap failed and said so.
+    BootstrapFailed,
+    /// The child's shim never reported ready within the ready timeout.
+    ReadyTimeout,
+    /// The spin gate could not be released.
+    Release,
+}
+
+impl ChildInjectError {
+    /// A short stable spelling, the key of the refused-child counter.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::NoShimDll => "no-shim-dll",
+            Self::NoPayload => "no-payload",
+            Self::Arm => "arm-failed",
+            Self::CfgFile => "cfg-file",
+            Self::Resume => "resume-failed",
+            Self::SentinelTimeout => "sentinel-timeout",
+            Self::ChildExited => "child-exited",
+            Self::InjectDll => "inject-dll",
+            Self::BootstrapFailed => "bootstrap-failed",
+            Self::ReadyTimeout => "ready-timeout",
+            Self::Release => "release-failed",
+        }
+    }
+}
+
+/// How long a spawning process waits for a child's shim, per wait (the early
+/// payload's sentinel, then the full shim's ready signal): the same ready
+/// timeout the top-level launch used. `run_target_with_shim` publishes it in
+/// `VFS_READY_TIMEOUT_SECS`, which the child inherits; without it, the shared
+/// default.
+pub(crate) fn child_ready_timeout_ms() -> u32 {
+    u32::try_from(vfs_env::ready_timeout_secs().saturating_mul(1000)).unwrap_or(u32::MAX - 1)
+}
+
+/// Inject into a force-suspended child (same vehicle as the director):
 /// arm early payload with spin gate → resume → wait install sentinel →
 /// LoadLibrary full shim → wait ready → release spin.
 ///
-/// On any failure after the primary may be spinning, attempts to release the
-/// gate. Returns whether dual-layer completed successfully.
-pub(crate) fn inject_child_dual_layer(
+/// **Fails closed.** On any `Err` the child is still parked behind the spin
+/// gate or in an unknown state, and the caller must kill it: there is no
+/// fallback that runs it without the full shim. The per-pid config file is
+/// removed on every path.
+pub(crate) fn inject_child(
+    process: HANDLE,
+    thread: HANDLE,
+    pid: u32,
+    full_shim_dll: Option<&str>,
+    timeout_ms: u32,
+) -> Result<(), ChildInjectError> {
+    let full_shim_dll = full_shim_dll.ok_or(ChildInjectError::NoShimDll)?;
+    let cfg_path = payload_cfg_path_for_pid(pid);
+    let r = inject_child_dual_layer(process, thread, pid, full_shim_dll, timeout_ms, &cfg_path);
+    // The child has read it by now, or never will.
+    let _ = std::fs::remove_file(&cfg_path);
+    r
+}
+
+fn inject_child_dual_layer(
     process: HANDLE,
     thread: HANDLE,
     pid: u32,
     full_shim_dll: &str,
     timeout_ms: u32,
-) -> bool {
-    let payload = match payload_dll_path() {
-        Some(p) => p,
-        None => return false,
-    };
+    cfg_path: &std::path::Path,
+) -> Result<(), ChildInjectError> {
+    let payload = payload_dll_path().ok_or(ChildInjectError::NoPayload)?;
     let redirects = child_preinit_redirects();
     // SAFETY: `process`/`thread` come from our own `CreateProcessInternalW`
     // hook, which forced CREATE_SUSPENDED, so the child is live and suspended
     // and we hold the rights the call needs.
-    let arm = match unsafe { arm_preinit_payload_ex(process, thread, &payload, &redirects, true) } {
-        Ok(a) => a,
-        Err(_) => return false,
-    };
+    let arm = unsafe { arm_preinit_payload_ex(process, thread, &payload, &redirects, true) }
+        .map_err(|_| ChildInjectError::Arm)?;
 
     // Child bootstrap finds cfg via PID file (env may still hold parent's path).
-    let cfg_path = payload_cfg_path_for_pid(pid);
-    if std::fs::write(&cfg_path, format!("{:x}", arm.cfg_remote)).is_err() {
-        release_spin(process, arm.release_flag);
-        return false;
-    }
+    std::fs::write(cfg_path, format!("{:x}", arm.cfg_remote))
+        .map_err(|_| ChildInjectError::CfgFile)?;
 
     // SAFETY: thread from CreateProcess force-suspend; resume to run stub.
-    unsafe {
-        if ResumeThread(thread) == u32::MAX {
-            release_spin(process, arm.release_flag);
-            return false;
-        }
+    if unsafe { ResumeThread(thread) } == u32::MAX {
+        return Err(ChildInjectError::Resume);
     }
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
@@ -163,54 +231,35 @@ pub(crate) fn inject_child_dual_layer(
         if read_u32(process, arm.counters + 0x1C) == Some(0xC0DE) {
             break;
         }
+        if has_exited(process) {
+            return Err(ChildInjectError::ChildExited);
+        }
         if Instant::now() >= deadline {
-            release_spin(process, arm.release_flag);
-            let _ = std::fs::remove_file(&cfg_path);
-            return false;
+            return Err(ChildInjectError::SentinelTimeout);
         }
         std::thread::sleep(Duration::from_millis(1));
     }
 
     if !inject_dll(process, full_shim_dll) {
-        release_spin(process, arm.release_flag);
-        let _ = std::fs::remove_file(&cfg_path);
-        return false;
+        return Err(ChildInjectError::InjectDll);
     }
 
-    if !wait_ready(pid, timeout_ms) {
-        release_spin(process, arm.release_flag);
-        let _ = std::fs::remove_file(&cfg_path);
-        return false;
+    match wait_ready(process, pid, timeout_ms) {
+        ReadyWait::Ready => {}
+        ReadyWait::BootstrapFailed => return Err(ChildInjectError::BootstrapFailed),
+        ReadyWait::Exited => return Err(ChildInjectError::ChildExited),
+        ReadyWait::TimedOut => return Err(ChildInjectError::ReadyTimeout),
     }
 
     if !release_spin(process, arm.release_flag) {
-        let _ = std::fs::remove_file(&cfg_path);
-        return false;
+        return Err(ChildInjectError::Release);
     }
-
-    // Best-effort cleanup of the one-shot cfg file (child already read it).
-    let _ = std::fs::remove_file(&cfg_path);
-    true
+    Ok(())
 }
 
-/// Inject into a suspended child: dual-layer if payload is available, else
-/// classic LoadLibrary-only. Then wait for readiness.
-pub(crate) fn inject_child(
-    process: HANDLE,
-    thread: HANDLE,
-    pid: u32,
-    full_shim_dll: &str,
-    timeout_ms: u32,
-) -> bool {
-    if inject_child_dual_layer(process, thread, pid, full_shim_dll, timeout_ms) {
-        return true;
-    }
-    // Fallback: classic remote LoadLibrary (no static-import pre-init).
-    if inject_dll(process, full_shim_dll) {
-        wait_ready(pid, timeout_ms)
-    } else {
-        false
-    }
+fn has_exited(process: HANDLE) -> bool {
+    // SAFETY: a zero-timeout poll of a process handle we own.
+    unsafe { WaitForSingleObject(process, 0) == 0 }
 }
 
 fn release_spin(process: HANDLE, release_flag: u64) -> bool {
@@ -286,18 +335,55 @@ pub(crate) fn signal_ready() {
     }
 }
 
-/// Wait up to `timeout_ms` for `pid`'s shim to signal readiness.
-pub(crate) fn wait_ready(pid: u32, timeout_ms: u32) -> bool {
-    // SAFETY: named-event create + timed wait; handle closed before return.
+/// Signal that the current process's shim could not bootstrap, so a spawning
+/// parent stops waiting for a ready signal that will not come and kills us.
+/// The counterpart of [`signal_ready`].
+pub fn signal_bootstrap_failed() {
+    // SAFETY: named-event create + set; the leaked handle is process-lifetime.
     unsafe {
-        let name = ready_event_name(pid);
+        let name = failed_event_name(GetCurrentProcessId());
         let ev = CreateEventW(core::ptr::null(), 1, 0, name.as_ptr());
-        if ev.is_null() {
-            return false;
+        if !ev.is_null() {
+            SetEvent(ev);
         }
-        let r = WaitForSingleObject(ev, timeout_ms);
-        CloseHandle(ev);
-        r == 0
+    }
+}
+
+/// How a wait for a child's shim ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadyWait {
+    Ready,
+    BootstrapFailed,
+    Exited,
+    TimedOut,
+}
+
+/// Wait up to `timeout_ms` for `pid`'s shim to signal readiness or failure,
+/// or for the child to exit, whichever comes first.
+pub(crate) fn wait_ready(process: HANDLE, pid: u32, timeout_ms: u32) -> ReadyWait {
+    // SAFETY: named-event create + timed wait; handles closed before return.
+    unsafe {
+        let ready = CreateEventW(core::ptr::null(), 1, 0, ready_event_name(pid).as_ptr());
+        let failed = CreateEventW(core::ptr::null(), 1, 0, failed_event_name(pid).as_ptr());
+        if ready.is_null() || failed.is_null() {
+            for h in [ready, failed] {
+                if !h.is_null() {
+                    CloseHandle(h);
+                }
+            }
+            return ReadyWait::TimedOut;
+        }
+        // Index order is priority order when several are signalled at once.
+        let handles = [ready, failed, process];
+        let r = WaitForMultipleObjects(3, handles.as_ptr(), 0, timeout_ms);
+        CloseHandle(ready);
+        CloseHandle(failed);
+        match r {
+            0 => ReadyWait::Ready,
+            1 => ReadyWait::BootstrapFailed,
+            2 => ReadyWait::Exited,
+            _ => ReadyWait::TimedOut,
+        }
     }
 }
 

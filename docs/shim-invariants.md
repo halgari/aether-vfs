@@ -840,6 +840,64 @@ by [`qif_hook_body`] — so the leak hid there; any caller reaching
 the leak became visible at all.
 
 
+## Child processes fail closed
+
+The invariant is stated over "any process in the session". A process the shim
+cannot virtualise must not run, so `CreateProcessInternalW` (hooked in
+`hook/process.rs`) has no failure mode that resumes a child without the shim.
+
+**The rule.** Every `CreateProcess*` under the shim funnels into the hook, which
+forces `CREATE_SUSPENDED` and injects the child (`child::inject_child`: early
+payload with a spin gate, resume to the sentinel, remote `LoadLibrary` of the
+full shim, wait for ready, release the gate). Any failure of that, whatever the
+step, ends in `refuse_child`:
+
+- the child is terminated (and waited for briefly, so a caller that sees the
+  failure sees no child either) and both handles are closed and cleared;
+- the call returns `FALSE` with `ERROR_PROCESS_ABORTED`;
+- `hookstats::child_inject_refused_count(<reason>)` is bumped, ungated, and
+  the stats report prints a `CHILD PROCESSES REFUSED` section first;
+- the child is never resumed, not even to let it exit.
+
+The failures: no `SELF_DLL` (the shim does not know its own DLL path, so it
+cannot inject), no `vfs_payload.dll` beside the shim, an arm failure, the
+per-pid config file unwritable, `ResumeThread` failing, the install sentinel
+never appearing, the child exiting early, `LoadLibrary` not even starting, the
+child's shim reporting a bootstrap failure, no ready signal in time, and the
+gate release failing. There is **no plain-`LoadLibrary` fallback** any more: a
+child whose dual-layer inject fails is in an unknown state, and the previous
+fallback then resumed it regardless.
+
+**Nothing is skipped on purpose.** The hook does not exempt system processes,
+helpers or anything else; `VFS_INJECT_*` switches (`INJECT_CWD`,
+`INJECT_STEAM_HELPER`) belong to the top-level injector, which starts the Steam
+helper itself, outside the shim. The only knob is `VFS_CHILD_CWD_ROOT`, which
+changes the child's working directory, not whether it is injected. A child that
+cannot be injected (for instance a 32-bit image, which the 64-bit payload
+cannot arm) therefore fails to start; if a case like that needs to run, it needs
+an explicit, named exemption, not a silent resume.
+
+**How the child tells the parent it failed.** The child's shim sets
+`Local\vfs_shim_ready_<pid>` once its hooks are live. When its bootstrap fails
+it sets `Local\vfs_shim_failed_<pid>` instead (`signal_bootstrap_failed`), and
+the parent waits on both events and on the child's process handle, so a failed
+or crashed child is refused at once rather than after the timeout. A child that
+simply never answers is refused at the timeout.
+
+**The timeout.** The parent waits as long as the top-level launch did, for each
+of its two waits (sentinel, ready). `run_target_with_shim` writes
+`RunConfig::ready_timeout` into `VFS_READY_TIMEOUT_SECS` in the target's
+environment; the shim reads it back with `vfs_env::ready_timeout_secs()`
+(default `DEFAULT_READY_TIMEOUT_SECS`, 180). Haskill's 300 s therefore applies
+to SkyrimSE.exe launched by `skse64_loader.exe`, which was previously given 5 s
+and then run un-virtualised on a cold prefix. A launcher that creates a child
+with an explicit environment block lacking the variable gets the default (the
+same launcher would also lose `VFS_SHIM_CONFIG`).
+
+**Tests.** `vfs-shim/tests/diagnostics/child_inject_fails_closed.rs` (the spawn
+fails, no child remains, the child never ran) and, for the success half,
+`vfs-embed`'s `proton_launch` `a_child_the_fixture_spawns_is_virtualised_too_under_proton`.
+
 ## Lock semantics
 
 `NtLockFile` on a synthetic handle is granted without being held. This is a known gap, accepted

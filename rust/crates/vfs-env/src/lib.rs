@@ -120,8 +120,27 @@ pub const DISCOVERY_PATH: &str = "VFS_DISCOVERY_PATH";
 /// the directory beside the running executable. An explicit
 /// `LaunchOpts::shim_dll` still wins. The Proton tests read it too.
 pub const WINDOWS_ARTIFACTS: &str = "VFS_WINDOWS_ARTIFACTS";
-/// Seconds to wait for the child's hooks to report ready before giving up.
+/// Seconds to wait for the shim's hooks to report ready before giving up.
+///
+/// One value bounds both waits: the launcher's wait for the top-level target
+/// (`vfs-injector` reads it; `run_target_with_shim` also *sets* it in the
+/// target's environment from `RunConfig::ready_timeout`), and the shim's wait
+/// for each child process it injects (`CreateProcessInternalW`), which reads it
+/// back from that inherited environment. A child that is a slow but healthy
+/// cold start therefore gets the same allowance the launch did. Unset or
+/// unparsable: [`DEFAULT_READY_TIMEOUT_SECS`].
 pub const READY_TIMEOUT_SECS: &str = "VFS_READY_TIMEOUT_SECS";
+/// The ready wait when [`READY_TIMEOUT_SECS`] is unset: what a Windows
+/// `Session::launch` has always defaulted to. A cold first launch in a fresh
+/// Wine prefix can take well over the 20 s this used to be. The one place the
+/// number is written; the injector, `vfs-embed` and the shim all use it.
+pub const DEFAULT_READY_TIMEOUT_SECS: u64 = 180;
+
+/// The ready wait in seconds, as the environment says it: [`READY_TIMEOUT_SECS`]
+/// if set and numeric, else [`DEFAULT_READY_TIMEOUT_SECS`]; never below 1.
+pub fn ready_timeout_secs() -> u64 {
+    parsed_or(READY_TIMEOUT_SECS, DEFAULT_READY_TIMEOUT_SECS).max(1)
+}
 /// Working directory `vfs-injector` starts its target in, as the target sees
 /// it (`C:\…`). Set by the Proton launch; unset, the target inherits the
 /// injector's own directory.
@@ -344,6 +363,9 @@ pub const FIXTURE_CACHE_RW_DATA: &str = "VFS_FIXTURE_CACHE_RW_DATA";
 /// `vfs-fixture-read`: milliseconds to stay alive after the read-cache phase,
 /// so a `SHIM_STATS_LOG` report covers it.
 pub const FIXTURE_LINGER_MS: &str = "VFS_FIXTURE_LINGER_MS";
+/// `vfs-fixture-read`: after the first read, run a second copy of the fixture
+/// and fail unless it succeeds (it can only if the shim injected it).
+pub const FIXTURE_SPAWN_CHILD: &str = "VFS_FIXTURE_SPAWN_CHILD";
 /// `vfs-fixture-read`: a file read on slow threads while others read
 /// `FIXTURE_PATH` (the concurrent-read e2e).
 pub const FIXTURE_SLOW_PATH: &str = "VFS_FIXTURE_SLOW_PATH";
@@ -486,7 +508,7 @@ pub const ALL: &[Var] = &[
     Var { name: LAUNCH_IMAGE, kind: Kind::Handshake, default: "none; staging derives it" },
     Var { name: DISCOVERY_PATH, kind: Kind::Handshake, default: "platform default" },
     Var { name: WINDOWS_ARTIFACTS, kind: Kind::Behaviour, default: "beside the running executable" },
-    Var { name: READY_TIMEOUT_SECS, kind: Kind::Behaviour, default: "180" },
+    Var { name: READY_TIMEOUT_SECS, kind: Kind::Behaviour, default: "180 (DEFAULT_READY_TIMEOUT_SECS)" },
     Var { name: INJECT_CWD, kind: Kind::Handshake, default: "the injector's own directory" },
     Var { name: INJECT_STEAM_HELPER, kind: Kind::Handshake, default: "no Steam helper" },
     Var { name: SHIM_CONFIG, kind: Kind::Handshake, default: "required by the shim" },
@@ -534,6 +556,7 @@ pub const ALL: &[Var] = &[
     Var { name: FIXTURE_CACHE_RW_PATH, kind: Kind::Fixture, default: "unset: no rewrite" },
     Var { name: FIXTURE_CACHE_RW_DATA, kind: Kind::Fixture, default: "fresh" },
     Var { name: FIXTURE_LINGER_MS, kind: Kind::Fixture, default: "0" },
+    Var { name: FIXTURE_SPAWN_CHILD, kind: Kind::Fixture, default: "unset: no child" },
     Var { name: FIXTURE_SLOW_PATH, kind: Kind::Fixture, default: "unset: no slow reads" },
     Var { name: FIXTURE_SLOW_THREADS, kind: Kind::Fixture, default: "1" },
     Var { name: FIXTURE_SLOW_STARTED, kind: Kind::Fixture, default: "unset: no wait" },

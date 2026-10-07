@@ -307,6 +307,8 @@ fn empty_snapshot() -> Snapshot {
         outcome_paths: std::array::from_fn(|_| HashMap::new()),
         hook_panics_total: 0,
         hook_panics: HashMap::new(),
+        child_inject_refused_total: 0,
+        child_inject_refused: HashMap::new(),
         read_cache: None,
         read_cache_files: Vec::new(),
     }
@@ -400,4 +402,22 @@ fn refused_deletes_on_close_render_with_their_paths_and_none_render_nothing() {
     let s = render_delete_on_close_refused(&snap);
     assert!(s.contains("refused") && s.contains(": 2"), "{s}");
     assert!(s.contains(r"2x  \??\C:\root\a.esp (status -1)"), "{s}");
+}
+
+#[test]
+fn a_refused_child_is_counted_and_reported_by_reason() {
+    let reason = "test-reason-unique";
+    assert_eq!(child_inject_refused_count(reason), 0);
+    note_child_inject_refused(reason);
+    note_child_inject_refused(reason);
+    assert_eq!(child_inject_refused_count(reason), 2);
+    assert!(child_inject_refused_total() >= 2);
+
+    assert_eq!(render_child_inject_refused(&empty_snapshot()), "");
+    let mut snap = empty_snapshot();
+    snap.child_inject_refused_total = 3;
+    snap.child_inject_refused.insert("ready-timeout", 3);
+    let s = render_child_inject_refused(&snap);
+    assert!(s.contains("CHILD PROCESSES REFUSED: 3"), "{s}");
+    assert!(s.contains("ready-timeout"), "{s}");
 }

@@ -99,8 +99,42 @@ fn tmp(name: &str) -> PathBuf {
             (vfs-injector.exe, vfs_shim_dll.dll, vfs_payload.dll, vfs-fixture-read.exe) for \
             this profile — see bin/build-windows"]
 fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider() {
+    launch_fixture(
+        "proton_launch::session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider",
+        BTreeMap::new(),
+    );
+}
+
+/// **A child of the launched process is virtualised too.** The same launch, with
+/// the fixture asked (`VFS_FIXTURE_SPAWN_CHILD`) to run a second copy of itself
+/// after its own read. That copy is created through the shim's
+/// `CreateProcessInternalW` hook, so it is injected like the launch was; it
+/// reads the same provider-only file and exits non-zero if it cannot. The
+/// fixture exits non-zero if the child does, so a child that ran without the
+/// shim (or a spawn that the hook refused) fails the launch.
+///
+/// This is the success half of the shim's fail-closed child rule: the failure
+/// half (a child that cannot be injected is killed and its `CreateProcess`
+/// fails) is `vfs-shim`'s `child_inject_fails_closed`.
+#[test]
+#[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts \
+            (vfs-injector.exe, vfs_shim_dll.dll, vfs_payload.dll, vfs-fixture-read.exe) for \
+            this profile — see bin/build-windows"]
+fn a_child_the_fixture_spawns_is_virtualised_too_under_proton() {
+    let mut env = BTreeMap::new();
+    env.insert("VFS_FIXTURE_SPAWN_CHILD".to_string(), "1".to_string());
+    launch_fixture(
+        "proton_launch::a_child_the_fixture_spawns_is_virtualised_too_under_proton",
+        env,
+    );
+}
+
+/// The body of both launches above: serve [`VPATH`] from a provider, launch the
+/// fixture with `extra_env` on top of the read it always does, and check it
+/// exited 0 having read every byte through the ring.
+fn launch_fixture(test_name: &str, extra_env: BTreeMap<String, String>) {
     let _one = ONE_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(rig) = support::rig("proton_launch::session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider", "launch", &[vfs_proton::artifacts::FIXTURE_READ])
+    let Some(rig) = support::rig(test_name, "launch", &[vfs_proton::artifacts::FIXTURE_READ])
     else {
         return;
     };
@@ -162,7 +196,7 @@ fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider(
          would make the child's read prove nothing"
     );
 
-    let mut env = BTreeMap::new();
+    let mut env = extra_env;
     env.insert("VFS_FIXTURE_PATH".to_string(), CHILD_PATH.to_string());
     env.insert("VFS_FIXTURE_EXPECT".to_string(), LEN.to_string());
     env.insert("VFS_FIXTURE_FILL".to_string(), FILL.to_string());

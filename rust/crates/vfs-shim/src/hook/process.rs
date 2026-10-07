@@ -2,12 +2,13 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{TRAMP_CPIW, child_cwd_root};
-use crate::child::{inject_child, re_suspend};
+use crate::child::{ChildInjectError, child_ready_timeout_ms, inject_child, re_suspend};
 use core::ffi::c_void;
 use std::sync::OnceLock;
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PROCESS_ABORTED, HANDLE, SetLastError};
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW,
+    CREATE_SUSPENDED, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW, TerminateProcess,
+    WaitForSingleObject,
 };
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
@@ -31,14 +32,19 @@ pub(super) type CreateProcessInternalWFn = unsafe extern "system" fn(
 /// process-creation hook can inject the same DLL into children.
 pub(super) static SELF_DLL: OnceLock<String> = OnceLock::new();
 
-/// How long a spawning process waits for a child's shim to install its hooks
-/// before resuming the child anyway (unvirtualized rather than hung).
-const CHILD_READY_TIMEOUT_MS: u32 = 5_000;
-
 /// `CreateProcessInternalW` hook: force the child to start suspended, dual-layer
 /// inject (early payload + full shim), wait for hooks, then resume (unless the
-/// caller asked for a suspended child). Best-effort — a failed inject or timeout
-/// still resumes the child (unvirtualized rather than hung).
+/// caller asked for a suspended child).
+///
+/// **Fails closed.** Every child this hook creates is injected, and if that
+/// fails for any reason (no shim DLL path, no payload, an arm or LoadLibrary
+/// failure, the child's shim reporting failure, the child dying, or no ready
+/// signal within the launch's ready timeout) the child is killed, its handles
+/// are closed, and this call returns `FALSE` with `ERROR_PROCESS_ABORTED`. The
+/// child is never resumed un-virtualised. There is no list of children the
+/// shim deliberately leaves alone: a `CreateProcess` under the shim is either a
+/// virtualised child or an error. See docs/shim-invariants.md, "Child
+/// processes fail closed".
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn cpiw_hook_body(
     token: HANDLE,
@@ -101,19 +107,61 @@ pub(super) unsafe fn cpiw_hook_body(
         let hprocess = unsafe { (*pi).hProcess };
         // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
         let hthread = unsafe { (*pi).hThread };
-        if let Some(dll) = SELF_DLL.get() {
-            let _ = inject_child(hprocess, hthread, pid, dll, CHILD_READY_TIMEOUT_MS);
-            if caller_suspended {
-                re_suspend(hthread);
+        match inject_child(
+            hprocess,
+            hthread,
+            pid,
+            SELF_DLL.get().map(String::as_str),
+            child_ready_timeout_ms(),
+        ) {
+            Ok(()) => {
+                if caller_suspended {
+                    re_suspend(hthread);
+                } else {
+                    // SAFETY: FFI call with valid arguments.
+                    unsafe { ResumeThread(hthread) };
+                }
             }
-            if !caller_suspended {
-                // SAFETY: FFI call with valid arguments.
-                unsafe { ResumeThread(hthread) };
+            Err(why) => {
+                // SAFETY: `pi` and `ptok` are the caller's out-parameters from
+                // the call that just succeeded.
+                unsafe { refuse_child(pi, ptok, why) };
+                return 0;
             }
-        } else if !caller_suspended {
-            // SAFETY: FFI call with valid arguments.
-            unsafe { ResumeThread(hthread) };
         }
     }
     r
+}
+
+/// Kill a child that could not be injected and make the `CreateProcess` call
+/// that made it fail.
+///
+/// The process is terminated and given a moment to go away (termination is
+/// asynchronous, and a caller that sees `FALSE` expects no child to be left),
+/// both handles are closed and cleared so a careless caller cannot use them,
+/// a token handed back through `ptok` is closed, and the failure is counted by
+/// reason in the hook stats (ungated).
+///
+/// # Safety
+/// `pi` must point to the `PROCESS_INFORMATION` the successful call filled,
+/// with handles not yet closed; `ptok` is null or the call's token out-pointer.
+unsafe fn refuse_child(pi: *mut PROCESS_INFORMATION, ptok: *mut HANDLE, why: ChildInjectError) {
+    // SAFETY: per the contract above.
+    unsafe {
+        let p = &mut *pi;
+        TerminateProcess(p.hProcess, 1);
+        WaitForSingleObject(p.hProcess, 5_000);
+        CloseHandle(p.hThread);
+        CloseHandle(p.hProcess);
+        p.hThread = core::ptr::null_mut();
+        p.hProcess = core::ptr::null_mut();
+        p.dwProcessId = 0;
+        p.dwThreadId = 0;
+        if !ptok.is_null() && !(*ptok).is_null() {
+            CloseHandle(*ptok);
+            *ptok = core::ptr::null_mut();
+        }
+        SetLastError(ERROR_PROCESS_ABORTED);
+    }
+    crate::hookstats::note_child_inject_refused(why.label());
 }

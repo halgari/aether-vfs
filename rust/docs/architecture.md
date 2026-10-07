@@ -468,10 +468,15 @@ walk cannot discover it. For an SKSE launch the staged set is six files.
 **Follow the shim across `CreateProcess`.** The shim detours
 `kernelbase!CreateProcessInternalW` — the single funnel beneath every
 `CreateProcess*` variant — forces the child to start suspended, dual-layer
-injects it, waits for its hooks to report ready, then resumes. A failed inject or
-a timeout still resumes the child, so the failure mode is an unvirtualised game
-rather than a hung one. The child's image identity is scoped so the parent's does
-not leak into it.
+injects it, waits for its hooks to report ready, then resumes. **It fails
+closed**: a child whose injection fails, whose shim reports a bootstrap failure,
+that dies early, or that is not ready within the launch's ready timeout is
+terminated and its `CreateProcess` call returns `FALSE` (`ERROR_PROCESS_ABORTED`).
+A child is never resumed without the shim, so the failure mode is a launch that
+errors, not an unvirtualised game that writes to the real disk. The wait is the
+launch's own (`LaunchOpts::ready_timeout`, else 180 s), which the injector passes
+down in `VFS_READY_TIMEOUT_SECS`; every child is injected, none is skipped. The
+child's image identity is scoped so the parent's does not leak into it.
 
 Verified 2026-08-13: launched via SKSE, the hook-stats file is written by the
 *child* pid, `getskseversion` reports `2.2.6` in-game, and `coc riverwood` loads
