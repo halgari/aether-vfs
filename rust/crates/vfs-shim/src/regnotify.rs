@@ -369,7 +369,7 @@ unsafe fn wait_sync(real: &Real, h: isize, path: String, a: &Args, since: Option
     regkeys::close_real(real, event);
     let st = slot.status.load(Ordering::Acquire);
     // The caller is blocked in this call, so its status block is live.
-    write_iosb(a.iosb as usize, st);
+    crate::ntbuf::iosb_set(a.iosb, st, 0);
     st
 }
 
@@ -549,7 +549,7 @@ unsafe fn complete(real: &Real, done: Done, status: NTSTATUS) {
             iosb,
             thread,
         } => {
-            write_iosb(iosb, status);
+            crate::ntbuf::iosb_set(iosb as *mut c_void, status, 0);
             if event != 0 {
                 (api.set_event)(event as HANDLE, core::ptr::null_mut());
             }
@@ -574,13 +574,4 @@ unsafe fn release(real: &Real, done: Done) {
             }
         }
     }
-}
-
-/// `IO_STATUS_BLOCK { Status, Information = 0 }` at `iosb` (0: none).
-unsafe fn write_iosb(iosb: usize, status: NTSTATUS) {
-    if iosb == 0 {
-        return;
-    }
-    core::ptr::write_volatile(iosb as *mut i32, status);
-    core::ptr::write_volatile((iosb + core::mem::size_of::<usize>()) as *mut usize, 0);
 }

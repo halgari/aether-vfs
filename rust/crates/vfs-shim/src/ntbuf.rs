@@ -94,7 +94,8 @@ impl OwnedOa {
         case_insensitive: bool,
     ) -> Box<OwnedOa> {
         let mut buf: Vec<u16> = nt.encode_utf16().collect();
-        let max_bytes = (u16::MAX & !1) as usize;
+        // The longest even length a `UNICODE_STRING` can hold.
+        let max_bytes = 0xFFFE_usize;
         buf.truncate(max_bytes / 2);
         let bytes = (buf.len() * 2) as u16;
         buf.push(0);

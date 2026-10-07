@@ -3375,16 +3375,12 @@ unsafe fn try_fuse_create(
             if !file_handle.is_null() {
                 *file_handle = h as HANDLE;
             }
-            if !iosb.is_null() {
-                let p = iosb as *mut u8;
-                core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-                let info = if write {
-                    disposition_information(disposition, existed_before)
-                } else {
-                    crate::ntdef::FILE_OPENED
-                };
-                core::ptr::write_unaligned(p.add(8) as *mut usize, info);
-            }
+            let info = if write {
+                disposition_information(disposition, existed_before)
+            } else {
+                crate::ntdef::FILE_OPENED
+            };
+            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, info);
             // Direct PATH_TABLE insert with absolute path (path_of may be relative OA).
             if let Ok(mut t) = PATH_TABLE.lock() {
                 t.insert(h, path.clone());
@@ -3655,11 +3651,7 @@ unsafe fn try_fuse_mkdir(
             if !file_handle.is_null() {
                 *file_handle = h as HANDLE;
             }
-            if !iosb.is_null() {
-                let p = iosb as *mut u8;
-                core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-                core::ptr::write_unaligned(p.add(8) as *mut usize, FILE_CREATED);
-            }
+            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, FILE_CREATED);
             record_path(file_handle, Some(path), STATUS_SUCCESS);
             tag_under_root(file_handle, Some(path), STATUS_SUCCESS);
             Some(STATUS_SUCCESS)
@@ -3682,14 +3674,7 @@ unsafe fn try_fuse_mkdir(
                     if !file_handle.is_null() {
                         *file_handle = h as HANDLE;
                     }
-                    if !iosb.is_null() {
-                        let p = iosb as *mut u8;
-                        core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-                        core::ptr::write_unaligned(
-                            p.add(8) as *mut usize,
-                            crate::ntdef::FILE_OPENED,
-                        );
-                    }
+                    crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, crate::ntdef::FILE_OPENED);
                     record_path(file_handle, Some(path), STATUS_SUCCESS);
                     tag_under_root(file_handle, Some(path), STATUS_SUCCESS);
                     Some(STATUS_SUCCESS)
@@ -3933,7 +3918,7 @@ unsafe fn tramp_create_abs(
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
     let new_oa = OwnedOa::absolute(Some(&*oa), &nt, false);
-    let status = tramp(
+    tramp(
         file_handle,
         access,
         new_oa.as_ptr(),
@@ -3945,8 +3930,7 @@ unsafe fn tramp_create_abs(
         opts,
         ea,
         ealen,
-    );
-    status
+    )
 }
 
 /// Arity mirrors `NtOpenFile` exactly; it is not ours to reduce.
@@ -3963,8 +3947,7 @@ unsafe fn tramp_open_abs(
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
     let new_oa = OwnedOa::absolute(Some(&*oa), &nt, false);
-    let status = tramp(file_handle, access, new_oa.as_ptr(), iosb, share, opts);
-    status
+    tramp(file_handle, access, new_oa.as_ptr(), iosb, share, opts)
 }
 
 /// `NtOpenFile` hook. Mirrors `create_hook` (redirect / deny / pass-through +
@@ -4194,11 +4177,7 @@ unsafe fn qibn_hook_body(
                             }
                         }
                         crate::hookstats::note_stat(&path, &format!("byname{class_raw}-ok"));
-                        if !iosb.is_null() {
-                            let q = iosb as *mut u8;
-                            core::ptr::write_unaligned(q as *mut u32, STATUS_SUCCESS as u32);
-                            core::ptr::write_unaligned(q.add(8) as *mut usize, n);
-                        }
+                        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, n);
                         return STATUS_SUCCESS;
                     }
                     crate::hookstats::note_stat(&path, &format!("byname{class_raw}-UNSUP"));
@@ -4223,11 +4202,7 @@ unsafe fn qibn_hook_body(
             match engine.overlay_state(&path) {
                 Some(OverlayState::Present { is_dir, size, .. }) => {
                     if let Some(n) = fill_by_name(class_raw, info, length, is_dir, size) {
-                        if !iosb.is_null() {
-                            let q = iosb as *mut u8;
-                            core::ptr::write_unaligned(q as *mut u32, STATUS_SUCCESS as u32);
-                            core::ptr::write_unaligned(q.add(8) as *mut usize, n);
-                        }
+                        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, n);
                         return STATUS_SUCCESS;
                     }
                 }
@@ -4634,8 +4609,7 @@ unsafe fn tramp_delete_abs(
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
     let new_oa = OwnedOa::absolute(Some(&*oa), &nt, false);
-    let status = tramp(new_oa.as_ptr());
-    status
+    tramp(new_oa.as_ptr())
 }
 
 /// True when this `NtSetInformationFile` call requests a delete (either
@@ -4703,16 +4677,6 @@ unsafe fn setinfo_source_path(handle: HANDLE) -> Option<(String, bool)> {
         return Some((p, false));
     }
     vfs_win::final_path_for_handle(handle).map(|p| (p, true))
-}
-
-/// Write a successful (Information = 0) IoStatusBlock for a set-info we handled
-/// and suppressed from the real filesystem.
-unsafe fn setinfo_ok_iosb(iosb: *mut c_void) {
-    if !iosb.is_null() {
-        let p = iosb as *mut u8;
-        core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-        core::ptr::write_unaligned(p.add(8) as *mut usize, 0);
-    }
 }
 
 /// `FileCompletionInformation` — binds a handle to an I/O completion port.
@@ -4784,7 +4748,7 @@ unsafe fn setinfo_hook_body(
             ) {
                 if eof >= 0 && c.truncate(fh, eof as u64).is_ok() {
                     crate::fuse_synth::set_size(handle as isize, eof as u64);
-                    setinfo_ok_iosb(iosb);
+                    crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
                     return STATUS_SUCCESS;
                 }
             }
@@ -4859,7 +4823,7 @@ unsafe fn setinfo_hook_body(
                         }
                     };
                     if ok {
-                        setinfo_ok_iosb(iosb);
+                        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
                         return STATUS_SUCCESS;
                     }
                     return STATUS_UNSUCCESSFUL;
@@ -4919,7 +4883,7 @@ unsafe fn setinfo_hook_body(
             };
             if handled {
                 // Suppress the real delete/rename; report success to the caller.
-                setinfo_ok_iosb(iosb);
+                crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
                 return STATUS_SUCCESS;
             }
             // **The source is under a managed root and nothing above absorbed
@@ -4992,15 +4956,6 @@ unsafe fn setinfo_hook_body(
         }
     }
     tramp(handle, iosb, info, length, class)
-}
-
-/// Fill IoStatusBlock for a successful synth query of `bytes` information.
-unsafe fn synth_iosb_ok(iosb: *mut c_void, bytes: usize) {
-    if !iosb.is_null() {
-        let p = iosb as *mut u8;
-        core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-        core::ptr::write_unaligned(p.add(8) as *mut usize, bytes);
-    }
 }
 
 /// The final DOS path (`C:\dir\file`, stored spelling) of a synthetic handle:
@@ -5147,7 +5102,11 @@ unsafe fn fuse_query_information(
                 FILE_ATTRIBUTE_NORMAL
             };
             (*bi)._reserved = 0;
-            synth_iosb_ok(iosb, core::mem::size_of::<FileBasicInformation>());
+            crate::ntbuf::iosb_set(
+                iosb,
+                STATUS_SUCCESS,
+                core::mem::size_of::<FileBasicInformation>(),
+            );
             STATUS_SUCCESS
         }
         FILE_STANDARD_INFORMATION => {
@@ -5161,7 +5120,11 @@ unsafe fn fuse_query_information(
             (*si).delete_pending = 0;
             (*si).directory = if is_dir { 1 } else { 0 };
             (*si)._pad = 0;
-            synth_iosb_ok(iosb, core::mem::size_of::<FileStandardInformation>());
+            crate::ntbuf::iosb_set(
+                iosb,
+                STATUS_SUCCESS,
+                core::mem::size_of::<FileStandardInformation>(),
+            );
             STATUS_SUCCESS
         }
         FILE_INTERNAL_INFORMATION => {
@@ -5169,7 +5132,11 @@ unsafe fn fuse_query_information(
                 return STATUS_BUFFER_OVERFLOW;
             }
             (*(info as *mut FileInternalInformation)).index_number = synth_file_id(handle);
-            synth_iosb_ok(iosb, core::mem::size_of::<FileInternalInformation>());
+            crate::ntbuf::iosb_set(
+                iosb,
+                STATUS_SUCCESS,
+                core::mem::size_of::<FileInternalInformation>(),
+            );
             STATUS_SUCCESS
         }
         FILE_POSITION_INFORMATION => {
@@ -5177,7 +5144,11 @@ unsafe fn fuse_query_information(
                 return STATUS_BUFFER_OVERFLOW;
             }
             (*(info as *mut FilePositionInformation)).current_byte_offset = pos as i64;
-            synth_iosb_ok(iosb, core::mem::size_of::<FilePositionInformation>());
+            crate::ntbuf::iosb_set(
+                iosb,
+                STATUS_SUCCESS,
+                core::mem::size_of::<FilePositionInformation>(),
+            );
             STATUS_SUCCESS
         }
         FILE_NETWORK_OPEN_INFORMATION => {
@@ -5196,7 +5167,11 @@ unsafe fn fuse_query_information(
             } else {
                 FILE_ATTRIBUTE_NORMAL
             };
-            synth_iosb_ok(iosb, core::mem::size_of::<FileNetworkOpenInformation>());
+            crate::ntbuf::iosb_set(
+                iosb,
+                STATUS_SUCCESS,
+                core::mem::size_of::<FileNetworkOpenInformation>(),
+            );
             STATUS_SUCCESS
         }
         FILE_ALL_INFORMATION => {
@@ -5228,7 +5203,7 @@ unsafe fn fuse_query_information(
             core::ptr::write_unaligned(p.add(64) as *mut i64, synth_file_id(handle));
             // Position.CurrentByteOffset @ 80
             core::ptr::write_unaligned(p.add(80) as *mut i64, pos as i64);
-            synth_iosb_ok(iosb, PREFIX);
+            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, PREFIX);
             STATUS_SUCCESS
         }
         FILE_NAME_INFORMATION | FILE_NORMALIZED_NAME_INFORMATION => {
@@ -5267,11 +5242,7 @@ unsafe fn fuse_query_information(
             } else {
                 STATUS_BUFFER_OVERFLOW
             };
-            if !iosb.is_null() {
-                let q = iosb as *mut u8;
-                core::ptr::write_unaligned(q as *mut u32, status as u32);
-                core::ptr::write_unaligned(q.add(8) as *mut usize, 4 + fits * 2);
-            }
+            crate::ntbuf::iosb_set(iosb, status, 4 + fits * 2);
             status
         }
         FILE_ID_INFORMATION => {
@@ -5287,7 +5258,7 @@ unsafe fn fuse_query_information(
             core::ptr::write_bytes(p, 0, LEN);
             core::ptr::write_unaligned(p as *mut u64, SYNTH_VOLUME_SERIAL);
             core::ptr::write_unaligned(p.add(8) as *mut i64, synth_file_id(handle));
-            synth_iosb_ok(iosb, LEN);
+            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN);
             STATUS_SUCCESS
         }
         FILE_STAT_INFORMATION => {
@@ -5326,7 +5297,7 @@ unsafe fn fuse_query_information(
             core::ptr::write_unaligned(p.add(64) as *mut u32, 1);
             // FILE_GENERIC_READ.
             core::ptr::write_unaligned(p.add(68) as *mut u32, 0x0012_0089);
-            synth_iosb_ok(iosb, LEN);
+            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN);
             STATUS_SUCCESS
         }
         FILE_ATTRIBUTE_TAG_INFORMATION => {
@@ -5343,11 +5314,11 @@ unsafe fn fuse_query_information(
             };
             core::ptr::write_unaligned(p as *mut u32, attrs);
             core::ptr::write_unaligned(p.add(4) as *mut u32, 0);
-            synth_iosb_ok(iosb, LEN);
+            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN);
             STATUS_SUCCESS
         }
         _ => {
-            synth_iosb_ok(iosb, 0);
+            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
             STATUS_SUCCESS
         }
     }
@@ -5376,7 +5347,11 @@ unsafe fn qvol_hook_body(
             let di = info as *mut FileFsDeviceInformation;
             (*di).device_type = FILE_DEVICE_DISK;
             (*di).characteristics = 0;
-            synth_iosb_ok(iosb, core::mem::size_of::<FileFsDeviceInformation>());
+            crate::ntbuf::iosb_set(
+                iosb,
+                STATUS_SUCCESS,
+                core::mem::size_of::<FileFsDeviceInformation>(),
+            );
             return STATUS_SUCCESS;
         }
         // Soft-success for other volume classes (size/attr) with zeros.
@@ -5393,7 +5368,7 @@ unsafe fn qvol_hook_body(
                 SYNTH_VOLUME_SERIAL as u32,
             );
         }
-        synth_iosb_ok(iosb, length as usize);
+        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, length as usize);
         return STATUS_SUCCESS;
     }
     tramp(handle, iosb, info, length, class)
@@ -5518,7 +5493,7 @@ unsafe fn lock_hook_body(
             },
             synth_path(handle).as_deref(),
         );
-        synth_iosb_ok(iosb, 0);
+        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
         if !event.is_null() {
             windows_sys::Win32::System::Threading::SetEvent(event);
         }
@@ -5557,7 +5532,7 @@ unsafe fn unlock_hook_body(
             return STATUS_INVALID_HANDLE;
         }
         crate::hookstats::note_synthetic_lock("unlock", synth_path(handle).as_deref());
-        synth_iosb_ok(iosb, 0);
+        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
         return STATUS_SUCCESS;
     }
     tramp(handle, iosb, byte_offset, length, key)
@@ -5581,7 +5556,7 @@ unsafe fn flush_hook_body(handle: HANDLE, iosb: *mut c_void) -> NTSTATUS {
             return STATUS_INVALID_HANDLE;
         }
         crate::hookstats::note_synthetic_lock("flush", synth_path(handle).as_deref());
-        synth_iosb_ok(iosb, 0);
+        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
         return STATUS_SUCCESS;
     }
     tramp(handle, iosb)
@@ -5646,11 +5621,7 @@ unsafe fn qif_hook_body(
                 DirStatus::Success => STATUS_SUCCESS,
                 _ => STATUS_BUFFER_OVERFLOW,
             };
-            if !iosb.is_null() {
-                let p = iosb as *mut u8;
-                core::ptr::write_unaligned(p as *mut u32, status as u32);
-                core::ptr::write_unaligned(p.add(8) as *mut usize, r.bytes);
-            }
+            crate::ntbuf::iosb_set(iosb, status, r.bytes);
             return status;
         }
     }
@@ -6023,11 +5994,7 @@ unsafe fn write_hook_body(
                 {
                     Ok(n) => n,
                     Err(_) => {
-                        if !iosb.is_null() {
-                            let p = iosb as *mut u8;
-                            core::ptr::write_unaligned(p as *mut u32, STATUS_UNSUCCESSFUL as u32);
-                            core::ptr::write_unaligned(p.add(8) as *mut usize, 0usize);
-                        }
+                        crate::ntbuf::iosb_set(iosb, STATUS_UNSUCCESSFUL, 0);
                         return STATUS_UNSUCCESSFUL;
                     }
                 }
@@ -6049,11 +6016,7 @@ unsafe fn write_hook_body(
             if end > size {
                 crate::fuse_synth::grow_size(handle as isize, end);
             }
-            if !iosb.is_null() {
-                let p = iosb as *mut u8;
-                core::ptr::write_unaligned(p as *mut u32, STATUS_SUCCESS as u32);
-                core::ptr::write_unaligned(p.add(8) as *mut usize, n);
-            }
+            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, n);
             if !event.is_null() {
                 windows_sys::Win32::System::Threading::SetEvent(event);
             }
@@ -6112,11 +6075,7 @@ unsafe fn read_hook_body(
             let off = explicit.unwrap_or(pos);
             let want = length as usize;
             if off >= size {
-                if !iosb.is_null() {
-                    let p = iosb as *mut u8;
-                    core::ptr::write_unaligned(p as *mut u32, STATUS_END_OF_FILE as u32);
-                    core::ptr::write_unaligned(p.add(8) as *mut usize, 0usize);
-                }
+                crate::ntbuf::iosb_set(iosb, STATUS_END_OF_FILE, 0);
                 return STATUS_END_OF_FILE;
             }
             // Phase 1: fill the game's NtReadFile buffer in place (no intermediate tmp).
@@ -6145,11 +6104,7 @@ unsafe fn read_hook_body(
                 }) {
                     Ok(n) => n,
                     Err(_) => {
-                        if !iosb.is_null() {
-                            let p = iosb as *mut u8;
-                            core::ptr::write_unaligned(p as *mut u32, STATUS_UNSUCCESSFUL as u32);
-                            core::ptr::write_unaligned(p.add(8) as *mut usize, 0usize);
-                        }
+                        crate::ntbuf::iosb_set(iosb, STATUS_UNSUCCESSFUL, 0);
                         return STATUS_UNSUCCESSFUL;
                     }
                 }
@@ -6164,11 +6119,7 @@ unsafe fn read_hook_body(
                 } else {
                     STATUS_SUCCESS
                 };
-                if !iosb.is_null() {
-                    let p = iosb as *mut u8;
-                    core::ptr::write_unaligned(p as *mut u32, status as u32);
-                    core::ptr::write_unaligned(p.add(8) as *mut usize, n);
-                }
+                crate::ntbuf::iosb_set(iosb, status, n);
                 if !event.is_null() {
                     windows_sys::Win32::System::Threading::SetEvent(event);
                 }
@@ -7026,11 +6977,7 @@ unsafe fn serve_dir_query(
         DirStatus::BufferOverflow => STATUS_BUFFER_OVERFLOW,
     };
     // IO_STATUS_BLOCK: Status (NTSTATUS) @0, Information (ULONG_PTR) @8.
-    if !iosb.is_null() {
-        let p = iosb as *mut u8;
-        core::ptr::write_unaligned(p as *mut u32, status as u32);
-        core::ptr::write_unaligned(p.add(8) as *mut usize, result.bytes);
-    }
+    crate::ntbuf::iosb_set(iosb, status, result.bytes);
     status
 }
 
