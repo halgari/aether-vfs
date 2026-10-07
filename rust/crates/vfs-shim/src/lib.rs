@@ -32,8 +32,9 @@ mod synth_section;
 mod tramp;
 
 pub use bootstrap::{
-    BootstrapError, bootstrap_from_config_path, bootstrap_from_config_path_with_payload,
-    load_static_imports_from_config_path, static_imports_to_preinit, sync_bootstrap,
+    BootstrapError, bootstrap_failed_content, bootstrap_from_config_path,
+    bootstrap_from_config_path_with_payload, load_static_imports_from_config_path,
+    static_imports_to_preinit, sync_bootstrap,
 };
 // The encoders (and `StaticImport`) live in `vfs_protocol::shimcfg` — pure
 // byte assembly with no Windows dependency — so a native Linux Director can

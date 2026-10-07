@@ -31,8 +31,20 @@ pub fn describe_injector_error(raw: &str) -> String {
     }
     if let Some(secs) = raw.strip_prefix(vfs_env::INJECTOR_READY_TIMEOUT_PREFIX) {
         return format!(
-            "the shim did not report ready within {secs} s — the target is hung or still \
-             starting; raise the ready timeout if a cold prefix is this slow"
+            "the shim did not report ready within {secs} s, so the target was killed before it \
+             ran — it is hung or still starting; raise the ready timeout if a cold prefix is \
+             this slow"
+        );
+    }
+    if let Some(why) = raw.strip_prefix(vfs_env::INJECTOR_FUSE_FAILED_PREFIX) {
+        return format!(
+            "the shim could not attach to the director, so the target was killed before it ran: \
+             {why}"
+        );
+    }
+    if let Some(why) = raw.strip_prefix(vfs_env::INJECTOR_BOOTSTRAP_FAILED_PREFIX) {
+        return format!(
+            "the shim could not bootstrap, so the target was killed before it ran: {why}"
         );
     }
     format!(
@@ -60,6 +72,10 @@ mod tests {
         );
         let t = describe_injector_error("ready-timeout:180");
         assert!(t.contains("180 s"), "{t}");
+        let f = describe_injector_error("fuse-failed:no ring");
+        assert!(f.contains("attach to the director") && f.contains("no ring"), "{f}");
+        let b = describe_injector_error("bootstrap-failed:shim config version 3");
+        assert!(b.contains("bootstrap") && b.contains("version 3"), "{b}");
         assert_eq!(
             describe_injector_error("inject:CreateProcess"),
             "injection failed: CreateProcess"

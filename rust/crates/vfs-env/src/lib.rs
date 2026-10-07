@@ -174,6 +174,13 @@ pub const READY_OK: &str = "ready";
 /// short reason. Releasing the process past this point means every path it
 /// opens falls straight through to the real filesystem, unnoticed.
 pub const READY_FUSE_FAILED_PREFIX: &str = "fuse-failed:";
+/// Prefix of the content written when the shim could not bootstrap for a
+/// reason that is not the director: a config from another build or a damaged
+/// one, an unreadable config file, a hook that would not install. Followed by
+/// the reason. The launcher kills the parked process on it, as for
+/// [`READY_FUSE_FAILED_PREFIX`]. (A config error used spell itself with the
+/// fuse prefix; an injector still reads that spelling, as a fuse failure.)
+pub const READY_BOOTSTRAP_FAILED_PREFIX: &str = "bootstrap-failed:";
 
 // ─── injector failure report ─────────────────────────────────────────────────
 // Also not switch names. `vfs-injector` exits 3 for every injection failure,
@@ -189,6 +196,12 @@ pub const INJECTOR_TARGET_EXITED_PREFIX: &str = "target-exited:";
 /// Report prefix: the shim did not report ready in time, followed by the
 /// timeout in seconds.
 pub const INJECTOR_READY_TIMEOUT_PREFIX: &str = "ready-timeout:";
+/// Report prefix: the shim reported that the director's client failed to
+/// attach, followed by the reason.
+pub const INJECTOR_FUSE_FAILED_PREFIX: &str = "fuse-failed:";
+/// Report prefix: the shim reported that it could not bootstrap (bad config,
+/// hook install), followed by the reason.
+pub const INJECTOR_BOOTSTRAP_FAILED_PREFIX: &str = "bootstrap-failed:";
 /// Report prefix: any other injection failure, followed by its description.
 pub const INJECTOR_FAILED_PREFIX: &str = "inject:";
 

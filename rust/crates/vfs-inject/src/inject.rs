@@ -532,6 +532,31 @@ pub struct PreinitArm {
     pub release_flag: u64,
 }
 
+/// What the contents of the shim's ready file say.
+#[derive(Debug)]
+enum ReadyState {
+    /// `READY_OK`: release the process.
+    Ready,
+    /// A failure spelling: the process must be killed with this error.
+    Failed(InjectError),
+    /// Empty, partial or unrecognised: keep waiting (a write in flight reads
+    /// as this too). Never a reason to release.
+    Pending,
+}
+
+fn classify_ready(content: &str) -> ReadyState {
+    if content == vfs_env::READY_OK {
+        ReadyState::Ready
+    } else if let Some(msg) = content.strip_prefix(vfs_env::READY_FUSE_FAILED_PREFIX) {
+        // Also how an older shim spelled a config error; its message says so.
+        ReadyState::Failed(InjectError::FuseInit(msg.to_string()))
+    } else if let Some(msg) = content.strip_prefix(vfs_env::READY_BOOTSTRAP_FAILED_PREFIX) {
+        ReadyState::Failed(InjectError::Bootstrap(msg.to_string()))
+    } else {
+        ReadyState::Pending
+    }
+}
+
 /// Launch the target with dual-layer injection:
 /// 1. Pre-init early payload (RIP-redirect) installs hooks then **spins**  
 /// 2. Injector LoadLibrary full shim (remote thread) — loader init with early
@@ -678,32 +703,31 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
         }
 
         // Wait for the full shim's ready marker. Its *content*, not merely its
-        // existence, is the protocol (see `vfs_env::READY_OK` /
-        // `READY_FUSE_FAILED_PREFIX`): a director-configured launch whose FUSE
-        // client failed to attach still touches this file, but with the
-        // failure spelling, so it is distinguishable here from both success
-        // and from a shim that never loaded at all (which leaves the file
-        // absent and falls to the `Timeout` case below, unchanged).
+        // existence, is the protocol (see `vfs_env::READY_OK`,
+        // `READY_FUSE_FAILED_PREFIX`, `READY_BOOTSTRAP_FAILED_PREFIX`): a shim
+        // whose FUSE client failed to attach, or that could not bootstrap,
+        // still touches this file, but with a failure spelling, so it is
+        // distinguishable here from success. A shim that never wrote anything
+        // (it never loaded, or it died or hung before it could say so) leaves
+        // the file absent and falls to the timeout below. Every failure ends
+        // the same way: the primary thread is still parked behind the
+        // pre-init spin gate, nothing has run, and the process is killed
+        // rather than released into an un-virtualised game.
         let deadline = Instant::now() + cfg.ready_timeout;
         loop {
-            match std::fs::read_to_string(&cfg.ready_path) {
-                Ok(content) if content.starts_with(vfs_env::READY_FUSE_FAILED_PREFIX) => {
-                    let msg = content
-                        .strip_prefix(vfs_env::READY_FUSE_FAILED_PREFIX)
-                        .unwrap_or(&content)
-                        .to_string();
-                    // Hooks may be live, but the primary thread is still
-                    // parked behind the pre-init spin gate — nothing has run
-                    // yet. Kill it outright rather than release it into an
-                    // un-virtualised game, which the release below would
-                    // otherwise do.
-                    let _ = TerminateProcess(pi.hProcess, 1);
-                    CloseHandle(pi.hThread);
-                    CloseHandle(pi.hProcess);
-                    return Err(InjectError::FuseInit(msg));
-                }
-                Ok(content) if content == vfs_env::READY_OK => break,
-                _ => {}
+            let failure = match std::fs::read_to_string(&cfg.ready_path) {
+                Ok(content) => match classify_ready(&content) {
+                    ReadyState::Ready => break,
+                    ReadyState::Failed(e) => Some(e),
+                    ReadyState::Pending => None,
+                },
+                Err(_) => None,
+            };
+            if let Some(e) = failure {
+                let _ = TerminateProcess(pi.hProcess, 1);
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                return Err(e);
             }
             if let Some(code) = exited(pi.hProcess) {
                 CloseHandle(pi.hThread);
@@ -811,5 +835,27 @@ pub fn run_target_with_preinit(cfg: PreinitConfig) -> Result<i32, InjectError> {
             return Err(InjectError::ExitCode);
         }
         Ok(code as i32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_file_contents_map_to_release_kill_or_wait() {
+        assert!(matches!(classify_ready("ready"), ReadyState::Ready));
+        assert!(matches!(
+            classify_ready("fuse-failed:no ring"),
+            ReadyState::Failed(InjectError::FuseInit(m)) if m == "no ring"
+        ));
+        assert!(matches!(
+            classify_ready("bootstrap-failed:shim config version 3"),
+            ReadyState::Failed(InjectError::Bootstrap(m)) if m == "shim config version 3"
+        ));
+        // Nothing here may ever read as Ready: a half-written file keeps waiting.
+        for partial in ["", "rea", "ready ", "boot", "bootstrap", "Ready"] {
+            assert!(matches!(classify_ready(partial), ReadyState::Pending), "{partial:?}");
+        }
     }
 }

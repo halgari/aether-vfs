@@ -67,6 +67,17 @@ pub enum BootstrapError {
     Install(InstallError),
 }
 
+/// The ready-file content that reports a bootstrap failure that is not the
+/// director's: [`vfs_env::READY_BOOTSTRAP_FAILED_PREFIX`] and the reason. A
+/// config error carries its own message (it names both versions).
+pub fn bootstrap_failed_content(e: &BootstrapError) -> String {
+    let why = match e {
+        BootstrapError::Config(c) => c.to_string(),
+        other => format!("{other:?}"),
+    };
+    format!("{}{why}", vfs_env::READY_BOOTSTRAP_FAILED_PREFIX)
+}
+
 /// Read a config file, attach the director's client, and install the hooks. Returns the
 /// guard keeping the hooks alive (the injected DLL leaks it).
 ///
@@ -186,18 +197,15 @@ pub fn sync_bootstrap(payload_cfg: *mut c_void) -> u32 {
             }
             3
         }
-        // A config from another build (or a damaged one): same ready-file spelling, so the
-        // launcher kills the parked process and reports why instead of timing out.
-        Err(BootstrapError::Config(e)) => {
+        // A config from another build or a damaged one, an unreadable config, a hook that
+        // would not install: say so in the ready file, so the launcher kills the parked
+        // process and reports why instead of waiting out its timeout.
+        Err(e) => {
             if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
-                let _ = std::fs::write(
-                    &ready,
-                    format!("{}{e}", vfs_env::READY_FUSE_FAILED_PREFIX),
-                );
+                let _ = std::fs::write(&ready, bootstrap_failed_content(&e));
             }
             2
         }
-        Err(_) => 2,
     }
 }
 
@@ -322,5 +330,18 @@ mod tests {
             Err(BootstrapError::Config(ConfigError::Version { found: 3, .. }))
         ));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// What the launcher reads in the ready file for a config refusal: the bootstrap spelling
+    /// (not the director's), carrying the message that names both versions.
+    #[test]
+    fn a_config_refusal_is_spelled_for_the_ready_file() {
+        let e = BootstrapError::Config(ConfigError::Version { found: 3, expected: 2 });
+        let content = bootstrap_failed_content(&e);
+        assert!(content.starts_with(vfs_env::READY_BOOTSTRAP_FAILED_PREFIX), "{content}");
+        assert!(content.contains("version 3") && content.contains("version 2"), "{content}");
+        assert!(!content.starts_with(vfs_env::READY_FUSE_FAILED_PREFIX));
+        let io = bootstrap_failed_content(&BootstrapError::Io);
+        assert_eq!(io, format!("{}Io", vfs_env::READY_BOOTSTRAP_FAILED_PREFIX));
     }
 }

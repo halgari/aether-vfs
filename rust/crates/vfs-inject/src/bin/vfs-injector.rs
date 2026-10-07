@@ -95,6 +95,12 @@ fn main() {
                 vfs_env::INJECTOR_READY_TIMEOUT_PREFIX,
                 ready_timeout.as_secs()
             ),
+            InjectError::FuseInit(msg) => {
+                format!("{}{msg}", vfs_env::INJECTOR_FUSE_FAILED_PREFIX)
+            }
+            InjectError::Bootstrap(msg) => {
+                format!("{}{msg}", vfs_env::INJECTOR_BOOTSTRAP_FAILED_PREFIX)
+            }
             other => format!("{}{other:?}", vfs_env::INJECTOR_FAILED_PREFIX),
         };
         let _ = std::fs::write(&report, line);

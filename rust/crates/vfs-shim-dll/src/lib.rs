@@ -36,7 +36,7 @@ const DLL_PROCESS_ATTACH: u32 = 1;
 /// function does is spawn `bootstrap`, so a panic here means bootstrap never
 /// started and the ready file is never written — which
 /// `vfs_inject::run_target_with_shim` already handles as `InjectError::Timeout`,
-/// after which it releases (classic path) or terminates the child. So the
+/// after which it terminates the child. So the
 /// existing handshake reports it; returning `TRUE` just avoids replacing a
 /// diagnosable timeout with a loader failure.
 #[no_mangle]
@@ -115,17 +115,16 @@ fn bootstrap() {
                 );
             }
         }
-        // A config from another build: say so in the ready file as well as the boot log.
-        Err(vfs_shim::BootstrapError::Config(e)) => {
-            log_boot(&format!("shim config refused: {e}"));
-            if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
-                let _ = std::fs::write(&ready, format!("{}{e}", vfs_env::READY_FUSE_FAILED_PREFIX));
-            }
-        }
+        // Any other bootstrap failure (a config from another build, an unreadable
+        // config, a hook that would not install): say so in the ready file as well as the
+        // boot log, so the launcher kills the parked process and reports why.
         Err(e) => {
             log_boot(&format!(
                 "bootstrap_from_config_path({config}) failed: {e:?}"
             ));
+            if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
+                let _ = std::fs::write(&ready, vfs_shim::bootstrap_failed_content(&e));
+            }
         }
     }
 }

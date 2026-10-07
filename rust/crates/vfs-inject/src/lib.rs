@@ -65,6 +65,11 @@ pub enum InjectError {
     Alloc,
     Write,
     RemoteThread,
+    /// The shim did not report ready within `ready_timeout` (or the early
+    /// payload never reached its install sentinel). Once the process is past
+    /// the payload and parked at the spin gate, the process is **killed**
+    /// rather than released: a bootstrap that never says anything must not
+    /// leave the target running un-virtualised.
     Timeout,
     Wait,
     ExitCode,
@@ -81,6 +86,11 @@ pub enum InjectError {
     /// loaded at all (no injection happened) — that is not a FUSE failure and
     /// must not be reported as one.
     FuseInit(String),
+    /// The shim loaded but could not bootstrap — a config from another build
+    /// or a damaged one, an unreadable config, a hook that would not install —
+    /// and said so in the ready file. Killed before release, like
+    /// [`FuseInit`](InjectError::FuseInit).
+    Bootstrap(String),
     /// The target exited — with this exit code, an `NTSTATUS` such as
     /// `0xC0000135` (a DLL it imports is missing) when the loader killed it —
     /// before the shim reported ready. Reported as soon as it is seen rather
