@@ -94,7 +94,6 @@ fn an_unaccounted_open_still_fails_even_with_unrouted_opens_present() {
     // a bypass outright — that claim was false from gate 4 onward.
     assert!(msg.contains("not *necessarily* one"), "{msg}");
     assert!(msg.contains("directory downgrade"), "{msg}");
-    assert!(msg.contains("cow_seed"), "{msg}");
 }
 
 #[test]

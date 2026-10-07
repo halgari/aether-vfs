@@ -1351,9 +1351,9 @@ fn vector14_child_without_shim(abs: &str) -> Line {
                         DLL into children, so under a session this child IS injected and its \
                         read is answered by the director like any other -- under the negative \
                         canary it reports error:cmd-exit:1, i.e. the real bytes were NOT \
-                        reachable. Still not asserted, because that injection is best-effort \
-                        (force-suspend, inject, give up on timeout), so a pass here would be a \
-                        pass about scheduling. See rust/docs/escape-matrix.md, 'Gate 4, Task 8'.";
+                        reachable. Still not asserted here: child injection now fails closed (a \
+                        child that cannot be injected is killed), and the \
+                        escape matrix records that. See rust/docs/escape-matrix.md, 'Gate 4, Task 8'.";
             let spelling = format!("cmd /C type {abs}");
             match std::process::Command::new("cmd")
                 .arg("/C")
@@ -1386,10 +1386,10 @@ fn vector14_child_without_shim(abs: &str) -> Line {
                         children, so under a session this child's write is answered by the \
                         director too -- `written` against the positive canary (the bytes land in \
                         the provider store), error:cmd-exit:1 against the negative one. Not \
-                        asserted, because that injection is best-effort. Targets a SIBLING of \
+                        asserted here: child injection fails closed. Targets a SIBLING of \
                         the canary (<target>.v14-child-write.txt) rather than the canary itself, \
-                        so that on the one run where the inject does time out, the canary's own \
-                        bytes stay a clean signal for the caller's real-filesystem assertions.";
+                        so that the canary's own bytes stay a clean signal for the caller's \
+                        real-filesystem assertions.";
             let sibling = format!("{abs}{V14_WRITE_SUFFIX}");
             let spelling = format!("cmd /C echo v14-child-write>{sibling}");
             // `raw_arg`, not `arg`: the payload is a *shell* command line

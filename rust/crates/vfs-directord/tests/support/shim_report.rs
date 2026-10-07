@@ -437,10 +437,10 @@ pub fn assert_reconciled(shim_report: &Path, opens_ok: u64) -> Reconciliation {
          to rule out first:\n\
          \n\
          1. A shim-issued `OP_OPEN` that carries no `Routed` and is not \
-            counted. Two exist today (the directory downgrade's re-issued \
-            read open, and copy-up's own open in `Engine::cow_seed`); both \
-            call `hookstats::note_unrouted_director_open`, which is what \
-            `{UNROUTED_OPEN_LABEL}` above reports. A *third* such site added \
+            counted. One exists today (the directory downgrade's re-issued \
+            read open); it calls `hookstats::note_unrouted_director_open`, \
+            which is what `{UNROUTED_OPEN_LABEL}` above reports. A *second* \
+            such site added \
             without that call shows up here as negative drift and is a \
             measurement gap, not an escape.\n\
          2. A label rename in `vfs_shim::hookstats` that this module's \
