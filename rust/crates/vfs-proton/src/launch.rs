@@ -644,13 +644,15 @@ fn check_geometry(l: &WineLaunch) -> Result<(), LaunchError> {
     let need = l.arena_offset.saturating_add(l.arena_len);
     if need > l.ring_bytes {
         return Err(LaunchError::Geometry(format!(
-            "arena_offset {} + arena_len {} = {need} exceeds ring_bytes {}; the child would              map a view too small to hold the arena and fail only under load",
+            "arena_offset {} + arena_len {} = {need} exceeds ring_bytes {}; the child would \
+             map a view too small to hold the arena and fail only under load",
             l.arena_offset, l.arena_len, l.ring_bytes
         )));
     }
     match std::fs::metadata(&l.ring_path) {
         Ok(m) if (m.len() as usize) < l.ring_bytes => Err(LaunchError::Geometry(format!(
-            "ring file {} is {} bytes but ring_bytes is {}; mapping past the end of a file              faults on touch rather than failing at map time",
+            "ring file {} is {} bytes but ring_bytes is {}; mapping past the end of a file \
+             faults on touch rather than failing at map time",
             l.ring_path.display(),
             m.len(),
             l.ring_bytes
