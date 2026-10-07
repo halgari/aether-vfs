@@ -11,8 +11,7 @@ use super::*;
 /// could not answer that either — a process wedged in a retry loop reopens one
 /// path thousands of times, and dedup hides exactly the path that matters. So
 /// this counts repeats and reports the busiest first.
-pub(super) static PATHS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
-pub(super) const PATHS_MAX: usize = 4000;
+pub(super) static PATHS: BoundedTally<String> = BoundedTally::new(4000);
 /// How many of the busiest paths to print. Generous: the question this answers
 /// is usually "did the process ever touch X", and a path asked for once is
 /// exactly the interesting case when X is a file that should have loaded.
@@ -23,18 +22,9 @@ pub fn note_passthrough(path: &str) {
     if !enabled() {
         return;
     }
-    let Ok(mut g) = PATHS.lock() else { return };
-    let map = g.get_or_insert_with(HashMap::new);
-    let lower = path.to_ascii_lowercase();
-    if let Some(c) = map.get_mut(&lower) {
-        *c += 1;
-        return;
-    }
     // Past the cap we stop learning new paths but keep counting known ones,
     // so a loop that started early still shows its true rate.
-    if map.len() < PATHS_MAX {
-        map.insert(lower, 1);
-    }
+    PATHS.add(path.to_ascii_lowercase());
 }
 
 /// Busiest-first rendering, split out so the ordering is testable without
@@ -62,18 +52,13 @@ pub(super) fn format_paths(mut pairs: Vec<(String, u64)>) -> String {
 /// A relative open names its parent only by handle; if that handle is unknown
 /// the call cannot be matched against the root, cannot be served, and appears
 /// in no path-keyed report. Counting them says whether anything is hiding.
-pub(super) static UNDECODABLE: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+pub(super) static UNDECODABLE: BoundedTally<String> = BoundedTally::unbounded();
 
 pub fn note_undecodable(name: Option<&str>) {
     if !enabled() {
         return;
     }
-    let Ok(mut g) = UNDECODABLE.lock() else {
-        return;
-    };
-    let map = g.get_or_insert_with(HashMap::new);
-    let key = name.unwrap_or("<no name>").to_ascii_lowercase();
-    *map.entry(key).or_insert(0) += 1;
+    UNDECODABLE.add(name.unwrap_or("<no name>").to_ascii_lowercase());
 }
 
 pub(super) fn render_undecodable(snap: &Snapshot) -> String {
@@ -154,24 +139,14 @@ ordered trace of under-root operations ({}):
 /// Skyrim.esm is missing" look identical from the open path.
 /// Keyed by outcome + path and counted, so recording *every* stat — including
 /// the thousands of Windows DLL probes — stays bounded by distinct paths.
-pub(super) static STATS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
-pub(super) const STATS_MAX: usize = 4000;
+pub(super) static STATS: BoundedTally<String> = BoundedTally::new(4000);
 
 pub fn note_stat(path: &str, outcome: &str) {
     if !enabled() {
         return;
     }
-    let Ok(mut g) = STATS.lock() else { return };
-    let map = g.get_or_insert_with(HashMap::new);
     note_trace("stat", path, outcome);
-    let key = format!("{:<12} {}", outcome, path.to_ascii_lowercase());
-    if let Some(c) = map.get_mut(&key) {
-        *c += 1;
-        return;
-    }
-    if map.len() < STATS_MAX {
-        map.insert(key, 1);
-    }
+    STATS.add(format!("{:<12} {}", outcome, path.to_ascii_lowercase()));
 }
 
 pub(super) fn render_stats(snap: &Snapshot) -> String {
@@ -273,9 +248,8 @@ pub(super) static OUTCOME_COUNTS: [AtomicU64; OUTCOME_N] = [const { AtomicU64::n
 /// Paths seen for each outcome, bounded the same way `PATHS` is: past the cap
 /// we stop learning new paths but keep counting known ones, so an early-
 /// starting loop still shows its true rate.
-pub(super) static OUTCOME_PATHS: [Mutex<Option<HashMap<String, u64>>>; OUTCOME_N] =
-    [const { Mutex::new(None) }; OUTCOME_N];
-pub(super) const OUTCOME_PATHS_MAX: usize = 4000;
+pub(super) static OUTCOME_PATHS: [BoundedTally<String>; OUTCOME_N] =
+    [const { BoundedTally::new(4000) }; OUTCOME_N];
 /// How many of the busiest paths to print per outcome. Smaller than
 /// `PATHS_SHOWN`: this table prints one such list per outcome, so it must
 /// stay skimmable rather than repeat the full passthrough dump seven times.
@@ -364,18 +338,7 @@ pub fn note_open_outcome(outcome: OpenOutcome, path: &str) {
     }
     let idx = outcome as usize;
     OUTCOME_COUNTS[idx].fetch_add(1, Ordering::Relaxed);
-    let Ok(mut g) = OUTCOME_PATHS[idx].lock() else {
-        return;
-    };
-    let map = g.get_or_insert_with(HashMap::new);
-    let lower = path.to_ascii_lowercase();
-    if let Some(c) = map.get_mut(&lower) {
-        *c += 1;
-        return;
-    }
-    if map.len() < OUTCOME_PATHS_MAX {
-        map.insert(lower, 1);
-    }
+    OUTCOME_PATHS[idx].add(path.to_ascii_lowercase());
 }
 
 /// Busiest-first rendering of one outcome's paths, capped at

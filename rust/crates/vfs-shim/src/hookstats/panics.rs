@@ -27,16 +27,13 @@ use super::*;
 /// separate atomic so a poisoned map still cannot hide that *something*
 /// panicked.
 pub(super) static HOOK_PANICS_TOTAL: AtomicU64 = AtomicU64::new(0);
-pub(super) static HOOK_PANICS: Mutex<Option<HashMap<&'static str, u64>>> = Mutex::new(None);
+pub(super) static HOOK_PANICS: BoundedTally<&'static str> = BoundedTally::unbounded();
 
 /// Record a panic caught at a hook's `extern "system"` boundary. `name` is the
 /// hooked export, e.g. `"NtCreateFile"`.
 pub fn note_hook_panic(name: &'static str) {
     HOOK_PANICS_TOTAL.fetch_add(1, Ordering::Relaxed);
-    let Ok(mut g) = HOOK_PANICS.lock() else {
-        return;
-    };
-    *g.get_or_insert_with(HashMap::new).entry(name).or_insert(0) += 1;
+    HOOK_PANICS.add(name);
 }
 
 /// How many hook panics have been caught process-wide. Zero in a healthy run;
@@ -48,11 +45,7 @@ pub fn hook_panics_total() -> u64 {
 /// How many were caught in one named entry point. `pub` for the same reason
 /// [`outcome_count`] is: a test can pin a class at zero, or watch it move.
 pub fn hook_panic_count(name: &str) -> u64 {
-    HOOK_PANICS
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|m| m.get(name).copied()))
-        .unwrap_or(0)
+    HOOK_PANICS.count(name)
 }
 
 /// Caught panics, rendered **first** in the report rather than with the other

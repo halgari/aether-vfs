@@ -67,9 +67,10 @@ pub(super) struct Snapshot {
     pub(super) read_cache_files: Vec<vfs_ipc::FileReport>,
 }
 
-/// Clone the contents of one of this module's `Mutex<Option<T>>` accumulators,
-/// treating "poisoned" and "never initialised" alike as empty. Every field of
-/// [`Snapshot`] that is not a plain atomic is read through this.
+/// Clone the contents of one of this module's `Mutex<Option<T>>` logs,
+/// treating "poisoned" and "never initialised" alike as empty. The ordered logs
+/// (`TRACE`, `READDIRS`) are read through this; every counted table is a
+/// `BoundedTally` and reads through its `snapshot`.
 pub(super) fn accumulated<T: Clone + Default>(m: &Mutex<Option<T>>) -> T {
     m.lock()
         .ok()
@@ -95,7 +96,7 @@ pub(super) fn snapshot() -> Snapshot {
         std::array::from_fn(|_| HashMap::new());
     for (i, outcome) in ALL_OUTCOMES.into_iter().enumerate() {
         outcome_counts[i] = outcome_count(outcome);
-        outcome_paths[i] = accumulated(&OUTCOME_PATHS[i]);
+        outcome_paths[i] = OUTCOME_PATHS[i].snapshot();
     }
     Snapshot {
         calls,
@@ -115,12 +116,12 @@ pub(super) fn snapshot() -> Snapshot {
         fill_bytes: FILL_BYTES.load(Ordering::Relaxed),
         fill_nanos: FILL_NANOS.load(Ordering::Relaxed),
         fill_max_nanos: FILL_MAX_NANOS.load(Ordering::Relaxed),
-        setinfo_noop: accumulated(&SETINFO_NOOP),
-        synth_locks: accumulated(&SYNTH_LOCKS),
-        passthrough: accumulated(&PATHS),
-        undecodable: accumulated(&UNDECODABLE),
+        setinfo_noop: SETINFO_NOOP.snapshot(),
+        synth_locks: SYNTH_LOCKS.snapshot(),
+        passthrough: PATHS.snapshot(),
+        undecodable: UNDECODABLE.snapshot(),
         trace: accumulated(&TRACE),
-        stats: accumulated(&STATS),
+        stats: STATS.snapshot(),
         readdirs: accumulated(&READDIRS),
         readdir_calls: READDIR_CALLS.load(Ordering::Relaxed),
         readdirs_dropped: READDIRS_DROPPED.load(Ordering::Relaxed),
@@ -136,11 +137,11 @@ pub(super) fn snapshot() -> Snapshot {
         reg: reg_counters(),
         copy_up_counts: std::array::from_fn(|i| copy_up_count(ALL_COPY_UPS[i])),
         copy_up_bytes: COPYUP_BYTES.load(Ordering::Relaxed),
-        copy_ups: accumulated(&COPYUPS),
+        copy_ups: COPYUPS.snapshot(),
         overlay_fail_counts: std::array::from_fn(|i| overlay_fail_count(ALL_OVERLAY_FAILS[i])),
-        overlay_fails: accumulated(&OVERLAY_FAILS),
+        overlay_fails: OVERLAY_FAILS.snapshot(),
         hook_panics_total: hook_panics_total(),
-        hook_panics: accumulated(&HOOK_PANICS),
+        hook_panics: HOOK_PANICS.snapshot(),
         read_cache: crate::read_cache::stats(),
         read_cache_files: crate::read_cache::top_files(READ_CACHE_FILES_SHOWN),
     }

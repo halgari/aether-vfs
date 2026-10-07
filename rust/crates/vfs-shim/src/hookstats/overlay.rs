@@ -100,8 +100,7 @@ pub(super) static COPYUP_COUNTS: [AtomicU64; COPYUP_N] = [const { AtomicU64::new
 pub(super) static COPYUP_BYTES: AtomicU64 = AtomicU64::new(0);
 /// `label` + root-qualified vpath, counted — the `STATS` shape, so outcomes
 /// group together when the rows are sorted by key and two reports diff cleanly.
-pub(super) static COPYUPS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
-pub(super) const COPYUPS_MAX: usize = 2000;
+pub(super) static COPYUPS: BoundedTally<String> = BoundedTally::new(2000);
 
 /// Current value of one copy-up counter. `pub` for the same reason
 /// [`outcome_count`] is: a gate's own test can assert a class went to zero
@@ -130,16 +129,7 @@ pub fn note_copy_up(outcome: CopyUp, root: u32, vpath: &str, bytes: u64) {
     }
     let path = format!("root{root}/{}", vpath.to_ascii_lowercase());
     note_trace("copy-up", &path, &format!("{} {bytes}B", outcome.label()));
-    let Ok(mut g) = COPYUPS.lock() else { return };
-    let map = g.get_or_insert_with(HashMap::new);
-    let key = format!("{:<26} {path}", outcome.label());
-    if let Some(c) = map.get_mut(&key) {
-        *c += 1;
-        return;
-    }
-    if map.len() < COPYUPS_MAX {
-        map.insert(key, 1);
-    }
+    COPYUPS.add(format!("{:<26} {path}", outcome.label()));
 }
 
 /// A shim-local overlay filesystem mutation that did not happen.
@@ -226,8 +216,7 @@ impl OverlayFail {
 pub(super) static OVERLAY_FAIL_COUNTS: [AtomicU64; OVERLAY_FAIL_N] =
     [const { AtomicU64::new(0) }; OVERLAY_FAIL_N];
 /// `label` + root-qualified vpath, counted — the `STATS`/`COPYUPS` shape.
-pub(super) static OVERLAY_FAILS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
-pub(super) const OVERLAY_FAILS_MAX: usize = 2000;
+pub(super) static OVERLAY_FAILS: BoundedTally<String> = BoundedTally::new(2000);
 
 /// Current value of one overlay-failure counter. `pub` for the same reason
 /// [`copy_up_count`] is: a test can assert a class stayed at zero, or moved,
@@ -260,18 +249,7 @@ pub fn note_overlay_fail(fail: OverlayFail, root: u32, vpath: &str) {
     // Also in the ordered trace: what the game did *next* after the overlay
     // refused to move is the other half of explaining the open that failed.
     note_trace("overlay", &path, fail.label());
-    let Ok(mut g) = OVERLAY_FAILS.lock() else {
-        return;
-    };
-    let map = g.get_or_insert_with(HashMap::new);
-    let key = format!("{:<26} {path}", fail.label());
-    if let Some(c) = map.get_mut(&key) {
-        *c += 1;
-        return;
-    }
-    if map.len() < OVERLAY_FAILS_MAX {
-        map.insert(key, 1);
-    }
+    OVERLAY_FAILS.add(format!("{:<26} {path}", fail.label()));
 }
 
 /// The header still counts **failures only** — that is the number a reader is

@@ -16,12 +16,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use self::tally::BoundedTally;
+
 mod io;
 mod open;
 mod overlay;
 mod panics;
 mod registry;
 mod report;
+mod tally;
 #[cfg(test)]
 mod tests;
 

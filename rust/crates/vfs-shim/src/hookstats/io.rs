@@ -221,17 +221,13 @@ pub(super) fn render_fills(snap: &Snapshot) -> String {
 /// real delete/rename silently no-op before this counter existed. Counting by
 /// class number, not asserting the set is empty, is what keeps that
 /// assumption checkable.
-pub(super) static SETINFO_NOOP: Mutex<Option<HashMap<u32, u64>>> = Mutex::new(None);
+pub(super) static SETINFO_NOOP: BoundedTally<u32> = BoundedTally::unbounded();
 
 pub fn note_setinfo_noop(class: u32) {
     if !enabled() {
         return;
     }
-    let Ok(mut g) = SETINFO_NOOP.lock() else {
-        return;
-    };
-    let map = g.get_or_insert_with(HashMap::new);
-    *map.entry(class).or_insert(0) += 1;
+    SETINFO_NOOP.add(class);
 }
 
 pub(super) fn render_setinfo_noop(snap: &Snapshot) -> String {
@@ -262,29 +258,17 @@ pub(super) fn render_setinfo_noop(snap: &Snapshot) -> String {
 /// nothing in any log says a lock was involved. Keyed by operation + path so
 /// "who is locking what, and is anyone locking the same thing" is answerable
 /// from a report rather than from a debugger.
-pub(super) static SYNTH_LOCKS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
-pub(super) const SYNTH_LOCKS_MAX: usize = 2000;
+pub(super) static SYNTH_LOCKS: BoundedTally<String> = BoundedTally::new(2000);
 
 pub fn note_synthetic_lock(op: &str, path: Option<&str>) {
     if !enabled() {
         return;
     }
-    let Ok(mut g) = SYNTH_LOCKS.lock() else {
-        return;
-    };
-    let map = g.get_or_insert_with(HashMap::new);
-    let key = format!(
+    SYNTH_LOCKS.add(format!(
         "{:<16} {}",
         op,
         path.unwrap_or("<untracked handle>").to_ascii_lowercase()
-    );
-    if let Some(c) = map.get_mut(&key) {
-        *c += 1;
-        return;
-    }
-    if map.len() < SYNTH_LOCKS_MAX {
-        map.insert(key, 1);
-    }
+    ));
 }
 
 pub(super) fn render_synth_locks(snap: &Snapshot) -> String {
