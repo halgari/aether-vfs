@@ -75,7 +75,7 @@ pub(crate) fn spawn_retrying_busy(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

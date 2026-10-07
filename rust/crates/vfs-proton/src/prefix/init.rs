@@ -255,6 +255,7 @@ fn run_wineboot(runtime: &Path, prefix_dir: &Path) -> Result<(), PrefixError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::prefix::scratch;
 
     /// A runtime whose `proton` is a shell script: it logs its argv and the
