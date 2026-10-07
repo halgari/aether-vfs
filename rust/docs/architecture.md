@@ -81,7 +81,7 @@ answers `resolve(vpath)`. It knows about:
   enumeration).
 - **Wildcards** — enumeration filters (`*.esm`) are matched here, not in the hook.
 
-`vfs-shared` is the bitness-neutral shared-memory layout for publishing a
+snapshot of that tree.
 snapshot of that tree, with a seqlock so a reader never observes a torn update.
 
 Keeping this layer pure is what makes the merge semantics testable without a
@@ -707,7 +707,7 @@ observer before concluding the process is idle.
 | crate | role |
 |---|---|
 | `vfs-core` | pure merged-tree resolver: layers, tombstones, case folding, wildcards |
-| `vfs-shared` | bitness-neutral shared snapshot layout + seqlock |
+| `vfs-shared` | bitness-neutral shared snapshot layout |
 | `vfs-provider` | provider contract: `Capabilities`, `VPath`, `Provider`, conformance suite |
 | `vfs-protocol` | ring wire codecs and opcodes (re-exports the provider contract for existing importers) |
 | `vfs-ipc` | control ring + bulk arena, OS-free |

@@ -26,7 +26,7 @@ pub struct SharedMapping {
 }
 
 // SAFETY: the mapped pages are shared memory; all concurrent access is governed
-// by the vfs-ipc ring protocol (atomics + seqlock), the same rationale that
+// by the vfs-ipc ring protocol (atomics), the same rationale that
 // makes `SharedSeg` itself `Send + Sync`.
 #[allow(unsafe_code)]
 unsafe impl Send for SharedMapping {}
