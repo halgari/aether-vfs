@@ -17,6 +17,7 @@ tracing = "0.1"
 tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
+vfs-provider = { path = "../vfs-provider", features = ["conformance"] }
 tempfile = "3"
 vfs-compose = { path = "../vfs-compose" }
 

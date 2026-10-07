@@ -10,4 +10,5 @@ vfs-core = { path = "../vfs-core" }
 vfs-provider = { path = "../vfs-provider" }
 
 [dev-dependencies]
+vfs-provider = { path = "../vfs-provider", features = ["conformance"] }
 tempfile = "3"

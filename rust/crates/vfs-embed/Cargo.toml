@@ -15,6 +15,11 @@ default = ["zip"]
 ## Convenience `Session::mount_zip` (pulls vfs-zip). Moved here with `Session`
 ## itself; `vfs-director` no longer has a `zip` feature.
 zip = ["dep:vfs-zip"]
+## Re-export the provider conformance suite (`assert_conformance`,
+## `write_fixture_tree`, `FIXTURE_FILES`) and the fixture providers it needs, so
+## a host tests its providers against it without naming vfs-provider. Off by
+## default: it is test code, enabled from a host's `[dev-dependencies]`.
+conformance = ["vfs-provider/conformance"]
 
 [dependencies]
 # The kernel this API is a seam over: `Director`, its ring/IPC server, the
@@ -73,3 +78,5 @@ vfs-ipc = { path = "../vfs-ipc" }
 # is a C cross-compile that fails before any of our code is reached — the same
 # reason the dependency is gated in the first place.
 vfs-zip = { path = "../vfs-zip" }
+# `conformance::SeqFixture` in the lib tests.
+vfs-provider = { path = "../vfs-provider", features = ["conformance"] }

@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 //! The provider contract: what a filesystem provider can do, how it is
-//! addressed, and the conformance suite that holds every implementation —
-//! Rust or host-language — to the same standard.
+//! addressed, and (behind the `conformance` feature) the conformance suite
+//! that holds every implementation — Rust or host-language — to the same
+//! standard. A consumer that runs the suite enables the feature in its
+//! `[dev-dependencies]`; it is not compiled into a release build.
 
 mod caps;
+#[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
 mod handle_table;
 mod layout;
@@ -13,6 +16,7 @@ mod provider;
 mod status;
 
 pub use caps::{Access, Capabilities, CaseMatch};
+#[cfg(any(test, feature = "conformance"))]
 pub use conformance::{assert_conformance, write_fixture_tree, RwMemFixture, FIXTURE_FILES};
 pub use handle_table::HandleTable;
 pub use layout::{

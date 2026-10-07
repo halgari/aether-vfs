@@ -191,6 +191,10 @@ pub use vfs_provider::{
 // `FIXTURE_FILES` because a host-language provider has to serve exactly that
 // tree and must not hold a second, drifting copy of it.
 // ---------------------------------------------------------------------------
+// Behind the `conformance` feature, which a host enables in its
+// `[dev-dependencies]`: the suite is test code and is not compiled into a
+// release build.
+#[cfg(feature = "conformance")]
 pub use vfs_provider::{assert_conformance, write_fixture_tree, FIXTURE_FILES};
 
 // ---------------------------------------------------------------------------

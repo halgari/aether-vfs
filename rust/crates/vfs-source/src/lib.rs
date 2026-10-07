@@ -13,6 +13,9 @@ pub mod pb {
 pub use remote::RemoteProvider;
 pub use serve::ProviderSourceService;
 pub use vfs_control::SourceSpec;
+/// The conformance suite, for a host that tests its sources: the `conformance`
+/// feature.
+#[cfg(feature = "conformance")]
 pub use vfs_provider::{assert_conformance, write_fixture_tree};
 pub use vfs_provider::{DirEntry, Provider, Stat, KIND_DIR, KIND_FILE, OPEN_READ};
 

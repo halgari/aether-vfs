@@ -34,6 +34,8 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+# `tests/fakedirector` mounts `RwMemFixture`.
+vfs-provider = { path = "../vfs-provider", features = ["conformance"] }
 # `bridge` (test-only) provides `flatten` for building snapshot fixtures.
 vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
 windows-sys = { version = "0.61", features = [

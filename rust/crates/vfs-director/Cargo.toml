@@ -52,4 +52,5 @@ vfs-shim = { path = "../vfs-shim" }
 vfs-redirect = { path = "../vfs-redirect" }
 
 [dev-dependencies]
+vfs-provider = { path = "../vfs-provider", features = ["conformance"] }
 vfs-testkit = { path = "../vfs-testkit" }
