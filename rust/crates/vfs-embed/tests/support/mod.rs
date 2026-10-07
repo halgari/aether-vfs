@@ -224,8 +224,13 @@ pub fn runtime_dir() -> Result<PathBuf, String> {
 /// the real runtime ([`runtime_dir`]). Prefixes and sessions land in it, not in the user's
 /// real home. It is kept between runs (a booted prefix is reused); `group` names it.
 pub fn throwaway_home(group: &str) -> Result<PathBuf, String> {
+    home_in(&Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("vfs-test-home-{group}")))
+}
+
+/// Make `home` an aether home whose `runtimes` holds one symlink to [`runtime_dir`], for a
+/// test that owns (and later removes) its home.
+pub fn home_in(home: &Path) -> Result<PathBuf, String> {
     let runtime = runtime_dir()?;
-    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("vfs-test-home-{group}"));
     let runtimes = home.join("runtimes");
     std::fs::create_dir_all(&runtimes).unwrap();
     let link = runtimes.join(runtime.file_name().expect("runtime dir name"));
@@ -233,7 +238,7 @@ pub fn throwaway_home(group: &str) -> Result<PathBuf, String> {
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&runtime, &link).unwrap();
     }
-    Ok(home)
+    Ok(home.to_path_buf())
 }
 
 /// What a Proton end-to-end test needs from the machine: a home and the artefacts.

@@ -27,6 +27,8 @@
 //! them depends on whether a real client is running on the machine.
 #![cfg(unix)]
 
+mod support;
+
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -41,11 +43,7 @@ const ROOT0: &str = r"C:\Games\Fake";
 
 /// Scratch under Cargo's `CARGO_TARGET_TMPDIR`, not `/tmp`.
 fn tmp(tag: &str) -> PathBuf {
-    let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("vfs-fake-rt-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    support::scratch("vfs-fake-rt", tag)
 }
 
 /// Minimal PE: MZ header, e_lfanew, PE32+ optional header, no imports — the
