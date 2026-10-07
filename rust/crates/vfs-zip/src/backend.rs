@@ -167,6 +167,18 @@ impl Provider for ZipProvider {
         }))
     }
 
+    /// The last component of the entry's key in the central directory, found
+    /// by the folded index.
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        let rel = p.rel.trim_matches('/');
+        if rel.is_empty() {
+            return Ok(None);
+        }
+        Ok(self.by_fold.get(&fold(rel)).map(|canon| {
+            canon.rsplit_once('/').map_or(canon.as_str(), |(_, last)| last).to_string()
+        }))
+    }
+
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
         let path = p.rel;
         let p = path.trim_start_matches('/');
