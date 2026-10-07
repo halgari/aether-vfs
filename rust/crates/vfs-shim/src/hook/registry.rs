@@ -37,28 +37,96 @@ fn reg_bypass() -> bool {
     !crate::regclient::enabled() || in_hook_reenter()
 }
 
-/// `NtOpenKey` hook. See `regkeys::open_or_create`.
-pub(super) unsafe fn open_key_hook_body(
-    key: *mut HANDLE,
-    access: u32,
-    oa: *const ObjectAttributes,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::OpenKey);
-    let Some(tramp) = TRAMP_OPEN_KEY.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if reg_bypass() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, access, oa) };
+/// A write hook's answer, or the real call when the key is not one the overlay serves.
+fn done_or(w: crate::regwrite::Write, pass: impl FnOnce() -> NTSTATUS) -> NTSTATUS {
+    match w {
+        crate::regwrite::Write::Done(st) => st,
+        crate::regwrite::Write::Pass => pass(),
     }
-    // Held for the whole call: a registry or file call this thread makes while the hook works
-    // (the shim's own) goes straight to ntdll.
-    let Some(_io) = ShimIoGuard::enter() else {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, access, oa) };
+}
+
+/// The body of a read-shaped registry hook: the overlay off, or this thread inside the shim's own
+/// work (`reg_bypass`), goes to the real call; otherwise `ShimIoGuard` is held for the whole call
+/// (a registry or file call this thread makes while the hook works, the shim's own, goes straight
+/// to ntdll) and `overlay` answers.
+///
+/// `|tramp|` (and `|tramp, pass|`) name the unhooked entry point (and a closure that calls it with
+/// the hook's arguments) for `overlay`, an expression evaluated inside the generated `unsafe fn`
+/// under its NT-pointer contract (hook/mod.rs).
+macro_rules! reg_read_body {
+    ($(#[$attr:meta])* fn $body:ident($($arg:ident: $ty:ty),* $(,)?),
+     $hook:ident, $tramp:ident, |$t:ident| $overlay:expr;) => {
+        reg_read_body! {
+            $(#[$attr])* fn $body($($arg: $ty),*),
+            $hook, $tramp, |$t, pass| $overlay;
+        }
     };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe {
+    ($(#[$attr:meta])* fn $body:ident($($arg:ident: $ty:ty),* $(,)?),
+     $hook:ident, $tramp:ident, |$t:ident, $pass:ident| $overlay:expr;) => {
+        $(#[$attr])*
+        pub(super) unsafe fn $body($($arg: $ty),*) -> NTSTATUS {
+            let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::$hook);
+            let Some($t) = $tramp.get() else {
+                return STATUS_UNSUCCESSFUL;
+            };
+            #[allow(unused_variables)]
+            let $pass = || {
+                // SAFETY: the original NT function, called with valid NT arguments.
+                unsafe { $t($($arg),*) }
+            };
+            if reg_bypass() {
+                return $pass();
+            }
+            let Some(_io) = ShimIoGuard::enter() else {
+                return $pass();
+            };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { $overlay }
+        }
+    };
+}
+
+/// The body of a write-shaped registry hook. The overlay off goes to the real call. With it on, a
+/// write made while the hook is bypassed (the shim's own work: `ShimIoGuard` is already held) is
+/// refused with `STATUS_UNSUCCESSFUL`, never made for real. Otherwise `overlay` (an expression
+/// under the generated `unsafe fn`'s NT-pointer contract) answers a [`Write`], and `Write::Pass`
+/// makes the real call.
+///
+/// [`Write`]: crate::regwrite::Write
+macro_rules! reg_write_body {
+    ($(#[$attr:meta])* fn $body:ident($($arg:ident: $ty:ty),* $(,)?),
+     $hook:ident, $tramp:ident, $overlay:expr;) => {
+        $(#[$attr])*
+        pub(super) unsafe fn $body($($arg: $ty),*) -> NTSTATUS {
+            let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::$hook);
+            let Some(tramp) = $tramp.get() else {
+                return STATUS_UNSUCCESSFUL;
+            };
+            if !crate::regclient::enabled() {
+                // SAFETY: the original NT function, called with valid NT arguments.
+                return unsafe { tramp($($arg),*) };
+            }
+            let Some(_io) = ShimIoGuard::enter() else {
+                return STATUS_UNSUCCESSFUL;
+            };
+            let _ws = crate::regclient::WriteScope::enter();
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            done_or(unsafe { $overlay }, || {
+                // SAFETY: the original NT function, called with valid NT arguments.
+                unsafe { tramp($($arg),*) }
+            })
+        }
+    };
+}
+
+reg_read_body! {
+    /// `NtOpenKey` hook. See `regkeys::open_or_create`.
+    fn open_key_hook_body(
+        key: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+    ),
+    OpenKey, TRAMP_OPEN_KEY, |tramp| {
         crate::regkeys::open_or_create(
             &reg_real(),
             key,
@@ -68,30 +136,18 @@ pub(super) unsafe fn open_key_hook_body(
             &mut |oa| tramp(key, access, oa),
         )
         .status
-    }
+    };
 }
 
-/// `NtOpenKeyEx` hook. See `regkeys::open_or_create`.
-pub(super) unsafe fn open_key_ex_hook_body(
-    key: *mut HANDLE,
-    access: u32,
-    oa: *const ObjectAttributes,
-    options: u32,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::OpenKeyEx);
-    let Some(tramp) = TRAMP_OPEN_KEY_EX.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if reg_bypass() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, access, oa, options) };
-    }
-    let Some(_io) = ShimIoGuard::enter() else {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, access, oa, options) };
-    };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe {
+reg_read_body! {
+    /// `NtOpenKeyEx` hook. See `regkeys::open_or_create`.
+    fn open_key_ex_hook_body(
+        key: *mut HANDLE,
+        access: u32,
+        oa: *const ObjectAttributes,
+        options: u32,
+    ),
+    OpenKeyEx, TRAMP_OPEN_KEY_EX, |tramp| {
         crate::regkeys::open_or_create(
             &reg_real(),
             key,
@@ -101,7 +157,7 @@ pub(super) unsafe fn open_key_ex_hook_body(
             &mut |oa| tramp(key, access, oa, options),
         )
         .status
-    }
+    };
 }
 
 /// `NtCreateKey` hook. With the overlay on, the real `NtCreateKey` is never called: a key that
@@ -216,452 +272,208 @@ pub(super) unsafe fn dup_hook_body(
     }
 }
 
-/// `NtQueryKey` hook. See `regquery::query_key`.
-pub(super) unsafe fn query_key_hook_body(
-    key: HANDLE,
-    class: u32,
-    info: *mut c_void,
-    length: u32,
-    ret_len: *mut u32,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QueryKey);
-    let Some(tramp) = TRAMP_QUERY_KEY.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if reg_bypass() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, class, info, length, ret_len) };
-    }
-    let Some(_io) = ShimIoGuard::enter() else {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, class, info, length, ret_len) };
-    };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe { crate::regquery::query_key(&reg_real(), key as isize, class, info, length, ret_len) }
+reg_read_body! {
+    /// `NtQueryKey` hook. See `regquery::query_key`.
+    fn query_key_hook_body(
+        key: HANDLE,
+        class: u32,
+        info: *mut c_void,
+        length: u32,
+        ret_len: *mut u32,
+    ),
+    QueryKey, TRAMP_QUERY_KEY, |tramp| crate::regquery::query_key(&reg_real(), key as isize, class, info, length, ret_len);
 }
 
-/// `NtEnumerateKey` hook. See `regquery::enumerate_key`.
-pub(super) unsafe fn enum_key_hook_body(
-    key: HANDLE,
-    index: u32,
-    class: u32,
-    info: *mut c_void,
-    length: u32,
-    ret_len: *mut u32,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::EnumerateKey);
-    let Some(tramp) = TRAMP_ENUM_KEY.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if reg_bypass() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, index, class, info, length, ret_len) };
-    }
-    let Some(_io) = ShimIoGuard::enter() else {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, index, class, info, length, ret_len) };
-    };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe {
-        crate::regquery::enumerate_key(
-            &reg_real(),
-            key as isize,
-            index,
-            class,
-            info,
-            length,
-            ret_len,
-        )
-    }
+reg_read_body! {
+    /// `NtEnumerateKey` hook. See `regquery::enumerate_key`.
+    fn enum_key_hook_body(
+        key: HANDLE,
+        index: u32,
+        class: u32,
+        info: *mut c_void,
+        length: u32,
+        ret_len: *mut u32,
+    ),
+    EnumerateKey, TRAMP_ENUM_KEY, |tramp| crate::regquery::enumerate_key(&reg_real(), key as isize, index, class, info, length, ret_len);
 }
 
-/// `NtQueryValueKey` hook. See `regquery::query_value_key`.
-pub(super) unsafe fn query_value_hook_body(
-    key: HANDLE,
-    name: *const UnicodeString,
-    class: u32,
-    info: *mut c_void,
-    length: u32,
-    ret_len: *mut u32,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QueryValueKey);
-    let Some(tramp) = TRAMP_QUERY_VALUE.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if reg_bypass() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, name, class, info, length, ret_len) };
-    }
-    let Some(_io) = ShimIoGuard::enter() else {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, name, class, info, length, ret_len) };
-    };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe {
-        crate::regquery::query_value_key(
-            &reg_real(),
-            key as isize,
-            name,
-            class,
-            info,
-            length,
-            ret_len,
-        )
-    }
+reg_read_body! {
+    /// `NtQueryValueKey` hook. See `regquery::query_value_key`.
+    fn query_value_hook_body(
+        key: HANDLE,
+        name: *const UnicodeString,
+        class: u32,
+        info: *mut c_void,
+        length: u32,
+        ret_len: *mut u32,
+    ),
+    QueryValueKey, TRAMP_QUERY_VALUE, |tramp| crate::regquery::query_value_key(&reg_real(), key as isize, name, class, info, length, ret_len);
 }
 
-/// `NtEnumerateValueKey` hook. See `regquery::enumerate_value_key`.
-pub(super) unsafe fn enum_value_hook_body(
-    key: HANDLE,
-    index: u32,
-    class: u32,
-    info: *mut c_void,
-    length: u32,
-    ret_len: *mut u32,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::EnumerateValueKey);
-    let Some(tramp) = TRAMP_ENUM_VALUE.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if reg_bypass() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, index, class, info, length, ret_len) };
-    }
-    let Some(_io) = ShimIoGuard::enter() else {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, index, class, info, length, ret_len) };
-    };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe {
-        crate::regquery::enumerate_value_key(
-            &reg_real(),
-            key as isize,
-            index,
-            class,
-            info,
-            length,
-            ret_len,
-        )
-    }
+reg_read_body! {
+    /// `NtEnumerateValueKey` hook. See `regquery::enumerate_value_key`.
+    fn enum_value_hook_body(
+        key: HANDLE,
+        index: u32,
+        class: u32,
+        info: *mut c_void,
+        length: u32,
+        ret_len: *mut u32,
+    ),
+    EnumerateValueKey, TRAMP_ENUM_VALUE, |tramp| crate::regquery::enumerate_value_key(&reg_real(), key as isize, index, class, info, length, ret_len);
 }
 
-/// `NtQueryMultipleValueKey` hook. See `regquery::query_multiple_value_key`.
-pub(super) unsafe fn query_multiple_hook_body(
-    key: HANDLE,
-    entries: *mut c_void,
-    count: u32,
-    buffer: *mut c_void,
-    buffer_len: *mut u32,
-    required: *mut u32,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QueryMultipleValueKey);
-    let Some(tramp) = TRAMP_QUERY_MULTIPLE.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if reg_bypass() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, entries, count, buffer, buffer_len, required) };
-    }
-    let Some(_io) = ShimIoGuard::enter() else {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, entries, count, buffer, buffer_len, required) };
-    };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    unsafe {
-        crate::regquery::query_multiple_value_key(
-            &reg_real(),
-            key as isize,
-            entries,
-            count,
-            buffer,
-            buffer_len,
-            required,
-        )
-    }
-}
-
-/// Whether a registry *write* hook may go on with the overlay on: not when this thread is inside
-/// the shim's own work (ruling: such a write is refused, never made for real). `Some(guard)` to
-/// hold for the call.
-fn reg_write_guard() -> Option<ShimIoGuard> {
-    if in_hook_reenter() {
-        return None;
-    }
-    ShimIoGuard::enter()
-}
-
-/// `NtSetValueKey` hook. With the overlay on, a write on a virtualised key goes to the director
-/// (`regwrite::set_value_key`) and never to the real key; `TitleIndex` is ignored, as Windows
-/// ignores it.
-pub(super) unsafe fn set_value_key_hook_body(
-    key: HANDLE,
-    name: *const UnicodeString,
-    title_index: u32,
-    ty: u32,
-    data: *const c_void,
-    size: u32,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetValueKey);
-    let Some(tramp) = TRAMP_SET_VALUE.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if !crate::regclient::enabled() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, name, title_index, ty, data, size) };
-    }
-    let Some(_io) = reg_write_guard() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    let _ws = crate::regclient::WriteScope::enter();
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    match unsafe { crate::regwrite::set_value_key(&reg_real(), key as isize, name, ty, data, size) }
-    {
-        crate::regwrite::Write::Done(st) => st,
-        // SAFETY: the original NT function, called with valid NT arguments.
-        crate::regwrite::Write::Pass => unsafe { tramp(key, name, title_index, ty, data, size) },
-    }
-}
-
-/// `NtDeleteValueKey` hook. See `regwrite::delete_value_key`.
-pub(super) unsafe fn delete_value_key_hook_body(
-    key: HANDLE,
-    name: *const UnicodeString,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::DeleteValueKey);
-    let Some(tramp) = TRAMP_DELETE_VALUE.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if !crate::regclient::enabled() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, name) };
-    }
-    let Some(_io) = reg_write_guard() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    let _ws = crate::regclient::WriteScope::enter();
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    match unsafe { crate::regwrite::delete_value_key(&reg_real(), key as isize, name) } {
-        crate::regwrite::Write::Done(st) => st,
-        // SAFETY: the original NT function, called with valid NT arguments.
-        crate::regwrite::Write::Pass => unsafe { tramp(key, name) },
-    }
-}
-
-/// `NtDeleteKey` hook. See `regwrite::delete_key`.
-pub(super) unsafe fn delete_key_hook_body(key: HANDLE) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::DeleteKey);
-    let Some(tramp) = TRAMP_DELETE_KEY.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if !crate::regclient::enabled() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key) };
-    }
-    let Some(_io) = reg_write_guard() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    let _ws = crate::regclient::WriteScope::enter();
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    match unsafe { crate::regwrite::delete_key(&reg_real(), key as isize) } {
-        crate::regwrite::Write::Done(st) => st,
-        // SAFETY: the original NT function, called with valid NT arguments.
-        crate::regwrite::Write::Pass => unsafe { tramp(key) },
-    }
-}
-
-/// `NtRenameKey` hook. See `regwrite::rename_key`.
-pub(super) unsafe fn rename_key_hook_body(key: HANDLE, new_name: *const UnicodeString) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::RenameKey);
-    let Some(tramp) = TRAMP_RENAME_KEY.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if !crate::regclient::enabled() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, new_name) };
-    }
-    let Some(_io) = reg_write_guard() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    let _ws = crate::regclient::WriteScope::enter();
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    match unsafe { crate::regwrite::rename_key(&reg_real(), key as isize, new_name) } {
-        crate::regwrite::Write::Done(st) => st,
-        // SAFETY: the original NT function, called with valid NT arguments.
-        crate::regwrite::Write::Pass => unsafe { tramp(key, new_name) },
-    }
-}
-
-/// `NtSetInformationKey` hook. See `regwrite::set_information_key`.
-pub(super) unsafe fn set_info_key_hook_body(
-    key: HANDLE,
-    class: u32,
-    info: *const c_void,
-    length: u32,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetInformationKey);
-    let Some(tramp) = TRAMP_SET_INFO_KEY.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if !crate::regclient::enabled() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key, class, info, length) };
-    }
-    let Some(_io) = reg_write_guard() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    let _ws = crate::regclient::WriteScope::enter();
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    match unsafe {
-        crate::regwrite::set_information_key(&reg_real(), key as isize, class, info, length)
-    } {
-        crate::regwrite::Write::Done(st) => st,
-        // SAFETY: the original NT function, called with valid NT arguments.
-        crate::regwrite::Write::Pass => unsafe { tramp(key, class, info, length) },
-    }
-}
-
-/// `NtFlushKey` hook. See `regwrite::flush_key`. A flush writes nothing the caller did not
-/// already write, so the shim's own (re-entrant) calls pass through like the read hooks'.
-pub(super) unsafe fn flush_key_hook_body(key: HANDLE) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::FlushKey);
-    let Some(tramp) = TRAMP_FLUSH_KEY.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    if reg_bypass() {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key) };
-    }
-    let Some(_io) = ShimIoGuard::enter() else {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        return unsafe { tramp(key) };
-    };
-    let _ws = crate::regclient::WriteScope::enter();
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    match unsafe { crate::regwrite::flush_key(&reg_real(), key as isize) } {
-        crate::regwrite::Write::Done(st) => st,
-        // SAFETY: the original NT function, called with valid NT arguments.
-        crate::regwrite::Write::Pass => unsafe { tramp(key) },
-    }
-}
-
-/// `NtNotifyChangeKey` hook. A key the overlay serves gets an overlay waiter
-/// (`regnotify::notify`); anything else the real call.
-#[allow(clippy::too_many_arguments)]
-pub(super) unsafe fn notify_key_hook_body(
-    key: HANDLE,
-    event: HANDLE,
-    apc: *const c_void,
-    apc_ctx: *const c_void,
-    iosb: *mut c_void,
-    filter: u32,
-    subtree: u8,
-    buffer: *mut c_void,
-    buffer_len: u32,
-    asynchronous: u8,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::NotifyChangeKey);
-    let Some(tramp) = TRAMP_NOTIFY_KEY.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    let pass = || {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        unsafe {
-            tramp(
-                key,
-                event,
-                apc,
-                apc_ctx,
-                iosb,
-                filter,
-                subtree,
-                buffer,
-                buffer_len,
-                asynchronous,
-            )
-        }
-    };
-    if reg_bypass() {
-        return pass();
-    }
-    let Some(_io) = ShimIoGuard::enter() else {
-        return pass();
-    };
-    let args = crate::regnotify::Args {
-        event,
-        apc,
-        apc_ctx,
-        iosb,
-        subtree: subtree != 0,
-        asynchronous: asynchronous != 0,
-        count: 0,
-    };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    match unsafe { crate::regnotify::notify(&reg_real(), key as isize, &args) } {
-        crate::regnotify::Notify::Done(st) => st,
-        crate::regnotify::Notify::Pass => pass(),
-    }
-}
-
-/// `NtNotifyChangeMultipleKeys` hook: as `NtNotifyChangeKey` for the master key; subordinate
-/// keys on a key the overlay serves are `STATUS_NOT_SUPPORTED`.
-#[allow(clippy::too_many_arguments)]
-pub(super) unsafe fn notify_multiple_hook_body(
-    key: HANDLE,
-    count: u32,
-    subordinates: *const ObjectAttributes,
-    event: HANDLE,
-    apc: *const c_void,
-    apc_ctx: *const c_void,
-    iosb: *mut c_void,
-    filter: u32,
-    subtree: u8,
-    buffer: *mut c_void,
-    buffer_len: u32,
-    asynchronous: u8,
-) -> NTSTATUS {
-    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::NotifyChangeMultipleKeys);
-    let Some(tramp) = TRAMP_NOTIFY_MULTIPLE.get() else {
-        return STATUS_UNSUCCESSFUL;
-    };
-    let pass = || {
-        // SAFETY: the original NT function, called with valid NT arguments.
-        unsafe {
-            tramp(
-                key,
-                count,
-                subordinates,
-                event,
-                apc,
-                apc_ctx,
-                iosb,
-                filter,
-                subtree,
-                buffer,
-                buffer_len,
-                asynchronous,
-            )
-        }
-    };
-    if reg_bypass() {
-        return pass();
-    }
-    let Some(_io) = ShimIoGuard::enter() else {
-        return pass();
-    };
-    let args = crate::regnotify::Args {
-        event,
-        apc,
-        apc_ctx,
-        iosb,
-        subtree: subtree != 0,
-        asynchronous: asynchronous != 0,
+reg_read_body! {
+    /// `NtQueryMultipleValueKey` hook. See `regquery::query_multiple_value_key`.
+    fn query_multiple_hook_body(
+        key: HANDLE,
+        entries: *mut c_void,
+        count: u32,
+        buffer: *mut c_void,
+        buffer_len: *mut u32,
+        required: *mut u32,
+    ),
+    QueryMultipleValueKey, TRAMP_QUERY_MULTIPLE, |tramp| crate::regquery::query_multiple_value_key(
+        &reg_real(),
+        key as isize,
+        entries,
         count,
+        buffer,
+        buffer_len,
+        required,
+    );
+}
+
+reg_write_body! {
+    /// `NtSetValueKey` hook. With the overlay on, a write on a virtualised key goes to the director
+    /// (`regwrite::set_value_key`) and never to the real key; `TitleIndex` is ignored, as Windows
+    /// ignores it.
+    fn set_value_key_hook_body(
+        key: HANDLE,
+        name: *const UnicodeString,
+        title_index: u32,
+        ty: u32,
+        data: *const c_void,
+        size: u32,
+    ),
+    SetValueKey, TRAMP_SET_VALUE, crate::regwrite::set_value_key(&reg_real(), key as isize, name, ty, data, size);
+}
+
+reg_write_body! {
+    /// `NtDeleteValueKey` hook. See `regwrite::delete_value_key`.
+    fn delete_value_key_hook_body(
+        key: HANDLE,
+        name: *const UnicodeString,
+    ),
+    DeleteValueKey, TRAMP_DELETE_VALUE, crate::regwrite::delete_value_key(&reg_real(), key as isize, name);
+}
+
+reg_write_body! {
+    /// `NtDeleteKey` hook. See `regwrite::delete_key`.
+    fn delete_key_hook_body(
+        key: HANDLE,
+    ),
+    DeleteKey, TRAMP_DELETE_KEY, crate::regwrite::delete_key(&reg_real(), key as isize);
+}
+
+reg_write_body! {
+    /// `NtRenameKey` hook. See `regwrite::rename_key`.
+    fn rename_key_hook_body(
+        key: HANDLE,
+        new_name: *const UnicodeString,
+    ),
+    RenameKey, TRAMP_RENAME_KEY, crate::regwrite::rename_key(&reg_real(), key as isize, new_name);
+}
+
+reg_write_body! {
+    /// `NtSetInformationKey` hook. See `regwrite::set_information_key`.
+    fn set_info_key_hook_body(
+        key: HANDLE,
+        class: u32,
+        info: *const c_void,
+        length: u32,
+    ),
+    SetInformationKey, TRAMP_SET_INFO_KEY, crate::regwrite::set_information_key(&reg_real(), key as isize, class, info, length);
+}
+
+reg_read_body! {
+    /// `NtFlushKey` hook. See `regwrite::flush_key`. A flush writes nothing the caller did not
+    /// already write, so the shim's own (re-entrant) calls pass through like the read hooks'.
+    fn flush_key_hook_body(
+        key: HANDLE,
+    ),
+    FlushKey, TRAMP_FLUSH_KEY, |tramp| {
+        let _ws = crate::regclient::WriteScope::enter();
+        done_or(crate::regwrite::flush_key(&reg_real(), key as isize), || tramp(key))
     };
-    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    match unsafe { crate::regnotify::notify(&reg_real(), key as isize, &args) } {
-        crate::regnotify::Notify::Done(st) => st,
-        crate::regnotify::Notify::Pass => pass(),
-    }
+}
+
+reg_read_body! {
+    /// `NtNotifyChangeKey` hook. A key the overlay serves gets an overlay waiter
+    /// (`regnotify::notify`); anything else the real call.
+    #[allow(clippy::too_many_arguments)]
+    fn notify_key_hook_body(
+        key: HANDLE,
+        event: HANDLE,
+        apc: *const c_void,
+        apc_ctx: *const c_void,
+        iosb: *mut c_void,
+        filter: u32,
+        subtree: u8,
+        buffer: *mut c_void,
+        buffer_len: u32,
+        asynchronous: u8,
+    ),
+    NotifyChangeKey, TRAMP_NOTIFY_KEY, |tramp, pass| {
+        let args = crate::regnotify::Args {
+            event,
+            apc,
+            apc_ctx,
+            iosb,
+            subtree: subtree != 0,
+            asynchronous: asynchronous != 0,
+            count: 0,
+        };
+        match crate::regnotify::notify(&reg_real(), key as isize, &args) {
+            crate::regnotify::Notify::Done(st) => st,
+            crate::regnotify::Notify::Pass => pass(),
+        }
+    };
+}
+
+reg_read_body! {
+    /// `NtNotifyChangeMultipleKeys` hook: as `NtNotifyChangeKey` for the master key; subordinate
+    /// keys on a key the overlay serves are `STATUS_NOT_SUPPORTED`.
+    #[allow(clippy::too_many_arguments)]
+    fn notify_multiple_hook_body(
+        key: HANDLE,
+        count: u32,
+        subordinates: *const ObjectAttributes,
+        event: HANDLE,
+        apc: *const c_void,
+        apc_ctx: *const c_void,
+        iosb: *mut c_void,
+        filter: u32,
+        subtree: u8,
+        buffer: *mut c_void,
+        buffer_len: u32,
+        asynchronous: u8,
+    ),
+    NotifyChangeMultipleKeys, TRAMP_NOTIFY_MULTIPLE, |tramp, pass| {
+        let args = crate::regnotify::Args {
+            event,
+            apc,
+            apc_ctx,
+            iosb,
+            subtree: subtree != 0,
+            asynchronous: asynchronous != 0,
+            count,
+        };
+        match crate::regnotify::notify(&reg_real(), key as isize, &args) {
+            crate::regnotify::Notify::Done(st) => st,
+            crate::regnotify::Notify::Pass => pass(),
+        }
+    };
 }
 
 /// `NtQuerySecurityObject` hook: a synthetic key answers the real key's (or nearest real
@@ -719,7 +531,7 @@ pub(super) unsafe fn set_security_hook_body(
     }
     // With the overlay on, a security change this hook cannot examine (the shim's own call, or
     // no guard) is refused, as the write hooks refuse theirs: it may be on a virtualised key.
-    let Some(_io) = reg_write_guard() else {
+    let Some(_io) = ShimIoGuard::enter() else {
         return STATUS_UNSUCCESSFUL;
     };
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
@@ -760,7 +572,7 @@ pub(super) unsafe fn set_info_object_hook_body(
 /// `modifies`: the call changes the real registry (Restore, Replace, Load*, Unload*, transacted
 /// create/open). When the hook is bypassed with the overlay on (the shim's own call, or no
 /// guard) such a call is refused with `STATUS_UNSUCCESSFUL`, as the write hooks refuse theirs
-/// (`reg_write_guard`); the harmless ones (Save, Compress, Lock) still get the real call.
+/// (`ShimIoGuard::enter` fails); the harmless ones (Save, Compress, Lock) still get the real call.
 ///
 /// `refuse` is evaluated inside the generated `unsafe fn` but is not itself in an unsafe block:
 /// an invocation whose `refuse` calls an `unsafe fn` (`served_key`, `served_target`) wraps that
@@ -778,7 +590,7 @@ macro_rules! out_of_scope_body {
                 // SAFETY: the original NT function, called with valid NT arguments.
                 return unsafe { tramp($($arg),*) };
             }
-            let Some(_io) = reg_write_guard() else {
+            let Some(_io) = ShimIoGuard::enter() else {
                 if $modifies {
                     return STATUS_UNSUCCESSFUL;
                 }
