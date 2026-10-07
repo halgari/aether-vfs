@@ -2785,18 +2785,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vfs-launch"
-version = "0.1.0"
-dependencies = [
- "vfs-core",
- "vfs-embed",
- "vfs-ipc",
- "vfs-protocol",
- "vfs-server",
- "vfs-zip",
-]
-
-[[package]]
 name = "vfs-pe"
 version = "0.1.0"
 
@@ -2858,16 +2846,6 @@ dependencies = [
  "vfs-storage",
  "vfs-unix",
  "vfs-win",
-]
-
-[[package]]
-name = "vfs-server"
-version = "0.1.0"
-dependencies = [
- "vfs-core",
- "vfs-ipc",
- "vfs-protocol",
- "vfs-shared",
 ]
 
 [[package]]

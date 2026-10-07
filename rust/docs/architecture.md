@@ -321,7 +321,7 @@ enableable by accident), and `opt_out` is on unless explicitly disabled.
 `vfs_env::describe()` prints the whole surface; the rustdoc on each constant is
 the reference.
 
-### 3.8 Control plane — `vfs-control`, `vfs-directord`, `vfs-launch`
+### 3.8 Control plane — `vfs-control`, `vfs-directord`
 
 A gRPC contract plus a declarative config schema, a daemon that can hold many
 sessions, and CLIs. The control plane is language-agnostic; the data plane is
@@ -726,7 +726,6 @@ observer before concluding the process is idle.
 | `vfs-shim` / `vfs-shim-dll` | NT detours, FUSE client, synthetic handles, sections |
 | `vfs-payload` | `no_std` pre-init hook payload |
 | `vfs-inject` | injection, PE parsing, process creation |
-| `vfs-launch` | end-user launcher |
 | `vfs-fixture-*`, `vfs-ring-harness` | test fixtures |
 
 Dependency direction is enforced by the split: pure crates never learn about the

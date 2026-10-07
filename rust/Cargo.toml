@@ -31,7 +31,6 @@ members = [
   "crates/vfs-ipc",
   "crates/vfs-inject",
   "crates/vfs-redirect",
-  "crates/vfs-server",
   "crates/vfs-director",
   "crates/vfs-embed",
   "crates/vfs-shim",
@@ -46,7 +45,6 @@ members = [
   # which is the thicker of the two.
   "crates/vfs-proton",
   "crates/vfs-zip",
-  "crates/vfs-launch",
   "crates/vfs-fixture-read",
   "crates/vfs-fixture-writepath",
   "crates/vfs-fixture-escape",

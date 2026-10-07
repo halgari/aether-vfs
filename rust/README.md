@@ -25,12 +25,9 @@ vfs-state\
 ```
 
 ```powershell
-cargo build -p vfs-shim-dll -p vfs-launch --release
+cargo build -p vfs-shim-dll --release
 cargo build --release --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
-cargo run -p vfs-launch --release
-# optional:
-cargo run -p vfs-launch --release -- --probe   # VFS reads only
-cargo run -p vfs-launch --release -- --wait    # wait for game exit
+# The `vfs-launch` CLI was removed; launch through `vfs` (vfs-directord) or vfs-embed.
 ```
 
 ## Host API sketch

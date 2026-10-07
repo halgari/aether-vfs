@@ -107,8 +107,7 @@ impl Inner {
 
 /// Running IPC server bound to a director kernel (keeps workers alive).
 ///
-/// This is the **production ring host** for remapped child I/O (not the legacy
-/// `vfs_server::Server` tree path).
+/// This is the **production ring host** for remapped child I/O.
 pub struct IpcServe {
     /// Windows-only, with the three event-name fields below: they name the
     /// *named-section* handshake, which has no counterpart in the file-backed

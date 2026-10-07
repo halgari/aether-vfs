@@ -4,7 +4,7 @@ Numbers for the director FUSE control ring (shared-memory RPC) and related delta
 
 | Doc | Description |
 |-----|-------------|
-| [fuse-rpc-latest.md](./fuse-rpc-latest.md) | Last full machine report from `vfs-fuse-bench` |
+| [fuse-rpc-latest.md](./fuse-rpc-latest.md) | Last full machine report from `vfs-fuse-bench` (**historical**: the tool and `vfs-server` are deleted) |
 | [fuse-rpc-performance.md](./fuse-rpc-performance.md) | Early performance summary |
 | [a-optimizations-delta.md](./a-optimizations-delta.md) | A1–A5 (open handle, unlock I/O, decode-into, geom, pipeline) |
 | [b-optimizations-delta.md](./b-optimizations-delta.md) | B1–B5 (bulk arena, payload cap, workers, events, readahead) |
@@ -22,8 +22,8 @@ Architecture context: [../architecture.md](../architecture.md) §5.
 ## Run
 
 ```powershell
-cargo run -p vfs-launch --bin vfs-fuse-bench --release
-cargo run -p vfs-launch --bin vfs-fuse-bench --release -- --zip
+# vfs-fuse-bench was deleted with vfs-launch; the live benchmark is ring-bench:
+cargo run -p vfs-ring-harness --bin ring-bench --release
 ```
 
 The block-cache figures were produced by `spike-node/cache-cost`, a throwaway
