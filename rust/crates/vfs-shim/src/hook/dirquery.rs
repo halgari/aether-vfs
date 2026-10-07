@@ -1,4 +1,5 @@
 //! Directory enumeration: `NtQueryDirectoryFile` and `NtQueryDirectoryFileEx`.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{DIR_TABLE, ENGINE, TRAMP_QDIR, TRAMP_QDIREX, path_of_handle};
 use crate::ntdef::{
@@ -31,7 +32,9 @@ pub(super) struct DirTracked {
 /// Extract a search wildcard from a `PUNICODE_STRING`. Null/empty/`*`/`*.*`
 /// mean "match everything" (`Ok(None)`). A string `ntbuf::us_units` rejects is `Err`.
 unsafe fn wildcard_of(file_name: *const UnicodeString) -> Result<Option<String>, NTSTATUS> {
-    Ok(crate::ntbuf::us_string(file_name)?.filter(|s| !(s.is_empty() || s == "*" || s == "*.*")))
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    Ok(unsafe { crate::ntbuf::us_string(file_name) }?
+        .filter(|s| !(s.is_empty() || s == "*" || s == "*.*")))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -52,21 +55,24 @@ pub(super) unsafe fn qdirex_hook_body(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    serve_dir_query(
-        handle,
-        iosb,
-        info,
-        length,
-        class_raw,
-        flags & SL_RESTART_SCAN != 0,
-        flags & SL_RETURN_SINGLE_ENTRY != 0,
-        file_name,
-        &|| {
-            tramp(
-                handle, event, apc, apc_ctx, iosb, info, length, class_raw, flags, file_name,
-            )
-        },
-    )
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe {
+        serve_dir_query(
+            handle,
+            iosb,
+            info,
+            length,
+            class_raw,
+            flags & SL_RESTART_SCAN != 0,
+            flags & SL_RETURN_SINGLE_ENTRY != 0,
+            file_name,
+            &|| {
+                tramp(
+                    handle, event, apc, apc_ctx, iosb, info, length, class_raw, flags, file_name,
+                )
+            },
+        )
+    }
 }
 
 /// The classic entry point. Same body, different argument shape.
@@ -89,22 +95,25 @@ pub(super) unsafe fn qdir_hook_body(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    serve_dir_query(
-        handle,
-        iosb,
-        info,
-        length,
-        class_raw,
-        restart != 0,
-        single != 0,
-        file_name,
-        &|| {
-            tramp(
-                handle, event, apc, apc_ctx, iosb, info, length, class_raw, single, file_name,
-                restart,
-            )
-        },
-    )
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe {
+        serve_dir_query(
+            handle,
+            iosb,
+            info,
+            length,
+            class_raw,
+            restart != 0,
+            single != 0,
+            file_name,
+            &|| {
+                tramp(
+                    handle, event, apc, apc_ctx, iosb, info, length, class_raw, single, file_name,
+                    restart,
+                )
+            },
+        )
+    }
 }
 
 /// Shared body for both enumeration entry points.
@@ -143,7 +152,8 @@ unsafe fn serve_dir_query(
                     let dir = path_of_handle(handle).unwrap_or_else(|| "<unknown>".to_string());
                     crate::hookstats::note_readdir(
                         &dir,
-                        wildcard_of(file_name).ok().flatten().as_deref(),
+                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                        unsafe { wildcard_of(file_name) }.ok().flatten().as_deref(),
                         0,
                         crate::hookstats::ReadDirSource::Os,
                     );
@@ -243,7 +253,8 @@ unsafe fn serve_dir_query(
     // the lock must NOT be held here (NtClose also takes it).
     let rebuilt = if need_build {
         // A wildcard NT's own capture refuses gets NT's answer.
-        let wildcard = match wildcard_of(file_name) {
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        let wildcard = match unsafe { wildcard_of(file_name) } {
             Ok(w) => w,
             Err(st) => return st,
         };
@@ -361,7 +372,8 @@ unsafe fn serve_dir_query(
         if let Some((entries, source)) = rebuilt {
             crate::hookstats::note_readdir(
                 &dir_path,
-                wildcard_of(file_name).ok().flatten().as_deref(),
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { wildcard_of(file_name) }.ok().flatten().as_deref(),
                 entries.len(),
                 source,
             );
@@ -378,7 +390,8 @@ unsafe fn serve_dir_query(
 
     // Unlocked from here: a fault on `info` can now re-enter the shim freely.
     if result.bytes > 0 {
-        let buf = core::slice::from_raw_parts_mut(info as *mut u8, length as usize);
+        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+        let buf = unsafe { core::slice::from_raw_parts_mut(info as *mut u8, length as usize) };
         buf[..result.bytes].copy_from_slice(&scratch[..result.bytes]);
     }
 
@@ -388,7 +401,8 @@ unsafe fn serve_dir_query(
         DirStatus::BufferOverflow => STATUS_BUFFER_OVERFLOW,
     };
     // IO_STATUS_BLOCK: Status (NTSTATUS) @0, Information (ULONG_PTR) @8.
-    crate::ntbuf::iosb_set(iosb, status, result.bytes);
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe { crate::ntbuf::iosb_set(iosb, status, result.bytes) };
     status
 }
 
