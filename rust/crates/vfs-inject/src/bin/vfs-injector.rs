@@ -1,8 +1,7 @@
-//! Generic injector (formalized from the M3 spike): a JVM-drivable wrapper
-//! over `run_target_with_shim`. The JVM sets the ring env (VFS_RING_SECTION
-//! etc.), spawns this bin; this bin injects the shim (dual-layer) into the
-//! target, which inherits the env and connects its FuseClient back to the JVM
-//! ring.
+//! Generic injector: a command-line wrapper over `run_target_with_shim`. The
+//! host (the director, or a test) sets the ring env (VFS_RING_SECTION etc.) and
+//! spawns this bin; this bin injects the shim (dual-layer) into the target,
+//! which inherits the env and connects its FuseClient back to the host's ring.
 //!
 //! Usage:
 //!   vfs-injector <target_exe> <shim_dll> <payload_dll> <config_file> <ready_file> [-- target_args...]

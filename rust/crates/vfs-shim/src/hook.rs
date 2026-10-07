@@ -1098,7 +1098,7 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
 
     // Present since Win8, and optional for the same reason `NtQueryInformationByName`
     // below is: a host may not export it. Measured against GE-Proton11-6
-    // (Wine 11.0 Staging), whose ntdll does not export exactly these two of the
+    // (Wine 11.0 Staging), whose ntdll omits exactly these two of the
     // functions installed here.
     //
     // Skipping it costs no coverage on such a host. `make_detour` fails because
