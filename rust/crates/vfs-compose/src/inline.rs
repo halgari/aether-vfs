@@ -1,21 +1,29 @@
-//! Read-only, immutable in-memory file tree (Clojure `inline-provider`).
-//!
-//! A [`MemoryProvider`] with the write half of the contract taken away: the
-//! tree is the one `MemoryProvider` serves (fold-equal lookup, synthesized
-//! parent directories), but the capabilities declare `Access::Read` and
-//! `immutable`, and every mutating call is refused. Many tests across the
-//! workspace key off exactly those capabilities, which is why this stays a
-//! type of its own rather than a mode of `MemoryProvider`.
+//! In-memory file tree backend for tests (Clojure `inline-provider`).
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use vfs_provider::{
-    bad_request, Capabilities, DirEntry, Handle, Provider, Stat, VPath, OPEN_READ, OPEN_WRITE,
+    bad_fh, bad_request, map_io_err, not_a_dir, not_found, Capabilities, DirEntry,
+    Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
 
-use crate::MemoryProvider;
+use crate::casefold::{fold_components, fold_strip_prefix};
+
+struct FileData {
+    bytes: Vec<u8>,
+}
 
 /// Flat map of virtual paths → file bytes. Parent dirs are synthesized.
 pub struct InlineProvider {
-    tree: MemoryProvider,
+    files: HashMap<String, FileData>,
+    /// Folded key → the spelling `files` is keyed by. Built once; this provider
+    /// is immutable after construction, so unlike `MemoryProvider`'s index this
+    /// one needs no maintenance and no lock.
+    by_fold: HashMap<String, String>,
+    next: AtomicU64,
+    opens: Mutex<HashMap<u64, (String, Vec<u8>)>>,
 }
 
 impl InlineProvider {
@@ -25,10 +33,77 @@ impl InlineProvider {
         P: AsRef<str>,
         B: AsRef<[u8]>,
     {
+        let mut files = HashMap::new();
+        for (p, b) in entries {
+            let path = normalize(p.as_ref());
+            files.insert(
+                path,
+                FileData {
+                    bytes: b.as_ref().to_vec(),
+                },
+            );
+        }
+        let mut by_fold = HashMap::with_capacity(files.len());
+        for key in files.keys() {
+            by_fold.insert(vfs_core::fold(key), key.clone());
+        }
         Self {
-            tree: MemoryProvider::from_files(entries),
+            files,
+            by_fold,
+            next: AtomicU64::new(1),
+            opens: Mutex::new(HashMap::new()),
         }
     }
+
+    /// The stored spelling for `path`, or `None` if nothing fold-equal exists.
+    fn canonical(&self, path: &str) -> Option<&String> {
+        if self.files.contains_key(path) {
+            return self.files.get_key_value(path).map(|(k, _)| k);
+        }
+        self.by_fold.get(&vfs_core::fold(path))
+    }
+
+    /// Shared getattr logic, addressed by an already-normalized plain path.
+    fn stat(&self, path: &str) -> Result<Option<Stat>, i32> {
+        if path.is_empty() {
+            return Ok(Some(Stat {
+                kind: KIND_DIR,
+                size: 0,
+                mtime: 0,
+            }));
+        }
+        if let Some(key) = self.canonical(path) {
+            let f = &self.files[key];
+            return Ok(Some(Stat {
+                kind: KIND_FILE,
+                size: f.bytes.len() as u64,
+                mtime: 0,
+            }));
+        }
+        // Directory if any file has this path as a fold-equal component
+        // prefix. Compared component-by-component (never by byte offset):
+        // fold is not length-preserving, so a folded query and an unfolded
+        // key can only be lined up by walking `/`-separated parts.
+        if dir_has_fold_prefix(self.files.keys().map(String::as_str), path) {
+            return Ok(Some(Stat {
+                kind: KIND_DIR,
+                size: 0,
+                mtime: 0,
+            }));
+        }
+        Ok(None)
+    }
+}
+
+fn normalize(path: &str) -> String {
+    path.replace('\\', "/").trim_matches('/').to_string()
+}
+
+/// True if any of `keys` has `query` as a proper fold-equal directory prefix.
+fn dir_has_fold_prefix<'a>(keys: impl Iterator<Item = &'a str>, query: &str) -> bool {
+    let query = fold_components(query);
+    keys.into_iter()
+        .any(|k| fold_strip_prefix(k, &query).is_some())
 }
 
 impl Provider for InlineProvider {
@@ -40,28 +115,88 @@ impl Provider for InlineProvider {
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
-        self.tree.getattr(p)
+        let path = p.rel;
+        let path = normalize(path);
+        self.stat(&path)
     }
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
-        self.tree.readdir(p)
+        let path = p.rel;
+        let path = normalize(path);
+        if self.stat(&path)?.map(|s| s.kind) != Some(KIND_DIR) {
+            if self.canonical(&path).is_some() {
+                return Err(not_a_dir());
+            }
+            return Err(not_found());
+        }
+        let query = fold_components(&path);
+        let mut names: HashMap<String, Stat> = HashMap::new();
+        for (k, f) in &self.files {
+            let Some(rel) = fold_strip_prefix(k, &query) else {
+                continue;
+            };
+            let name = rel.split('/').next().unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            let is_file = !rel.contains('/');
+            let st = if is_file {
+                Stat {
+                    kind: KIND_FILE,
+                    size: f.bytes.len() as u64,
+                    mtime: 0,
+                }
+            } else {
+                Stat {
+                    kind: KIND_DIR,
+                    size: 0,
+                    mtime: 0,
+                }
+            };
+            names.entry(name.to_string()).or_insert(st);
+        }
+        Ok(names
+            .into_iter()
+            .map(|(name, stat)| DirEntry { name, stat })
+            .collect())
     }
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+        let path = p.rel;
         if flags & OPEN_WRITE != 0 {
             return Err(bad_request());
         }
-        // Read-only whatever else the caller asked for: create, truncate and
-        // exclusive are meaningless here and must not reach the tree.
-        self.tree.open(p, OPEN_READ)
+        let path = normalize(path);
+        let key = self.canonical(&path).ok_or_else(not_found)?;
+        let f = &self.files[key];
+        let h = self.next.fetch_add(1, Ordering::Relaxed);
+        let size = f.bytes.len() as u64;
+        self.opens
+            .lock()
+            .map_err(|_| map_io_err())?
+            .insert(h, (key.clone(), f.bytes.clone()));
+        Ok((h, size, false))
     }
 
     fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-        self.tree.read_at(h, offset, buf)
+        let g = self.opens.lock().map_err(|_| map_io_err())?;
+        let (_, bytes) = g.get(&h).ok_or_else(bad_fh)?;
+        if offset as usize >= bytes.len() {
+            return Ok(0);
+        }
+        let start = offset as usize;
+        let n = buf.len().min(bytes.len() - start);
+        buf[..n].copy_from_slice(&bytes[start..start + n]);
+        Ok(n)
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        self.tree.close(h)
+        self.opens
+            .lock()
+            .map_err(|_| map_io_err())?
+            .remove(&h)
+            .ok_or_else(bad_fh)?;
+        Ok(())
     }
 }
 
