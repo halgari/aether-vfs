@@ -166,6 +166,10 @@ impl Provider for SeekableProvider {
         self.inner.readdir(p)
     }
 
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        self.inner.stored_name(p)
+    }
+
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         let (inner, size, is_dir) = self.inner.open(p, flags)?;
         let h = self.next.fetch_add(1, Ordering::Relaxed);

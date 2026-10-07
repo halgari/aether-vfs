@@ -91,6 +91,20 @@ impl Provider for SubdirProvider {
         })
     }
 
+    /// The root of this provider has no name of its own. Mapping it would ask
+    /// `inner` for the prefix directory itself, and that answer is `inner`'s
+    /// spelling of the prefix, not a name in this provider.
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        if p.rel.trim_matches(|c| c == '/' || c == '\\').is_empty() {
+            return Ok(None);
+        }
+        let joined = self.map_path(p.rel);
+        self.inner.stored_name(VPath {
+            root: p.root,
+            rel: &joined,
+        })
+    }
+
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         let path = p.rel;
         let joined = self.map_path(path);

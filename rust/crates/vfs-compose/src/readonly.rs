@@ -63,6 +63,10 @@ impl Provider for ReadOnlyProvider {
         self.inner.readdir(p)
     }
 
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        self.inner.stored_name(p)
+    }
+
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         if flags & MUTATING_FLAGS != 0 {
             return Err(read_only());

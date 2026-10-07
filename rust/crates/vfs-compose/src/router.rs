@@ -73,6 +73,10 @@ impl Provider for RouterProvider {
         self.provider_for(path).readdir(p)
     }
 
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        self.provider_for(p.rel).stored_name(p)
+    }
+
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         let path = p.rel;
         let provider = self.provider_for(path);
