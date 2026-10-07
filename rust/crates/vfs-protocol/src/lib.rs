@@ -435,6 +435,18 @@ pub fn decode_names_req(p: &[u8]) -> Option<(u32, u32, String)> {
     Some((root, skip, path))
 }
 
+/// STORED_NAMES reply: the names joined by `/` (a name has no `/` in it).
+pub fn encode_names_resp(names: &[String]) -> Vec<u8> {
+    names.join("/").into_bytes()
+}
+
+/// The names of a STORED_NAMES reply, or `None` if it is not UTF-8. An empty
+/// payload is one empty name, as `str::split` has it.
+pub fn decode_names_resp(p: &[u8]) -> Option<Vec<String>> {
+    let text = core::str::from_utf8(p).ok()?;
+    Some(text.split('/').map(str::to_string).collect())
+}
+
 /// RENAME req: `root:u32 | from_len:u32 | from_utf8 | to_utf8`
 ///
 /// One root, not two: `Director::rename` resolves both sides against a single
@@ -807,6 +819,14 @@ pub fn decode_reg_key_reply(b: &[u8]) -> Option<(Option<Node>, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_resp_roundtrip() {
+        let names = vec!["Data".to_string(), "Skyrim.esm".to_string()];
+        assert_eq!(encode_names_resp(&names), b"Data/Skyrim.esm");
+        assert_eq!(decode_names_resp(&encode_names_resp(&names)), Some(names));
+        assert_eq!(decode_names_resp(&[0xff]), None);
+    }
 
     #[test]
     fn open_req_roundtrip() {

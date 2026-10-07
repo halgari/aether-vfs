@@ -5,10 +5,10 @@ use vfs_protocol::{
     decode_reg_rename_key, decode_reg_set_value, encode_reg_changed_reply, encode_reg_lookup_reply,
     encode_reg_version_reply, OP_REG_CHANGED, OP_REG_CREATE_KEY, OP_REG_DELETE_KEY,
     OP_REG_DELETE_VALUE, OP_REG_KEY, OP_REG_LOOKUP, OP_REG_RENAME_KEY, OP_REG_SET_VALUE,
-    ST_BAD_REQUEST, ST_OK, ST_REPLY_TOO_LARGE,
+    ST_REPLY_TOO_LARGE,
 };
 
-use super::max_read_data;
+use super::{bad, max_read_data, reply, Reply};
 use crate::registry::{lookup_state, RegistryHost};
 
 /// The registry overlay opcodes (15-22) against an attached [`RegistryHost`]. A payload that
@@ -24,55 +24,50 @@ pub(super) fn dispatch_registry(
     opcode: u32,
     payload: &[u8],
     payload_cap: u32,
-) -> (i32, Vec<u8>) {
-    let reply = |r: Result<Vec<u8>, i32>| match r {
-        Ok(b) => (ST_OK, b),
-        Err(st) => (st, Vec::new()),
-    };
+) -> Reply {
     let version = |r: Result<u64, i32>| reply(r.map(encode_reg_version_reply));
-    let bad = (ST_BAD_REQUEST, Vec::new());
     match opcode {
         OP_REG_LOOKUP => match decode_reg_path(payload) {
             Some(p) => reply(
                 host.lookup(p)
                     .map(|(l, below, v)| encode_reg_lookup_reply(lookup_state(l), below, v)),
             ),
-            None => bad,
+            None => bad(),
         },
         OP_REG_KEY => match decode_reg_path(payload) {
             Some(p) => match host.key_reply(p) {
                 Ok(b) if b.len() > max_read_data(payload_cap) => (ST_REPLY_TOO_LARGE, Vec::new()),
                 r => reply(r),
             },
-            None => bad,
+            None => bad(),
         },
         OP_REG_SET_VALUE => match decode_reg_set_value(payload) {
             Some((p, name, ty, data)) => version(host.set_value(p, name, ty, data)),
-            None => bad,
+            None => bad(),
         },
         OP_REG_DELETE_VALUE => match decode_reg_delete_value(payload) {
             Some((p, name)) => version(host.delete_value(p, name)),
-            None => bad,
+            None => bad(),
         },
         OP_REG_CREATE_KEY => match decode_reg_create_key(payload) {
             Some((p, volatile)) => version(host.create_key(p, volatile)),
-            None => bad,
+            None => bad(),
         },
         OP_REG_DELETE_KEY => match decode_reg_path(payload) {
             Some(p) => version(host.delete_key(p)),
-            None => bad,
+            None => bad(),
         },
         OP_REG_RENAME_KEY => match decode_reg_rename_key(payload) {
             Some((p, leaf)) => version(host.rename_key(p, leaf)),
-            None => bad,
+            None => bad(),
         },
         OP_REG_CHANGED => match decode_reg_changed(payload) {
             Some((p, subtree, since)) => reply(
                 host.changed(p, subtree, since)
                     .map(|(changed, v)| encode_reg_changed_reply(changed, v)),
             ),
-            None => bad,
+            None => bad(),
         },
-        _ => bad,
+        _ => bad(),
     }
 }
