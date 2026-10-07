@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
-use crate::ops::{
+use vfs_provider::{
     bad_request, is_dir, map_io_err, not_found, read_only, Access, DirEntry, Handle, Provider,
     RootId, SetAttr, Stat, VPath, OPEN_WRITE,
 };
@@ -301,7 +301,7 @@ impl Director {
     pub fn read(&self, fh: u64, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let (backend, bh, size, is_dir_flag) = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let rec = g.get(&fh).ok_or_else(crate::ops::bad_fh)?;
+            let rec = g.get(&fh).ok_or_else(vfs_provider::bad_fh)?;
             if rec.is_dir {
                 return Err(is_dir());
             }
@@ -319,7 +319,7 @@ impl Director {
     pub fn close(&self, fh: u64) -> Result<(), i32> {
         let rec = {
             let mut g = self.opens.lock().map_err(|_| map_io_err())?;
-            g.remove(&fh).ok_or_else(crate::ops::bad_fh)?
+            g.remove(&fh).ok_or_else(vfs_provider::bad_fh)?
         };
         rec.backend.close(rec.bh)
     }
@@ -332,7 +332,7 @@ impl Director {
     pub fn write(&self, fh: u64, offset: u64, buf: &[u8]) -> Result<usize, i32> {
         let (backend, bh, effective_offset) = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let rec = g.get(&fh).ok_or_else(crate::ops::bad_fh)?;
+            let rec = g.get(&fh).ok_or_else(vfs_provider::bad_fh)?;
             if rec.is_dir {
                 return Err(is_dir());
             }
@@ -359,7 +359,7 @@ impl Director {
     pub fn set_len(&self, fh: u64, len: u64) -> Result<(), i32> {
         let (backend, bh) = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let rec = g.get(&fh).ok_or_else(crate::ops::bad_fh)?;
+            let rec = g.get(&fh).ok_or_else(vfs_provider::bad_fh)?;
             (Arc::clone(&rec.backend), rec.bh)
         };
         let result = backend.set_len(bh, len);
@@ -379,7 +379,7 @@ impl Director {
     pub fn flush(&self, fh: u64) -> Result<(), i32> {
         let (backend, bh) = {
             let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let rec = g.get(&fh).ok_or_else(crate::ops::bad_fh)?;
+            let rec = g.get(&fh).ok_or_else(vfs_provider::bad_fh)?;
             (Arc::clone(&rec.backend), rec.bh)
         };
         backend.flush(bh)
@@ -417,7 +417,7 @@ impl Director {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ops::OPEN_READ;
+    use vfs_provider::OPEN_READ;
 
     /// What the shim's read cache relies on: a handle is reported immutable
     /// only when the provider that holds it is, even inside an overlay whose

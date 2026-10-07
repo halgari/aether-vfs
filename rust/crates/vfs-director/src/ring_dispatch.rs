@@ -13,7 +13,7 @@ use vfs_protocol::{
 
 use crate::director::Director;
 use crate::io_stats;
-use crate::ops::{KIND_DIR, OPEN_READ};
+use vfs_provider::{KIND_DIR, OPEN_READ};
 
 mod registry;
 

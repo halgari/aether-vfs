@@ -34,6 +34,8 @@ pub mod io_stats;
 // `vfs-protocol`, `vfs-ipc`, `vfs-compose` and `Director`.
 pub mod ipc;
 pub mod mount_graph;
+// compat: removed by cleanup stream I
+#[doc(hidden)]
 pub mod ops;
 pub mod path;
 pub mod registry;
@@ -45,7 +47,7 @@ pub use disk::DiskProvider;
 pub use ipc::IpcServe;
 pub use io_stats::{mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report};
 pub use mount_graph::MountGraph;
-pub use ops::{Provider, Handle, DirEntry, RootId, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
+pub use vfs_provider::{Provider, Handle, DirEntry, RootId, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
 pub use registry::{RegistryGenSink, RegistryGeneration};
 // compat: removed by cleanup stream I
 #[doc(hidden)]

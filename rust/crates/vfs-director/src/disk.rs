@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use crate::ops::{
+use vfs_provider::{
     bad_request, exists, map_io_err, not_a_dir, not_found, Access, Capabilities, CaseMatch,
     DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE,
     OPEN_EXCL, OPEN_TRUNC, OPEN_WRITE,
@@ -399,27 +399,27 @@ impl Provider for DiskProvider {
 
     fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         let mut g = self.opens.lock().map_err(|_| map_io_err())?;
-        let f = g.get_mut(&h).ok_or_else(crate::ops::bad_fh)?;
+        let f = g.get_mut(&h).ok_or_else(vfs_provider::bad_fh)?;
         f.seek(SeekFrom::Start(offset)).map_err(|_| map_io_err())?;
         f.read(buf).map_err(|_| map_io_err())
     }
 
     fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
         let mut g = self.opens.lock().map_err(|_| map_io_err())?;
-        let f = g.get_mut(&h).ok_or_else(crate::ops::bad_fh)?;
+        let f = g.get_mut(&h).ok_or_else(vfs_provider::bad_fh)?;
         f.seek(SeekFrom::Start(offset)).map_err(|_| map_io_err())?;
         f.write(buf).map_err(|_| map_io_err())
     }
 
     fn set_len(&self, h: Handle, len: u64) -> Result<(), i32> {
         let g = self.opens.lock().map_err(|_| map_io_err())?;
-        let f = g.get(&h).ok_or_else(crate::ops::bad_fh)?;
+        let f = g.get(&h).ok_or_else(vfs_provider::bad_fh)?;
         f.set_len(len).map_err(|_| map_io_err())
     }
 
     fn flush(&self, h: Handle) -> Result<(), i32> {
         let g = self.opens.lock().map_err(|_| map_io_err())?;
-        let f = g.get(&h).ok_or_else(crate::ops::bad_fh)?;
+        let f = g.get(&h).ok_or_else(vfs_provider::bad_fh)?;
         f.sync_all().map_err(|_| map_io_err())
     }
 

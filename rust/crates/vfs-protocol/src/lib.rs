@@ -4,10 +4,12 @@
 //! `vfs-registry`'s portable node model.
 #![forbid(unsafe_code)]
 
+// compat: removed by cleanup stream I
+#[doc(hidden)]
 pub mod ops;
 pub mod shimcfg;
 
-pub use ops::{
+pub use vfs_provider::{
     bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, not_supported, ok,
     read_only, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId, SetAttr, Stat,
     VPath, KIND_DIR, KIND_FILE, KIND_TOMBSTONE,
@@ -18,12 +20,14 @@ pub use vfs_provider::{
     ST_NOT_SUPPORTED, ST_NO_SPACE, ST_OK, ST_READ_ONLY, ST_REPLY_TOO_LARGE,
 };
 
-// Opcode catalog — must match `vfs_ipc::layout` values (do not renumber).
+// The opcode catalog. This is the only definition: `vfs_ipc::layout`
+// re-exports it. Numbers 4 and 12 are reserved (once `materialize` and
+// `register-process`); nothing sends them and the director answers
+// `ST_BAD_REQUEST`. Never renumber.
 
 pub const OP_GETATTR: u32 = 1;
 pub const OP_READDIR: u32 = 2;
 pub const OP_OPEN: u32 = 3;
-pub const OP_MATERIALIZE: u32 = 4;
 pub const OP_READ: u32 = 5;
 pub const OP_WRITE: u32 = 6;
 pub const OP_SETATTR: u32 = 7;
@@ -31,7 +35,6 @@ pub const OP_RENAME: u32 = 8;
 pub const OP_DELETE: u32 = 9;
 pub const OP_MKDIR: u32 = 10;
 pub const OP_CLOSE: u32 = 11;
-pub const OP_REGISTER_PROCESS: u32 = 12;
 pub const OP_HEARTBEAT: u32 = 13;
 /// The stored spelling of a path's components: see [`encode_names_req`].
 pub const OP_STORED_NAMES: u32 = 14;
@@ -45,6 +48,46 @@ pub const OP_REG_CREATE_KEY: u32 = 19;
 pub const OP_REG_DELETE_KEY: u32 = 20;
 pub const OP_REG_RENAME_KEY: u32 = 21;
 pub const OP_REG_CHANGED: u32 = 22;
+
+/// Every live opcode with its name, in number order.
+pub const OPCODES: &[(&str, u32)] = &[
+    ("getattr", OP_GETATTR),
+    ("readdir", OP_READDIR),
+    ("open", OP_OPEN),
+    ("read", OP_READ),
+    ("write", OP_WRITE),
+    ("setattr", OP_SETATTR),
+    ("rename", OP_RENAME),
+    ("delete", OP_DELETE),
+    ("mkdir", OP_MKDIR),
+    ("close", OP_CLOSE),
+    ("heartbeat", OP_HEARTBEAT),
+    ("stored-names", OP_STORED_NAMES),
+    ("reg-lookup", OP_REG_LOOKUP),
+    ("reg-key", OP_REG_KEY),
+    ("reg-set-value", OP_REG_SET_VALUE),
+    ("reg-delete-value", OP_REG_DELETE_VALUE),
+    ("reg-create-key", OP_REG_CREATE_KEY),
+    ("reg-delete-key", OP_REG_DELETE_KEY),
+    ("reg-rename-key", OP_REG_RENAME_KEY),
+    ("reg-changed", OP_REG_CHANGED),
+];
+
+/// Every status code with its name, in number order.
+pub const STATUSES: &[(&str, i32)] = &[
+    ("ok", ST_OK),
+    ("not-found", ST_NOT_FOUND),
+    ("not-a-directory", ST_NOT_A_DIRECTORY),
+    ("bad-request", ST_BAD_REQUEST),
+    ("io-error", ST_IO_ERROR),
+    ("is-dir", ST_IS_DIR),
+    ("bad-fh", ST_BAD_FH),
+    ("no-space", ST_NO_SPACE),
+    ("not-supported", ST_NOT_SUPPORTED),
+    ("read-only", ST_READ_ONLY),
+    ("exists", ST_EXISTS),
+    ("reply-too-large", ST_REPLY_TOO_LARGE),
+];
 
 /// Ring/request flag: prefer bulk-arena READ (data in shared arena, not ring payload).
 pub const FLAG_READ_BULK: u32 = 0x1;
@@ -969,13 +1012,15 @@ mod tests {
     }
 
     #[test]
-    fn opcode_constants_match_ipc_catalog() {
-        assert_eq!(OP_OPEN, 3);
-        assert_eq!(OP_READ, 5);
-        assert_eq!(OP_CLOSE, 11);
-        assert_eq!(OP_GETATTR, 1);
-        assert_eq!(OP_READDIR, 2);
-        assert_eq!(OP_HEARTBEAT, 13);
+    fn opcode_and_status_tables_are_complete_and_distinct() {
+        let ops: Vec<u32> = OPCODES.iter().map(|&(_, v)| v).collect();
+        assert!(ops.windows(2).all(|w| w[0] < w[1]), "sorted, no duplicates");
+        assert_eq!(ops.len(), 20);
+        for reserved in [4, 12] {
+            assert!(!ops.contains(&reserved), "{reserved} is reserved");
+        }
+        let sts: Vec<i32> = STATUSES.iter().map(|&(_, v)| v).collect();
+        assert_eq!(sts, (-11..=0).rev().collect::<Vec<i32>>());
     }
 
     #[test]
