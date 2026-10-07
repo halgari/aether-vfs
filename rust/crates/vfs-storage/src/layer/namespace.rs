@@ -94,12 +94,7 @@ impl LayerProvider {
             self.acquire(&rec, &p.folded)
         })();
         if made.is_err() {
-            let unrow = !row
-                || self
-                    .storage
-                    .catalog
-                    .remove(self.id, &p.folded)
-                    .is_ok();
+            let unrow = !row || self.storage.catalog.remove(self.id, &p.folded).is_ok();
             let unstore = !stored || self.storage.store.delete(&id).is_ok();
             if !(unrow && unstore) {
                 self.storage

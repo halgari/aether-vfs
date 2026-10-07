@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 use vfs_core::fold;
 use vfs_provider::map_io_err;
 
-use crate::util::lock;
 use crate::config::{Durability, ScratchDir};
 use crate::ids::Guid;
 use crate::layer_io::FileCell;
 use crate::storage::{Storage, StorageError};
+use crate::util::lock;
 
 /// The default for [`DurableClock::max_commits`]
 /// ([`StorageConfig::max_deferred_commits`]).

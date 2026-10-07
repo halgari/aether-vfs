@@ -127,7 +127,13 @@ pub(super) fn normalize(case: CaseMatch, rel: &str) -> String {
 }
 
 /// The identity hash of a cached file (see the module docs).
-pub(super) fn identity(key: &SourceKey, root: RootId, path: &str, size: u64, version: &[u8]) -> [u8; 16] {
+pub(super) fn identity(
+    key: &SourceKey,
+    root: RootId,
+    path: &str,
+    size: u64,
+    version: &[u8],
+) -> [u8; 16] {
     let mut h = blake3::Hasher::new();
     let root = root.0.to_le_bytes();
     let size = size.to_le_bytes();
