@@ -13,6 +13,12 @@ use std::collections::BTreeMap;
 pub const MAX_KEY_NAME: usize = 255;
 pub const MAX_VALUE_NAME: usize = 16383;
 pub const MAX_DATA: usize = 1 << 20;
+/// Deepest key nesting, counted as components below `\Registry` (Windows' own limit).
+/// Most distinct deletion records kept for `changed_since`. On overflow they are all dropped
+/// and `deleted_floor` rises to the newest of them: a spurious change notification for an
+/// absent key, never a missed one.
+pub const MAX_DELETED_AT: usize = 16384;
+pub const MAX_KEY_DEPTH: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Value {
@@ -56,6 +62,8 @@ pub enum RegError {
     NotFound,
     AlreadyExists,
     InvalidPath,
+    /// More than [`MAX_KEY_DEPTH`] levels below `\Registry`.
+    TooDeep,
 }
 
 impl std::fmt::Display for RegError {
@@ -66,6 +74,7 @@ impl std::fmt::Display for RegError {
             RegError::NotFound => "not found",
             RegError::AlreadyExists => "already exists",
             RegError::InvalidPath => "invalid path",
+            RegError::TooDeep => "key nested too deeply",
         })
     }
 }
@@ -92,6 +101,9 @@ pub struct Overlay {
     /// Unlike `tombs` it survives revival of the path, so `changed_since` still sees the
     /// deletion of a former descendant after its ancestor is recreated or its name reused.
     deleted_at: BTreeMap<String, u64>,
+    /// Deletions at or below this version have been forgotten (see [`MAX_DELETED_AT`]); an
+    /// absent key then counts as changed for any older `version`.
+    deleted_floor: u64,
     version: u64,
 }
 
@@ -111,6 +123,14 @@ fn valid_path(p: &str) -> bool {
 fn check_key_name(p: &str) -> Result<(), RegError> {
     if p.split('\\').skip(1).any(|c| utf16_len(c) > MAX_KEY_NAME) {
         return Err(RegError::NameTooLong);
+    }
+    Ok(())
+}
+
+fn check_depth(p: &str) -> Result<(), RegError> {
+    // `p` is a valid path: the empty lead and `Registry` are not levels.
+    if p.split('\\').count() - 2 > MAX_KEY_DEPTH {
+        return Err(RegError::TooDeep);
     }
     Ok(())
 }
@@ -198,6 +218,7 @@ impl Overlay {
         if !valid_path(path) {
             return Err(RegError::InvalidPath);
         }
+        check_depth(path)?;
         let f = fold(path);
         for (cf, (_, st)) in &node.children {
             if *st == Child::Tombstone {
@@ -229,6 +250,7 @@ impl Overlay {
             return Err(RegError::InvalidPath);
         }
         check_key_name(path)?;
+        check_depth(path)?;
         if utf16_len(name) > MAX_VALUE_NAME {
             return Err(RegError::NameTooLong);
         }
@@ -296,6 +318,7 @@ impl Overlay {
             return Err(RegError::InvalidPath);
         }
         check_key_name(path)?;
+        check_depth(path)?;
         if self.entries.contains_key(&fold(path)) {
             return Err(RegError::AlreadyExists);
         }
@@ -429,7 +452,7 @@ impl Overlay {
             }
             match path::parent(cur) {
                 Some(p) => cur = p,
-                None => return false,
+                None => return self.deleted_floor > version,
             }
         }
     }
@@ -439,6 +462,11 @@ impl Overlay {
         let hw = self.deleted_at.entry(folded.clone()).or_insert(0);
         *hw = (*hw).max(v);
         self.tombs.insert(folded, v);
+        if self.deleted_at.len() > MAX_DELETED_AT {
+            let newest = self.deleted_at.values().copied().max().unwrap_or(0);
+            self.deleted_floor = self.deleted_floor.max(newest);
+            self.deleted_at.clear();
+        }
     }
 
     fn bump(&mut self) -> u64 {
@@ -567,6 +595,50 @@ mod tests {
             .values
             .iter()
             .find(|v| v.name.to_lowercase() == f)
+    }
+
+    #[test]
+    fn depth_cap_refuses_513_and_accepts_512() {
+        let chain = |n: usize| {
+            let mut p = String::from(r"\Registry");
+            for i in 0..n {
+                p.push_str(&format!(r"\k{i}"));
+            }
+            p
+        };
+        let mut o = Overlay::new();
+        assert!(o.create_key(&chain(MAX_KEY_DEPTH), false, false, 1).is_ok());
+        let deep = chain(MAX_KEY_DEPTH + 1);
+        assert_eq!(o.create_key(&deep, false, false, 2), Err(RegError::TooDeep));
+        assert_eq!(
+            o.set_value(&deep, "v", REG_SZ, b"a", 2),
+            Err(RegError::TooDeep)
+        );
+        assert_eq!(
+            o.insert_node(&deep, Node::default(), 2),
+            Err(RegError::TooDeep)
+        );
+        assert!(o.node(&deep).is_none());
+        // The refused write left the version alone.
+        assert_eq!(o.version(), 1);
+    }
+
+    #[test]
+    fn deleted_at_is_bounded_and_stays_conservative() {
+        let mut o = Overlay::new();
+        let base = r"\Registry\Machine\Software";
+        o.create_key(base, false, false, 1).unwrap();
+        for i in 0..MAX_DELETED_AT + 5 {
+            let p = format!(r"{base}\k{i}");
+            o.create_key(&p, false, false, 1).unwrap();
+            o.delete_key(&p, 1).unwrap();
+        }
+        assert!(o.deleted_at.len() <= MAX_DELETED_AT);
+        let v = o.version();
+        // A key deleted before the floor still reads as changed for older versions...
+        assert!(o.changed_since(&format!(r"{base}\k0"), false, 0));
+        // ...and nothing is reported changed at or after the newest version.
+        assert!(!o.changed_since(&format!(r"{base}\never"), false, v));
     }
 
     #[test]
