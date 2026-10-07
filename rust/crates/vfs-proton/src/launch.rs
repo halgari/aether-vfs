@@ -693,7 +693,7 @@ mod tests {
         // Mapping past the end of a file faults on touch rather than failing at
         // map time, so a short file is the same hazard as a small view.
         let mut l = sample();
-        let p = std::env::temp_dir().join(format!("vfs-launch-short-{}.bin", std::process::id()));
+        let p = crate::test_tmp::dir().join(format!("vfs-launch-short-{}.bin", std::process::id()));
         std::fs::write(&p, [0u8; 128]).unwrap();
         l.ring_host_path = Some(p.clone());
         l.ring_bytes = 64 * 1024;
@@ -1133,7 +1133,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn finish_maps_exits_and_reads_the_injector_report() {
-        let dir = std::env::temp_dir().join(format!("vfs-launch-finish-{}", std::process::id()));
+        let dir = crate::test_tmp::dir().join(format!("vfs-launch-finish-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut l = sample();
@@ -1180,7 +1180,7 @@ mod tests {
 
     #[test]
     fn a_non_ge_runtime_is_refused_before_anything_is_spawned() {
-        let dir = std::env::temp_dir().join(format!("vfs-launch-notge-{}", std::process::id()));
+        let dir = crate::test_tmp::dir().join(format!("vfs-launch-notge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("version"), "1700000000 proton-9.0-4\n").unwrap();

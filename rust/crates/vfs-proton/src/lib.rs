@@ -25,6 +25,8 @@ pub mod prefix;
 pub mod release;
 pub mod runtime;
 pub mod steam;
+#[cfg(test)]
+mod test_tmp;
 
 #[cfg(feature = "acquire")]
 pub use install::{

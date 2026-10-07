@@ -603,7 +603,7 @@ mod tests {
 
     #[test]
     fn verify_digest_accepts_the_true_hash_and_rejects_a_wrong_one() {
-        let p = std::env::temp_dir()
+        let p = crate::test_tmp::dir()
             .join(format!("vfs-proton-dg-{}.bin", std::process::id()));
         std::fs::write(&p, b"abc").unwrap();
         // Known SHA-512 of "abc".
@@ -621,7 +621,7 @@ mod tests {
     fn extract_refuses_an_archive_with_a_traversing_member() {
         // A tar entry named ../escaped would write outside the target directory.
         // Build such an archive and require refusal.
-        let dir = std::env::temp_dir()
+        let dir = crate::test_tmp::dir()
             .join(format!("vfs-proton-evil-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn extract_returns_the_single_top_level_directory() {
-        let dir = std::env::temp_dir()
+        let dir = crate::test_tmp::dir()
             .join(format!("vfs-proton-ok-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -708,7 +708,7 @@ mod tests {
 
     #[test]
     fn extract_refuses_a_symlink_whose_target_escapes() {
-        let dir = std::env::temp_dir()
+        let dir = crate::test_tmp::dir()
             .join(format!("vfs-proton-symesc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -731,7 +731,7 @@ mod tests {
 
     #[test]
     fn extract_refuses_a_hard_link_whose_target_escapes() {
-        let dir = std::env::temp_dir()
+        let dir = crate::test_tmp::dir()
             .join(format!("vfs-proton-hardesc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -756,7 +756,7 @@ mod tests {
         // target (e.g. `files/lib/x/y -> ../../z`). Refusing every `..` would
         // break the real extraction, so containment, not the literal `..`, is
         // the rule.
-        let dir = std::env::temp_dir()
+        let dir = crate::test_tmp::dir()
             .join(format!("vfs-proton-syminside-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -797,7 +797,7 @@ mod tests {
         // tarball can match its publisher digest and still be stock Valve
         // Proton, which PROTONPATH would happily use. install_release runs
         // verify_ge on the extracted tree for exactly this reason.
-        let dir = std::env::temp_dir()
+        let dir = crate::test_tmp::dir()
             .join(format!("vfs-proton-stock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -829,7 +829,7 @@ mod tests {
         // network by construction: if the short-circuit regressed, the test
         // fails with a connection-refused Http error instead of downloading
         // 533 MB.
-        let base = std::env::temp_dir()
+        let base = crate::test_tmp::dir()
             .join(format!("vfs-proton-idem-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let root = Root::at(base.clone());
@@ -853,7 +853,7 @@ mod tests {
 
     #[test]
     fn a_tag_that_would_escape_the_runtimes_directory_is_refused_before_any_io() {
-        let base = std::env::temp_dir()
+        let base = crate::test_tmp::dir()
             .join(format!("vfs-proton-badtag-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let root = Root::at(base.clone());

@@ -596,7 +596,7 @@ mod tests {
     use super::*;
 
     fn tmpdir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("vfs-proton-nvapi-{}-{tag}", std::process::id()));
+        let d = crate::test_tmp::dir().join(format!("vfs-proton-nvapi-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
