@@ -140,5 +140,14 @@ windows-sys = "0.61"
 [profile.dev]
 panic = "unwind"
 
+# Third-party code (zstd, redb, blake3, ...) optimised even in debug builds, so
+# debug tests and the debug Proton e2e run near release speed. Workspace crates
+# stay at opt-level 0 for debuggability. Optimisation only, no behaviour change.
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.release]
 panic = "unwind"
+# Line tables only: Wine crash reports and core dumps symbolise, with no change
+# to the generated code.
+debug = "line-tables-only"
