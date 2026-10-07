@@ -1,5 +1,5 @@
-//! Pure FUSE contracts for the VFS stack: wire codecs, status/opcodes, and
-//! the provider contract (re-exported from `vfs-provider`). No OS I/O. Registry ops use `vfs-registry`'s portable node model.
+//! Pure wire and provider contracts for the VFS stack: wire codecs, status/opcodes, and
+//! the provider contract (re-exported from `vfs-provider`). No OS I/O. The vocabulary is FUSE-style RPC, but nothing here touches `/dev/fuse`. Registry ops use `vfs-registry`'s portable node model.
 #![forbid(unsafe_code)]
 
 pub mod ops;

@@ -1,11 +1,11 @@
-//! Emits the protocol descriptor (single source of truth for the Clojure mirror).
+//! Emits the protocol descriptor (the wire contract's checked-in snapshot, diffed by CI).
 
 use std::fmt::Write as _;
 use vfs_ipc::layout as L;
 use vfs_protocol as P;
 use vfs_protocol::{AttrResp, DirEntryWire, ReadReq};
 
-/// FNV-1a over the descriptor text; low 32 bits used as the handshake hash (M3).
+/// FNV-1a over the descriptor text; low 32 bits used as the handshake hash.
 pub fn content_hash(s: &str) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
     for b in s.bytes() {

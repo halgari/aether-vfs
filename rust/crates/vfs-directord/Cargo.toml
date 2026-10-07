@@ -25,8 +25,8 @@ vfs-source = { path = "../vfs-source" }
 # The embeddable API this daemon is one host over (design spec §4). Session
 # lifecycle, roots, composition and launch all come from here.
 vfs-embed = { path = "../vfs-embed" }
-# Kernel-level pieces the daemon still reaches for directly: `stage` (putting
-# a launch image on real disk) and `io_stats`.
+# Kernel-level pieces only the `skyrim-live` harness reaches for directly:
+# `stage` (putting a launch image on real disk), `bench` and `io_stats`.
 vfs-director = { path = "../vfs-director" }
 vfs-compose = { path = "../vfs-compose" }
 vfs-zip = { path = "../vfs-zip" }

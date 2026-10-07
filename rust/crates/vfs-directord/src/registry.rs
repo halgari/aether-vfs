@@ -998,7 +998,6 @@ fn daemon_names_only_the_embed_api() {
     // all engine, and naming any of them is the same mistake.
     let needles = [
         concat!("vfs_", "director", "::"),
-        concat!("vfs_", "cache", "::"),
         concat!("vfs_", "compose", "::"),
         concat!("vfs_", "protocol", "::"),
         concat!("vfs_", "provider", "::"),

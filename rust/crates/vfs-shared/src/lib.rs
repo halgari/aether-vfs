@@ -19,5 +19,3 @@ pub use reader::{
 };
 
 pub use seqlock::{publish, read_stable, AlignedBuf, PublishError};
-
-// pub use lines are added by later tasks as items land.
