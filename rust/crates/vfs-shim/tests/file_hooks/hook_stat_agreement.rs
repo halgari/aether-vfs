@@ -16,34 +16,19 @@
 //!     tombstone honoured by three APIs and ignored by the fourth still exposes
 //!     the file.
 //!
-//! Task 4 note: this binary installs the shim with **no director** attached
-//! (`vfs_shim::install`, not a real launch). Before Task 4, a plain `Engine`
-//! answered attribute queries locally from its published snapshot
-//! (`RootMap::query_attributes`/`AttrDecision`), so a virtual-only file was
-//! visible and a tombstoned real file was hidden through the **name-based**
-//! attribute APIs (`NtQueryAttributesFile`, `NtQueryFullAttributesFile`,
-//! `NtQueryInformationByName`) even with no director in the loop. Task 4
-//! deleted that local-answering path — those three now route to the director
-//! only (`hook/file_attr.rs::fuse_path_attr`) — so with none attached, a virtual-only
-//! file is (correctly) invisible to all three, and a tombstoned real file is
-//! (correctly, for this no-director harness) visible to all three, since
-//! nothing here has been told to hide it from them. Those assertions were
-//! flipped for exactly that reason.
-//!
-//! `std::fs::metadata` is unaffected and stays as it was: Rust's std opens a
-//! handle for `metadata()` rather than calling a name-based attribute API, so
-//! it resolves through `Decision` (untouched by Task 4; that deletion is gate
-//! 4's) — a virtual file is still visible through it, and a tombstoned file
-//! is still hidden through it, exactly as before.
-//!
-//! No director-mediated equivalent of the flipped assertions exists yet
-//! (same gap Task 3's report already named for other hooks): a real launch
-//! always has a director, so this is a coverage gap in the test suite, not a
-//! live bypass.
+//! Under a managed root all of them are answered by the director: the name-based queries by its
+//! `getattr` (`hook/file_attr.rs::stat_by_path`), an open by its `open`. Before task C8 this
+//! binary ran with no director and the name-based assertions had been flipped to "nothing
+//! answers" while `std::fs::metadata` still went through the snapshot, so the four APIs were
+//! asserted to *disagree*. Through the fake director they agree again, in both directions: a
+//! served file is visible with its size to every API, and a real file under the root that the
+//! director does not serve (where a snapshot tombstone used to be) is invisible to every API.
 
 use std::ffi::c_void;
 
+use crate::fakedirector;
 use crate::ntapi;
+use fakedirector::{Fake, ReadStyle};
 use ntapi::*;
 
 const PAYLOAD_LEN: u64 = 4096;
@@ -56,50 +41,41 @@ fn every_stat_api_agrees_about_existence_and_size() {
     isolate!();
     let pid = std::process::id();
     let base = std::env::temp_dir().join(format!("vfs-shim-statagree-{pid}"));
+    let _ = std::fs::remove_dir_all(&base);
     let root = base.join("gameroot");
-    let backing = base.join("backing");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&backing).unwrap();
-
-    let add_backing = backing.join("added.esm");
-    std::fs::write(&add_backing, vec![7u8; PAYLOAD_LEN as usize]).unwrap();
-    // Real on disk; the snapshot tombstones it, but with no director attached
-    // the name-based attribute APIs never consult that tombstone any more
-    // (see the module doc comment).
+    // Outside every root: a plain real file, used only to probe which by-name classes this
+    // host answers at all.
+    let add_backing = base.join("probe.esm");
+    std::fs::write(&add_backing, b"probe").unwrap();
+    // Real on disk under the root, and not served: every API must call it absent.
     std::fs::write(root.join("hidden.esp"), b"leaked").unwrap();
 
-    let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        let e = |vpath: &str, kind: EntryKind, source: &str, size: u64| InputEntry {
-            vpath: vpath.into(),
-            kind,
-            source: source.into(),
-            size,
-            mtime: 0,
-        };
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![
-                e(
-                    "added.esm",
-                    EntryKind::File,
-                    add_backing.to_str().unwrap(),
-                    PAYLOAD_LEN,
-                ),
-                e("hidden.esp", EntryKind::Tombstone, "", 0),
-            ],
+    fakedirector::install(
+        &root,
+        Fake::new().with(
+            "added.esm",
+            vec![7u8; PAYLOAD_LEN as usize],
+            ReadStyle::Whole,
+        ),
+        0,
+    );
+    let snapshot = vfs_shared::bridge::flatten(
+        &vfs_core::build(vec![vfs_core::Layer {
+            id: vfs_core::LayerId(0),
+            entries: Vec::new(),
         }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-    let engine = vfs_shim::Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let _guard = vfs_shim::install(engine).expect("install");
+        .unwrap(),
+    );
+    let _guard =
+        vfs_shim::install(vfs_shim::Engine::new(root.to_str().unwrap(), snapshot).unwrap())
+            .expect("install");
 
     // Some `NtQueryInformationByName` classes are unsupported for a plain
     // by-name query on some Windows builds/paths even for a perfectly
     // ordinary, already-existing real file with nothing virtualized about it
     // (`add_backing` sits outside `root` entirely, so this is a pure
-    // passthrough query, unrelated to anything this shim or Task 4 does).
+    // passthrough query, unrelated to anything this shim does).
     // A class this environment can't use at all tells us nothing about
     // whether the hooks agree with each other, so such a class is skipped
     // below exactly like the existing "export absent" tolerance.
@@ -112,72 +88,64 @@ fn every_stat_api_agrees_about_existence_and_size() {
     let virt = root.join("added.esm");
     let nt = format!(r"\??\{}", virt.display());
 
-    // `std::fs::metadata` opens a handle (`Decision`-backed) — unaffected by
-    // Task 4, unchanged from before.
-    assert!(
-        std::fs::metadata(&virt).is_ok(),
-        "std::fs::metadata could not see the virtual file"
-    );
     assert_eq!(
-        std::fs::metadata(&virt).unwrap().len(),
-        PAYLOAD_LEN,
-        "std::fs::metadata reported the wrong size"
+        std::fs::metadata(&virt).map(|m| m.len()).ok(),
+        Some(PAYLOAD_LEN),
+        "std::fs::metadata could not see the virtual file, or reported the wrong size"
     );
-
-    // The name-based attribute APIs no longer answer locally without a
-    // director (flipped from "must find it" — see the module doc comment).
     let (st, _) = nt_query_attributes_abs(&nt);
     assert!(
-        st < 0,
-        "NtQueryAttributesFile saw a virtual-only file with no director attached"
+        st >= 0,
+        "NtQueryAttributesFile could not see the virtual file: {st:#x}"
     );
-    let (st, _) = nt_query_full_attributes_abs(&nt);
-    assert!(
-        st < 0,
-        "NtQueryFullAttributesFile saw a virtual-only file with no director attached"
-    );
-    for class in SIZED_CLASSES {
-        if let Some((st, _)) = nt_query_by_name_abs(&nt, class) {
-            assert!(
-                st < 0,
-                "NtQueryInformationByName({class}) saw a virtual-only file with no director attached"
-            );
-        }
-    }
-
-    // ── a real file the snapshot hides ──────────────────────────────────────
-    let hidden = root.join("hidden.esp");
-    let hidden_nt = format!(r"\??\{}", hidden.display());
-
-    // `std::fs::metadata` still hides it: the tombstone is enforced through
-    // `Decision::Deny` (an open-based path, untouched by Task 4) —
-    // unchanged from before.
-    assert!(
-        std::fs::metadata(&hidden).is_err(),
-        "std::fs::metadata revealed a tombstoned file"
-    );
-
-    // The name-based attribute APIs no longer enforce the tombstone without a
-    // director (flipped from "must refuse to see it" — see the module doc
-    // comment).
-    let (st, _) = nt_query_attributes_abs(&hidden_nt);
+    let (st, size) = nt_query_full_attributes_abs(&nt);
     assert!(
         st >= 0,
-        "NtQueryAttributesFile hid a real file with no director attached to enforce the tombstone"
+        "NtQueryFullAttributesFile could not see the virtual file: {st:#x}"
     );
-    let (st, _) = nt_query_full_attributes_abs(&hidden_nt);
-    assert!(
-        st >= 0,
-        "NtQueryFullAttributesFile hid a real file with no director attached to enforce the tombstone"
+    assert_eq!(
+        size, PAYLOAD_LEN as i64,
+        "NtQueryFullAttributesFile reported the wrong size"
     );
     for class in SIZED_CLASSES {
         if !class_supported(class) {
             continue; // this class does not answer for a plain real file here
         }
-        if let Some((st, _)) = nt_query_by_name_abs(&hidden_nt, class) {
+        if let Some((st, size)) = nt_query_by_name_abs(&nt, class) {
             assert!(
                 st >= 0,
-                "NtQueryInformationByName({class}) hid a real file with no director attached"
+                "NtQueryInformationByName({class}) could not see the virtual file"
+            );
+            assert_eq!(
+                size, PAYLOAD_LEN as i64,
+                "NtQueryInformationByName({class}) reported the wrong size"
+            );
+        }
+    }
+
+    // ── a real file under the root that the director does not serve ────────
+    let hidden = root.join("hidden.esp");
+    let hidden_nt = format!(r"\??\{}", hidden.display());
+
+    assert!(
+        std::fs::metadata(&hidden).is_err(),
+        "std::fs::metadata revealed a real, unserved file under the root"
+    );
+    let (st, _) = nt_query_attributes_abs(&hidden_nt);
+    assert!(
+        st < 0,
+        "NtQueryAttributesFile revealed a real, unserved file under the root"
+    );
+    let (st, _) = nt_query_full_attributes_abs(&hidden_nt);
+    assert!(
+        st < 0,
+        "NtQueryFullAttributesFile revealed a real, unserved file under the root"
+    );
+    for class in SIZED_CLASSES {
+        if let Some((st, _)) = nt_query_by_name_abs(&hidden_nt, class) {
+            assert!(
+                st < 0,
+                "NtQueryInformationByName({class}) revealed a real, unserved file under the root"
             );
         }
     }

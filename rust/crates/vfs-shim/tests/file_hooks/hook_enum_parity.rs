@@ -12,55 +12,19 @@
 //! process never calls. A functional test per entry point is the only thing
 //! that can tell those apart, so this compares the two directly.
 //!
-//! Task 4: this binary installs the shim with **no director** attached
-//! (`vfs_shim::install`, not a real launch). Before Task 4, a directory
-//! listing without a director still merged in the snapshot's virtual
-//! children and hid its tombstones (`RootMap::merge_directory`). That local
-//! merge is deleted, so `added.esm` (mod-only) no longer appears and
-//! `hidden.esp` (tombstoned only in the snapshot) is no longer hidden — both
-//! assertions below were flipped for that reason. The two-entry-point
-//! agreement itself — this test's actual point — is unchanged and still the
-//! thing being proven: whatever the listing contains, both entry points must
-//! show it identically.
-//!
-//! Gate 4, Task 8b correction, in two parts. First: this comment used to say
-//! a no-director listing "is exactly the real directory (plus any
-//! write-overlay entries)", which was true and was the bug —
-//! `serve_dir_query` drained the real directory behind the mount for any
-//! listing the director could not be asked about, so a real, unserved file
-//! under a managed root would be listed by name. That drain is deleted.
-//!
-//! Second, and the reason the expectations below did not move: **this test
-//! never went through that code, and does not go through its replacement
-//! either.** `Data` is overlay-backed (see the Gate 3 Task 5 note above), so
-//! `Engine::decide` answers `Decision::Redirect`, and neither `Redirect` arm
-//! calls `tag_under_root` — the handle never enters `DIR_TABLE`, and
-//! `serve_dir_query` hands it straight to the OS on its untracked branch,
-//! against the overlay's own physical path (`overlay/root-0/data`). Measured
-//! with a probe in each branch, not inferred: zero hits on either under-root
-//! branch here. So what this file proves is entry-point parity for an
-//! ordinary passthrough listing, which is what it was always for; it is not
-//! coverage of the no-director enumeration branch, and an earlier draft of
-//! the task 8b notes wrongly claimed it was.
-//!
-//! Gate 3, Task 5 flip: `RootMap::decide` now denies (rather than passes
-//! through) any `Dir`/`NotFound` resolution, and this test's own enumerated
-//! directory (`Data`, implied as a `Dir` node by the `added.esm`/`hidden.esp`
-//! snapshot entries under it) is exactly that. With no director and no
-//! overlay, it could no longer even be *opened*, let alone enumerated. Same
-//! fix as `hook_relative_paths.rs`: give the engine a write overlay and make
-//! `Data` overlay-backed, so `Engine::overlay_state`'s `Present` answer (
-//! checked *before* `RootMap::decide`) lets the open through. The real,
-//! physical directory this lands on is `overlay/root-0/data` (Task 2, gate 4:
-//! the overlay's on-disk layout is root-scoped, see `Overlay::root_dir`), not
-//! `root/Data` — so the real-vs-tombstoned marker files live there now — but
-//! the virtual path tracked for the open (and so what the snapshot/overlay-
-//! listing logic reasons about) is still `root\Data`, unaffected.
+//! The listing is the director's (task C8 converted this from a no-director harness, where a
+//! `Data` open had to be overlay-backed just to be openable and was then a plain OS listing of
+//! the overlay directory, never the shim's own enumeration branch). Through the fake director
+//! `Data` is a synthetic directory handle, both entry points reach `serve_dir_query`'s director
+//! branch, and the expectations are the merged view's again: a served file the real directory
+//! does not hold is listed, and a real file the director does not serve is not.
 
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 
+use crate::fakedirector;
 use crate::ntapi;
+use fakedirector::{Fake, ReadStyle};
 use ntapi::*;
 
 #[test]
@@ -68,59 +32,32 @@ fn classic_and_ex_enumeration_agree() {
     isolate!();
     let pid = std::process::id();
     let base = std::env::temp_dir().join(format!("vfs-shim-enumparity-{pid}"));
+    let _ = std::fs::remove_dir_all(&base);
     let root = base.join("gameroot");
-    let overlay = base.join("overlay");
-    let backing = base.join("backing");
     let data_dir = root.join("Data");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&backing).unwrap();
-    // `Data` is overlay-backed (see the module doc comment for why): the real,
-    // physical directory a `Data` open actually lands on.
-    //
-    // Task 2 (gate 4): the overlay's on-disk layout is root-scoped (see
-    // `Overlay::root_dir`) so two roots serving the same relative path can't
-    // collide. `Engine` only ever resolves under `RootId::DEFAULT` (root 0)
-    // today, so `data` must physically live under `overlay/root-0`.
-    let overlay_data = overlay.join("root-0").join("data");
-    std::fs::create_dir_all(&overlay_data).unwrap();
+    std::fs::create_dir_all(&data_dir).unwrap();
 
-    // A real file, a VFS-only file, and a real file hidden by a tombstone: the
-    // three cases where the merged view differs from what is on disk. All
-    // three physically live under the overlay's `data` now, since that is
-    // where a `Data` open actually resolves.
-    std::fs::write(overlay_data.join("real.txt"), b"r").unwrap();
-    std::fs::write(overlay_data.join("hidden.esp"), b"h").unwrap();
-    let add_backing = backing.join("added.esm");
-    std::fs::write(&add_backing, vec![0u8; 7]).unwrap();
+    // A real file the director does not serve: it must not be listed.
+    std::fs::write(data_dir.join("hidden.esp"), b"h").unwrap();
 
-    let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        let e = |vpath: &str, kind: EntryKind, source: &str, size: u64| InputEntry {
-            vpath: vpath.into(),
-            kind,
-            source: source.into(),
-            size,
-            mtime: 0,
-        };
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![
-                e(
-                    "Data/added.esm",
-                    EntryKind::File,
-                    add_backing.to_str().unwrap(),
-                    7,
-                ),
-                e("Data/hidden.esp", EntryKind::Tombstone, "", 0),
-            ],
+    fakedirector::install(
+        &root,
+        Fake::new()
+            .with_dir("data")
+            .with("data/added.esm", vec![0u8; 7], ReadStyle::Whole)
+            .with("data/real.txt", b"r".to_vec(), ReadStyle::Whole),
+        0,
+    );
+    let snapshot = vfs_shared::bridge::flatten(
+        &vfs_core::build(vec![vfs_core::Layer {
+            id: vfs_core::LayerId(0),
+            entries: Vec::new(),
         }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-    let engine =
-        vfs_shim::Engine::with_overlay(root.to_str().unwrap(), overlay.to_str().unwrap(), snapshot)
-            .unwrap();
-    let _guard = vfs_shim::install(engine).expect("install");
+        .unwrap(),
+    );
+    let _guard =
+        vfs_shim::install(vfs_shim::Engine::new(root.to_str().unwrap(), snapshot).unwrap())
+            .expect("install");
 
     // `read_dir` goes through NtQueryDirectoryFileEx.
     let mut via_ex: Vec<String> = std::fs::read_dir(&data_dir)
@@ -150,24 +87,18 @@ fn classic_and_ex_enumeration_agree() {
     );
 
     // Spell out what the listing must contain, so a result that is merely
-    // *consistently wrong* still fails. This is the overlay-backed `Data`
-    // directory as the OS sees it: `real.txt` and `hidden.esp` (both
-    // physically there) show, and `added.esm` (mod-only, snapshot only) does
-    // not — see the module doc comment for why this flipped from the old
-    // merged-view expectations, and for why gate 4 task 8b did not move it
-    // again (this open is a `Redirect`, so it never reaches the code 8b
-    // changed).
+    // *consistently wrong* still fails.
     assert!(
         via_classic.iter().any(|n| n == "real.txt"),
         "real.txt missing: {via_classic:?}"
     );
     assert!(
-        !via_classic.iter().any(|n| n == "added.esm"),
-        "a mod-added file leaked in without a director consulting the snapshot: {via_classic:?}"
+        via_classic.iter().any(|n| n == "added.esm"),
+        "a served file the real directory does not hold must be listed: {via_classic:?}"
     );
     assert!(
-        via_classic.iter().any(|n| n == "hidden.esp"),
-        "no director means no snapshot tombstone — the real file must not be hidden: {via_classic:?}"
+        !via_classic.iter().any(|n| n == "hidden.esp"),
+        "a real file the director does not serve leaked into the listing: {via_classic:?}"
     );
 
     let _ = std::fs::remove_dir_all(&base);

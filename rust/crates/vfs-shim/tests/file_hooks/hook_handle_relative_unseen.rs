@@ -21,7 +21,9 @@
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 
+use crate::fakedirector;
 use crate::ntapi;
+use fakedirector::{Fake, ReadStyle};
 use ntapi::*;
 
 /// What the virtual (correct) file must read as.
@@ -41,10 +43,9 @@ fn handle_relative_open_via_a_handle_opened_before_injection() {
     let base = std::env::temp_dir().join(format!("vfs-shim-unseen-handle-{pid}"));
     // `base` plays the role of `C:\Games`: an ancestor of the managed root,
     // itself genuinely outside it.
+    let _ = std::fs::remove_dir_all(&base);
     let root = base.join("gameroot"); // plays `C:\Games\Skyrim`
-    let backing_dir = base.join("backing");
     std::fs::create_dir_all(root.join("Data")).unwrap();
-    std::fs::create_dir_all(&backing_dir).unwrap();
 
     // The real on-disk file a bypass would actually read, shadowed by the
     // virtual mapping below. If the vector stays open, this is what a
@@ -53,25 +54,6 @@ fn handle_relative_open_via_a_handle_opened_before_injection() {
 
     // A genuinely-outside sibling file, for the over-eager direction.
     std::fs::write(base.join("outside.txt"), OUTSIDE_PAYLOAD).unwrap();
-
-    let backing_file = backing_dir.join("added.esm");
-    std::fs::write(&backing_file, VIRTUAL_PAYLOAD).unwrap();
-
-    let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![InputEntry {
-                vpath: "Data/added.esm".into(),
-                kind: EntryKind::File,
-                source: backing_file.to_string_lossy().as_ref().into(),
-                size: VIRTUAL_PAYLOAD.len() as u64,
-                mtime: 0,
-            }],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
 
     // ── open the ancestor handle BEFORE the shim exists ─────────────────────
     // No hooks are installed yet, so this `CreateFileW` reaches the real
@@ -82,8 +64,22 @@ fn handle_relative_open_via_a_handle_opened_before_injection() {
     let ancestor = open_dir(&base);
     assert!(!ancestor.is_null(), "could not open the ancestor directory");
 
-    let engine = vfs_shim::Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let _guard = vfs_shim::install(engine).expect("install");
+    // The virtual content is the director's.
+    fakedirector::install(
+        &root,
+        Fake::new().with("data/added.esm", VIRTUAL_PAYLOAD.to_vec(), ReadStyle::Whole),
+        0,
+    );
+    let snapshot = vfs_shared::bridge::flatten(
+        &vfs_core::build(vec![vfs_core::Layer {
+            id: vfs_core::LayerId(0),
+            entries: Vec::new(),
+        }])
+        .unwrap(),
+    );
+    let _guard =
+        vfs_shim::install(vfs_shim::Engine::new(root.to_str().unwrap(), snapshot).unwrap())
+            .expect("install");
 
     // ── under-eager direction: the in-root child must resolve through the VFS ──
     let h = nt_create_relative(ancestor, r"gameroot\Data\added.esm");

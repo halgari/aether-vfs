@@ -1,23 +1,23 @@
 //! Runs in its own process: path-based attribute queries reflect the VFS.
 //!
-//! Task 4: this binary installs the shim with **no director** attached
-//! (`vfs_shim::install`, not a real launch). Before Task 4, attribute queries
-//! fell back to answering locally from the published snapshot
-//! (`RootMap::query_attributes`/`AttrDecision`), so a virtual file/dir was
-//! visible and a tombstoned real file was hidden even with nothing to
-//! consult. That local-answering path is deleted — attribute queries now
-//! route to the director only (`hook/file_attr.rs::fuse_path_attr`) — so with no
-//! director, none of that happens any more: a virtual path is (correctly)
-//! invisible, and a tombstoned real file is (correctly, for this harness)
-//! visible, since nothing here has been told to hide it. The assertions below
-//! were flipped for exactly that reason and documented at each site; the
-//! "non-virtual real file passes through" case is unchanged, since it never
-//! depended on the deleted mechanism.
+//! `GetFileAttributesW` and `GetFileAttributesExW` reach `NtQueryAttributesFile` and
+//! `NtQueryFullAttributesFile`, which under a managed root are answered by the director's
+//! `getattr` alone (`hook/file_attr.rs::stat_by_path`).
+//!
+//! Before task C8 this binary installed the shim with no director, so the assertions had been
+//! flipped to "nothing answers" (a virtual file invisible, a hidden real file visible). Through
+//! the fake director it makes the original claims again: a served file and directory are
+//! visible with the director's size and kind, a real file under the root that the director
+//! does not serve is invisible (the sealed root's answer, where a snapshot tombstone used to
+//! be), and a real file outside every root passes through.
+use crate::fakedirector;
+
+use fakedirector::{Fake, ReadStyle};
 use std::ffi::c_void;
-use vfs_shim::{install, Engine};
+use vfs_shim::{Engine, install};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileAttributesExW, GetFileAttributesW, GetFileExInfoStandard, INVALID_FILE_ATTRIBUTES,
-    WIN32_FILE_ATTRIBUTE_DATA,
+    FILE_ATTRIBUTE_DIRECTORY, GetFileAttributesExW, GetFileAttributesW, GetFileExInfoStandard,
+    INVALID_FILE_ATTRIBUTES, WIN32_FILE_ATTRIBUTE_DATA,
 };
 
 fn wide(s: &str) -> Vec<u16> {
@@ -28,74 +28,71 @@ fn wide(s: &str) -> Vec<u16> {
 fn attribute_queries_reflect_the_vfs() {
     isolate!();
     let pid = std::process::id();
-    let root = std::env::temp_dir().join(format!("vfs-shim-attrs-{pid}"));
-    let backing_dir = root.join("backing");
-    std::fs::create_dir_all(&backing_dir).unwrap();
+    let base = std::env::temp_dir().join(format!("vfs-shim-attrs-{pid}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let root = base.join("root");
+    std::fs::create_dir_all(&root).unwrap();
 
-    // Real files on disk under the root.
-    let real = root.join("real.esp"); // not in snapshot -> pass through
-    let gone = root.join("gone.esp"); // tombstoned -> hidden
-    std::fs::write(&real, b"real").unwrap();
+    // A real file under the root that the director does not serve.
+    let gone = root.join("gone.esp");
     std::fs::write(&gone, b"gone").unwrap();
-    let backing = backing_dir.join("mod.esp");
-    std::fs::write(&backing, vec![0u8; 1234]).unwrap();
+    // A real file outside every root.
+    let outside = base.join("outside.esp");
+    std::fs::write(&outside, b"real").unwrap();
 
-    // Virtual paths (absent on disk).
+    // Virtual paths (absent on disk), served by the director.
     let vfile = root.join("mod.esp");
     let vdir = root.join("moddir");
-
-    let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        let e = |vpath: &str, kind: EntryKind, source: &str, size: u64| InputEntry {
-            vpath: vpath.into(),
-            kind,
-            source: source.into(),
-            size,
-            mtime: 0,
-        };
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![
-                e("mod.esp", EntryKind::File, backing.to_str().unwrap(), 1234),
-                e("moddir", EntryKind::Dir, "", 0),
-                e("gone.esp", EntryKind::Tombstone, "", 0),
-            ],
+    fakedirector::install(
+        &root,
+        Fake::new()
+            .with("mod.esp", vec![0u8; 1234], ReadStyle::Whole)
+            .with_dir("moddir"),
+        0,
+    );
+    let snapshot = vfs_shared::bridge::flatten(
+        &vfs_core::build(vec![vfs_core::Layer {
+            id: vfs_core::LayerId(0),
+            entries: Vec::new(),
         }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let _guard = install(engine).expect("install");
+        .unwrap(),
+    );
+    let _guard = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
 
-    // No director: nothing answers for a virtual-only path any more (flipped
-    // from "virtual file should have attributes" — see the module doc comment).
     let a = unsafe { GetFileAttributesW(wide(vfile.to_str().unwrap()).as_ptr()) };
-    assert_eq!(
-        a, INVALID_FILE_ATTRIBUTES,
-        "a virtual file was visible with no director attached"
-    );
-
-    // Same for a virtual directory (flipped from "virtual dir must be a dir").
-    let d = unsafe { GetFileAttributesW(wide(vdir.to_str().unwrap()).as_ptr()) };
-    assert_eq!(
-        d, INVALID_FILE_ATTRIBUTES,
-        "a virtual directory was visible with no director attached"
-    );
-
-    // No director: nothing enforces the snapshot's tombstone any more
-    // (flipped from "tombstoned file must be hidden").
-    let g = unsafe { GetFileAttributesW(wide(gone.to_str().unwrap()).as_ptr()) };
     assert_ne!(
-        g, INVALID_FILE_ATTRIBUTES,
-        "a tombstoned real file was hidden with no director attached to enforce it"
+        a, INVALID_FILE_ATTRIBUTES,
+        "a served file must have attributes"
+    );
+    assert_eq!(
+        a & FILE_ATTRIBUTE_DIRECTORY,
+        0,
+        "a served file is not a directory"
     );
 
-    // Non-virtual real file passes through — unaffected by Task 4.
-    let r = unsafe { GetFileAttributesW(wide(real.to_str().unwrap()).as_ptr()) };
-    assert_ne!(r, INVALID_FILE_ATTRIBUTES, "real file should pass through");
+    let d = unsafe { GetFileAttributesW(wide(vdir.to_str().unwrap()).as_ptr()) };
+    assert_ne!(
+        d, INVALID_FILE_ATTRIBUTES,
+        "a served directory must have attributes"
+    );
+    assert_ne!(
+        d & FILE_ATTRIBUTE_DIRECTORY,
+        0,
+        "a served directory must be a directory"
+    );
 
-    // No director: GetFileAttributesExW must fail for the virtual file too
-    // (flipped from "should succeed ... report the snapshot's size").
+    let g = unsafe { GetFileAttributesW(wide(gone.to_str().unwrap()).as_ptr()) };
+    assert_eq!(
+        g, INVALID_FILE_ATTRIBUTES,
+        "a real file under the root that the director does not serve must be invisible"
+    );
+
+    let r = unsafe { GetFileAttributesW(wide(outside.to_str().unwrap()).as_ptr()) };
+    assert_ne!(
+        r, INVALID_FILE_ATTRIBUTES,
+        "a real file outside every root passes through"
+    );
+
     let mut data: WIN32_FILE_ATTRIBUTE_DATA = unsafe { std::mem::zeroed() };
     let ok = unsafe {
         GetFileAttributesExW(
@@ -104,8 +101,12 @@ fn attribute_queries_reflect_the_vfs() {
             &mut data as *mut _ as *mut c_void,
         )
     };
+    assert_ne!(ok, 0, "GetFileAttributesExW must succeed for a served file");
+    let size = (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow);
     assert_eq!(
-        ok, 0,
-        "GetFileAttributesExW succeeded for a virtual file with no director attached"
+        size, 1234,
+        "GetFileAttributesExW must report the director's size"
     );
+
+    let _ = std::fs::remove_dir_all(&base);
 }

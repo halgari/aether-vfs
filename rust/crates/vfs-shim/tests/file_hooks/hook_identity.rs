@@ -1,6 +1,16 @@
-//! Runs in its own process: a redirected virtual file reports its VIRTUAL path.
+//! Runs in its own process: a virtual file reports its VIRTUAL path.
+//!
+//! The file is served by the (fake) director, so its handle is synthetic and
+//! `GetFinalPathNameByHandleW` is answered by the shim (`NtQueryObject` on Wine,
+//! `NtQueryInformationFile` on Windows) from the path it was opened as. Before
+//! task C8 this was a snapshot redirect to a real backing file, and the claim was
+//! that the backing file's name did not leak; the claim that survives is that the
+//! name reported is the virtual one.
+use crate::fakedirector;
+
+use fakedirector::{Fake, ReadStyle};
 use std::os::windows::io::AsRawHandle;
-use vfs_shim::{install, Engine};
+use vfs_shim::{Engine, install};
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
 
@@ -9,37 +19,25 @@ fn redirected_file_reports_virtual_path() {
     isolate!();
     let pid = std::process::id();
     let root = std::env::temp_dir().join(format!("vfs-shim-ident-{pid}"));
-    let backing_dir = std::env::temp_dir().join(format!("vfs-shim-ident-backing-{pid}"));
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&backing_dir).unwrap();
 
-    // Backing file with a DISTINCT name so we can tell the two paths apart.
-    let backing = backing_dir.join("backing_blob.dat");
-    std::fs::write(&backing, b"the-real-bytes").unwrap();
-
-    // Virtual file, absent on disk, redirects to the backing blob.
+    // Virtual file, absent on disk, served by the director.
     let vfile = root.join("mod.esp");
-
-    let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![InputEntry {
-                vpath: "mod.esp".into(),
-                kind: EntryKind::File,
-                source: backing.to_str().unwrap().into(),
-                size: 14,
-                mtime: 0,
-            }],
+    fakedirector::install(
+        &root,
+        Fake::new().with("mod.esp", b"the-real-bytes".to_vec(), ReadStyle::Whole),
+        0,
+    );
+    let snapshot = vfs_shared::bridge::flatten(
+        &vfs_core::build(vec![vfs_core::Layer {
+            id: vfs_core::LayerId(0),
+            entries: Vec::new(),
         }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let _guard = install(engine).expect("install");
+        .unwrap(),
+    );
+    let _guard = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
 
-    // Open the virtual path -> redirected; content comes from the backing file.
-    let f = std::fs::File::open(&vfile).expect("open redirected virtual file");
+    let f = std::fs::File::open(&vfile).expect("open the virtual file");
     let content = std::fs::read(&vfile).unwrap();
     assert_eq!(content, b"the-real-bytes");
 
@@ -49,12 +47,9 @@ fn redirected_file_reports_virtual_path() {
     assert!(n > 0, "GetFinalPathNameByHandleW failed");
     let final_path = String::from_utf16_lossy(&buf[..n as usize]).to_lowercase();
 
+    let expect = root.join("mod.esp").to_string_lossy().to_lowercase();
     assert!(
-        final_path.contains("mod.esp"),
-        "should report virtual name: {final_path}"
-    );
-    assert!(
-        !final_path.contains("backing_blob"),
-        "must NOT leak backing name: {final_path}"
+        final_path.ends_with(&expect),
+        "should report the virtual path {expect}: {final_path}"
     );
 }

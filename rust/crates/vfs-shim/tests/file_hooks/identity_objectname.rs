@@ -1,15 +1,22 @@
-//! A redirected handle must not leak its backing path through NtQueryObject.
+//! A virtual file's handle must answer `NtQueryObject` with its virtual name, and follow the
+//! host's size-probe contract exactly.
 //!
 //! `GetFinalPathNameByHandleW` takes different routes on different hosts —
 //! `NtQueryInformationFile` on Windows, `NtQueryObject` on Wine — so a shim that
-//! only spoofs the first answers correctly on one host and leaks on the other.
+//! only answers the first is right on one host and wrong on the other.
 //!
-//! Runs in its own process: `install` is one-shot per process (`ENGINE.set` returns
-//! `AlreadyInstalled` on a second call) and patches process-global ntdll
-//! trampolines, so the untracked-handle half of this contract lives in
-//! `identity_objectname_untracked.rs` rather than beside this test.
+//! The file is served by the (fake) director, so the handle is synthetic and the kernel has no
+//! name for it at all: the shim's answer is the only one. Before task C8 this was a snapshot
+//! redirect to a real backing file (a real handle whose name had to be replaced); the answer
+//! goes through the same `emit_object_name`, so the size-probe half is unchanged.
+//!
+//! Runs in its own process: `install` patches process-global ntdll trampolines, so the
+//! untracked-handle half of this contract lives in `identity_objectname_untracked.rs`.
 
-use vfs_shim::{install, Engine};
+use crate::fakedirector;
+
+use fakedirector::{Fake, ReadStyle};
+use vfs_shim::{Engine, install};
 use windows_sys::Win32::Foundation::HANDLE;
 
 #[link(name = "ntdll")]
@@ -52,50 +59,36 @@ fn a_redirected_handle_reports_its_virtual_name_not_the_backing_one() {
     isolate!();
     let pid = std::process::id();
     let root = std::env::temp_dir().join(format!("vfs-objname-{pid}"));
-    let backing_dir = std::env::temp_dir().join(format!("vfs-objname-backing-{pid}"));
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&backing_dir).unwrap();
-    let backing = backing_dir.join("backing_blob.dat");
-    std::fs::write(&backing, b"the-real-bytes").unwrap();
     let vfile = root.join("mod.esp");
-
-    let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![InputEntry {
-                vpath: "mod.esp".into(),
-                kind: EntryKind::File,
-                source: backing.to_str().unwrap().into(),
-                size: 14,
-                mtime: 0,
-            }],
+    fakedirector::install(
+        &root,
+        Fake::new().with("mod.esp", b"the-real-bytes".to_vec(), ReadStyle::Whole),
+        0,
+    );
+    let snapshot = vfs_shared::bridge::flatten(
+        &vfs_core::build(vec![vfs_core::Layer {
+            id: vfs_core::LayerId(0),
+            entries: Vec::new(),
         }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let _guard = install(engine).expect("install");
+        .unwrap(),
+    );
+    let _guard = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
 
     use std::os::windows::io::AsRawHandle;
-    let f = std::fs::File::open(&vfile).expect("open redirected virtual file");
+    let f = std::fs::File::open(&vfile).expect("open the virtual file");
     let name = object_name(f.as_raw_handle() as HANDLE).to_lowercase();
 
     assert!(
-        name.contains("mod.esp"),
+        name.ends_with(r"\mod.esp") && name.contains(&format!("vfs-objname-{pid}")),
         "must report the VIRTUAL name: {name}"
-    );
-    assert!(
-        !name.contains("backing_blob"),
-        "must NOT leak the backing name: {name}"
     );
 
     // The size-probe contract, measured on Windows 11 and Wine 11.0
     // (GE-Proton11-6) on 2026-09-01 and identical on both. A caller that
     // queries with a tiny buffer, allocates what `ReturnLength` asks for and
     // queries again either loops forever or fails outright unless the spoof
-    // reproduces this — and the spoofed name is a different length from the
-    // real one, so `ReturnLength` here has to describe the *spoofed* buffer.
+    // reproduces this, and `ReturnLength` has to describe the shim's own answer.
     let h = f.as_raw_handle() as HANDLE;
     let mut required = 0u32;
     for (len, expect) in [

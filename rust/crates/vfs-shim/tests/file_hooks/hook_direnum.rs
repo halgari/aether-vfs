@@ -1,92 +1,55 @@
-//! Runs in its own process: without a director, nothing under the managed root is
-//! reachable at all — not even a directory listing of real, on-disk files.
+//! Runs in its own process: a directory listing under a managed root is exactly what the
+//! director serves. Real, on-disk files beneath the root are never drained into it.
 //!
-//! Gate 3, Task 5 flip (was `read_dir_without_a_director_is_exactly_the_real_directory`,
-//! asserting that a no-director session still showed exactly the real
-//! directory's own contents). Before Task 4, `RootMap::merge_directory`
-//! blended the snapshot's virtual children into whatever the OS returned for
-//! a directory the shim could not (or, in this harness, did not) ask a real
-//! director about; Task 4 removed that blending, so a no-director listing
-//! became exactly the real directory — the assertion this test used to make.
-//! That intermediate state was itself the fall-through gate 4 task 8b closed:
-//! a no-director listing is now the write overlay's own entries alone, and
-//! nothing drains a real directory into a served listing any more. This test
-//! never reaches that code — the open is denied one level earlier, see below —
-//! but the sentence above should not be read as describing today's behaviour.
-//!
-//! Task 5 goes one step further: the managed root's own directory node is
-//! always `SnapResolution::Dir` in any snapshot (`SnapshotReader::resolve`'s
-//! empty-component case resolves to the tree's own root node, which is
-//! always a `Dir`), and `RootMap::decide` now denies a `Dir` resolution it
-//! has no live director to serve (see that function's own doc comment) —
-//! rather than falling through to the real filesystem as it used to. So the
-//! root directory itself can no longer even be *opened* without a director,
-//! let alone enumerated: `std::fs::read_dir(&root)` now fails outright. This
-//! is a stronger, and arguably more honest, statement of the same underlying
-//! fact this file always existed to prove — a directory listing is only ever
-//! authoritative when a real director backs it (`serve_dir_query` in
-//! `hook/`, unchanged by this task) — no director now means no access at
-//! all, not merely "no snapshot contribution".
-use vfs_shim::{install, Engine};
+//! This was `read_dir_without_a_director_is_denied_outright`, which installed the shim with no
+//! director and showed the root could not even be opened. Task C8 removed the no-director
+//! configuration (bootstrap never installs a detour without a director), and the claim that
+//! survives it is the one this file always existed for: a listing is only ever authoritative
+//! when a director backs it. So the real directory holds files the director does not serve,
+//! the director serves one the real directory does not hold, and the listing must be the
+//! director's alone (`hook/dirquery.rs::serve_dir_query`).
+use crate::fakedirector;
+
+use fakedirector::{Fake, ReadStyle};
+use vfs_shim::{Engine, install};
 
 #[test]
-fn read_dir_without_a_director_is_denied_outright() {
+fn read_dir_lists_only_what_the_director_serves() {
     isolate!();
     let pid = std::process::id();
     let root = std::env::temp_dir().join(format!("vfs-shim-direnum-{pid}"));
-    // Backing files live OUTSIDE the root so they do not appear in any listing.
-    let backing_dir = std::env::temp_dir().join(format!("vfs-shim-direnum-backing-{pid}"));
+    let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&backing_dir).unwrap();
 
-    // Real on-disk contents of the enumerated directory -- before this task,
-    // these were visible via passthrough even with no director attached.
+    // Real on-disk contents of the enumerated directory, none of them served.
     std::fs::write(root.join("real_a.txt"), b"a").unwrap();
     std::fs::write(root.join("real_b.txt"), b"b").unwrap();
     std::fs::create_dir_all(root.join("realdir")).unwrap();
 
-    // Backing file for a mod add -- never read either way: not by a director
-    // (there is none), and not by falling through to the snapshot locally
-    // (Task 4 removed that; Task 5 removes the passthrough that would have
-    // reached the real root directory at all).
-    let add_backing = backing_dir.join("added.esp");
-    std::fs::write(&add_backing, vec![0u8; 10]).unwrap();
-
-    let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        let e = |vpath: &str, kind: EntryKind, source: &str, size: u64| InputEntry {
-            vpath: vpath.into(),
-            kind,
-            source: source.into(),
-            size,
-            mtime: 0,
-        };
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![e(
-                "added.esp",
-                EntryKind::File,
-                add_backing.to_str().unwrap(),
-                10,
-            )],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let _guard = install(engine).expect("install");
-
-    // No director is attached in this harness at all, so `try_fuse_create`
-    // always defers to `decision_for` -> `RootMap::decide`, and the root's
-    // own node is always `SnapResolution::Dir` -- denied outright now,
-    // rather than passed through to the real, on-disk directory as before.
-    let err = std::fs::read_dir(&root).expect_err(
-        "without a director, opening the managed root itself must be denied \
-         outright -- it must not fall through to the real, on-disk directory",
+    fakedirector::install(
+        &root,
+        Fake::new()
+            .with("added.esp", vec![0u8; 10], ReadStyle::Whole)
+            .with_dir("served_dir"),
+        0,
     );
+    let snapshot = vfs_shared::bridge::flatten(
+        &vfs_core::build(vec![vfs_core::Layer {
+            id: vfs_core::LayerId(0),
+            entries: Vec::new(),
+        }])
+        .unwrap(),
+    );
+    let _guard = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
+
+    let mut names: Vec<String> = std::fs::read_dir(&root)
+        .expect("the managed root must open and list through the director")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
     assert_eq!(
-        err.kind(),
-        std::io::ErrorKind::NotFound,
-        "expected STATUS_OBJECT_NAME_NOT_FOUND -> ErrorKind::NotFound, got {err:?}"
+        names,
+        ["added.esp", "served_dir"],
+        "the listing must be the director's: no real, unserved file may appear in it"
     );
 }
