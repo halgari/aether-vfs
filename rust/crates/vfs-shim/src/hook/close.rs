@@ -1,0 +1,98 @@
+//! `NtClose`.
+
+use super::{DIR_TABLE, HANDLE_PATHS, IDENTITY_TABLE, PATH_TABLE, TRAMP_CLOSE, reg_real};
+use crate::ntdef::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
+use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
+
+/// Reclaim any tracking for a closing handle before the OS (possibly) reuses
+/// its value.
+pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Close);
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::ENTER);
+    let tramp = match TRAMP_CLOSE.get() {
+        Some(t) => t,
+        None => return STATUS_UNSUCCESSFUL,
+    };
+    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+        crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_TABLE);
+        if let Some(fh) = crate::fuse_synth::close_fuse(handle as isize) {
+            crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_CLIENT);
+            if let Some(c) = crate::fuse_client::global() {
+                crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_RING);
+                let _ = c.close(fh);
+                crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_DONE);
+            }
+        }
+        crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_EXIT);
+        return STATUS_SUCCESS;
+    }
+    if crate::zipserve::is_synth_section(handle as isize) {
+        crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_TABLE);
+        // Releasing shim-owned VA waits for the last view (NT semantics).
+        if let Some(window) = crate::zipserve::close_section(handle as isize) {
+            crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_REGION);
+            crate::lazy_section::on_section_closed(window);
+            crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_DONE);
+        }
+        crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_EXIT);
+        return STATUS_SUCCESS;
+    }
+    // Registry key handles: a synthetic one is answered here, a pass-through one loses its
+    // record and is closed for real below (then `after_real_close`).
+    let reg_close = if crate::regclient::enabled() {
+        match crate::regkeys::close(&reg_real(), handle as isize) {
+            crate::regkeys::Close::Done(st) => return st,
+            crate::regkeys::Close::Real(rec) => Some(rec),
+        }
+    } else {
+        None
+    };
+    // **`try_lock`, never `lock`.** This is best-effort reclamation, and a
+    // blocking acquisition here hangs the process permanently.
+    //
+    // Traced 2026-09-02 with `VFS_SHIM_BREADCRUMB`, three reproductions:
+    // `threads=1`, `current=NtClose`, `mark=TABLE_HANDLE_PATHS`,
+    // `holder=CLOSE_HOOK`, `entries - exits = 2`, zero CPU, and immune to
+    // `TerminateProcess`. The holder is `close_hook_body` — but the only
+    // statement it holds the guard across is a `BTreeMap<isize, String>`
+    // remove, which cannot close a handle and so cannot be a live outer frame
+    // re-entering. The holder is a **dead** frame.
+    //
+    // A thread terminated while holding a `std::sync::Mutex` leaves it locked
+    // **forever, and not poisoned** — so every `if let Ok(..)` in this crate is
+    // no defence against it. At process exit Windows terminates every thread
+    // but one before `DLL_PROCESS_DETACH`, and the surviving thread then closes
+    // handles on its way out. `vfs_shim_dll`'s own `DllMain` records this exact
+    // hazard for a different lock: "one killed mid-write leaves a lock the flush
+    // waits on forever".
+    //
+    // `try_lock` cannot deadlock. Losing a reclamation is harmless: the entry
+    // is keyed by a handle value that is about to become invalid, `HANDLE_PATHS`
+    // is bounded by `HANDLE_PATHS_MAX` against unbounded growth, and the
+    // process is on its way out in the case that matters.
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLES);
+    if let Ok(mut table) = DIR_TABLE.try_lock() {
+        table.remove(&(handle as isize));
+    }
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_HANDLE_PATHS);
+    if let Ok(mut t) = HANDLE_PATHS.try_lock() {
+        crate::breadcrumb::set_holder(crate::breadcrumb::holder::CLOSE_HOOK);
+        t.remove(&(handle as isize));
+        crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
+    }
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_IDENTITY);
+    if let Ok(mut t) = IDENTITY_TABLE.try_lock() {
+        t.remove(&(handle as isize));
+    }
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_PATH);
+    if let Ok(mut t) = PATH_TABLE.try_lock() {
+        t.remove(&(handle as isize));
+    }
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP);
+    let r = tramp(handle);
+    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP_DONE);
+    if let Some(rec) = reg_close {
+        crate::regkeys::after_real_close(handle as isize, rec, r);
+    }
+    r
+}
