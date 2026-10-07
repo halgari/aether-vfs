@@ -240,6 +240,8 @@ pub(crate) const FILE_END_OF_FILE_INFORMATION: u32 = 20;
 
 /// `FILE_DIRECTORY_FILE` `CreateOptions` flag — the open targets a directory.
 pub(crate) const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
+/// `CreateOptions`: delete the file when the last handle to it is closed.
+pub(crate) const FILE_DELETE_ON_CLOSE: u32 = 0x0000_1000;
 
 /// `NtQueryDirectoryFileEx` QueryFlags.
 pub(crate) const SL_RESTART_SCAN: u32 = 0x01;

@@ -23,6 +23,8 @@ struct FuseOpen {
     /// a write handle holds one too, so a write or truncate through it can
     /// drop the file.
     cache: Option<vfs_ipc::FileRef>,
+    /// Opened with `FILE_DELETE_ON_CLOSE`: closing it deletes `abs_path` at the director.
+    delete_on_close: bool,
 }
 
 /// What a read through a handle needs, under one lock: see [`lookup_read`].
@@ -83,6 +85,7 @@ pub(crate) fn open_fuse_at_ex(
             append_only,
             abs_path,
             cache: None,
+            delete_on_close: false,
         },
     );
     Some(handle as isize)
@@ -191,9 +194,21 @@ pub(crate) fn grow_size(handle: isize, end: u64) {
     }
 }
 
-pub(crate) fn close_fuse(handle: isize) -> Option<u64> {
+/// Record that `handle` was opened with `FILE_DELETE_ON_CLOSE`.
+pub(crate) fn set_delete_on_close(handle: isize) {
+    if let Ok(mut g) = TABLE.lock() {
+        if let Some(e) = g.get_mut(&(handle as usize)) {
+            e.delete_on_close = true;
+        }
+    }
+}
+
+/// Forget `handle`. Returns its director `fh`, and the path to delete now that it is closed
+/// when it was opened with `FILE_DELETE_ON_CLOSE` ([`set_delete_on_close`]).
+pub(crate) fn close_fuse(handle: isize) -> Option<(u64, Option<String>)> {
     let mut g = TABLE.lock().ok()?;
-    g.remove(&(handle as usize)).map(|e| e.fh)
+    g.remove(&(handle as usize))
+        .map(|e| (e.fh, e.abs_path.filter(|_| e.delete_on_close)))
 }
 
 #[cfg(test)]

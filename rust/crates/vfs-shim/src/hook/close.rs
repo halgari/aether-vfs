@@ -17,11 +17,21 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     };
     if crate::synth_file::is_fuse_synth(handle as isize) {
         crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_TABLE);
-        if let Some(fh) = crate::synth_file::close_fuse(handle as isize) {
+        if let Some((fh, delete)) = crate::synth_file::close_fuse(handle as isize) {
             crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_CLIENT);
             if let Some(c) = crate::director::global() {
                 crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_RING);
                 let _ = c.close(fh);
+                // `FILE_DELETE_ON_CLOSE`: the delete happens now, at the director, as NT does it
+                // at the last close. Wine's `DeleteFileW` is exactly this (an open with the flag,
+                // then a close), so without it every Win32 delete of a served file was a silent
+                // no-op under Proton. NtClose cannot report a failure, so a refusal is dropped,
+                // as the kernel drops one.
+                if let Some((root, vp)) = delete.as_deref().and_then(|p| c.route(p)) {
+                    c.names_changed(root, &vp);
+                    crate::read_cache::invalidate_path(root.0, &vp);
+                    let _ = c.delete(root, &vp);
+                }
                 crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_DONE);
             }
         }

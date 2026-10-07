@@ -8,9 +8,10 @@ use super::{
 };
 use crate::ntbuf::OwnedOa;
 use crate::ntdef::{
-    FILE_CREATED, FILE_DIRECTORY_FILE, ObjectAttributes, STATUS_ACCESS_DENIED,
-    STATUS_FILE_IS_A_DIRECTORY, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND,
-    STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    FILE_CREATED, FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE, ObjectAttributes,
+    STATUS_ACCESS_DENIED, STATUS_FILE_IS_A_DIRECTORY, STATUS_OBJECT_NAME_COLLISION,
+    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS,
+    STATUS_UNSUCCESSFUL,
 };
 use core::ffi::c_void;
 use std::sync::OnceLock;
@@ -652,6 +653,16 @@ unsafe fn route_open(
             }
         }
         hs.mark_rooted();
+        // The director has no delete-on-close of its own: remember it on the synthetic handle,
+        // and the close does the delete (`close_hook_body`).
+        if st >= 0 && opts & FILE_DELETE_ON_CLOSE != 0 && !file_handle.is_null() {
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs); the open succeeded,
+            // so the handle slot holds the synthetic handle it wrote.
+            let h = unsafe { *file_handle } as isize;
+            if crate::synth_file::is_fuse_synth(h) {
+                crate::synth_file::set_delete_on_close(h);
+            }
+        }
         if create {
             // FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT. Absent means
             // the caller intends asynchronous completion, which a synthetic handle

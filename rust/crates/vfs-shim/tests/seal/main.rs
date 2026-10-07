@@ -13,6 +13,7 @@ mod fakedirector;
 #[path = "../ntapi/mod.rs"]
 mod ntapi;
 
+mod delete_on_close;
 mod handle_ops_out_of_root_sealed;
 mod nt_delete_file_no_director;
 mod nt_delete_file_sealed;
