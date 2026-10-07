@@ -123,7 +123,7 @@ fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider(
     // refuses it by name). So the fixture is copied in, and the *data* is what
     // stays virtual.
     let image = root.join("fixture.exe");
-    std::fs::copy(&art.path("vfs-fixture-read.exe"), &image)
+    std::fs::copy(art.path("vfs-fixture-read.exe"), &image)
         .expect("copy the fixture into the root");
 
     let provider = Arc::new(Loud::new(&content));
@@ -369,7 +369,7 @@ fn stalled_reads_on_two_threads_do_not_hold_up_file_operations_on_others_under_p
     )
     .unwrap();
     let image = root.join("fixture.exe");
-    std::fs::copy(&art.path("vfs-fixture-read.exe"), &image)
+    std::fs::copy(art.path("vfs-fixture-read.exe"), &image)
         .expect("copy the fixture into the root");
 
     let provider = Arc::new(Stalling {
@@ -530,7 +530,7 @@ fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
     write(&lower, "Data/OnlyInLower/b.txt", b"b");
     write(&root, "RealOnly/r.txt", b"r");
     let image = root.join("fixture.exe");
-    std::fs::copy(&art.path("vfs-fixture-read.exe"), &image)
+    std::fs::copy(art.path("vfs-fixture-read.exe"), &image)
         .expect("copy the fixture into the root");
 
     // A write layer like a host's: what the fixture creates lands here, and
@@ -791,7 +791,7 @@ fn small_reads_of_an_immutable_file_are_served_by_the_shim_read_cache_under_prot
     let overlay = tmp("rc-overlay");
     let storage_dir = tmp("rc-storage");
     let image = root.join("fixture.exe");
-    std::fs::copy(&art.path("vfs-fixture-read.exe"), &image)
+    std::fs::copy(art.path("vfs-fixture-read.exe"), &image)
         .expect("copy the fixture into the root");
 
     let mut x = 0x0123_4567_89AB_CDEFu64;
