@@ -42,7 +42,7 @@ use crate::fakedirector;
 use crate::ntapi;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{install, Engine};
+use vfs_shim::{Engine, install};
 
 /// Bytes of the file being moved in from outside. Distinct from anything the
 /// director holds, so a copy that appears anywhere can be attributed.
@@ -71,7 +71,7 @@ fn a_rename_into_a_managed_root_from_outside_it_never_lands() {
     std::env::set_var(vfs_env::SHIM_STATS_INTERVAL_MS, "3600000");
 
     let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
+        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
         let tree = build(vec![Layer {
             id: LayerId(0),
             entries: vec![InputEntry {

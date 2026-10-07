@@ -15,7 +15,7 @@
 
 use crate::fakedirector;
 
-use vfs_shim::{install, Engine};
+use vfs_shim::{Engine, install};
 
 #[test]
 fn a_refused_write_creates_nothing_on_the_real_filesystem_under_the_root() {
@@ -30,7 +30,7 @@ fn a_refused_write_creates_nothing_on_the_real_filesystem_under_the_root() {
     std::fs::create_dir_all(root.join("data")).unwrap();
 
     let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
+        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
         let tree = build(vec![Layer {
             id: LayerId(0),
             entries: vec![InputEntry {

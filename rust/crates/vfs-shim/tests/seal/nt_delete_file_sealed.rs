@@ -28,6 +28,10 @@
 //!   not-found, and the perfectly good file sitting right there stays.
 //! - `readonly/locked.esp` is served, but by a layer outside every writable
 //!   mount, so the director refuses with `ST_READ_ONLY`.
+//! - The managed root directory itself: its remainder is the root (`"."` on the
+//!   wire), which no provider deletes. The delete must fail and the real
+//!   directory must stay — a root that resolves with an empty remainder is still
+//!   under the root, not a reason to hand the path to the kernel.
 //! - `outside.txt` lives outside every root and must really be deleted. A hook
 //!   that answered every `NtDeleteFile` would pass all the assertions above
 //!   and break the rest of the process; this is the assertion that catches it.
@@ -55,7 +59,7 @@ use crate::fakedirector;
 use crate::ntapi;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{install, Engine};
+use vfs_shim::{Engine, install};
 
 /// Bytes on the real filesystem under the managed root.
 const HOST_SERVED: &[u8] = b"host: data/served.esp";
@@ -102,7 +106,7 @@ fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
     // could mean "the path was not recognised" rather than "the delete was
     // contained" — the same reasoning `drm_names_route_to_director` records.
     let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
+        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
         let entries = [
             "data/served.esp",
             "data/unserved.bin",
@@ -155,6 +159,7 @@ fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
         ntapi::nt_delete_file(&root.join("data").join("unserved.bin").to_string_lossy());
     let locked_status =
         ntapi::nt_delete_file(&root.join("readonly").join("locked.esp").to_string_lossy());
+    let root_itself_status = ntapi::nt_delete_file(&root.to_string_lossy());
     let outside_status = ntapi::nt_delete_file(&base.join("outside.txt").to_string_lossy());
 
     // --- the handle-relative decode ----------------------------------------
@@ -276,6 +281,17 @@ fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
         fake.contents("data/relative.esp"),
         None,
         "the handle-relative delete must have landed at the director"
+    );
+
+    // The managed root itself: refused, and still there.
+    assert!(
+        root_itself_status < 0,
+        "a path-based delete of the managed root itself reported success; got \
+         {root_itself_status:#x}"
+    );
+    assert!(
+        root.is_dir(),
+        "the managed root directory itself was deleted"
     );
 
     // And the other direction: outside every root the hook must not have an

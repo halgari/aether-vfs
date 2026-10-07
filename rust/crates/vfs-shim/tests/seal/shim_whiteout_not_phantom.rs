@@ -35,7 +35,7 @@ use crate::fakedirector;
 use crate::ntapi;
 
 use vfs_redirect::RootId;
-use vfs_shim::{install, overlay_layer_dir, Engine};
+use vfs_shim::{Engine, install, overlay_layer_dir};
 
 const KEPT: &[u8] = b"kept";
 const GONE: &[u8] = b"gone";

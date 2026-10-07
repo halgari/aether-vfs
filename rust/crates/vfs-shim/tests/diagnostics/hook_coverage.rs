@@ -20,7 +20,10 @@
 //! process would fight. Every test in these binaries re-executes itself in a
 //! fresh process for that reason (see `tests/common/mod.rs`).
 
-use vfs_shim::{install, skipped_detours, Engine};
+use crate::fakedirector;
+
+use fakedirector::{Fake, ReadStyle};
+use vfs_shim::{Engine, install, skipped_detours};
 
 #[test]
 fn a_successful_install_skips_no_detour_on_windows() {
@@ -30,28 +33,21 @@ fn a_successful_install_skips_no_detour_on_windows() {
     std::env::set_var(vfs_env::REGISTRY, "1");
     let pid = std::process::id();
     let root = std::env::temp_dir().join(format!("vfs-shim-hookcov-{pid}"));
-    let backing_dir = std::env::temp_dir().join(format!("vfs-shim-hookcov-backing-{pid}"));
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(&backing_dir).unwrap();
 
-    let backing = backing_dir.join("backing_blob.dat");
-    std::fs::write(&backing, b"the-real-bytes").unwrap();
-
-    let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![InputEntry {
-                vpath: "mod.esp".into(),
-                kind: EntryKind::File,
-                source: backing.to_str().unwrap().into(),
-                size: 14,
-                mtime: 0,
-            }],
+    // The virtual file is the director's.
+    fakedirector::install(
+        &root,
+        Fake::new().with("mod.esp", b"the-real-bytes".to_vec(), ReadStyle::Whole),
+        0,
+    );
+    let snapshot = vfs_shared::bridge::flatten(
+        &vfs_core::build(vec![vfs_core::Layer {
+            id: vfs_core::LayerId(0),
+            entries: Vec::new(),
         }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
+        .unwrap(),
+    );
     let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
 
     // Assert *after* a successful install: `SKIPPED_DETOURS` is only written by
@@ -81,5 +77,4 @@ fn a_successful_install_skips_no_detour_on_windows() {
 
     drop(guard);
     let _ = std::fs::remove_dir_all(&root);
-    let _ = std::fs::remove_dir_all(&backing_dir);
 }

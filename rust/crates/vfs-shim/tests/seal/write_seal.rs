@@ -28,7 +28,7 @@ use crate::fakedirector;
 
 use std::io::Write;
 use vfs_redirect::RootId;
-use vfs_shim::{install, outcome_count, overlay_layer_dir, Engine, OpenOutcome};
+use vfs_shim::{Engine, OpenOutcome, install, outcome_count, overlay_layer_dir};
 
 /// `ERROR_FILE_NOT_FOUND` — `STATUS_OBJECT_NAME_NOT_FOUND`.
 const ERROR_FILE_NOT_FOUND: i32 = 2;
@@ -62,7 +62,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
     std::env::set_var(vfs_env::SHIM_STATS_INTERVAL_MS, "3600000");
 
     let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
+        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
         let tree = build(vec![Layer {
             id: LayerId(0),
             entries: vec![InputEntry {

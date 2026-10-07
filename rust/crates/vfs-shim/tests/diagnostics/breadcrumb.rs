@@ -9,7 +9,10 @@
 //! So this test does not merely call `snapshot()`; it parses the bytes off disk
 //! the way a watchdog would.
 
-use vfs_shim::{install, Engine};
+use crate::fakedirector;
+
+use fakedirector::{Fake, ReadStyle};
+use vfs_shim::{Engine, install};
 
 const NONE: u32 = u32::MAX;
 const MAGIC: u32 = 0x4252_4342;
@@ -39,24 +42,20 @@ fn an_outside_reader_can_see_which_hook_the_process_is_in() {
 
     let root = dir.join("root");
     std::fs::create_dir_all(&root).unwrap();
-    let backing = dir.join("backing.dat");
-    std::fs::write(&backing, b"breadcrumbed").unwrap();
 
-    let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![InputEntry {
-                vpath: "mod.esp".into(),
-                kind: EntryKind::File,
-                source: backing.to_str().unwrap().into(),
-                size: 12,
-                mtime: 0,
-            }],
+    // The virtual file is the director's.
+    fakedirector::install(
+        &root,
+        Fake::new().with("mod.esp", b"breadcrumbed".to_vec(), ReadStyle::Whole),
+        0,
+    );
+    let snapshot = vfs_shared::bridge::flatten(
+        &vfs_core::build(vec![vfs_core::Layer {
+            id: vfs_core::LayerId(0),
+            entries: Vec::new(),
         }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
+        .unwrap(),
+    );
     let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
     let _guard = install(engine).expect("install");
 

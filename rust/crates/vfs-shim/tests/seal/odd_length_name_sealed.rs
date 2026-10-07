@@ -17,7 +17,7 @@ use crate::fakedirector;
 use std::ffi::c_void;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{install, Engine};
+use vfs_shim::{Engine, install};
 
 const HOST: &[u8] = b"host: data/x.esp";
 const DIR: &[u8] = b"director: data/x.esp";
@@ -111,7 +111,7 @@ fn an_odd_length_name_under_a_managed_root_is_refused_and_touches_nothing() {
     std::env::set_var(vfs_env::SHIM_STATS_INTERVAL_MS, "3600000");
 
     let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
+        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
         let tree = build(vec![Layer {
             id: LayerId(0),
             entries: vec![InputEntry {
