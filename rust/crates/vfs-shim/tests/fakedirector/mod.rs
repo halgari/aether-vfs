@@ -13,7 +13,7 @@
 //! does in production, so the code path under test is the production one; only
 //! the far side of the ring is a fake.
 //!
-//! It answers what copy-up uses (HEARTBEAT, GETATTR, OPEN, READ, CLOSE) plus
+//! It answers HEARTBEAT, GETATTR, READDIR, OPEN, READ, CLOSE and SETATTR (truncate), plus
 //! WRITE, DELETE and RENAME — the last two for gate 5's Task 5, where the
 //! question is whether a path-based delete or a rename into the root is
 //! *answered here* or performed on the real filesystem, and only a fake that
@@ -31,6 +31,11 @@
 //! but by a read-only layer), and *already there* (`ST_EXISTS` for
 //! `OPEN_EXCL`). [`Fake::writable_under`] draws the line between the first two;
 //! anything served but outside a writable prefix answers the third.
+//!
+//! **Roots.** Every request carries a root id. Root 0's files are keyed by their bare vpath,
+//! which is what every single-root fixture uses; any other root's are keyed `@<id>/<vpath>`
+//! ([`key`]), so a fixture serving the same relative path under two roots holds two entries and
+//! a request that lost its root shows up as the wrong file.
 //!
 //! **The registry half** (opcodes 15-22) is not faked at all: [`Fake::with_registry`] puts a
 //! real `vfs_director::Director` with a real `RegistryHost` behind the ring and answers those
@@ -130,46 +135,66 @@ impl Tally {
     fn bump(m: &Mutex<HashMap<String, u64>>, vpath: &str) {
         *m.lock().unwrap().entry(vpath.to_string()).or_insert(0) += 1;
     }
-    fn get(m: &Mutex<HashMap<String, u64>>, vpath: &str) -> u64 {
-        m.lock().unwrap().get(vpath).copied().unwrap_or(0)
+    fn get(m: &Mutex<HashMap<String, u64>>, k: &str) -> u64 {
+        m.lock().unwrap().get(k).copied().unwrap_or(0)
+    }
+    /// A file tally: keyed by the folded vpath, as the table is ([`key`]).
+    fn get_file(m: &Mutex<HashMap<String, u64>>, vpath: &str) -> u64 {
+        Self::get(m, &vpath.to_ascii_lowercase())
     }
     /// OPENs that issued a handle (a not-found OPEN issues none).
     pub(crate) fn opens(&self, vpath: &str) -> u64 {
-        Self::get(&self.opened, vpath)
+        Self::get_file(&self.opened, vpath)
     }
     pub(crate) fn closes(&self, vpath: &str) -> u64 {
-        Self::get(&self.closed, vpath)
+        Self::get_file(&self.closed, vpath)
     }
     /// READ requests that reached the server for this file — the ring round
     /// trips a copy-up of it actually cost.
     pub(crate) fn reads(&self, vpath: &str) -> u64 {
-        Self::get(&self.reads, vpath)
+        Self::get_file(&self.reads, vpath)
     }
     /// Of those, the ones answered through the shared **arena** rather than
     /// inline. This is what says a test covered the transport a real copy-up
     /// of a large file uses, rather than only the small-file one.
     pub(crate) fn bulk_reads(&self, vpath: &str) -> u64 {
-        Self::get(&self.bulk_reads, vpath)
+        Self::get_file(&self.bulk_reads, vpath)
     }
     /// WRITE requests that reached the server for this file. Zero here with
     /// bytes on disk somewhere means the write never crossed the ring.
     pub(crate) fn writes(&self, vpath: &str) -> u64 {
-        Self::get(&self.writes, vpath)
+        Self::get_file(&self.writes, vpath)
     }
     /// DELETE requests that reached the server for this vpath. A zero here
     /// with the real file gone means the delete went to the filesystem.
     pub(crate) fn deletes(&self, vpath: &str) -> u64 {
-        Self::get(&self.deletes, vpath)
+        Self::get_file(&self.deletes, vpath)
     }
     /// RENAME requests that reached the server, counted against the *source*
     /// vpath.
     pub(crate) fn renames(&self, vpath: &str) -> u64 {
-        Self::get(&self.renames, vpath)
+        Self::get_file(&self.renames, vpath)
     }
     /// Registry requests with `opcode` for `path` (as sent) that reached the server: zero for
     /// a read means it was answered from the shim's cache.
     pub(crate) fn reg(&self, opcode: u32, path: &str) -> u64 {
         Self::get(&self.reg, &format!("{opcode} {path}"))
+    }
+}
+
+/// The table key for `vpath` under `root`: the bare vpath for root 0, `@<root>/<vpath>` for any
+/// other. A fixture names a second root's files with this (`key(1, "data/a.esp")`).
+///
+/// Folded (ASCII lowercase), because a real provider graph looks names up case-insensitively and
+/// the shim does not always send the folded spelling: a write open carries the caller's
+/// (`FuseClient::vpath_as_spelled`). So the fake stores and finds every name folded, and does not
+/// model the stored case at all.
+pub(crate) fn key(root: u32, vpath: &str) -> String {
+    let vpath = vpath.to_ascii_lowercase();
+    if root == 0 {
+        vpath
+    } else {
+        format!("@{root}/{vpath}")
     }
 }
 
@@ -190,6 +215,9 @@ pub(crate) struct Fake {
     handles: Mutex<HashMap<u64, String>>,
     next_fh: AtomicU64,
     writable: Vec<String>,
+    /// Prefixes under which a write open fails with `ST_IO_ERROR`: a provider that broke, not
+    /// one that refused.
+    failing: Vec<String>,
     /// Answers the registry opcodes when set ([`Fake::with_registry`]).
     director: Option<Arc<vfs_director::Director>>,
     pub(crate) tally: Tally,
@@ -203,6 +231,7 @@ impl Fake {
             handles: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             writable: Vec::new(),
+            failing: Vec::new(),
             director: None,
             tally: Tally::default(),
         }
@@ -237,12 +266,13 @@ impl Fake {
     /// `FILE_ADD_SUBDIRECTORY`, which every `FILE_FLAG_BACKUP_SEMANTICS`
     /// directory open carries.
     pub(crate) fn with_dir(mut self, vpath: &str) -> Fake {
-        self.dirs.push(vpath.to_string());
+        self.dirs.push(vpath.to_ascii_lowercase());
         self
     }
 
+    /// A root itself (`"."` on the wire) is always a directory.
     fn is_dir(&self, vpath: &str) -> bool {
-        self.dirs.iter().any(|d| d == vpath)
+        vpath == "." || vpath.ends_with("/.") || self.dirs.iter().any(|d| d == vpath)
     }
 
     /// Declare a vpath prefix that a `ReadWrite` provider is mounted over: a
@@ -255,12 +285,23 @@ impl Fake {
     /// With no prefix declared at all (the default) the whole graph is
     /// read-only, which is the shape every pre-Task-5 fixture here wanted.
     pub(crate) fn writable_under(mut self, prefix: &str) -> Fake {
-        self.writable.push(prefix.to_string());
+        self.writable.push(prefix.to_ascii_lowercase());
         self
     }
 
     fn is_writable(&self, vpath: &str) -> bool {
         self.writable.iter().any(|p| vpath.starts_with(p.as_str()))
+    }
+
+    /// Declare a vpath prefix whose write opens fail with `ST_IO_ERROR`, the answer a provider
+    /// gives when its own I/O breaks. Checked before anything else a write open looks at.
+    pub(crate) fn failing_writes_under(mut self, prefix: &str) -> Fake {
+        self.failing.push(prefix.to_ascii_lowercase());
+        self
+    }
+
+    fn write_fails(&self, vpath: &str) -> bool {
+        self.failing.iter().any(|p| vpath.starts_with(p.as_str()))
     }
 
     /// Add a file to the provider graph. `vpath` is the folded, `/`-joined
@@ -269,7 +310,7 @@ impl Fake {
         self.files
             .get_mut()
             .unwrap()
-            .insert(vpath.to_string(), Entry { bytes, style });
+            .insert(vpath.to_ascii_lowercase(), Entry { bytes, style });
         self
     }
 
@@ -280,7 +321,7 @@ impl Fake {
         self.files
             .lock()
             .unwrap()
-            .get(vpath)
+            .get(&vpath.to_ascii_lowercase())
             .map(|e| e.bytes.clone())
     }
 
@@ -297,9 +338,10 @@ impl Fake {
         match opcode {
             P::OP_HEARTBEAT => (P::ST_OK, Vec::new()),
             P::OP_GETATTR => {
-                let Some((_root, vpath)) = P::decode_path_req(payload) else {
+                let Some((root, vpath)) = P::decode_path_req(payload) else {
                     return (P::ST_BAD_REQUEST, Vec::new());
                 };
+                let vpath = key(root, &vpath);
                 if self.is_dir(&vpath) {
                     return (
                         P::ST_OK,
@@ -337,13 +379,18 @@ impl Fake {
             // listing like any other. A fake that filtered it would be
             // fictional in exactly the way the defect lives in.
             P::OP_READDIR => {
-                let Some((_root, vpath)) = P::decode_path_req(payload) else {
+                let Some((root, vpath)) = P::decode_path_req(payload) else {
                     return (P::ST_BAD_REQUEST, Vec::new());
                 };
                 // `FuseClient::readdir` sends "." for the root itself.
-                let prefix = match vpath.as_str() {
-                    "." | "" => String::new(),
-                    v => format!("{v}/"),
+                let dir = match vpath.as_str() {
+                    "." | "" => key(root, ""),
+                    v => key(root, v),
+                };
+                let prefix = if dir.is_empty() || dir.ends_with('/') {
+                    dir
+                } else {
+                    format!("{dir}/")
                 };
                 let mut out: Vec<P::DirEntryWire> = Vec::new();
                 let mut seen: Vec<String> = Vec::new();
@@ -382,9 +429,13 @@ impl Fake {
                 (P::ST_OK, P::encode_readdir_resp(&out))
             }
             P::OP_OPEN => {
-                let Some((_root, flags, vpath)) = P::decode_open_req(payload) else {
+                let Some((root, flags, vpath)) = P::decode_open_req(payload) else {
                     return (P::ST_BAD_REQUEST, Vec::new());
                 };
+                let vpath = key(root, &vpath);
+                if flags & P::OPEN_WRITE != 0 && self.write_fails(&vpath) {
+                    return (P::ST_IO_ERROR, Vec::new());
+                }
                 if self.is_dir(&vpath) {
                     if flags & P::OPEN_WRITE != 0 {
                         // The three answers a real graph gives, and they are
@@ -542,9 +593,10 @@ impl Fake {
             // sealed-path test pass for the wrong reason — the shim would look
             // like it had routed a delete the graph would in fact have refused.
             P::OP_DELETE => {
-                let Some((_root, vpath)) = P::decode_path_req(payload) else {
+                let Some((root, vpath)) = P::decode_path_req(payload) else {
                     return (P::ST_BAD_REQUEST, Vec::new());
                 };
+                let vpath = key(root, &vpath);
                 Tally::bump(&self.tally.deletes, &vpath);
                 let mut files = self.files.lock().unwrap();
                 if !files.contains_key(&vpath) {
@@ -557,9 +609,10 @@ impl Fake {
                 (P::ST_OK, Vec::new())
             }
             P::OP_RENAME => {
-                let Some((_root, from, to)) = P::decode_rename_req(payload) else {
+                let Some((root, from, to)) = P::decode_rename_req(payload) else {
                     return (P::ST_BAD_REQUEST, Vec::new());
                 };
+                let (from, to) = (key(root, &from), key(root, &to));
                 Tally::bump(&self.tally.renames, &from);
                 let mut files = self.files.lock().unwrap();
                 if !files.contains_key(&from) {
@@ -570,6 +623,23 @@ impl Fake {
                 }
                 let e = files.remove(&from).expect("just checked");
                 files.insert(to, e);
+                (P::ST_OK, Vec::new())
+            }
+            // Truncate (`FuseClient::truncate`): `File::create` on an existing file truncates this
+            // way, through `FileEndOfFileInfo`.
+            P::OP_SETATTR => {
+                let Some(req) = P::decode_setattr_req(payload) else {
+                    return (P::ST_BAD_REQUEST, Vec::new());
+                };
+                let vpath = match self.handles.lock().unwrap().get(&req.fh) {
+                    Some(v) => v.clone(),
+                    None => return (P::ST_BAD_FH, Vec::new()),
+                };
+                let mut files = self.files.lock().unwrap();
+                let Some(e) = files.get_mut(&vpath) else {
+                    return (P::ST_NOT_FOUND, Vec::new());
+                };
+                e.bytes.resize(req.size as usize, 0);
                 (P::ST_OK, Vec::new())
             }
             P::OP_CLOSE => {
@@ -619,7 +689,11 @@ impl Fake {
 /// request at or above [`BULK_THRESHOLD`] takes the same transport it takes
 /// live. Below the threshold reads stay inline either way, so one ring can
 /// cover both.
-pub(crate) fn install(virtual_dir: &std::path::Path, fake: Fake, arena_len: usize) -> &'static Fake {
+pub(crate) fn install(
+    virtual_dir: &std::path::Path,
+    fake: Fake,
+    arena_len: usize,
+) -> &'static Fake {
     static FAKE: OnceLock<&'static Fake> = OnceLock::new();
     FAKE.get_or_init(|| {
         let fake: &'static Fake = Box::leak(Box::new(fake));
