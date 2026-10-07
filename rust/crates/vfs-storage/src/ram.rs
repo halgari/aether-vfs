@@ -53,7 +53,7 @@ struct Key {
 
 /// Counters of a [`RamTier`], summed over its shards.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RamStats {
+pub(crate) struct RamStats {
     pub hits: u64,
     pub misses: u64,
     pub evicts: u64,
@@ -99,10 +99,11 @@ const MIN_BLOCKS_PER_SHARD: u64 = 8;
 /// so shard geometry is identical on every machine and can be asserted on.
 const MAX_SHARDS: usize = 64;
 /// The block size [`RamTier::new`] sizes shards for: the block store's default.
+#[cfg(test)]
 const DEFAULT_GEOMETRY_BLOCK: u64 = 64 * 1024;
 
 /// Thread-safe RAM tier of decompressed blocks.
-pub struct RamTier {
+pub(crate) struct RamTier {
     budget: u64,
     shards: Box<[RwLock<Shard>]>,
     /// `shards.len() - 1`; `shards.len()` is always a power of two.
@@ -120,6 +121,7 @@ pub struct RamTier {
 impl RamTier {
     /// A tier of `budget_bytes`, with shards sized for the block store's default
     /// block size. A zero budget is "no RAM tier": every `put` is refused.
+    #[cfg(test)]
     pub fn new(budget_bytes: u64) -> Self {
         Self::with_geometry(budget_bytes, DEFAULT_GEOMETRY_BLOCK)
     }
@@ -159,6 +161,7 @@ impl RamTier {
 
     /// The largest block `put` accepts: the **per-shard** budget. Zero means the
     /// tier is off.
+    #[cfg(test)]
     pub fn max_cacheable_block(&self) -> u64 {
         self.shard_budget
     }

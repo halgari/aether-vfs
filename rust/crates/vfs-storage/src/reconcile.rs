@@ -216,7 +216,7 @@ pub(crate) fn reconcile(
                         "layer file row length differs from the store's; using the store's"
                     );
                     rec.len = info.len;
-                    match catalog.put(layer, &path, &rec, false) {
+                    match catalog.put(layer, &path, &rec) {
                         Ok(()) => report.resized_rows.push((lname, path)),
                         Err(e) => repair_failed(
                             &mut report,
@@ -236,7 +236,7 @@ pub(crate) fn reconcile(
         let emptied = repair(|| Ok(store.set_len(&id, 0)?)).and_then(|()| {
             if let Some(mut rec) = catalog.get(layer, &path)? {
                 rec.len = 0;
-                catalog.put(layer, &path, &rec, false)?;
+                catalog.put(layer, &path, &rec)?;
             }
             Ok(())
         });
@@ -458,7 +458,7 @@ mod tests {
             len: 5000,
             mtime: 7,
         };
-        s.catalog.put(lid, "lost.txt", &rec, false).unwrap();
+        s.catalog.put(lid, "lost.txt", &rec).unwrap();
         s.close_unclean(); // a crash: no clean-close mark
 
         let s = Storage::open(d.path(), cfg()).unwrap();
@@ -878,7 +878,7 @@ mod tests {
             len: 10,
             mtime: 1,
         };
-        s.catalog.put(lid, "lost.bin", &lost, false).unwrap(); // to recreate empty
+        s.catalog.put(lid, "lost.bin", &lost).unwrap(); // to recreate empty
         s.store.set_len(&layer_file_id(&new_guid()), 5).unwrap(); // an orphan: compaction
         s.close_unclean(); // a crash: no clean-close mark
 
@@ -940,7 +940,7 @@ mod tests {
         let lid = s.catalog.layer_id("l").unwrap().unwrap();
         let mut rec = s.catalog.get(lid, "f.bin").unwrap().unwrap();
         rec.len = 100;
-        s.catalog.put(lid, "f.bin", &rec, false).unwrap();
+        s.catalog.put(lid, "f.bin", &rec).unwrap();
         s.close_unclean(); // a crash: no clean-close mark
 
         let s = Storage::open(d.path(), cfg()).unwrap();

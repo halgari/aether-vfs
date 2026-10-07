@@ -833,7 +833,6 @@ mod tests {
                     len: 0,
                     mtime: 0,
                 },
-                false,
             )
             .unwrap();
         let out = d.path().join("out");

@@ -212,7 +212,7 @@ impl LayerProvider {
     fn put(&self, folded: &str, rec: &EntryRec) -> Result<(), i32> {
         self.storage
             .catalog
-            .put(self.id, folded, rec, false)
+            .put(self.id, folded, rec)
             .map_err(|e| self.st_err("catalog put", e))
     }
 
@@ -275,7 +275,7 @@ impl LayerProvider {
     /// first. Best effort. Under `ns`.
     fn rollback(&self, created: &[String]) {
         for dir in created.iter().rev() {
-            let _ = self.storage.catalog.remove(self.id, dir, false);
+            let _ = self.storage.catalog.remove(self.id, dir);
         }
     }
 
@@ -384,7 +384,7 @@ impl LayerProvider {
                 || self
                     .storage
                     .catalog
-                    .remove(self.id, &p.folded, false)
+                    .remove(self.id, &p.folded)
                     .is_ok();
             let unstore = !stored || self.storage.store.delete(&id).is_ok();
             if !(unrow && unstore) {
@@ -727,7 +727,7 @@ impl Provider for LayerProvider {
             let rec = self.get(&p.folded)?.ok_or_else(not_found)?;
             self.storage
                 .catalog
-                .remove(self.id, &p.folded, false)
+                .remove(self.id, &p.folded)
                 .map_err(|e| self.st_err("catalog remove", e))?;
             if rec.kind == KIND_FILE {
                 self.doom(rec.guid)?;
@@ -842,7 +842,7 @@ impl LayerProvider {
                 }
                 self.storage
                     .catalog
-                    .put_many(self.id, &rows, false)
+                    .put_many(self.id, &rows)
                     .map_err(|e| self.st_err("catalog put", e))?;
                 committed = true;
                 #[cfg(test)]

@@ -1,8 +1,8 @@
 //! `vfs-storage`: the block store as pull-through cache and layer storage.
 //!
-//! A [`Storage`] owns one `vfs_block_store::BlockStore`, a redb [`Catalog`]
+//! A [`Storage`] owns one `vfs_block_store::BlockStore`, a redb catalog
 //! beside it that names what the store holds (layers and their entries, and
-//! cached files' eviction bookkeeping), and a [`RamTier`] of decompressed
+//! cached files' eviction bookkeeping), and a RAM tier of decompressed
 //! blocks. See `docs/superpowers/specs/2026-09-29-vfs-storage-design.md`.
 //!
 //! **Durability.** Layer writes and namespace changes commit non-durably;
@@ -31,12 +31,9 @@ mod storage;
 mod test_util;
 
 pub use cached::{CacheStats, SourceKey};
-pub use catalog::{CacheRec, Catalog, EntryRec};
 pub use config::{Durability, ScratchDir, StorageConfig};
 pub use evict::ClearReport;
-pub use ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, Guid, StoreIdKind};
 pub use manage::{LayerInfo, SpaceUsage, StorageStats};
-pub use ram::{RamStats, RamTier};
 pub use reconcile::ReconcileReport;
 pub use storage::{CloseOutcome, Storage, StorageError};
 // The block store's compression and accounting types, so a host configures
