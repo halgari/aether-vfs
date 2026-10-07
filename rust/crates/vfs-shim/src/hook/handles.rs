@@ -103,6 +103,37 @@ pub(super) static HANDLES: Mutex<HandleTable> = Mutex::new(HandleTable::new());
 
 const HANDLE_PATHS_MAX: usize = 65_536;
 
+/// Forget whatever the table holds for `key`, because a new handle with that value was just
+/// issued. A handle value the OS (or the synthetic allocator) reuses can only have a stale
+/// record, left behind by a close whose `try_lock` lost; without this, the stale `under_root`
+/// path of a closed handle would be read as the new handle's (a `DeleteFile` of a real file
+/// outside the root would then act on an unrelated path). The open then writes only what it
+/// knows. `blocking` is for an open that goes on to take the table's lock anyway; otherwise
+/// the clear is a `try_lock`, and a clear that loses it leaves the stale record, as before.
+pub(super) fn reset_key(key: isize, blocking: bool) {
+    if blocking {
+        if let Ok(mut t) = HANDLES.lock() {
+            t.remove(key);
+        }
+    } else if let Ok(mut t) = HANDLES.try_lock() {
+        t.remove(key);
+    }
+}
+
+/// [`reset_key`] for the handle a successful `NtCreateFile`/`NtOpenFile` returned. `path` is
+/// the decoded path the open will record: with one, the open takes the lock anyway
+/// (`tag_under_root`), so the clear blocks like it does; without one (nothing is recorded) it
+/// is a `try_lock`, so a pass-through open that took no lock before still takes none that can
+/// block. The residual window: a path-less open whose clear loses the `try_lock` keeps a stale
+/// record, but nothing reads a record for it except by its own handle value.
+pub(super) unsafe fn reset_handle(file_handle: *mut HANDLE, path: Option<&str>, status: NTSTATUS) {
+    if status < 0 || file_handle.is_null() {
+        return;
+    }
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    reset_key(unsafe { *file_handle } as isize, path.is_some());
+}
+
 /// Record a freshly-opened handle as a candidate directory for enumeration
 /// virtualization: only when the open succeeded and its path is under the
 /// managed root. Harmless for file handles (they never receive a dir-enum call)
@@ -287,6 +318,40 @@ mod tests {
         t.remove(8);
         assert!(t.opened_as(8).is_none() && t.under_root(8).is_none());
         assert!(t.identity(8).is_none() && t.dir(8).is_none());
+    }
+
+    #[test]
+    fn a_stale_record_is_cleared_when_a_new_open_reuses_the_handle_value() {
+        // A distinct value: the global table is shared with other tests.
+        let h: isize = 0x7ead_0001;
+        {
+            let mut t = HANDLES.lock().unwrap();
+            // The record a close left behind when it lost its try_lock.
+            t.set_under_root(h, "stale".into());
+            t.set_opened_as(h, "stale".into());
+            t.set_identity(h, "stale".into());
+            t.set_dir(
+                h,
+                DirTracked {
+                    dir_nt_path: "stale".into(),
+                    state: None,
+                },
+            );
+        }
+        let mut slot = h as HANDLE;
+        // A failed open issued no handle: nothing is cleared.
+        unsafe { reset_handle(&mut slot, Some("p"), -1) };
+        assert!(HANDLES.lock().unwrap().under_root(h).is_some());
+        // A successful one did (with and without a path to record).
+        unsafe { reset_handle(&mut slot, Some("p"), 0) };
+        {
+            let t = HANDLES.lock().unwrap();
+            assert!(t.under_root(h).is_none() && t.opened_as(h).is_none());
+            assert!(t.identity(h).is_none() && t.dir(h).is_none());
+        }
+        HANDLES.lock().unwrap().set_under_root(h, "stale".into());
+        unsafe { reset_handle(&mut slot, None, 0) };
+        assert!(HANDLES.lock().unwrap().under_root(h).is_none());
     }
 
     #[test]

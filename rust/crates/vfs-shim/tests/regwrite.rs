@@ -20,12 +20,12 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use fakedirector::Fake;
 use vfs_registry::Lookup;
-use vfs_shim::{install, is_synthetic_key_handle, regclient, registry_handle_path, Engine};
-use windows_sys::Win32::Foundation::{LocalFree, FILETIME, HANDLE};
+use vfs_shim::{Engine, install, is_synthetic_key_handle, regclient, registry_handle_path};
+use windows_sys::Win32::Foundation::{FILETIME, HANDLE, LocalFree};
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryInfoKeyW,
-    RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ,
-    REG_OPTION_NON_VOLATILE,
+    HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ, REG_OPTION_NON_VOLATILE, RegCloseKey,
+    RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW,
+    RegSetValueExW,
 };
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -312,7 +312,7 @@ fn real_raw(rel: &str, name: &str, ty: u32, data: &[u8]) {
 
 fn user_sid() -> String {
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     unsafe {
         let mut token: HANDLE = std::ptr::null_mut();
@@ -450,7 +450,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         std::env::set_var(vfs_env::REGISTRY, "1");
         let fake = fakedirector::install(&root, Fake::new().with_registry(), 0);
         let snapshot = {
-            use vfs_core::{build, Layer, LayerId};
+            use vfs_core::{Layer, LayerId, build};
             let tree = build(vec![Layer {
                 id: LayerId(0),
                 entries: vec![],
@@ -609,6 +609,26 @@ fn a_write_through_a_real_handle_goes_to_the_overlay_and_the_handle_then_merges(
     for x in [h, h2, h3] {
         close(x);
     }
+}
+
+/// With the overlay on, a registry write made while the shim is inside its own work (a
+/// `ShimIoGuard` held) is refused, never made for real (the `reg_write_body!` rule).
+#[test]
+fn a_write_bypassed_by_the_shim_guard_is_refused_and_never_reaches_the_real_key() {
+    let (_g, f) = fixture();
+    let (st, h) = f.open("Cow", NT_KEY_READ | NT_KEY_SET_VALUE);
+    assert_eq!(st, STATUS_SUCCESS);
+    let st = vfs_shim::as_shim_io_for_tests(|| set_dword(h, "orig", 99));
+    assert_eq!(st, STATUS_UNSUCCESSFUL);
+    let st = vfs_shim::as_shim_io_for_tests(|| delete_value(h, "orig"));
+    assert_eq!(st, STATUS_UNSUCCESSFUL);
+    assert_eq!(f.real_value("Cow", "orig"), hex(&1u32.to_le_bytes()));
+    assert_eq!(
+        query_dword(h, "orig"),
+        Ok(1),
+        "and the overlay did not take it either"
+    );
+    close(h);
 }
 
 #[test]

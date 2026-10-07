@@ -4,7 +4,7 @@
 use super::{
     HANDLES, ShimIoGuard, TRAMP_CREATE, TRAMP_OPEN, allow_disk_fallthrough, decision_for,
     fuse_root_directory, in_hook_reenter, object_name_str, path_is_ours, path_of_tracked,
-    record_identity, record_path, tag_under_root, to_nt_path,
+    record_identity, record_path, reset_handle, reset_key, tag_under_root, to_nt_path,
 };
 use crate::ntbuf::OwnedOa;
 use crate::ntdef::{
@@ -372,6 +372,7 @@ unsafe fn try_fuse_create(
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, info) };
             // Direct PATH_TABLE insert with absolute path (path_of may be relative OA).
+            reset_key(h, true);
             if let Ok(mut t) = HANDLES.lock() {
                 t.set_under_root(h, path.clone());
             }
@@ -591,6 +592,8 @@ unsafe fn try_fuse_mkdir(
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, FILE_CREATED) };
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { reset_handle(file_handle, Some(path), STATUS_SUCCESS) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { record_path(file_handle, Some(path), STATUS_SUCCESS) };
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { tag_under_root(file_handle, Some(path), STATUS_SUCCESS) };
@@ -621,6 +624,8 @@ unsafe fn try_fuse_mkdir(
                     unsafe {
                         crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, crate::ntdef::FILE_OPENED)
                     };
+                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                    unsafe { reset_handle(file_handle, Some(path), STATUS_SUCCESS) };
                     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
                     unsafe { record_path(file_handle, Some(path), STATUS_SUCCESS) };
                     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
@@ -841,6 +846,8 @@ unsafe fn route_open(
             };
             let status = real(new_oa.as_ptr());
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { reset_handle(file_handle, path, status) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { record_identity(file_handle, path, status) };
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { record_path(file_handle, path, status) };
@@ -878,6 +885,8 @@ unsafe fn route_open(
                         Err(st) => st,
                     };
                     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                    unsafe { reset_handle(file_handle, Some(path), status) };
+                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
                     unsafe { tag_under_root(file_handle, Some(path), status) };
                     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
                     unsafe { record_path(file_handle, Some(path), status) };
@@ -886,6 +895,8 @@ unsafe fn route_open(
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
             let status = real(oa);
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { reset_handle(file_handle, path, status) };
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { tag_under_root(file_handle, path, status) };
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
