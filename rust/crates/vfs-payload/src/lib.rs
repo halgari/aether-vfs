@@ -819,6 +819,13 @@ mod tests {
         assert_eq!(offset_of!(Config, redirect_count), 76);
         assert_eq!(offset_of!(Config, redirects), 80);
         assert_eq!(offset_of!(Config, counters), 80 + 40 * MAX_REDIRECTS);
+        // The `secondary_*` slots are written into a live process by
+        // `vfs_shim::install_late`; they are the fields most likely to drift.
+        assert_eq!(offset_of!(Config, secondary_open), 248);
+        assert_eq!(offset_of!(Config, secondary_create), 256);
+        assert_eq!(offset_of!(Config, secondary_qattr), 264);
+        assert_eq!(offset_of!(Config, secondary_qfull), 272);
+        assert_eq!(size_of::<Config>(), 280);
         assert_eq!(MAX_REDIRECTS, 4);
     }
 }

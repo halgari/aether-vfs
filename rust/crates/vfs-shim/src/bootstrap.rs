@@ -6,7 +6,7 @@ use core::ffi::c_void;
 
 use crate::engine::{Engine, EngineError};
 use crate::hook::{install, install_late, HookGuard, InstallError};
-use crate::payload_abi::PayloadConfig;
+use vfs_inject::PayloadConfig;
 
 /// True when `p` looks like a live early-payload Config in *this* process
 /// (readable page + nt_protect matches our ntdll). Rejects inherited parent

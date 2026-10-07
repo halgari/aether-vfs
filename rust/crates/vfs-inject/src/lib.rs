@@ -18,6 +18,7 @@ mod static_imports;
 mod steam_helper;
 mod stub;
 
+pub use payload_cfg::{PayloadConfig, RedirectEntry, MAX_REDIRECTS};
 pub use pe::{is_system_import_dll, map_image_from_pe_bytes_local, pe_looks_like_image};
 
 /// Import DLL names of a raw PE. Now `vfs-pe`'s; it parses the **file** image

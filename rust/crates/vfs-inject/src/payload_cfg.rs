@@ -1,4 +1,6 @@
-//! Host-side mirror of `vfs_payload::Config` — must match field-for-field.
+//! Host-side mirror of `vfs_payload::Config` — must match field-for-field. The
+//! injector and `vfs-shim` (which publishes the `secondary_*` slots from
+//! `install_late`) both use this one definition.
 #![allow(unsafe_code)]
 
 pub const MAX_REDIRECTS: usize = 4;
@@ -109,5 +111,12 @@ mod tests {
         assert_eq!(offset_of!(PayloadConfig, redirect_count), 76);
         assert_eq!(offset_of!(PayloadConfig, redirects), 80);
         assert_eq!(offset_of!(PayloadConfig, counters), 80 + 40 * MAX_REDIRECTS);
+        // The `secondary_*` slots are written into a live process by
+        // `vfs_shim::install_late`; they are the fields most likely to drift.
+        assert_eq!(offset_of!(PayloadConfig, secondary_open), 248);
+        assert_eq!(offset_of!(PayloadConfig, secondary_create), 256);
+        assert_eq!(offset_of!(PayloadConfig, secondary_qattr), 264);
+        assert_eq!(offset_of!(PayloadConfig, secondary_qfull), 272);
+        assert_eq!(size_of::<PayloadConfig>(), 280);
     }
 }

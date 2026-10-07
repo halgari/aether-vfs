@@ -16,7 +16,6 @@ mod inject;
 mod lazy_section;
 mod ntdef;
 mod overlay;
-mod payload_abi;
 mod read_cache;
 /// The registry hooks' client for the director's registry overlay.
 pub mod regclient;
@@ -97,4 +96,4 @@ pub fn is_synthetic_key_handle(handle: isize) -> bool {
     regkeys::is_synthetic(handle)
 }
 pub use overlay::overlay_layer_dir;
-pub use payload_abi::PayloadConfig;
+pub use vfs_inject::PayloadConfig;
