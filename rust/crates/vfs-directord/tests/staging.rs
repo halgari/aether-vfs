@@ -100,6 +100,7 @@ fn staged_launch_artifacts_resolve_through_the_provider_graph() {
                     exe_vpath: "skse64_loader.exe",
                     also: &also,
                     fallback_dirs: &[],
+                    shim: None,
                 },
             )
         })

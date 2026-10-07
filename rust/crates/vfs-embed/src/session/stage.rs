@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use vfs_compose::DiskProvider;
-use vfs_director::stage::{stage_launch_into, ImageSource};
+use vfs_director::stage::{stage_launch_into, stage_launch_into_patched, ImageSource};
 use vfs_director::Director;
 use vfs_provider::{Provider, RootId};
 
@@ -15,7 +15,7 @@ use vfs_provider::{Provider, RootId};
 use vfs_director::stage::StagedDir;
 
 use super::read::read_whole;
-use super::{LaunchOpts, Session, StageOpts};
+use super::{Activation, LaunchOpts, Session, StageOpts};
 use crate::image::{self, ImageTarget};
 
 /// Reads whole files out of a session's own composed graph, for
@@ -71,13 +71,23 @@ impl Session {
         // VFS with it, which is what stopped Cyberpunk 2077 and Stardew
         // Valley booting while Skyrim (EXE at the root, content found via
         // cwd) was unaffected.
-        let staged = stage_launch_into(
-            source,
-            opts.exe_vpath,
-            opts.also,
-            &self.virtual_root,
-            opts.fallback_dirs,
-        )?;
+        let staged = match opts.shim {
+            Some(shim) => stage_launch_into_patched(
+                source,
+                opts.exe_vpath,
+                opts.also,
+                &self.virtual_root,
+                opts.fallback_dirs,
+                shim,
+            )?,
+            None => stage_launch_into(
+                source,
+                opts.exe_vpath,
+                opts.also,
+                &self.virtual_root,
+                opts.fallback_dirs,
+            )?,
+        };
         let disk: Arc<dyn Provider> = Arc::new(DiskProvider::new(staged.dir()));
         {
             let mut roots = self
@@ -114,6 +124,32 @@ impl Session {
             .ok()
             .and_then(|s| s.as_ref().map(|d| d.proxies().to_vec()))
             .unwrap_or_default()
+    }
+
+    /// Staged EXEs the last staging could not import-activate, and why
+    /// ([`vfs_director::stage::StagedDir::unpatched`]). The shim is injected
+    /// into them instead.
+    pub fn staged_unpatched(&self) -> Vec<(String, String)> {
+        self.staged
+            .lock()
+            .ok()
+            .and_then(|s| s.as_ref().map(|d| d.unpatched().to_vec()))
+            .unwrap_or_default()
+    }
+
+    /// The shim's bytes for staging to import-activate with, or `None` under
+    /// [`Activation::Inject`]. Located the way the launch itself locates it.
+    fn shim_for_staging(&self, opts: &LaunchOpts) -> Result<Option<Vec<u8>>, String> {
+        if opts.activation != Activation::Import {
+            return Ok(None);
+        }
+        #[cfg(unix)]
+        let path = super::proton::locate_wine_artifacts(opts)?.1;
+        #[cfg(windows)]
+        let path = PathBuf::from(super::windows::locate_shim(opts)?);
+        std::fs::read(&path)
+            .map(Some)
+            .map_err(|e| format!("launch: reading the shim {}: {e}", path.display()))
     }
 
     /// Where `opts.image` points, staged if need be: the one resolver both
@@ -203,6 +239,7 @@ impl Session {
                 // the staging directory back under the curated graph, and
                 // launch the real file that produces.
                 let also: Vec<&str> = opts.stage_also.iter().map(String::as_str).collect();
+                let shim = self.shim_for_staging(opts)?;
                 let host = self
                     .stage_launch(
                         &KernelSource(Arc::clone(&self.kernel)),
@@ -210,6 +247,7 @@ impl Session {
                             exe_vpath: &vpath,
                             also: &also,
                             fallback_dirs: &opts.stage_fallback_dirs,
+                            shim: shim.as_deref(),
                         },
                     )
                     .map_err(|e| format!("launch: staging {vpath:?}: {e}"))?;
@@ -307,6 +345,9 @@ mod launch_image_tests {
         let host = s
             .resolve_for_test(&LaunchOpts {
                 image: img,
+                // Where staging lands, not how the image is activated: no shim
+                // to patch with here.
+                activation: Activation::Inject,
                 ..Default::default()
             })
             .unwrap();

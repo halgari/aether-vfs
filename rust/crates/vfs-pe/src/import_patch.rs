@@ -10,6 +10,11 @@
 //! (it would name the old layout), the Authenticode certificate (the signature no
 //! longer matches) and the header checksum (not checked for an EXE).
 
+/// The DLL an import-activated exe names first: the shim, staged beside it.
+pub const SHIM_IMPORT_DLL: &str = "vfs_shim_dll.dll";
+/// The shim export that import binds (`vfs_shim_activated`).
+pub const SHIM_IMPORT_SYMBOL: &str = "vfs_shim_activated";
+
 fn rd_u16(b: &[u8], o: usize) -> Result<u16, &'static str> {
     b.get(o..o + 2)
         .map(|s| u16::from_le_bytes([s[0], s[1]]))
@@ -84,7 +89,11 @@ pub fn add_first_import(raw: &[u8], dll: &str, func: &str) -> Result<Vec<u8>, &'
         return Err("no import directory slot");
     }
     // A .NET IL-only image: the loader ignores the native import table.
-    let clr_rva = if n_dirs > 14 { rd_u32(raw, dd + 14 * 8)? } else { 0 };
+    let clr_rva = if n_dirs > 14 {
+        rd_u32(raw, dd + 14 * 8)?
+    } else {
+        0
+    };
     if clr_rva != 0 {
         return Err("a .NET image (CLR header present) is not supported yet");
     }
@@ -134,7 +143,9 @@ pub fn add_first_import(raw: &[u8], dll: &str, func: &str) -> Result<Vec<u8>, &'
     };
     let tail = &raw[data_end.min(raw.len())..];
     let tail_is_cert_only = tail.is_empty()
-        || (cert_len != 0 && cert_off >= data_end && cert_off + cert_len >= raw.len()
+        || (cert_len != 0
+            && cert_off >= data_end
+            && cert_off + cert_len >= raw.len()
             && raw[data_end..cert_off].iter().all(|&b| b == 0));
     if !tail_is_cert_only {
         return Err("data after the last section that is not a certificate (an overlay)");
@@ -247,6 +258,57 @@ pub fn add_first_import(raw: &[u8], dll: &str, func: &str) -> Result<Vec<u8>, &'
     Ok(out)
 }
 
+/// Whether the PE that `read_at(offset, len)` reads names `dll` as its **first**
+/// import (ASCII case-insensitive). Reads the headers and one descriptor, not
+/// the image: callers ask this of a 37 MiB exe at every process creation.
+///
+/// `read_at` returns fewer bytes than asked only at the end of the file, and
+/// `None` on an error; anything malformed reads as "no".
+pub fn first_import_is(read_at: &mut dyn FnMut(u64, usize) -> Option<Vec<u8>>, dll: &str) -> bool {
+    first_import_name(read_at).is_some_and(|n| n.eq_ignore_ascii_case(dll))
+}
+
+fn first_import_name(read_at: &mut dyn FnMut(u64, usize) -> Option<Vec<u8>>) -> Option<String> {
+    let head = read_at(0, 0x1000)?;
+    if head.get(..2)? != b"MZ" {
+        return None;
+    }
+    let e_lfanew = rd_u32(&head, 0x3C).ok()? as usize;
+    let n_sections = rd_u16(&head, e_lfanew + 6).ok()? as usize;
+    let size_opt = rd_u16(&head, e_lfanew + 20).ok()? as usize;
+    let opt = e_lfanew + 24;
+    let dd = match rd_u16(&head, opt).ok()? {
+        0x20B => opt + 112,
+        0x10B => opt + 96,
+        _ => return None,
+    };
+    let imp_rva = rd_u32(&head, dd + IMAGE_DIRECTORY_ENTRY_IMPORT * 8).ok()? as usize;
+    if imp_rva == 0 {
+        return None;
+    }
+    let sect_base = opt + size_opt;
+    let table = if sect_base + n_sections * 40 <= head.len() {
+        head[sect_base..sect_base + n_sections * 40].to_vec()
+    } else {
+        read_at(sect_base as u64, n_sections * 40)?
+    };
+    let to_off = |rva: usize| -> Option<u64> {
+        (0..n_sections).find_map(|i| {
+            let s = i * 40;
+            let vsize = rd_u32(&table, s + 8).ok()? as usize;
+            let va = rd_u32(&table, s + 12).ok()? as usize;
+            let raw_size = rd_u32(&table, s + 16).ok()? as usize;
+            let raw_ptr = rd_u32(&table, s + 20).ok()? as usize;
+            (rva >= va && rva < va + vsize.max(raw_size)).then(|| (rva - va + raw_ptr) as u64)
+        })
+    };
+    let desc = read_at(to_off(imp_rva)?, 20)?;
+    let name_rva = rd_u32(&desc, 12).ok()? as usize;
+    let name = read_at(to_off(name_rva)?, 260)?;
+    let end = name.iter().position(|&b| b == 0)?;
+    String::from_utf8(name[..end].to_vec()).ok()
+}
+
 /// Raise the header's `SizeOfStackReserve` to at least `min` bytes, in place.
 /// The primary thread's stack is sized from it, so a patched exe needs no
 /// stack growth at launch. Returns whether it changed.
@@ -256,7 +318,12 @@ pub fn raise_stack_reserve(raw: &mut [u8], min: u64) -> Result<bool, &'static st
     let pe32_plus = rd_u16(raw, opt)? == 0x20B;
     let o = opt + 72;
     let cur = if pe32_plus {
-        u64::from_le_bytes(raw.get(o..o + 8).ok_or("read past end")?.try_into().unwrap())
+        u64::from_le_bytes(
+            raw.get(o..o + 8)
+                .ok_or("read past end")?
+                .try_into()
+                .unwrap(),
+        )
     } else {
         rd_u32(raw, o)? as u64
     };
@@ -266,7 +333,11 @@ pub fn raise_stack_reserve(raw: &mut [u8], min: u64) -> Result<bool, &'static st
     if pe32_plus {
         raw[o..o + 8].copy_from_slice(&min.to_le_bytes());
     } else {
-        wr_u32(raw, o, u32::try_from(min).map_err(|_| "reserve too large for PE32")?);
+        wr_u32(
+            raw,
+            o,
+            u32::try_from(min).map_err(|_| "reserve too large for PE32")?,
+        );
     }
     Ok(true)
 }
@@ -289,10 +360,29 @@ mod tests {
             return;
         };
         let before = import_dll_names_of_pe(&raw).unwrap();
-        let patched = add_first_import(&raw, "aether_shim.dll", "vfs_shim_activated").unwrap();
+        let patched = add_first_import(&raw, "aether_shim.dll", SHIM_IMPORT_SYMBOL).unwrap();
         let after = import_dll_names_of_pe(&patched).unwrap();
         assert_eq!(after[0], "aether_shim.dll");
         assert_eq!(&after[1..], &before[..]);
+    }
+
+    #[test]
+    fn a_patched_exe_is_recognised_from_its_headers_alone() {
+        let Some(raw) = some_built_exe() else {
+            eprintln!("SKIP: no target/debug/vfs-fixture-read.exe (bin/build-windows)");
+            return;
+        };
+        let patched = add_first_import(&raw, SHIM_IMPORT_DLL, SHIM_IMPORT_SYMBOL).unwrap();
+        let reader = |b: &[u8]| {
+            let b = b.to_vec();
+            move |off: u64, len: usize| {
+                let off = (off as usize).min(b.len());
+                Some(b[off..(off + len).min(b.len())].to_vec())
+            }
+        };
+        assert!(first_import_is(&mut reader(&patched), "vfs_SHIM_dll.DLL"));
+        assert!(!first_import_is(&mut reader(&raw), SHIM_IMPORT_DLL));
+        assert!(!first_import_is(&mut reader(b"MZ"), SHIM_IMPORT_DLL));
     }
 
     #[test]

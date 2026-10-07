@@ -32,7 +32,9 @@
 //! `VFS_TEST_STEAM_CLIENT` (default `~/.local/share/Steam`),
 //! `VFS_TEST_SKYRIM_ALIVE_SECS` (default 30), `VFS_TEST_SKYRIM_IMAGE`
 //! (default `SkyrimSE.exe`; `skse64_loader.exe` tries the SKSE path),
-//! `VFS_TEST_SKYRIM_DXVK=1` (launch with Proton's DXVK/vkd3d overrides).
+//! `VFS_TEST_SKYRIM_DXVK=1` (launch with Proton's DXVK/vkd3d overrides),
+//! `VFS_TEST_SKYRIM_INJECT=1` (inject the shim instead of import-activating
+//! the staged EXEs).
 //! The game directory is never written: root 0 has a write layer of its own.
 //!
 //! The launch's liveness is the **prefix's**, not the launched image's: with
@@ -54,8 +56,8 @@ mod support;
 
 use support::Loud;
 use vfs_embed::{
-    DiskProvider, LaunchExit, LaunchOpts, PrefixInit, Provider, ReadOnlyProvider, RootId, Session,
-    PROTON_GRAPHICS_OVERRIDES,
+    Activation, DiskProvider, LaunchExit, LaunchOpts, PrefixInit, Provider, ReadOnlyProvider,
+    RootId, Session, PROTON_GRAPHICS_OVERRIDES,
 };
 
 /// Root 0's location in the prefix: unique per run, so a process match below
@@ -206,25 +208,6 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
     s.set_io_workers(8);
     s.mount_at(RootId(0), "", Arc::clone(&provider) as Arc<dyn Provider>)
         .unwrap();
-    // Spike: a layer over the game holding the import-patched exe and the shim
-    // it imports, so staging puts both on disk.
-    let spike_import = std::env::var_os("SPIKE_IMPORT").is_some();
-    if spike_import {
-        let layer = tmp("import-layer");
-        for exe in ["SkyrimSE.exe", "skse64_loader.exe"] {
-            let Ok(raw) = std::fs::read(game.join(exe)) else {
-                continue;
-            };
-            let mut patched =
-                vfs_pe::add_first_import(&raw, "vfs_shim_dll.dll", "vfs_shim_activated")
-                    .unwrap_or_else(|e| panic!("patch {exe}: {e}"));
-            vfs_pe::raise_stack_reserve(&mut patched, 16 * 1024 * 1024).unwrap();
-            std::fs::write(layer.join(exe), patched).unwrap();
-        }
-        std::fs::copy(art.shim_dll(), layer.join("vfs_shim_dll.dll")).unwrap();
-        s.mount_at(RootId(0), "", Arc::new(DiskProvider::new(&layer)))
-            .unwrap();
-    }
     s.set_write_layer_at(RootId(0), Arc::new(DiskProvider::new(&upper)))
         .unwrap();
     s.serve().unwrap();
@@ -238,9 +221,6 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
         ("SteamAppId".to_string(), "489830".to_string()),
         ("SteamGameId".to_string(), "489830".to_string()),
     ]);
-    if spike_import {
-        env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
-    }
     if std::env::var("VFS_TEST_SKYRIM_DXVK").as_deref() == Ok("1") {
         env.insert(
             "WINEDLLOVERRIDES".to_string(),
@@ -251,6 +231,11 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
         .launch_detached(&LaunchOpts {
             image,
             stage_also: vec!["SkyrimSE.exe".into()],
+            activation: if std::env::var("VFS_TEST_SKYRIM_INJECT").as_deref() == Ok("1") {
+                Activation::Inject
+            } else {
+                Activation::Import
+            },
             shim_dll: Some(art.shim_dll()),
             env,
             ready_timeout: Some(Duration::from_secs(300)),
@@ -297,7 +282,7 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
     let opened = provider.opened();
     eprintln!("the provider served {} opens", opened.len());
     eprintln!(
-        "SPIKE skse opens: {:?}",
+        "skse opens through the provider: {:?}",
         opened
             .iter()
             .filter(|p| p.contains("skse"))
@@ -307,8 +292,8 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
     for log in ["skse64_loader.log", "skse64.log"] {
         let p = docs.join("My Games/Skyrim Special Edition/SKSE").join(log);
         match std::fs::read_to_string(&p) {
-            Ok(s) => eprintln!("SPIKE {log}:\n{s}"),
-            Err(e) => eprintln!("SPIKE {log}: unreadable ({e}) at {}", p.display()),
+            Ok(s) => eprintln!("{log}:\n{s}"),
+            Err(e) => eprintln!("{log}: unreadable ({e}) at {}", p.display()),
         }
     }
     assert!(

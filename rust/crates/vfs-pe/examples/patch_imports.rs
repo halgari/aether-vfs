@@ -6,5 +6,10 @@ fn main() {
     let grew = vfs_pe::raise_stack_reserve(&mut out, 16 * 1024 * 1024).unwrap();
     std::fs::write(&a[2], &out).unwrap();
     let names = vfs_pe::import_dll_names_of_pe(&out).unwrap();
-    println!("{} -> {} bytes, stack raised: {grew}, imports: {:?}", raw.len(), out.len(), &names[..4.min(names.len())]);
+    println!(
+        "{} -> {} bytes, stack raised: {grew}, imports: {:?}",
+        raw.len(),
+        out.len(),
+        &names[..4.min(names.len())]
+    );
 }

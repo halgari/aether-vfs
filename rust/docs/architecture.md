@@ -481,18 +481,27 @@ Two mechanisms:
    be hooked before it runs.
 2. **The shim bootstraps in its own `DllMain`,** synchronously, however it was
    loaded, and fails the load if it cannot. It arrives one of two ways:
-   - **Import activation** (`VFS_ACTIVATION=import`). The exe is rewritten
-     (`vfs_pe::add_first_import`, the Detours `setdll` technique) to import the
-     shim before anything else, and its header's stack reserve is raised to
-     16 MiB (`raise_stack_reserve`). The launcher starts it normally. The shim's
-     `DllMain` runs after the imports are mapped and before any other import's
-     `DllMain`, its TLS callbacks or its entry point, whoever started the
-     process.
-   - **Injection**, the way SKSE injects its DLL: create the target suspended,
+   - **Import activation** (`LaunchOpts::activation`, the default). Staging
+     rewrites each EXE it stages (`vfs_pe::add_first_import`, the Detours
+     `setdll` technique) to import the shim before anything else, raises its
+     header's stack reserve to 16 MiB, and stages the shim beside it. The
+     launcher starts it normally. The shim's `DllMain` runs after the imports
+     are mapped and before any other import's `DllMain`, its TLS callbacks or
+     its entry point, whoever started the process; the loader refuses to start
+     it if the shim is missing or fails.
+   - **Injection**, for an EXE that is not staged (a real file, or outside every
+     root), that the patch refused (`StagedDir::unpatched`, reported in the
+     launch notes), or under `Activation::Inject`. It works the way SKSE injects
+     its DLL: create the target suspended,
      grow its primary stack to 16 MiB, `LoadLibrary` the shim on a remote
      thread (which first runs process initialisation, then the shim's
      bootstrap), wait for that thread, and resume once the ready file says
      "ready". The primary thread never runs before the hooks are live.
+
+   The launcher and the process hook choose per EXE, by reading its import
+   table (`vfs_inject::exe_imports_shim`; the hook reads the real file, since
+   the VFS answers the path with the unpatched original). Injecting a patched
+   EXE would load a second shim.
 
 Until 2026-10 a third mechanism ran first: a `no_std` early payload, reflectively
 mapped and entered by redirecting the primary thread's start address, hooked the
@@ -570,9 +579,9 @@ walk cannot discover it. For an SKSE launch the staged set is six files.
 `CreateProcess*` variant — forces the child to start suspended, injects it as
 above (the child's primary thread is never resumed before the shim is up, so a
 caller that asked for a suspended child, like `skse64_loader`, gets it still
-suspended), then resumes it unless the caller asked otherwise. Under import
-activation the hook leaves creation alone, and each patched child activates
-itself through its own import. **It fails closed**: a child whose injection fails, whose shim reports a bootstrap failure,
+suspended), then resumes it unless the caller asked otherwise. A child whose
+EXE imports the shim is left to activate itself through that import. **It fails
+closed**: a child whose injection fails, whose shim reports a bootstrap failure,
 that dies early, or that is not ready within the launch's ready timeout is
 terminated and its `CreateProcess` call returns `FALSE` (`ERROR_PROCESS_ABORTED`).
 A child is never released without the shim, so the failure mode is a launch that

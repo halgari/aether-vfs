@@ -295,7 +295,7 @@ impl Session {
 
 // Only `launch`'s Windows body calls this, so it is gated alongside it.
 #[cfg(windows)]
-fn locate_shim(opts: &LaunchOpts) -> Result<String, String> {
+pub(super) fn locate_shim(opts: &LaunchOpts) -> Result<String, String> {
     let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
     if let Some(d) = &opts.shim_dll {
         return Ok(text(d));

@@ -46,8 +46,8 @@ use std::time::Duration;
 
 use support::Loud;
 use vfs_embed::{
-    Capabilities, DirEntry, DiskProvider, Handle, LaunchOpts, Provider, Session, SetAttr, Stat,
-    VPath,
+    Activation, Capabilities, DirEntry, DiskProvider, Handle, LaunchOpts, Provider, Session,
+    SetAttr, Stat, VPath,
 };
 
 /// The one file that exists only in the provider, as the child names it.
@@ -129,55 +129,95 @@ fn a_child_the_fixture_spawns_is_virtualised_too_under_proton() {
     );
 }
 
-/// Spike: the same launch with the fixture's import table patched to load the
-/// shim first, started without `CREATE_SUSPENDED` or any injection.
+/// **Import activation, the default.** The fixture exists only in the provider,
+/// so the launch stages it, and staging rewrites it to import the shim first
+/// and puts the shim beside it. The injector sees that and starts it with no
+/// suspended create and no injection; the loader runs the shim's `DllMain`.
 #[test]
-#[ignore = "spike: import-table activation under Proton"]
-fn spike_import_activated_fixture_reads_from_the_provider() {
-    let mut env = BTreeMap::new();
-    env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
-    launch_fixture("proton_launch::spike_import_activated", env);
+#[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts"]
+fn a_staged_fixture_is_import_activated_and_reads_from_the_provider() {
+    launch_fixture_as(
+        "proton_launch::a_staged_fixture_is_import_activated",
+        Image::Staged(Activation::Import),
+        BTreeMap::new(),
+    );
 }
 
-/// Spike: an import-activated fixture spawns a child, which the shim's
-/// existing child hook leaves to activate itself through its own import.
+/// The same, with a child: the fixture runs a second copy of itself, which is
+/// the same patched exe, so the shim's process hook leaves it to activate
+/// itself rather than injecting a second shim into it.
 #[test]
-#[ignore = "spike"]
-fn spike_import_activated_fixture_child_is_virtualised() {
+#[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts"]
+fn an_import_activated_fixtures_patched_child_is_virtualised() {
     let mut env = BTreeMap::new();
-    env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
     env.insert("VFS_FIXTURE_SPAWN_CHILD".to_string(), "1".to_string());
-    launch_fixture("proton_launch::spike_import_activated_child", env);
+    launch_fixture_as(
+        "proton_launch::an_import_activated_fixtures_patched_child",
+        Image::Staged(Activation::Import),
+        env,
+    );
 }
 
-/// Spike: a patched exe whose shim is missing never starts (the loader refuses
-/// it, 0xC0000135), so nothing of it runs un-virtualised.
+/// `Activation::Inject` stages the fixture unchanged and injects it.
 #[test]
-#[ignore = "spike: import-table activation under Proton"]
+#[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts"]
+fn a_staged_fixture_is_injected_when_asked() {
+    launch_fixture_as(
+        "proton_launch::a_staged_fixture_is_injected_when_asked",
+        Image::Staged(Activation::Inject),
+        BTreeMap::new(),
+    );
+}
+
+/// A patched exe whose shim is missing never starts (the loader refuses it,
+/// 0xC0000135), so nothing of it runs un-virtualised.
+#[test]
+#[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts"]
 #[should_panic(expected = "0xc0000135")]
-fn spike_import_activated_missing_shim_refuses_to_start() {
-    let mut env = BTreeMap::new();
-    env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
-    env.insert("SPIKE_NO_SHIM".to_string(), "1".to_string());
-    launch_fixture("proton_launch::spike_import_missing_shim", env);
+fn a_patched_exe_without_its_shim_refuses_to_start() {
+    launch_fixture_as(
+        "proton_launch::a_patched_exe_without_its_shim",
+        Image::Patched { shim: false },
+        BTreeMap::new(),
+    );
 }
 
-/// Spike: a patched exe whose shim cannot bootstrap never starts either: the
-/// shim's `DllMain` fails, and with it process start (0xC0000142).
+/// A patched exe whose shim cannot bootstrap never starts either: the shim's
+/// `DllMain` fails, and with it process start (0xC0000142).
 #[test]
-#[ignore = "spike: import-table activation under Proton"]
+#[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts"]
 #[should_panic(expected = "0xc0000142")]
-fn spike_import_activated_failed_bootstrap_refuses_to_start() {
+fn a_patched_exe_whose_shim_fails_refuses_to_start() {
     let mut env = BTreeMap::new();
-    env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
     env.insert("VFS_TEST_FUSE_INIT_FAIL".to_string(), "1".to_string());
-    launch_fixture("proton_launch::spike_import_failed_bootstrap", env);
+    launch_fixture_as(
+        "proton_launch::a_patched_exe_whose_shim_fails",
+        Image::Patched { shim: true },
+        env,
+    );
+}
+
+/// Where the fixture image comes from.
+enum Image {
+    /// Copied into the root as a real file, unchanged: launched as is and
+    /// injected.
+    Real,
+    /// Copied into the root and patched by the test, with or without the shim
+    /// beside it.
+    Patched { shim: bool },
+    /// Served only by the provider, so the launch stages it, with this
+    /// activation.
+    Staged(Activation),
 }
 
 /// The body of both launches above: serve [`VPATH`] from a provider, launch the
 /// fixture with `extra_env` on top of the read it always does, and check it
 /// exited 0 having read every byte through the ring.
 fn launch_fixture(test_name: &str, extra_env: BTreeMap<String, String>) {
+    launch_fixture_as(test_name, Image::Real, extra_env);
+}
+
+fn launch_fixture_as(test_name: &str, how: Image, extra_env: BTreeMap<String, String>) {
     let _one = ONE_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
     let Some(rig) = support::rig(test_name, "launch", &[vfs_proton::artifacts::FIXTURE_READ])
     else {
@@ -195,26 +235,35 @@ fn launch_fixture(test_name: &str, extra_env: BTreeMap<String, String>) {
     std::fs::create_dir_all(content.join("data")).unwrap();
     std::fs::write(content.join("data").join("hello.txt"), [FILL; LEN]).unwrap();
 
-    // The image is a **real file** under the managed root, not staged out of
-    // the graph (`launch` stages a graph-only image on this path too): this
-    // test is about the *data* going over the ring, so the fixture is copied in
-    // and the data is what stays virtual.
+    // Usually the image is a **real file** under the managed root, not staged
+    // out of the graph: these tests are about the *data* going over the ring,
+    // so the fixture is copied in and the data is what stays virtual. The
+    // import-activation tests stage it, or patch the copy themselves.
     let image = root.join("fixture.exe");
-    std::fs::copy(art.path(vfs_proton::artifacts::FIXTURE_READ), &image)
-        .expect("copy the fixture into the root");
-    // Import activation (spike): the exe imports the shim first, and the shim
-    // sits beside it under the name the import asks for.
-    if extra_env.get("VFS_ACTIVATION").map(String::as_str) == Some("import") {
-        let raw = std::fs::read(&image).unwrap();
-        let mut patched =
-            vfs_pe::add_first_import(&raw, "vfs_shim_dll.dll", "vfs_shim_activated")
-                .expect("patch the fixture's imports");
-        vfs_pe::raise_stack_reserve(&mut patched, 16 * 1024 * 1024).unwrap();
-        std::fs::write(&image, patched).unwrap();
-        if !extra_env.contains_key("SPIKE_NO_SHIM") {
-            std::fs::copy(art.shim_dll(), root.join("vfs_shim_dll.dll")).unwrap();
+    let fixture = art.path(vfs_proton::artifacts::FIXTURE_READ);
+    let activation = match how {
+        Image::Real => {
+            std::fs::copy(fixture, &image).expect("copy the fixture into the root");
+            Activation::Import
         }
-    }
+        Image::Patched { shim } => {
+            let raw = std::fs::read(fixture).unwrap();
+            let mut patched =
+                vfs_pe::add_first_import(&raw, vfs_pe::SHIM_IMPORT_DLL, vfs_pe::SHIM_IMPORT_SYMBOL)
+                    .expect("patch the fixture's imports");
+            vfs_pe::raise_stack_reserve(&mut patched, 16 * 1024 * 1024).unwrap();
+            std::fs::write(&image, patched).unwrap();
+            if shim {
+                std::fs::copy(art.shim_dll(), root.join(vfs_pe::SHIM_IMPORT_DLL)).unwrap();
+            }
+            Activation::Import
+        }
+        Image::Staged(a) => {
+            std::fs::copy(fixture, content.join("fixture.exe"))
+                .expect("put the fixture in the provider");
+            a
+        }
+    };
 
     let provider = Arc::new(Loud::new(&content));
 
@@ -266,10 +315,31 @@ fn launch_fixture(test_name: &str, extra_env: BTreeMap<String, String>) {
             // `vfs-injector.exe` is taken from the directory holding `shim_dll`,
             // which is why setting this one path is enough for all three.
             shim_dll: Some(art.shim_dll()),
+            activation,
             env,
             ..Default::default()
         })
         .unwrap_or_else(|e| panic!("launch: {e}\nDIRECTOR saw: {:?}", provider.transcript()));
+
+    // A staged image is still on disk (the session holds the staging until the
+    // next launch): it imports the shim exactly when import activation asked.
+    if let Image::Staged(a) = how {
+        let bytes = std::fs::read(&image).expect("the staged fixture");
+        let mut read_at = |off: u64, len: usize| {
+            let off = (off as usize).min(bytes.len());
+            Some(bytes[off..(off + len).min(bytes.len())].to_vec())
+        };
+        assert_eq!(
+            vfs_pe::first_import_is(&mut read_at, vfs_pe::SHIM_IMPORT_DLL),
+            a == Activation::Import,
+            "the staged fixture's first import"
+        );
+        assert!(
+            s.staged_unpatched().is_empty(),
+            "{:?}",
+            s.staged_unpatched()
+        );
+    }
 
     let seen = provider.transcript();
     assert_eq!(

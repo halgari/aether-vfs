@@ -2,12 +2,10 @@ use vfs_inject::parse_injector_args;
 
 #[test]
 fn parses_positional_and_double_dash_args() {
-    let a: Vec<String> = [
-        "prog", "t.exe", "s.dll", "c.cfg", "r.flag", "--", "x", "y",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    let a: Vec<String> = ["prog", "t.exe", "s.dll", "c.cfg", "r.flag", "--", "x", "y"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let got = parse_injector_args(&a).unwrap();
     let (t, s, c, r, args) = (
         got.target,

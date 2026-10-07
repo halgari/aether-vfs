@@ -872,10 +872,13 @@ so it cannot inject), the child exiting early, `LoadLibrary` not starting or not
 finishing within the timeout, the child's shim reporting a bootstrap failure,
 and no ready signal once `LoadLibrary` has returned.
 
-**Import activation is the exception, and is not fail-closed yet.** With
-`VFS_ACTIVATION=import` the hook passes creation through untouched, because a
-patched child loads the shim itself. A child whose exe is *not* patched would
-then run un-virtualised; the hook does not check yet.
+**A patched child is not injected.** When the child's EXE imports the shim
+first (staging patched it; `child_imports_shim` reads the real file, because
+the VFS serves the unpatched original at that path), the hook resumes it, or
+leaves it suspended for the caller, without injecting: the loader loads the
+shim through the import and refuses to start the process if it cannot, so the
+rule holds without the hook. Injecting it as well would load a second shim.
+Every other child is injected as above.
 
 **Nothing is skipped on purpose.** The hook does not exempt system processes,
 helpers or anything else; `VFS_INJECT_*` switches (`INJECT_CWD`,

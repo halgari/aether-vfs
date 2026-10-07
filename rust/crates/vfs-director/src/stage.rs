@@ -206,6 +206,14 @@ pub struct StagedDir {
     staged: Vec<String>,
     /// The subset of `staged` that is in [`PROXY_DLL_NAMES`], in order.
     proxies: Vec<String>,
+    /// The shim DLL to import-activate staged EXEs with, when asked
+    /// ([`stage_launch_into_patched`]).
+    shim: Option<Vec<u8>>,
+    /// Staged EXEs rewritten to import the shim first.
+    patched: Vec<String>,
+    /// Staged EXEs the patch refused, with why: they are staged unchanged and
+    /// the shim is injected into them instead.
+    unpatched: Vec<(String, String)>,
     /// Absolute paths written, for the non-owning cleanup path.
     files: Vec<PathBuf>,
     /// Absolute paths of directories created, deepest last so pruning can walk
@@ -237,6 +245,17 @@ impl StagedDir {
     /// asks for native first, so these are the candidates for `name=n,b`.
     pub fn proxies(&self) -> &[String] {
         &self.proxies
+    }
+
+    /// Staged EXEs rewritten to import the shim first (import activation).
+    pub fn patched(&self) -> &[String] {
+        &self.patched
+    }
+
+    /// Staged EXEs the import patch refused, and why. They were staged
+    /// unchanged, so the shim is injected into them instead.
+    pub fn unpatched(&self) -> &[(String, String)] {
+        &self.unpatched
     }
 
     /// Delete now instead of at drop, reporting failure.
@@ -425,6 +444,47 @@ pub fn stage_launch_into(
     Ok(staged_dir)
 }
 
+/// [`stage_launch_into`], with every staged EXE (the image and each of
+/// `also`'s) rewritten to import `shim` first and `shim` staged beside it as
+/// [`vfs_pe::SHIM_IMPORT_DLL`]. Such an EXE activates the VFS itself whoever
+/// starts it, with no suspended create or injection: the loader runs the
+/// shim's `DllMain` before any other import initialises, and refuses to start
+/// the process if the shim is missing or fails.
+///
+/// An EXE the patch refuses ([`vfs_pe::add_first_import`]: a .NET image, data
+/// after its last section, no room for the table) is staged unchanged and
+/// recorded in [`StagedDir::unpatched`]; the launcher and the shim's process
+/// hook inject the shim into it instead.
+pub fn stage_launch_into_patched(
+    source: &dyn ImageSource,
+    exe_vpath: &str,
+    also: &[&str],
+    dir: &Path,
+    fallback_dirs: &[PathBuf],
+    shim: &[u8],
+) -> Result<StagedDir, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let mut staged_dir = new_staged_dir(dir, exe_vpath, false)?;
+    staged_dir.shim = Some(shim.to_vec());
+    stage_into(source, exe_vpath, &mut staged_dir, fallback_dirs)?;
+    for extra in also {
+        stage_into(source, extra, &mut staged_dir, fallback_dirs)?;
+    }
+    Ok(staged_dir)
+}
+
+/// The primary thread's stack a patched EXE asks for. The shim adds frames to
+/// every intercepted call, and the stock 1 MiB overflows (`0xC00000FD`).
+const PATCHED_STACK_RESERVE: u64 = 16 * 1024 * 1024;
+
+/// `exe` rewritten to import the shim first, with the shim's stack.
+fn patch_for_import_activation(exe: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let mut out =
+        vfs_pe::add_first_import(exe, vfs_pe::SHIM_IMPORT_DLL, vfs_pe::SHIM_IMPORT_SYMBOL)?;
+    vfs_pe::raise_stack_reserve(&mut out, PATCHED_STACK_RESERVE)?;
+    Ok(out)
+}
+
 /// Write one staged image, and record it for cleanup **only if staging is
 /// what put it there**.
 ///
@@ -446,6 +506,22 @@ fn write_staged(dest: &Path, bytes: &[u8], staged_dir: &mut StagedDir) -> Result
     }
     std::fs::write(dest, bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
     staged_dir.files.push(dest.to_path_buf());
+    Ok(())
+}
+
+/// Stage the shim beside a patched EXE. Unlike [`write_staged`], an existing
+/// file is overwritten: a shim from another build would refuse this launch's
+/// config, and the patched EXE cannot start without this one. It is removed
+/// on cleanup only if staging created it.
+fn write_shim(dest: &Path, bytes: &[u8], staged_dir: &mut StagedDir) -> Result<(), String> {
+    if staged_dir.files.iter().any(|f| f == dest) {
+        return Ok(());
+    }
+    let existed = exists_ignoring_case(dest);
+    std::fs::write(dest, bytes).map_err(|e| format!("write {}: {e}", dest.display()))?;
+    if !existed {
+        staged_dir.files.push(dest.to_path_buf());
+    }
     Ok(())
 }
 
@@ -504,6 +580,9 @@ fn new_staged_dir(dir: &Path, exe_vpath: &str, owns_dir: bool) -> Result<StagedD
         exe: dir.join(safe_parent(exe_vpath)?).join(&exe_name),
         staged: Vec::new(),
         proxies: Vec::new(),
+        shim: None,
+        patched: Vec::new(),
+        unpatched: Vec::new(),
         files: Vec::new(),
         created_dirs: Vec::new(),
         owns_dir,
@@ -538,7 +617,26 @@ fn stage_into(
     }
 
     let exe_path = target_dir.join(&exe_name);
-    write_staged(&exe_path, &exe_bytes, staged_dir)?;
+    // Import activation: the staged copy imports the shim first, and the shim
+    // sits beside it. The import walk below reads the original bytes, so it
+    // never goes looking for the shim in the VFS.
+    let is_exe = exe_name.to_ascii_lowercase().ends_with(".exe");
+    match staged_dir.shim.clone().filter(|_| is_exe) {
+        Some(shim) => match patch_for_import_activation(&exe_bytes) {
+            Ok(patched) => {
+                write_staged(&exe_path, &patched, staged_dir)?;
+                write_shim(&target_dir.join(vfs_pe::SHIM_IMPORT_DLL), &shim, staged_dir)?;
+                staged_dir.patched.push(exe_name.clone());
+            }
+            Err(why) => {
+                write_staged(&exe_path, &exe_bytes, staged_dir)?;
+                staged_dir
+                    .unpatched
+                    .push((exe_name.clone(), why.to_string()));
+            }
+        },
+        None => write_staged(&exe_path, &exe_bytes, staged_dir)?,
+    }
 
     // Names and written paths accumulate locally and are merged at the end:
     // holding `&mut staged_dir.staged` across the loop would rule out
@@ -892,6 +990,65 @@ mod tests {
             "target must be staged too"
         );
         assert!(staged.staged().iter().any(|s| s == "SkyrimSE.exe"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_exe_the_patch_refuses_is_staged_unchanged_and_named() {
+        let root = tmp_root("unpatched");
+        let mut m = HashMap::new();
+        m.insert("game.exe".to_string(), bare_pe());
+        let staged = stage_launch_into_patched(&Fake(m), "game.exe", &[], &root, &[], b"shim")
+            .expect("stage");
+        assert_eq!(std::fs::read(root.join("game.exe")).unwrap(), bare_pe());
+        assert!(staged.patched().is_empty());
+        assert_eq!(staged.unpatched().len(), 1);
+        assert_eq!(staged.unpatched()[0].0, "game.exe");
+        assert!(
+            !root.join(vfs_pe::SHIM_IMPORT_DLL).exists(),
+            "no shim beside an exe that does not import it"
+        );
+        drop(staged);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn staged_exes_import_the_shim_and_cleanup_removes_it() {
+        let built =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/vfs-fixture-read.exe");
+        let Ok(exe) = std::fs::read(&built) else {
+            eprintln!("SKIP: no {} (bin/build-windows)", built.display());
+            return;
+        };
+        let root = tmp_root("patched");
+        let mut m = HashMap::new();
+        m.insert("loader.exe".to_string(), exe.clone());
+        m.insert("game.exe".to_string(), exe);
+        let staged =
+            stage_launch_into_patched(&Fake(m), "loader.exe", &["game.exe"], &root, &[], b"shim")
+                .expect("stage");
+        assert_eq!(staged.patched(), ["loader.exe", "game.exe"]);
+        for name in ["loader.exe", "game.exe"] {
+            let bytes = std::fs::read(root.join(name)).unwrap();
+            let mut read_at = |off: u64, len: usize| {
+                let off = (off as usize).min(bytes.len());
+                Some(bytes[off..(off + len).min(bytes.len())].to_vec())
+            };
+            assert!(
+                vfs_pe::first_import_is(&mut read_at, vfs_pe::SHIM_IMPORT_DLL),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(root.join(vfs_pe::SHIM_IMPORT_DLL)).unwrap(),
+            b"shim"
+        );
+        drop(staged);
+        assert!(
+            !root.join(vfs_pe::SHIM_IMPORT_DLL).exists(),
+            "cleanup removes the shim"
+        );
+        assert!(!root.join("game.exe").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -126,8 +126,8 @@ mod sources;
 mod test_scratch;
 
 pub use session::{
-    compose_root, registry_sync_for, LaunchExit, LaunchOpts, RegistrySync, Session, StageOpts,
-    STOPPED_EXIT_CODE,
+    compose_root, registry_sync_for, Activation, LaunchExit, LaunchOpts, RegistrySync, Session,
+    StageOpts, STOPPED_EXIT_CODE,
 };
 #[cfg(unix)]
 pub use session::{LaunchHandle, LaunchStopper};

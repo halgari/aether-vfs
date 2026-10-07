@@ -793,6 +793,12 @@ impl Session {
 
         let (injector, shim_dll) = locate_wine_artifacts(opts)?;
         let (steam, mut notes) = self.steam_launch(&opts.env);
+        for (exe, why) in self.staged_unpatched() {
+            notes.push(format!(
+                "activation: {exe} could not be patched to import the shim ({why}), so the \
+                 shim is injected into it instead"
+            ));
+        }
         let nvapi = nvapi_for_launch(opts, runtime, prefix, &mut notes);
 
         let mut launch = WineLaunch::new(
@@ -1072,7 +1078,9 @@ fn join_wine(base: &str, rel: &Path) -> Result<String, String> {
 /// listed: a launch that reported them one at a time would cost a Wine
 /// round-trip per file.
 #[cfg(unix)]
-fn locate_wine_artifacts(opts: &LaunchOpts) -> Result<(PathBuf, PathBuf), String> {
+pub(in crate::session) fn locate_wine_artifacts(
+    opts: &LaunchOpts,
+) -> Result<(PathBuf, PathBuf), String> {
     let dir = vfs_env::path(vfs_env::WINDOWS_ARTIFACTS).filter(|p| !p.as_os_str().is_empty());
     locate_wine_artifacts_in(opts, dir.as_deref())
 }

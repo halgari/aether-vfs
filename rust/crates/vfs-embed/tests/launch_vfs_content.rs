@@ -107,6 +107,7 @@ fn a_staged_copy_must_not_shadow_curated_content_at_the_same_path() {
                 exe_vpath: "game.exe",
                 also: &["helper.exe"],
                 fallback_dirs: &[],
+                shim: None,
             },
         )
         .expect("stage");
@@ -318,11 +319,7 @@ fn ensure_fixtures() {
         );
 
         let profile = profile_dir();
-        for name in [
-            "vfs_shim_dll.dll",
-            "vfs-probe.exe",
-            "vfs-fixture-read.exe",
-        ] {
+        for name in ["vfs_shim_dll.dll", "vfs-probe.exe", "vfs-fixture-read.exe"] {
             let dest = profile.join(name);
             if dest.is_file() {
                 continue;
@@ -550,6 +547,7 @@ fn session_staging_puts_a_game_root_proxy_dll_on_disk() {
                 exe_vpath: "skse64_loader.exe",
                 also: &["SkyrimSE.exe"],
                 fallback_dirs: &[],
+                shim: None,
             },
         )
         .expect("stage");

@@ -32,6 +32,8 @@ pub struct LaunchOpts {
     /// with [`Session::stop_launch`] (dropping the session also stops it). A
     /// host that wants the handle itself calls [`Session::launch_detached`].
     pub wait: bool,
+    /// How the shim gets into the program: see [`Activation`].
+    pub activation: Activation,
     /// Extra images to stage beside a graph-resolved `image`, by vpath, each
     /// with its own PE import closure. Ignored when nothing is staged.
     ///
@@ -141,6 +143,7 @@ impl Default for LaunchOpts {
             image: String::new(),
             args: Vec::new(),
             wait: true,
+            activation: Activation::default(),
             stage_also: Vec::new(),
             stage_fallback_dirs: Vec::new(),
             shim_dll: None,
@@ -152,6 +155,22 @@ impl Default for LaunchOpts {
             nvapi: true,
         }
     }
+}
+
+/// How a launch puts the shim into a program.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Activation {
+    /// Staging rewrites each EXE it stages (the image and
+    /// [`LaunchOpts::stage_also`]) to import the shim first, and stages the
+    /// shim beside it. Such an EXE activates the VFS itself whoever starts it,
+    /// and cannot start without it. An EXE that is not staged (a real file in
+    /// the root, or outside every root), or that the patch refuses, is
+    /// injected instead: the launcher and the shim's process hook decide per
+    /// EXE by reading its import table.
+    #[default]
+    Import,
+    /// Never patch: inject the shim into every process.
+    Inject,
 }
 
 /// What [`Session::stage_launch`] writes to disk, beyond the image itself.
@@ -170,4 +189,7 @@ pub struct StageOpts<'a> {
     /// Real-disk fallbacks for imports the graph does not carry — see
     /// [`LaunchOpts::stage_fallback_dirs`].
     pub fallback_dirs: &'a [PathBuf],
+    /// The shim DLL's bytes, to import-activate each staged EXE with
+    /// ([`Activation::Import`]); `None` stages them unchanged.
+    pub shim: Option<&'a [u8]>,
 }

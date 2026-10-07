@@ -33,7 +33,6 @@ pub const PRIMARY_STACK_BYTES: usize = 16 * 1024 * 1024;
 /// reservation, not the commit.
 const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x0001_0000;
 
-
 /// The exit code of `process` if it has already exited.
 ///
 /// # Safety
@@ -53,7 +52,6 @@ fn wide(s: &str) -> Vec<u16> {
         .chain(std::iter::once(0))
         .collect()
 }
-
 
 /// Grow the *primary* suspended thread's stack to `stack_reserve` bytes.
 ///
@@ -366,8 +364,8 @@ unsafe fn fail_closed(pi: &PROCESS_INFORMATION, e: InjectError) -> InjectError {
 
 /// Launch the target with the shim.
 ///
-/// With `VFS_ACTIVATION=import` the target exe imports the shim first and is
-/// started normally ([`run_import_activated`]). Otherwise it is injected, the
+/// A target exe that imports the shim first (staging patched it) is started
+/// normally ([`run_import_activated`]). Any other is injected, the
 /// way SKSE injects its DLL: created suspended, its primary stack grown to
 /// [`PRIMARY_STACK_BYTES`], the shim `LoadLibrary`'d on a remote thread (which
 /// runs process initialisation and then the shim's bootstrap), and resumed
@@ -398,7 +396,7 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
     }
     let _ = std::fs::remove_file(&cfg.ready_path);
 
-    if vfs_env::text(vfs_env::ACTIVATION).as_deref() == Some(vfs_env::ACTIVATION_IMPORT) {
+    if crate::exe_imports_shim(&cfg.target_exe) {
         return run_import_activated(&cfg);
     }
 

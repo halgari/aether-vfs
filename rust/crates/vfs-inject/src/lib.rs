@@ -69,7 +69,7 @@ pub enum InjectError {
     TargetExited(u32),
 }
 
-pub use artifacts::find_near;
+pub use artifacts::{exe_imports_shim, find_near};
 pub use cli::{parse_injector_args, InjectorArgs};
 pub use inject::{expand_primary_stack, inject_dll, run_target_with_shim, PRIMARY_STACK_BYTES};
 pub use steam_helper::{

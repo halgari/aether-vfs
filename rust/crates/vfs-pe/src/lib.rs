@@ -1,7 +1,9 @@
 //! Pure PE byte parsing.
 
 mod import_patch;
-pub use import_patch::{add_first_import, raise_stack_reserve};
+pub use import_patch::{
+    add_first_import, first_import_is, raise_stack_reserve, SHIM_IMPORT_DLL, SHIM_IMPORT_SYMBOL,
+};
 
 fn rd_u16(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])

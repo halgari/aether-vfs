@@ -172,13 +172,6 @@ pub const SHIM_READY: &str = "VFS_SHIM_READY";
 pub const CHILD_REFUSED_LOG: &str = "VFS_CHILD_REFUSED_LOG";
 /// Appended to the ready file's path to name [`CHILD_REFUSED_LOG`]'s file.
 pub const CHILD_REFUSED_SUFFIX: &str = ".child-refused";
-/// `import` means the target exe was rewritten to import the shim first, so the
-/// launcher starts it normally, the shim bootstraps from `DllMain`, and the
-/// shim's process hook leaves children to activate themselves the same way.
-/// Unset: the launcher injects the shim, and so does the process hook.
-pub const ACTIVATION: &str = "VFS_ACTIVATION";
-/// The [`ACTIVATION`] value for import-table activation.
-pub const ACTIVATION_IMPORT: &str = "import";
 /// Test-only: force `vfs_shim::director::try_init_from_env` to report a
 /// connect failure, regardless of ring configuration. Exists to exercise a
 /// director-launched process's abort path without a director that is
@@ -610,11 +603,6 @@ pub const ALL: &[Var] = &[
         name: SHIM_READY,
         kind: Kind::Handshake,
         default: "no ready signal",
-    },
-    Var {
-        name: ACTIVATION,
-        kind: Kind::Handshake,
-        default: "unset: the shim is injected",
     },
     Var {
         name: CHILD_REFUSED_LOG,

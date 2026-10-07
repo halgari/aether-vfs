@@ -7,8 +7,8 @@ use core::ffi::c_void;
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{CloseHandle, SetLastError, ERROR_PROCESS_ABORTED, HANDLE};
 use windows_sys::Win32::System::Threading::{
-    ResumeThread, TerminateProcess, WaitForSingleObject, CREATE_SUSPENDED, PROCESS_INFORMATION,
-    STARTUPINFOW,
+    QueryFullProcessImageNameW, ResumeThread, TerminateProcess, WaitForSingleObject,
+    CREATE_SUSPENDED, PROCESS_INFORMATION, STARTUPINFOW,
 };
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
@@ -66,19 +66,6 @@ pub(super) unsafe fn cpiw_hook_body(
     };
     let caller_suspended = flags & CREATE_SUSPENDED != 0;
 
-    // Spike: import activation. Children are patched exes that load the shim
-    // through their own import table, so creation passes through unchanged.
-    // Not fail-closed yet: an unpatched child would run un-virtualised.
-    if vfs_env::text(vfs_env::ACTIVATION).as_deref() == Some(vfs_env::ACTIVATION_IMPORT) {
-        // SAFETY: the original NT function, called with the caller's arguments.
-        return unsafe {
-            tramp(
-                token, app, cmd, proc_attr, thread_attr, inherit, flags, env, cur_dir, si, pi,
-                ptok,
-            )
-        };
-    }
-
     // Start managed children in the virtual root, not the launcher's directory
     // (see `child_cwd_root`). Kept alive for the whole call: `cur_dir_eff` may
     // point into it.
@@ -119,6 +106,16 @@ pub(super) unsafe fn cpiw_hook_body(
         let hprocess = unsafe { (*pi).hProcess };
         // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
         let hthread = unsafe { (*pi).hThread };
+        // A patched child loads the shim through its own import table, and the
+        // loader refuses to start it without one, so it is not injected:
+        // injecting would load a second copy.
+        if child_imports_shim(hprocess) {
+            if !caller_suspended {
+                // SAFETY: FFI call with valid arguments.
+                unsafe { ResumeThread(hthread) };
+            }
+            return r;
+        }
         match inject_child(
             hprocess,
             hthread,
@@ -142,6 +139,22 @@ pub(super) unsafe fn cpiw_hook_body(
         }
     }
     r
+}
+
+/// Whether the child's EXE imports the shim first (staging patched it).
+///
+/// Read from the real disk, not through the VFS: staging's copy is mounted
+/// *below* the curated content, so the VFS answers the image's path with the
+/// original, unpatched EXE.
+fn child_imports_shim(process: HANDLE) -> bool {
+    // `None` means this thread is already inside the shim's own I/O, where
+    // every file call goes to the real disk anyway.
+    let _real_disk = super::entry::ShimIoGuard::enter();
+    let mut buf = vec![0u16; 32768];
+    let mut len = buf.len() as u32;
+    // SAFETY: a process handle from `CreateProcess`, into a buffer of `len` units.
+    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut len) };
+    ok != 0 && vfs_inject::exe_imports_shim(&String::from_utf16_lossy(&buf[..len as usize]))
 }
 
 /// Kill a child that could not be injected and make the `CreateProcess` call
