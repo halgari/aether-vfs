@@ -99,11 +99,12 @@ impl<F: Copy> Tramp<F> {
 mod tests {
     use super::*;
 
-    type F = unsafe extern "system" fn(u32) -> u32;
-    unsafe extern "system" fn double(x: u32) -> u32 {
+    // A plain fn type: `extern "system"` definitions are checked by the panic-containment scan.
+    type F = fn(u32) -> u32;
+    fn double(x: u32) -> u32 {
         x * 2
     }
-    unsafe extern "system" fn triple(x: u32) -> u32 {
+    fn triple(x: u32) -> u32 {
         x * 3
     }
 
@@ -117,9 +118,9 @@ mod tests {
     fn a_stored_function_reads_back_and_calls() {
         let t: Tramp<F> = Tramp::new();
         t.set(Some(double));
-        assert_eq!(unsafe { t.get().expect("stored")(21) }, 42);
+        assert_eq!(t.get().expect("stored")(21), 42);
         t.set(Some(triple));
-        assert_eq!(unsafe { t.get().expect("stored")(14) }, 42);
+        assert_eq!(t.get().expect("stored")(14), 42);
     }
 
     #[test]
@@ -135,7 +136,7 @@ mod tests {
         let t: Tramp<F> = Tramp::new();
         // SAFETY: `double` has this slot's signature.
         unsafe { t.raw().store(Some(double as F as *const ())) };
-        assert_eq!(unsafe { t.get().expect("stored")(5) }, 10);
+        assert_eq!(t.get().expect("stored")(5), 10);
         // SAFETY: clearing needs no signature.
         unsafe { t.raw().store(None) };
         assert!(t.get().is_none());
