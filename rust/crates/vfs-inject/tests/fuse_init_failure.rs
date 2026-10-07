@@ -6,6 +6,7 @@
 //! `run_target_with_shim` is the exact function `vfs_embed::Session::launch`
 //! calls (it only wraps the error into a `String`), so exercising it here
 //! proves the production launch path aborts, not just some lower-level detail.
+#![allow(unsafe_code)]
 mod common;
 
 use std::time::Duration;

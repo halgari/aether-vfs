@@ -43,7 +43,10 @@ fn scenario(name: &str, dir: &Path) {
     setup(&store);
     // SAFETY: the child runs a single test thread and no other thread reads the environment
     // concurrently; crash points only read this variable.
-    unsafe { std::env::set_var(CRASH_AT, std::env::var(POINT).unwrap()) };
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var(CRASH_AT, std::env::var(POINT).unwrap())
+    };
     match name {
         "write" => {
             let b = random_bytes(2, 3 * BS);

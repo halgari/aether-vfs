@@ -9,6 +9,7 @@
 //! valid and whose failure is the missing ring.
 //!
 //! Single-test binary: `run_target_with_shim` mutates process-global env vars.
+#![allow(unsafe_code)]
 mod common;
 
 use std::time::Duration;

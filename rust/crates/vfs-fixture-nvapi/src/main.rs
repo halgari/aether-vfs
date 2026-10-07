@@ -16,6 +16,7 @@
 //! Exit code: 0 when NVAPI initialised, 10 when it did not, 11 when
 //! `nvapi64.dll` or its export is missing (not 2 or 3, which are
 //! `vfs-injector`'s own).
+#![allow(unsafe_code)]
 
 #[cfg(not(windows))]
 fn main() {

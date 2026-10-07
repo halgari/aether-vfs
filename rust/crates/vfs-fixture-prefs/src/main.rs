@@ -1,5 +1,6 @@
 //! The profile-API (INI) fixture; see `windows.rs`. Windows only: it calls
 //! `GetPrivateProfileStringW` and friends directly.
+#![allow(unsafe_code)]
 
 #[cfg(windows)]
 mod windows;

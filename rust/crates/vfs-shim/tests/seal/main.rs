@@ -3,6 +3,7 @@
 //! Each `#[test]` runs in a fresh process (see `common`), so the scenarios here may install
 //! different process-wide state. Add a scenario as a module below.
 #![cfg(windows)]
+#![allow(unsafe_code)]
 
 #[macro_use]
 #[path = "../common/mod.rs"]

@@ -27,6 +27,7 @@
 //!
 //! Exit code 0 when the mode ran (a failed registry call is data, not a failure), 12 for an
 //! unknown mode. Not 2 or 3, which are `vfs-injector`'s own.
+#![allow(unsafe_code)]
 
 #[cfg(not(windows))]
 fn main() {

@@ -28,6 +28,7 @@
 //! `VFS_FIXTURE_CACHE_PATH` and its companions run the read-cache phase after
 //! the first read: see `cache.rs`. `VFS_FIXTURE_LINGER_MS` keeps the process
 //! alive that long after it, so a shim stats report covers the run.
+#![allow(unsafe_code)]
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};

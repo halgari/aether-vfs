@@ -7,6 +7,7 @@
 //! Single-test binary, like `fuse_init_failure.rs`: `run_target_with_shim`
 //! mutates process-global env vars (`SHIM_CONFIG`/`SHIM_READY`/…) itself, so a
 //! second test in the same binary could race it.
+#![allow(unsafe_code)]
 mod common;
 
 use std::time::Duration;

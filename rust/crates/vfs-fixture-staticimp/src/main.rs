@@ -1,6 +1,7 @@
 //! Pre-init injection fixture: statically imports vproxy.dll. Reaching main
 //! means the loader bound that import during process init. Exit 0 iff the
 //! backing export value (4242) is observed.
+#![allow(unsafe_code)]
 
 // Force a PE import of vproxy.dll (not a static link of the rlib). Combined
 // with build.rs link-search for the import library.

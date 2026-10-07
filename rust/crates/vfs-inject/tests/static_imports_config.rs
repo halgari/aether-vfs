@@ -22,6 +22,7 @@
 //! `preinit_only_still_accepts_explicit_redirects` still proves the
 //! preinit-only redirect path end-to-end (it never calls
 //! `bootstrap_from_config_path` / `run_target_with_shim` at all).
+#![allow(unsafe_code)]
 mod common;
 
 use vfs_inject::{run_target_with_preinit, PreinitConfig};

@@ -18,6 +18,7 @@
 //!   deleted.txt     real file, tombstoned                  -> hidden
 //!   virtual_dir     virtual directory                      (not on disk)
 //!   real_dir        real directory
+#![allow(unsafe_code)]
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use windows_sys::Win32::Foundation::HANDLE;

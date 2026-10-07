@@ -7,6 +7,7 @@
 //! which is what a shim that dies or hangs before bootstrap looks like.
 //!
 //! Single-test binary: `run_target_with_shim` mutates process-global env vars.
+#![allow(unsafe_code)]
 mod common;
 
 use std::time::Duration;

@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 use std::mem::{size_of, zeroed};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;

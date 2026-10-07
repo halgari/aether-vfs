@@ -61,6 +61,8 @@ async fn health_ok(client: &mut DirectorClient<Channel>) -> bool {
     client.health(vfs_control::pb::HealthReq {}).await.is_ok()
 }
 
+// The Windows branch calls `OpenProcess` directly.
+#[cfg_attr(windows, allow(unsafe_code))]
 fn process_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;

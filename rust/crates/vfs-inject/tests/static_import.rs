@@ -1,5 +1,6 @@
 //! Prove pre-init reflective-map + RIP-redirect virtualizes the target EXE's
 //! own static PE import of vproxy.dll with zero files in the app directory.
+#![allow(unsafe_code)]
 mod common;
 
 use vfs_inject::{run_target_with_preinit, PreinitConfig, PreinitRedirect};

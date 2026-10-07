@@ -75,7 +75,13 @@ license = "GPL-3.0-only"
 rust-version = "1.89"
 publish = false
 
-[workspace.lints]
+# Unsafe is denied by default; a crate (or a test/bin root) that is FFI by
+# nature says so with `#![allow(unsafe_code)]`, which makes the surface explicit.
+# Not enabled yet because they need hundreds of edits in vfs-shim / vfs-win /
+# the fixtures: rust `unsafe_op_in_unsafe_fn` and clippy
+# `undocumented_unsafe_blocks`.
+[workspace.lints.rust]
+unsafe_code = "deny"
 
 [workspace.dependencies]
 # Internal crates.

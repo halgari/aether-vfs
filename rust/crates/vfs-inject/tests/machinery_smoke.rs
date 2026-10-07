@@ -8,6 +8,7 @@
 //! aborts on `FuseInitError::NotConfigured`). The remaining test below is a
 //! pure-function check of `merge_preinit_redirects` and does not touch
 //! bootstrap at all.
+#![allow(unsafe_code)]
 mod common;
 
 use vfs_inject::merge_preinit_redirects;

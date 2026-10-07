@@ -1,5 +1,6 @@
 //! The escape fixture; see `windows.rs`. Windows only: the vectors are NT and
 //! Win32 path spellings.
+#![allow(unsafe_code)]
 
 #[cfg(windows)]
 mod windows;
