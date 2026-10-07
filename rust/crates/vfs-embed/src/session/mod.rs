@@ -34,6 +34,7 @@ pub use proton::{LaunchHandle, LaunchStopper};
 pub use registry::{registry_sync_for, RegistrySync};
 
 use compose::RootComposition;
+use stage::empty_tree_snapshot;
 #[cfg(unix)]
 use proton::ProtonState;
 
@@ -337,6 +338,66 @@ impl Session {
         #[cfg(unix)]
         self.proton.release_ring(&self.state_dir);
     }
+}
+
+// The steps `serve` and `launch` repeat on both targets. What differs is the
+// transport (a named section on Windows, a file-backed ring on unix) and the
+// environment the child gets, and those stay in `windows` and `proton`.
+impl Session {
+    /// The start of both `serve` bodies. `Ok(false)`: the session is already
+    /// serving, and `serve` is idempotent. Otherwise the root, overlay and
+    /// state directories exist and the caller starts its ring.
+    fn begin_serve(&self) -> Result<bool, String> {
+        if self.ipc.is_some() {
+            return Ok(false);
+        }
+        std::fs::create_dir_all(&self.virtual_root)
+            .map_err(|e| format!("create root: {e}"))?;
+        std::fs::create_dir_all(&self.overlay).map_err(|e| format!("create overlay: {e}"))?;
+        std::fs::create_dir_all(&self.state_dir).map_err(|e| format!("create state: {e}"))?;
+        Ok(true)
+    }
+
+    /// The live ring, or the refusal every `launch` gives before `serve`.
+    fn require_serving(&self) -> Result<&IpcServe, String> {
+        self.ipc
+            .as_ref()
+            .ok_or_else(|| "serve() before launch()".to_string())
+    }
+
+    /// Writes `state_dir/shim.cfg` for the shim: `root` and `overlay` as the
+    /// shim sees them, and an empty tree snapshot (`Engine::build` rejects
+    /// zero-length snapshot bytes, which would abort dual-layer bootstrap
+    /// before hooks install). Returns the file's path.
+    fn write_shim_config(&self, root: &str, overlay: &str) -> Result<PathBuf, String> {
+        let path = self.state_dir.join("shim.cfg");
+        std::fs::write(
+            &path,
+            vfs_protocol::shimcfg::encode_config_with_overlay(
+                root,
+                overlay,
+                &empty_tree_snapshot(),
+            ),
+        )
+        .map_err(|e| format!("launch: write {}: {e}", path.display()))?;
+        Ok(path)
+    }
+
+    /// `state_dir/ready.flag`, removed if an earlier launch left it, so the
+    /// injector waits for this launch's shim and not for a stale one.
+    fn fresh_ready_flag(&self) -> PathBuf {
+        let path = self.state_dir.join("ready.flag");
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+}
+
+/// The refusal for a launch that names no image.
+fn check_image(opts: &LaunchOpts) -> Result<(), String> {
+    if opts.image.trim().is_empty() {
+        return Err("LaunchOpts.image is empty — name the image to launch".to_string());
+    }
+    Ok(())
 }
 
 impl Default for Session {

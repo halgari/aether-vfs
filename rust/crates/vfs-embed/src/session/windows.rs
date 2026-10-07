@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use vfs_director::ipc::IpcServe;
 
-use super::stage::{empty_tree_snapshot, ResolvedImage};
-use super::{LaunchOpts, Session};
+use super::stage::ResolvedImage;
+use super::{check_image, LaunchOpts, Session};
 
 /// Serializes **every** process-global env mutation this crate performs —
 /// [`Session::serve`]'s as well as [`Session::launch`]'s.
@@ -74,13 +74,9 @@ impl Session {
     /// unchanged.
     #[cfg(windows)]
     pub fn serve(&mut self) -> Result<(), String> {
-        if self.ipc.is_some() {
+        if !self.begin_serve()? {
             return Ok(());
         }
-        std::fs::create_dir_all(&self.virtual_root)
-            .map_err(|e| format!("create root: {e}"))?;
-        std::fs::create_dir_all(&self.overlay).map_err(|e| format!("create overlay: {e}"))?;
-        std::fs::create_dir_all(&self.state_dir).map_err(|e| format!("create state: {e}"))?;
 
         let section = format!(
             "Local\\vfs_ring_{}_{}",
@@ -113,14 +109,7 @@ impl Session {
             );
         }
 
-        // Minimal shim.cfg (FUSE path is env-driven). The snapshot must still be a
-        // valid empty tree: Engine::build rejects zero-length snapshot bytes, which
-        // would abort dual-layer bootstrap before hooks install.
-        let overlay_s = self.overlay.to_string_lossy().into_owned();
-        let snap = empty_tree_snapshot();
-        let config_bytes =
-            vfs_shim::encode_config_with_overlay(&root_s, &overlay_s, &snap);
-        let _ = std::fs::write(self.state_dir.join("shim.cfg"), config_bytes);
+        // No `shim.cfg` here: `launch` writes it from the root as it is then.
 
         self.ipc = Some(ipc);
         Ok(())
@@ -187,14 +176,8 @@ impl Session {
     /// shape.
     #[cfg(windows)]
     pub fn launch(&self, opts: &LaunchOpts) -> Result<i32, String> {
-        let ipc = self
-            .ipc
-            .as_ref()
-            .ok_or_else(|| "serve() before launch()".to_string())?;
-
-        if opts.image.trim().is_empty() {
-            return Err("LaunchOpts.image is empty — name the image to launch".to_string());
-        }
+        let ipc = self.require_serving()?;
+        check_image(opts)?;
 
         // Root 0 may have been declared after `serve`, which created the
         // managed root it had then; resolving (and staging) needs this one.
@@ -204,21 +187,16 @@ impl Session {
             ResolvedImage::InRoot { host, .. } => host,
             ResolvedImage::Outside(p) => PathBuf::from(p),
         };
-        let config_path = self.state_dir.join("shim.cfg");
-        // `serve` wrote `shim.cfg` and the thin config from root 0's location
-        // as it was then; root 0 may have been declared since. Rewrite both
-        // from the current one so the shim is told the root this child sees.
+        // `serve` wrote the thin config from root 0's location as it was then;
+        // root 0 may have been declared since. Write `shim.cfg` and rewrite the
+        // thin config from the current one so the shim is told the root this
+        // child sees.
         let root_s = self.virtual_root.to_string_lossy().into_owned();
         let overlay_s = self.overlay.to_string_lossy().into_owned();
-        std::fs::write(
-            &config_path,
-            vfs_shim::encode_config_with_overlay(&root_s, &overlay_s, &empty_tree_snapshot()),
-        )
-        .map_err(|e| format!("launch: write {}: {e}", config_path.display()))?;
+        let config_path = self.write_shim_config(&root_s, &overlay_s)?;
         let thin = self.state_dir.join("fuse.cfg");
         ipc.write_thin_config(&thin, &root_s)?;
-        let ready_path = self.state_dir.join("ready.flag");
-        let _ = std::fs::remove_file(&ready_path);
+        let ready_path = self.fresh_ready_flag();
 
         let (dll, payload) = locate_shim_payload(opts)?;
         // Remote LoadLibrary resolves relative to the *child* cwd (managed root,

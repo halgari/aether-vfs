@@ -35,6 +35,11 @@ vfs-storage = { path = "../vfs-storage" }
 tracing = "0.1"
 vfs-env = { path = "../vfs-env" }
 vfs-zip = { path = "../vfs-zip", optional = true }
+# The portable shim-config encoder (`vfs_protocol::shimcfg`), used by both
+# targets' `launch` (`vfs-shim` re-exports the same function, but cannot be
+# built on unix: `retour` -> `libudis86-sys`), and the ring wire codecs the
+# tests drive a served session with.
+vfs-protocol = { path = "../vfs-protocol" }
 
 # Injection and the NT-hook shim are the Windows delivery mechanism. They are
 # gated in the manifest, not with cfg in source: `vfs-shim` pulls `retour` ->
@@ -55,12 +60,6 @@ vfs-shim = { path = "../vfs-shim" }
 # the same reason `vfs-shim` is kept out of the Linux graph above. A host
 # embedding this API launches a runtime; it does not download one.
 vfs-proton = { path = "../vfs-proton", default-features = false }
-# The portable shim-config encoder (`vfs_protocol::shimcfg`). On Windows the
-# same bytes come from `vfs-shim`'s re-export of it; on unix `vfs-shim` cannot
-# be built at all (`retour` -> `libudis86-sys`), which is why the encoder moved
-# into `vfs-protocol` in the first place. Also a dev-dependency below, for the
-# ring codecs — the two entries are the same crate, not two copies.
-vfs-protocol = { path = "../vfs-protocol" }
 
 [dev-dependencies]
 # `vfs-zip` is optional above (the `zip` feature); tests use `ZipProvider`
@@ -72,6 +71,3 @@ vfs-protocol = { path = "../vfs-protocol" }
 # is a C cross-compile that fails before any of our code is reached — the same
 # reason the dependency is gated in the first place.
 vfs-zip = { path = "../vfs-zip" }
-# Ring wire codecs, for the tests that drive a served session over the ring
-# the way the injected shim does.
-vfs-protocol = { path = "../vfs-protocol" }

@@ -14,8 +14,8 @@ use vfs_proton::{
     steam::SteamSide,
 };
 
-use super::stage::{empty_tree_snapshot, ResolvedImage};
-use super::{LaunchExit, LaunchOpts, Session, STOPPED_EXIT_CODE};
+use super::stage::ResolvedImage;
+use super::{check_image, LaunchExit, LaunchOpts, Session, STOPPED_EXIT_CODE};
 use crate::image::{self, RootLocation};
 
 mod handle;
@@ -306,13 +306,9 @@ impl Session {
     ///   until a Wine prefix does — so [`Session::launch`] writes it.
     #[cfg(unix)]
     pub fn serve(&mut self) -> Result<(), String> {
-        if self.ipc.is_some() {
+        if !self.begin_serve()? {
             return Ok(());
         }
-        std::fs::create_dir_all(&self.virtual_root)
-            .map_err(|e| format!("create root: {e}"))?;
-        std::fs::create_dir_all(&self.overlay).map_err(|e| format!("create overlay: {e}"))?;
-        std::fs::create_dir_all(&self.state_dir).map_err(|e| format!("create state: {e}"))?;
 
         let named = self.state_dir.join(RING_FILE);
         // Unlinked rather than reused. `FileMapping::create` grows a file but
@@ -545,10 +541,7 @@ impl Session {
     /// as long as the program should run.
     #[cfg(unix)]
     pub fn launch_detached(&self, opts: &LaunchOpts) -> Result<LaunchHandle, String> {
-        let ipc = self
-            .ipc
-            .as_ref()
-            .ok_or_else(|| "serve() before launch()".to_string())?;
+        let ipc = self.require_serving()?;
         // `serve` on this target always starts file-backed, so this is really a
         // check that the ring belongs to that `serve` and not to a named
         // section somebody else handed this session.
@@ -561,9 +554,7 @@ impl Session {
             })?
             .to_path_buf();
 
-        if opts.image.trim().is_empty() {
-            return Err("LaunchOpts.image is empty — name the image to launch".to_string());
-        }
+        check_image(opts)?;
         // A detached launch that has ended still holds the prefix lock.
         self.reap_detached();
         // Refused up front, before `resolve_launch_image` can stage anything:
@@ -681,16 +672,8 @@ impl Session {
         // prefix above did. The snapshot must still be a valid empty tree —
         // `Engine::build` rejects zero-length snapshot bytes, which would abort
         // dual-layer bootstrap before hooks install.
-        let config_path = self.state_dir.join("shim.cfg");
-        let snap = empty_tree_snapshot();
-        std::fs::write(
-            &config_path,
-            vfs_protocol::shimcfg::encode_config_with_overlay(&root0, &wine_overlay, &snap),
-        )
-        .map_err(|e| format!("launch: write {}: {e}", config_path.display()))?;
-
-        let ready_path = self.state_dir.join("ready.flag");
-        let _ = std::fs::remove_file(&ready_path);
+        let config_path = self.write_shim_config(&root0, &wine_overlay)?;
+        let ready_path = self.fresh_ready_flag();
 
         let (injector, shim_dll, payload_dll) = locate_wine_artifacts(opts)?;
         let (steam, mut notes) = self.steam_launch(&opts.env);
