@@ -37,11 +37,39 @@ use vfs_embed::{Capabilities, DirEntry, DiskProvider, Handle, Provider, SetAttr,
 
 /// A fresh, empty directory `target/tmp/<group>-<pid>-<tag>`.
 pub fn scratch(group: &str, tag: &str) -> PathBuf {
+    sweep_old_scratch();
     let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("{group}-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
+}
+
+/// Once per process, remove pid-suffixed scratch directories under `target/tmp` untouched for
+/// a day. The throwaway homes (`vfs-test-home-*`) are kept.
+fn sweep_old_scratch() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let day = std::time::Duration::from_secs(24 * 3600);
+        let Ok(rd) = std::fs::read_dir(env!("CARGO_TARGET_TMPDIR")) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("vfs-") || name.starts_with("vfs-test-home-") {
+                continue;
+            }
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > day);
+            if old {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -206,18 +234,20 @@ pub fn runtime_dir() -> Result<PathBuf, String> {
         };
     }
     let root = vfs_proton::Root::from_env().map_err(|e| format!("no aether home: {e}"))?;
-    vfs_proton::runtime::installed_dirs(&root)
-        .ok()
-        .and_then(|v| v.into_iter().next())
-        .map(|(_, dir)| dir)
-        .ok_or_else(|| {
-            format!(
-                "no verified GE-Proton runtime under {}: run `cargo run -p vfs-proton -- install`, \
-                 or set VFS_HOME to a home that has one, or VFS_TEST_PROTON_RUNTIME to a GE-Proton \
-                 directory",
-                root.runtimes().display()
-            )
-        })
+    let found = vfs_proton::runtime::installed_dirs(&root).map_err(|e| {
+        format!(
+            "cannot list GE-Proton runtimes under {}: {e}",
+            root.runtimes().display()
+        )
+    })?;
+    found.into_iter().next().map(|(_, dir)| dir).ok_or_else(|| {
+        format!(
+            "no verified GE-Proton runtime under {}: run `cargo run -p vfs-proton -- install`, \
+             or set VFS_HOME to a home that has one, or VFS_TEST_PROTON_RUNTIME to a GE-Proton \
+             directory",
+            root.runtimes().display()
+        )
+    })
 }
 
 /// An aether home of the test's own under `target/tmp`, whose `runtimes` holds one symlink to

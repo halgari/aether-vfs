@@ -163,7 +163,8 @@ fn a_launched_program_finds_the_running_steam_client() {
         support::skip(
             "proton_steam::a_launched_program_finds_the_running_steam_client",
             format!(
-                "the Steam client is not running (start Steam and log in): {:?}",
+                "no Steam helper was started: either the Steam client is not running (start \
+                 Steam and log in) or the helper failed to start; launch notes: {:?}",
                 handle.notes()
             ),
         );

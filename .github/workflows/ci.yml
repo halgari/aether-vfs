@@ -230,6 +230,9 @@ jobs:
       - name: Proton end-to-end (Windows fixture under Wine, Linux Director)
         run: timeout 900 cargo test -p vfs-embed --test proton_launch -- --ignored --nocapture
         working-directory: rust
+        # A missing runtime or artefact is a failure here, not a SKIP.
+        env:
+          VFS_TEST_REQUIRE_ALL: "1"
       # Both `#[ignore]`d tests in the file: the disk write layer, and the
       # named storage layer (`type = "layer"`) whose save must survive `vfs
       # down` and a daemon restart and come back out through `vfs layer

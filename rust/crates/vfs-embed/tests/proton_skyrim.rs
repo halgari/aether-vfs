@@ -143,8 +143,10 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
         return;
     };
     if !game.join("SkyrimSE.exe").is_file() {
-        support::skip(TEST, format!("{} has no SkyrimSE.exe", game.display()));
-        return;
+        panic!(
+            "{TEST}: VFS_TEST_SKYRIM_DIR={} has no SkyrimSE.exe; point it at the game directory",
+            game.display()
+        );
     }
     let alive = Duration::from_secs(
         std::env::var("VFS_TEST_SKYRIM_ALIVE_SECS")
