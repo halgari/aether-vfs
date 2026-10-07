@@ -69,6 +69,14 @@ fn a_hard_link_touching_a_managed_root_is_refused_and_one_outside_works() {
     );
     ntapi::close(h);
 
+    // A target that cannot be decoded (declared name length past the buffer) fails closed.
+    let (st, h) = ntapi::nt_open_abs(&outside.join("ctl.esp").to_string_lossy(), DELETE);
+    assert!(st >= 0, "opening the control source failed: {st:#x}");
+    let mut bad = vec![0u8; 24];
+    bad[16..20].copy_from_slice(&200u32.to_le_bytes());
+    let undecodable = ntapi::nt_set_info_raw(h, &mut bad, ntapi::FILE_LINK_INFORMATION);
+    ntapi::close(h);
+
     // Control: both ends outside every root.
     let ctl_std = std::fs::hard_link(outside.join("ctl.esp"), outside.join("ctl-link.esp"));
     let (st, h) = ntapi::nt_open_abs(&outside.join("ctl-nt.esp").to_string_lossy(), DELETE);
@@ -117,6 +125,11 @@ fn a_hard_link_touching_a_managed_root_is_refused_and_one_outside_works() {
         from_served,
         ntapi::STATUS_ACCESS_DENIED,
         "a link from a served handle: {from_served:#x}"
+    );
+    assert_eq!(
+        undecodable,
+        ntapi::STATUS_ACCESS_DENIED,
+        "an undecodable link target reached the kernel: {undecodable:#x}"
     );
     assert!(refused >= 2, "the refusals were not counted ({refused})");
 

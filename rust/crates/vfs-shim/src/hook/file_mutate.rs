@@ -411,8 +411,8 @@ pub(super) unsafe fn setinfo_hook_body(
 /// operation, so there is nowhere to route it: a link *into* a root would have the kernel create
 /// a real file under a root that seals everything the provider graph does not serve, and a link
 /// *from* a root file would alias a path the graph owns. `None` when neither end is under a root
-/// (the call passes through). An undecodable target is not guessed at: it passes, as a rename's
-/// does, because only a parsed target can be shown to be under a root.
+/// (the call passes through). An undecodable target fails closed: only a parsed target can be
+/// shown to be outside every root, so one that cannot be parsed is refused, never trampolined.
 ///
 /// The layouts are the rename classes', so the target is read with `parse_rename_target`.
 ///
@@ -436,7 +436,10 @@ unsafe fn refuse_link_touching_root(
         }
     }
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-    let target = unsafe { parse_rename_target(info, length) }?;
+    let Some(target) = (unsafe { parse_rename_target(info, length) }) else {
+        crate::hookstats::note_link_refused("<undecodable link target>");
+        return Some(STATUS_ACCESS_DENIED);
+    };
     if path_is_ours(&target) {
         crate::hookstats::note_link_refused(&target);
         return Some(STATUS_ACCESS_DENIED);

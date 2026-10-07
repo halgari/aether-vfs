@@ -511,8 +511,9 @@ route: it either touches no root and passes through, or it is refused.
 - A target under a root, from a source outside every root: refused. This is the write escape: the
   kernel would otherwise create a real file under a root that seals everything the graph does not
   serve.
-- Both ends outside every root, or an unparseable target against a source outside every root:
-  passes to the trampoline.
+- A target that cannot be parsed (a name length past the buffer, a handle-relative name against an
+  unknown directory): refused, fail closed. Only a parsed target can be shown to be outside a root.
+- Both ends outside every root: passes to the trampoline.
 
 Each refusal is counted (`hookstats::link_refused_count`).
 

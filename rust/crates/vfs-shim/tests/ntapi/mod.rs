@@ -553,3 +553,21 @@ pub(crate) fn nt_enum_classic_filtered(dir: *mut c_void, wildcard: Option<&str>)
     }
     out
 }
+
+/// `NtSetInformationFile` with a caller-built buffer, for malformed-input cases.
+pub(crate) fn nt_set_info_raw(h: *mut c_void, buf: &mut [u8], class: u32) -> i32 {
+    let Some(p) = ntdll_proc("NtSetInformationFile") else {
+        return -1;
+    };
+    let f: NtSetInformationFileFn = unsafe { core::mem::transmute(p) };
+    let mut iosb = [0u8; 16];
+    unsafe {
+        f(
+            h,
+            iosb.as_mut_ptr() as *mut c_void,
+            buf.as_mut_ptr() as *mut c_void,
+            buf.len() as u32,
+            class,
+        )
+    }
+}
