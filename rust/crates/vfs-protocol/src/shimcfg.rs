@@ -7,8 +7,8 @@
 //! Linux Director must be able to build a shim config for a Wine-hosted
 //! shim: the encoder is pure byte assembly and only its former enclosing
 //! modules (`crate::engine`, `crate::hook`, and the payload config in
-//! `vfs_inject::payload_cfg` / vfs-payload) needed Windows. The decoder stays in `vfs-shim` — only the shim itself reads
-//! these bytes back.
+//! `vfs_inject::payload_cfg` / vfs-payload) needed Windows. The decoder stays
+//! in `vfs-shim`: only the shim itself reads these bytes back.
 
 /// One static-import DLL virtualization: the EXE's import of `dll_name`
 /// (final path component, e.g. `d3d11.dll`) is redirected pre-init to
