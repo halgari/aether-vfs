@@ -87,6 +87,13 @@ impl HandleTable {
     }
 }
 
+/// How many handles the shim holds a record for. For tests: a count that keeps rising across
+/// open/close pairs is a leak.
+#[doc(hidden)]
+pub fn tracked_handle_count() -> usize {
+    HANDLES.lock().map(|t| t.map.len()).unwrap_or(0)
+}
+
 pub(super) static HANDLES: Mutex<HandleTable> = Mutex::new(HandleTable::new());
 
 const HANDLE_PATHS_MAX: usize = 65_536;

@@ -19,5 +19,6 @@ mod nt_delete_file_sealed;
 mod odd_length_name_sealed;
 mod rename_into_root_sealed;
 mod shim_whiteout_not_phantom;
+mod synthetic_close_reclaims;
 mod write_seal;
 mod write_seal_no_overlay;

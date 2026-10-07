@@ -6,6 +6,15 @@ use crate::ntdef::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
 use crate::sync::{CloseLock, lock_for_close};
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
+/// Drop the handle's whole record from [`HANDLES`], non-blocking (`lock_for_close`).
+fn forget_handle(handle: HANDLE) {
+    if let Some(mut t) = lock_for_close(&HANDLES, &CloseLock::FILE) {
+        crate::breadcrumb::set_holder(crate::breadcrumb::holder::CLOSE_HOOK);
+        t.remove(handle as isize);
+        crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
+    }
+}
+
 /// Reclaim any tracking for a closing handle before the OS (possibly) reuses
 /// its value.
 pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
@@ -42,6 +51,11 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
                 crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_DONE);
             }
         }
+        // The handle's record in `HANDLES` goes with it. Synthetic values only increase, so
+        // nothing would ever reuse the key to clear it (`reset_key`): without this every
+        // director-served open leaves a record for the life of the process, and after
+        // `HANDLE_PATHS_MAX` of them no handle gets an `opened_as` at all.
+        forget_handle(handle);
         crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_EXIT);
         return STATUS_SUCCESS;
     }
@@ -74,11 +88,7 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     // entry is keyed by a handle that is about to become invalid.
     // See `sync::lock_for_close` and docs/shim-invariants.md, "Close-path locking".
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLES);
-    if let Some(mut t) = lock_for_close(&HANDLES, &CloseLock::FILE) {
-        crate::breadcrumb::set_holder(crate::breadcrumb::holder::CLOSE_HOOK);
-        t.remove(handle as isize);
-        crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
-    }
+    forget_handle(handle);
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP);
     // SAFETY: the original NT function, called with valid NT arguments.
     let r = unsafe { tramp(handle) };

@@ -58,6 +58,7 @@ pub use hook::as_shim_io_for_tests;
 pub use hook::contain_panic;
 pub use hook::{
     HookGuard, InstallError, install, install_late, registry_detours_installed, skipped_detours,
+    tracked_handle_count,
 };
 /// The under-root open classifier's counters. Exported so a gate's own tests
 /// can assert that a bypass class it closed reads **zero** — see

@@ -35,6 +35,7 @@ mod whiteout;
 
 pub(crate) use self::entry::ShimIoGuard;
 pub use self::entry::{as_shim_io_for_tests, contain_panic};
+pub use self::handles::tracked_handle_count;
 pub use self::install::{
     HookGuard, InstallError, install, install_late, registry_detours_installed, skipped_detours,
 };
