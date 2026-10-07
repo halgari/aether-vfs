@@ -1,4 +1,4 @@
-//! **The increment's definition of done**: the public API — `Session::serve()`
+//! **The Proton path end to end**: the public API — `Session::serve()`
 //! then `Session::launch()` — starts a real Windows executable under
 //! GE-Proton on Linux, with the shim injected, and the child reads a file that
 //! exists **only** inside this native Linux Director's provider.
@@ -32,10 +32,11 @@
 //! `C:\vfs-session\root` inside the child, whatever the host path is, and the
 //! virtual file is at `C:\vfs-session\root\data\hello.txt`. That is a private
 //! constant of `Session` (`WINE_LINK_DIR`), not public API; there is no
-//! accessor for it yet, and inventing one is a change to a shipped struct that
-//! this increment does not make. If the two ever drift, this test fails with
-//! the fixture reporting the path it could not read, which names the drift.
+//! accessor for it. If the two ever drift, this test fails with the fixture
+//! reporting the path it could not read, which names the drift.
 #![cfg(unix)]
+
+mod support;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -43,6 +44,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use support::Loud;
 use vfs_embed::{
     Capabilities, DirEntry, DiskProvider, Handle, LaunchOpts, Provider, Session, SetAttr, Stat,
     VPath,
@@ -61,230 +63,48 @@ const VPATH: &str = "data/hello.txt";
 const FILL: u8 = 0x5A;
 const LEN: usize = 4096;
 
-// ---------------------------------------------------------------------------
-// The Director side: a provider that says what it was asked.
-// ---------------------------------------------------------------------------
-
-/// A [`DiskProvider`] that logs every call to stderr and records the vpaths it
-/// served. The log is this run's Director-side transcript, and `served` is
-/// what turns "the child exited 0" into "the child's bytes came from here".
-struct Loud {
-    disk: DiskProvider,
-    /// `(op, vpath)` for the path-addressed calls, plus `("read_at", vpath)`
-    /// resolved back through `handles`.
-    calls: Mutex<Vec<(String, String)>>,
-    /// Open handles, so a `read_at` (which carries no path) can be attributed.
-    handles: Mutex<BTreeMap<Handle, String>>,
-}
-
-impl Loud {
-    fn new(root: &Path) -> Self {
-        Loud {
-            disk: DiskProvider::new(root),
-            calls: Mutex::new(Vec::new()),
-            handles: Mutex::new(BTreeMap::new()),
-        }
-    }
-
-    fn note(&self, op: &str, path: &str, detail: &str) {
-        eprintln!("DIRECTOR: {op} {path:?} {detail}");
-        self.calls
-            .lock()
-            .unwrap()
-            .push((op.to_string(), path.to_string()));
-    }
-
-    fn saw(&self, op: &str, path: &str) -> bool {
-        self.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(o, p)| o == op && p == path)
-    }
-
-    fn transcript(&self) -> Vec<String> {
-        self.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(o, p)| format!("{o} {p}"))
-            .collect()
-    }
-}
-
-impl Provider for Loud {
-    fn capabilities(&self) -> Capabilities {
-        self.disk.capabilities()
-    }
-
-    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
-        let r = self.disk.getattr(p);
-        self.note(
-            "getattr",
-            p.rel,
-            &match &r {
-                Ok(Some(s)) => format!("-> kind={} size={}", s.kind, s.size),
-                Ok(None) => "-> absent".to_string(),
-                Err(e) => format!("-> err {e}"),
-            },
-        );
-        r
-    }
-
-    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
-        let r = self.disk.readdir(p);
-        self.note(
-            "readdir",
-            p.rel,
-            &match &r {
-                Ok(v) => format!("-> {} entries", v.len()),
-                Err(e) => format!("-> err {e}"),
-            },
-        );
-        r
-    }
-
-    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
-        let r = self.disk.open(p, flags);
-        if let Ok((h, _, _)) = &r {
-            self.handles.lock().unwrap().insert(*h, p.rel.to_string());
-        }
-        self.note(
-            "open",
-            p.rel,
-            &match &r {
-                Ok((h, size, dir)) => format!("flags={flags:#x} -> fh={h} size={size} dir={dir}"),
-                Err(e) => format!("flags={flags:#x} -> err {e}"),
-            },
-        );
-        r
-    }
-
-    fn close(&self, h: Handle) -> Result<(), i32> {
-        let path = self.handles.lock().unwrap().remove(&h).unwrap_or_default();
-        let r = self.disk.close(h);
-        self.note("close", &path, &format!("fh={h} -> {r:?}"));
-        r
-    }
-
-    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-        let path = self
-            .handles
-            .lock()
-            .unwrap()
-            .get(&h)
-            .cloned()
-            .unwrap_or_default();
-        let r = self.disk.read_at(h, offset, buf);
-        self.note(
-            "read_at",
-            &path,
-            &format!("fh={h} offset={offset} want={} -> {r:?}", buf.len()),
-        );
-        r
-    }
-
-    fn set_attr(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
-        self.disk.set_attr(p, attr)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Locating what a Linux box cannot build
-// ---------------------------------------------------------------------------
-
-fn profile_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let dir = exe.parent().unwrap();
-    if dir.file_name().and_then(|s| s.to_str()) == Some("deps") {
-        dir.parent().unwrap().to_path_buf()
-    } else {
-        dir.to_path_buf()
-    }
-}
-
-/// `vfs-injector.exe`, `vfs_shim_dll.dll`, `vfs_payload.dll` and the fixture
-/// are **Windows PEs**, cross-built by `bin/build-windows`, which copies them
-/// in beside the test binary. Missing ones are named together with where they go: one
-/// message per run instead of one per artifact.
-fn windows_artifacts() -> BTreeMap<&'static str, PathBuf> {
-    let profile = profile_dir();
-    let names = [
-        "vfs-injector.exe",
-        "vfs_shim_dll.dll",
-        "vfs_payload.dll",
-        "vfs-fixture-read.exe",
-    ];
-    let mut found = BTreeMap::new();
-    let mut missing = Vec::new();
-    for name in names {
-        let mut hit = None;
-        for cand in [profile.join(name), profile.join("deps").join(name)] {
-            if cand.is_file() {
-                hit = Some(cand);
-                break;
-            }
-        }
-        match hit {
-            Some(p) => {
-                found.insert(name, p);
-            }
-            None => missing.push(name),
-        }
-    }
-    assert!(
-        missing.is_empty(),
-        "these Windows artifacts are missing: {}.\n\
-         Cross-build them with `bin/build-windows` (from the repo root), which copies them \
-         into {}.",
-        missing.join(", "),
-        profile.display()
-    );
-    found
-}
-
 /// One Wine launch at a time: each test boots its own prefix, and two booting
 /// at once on one machine is slower than either alone and proves nothing more.
 static ONE_LAUNCH: Mutex<()> = Mutex::new(());
 
 fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("vfs-proton-launch-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    support::scratch("vfs-proton-launch", name)
 }
 
 // ---------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------
 
-/// **The whole increment.** `Session::serve()` + `Session::launch()` start a
+/// **The whole path.** `Session::serve()` + `Session::launch()` start a
 /// Windows executable under GE-Proton, the injected shim routes its
 /// `NtCreateFile`/`NtReadFile` back over a file-backed ring to this native
 /// Linux Director, and the file it reads exists on no filesystem the Wine
 /// process can see.
 ///
 /// Requires, and cannot provide for itself:
-/// * a verified **GE-Proton runtime** under `$VFS_HOME/runtimes` (install with
-///   `vfs-proton install`);
-/// * a **Wine prefix**, which `Session::launch` boots itself under
-///   `$VFS_HOME/sessions/<id>/prefix` — so a 32-bit runtime must be installed
+/// * a verified **GE-Proton runtime** (install with `vfs-proton install`;
+///   `support::runtime_dir` says where it is looked for);
+/// * a **Wine prefix**, which `Session::launch` boots itself under the test's
+///   throwaway home, `sessions/<id>/prefix` — so a 32-bit runtime must be installed
 ///   (`lib32-glibc`, `lib32-gcc-libs` on Arch), since `wine`'s launcher probes
 ///   for the 32-bit loader even under `WINEARCH=win64`;
-/// * the four **Windows artifacts** listed in [`windows_artifacts`], from
-///   `bin/build-windows`.
+/// * the four **Windows artifacts** (`support::windows_artifacts`), from
+///   `bin/build-windows` for this test's profile.
+///
+/// A missing prerequisite prints `SKIP ...` with the command to run and passes
+/// (`tests/support/mod.rs`); the launch runs in a throwaway aether home under
+/// `target/tmp`, never the user's.
 #[test]
-#[ignore = "needs a GE-Proton runtime under $VFS_HOME/runtimes, a bootable Wine prefix, and \
-            Windows-built artifacts (vfs-injector.exe, vfs_shim_dll.dll, vfs_payload.dll, \
-            vfs-fixture-read.exe) beside the test binary — see bin/build-windows"]
+#[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts \
+            (vfs-injector.exe, vfs_shim_dll.dll, vfs_payload.dll, vfs-fixture-read.exe) for \
+            this profile — see bin/build-windows"]
 fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider() {
     let _one = ONE_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
-    let art = windows_artifacts();
-    assert!(
-        std::env::var_os("VFS_HOME").is_some(),
-        "set VFS_HOME to the aether-vfs home holding runtimes/GE-Proton…; \
-         Session::launch resolves the runtime and this session's prefix from it"
-    );
+    let Some(rig) = support::rig("proton_launch::session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider", "launch", &[vfs_proton::artifacts::FIXTURE_READ])
+    else {
+        return;
+    };
+    let art = &rig.art;
 
     let root = tmp("root");
     let state = tmp("state");
@@ -296,17 +116,18 @@ fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider(
     std::fs::create_dir_all(content.join("data")).unwrap();
     std::fs::write(content.join("data").join("hello.txt"), [FILL; LEN]).unwrap();
 
-    // The image must be a **real file** under the managed root: `CreateProcess`
-    // inside Wine reads it before any hook of ours exists in the child, and
-    // staging a graph-only image is not wired to the Proton path (`launch`
-    // refuses it by name). So the fixture is copied in, and the *data* is what
-    // stays virtual.
+    // The image is a **real file** under the managed root, not staged out of
+    // the graph (`launch` stages a graph-only image on this path too): this
+    // test is about the *data* going over the ring, so the fixture is copied in
+    // and the data is what stays virtual.
     let image = root.join("fixture.exe");
-    std::fs::copy(&art["vfs-fixture-read.exe"], &image).expect("copy the fixture into the root");
+    std::fs::copy(art.path(vfs_proton::artifacts::FIXTURE_READ), &image)
+        .expect("copy the fixture into the root");
 
     let provider = Arc::new(Loud::new(&content));
 
     let mut s = Session::new();
+    s.set_home(&rig.home);
     s.set_root(&root);
     s.set_state_dir(&state);
     s.set_overlay(&overlay);
@@ -317,7 +138,9 @@ fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider(
     let ipc = s.ipc().expect("serve() must leave a live ring");
     eprintln!(
         "DIRECTOR: ring {} map_bytes={} arena_offset={} arena_len={} payload_cap={}",
-        ipc.ring_path().map(|p| p.display().to_string()).unwrap_or_default(),
+        ipc.ring_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
         ipc.map_bytes,
         ipc.arena_offset,
         ipc.arena_len,
@@ -327,7 +150,9 @@ fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider(
     // Read it back through the graph first. If this fails, the launch was
     // never going to work and the diagnosis is on this side of the ring.
     assert_eq!(
-        s.read_file(VPATH).expect("the provider must serve the vpath").len(),
+        s.read_file(VPATH)
+            .expect("the provider must serve the vpath")
+            .len(),
         LEN,
         "the host-side read through the same graph the child will use"
     );
@@ -348,8 +173,8 @@ fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider(
             wait: true,
             // `vfs-injector.exe` is taken from the directory holding `shim_dll`,
             // which is why setting this one path is enough for all three.
-            shim_dll: Some(art["vfs_shim_dll.dll"].to_string_lossy().into_owned()),
-            payload_dll: Some(art["vfs_payload.dll"].to_string_lossy().into_owned()),
+            shim_dll: Some(art.shim_dll()),
+            payload_dll: Some(art.payload_dll()),
             env,
             ..Default::default()
         })
@@ -520,15 +345,15 @@ impl Provider for Stalling {
 /// three free permits), and its yield-then-sleep wait, in an injected DLL on
 /// Wine threads.
 #[test]
-#[ignore = "needs a GE-Proton runtime under $VFS_HOME/runtimes, a bootable Wine prefix, and \
-            Windows-built artifacts beside the test binary — see bin/build-windows"]
+#[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts \
+            for this profile — see bin/build-windows"]
 fn stalled_reads_on_two_threads_do_not_hold_up_file_operations_on_others_under_proton() {
     let _one = ONE_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
-    let art = windows_artifacts();
-    assert!(
-        std::env::var_os("VFS_HOME").is_some(),
-        "set VFS_HOME to the aether-vfs home holding runtimes/GE-Proton…"
-    );
+    let Some(rig) = support::rig("proton_launch::stalled_reads_on_two_threads_do_not_hold_up_file_operations_on_others_under_proton", "launch", &[vfs_proton::artifacts::FIXTURE_READ])
+    else {
+        return;
+    };
+    let art = &rig.art;
 
     let root = tmp("c-root");
     let state = tmp("c-state");
@@ -542,7 +367,8 @@ fn stalled_reads_on_two_threads_do_not_hold_up_file_operations_on_others_under_p
     )
     .unwrap();
     let image = root.join("fixture.exe");
-    std::fs::copy(&art["vfs-fixture-read.exe"], &image).expect("copy the fixture into the root");
+    std::fs::copy(art.path(vfs_proton::artifacts::FIXTURE_READ), &image)
+        .expect("copy the fixture into the root");
 
     let provider = Arc::new(Stalling {
         disk: DiskProvider::new(&content),
@@ -557,6 +383,7 @@ fn stalled_reads_on_two_threads_do_not_hold_up_file_operations_on_others_under_p
     });
 
     let mut s = Session::new();
+    s.set_home(&rig.home);
     s.set_root(&root);
     s.set_state_dir(&state);
     s.set_overlay(&overlay);
@@ -584,8 +411,8 @@ fn stalled_reads_on_two_threads_do_not_hold_up_file_operations_on_others_under_p
         .launch(&LaunchOpts {
             image: "fixture.exe".into(),
             wait: true,
-            shim_dll: Some(art["vfs_shim_dll.dll"].to_string_lossy().into_owned()),
-            payload_dll: Some(art["vfs_payload.dll"].to_string_lossy().into_owned()),
+            shim_dll: Some(art.shim_dll()),
+            payload_dll: Some(art.payload_dll()),
             env,
             ..Default::default()
         })
@@ -662,15 +489,18 @@ const NAMES_ROOT: &str = r"C:\Haskill\TestList\game";
 /// The expected paths are spelled as the providers store them, which is not
 /// how the fixture is told to open them.
 #[test]
-#[ignore = "needs a GE-Proton runtime under $VFS_HOME/runtimes, a bootable Wine prefix, and \
-            Windows-built artifacts beside the test binary — see bin/build-windows"]
+#[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts \
+            for this profile — see bin/build-windows"]
 fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
     let _one = ONE_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
-    let art = windows_artifacts();
-    assert!(
-        std::env::var_os("VFS_HOME").is_some(),
-        "set VFS_HOME to the aether-vfs home holding runtimes/GE-Proton…"
-    );
+    let Some(rig) = support::rig(
+        "proton_launch::a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton",
+        "launch",
+        &[vfs_proton::artifacts::FIXTURE_READ],
+    ) else {
+        return;
+    };
+    let art = &rig.art;
 
     let root = tmp("n-root");
     let state = tmp("n-state");
@@ -698,7 +528,8 @@ fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
     write(&lower, "Data/OnlyInLower/b.txt", b"b");
     write(&root, "RealOnly/r.txt", b"r");
     let image = root.join("fixture.exe");
-    std::fs::copy(&art["vfs-fixture-read.exe"], &image).expect("copy the fixture into the root");
+    std::fs::copy(art.path(vfs_proton::artifacts::FIXTURE_READ), &image)
+        .expect("copy the fixture into the root");
 
     // A write layer like a host's: what the fixture creates lands here, and
     // the providers below stay read-only.
@@ -707,6 +538,7 @@ fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
         .expect("open storage");
 
     let mut s = Session::new();
+    s.set_home(&rig.home);
     s.set_root(&root);
     s.declare_root(0, NAMES_ROOT);
     s.set_state_dir(&state);
@@ -828,8 +660,8 @@ fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
         .launch(&LaunchOpts {
             image: "fixture.exe".into(),
             wait: true,
-            shim_dll: Some(art["vfs_shim_dll.dll"].to_string_lossy().into_owned()),
-            payload_dll: Some(art["vfs_payload.dll"].to_string_lossy().into_owned()),
+            shim_dll: Some(art.shim_dll()),
+            payload_dll: Some(art.payload_dll()),
             env,
             ..Default::default()
         })
@@ -942,22 +774,23 @@ impl Provider for CountingImmutable {
 ///   hundred thousand the fixture made;
 /// * the shim's **stats report** shows read-cache hits.
 #[test]
-#[ignore = "needs a GE-Proton runtime under $VFS_HOME/runtimes, a bootable Wine prefix, and \
-            Windows-built artifacts beside the test binary — see bin/build-windows"]
+#[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts \
+            for this profile — see bin/build-windows"]
 fn small_reads_of_an_immutable_file_are_served_by_the_shim_read_cache_under_proton() {
     let _one = ONE_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());
-    let art = windows_artifacts();
-    assert!(
-        std::env::var_os("VFS_HOME").is_some(),
-        "set VFS_HOME to the aether-vfs home holding runtimes/GE-Proton…"
-    );
+    let Some(rig) = support::rig("proton_launch::small_reads_of_an_immutable_file_are_served_by_the_shim_read_cache_under_proton", "launch", &[vfs_proton::artifacts::FIXTURE_READ])
+    else {
+        return;
+    };
+    let art = &rig.art;
 
     let root = tmp("rc-root");
     let state = tmp("rc-state");
     let overlay = tmp("rc-overlay");
     let storage_dir = tmp("rc-storage");
     let image = root.join("fixture.exe");
-    std::fs::copy(&art["vfs-fixture-read.exe"], &image).expect("copy the fixture into the root");
+    std::fs::copy(art.path(vfs_proton::artifacts::FIXTURE_READ), &image)
+        .expect("copy the fixture into the root");
 
     let mut x = 0x0123_4567_89AB_CDEFu64;
     let cached: Vec<u8> = (0..CACHE_LEN)
@@ -981,6 +814,7 @@ fn small_reads_of_an_immutable_file_are_served_by_the_shim_read_cache_under_prot
         .expect("open storage");
 
     let mut s = Session::new();
+    s.set_home(&rig.home);
     s.set_root(&root);
     s.set_state_dir(&state);
     s.set_overlay(&overlay);
@@ -1010,8 +844,8 @@ fn small_reads_of_an_immutable_file_are_served_by_the_shim_read_cache_under_prot
         .launch(&LaunchOpts {
             image: "fixture.exe".into(),
             wait: true,
-            shim_dll: Some(art["vfs_shim_dll.dll"].to_string_lossy().into_owned()),
-            payload_dll: Some(art["vfs_payload.dll"].to_string_lossy().into_owned()),
+            shim_dll: Some(art.shim_dll()),
+            payload_dll: Some(art.payload_dll()),
             env,
             ..Default::default()
         })

@@ -8,9 +8,8 @@
 //! like any launch.
 //!
 //! Needs, and cannot provide for itself:
-//! * a verified GE-Proton runtime under `$VFS_HOME/runtimes`, and `python3`
-//!   (Proton's prefix setup);
-//! * the Windows artifacts from `bin/build-windows` beside the test binary;
+//! * a verified GE-Proton runtime and `python3` (Proton's prefix setup);
+//! * the Windows artifacts from `bin/build-windows` for this test's profile;
 //! * a Steam install (`VFS_TEST_STEAM_CLIENT`, else `~/.local/share/Steam`)
 //!   and, for the first test, that client **running** and logged in, with
 //!   `HOME` pointing at the home it runs in;
@@ -20,13 +19,16 @@
 //!   Skyrim Special Edition). The client shows it as running for the few
 //!   seconds each launch takes.
 //!
-//! A test whose Steam install, `steam_api64.dll` or (first test) running
-//! client is missing says so on stderr and passes without checking anything.
+//! A test whose runtime, artifacts, Steam install, `steam_api64.dll` or (first test) running
+//! client is missing prints `SKIP ...` and passes (`tests/support/mod.rs` has the policy).
 #![cfg(unix)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
 use std::sync::Arc;
+
+mod support;
 
 use vfs_embed::{DiskProvider, LaunchOpts, PrefixInit, Provider, Session};
 
@@ -35,44 +37,7 @@ use vfs_embed::{DiskProvider, LaunchOpts, PrefixInit, Provider, Session};
 const ROOT0: &str = r"C:\vfs-session\root";
 
 fn tmp(tag: &str) -> PathBuf {
-    let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("vfs-proton-steam-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn profile_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let dir = exe.parent().unwrap();
-    if dir.file_name().and_then(|s| s.to_str()) == Some("deps") {
-        dir.parent().unwrap().to_path_buf()
-    } else {
-        dir.to_path_buf()
-    }
-}
-
-fn artifact(name: &str) -> PathBuf {
-    let p = profile_dir().join(name);
-    assert!(
-        p.is_file(),
-        "{} is missing: cross-build the Windows artifacts with `bin/build-windows`",
-        p.display()
-    );
-    p
-}
-
-/// The Steam client's install directory: `VFS_TEST_STEAM_CLIENT`, else
-/// `~/.local/share/Steam`. `None` (the test skips) when it does not exist.
-fn steam_client() -> Option<PathBuf> {
-    let dir = match std::env::var_os("VFS_TEST_STEAM_CLIENT") {
-        Some(p) => PathBuf::from(p),
-        None => PathBuf::from(std::env::var_os("HOME")?)
-            .join(".local")
-            .join("share")
-            .join("Steam"),
-    };
-    dir.is_dir().then_some(dir)
+    support::scratch("vfs-proton-steam", tag)
 }
 
 /// `VFS_TEST_STEAM_API_DLL`, else the first `steam_api64.dll` a game under
@@ -97,11 +62,7 @@ static PREFIX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The `steam-probe: key=value` lines of a launch's log.
 fn probe(log: &str) -> BTreeMap<String, String> {
-    log.lines()
-        .filter_map(|l| l.trim().strip_prefix("steam-probe: "))
-        .filter_map(|l| l.split_once('='))
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect()
+    support::probe_lines(log, "steam-probe: ")
 }
 
 struct Probe {
@@ -111,19 +72,24 @@ struct Probe {
 }
 
 /// A served session in a Proton-initialized prefix named `prefix`, with the
-/// probe and the Steam API DLL as real files in root 0; `None`, after saying
-/// why, when this machine has no Steam client or `steam_api64.dll`.
-fn probe_session(tag: &str, prefix: &str) -> Option<Probe> {
-    assert!(
-        std::env::var_os("VFS_HOME").is_some(),
-        "set VFS_HOME to the aether-vfs home holding runtimes/GE-Proton…"
-    );
-    let Some(client) = steam_client() else {
-        eprintln!("skipping: no Steam client directory (set VFS_TEST_STEAM_CLIENT)");
-        return None;
+/// probe and the Steam API DLL as real files in root 0; `None`, after a
+/// `SKIP` line, when this machine lacks the runtime, the artifacts, a Steam
+/// client or a `steam_api64.dll`.
+fn probe_session(test: &str, tag: &str, prefix: &str) -> Option<Probe> {
+    let rig = support::rig(test, "steam", &[vfs_proton::artifacts::FIXTURE_STEAM])?;
+    let client = match support::steam_client() {
+        Ok(c) => c,
+        Err(why) => {
+            support::skip(test, why);
+            return None;
+        }
     };
     let Some(dll) = steam_api_dll(&client) else {
-        eprintln!("skipping: no steam_api64.dll found (set VFS_TEST_STEAM_API_DLL)");
+        support::skip(
+            test,
+            "no steam_api64.dll found under the client's steamapps/common: \
+             set VFS_TEST_STEAM_API_DLL",
+        );
         return None;
     };
     let app_id: u32 = std::env::var("VFS_TEST_STEAM_APP_ID")
@@ -132,10 +98,15 @@ fn probe_session(tag: &str, prefix: &str) -> Option<Probe> {
         .unwrap_or(489830);
 
     let root = tmp(&format!("{tag}-root"));
-    std::fs::copy(artifact("vfs-fixture-steam.exe"), root.join("probe.exe")).unwrap();
+    std::fs::copy(
+        rig.art.path(vfs_proton::artifacts::FIXTURE_STEAM),
+        root.join("probe.exe"),
+    )
+    .unwrap();
     std::fs::copy(&dll, root.join("steam_api64.dll")).unwrap();
 
     let mut s = Session::new();
+    s.set_home(&rig.home);
     s.set_root(&root);
     s.set_state_dir(tmp(&format!("{tag}-state")));
     s.set_overlay(tmp(&format!("{tag}-overlay")));
@@ -152,8 +123,8 @@ fn probe_session(tag: &str, prefix: &str) -> Option<Probe> {
     let opts = LaunchOpts {
         image: "probe.exe".into(),
         wait: true,
-        shim_dll: Some(artifact("vfs_shim_dll.dll").to_string_lossy().into_owned()),
-        payload_dll: Some(artifact("vfs_payload.dll").to_string_lossy().into_owned()),
+        shim_dll: Some(rig.art.shim_dll()),
+        payload_dll: Some(rig.art.payload_dll()),
         env: BTreeMap::from([
             (
                 "VFS_FIXTURE_STEAM_API_DLL".to_string(),
@@ -175,19 +146,27 @@ fn probe_session(tag: &str, prefix: &str) -> Option<Probe> {
 }
 
 #[test]
-#[ignore = "needs a GE-Proton runtime under $VFS_HOME/runtimes, the Windows artifacts from \
+#[ignore = "needs a GE-Proton runtime, the Windows artifacts from \
             bin/build-windows, a Steam install with a game shipping steam_api64.dll, and that \
             client running and logged in to an account that owns the app"]
 fn a_launched_program_finds_the_running_steam_client() {
     let _turn = PREFIX.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(p) = probe_session("on", "steam-probe") else {
+    let Some(p) = probe_session(
+        "proton_steam::a_launched_program_finds_the_running_steam_client",
+        "on",
+        "steam-probe",
+    ) else {
         return;
     };
     let handle = p.session.launch_detached(&p.opts).expect("launch");
     if !handle.steam_helper() {
-        eprintln!(
-            "skipping: the Steam client is not running: {:?}",
-            handle.notes()
+        support::skip(
+            "proton_steam::a_launched_program_finds_the_running_steam_client",
+            format!(
+                "no Steam helper was started: either the Steam client is not running (start \
+                 Steam and log in) or the helper failed to start; launch notes: {:?}",
+                handle.notes()
+            ),
         );
         return;
     }
@@ -229,14 +208,18 @@ fn a_launched_program_finds_the_running_steam_client() {
 }
 
 #[test]
-#[ignore = "needs a GE-Proton runtime under $VFS_HOME/runtimes, the Windows artifacts from \
+#[ignore = "needs a GE-Proton runtime, the Windows artifacts from \
             bin/build-windows, and a Steam install with a game shipping steam_api64.dll (the \
             client need not run)"]
 fn without_a_running_client_the_launch_goes_ahead_and_says_so() {
     let _turn = PREFIX.lock().unwrap_or_else(|e| e.into_inner());
     // The prefix the other test runs the helper in: the pid it leaves must
     // not make this launch's Steam API find a client.
-    let Some(mut p) = probe_session("off", "steam-probe") else {
+    let Some(mut p) = probe_session(
+        "proton_steam::without_a_running_client_the_launch_goes_ahead_and_says_so",
+        "off",
+        "steam-probe",
+    ) else {
         return;
     };
     // A state directory with no pid file: no client is running, as far as

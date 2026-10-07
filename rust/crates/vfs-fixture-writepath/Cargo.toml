@@ -7,3 +7,6 @@ license = "GPL-3.0-only"
 [[bin]]
 name = "vfs-fixture-writepath"
 path = "src/main.rs"
+
+[dependencies]
+vfs-env = { path = "../vfs-env" }

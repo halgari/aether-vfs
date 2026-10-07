@@ -43,16 +43,17 @@ impl<'a> DataArena<'a> {
         }
     }
 
-    pub fn bank_index(&self, slot: u32) -> usize {
+    pub(crate) fn bank_index(&self, slot: u32) -> usize {
         (slot as usize) % self.banks
     }
 
     /// Mapping-relative offset of the start of `slot`'s bank.
-    pub fn bank_mapping_offset(&self, slot: u32) -> u64 {
+    pub(crate) fn bank_mapping_offset(&self, slot: u32) -> u64 {
         (self.mapping_offset + self.bank_index(slot) * self.bank_size) as u64
     }
 
     /// Write `data` into the bank for `slot`. Returns mapping-relative offset of data.
+    #[cfg(test)]
     pub fn write_bank(&self, slot: u32, data: &[u8]) -> Result<u64, ArenaError> {
         if data.len() > self.bank_size {
             return Err(ArenaError::TooLarge);

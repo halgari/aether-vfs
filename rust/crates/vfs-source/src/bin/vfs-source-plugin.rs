@@ -12,7 +12,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tokio::net::TcpListener;
 use tonic::transport::Server;
-use vfs_director::DiskProvider;
+use vfs_compose::DiskProvider;
 use vfs_source::pb::source_server::SourceServer;
 use vfs_source::ProviderSourceService;
 

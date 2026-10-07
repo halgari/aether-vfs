@@ -28,8 +28,9 @@ use crate::ring_dispatch::dispatch_director;
 
 /// The ring's shared-memory backing, chosen by target.
 ///
-/// Both types expose `seg()`, `len()` and `as_mut_ptr()` with identical
-/// meaning — deliberately, so everything above this line is written once.
+/// Both types implement [`vfs_ipc::RingBacking`] (`seg()`, `len()` and
+/// `as_mut_ptr()` with identical meaning) — deliberately, so everything above
+/// this line is written once.
 /// `SharedMapping` is a named page-file-backed section; `FileMapping` is an
 /// `mmap` over a real file, which is what lets a shim inside Wine and a native
 /// Linux Director share one ring.
@@ -37,6 +38,13 @@ use crate::ring_dispatch::dispatch_director;
 type RingMapping = vfs_win::SharedMapping;
 #[cfg(unix)]
 type RingMapping = vfs_unix::FileMapping;
+
+// The contract itself, checked where the backing is chosen: a target whose
+// mapping type drifts from `RingBacking` fails here, not somewhere above.
+const _: fn() = || {
+    fn assert_ring_backing<T: vfs_ipc::RingBacking>() {}
+    assert_ring_backing::<RingMapping>();
+};
 
 pub const DEFAULT_SLOT_COUNT: u32 = 32;
 /// Re-export for callers; keep in sync with [`vfs_ipc::DEFAULT_ARENA_BYTES`].
@@ -107,8 +115,7 @@ impl Inner {
 
 /// Running IPC server bound to a director kernel (keeps workers alive).
 ///
-/// This is the **production ring host** for remapped child I/O (not the legacy
-/// `vfs_server::Server` tree path).
+/// This is the **production ring host** for remapped child I/O.
 pub struct IpcServe {
     /// Windows-only, with the three event-name fields below: they name the
     /// *named-section* handshake, which has no counterpart in the file-backed
@@ -382,14 +389,9 @@ impl IpcServe {
         std::fs::write(path, body).map_err(|e| format!("write thin config: {e}"))
     }
 
-    /// Windows-only, with [`Self::apply_env_roots`]: it publishes the section
-    /// name and both event names, none of which exist in the file-backed mode.
-    #[cfg(windows)]
-    pub fn apply_env(&self, virtual_root: &str, thin_cfg: &std::path::Path) {
-        self.apply_env_roots(virtual_root, &[], thin_cfg, false)
-    }
-
-    /// [`Self::apply_env`] for a session that virtualizes more than one root.
+    /// Windows-only: publishes the section name and both event names, none of
+    /// which exist in the file-backed mode. For a session that virtualizes
+    /// more than one root, pass the extra roots.
     ///
     /// `extra_roots` is `(id, path)` for every root **beyond root 0**, which
     /// `virtual_root` names. The shim needs the full set because the root id
@@ -405,44 +407,49 @@ impl IpcServe {
         registry: bool,
     ) {
         // Process-global env is for the injected child (and single-session hosts).
-        std::env::set_var(vfs_env::RING_SECTION, &self.section_name);
-        // Cleared for the same reason `VIRTUAL_ROOTS` is below, and it is the
-        // more dangerous of the two: `VFS_RING_PATH` **wins** over
-        // `VFS_RING_SECTION` in the shim (see `fuse_client::ring_source`), so a
-        // stale value left by an earlier file-backed session in this process
-        // would send the child to that old ring file — attaching it to a
-        // director that is gone, or to a stale ring another one is still
-        // serving — while this session's brand-new section sat unused and every
-        // log said the launch was configured correctly.
-        std::env::remove_var(vfs_env::RING_PATH);
-        std::env::set_var(vfs_env::RING_BYTES, self.map_bytes.to_string());
-        std::env::set_var(vfs_env::RING_PAYLOAD_CAP, self.payload_cap.to_string());
-        std::env::set_var(vfs_env::ARENA_OFFSET, self.arena_offset.to_string());
-        std::env::set_var(vfs_env::ARENA_LEN, self.arena_len.to_string());
-        std::env::set_var(vfs_env::SERVER_EV, &self.server_ev_name);
-        std::env::set_var(vfs_env::CLIENT_EV, &self.client_ev_name);
-        std::env::set_var(vfs_env::FUSE_CFG, thin_cfg.to_string_lossy().as_ref());
-        std::env::set_var(vfs_env::VIRTUAL_DIR, virtual_root);
-        // Set only while a registry layer is attached; cleared otherwise so a
-        // stale value from an earlier session cannot turn the hooks on.
+        //
+        // Every `vfs_env::handshake::TRANSPORT` name is either set here or
+        // removed, so nothing a previous session in this process left behind
+        // can reach the child. The removals that matter most:
+        // - `VFS_RING_PATH` **wins** over `VFS_RING_SECTION` in the shim (see
+        //   `fuse_client::ring_source`), so a stale value from an earlier
+        //   file-backed session would send the child to that old ring file
+        //   (a director that is gone, or one another session still serves)
+        //   while this session's section sat unused and every log said the
+        //   launch was configured correctly;
+        // - `VFS_VIRTUAL_ROOTS`: inheriting a stale extra root is the
+        //   "declared root that is not there" failure the variable exists to
+        //   prevent;
+        // - `VFS_REGISTRY`: a stale value must not turn the hooks on.
+        let thin_cfg = thin_cfg.to_string_lossy();
+        let map_bytes = self.map_bytes.to_string();
+        let payload_cap = self.payload_cap.to_string();
+        let arena_offset = self.arena_offset.to_string();
+        let arena_len = self.arena_len.to_string();
+        let mut set: Vec<(&str, &str)> = vec![
+            (vfs_env::RING_SECTION, &self.section_name),
+            (vfs_env::RING_BYTES, &map_bytes),
+            (vfs_env::RING_PAYLOAD_CAP, &payload_cap),
+            (vfs_env::ARENA_OFFSET, &arena_offset),
+            (vfs_env::ARENA_LEN, &arena_len),
+            (vfs_env::SERVER_EV, &self.server_ev_name),
+            (vfs_env::CLIENT_EV, &self.client_ev_name),
+            (vfs_env::FUSE_CFG, &thin_cfg),
+            (vfs_env::VIRTUAL_DIR, virtual_root),
+        ];
+        // Set only while a registry layer is attached.
         if registry {
-            std::env::set_var(vfs_env::REGISTRY, "1");
-        } else {
-            std::env::remove_var(vfs_env::REGISTRY);
+            set.push((vfs_env::REGISTRY, "1"));
         }
-        if extra_roots.is_empty() {
-            // Cleared, not left alone: a previous single-session host in this
-            // process may have set it, and inheriting a stale second root is
-            // exactly the "declared root that is not there" failure this var
-            // exists to prevent.
-            std::env::remove_var(vfs_env::VIRTUAL_ROOTS);
-        } else {
-            let spec = extra_roots
-                .iter()
-                .map(|(id, path)| format!("{id}={path}"))
-                .collect::<Vec<_>>()
-                .join(";");
-            std::env::set_var(vfs_env::VIRTUAL_ROOTS, spec);
+        let roots = vfs_env::handshake::encode_roots(extra_roots);
+        if let Some(spec) = &roots {
+            set.push((vfs_env::VIRTUAL_ROOTS, spec));
+        }
+        for name in vfs_env::handshake::TRANSPORT {
+            match set.iter().find(|(n, _)| n == name) {
+                Some((n, v)) => std::env::set_var(n, v),
+                None => std::env::remove_var(name),
+            }
         }
     }
 }

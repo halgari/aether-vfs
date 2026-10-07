@@ -6,12 +6,11 @@
 //! the descriptors they inherited.
 #![cfg(unix)]
 
-use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use vfs_proton::launch::{run, WineLaunch};
+use vfs_proton::launch::{LaunchFiles, RingGeometry, WineLaunch, run};
 
 fn scratch(tag: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -43,32 +42,29 @@ exit 0
 }
 
 fn launch(dir: &Path, log_file: Option<PathBuf>) -> WineLaunch {
-    WineLaunch {
-        runtime: fake_runtime(dir),
-        prefix: dir.join("pfx"),
-        injector: dir.join("vfs-injector.exe"),
-        shim_dll: dir.join("vfs_shim_dll.dll"),
-        payload_dll: dir.join("vfs_payload.dll"),
-        target: r"C:\probe\target.exe".to_string(),
-        config_file: dir.join("shim.cfg"),
-        ready_file: dir.join("ready.flag"),
-        ring_path: PathBuf::from(r"C:\probe\ring.bin"),
-        ring_bytes: 33_751_040,
-        arena_offset: 65_536,
-        arena_len: 33_554_432,
-        payload_cap: 1_048_576,
-        virtual_dir: r"C:\probe\managed".to_string(),
-        virtual_roots: vec![],
-        args: vec![],
-        extra_env: BTreeMap::new(),
-        cwd: None,
-        ready_timeout_secs: None,
-        log_file,
-        steam: vfs_proton::SteamSide::Untouched,
-        notes: Vec::new(),
-        nvapi: None,
-        registry: false,
-    }
+    let mut l = WineLaunch::new(
+        fake_runtime(dir),
+        dir.join("pfx"),
+        r"C:\probe\target.exe".to_string(),
+        r"C:\probe\managed".to_string(),
+        LaunchFiles {
+            injector: dir.join("vfs-injector.exe"),
+            shim_dll: dir.join("vfs_shim_dll.dll"),
+            payload_dll: dir.join("vfs_payload.dll"),
+            config_file: dir.join("shim.cfg"),
+            ready_file: dir.join("ready.flag"),
+        },
+        RingGeometry {
+            path: PathBuf::from(r"C:\probe\ring.bin"),
+            host_path: None,
+            bytes: 33_751_040,
+            arena_offset: 65_536,
+            arena_len: 33_554_432,
+            payload_cap: 1_048_576,
+        },
+    );
+    l.log_file = log_file;
+    l
 }
 
 fn wait_for_line(log: &Path, line: &str) -> String {

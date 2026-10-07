@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! `vfs-core`: pure, OS-independent read-only resolver for a merged/overlaid
+//! `vfs-core`: pure, OS-independent resolver for a merged/overlaid
 //! virtual filesystem. Fed enumerated layers (data-in); does no I/O.
 //!
 //! ```
@@ -30,11 +30,16 @@ mod wildcard;
 
 pub use cachekey::compute_cache_key;
 pub use model::{
-    BuildError, CacheKey, DirEntry, EntryKind, InputEntry, Layer, LayerId, NodeKind, Resolution,
-    SourceId, Stat, VfsError,
+    BuildError, CacheKey, EntryKind, InputEntry, Layer, LayerId, Resolution, SourceId, TreeEntry,
+    TreeStat, VfsError,
 };
+// compat: removed by cleanup stream I
+#[doc(hidden)]
+pub use model::NodeKind;
 pub use casefold::fold;
-pub use path::{normalize_vpath, PathError};
+pub use path::{
+    normalize_rel, normalize_vpath, rel_components, split_parent, trim_rel, BadComponent, PathError,
+};
 pub use source::{decode, encode_zip_window, Source};
 pub use tree::VfsTree;
 pub use tree::build;

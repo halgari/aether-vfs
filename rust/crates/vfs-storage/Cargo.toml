@@ -14,13 +14,16 @@ redb = "4.3"
 uuid = { version = "1", features = ["v4"] }
 blake3 = "1"
 tracing = "0.1"
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
+vfs-provider = { path = "../vfs-provider", features = ["conformance"] }
 tempfile = "3"
 vfs-compose = { path = "../vfs-compose" }
 
 [features]
 # Compress bulk writes on the GPU (`vfs_block_store::BulkCompression::Gpu`).
 gpu-zstd = ["vfs-block-store/gpu-zstd"]
-# Hooks other crates' tests use (a crash at drop).
-test-hooks = []
+# Hooks other crates' tests use: `Storage::crash_on_drop_for_tests` and
+# `snapshot_as_killed`.
+test-hooks = ["dep:tempfile"]

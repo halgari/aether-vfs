@@ -17,11 +17,7 @@ pub struct SubdirProvider {
 
 impl SubdirProvider {
     pub fn new(inner: Arc<dyn Provider>, prefix: impl Into<String>) -> Self {
-        let prefix = prefix
-            .into()
-            .replace('\\', "/")
-            .trim_matches('/')
-            .to_string();
+        let prefix = vfs_core::trim_rel(&prefix.into());
         Self { inner, prefix }
     }
 
@@ -59,7 +55,7 @@ impl SubdirProvider {
     /// property being lost if stripping logic is ever added here — not
     /// because `map_path` currently strips anything.
     fn map_path(&self, path: &str) -> String {
-        let path = path.replace('\\', "/").trim_matches('/').to_string();
+        let path = vfs_core::trim_rel(path);
         if path.is_empty() {
             self.prefix.clone()
         } else {
@@ -86,6 +82,20 @@ impl Provider for SubdirProvider {
         let path = p.rel;
         let joined = self.map_path(path);
         self.inner.readdir(VPath {
+            root: p.root,
+            rel: &joined,
+        })
+    }
+
+    /// The root of this provider has no name of its own. Mapping it would ask
+    /// `inner` for the prefix directory itself, and that answer is `inner`'s
+    /// spelling of the prefix, not a name in this provider.
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        if p.rel.trim_matches(|c| c == '/' || c == '\\').is_empty() {
+            return Ok(None);
+        }
+        let joined = self.map_path(p.rel);
+        self.inner.stored_name(VPath {
             root: p.root,
             rel: &joined,
         })
@@ -210,15 +220,15 @@ mod tests {
     ///
     /// `vfs_provider::RwMemFixture` cannot stand in for `inner` here: it
     /// always serves `FIXTURE_FILES` at its own root, but `SubdirProvider`
-    /// addresses `inner` at `mounted/*`. `overlay::tests::MemUpper` is a
+    /// addresses `inner` at `mounted/*`. `MemoryProvider` is a
     /// blank writable store instead, so the fixture tree is seeded here,
     /// under the prefix, exactly where `map_path` will look for it.
     #[test]
     fn subdir_over_a_writable_inner_passes_conformance() {
-        use crate::overlay::tests::MemUpper;
+        use crate::MemoryProvider;
         use vfs_provider::{OPEN_CREATE, OPEN_WRITE};
 
-        let inner: Arc<dyn vfs_provider::Provider> = Arc::new(MemUpper::default());
+        let inner: Arc<dyn vfs_provider::Provider> = Arc::new(MemoryProvider::default());
         inner.mkdir(VPath::at_default("mounted")).unwrap();
         inner.mkdir(VPath::at_default("mounted/sub")).unwrap();
         for (rel, body) in vfs_provider::FIXTURE_FILES {

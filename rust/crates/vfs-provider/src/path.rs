@@ -7,7 +7,7 @@
 pub struct RootId(pub u32);
 
 impl RootId {
-    /// The root every single-root session and every Stage-1 call site uses.
+    /// The root every single-root session uses.
     pub const DEFAULT: RootId = RootId(0);
 }
 
@@ -18,9 +18,7 @@ impl RootId {
 /// folds a vpath before sending it (`vfs-redirect`'s `match_canonical`), while
 /// host-side callers — `vfs-embed`, this crate's conformance suite —
 /// send the original spelling. A provider therefore resolves fold-equal names
-/// identically unless it declares [`crate::CaseMatch::Sensitive`]. An earlier
-/// version of this comment said "original case preserved", which was true of
-/// only one of the two paths and is what spec §6b was.
+/// identically unless it declares [`crate::CaseMatch::Sensitive`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VPath<'a> {
     pub root: RootId,

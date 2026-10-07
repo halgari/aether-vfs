@@ -3,6 +3,7 @@ name = "vfs-registry"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
+publish = false
 
 [dependencies]
 vfs-core = { path = "../vfs-core" }

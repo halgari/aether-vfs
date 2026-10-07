@@ -18,8 +18,8 @@
 //!   detached launch stopped through its handle.
 //!
 //! **Env-gated, and `#[ignore]`d.** It needs a local, Steam-installed Skyrim
-//! SE and a running Steam client, which no CI runner has; it returns early
-//! (passing) unless `VFS_TEST_SKYRIM_DIR` names the game directory. Run:
+//! SE and a running Steam client, which no CI runner has; it prints `SKIP ...`
+//! and passes unless `VFS_TEST_SKYRIM_DIR` names the game directory. Run:
 //!
 //! ```text
 //! bin/build-windows
@@ -28,7 +28,7 @@
 //! ```
 //!
 //! Optional: `VFS_TEST_PROTON_RUNTIME` (a GE-Proton directory; default the
-//! newest verified runtime in the environment's aether home),
+//! newest verified runtime in the environment's aether home, see `tests/support`),
 //! `VFS_TEST_STEAM_CLIENT` (default `~/.local/share/Steam`),
 //! `VFS_TEST_SKYRIM_ALIVE_SECS` (default 30), `VFS_TEST_SKYRIM_IMAGE`
 //! (default `SkyrimSE.exe`; `skse64_loader.exe` tries the SKSE path),
@@ -47,76 +47,21 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod support;
+
+use support::Loud;
 use vfs_embed::{
-    Capabilities, DirEntry, DiskProvider, Handle, LaunchExit, LaunchOpts, PrefixInit, Provider,
-    ReadOnlyProvider, RootId, Session, Stat, VPath, PROTON_GRAPHICS_OVERRIDES,
+    DiskProvider, LaunchExit, LaunchOpts, PrefixInit, Provider, ReadOnlyProvider, RootId, Session,
+    PROTON_GRAPHICS_OVERRIDES,
 };
 
 /// Root 0's location in the prefix: unique per run, so a process match below
 /// cannot be some other Skyrim.
 fn root0_location() -> String {
     format!(r"C:\aether-e2e\skyrim-{}", std::process::id())
-}
-
-/// Root 0's provider, recording every path it opened.
-struct Recording {
-    inner: Arc<dyn Provider>,
-    opened: Mutex<Vec<String>>,
-}
-
-impl Recording {
-    fn opened(&self) -> Vec<String> {
-        self.opened.lock().unwrap().clone()
-    }
-}
-
-impl Provider for Recording {
-    fn capabilities(&self) -> Capabilities {
-        self.inner.capabilities()
-    }
-    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
-        self.inner.getattr(p)
-    }
-    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
-        self.inner.readdir(p)
-    }
-    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
-        let r = self.inner.open(p, flags);
-        if r.is_ok() {
-            self.opened.lock().unwrap().push(p.rel.to_ascii_lowercase());
-        }
-        r
-    }
-    fn close(&self, h: Handle) -> Result<(), i32> {
-        self.inner.close(h)
-    }
-    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-        self.inner.read_at(h, offset, buf)
-    }
-}
-
-fn profile_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let dir = exe.parent().unwrap();
-    if dir.file_name().and_then(|s| s.to_str()) == Some("deps") {
-        dir.parent().unwrap().to_path_buf()
-    } else {
-        dir.to_path_buf()
-    }
-}
-
-/// `vfs_shim_dll.dll` and `vfs_payload.dll` beside the test binary, where
-/// `bin/build-windows` copies them (with `vfs-injector.exe`).
-fn artifacts() -> (String, String) {
-    let p = profile_dir();
-    let (shim, payload) = (p.join("vfs_shim_dll.dll"), p.join("vfs_payload.dll"));
-    for f in [&shim, &payload, &p.join("vfs-injector.exe")] {
-        assert!(f.is_file(), "{} is missing: run bin/build-windows", f.display());
-    }
-    (shim.to_string_lossy().into_owned(), payload.to_string_lossy().into_owned())
 }
 
 /// This run's scratch root, under the target directory.
@@ -146,61 +91,25 @@ impl Drop for Scratch {
 /// `WINEPREFIX`: every Wine process of the launch inherits it.
 fn prefix_processes(prefix: &Path) -> Vec<u32> {
     let want = format!("WINEPREFIX={}", prefix.display()).into_bytes();
-    let Ok(rd) = std::fs::read_dir("/proc") else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
     rd.flatten()
         .filter_map(|e| {
             let pid: u32 = e.file_name().to_str()?.parse().ok()?;
             let env = std::fs::read(e.path().join("environ")).ok()?;
-            env.split(|b| *b == 0).any(|kv| kv == want.as_slice()).then_some(pid)
+            env.split(|b| *b == 0)
+                .any(|kv| kv == want.as_slice())
+                .then_some(pid)
         })
         .collect()
 }
 
-/// The environment's aether home, as `Session` resolves it without `set_home`.
-fn env_home() -> PathBuf {
-    if let Some(h) = std::env::var_os("VFS_HOME") {
-        return PathBuf::from(h);
-    }
-    if let Some(x) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(x).join("aether-vfs");
-    }
-    PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(".local/share/aether-vfs")
-}
-
-/// The newest runtime directory under `home/runtimes` with a GE `version`.
-fn newest_runtime(home: &Path) -> Option<PathBuf> {
-    let mut found: Vec<(String, PathBuf)> = std::fs::read_dir(home.join("runtimes"))
-        .ok()?
-        .flatten()
-        .filter_map(|e| {
-            let v = std::fs::read_to_string(e.path().join("version")).ok()?;
-            let tag = v.split_whitespace().find(|t| t.starts_with("GE-Proton"))?.to_string();
-            Some((tag, e.path()))
-        })
-        .collect();
-    // Numeric `(N, M)` order, as `vfs_proton::cmp_tags` does it.
-    let key = |tag: &str| -> (u64, u64) {
-        let (n, m) = tag.trim_start_matches("GE-Proton").split_once('-').unwrap_or(("0", "0"));
-        (n.parse().unwrap_or(0), m.parse().unwrap_or(0))
-    };
-    found.sort_by_key(|(tag, _)| key(tag));
-    found.pop().map(|(_, p)| p)
-}
-
-/// The GE-Proton runtime to launch with.
-fn runtime() -> PathBuf {
-    if let Some(p) = std::env::var_os("VFS_TEST_PROTON_RUNTIME") {
-        return PathBuf::from(p);
-    }
-    let home = env_home();
-    newest_runtime(&home).unwrap_or_else(|| {
-        panic!("no GE-Proton runtime under {}/runtimes: set VFS_TEST_PROTON_RUNTIME", home.display())
-    })
-}
-
 /// Argv[0] of every live process, lowercased.
 fn process_images() -> Vec<(u32, String)> {
-    let Ok(rd) = std::fs::read_dir("/proc") else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
     rd.flatten()
         .filter_map(|e| {
             let pid: u32 = e.file_name().to_str()?.parse().ok()?;
@@ -225,38 +134,63 @@ fn skyrim_pid(location: &str) -> Option<u32> {
 #[ignore = "needs a local Skyrim SE (VFS_TEST_SKYRIM_DIR), a running Steam client, a GE-Proton \
             runtime and bin/build-windows artifacts"]
 fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
+    const TEST: &str = "proton_skyrim::vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton";
     let Some(game) = std::env::var_os("VFS_TEST_SKYRIM_DIR").map(PathBuf::from) else {
-        eprintln!("VFS_TEST_SKYRIM_DIR is unset: skipping the Skyrim launch");
+        support::skip(
+            TEST,
+            "VFS_TEST_SKYRIM_DIR is unset: point it at a Steam-installed Skyrim Special Edition",
+        );
         return;
     };
-    assert!(game.join("SkyrimSE.exe").is_file(), "{} has no SkyrimSE.exe", game.display());
+    if !game.join("SkyrimSE.exe").is_file() {
+        panic!(
+            "{TEST}: VFS_TEST_SKYRIM_DIR={} has no SkyrimSE.exe; point it at the game directory",
+            game.display()
+        );
+    }
     let alive = Duration::from_secs(
-        std::env::var("VFS_TEST_SKYRIM_ALIVE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(30),
+        std::env::var("VFS_TEST_SKYRIM_ALIVE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30),
     );
     let image = std::env::var("VFS_TEST_SKYRIM_IMAGE").unwrap_or_else(|_| "SkyrimSE.exe".into());
-    let steam = std::env::var_os("VFS_TEST_STEAM_CLIENT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(".local/share/Steam")
-        });
-    let (shim, payload) = artifacts();
+    let steam = match support::steam_client() {
+        Ok(c) => c,
+        Err(why) => {
+            support::skip(TEST, why);
+            return;
+        }
+    };
+    let art = match support::windows_artifacts(&[]) {
+        Ok(a) => a,
+        Err(why) => {
+            support::skip(TEST, why);
+            return;
+        }
+    };
     let _scratch = Scratch(scratch_root());
 
     // An aether home of this run's own, whose one runtime is a symlink.
-    let home = tmp("home");
-    std::fs::create_dir_all(home.join("runtimes")).unwrap();
-    let rt = runtime();
-    std::os::unix::fs::symlink(&rt, home.join("runtimes").join(rt.file_name().unwrap())).unwrap();
+    let home = match support::home_in(&tmp("home")) {
+        Ok(h) => h,
+        Err(why) => {
+            support::skip(TEST, why);
+            return;
+        }
+    };
 
     let root0 = tmp("root0");
     let upper = tmp("upper");
     let state = tmp("state");
     let overlay = tmp("overlay");
     let location = root0_location();
-    let provider = Arc::new(Recording {
-        inner: Arc::new(ReadOnlyProvider::new(Arc::new(DiskProvider::new(&game)))),
-        opened: Mutex::new(Vec::new()),
-    });
+    let provider = Arc::new(
+        Loud::over(Arc::new(ReadOnlyProvider::new(Arc::new(
+            DiskProvider::new(&game),
+        ))))
+        .quiet(),
+    );
 
     let mut s = Session::new();
     s.set_home(&home);
@@ -265,26 +199,38 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
     s.set_overlay(&overlay);
     s.declare_root(0, &location);
     s.set_prefix_name("skyrim-e2e").unwrap();
-    s.set_prefix_init(PrefixInit::Proton { steam_client: steam, app_id: Some(489830) });
+    s.set_prefix_init(PrefixInit::Proton {
+        steam_client: steam,
+        app_id: Some(489830),
+    });
     s.set_io_workers(8);
-    s.mount_at(RootId(0), "", Arc::clone(&provider) as Arc<dyn Provider>).unwrap();
-    s.set_write_layer_at(RootId(0), Arc::new(DiskProvider::new(&upper))).unwrap();
+    s.mount_at(RootId(0), "", Arc::clone(&provider) as Arc<dyn Provider>)
+        .unwrap();
+    s.set_write_layer_at(RootId(0), Arc::new(DiskProvider::new(&upper)))
+        .unwrap();
     s.serve().unwrap();
-    assert_eq!(std::fs::read_dir(&root0).unwrap().count(), 0, "root 0 starts empty");
+    assert_eq!(
+        std::fs::read_dir(&root0).unwrap().count(),
+        0,
+        "root 0 starts empty"
+    );
 
     let mut env = BTreeMap::from([
         ("SteamAppId".to_string(), "489830".to_string()),
         ("SteamGameId".to_string(), "489830".to_string()),
     ]);
     if std::env::var("VFS_TEST_SKYRIM_DXVK").as_deref() == Ok("1") {
-        env.insert("WINEDLLOVERRIDES".to_string(), PROTON_GRAPHICS_OVERRIDES.to_string());
+        env.insert(
+            "WINEDLLOVERRIDES".to_string(),
+            PROTON_GRAPHICS_OVERRIDES.to_string(),
+        );
     }
     let mut h = s
         .launch_detached(&LaunchOpts {
             image,
             stage_also: vec!["SkyrimSE.exe".into()],
-            shim_dll: Some(shim),
-            payload_dll: Some(payload),
+            shim_dll: Some(art.shim_dll()),
+            payload_dll: Some(art.payload_dll()),
             env,
             ready_timeout: Some(Duration::from_secs(300)),
             ..Default::default()
@@ -297,9 +243,15 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
             break pid;
         }
         if let Some(exit) = h.try_wait().unwrap() {
-            panic!("the launch ended before SkyrimSE.exe appeared: {exit:?}; opened: {:?}", provider.opened());
+            panic!(
+                "the launch ended before SkyrimSE.exe appeared: {exit:?}; opened: {:?}",
+                provider.opened()
+            );
         }
-        assert!(started.elapsed() < Duration::from_secs(300), "SkyrimSE.exe never appeared");
+        assert!(
+            started.elapsed() < Duration::from_secs(300),
+            "SkyrimSE.exe never appeared"
+        );
         std::thread::sleep(Duration::from_millis(250));
     };
     eprintln!("SkyrimSE.exe is pid {pid} after {:?}", started.elapsed());
@@ -312,14 +264,21 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
             up.elapsed(),
             provider.opened()
         );
-        assert_eq!(h.try_wait().unwrap(), None, "the launch ended after {:?}", up.elapsed());
+        assert_eq!(
+            h.try_wait().unwrap(),
+            None,
+            "the launch ended after {:?}",
+            up.elapsed()
+        );
         std::thread::sleep(Duration::from_secs(1));
     }
 
     let opened = provider.opened();
     eprintln!("the provider served {} opens", opened.len());
     assert!(
-        opened.iter().any(|p| p.starts_with("data/") && (p.ends_with(".esm") || p.ends_with(".bsa"))),
+        opened
+            .iter()
+            .any(|p| p.starts_with("data/") && (p.ends_with(".esm") || p.ends_with(".bsa"))),
         "the game must have opened its data through the provider: {opened:?}"
     );
     // Only staging wrote into root 0: the images and their imports, no Data.
@@ -334,12 +293,22 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
     assert_eq!(h.stop().unwrap(), LaunchExit::Stopped);
     let gone = Instant::now();
     while skyrim_pid(&location).is_some() {
-        assert!(gone.elapsed() < Duration::from_secs(30), "SkyrimSE.exe outlived the stop");
+        assert!(
+            gone.elapsed() < Duration::from_secs(30),
+            "SkyrimSE.exe outlived the stop"
+        );
         std::thread::sleep(Duration::from_millis(250));
     }
     // `Stopped` is reported only once the prefix is quiet.
-    let pfx = home.join("sessions").join("skyrim-e2e").join("compat").join("pfx");
+    let pfx = home
+        .join("sessions")
+        .join("skyrim-e2e")
+        .join("compat")
+        .join("pfx");
     let left = prefix_processes(&pfx);
-    assert!(left.is_empty(), "processes left in the prefix after the stop: {left:?}");
+    assert!(
+        left.is_empty(),
+        "processes left in the prefix after the stop: {left:?}"
+    );
     s.stop_serve();
 }

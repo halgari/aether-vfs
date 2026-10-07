@@ -1,4 +1,4 @@
-//! Task 2 (gate 3), at the actual production entrypoint: `Session::launch` is
+//! The FUSE-init gate at the actual production entrypoint: `Session::launch` is
 //! what a real host calls, and it must return an error — not run the process
 //! un-virtualized — when the shim's FUSE client fails to attach to this
 //! session's own, correctly-configured director.
@@ -10,13 +10,12 @@
 //! uses, through a real `serve()` + `launch()` session rather than a
 //! hand-built `RunConfig`.
 //!
-//! **Whole target is Windows-only.** It needs a live ring, a real
-//! `CreateProcess` and DLL injection, and the three Windows fixture artifacts
-//! `ensure_fixtures` locates; `Session::serve`/`launch` have no non-Windows
-//! body yet (increment 2 of
-//! docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md). Gated at the
-//! crate root of the target rather than per item, since there is only the one
-//! test and every helper here exists to serve it.
+//! **Whole target is Windows-only.** It needs a real `CreateProcess` and DLL
+//! injection by `vfs-inject`, and the three Windows fixture artifacts
+//! `ensure_fixtures` locates. (The Proton path's launch failure modes are in
+//! `proton_launch.rs` and `proton_fake_runtime.rs`.) Gated at the crate root of
+//! the target rather than per item, since there is only the one test and every
+//! helper here exists to serve it.
 #![cfg(windows)]
 
 use std::sync::Arc;
@@ -59,11 +58,15 @@ fn ensure_fixtures() {
             .canonicalize()
             .expect("workspace root");
 
+        // Build for the profile this test runs in: `profile_dir()` is that profile's
+        // directory, so a debug build under `cargo test --release` would land elsewhere.
+        let release: &[&str] = if cfg!(debug_assertions) { &[] } else { &["--release"] };
         let status = std::process::Command::new(&cargo)
             .current_dir(&workspace)
             .args([
                 "build", "-p", "vfs-shim-dll", "-p", "vfs-inject", "--bin", "vfs-probe", "--quiet",
             ])
+            .args(release)
             .status()
             .expect("spawn cargo to build shim + vfs-probe");
         assert!(status.success(), "shim/vfs-probe build failed: {status}");
@@ -78,6 +81,7 @@ fn ensure_fixtures() {
                 "crates/vfs-payload/Cargo.toml",
                 "--quiet",
             ])
+            .args(release)
             .status()
             .expect("spawn cargo to build vfs-payload");
         assert!(status.success(), "vfs-payload build failed: {status}");

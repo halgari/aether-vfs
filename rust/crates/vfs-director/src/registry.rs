@@ -39,11 +39,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use vfs_protocol::encode_reg_key_reply;
 use vfs_provider::{
-    map_io_err, Provider, VPath, OPEN_CREATE, OPEN_READ, OPEN_TRUNC, OPEN_WRITE, ST_BAD_REQUEST,
-    ST_EXISTS, ST_IO_ERROR, ST_NOT_FOUND,
+    OPEN_CREATE, OPEN_READ, OPEN_TRUNC, OPEN_WRITE, Provider, ST_BAD_REQUEST, ST_EXISTS,
+    ST_IO_ERROR, ST_NOT_FOUND, VPath, map_io_err,
 };
 pub use vfs_registry::Lookup;
-use vfs_registry::{path as regpath, Node, Overlay, RegError};
+use vfs_registry::{Node, Overlay, RegError, path as regpath};
 
 /// The registry layer's one file (plan ruling R3).
 pub const OVERLAY_FILE: &str = "overlay.reg";
@@ -79,9 +79,12 @@ fn filetime_now() -> u64 {
 /// maps these to NT statuses: `ST_BAD_REQUEST` to `STATUS_INVALID_PARAMETER` (the spec's answer
 /// for names and data over the limits), `ST_NOT_FOUND` to `STATUS_OBJECT_NAME_NOT_FOUND` and
 /// `ST_EXISTS` to `STATUS_OBJECT_NAME_COLLISION`.
-pub fn reg_status(e: RegError) -> i32 {
+pub(crate) fn reg_status(e: RegError) -> i32 {
     match e {
-        RegError::NameTooLong | RegError::DataTooLarge | RegError::InvalidPath => ST_BAD_REQUEST,
+        RegError::NameTooLong
+        | RegError::DataTooLarge
+        | RegError::InvalidPath
+        | RegError::TooDeep => ST_BAD_REQUEST,
         RegError::NotFound => ST_NOT_FOUND,
         RegError::AlreadyExists => ST_EXISTS,
     }
@@ -582,7 +585,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use vfs_provider::{Provider, RwMemFixture, VPath, OPEN_READ, ST_NOT_FOUND};
+    use vfs_provider::{OPEN_READ, Provider, RwMemFixture, ST_NOT_FOUND, VPath};
 
     const K: &str = r"\Registry\Machine\Software\Mod";
 
@@ -767,7 +770,10 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         h.set_value(K, "v", 1, b"x\0").unwrap();
         h.durable().unwrap();
-        assert!(read_file(&p, OVERLAY_FILE).is_some(), "saved before the sync");
+        assert!(
+            read_file(&p, OVERLAY_FILE).is_some(),
+            "saved before the sync"
+        );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         // Already durable.
         h.durable().unwrap();
@@ -794,7 +800,10 @@ mod tests {
         h.set_value(K, "v", 1, b"x\0").unwrap();
         assert_eq!(h.durable(), Err(ST_IO_ERROR));
         fail.store(false, std::sync::atomic::Ordering::SeqCst);
-        assert!(h.inner.unsynced.load(Ordering::SeqCst), "still owed a durable point");
+        assert!(
+            h.inner.unsynced.load(Ordering::SeqCst),
+            "still owed a durable point"
+        );
         h.durable().unwrap();
         assert!(!h.inner.unsynced.load(Ordering::SeqCst));
     }
@@ -809,7 +818,10 @@ mod tests {
         h.set_value(K, "v", 1, b"x\0").unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
-            assert!(Instant::now() < deadline, "the saver never reached a durable point");
+            assert!(
+                Instant::now() < deadline,
+                "the saver never reached a durable point"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         // Durable now, and nothing new: no more calls.

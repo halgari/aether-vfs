@@ -3,5 +3,13 @@ name = "vfs-provider"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
+publish = false
+
+[features]
+## The conformance suite (`vfs_provider::conformance`, `assert_conformance`,
+## the fixture providers). Off by default so it is not compiled into every
+## consumer's build; a crate that tests a provider enables it in
+## `[dev-dependencies]`. This crate's own tests always have it.
+conformance = []
 
 [dependencies]

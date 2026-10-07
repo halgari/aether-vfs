@@ -27,6 +27,8 @@
 //! them depends on whether a real client is running on the machine.
 #![cfg(unix)]
 
+mod support;
+
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -41,11 +43,7 @@ const ROOT0: &str = r"C:\Games\Fake";
 
 /// Scratch under Cargo's `CARGO_TARGET_TMPDIR`, not `/tmp`.
 fn tmp(tag: &str) -> PathBuf {
-    let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("vfs-fake-rt-{}-{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    support::scratch("vfs-fake-rt", tag)
 }
 
 /// Minimal PE: MZ header, e_lfanew, PE32+ optional header, no imports — the
@@ -158,11 +156,11 @@ fn session(tag: &str, home: &Path) -> (Session, PathBuf, String) {
     s.set_steam_helper(false);
     std::fs::write(s.virtual_root().join("game.exe"), b"MZ").unwrap();
     let art = tmp(&format!("{tag}-art"));
-    for f in ["vfs-injector.exe", "vfs_shim_dll.dll", "vfs_payload.dll"] {
+    for f in vfs_proton::artifacts::LAUNCH {
         std::fs::write(art.join(f), b"MZ").unwrap();
     }
     s.serve().unwrap();
-    let shim = art.join("vfs_shim_dll.dll").to_string_lossy().into_owned();
+    let shim = art.join(vfs_proton::artifacts::SHIM_DLL).to_string_lossy().into_owned();
     let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
     (s, pfx, shim)
 }
@@ -171,8 +169,11 @@ fn opts(shim: &str, mode: &str, wait: bool) -> LaunchOpts {
     LaunchOpts {
         image: "game.exe".into(),
         wait,
-        shim_dll: Some(shim.to_string()),
-        payload_dll: Some(shim.replace("vfs_shim_dll", "vfs_payload")),
+        shim_dll: Some(shim.into()),
+        payload_dll: Some(
+            shim.replace(vfs_proton::artifacts::SHIM_DLL, vfs_proton::artifacts::PAYLOAD_DLL)
+                .into(),
+        ),
         env: BTreeMap::from([("FAKE_WINE_MODE".to_string(), mode.to_string())]),
         ..Default::default()
     }
@@ -407,10 +408,10 @@ fn with_a_running_steam_client_the_launch_asks_for_the_helper_and_sets_steams_en
     let args = std::fs::read_to_string(pfx.join("fake-wine.args")).unwrap();
     let args: Vec<&str> = args.split_whitespace().collect();
     assert_eq!(args.len(), 6, "{args:?}");
-    assert!(args[0].ends_with("vfs-injector.exe"), "{args:?}");
+    assert!(args[0].ends_with(vfs_proton::artifacts::INJECTOR), "{args:?}");
     assert_eq!(args[1], r"C:\Games\Fake\game.exe");
-    assert!(args[2].ends_with("vfs_shim_dll.dll"), "{args:?}");
-    assert!(args[3].ends_with("vfs_payload.dll"), "{args:?}");
+    assert!(args[2].ends_with(vfs_proton::artifacts::SHIM_DLL), "{args:?}");
+    assert!(args[3].ends_with(vfs_proton::artifacts::PAYLOAD_DLL), "{args:?}");
     assert!(args[4].ends_with("shim.cfg"), "{args:?}");
     assert!(args[5].ends_with("ready.flag"), "{args:?}");
 
@@ -595,11 +596,11 @@ fn a_second_launch_while_one_is_running_is_refused_before_staging_can_clobber_it
     std::fs::write(content.join("game.exe"), bare_pe()).unwrap();
     s.mount("", Arc::new(DiskProvider::new(&content))).unwrap();
     let art = tmp("second-art");
-    for f in ["vfs-injector.exe", "vfs_shim_dll.dll", "vfs_payload.dll"] {
+    for f in vfs_proton::artifacts::LAUNCH {
         std::fs::write(art.join(f), b"MZ").unwrap();
     }
     s.serve().unwrap();
-    let shim = art.join("vfs_shim_dll.dll").to_string_lossy().into_owned();
+    let shim = art.join(vfs_proton::artifacts::SHIM_DLL).to_string_lossy().into_owned();
     let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
 
     assert_eq!(s.launch(&opts(&shim, "sleep", false)).unwrap(), 0);
@@ -822,11 +823,11 @@ fn a_kept_detached_handle_blocks_a_second_launch_and_is_stopped_by_stop_launch()
     std::fs::write(content.join("game.exe"), bare_pe()).unwrap();
     s.mount("", Arc::new(DiskProvider::new(&content))).unwrap();
     let art = tmp("kept-art");
-    for f in ["vfs-injector.exe", "vfs_shim_dll.dll", "vfs_payload.dll"] {
+    for f in vfs_proton::artifacts::LAUNCH {
         std::fs::write(art.join(f), b"MZ").unwrap();
     }
     s.serve().unwrap();
-    let shim = art.join("vfs_shim_dll.dll").to_string_lossy().into_owned();
+    let shim = art.join(vfs_proton::artifacts::SHIM_DLL).to_string_lossy().into_owned();
     let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
 
     let mut h = s.launch_detached(&opts(&shim, "sleep", true)).unwrap();
@@ -864,4 +865,48 @@ fn a_prefix_in_use_elsewhere_is_not_set_up_under_it() {
     );
     drop(held);
     assert_eq!(s.launch(&opts(&shim, "ok", true)).unwrap(), 0);
+}
+
+#[test]
+fn prepare_prefix_sets_the_prefix_up_as_a_launch_would_without_serving() {
+    let home = fake_home("prepare");
+    let mut s = Session::new();
+    s.set_home(&home);
+    s.set_state_dir(tmp("prepare-state"));
+    s.set_prefix_name("fake").unwrap();
+    s.set_prefix_init(PrefixInit::Proton {
+        steam_client: tmp("prepare-steam"),
+        app_id: Some(489830),
+    });
+    let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
+    assert_eq!(s.prepare_prefix().unwrap(), pfx);
+    assert!(pfx.join("drive_c").join("windows").join("system32").is_dir());
+    // A prefix the runtime already set up is left as it is, and the lock is
+    // not held after the call.
+    assert_eq!(s.prepare_prefix().unwrap(), pfx);
+}
+
+#[test]
+fn prepare_prefix_without_a_runtime_says_so_and_is_not_a_launch_error() {
+    let home = tmp("prepare-none");
+    let mut s = Session::new();
+    s.set_home(&home);
+    s.set_state_dir(tmp("prepare-none-state"));
+    s.set_prefix_name("fake").unwrap();
+    let e = s.prepare_prefix().unwrap_err();
+    assert!(e.starts_with("no verified GE-Proton runtime under "), "{e}");
+}
+
+#[test]
+fn only_a_launch_adds_the_install_hint_to_the_no_runtime_error() {
+    let home = tmp("hint-none");
+    let (s, _pfx, shim) = session("hint", &home);
+    let e = s.launch(&opts(&shim, "ok", true)).unwrap_err();
+    assert!(
+        e.starts_with("launch: no verified GE-Proton runtime under ")
+            && e.contains("vfs-proton install"),
+        "{e}"
+    );
+    let e = s.prepare_prefix().unwrap_err();
+    assert!(!e.contains("vfs-proton install"), "{e}");
 }

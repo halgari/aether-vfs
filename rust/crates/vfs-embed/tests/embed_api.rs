@@ -5,8 +5,8 @@
 //! The interesting assertion is not any single `assert_eq!` below; it is the
 //! import list. This file names no engine crate. If a host cannot do what the
 //! daemon does without reaching past `vfs-embed`, the crate is not the seam
-//! spec §4 says it is, and the second host (the Node binding) would have
-//! discovered that instead of this test. `no_engine_crate_is_named_here`
+//! spec §4 says it is, and the next host would discover that instead of this
+//! test. `no_engine_crate_is_named_here`
 //! makes that literal by reading this file back.
 
 use std::sync::Arc;
@@ -36,11 +36,9 @@ fn dir(tag: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
 
 /// A whole-file read out of any root's graph.
 ///
-/// This used to be a hand-rolled open/read/close loop against
-/// `session.kernel()`, for one reason: `Session::read_file` hardcoded root 0, so
-/// the only host-side way to read the second root a *two*-root session exists to
-/// test was to bypass the accessor. `Session::read_file_at` is that gap closed,
-/// and this helper now exists only to unwrap and keep the assertions short.
+/// `Session::read_file_at` takes the root, which a *two*-root session needs to
+/// read the second root back; this helper only unwraps it to keep the
+/// assertions short.
 #[cfg(windows)]
 fn read_whole(session: &Session, root: RootId, rel: &str) -> Vec<u8> {
     session
@@ -55,9 +53,8 @@ fn read_whole(session: &Session, root: RootId, rel: &str) -> Vec<u8> {
 /// Two roots, because one root hides the whole class of bug this session type
 /// exists to prevent: a single-root session cannot show that root 1's write
 /// lands in root 1's write layer rather than root 0's.
-// The shared-memory ring is the Windows delivery transport; `Session::serve`
-// has no non-Windows body yet (increment 2 of the Wine-hosted-shim design), so
-// a test that needs a live ring is gated rather than left to fail there.
+// Windows-only: it launches through `vfs-inject`'s `CreateProcess` path and
+// needs the Windows fixture artifacts.
 #[cfg(windows)]
 #[test]
 fn a_two_root_session_composes_writes_and_reads_back_through_vfs_embed_alone() {
@@ -255,10 +252,10 @@ fn launch_opts_are_constructible_from_this_crate() {
 
 /// Declaring root 0 must **do** something.
 ///
-/// It used to be accepted, recorded in `declared_roots()`, and then dropped on
-/// the way to the environment the child inherits — the one outcome that cannot
-/// be right, and invisible to a host that had every reason to believe the call
-/// took. Root 0's host directory is the managed root, so that is where the
+/// Accepting the call, recording it in `declared_roots()`, and then dropping it
+/// on the way to the environment the child inherits is the one outcome that
+/// cannot be right, and invisible to a host that has every reason to believe
+/// the call took. Root 0's host directory is the managed root, so that is where the
 /// declaration goes; a host walking its roots and declaring all of them gets
 /// what it asked for rather than a silent no-op on the first one.
 ///
@@ -316,7 +313,7 @@ fn declaring_root_zero_on_unix_sets_its_location_not_the_managed_root() {
 }
 
 /// A relative `LaunchOpts.image` is resolved on real disk under the managed
-/// root, then — Task 4b — as a vpath in the provider graph, which is staged
+/// root, then as a vpath in the provider graph, which is staged
 /// out. Both halves of that are proven end to end in `launch_vfs_content.rs`,
 /// including a process that actually runs from bytes only the graph held.
 ///
@@ -325,9 +322,8 @@ fn declaring_root_zero_on_unix_sets_its_location_not_the_managed_root() {
 /// image the graph serves but the stager cannot use, a name nothing serves at
 /// all, and no name given. Collapsing any two of them sends a host chasing the
 /// wrong thing.
-// The shared-memory ring is the Windows delivery transport; `Session::serve`
-// has no non-Windows body yet (increment 2 of the Wine-hosted-shim design), so
-// a test that needs a live ring is gated rather than left to fail there.
+// Windows-only: it launches through `vfs-inject`'s `CreateProcess` path and
+// needs the Windows fixture artifacts.
 #[cfg(windows)]
 #[test]
 fn launching_a_relative_image_reports_which_of_the_three_ways_it_failed() {
@@ -402,81 +398,4 @@ fn no_engine_crate_is_named_here() {
              not in the test"
         );
     }
-}
-
-/// The same assertion from the other side: **no host in this workspace may reach
-/// past the seam.**
-///
-/// `Session::kernel()` is a public escape hatch, and it stayed public on purpose
-/// — the staging redesign and this crate's own tests need it, and `skyrim-live`
-/// (stage 5's problem) is a legitimate direct kernel user until it moves. But a
-/// *host* using it is the evidence spec §4 warns about, in this crate's own
-/// words: "if a host has to reach past this crate, the fix belongs here rather
-/// than in the host".
-///
-/// Both hosts checked here were reaching past it, for the same two calls, until
-/// `Session::readdir` and `Session::getattr` existed: the Node binding for
-/// `readdir`, and `vfs-launch` four times for `readdir` and `getattr` — the
-/// second one while its module header claimed to be a plain host over the embed
-/// API. Two hosts needing the identical thing is the definition of a gap in the
-/// seam, and it took adding a third host to notice.
-///
-/// The daemon has its own, stronger version of this check
-/// (`daemon_names_only_the_embed_api`, which forbids naming any engine crate at
-/// all). This one is narrower on purpose: these two hosts genuinely name
-/// `vfs_embed` types only, so the single thing left to forbid is the hatch.
-///
-/// **Files are read off each host's `src/` recursively**, so a new module cannot
-/// be added outside the check — the same derivation the shim's containment guard
-/// uses, and for the same reason: the hand-written version of that guard had a
-/// hole and was believed anyway.
-#[test]
-fn no_host_in_this_workspace_reaches_past_the_seam() {
-    // Assembled so that naming it here does not trip the scan if this file is
-    // ever moved into one of the directories below.
-    let hatch = concat!(".kernel", "()");
-
-    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/");
-    // The hosts. The daemon is absent because it has a stricter guard of its
-    // own; `vfs-payload` and the engine crates are not hosts.
-    let hosts = ["vfs-launch"];
-
-    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        for e in std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
-            .flatten()
-        {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, out);
-            } else if p.extension().is_some_and(|x| x == "rs") {
-                out.push(p);
-            }
-        }
-    }
-
-    let mut checked = 0usize;
-    for host in hosts {
-        let src = crates.join(host).join("src");
-        assert!(src.is_dir(), "{} is not a directory", src.display());
-        let mut files = Vec::new();
-        walk(&src, &mut files);
-        assert!(!files.is_empty(), "no sources found under {}", src.display());
-        for path in files {
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            checked += 1;
-            assert!(
-                !text.contains(hatch),
-                "{host}/src/{} calls `{hatch}` — a host must reach the graph through \
-                 `Session`. If `Session` cannot express it, add it to vfs-embed (that is \
-                 where `readdir` and `getattr` came from) rather than opening the hatch \
-                 here; whatever this host needed, the Python binding needs next.",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
-        }
-    }
-    assert!(checked >= 3, "only {checked} host sources were read");
 }

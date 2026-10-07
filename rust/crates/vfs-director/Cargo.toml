@@ -10,16 +10,6 @@ description = "Director kernel: one provider per root, ring server, staging. The
 name = "vfs_director"
 path = "src/lib.rs"
 
-# The server half of the Wine boundary run: a native Linux Director serving one
-# file over a file-backed ring, for a shim inside Proton's Wine. Declared
-# explicitly rather than left to autobins so the binary is visible in the
-# manifest next to the library it drives. Its body is `cfg(unix)` — the ring
-# file is an `mmap` — and its Windows `main` exits nonzero rather than
-# pretending to serve.
-[[bin]]
-name = "vfs-serve-fb"
-path = "src/bin/vfs-serve-fb.rs"
-
 # No `zip` feature: it existed only for `Session::mount_zip`, and `Session`
 # now lives in `vfs-embed`, which carries the feature instead.
 
@@ -51,13 +41,6 @@ vfs-unix = { path = "../vfs-unix" }
 [target.'cfg(windows)'.dependencies]
 # `ipc.rs` — SharedMapping + EventNotifier, the ring's OS handles.
 vfs-win = { path = "../vfs-win" }
-# Window + process enumeration for the load benchmark (src/bench.rs), which is
-# already `#[cfg(windows)]` in code — this makes the manifest agree.
-windows-sys = { version = "0.61", features = [
-  "Win32_Foundation",
-  "Win32_UI_WindowsAndMessaging",
-  "Win32_System_Diagnostics_ToolHelp",
-] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # Integrity tests compare the composed VFS against a native extract.
@@ -67,3 +50,7 @@ vfs-shim = { path = "../vfs-shim" }
 # `RootMap` the shim uses, rather than lowercasing a string in the test — the
 # whole point being that the two sides of the ring must fold identically.
 vfs-redirect = { path = "../vfs-redirect" }
+
+[dev-dependencies]
+vfs-provider = { path = "../vfs-provider", features = ["conformance"] }
+vfs-testkit = { path = "../vfs-testkit" }

@@ -1,8 +1,9 @@
 //! **The public embeddable API.** Session lifecycle, roots, composition,
 //! launch — design spec §4.
 //!
-//! Everything above this crate is a *host*: `vfs.exe` and its daemon, the Node
-//! binding, the Python binding after it. Everything below it is the engine:
+//! Everything above this crate is a *host*: `vfs.exe` and its daemon, or any
+//! program that embeds a session (a language binding, a launcher). Everything
+//! below it is the engine:
 //! the [`Director`] kernel, the provider contract, and the composition
 //! primitives. A host is expected to name **only this crate**; if a host has
 //! to `use vfs_director::…` or `use vfs_directord::…` to get something done,
@@ -46,8 +47,8 @@
 //! the ring the injected shim talks over, and the launch. It does not own a
 //! *table* of sessions, a control plane, or a config file format. The daemon
 //! in `vfs-directord` keeps those, because they are properties of that
-//! particular host rather than of embedding — a Node host addresses its
-//! sessions with JavaScript object references, not with `"s1"` strings over
+//! particular host rather than of embedding — an embedding host addresses its
+//! sessions with its own object references, not with `"s1"` strings over
 //! gRPC, and composes its graph from code rather than from TOML (spec §6:
 //! "Config is a serialization of the graph, not the other way round").
 //!
@@ -82,20 +83,21 @@
 //!
 //! ## What a host still has to build for itself
 //!
-//! Written down because the alternative is each new binding rediscovering it.
+//! Written down because the alternative is each new host rediscovering it.
 //!
 //! * **Locate its own `vfs_shim_dll.dll` / `vfs_payload.dll`.** Left unset,
 //!   [`LaunchOpts::shim_dll`] searches next to `std::env::current_exe()`,
-//!   which for a Node addon is `node.exe` and for a Python extension is
-//!   `python.exe` — neither anywhere near the shipped DLLs. A binding must
-//!   resolve both from its own module path and set them; they are effectively
-//!   mandatory outside this workspace's own binaries.
+//!   which for any host that is not one of this workspace's binaries (a
+//!   language runtime loading the host as a module, say) is nowhere near the
+//!   shipped DLLs. Such a host must resolve both from its own module path and
+//!   set them; they are effectively mandatory outside this workspace's own
+//!   binaries.
 //! * **Keep its threads away from `std::env` — Windows only.** There,
 //!   `CreateProcessW` inherits by null environment, so [`Session::serve`] and
 //!   [`Session::launch`] write process-global `VFS_*` variables under a lock.
 //!   The lock orders *our* writers and cannot order a host's:
-//!   `std::env::set_var` is unsound in a multi-threaded process, and a Node
-//!   or Python host is multi-threaded by construction. On unix `Session::serve`
+//!   `std::env::set_var` is unsound in a multi-threaded process, and an
+//!   embedding host is multi-threaded by construction. On unix `Session::serve`
 //!   and `Session::launch` never write process env: a Wine child's
 //!   environment block is built explicitly by `vfs_proton::launch::launch_env`.
 //! * **Its own [`Storage`], if it wants caching or persistent layers.** A
@@ -120,6 +122,8 @@
 pub mod image;
 mod session;
 mod sources;
+#[cfg(test)]
+mod test_scratch;
 
 pub use session::{
     compose_root, registry_sync_for, LaunchExit, LaunchOpts, RegistrySync, Session, StageOpts,
@@ -130,6 +134,30 @@ pub use session::{LaunchHandle, LaunchStopper};
 /// How a Proton launch sets up its Wine prefix — see [`Session::set_prefix_init`].
 #[cfg(unix)]
 pub use vfs_proton::prefix::{PrefixInit, PROTON_GRAPHICS_OVERRIDES};
+/// The pieces of the Proton (Wine) delivery a host names besides a
+/// [`Session`]: where aether-vfs keeps runtimes and prefixes, which runtime a
+/// launch would use, a prefix's directory and lock, the NVAPI status, and the
+/// Windows build artefacts' names. Re-exported from `vfs-proton`, so a host
+/// names only this crate (see the crate docs). Unix only, as the launch is.
+#[cfg(unix)]
+pub mod proton {
+    pub use vfs_proton::layout::Root;
+    pub use vfs_proton::prefix::{prefix_dir, Prefix, PrefixInit, PrefixLock};
+
+    /// The names of the Windows binaries `bin/build-windows` produces and a
+    /// Proton launch needs ([`LaunchOpts`](crate::LaunchOpts)).
+    pub use vfs_proton::artifacts;
+
+    /// What NVAPI and DLSS need and whether this machine has it.
+    pub mod nvapi {
+        pub use vfs_proton::nvapi::{status, Capability, GpuModel, NvapiStatus};
+    }
+
+    /// GE-Proton runtimes under a `Root`.
+    pub mod runtime {
+        pub use vfs_proton::runtime::{cmp_tags, installed_dirs, newest_installed, verify_ge};
+    }
+}
 /// What became of Proton's Steam helper in a launch — see
 /// [`LaunchHandle::steam_helper_status`].
 #[cfg(unix)]
@@ -163,6 +191,10 @@ pub use vfs_provider::{
 // `FIXTURE_FILES` because a host-language provider has to serve exactly that
 // tree and must not hold a second, drifting copy of it.
 // ---------------------------------------------------------------------------
+// Behind the `conformance` feature, which a host enables in its
+// `[dev-dependencies]`: the suite is test code and is not compiled into a
+// release build.
+#[cfg(feature = "conformance")]
 pub use vfs_provider::{assert_conformance, write_fixture_tree, FIXTURE_FILES};
 
 // ---------------------------------------------------------------------------
@@ -257,8 +289,7 @@ mod tests {
 
     #[test]
     fn session_read_file_helper() {
-        let dir = std::env::temp_dir().join(format!("vfs-sess-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::test_scratch::scratch_created("sess");
         std::fs::write(dir.join("a.bin"), b"xyz").unwrap();
         let s = Session::new();
         s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
@@ -346,8 +377,7 @@ mod tests {
     #[test]
     fn a_write_refused_by_a_readonly_layer_is_recorded_for_discovery() {
         let _rej = REJECTED_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("vfs-ro-rej-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::test_scratch::scratch_created("ro-rej");
         std::fs::write(dir.join("vanilla.ini"), b"[General]").unwrap();
 
         let s = Session::new();
@@ -378,11 +408,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Drives the live shared-memory ring end to end, so it is Windows-only:
-    // `Session::serve` has no non-Windows body yet and `Session::ipc` (used
-    // below) does not exist there at all — increment 2 of
-    // docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md.
-    #[cfg(windows)]
+    // Drives the live ring end to end through `Session::ipc`'s in-process
+    // client: a named section on Windows, the file-backed ring on unix.
     #[test]
     fn session_serve_and_ring_read() {
         use vfs_protocol::{
@@ -390,14 +417,13 @@ mod tests {
             ReadReq, OPEN_READ, OP_OPEN, OP_READ, ST_OK,
         };
 
-        let dir = std::env::temp_dir().join(format!("vfs-sess-ring-{}", std::process::id()));
-        let state = std::env::temp_dir().join(format!("vfs-sess-st-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::test_scratch::scratch_created("sess-ring");
         std::fs::write(dir.join("payload.bin"), b"ring-bytes").unwrap();
 
-        let mut s = Session::new();
+        // Root, overlay and state all under the scratch dir, so `serve` creates
+        // nothing in the host's temp dir.
+        let mut s = crate::test_scratch::session_in_scratch("sess-ring-session");
         s.set_root(&dir);
-        s.set_state_dir(&state);
         s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
         s.serve().expect("serve");
         assert!(s.is_serving());
@@ -429,6 +455,5 @@ mod tests {
         s.stop_serve();
         assert!(!s.is_serving());
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&state);
     }
 }

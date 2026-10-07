@@ -8,23 +8,23 @@
 //! [`StoreIdKind::Foreign`].
 
 /// A layer file's identity, fixed at creation and kept across renames.
-pub type Guid = [u8; 16];
+pub(crate) type Guid = [u8; 16];
 
 const LAYER_PREFIX: u8 = b'L';
 const CACHE_PREFIX: u8 = b'C';
 
 /// A fresh random GUID (UUID v4 bytes).
-pub fn new_guid() -> Guid {
+pub(crate) fn new_guid() -> Guid {
     *uuid::Uuid::new_v4().as_bytes()
 }
 
 /// The store file id of a layer file.
-pub fn layer_file_id(g: &Guid) -> [u8; 17] {
+pub(crate) fn layer_file_id(g: &Guid) -> [u8; 17] {
     prefixed(LAYER_PREFIX, g)
 }
 
 /// The store file id of a cache file, from its 16-byte identity hash.
-pub fn cache_file_id(h: &[u8; 16]) -> [u8; 17] {
+pub(crate) fn cache_file_id(h: &[u8; 16]) -> [u8; 17] {
     prefixed(CACHE_PREFIX, h)
 }
 
@@ -37,7 +37,7 @@ fn prefixed(p: u8, rest: &[u8; 16]) -> [u8; 17] {
 
 /// What a store file id names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StoreIdKind {
+pub(crate) enum StoreIdKind {
     /// A layer file, by GUID.
     Layer(Guid),
     /// A cache file, by identity hash.
@@ -47,7 +47,7 @@ pub enum StoreIdKind {
 }
 
 /// Classifies a store file id by its prefix and length.
-pub fn classify_store_id(id: &[u8]) -> StoreIdKind {
+pub(crate) fn classify_store_id(id: &[u8]) -> StoreIdKind {
     let Some((&p, rest)) = id.split_first() else {
         return StoreIdKind::Foreign;
     };

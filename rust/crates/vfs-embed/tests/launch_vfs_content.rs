@@ -1,12 +1,10 @@
-//! Task 4b: launching an image that is **VFS content** — the top item on the
-//! embeddable API's gap list.
+//! Launching an image that is **VFS content**.
 //!
 //! A managed root is deliberately empty on disk; the game lives in the
 //! provider graph. `CreateProcess` cannot create a process from bytes, so the
 //! image has to be written out with its PE import closure and the staging
-//! directory mounted back into the graph. Until this task that sequence
-//! existed once, in `vfs-directord`'s `SessionRegistry::launch`, and no other
-//! host could reach it.
+//! directory mounted back into the graph. `Session::stage_launch` is that
+//! sequence and `Session::launch` calls it, so every host gets it.
 //!
 //! Two things are proven here, and the **first one is the load-bearing one**:
 //!
@@ -60,7 +58,8 @@ impl ImageSource for Fake {
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("vfs-launch-content-{}-{name}", std::process::id()));
+    let d = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("vfs-launch-content-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -89,6 +88,8 @@ fn a_staged_copy_must_not_shadow_curated_content_at_the_same_path() {
 
     let mut s = Session::new();
     s.set_state_dir(&state);
+    // Staging writes into the managed root: keep it out of the temp dir.
+    s.set_root(tmp("precedence-root"));
     s.mount("", inline(&[("game.exe", &bare_pe(b"CURATED"))]))
         .unwrap();
 
@@ -175,8 +176,7 @@ fn a_staged_copy_must_not_shadow_curated_content_at_the_same_path() {
 /// happened before that failure is the point, exactly as in `vfs-directord`'s
 /// `production_launch_stages_a_relative_image_before_create_process` — the
 /// staged files survive it because the session holds the `StagedDir`.
-// Needs a live ring and a real `CreateProcess` + inject: Windows-only until the
-// Proton path lands (increment 2 of the Wine-hosted-shim design).
+// Needs a real `CreateProcess` + inject by `vfs-inject`: Windows-only.
 #[cfg(windows)]
 #[test]
 fn launch_stages_companion_images_at_their_vpath_inside_the_root() {
@@ -283,12 +283,16 @@ fn ensure_fixtures() {
             .canonicalize()
             .expect("workspace root");
 
+        // Build for the profile this test runs in: `profile_dir()` is that profile's
+        // directory, so a debug build under `cargo test --release` would land elsewhere.
+        let release: &[&str] = if cfg!(debug_assertions) { &[] } else { &["--release"] };
         let status = std::process::Command::new(&cargo)
             .current_dir(&workspace)
             .args([
                 "build", "-p", "vfs-shim-dll", "-p", "vfs-inject", "--bin", "vfs-probe",
                 "-p", "vfs-fixture-read", "--quiet",
             ])
+            .args(release)
             .status()
             .expect("spawn cargo to build shim + vfs-probe + vfs-fixture-read");
         assert!(status.success(), "shim/vfs-probe/vfs-fixture-read build failed: {status}");
@@ -303,6 +307,7 @@ fn ensure_fixtures() {
                 "crates/vfs-payload/Cargo.toml",
                 "--quiet",
             ])
+            .args(release)
             .status()
             .expect("spawn cargo to build vfs-payload");
         assert!(status.success(), "vfs-payload build failed: {status}");
@@ -341,8 +346,7 @@ fn ensure_fixtures() {
 /// * the staged image answers at its vpath afterwards, so a later
 ///   hook-mediated open of the same relative name resolves through the graph
 ///   instead of falling through to disk.
-// Needs a live ring and a real `CreateProcess` + inject: Windows-only until the
-// Proton path lands (increment 2 of the Wine-hosted-shim design).
+// Needs a real `CreateProcess` + inject by `vfs-inject`: Windows-only.
 #[cfg(windows)]
 #[test]
 fn an_image_only_the_provider_graph_holds_launches_from_an_empty_managed_root() {
@@ -513,6 +517,8 @@ fn session_staging_puts_a_game_root_proxy_dll_on_disk() {
 
     let mut s = Session::new();
     s.set_state_dir(&state);
+    // Staging writes into the managed root: keep it out of the temp dir.
+    s.set_root(tmp("proxy-root"));
     s.mount(
         "",
         inline(&[

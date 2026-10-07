@@ -22,7 +22,8 @@ fn pattern(len: usize) -> Vec<u8> {
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("vfs-integrity-{}-{name}", std::process::id()));
+    let d = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("vfs-integrity-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -197,9 +198,8 @@ fn real_archive_matches_native_extract() {
 /// silently — the director would still be byte-exact, and only the game would
 /// see garbage.
 // `vfs_shim` (the ring client this drives) is in the `cfg(windows)` dependency
-// table, and `Session::serve` has no non-Windows body yet — increment 2 of
-// docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md. Every other
-// test in this file is portable and stays ungated.
+// table, so this test is Windows-only. Every other test in this file is
+// portable and stays ungated.
 #[cfg(windows)]
 #[test]
 fn ring_client_reads_are_byte_exact() {

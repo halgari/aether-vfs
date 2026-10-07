@@ -1,3 +1,5 @@
+> Historical: measured against crates that have since been removed (`vfs-server`, `vfs-fuse-bench`); numbers are kept as a record, not current guidance.
+
 # Read into game buffers — bulk only
 
 **Date:** 2026-07-15 (updated: remote WPM removed)

@@ -8,14 +8,17 @@
 //! children following inline. Volatile nodes and their subtrees are not written.
 //!
 //! `decode` validates everything and never panics: a damaged file is a [`FormatError`].
-use crate::overlay::{Child, Node, Overlay, Value, MAX_DATA, MAX_KEY_NAME, MAX_VALUE_NAME};
+use crate::overlay::{
+    Child, MAX_DATA, MAX_DECODE_DEPTH, MAX_KEY_NAME, MAX_VALUE_NAME, Node, Overlay, Value,
+};
 use crate::path::fold;
 use std::collections::BTreeSet;
 
 pub const MAGIC: &[u8; 8] = b"AEREG\0\0\x01";
 
-/// Deepest key nesting `decode` accepts (bounds recursion).
-const MAX_DEPTH: usize = 1024;
+/// Deepest key nesting `decode` accepts (bounds recursion). Above the 512 write cap so files
+/// from the old, uncapped writer still load.
+const MAX_DEPTH: usize = MAX_DECODE_DEPTH;
 const FLAG_CREATED: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -416,30 +419,31 @@ mod tests {
         }
     }
 
+    fn seal(body: &[u8]) -> Vec<u8> {
+        let mut b = MAGIC.to_vec();
+        b.extend_from_slice(body);
+        b.extend_from_slice(&[0; 8]);
+        reseal(b)
+    }
+    fn s(x: &str) -> Vec<u8> {
+        let mut v = (x.len() as u32).to_le_bytes().to_vec();
+        v.extend_from_slice(x.as_bytes());
+        v
+    }
+    // node: spelling, flags, last_write, nvalues, ntomb, nctomb, nchildren
+    fn node(name: &[u8], flags: u8, nv: u32, nt: u32, nct: u32, nc: u32) -> Vec<u8> {
+        let mut v = name.to_vec();
+        v.push(flags);
+        v.extend_from_slice(&0u64.to_le_bytes());
+        for n in [nv, nt, nct, nc] {
+            v.extend_from_slice(&n.to_le_bytes());
+        }
+        v
+    }
+
     #[test]
     fn inconsistent_bodies_are_refused() {
         // Hand-build bodies behind a valid checksum.
-        fn seal(body: &[u8]) -> Vec<u8> {
-            let mut b = MAGIC.to_vec();
-            b.extend_from_slice(body);
-            b.extend_from_slice(&[0; 8]);
-            reseal(b)
-        }
-        fn s(x: &str) -> Vec<u8> {
-            let mut v = (x.len() as u32).to_le_bytes().to_vec();
-            v.extend_from_slice(x.as_bytes());
-            v
-        }
-        // node: spelling, flags, last_write, nvalues, ntomb, nctomb, nchildren
-        fn node(name: &[u8], flags: u8, nv: u32, nt: u32, nct: u32, nc: u32) -> Vec<u8> {
-            let mut v = name.to_vec();
-            v.push(flags);
-            v.extend_from_slice(&0u64.to_le_bytes());
-            for n in [nv, nt, nct, nc] {
-                v.extend_from_slice(&n.to_le_bytes());
-            }
-            v
-        }
         let good = {
             let mut b = vec![1u8];
             b.extend(node(&s("Registry"), 0, 0, 0, 0, 0));
@@ -515,6 +519,79 @@ mod tests {
             ty: 0,
             data: vec![],
         };
+    }
+
+    #[test]
+    fn write_depth_round_trips_and_decode_accepts_older_deeper_files() {
+        // Debug-build recursion frames at 1024 levels outgrow the default 2 MiB test stack.
+        std::thread::Builder::new()
+            .stack_size(32 << 20)
+            .spawn(write_depth_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn write_depth_body() {
+        use crate::overlay::{MAX_WRITE_DEPTH, RegError};
+        let chain = |n: usize| {
+            let mut p = String::from(r"\Registry");
+            for i in 0..n {
+                p.push_str(&format!(r"\k{i}"));
+            }
+            p
+        };
+        let mut o = Overlay::new();
+        let deepest = chain(MAX_WRITE_DEPTH);
+        o.create_key(&deepest, false, false, 7).unwrap();
+        o.set_value(&deepest, "v", 1, b"x", 8).unwrap();
+        let back = decode(&encode(&o)).unwrap();
+        assert_eq!(back.node(&deepest), o.node(&deepest));
+        assert_eq!(back.node(&deepest).unwrap().values.len(), 1);
+
+        // A file the old, uncapped writer could have made: `depth` nested "k" keys.
+        let file = |depth: usize| {
+            let mut b = vec![1u8];
+            b.extend(node(&s("Registry"), 0, 0, 0, 0, 1));
+            for _ in 1..depth {
+                b.extend(node(&s("k"), 0, 0, 0, 0, 1));
+            }
+            b.extend(node(&s("k"), 0, 0, 0, 0, 0));
+            seal(&b)
+        };
+        let old = decode(&file(MAX_WRITE_DEPTH + 100)).expect("deeper than the write cap decodes");
+        // It re-encodes and reloads, but a new write that deep is refused.
+        assert!(decode(&encode(&old)).is_ok());
+        let mut p = String::from(r"\Registry");
+        for _ in 0..MAX_WRITE_DEPTH + 100 {
+            p.push_str(r"\k");
+        }
+        let mut old = old;
+        assert!(old.node(&p).is_some());
+        p.push_str(r"\new");
+        assert_eq!(old.create_key(&p, false, false, 9), Err(RegError::TooDeep));
+
+        assert!(decode(&file(MAX_DECODE_DEPTH)).is_ok());
+        assert!(matches!(
+            decode(&file(MAX_DECODE_DEPTH + 1)),
+            Err(FormatError::Invalid("keys nested too deeply"))
+        ));
+    }
+
+    #[test]
+    fn multibyte_names_at_the_limits_round_trip() {
+        for unit in ["\u{e9}", "\u{20ac}", "\u{1F600}"] {
+            let w = unit.encode_utf16().count();
+            let key = unit.repeat(MAX_KEY_NAME / w);
+            let val = unit.repeat(MAX_VALUE_NAME / w);
+            let path = format!(r"\Registry\{key}");
+            let mut o = Overlay::new();
+            o.create_key(&path, false, false, 1).unwrap();
+            o.set_value(&path, &val, 1, b"d", 2).unwrap();
+            let back = decode(&encode(&o)).unwrap();
+            assert_eq!(back.node(&path), o.node(&path));
+            assert_eq!(back.node(&path).unwrap().values[0].name, val);
+        }
     }
 
     fn checksum(b: &[u8]) -> u64 {

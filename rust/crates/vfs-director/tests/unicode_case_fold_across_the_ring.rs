@@ -26,14 +26,13 @@
 //! tests of `fold`; swapping `fold` for `to_ascii_lowercase` anywhere below the
 //! ring makes them fail.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use vfs_compose::LayeredProvider;
-use vfs_director::{DiskProvider, MountGraph};
+use vfs_compose::{DiskProvider, LayeredProvider, MountGraph};
 use vfs_provider::{Provider, VPath, OPEN_READ};
 use vfs_redirect::{RootMap, VolumeMap};
+use vfs_testkit::zip::write_stored_zip;
 use vfs_zip::ZipProvider;
 
 /// A directory component whose case only Unicode folds: `Ü`/`ü` and `Б`/`б`
@@ -195,59 +194,3 @@ fn layered_readdir_collapses_two_case_spellings_of_a_non_ascii_name() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ---------------------------------------------------------------------------
-// Minimal Stored-only zip writer (the only method `ZipProvider` supports).
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
-}
-
-fn write_stored_zip(path: &Path, entry: &str, content: &[u8]) {
-    let mut buf = Vec::new();
-    let crc = crc32(content);
-    let n = entry.len() as u16;
-    buf.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 4]);
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&n.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(entry.as_bytes());
-    buf.extend_from_slice(content);
-    let cd_start = buf.len() as u32;
-    buf.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 6]);
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&n.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 8]);
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(entry.as_bytes());
-    let cd_size = buf.len() as u32 - cd_start;
-    buf.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 4]);
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&cd_size.to_le_bytes());
-    buf.extend_from_slice(&cd_start.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
-}

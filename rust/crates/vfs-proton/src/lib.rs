@@ -15,32 +15,30 @@
 // behind the `acquire` feature (default on). See the manifest for why: it
 // carries `ureq` -> `rustls` -> `ring`, a C cross-compile in a build script,
 // and `vfs-embed` consumes this crate on unix to *launch*, not to install.
+pub mod artifacts;
 #[cfg(feature = "acquire")]
 pub mod install;
 pub mod launch;
 pub mod layout;
 pub mod nvapi;
 pub mod prefix;
+mod process;
 #[cfg(feature = "acquire")]
 pub mod release;
 pub mod runtime;
 pub mod steam;
+#[cfg(test)]
+mod test_tmp;
 
+// The module paths (`launch::`, `prefix::`, `nvapi::`, ...) are canonical. The
+// flat re-exports below are the ones the `vfs-proton` binary and this
+// repository's tests use.
 #[cfg(feature = "acquire")]
-pub use install::{
-    extract_tar_gz, install_release, parse_sha512sum, partial_path, verify_digest, InstallError,
-    Installed,
-};
-pub use launch::{
-    check_extra_env, command_line, describe_injector_error, finish, injector_error_path,
-    is_reserved_env, launch_env, merge_dll_overrides, spawn, wine_binary, LaunchError, WineLaunch,
-    BASE_DLL_OVERRIDES, DEFAULT_WINEDEBUG,
-};
+pub use install::{extract_tar_gz, install_release, parse_sha512sum, partial_path, verify_digest};
+pub use launch::{DEFAULT_WINEDEBUG, WineLaunch, finish, launch_env, merge_dll_overrides, spawn};
 pub use layout::Root;
-pub use prefix::{ensure, ensure_with, Prefix, PrefixError, PrefixInit};
+pub use prefix::{Prefix, PrefixInit, ensure, ensure_with};
 #[cfg(feature = "acquire")]
-pub use release::{fetch_releases, parse_releases, pick, Release, ResolveError};
-pub use runtime::{
-    cmp_tags, installed, installed_dirs, runtime_lib_env, runtime_lib_env_host, verify_ge, VerifyError,
-};
-pub use steam::{HelperStatus, SteamLaunch, SteamSide, STEAM_HELPER, STEAM_HELPER_OVERRIDE};
+pub use release::{Release, fetch_releases, pick};
+pub use runtime::{cmp_tags, installed, installed_dirs, verify_ge};
+pub use steam::{HelperStatus, SteamLaunch, SteamSide};

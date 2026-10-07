@@ -34,15 +34,9 @@
 //! Store ids of any other shape are not `vfs-storage`'s: they are logged and
 //! left alone.
 //!
-//! None of this can follow a clean close ([`Storage::close`], or the drop of
-//! the last reference) of a session that left nothing for this pass: every
-//! write is then durable on both sides, in order, and the catalog and the
-//! block store hold the same random clean-close token. A session that left a
-//! repair here (a store delete that failed, a failed commit, a write that
-//! panicked, corruption found: see `Storage::needs_reconcile`) leaves no
-//! token. An open that finds matching tokens removes the catalog's durably
-//! before anything else and skips this pass
-//! ([`ReconcileReport::skipped_after_clean_close`]).
+//! None of this runs after a clean close of a session that left nothing for
+//! it ([`ReconcileReport::skipped_after_clean_close`]): the token handshake is
+//! in `rust/docs/durability.md`.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -52,6 +46,7 @@ use std::sync::RwLock;
 use vfs_block_store::{BlockStore, CompactOptions};
 
 use crate::catalog::Catalog;
+use crate::layer_io::RUN_BLOCKS;
 use crate::ids::{cache_file_id, classify_store_id, layer_file_id, StoreIdKind};
 use crate::storage::{Storage, StorageError};
 
@@ -108,9 +103,6 @@ fn repair_failed(report: &mut ReconcileReport, what: String, e: &StorageError) {
     tracing::error!(error = %e, "reconcile: {what} failed; left for the next open");
     report.failed_repairs.push(format!("{what}: {e}"));
 }
-
-/// Blocks per `write_blocks` call when zero-filling.
-const RUN_BLOCKS: u64 = 64;
 
 /// Brings `catalog` and `store` back into agreement (see the module docs),
 /// then flushes the store and commits the catalog durably, in that order,
@@ -216,7 +208,7 @@ pub(crate) fn reconcile(
                         "layer file row length differs from the store's; using the store's"
                     );
                     rec.len = info.len;
-                    match catalog.put(layer, &path, &rec, false) {
+                    match catalog.put(layer, &path, &rec) {
                         Ok(()) => report.resized_rows.push((lname, path)),
                         Err(e) => repair_failed(
                             &mut report,
@@ -236,7 +228,7 @@ pub(crate) fn reconcile(
         let emptied = repair(|| Ok(store.set_len(&id, 0)?)).and_then(|()| {
             if let Some(mut rec) = catalog.get(layer, &path)? {
                 rec.len = 0;
-                catalog.put(layer, &path, &rec, false)?;
+                catalog.put(layer, &path, &rec)?;
             }
             Ok(())
         });
@@ -376,7 +368,7 @@ mod tests {
 
     use crate::catalog::{CacheRec, EntryRec};
     use crate::config::{Durability, StorageConfig};
-    use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, StoreIdKind};
+use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, StoreIdKind};
     use crate::storage::Storage;
 
     const BS: u64 = 4096;
@@ -458,7 +450,7 @@ mod tests {
             len: 5000,
             mtime: 7,
         };
-        s.catalog.put(lid, "lost.txt", &rec, false).unwrap();
+        s.catalog.put(lid, "lost.txt", &rec).unwrap();
         s.close_unclean(); // a crash: no clean-close mark
 
         let s = Storage::open(d.path(), cfg()).unwrap();
@@ -599,7 +591,7 @@ mod tests {
         #[cfg(not(windows))]
         {
             let killed = tempfile::tempdir().unwrap();
-            crate::test_util::snapshot(d.path(), killed.path());
+            crate::test_util::snapshot_as_killed(d.path(), killed.path()).unwrap();
             let k = Storage::open(killed.path(), cfg()).unwrap();
             assert_eq!(*k.last_reconcile(), Default::default());
             let kp = k.layer("saves").unwrap();
@@ -634,7 +626,7 @@ mod tests {
         s.store.flush().unwrap(); // the store half reached disk, the catalog did not
 
         let killed = tempfile::tempdir().unwrap();
-        crate::test_util::snapshot(d.path(), killed.path());
+        crate::test_util::snapshot_as_killed(d.path(), killed.path()).unwrap();
         let k = Storage::open(killed.path(), cfg()).unwrap();
         assert_consistent(&k);
         assert!(k.last_reconcile().orphans_deleted >= 1);
@@ -851,7 +843,7 @@ mod tests {
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("fresh").unwrap();
         let killed = tempfile::tempdir().unwrap();
-        crate::test_util::snapshot(d.path(), killed.path());
+        crate::test_util::snapshot_as_killed(d.path(), killed.path()).unwrap();
         let k = Storage::open(killed.path(), cfg()).unwrap();
         assert!(k.catalog.layer_id("fresh").unwrap().is_some());
         drop(p);
@@ -878,7 +870,7 @@ mod tests {
             len: 10,
             mtime: 1,
         };
-        s.catalog.put(lid, "lost.bin", &lost, false).unwrap(); // to recreate empty
+        s.catalog.put(lid, "lost.bin", &lost).unwrap(); // to recreate empty
         s.store.set_len(&layer_file_id(&new_guid()), 5).unwrap(); // an orphan: compaction
         s.close_unclean(); // a crash: no clean-close mark
 
@@ -940,7 +932,7 @@ mod tests {
         let lid = s.catalog.layer_id("l").unwrap().unwrap();
         let mut rec = s.catalog.get(lid, "f.bin").unwrap().unwrap();
         rec.len = 100;
-        s.catalog.put(lid, "f.bin", &rec, false).unwrap();
+        s.catalog.put(lid, "f.bin", &rec).unwrap();
         s.close_unclean(); // a crash: no clean-close mark
 
         let s = Storage::open(d.path(), cfg()).unwrap();

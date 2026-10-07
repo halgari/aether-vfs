@@ -17,3 +17,6 @@ vfs-provider = { path = "../vfs-provider" }
 # combinator that keys or compares a name below the ring has to use the same
 # function or the two sides disagree on anything Unicode-cased.
 vfs-core = { path = "../vfs-core" }
+
+[dev-dependencies]
+vfs-provider = { path = "../vfs-provider", features = ["conformance"] }

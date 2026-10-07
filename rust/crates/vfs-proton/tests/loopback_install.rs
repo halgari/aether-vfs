@@ -34,11 +34,12 @@
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sha2::{Digest as _, Sha512};
-use vfs_proton::{install_release, InstallError, Release, Root};
+use vfs_proton::install::InstallError;
+use vfs_proton::{Release, Root, install_release};
 
 // ─── the loopback server ─────────────────────────────────────────────────────
 
@@ -170,7 +171,8 @@ fn sha512sum_body(body: &[u8], name: &str) -> String {
 }
 
 fn base_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("vfs-proton-loop-{}-{name}", std::process::id()));
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("vfs-proton-loop-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
 }

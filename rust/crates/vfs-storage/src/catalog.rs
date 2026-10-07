@@ -16,14 +16,9 @@
 //!
 //! ## Durability
 //!
-//! Every write commits with `Durability::None` unless it says otherwise (only
-//! [`Catalog::put`] and [`Catalog::remove`] with `durable: true`), and
-//! [`Catalog::commit_durable`] makes everything before it durable. The catalog
-//! and the block store commit separately, so the caller orders them:
-//! `BlockStore::flush()` first, then `commit_durable`, so that every durable
-//! catalog row references durable store data. A durable commit makes *all*
-//! earlier non-durable commits durable too, which is why the catalog never
-//! makes one on its own initiative.
+//! Every row write commits with `Durability::None`; [`Catalog::commit_durable`]
+//! publishes everything before it. The caller orders it after the block store's
+//! flush: the policy is in `rust/docs/durability.md` (module `crate::durable`).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,7 +51,7 @@ const ENTRY_HEADER: usize = 1 + 1 + 16 + 8 + 8;
 
 /// One file or directory of a layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntryRec {
+pub(crate) struct EntryRec {
     /// The last path component, in its original case.
     pub name: String,
     /// `vfs_provider::KIND_FILE` or `KIND_DIR`.
@@ -102,7 +97,7 @@ impl EntryRec {
 
 /// One cached file's eviction bookkeeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CacheRec {
+pub(crate) struct CacheRec {
     /// Minutes since the Unix epoch of the last access.
     pub last_access_min: u64,
     /// The file's length: bytes it counts against `cache_max_bytes`.
@@ -118,7 +113,7 @@ pub struct CacheRec {
 /// [`Catalog::remove`] and as a [`Catalog::rename`] destination) are therefore
 /// checked inside the call's own transaction, and a layer provider serialises
 /// its read-modify-write sequences with a per-layer lock.
-pub struct Catalog {
+pub(crate) struct Catalog {
     db: Database,
     /// Non-durable commits since the last durable one (approximate upward:
     /// a commit racing a durable one may be counted after it made it
@@ -142,6 +137,7 @@ fn dir_prefix(folded_dir: &str) -> String {
 
 impl Catalog {
     /// Opens or creates the catalog at `path`.
+    #[cfg(test)]
     pub fn open(path: &Path) -> Result<Self, StorageError> {
         Self::open_with_cache(path, CACHE_BYTES)
     }
@@ -323,20 +319,17 @@ impl Catalog {
 
     /// Inserts or replaces the entry at `folded`.
     ///
-    /// `durable: false` commits with no durability. `durable: true` commits
-    /// with `Durability::Immediate`, and a durable commit also makes **every
-    /// earlier non-durable row** durable, not just this one: call
-    /// `BlockStore::flush()` first, so no durable row references store data that
+    /// Commits with no durability; [`Self::commit_durable`] publishes it,
+    /// after `BlockStore::flush()` so no durable row references store data that
     /// is not yet durable (spec §6).
     pub fn put(
         &self,
         layer: u64,
         folded: &str,
         rec: &EntryRec,
-        durable: bool,
     ) -> Result<(), StorageError> {
         let key = vfs_core::fold(folded);
-        self.write(durable, |txn| {
+        self.write(false, |txn| {
             let mut t = txn.open_table(ENTRIES).map_err(db_err)?;
             t.insert((layer, key.as_str()), rec.encode().as_slice())
                 .map_err(db_err)?;
@@ -349,9 +342,8 @@ impl Catalog {
         &self,
         layer: u64,
         rows: &[(String, EntryRec)],
-        durable: bool,
     ) -> Result<(), StorageError> {
-        self.write(durable, |txn| {
+        self.write(false, |txn| {
             let mut t = txn.open_table(ENTRIES).map_err(db_err)?;
             for (folded, rec) in rows {
                 let key = vfs_core::fold(folded);
@@ -370,14 +362,13 @@ impl Catalog {
     /// the directory is re-created). [`StorageError::NotFound`] for a missing
     /// row, [`StorageError::BadRequest`] for the layer root.
     ///
-    /// `durable` is as for [`Self::put`], including that a durable commit makes
-    /// every earlier non-durable row durable: `BlockStore::flush()` first.
-    pub fn remove(&self, layer: u64, folded: &str, durable: bool) -> Result<(), StorageError> {
+    /// Non-durable, as for [`Self::put`].
+    pub fn remove(&self, layer: u64, folded: &str) -> Result<(), StorageError> {
         let key = vfs_core::fold(folded);
         if key.is_empty() {
             return Err(StorageError::BadRequest("remove of a layer root".into()));
         }
-        self.write(durable, |txn| {
+        self.write(false, |txn| {
             let mut t = txn.open_table(ENTRIES).map_err(db_err)?;
             if has_children(&t, layer, &key)? {
                 return Err(StorageError::NotEmpty(key.clone()));
@@ -715,10 +706,10 @@ mod tests {
             len: 0,
             mtime: 0,
         };
-        c.put(l, "saves", &dirr("Saves"), false).unwrap();
-        c.put(l, "saves/one.ess", &file("One.ess"), false).unwrap();
-        c.put(l, "saves/sub", &dirr("Sub"), false).unwrap();
-        c.put(l, "saves/sub/deep.ess", &file("deep.ess"), false)
+        c.put(l, "saves", &dirr("Saves")).unwrap();
+        c.put(l, "saves/one.ess", &file("One.ess")).unwrap();
+        c.put(l, "saves/sub", &dirr("Sub")).unwrap();
+        c.put(l, "saves/sub/deep.ess", &file("deep.ess"))
             .unwrap();
         let mut names: Vec<_> = c
             .children(l, "saves")
@@ -750,8 +741,8 @@ mod tests {
             len: 3,
             mtime: 0,
         };
-        c.put(l, "a", &dirr("A"), false).unwrap();
-        c.put(l, "a/x", &file("x"), false).unwrap();
+        c.put(l, "a", &dirr("A")).unwrap();
+        c.put(l, "a/x", &file("x")).unwrap();
         c.rename(l, "a", "b", "B").unwrap();
         assert!(c.get(l, "a").unwrap().is_none() && c.get(l, "a/x").unwrap().is_none());
         assert_eq!(c.get(l, "b").unwrap().unwrap().name, "B");
@@ -789,10 +780,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
-        c.put(l, "saves", &dirr("saves"), false).unwrap();
-        c.put(l, "saves-old", &dirr("saves-old"), false).unwrap();
-        c.put(l, "saves-old/x", &file("x", 1), false).unwrap();
-        c.put(l, "saves/a", &file("a", 2), false).unwrap();
+        c.put(l, "saves", &dirr("saves")).unwrap();
+        c.put(l, "saves-old", &dirr("saves-old")).unwrap();
+        c.put(l, "saves-old/x", &file("x", 1)).unwrap();
+        c.put(l, "saves/a", &file("a", 2)).unwrap();
         let names: Vec<_> = c
             .children(l, "saves")
             .unwrap()
@@ -811,15 +802,15 @@ mod tests {
         let a = c.create_layer("a").unwrap();
         let b = c.create_layer("b").unwrap();
         assert_ne!(a, b);
-        c.put(a, "Saves", &dirr("Saves"), false).unwrap();
+        c.put(a, "Saves", &dirr("Saves")).unwrap();
         assert_eq!(c.get(a, "saves").unwrap().unwrap().name, "Saves");
         assert_eq!(c.get(a, "SAVES").unwrap().unwrap().name, "Saves");
         assert!(c.get(b, "saves").unwrap().is_none());
         assert!(c.children(b, "").unwrap().is_empty());
-        c.remove(a, "SAVES", false).unwrap();
+        c.remove(a, "SAVES").unwrap();
         assert!(c.get(a, "saves").unwrap().is_none());
         assert!(matches!(
-            c.remove(a, "saves", false),
+            c.remove(a, "saves"),
             Err(StorageError::NotFound(_))
         ));
     }
@@ -832,19 +823,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
-        c.put(l, "d", &dirr("d"), false).unwrap();
-        c.put(l, "d/f", &file("f", 1), false).unwrap();
-        c.put(l, "d-sibling", &file("s", 2), false).unwrap();
-        let err = c.remove(l, "d", false).unwrap_err();
+        c.put(l, "d", &dirr("d")).unwrap();
+        c.put(l, "d/f", &file("f", 1)).unwrap();
+        c.put(l, "d-sibling", &file("s", 2)).unwrap();
+        let err = c.remove(l, "d").unwrap_err();
         assert!(matches!(err, StorageError::NotEmpty(_)), "{err}");
         assert_eq!(err.to_status(), vfs_provider::ST_IS_DIR);
         assert!(c.get(l, "d").unwrap().is_some() && c.get(l, "d/f").unwrap().is_some());
-        c.remove(l, "d/f", false).unwrap();
+        c.remove(l, "d/f").unwrap();
         // Empty now; a sibling sharing the prefix `d` does not count as a child.
-        c.remove(l, "d", false).unwrap();
+        c.remove(l, "d").unwrap();
         assert!(c.get(l, "d").unwrap().is_none());
         assert!(matches!(
-            c.remove(l, "", false),
+            c.remove(l, ""),
             Err(StorageError::BadRequest(_))
         ));
     }
@@ -856,27 +847,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
-        c.put(l, "root", &dirr("root"), false).unwrap();
+        c.put(l, "root", &dirr("root")).unwrap();
         for d in ["a", "b", "c"] {
-            c.put(l, &format!("root/{d}"), &dirr(d), false).unwrap();
+            c.put(l, &format!("root/{d}"), &dirr(d)).unwrap();
             for i in 0..50 {
-                c.put(l, &format!("root/{d}/x{i}"), &dirr("x"), false)
+                c.put(l, &format!("root/{d}/x{i}"), &dirr("x"))
                     .unwrap();
                 c.put(
                     l,
                     &format!("root/{d}/x{i}/deep.ess"),
                     &file("deep.ess", 1),
-                    false,
                 )
                 .unwrap();
             }
         }
-        c.put(l, "root/a.txt", &file("a.txt", 2), false).unwrap(); // sorts after "a/..."
-        c.put(l, "root/b0", &file("b0", 3), false).unwrap(); // the skip target itself
-        c.put(l, "root/orphan/child", &file("child", 4), false)
+        c.put(l, "root/a.txt", &file("a.txt", 2)).unwrap(); // sorts after "a/..."
+        c.put(l, "root/b0", &file("b0", 3)).unwrap(); // the skip target itself
+        c.put(l, "root/orphan/child", &file("child", 4))
             .unwrap(); // no "root/orphan" row
-        c.put(l, "root/z", &file("z", 5), false).unwrap();
-        c.put(l, "root0", &file("root0", 6), false).unwrap(); // past the prefix
+        c.put(l, "root/z", &file("z", 5)).unwrap();
+        c.put(l, "root0", &file("root0", 6)).unwrap(); // past the prefix
         let names: Vec<_> = c
             .children(l, "root")
             .unwrap()
@@ -905,7 +895,8 @@ mod tests {
             len: u64::MAX,
             mtime: -7,
         };
-        c.put(l, "ünïcode save.ess", &rec, true).unwrap();
+        c.put(l, "ünïcode save.ess", &rec).unwrap();
+        c.commit_durable().unwrap();
         drop(c);
         let c = open(&dir);
         assert_eq!(c.get(l, "ünïcode save.ess").unwrap(), Some(rec));
@@ -917,10 +908,10 @@ mod tests {
         let c = open(&dir);
         let a = c.create_layer("a").unwrap();
         let b = c.create_layer("b").unwrap();
-        c.put(a, "d", &dirr("d"), false).unwrap();
-        c.put(a, "d/f", &file("f", 1), false).unwrap();
-        c.put(a, "g", &file("g", 2), false).unwrap();
-        c.put(b, "h", &file("h", 3), false).unwrap();
+        c.put(a, "d", &dirr("d")).unwrap();
+        c.put(a, "d/f", &file("f", 1)).unwrap();
+        c.put(a, "g", &file("g", 2)).unwrap();
+        c.put(b, "h", &file("h", 3)).unwrap();
         let mut guids = c.drop_layer(a).unwrap();
         guids.sort();
         assert_eq!(guids, vec![[1; 16], [2; 16]]);
@@ -941,12 +932,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
-        c.put(l, "a", &dirr("a"), false).unwrap();
-        c.put(l, "a/x", &file("x", 1), false).unwrap();
-        c.put(l, "a/sub", &dirr("sub"), false).unwrap();
-        c.put(l, "a/sub/y", &file("y", 2), false).unwrap();
-        c.put(l, "b", &dirr("b"), false).unwrap();
-        c.put(l, "ab", &file("ab", 4), false).unwrap(); // shares the prefix "a", not "a/"
+        c.put(l, "a", &dirr("a")).unwrap();
+        c.put(l, "a/x", &file("x", 1)).unwrap();
+        c.put(l, "a/sub", &dirr("sub")).unwrap();
+        c.put(l, "a/sub/y", &file("y", 2)).unwrap();
+        c.put(l, "b", &dirr("b")).unwrap();
+        c.put(l, "ab", &file("ab", 4)).unwrap(); // shares the prefix "a", not "a/"
         assert_eq!(c.rename(l, "a", "b", "B").unwrap(), Vec::<Guid>::new());
         assert_eq!(c.get(l, "b/x").unwrap().unwrap().guid, [1; 16]);
         assert_eq!(c.get(l, "b/sub/y").unwrap().unwrap().guid, [2; 16]);
@@ -968,8 +959,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
-        c.put(l, "new.ess", &file("new.ess", 1), false).unwrap();
-        c.put(l, "save.ess", &file("Save.ess", 2), false).unwrap();
+        c.put(l, "new.ess", &file("new.ess", 1)).unwrap();
+        c.put(l, "save.ess", &file("Save.ess", 2)).unwrap();
         assert_eq!(
             c.rename(l, "new.ess", "save.ess", "Save.ess").unwrap(),
             vec![[2; 16]]
@@ -984,11 +975,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
-        c.put(l, "a", &dirr("a"), false).unwrap();
-        c.put(l, "a/x", &file("x", 1), false).unwrap();
-        c.put(l, "b", &dirr("b"), false).unwrap();
-        c.put(l, "b/keep", &file("keep", 9), false).unwrap();
-        c.put(l, "f", &file("f", 3), false).unwrap();
+        c.put(l, "a", &dirr("a")).unwrap();
+        c.put(l, "a/x", &file("x", 1)).unwrap();
+        c.put(l, "b", &dirr("b")).unwrap();
+        c.put(l, "b/keep", &file("keep", 9)).unwrap();
+        c.put(l, "f", &file("f", 3)).unwrap();
         for from in ["a", "f"] {
             let err = c.rename(l, from, "b", "b").unwrap_err();
             assert!(matches!(err, StorageError::Exists(_)), "{err}");
@@ -999,7 +990,7 @@ mod tests {
         assert_eq!(c.get(l, "a/x").unwrap().unwrap().guid, [1; 16]);
         assert_eq!(c.get(l, "f").unwrap().unwrap().guid, [3; 16]);
         // A directory onto its own parent is the same refusal: the parent holds it.
-        c.put(l, "a/inner", &dirr("inner"), false).unwrap();
+        c.put(l, "a/inner", &dirr("inner")).unwrap();
         assert!(matches!(
             c.rename(l, "a/inner", "a", "a"),
             Err(StorageError::Exists(_))
@@ -1011,8 +1002,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
-        c.put(l, "a", &dirr("a"), false).unwrap();
-        c.put(l, "a/x", &file("x", 1), false).unwrap();
+        c.put(l, "a", &dirr("a")).unwrap();
+        c.put(l, "a/x", &file("x", 1)).unwrap();
         assert!(c.rename(l, "a", "A", "A").unwrap().is_empty());
         assert_eq!(c.get(l, "a").unwrap().unwrap().name, "A");
         assert_eq!(c.get(l, "a/x").unwrap().unwrap().guid, [1; 16]);
@@ -1023,7 +1014,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = open(&dir);
         let l = c.create_layer("p").unwrap();
-        c.put(l, "a", &dirr("a"), false).unwrap();
+        c.put(l, "a", &dirr("a")).unwrap();
         let missing = c.rename(l, "nope", "b", "b").unwrap_err();
         assert!(matches!(missing, StorageError::NotFound(_)), "{missing}");
         assert_eq!(missing.to_status(), vfs_provider::ST_NOT_FOUND);

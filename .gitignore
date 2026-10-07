@@ -4,4 +4,3 @@ target/
 .clj-kondo/.cache/
 .lsp/.cache/
 .superpowers/
-resources/native/

@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.89"
 description = "Deduplicating, compressing block store for a virtual file system cache"
 license = "GPL-3.0-only"
+publish = false
 
 [dependencies]
 blake3 = "1.8"
