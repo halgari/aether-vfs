@@ -1,4 +1,5 @@
 //! Hook entry points: the reentrancy guard, panic containment and the `extern "system"` wrappers.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
     close_hook_body, compress_key_hook_body, cpiw_hook_body, create_hook_body,
@@ -372,7 +373,10 @@ mod tests {
     unsafe fn panicking_hook_body(reached: *mut u32) -> NTSTATUS {
         let _frame = DropFlag(&HOOK_FRAME_DROPPED);
         if !reached.is_null() {
-            *reached = 1;
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                *reached = 1;
+            }
         }
         panic!("deliberate test panic inside a hook body");
     }
