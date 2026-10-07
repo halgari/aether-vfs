@@ -117,6 +117,15 @@ impl Provider for MemFixture {
         Ok(out)
     }
 
+    /// Exact-keyed, so the stored spelling is the last component of the path
+    /// given, when the entry exists.
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        if p.rel.is_empty() || self.getattr(p)?.is_none() {
+            return Ok(None);
+        }
+        Ok(p.rel.rsplit('/').next().map(str::to_string))
+    }
+
     fn open(&self, p: VPath, _flags: u32) -> Result<(Handle, u64, bool), i32> {
         let body = self.files.get(p.rel).ok_or_else(not_found)?.clone();
         let size = body.len() as u64;
@@ -268,6 +277,15 @@ impl Provider for RwMemFixture {
             preferred_block: None,
             case: CaseMatch::Sensitive,
         }
+    }
+
+    /// Exact-keyed, so the stored spelling is the last component of the path
+    /// given, when the entry exists.
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        if p.rel.is_empty() || self.getattr(p)?.is_none() {
+            return Ok(None);
+        }
+        Ok(p.rel.rsplit('/').next().map(str::to_string))
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
@@ -735,6 +753,7 @@ pub fn assert_conformance(p: Arc<dyn Provider>) {
 
     assert_common(&p);
     assert_case(&p, caps.case);
+    assert_stored_name(&p, caps.case);
     match caps.access {
         Access::SeqRead => assert_sequential(&p),
         Access::Read | Access::ReadWrite => assert_positional(&p),
@@ -742,6 +761,55 @@ pub fn assert_conformance(p: Arc<dyn Provider>) {
     if caps.access == Access::ReadWrite {
         assert_writable(&p); // last: these cases mutate
     }
+}
+
+/// `stored_name` is optional (`ST_NOT_SUPPORTED` is a legal answer), but a
+/// provider that answers must agree with the listing of the parent: the name
+/// the listing shows, for the seeded spelling and, when the provider folds
+/// case, for an upper-cased one; `None` for the root and for an absent path.
+fn assert_stored_name(p: &Arc<dyn Provider>, case: CaseMatch) {
+    let seeded = ["a.txt", "sub", "sub/b.txt"];
+    match p.stored_name(VPath::at_default(seeded[0])) {
+        Err(e) if e == crate::not_supported() => return,
+        _ => {}
+    }
+
+    for rel in seeded {
+        let (parent, last) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let listed = p
+            .readdir(VPath::at_default(parent))
+            .unwrap_or_else(|e| panic!("readdir({parent:?}) failed with status {e}"))
+            .into_iter()
+            .map(|e| e.name)
+            .find(|n| n == last)
+            .unwrap_or_else(|| panic!("readdir({parent:?}) does not list {last}"));
+
+        let mut queries = vec![rel.to_string()];
+        if case == CaseMatch::Insensitive {
+            queries.push(rel.to_uppercase());
+        }
+        for q in queries {
+            let got = p
+                .stored_name(VPath::at_default(&q))
+                .unwrap_or_else(|e| panic!("stored_name({q:?}) failed with status {e}"));
+            assert_eq!(
+                got.as_deref(),
+                Some(listed.as_str()),
+                "stored_name({q:?}) must be the name the listing of {parent:?} shows"
+            );
+        }
+    }
+
+    assert_eq!(
+        p.stored_name(VPath::at_default("")).expect("stored_name: provider root"),
+        None,
+        "the provider root has no name of its own"
+    );
+    assert_eq!(
+        p.stored_name(VPath::at_default("nope.txt")).expect("stored_name: absent path"),
+        None,
+        "stored_name of an absent path must be None"
+    );
 }
 
 fn assert_common(p: &Arc<dyn Provider>) {
@@ -1345,6 +1413,39 @@ mod tests {
     #[test]
     fn the_writable_fixture_passes_its_own_suite() {
         assert_conformance(std::sync::Arc::new(RwMemFixture::new()));
+    }
+
+    /// A provider whose `stored_name` is not the name its listing shows.
+    struct WrongSpelling(MemFixture);
+
+    impl Provider for WrongSpelling {
+        fn capabilities(&self) -> Capabilities {
+            self.0.capabilities()
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            self.0.getattr(p)
+        }
+        fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+            self.0.readdir(p)
+        }
+        fn open(&self, p: VPath, f: u32) -> Result<(Handle, u64, bool), i32> {
+            self.0.open(p, f)
+        }
+        fn close(&self, h: Handle) -> Result<(), i32> {
+            self.0.close(h)
+        }
+        fn read_at(&self, h: Handle, o: u64, b: &mut [u8]) -> Result<usize, i32> {
+            self.0.read_at(h, o, b)
+        }
+        fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+            Ok(self.0.stored_name(p)?.map(|n| n.to_uppercase()))
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "stored_name")]
+    fn a_stored_name_that_disagrees_with_the_listing_fails_the_suite() {
+        assert_conformance(std::sync::Arc::new(WrongSpelling(MemFixture::new())));
     }
 
     #[test]
