@@ -1078,7 +1078,6 @@ impl Session {
         let host = layer
             .map(|l| RegistryHost::open_with_sync(l, sync))
             .transpose()?;
-        let attached = host.is_some();
         let old = self.kernel.registry();
         // Made durable before the swap: nothing of the old layer may be lost,
         // and a failure leaves the old host attached.
@@ -1086,19 +1085,11 @@ impl Session {
             old.durable()?;
         }
         self.kernel.set_registry(host);
-        // Windows children inherit this process's environment; a unix launch
-        // builds its own (`WineLaunch::registry`).
-        #[cfg(windows)]
-        {
-            let _guard = LAUNCH_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            if attached {
-                std::env::set_var(vfs_env::REGISTRY, "1");
-            } else {
-                std::env::remove_var(vfs_env::REGISTRY);
-            }
-        }
-        #[cfg(not(windows))]
-        let _ = attached;
+        // `VFS_REGISTRY` reaches a child through `launch`: `apply_env_roots`
+        // sets or clears it, under `LAUNCH_ENV_LOCK`, from
+        // `registry_attached()` on every serve and launch (a unix launch
+        // builds its own environment, `WineLaunch::registry`). So this does
+        // not write process env.
         // The old host is dropped here, already clean, so its drop-time save
         // writes nothing.
         drop(old);
