@@ -22,7 +22,7 @@
 //! (`install_late`), where the pointers come from another module's memory. Nothing here needs
 //! `SeqCst`: a slot has one writer at a time (install) and independent readers.
 #![allow(unsafe_code)]
-// Unused until the hook families move onto it, one commit each; removed with the first.
+// `RawTramp::load` is only used once the registry family moves onto the table.
 #![allow(dead_code)]
 
 use core::marker::PhantomData;

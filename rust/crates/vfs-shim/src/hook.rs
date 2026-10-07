@@ -196,6 +196,8 @@ macro_rules! entry_points_from_table {
         {
             export: $export:literal,
             stat: [$($stat:tt)*],
+            tramp: $tramp:ident: $fnty:ty,
+            install: $kind:ident, group: $group:ident, flags: [$($flag:ident),*],
             $(#[$attr:meta])*
             hook: $wrapper:ident = $body:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty,
             on_panic: $fallback:expr,
@@ -238,20 +240,27 @@ fn child_cwd_root() -> bool {
 
 use retour::RawDetour;
 use vfs_redirect::{
-    nt_to_volume_relative, write_dir_info, write_file_name_info, Decision, DirInfoClass, DirItem,
-    DirStatus, SYNTH_FILETIME,
+    Decision, DirInfoClass, DirItem, DirStatus, SYNTH_FILETIME, nt_to_volume_relative,
+    write_dir_info, write_file_name_info,
 };
 use windows_sys::Win32::Foundation::{ERROR_INTERNAL_ERROR, HANDLE, HMODULE, NTSTATUS};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows_sys::Win32::System::Threading::{
-    ResumeThread, CREATE_SUSPENDED, PROCESS_INFORMATION, STARTUPINFOW,
+    CREATE_SUSPENDED, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW,
 };
 
 use crate::engine::Engine;
 use crate::inject::{inject_child, re_suspend, self_dll_path};
 use crate::ntbuf::OwnedOa;
 use crate::ntdef::{
-    FileBasicInformation, FileEndOfFileInformation, FileFsDeviceInformation,
+    FILE_ALL_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_TAG_INFORMATION, FILE_BASIC_INFORMATION, FILE_CREATED, FILE_DEVICE_DISK,
+    FILE_DIRECTORY_FILE, FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION,
+    FILE_DISPOSITION_INFORMATION_EX, FILE_END_OF_FILE_INFORMATION, FILE_FS_DEVICE_INFORMATION,
+    FILE_ID_INFORMATION, FILE_INTERNAL_INFORMATION, FILE_NAME_INFORMATION,
+    FILE_NETWORK_OPEN_INFORMATION, FILE_NORMALIZED_NAME_INFORMATION, FILE_POSITION_INFORMATION,
+    FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_EX, FILE_STANDARD_INFORMATION,
+    FILE_STAT_INFORMATION, FileBasicInformation, FileEndOfFileInformation, FileFsDeviceInformation,
     FileInternalInformation, FileNetworkOpenInformation, FilePositionInformation,
     FileStandardInformation, NtCloseFn, NtCreateFileFn, NtCreateKeyFn, NtCreateKeyTransactedFn,
     NtCreateSectionFn, NtDeleteFileFn, NtDeleteKeyFn, NtDeleteValueKeyFn, NtDuplicateObjectFn,
@@ -265,22 +274,16 @@ use crate::ntdef::{
     NtReadFileFn, NtRenameKeyFn, NtReplaceKeyFn, NtRestoreKeyFn, NtSaveKeyExFn, NtSaveKeyFn,
     NtSaveMergedKeysFn, NtSetInformationFileFn, NtSetInformationKeyFn, NtSetInformationObjectFn,
     NtSetSecurityObjectFn, NtSetValueKeyFn, NtUnloadKey2Fn, NtUnloadKeyFn, NtUnlockFileFn,
-    NtUnmapViewOfSectionFn, NtWriteFileFn, ObjectAttributes, UnicodeString, FILE_ALL_INFORMATION,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFORMATION,
-    FILE_BASIC_INFORMATION, FILE_CREATED, FILE_DEVICE_DISK, FILE_DIRECTORY_FILE,
-    FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION, FILE_DISPOSITION_INFORMATION_EX,
-    FILE_END_OF_FILE_INFORMATION, FILE_FS_DEVICE_INFORMATION, FILE_ID_INFORMATION,
-    FILE_INTERNAL_INFORMATION, FILE_NAME_INFORMATION, FILE_NETWORK_OPEN_INFORMATION,
-    FILE_NORMALIZED_NAME_INFORMATION, FILE_POSITION_INFORMATION, FILE_RENAME_INFORMATION,
-    FILE_RENAME_INFORMATION_EX, FILE_STANDARD_INFORMATION, FILE_STAT_INFORMATION,
-    OBJECT_NAME_INFORMATION, OBJECT_NAME_INFORMATION_HEADER, SEC_IMAGE, SL_RESTART_SCAN,
-    SL_RETURN_SINGLE_ENTRY, STATUS_ACCESS_DENIED, STATUS_BUFFER_OVERFLOW, STATUS_END_OF_FILE,
-    STATUS_FILE_IS_A_DIRECTORY, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_FILE_FOR_SECTION,
-    STATUS_INVALID_HANDLE, STATUS_NOT_SUPPORTED, STATUS_NO_MORE_FILES,
-    STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
-    STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SECTION_TOO_BIG, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+    NtUnmapViewOfSectionFn, NtWriteFileFn, OBJECT_NAME_INFORMATION, OBJECT_NAME_INFORMATION_HEADER,
+    ObjectAttributes, SEC_IMAGE, SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_ACCESS_DENIED,
+    STATUS_BUFFER_OVERFLOW, STATUS_END_OF_FILE, STATUS_FILE_IS_A_DIRECTORY,
+    STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_FILE_FOR_SECTION, STATUS_INVALID_HANDLE,
+    STATUS_NO_MORE_FILES, STATUS_NOT_SUPPORTED, STATUS_OBJECT_NAME_COLLISION,
+    STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
+    STATUS_SECTION_TOO_BIG, STATUS_SUCCESS, STATUS_UNSUCCESSFUL, UnicodeString,
 };
 use crate::overlay::OverlayState;
+use crate::tramp::{RawTramp, Tramp};
 
 /// Errors installing the hooks.
 #[derive(Debug)]
@@ -292,21 +295,169 @@ pub enum InstallError {
 }
 
 static ENGINE: OnceLock<Engine> = OnceLock::new();
-// Each set once, before any detour is enabled; only read from the hooks after.
-static mut TRAMP_CREATE: Option<NtCreateFileFn> = None;
-static mut TRAMP_QATTR: Option<NtQueryAttributesFileFn> = None;
-static mut TRAMP_QFULL: Option<NtQueryFullAttributesFileFn> = None;
-static mut TRAMP_OPEN: Option<NtOpenFileFn> = None;
-static mut TRAMP_QDIREX: Option<NtQueryDirectoryFileExFn> = None;
-static mut TRAMP_QDIR: Option<NtQueryDirectoryFileFn> = None;
-static mut TRAMP_QIBN: Option<NtQueryInformationByNameFn> = None;
-static mut TRAMP_DELETE: Option<NtDeleteFileFn> = None;
-static mut TRAMP_CLOSE: Option<NtCloseFn> = None;
-static mut TRAMP_QIF: Option<NtQueryInformationFileFn> = None;
-static mut TRAMP_QOBJ: Option<NtQueryObjectFn> = None;
-static mut TRAMP_SETINFO: Option<NtSetInformationFileFn> = None;
-static mut TRAMP_READ: Option<NtReadFileFn> = None;
-static mut TRAMP_WRITE: Option<NtWriteFileFn> = None;
+// The trampoline slots, one `Tramp` per row of `detour_table!`. Each is set once, before its
+// detour is enabled, and only read from the hooks after.
+//
+// Families move onto the table one commit at a time: a group listed in `tramp_static!` has its
+// slot generated here; the others are still the hand-written `static mut`s below.
+macro_rules! tramp_static {
+    (File, $name:ident, $ty:ty) => {
+        static $name: Tramp<$ty> = Tramp::new();
+    };
+    ($other:ident, $name:ident, $ty:ty) => {};
+}
+
+macro_rules! tramp_statics_from_table {
+    ($(
+        {
+            export: $export:literal,
+            stat: [$($stat:tt)*],
+            tramp: $tramp:ident: $fnty:ty,
+            install: $kind:ident, group: $group:ident, flags: [$($flag:ident),*],
+            $($rest:tt)*
+        }
+    )*) => {
+        $(tramp_static!($group, $tramp, $fnty);)*
+    };
+}
+
+detour_table!(tramp_statics_from_table);
+
+/// What the install does with a detour whose export is missing or cannot be enabled.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Install {
+    /// Failure aborts the whole install ([`InstallError`]).
+    Required,
+    /// Skipped, and the export name is added to [`skipped_detours`].
+    Optional,
+    /// An export ntdll does not have is skipped silently (it cannot be called, so nothing goes
+    /// unvirtualised without it); one it has that cannot be detoured is reported like `Optional`.
+    IfPresent,
+    /// Skipped silently, whatever the reason.
+    BestEffort,
+}
+
+/// Which install pass a detour belongs to.
+// `Registry` and `Process` rows are not generated yet; the allow goes with the last family.
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Group {
+    File,
+    /// Only with `VFS_REGISTRY` set; all or nothing (`regclient::detours_installed`).
+    Registry,
+    Process,
+}
+
+// `RawFallback` is used by the registry family.
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Flag {
+    /// Owned by the early payload in a dual-layer install: not detoured by `install_late`.
+    Early,
+    /// The slot holds ntdll's own export whenever the detour is not installed.
+    RawFallback,
+    /// The registry overlay cannot run without it: a miss is added to its `missing` set.
+    NeededByRegistry,
+}
+
+/// One row of `detour_table!`, at run time.
+struct Detour {
+    export: &'static core::ffi::CStr,
+    hook: *const (),
+    tramp: &'static RawTramp,
+    install: Install,
+    group: Group,
+    flags: &'static [Flag],
+}
+
+macro_rules! detour_row {
+    (File, $export:literal, $hook:ident, $tramp:ident, $kind:ident, $group:ident,
+     [$($flag:ident),*]) => {
+        Some(Detour {
+            export: match core::ffi::CStr::from_bytes_with_nul(concat!($export, "\0").as_bytes()) {
+                Ok(c) => c,
+                Err(_) => panic!("export name has a NUL"),
+            },
+            hook: $hook as *const (),
+            tramp: $tramp.raw(),
+            install: Install::$kind,
+            group: Group::$group,
+            flags: &[$(Flag::$flag),*],
+        })
+    };
+    ($other:ident, $export:literal, $hook:ident, $tramp:ident, $kind:ident, $group:ident,
+     [$($flag:ident),*]) => {
+        None
+    };
+}
+
+macro_rules! detours_from_table {
+    ($(
+        {
+            export: $export:literal,
+            stat: [$($stat:tt)*],
+            tramp: $tramp:ident: $fnty:ty,
+            install: $kind:ident, group: $group:ident, flags: [$($flag:ident),*],
+            $(#[$attr:meta])*
+            hook: $hook:ident = $($rest:tt)*
+        }
+    )*) => {
+        /// Every detour, in install order.
+        fn detour_rows() -> Vec<Detour> {
+            [$(detour_row!($group, $export, $hook, $tramp, $kind, $group, [$($flag),*])),*]
+                .into_iter()
+                .flatten()
+                .collect()
+        }
+    };
+}
+
+detour_table!(detours_from_table);
+
+impl Detour {
+    fn has(&self, flag: Flag) -> bool {
+        self.flags.contains(&flag)
+    }
+
+    fn label(&self) -> &'static str {
+        self.export.to_str().unwrap_or("?")
+    }
+
+    /// Build the detour and store its trampoline. **The store comes before the enable**, so no
+    /// call can reach the hook while its trampoline is unset.
+    unsafe fn prepare(&self, lib: HMODULE) -> Result<RawDetour, InstallError> {
+        let d = make_detour(lib, self.export, self.hook)?;
+        // SAFETY: `d`'s trampoline calls this export, whose type the table gave the slot.
+        self.tramp.store(Some(d.trampoline() as *const ()));
+        Ok(d)
+    }
+
+    /// `prepare` + enable for a row that may be skipped: `true` when it is in. A failure clears
+    /// the slot again (`BestEffort` leaves it, as the hand-written install did: a detour that is
+    /// not enabled never calls its hook). `Optional` and `IfPresent` failures are noted in
+    /// [`SKIPPED_DETOURS`].
+    unsafe fn install_soft(&self, lib: HMODULE, detours: &mut Vec<RawDetour>) -> bool {
+        if self.install == Install::IfPresent
+            && GetProcAddress(lib, self.export.as_ptr().cast()).is_none()
+        {
+            return true;
+        }
+        if let Ok(d) = self.prepare(lib) {
+            if d.enable().is_ok() {
+                detours.push(d);
+                return true;
+            }
+            if self.install != Install::BestEffort {
+                self.tramp.store(None);
+            }
+        }
+        if self.install != Install::BestEffort {
+            note_skipped_detour(self.label());
+        }
+        false
+    }
+}
+
 /// The volume every synthetic handle says it is on, where a volume serial
 /// number is asked for together with a file id: two ids are only comparable
 /// on one volume, and every virtual file is on this one.
@@ -317,13 +468,6 @@ static mut TRAMP_WRITE: Option<NtWriteFileFn> = None;
 /// one handle is on.
 const SYNTH_VOLUME_SERIAL: u64 = 0x5646_5300;
 
-static mut TRAMP_CREATE_SECTION: Option<NtCreateSectionFn> = None;
-static mut TRAMP_MAP_VIEW: Option<NtMapViewOfSectionFn> = None;
-static mut TRAMP_UNMAP_VIEW: Option<NtUnmapViewOfSectionFn> = None;
-static mut TRAMP_QVOL: Option<NtQueryVolumeInformationFileFn> = None;
-static mut TRAMP_LOCK: Option<NtLockFileFn> = None;
-static mut TRAMP_UNLOCK: Option<NtUnlockFileFn> = None;
-static mut TRAMP_FLUSH: Option<NtFlushBuffersFileFn> = None;
 static mut TRAMP_CPIW: Option<CreateProcessInternalWFn> = None;
 // Registry overlay (registry_hooks below).
 static mut TRAMP_OPEN_KEY: Option<NtOpenKeyFn> = None;
@@ -599,16 +743,19 @@ pub unsafe fn install_late(
     unsafe {
         let cfg = &mut *payload_cfg;
         // Call originals via the early payload's trampolines (real ntdll tails).
-        TRAMP_CREATE = Some(core::mem::transmute::<usize, NtCreateFileFn>(
+        TRAMP_CREATE.set(Some(core::mem::transmute::<usize, NtCreateFileFn>(
             cfg.create_tramp,
+        )));
+        TRAMP_OPEN.set(Some(core::mem::transmute::<usize, NtOpenFileFn>(
+            cfg.open_tramp,
+        )));
+        TRAMP_QATTR.set(Some(
+            core::mem::transmute::<usize, NtQueryAttributesFileFn>(cfg.qattr_tramp),
         ));
-        TRAMP_OPEN = Some(core::mem::transmute::<usize, NtOpenFileFn>(cfg.open_tramp));
-        TRAMP_QATTR = Some(core::mem::transmute::<usize, NtQueryAttributesFileFn>(
-            cfg.qattr_tramp,
-        ));
-        TRAMP_QFULL = Some(core::mem::transmute::<usize, NtQueryFullAttributesFileFn>(
-            cfg.qfull_tramp,
-        ));
+        TRAMP_QFULL.set(Some(core::mem::transmute::<
+            usize,
+            NtQueryFullAttributesFileFn,
+        >(cfg.qfull_tramp)));
 
         // Publish secondary last-ish: hooks become Engine-backed for non-table paths.
         core::ptr::write_volatile(&mut cfg.secondary_create, create_hook as *const () as usize);
@@ -623,188 +770,49 @@ pub unsafe fn install_late(
 
 /// `patch_early_owned`: when true, also detour the four path/attr stubs
 /// (standalone install). When false, only remainder detours (dual-layer).
+///
+/// The file detours are walked in `detour_table!` order, which is the install order:
+///
+///  1. the `Early` rows, if asked: every one is built and has its trampoline stored, then all
+///     are enabled;
+///  2. the other file rows in order. A `Required` one is built and stored but **not yet
+///     enabled**; an `Optional` one is enabled at once (it may turn out absent);
+///  3. `host_name_convention` is decided, then the `Required` rows from step 2 are enabled.
 unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, InstallError> {
     let ntdll = GetModuleHandleA(c"ntdll.dll".as_ptr().cast());
     if ntdll.is_null() {
         return Err(InstallError::NtdllMissing);
     }
 
+    let rows = detour_rows();
     let mut detours: Vec<RawDetour> = Vec::new();
 
     if patch_early_owned {
-        let d_create = make_detour(ntdll, c"NtCreateFile", create_hook as *const ())?;
-        TRAMP_CREATE = Some(core::mem::transmute::<*const (), NtCreateFileFn>(
-            d_create.trampoline() as *const (),
-        ));
-        let d_qattr = make_detour(ntdll, c"NtQueryAttributesFile", qattr_hook as *const ())?;
-        TRAMP_QATTR = Some(core::mem::transmute::<*const (), NtQueryAttributesFileFn>(
-            d_qattr.trampoline() as *const (),
-        ));
-        let d_qfull = make_detour(ntdll, c"NtQueryFullAttributesFile", qfull_hook as *const ())?;
-        TRAMP_QFULL = Some(
-            core::mem::transmute::<*const (), NtQueryFullAttributesFileFn>(
-                d_qfull.trampoline() as *const ()
-            ),
-        );
-        let d_open = make_detour(ntdll, c"NtOpenFile", open_hook as *const ())?;
-        TRAMP_OPEN = Some(core::mem::transmute::<*const (), NtOpenFileFn>(
-            d_open.trampoline() as *const (),
-        ));
-        d_create.enable().map_err(|_| InstallError::Detour)?;
-        d_qattr.enable().map_err(|_| InstallError::Detour)?;
-        d_qfull.enable().map_err(|_| InstallError::Detour)?;
-        d_open.enable().map_err(|_| InstallError::Detour)?;
-        detours.extend([d_create, d_qattr, d_qfull, d_open]);
+        let mut early = Vec::new();
+        for d in rows
+            .iter()
+            .filter(|d| d.group == Group::File && d.has(Flag::Early))
+        {
+            early.push(d.prepare(ntdll)?);
+        }
+        for d in &early {
+            d.enable().map_err(|_| InstallError::Detour)?;
+        }
+        detours.extend(early);
     }
 
-    // Present since Win8, and optional for the same reason `NtQueryInformationByName`
-    // below is: a host may not export it. Measured against GE-Proton11-6
-    // (Wine 11.0 Staging), whose ntdll omits exactly these two of the
-    // functions installed here.
-    //
-    // Skipping it costs no coverage on such a host. `make_detour` fails because
-    // `GetProcAddress` found nothing, and a symbol absent from ntdll's export
-    // table is equally unreachable for the game — it cannot be resolved
-    // dynamically and a static import against it would fail module load. So the
-    // only reachable enumeration entry point there is `NtQueryDirectoryFile`,
-    // hooked unconditionally just below.
-    //
-    // This is NOT licence to let enumeration go unhooked where the export does
-    // exist: on Windows both are present and both are hooked, and a caller on an
-    // unhooked enumeration path sees the real, near-empty folder and leaves no
-    // trace anywhere. `skipped_detours()` reports what was passed over so a host
-    // that expects total coverage can assert it rather than discover the hole
-    // from a mod list that silently reads empty.
-    // Tracked in a local rather than by reading `TRAMP_QDIREX` back: taking a
-    // shared reference to a `static mut` is undefined behaviour if anything
-    // mutates it concurrently, and `static_mut_refs` rightly denies it.
-    let mut qdirex_installed = false;
-    if let Ok(d_qdirex) = make_detour(ntdll, c"NtQueryDirectoryFileEx", qdirex_hook as *const ()) {
-        TRAMP_QDIREX = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileExFn>(
-            d_qdirex.trampoline() as *const (),
-        ));
-        if d_qdirex.enable().is_ok() {
-            detours.push(d_qdirex);
-            qdirex_installed = true;
-        } else {
-            TRAMP_QDIREX = None;
+    // File detours the registry overlay depends on that are not in (`NeededByRegistry`).
+    let mut registry_missing: Vec<&'static str> = Vec::new();
+    let mut deferred = Vec::new();
+    for d in rows
+        .iter()
+        .filter(|d| d.group == Group::File && !d.has(Flag::Early))
+    {
+        if d.install == Install::Required {
+            deferred.push(d.prepare(ntdll)?);
+        } else if !d.install_soft(ntdll, &mut detours) && d.has(Flag::NeededByRegistry) {
+            registry_missing.push(d.label());
         }
-    }
-    if !qdirex_installed {
-        note_skipped_detour("NtQueryDirectoryFileEx");
-    }
-    // Both enumeration exports must be covered: whichever one the caller picks
-    // decides whether it sees the composed tree or the real, near-empty folder
-    // behind it, and a caller on the unhooked one leaves no trace anywhere.
-    let d_qdir = make_detour(ntdll, c"NtQueryDirectoryFile", qdir_hook as *const ())?;
-    TRAMP_QDIR = Some(core::mem::transmute::<*const (), NtQueryDirectoryFileFn>(
-        d_qdir.trampoline() as *const (),
-    ));
-    // The path-based delete. It is not optional and not a nicety: it takes no
-    // handle, so an unhooked call resolves the `OBJECT_ATTRIBUTES` path itself
-    // and deletes the file that is really there, under a managed root or not.
-    // See `delete_hook`.
-    let d_delete = make_detour(ntdll, c"NtDeleteFile", delete_hook as *const ())?;
-    TRAMP_DELETE = Some(core::mem::transmute::<*const (), NtDeleteFileFn>(
-        d_delete.trampoline() as *const (),
-    ));
-    let d_close = make_detour(ntdll, c"NtClose", close_hook as *const ())?;
-    TRAMP_CLOSE = Some(core::mem::transmute::<*const (), NtCloseFn>(
-        d_close.trampoline() as *const (),
-    ));
-    let d_qif = make_detour(ntdll, c"NtQueryInformationFile", qif_hook as *const ())?;
-    TRAMP_QIF = Some(core::mem::transmute::<*const (), NtQueryInformationFileFn>(
-        d_qif.trampoline() as *const (),
-    ));
-    let d_setinfo = make_detour(ntdll, c"NtSetInformationFile", setinfo_hook as *const ())?;
-    TRAMP_SETINFO = Some(core::mem::transmute::<*const (), NtSetInformationFileFn>(
-        d_setinfo.trampoline() as *const (),
-    ));
-    let d_read = make_detour(ntdll, c"NtReadFile", read_hook as *const ())?;
-    TRAMP_READ = Some(core::mem::transmute::<*const (), NtReadFileFn>(
-        d_read.trampoline() as *const (),
-    ));
-    let d_write = make_detour(ntdll, c"NtWriteFile", write_hook as *const ())?;
-    TRAMP_WRITE = Some(core::mem::transmute::<*const (), NtWriteFileFn>(
-        d_write.trampoline() as *const (),
-    ));
-    let d_csec = make_detour(ntdll, c"NtCreateSection", create_section_hook as *const ())?;
-    TRAMP_CREATE_SECTION = Some(core::mem::transmute::<*const (), NtCreateSectionFn>(
-        d_csec.trampoline() as *const (),
-    ));
-    let d_map = make_detour(ntdll, c"NtMapViewOfSection", map_view_hook as *const ())?;
-    TRAMP_MAP_VIEW = Some(core::mem::transmute::<*const (), NtMapViewOfSectionFn>(
-        d_map.trampoline() as *const (),
-    ));
-    let d_unmap = make_detour(ntdll, c"NtUnmapViewOfSection", unmap_view_hook as *const ())?;
-    TRAMP_UNMAP_VIEW = Some(core::mem::transmute::<*const (), NtUnmapViewOfSectionFn>(
-        d_unmap.trampoline() as *const (),
-    ));
-    let d_qvol = make_detour(
-        ntdll,
-        c"NtQueryVolumeInformationFile",
-        qvol_hook as *const (),
-    )?;
-    TRAMP_QVOL = Some(core::mem::transmute::<
-        *const (),
-        NtQueryVolumeInformationFileFn,
-    >(d_qvol.trampoline() as *const ()));
-    // The lock/flush trio. Without these a synthetic handle is not merely
-    // missing a feature — the *next* call after a successful open fails, and
-    // the caller abandons the file entirely. See `lock_hook`.
-    let d_lock = make_detour(ntdll, c"NtLockFile", lock_hook as *const ())?;
-    TRAMP_LOCK = Some(core::mem::transmute::<*const (), NtLockFileFn>(
-        d_lock.trampoline() as *const (),
-    ));
-    let d_unlock = make_detour(ntdll, c"NtUnlockFile", unlock_hook as *const ())?;
-    TRAMP_UNLOCK = Some(core::mem::transmute::<*const (), NtUnlockFileFn>(
-        d_unlock.trampoline() as *const (),
-    ));
-    let d_flush = make_detour(ntdll, c"NtFlushBuffersFile", flush_hook as *const ())?;
-    TRAMP_FLUSH = Some(core::mem::transmute::<*const (), NtFlushBuffersFileFn>(
-        d_flush.trampoline() as *const (),
-    ));
-
-    // Present since Win10 1709. Optional so an older host still installs.
-    let mut qibn_installed = false;
-    if let Ok(d_qibn) = make_detour(ntdll, c"NtQueryInformationByName", qibn_hook as *const ()) {
-        TRAMP_QIBN = Some(
-            core::mem::transmute::<*const (), NtQueryInformationByNameFn>(
-                d_qibn.trampoline() as *const ()
-            ),
-        );
-        if d_qibn.enable().is_ok() {
-            detours.push(d_qibn);
-            qibn_installed = true;
-        } else {
-            TRAMP_QIBN = None;
-        }
-    }
-    if !qibn_installed {
-        note_skipped_detour("NtQueryInformationByName");
-    }
-
-    // The other half of handle identity, beside `NtQueryInformationFile`'s
-    // class-48 spoof: `GetFinalPathNameByHandleW` reaches
-    // `NtQueryInformationFile` on Windows and `NtQueryObject` here on Wine, so
-    // leaving this one unhooked leaks the backing path on whichever host takes
-    // the other route. Optional in the same style as the two above only because
-    // a host might not export it — both hosts measured here do, so
-    // `skipped_detours()` stays empty and `tests/hook_coverage.rs` asserts it.
-    let mut qobj_installed = false;
-    if let Ok(d_qobj) = make_detour(ntdll, c"NtQueryObject", qobj_hook as *const ()) {
-        TRAMP_QOBJ = Some(core::mem::transmute::<*const (), NtQueryObjectFn>(
-            d_qobj.trampoline() as *const (),
-        ));
-        if d_qobj.enable().is_ok() {
-            detours.push(d_qobj);
-            qobj_installed = true;
-        } else {
-            TRAMP_QOBJ = None;
-        }
-    }
-    if !qobj_installed {
-        note_skipped_detour("NtQueryObject");
     }
     // Decided here, once, rather than inside the first name query: its
     // fallback asks the loader for a module, and a hook that takes the loader
@@ -812,26 +820,13 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     // holds the loader lock and makes a name query of its own.
     let _ = host_name_convention();
 
-    d_qdir.enable().map_err(|_| InstallError::Detour)?;
-    d_delete.enable().map_err(|_| InstallError::Detour)?;
-    d_close.enable().map_err(|_| InstallError::Detour)?;
-    d_qif.enable().map_err(|_| InstallError::Detour)?;
-    d_setinfo.enable().map_err(|_| InstallError::Detour)?;
-    d_read.enable().map_err(|_| InstallError::Detour)?;
-    d_write.enable().map_err(|_| InstallError::Detour)?;
-    d_csec.enable().map_err(|_| InstallError::Detour)?;
-    d_map.enable().map_err(|_| InstallError::Detour)?;
-    d_unmap.enable().map_err(|_| InstallError::Detour)?;
-    d_qvol.enable().map_err(|_| InstallError::Detour)?;
-    d_lock.enable().map_err(|_| InstallError::Detour)?;
-    d_unlock.enable().map_err(|_| InstallError::Detour)?;
-    d_flush.enable().map_err(|_| InstallError::Detour)?;
+    for d in &deferred {
+        d.enable().map_err(|_| InstallError::Detour)?;
+    }
     // Every enabled detour must be kept alive here: dropping one silently
     // un-patches it, which reads exactly like "the process never calls this".
-    detours.extend([
-        d_qdir, d_delete, d_close, d_qif, d_setinfo, d_read, d_write, d_csec, d_map, d_unmap,
-        d_qvol, d_lock, d_unlock, d_flush,
-    ]);
+    detours.extend(deferred);
+    let qobj_installed = registry_missing.is_empty();
 
     // The registry overlay's detours go in only when the host asked for the overlay
     // (`VFS_REGISTRY`): with it unset this process's registry calls, and its process-wide
@@ -1336,13 +1331,13 @@ pub(crate) unsafe fn reg_real() -> crate::regkeys::Real {
     crate::regkeys::Real {
         open_ex: TRAMP_OPEN_KEY_EX,
         query: TRAMP_QUERY_KEY,
-        close: TRAMP_CLOSE,
+        close: TRAMP_CLOSE.get(),
         dup: TRAMP_DUP,
         enum_key: TRAMP_ENUM_KEY,
         query_value: TRAMP_QUERY_VALUE,
         enum_value: TRAMP_ENUM_VALUE,
         query_multiple: TRAMP_QUERY_MULTIPLE,
-        query_object: TRAMP_QOBJ,
+        query_object: TRAMP_QOBJ.get(),
     }
 }
 
@@ -3260,7 +3255,7 @@ unsafe fn create_hook_body(
     ealen: u32,
 ) -> NTSTATUS {
     let mut _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Create);
-    let tramp = match TRAMP_CREATE {
+    let tramp = match TRAMP_CREATE.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -3531,7 +3526,7 @@ unsafe fn open_hook_body(
     opts: u32,
 ) -> NTSTATUS {
     let mut _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Open);
-    let tramp = match TRAMP_OPEN {
+    let tramp = match TRAMP_OPEN.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -3720,7 +3715,7 @@ unsafe fn qibn_hook_body(
     class_raw: u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QByName);
-    let tramp = match TRAMP_QIBN {
+    let tramp = match TRAMP_QIBN.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -3792,7 +3787,7 @@ unsafe fn qattr_hook_body(
     info: *mut FileBasicInformation,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QAttr);
-    let tramp = match TRAMP_QATTR {
+    let tramp = match TRAMP_QATTR.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -3873,7 +3868,7 @@ unsafe fn qfull_hook_body(
     info: *mut FileNetworkOpenInformation,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QFull);
-    let tramp = match TRAMP_QFULL {
+    let tramp = match TRAMP_QFULL.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -3955,7 +3950,7 @@ unsafe fn qfull_hook_body(
 unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Close);
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::ENTER);
-    let tramp = match TRAMP_CLOSE {
+    let tramp = match TRAMP_CLOSE.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -4088,7 +4083,7 @@ unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
 /// rest of it.
 unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::DeleteFile);
-    let tramp = match TRAMP_DELETE {
+    let tramp = match TRAMP_DELETE.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -4293,7 +4288,7 @@ unsafe fn setinfo_hook_body(
     class: u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetInfo);
-    let tramp = match TRAMP_SETINFO {
+    let tramp = match TRAMP_SETINFO.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -4587,7 +4582,7 @@ fn host_name_convention() -> &'static str {
         // buffer of the length it is told.
         #[allow(unsafe_code)]
         let probed = unsafe {
-            match (TRAMP_QOBJ, cwd_from_peb()) {
+            match (TRAMP_QOBJ.get(), cwd_from_peb()) {
                 (Some(tramp), Some((cwd, _))) => {
                     let mut scratch = vec![0u8; 2048];
                     let mut need = 0u32;
@@ -4905,7 +4900,7 @@ unsafe fn qvol_hook_body(
     class: u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QVol);
-    let tramp = match TRAMP_QVOL {
+    let tramp = match TRAMP_QVOL.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -5042,7 +5037,7 @@ unsafe fn lock_hook_body(
     exclusive: u8,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Lock);
-    let tramp = match TRAMP_LOCK {
+    let tramp = match TRAMP_LOCK.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -5094,7 +5089,7 @@ unsafe fn unlock_hook_body(
     key: u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Unlock);
-    let tramp = match TRAMP_UNLOCK {
+    let tramp = match TRAMP_UNLOCK.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -5118,7 +5113,7 @@ unsafe fn unlock_hook_body(
 /// it can actually guarantee is that they reached the director.
 unsafe fn flush_hook_body(handle: HANDLE, iosb: *mut c_void) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::FlushBuffers);
-    let tramp = match TRAMP_FLUSH {
+    let tramp = match TRAMP_FLUSH.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -5171,7 +5166,7 @@ unsafe fn qif_hook_body(
     class: u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QueryInfo);
-    let tramp = match TRAMP_QIF {
+    let tramp = match TRAMP_QIF.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -5317,7 +5312,7 @@ unsafe fn qobj_hook_body(
     ret_len: *mut u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QObj);
-    let tramp = match TRAMP_QOBJ {
+    let tramp = match TRAMP_QOBJ.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -5518,7 +5513,7 @@ unsafe fn write_hook_body(
     key: *const u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Write);
-    let tramp = match TRAMP_WRITE {
+    let tramp = match TRAMP_WRITE.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -5617,7 +5612,7 @@ unsafe fn read_hook_body(
     key: *const u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Read);
-    let tramp = match TRAMP_READ {
+    let tramp = match TRAMP_READ.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -5896,7 +5891,7 @@ unsafe fn fuse_create_section(
         return STATUS_UNSUCCESSFUL;
     };
     use windows_sys::Win32::System::Memory::{
-        VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
     };
     let map_len = size as usize;
     let base = VirtualAlloc(
@@ -5967,7 +5962,7 @@ unsafe fn create_section_hook_body(
     file_handle: HANDLE,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::CreateSection);
-    let tramp = match TRAMP_CREATE_SECTION {
+    let tramp = match TRAMP_CREATE_SECTION.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -6016,7 +6011,7 @@ unsafe fn map_view_hook_body(
     protect: u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::MapView);
-    let tramp = match TRAMP_MAP_VIEW {
+    let tramp = match TRAMP_MAP_VIEW.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -6077,7 +6072,7 @@ unsafe fn map_view_hook_body(
 /// the last reference to one does not tear the memory down here — the region
 /// belongs to whoever mapped it (see `lazy_section::on_section_closed`).
 unsafe fn unmap_view_hook_body(process: HANDLE, base: *mut c_void) -> NTSTATUS {
-    let tramp = match TRAMP_UNMAP_VIEW {
+    let tramp = match TRAMP_UNMAP_VIEW.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -6187,7 +6182,7 @@ unsafe fn qdirex_hook_body(
     file_name: *const UnicodeString,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QDirEx);
-    let tramp = match TRAMP_QDIREX {
+    let tramp = match TRAMP_QDIREX.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
@@ -6224,7 +6219,7 @@ unsafe fn qdir_hook_body(
     restart: u8,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QDir);
-    let tramp = match TRAMP_QDIR {
+    let tramp = match TRAMP_QDIR.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
