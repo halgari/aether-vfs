@@ -86,12 +86,12 @@ unsafe fn try_fuse_create(
 
     // Every under-root open, read and write, goes through the director, and every
     // answer it gives, failures included, is this function's answer: no decision below
-    // returns `None` except behind the `allow_disk_fallthrough` opt-out. The one other
-    // `None` (`open_fuse_at_ex(...)?` on a poisoned synth table) is not reachable:
-    // nothing inside those critical sections can unwind. `contain_panic` would not
-    // make it safe, since the guard's drop has already poisoned the lock. Re-check
-    // that argument if `synth_file` grows a fallible or reentrant operation under its
-    // locks.
+    // returns `None` except behind the `allow_disk_fallthrough` opt-out. A poisoned
+    // synth table (`open_fuse_at_ex` answering `None`) is not reachable — nothing inside
+    // those critical sections can unwind, and `contain_panic` would not make it safe,
+    // since the guard's drop has already poisoned the lock — and it fails closed
+    // (`STATUS_UNSUCCESSFUL`, the director's handle given back) rather than returning
+    // `None`, which would send an under-root path to the real call.
     // See docs/shim-invariants.md, "Sealed root: opens".
     // (Primary stack is expanded to 16 MiB by vfs-inject; open is a shallow ring op.)
     // Only the three "conditional" dispositions need to know whether the
@@ -149,13 +149,19 @@ unsafe fn try_fuse_create(
         Ok(resp) => {
             // Record absolute path on the handle so later relative opens
             // (RootDirectory=this handle) resolve through the director.
-            let h = crate::synth_file::open_fuse_at_ex(
+            // A poisoned synth table (not reachable: see the doc at the top of this function)
+            // fails the open closed and gives the director its handle back. Returning `None`
+            // would send an under-root path on to the real call.
+            let Some(h) = crate::synth_file::open_fuse_at_ex(
                 resp.fh,
                 resp.size,
                 resp.is_dir,
                 Some(path.clone()),
                 append_only,
-            )?;
+            ) else {
+                let _ = client.close(resp.fh);
+                return Some(STATUS_UNSUCCESSFUL);
+            };
             // Every file handle joins the read cache's view of its file: a
             // write or mutable open drops what it holds of it; an immutable
             // read open may be served from it.
@@ -385,7 +391,11 @@ unsafe fn try_fuse_mkdir(
             // close(0) is a harmless no-op. The caller (CreateDirectoryW) only
             // needs a handle to receive and immediately close; later metadata
             // reads are path-based (qattr/getattr), not through this handle.
-            let h = crate::synth_file::open_fuse(0, 0, true)?;
+            let h = match crate::synth_file::open_fuse(0, 0, true) {
+                Some(h) => h,
+                // A poisoned synth table: fail closed rather than fall through to a real mkdir.
+                None => return Some(STATUS_UNSUCCESSFUL),
+            };
             if !file_handle.is_null() {
                 // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
                 unsafe {
@@ -416,7 +426,11 @@ unsafe fn try_fuse_mkdir(
                 if disp == 2 {
                     Some(STATUS_OBJECT_NAME_COLLISION)
                 } else {
-                    let h = crate::synth_file::open_fuse(0, 0, true)?;
+                    let h = match crate::synth_file::open_fuse(0, 0, true) {
+                        Some(h) => h,
+                        // A poisoned synth table: fail closed rather than fall through to a real mkdir.
+                        None => return Some(STATUS_UNSUCCESSFUL),
+                    };
                     if !file_handle.is_null() {
                         // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
                         unsafe {
@@ -632,7 +646,7 @@ unsafe fn route_open(
             // so the handle slot holds the synthetic handle it wrote.
             let h = unsafe { *file_handle } as isize;
             if crate::synth_file::is_fuse_synth(h) {
-                crate::synth_file::set_delete_on_close(h);
+                crate::synth_file::set_delete_on_close(h, true);
             }
         }
         if create {

@@ -223,6 +223,46 @@ pub(super) fn render_fills(snap: &Snapshot) -> String {
 /// assumption checkable.
 pub(super) static SETINFO_NOOP: BoundedTally<u32> = BoundedTally::unbounded();
 
+/// Deletes on close the director refused: a handle opened with `FILE_DELETE_ON_CLOSE` was
+/// closed, `OP_DELETE` for its path failed (a read-only layer, a provider error, a director that
+/// is gone), and the file stayed. `NtClose` cannot report it — Wine's `DeleteFileW` returns
+/// TRUE regardless — so this is the only record. The total is counted whether or not stats are
+/// on; the paths only when they are.
+pub(super) static DELETE_ON_CLOSE_REFUSED: AtomicU64 = AtomicU64::new(0);
+pub(super) static DELETE_ON_CLOSE_REFUSED_PATHS: BoundedTally<String> = BoundedTally::new(2000);
+
+/// A delete-on-close of `path` was refused by the director with `status`.
+pub(crate) fn note_delete_on_close_refused(path: &str, status: i32) {
+    DELETE_ON_CLOSE_REFUSED.fetch_add(1, Ordering::Relaxed);
+    if !enabled() {
+        return;
+    }
+    DELETE_ON_CLOSE_REFUSED_PATHS.add(format!("{path} (status {status})"));
+    note_trace("delete-on-close", path, "REFUSED");
+}
+
+/// How many deletes on close the director has refused so far.
+pub fn delete_on_close_refused_count() -> u64 {
+    DELETE_ON_CLOSE_REFUSED.load(Ordering::Relaxed)
+}
+
+pub(super) fn render_delete_on_close_refused(snap: &Snapshot) -> String {
+    if snap.delete_on_close_refused == 0 {
+        return String::new();
+    }
+    let mut rows: Vec<(&String, &u64)> = snap.delete_on_close_refused_paths.iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let mut s = format!(
+        "\nFILE_DELETE_ON_CLOSE deletes the director refused (the file stayed; the close \
+         reported success): {}\n",
+        snap.delete_on_close_refused
+    );
+    for (path, count) in rows {
+        s.push_str(&format!("  {count:>6}x  {path}\n"));
+    }
+    s
+}
+
 pub(crate) fn note_setinfo_noop(class: u32) {
     if !enabled() {
         return;

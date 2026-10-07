@@ -27,6 +27,7 @@ mod tally;
 #[cfg(test)]
 mod tests;
 
+pub use io::delete_on_close_refused_count;
 pub(crate) use io::*;
 pub use open::*;
 pub use panics::*;

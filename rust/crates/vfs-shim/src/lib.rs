@@ -64,9 +64,9 @@ pub use hook::{
 /// [`hookstats::outcome_count`]. A class nobody asserts on is a class that can
 /// quietly start (or stop) counting again.
 pub use hookstats::{
-    OpenOutcome, RegNotify, hook_panic_count, hook_panics_total, outcome_count, reg_notify_count,
-    reg_overlay_disabled_by, reg_read_fallback_count, reg_unresolved_count,
-    reg_write_refused_count, unrouted_director_opens,
+    OpenOutcome, RegNotify, delete_on_close_refused_count, hook_panic_count, hook_panics_total,
+    outcome_count, reg_notify_count, reg_overlay_disabled_by, reg_read_fallback_count,
+    reg_unresolved_count, reg_write_refused_count, unrouted_director_opens,
 };
 pub use vfs_protocol::shimcfg::{
     StaticImport, encode_config, encode_config_full, encode_config_with_overlay,

@@ -293,6 +293,8 @@ fn empty_snapshot() -> Snapshot {
         reg_close_lock_given_up: 0,
         reg: RegCounters::default(),
         setinfo_noop: HashMap::new(),
+        delete_on_close_refused: 0,
+        delete_on_close_refused_paths: HashMap::new(),
         synth_locks: HashMap::new(),
         passthrough: HashMap::new(),
         undecodable: HashMap::new(),
@@ -386,4 +388,16 @@ fn the_read_cache_section_reports_hits_misses_fetches_evictions_and_invalidation
         ..empty_snapshot()
     };
     assert_eq!(render_read_cache(&idle), "");
+}
+
+#[test]
+fn refused_deletes_on_close_render_with_their_paths_and_none_render_nothing() {
+    let mut snap = empty_snapshot();
+    assert_eq!(render_delete_on_close_refused(&snap), "");
+    snap.delete_on_close_refused = 2;
+    snap.delete_on_close_refused_paths
+        .insert(r"\??\C:\root\a.esp (status -1)".to_string(), 2);
+    let s = render_delete_on_close_refused(&snap);
+    assert!(s.contains("refused") && s.contains(": 2"), "{s}");
+    assert!(s.contains(r"2x  \??\C:\root\a.esp (status -1)"), "{s}");
 }

@@ -36,6 +36,8 @@ pub(super) struct Snapshot {
     pub(super) fill_nanos: u64,
     pub(super) fill_max_nanos: u64,
     pub(super) setinfo_noop: HashMap<u32, u64>,
+    pub(super) delete_on_close_refused: u64,
+    pub(super) delete_on_close_refused_paths: HashMap<String, u64>,
     pub(super) synth_locks: HashMap<String, u64>,
     pub(super) passthrough: HashMap<String, u64>,
     pub(super) undecodable: HashMap<String, u64>,
@@ -112,6 +114,8 @@ pub(super) fn snapshot() -> Snapshot {
         fill_nanos: FILL_NANOS.load(Ordering::Relaxed),
         fill_max_nanos: FILL_MAX_NANOS.load(Ordering::Relaxed),
         setinfo_noop: SETINFO_NOOP.snapshot(),
+        delete_on_close_refused: DELETE_ON_CLOSE_REFUSED.load(Ordering::Relaxed),
+        delete_on_close_refused_paths: DELETE_ON_CLOSE_REFUSED_PATHS.snapshot(),
         synth_locks: SYNTH_LOCKS.snapshot(),
         passthrough: PATHS.snapshot(),
         undecodable: UNDECODABLE.snapshot(),
@@ -255,7 +259,7 @@ pub(super) fn banner() -> String {
 pub(super) fn render_report() -> String {
     let snap = snapshot();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         banner(),
         render_hook_panics(&snap),
         render(&snap),
@@ -270,6 +274,7 @@ pub(super) fn render_report() -> String {
         render_readdirs(&snap),
         render_passthrough(&snap),
         render_setinfo_noop(&snap),
+        render_delete_on_close_refused(&snap),
         render_synth_locks(&snap),
         render_outcomes(&snap)
     )

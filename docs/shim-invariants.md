@@ -215,13 +215,12 @@ including the failures, is this function's answer too: since gate 4's
 Task 5 no *decision* below returns `None`, except behind the explicit
 `allow_disk_fallthrough` opt-out.
 
-One `None` below is not a decision: `open_fuse_at_ex(...)?` on the
-success path gives up its handle if the synth table's mutex is poisoned,
-which sends the caller to the real call after the director has already
-opened the file — and leaks that `fh`, since nothing closes it. It
-pre-dates this task, and it is a real hole in "the director's answer is
-the caller's answer", so do not read the paragraph above as more
-absolute than it is.
+A poisoned synth table used to be the one `None` that was not a
+decision: `open_fuse_at_ex(...)?` on the success path gave up its handle,
+which sent the caller to the real call after the director had already
+opened the file, and leaked that `fh`. Since task C8's fix round it fails
+closed instead: `STATUS_UNSUCCESSFUL`, and the director's `fh` is closed.
+`try_fuse_mkdir`'s two `open_fuse` calls do the same.
 
 It is still not a live route — but not for the reason this comment used
 to give. It claimed the crate builds with `panic = "abort"`; it does
@@ -372,6 +371,33 @@ not claim is one the backstop would not claim either.
 Outside every root the call is trampolined unchanged, which is most of them
 — a hook with an opinion about every delete in the process would break the
 rest of it.
+
+### `close_hook_body`: `FILE_DELETE_ON_CLOSE` on a synthetic handle
+
+From `hook/close.rs` and `hook/file_open.rs`.
+
+**A third delete route, added by task C8.** Wine's `DeleteFileW` (kernelbase) is not a
+disposition set-info: it is `NtCreateFile` with `FILE_DELETE_ON_CLOSE` followed by `NtClose`.
+The director has no delete-on-close of its own, so the shim keeps it: `route_open` records the
+flag on the synthetic handle it returns (`synth_file::set_delete_on_close`), and
+`close_hook_body` sends `OP_DELETE` for the handle's path — the path it is named by when it
+closes, so after a rename through it, the new one — after releasing the `fh`, as NT deletes at
+the last close. Until then every Win32 delete of a director-served file under Proton reported
+success and deleted nothing.
+
+- **A refusal cannot be reported.** `NtClose` has no way to say the delete failed, and
+  `DeleteFileW` returns TRUE either way, so a refusal (a read-only layer, a provider error, a
+  director that is gone) is counted with its path (`hookstats::note_delete_on_close_refused`,
+  the report's "FILE_DELETE_ON_CLOSE deletes the director refused" section, and the trace). It
+  is not refused up front with `STATUS_CANNOT_DELETE` as NT would: the open carries `DELETE`
+  access, which is not a write open, and nothing in a read open's answer says whether the path
+  is deletable, so knowing would cost a round trip on every such open.
+- **No second delete.** A set-info delete that succeeds through a handle that also has the flag
+  clears it, so the close does not send `OP_DELETE` again — which could delete a file recreated
+  under the same name in between.
+- **Not honoured on a directory `try_fuse_mkdir` created.** That handle is synthesised without a
+  path recorded on it (`open_fuse(0, 0, true)`) and the flag is never set, so a directory created
+  with `FILE_DELETE_ON_CLOSE` survives its close. Not seen in practice; a known gap.
 
 ### `delete_status_for`: mapping a director refusal
 

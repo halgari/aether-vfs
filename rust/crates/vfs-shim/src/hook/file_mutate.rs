@@ -197,7 +197,12 @@ unsafe fn director_delete_or_rename(
     c.names_changed(root, &src);
     crate::read_cache::invalidate_path(root.0, &src);
     let ok = if is_delete {
-        c.delete(root, &src).is_ok()
+        let deleted = c.delete(root, &src).is_ok();
+        if deleted {
+            // Deleted now: a delete-on-close on the same handle must not delete again at close.
+            crate::synth_file::set_delete_on_close(handle as isize, false);
+        }
+        deleted
     } else {
         // The destination is a name being created, so it goes as the caller spelled it — which
         // is also how a rename that changes only the letter case says what the new case is. See
