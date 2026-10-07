@@ -896,3 +896,17 @@ fn prepare_prefix_without_a_runtime_says_so_and_is_not_a_launch_error() {
     let e = s.prepare_prefix().unwrap_err();
     assert!(e.starts_with("no verified GE-Proton runtime under "), "{e}");
 }
+
+#[test]
+fn only_a_launch_adds_the_install_hint_to_the_no_runtime_error() {
+    let home = tmp("hint-none");
+    let (s, _pfx, shim) = session("hint", &home);
+    let e = s.launch(&opts(&shim, "ok", true)).unwrap_err();
+    assert!(
+        e.starts_with("launch: no verified GE-Proton runtime under ")
+            && e.contains("vfs-proton install"),
+        "{e}"
+    );
+    let e = s.prepare_prefix().unwrap_err();
+    assert!(!e.contains("vfs-proton install"), "{e}");
+}

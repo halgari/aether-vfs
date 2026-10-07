@@ -15,10 +15,11 @@ default = ["zip"]
 ## Convenience `Session::mount_zip` (pulls vfs-zip). Moved here with `Session`
 ## itself; `vfs-director` no longer has a `zip` feature.
 zip = ["dep:vfs-zip"]
-## Re-export the provider conformance suite (`assert_conformance`,
-## `write_fixture_tree`, `FIXTURE_FILES`) and the fixture providers it needs, so
-## a host tests its providers against it without naming vfs-provider. Off by
-## default: it is test code, enabled from a host's `[dev-dependencies]`.
+## Re-export `assert_conformance`, `write_fixture_tree` and `FIXTURE_FILES`
+## from vfs-provider's conformance suite, so a host can run it without naming
+## vfs-provider for those. The fixture providers (`RwMemFixture`, ...) are
+## reached through vfs-provider's own `conformance` feature. Off by default:
+## it is test code, enabled from a host's `[dev-dependencies]`.
 conformance = ["vfs-provider/conformance"]
 
 [dependencies]

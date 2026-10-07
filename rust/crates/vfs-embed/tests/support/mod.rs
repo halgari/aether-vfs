@@ -234,13 +234,13 @@ pub fn runtime_dir() -> Result<PathBuf, String> {
         };
     }
     let root = vfs_proton::Root::from_env().map_err(|e| format!("no aether home: {e}"))?;
-    let found = vfs_proton::runtime::installed_dirs(&root).map_err(|e| {
+    let found = vfs_proton::runtime::newest_installed(&root).map_err(|e| {
         format!(
             "cannot list GE-Proton runtimes under {}: {e}",
             root.runtimes().display()
         )
     })?;
-    found.into_iter().next().map(|(_, dir)| dir).ok_or_else(|| {
+    found.ok_or_else(|| {
         format!(
             "no verified GE-Proton runtime under {}: run `cargo run -p vfs-proton -- install`, \
              or set VFS_HOME to a home that has one, or VFS_TEST_PROTON_RUNTIME to a GE-Proton \

@@ -134,6 +134,11 @@ impl ProtonState {
     }
 }
 
+/// The start of the error for "no runtime installed", shared by `launch` and
+/// `prepare_prefix`; `launch` appends the install hint.
+#[cfg(unix)]
+const NO_RUNTIME: &str = "no verified GE-Proton runtime under";
+
 impl Session {
     /// Unix: the aether-vfs home `launch` takes GE-Proton runtimes
     /// (`<home>/runtimes`) and prefixes (`<home>/sessions`) from, instead of
@@ -570,7 +575,16 @@ impl Session {
         // behaves as on Windows.
         let resolved = self.resolve_launch_image(opts)?;
 
-        let booted = self.ensure_prefix().map_err(|e| format!("launch: {e}"))?;
+        let booted = self.ensure_prefix().map_err(|e| match e.strip_prefix(NO_RUNTIME) {
+            // The CLI hint belongs to aether's own launch path; a host that
+            // calls `prepare_prefix` gets the bare message.
+            Some(_) => format!(
+                "launch: {e} — install one with `vfs-proton install` (VFS_HOME selects \
+                 where it lands). Launching on stock Proton instead is the silent \
+                 downgrade this path refuses."
+            ),
+            None => format!("launch: {e}"),
+        })?;
         let wine = self.wine_launch(opts, ipc, &ring, resolved, &booted)?;
 
         let child = vfs_proton::launch::spawn(&wine).map_err(|e| format!("launch: {e}"))?;
@@ -690,12 +704,7 @@ impl Session {
         let runtime = vfs_proton::runtime::newest_installed(&home)
             .map_err(|e| format!("reading {}: {e}", home.runtimes().display()))?
             .ok_or_else(|| {
-                format!(
-                    "no verified GE-Proton runtime under {} — install one with \
-                     `vfs-proton install` (VFS_HOME selects where it lands). Launching on \
-                     stock Proton instead is the silent downgrade this path refuses.",
-                    home.runtimes().display()
-                )
+                format!("{NO_RUNTIME} {}", home.runtimes().display())
             })?;
 
         let prefix_id = match &self.proton.prefix_name {
@@ -727,7 +736,7 @@ impl Session {
         // run under a program another process is running in it.
         let lock = Prefix { dir: prefix_dir }
             .lock()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("wine prefix: {e}"))?;
         let prefix =
             vfs_proton::prefix::ensure_with(&home, &runtime, &prefix_id, &self.proton.prefix_init)
                 .map_err(|e| format!("wine prefix: {e}"))?;
@@ -1094,7 +1103,8 @@ fn locate_wine_artifacts_in(
             .map(Path::to_path_buf)
             .ok_or_else(|| "launch: current_exe() has no parent directory".to_string())?,
     };
-    let or_beside = |set: &Option<PathBuf>, name: &str| set.clone().unwrap_or_else(|| base.join(name));
+    let or_beside =
+        |set: &Option<PathBuf>, name: &str| set.clone().unwrap_or_else(|| base.join(name));
     let shim = or_beside(&opts.shim_dll, artifacts::SHIM_DLL);
     let payload = or_beside(&opts.payload_dll, artifacts::PAYLOAD_DLL);
     let injector = or_beside(&opts.injector, artifacts::INJECTOR);
