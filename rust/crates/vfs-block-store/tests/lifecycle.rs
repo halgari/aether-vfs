@@ -288,6 +288,7 @@ fn file_ids_lists_every_file_once() {
 }
 
 /// Copies a store directory as it is on disk: what a process killed now leaves.
+#[cfg(not(windows))]
 fn snapshot(from: &std::path::Path, to: &std::path::Path) {
     std::fs::create_dir_all(to).unwrap();
     for e in std::fs::read_dir(from).unwrap() {
