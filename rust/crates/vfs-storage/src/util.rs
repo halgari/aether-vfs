@@ -3,6 +3,8 @@
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use vfs_provider::map_io_err;
+
 /// Locks `m`, entering a poisoned lock: every critical section here leaves its
 /// map consistent at each step, so a panic elsewhere is no reason to stop.
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -14,4 +16,8 @@ pub(crate) fn now_minute() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() / 60)
         .unwrap_or(0)
+}
+
+pub(crate) fn lock_status<T>(m: &Mutex<T>) -> Result<MutexGuard<'_, T>, i32> {
+    m.lock().map_err(|_| map_io_err())
 }

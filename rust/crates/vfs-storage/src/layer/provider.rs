@@ -45,7 +45,7 @@ impl Provider for LayerProvider {
         // A create writes a row, then its store file: a pair under the
         // durability gate, which comes before `ns`.
         let gate = create.then(|| self.storage.gate_shared());
-        let ns = lock(&self.ns)?;
+        let ns = lock_status(&self.ns)?;
         let (cell, created) = match self.get(&p.folded)? {
             Some(r) if r.kind == KIND_DIR => {
                 if create && flags & OPEN_EXCL != 0 {
@@ -88,7 +88,7 @@ impl Provider for LayerProvider {
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        let of = lock(&self.handles)?.remove(&h).ok_or_else(bad_fh)?;
+        let of = lock_status(&self.handles)?.remove(&h).ok_or_else(bad_fh)?;
         let Some(cell) = &of.cell else {
             return Ok(());
         };
@@ -154,7 +154,7 @@ impl Provider for LayerProvider {
             return Ok(());
         }
         {
-            let _ns = lock(&self.ns)?;
+            let _ns = lock_status(&self.ns)?;
             match self.get(&p.folded)? {
                 Some(r) if r.kind == KIND_DIR => return Ok(()),
                 Some(_) => return Err(exists()),
@@ -185,7 +185,7 @@ impl Provider for LayerProvider {
             return Err(bad_request());
         }
         {
-            let _ns = lock(&self.ns)?;
+            let _ns = lock_status(&self.ns)?;
             let rec = self.get(&p.folded)?.ok_or_else(not_found)?;
             self.storage
                 .catalog

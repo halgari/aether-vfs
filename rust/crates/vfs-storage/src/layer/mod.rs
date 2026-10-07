@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 
 use vfs_core::fold;
 use vfs_provider::{
@@ -44,11 +44,8 @@ use crate::ids::{layer_file_id, new_guid, Guid};
 use crate::layer_io::{FileCell, FileState};
 use crate::storage::{Storage, StorageError};
 
+use crate::util::lock_status;
 use path::{folded_path, LPath};
-
-fn lock<T>(m: &Mutex<T>) -> Result<MutexGuard<'_, T>, i32> {
-    m.lock().map_err(|_| map_io_err())
-}
 
 /// A file cell's state, shared: a read (see `layer_io`'s locking notes).
 fn read_state(m: &RwLock<FileState>) -> Result<RwLockReadGuard<'_, FileState>, i32> {
@@ -163,7 +160,7 @@ impl LayerProvider {
     /// The shared cell of the file row `rec` at `folded`, created on first
     /// use, with one more open counted. Under `ns`.
     fn acquire(&self, rec: &EntryRec, folded: &str) -> Result<Arc<FileCell>, i32> {
-        let mut cells = lock(&self.cells)?;
+        let mut cells = lock_status(&self.cells)?;
         let cell = match cells.get(&rec.guid).and_then(Weak::upgrade) {
             Some(c) => c,
             None => {
@@ -206,10 +203,10 @@ impl LayerProvider {
     /// Drops one open of `cell`; the last one of a removed file dooms it.
     /// Returns whether it did (the caller then runs a durable point).
     fn release(&self, cell: &FileCell) -> Result<bool, i32> {
-        let _ns = lock(&self.ns)?;
+        let _ns = lock_status(&self.ns)?;
         let last = cell.opens.fetch_sub(1, Ordering::AcqRel) == 1;
-        if last && lock(&cell.path)?.is_none() {
-            lock(&self.storage.doomed)?.push(cell.guid);
+        if last && lock_status(&cell.path)?.is_none() {
+            lock_status(&self.storage.doomed)?.push(cell.guid);
             return Ok(true);
         }
         Ok(false)
@@ -248,15 +245,15 @@ impl LayerProvider {
     /// Sets `cell`'s row length to `len` (and its mtime, if `stamp`), if the
     /// row is still `cell`'s. Under the gate, which the caller holds.
     fn update_row(&self, cell: &FileCell, len: u64, stamp: bool) -> Result<(), i32> {
-        let _ns = lock(&self.ns)?;
-        let Some(path) = lock(&cell.path)?.clone() else {
+        let _ns = lock_status(&self.ns)?;
+        let Some(path) = lock_status(&cell.path)?.clone() else {
             return Ok(());
         };
         if let Some(mut rec) = self.get(&path)? {
             if rec.guid == cell.guid {
                 rec.len = len;
                 if stamp {
-                    rec.mtime = lock(&cell.mtime_override)?.unwrap_or_else(now);
+                    rec.mtime = lock_status(&cell.mtime_override)?.unwrap_or_else(now);
                 }
                 self.put(&path, &rec)?;
             }
@@ -281,7 +278,7 @@ impl LayerProvider {
     }
 
     fn handle(&self, h: Handle) -> Result<Arc<OpenFile>, i32> {
-        lock(&self.handles)?.get(&h).cloned().ok_or_else(bad_fh)
+        lock_status(&self.handles)?.get(&h).cloned().ok_or_else(bad_fh)
     }
 
     fn file_of(&self, h: Handle) -> Result<(Arc<OpenFile>, Arc<FileCell>), i32> {
@@ -292,7 +289,7 @@ impl LayerProvider {
 
     fn track(&self, of: OpenFile) -> Result<Handle, i32> {
         let h = self.next.fetch_add(1, Ordering::Relaxed);
-        lock(&self.handles)?.insert(h, Arc::new(of));
+        lock_status(&self.handles)?.insert(h, Arc::new(of));
         Ok(h)
     }
 

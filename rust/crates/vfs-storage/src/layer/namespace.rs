@@ -52,12 +52,12 @@ impl LayerProvider {
     pub(super) fn doom(&self, guid: Guid) -> Result<(), i32> {
         self.storage.ram.invalidate_file(&layer_file_id(&guid));
         if let Some(c) = self.live_cell(&guid) {
-            *lock(&c.path)? = None;
+            *lock_status(&c.path)? = None;
             if c.opens.load(Ordering::Acquire) > 0 {
                 return Ok(()); // its last `release` dooms it
             }
         }
-        lock(&self.storage.doomed)?.push(guid);
+        lock_status(&self.storage.doomed)?.push(guid);
         Ok(())
     }
 
@@ -112,7 +112,7 @@ impl LayerProvider {
 
     /// The namespace half of `rename`, under `ns`.
     pub(super) fn rename_rows(&self, from: &LPath, to: &LPath) -> Result<(), i32> {
-        let _ns = lock(&self.ns)?;
+        let _ns = lock_status(&self.ns)?;
         let from_is_dir = self.get(&from.folded)?.ok_or_else(not_found)?.kind == KIND_DIR;
         let mut parents = Vec::new();
         if from.folded != to.folded {
@@ -146,8 +146,8 @@ impl LayerProvider {
         }
         // Open files under the moved path follow it.
         let prefix = format!("{}/", from.folded);
-        for c in lock(&self.cells)?.values().filter_map(Weak::upgrade) {
-            let mut path = lock(&c.path)?;
+        for c in lock_status(&self.cells)?.values().filter_map(Weak::upgrade) {
+            let mut path = lock_status(&c.path)?;
             let moved = match path.as_deref() {
                 Some(p) if p == from.folded => Some(to.folded.clone()),
                 Some(p) => p
@@ -165,7 +165,7 @@ impl LayerProvider {
     pub(super) fn set_attr_impl(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
         let p = LPath::parse(p.rel)?;
         if let Some(size) = attr.size {
-            let ns = lock(&self.ns)?;
+            let ns = lock_status(&self.ns)?;
             let rec = self.get(&p.folded)?.ok_or_else(not_found)?;
             if rec.kind != KIND_FILE {
                 return Err(is_dir());
@@ -179,13 +179,13 @@ impl LayerProvider {
             self.changed(Some(&cell))?;
         }
         if let Some(mtime) = attr.mtime {
-            let _ns = lock(&self.ns)?;
+            let _ns = lock_status(&self.ns)?;
             let mut rec = self.get(&p.folded)?.ok_or_else(not_found)?;
             rec.mtime = mtime;
             self.put(&p.folded, &rec)?;
             if rec.kind == KIND_FILE {
                 if let Some(c) = self.live_cell(&rec.guid) {
-                    *lock(&c.mtime_override)? = Some(mtime);
+                    *lock_status(&c.mtime_override)? = Some(mtime);
                 }
             }
         }

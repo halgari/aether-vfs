@@ -31,7 +31,7 @@ impl LayerProvider {
             // layer commit): no durable point lands between them.
             let _gate = self.storage.gate_shared();
             {
-                let _ns = lock(&self.ns)?;
+                let _ns = lock_status(&self.ns)?;
                 for p in &paths {
                     if matches!(self.get(&p.folded)?, Some(r) if r.kind == KIND_DIR) {
                         return Err(is_dir());
@@ -51,7 +51,7 @@ impl LayerProvider {
             // theirs, whatever fails after.
             let mut committed = false;
             let rows = (|| {
-                let _ns = lock(&self.ns)?;
+                let _ns = lock_status(&self.ns)?;
                 let mut rows = Vec::with_capacity(files.len());
                 let mut replaced = Vec::new();
                 for ((p, guid), (_, data)) in paths.iter().zip(&guids).zip(files) {
