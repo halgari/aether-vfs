@@ -1,6 +1,6 @@
 # Escape matrix: Gate 2
 
-**Provenance.** `crates/vfs-directord/tests/e2e.rs`'s
+**Provenance.** `crates/vfs-directord/tests/escape_matrix.rs`'s
 `escape_matrix_positive_and_negative_canary` runs `vfs-fixture-escape.exe`
 under a real, composed session — daemon, director, injected shim, the
 works, not a standalone/uninjected run — against two targets. It is part of
@@ -79,7 +79,7 @@ Task 5, when the negative canary's read was still merely *documented* as
 sealed (in the "Update, Gate 3, Task 5" paragraph above) without the test
 itself asserting it. This task adds that assertion:
 `escape_matrix_positive_and_negative_canary`'s `negative_expectation`
-(`crates/vfs-directord/tests/e2e.rs`) now checks each buildable vector's own
+(`crates/vfs-directord/tests/escape_matrix.rs`) now checks each buildable vector's own
 reported outcome — not the classified-paths set, a separate check kept
 alongside it, see below — and requires `not-found`, failing the test outright
 if any spelling still opens the real bytes. **Corrected statement, precise

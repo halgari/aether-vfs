@@ -62,7 +62,7 @@ jobs:
         # Ensure shim/payload/fixtures sit next to the test profile so the
         # daemon e2e can inject them without a nested cargo build. The fixture
         # list must stay in step with `ensure_inject_artifacts`'s `needed`
-        # array in crates/vfs-directord/tests/e2e.rs — that is the code that
+        # array in crates/vfs-directord/tests/support/artifacts.rs — that is the code that
         # decides which artifacts have to be present, and it re-runs cargo
         # itself for anything missing or stale.
         #
