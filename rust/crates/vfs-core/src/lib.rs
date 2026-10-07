@@ -34,7 +34,9 @@ pub use model::{
     SourceId, Stat, VfsError,
 };
 pub use casefold::fold;
-pub use path::{normalize_vpath, PathError};
+pub use path::{
+    normalize_rel, normalize_vpath, rel_components, split_parent, trim_rel, BadComponent, PathError,
+};
 pub use source::{decode, encode_zip_window, Source};
 pub use tree::VfsTree;
 pub use tree::build;
