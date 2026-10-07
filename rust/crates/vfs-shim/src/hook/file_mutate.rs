@@ -121,7 +121,7 @@ fn delete_status_for(st: i32) -> NTSTATUS {
 }
 
 /// `NtDeleteFile` via the trampoline with an absolute NT path and a **null**
-/// `RootDirectory`. The `NtDeleteFile` counterpart of [`tramp_create_abs`];
+/// `RootDirectory`. The `NtDeleteFile` counterpart of [`super::file_open::tramp_create_abs`];
 /// see that function for when a synthetic root reaches a fall-through at all.
 unsafe fn tramp_delete_abs(
     tramp: NtDeleteFileFn,
@@ -156,7 +156,7 @@ unsafe fn is_delete_request(info: *mut c_void, length: u32, class: u32) -> bool 
 
 /// The NT path a handle-based delete/rename should act on, and whether finding it
 /// required consulting the OS about the handle's *current* target (the provenance
-/// bit [`DecodedPath`] carries, for the same reason).
+/// bit [`super::path::DecodedPath`] carries, for the same reason).
 ///
 /// The order is correctness: the recorded name wins wherever there is one, because
 /// for a redirected handle it is the virtual path while the handle itself targets
