@@ -967,11 +967,11 @@ pub struct SessionSummary {
 /// be an API — so the claim is asserted rather than described.
 ///
 /// Every engine crate below is fully re-exported by `vfs-embed`; naming one
-/// directly is not a compile error and never will be (they are still real
-/// dependencies of this crate, because `skyrim-live.rs` — stage 5's problem —
-/// lives in it). So the only way "the daemon goes through the embed API" stays
-/// true is to read the source text back, exactly as
-/// `vfs-embed/tests/embed_api.rs` does from the other side of the seam.
+/// directly is not a compile error where it is a dev-dependency (the
+/// integration tests use `vfs-director` and `vfs-protocol`). So the only way
+/// "the daemon goes through the embed API" stays true is to read the source
+/// text back, exactly as `vfs-embed/tests/embed_api.rs` does from the other
+/// side of the seam.
 ///
 /// `vfs-control` and `vfs-source` are deliberately **not** on the list. They
 /// are this host's config format and its `SourceSpec` → provider factory —
@@ -1011,9 +1011,6 @@ fn daemon_names_only_the_embed_api() {
     ];
 
     // `src/*.rs` — every module of the daemon library plus the `vfs` binary.
-    // `src/bin/` is deliberately not descended into: `skyrim-live.rs` is a
-    // scenario harness that stage 5 removes from this crate, and it is a
-    // legitimate direct kernel user until then.
     let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&src_dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", src_dir.display()))

@@ -2616,10 +2616,15 @@ dependencies = [
  "vfs-compose",
  "vfs-core",
  "vfs-director",
+ "vfs-embed",
+ "vfs-env",
  "vfs-ipc",
  "vfs-protocol",
  "vfs-provider",
  "vfs-storage",
+ "vfs-win",
+ "vfs-zip",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2689,7 +2694,6 @@ dependencies = [
  "vfs-unix",
  "vfs-win",
  "vfs-zip",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2706,15 +2710,12 @@ dependencies = [
  "toml",
  "tonic",
  "tracing-subscriber",
- "vfs-compose",
  "vfs-control",
  "vfs-director",
  "vfs-embed",
  "vfs-env",
  "vfs-protocol",
  "vfs-source",
- "vfs-win",
- "vfs-zip",
 ]
 
 [[package]]

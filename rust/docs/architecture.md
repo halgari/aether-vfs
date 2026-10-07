@@ -719,14 +719,15 @@ observer before concluding the process is idle.
 | `vfs-source` | declarative spec → provider, incl. `RemoteProvider` gRPC plugins |
 | `vfs-director` | FUSE kernel, session, staging, launch |
 | `vfs-registry` | registry overlay tree, its file format, the merge with a real key, NT query layouts |
-| `vfs-directord` | daemon + CLI; `skyrim-live` harness |
+| `vfs-directord` | daemon + CLI |
 | `vfs-control` | gRPC contract + config schema |
 | `vfs-env` | every `VFS_*` switch, defined once, with a drift test |
 | `vfs-redirect` | pure redirect-decision core |
 | `vfs-shim` / `vfs-shim-dll` | NT detours, FUSE client, synthetic handles, sections |
 | `vfs-payload` | `no_std` pre-init hook payload |
 | `vfs-inject` | injection, PE parsing, process creation |
-| `vfs-fixture-*`, `vfs-bench` | test fixtures |
+| `vfs-fixture-*` | test fixtures |
+| `vfs-bench` | `ring-bench` (ring round trips) and `skyrim-live` (live Skyrim launch harness, Windows) |
 
 Dependency direction is enforced by the split: pure crates never learn about the
 OS, and the zip provider never learns about the host.

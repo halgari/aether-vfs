@@ -896,7 +896,7 @@ see "Gate 4 note" and the write matrix below.
 
 **This is the most consequential correction in this section, stated up
 front rather than as a footnote.**
-`crates/vfs-directord/src/bin/skyrim-live.rs`'s `mount_low_priority_disk_layers` (~lines 449-461) mounts
+`crates/vfs-bench/src/bin/skyrim-live.rs`'s `mount_low_priority_disk_layers` (~lines 449-461) mounts
 `DiskProvider::new(root)` at `/` — the managed root's own physical directory,
 mounted as a provider over itself. Layered above it in `run()` (~lines
 202-229): the zip-packaged game content, an optional mods directory, and the

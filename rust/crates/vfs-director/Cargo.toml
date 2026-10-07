@@ -41,13 +41,6 @@ vfs-unix = { path = "../vfs-unix" }
 [target.'cfg(windows)'.dependencies]
 # `ipc.rs` — SharedMapping + EventNotifier, the ring's OS handles.
 vfs-win = { path = "../vfs-win" }
-# Window + process enumeration for the load benchmark (src/bench.rs), which is
-# already `#[cfg(windows)]` in code — this makes the manifest agree.
-windows-sys = { version = "0.61", features = [
-  "Win32_Foundation",
-  "Win32_UI_WindowsAndMessaging",
-  "Win32_System_Diagnostics_ToolHelp",
-] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # Integrity tests compare the composed VFS against a native extract.

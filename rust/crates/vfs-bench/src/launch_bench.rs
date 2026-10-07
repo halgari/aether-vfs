@@ -1,6 +1,6 @@
 //! Load benchmark for a real game launch.
 //!
-//! `vfs-fuse-bench` measures synthetic ring round-trips; this measures the thing
+//! `ring-bench` measures synthetic ring round-trips; this measures the thing
 //! a player feels — wall clock from process start to a window on screen, and how
 //! much VFS traffic it took to get there.
 //!
@@ -76,7 +76,7 @@ impl Timeline {
 }
 
 /// Human-readable timeline plus counters.
-pub fn report(tl: &Timeline, totals: &crate::io_stats::Totals, label: &str) -> String {
+pub fn report(tl: &Timeline, totals: &vfs_director::io_stats::Totals, label: &str) -> String {
     let mut s = String::new();
     s.push_str(&format!("\n=== load benchmark: {label} ===\n"));
     s.push_str("  phase                        delta      cumulative\n");
@@ -97,18 +97,13 @@ pub fn report(tl: &Timeline, totals: &crate::io_stats::Totals, label: &str) -> S
     ));
     s.push_str(&format!(
         "  ops: getattr={} readdir={} open={} close={} err={} paths={}\n",
-        totals.getattrs,
-        totals.readdirs,
-        totals.opens,
-        totals.closes,
-        totals.errors,
-        totals.paths
+        totals.getattrs, totals.readdirs, totals.opens, totals.closes, totals.errors, totals.paths
     ));
     s
 }
 
 /// One markdown table row, for appending to a benchmark doc.
-pub fn markdown_row(tl: &Timeline, totals: &crate::io_stats::Totals, label: &str) -> String {
+pub fn markdown_row(tl: &Timeline, totals: &vfs_director::io_stats::Totals, label: &str) -> String {
     let secs = |n: &str| {
         tl.at(n)
             .map(|d| format!("{:.2}", d.as_secs_f64()))
@@ -203,7 +198,7 @@ fn find_window(pid: u32) -> Option<(u32, u32)> {
 fn find_pid(image_name: &str) -> Option<u32> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
     // SAFETY: standard snapshot walk; handle closed on every path.
@@ -284,19 +279,27 @@ mod tests {
 
     #[test]
     fn read_amplification_metrics() {
-        let t = crate::io_stats::Totals {
+        let t = vfs_director::io_stats::Totals {
             reads: 12432,
             bytes: 64 * 1024 * 1024,
             ..Default::default()
         };
         // The shaders.bsa signature: many tiny reads.
-        assert!((t.bytes_per_read() / 1024.0 - 5.27).abs() < 0.1, "{}", t.bytes_per_read());
-        assert!((t.reads_per_mib() - 194.25).abs() < 1.0, "{}", t.reads_per_mib());
+        assert!(
+            (t.bytes_per_read() / 1024.0 - 5.27).abs() < 0.1,
+            "{}",
+            t.bytes_per_read()
+        );
+        assert!(
+            (t.reads_per_mib() - 194.25).abs() < 1.0,
+            "{}",
+            t.reads_per_mib()
+        );
     }
 
     #[test]
     fn empty_totals_do_not_divide_by_zero() {
-        let t = crate::io_stats::Totals::default();
+        let t = vfs_director::io_stats::Totals::default();
         assert_eq!(t.bytes_per_read(), 0.0);
         assert_eq!(t.reads_per_mib(), 0.0);
     }
@@ -308,7 +311,7 @@ mod tests {
             name: "zip index".into(),
             at: Duration::from_millis(500),
         });
-        let row = markdown_row(&tl, &crate::io_stats::Totals::default(), "debug");
+        let row = markdown_row(&tl, &vfs_director::io_stats::Totals::default(), "debug");
         assert!(row.contains("| debug |"), "{row}");
         assert!(row.contains("0.50"), "{row}");
         // A run that never reached the window must not read as instant.

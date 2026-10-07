@@ -14,10 +14,6 @@ path = "src/lib.rs"
 name = "vfs"
 path = "src/main.rs"
 
-[[bin]]
-name = "skyrim-live"
-path = "src/bin/skyrim-live.rs"
-
 [dependencies]
 vfs-env = { path = "../vfs-env" }
 vfs-control = { path = "../vfs-control" }
@@ -25,16 +21,6 @@ vfs-source = { path = "../vfs-source" }
 # The embeddable API this daemon is one host over (design spec §4). Session
 # lifecycle, roots, composition and launch all come from here.
 vfs-embed = { path = "../vfs-embed" }
-# Kernel-level pieces only the `skyrim-live` harness reaches for directly:
-# `stage` (putting a launch image on real disk), `bench` and `io_stats`.
-vfs-director = { path = "../vfs-director" }
-vfs-compose = { path = "../vfs-compose" }
-vfs-zip = { path = "../vfs-zip" }
-vfs-protocol = { path = "../vfs-protocol" }
-# GetFinalPathNameByHandleW, for resolving the second (Documents\My Games)
-# root's junction to its real target in `skyrim-live` — see that binary's
-# `resolve_second_root_target`.
-vfs-win = { path = "../vfs-win" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "io-util", "signal"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.14"
@@ -47,6 +33,10 @@ serde_json = "1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
 
 [dev-dependencies]
+# The daemon proper doesn't use stage/bench/io_stats; skyrim-live (now in
+# `vfs-bench`) and these tests do.
+vfs-director = { path = "../vfs-director" }
+vfs-protocol = { path = "../vfs-protocol" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 tempfile = "3"
 toml = "0.8"

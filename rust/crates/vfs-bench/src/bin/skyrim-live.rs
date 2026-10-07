@@ -2,7 +2,7 @@
 //! saves/profiles and a write overlay.
 //!
 //! ```text
-//! cargo run -p vfs-directord --bin skyrim-live --release
+//! cargo run -p vfs-bench --bin skyrim-live --release
 //! ```
 //!
 //! Defaults (override with env):
@@ -78,7 +78,7 @@ impl vfs_director::stage::ImageSource for KernelSource<'_> {
 fn run() -> Result<(), String> {
     // Load benchmark: record phase timings and, when VFS_BENCH=1, stop at the
     // first rendered frame instead of running the game indefinitely.
-    let mut timeline = vfs_director::bench::Timeline::new();
+    let mut timeline = vfs_bench::launch_bench::Timeline::new();
     let bench = vfs_env::opt_in(vfs_env::BENCH);
 
     let zip_path = env_path(vfs_env::SKYRIM_ZIP, r"C:\tmp\skyrimse.zip");
@@ -506,7 +506,7 @@ component match sees exactly what the game's own raw NT open spells)",
     if bench {
         // Stop at the first rendered frame: that is the number a player feels,
         // and it bounds every cost on the path (staging, inject, streaming).
-        use vfs_director::bench;
+        use vfs_bench::launch_bench as bench;
         let timeout = std::time::Duration::from_secs(300);
         let pid = bench::wait_for_pid("SkyrimSE.exe", timeout)
             .ok_or_else(|| "benchmark: SkyrimSE.exe never appeared".to_string())?;
@@ -957,9 +957,6 @@ fn ensure_steam_running() -> Result<(), String> {
     Ok(())
 }
 
-/// Skyrim SE Steam AppID — used for overlay disable + log filters.
-const SKYRIM_SE_APPID: &str = "489830";
-
 /// Best-effort: turn off in-game overlay for Skyrim SE so Steam does not inject
 /// `gameoverlayui64` into the game process (observed CM assert + Shutdown).
 ///
@@ -976,7 +973,7 @@ fn disable_skyrim_game_overlay() -> Result<(), String> {
                 "-Command",
                 &format!(
                     r#"
-$path = 'HKCU:\Software\Valve\Steam\Apps\{SKYRIM_SE_APPID}'
+$path = 'HKCU:\Software\Valve\Steam\Apps\{SKYRIM_SE_APP_ID}'
 if (-not (Test-Path $path)) {{ New-Item -Path $path -Force | Out-Null }}
 New-ItemProperty -Path $path -Name Overlay -Value 0 -PropertyType DWord -Force | Out-Null
 New-ItemProperty -Path $path -Name Running -Value 0 -PropertyType DWord -Force | Out-Null
@@ -1000,9 +997,9 @@ if (Test-Path $steam) {{
                 if !lc.is_file() {
                     continue;
                 }
-                match inject_enable_game_overlay_off(&lc, SKYRIM_SE_APPID) {
+                match inject_enable_game_overlay_off(&lc, SKYRIM_SE_APP_ID) {
                     Ok(true) => eprintln!(
-                        "  overlay: set EnableGameOverlay=0 for app {SKYRIM_SE_APPID} in {}",
+                        "  overlay: set EnableGameOverlay=0 for app {SKYRIM_SE_APP_ID} in {}",
                         lc.display()
                     ),
                     Ok(false) => eprintln!(
@@ -1014,7 +1011,7 @@ if (Test-Path $steam) {{
             }
         }
         eprintln!(
-            "  overlay: disabled for app {SKYRIM_SE_APPID} (registry+localconfig); restart Steam once if it was already running so the client reloads VDF"
+            "  overlay: disabled for app {SKYRIM_SE_APP_ID} (registry+localconfig); restart Steam once if it was already running so the client reloads VDF"
         );
         Ok(())
     }

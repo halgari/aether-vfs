@@ -115,7 +115,7 @@ pub enum OverlayState {
 /// at), and every whiteout stops applying, so files deleted at runtime
 /// silently reappear. This was a deliberate call, not an oversight: the only
 /// two callers that set a persistent overlay path are dev-harness binaries
-/// with no shipped users (`vfs-directord/src/bin/skyrim-live.rs`,
+/// with no shipped users (`vfs-bench/src/bin/skyrim-live.rs`,
 /// `vfs-launch`), and a migrator would have to assume "everything at the old
 /// top level belongs to root 0" — exactly the assumption multi-root `Engine`
 /// (the very next task, now done) makes false.
