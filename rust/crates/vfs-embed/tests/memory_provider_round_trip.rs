@@ -19,7 +19,8 @@ use vfs_embed::{MemoryProvider, RootId, Session, OPEN_WRITE};
 #[test]
 fn a_memory_provider_round_trips_a_write_back_to_the_host() {
     let session_base =
-        std::env::temp_dir().join(format!("vfs-embed-memrt-{}", std::process::id()));
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("vfs-embed-memrt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&session_base);
 
     let mut session = Session::new();

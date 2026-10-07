@@ -22,7 +22,8 @@ fn pattern(len: usize) -> Vec<u8> {
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("vfs-integrity-{}-{name}", std::process::id()));
+    let d = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("vfs-integrity-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

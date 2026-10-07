@@ -2468,17 +2468,9 @@ mod registry_layer_tests {
         })
     }
 
-    /// A scratch directory under the build's target dir (never `/tmp`):
-    /// `target/[<triple>/]tmp`, beside the test executable's profile dir.
+    /// A scratch directory under the build's target dir (never `/tmp`).
     fn scratch_dir(tag: &str) -> PathBuf {
-        let exe = std::env::current_exe().unwrap();
-        // target/[<triple>/]<profile>/deps/<exe>
-        let target = exe.parent().and_then(Path::parent).and_then(Path::parent).unwrap();
-        let dir = target
-            .join("tmp")
-            .join(format!("vfs-reglayer-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+        crate::test_scratch::scratch_dir(&format!("reglayer-{tag}"))
     }
 
     fn storage_layer(tag: &str) -> (PathBuf, Arc<dyn Provider>) {
@@ -3383,9 +3375,7 @@ mod root_ownership_tests {
     use vfs_provider::ST_EXISTS;
 
     fn dir(tag: &str, file: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("vfs-own-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
+        let p = crate::test_scratch::scratch_created(&format!("own-{tag}"));
         std::fs::write(p.join(file), file.as_bytes()).unwrap();
         p
     }
@@ -3546,9 +3536,7 @@ mod ring_location_tests {
     #[test]
     fn only_a_directory_private_to_this_user_may_hold_the_ring() {
         use std::os::unix::fs::PermissionsExt;
-        let base = std::env::temp_dir().join(format!("vfs-ringpriv-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
+        let base = crate::test_scratch::scratch_created("ringpriv");
         let set = |mode: u32| {
             std::fs::set_permissions(&base, std::fs::Permissions::from_mode(mode)).unwrap()
         };
@@ -3582,8 +3570,7 @@ mod ring_location_tests {
         if !is_memory_fs(&runtime) || !is_private_dir(&runtime) {
             return;
         }
-        let base = std::env::temp_dir().join(format!("vfs-ringname-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_scratch::scratch_dir("ringname");
         let state = base.join("state");
         std::fs::create_dir_all(state.join("sub")).unwrap();
         let direct = ring_in_memory(&state, &state.join("a.bin")).unwrap();
@@ -3610,8 +3597,7 @@ mod ring_location_tests {
         if !is_memory_fs(&runtime) {
             return;
         }
-        let base = std::env::temp_dir().join(format!("vfs-ringloc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::test_scratch::scratch_dir("ringloc");
         let mut s = Session::new();
         s.set_root(base.join("root"));
         s.set_overlay(base.join("overlay"));
@@ -3695,9 +3681,7 @@ mod launch_image_tests {
     }
 
     fn content(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("vfs-li-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
+        let p = crate::test_scratch::scratch_created(&format!("li-{tag}"));
         std::fs::write(p.join("game.exe"), bare_pe()).unwrap();
         p
     }
@@ -3705,7 +3689,7 @@ mod launch_image_tests {
     #[test]
     fn a_graph_only_image_in_root_zero_is_staged_into_the_root() {
         let c = content("stage");
-        let s = Session::new();
+        let s = crate::test_scratch::session_in_scratch("stage-session");
         s.mount("", Arc::new(DiskProvider::new(&c))).unwrap();
         let loc0 = s.root_locations()[0].location.clone();
         let img = image::join_location(&loc0, "game.exe");
@@ -3747,7 +3731,7 @@ mod launch_image_tests {
     /// where a file of that name really exists in the root (unix allows it).
     #[test]
     fn a_vpath_component_with_a_colon_is_refused_by_name() {
-        let s = Session::new();
+        let s = crate::test_scratch::session_in_scratch("colon");
         std::fs::create_dir_all(s.virtual_root().join("bin")).unwrap();
         if cfg!(unix) {
             std::fs::write(s.virtual_root().join("C:foo.exe"), bare_pe()).unwrap();
@@ -3784,7 +3768,7 @@ mod launch_image_tests {
     #[cfg(unix)]
     #[test]
     fn unix_host_path_inside_the_managed_root_is_root_zero() {
-        let s = Session::new();
+        let s = crate::test_scratch::session_in_scratch("inside-root");
         std::fs::create_dir_all(s.virtual_root().join("bin")).unwrap();
         let real = s.virtual_root().join("bin").join("real.exe");
         std::fs::write(&real, bare_pe()).unwrap();
@@ -3845,9 +3829,7 @@ mod launch_image_tests {
 
     #[cfg(unix)]
     fn scratch(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("vfs-lr-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
+        let p = crate::test_scratch::scratch_created(&format!("lr-{tag}"));
         p
     }
 
@@ -3960,8 +3942,7 @@ mod launch_image_tests {
     #[cfg(unix)]
     #[test]
     fn an_anonymous_prefix_is_removed_on_drop_and_a_named_one_is_not() {
-        let home = std::env::temp_dir().join(format!("vfs-drop-home-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
+        let home = crate::test_scratch::scratch_dir("drop-home");
         let root = ProtonRoot::at(home.clone());
         let anon_dir = root.try_session_dir("anon-x").unwrap().join("prefix");
         let named_dir = root.try_session_dir("named-x").unwrap().join("prefix");
@@ -3987,7 +3968,7 @@ mod launch_image_tests {
 
     #[test]
     fn io_workers_default_clamp_and_reach_the_ring() {
-        let mut s = Session::new();
+        let mut s = crate::test_scratch::session_in_scratch("workers");
         assert_eq!(s.io_workers(), 4, "the default is unchanged");
         s.set_io_workers(0);
         assert_eq!(s.io_workers(), 1);

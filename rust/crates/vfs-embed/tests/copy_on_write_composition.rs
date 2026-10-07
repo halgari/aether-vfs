@@ -46,7 +46,8 @@ struct Layout {
 }
 
 fn layout(name: &str) -> Layout {
-    let base = std::env::temp_dir().join(format!("vfs-cow-{}-{name}", std::process::id()));
+    let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("vfs-cow-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let l = Layout {
         root: base.join("root"),

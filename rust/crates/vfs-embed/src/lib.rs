@@ -120,6 +120,8 @@
 pub mod image;
 mod session;
 mod sources;
+#[cfg(test)]
+mod test_scratch;
 
 pub use session::{
     compose_root, registry_sync_for, LaunchExit, LaunchOpts, RegistrySync, Session, StageOpts,
@@ -257,8 +259,7 @@ mod tests {
 
     #[test]
     fn session_read_file_helper() {
-        let dir = std::env::temp_dir().join(format!("vfs-sess-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::test_scratch::scratch_created("sess");
         std::fs::write(dir.join("a.bin"), b"xyz").unwrap();
         let s = Session::new();
         s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
@@ -346,8 +347,7 @@ mod tests {
     #[test]
     fn a_write_refused_by_a_readonly_layer_is_recorded_for_discovery() {
         let _rej = REJECTED_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("vfs-ro-rej-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::test_scratch::scratch_created("ro-rej");
         std::fs::write(dir.join("vanilla.ini"), b"[General]").unwrap();
 
         let s = Session::new();
