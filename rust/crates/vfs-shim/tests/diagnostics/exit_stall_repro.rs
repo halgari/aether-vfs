@@ -167,6 +167,8 @@ fn child() {
             .chain(std::iter::once(0))
             .collect()
     };
+    // Read before the load: the shim drops this variable once it has reported.
+    let ready = std::path::PathBuf::from(std::env::var_os("VFS_SHIM_READY").expect("ready"));
     extern "system" {
         fn LoadLibraryW(p: *const u16) -> *mut core::ffi::c_void;
     }
@@ -179,7 +181,6 @@ fn child() {
     // ready file. Waiting for it is what makes "the hooks were live" a fact
     // rather than a hope — a run that hung with a failed bootstrap would prove
     // nothing at all.
-    let ready = std::path::PathBuf::from(std::env::var_os("VFS_SHIM_READY").expect("ready"));
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !ready.exists() {
         assert!(

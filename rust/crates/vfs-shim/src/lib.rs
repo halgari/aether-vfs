@@ -31,7 +31,7 @@ mod synth_file;
 mod synth_section;
 mod tramp;
 
-pub use child::signal_bootstrap_failed;
+pub use child::{finish_ready_handshake, signal_bootstrap_failed};
 pub use bootstrap::{
     BootstrapError, bootstrap_failed_content, bootstrap_from_config_path,
     bootstrap_from_config_path_with_payload, load_static_imports_from_config_path,

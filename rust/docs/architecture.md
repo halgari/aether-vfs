@@ -472,7 +472,7 @@ injects it, waits for its hooks to report ready, then resumes. **It fails
 closed**: a child whose injection fails, whose shim reports a bootstrap failure,
 that dies early, or that is not ready within the launch's ready timeout is
 terminated and its `CreateProcess` call returns `FALSE` (`ERROR_PROCESS_ABORTED`).
-A child is never resumed without the shim, so the failure mode is a launch that
+A child is never released without the shim, so the failure mode is a launch that
 errors, not an unvirtualised game that writes to the real disk. The wait is the
 launch's own (`LaunchOpts::ready_timeout`, else 180 s), which the injector passes
 down in `VFS_READY_TIMEOUT_SECS`; every child is injected, none is skipped. The

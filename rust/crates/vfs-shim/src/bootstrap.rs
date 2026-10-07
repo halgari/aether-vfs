@@ -172,6 +172,7 @@ pub fn bootstrap_from_config_path_with_payload(
 /// (caller contract; not checked).
 pub fn sync_bootstrap(payload_cfg: *mut c_void) -> u32 {
     let r = sync_bootstrap_inner(payload_cfg);
+    crate::child::finish_ready_handshake();
     if r != 0 {
         // A parent that force-suspended us is waiting for a signal; tell it
         // now rather than let it wait out its timeout.

@@ -601,6 +601,10 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
     std::env::set_var(vfs_env::PAYLOAD_PATH, &payload_path);
     let cfg_file = format!("{}.payload_cfg", cfg.ready_path);
     std::env::set_var(vfs_env::DUAL_LAYER, "1");
+    // Where the shim says which children it killed; descendants inherit it.
+    let refused_log = format!("{}{}", cfg.ready_path, vfs_env::CHILD_REFUSED_SUFFIX);
+    let _ = std::fs::remove_file(&refused_log);
+    std::env::set_var(vfs_env::CHILD_REFUSED_LOG, &refused_log);
     // The shim waits for each child process it injects as long as this launch
     // waits for the shim: it reads the value back from the inherited environment.
     std::env::set_var(

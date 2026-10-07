@@ -243,7 +243,13 @@ impl Session {
             self.registry_attached(),
         );
 
-        let mut saved: Vec<(String, Option<String>)> = Vec::with_capacity(opts.env.len());
+        let mut saved: Vec<(String, Option<String>)> = Vec::with_capacity(opts.env.len() + 2);
+        // `run_target_with_shim` publishes these for the target to inherit;
+        // they must not outlive this launch in a host that launches again.
+        // Saved before `opts.env` and before the ready timeout is read below.
+        for k in [vfs_env::READY_TIMEOUT_SECS, vfs_env::CHILD_REFUSED_LOG] {
+            saved.push((k.to_string(), std::env::var(k).ok()));
+        }
         for (k, v) in &opts.env {
             saved.push((k.clone(), std::env::var(k).ok()));
             std::env::set_var(k, v);
@@ -276,7 +282,24 @@ impl Session {
             }
         }
 
-        exit.map_err(|e| format!("launch: {e:?}"))
+        // Children the shim killed because it could not inject them, one
+        // `<image> <reason>` line each, beside the ready file.
+        let refused = std::fs::read_to_string(format!(
+            "{ready_path_s}{}",
+            vfs_env::CHILD_REFUSED_SUFFIX
+        ))
+        .unwrap_or_default();
+        exit.map_err(|e| {
+            let mut msg = format!("launch: {e:?}");
+            for line in refused.lines().filter(|l| !l.trim().is_empty()) {
+                msg.push_str(&format!(
+                    "\na child process was refused and killed because the shim could not \
+                     inject it (`<image> <reason>`): {}",
+                    line.trim()
+                ));
+            }
+            msg
+        })
     }
 }
 

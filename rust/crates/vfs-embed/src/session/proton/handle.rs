@@ -180,13 +180,20 @@ impl LaunchHandle {
     /// injector has reported, why the Steam helper is not running or that
     /// the Windows artifacts are too old to start it
     /// ([`LaunchHandle::steam_helper_status`]). Call it again after the
-    /// program has started for the second part.
+    /// program has started for the second part. Last, one line per child
+    /// process the shim refused (killed because it could not inject it; its
+    /// `CreateProcess` failed): the launcher's child that never started.
     pub fn notes(&self) -> Vec<String> {
         let mut notes = self.wine.notes.clone();
         notes.extend(vfs_proton::steam::helper_note(
             &self.wine.steam,
             &self.steam_helper_status(),
         ));
+        notes.extend(
+            vfs_proton::launch::read_child_refusals(&self.wine.ready_file)
+                .iter()
+                .map(|l| vfs_proton::launch::describe_child_refusal(l)),
+        );
         notes
     }
 

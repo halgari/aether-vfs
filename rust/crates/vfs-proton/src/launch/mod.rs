@@ -48,7 +48,10 @@ pub use env::{
     BASE_DLL_OVERRIDES, DEFAULT_WINEDEBUG, check_extra_env, is_reserved_env, launch_env,
     merge_dll_overrides,
 };
-pub use injector::{describe_injector_error, injector_error_path};
+pub use injector::{
+    child_refused_path, describe_child_refusal, describe_injector_error, injector_error_path,
+    read_child_refusals,
+};
 
 /// The host files a launch hands the injector.
 #[derive(Debug, Clone)]

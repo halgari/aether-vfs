@@ -90,7 +90,9 @@ pub const SYNC_BOOTSTRAP_PANICKED: u32 = 4;
 /// tells a parent that is waiting on this process (a shim-injected child's
 /// spawner) so it can kill us now instead of waiting out its timeout.
 fn bootstrap() {
-    if !bootstrap_inner() {
+    let ok = bootstrap_inner();
+    vfs_shim::finish_ready_handshake();
+    if !ok {
         vfs_shim::signal_bootstrap_failed();
     }
 }

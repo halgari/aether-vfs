@@ -166,6 +166,14 @@ pub const SHIM_CONFIG: &str = "VFS_SHIM_CONFIG";
 pub const SHIM_READY: &str = "VFS_SHIM_READY";
 /// Path to `vfs_payload.dll`, for children that resolve it by environment.
 pub const PAYLOAD_PATH: &str = "VFS_PAYLOAD_PATH";
+/// Where the shim appends a line (`<image> <reason>`) for every child process
+/// it killed because it could not inject it (see the shim's
+/// `CreateProcessInternalW` hook). `run_target_with_shim` sets it to the ready
+/// file's path plus [`CHILD_REFUSED_SUFFIX`] and every descendant inherits it,
+/// so the launcher reads one file. Unset: refusals are only counted.
+pub const CHILD_REFUSED_LOG: &str = "VFS_CHILD_REFUSED_LOG";
+/// Appended to the ready file's path to name [`CHILD_REFUSED_LOG`]'s file.
+pub const CHILD_REFUSED_SUFFIX: &str = ".child-refused";
 /// File carrying the remote address of the payload config, for `install_late`.
 pub const PAYLOAD_CFG_FILE: &str = "VFS_PAYLOAD_CFG_FILE";
 /// Set when the launch uses the dual-layer (pre-init payload + full shim) path.
@@ -516,6 +524,7 @@ pub const ALL: &[Var] = &[
     Var { name: PAYLOAD_PATH, kind: Kind::Handshake, default: "resolved beside the shim" },
     Var { name: PAYLOAD_CFG_FILE, kind: Kind::Handshake, default: "none" },
     Var { name: DUAL_LAYER, kind: Kind::Handshake, default: "unset" },
+    Var { name: CHILD_REFUSED_LOG, kind: Kind::Handshake, default: "unset: refusals are only counted" },
     Var { name: TEST_FUSE_INIT_FAIL, kind: Kind::Fixture, default: "false (FUSE inits normally)" },
     Var { name: ALLOW_DISK_FALLTHROUGH, kind: Kind::Behaviour, default: "false (root stays sealed)" },
     Var { name: DISK_ONLY_ROOT, kind: Kind::Behaviour, default: "false" },
@@ -711,6 +720,7 @@ pub mod handshake {
         PAYLOAD_PATH,
         PAYLOAD_CFG_FILE,
         DUAL_LAYER,
+        CHILD_REFUSED_LOG,
     ];
 
     /// Every handshake name.

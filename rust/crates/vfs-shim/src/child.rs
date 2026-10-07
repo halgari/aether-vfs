@@ -14,7 +14,7 @@ use windows_sys::Win32::System::LibraryLoader::{
 };
 use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateRemoteThread, GetCurrentProcessId, LPTHREAD_START_ROUTINE, ResumeThread,
+    CreateEventW, CreateRemoteThread, GetCurrentProcessId, GetExitCodeThread, IsWow64Process2, LPTHREAD_START_ROUTINE, ResumeThread,
     SetEvent, SuspendThread, WaitForMultipleObjects, WaitForSingleObject,
 };
 
@@ -64,8 +64,11 @@ fn child_preinit_redirects() -> Vec<PreinitRedirect> {
 }
 
 /// Inject `dll_path` into `process` via `LoadLibraryW` on a remote thread and
-/// wait for that thread (i.e. for `DllMain` to run).
-pub(crate) fn inject_dll(process: HANDLE, dll_path: &str) -> bool {
+/// wait up to `timeout_ms` for that thread (i.e. for `DllMain` to run).
+/// `false` if the thread could not be started, did not finish in time, or
+/// `LoadLibraryW` returned NULL (the thread's exit code is the low 32 bits of
+/// the module handle, so 0 is a failed load).
+pub(crate) fn inject_dll(process: HANDLE, dll_path: &str, timeout_ms: u32) -> bool {
     // SAFETY: standard remote-LoadLibrary injection into a live child process.
     unsafe {
         let dll_w = wide(dll_path);
@@ -115,9 +118,11 @@ pub(crate) fn inject_dll(process: HANDLE, dll_path: &str) -> bool {
         if th.is_null() || th == INVALID_HANDLE_VALUE {
             return false;
         }
-        WaitForSingleObject(th, INFINITE_MS);
+        let done = WaitForSingleObject(th, timeout_ms) == 0;
+        let mut code = 0u32;
+        let got = done && GetExitCodeThread(th, &mut code) != 0;
         CloseHandle(th);
-        true
+        got && code != 0
     }
 }
 
@@ -125,6 +130,8 @@ pub(crate) fn inject_dll(process: HANDLE, dll_path: &str) -> bool {
 /// killed and its `CreateProcess` call failing (see `hook::process`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChildInjectError {
+    /// The child is a 32-bit (WOW64) image; the shim and payload are 64-bit.
+    Child32Bit,
     /// This shim's own DLL path is unknown, so there is nothing to inject.
     NoShimDll,
     /// `vfs_payload.dll` could not be found beside the shim.
@@ -153,6 +160,7 @@ impl ChildInjectError {
     /// A short stable spelling, the key of the refused-child counter.
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::Child32Bit => "child-32bit",
             Self::NoShimDll => "no-shim-dll",
             Self::NoPayload => "no-payload",
             Self::Arm => "arm-failed",
@@ -193,6 +201,9 @@ pub(crate) fn inject_child(
     timeout_ms: u32,
 ) -> Result<(), ChildInjectError> {
     let full_shim_dll = full_shim_dll.ok_or(ChildInjectError::NoShimDll)?;
+    if is_32bit(process) {
+        return Err(ChildInjectError::Child32Bit);
+    }
     let cfg_path = payload_cfg_path_for_pid(pid);
     let r = inject_child_dual_layer(process, thread, pid, full_shim_dll, timeout_ms, &cfg_path);
     // The child has read it by now, or never will.
@@ -240,7 +251,7 @@ fn inject_child_dual_layer(
         std::thread::sleep(Duration::from_millis(1));
     }
 
-    if !inject_dll(process, full_shim_dll) {
+    if !inject_dll(process, full_shim_dll, timeout_ms) {
         return Err(ChildInjectError::InjectDll);
     }
 
@@ -255,6 +266,16 @@ fn inject_child_dual_layer(
         return Err(ChildInjectError::Release);
     }
     Ok(())
+}
+
+/// Whether `process` is a 32-bit image running under WOW64. A query that
+/// fails reads as "no": the arm step then decides.
+fn is_32bit(process: HANDLE) -> bool {
+    let (mut machine, mut native) = (0u16, 0u16);
+    // SAFETY: a query of a process handle we own, into two locals.
+    let ok = unsafe { IsWow64Process2(process, &mut machine, &mut native) };
+    // `IMAGE_FILE_MACHINE_UNKNOWN` (0): not a WOW64 process.
+    ok != 0 && machine != 0
 }
 
 fn has_exited(process: HANDLE) -> bool {
@@ -335,6 +356,20 @@ pub(crate) fn signal_ready() {
     }
 }
 
+/// Called once this process's shim has finished writing its own ready state:
+/// drops the two variables the top-level launch used to talk to *this* process
+/// (`VFS_SHIM_READY`, the ready file; `VFS_PAYLOAD_CFG_FILE`, the address of
+/// *this* process's payload config), so descendants do not inherit them. A
+/// child that did would write its own "ready" or failure into the top-level
+/// ready file and its boot log, and would try the parent's payload-config
+/// address. Children find their config by pid (`payload_cfg_path_for_pid`) and
+/// signal their spawner by named event, and refusals are logged through
+/// `VFS_CHILD_REFUSED_LOG`, which is left set.
+pub fn finish_ready_handshake() {
+    std::env::remove_var(vfs_env::SHIM_READY);
+    std::env::remove_var(vfs_env::PAYLOAD_CFG_FILE);
+}
+
 /// Signal that the current process's shim could not bootstrap, so a spawning
 /// parent stops waiting for a ready signal that will not come and kills us.
 /// The counterpart of [`signal_ready`].
@@ -395,4 +430,4 @@ pub(crate) fn re_suspend(thread: HANDLE) {
     }
 }
 
-const INFINITE_MS: u32 = 0xFFFF_FFFF;
+

@@ -41,7 +41,7 @@ pub(super) static SELF_DLL: OnceLock<String> = OnceLock::new();
 /// failure, the child's shim reporting failure, the child dying, or no ready
 /// signal within the launch's ready timeout) the child is killed, its handles
 /// are closed, and this call returns `FALSE` with `ERROR_PROCESS_ABORTED`. The
-/// child is never resumed un-virtualised. There is no list of children the
+/// child is never released un-virtualised. There is no list of children the
 /// shim deliberately leaves alone: a `CreateProcess` under the shim is either a
 /// virtualised child or an error. See docs/shim-invariants.md, "Child
 /// processes fail closed".
@@ -124,8 +124,8 @@ pub(super) unsafe fn cpiw_hook_body(
             }
             Err(why) => {
                 // SAFETY: `pi` and `ptok` are the caller's out-parameters from
-                // the call that just succeeded.
-                unsafe { refuse_child(pi, ptok, why) };
+                // the call that just succeeded; `app`/`cmd` are the caller's strings.
+                unsafe { refuse_child(pi, ptok, app, cmd, why) };
                 return 0;
             }
         }
@@ -145,7 +145,16 @@ pub(super) unsafe fn cpiw_hook_body(
 /// # Safety
 /// `pi` must point to the `PROCESS_INFORMATION` the successful call filled,
 /// with handles not yet closed; `ptok` is null or the call's token out-pointer.
-unsafe fn refuse_child(pi: *mut PROCESS_INFORMATION, ptok: *mut HANDLE, why: ChildInjectError) {
+unsafe fn refuse_child(
+    pi: *mut PROCESS_INFORMATION,
+    ptok: *mut HANDLE,
+    app: *const u16,
+    cmd: *const u16,
+    why: ChildInjectError,
+) {
+    // SAFETY: per the contract above; `app`/`cmd` are the caller's NUL-terminated
+    // strings or null.
+    let image = unsafe { child_image(app, cmd) };
     // SAFETY: per the contract above.
     unsafe {
         let p = &mut *pi;
@@ -161,7 +170,57 @@ unsafe fn refuse_child(pi: *mut PROCESS_INFORMATION, ptok: *mut HANDLE, why: Chi
             CloseHandle(*ptok);
             *ptok = core::ptr::null_mut();
         }
-        SetLastError(ERROR_PROCESS_ABORTED);
     }
     crate::hookstats::note_child_inject_refused(why.label());
+    log_refusal(&image, why.label());
+    // Last: the file I/O above would overwrite it.
+    // SAFETY: FFI call with a valid argument.
+    unsafe { SetLastError(ERROR_PROCESS_ABORTED) };
+}
+
+/// Append `<image> <reason>` to the file `VFS_CHILD_REFUSED_LOG` names, which
+/// the launcher reads. Best-effort: the kill and the failed call do not depend
+/// on it.
+fn log_refusal(image: &str, reason: &str) {
+    use std::io::Write;
+    let Some(path) = vfs_env::text(vfs_env::CHILD_REFUSED_LOG) else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        // One write, so concurrent refusals do not interleave within a line.
+        let _ = f.write_all(format!("{image} {reason}\n").as_bytes());
+    }
+}
+
+/// The program a `CreateProcess` call names: `app` if given, else the first
+/// token of the command line (a quoted token whole). Capped, and a newline
+/// would break the one-line-per-refusal format, so those become spaces.
+///
+/// # Safety
+/// `app` and `cmd` are null or point to NUL-terminated UTF-16.
+unsafe fn child_image(app: *const u16, cmd: *const u16) -> String {
+    const CAP: usize = 4096;
+    let read = |p: *const u16| -> Vec<u16> {
+        let mut v = Vec::new();
+        if !p.is_null() {
+            // SAFETY: per the contract, read up to the NUL or the cap.
+            unsafe {
+                while v.len() < CAP && *p.add(v.len()) != 0 {
+                    v.push(*p.add(v.len()));
+                }
+            }
+        }
+        v
+    };
+    let mut w = read(app);
+    if w.is_empty() {
+        let c = read(cmd);
+        w = match c.first() {
+            Some(&q) if q == u16::from(b'"') => {
+                c[1..].iter().copied().take_while(|&x| x != u16::from(b'"')).collect()
+            }
+            _ => c.iter().copied().take_while(|&x| x != u16::from(b' ')).collect(),
+        };
+    }
+    String::from_utf16_lossy(&w).replace(['\r', '\n'], " ")
 }

@@ -10,7 +10,9 @@
 //!
 //! 1. the spawn fails (with `ERROR_PROCESS_ABORTED`),
 //! 2. no child process of this one is left, and
-//! 3. the child never ran (it writes a marker file as its one act).
+//! 3. the child never ran (it writes a marker file as its one act), and
+//! 4. the refusal is logged for the launcher, as `<image> <reason>`, in the
+//!    file `VFS_CHILD_REFUSED_LOG` names.
 //!
 //! The success half (a child that injects fine still runs, virtualised) needs
 //! the real shim DLL and a director, so it is the Proton end-to-end test
@@ -65,6 +67,8 @@ fn a_child_that_cannot_be_injected_is_killed_and_its_spawn_fails() {
     // the payload named here does not exist.
     std::env::set_var(vfs_env::READY_TIMEOUT_SECS, "2");
     std::env::set_var(vfs_env::PAYLOAD_PATH, base.join("no-such-payload.dll"));
+    let refused_log = base.join("ready.flag.child-refused");
+    std::env::set_var(vfs_env::CHILD_REFUSED_LOG, &refused_log);
     let _guard = install().expect("install");
 
     let refused_before = child_inject_refused_total();
@@ -90,6 +94,18 @@ fn a_child_that_cannot_be_injected_is_killed_and_its_spawn_fails() {
         child_inject_refused_total(),
         refused_before + 1,
         "the refusal must be counted"
+    );
+
+    // The launcher can learn of it: one `<image> <reason>` line, whose reason
+    // is one the counter has just counted.
+    let log = std::fs::read_to_string(&refused_log).expect("the refusal must be logged");
+    let line = log.lines().next().expect("a line");
+    assert_eq!(log.lines().count(), 1, "{log:?}");
+    let (image, reason) = line.rsplit_once(' ').expect("`<image> <reason>`");
+    assert!(image.to_lowercase().contains("cmd"), "image {image:?} in {line:?}");
+    assert!(
+        vfs_shim::child_inject_refused_count(reason) >= 1,
+        "reason {reason:?} in {line:?} is not one the counter knows"
     );
 
     // The hook waits for the kill before returning, but allow the process

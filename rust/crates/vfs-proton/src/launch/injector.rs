@@ -10,6 +10,36 @@ pub fn injector_error_path(ready_file: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Where the shim lists the child processes it killed because it could not
+/// inject them: the ready file's path plus [`vfs_env::CHILD_REFUSED_SUFFIX`].
+pub fn child_refused_path(ready_file: &Path) -> PathBuf {
+    let mut s = ready_file.as_os_str().to_owned();
+    s.push(vfs_env::CHILD_REFUSED_SUFFIX);
+    PathBuf::from(s)
+}
+
+/// The lines of the child-refused file beside `ready_file` (`<image> <reason>`
+/// each), empty when none was written.
+pub fn read_child_refusals(ready_file: &Path) -> Vec<String> {
+    std::fs::read_to_string(child_refused_path(ready_file))
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One refusal line as a sentence for an error or a launch note.
+pub fn describe_child_refusal(line: &str) -> String {
+    format!(
+        "a child process was refused and killed because the shim could not inject it \
+         (`<image> <reason>`): {line}"
+    )
+}
+
 /// A readable account of the injector's one-line failure report.
 pub fn describe_injector_error(raw: &str) -> String {
     let raw = raw.trim();
@@ -84,5 +114,23 @@ mod tests {
             injector_error_path(Path::new("/s/ready.flag")),
             Path::new("/s/ready.flag.injector-error")
         );
+    }
+
+    #[test]
+    fn child_refusals_are_read_beside_the_ready_file_and_absent_means_none() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("vfs-proton-refused-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ready = dir.join("ready.flag");
+        assert!(read_child_refusals(&ready).is_empty());
+        std::fs::write(child_refused_path(&ready), "C:\\a b\\x.exe ready-timeout\n\ny.exe child-32bit\n")
+            .unwrap();
+        assert_eq!(
+            read_child_refusals(&ready),
+            ["C:\\a b\\x.exe ready-timeout", "y.exe child-32bit"]
+        );
+        assert!(child_refused_path(&ready).to_string_lossy().ends_with(".child-refused"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

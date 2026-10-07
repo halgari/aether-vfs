@@ -856,13 +856,23 @@ step, ends in `refuse_child`:
   failure sees no child either) and both handles are closed and cleared;
 - the call returns `FALSE` with `ERROR_PROCESS_ABORTED`;
 - `hookstats::child_inject_refused_count(<reason>)` is bumped, ungated, and
-  the stats report prints a `CHILD PROCESSES REFUSED` section first;
-- the child is never resumed, not even to let it exit.
+  the stats report prints a `CHILD PROCESSES REFUSED` section right after the
+  banner and the caught-panics section, ahead of the counters;
+- the child is never released: it was resumed only far enough to run the
+  payload's stub, which holds it at the spin gate, and it is killed there, so
+  none of its own code ever runs.
+- the refusal is appended as `<image> <reason>` to the file
+  `VFS_CHILD_REFUSED_LOG` names (the ready file plus `.child-refused`, set by
+  the injector and inherited), which `vfs-embed` reports in the launch notes
+  (Proton) or the launch error (Windows).
 
-The failures: no `SELF_DLL` (the shim does not know its own DLL path, so it
+The failures: the child is a 32-bit image (`child-32bit`, checked first with
+`IsWow64Process2`; the 64-bit payload cannot arm it, so it fails at once and is
+named, not exempted), no `SELF_DLL` (the shim does not know its own DLL path, so it
 cannot inject), no `vfs_payload.dll` beside the shim, an arm failure, the
 per-pid config file unwritable, `ResumeThread` failing, the install sentinel
-never appearing, the child exiting early, `LoadLibrary` not even starting, the
+never appearing, the child exiting early, `LoadLibrary` not even starting, not finishing within the timeout, or returning
+NULL (the remote thread's exit code is checked), the
 child's shim reporting a bootstrap failure, no ready signal in time, and the
 gate release failing. There is **no plain-`LoadLibrary` fallback** any more: a
 child whose dual-layer inject fails is in an unknown state, and the previous
@@ -873,9 +883,14 @@ helpers or anything else; `VFS_INJECT_*` switches (`INJECT_CWD`,
 `INJECT_STEAM_HELPER`) belong to the top-level injector, which starts the Steam
 helper itself, outside the shim. The only knob is `VFS_CHILD_CWD_ROOT`, which
 changes the child's working directory, not whether it is injected. A child that
-cannot be injected (for instance a 32-bit image, which the 64-bit payload
-cannot arm) therefore fails to start; if a case like that needs to run, it needs
+cannot be injected (a 32-bit image, for instance) therefore fails to start; if a case like that needs to run, it needs
 an explicit, named exemption, not a silent resume.
+
+**What the child inherits.** After a shim has written its own ready state it
+drops `VFS_SHIM_READY` and `VFS_PAYLOAD_CFG_FILE` from its environment
+(`finish_ready_handshake`), so descendants neither overwrite the top-level ready
+file and boot log nor try the parent's payload-config address. A child needs
+neither: its config is found by pid and it answers its spawner by event.
 
 **How the child tells the parent it failed.** The child's shim sets
 `Local\vfs_shim_ready_<pid>` once its hooks are live. When its bootstrap fails
