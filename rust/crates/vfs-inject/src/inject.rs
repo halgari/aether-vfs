@@ -651,7 +651,8 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
         ) {
             Ok(a) => a,
             Err(e) => {
-                let _ = ResumeThread(pi.hThread);
+                // Never resume it: without the payload nothing virtualises it.
+                let _ = TerminateProcess(pi.hProcess, 1);
                 CloseHandle(pi.hThread);
                 CloseHandle(pi.hProcess);
                 return Err(e);
@@ -684,6 +685,8 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
                 return Err(InjectError::TargetExited(code));
             }
             if Instant::now() >= deadline {
+                // Parked behind the spin gate; do not leave it alive.
+                let _ = TerminateProcess(pi.hProcess, 1);
                 CloseHandle(pi.hThread);
                 CloseHandle(pi.hProcess);
                 return Err(InjectError::Timeout);
@@ -694,9 +697,8 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
         // Full shim LoadLibrary on a remote thread. Process init runs here with
         // early hooks already live. DllMain spawns bootstrap → install_late.
         if let Err(e) = inject_dll(pi.hProcess, &cfg.dll_path) {
-            // Release spin so the process can die cleanly.
-            let one = 1u32.to_le_bytes();
-            let _ = wpm(pi.hProcess, arm.release_flag, &one);
+            // Releasing the gate would run the game without the full shim.
+            let _ = TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
             return Err(e);
