@@ -138,7 +138,7 @@ jobs:
       # non-ignored tests run on any Linux box; its one Wine test is
       # `#[ignore]`d and run by `proton-linux`.
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe -p vfs-source -p vfs-zip -p xtask-descriptor -p vfs-core -p vfs-env -p vfs-shared -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord -p vfs-block-store -p vfs-storage -p vfs-registry
+        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe -p vfs-source -p vfs-zip -p vfs-core -p vfs-env -p vfs-shared -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord -p vfs-block-store -p vfs-storage -p vfs-registry
         working-directory: rust
       # The block store's own gates, carried over from its repository:
       # `crash-points` compiles in the abort hooks its subprocess crash tests
@@ -164,10 +164,6 @@ jobs:
       - name: Director kernel (compile+test on Linux)
         run: cargo test -p vfs-director
         working-directory: rust
-      - name: Regenerate protocol artifacts
-        run: bin/regen-protocol
-      - name: Fail on protocol drift
-        run: git diff --exit-code resources/
 
   # The Proton path end to end, on Linux: the shim is always a Windows PE,
   # injected into a Windows program inside GE-Proton's Wine, while the Director

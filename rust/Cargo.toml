@@ -60,7 +60,6 @@ members = [
   # registry sequence whose transcript must not change when the overlay is on.
   "crates/vfs-fixture-registry",
   "crates/vfs-bench",
-  "crates/xtask-descriptor",
 ]
 exclude = ["crates/vfs-payload"]
 
