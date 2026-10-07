@@ -2961,8 +2961,8 @@ dependencies = [
 name = "vfs-zip"
 version = "0.1.0"
 dependencies = [
+ "tempfile",
  "vfs-core",
- "vfs-protocol",
  "vfs-provider",
 ]
 

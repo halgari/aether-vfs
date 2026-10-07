@@ -15,17 +15,32 @@ use vfs_core::{EntryKind, InputEntry, Layer, LayerId, SourceId};
 pub mod backend;
 pub use backend::ZipProvider;
 
-/// Open a zip as a [`vfs_provider::Provider`] (mount with `Director::mount` / `Session::mount`).
-pub fn open_backend(zip_path: &Path) -> Result<ZipProvider, ZipError> {
-    ZipProvider::open(zip_path)
-}
-
 #[derive(Debug)]
 pub enum ZipError {
     Io(std::io::Error),
     NotAZip,
     Unsupported(String),
     Malformed(String),
+}
+
+impl std::fmt::Display for ZipError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ZipError::Io(e) => write!(f, "zip i/o error: {e}"),
+            ZipError::NotAZip => f.write_str("not a zip archive"),
+            ZipError::Unsupported(what) => write!(f, "unsupported zip feature: {what}"),
+            ZipError::Malformed(what) => write!(f, "malformed zip archive: {what}"),
+        }
+    }
+}
+
+impl std::error::Error for ZipError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ZipError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 impl From<std::io::Error> for ZipError {
@@ -338,12 +353,30 @@ mod tests {
         !crc
     }
 
+    /// A real archive from the corpus directory: `VFS_ZIP_CORPUS` if set,
+    /// else `C:\GameLayers`.
+    fn corpus_archive(name: &str) -> std::path::PathBuf {
+        let dir = std::env::var_os("VFS_ZIP_CORPUS").unwrap_or_else(|| r"C:\GameLayers".into());
+        std::path::Path::new(&dir).join(name)
+    }
+
+    #[test]
+    fn zip_error_displays_and_chains() {
+        use std::error::Error;
+        assert_eq!(ZipError::NotAZip.to_string(), "not a zip archive");
+        assert!(ZipError::Unsupported("deflate".into()).to_string().contains("deflate"));
+        let io = ZipError::from(std::io::Error::other("boom"));
+        assert!(io.to_string().contains("boom"));
+        assert!(io.source().is_some());
+        assert!(ZipError::NotAZip.source().is_none());
+    }
+
     #[test]
     fn zip_backend_getattr_open_read() {
-        use vfs_protocol::{Provider, VPath, OPEN_READ};
+        use vfs_provider::{Provider, VPath, OPEN_READ};
 
-        let dir = std::env::temp_dir().join(format!("vfs-zip-be-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let content = b"HELLO FROM INSIDE THE ZIP";
         let zip = write_plain_zip(&dir, "Data/hello.txt", content);
         let be = ZipProvider::open(&zip).unwrap();
@@ -361,13 +394,12 @@ mod tests {
         let n = be.read_at(h, 0, &mut buf).unwrap();
         assert_eq!(&buf[..n], content);
         be.close(h).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn reads_a_plain_stored_zip_entry() {
-        let dir = std::env::temp_dir().join(format!("vfs-zip-plain-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let content = b"HELLO FROM INSIDE THE ZIP";
         let zip = write_plain_zip(&dir, "Data/hello.txt", content);
 
@@ -388,15 +420,14 @@ mod tests {
             }
             other => panic!("expected zip window, got {other:?}"),
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn rejects_a_deflated_entry() {
         // method != 0 in the central header -> Unsupported. Reuse the plain
         // writer but flip the method byte at central offset (10) after writing.
-        let dir = std::env::temp_dir().join(format!("vfs-zip-defl-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let zip = write_plain_zip(&dir, "a.bin", b"xxxx");
         let mut bytes = std::fs::read(&zip).unwrap();
         // Find the central-directory signature and set method (offset +10) to 8.
@@ -407,16 +438,15 @@ mod tests {
         bytes[cd + 10] = 8;
         std::fs::write(&zip, &bytes).unwrap();
         assert!(matches!(read_layer(&zip, LayerId(0)), Err(ZipError::Unsupported(_))));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn reads_the_real_skyui_archive() {
-        let zip = Path::new(r"C:\GameLayers\3. SkyUI 6.11.zip");
+        let zip = corpus_archive("3. SkyUI 6.11.zip");
         if !zip.exists() {
             return; // skip when the archive is absent
         }
-        let layer = read_layer(zip, LayerId(2)).unwrap();
+        let layer = read_layer(&zip, LayerId(2)).unwrap();
         let esp = layer.entries.iter().find(|e| e.vpath == "Data/SkyUI_SE.esp").unwrap();
         assert_eq!(esp.size, 2433);
     }
@@ -424,8 +454,8 @@ mod tests {
     #[test]
     #[ignore = "reads the 16 GB ZIP64 base archive; run manually"]
     fn reads_the_real_base_archive_zip64() {
-        let zip = Path::new(r"C:\GameLayers\1. Skyrim Special Edition.zip");
-        let layer = read_layer(zip, LayerId(0)).unwrap();
+        let zip = corpus_archive("1. Skyrim Special Edition.zip");
+        let layer = read_layer(&zip, LayerId(0)).unwrap();
         // An entry known to sit past the 4 GB mark exercises ZIP64 offsets.
         let tex = layer.entries.iter().find(|e| e.vpath == "Data/Skyrim - Textures1.bsa").unwrap();
         assert_eq!(tex.size, 1_511_492_648);
@@ -437,11 +467,10 @@ mod tests {
 
     #[test]
     fn a_too_small_file_is_not_a_zip() {
-        let dir = std::env::temp_dir().join(format!("vfs-zip-tiny-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let path = dir.join("tiny.bin");
         std::fs::write(&path, b"PK").unwrap(); // 2 bytes, no EOCD
         assert!(matches!(read_layer(&path, LayerId(0)), Err(ZipError::NotAZip)));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
