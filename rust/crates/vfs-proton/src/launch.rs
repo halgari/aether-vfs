@@ -280,7 +280,7 @@ pub fn command_line(l: &WineLaunch) -> (String, Vec<String>) {
 ///
 /// `VFS_ARENA_OFFSET` *is* exported even though today's client derives the
 /// offset from the ring header: it is what the working `vfs-serve-fb` run
-/// published, it is what the Windows `IpcServe::apply_env` sets, and a
+/// published, it is what the Windows `IpcServe::apply_env_roots` sets, and a
 /// geometry field that exists at one end and not the other is exactly the
 /// drift `vfs-env` was created to stop.
 pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
