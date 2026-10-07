@@ -150,7 +150,7 @@ impl Session {
         match &self.proton.home {
             Some(h) => Ok(ProtonRoot::at(h.clone())),
             None => ProtonRoot::from_env()
-                .map_err(|e| format!("launch: no aether-vfs home (set_home, or VFS_HOME): {e}")),
+                .map_err(|e| format!("no aether-vfs home (set_home, or VFS_HOME): {e}")),
         }
     }
 
@@ -569,7 +569,7 @@ impl Session {
         // behaves as on Windows.
         let resolved = self.resolve_launch_image(opts)?;
 
-        let booted = self.ensure_prefix()?;
+        let booted = self.ensure_prefix().map_err(|e| format!("launch: {e}"))?;
         let wine = self.wine_launch(opts, ipc, &ring, resolved, &booted)?;
 
         let child = vfs_proton::launch::spawn(&wine).map_err(|e| format!("launch: {e}"))?;
@@ -657,23 +657,40 @@ impl Session {
         })
     }
 
+    /// Unix: set this session's Wine prefix up now, as [`Session::launch`]
+    /// would, and return its directory: files a launch needs in the prefix
+    /// can then be put there before the program starts.
+    ///
+    /// It is the launch's own prefix step and nothing else: the newest
+    /// verified runtime of the session's home ([`Session::set_home`]), the
+    /// prefix named by [`Session::set_prefix_name`] and set up the way
+    /// [`Session::set_prefix_init`] says, under the prefix's launch lock
+    /// (held only while it is set up). A prefix the runtime in use already
+    /// set up is left as it is, so this is quick on every call but the first
+    /// and the first after a runtime change, and the launch that follows
+    /// finds the prefix ready. The session need not be serving. It fails as
+    /// the launch would: no runtime, a prefix another live launch is using, a
+    /// Proton setup that fails.
+    ///
+    /// With no [`Session::set_prefix_name`] the prefix is anonymous, keyed by
+    /// `state_dir` and deleted when this session drops, as for a launch.
+    #[cfg(unix)]
+    pub fn prepare_prefix(&self) -> Result<PathBuf, String> {
+        Ok(self.ensure_prefix()?.prefix.dir.clone())
+    }
+
     /// The newest verified runtime and this session's prefix, locked and set
     /// up. An anonymous prefix is recorded for `Drop` before it is booted, so
-    /// a boot that fails half-way is still deleted.
+    /// a boot that fails half-way is still deleted. The errors carry no
+    /// "launch:" prefix: [`Session::launch_detached`] adds it, and
+    /// [`Session::prepare_prefix`] is not a launch.
     fn ensure_prefix(&self) -> Result<BootedPrefix, String> {
         let home = self.proton_home()?;
-        // `installed_dirs`, not `installed` + `runtime_dir`: the tag comes from
-        // the tree's `version` file and the directory name from the release it
-        // was installed from, and re-joining the tag onto `runtimes()` assumes
-        // those always agree.
-        let runtime = vfs_proton::runtime::installed_dirs(&home)
-            .map_err(|e| format!("launch: reading {}: {e}", home.runtimes().display()))?
-            .into_iter()
-            .next()
-            .map(|(_tag, dir)| dir)
+        let runtime = vfs_proton::runtime::newest_installed(&home)
+            .map_err(|e| format!("reading {}: {e}", home.runtimes().display()))?
             .ok_or_else(|| {
                 format!(
-                    "launch: no verified GE-Proton runtime under {} — install one with \
+                    "no verified GE-Proton runtime under {} — install one with \
                      `vfs-proton install` (VFS_HOME selects where it lands). Launching on \
                      stock Proton instead is the silent downgrade this path refuses.",
                     home.runtimes().display()
@@ -686,7 +703,7 @@ impl Session {
         };
         let prefix_dir =
             vfs_proton::prefix::prefix_dir(&home, &prefix_id, &self.proton.prefix_init)
-                .map_err(|e| format!("launch: wine prefix: {e}"))?;
+                .map_err(|e| format!("wine prefix: {e}"))?;
         if self.proton.prefix_name.is_none() {
             // Recorded before `ensure`, so a boot that fails half-way is
             // still deleted on drop.
@@ -709,10 +726,10 @@ impl Session {
         // run under a program another process is running in it.
         let lock = Prefix { dir: prefix_dir }
             .lock()
-            .map_err(|e| format!("launch: {e}"))?;
+            .map_err(|e| e.to_string())?;
         let prefix =
             vfs_proton::prefix::ensure_with(&home, &runtime, &prefix_id, &self.proton.prefix_init)
-                .map_err(|e| format!("launch: wine prefix: {e}"))?;
+                .map_err(|e| format!("wine prefix: {e}"))?;
         Ok(BootedPrefix {
             runtime,
             prefix,

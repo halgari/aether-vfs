@@ -863,3 +863,33 @@ fn a_prefix_in_use_elsewhere_is_not_set_up_under_it() {
     drop(held);
     assert_eq!(s.launch(&opts(&shim, "ok", true)).unwrap(), 0);
 }
+
+#[test]
+fn prepare_prefix_sets_the_prefix_up_as_a_launch_would_without_serving() {
+    let home = fake_home("prepare");
+    let mut s = Session::new();
+    s.set_home(&home);
+    s.set_state_dir(tmp("prepare-state"));
+    s.set_prefix_name("fake").unwrap();
+    s.set_prefix_init(PrefixInit::Proton {
+        steam_client: tmp("prepare-steam"),
+        app_id: Some(489830),
+    });
+    let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
+    assert_eq!(s.prepare_prefix().unwrap(), pfx);
+    assert!(pfx.join("drive_c").join("windows").join("system32").is_dir());
+    // A prefix the runtime already set up is left as it is, and the lock is
+    // not held after the call.
+    assert_eq!(s.prepare_prefix().unwrap(), pfx);
+}
+
+#[test]
+fn prepare_prefix_without_a_runtime_says_so_and_is_not_a_launch_error() {
+    let home = tmp("prepare-none");
+    let mut s = Session::new();
+    s.set_home(&home);
+    s.set_state_dir(tmp("prepare-none-state"));
+    s.set_prefix_name("fake").unwrap();
+    let e = s.prepare_prefix().unwrap_err();
+    assert!(e.starts_with("no verified GE-Proton runtime under "), "{e}");
+}
