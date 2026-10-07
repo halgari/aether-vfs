@@ -284,13 +284,15 @@ impl Session {
 // payload pair), so it is gated alongside it.
 #[cfg(windows)]
 fn locate_shim_payload(opts: &LaunchOpts) -> Result<(String, String), String> {
+    let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
     if let (Some(d), Some(p)) = (&opts.shim_dll, &opts.payload_dll) {
-        return Ok((d.clone(), p.clone()));
+        return Ok((text(d), text(p)));
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dll = opts
         .shim_dll
-        .clone()
+        .as_deref()
+        .map(text)
         .or_else(|| {
             vfs_inject::find_near(&exe, "vfs_shim_dll.dll")
                 .map(|p| p.to_string_lossy().into_owned())
@@ -298,7 +300,8 @@ fn locate_shim_payload(opts: &LaunchOpts) -> Result<(String, String), String> {
         .ok_or_else(|| "vfs_shim_dll.dll not found (set LaunchOpts.shim_dll)".to_string())?;
     let payload = opts
         .payload_dll
-        .clone()
+        .as_deref()
+        .map(text)
         .or_else(|| vfs_inject::ensure_payload_beside_shim(&dll, None))
         .ok_or_else(|| "vfs_payload.dll not found".to_string())?;
     Ok((dll, payload))

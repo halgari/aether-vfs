@@ -128,13 +128,13 @@ impl Artifacts {
     }
 
     /// `LaunchOpts::shim_dll`. The injector is looked for beside it.
-    pub fn shim_dll(&self) -> String {
-        self.path(vfs_proton::artifacts::SHIM_DLL).to_string_lossy().into_owned()
+    pub fn shim_dll(&self) -> PathBuf {
+        self.path(vfs_proton::artifacts::SHIM_DLL).to_path_buf()
     }
 
     /// `LaunchOpts::payload_dll`.
-    pub fn payload_dll(&self) -> String {
-        self.path(vfs_proton::artifacts::PAYLOAD_DLL).to_string_lossy().into_owned()
+    pub fn payload_dll(&self) -> PathBuf {
+        self.path(vfs_proton::artifacts::PAYLOAD_DLL).to_path_buf()
     }
 }
 

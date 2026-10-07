@@ -169,8 +169,11 @@ fn opts(shim: &str, mode: &str, wait: bool) -> LaunchOpts {
     LaunchOpts {
         image: "game.exe".into(),
         wait,
-        shim_dll: Some(shim.to_string()),
-        payload_dll: Some(shim.replace(vfs_proton::artifacts::SHIM_DLL, vfs_proton::artifacts::PAYLOAD_DLL)),
+        shim_dll: Some(shim.into()),
+        payload_dll: Some(
+            shim.replace(vfs_proton::artifacts::SHIM_DLL, vfs_proton::artifacts::PAYLOAD_DLL)
+                .into(),
+        ),
         env: BTreeMap::from([("FAKE_WINE_MODE".to_string(), mode.to_string())]),
         ..Default::default()
     }

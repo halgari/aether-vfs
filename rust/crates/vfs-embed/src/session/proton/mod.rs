@@ -1060,12 +1060,11 @@ fn join_wine(base: &str, rel: &Path) -> Result<String, String> {
 /// targets, cross-built separately from the Linux host (`bin/build-windows`,
 /// which copies them beside the Linux binaries) — so this resolves what is
 /// already there rather than producing anything, and says so in the failure.
-/// [`LaunchOpts::shim_dll`] / [`LaunchOpts::payload_dll`] win when set; the
-/// documented default location is the directory holding `shim_dll` if only
-/// that is set, else `VFS_WINDOWS_ARTIFACTS`, else the
-/// directory holding `current_exe()`. The injector has no `LaunchOpts` field of
-/// its own, so that same directory is where it is looked for — the one
-/// `cargo build` puts all three in.
+/// [`LaunchOpts::shim_dll`], [`LaunchOpts::payload_dll`] and
+/// [`LaunchOpts::injector`] win when set; the default location of the others is
+/// the directory holding `shim_dll` if that is set, else
+/// `VFS_WINDOWS_ARTIFACTS`, else the directory holding `current_exe()` — the
+/// one `cargo build` puts all three in.
 ///
 /// All three are checked before any of them is used, and every missing one is
 /// listed: a launch that reported them one at a time would cost a Wine
@@ -1084,7 +1083,7 @@ fn locate_wine_artifacts_in(
     env_dir: Option<&Path>,
 ) -> Result<(PathBuf, PathBuf, PathBuf), String> {
     let base = match (&opts.shim_dll, env_dir) {
-        (Some(s), _) => Path::new(s)
+        (Some(s), _) => s
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from(".")),
@@ -1095,17 +1094,10 @@ fn locate_wine_artifacts_in(
             .map(Path::to_path_buf)
             .ok_or_else(|| "launch: current_exe() has no parent directory".to_string())?,
     };
-    let shim = opts
-        .shim_dll
-        .clone()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| base.join(artifacts::SHIM_DLL));
-    let payload = opts
-        .payload_dll
-        .clone()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| base.join(artifacts::PAYLOAD_DLL));
-    let injector = base.join(artifacts::INJECTOR);
+    let or_beside = |set: &Option<PathBuf>, name: &str| set.clone().unwrap_or_else(|| base.join(name));
+    let shim = or_beside(&opts.shim_dll, artifacts::SHIM_DLL);
+    let payload = or_beside(&opts.payload_dll, artifacts::PAYLOAD_DLL);
+    let injector = or_beside(&opts.injector, artifacts::INJECTOR);
 
     let missing: Vec<String> = [&injector, &shim, &payload]
         .iter()
@@ -1117,8 +1109,8 @@ fn locate_wine_artifacts_in(
             "launch: these Windows artifacts are missing: {}. Cross-build them with \
              `bin/build-windows` (which copies them beside the Linux binaries), put all three \
              in {}, set VFS_WINDOWS_ARTIFACTS to the directory holding them, or set \
-             LaunchOpts.shim_dll and LaunchOpts.payload_dll to where they are \
-             (vfs-injector.exe is then looked for beside shim_dll).",
+             LaunchOpts.shim_dll, payload_dll and injector to where they are \
+             (any of the three left unset is looked for beside shim_dll).",
             missing.join(", "),
             base.display()
         ));
@@ -1358,12 +1350,7 @@ mod tests {
         // An explicit shim_dll wins over the directory.
         let other = scratch("artifacts-other");
         let opts = LaunchOpts {
-            shim_dll: Some(
-                other
-                    .join(artifacts::SHIM_DLL)
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
+            shim_dll: Some(other.join(artifacts::SHIM_DLL)),
             ..Default::default()
         };
         let e = locate_wine_artifacts_in(&opts, Some(&dir)).unwrap_err();
@@ -1371,6 +1358,21 @@ mod tests {
             e.contains(&other.display().to_string()) && e.contains("VFS_WINDOWS_ARTIFACTS"),
             "{e}"
         );
+
+        // An explicit injector wins too, and only it moves.
+        let inj_elsewhere = other.join(artifacts::INJECTOR);
+        std::fs::write(&inj_elsewhere, b"x").unwrap();
+        let (inj, shim, payload) = locate_wine_artifacts_in(
+            &LaunchOpts {
+                injector: Some(inj_elsewhere.clone()),
+                ..Default::default()
+            },
+            Some(&dir),
+        )
+        .unwrap();
+        assert_eq!(inj, inj_elsewhere);
+        assert_eq!(shim, dir.join(artifacts::SHIM_DLL));
+        assert_eq!(payload, dir.join(artifacts::PAYLOAD_DLL));
 
         // A directory missing some of them names each one.
         std::fs::remove_file(dir.join(artifacts::PAYLOAD_DLL)).unwrap();

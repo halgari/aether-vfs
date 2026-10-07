@@ -48,7 +48,8 @@ pub struct LaunchOpts {
     /// without a fallback the loader fails them during process init — before
     /// any hook of ours exists to help.
     pub stage_fallback_dirs: Vec<PathBuf>,
-    /// Absolute paths to `vfs_shim_dll.dll` and `vfs_payload.dll`.
+    /// Absolute paths to `vfs_shim_dll.dll`, `vfs_payload.dll` and (Proton
+    /// path) `vfs-injector.exe`.
     ///
     /// Left `None`, they are searched for **next to `std::env::current_exe()`**
     /// — and that is only the right answer when the host process *is* one of
@@ -63,15 +64,19 @@ pub struct LaunchOpts {
     /// "`vfs_shim_dll.dll` not found" from a host that shipped the DLL, with
     /// nothing pointing at why the search looked where it did.
     ///
-    /// **On the Proton path these two fields answer for three files.** A Wine
-    /// launch also needs `vfs-injector.exe`, and it has no field of its own:
-    /// it is looked for **beside `shim_dll`** when that is set, and otherwise
-    /// beside `current_exe()` — the one directory `cargo build` puts all three
-    /// in. On Linux they are a separate Windows cross-build
-    /// (`bin/build-windows`), so a missing one is reported by name (see `locate_wine_artifacts`) rather than surfacing as
-    /// a path error out of `wine`.
-    pub shim_dll: Option<String>,
-    pub payload_dll: Option<String>,
+    /// **On the Proton path a launch needs three files.** `injector` is
+    /// `vfs-injector.exe`; left `None` it is looked for **beside `shim_dll`**
+    /// when that is set, else in `VFS_WINDOWS_ARTIFACTS`, else beside
+    /// `current_exe()` — the one directory `cargo build` puts all three in.
+    /// On Linux they are a separate Windows cross-build
+    /// (`bin/build-windows`; the names are
+    /// `vfs_proton::artifacts::WINDOWS_ARTIFACTS`), so a missing one is
+    /// reported by name rather than surfacing as a path error out of `wine`.
+    /// The injector is not used on Windows, where it is in-process.
+    pub shim_dll: Option<PathBuf>,
+    pub payload_dll: Option<PathBuf>,
+    /// **Proton path only**: `vfs-injector.exe` — see [`shim_dll`](Self::shim_dll).
+    pub injector: Option<PathBuf>,
     /// Extra environment variables for the child.
     ///
     /// **Proton path: child-only.** They go into the environment block the
@@ -92,6 +97,8 @@ pub struct LaunchOpts {
     pub env: BTreeMap<String, String>,
     /// **Proton path only**: the working directory the program starts in, as
     /// it sees it — a `C:\…` path, or a path relative to root 0's location.
+    /// A `String`, not a `PathBuf`: it names a place in the Wine prefix, with
+    /// Windows spelling, not a host path.
     /// `None` is the image's own directory. On Windows the child starts in
     /// root 0's directory, as before, whatever this says.
     pub cwd: Option<String>,
@@ -139,6 +146,7 @@ impl Default for LaunchOpts {
             stage_fallback_dirs: Vec::new(),
             shim_dll: None,
             payload_dll: None,
+            injector: None,
             env: BTreeMap::new(),
             cwd: None,
             ready_timeout: None,
