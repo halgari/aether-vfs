@@ -16,6 +16,7 @@ use crate::ntdef::{
     STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_HANDLE, STATUS_OBJECT_NAME_INVALID,
     STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
+use crate::synth_file::FileView;
 use core::ffi::c_void;
 use std::sync::OnceLock;
 use vfs_redirect::{DirStatus, SYNTH_FILETIME, write_file_name_info};
@@ -150,7 +151,12 @@ unsafe fn fuse_query_information(
     length: u32,
     class: u32,
 ) -> NTSTATUS {
-    let Some((_, size, is_dir, pos, _append_only)) = crate::synth_file::lookup(handle as isize)
+    let Some(FileView {
+        size,
+        is_dir,
+        position: pos,
+        ..
+    }) = crate::synth_file::lookup(handle as isize)
     else {
         return STATUS_INVALID_HANDLE;
     };

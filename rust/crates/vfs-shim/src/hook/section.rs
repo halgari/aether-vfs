@@ -6,6 +6,7 @@ use crate::ntdef::{
     NtCreateSectionFn, ObjectAttributes, SEC_IMAGE, STATUS_INVALID_FILE_FOR_SECTION,
     STATUS_INVALID_HANDLE, STATUS_SECTION_TOO_BIG, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
+use crate::synth_file::FileView;
 use core::ffi::c_void;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
@@ -110,7 +111,10 @@ unsafe fn fuse_create_section(
     file_handle: HANDLE,
     tramp: NtCreateSectionFn,
 ) -> NTSTATUS {
-    let Some((fh, size, is_dir, _, _)) = crate::synth_file::lookup(file_handle as isize) else {
+    let Some(FileView {
+        fh, size, is_dir, ..
+    }) = crate::synth_file::lookup(file_handle as isize)
+    else {
         return STATUS_INVALID_HANDLE;
     };
     if is_dir || size == 0 {

@@ -13,6 +13,7 @@ use crate::ntdef::{
     ObjectAttributes, STATUS_ACCESS_DENIED, STATUS_FILE_IS_A_DIRECTORY,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
+use crate::synth_file::FileView;
 use core::ffi::c_void;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
@@ -244,7 +245,7 @@ pub(super) unsafe fn setinfo_hook_body(
             if let Some(f) = crate::synth_file::cache(handle as isize) {
                 crate::read_cache::invalidate(&f);
             }
-            if let (Some((fh, _, _, _, _)), Some(c)) = (
+            if let (Some(FileView { fh, .. }), Some(c)) = (
                 crate::synth_file::lookup(handle as isize),
                 crate::director::global(),
             ) {

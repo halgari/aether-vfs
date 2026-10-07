@@ -111,10 +111,25 @@ pub fn lookup_read(handle: isize) -> Option<ReadView> {
     })
 }
 
-pub fn lookup(handle: isize) -> Option<(u64, u64, bool, u64, bool)> {
+/// What a handle's table entry says about its file: see [`lookup`].
+pub struct FileView {
+    pub fh: u64,
+    pub size: u64,
+    pub is_dir: bool,
+    pub position: u64,
+    pub append_only: bool,
+}
+
+pub fn lookup(handle: isize) -> Option<FileView> {
     let g = TABLE.lock().ok()?;
     let e = g.get(&(handle as usize))?;
-    Some((e.fh, e.size, e.is_dir, e.position, e.append_only))
+    Some(FileView {
+        fh: e.fh,
+        size: e.size,
+        is_dir: e.is_dir,
+        position: e.position,
+        append_only: e.append_only,
+    })
 }
 
 /// Absolute path recorded for a FUSE handle (for relative RootDirectory opens).
@@ -191,8 +206,12 @@ mod tests {
             for end in ends {
                 grow_size(h, end);
             }
-            let (_, size, _, position, _) = lookup(h).unwrap();
-            assert_eq!((size, position), (200, 200), "ends reported as {ends:?}");
+            let v = lookup(h).unwrap();
+            assert_eq!(
+                (v.size, v.position),
+                (200, 200),
+                "ends reported as {ends:?}"
+            );
             close_fuse(h);
         }
     }

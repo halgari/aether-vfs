@@ -7,6 +7,7 @@ use super::{
 use crate::ntdef::{
     STATUS_END_OF_FILE, STATUS_INVALID_HANDLE, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
+use crate::synth_file::FileView;
 use core::ffi::c_void;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
@@ -167,8 +168,13 @@ pub(super) unsafe fn write_hook_body(
         crate::hookstats::note_read_completion(!apc.is_null(), !event.is_null());
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         let explicit = unsafe { crate::ntbuf::explicit_offset(byte_offset) };
-        if let Some((fh, size, _is_dir, pos, append_only)) =
-            crate::synth_file::lookup(handle as isize)
+        if let Some(FileView {
+            fh,
+            size,
+            position: pos,
+            append_only,
+            ..
+        }) = crate::synth_file::lookup(handle as isize)
         {
             // Append-only access (FILE_APPEND_DATA without FILE_WRITE_DATA)
             // forces every write to the current end of file at the kernel
