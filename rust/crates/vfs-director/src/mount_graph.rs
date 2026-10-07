@@ -282,7 +282,7 @@ impl Provider for MountGraph {
                     // `Director`'s own coarse pre-check never fires and this was
                     // the only place left that could still see the rejection
                     // for this specific mount.
-                    crate::io_stats::record_rejected_write(&path);
+                    vfs_compose::record_rejected_write(&path);
                     return Err(read_only());
                 }
                 continue;
@@ -663,10 +663,10 @@ mod tests {
             "the graph as a whole must report writable — the masking Finding 1 warned about"
         );
 
-        crate::io_stats::reset_rejected_writes();
+        vfs_compose::reset_rejected_writes();
         let result = g.open(VPath::at_default("ro/f"), vfs_provider::OPEN_WRITE);
         assert_eq!(result, Err(vfs_provider::ST_READ_ONLY));
-        let rejected = crate::io_stats::rejected_writes();
+        let rejected = vfs_compose::rejected_writes();
         assert!(
             rejected.iter().any(|(path, count)| path == "ro/f" && *count >= 1),
             "a write refused by one mount in a graph containing a writable \
@@ -722,7 +722,7 @@ mod tests {
         // The discovery instrument must stay quiet for a write that
         // succeeded: a rejection recorded here would send the gate-4 workflow
         // hunting for a provider that is already mounted.
-        let rejected = crate::io_stats::rejected_writes();
+        let rejected = vfs_compose::rejected_writes();
         assert!(
             !rejected.iter().any(|(path, _)| path == "only-on-disk.txt"),
             "a write that the graph served must not be recorded as rejected, got {rejected:?}"
