@@ -78,12 +78,12 @@ fn setup() -> std::path::PathBuf {
     std::fs::write(
         layer
             .join("data")
-            .join(vfs_redirect::whiteout_marker("gone.esp")),
+            .join(format!("gone.esp{}", vfs_redirect::WHITEOUT_SUFFIX)),
         b"",
     )
     .unwrap();
 
-    let marker = format!("data/{}", vfs_redirect::whiteout_marker("gone.esp"));
+    let marker = format!("data/gone.esp{}", vfs_redirect::WHITEOUT_SUFFIX);
     fakedirector::install(
         &root,
         fakedirector::Fake::new()
@@ -119,7 +119,7 @@ fn a_shim_whiteout_is_neither_listed_nor_ineffective_in_a_director_listing() {
          listing branch at all, so neither assertion below would mean anything: {names:?}"
     );
 
-    let marker = vfs_redirect::whiteout_marker("gone.esp");
+    let marker = format!("gone.esp{}", vfs_redirect::WHITEOUT_SUFFIX);
     assert!(
         !names.iter().any(|n| n.eq_ignore_ascii_case(&marker)),
         "half one: the whiteout marker surfaced to the caller as a real file called {marker}. \

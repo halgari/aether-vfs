@@ -8,17 +8,6 @@ pub const FILE_OPEN_IF: u32 = 3;
 pub const FILE_OVERWRITE: u32 = 4;
 pub const FILE_OVERWRITE_IF: u32 = 5;
 
-/// How an open intends to touch a file's content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WriteIntent {
-    /// The caller can modify content (has write/append/generic-write access).
-    pub write: bool,
-    /// The disposition keeps existing content (`OPEN`/`OPEN_IF`) rather than
-    /// truncating or replacing it — the signal that a copy-on-write materialize
-    /// must preserve the current bytes.
-    pub preserves: bool,
-}
-
 /// `FILE_WRITE_DATA`: the specific right to write file content.
 pub const FILE_WRITE_DATA: u32 = 0x0002;
 /// `FILE_APPEND_DATA`: the specific right to append.
@@ -28,17 +17,8 @@ pub const GENERIC_WRITE: u32 = 0x4000_0000;
 /// `GENERIC_ALL`, as the raw mask a hook observes.
 pub const GENERIC_ALL: u32 = 0x1000_0000;
 /// The access bits the shim's `is_write_open` treats as write access. `GENERIC_ALL` is not in
-/// it, though it implies write: `classify_open` counts it and the shim's predicate has never
-/// done so, and the two are kept as they were.
+/// it, though it implies write; the predicate has never counted it, and that is kept as it was.
 pub const WRITE_ACCESS: u32 = FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE;
-
-/// Classify an open from its desired-access mask and create disposition.
-pub fn classify_open(access: u32, disposition: u32) -> WriteIntent {
-    WriteIntent {
-        write: access & (WRITE_ACCESS | GENERIC_ALL) != 0,
-        preserves: matches!(disposition, FILE_OPEN | FILE_OPEN_IF),
-    }
-}
 
 /// `IoStatusBlock.Information` of a successful create: an existing object was replaced.
 pub const FILE_SUPERSEDED: usize = 0;
@@ -226,57 +206,13 @@ pub fn disposition_information(disposition: u32, existed_before: bool) -> usize 
 mod tests {
     use super::*;
 
-    /// The shared write-access constants: `classify_open` counts `GENERIC_ALL`, the bare
-    /// `WRITE_ACCESS` mask the shim's `is_write_open` uses does not (kept as it was).
+    /// The bare `WRITE_ACCESS` mask the shim's `is_write_open` uses: write, append and generic
+    /// write, and not `GENERIC_ALL` (kept as it was).
     #[test]
-    fn write_access_masks_agree_with_classify_open() {
+    fn write_access_mask_is_the_three_write_bits() {
         assert_eq!(WRITE_ACCESS, 0x4000_0006);
-        for bit in [
-            FILE_WRITE_DATA,
-            FILE_APPEND_DATA,
-            GENERIC_WRITE,
-            GENERIC_ALL,
-        ] {
-            assert!(classify_open(bit, FILE_OPEN).write, "{bit:#x}");
-        }
-        assert!(!classify_open(0x8000_0000, FILE_OPEN).write); // GENERIC_READ
+        assert_eq!(WRITE_ACCESS, FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE);
         assert_eq!(WRITE_ACCESS & GENERIC_ALL, 0);
-    }
-
-    #[test]
-    fn classify_open_reads_writes_and_preserves() {
-        // Read: SYNCHRONIZE|READ_DATA, disp OPEN -> not a write.
-        assert_eq!(
-            classify_open(0x0010_0001, FILE_OPEN),
-            WriteIntent {
-                write: false,
-                preserves: true
-            }
-        );
-        // GENERIC_WRITE + OPEN_IF -> write, preserves (COW-materialize).
-        assert_eq!(
-            classify_open(0x4010_0080, FILE_OPEN_IF),
-            WriteIntent {
-                write: true,
-                preserves: true
-            }
-        );
-        // GENERIC_WRITE + OVERWRITE_IF -> write, does not preserve (truncate).
-        assert_eq!(
-            classify_open(0x4000_0000, FILE_OVERWRITE_IF),
-            WriteIntent {
-                write: true,
-                preserves: false
-            }
-        );
-        // APPEND_DATA + CREATE -> write, create (no preserve).
-        assert_eq!(
-            classify_open(0x4, FILE_CREATE),
-            WriteIntent {
-                write: true,
-                preserves: false
-            }
-        );
     }
 
     // --- Fix 8: two disposition-classification bugs.

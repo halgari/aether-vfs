@@ -77,7 +77,7 @@ mod tests {
     /// either order and in any letter case, and unrelated entries stay.
     #[test]
     fn a_marker_and_the_name_it_hides_are_dropped_and_nothing_else_is() {
-        let marker = vfs_redirect::whiteout_marker("gone.esp");
+        let marker = format!("gone.esp{}", vfs_redirect::WHITEOUT_SUFFIX);
         for listing in [
             vec![item("GONE.esp"), item(&marker), item("kept.esp")],
             vec![item(&marker), item("kept.esp"), item("gone.esp")],

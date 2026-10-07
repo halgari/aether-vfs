@@ -197,9 +197,11 @@ relocated base and DRM still verified), and what actually needs the
 on-disk exe is outside this hook: `CreateProcess` of the host image, and
 Steam's own path association from a separate, un-injected process.
 
-`OpenOutcome::FellThroughDrmException` is deliberately kept in the enum
-and in the report reading **zero**: a removed counter cannot prove the
-class stayed closed, and the shim/director reconciliation asserts on it.
+The `FellThroughDrmException` outcome counter (and the `FellThroughRedirect`, `FellThroughServe`
+and `Denied` ones, which had no producer either) was removed with the shim-local engine. It had
+only ever read zero since the exceptions went, so it proved nothing a test cannot: that these
+names are served by the director is asserted by `director_overlay/drm_names_route_to_director.rs`
+(each name is `Routed`, and the bytes come from the director).
 
 The tracer stays wired for the live acceptance run — it is off unless
 `VFS_DRM_EXE_LOG` names a file, and it now sees the opens it never could

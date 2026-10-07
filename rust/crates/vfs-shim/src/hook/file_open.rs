@@ -79,7 +79,6 @@ unsafe fn try_fuse_create(
     // No basename exceptions: `steam_appid.txt`, `SkyrimSELauncher.exe`,
     // `steam_api{,64}.dll` and `SkyrimSE.exe` are served or sealed like any other path
     // under the root, so nothing under a managed root reaches the real disk by name.
-    // `OpenOutcome::FellThroughDrmException` stays in the enum and reads zero.
     // See docs/shim-invariants.md, "Sealed root: opens".
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
     drm_exe_trace(&path, unsafe { fuse_root_directory(oa) }, write);

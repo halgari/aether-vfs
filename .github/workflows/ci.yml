@@ -110,7 +110,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # `vfs-core`, `vfs-env` and `vfs-shared` were portable before anyone
+      # `vfs-core` and `vfs-env` were portable before anyone
       # claimed it: measured 2026-09-01 in a WSL Arch box on an ext4
       # checkout, they contribute passing tests with a Linux dependency graph
       # containing no windows crate at all. The ring transport is proven on
@@ -138,7 +138,7 @@ jobs:
       # non-ignored tests run on any Linux box; its one Wine test is
       # `#[ignore]`d and run by `proton-linux`.
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe -p vfs-source -p vfs-zip -p vfs-core -p vfs-env -p vfs-shared -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord -p vfs-block-store -p vfs-storage -p vfs-registry
+        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe -p vfs-source -p vfs-zip -p vfs-core -p vfs-env -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord -p vfs-block-store -p vfs-storage -p vfs-registry
         working-directory: rust
       # The block store's own gates, carried over from its repository:
       # `crash-points` compiles in the abort hooks its subprocess crash tests

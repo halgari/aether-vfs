@@ -240,13 +240,6 @@ pub mod mark_close {
     /// a re-entrant acquisition of a shim table lock rather than anything in
     /// the synthetic-handle paths.
     pub const TABLES: u32 = 1020;
-    /// No longer emitted (the handle tables are one): `DIR_TABLE` acquired, about to take
-    /// `HANDLE_PATHS`.
-    pub const TABLE_HANDLE_PATHS: u32 = 1023;
-    /// No longer emitted: about to take `IDENTITY_TABLE`.
-    pub const TABLE_IDENTITY: u32 = 1024;
-    /// No longer emitted: about to take `PATH_TABLE`.
-    pub const TABLE_PATH: u32 = 1025;
     /// Ordinary handle: about to call real ntdll `NtClose`.
     pub const TRAMP: u32 = 1021;
     /// Ordinary handle: real `NtClose` returned.

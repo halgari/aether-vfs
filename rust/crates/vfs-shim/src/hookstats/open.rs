@@ -166,79 +166,44 @@ pub(super) fn render_stats(snap: &Snapshot) -> String {
 
 /// Which code path an under-root open actually took.
 ///
-/// The shim's decision for an open under the managed root is not binary:
-/// besides being routed to the director, it can fall through to the real
-/// filesystem for several *different* reasons — a redirect that resolved to
-/// nothing, the generic pass-through default, a DRM host-exe exception, or the
-/// write-fallback path — or be denied outright. A single "fell through" counter
-/// cannot tell which of those happened, and that distinction is the entire
-/// point: gates 2-5 each remove exactly one of these classes, and only a
-/// counter that stays distinct per class can show that the gate which removed a
-/// class actually drove it to zero, without also masking a regression in a
-/// class that gate did not touch. `FellThroughRedirect`/`FellThroughServe` are
-/// gate 3's, `FellThroughPassthrough` is gates 2 and 3's,
-/// `FellThroughWriteFallback` is gate 4's, and `FellThroughDrmException` was
-/// gate 5's.
+/// The shim's decision for an open under the managed root is not binary: besides being routed to
+/// the director, it can fall through to the real filesystem, and a single "fell through" counter
+/// cannot tell which of the remaining reasons applied. The classes stay distinct so a regression
+/// in one cannot hide behind another.
 ///
-/// **`FellThroughServe` can no longer be recorded.** Gate 4 task 7 deleted
-/// `Decision::Serve` and the in-shim zip-window server it fed, so nothing
-/// increments it. The variant is kept rather than removed because the
-/// discriminants index `OUTCOME_COUNTS` and the audit tables in
-/// `docs/bypass-baseline.md` are written against these positions; renumbering
-/// them to retire a counter that already read zero in every measured run would
-/// invalidate that record for no gain. Read a zero here as "route removed",
-/// not "route measured and unexercised".
-///
-/// **`FellThroughDrmException` can no longer be recorded either, and is in
-/// exactly the same state.** Gate 5 task 4 deleted the four filename
-/// exceptions in `try_fuse_create` that were its only increment site, so a
-/// zero here also means "route removed", not "route measured and unexercised".
-/// The distinction is what the acceptance evidence turns on: a reader who takes
-/// this zero for a measured-and-clean run would be crediting the counter with
-/// proving something no counter can prove about a code path that no longer
-/// exists. What the retained variant *does* buy is the other direction — it
-/// cannot silently start counting again without a report saying so, and the
-/// shim/director reconciliation asserts on it.
+/// Three classes exist: `Routed`, `FellThroughPassthrough` (the generic pass-through default) and
+/// `FellThroughWriteFallback` (a write that fell back to the real filesystem). The others the
+/// bypass-removal gates drove to zero (`FellThroughRedirect`, `FellThroughServe`,
+/// `FellThroughDrmException`, `Denied`) had no producer left once the shim-local engine went, and
+/// were removed with it. Their rows in `docs/bypass-baseline.md` are history, written against the
+/// labels, which no code renders any more.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum OpenOutcome {
     Routed = 0,
-    FellThroughRedirect = 1,
-    FellThroughServe = 2,
-    FellThroughPassthrough = 3,
-    FellThroughDrmException = 4,
-    FellThroughWriteFallback = 5,
-    Denied = 6,
+    FellThroughPassthrough = 1,
+    FellThroughWriteFallback = 2,
 }
 
-pub(super) const OUTCOME_N: usize = 7;
+pub(super) const OUTCOME_N: usize = 3;
 
 /// Every variant, for iteration in `render_outcomes` and for the test that
 /// checks labels stay distinct.
 pub(crate) const ALL_OUTCOMES: [OpenOutcome; OUTCOME_N] = [
     OpenOutcome::Routed,
-    OpenOutcome::FellThroughRedirect,
-    OpenOutcome::FellThroughServe,
     OpenOutcome::FellThroughPassthrough,
-    OpenOutcome::FellThroughDrmException,
     OpenOutcome::FellThroughWriteFallback,
-    OpenOutcome::Denied,
 ];
 
 impl OpenOutcome {
     /// Rendered label. Must stay distinct across variants — see
-    /// `every_outcome_renders_with_a_distinct_label` — or a gate's removal of
-    /// one bypass class would be indistinguishable from another's in the
-    /// report.
+    /// `every_outcome_renders_with_a_distinct_label` — or the removal of one bypass class would be
+    /// indistinguishable from another's in the report.
     pub fn label(&self) -> &'static str {
         match self {
             OpenOutcome::Routed => "routed",
-            OpenOutcome::FellThroughRedirect => "fell-through: redirect",
-            OpenOutcome::FellThroughServe => "fell-through: serve",
             OpenOutcome::FellThroughPassthrough => "fell-through: passthrough",
-            OpenOutcome::FellThroughDrmException => "fell-through: drm-exception",
             OpenOutcome::FellThroughWriteFallback => "fell-through: write-fallback",
-            OpenOutcome::Denied => "denied",
         }
     }
 }
@@ -252,7 +217,7 @@ pub(super) static OUTCOME_PATHS: [BoundedTally<String>; OUTCOME_N] =
     [const { BoundedTally::new(4000) }; OUTCOME_N];
 /// How many of the busiest paths to print per outcome. Smaller than
 /// `PATHS_SHOWN`: this table prints one such list per outcome, so it must
-/// stay skimmable rather than repeat the full passthrough dump seven times.
+/// stay skimmable rather than repeat the full passthrough dump once per outcome.
 ///
 /// **Not purely cosmetic**: `vfs-directord`'s escape matrix locates each
 /// vector's own attempt in this list and asserts the list did not truncate

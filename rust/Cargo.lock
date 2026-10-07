@@ -2797,7 +2797,7 @@ dependencies = [
  "vfs-core",
  "vfs-env",
  "vfs-pe",
- "vfs-shared",
+ "vfs-protocol",
  "vfs-shim",
  "vfs-zip",
  "windows-sys 0.61.2",
@@ -2825,11 +2825,9 @@ version = "0.1.0"
 name = "vfs-protocol"
 version = "0.1.0"
 dependencies = [
- "vfs-core",
  "vfs-ipc",
  "vfs-provider",
  "vfs-registry",
- "vfs-shared",
 ]
 
 [[package]]
@@ -2856,19 +2854,11 @@ dependencies = [
  "vfs-core",
  "vfs-ntlayout",
  "vfs-provider",
- "vfs-shared",
  "vfs-win",
 ]
 
 [[package]]
 name = "vfs-registry"
-version = "0.1.0"
-dependencies = [
- "vfs-core",
-]
-
-[[package]]
-name = "vfs-shared"
 version = "0.1.0"
 dependencies = [
  "vfs-core",
@@ -2890,7 +2880,6 @@ dependencies = [
  "vfs-provider",
  "vfs-redirect",
  "vfs-registry",
- "vfs-shared",
  "vfs-win",
  "windows-sys 0.61.2",
 ]

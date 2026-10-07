@@ -16,8 +16,8 @@ use windows_sys::Win32::System::Memory::{
 
 /// RAII owner of a Windows file-mapping section and its mapped read/write view.
 ///
-/// The mapped view is exposed as a [`SharedSeg`] so the OS-independent ring and
-/// snapshot code operate on real cross-process shared memory.
+/// The mapped view is exposed as a [`SharedSeg`] so the OS-independent ring code
+/// operates on real cross-process shared memory.
 pub struct SharedMapping {
     handle: HANDLE,
     view: *mut core::ffi::c_void,

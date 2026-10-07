@@ -9,7 +9,6 @@ members = [
   # docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md.
   "crates/vfs-pe",
   "crates/vfs-env",
-  "crates/vfs-shared",
   "crates/vfs-protocol",
   "crates/vfs-control",
   "crates/vfs-source",

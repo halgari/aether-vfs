@@ -1,8 +1,8 @@
 //! Unix-side OS handles for the ring.
 //!
 //! The mirror of `vfs-win`: it owns this platform's shared-memory primitive and
-//! exposes it as a [`vfs_ipc::SharedSeg`], so the ring and snapshot code above
-//! stay OS-independent. Everything here is `cfg(unix)`; on Windows this crate
+//! exposes it as a [`vfs_ipc::SharedSeg`], so the ring code above
+//! stays OS-independent. Everything here is `cfg(unix)`; on Windows this crate
 //! builds to nothing.
 #![deny(unsafe_code)]
 

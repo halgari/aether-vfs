@@ -3,7 +3,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use vfs_core::{fold, normalize_vpath, PathError};
-use vfs_shared::{SnapResolution, SnapshotReader};
 
 use crate::cache::{cache_suppressed, OsConsultGuard, PathCache, DEFAULT_CACHE_CAPACITY};
 use crate::{canonicalise, expand_short_name, RootHit, RootId, VolumeMap};
@@ -185,84 +184,10 @@ impl RootMap {
     }
 
     /// The folded remainder components of `nt_path` under whichever root it
-    /// matched, or `None` if it is outside/malformed. Exposed so the overlay
-    /// layer can build overlay paths from the same normalized components the
-    /// snapshot uses. Callers that need to know *which* root want
+    /// matched, or `None` if it is outside/malformed. Callers that need to know *which* root want
     /// [`Self::resolve`].
     pub fn remainder(&self, nt_path: &str) -> Option<Vec<String>> {
         self.under_root(nt_path).map(|(_, rest)| rest)
-    }
-
-    /// Decide how to handle an incoming NT open path.
-    ///
-    /// Fail-safe only for paths this crate has no business deciding for at
-    /// all: `Located::Outside` (malformed, escaping, or genuinely outside the
-    /// managed root) still yields `PassThrough` — nothing here ever touches
-    /// traffic that never named the managed root in the first place.
-    ///
-    /// Everything *under* the root is decided here now, with no real-
-    /// filesystem escape hatch (gate 3's own reason for existing): a
-    /// virtualized file backed by a real disk path still redirects as before,
-    /// and a tombstone still denies — those two are unchanged. What changes is
-    /// the other two
-    /// arms, which used to fail open:
-    ///
-    /// - `NotFound` (a real, on-disk file/directory under the root that no
-    ///   provider serves) now denies too, rather than falling through to
-    ///   whatever is physically on disk. This is the change the whole gate
-    ///   exists for: before, a real file the provider graph had never heard
-    ///   of still opened, because "not virtualized" fell all the way through
-    ///   to the real filesystem underneath the mount. After, the provider
-    ///   graph is the sole authority for what exists under the root — if it
-    ///   does not know about a path, that path does not exist, full stop.
-    /// - `Dir` (a directory node the snapshot genuinely has — i.e. the
-    ///   provider graph considers it real) also denies *here*, which sounds
-    ///   backwards for something the brief calls "director-served" until the
-    ///   two-path structure is spelled out: this pure, snapshot-only
-    ///   function has no ring, no FUSE client, no way to literally open
-    ///   anything — it cannot serve a directory handle itself under any
-    ///   circumstances, virtualized or not. The actual "director-served
-    ///   handle" for a real virtual directory comes from
-    ///   `vfs-shim::hook::try_fuse_create`'s live round-trip to the director,
-    ///   which runs *before* this function is ever consulted and succeeds
-    ///   for every directory the provider graph actually knows about. This
-    ///   fallback is reached only when that live path did not classify the
-    ///   open at all (no director, or the FUSE client's own root notion
-    ///   disagreed with this crate's) — and in that situation there is no
-    ///   live director connection here to serve the directory from, so
-    ///   failing closed is the only safe answer, not a regression from some
-    ///   case that used to work through this function.
-    ///
-    /// See `rust/docs/escape-matrix.md` for the concrete, predicted
-    /// consequence of the `NotFound` half of this change (an MO2-style
-    /// junction inside the managed root, previously reachable only via the
-    /// passthrough this removes) and the configuration that restores it.
-    pub fn decide(&self, nt_path: &str, snap: &SnapshotReader) -> Decision {
-        match self.locate(nt_path, snap) {
-            Located::Resolved(SnapResolution::File { source, .. }) => {
-                match vfs_core::decode(&source) {
-                    // Nothing in the shim can serve a zip window any more (gate
-                    // 4 task 7 removed the in-process zip-window server along
-                    // with `Decision::Serve`). Zip-backed content is the
-                    // director's to serve over the ring, which runs *before*
-                    // this snapshot-only fallback is ever consulted; reaching
-                    // here with one means the director did not classify the
-                    // open, and there is no way to produce its bytes locally.
-                    // Denying matches what the shim already did — both
-                    // `Decision::Serve` arms in `hook.rs` returned
-                    // STATUS_OBJECT_NAME_NOT_FOUND whenever the FUSE client was
-                    // installed, which bootstrap guarantees.
-                    vfs_core::Source::ZipWindow { .. } => Decision::Deny,
-                    vfs_core::Source::Disk(bytes) => Decision::Redirect {
-                        target_nt: render_nt(bytes),
-                    },
-                }
-            }
-            Located::Resolved(SnapResolution::Tombstone)
-            | Located::Resolved(SnapResolution::Dir)
-            | Located::Resolved(SnapResolution::NotFound) => Decision::Deny,
-            Located::Outside => Decision::PassThrough,
-        }
     }
 
     /// Folded remainder components if `nt_path` is under the managed root, else
@@ -414,16 +339,6 @@ impl RootMap {
         }
         None
     }
-
-    fn locate(&self, nt_path: &str, snap: &SnapshotReader) -> Located {
-        match self.under_root(nt_path) {
-            None => Located::Outside,
-            Some((_, folded)) => {
-                let refs: Vec<&str> = folded.iter().map(String::as_str).collect();
-                Located::Resolved(snap.resolve(&refs))
-            }
-        }
-    }
 }
 
 /// The outcome of [`RootMap::compute_under_root`], tagged by whether it
@@ -440,37 +355,4 @@ enum Resolution {
     /// Reached by asking the OS what the path currently names (8.3 short-name
     /// / junction resolution). Never cached.
     OsConsulted(Option<RootHit>),
-}
-
-/// Where an NT path lands relative to the managed root.
-enum Located {
-    /// Not under the root, or malformed/escaping — never virtualized.
-    Outside,
-    /// Under the root; here is the snapshot's answer for the remainder.
-    Resolved(SnapResolution),
-}
-
-/// Render a backing `source` (a UTF-8 absolute Win32 path, per the director's
-/// contract) as an NT DOS-device path. A `source` already carrying an NT/DOS
-/// long-path prefix is returned unchanged rather than double-prefixed.
-fn render_nt(source: &[u8]) -> String {
-    let s = String::from_utf8_lossy(source);
-    if s.starts_with(r"\??\") || s.starts_with(r"\\?\") {
-        s.into_owned()
-    } else {
-        format!(r"\??\{s}")
-    }
-}
-
-/// The outcome of inspecting one NT open path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Decision {
-    /// Let the original NT open proceed unchanged.
-    PassThrough,
-    /// Reissue the open against this NT path (the mod backing file).
-    Redirect { target_nt: String },
-    /// The path is tombstoned (mod-deleted), unserveable, or not known to the
-    /// provider graph; the hook must return STATUS_OBJECT_NAME_NOT_FOUND
-    /// rather than open or pass through.
-    Deny,
 }

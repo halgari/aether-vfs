@@ -121,7 +121,6 @@ fn the_drm_names_are_answered_by_the_director_and_never_by_the_real_file() {
     // --- a write, which must reach the director and nothing else -----------
     let write_result = std::fs::write(root.join("steam_appid.txt"), WRITTEN);
 
-    let drm_exceptions = outcome_count(OpenOutcome::FellThroughDrmException);
     let routed = outcome_count(OpenOutcome::Routed);
 
     // Everything below reads the real filesystem under the managed root, which
@@ -187,11 +186,6 @@ fn the_drm_names_are_answered_by_the_director_and_never_by_the_real_file() {
          director with a zero here would mean something else put them there"
     );
 
-    assert_eq!(
-        drm_exceptions, 0,
-        "`FellThroughDrmException` must stay at zero: the class is closed, and the counter \
-         is kept precisely so a live session can prove it stayed closed"
-    );
     assert!(
         routed >= 5,
         "the four served names plus the write should all be classified `Routed`; got {routed}"

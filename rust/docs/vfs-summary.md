@@ -95,7 +95,9 @@ The bet: **the game process is the only place that must see the virtual world**,
 
 The codebase contains **two generations** of content serving. Both matter for understanding history and residual code.
 
-### 3.1 Generation A — Snapshot + in-process Serve (legacy / transitional)
+### 3.1 Generation A — Snapshot + in-process Serve (removed)
+
+*Removed: the shim-local Engine went in cleanup stream C and the snapshot, its config field and `vfs-shared` in stream I. Kept as history.*
 
 ```text
 Director/build time:  zips → vfs-zip → vfs-core Layer → merge → vfs-shared snapshot
@@ -385,8 +387,7 @@ panic handler, and excluded from the workspace for exactly this reason — uses
 | Crate | Responsibility |
 |-------|----------------|
 | **vfs-core** | Pure merge tree, Source disk/zip-window |
-| **vfs-shared** | Flattened snapshot |
-| **vfs-redirect** | Decision core for snapshot Engine |
+| **vfs-redirect** | Root map and path canonicalisation (the snapshot decision core and `vfs-shared` are gone) |
 
 ### 10.3 Dependency rationale (why not one crate)
 
