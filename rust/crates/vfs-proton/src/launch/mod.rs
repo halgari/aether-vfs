@@ -93,7 +93,12 @@ pub struct RingGeometry {
 /// `virtual_dir` are read by the shim *inside* Wine, where a Linux path means
 /// nothing. Use [`Prefix::windows_path`](crate::prefix::Prefix::windows_path)
 /// to build them.
+///
+/// `#[non_exhaustive]`: a field can be added without breaking a host, so a
+/// host builds one with [`WineLaunch::new`] and sets the public fields it
+/// wants. (Fields stay public and assignable.)
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct WineLaunch {
     /// The GE-Proton runtime directory (`…/GE-ProtonN-M-x86_64`). Verified
     /// before launch and exported as `PROTONPATH`.
