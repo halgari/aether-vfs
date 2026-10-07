@@ -390,12 +390,12 @@ mod tests {
         };
 
         let dir = crate::test_scratch::scratch_created("sess-ring");
-        let state = crate::test_scratch::scratch_dir("sess-st");
         std::fs::write(dir.join("payload.bin"), b"ring-bytes").unwrap();
 
-        let mut s = Session::new();
+        // Root, overlay and state all under the scratch dir, so `serve` creates
+        // nothing in the host's temp dir.
+        let mut s = crate::test_scratch::session_in_scratch("sess-ring-session");
         s.set_root(&dir);
-        s.set_state_dir(&state);
         s.mount("", Arc::new(DiskProvider::new(&dir))).unwrap();
         s.serve().expect("serve");
         assert!(s.is_serving());
@@ -427,6 +427,5 @@ mod tests {
         s.stop_serve();
         assert!(!s.is_serving());
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&state);
     }
 }

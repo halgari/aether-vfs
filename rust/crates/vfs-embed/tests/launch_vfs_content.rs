@@ -88,6 +88,8 @@ fn a_staged_copy_must_not_shadow_curated_content_at_the_same_path() {
 
     let mut s = Session::new();
     s.set_state_dir(&state);
+    // Staging writes into the managed root: keep it out of the temp dir.
+    s.set_root(tmp("precedence-root"));
     s.mount("", inline(&[("game.exe", &bare_pe(b"CURATED"))]))
         .unwrap();
 
@@ -515,6 +517,8 @@ fn session_staging_puts_a_game_root_proxy_dll_on_disk() {
 
     let mut s = Session::new();
     s.set_state_dir(&state);
+    // Staging writes into the managed root: keep it out of the temp dir.
+    s.set_root(tmp("proxy-root"));
     s.mount(
         "",
         inline(&[
