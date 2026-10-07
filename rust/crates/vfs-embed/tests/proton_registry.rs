@@ -19,21 +19,23 @@
 //! 6. Re-attach the same provider (in this session, then in a new one, which loads the
 //!    `overlay.reg` the detach flushed into it) and `probe`: PA each time.
 //!
-//! Needs, and cannot provide for itself: a verified GE-Proton runtime under the aether-vfs
-//! home's `runtimes` (`VFS_HOME`, else `$XDG_DATA_HOME/aether-vfs`), and the Windows
-//! artifacts from `bin/build-windows` beside the test binary, in the same profile:
+//! Needs, and cannot provide for itself: a verified GE-Proton runtime and the Windows
+//! artifacts from `bin/build-windows` for this test's profile:
 //! `bin/build-windows --release`, then
 //! `cargo test --release -p vfs-embed --test proton_registry -- --ignored`. Without either it
-//! says so on stderr and passes without checking anything.
+//! prints `SKIP ...` with the command to run and passes (see `tests/support/mod.rs` for the
+//! policy and for how the runtime and artifacts are found).
 //!
 //! Nothing it creates is outside this workspace's target directory: the test gets its own
-//! aether-vfs home there, whose `runtimes` links to the real one, so the Wine prefix
+//! aether-vfs home there (`support::throwaway_home`), so the Wine prefix
 //! (`sessions/registry-e2e`) is a throwaway one. The real registry it changes is that
 //! prefix's, and it removes its scratch keys again at the end.
 #![cfg(unix)]
 
+mod support;
+
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -44,75 +46,13 @@ const FIXTURE: &str = "vfs-fixture-registry.exe";
 const RUN_ID: &str = "e2e";
 const PREFIX: &str = "registry-e2e";
 
-fn base() -> PathBuf {
-    Path::new(env!("CARGO_TARGET_TMPDIR")).join("vfs-proton-registry")
-}
-
 fn fresh(name: &str) -> PathBuf {
-    let d = base().join(name);
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn profile_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let dir = exe.parent().unwrap();
-    if dir.file_name().and_then(|s| s.to_str()) == Some("deps") {
-        dir.parent().unwrap().to_path_buf()
-    } else {
-        dir.to_path_buf()
-    }
-}
-
-/// The Windows artifacts, or the names of the missing ones.
-fn windows_artifacts() -> Result<BTreeMap<&'static str, PathBuf>, Vec<&'static str>> {
-    let profile = profile_dir();
-    let mut found = BTreeMap::new();
-    let mut missing = Vec::new();
-    for name in [
-        "vfs-injector.exe",
-        "vfs_shim_dll.dll",
-        "vfs_payload.dll",
-        FIXTURE,
-    ] {
-        match [profile.join(name), profile.join("deps").join(name)]
-            .into_iter()
-            .find(|p| p.is_file())
-        {
-            Some(p) => {
-                found.insert(name, p);
-            }
-            None => missing.push(name),
-        }
-    }
-    if missing.is_empty() {
-        Ok(found)
-    } else {
-        Err(missing)
-    }
-}
-
-/// A home of the test's own whose `runtimes` is the real home's, so a launch finds the
-/// runtime and boots its prefix under the target directory.
-fn test_home() -> Option<PathBuf> {
-    let real = vfs_proton::Root::from_env().ok()?;
-    let runtimes = vfs_proton::runtime::installed_dirs(&real).ok()?;
-    if runtimes.is_empty() {
-        return None;
-    }
-    let home = base().join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let link = home.join("runtimes");
-    if std::fs::symlink_metadata(&link).is_err() {
-        std::os::unix::fs::symlink(real.runtimes(), &link).unwrap();
-    }
-    Some(home)
+    support::scratch("vfs-proton-registry", name)
 }
 
 struct Rig {
     home: PathBuf,
-    art: BTreeMap<&'static str, PathBuf>,
+    art: support::Artifacts,
     logs: PathBuf,
     launches: usize,
 }
@@ -121,7 +61,7 @@ impl Rig {
     /// A served session over a root holding the fixture, in the test's named prefix.
     fn session(&self, tag: &str) -> Session {
         let root = fresh(&format!("{tag}-root"));
-        std::fs::copy(&self.art[FIXTURE], root.join("probe.exe")).unwrap();
+        std::fs::copy(self.art.path(FIXTURE), root.join("probe.exe")).unwrap();
         let mut s = Session::new();
         s.set_home(&self.home);
         s.set_root(&root);
@@ -143,8 +83,8 @@ impl Rig {
                 image: "probe.exe".into(),
                 args: vec![mode.to_string(), RUN_ID.to_string()],
                 wait: true,
-                shim_dll: Some(self.art["vfs_shim_dll.dll"].to_string_lossy().into_owned()),
-                payload_dll: Some(self.art["vfs_payload.dll"].to_string_lossy().into_owned()),
+                shim_dll: Some(self.art.shim_dll()),
+                payload_dll: Some(self.art.payload_dll()),
                 log_file: Some(log.clone()),
                 // A Wine debug channel list for the fixture's launches, when one is wanted.
                 env: std::env::var("VFS_TEST_WINEDEBUG")
@@ -213,27 +153,12 @@ fn has(lines: &[String], needle: &str) -> bool {
 }
 
 #[test]
-#[ignore = "needs a GE-Proton runtime in the aether-vfs home and the Windows artifacts from \
-            bin/build-windows (including vfs-fixture-registry.exe) beside the test binary, in \
-            the same profile: bin/build-windows --release, then cargo test --release"]
+#[ignore = "needs a GE-Proton runtime and the Windows artifacts from bin/build-windows for this \
+            profile (including vfs-fixture-registry.exe): bin/build-windows --release, then \
+            cargo test --release"]
 fn registry_writes_look_the_same_through_the_overlay_and_never_reach_the_real_registry() {
-    let art = match windows_artifacts() {
-        Ok(a) => a,
-        Err(missing) => {
-            eprintln!(
-                "skipping: Windows artifacts missing beside the test binary ({}): {} \
-                 (cross-build them with `bin/build-windows{}` for this test's profile; \
-                 the usual run is `bin/build-windows --release` then \
-                 `cargo test --release -p vfs-embed --test proton_registry -- --ignored`)",
-                profile_dir().display(),
-                missing.join(", "),
-                if cfg!(debug_assertions) { "" } else { " --release" },
-            );
-            return;
-        }
-    };
-    let Some(home) = test_home() else {
-        eprintln!("skipping: no verified GE-Proton runtime in the aether-vfs home");
+    let Some(support::Rig { home, art }) = support::rig("proton_registry", "registry", &[FIXTURE])
+    else {
         return;
     };
     let mut rig = Rig {
