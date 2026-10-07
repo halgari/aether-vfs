@@ -735,8 +735,10 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
                 return Err(InjectError::TargetExited(code));
             }
             if Instant::now() >= deadline {
-                let one = 1u32.to_le_bytes();
-                let _ = wpm(pi.hProcess, arm.release_flag, &one);
+                // No word from the shim. Releasing the gate here would let the
+                // game run with whatever the shim did or did not manage to
+                // install, its writes reaching the real disk. Kill it.
+                let _ = TerminateProcess(pi.hProcess, 1);
                 CloseHandle(pi.hThread);
                 CloseHandle(pi.hProcess);
                 return Err(InjectError::Timeout);
