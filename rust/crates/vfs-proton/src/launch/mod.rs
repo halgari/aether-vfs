@@ -50,6 +50,39 @@ pub use env::{
 };
 pub use injector::{describe_injector_error, injector_error_path};
 
+/// The host files a launch hands the injector.
+#[derive(Debug, Clone)]
+pub struct LaunchFiles {
+    /// Host path to `vfs-injector.exe`.
+    pub injector: PathBuf,
+    /// Host path to `vfs_shim_dll.dll`.
+    pub shim_dll: PathBuf,
+    /// Host path to `vfs_payload.dll`.
+    pub payload_dll: PathBuf,
+    /// Host path to the shim config file the injector hands the shim.
+    pub config_file: PathBuf,
+    /// Host path to the ready file the injector waits on.
+    pub ready_file: PathBuf,
+}
+
+/// The ring a launch maps, as [`WineLaunch`] carries it.
+#[derive(Debug, Clone)]
+pub struct RingGeometry {
+    /// The ring file **as Wine sees it** (`C:\…`).
+    pub path: PathBuf,
+    /// The same file as a host path, for [`spawn`]'s length check; `None`
+    /// skips it.
+    pub host_path: Option<PathBuf>,
+    /// The Director's real map size.
+    pub bytes: usize,
+    /// Byte offset of the bulk arena within the ring mapping.
+    pub arena_offset: usize,
+    /// Byte length of the bulk arena.
+    pub arena_len: usize,
+    /// Inline ring payload capacity, in bytes.
+    pub payload_cap: u32,
+}
+
 /// Everything one Wine launch needs, with the ring geometry carried
 /// explicitly.
 ///
@@ -148,6 +181,49 @@ pub struct WineLaunch {
     /// The session has a registry layer attached: [`launch_env`] sets
     /// [`vfs_env::REGISTRY`] so the shim installs its registry hooks.
     pub registry: bool,
+}
+
+impl WineLaunch {
+    /// A launch with everything required and nothing optional: no extra
+    /// roots, arguments, environment, working directory, timeout or log,
+    /// [`SteamSide::Untouched`], no notes, no NVAPI, no registry layer. Set
+    /// the public fields for the rest.
+    pub fn new(
+        runtime: PathBuf,
+        prefix: PathBuf,
+        target: String,
+        virtual_dir: String,
+        files: LaunchFiles,
+        ring: RingGeometry,
+    ) -> WineLaunch {
+        WineLaunch {
+            runtime,
+            prefix,
+            injector: files.injector,
+            shim_dll: files.shim_dll,
+            payload_dll: files.payload_dll,
+            target,
+            config_file: files.config_file,
+            ready_file: files.ready_file,
+            ring_path: ring.path,
+            ring_host_path: ring.host_path,
+            ring_bytes: ring.bytes,
+            arena_offset: ring.arena_offset,
+            arena_len: ring.arena_len,
+            payload_cap: ring.payload_cap,
+            virtual_dir,
+            virtual_roots: Vec::new(),
+            args: Vec::new(),
+            extra_env: BTreeMap::new(),
+            cwd: None,
+            ready_timeout_secs: None,
+            log_file: None,
+            steam: SteamSide::Untouched,
+            notes: Vec::new(),
+            nvapi: None,
+            registry: false,
+        }
+    }
 }
 
 /// Why a launch did not happen, or did not finish cleanly.
@@ -463,33 +539,29 @@ mod tests {
     }
 
     pub(super) fn sample() -> WineLaunch {
-        WineLaunch {
-            runtime: abs("GE-Proton11-6-x86_64"),
-            prefix: abs("probe-prefix"),
-            injector: abs("bin/vfs-injector.exe"),
-            shim_dll: abs("bin/vfs_shim_dll.dll"),
-            payload_dll: abs("bin/vfs_payload.dll"),
-            target: r"C:\probe\target.exe".to_string(),
-            config_file: abs("state/shim.cfg"),
-            ready_file: abs("state/ready.txt"),
-            ring_path: PathBuf::from(r"C:\probe\ring.bin"),
-            ring_host_path: None,
-            ring_bytes: 33_751_040,
-            arena_offset: 65_536,
-            arena_len: 33_554_432,
-            payload_cap: 1_048_576,
-            virtual_dir: r"C:\probe\managed".to_string(),
-            virtual_roots: vec![],
-            args: vec!["-arg1".to_string(), "arg2".to_string()],
-            extra_env: BTreeMap::new(),
-            cwd: None,
-            ready_timeout_secs: None,
-            log_file: None,
-            steam: SteamSide::Untouched,
-            notes: Vec::new(),
-            nvapi: None,
-            registry: false,
-        }
+        let mut l = WineLaunch::new(
+            abs("GE-Proton11-6-x86_64"),
+            abs("probe-prefix"),
+            r"C:\probe\target.exe".to_string(),
+            r"C:\probe\managed".to_string(),
+            LaunchFiles {
+                injector: abs("bin/vfs-injector.exe"),
+                shim_dll: abs("bin/vfs_shim_dll.dll"),
+                payload_dll: abs("bin/vfs_payload.dll"),
+                config_file: abs("state/shim.cfg"),
+                ready_file: abs("state/ready.txt"),
+            },
+            RingGeometry {
+                path: PathBuf::from(r"C:\probe\ring.bin"),
+                host_path: None,
+                bytes: 33_751_040,
+                arena_offset: 65_536,
+                arena_len: 33_554_432,
+                payload_cap: 1_048_576,
+            },
+        );
+        l.args = vec!["-arg1".to_string(), "arg2".to_string()];
+        l
     }
 
     #[test]

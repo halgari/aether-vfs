@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use vfs_director::ipc::IpcServe;
 use vfs_proton::{
-    launch::WineLaunch,
+    launch::{LaunchFiles, RingGeometry, WineLaunch},
     layout::Root as ProtonRoot,
     prefix::{Prefix, PrefixInit, PrefixLock},
     steam::SteamSide,
@@ -773,38 +773,43 @@ impl Session {
         let (steam, mut notes) = self.steam_launch(&opts.env);
         let nvapi = nvapi_for_launch(opts, runtime, prefix, &mut notes);
 
-        Ok(WineLaunch {
-            runtime: runtime.clone(),
-            prefix: prefix.dir.clone(),
-            injector,
-            shim_dll,
-            payload_dll,
+        let mut launch = WineLaunch::new(
+            runtime.clone(),
+            prefix.dir.clone(),
             target,
-            config_file: config_path,
-            ready_file: ready_path,
-            ring_path: PathBuf::from(wine_ring),
-            // The host spelling, for the ring-length check in `spawn`.
-            ring_host_path: Some(ring.to_path_buf()),
+            root0,
+            LaunchFiles {
+                injector,
+                shim_dll,
+                payload_dll,
+                config_file: config_path,
+                ready_file: ready_path,
+            },
             // The live ring's own numbers. `map_bytes` is the whole mapping
             // (control ring + arena), which is what the shim must map.
-            ring_bytes: ipc.map_bytes,
-            arena_offset: ipc.arena_offset,
-            arena_len: ipc.arena_len,
-            payload_cap: ipc.payload_cap,
-            virtual_dir: root0,
-            virtual_roots: extra,
-            args: opts.args.clone(),
-            // Child-only: the spawned `wine` gets these in its environment
-            // block, and this process's environment is never written.
-            extra_env: opts.env.clone(),
-            cwd: Some(cwd),
-            ready_timeout_secs: opts.ready_timeout.map(|d| d.as_secs().max(1)),
-            log_file: opts.log_file.clone(),
-            steam,
-            notes,
-            nvapi,
-            registry: self.registry_attached(),
-        })
+            RingGeometry {
+                path: PathBuf::from(wine_ring),
+                // The host spelling, for the ring-length check in `spawn`.
+                host_path: Some(ring.to_path_buf()),
+                bytes: ipc.map_bytes,
+                arena_offset: ipc.arena_offset,
+                arena_len: ipc.arena_len,
+                payload_cap: ipc.payload_cap,
+            },
+        );
+        launch.virtual_roots = extra;
+        launch.args = opts.args.clone();
+        // Child-only: the spawned `wine` gets these in its environment
+        // block, and this process's environment is never written.
+        launch.extra_env = opts.env.clone();
+        launch.cwd = Some(cwd);
+        launch.ready_timeout_secs = opts.ready_timeout.map(|d| d.as_secs().max(1));
+        launch.log_file = opts.log_file.clone();
+        launch.steam = steam;
+        launch.notes = notes;
+        launch.nvapi = nvapi;
+        launch.registry = self.registry_attached();
+        Ok(launch)
     }
 
     /// Unix: stops the session's running launch — the one a `wait: false`

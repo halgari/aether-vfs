@@ -113,7 +113,7 @@ mod registry_layer_tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     #[cfg(unix)]
-    use vfs_proton::launch::WineLaunch;
+    use vfs_proton::launch::{LaunchFiles, RingGeometry, WineLaunch};
     use vfs_provider::OPEN_READ;
     use vfs_provider::VPath;
 
@@ -139,33 +139,29 @@ mod registry_layer_tests {
     #[cfg(unix)]
     fn launch_env_of(s: &Session) -> BTreeMap<String, String> {
         let p = |n: &str| PathBuf::from(format!("/x/{n}"));
-        vfs_proton::launch::launch_env(&WineLaunch {
-            runtime: p("rt"),
-            prefix: p("pfx"),
-            injector: p("inj"),
-            shim_dll: p("shim"),
-            payload_dll: p("payload"),
-            target: r"C:\t.exe".to_string(),
-            config_file: p("cfg"),
-            ready_file: p("ready"),
-            ring_path: p("ring"),
-            ring_host_path: None,
-            ring_bytes: 1,
-            arena_offset: 1,
-            arena_len: 1,
-            payload_cap: 1,
-            virtual_dir: r"C:\m".to_string(),
-            virtual_roots: vec![],
-            args: vec![],
-            extra_env: BTreeMap::new(),
-            cwd: None,
-            ready_timeout_secs: None,
-            log_file: None,
-            steam: vfs_proton::SteamSide::Untouched,
-            notes: vec![],
-            nvapi: None,
-            registry: s.registry_attached(),
-        })
+        let mut l = WineLaunch::new(
+            p("rt"),
+            p("pfx"),
+            r"C:\t.exe".to_string(),
+            r"C:\m".to_string(),
+            LaunchFiles {
+                injector: p("inj"),
+                shim_dll: p("shim"),
+                payload_dll: p("payload"),
+                config_file: p("cfg"),
+                ready_file: p("ready"),
+            },
+            RingGeometry {
+                path: p("ring"),
+                host_path: None,
+                bytes: 1,
+                arena_offset: 1,
+                arena_len: 1,
+                payload_cap: 1,
+            },
+        );
+        l.registry = s.registry_attached();
+        vfs_proton::launch::launch_env(&l)
     }
 
     /// A scratch directory under the build's target dir (never `/tmp`).
