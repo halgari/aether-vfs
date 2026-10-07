@@ -297,19 +297,6 @@ pub enum InstallError {
 static ENGINE: OnceLock<Engine> = OnceLock::new();
 // The trampoline slots, one `Tramp` per row of `detour_table!`. Each is set once, before its
 // detour is enabled, and only read from the hooks after.
-//
-// Families move onto the table one commit at a time: a group listed in `tramp_static!` has its
-// slot generated here; the others are still the hand-written `static mut`s below.
-macro_rules! tramp_static {
-    (File, $name:ident, $ty:ty) => {
-        static $name: Tramp<$ty> = Tramp::new();
-    };
-    (Registry, $name:ident, $ty:ty) => {
-        static $name: Tramp<$ty> = Tramp::new();
-    };
-    ($other:ident, $name:ident, $ty:ty) => {};
-}
-
 macro_rules! tramp_statics_from_table {
     ($(
         {
@@ -320,7 +307,7 @@ macro_rules! tramp_statics_from_table {
             $($rest:tt)*
         }
     )*) => {
-        $(tramp_static!($group, $tramp, $fnty);)*
+        $(static $tramp: Tramp<$fnty> = Tramp::new();)*
     };
 }
 
@@ -341,8 +328,6 @@ enum Install {
 }
 
 /// Which install pass a detour belongs to.
-// `Process` rows are not generated yet; the allow goes with the last family.
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Group {
     File,
@@ -371,10 +356,10 @@ struct Detour {
     flags: &'static [Flag],
 }
 
-macro_rules! detour_row_of {
+macro_rules! detour_row {
     ($export:literal, $hook:ident, $tramp:ident, $kind:ident, $group:ident,
      [$($flag:ident),*]) => {
-        Some(Detour {
+        Detour {
             export: match core::ffi::CStr::from_bytes_with_nul(concat!($export, "\0").as_bytes()) {
                 Ok(c) => c,
                 Err(_) => panic!("export name has a NUL"),
@@ -384,19 +369,7 @@ macro_rules! detour_row_of {
             install: Install::$kind,
             group: Group::$group,
             flags: &[$(Flag::$flag),*],
-        })
-    };
-}
-
-macro_rules! detour_row {
-    (File, $($args:tt)*) => {
-        detour_row_of!($($args)*)
-    };
-    (Registry, $($args:tt)*) => {
-        detour_row_of!($($args)*)
-    };
-    ($other:ident, $($args:tt)*) => {
-        None
+        }
     };
 }
 
@@ -413,10 +386,7 @@ macro_rules! detours_from_table {
     )*) => {
         /// Every detour, in install order.
         fn detour_rows() -> Vec<Detour> {
-            [$(detour_row!($group, $export, $hook, $tramp, $kind, $group, [$($flag),*])),*]
-                .into_iter()
-                .flatten()
-                .collect()
+            vec![$(detour_row!($export, $hook, $tramp, $kind, $group, [$($flag),*])),*]
         }
     };
 }
@@ -488,8 +458,6 @@ impl Detour {
 /// `dwVolumeSerialNumber` — and the two must not disagree about which volume
 /// one handle is on.
 const SYNTH_VOLUME_SERIAL: u64 = 0x5646_5300;
-
-static mut TRAMP_CPIW: Option<CreateProcessInternalWFn> = None;
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
 /// 12 params; only `flags` and `pi` are inspected/modified by the hook.
@@ -828,13 +796,9 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
             kb = GetModuleHandleA(c"kernel32.dll".as_ptr().cast());
         }
         if !kb.is_null() {
-            if let Ok(d_cpiw) = make_detour(kb, c"CreateProcessInternalW", cpiw_hook as *const ()) {
-                TRAMP_CPIW = Some(core::mem::transmute::<*const (), CreateProcessInternalWFn>(
-                    d_cpiw.trampoline() as *const (),
-                ));
-                if d_cpiw.enable().is_ok() {
-                    detours.push(d_cpiw);
-                }
+            // `BestEffort`: a failure here costs only child-process propagation, silently.
+            for d in rows.iter().filter(|d| d.group == Group::Process) {
+                d.install_soft(kb, &mut detours);
             }
         }
     }
@@ -5672,7 +5636,7 @@ unsafe fn cpiw_hook_body(
     pi: *mut PROCESS_INFORMATION,
     ptok: *mut HANDLE,
 ) -> i32 {
-    let tramp = match TRAMP_CPIW {
+    let tramp = match TRAMP_CPIW.get() {
         Some(t) => t,
         None => return 0, // STATUS/BOOL FALSE — invariant violation, should not occur
     };

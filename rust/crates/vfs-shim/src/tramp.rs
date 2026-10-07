@@ -2,7 +2,7 @@
 //!
 //! Each hooked export has one [`Tramp`] static. The install stores the trampoline there
 //! **before** it enables the detour, and the hook body reads it on every call. It replaces 60
-//! `static mut TRAMP_*: Option<Fn>`, whose reads and writes were each a `static_mut_refs`
+//! `static mut` trampolines (`Option<fn>`), whose reads and writes were each a `static_mut_refs`
 //! hazard and whose "stored before enabled, cleared if enabling fails" rule was repeated by
 //! hand at every install site.
 //!
@@ -22,8 +22,6 @@
 //! (`install_late`), where the pointers come from another module's memory. Nothing here needs
 //! `SeqCst`: a slot has one writer at a time (install) and independent readers.
 #![allow(unsafe_code)]
-// `RawTramp::load` is only used once the registry family moves onto the table.
-#![allow(dead_code)]
 
 use core::marker::PhantomData;
 use core::sync::atomic::{AtomicPtr, Ordering};
@@ -47,12 +45,6 @@ impl RawTramp {
     pub(crate) unsafe fn store(&self, tramp: Option<*const ()>) {
         let p = tramp.map_or(core::ptr::null_mut(), |p| p.cast_mut());
         self.0.store(p, Ordering::Release);
-    }
-
-    /// The stored pointer, or `None`. Used by install code to put a slot back.
-    pub(crate) fn load(&self) -> Option<*const ()> {
-        let p = self.0.load(Ordering::Acquire);
-        (!p.is_null()).then_some(p.cast_const())
     }
 }
 
@@ -119,7 +111,6 @@ mod tests {
     fn an_empty_slot_reads_none() {
         let t: Tramp<F> = Tramp::new();
         assert!(t.get().is_none());
-        assert!(t.raw().load().is_none());
     }
 
     #[test]
@@ -145,7 +136,6 @@ mod tests {
         // SAFETY: `double` has this slot's signature.
         unsafe { t.raw().store(Some(double as F as *const ())) };
         assert_eq!(unsafe { t.get().expect("stored")(5) }, 10);
-        assert_eq!(t.raw().load(), Some(double as F as *const ()));
         // SAFETY: clearing needs no signature.
         unsafe { t.raw().store(None) };
         assert!(t.get().is_none());
