@@ -37,7 +37,7 @@ fn counted_status(e: CountedErr) -> NTSTATUS {
 /// # Safety
 /// `us` is NULL or points to a readable `UNICODE_STRING` whose `Buffer`, if non-NULL, holds
 /// `Length` readable bytes that stay valid for `'a`.
-pub unsafe fn us_units<'a>(us: *const UnicodeString) -> Result<Option<&'a [u16]>, NTSTATUS> {
+pub(crate) unsafe fn us_units<'a>(us: *const UnicodeString) -> Result<Option<&'a [u16]>, NTSTATUS> {
     if us.is_null() {
         return Ok(None);
     }
@@ -53,7 +53,7 @@ pub unsafe fn us_units<'a>(us: *const UnicodeString) -> Result<Option<&'a [u16]>
 ///
 /// # Safety
 /// As [`us_units`].
-pub unsafe fn us_string(us: *const UnicodeString) -> Result<Option<String>, NTSTATUS> {
+pub(crate) unsafe fn us_string(us: *const UnicodeString) -> Result<Option<String>, NTSTATUS> {
     Ok(us_units(us)?.map(utf16_to_string))
 }
 
@@ -63,7 +63,7 @@ pub unsafe fn us_string(us: *const UnicodeString) -> Result<Option<String>, NTST
 ///
 /// # Safety
 /// As [`us_units`].
-pub unsafe fn value_name_units<'a>(
+pub(crate) unsafe fn value_name_units<'a>(
     us: *const UnicodeString,
 ) -> Result<Option<&'a [u16]>, NTSTATUS> {
     if us.is_null() {
@@ -83,7 +83,9 @@ pub unsafe fn value_name_units<'a>(
 /// # Safety
 /// `oa` is NULL or points to a readable `OBJECT_ATTRIBUTES`; its `ObjectName` is as for
 /// [`us_units`].
-pub unsafe fn oa_name_string(oa: *const ObjectAttributes) -> Result<Option<String>, NTSTATUS> {
+pub(crate) unsafe fn oa_name_string(
+    oa: *const ObjectAttributes,
+) -> Result<Option<String>, NTSTATUS> {
     if oa.is_null() {
         return Ok(None);
     }
@@ -95,7 +97,7 @@ pub unsafe fn oa_name_string(oa: *const ObjectAttributes) -> Result<Option<Strin
 ///
 /// The name is NUL-terminated in the buffer, with `Length` excluding the NUL and `MaximumLength`
 /// including it, as NT builds its own.
-pub struct OwnedOa {
+pub(crate) struct OwnedOa {
     buf: Vec<u16>,
     us: UnicodeString,
     oa: ObjectAttributes,
@@ -127,7 +129,7 @@ impl OwnedOa {
     ///
     /// A name too long for a `UNICODE_STRING` (over 0xFFFE bytes) is refused with
     /// `STATUS_OBJECT_NAME_INVALID`, never cut.
-    pub fn absolute(
+    pub(crate) fn absolute(
         template: Option<&ObjectAttributes>,
         nt: &str,
         case_insensitive: bool,
@@ -172,13 +174,13 @@ impl OwnedOa {
     }
 
     /// Set the `Length` field, for a caller that must echo the original attributes' own value.
-    pub fn with_length(mut self: Box<Self>, length: u32) -> Box<Self> {
+    pub(crate) fn with_length(mut self: Box<Self>, length: u32) -> Box<Self> {
         self.oa.length = length;
         self
     }
 
     /// The attributes, valid while `self` is alive.
-    pub fn as_ptr(&self) -> *const ObjectAttributes {
+    pub(crate) fn as_ptr(&self) -> *const ObjectAttributes {
         &self.oa
     }
 }
@@ -190,7 +192,7 @@ impl OwnedOa {
 ///
 /// # Safety
 /// `iosb` is NULL or points to 16 writable bytes (an `IO_STATUS_BLOCK`).
-pub unsafe fn iosb_set(iosb: *mut c_void, status: NTSTATUS, info: usize) {
+pub(crate) unsafe fn iosb_set(iosb: *mut c_void, status: NTSTATUS, info: usize) {
     if iosb.is_null() {
         return;
     }
@@ -205,7 +207,7 @@ pub unsafe fn iosb_set(iosb: *mut c_void, status: NTSTATUS, info: usize) {
 ///
 /// # Safety
 /// `byte_offset` is NULL or points to 8 readable bytes.
-pub unsafe fn explicit_offset(byte_offset: *const i64) -> Option<u64> {
+pub(crate) unsafe fn explicit_offset(byte_offset: *const i64) -> Option<u64> {
     if byte_offset.is_null() {
         return None;
     }

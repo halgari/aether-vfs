@@ -2,8 +2,8 @@
 //! Kept here so vfs-inject does not depend on vfs-shim (avoids a dep cycle:
 //! vfs-shim → vfs-inject for child dual-layer).
 
-use crate::payload_cfg::MAX_REDIRECTS;
 use crate::PreinitRedirect;
+use crate::payload_cfg::MAX_REDIRECTS;
 
 const CONFIG_MAGIC: &[u8; 4] = b"VFS1";
 
@@ -23,7 +23,7 @@ fn read_field(b: &[u8], off: usize) -> Option<(String, usize)> {
 }
 
 /// Decode static imports from a full config blob (same layout as vfs-shim).
-pub fn decode_static_imports(bytes: &[u8]) -> Option<Vec<StaticImport>> {
+pub(crate) fn decode_static_imports(bytes: &[u8]) -> Option<Vec<StaticImport>> {
     let (_root, after_root) = read_field(bytes, 0)?;
     let (_overlay, after_overlay) = read_field(bytes, after_root)?;
     let rest = bytes.get(after_overlay..)?;
@@ -46,13 +46,16 @@ pub fn decode_static_imports(bytes: &[u8]) -> Option<Vec<StaticImport>> {
     Some(statics)
 }
 
-pub fn load_static_imports_from_path(path: &str) -> Option<Vec<StaticImport>> {
+pub(crate) fn load_static_imports_from_path(path: &str) -> Option<Vec<StaticImport>> {
     let bytes = std::fs::read(path).ok()?;
     decode_static_imports(&bytes)
 }
 
 /// Convert static-import rows into early-payload redirects (stat backings, NT paths).
-pub fn static_imports_to_preinit(statics: &[StaticImport], max: usize) -> Vec<PreinitRedirect> {
+pub(crate) fn static_imports_to_preinit(
+    statics: &[StaticImport],
+    max: usize,
+) -> Vec<PreinitRedirect> {
     let mut out = Vec::new();
     for e in statics.iter().take(max) {
         let path = e.backing_path.trim();
@@ -84,7 +87,7 @@ pub fn static_imports_to_preinit(statics: &[StaticImport], max: usize) -> Vec<Pr
     out
 }
 
-pub fn load_preinit_from_config_file(path: &str, max: usize) -> Vec<PreinitRedirect> {
+pub(crate) fn load_preinit_from_config_file(path: &str, max: usize) -> Vec<PreinitRedirect> {
     match load_static_imports_from_path(path) {
         Some(s) => static_imports_to_preinit(&s, max),
         None => Vec::new(),

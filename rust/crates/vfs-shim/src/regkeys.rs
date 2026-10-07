@@ -58,15 +58,15 @@ use crate::sync::{CloseLock, lock_for_close};
 const SLOT_MASK: usize = (1 << 27) - 1;
 
 // Key access rights.
-pub const KEY_QUERY_VALUE: u32 = 0x0001;
-pub const KEY_SET_VALUE: u32 = 0x0002;
-pub const KEY_CREATE_SUB_KEY: u32 = 0x0004;
-pub const KEY_ENUMERATE_SUB_KEYS: u32 = 0x0008;
-pub const KEY_NOTIFY: u32 = 0x0010;
-pub const KEY_CREATE_LINK: u32 = 0x0020;
-pub const KEY_WOW64_64KEY: u32 = 0x0100;
-pub const KEY_WOW64_32KEY: u32 = 0x0200;
-pub const WOW64_MASK: u32 = KEY_WOW64_64KEY | KEY_WOW64_32KEY;
+pub(crate) const KEY_QUERY_VALUE: u32 = 0x0001;
+pub(crate) const KEY_SET_VALUE: u32 = 0x0002;
+pub(crate) const KEY_CREATE_SUB_KEY: u32 = 0x0004;
+pub(crate) const KEY_ENUMERATE_SUB_KEYS: u32 = 0x0008;
+pub(crate) const KEY_NOTIFY: u32 = 0x0010;
+pub(crate) const KEY_CREATE_LINK: u32 = 0x0020;
+pub(crate) const KEY_WOW64_64KEY: u32 = 0x0100;
+pub(crate) const KEY_WOW64_32KEY: u32 = 0x0200;
+pub(crate) const WOW64_MASK: u32 = KEY_WOW64_64KEY | KEY_WOW64_32KEY;
 pub(crate) const DELETE: u32 = 0x0001_0000;
 const READ_CONTROL: u32 = 0x0002_0000;
 const WRITE_DAC: u32 = 0x0004_0000;
@@ -76,13 +76,14 @@ const GENERIC_ALL: u32 = 0x1000_0000;
 const GENERIC_EXECUTE: u32 = 0x2000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const GENERIC_READ: u32 = 0x8000_0000;
-pub const KEY_READ: u32 = READ_CONTROL | KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_NOTIFY;
-pub const KEY_WRITE: u32 = READ_CONTROL | KEY_SET_VALUE | KEY_CREATE_SUB_KEY;
-pub const KEY_ALL_ACCESS: u32 = 0x000F_003F;
+pub(crate) const KEY_READ: u32 =
+    READ_CONTROL | KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_NOTIFY;
+pub(crate) const KEY_WRITE: u32 = READ_CONTROL | KEY_SET_VALUE | KEY_CREATE_SUB_KEY;
+pub(crate) const KEY_ALL_ACCESS: u32 = 0x000F_003F;
 
 /// A synthetic key handle's record.
 #[derive(Clone, Debug)]
-pub struct SynthKey {
+pub(crate) struct SynthKey {
     /// Canonical path (spec 2.2).
     pub path: String,
     /// The access the caller was granted, generic rights mapped to key rights
@@ -105,11 +106,11 @@ pub struct SynthKey {
 }
 
 /// `OBJ_INHERIT`: the only handle attribute a key handle keeps.
-pub const OBJ_INHERIT: u32 = 0x2;
+pub(crate) const OBJ_INHERIT: u32 = 0x2;
 
 /// A pass-through (real) key handle's record.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KeyRec {
+pub(crate) struct KeyRec {
     /// Canonical path (spec 2.2).
     pub path: String,
     /// Requested access, generic rights mapped ([`map_generic`]). For `MAXIMUM_ALLOWED` this is
@@ -127,12 +128,12 @@ static PASS: Mutex<BTreeMap<isize, KeyRec>> = Mutex::new(BTreeMap::new());
 static NEXT_SLOT: AtomicUsize = AtomicUsize::new(1);
 
 /// Whether `h` is a synthetic key handle.
-pub fn is_synthetic(h: isize) -> bool {
+pub(crate) fn is_synthetic(h: isize) -> bool {
     h > 0 && (h as usize) >> 29 == REG_TAG >> 29
 }
 
 /// Register a synthetic key handle and return its value.
-pub fn insert_synthetic(rec: SynthKey) -> Option<isize> {
+pub(crate) fn insert_synthetic(rec: SynthKey) -> Option<isize> {
     let mut t = SYNTH.lock().ok()?;
     if t.len() >= SLOT_MASK {
         return None;
@@ -152,7 +153,7 @@ pub fn insert_synthetic(rec: SynthKey) -> Option<isize> {
 }
 
 /// The record of a synthetic key handle.
-pub fn synthetic(h: isize) -> Option<SynthKey> {
+pub(crate) fn synthetic(h: isize) -> Option<SynthKey> {
     if !is_synthetic(h) {
         return None;
     }
@@ -168,7 +169,7 @@ fn remove_synthetic(h: isize) -> Option<SynthKey> {
 }
 
 /// Record a pass-through key handle.
-pub fn track(h: isize, rec: KeyRec) {
+pub(crate) fn track(h: isize, rec: KeyRec) {
     if let Ok(mut t) = PASS.lock() {
         t.insert(h, rec);
         crate::hookstats::note_reg_passthrough_handles(t.len());
@@ -176,7 +177,7 @@ pub fn track(h: isize, rec: KeyRec) {
 }
 
 /// The record of a pass-through key handle.
-pub fn tracked(h: isize) -> Option<KeyRec> {
+pub(crate) fn tracked(h: isize) -> Option<KeyRec> {
     PASS.lock().ok()?.get(&h).cloned()
 }
 
@@ -199,7 +200,7 @@ fn untrack(h: isize) -> Option<KeyRec> {
 /// once it succeeded, the notifications pending on the handle end (`STATUS_NOTIFY_CLEANUP`);
 /// if the handle is protected from close it is still open, so its record comes back and its
 /// notifications keep waiting.
-pub fn after_real_close(h: isize, rec: Option<KeyRec>, status: NTSTATUS) {
+pub(crate) fn after_real_close(h: isize, rec: Option<KeyRec>, status: NTSTATUS) {
     if status >= 0 {
         crate::regnotify::cleanup(h);
     } else if status == STATUS_HANDLE_NOT_CLOSABLE {
@@ -227,7 +228,7 @@ unsafe fn real_protected(real: &Real, h: isize) -> bool {
 }
 
 /// What [`close`] did with a key handle.
-pub enum Close {
+pub(crate) enum Close {
     /// A synthetic handle, answered here.
     Done(NTSTATUS),
     /// Not synthetic: closed for real by the caller, then [`after_real_close`] with this record
@@ -236,7 +237,7 @@ pub enum Close {
 }
 
 /// Mark a key handle's record deleted (`NtDeleteKey` through it succeeded).
-pub fn mark_deleted(h: isize) {
+pub(crate) fn mark_deleted(h: isize) {
     if is_synthetic(h) {
         if let Ok(mut t) = SYNTH.lock() {
             if let Some(k) = t.get_mut(&h) {
@@ -277,7 +278,7 @@ pub(crate) unsafe fn retarget(real: &Real, h: isize, new_path: &str) {
 /// What `NtQueryObject(ObjectNameInformation)` must answer for a real key handle whose record
 /// says the real key no longer names it: `Err(STATUS_KEY_DELETED)` once deleted through it, the
 /// NT name of its new path once renamed through it. `None`: the real call answers.
-pub fn passthrough_name(h: isize) -> Option<Result<String, NTSTATUS>> {
+pub(crate) fn passthrough_name(h: isize) -> Option<Result<String, NTSTATUS>> {
     if is_synthetic(h) || h <= 0 {
         return None;
     }
@@ -289,7 +290,7 @@ pub fn passthrough_name(h: isize) -> Option<Result<String, NTSTATUS>> {
 }
 
 /// The canonical path of a key handle from either table.
-pub fn path_of(h: isize) -> Option<String> {
+pub(crate) fn path_of(h: isize) -> Option<String> {
     if is_synthetic(h) {
         return synthetic(h).map(|k| k.path);
     }
@@ -297,7 +298,7 @@ pub fn path_of(h: isize) -> Option<String> {
 }
 
 /// Live (synthetic, pass-through) key handles.
-pub fn counts() -> (usize, usize) {
+pub(crate) fn counts() -> (usize, usize) {
     (
         SYNTH.lock().map(|t| t.len()).unwrap_or(0),
         PASS.lock().map(|t| t.len()).unwrap_or(0),
@@ -306,7 +307,7 @@ pub fn counts() -> (usize, usize) {
 
 /// Generic rights mapped to key rights (the registry's generic mapping); `MAXIMUM_ALLOWED`
 /// reads as everything. WOW64 flags are dropped: they select a view, they grant nothing.
-pub fn map_generic(access: u32) -> u32 {
+pub(crate) fn map_generic(access: u32) -> u32 {
     let mut a = access & !(GENERIC_ALL | GENERIC_EXECUTE | GENERIC_WRITE | GENERIC_READ);
     a &= !(MAXIMUM_ALLOWED | WOW64_MASK);
     if access & (GENERIC_READ | GENERIC_EXECUTE) != 0 {
@@ -322,14 +323,14 @@ pub fn map_generic(access: u32) -> u32 {
 }
 
 /// The access includes a right that changes the key (spec 3.2 "Desired access").
-pub fn wants_write(access: u32) -> bool {
+pub(crate) fn wants_write(access: u32) -> bool {
     map_generic(access)
         & (KEY_SET_VALUE | KEY_CREATE_SUB_KEY | KEY_CREATE_LINK | DELETE | WRITE_DAC | WRITE_OWNER)
         != 0
 }
 
 /// String form (`S-1-5-21-...`) of a binary SID.
-pub fn sid_string(sid: &[u8]) -> Option<String> {
+pub(crate) fn sid_string(sid: &[u8]) -> Option<String> {
     let (&rev, rest) = sid.split_first()?;
     let (&n, rest) = rest.split_first()?;
     let auth: &[u8; 6] = rest.get(..6)?.try_into().ok()?;
@@ -343,7 +344,7 @@ pub fn sid_string(sid: &[u8]) -> Option<String> {
 }
 
 /// The process user's SID as a string, read once from the process token.
-pub fn user_sid() -> Option<&'static str> {
+pub(crate) fn user_sid() -> Option<&'static str> {
     static SID: OnceLock<Option<String>> = OnceLock::new();
     SID.get_or_init(read_user_sid).as_deref()
 }
@@ -388,7 +389,7 @@ fn read_user_sid() -> Option<String> {
 
 /// Where a key name resolved to.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Resolved {
+pub(crate) enum Resolved {
     /// A canonical path.
     Path(String),
     /// An absolute name that is not a registry path the overlay knows about: pass it through.
@@ -399,7 +400,7 @@ pub enum Resolved {
 
 /// The canonical path of `name` relative to `base` (a canonical path, or `None` for an absolute
 /// name). An empty relative name is the base key itself.
-pub fn compose(base: Option<&str>, name: &str, sid: Option<&str>) -> Resolved {
+pub(crate) fn compose(base: Option<&str>, name: &str, sid: Option<&str>) -> Resolved {
     match base {
         None => match path::canonical(name, sid) {
             Ok(p) => Resolved::Path(p),
@@ -415,7 +416,7 @@ pub fn compose(base: Option<&str>, name: &str, sid: Option<&str>) -> Resolved {
 }
 
 /// The unhooked entry points the key logic calls (each hook's trampoline).
-pub struct Real {
+pub(crate) struct Real {
     pub open_ex: Option<NtOpenKeyExFn>,
     pub query: Option<NtQueryKeyFn>,
     pub close: Option<NtCloseFn>,
@@ -493,7 +494,7 @@ fn is_not_ours(h: isize) -> bool {
 }
 
 /// Handles remembered as not ours. For tests and diagnostics.
-pub fn not_ours_count() -> usize {
+pub(crate) fn not_ours_count() -> usize {
     NOT_OURS.lock().map_or(0, |t| t.len())
 }
 
@@ -526,7 +527,7 @@ unsafe fn granted_access(real: &Real, h: isize) -> Option<u32> {
 
 /// What [`resolve`] learned about a caller's handle.
 #[derive(Debug)]
-pub enum Resolution {
+pub(crate) enum Resolution {
     /// A real key on a virtualised path: its record (now tracked as pass-through).
     Ours(KeyRec),
     /// Not a key the overlay serves: a synthetic handle, a handle that is not a key, or a key
@@ -546,7 +547,7 @@ pub enum Resolution {
 ///
 /// # Safety
 /// `h` is a caller's handle; it is only passed to the real `NtQueryKey` and `NtQueryObject`.
-pub unsafe fn resolve(real: &Real, h: isize) -> Resolution {
+pub(crate) unsafe fn resolve(real: &Real, h: isize) -> Resolution {
     if is_synthetic(h) || h <= 0 {
         return Resolution::NotOurs;
     }
@@ -588,7 +589,7 @@ pub unsafe fn resolve(real: &Real, h: isize) -> Resolution {
 /// How a caller's key handle is going to be used, which decides what an unresolvable handle
 /// costs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
+pub(crate) enum Mode {
     /// A read: an unresolvable handle reads as not ours (the real call), counted as a read
     /// fallback (spec section 6). A pass-through handle merges through itself.
     Read,
@@ -602,7 +603,7 @@ pub enum Mode {
 
 /// A key handle the overlay serves, as one call sees it.
 #[derive(Debug, Clone)]
-pub struct KeyRef {
+pub(crate) struct KeyRef {
     /// The caller's handle.
     pub handle: isize,
     /// Canonical path (spec 2.2).
@@ -624,7 +625,7 @@ pub struct KeyRef {
 
 /// What [`key_handle`] made of a caller's handle.
 #[derive(Debug)]
-pub enum KeyHandle {
+pub(crate) enum KeyHandle {
     /// A key the overlay serves.
     Key(KeyRef),
     /// Not a key the overlay serves: the real call.
@@ -639,7 +640,7 @@ pub enum KeyHandle {
 
 impl KeyRef {
     /// The record of a synthetic key handle.
-    pub fn synthetic(h: isize) -> Option<KeyRef> {
+    pub(crate) fn synthetic(h: isize) -> Option<KeyRef> {
         let k = synthetic(h)?;
         Some(KeyRef {
             handle: h,
@@ -653,7 +654,7 @@ impl KeyRef {
     }
 
     /// `STATUS_ACCESS_DENIED` unless the handle was granted every bit of `right`.
-    pub fn check(&self, right: u32) -> Result<(), NTSTATUS> {
+    pub(crate) fn check(&self, right: u32) -> Result<(), NTSTATUS> {
         if self.access & right != right {
             return Err(STATUS_ACCESS_DENIED);
         }
@@ -709,7 +710,7 @@ pub(crate) fn gone(st: NTSTATUS) -> bool {
 ///
 /// # Safety
 /// `h` is a caller's handle; it is only passed to the real `NtQueryKey` and `NtQueryObject`.
-pub unsafe fn key_handle(real: &Real, h: isize, mode: Mode) -> KeyHandle {
+pub(crate) unsafe fn key_handle(real: &Real, h: isize, mode: Mode) -> KeyHandle {
     if is_synthetic(h) {
         return match KeyRef::synthetic(h) {
             Some(k) => KeyHandle::Key(k),
@@ -863,7 +864,7 @@ unsafe fn parent_exists(real: &Real, canonical: &str, wow64: u32) -> Result<bool
 
 /// Which call is being answered.
 #[derive(Clone, Copy)]
-pub enum Call {
+pub(crate) enum Call {
     /// `NtOpenKey` / `NtOpenKeyEx`.
     Open,
     /// `NtCreateKey` with its `CreateOptions`.
@@ -871,7 +872,7 @@ pub enum Call {
 }
 
 /// What an open or create comes to.
-pub struct Outcome {
+pub(crate) struct Outcome {
     pub status: NTSTATUS,
     /// For `NtCreateKey`'s `Disposition`, on success.
     pub disposition: u32,
@@ -901,7 +902,7 @@ impl Outcome {
 ///
 /// # Safety
 /// `out` and `oa` are the caller's NT arguments.
-pub unsafe fn open_or_create(
+pub(crate) unsafe fn open_or_create(
     real: &Real,
     out: *mut HANDLE,
     access: u32,
@@ -1175,7 +1176,7 @@ impl Key<'_> {
 }
 
 /// The open options `NtOpenKeyEx` accepts, out of `NtCreateKey`'s `CreateOptions`.
-pub fn open_options_of_create(options: u32) -> u32 {
+pub(crate) fn open_options_of_create(options: u32) -> u32 {
     options & (REG_OPTION_BACKUP_RESTORE | REG_OPTION_OPEN_LINK)
 }
 
@@ -1183,7 +1184,7 @@ pub fn open_options_of_create(options: u32) -> u32 {
 /// real handle closed, its notifications ended); `Close::Real` for anything else, whose
 /// pass-through record (if any) is dropped before the caller closes it for real and calls
 /// [`after_real_close`].
-pub unsafe fn close(real: &Real, h: isize) -> Close {
+pub(crate) unsafe fn close(real: &Real, h: isize) -> Close {
     // Whatever the handle was, an enumeration snapshot kept for it goes with it, and so do the
     // notifications pending on it (`STATUS_NOTIFY_CLEANUP`; a real handle's once its real close
     // succeeded). A synthetic handle protected from close stays, all of it.
@@ -1210,7 +1211,7 @@ pub unsafe fn close(real: &Real, h: isize) -> Close {
 /// The NT name of a synthetic key handle, for `NtQueryObject(ObjectNameInformation)`.
 /// `Err(STATUS_KEY_DELETED)` once the key was deleted through the handle (Windows answers a
 /// deleted key's name query so).
-pub fn object_name(h: isize) -> Option<Result<String, NTSTATUS>> {
+pub(crate) fn object_name(h: isize) -> Option<Result<String, NTSTATUS>> {
     synthetic(h).map(|k| {
         if k.deleted {
             Err(crate::ntdef::STATUS_KEY_DELETED)
@@ -1240,7 +1241,7 @@ unsafe fn type_donor(real: &Real) -> Option<isize> {
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments; `tramp` is the unhooked `NtQueryObject`.
-pub unsafe fn query_object(
+pub(crate) unsafe fn query_object(
     real: &Real,
     tramp: NtQueryObjectFn,
     h: isize,
@@ -1305,7 +1306,7 @@ fn is_self(process: HANDLE) -> bool {
 /// # Safety
 /// The arguments are the caller's NT arguments.
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn duplicate(
+pub(crate) unsafe fn duplicate(
     real: &Real,
     src_process: HANDLE,
     src: HANDLE,
@@ -1425,7 +1426,7 @@ pub unsafe fn duplicate(
 ///
 /// # Safety
 /// `info` is the caller's buffer of `length` bytes.
-pub unsafe fn set_handle_flags(
+pub(crate) unsafe fn set_handle_flags(
     h: isize,
     class: u32,
     info: *const c_void,
@@ -1464,7 +1465,7 @@ const LABEL_SECURITY_INFORMATION: u32 = 0x10;
 
 /// The rights reading the parts `info` names needs (as the Wine server and Windows check them):
 /// the SACL needs `ACCESS_SYSTEM_SECURITY`, everything else `READ_CONTROL`.
-pub fn query_security_rights(info: u32) -> u32 {
+pub(crate) fn query_security_rights(info: u32) -> u32 {
     let mut need = 0;
     if info & SACL_SECURITY_INFORMATION != 0 {
         need |= ACCESS_SYSTEM_SECURITY;
@@ -1477,7 +1478,7 @@ pub fn query_security_rights(info: u32) -> u32 {
 
 /// The rights writing the parts `info` names needs: owner, group and label need `WRITE_OWNER`,
 /// the DACL `WRITE_DAC`, the SACL `ACCESS_SYSTEM_SECURITY`.
-pub fn set_security_rights(info: u32) -> u32 {
+pub(crate) fn set_security_rights(info: u32) -> u32 {
     let mut need = 0;
     if info & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)
         != 0
@@ -1517,7 +1518,7 @@ unsafe fn open_real_rights(
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments; `tramp` is the unhooked `NtQuerySecurityObject`.
-pub unsafe fn query_security(
+pub(crate) unsafe fn query_security(
     real: &Real,
     tramp: NtQuerySecurityObjectFn,
     h: isize,
@@ -1568,7 +1569,7 @@ pub unsafe fn query_security(
 ///
 /// # Safety
 /// `sd` is the caller's security descriptor; `h` a caller's handle.
-pub unsafe fn set_security(
+pub(crate) unsafe fn set_security(
     real: &Real,
     h: isize,
     info: u32,
@@ -1619,7 +1620,7 @@ unsafe fn check_set_security(access: u32, deleted: bool, info: u32, sd: *const c
 
 /// Whether a key (handle or name) is one the overlay serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Serves {
+pub(crate) enum Serves {
     /// Synthetic, or a real key on a virtualised path.
     Yes,
     /// Not a key the overlay serves.
@@ -1637,7 +1638,7 @@ pub enum Serves {
 ///
 /// # Safety
 /// `h` is a caller's handle; it is only passed to the real `NtQueryKey` and `NtQueryObject`.
-pub unsafe fn serves_handle(real: &Real, h: isize) -> Serves {
+pub(crate) unsafe fn serves_handle(real: &Real, h: isize) -> Serves {
     if is_synthetic(h) {
         return Serves::Yes;
     }
@@ -1655,7 +1656,7 @@ pub unsafe fn serves_handle(real: &Real, h: isize) -> Serves {
 ///
 /// # Safety
 /// `oa` is the caller's `OBJECT_ATTRIBUTES` (nullable).
-pub unsafe fn serves_target(real: &Real, oa: *const ObjectAttributes) -> Serves {
+pub(crate) unsafe fn serves_target(real: &Real, oa: *const ObjectAttributes) -> Serves {
     if oa.is_null() {
         return Serves::No;
     }

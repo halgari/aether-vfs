@@ -28,12 +28,12 @@ mod tally;
 #[cfg(test)]
 mod tests;
 
-pub use io::*;
+pub(crate) use io::*;
 pub use open::*;
 pub use overlay::*;
 pub use panics::*;
 pub use registry::*;
-pub use report::*;
+pub(crate) use report::*;
 
 /// Generates [`Hook`], its count and its names from `detour_table!`: one `Variant = id` per row
 /// that has a `stat` column.
@@ -53,7 +53,7 @@ macro_rules! hook_stats_from_table {
         /// Hooks attributed separately: one entry per instrumented hook (there is no catch-all variant).
         #[derive(Copy, Clone, Debug, PartialEq, Eq)]
         #[repr(usize)]
-        pub enum Hook {
+        pub(crate) enum Hook {
             $($($variant = $id,)?)*
         }
 
@@ -92,7 +92,7 @@ const SLOW_NS: u64 = 1_000_000;
 static REPORTER: AtomicBool = AtomicBool::new(false);
 
 /// Whether instrumentation is on, resolved once.
-pub fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| vfs_env::present(vfs_env::SHIM_STATS_LOG))
 }
@@ -101,14 +101,14 @@ pub fn enabled() -> bool {
 ///
 /// Constructing this when disabled reads no clock and touches no atomics, so an
 /// un-instrumented run pays only a cached bool check.
-pub struct Timed {
+pub(crate) struct Timed {
     hook: Hook,
     start: Option<Instant>,
     rooted: bool,
 }
 
 impl Timed {
-    pub fn new(hook: Hook) -> Self {
+    pub(crate) fn new(hook: Hook) -> Self {
         // Independent of `enabled()`: the breadcrumb is for a hang, where the
         // stats path is useless (its clock reads and reporter thread have been
         // measured to suppress the race). Two relaxed stores, or nothing at all
@@ -126,7 +126,7 @@ impl Timed {
     }
 
     /// Mark this call as having been served from the VFS.
-    pub fn mark_rooted(&mut self) {
+    pub(crate) fn mark_rooted(&mut self) {
         self.rooted = true;
     }
 }

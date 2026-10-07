@@ -44,14 +44,14 @@ static SYNTH_VIEWS: Mutex<BTreeMap<usize, SynthView>> = Mutex::new(BTreeMap::new
 static NEXT_SLOT: Mutex<usize> = Mutex::new(0);
 
 /// Whether `handle` is a synthetic section (from [`register_mapped_image`]).
-pub fn is_synth_section(handle: isize) -> bool {
+pub(crate) fn is_synth_section(handle: isize) -> bool {
     (handle as usize) & SYNTH_SECTION_TAG != 0
 }
 
 /// Register an already-mapped PE image (from `map_image_from_pe_bytes_local`,
 /// or a [`crate::lazy_section`] reservation) as a synthetic section so
 /// `MapViewOfSection` returns `base`.
-pub fn register_mapped_image(base: usize, size: u64) -> Option<isize> {
+pub(crate) fn register_mapped_image(base: usize, size: u64) -> Option<isize> {
     let mut slot = NEXT_SLOT.lock().ok()?;
     let handle = SYNTH_SECTION_TAG | (*slot << 3);
     *slot += 1;
@@ -71,7 +71,7 @@ pub fn register_mapped_image(base: usize, size: u64) -> Option<isize> {
 /// The base lets the caller release shim-owned address space (see
 /// [`crate::lazy_section::on_section_closed`]). Views may still be outstanding;
 /// the owner frees only once the last one is unmapped.
-pub fn close_section(handle: isize) -> Option<usize> {
+pub(crate) fn close_section(handle: isize) -> Option<usize> {
     SYNTH_SECTIONS
         .lock()
         .ok()?
@@ -85,7 +85,7 @@ pub fn close_section(handle: isize) -> Option<usize> {
 /// region the section already covers (no extra mapping), so [`unmap_view`] must
 /// be used rather than `UnmapViewOfFile`, which would tear down memory the
 /// owner is still tracking.
-pub fn map_view(
+pub(crate) fn map_view(
     section_handle: isize,
     section_offset: u64,
     view_size: u64,
@@ -127,7 +127,7 @@ pub fn map_view(
 /// Owners of shim-allocated section memory use this to decide when a region is
 /// unreferenced. On a poisoned lock this reports "still in use": leaking a
 /// reservation is recoverable, freeing one out from under a live view is not.
-pub fn has_view_in(base: usize, len: usize) -> bool {
+pub(crate) fn has_view_in(base: usize, len: usize) -> bool {
     match SYNTH_VIEWS.lock() {
         Ok(v) => v.range(base..base.saturating_add(len)).next().is_some(),
         Err(_) => true,
@@ -135,7 +135,7 @@ pub fn has_view_in(base: usize, len: usize) -> bool {
 }
 
 /// Whether `base` is a synthetic mapped view (should no-op on UnmapView).
-pub fn is_synth_view(base: usize) -> bool {
+pub(crate) fn is_synth_view(base: usize) -> bool {
     SYNTH_VIEWS
         .lock()
         .map(|v| v.contains_key(&base))
@@ -144,7 +144,7 @@ pub fn is_synth_view(base: usize) -> bool {
 
 /// Forget one reference to a synthetic mapped view (do not unmap the underlying
 /// region). Returns true when this was the *last* reference to `base`.
-pub fn unmap_view(base: usize) -> bool {
+pub(crate) fn unmap_view(base: usize) -> bool {
     let Ok(mut views) = SYNTH_VIEWS.lock() else {
         return false;
     };

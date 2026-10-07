@@ -13,21 +13,21 @@ pub(super) static NAME_QUERIES_CACHED: AtomicU64 = AtomicU64::new(0);
 pub(super) static NAME_LOOKUPS: AtomicU64 = AtomicU64::new(0);
 
 /// A name query on a synthetic handle is being answered.
-pub fn note_name_query() {
+pub(crate) fn note_name_query() {
     if enabled() {
         NAME_QUERIES.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// ... wholly from what the shim remembered.
-pub fn note_name_query_cached() {
+pub(crate) fn note_name_query_cached() {
     if enabled() {
         NAME_QUERIES_CACHED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// ... by asking the director.
-pub fn note_name_lookup() {
+pub(crate) fn note_name_lookup() {
     if enabled() {
         NAME_LOOKUPS.fetch_add(1, Ordering::Relaxed);
     }
@@ -39,7 +39,7 @@ pub fn note_name_lookup() {
 pub(super) static REG_READ_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 
 /// A registry overlay read failed; the caller falls back to the real registry.
-pub fn note_reg_read_fallback() {
+pub(crate) fn note_reg_read_fallback() {
     REG_READ_FALLBACKS.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -54,7 +54,7 @@ pub fn reg_read_fallback_count() -> u64 {
 pub(super) static REG_UNRESOLVED: AtomicU64 = AtomicU64::new(0);
 
 /// A registry open could not be resolved to a path and was passed through.
-pub fn note_reg_unresolved() {
+pub(crate) fn note_reg_unresolved() {
     REG_UNRESOLVED.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -69,12 +69,12 @@ pub fn reg_unresolved_count() -> u64 {
 pub(super) static REG_CLOSE_LOCK_GIVEN_UP: AtomicU64 = AtomicU64::new(0);
 
 /// A registry handle-table removal gave up on its lock.
-pub fn note_reg_close_lock_given_up() {
+pub(crate) fn note_reg_close_lock_given_up() {
     REG_CLOSE_LOCK_GIVEN_UP.fetch_add(1, Ordering::Relaxed);
 }
 
 /// How many registry handle-table removals gave up on their lock so far.
-pub fn reg_close_lock_given_up_count() -> u64 {
+pub(crate) fn reg_close_lock_given_up_count() -> u64 {
     REG_CLOSE_LOCK_GIVEN_UP.load(Ordering::Relaxed)
 }
 
@@ -83,7 +83,7 @@ pub fn reg_close_lock_given_up_count() -> u64 {
 pub(super) static REG_OVERLAY_DISABLED: OnceLock<&'static str> = OnceLock::new();
 
 /// The registry overlay is off because the detour `name` could not be installed.
-pub fn note_reg_overlay_disabled(name: &'static str) {
+pub(crate) fn note_reg_overlay_disabled(name: &'static str) {
     let _ = REG_OVERLAY_DISABLED.set(name);
 }
 
@@ -100,7 +100,7 @@ pub fn reg_overlay_disabled_by() -> Option<&'static str> {
 pub(super) static REG_WRITE_REFUSED: AtomicU64 = AtomicU64::new(0);
 
 /// A registry overlay write was refused for want of the director.
-pub fn note_reg_write_refused() {
+pub(crate) fn note_reg_write_refused() {
     REG_WRITE_REFUSED.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -126,7 +126,7 @@ pub enum RegNotify {
 /// [`RegNotify`] counts. Counted whether or not stats are on.
 pub(super) static REG_NOTIFY: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
-pub fn note_reg_notify(e: RegNotify) {
+pub(crate) fn note_reg_notify(e: RegNotify) {
     REG_NOTIFY[e as usize].fetch_add(1, Ordering::Relaxed);
 }
 
@@ -140,13 +140,13 @@ pub fn reg_notify_count(e: RegNotify) -> u64 {
 pub(super) static REG_HANDLES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
 /// The synthetic key handle table now holds `n` handles.
-pub fn note_reg_virtual_handles(n: usize) {
+pub(crate) fn note_reg_virtual_handles(n: usize) {
     REG_HANDLES[0].store(n as u64, Ordering::Relaxed);
     REG_HANDLES[1].fetch_max(n as u64, Ordering::Relaxed);
 }
 
 /// The pass-through key handle table now holds `n` handles.
-pub fn note_reg_passthrough_handles(n: usize) {
+pub(crate) fn note_reg_passthrough_handles(n: usize) {
     REG_HANDLES[2].store(n as u64, Ordering::Relaxed);
     REG_HANDLES[3].fetch_max(n as u64, Ordering::Relaxed);
 }
@@ -220,7 +220,7 @@ pub(super) fn render_reg_fallbacks(snap: &Snapshot) -> String {
 }
 
 /// The label of the name-query row, for anything that parses the report.
-pub const NAME_QUERY_LABEL: &str = "final-path name queries";
+pub(crate) const NAME_QUERY_LABEL: &str = "final-path name queries";
 
 pub(super) fn render_name_queries(snap: &Snapshot) -> String {
     if snap.name_queries == 0 {

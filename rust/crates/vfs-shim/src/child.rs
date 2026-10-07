@@ -26,7 +26,7 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// Per-PID file the child bootstrap reads for early Config address (hex).
 /// Parent writes this after arming; avoids relying on inherited env addresses.
-pub fn payload_cfg_path_for_pid(pid: u32) -> PathBuf {
+pub(crate) fn payload_cfg_path_for_pid(pid: u32) -> PathBuf {
     std::env::temp_dir().join(format!("vfs_payload_cfg_{pid}.txt"))
 }
 
@@ -38,7 +38,7 @@ fn ready_event_name(pid: u32) -> Vec<u16> {
 /// Absolute path of `vfs_payload.dll` for dual-layer child inject.
 /// Prefers `VFS_PAYLOAD_PATH`, then co-locates/copies beside this shim DLL
 /// (searches parent / deps / current exe).
-pub fn payload_dll_path() -> Option<String> {
+pub(crate) fn payload_dll_path() -> Option<String> {
     let self_dll = self_dll_path()?;
     let preferred = vfs_env::text(vfs_env::PAYLOAD_PATH);
     vfs_inject::ensure_payload_beside_shim(&self_dll, preferred.as_deref())
@@ -60,7 +60,7 @@ fn child_preinit_redirects() -> Vec<PreinitRedirect> {
 
 /// Inject `dll_path` into `process` via `LoadLibraryW` on a remote thread and
 /// wait for that thread (i.e. for `DllMain` to run).
-pub fn inject_dll(process: HANDLE, dll_path: &str) -> bool {
+pub(crate) fn inject_dll(process: HANDLE, dll_path: &str) -> bool {
     // SAFETY: standard remote-LoadLibrary injection into a live child process.
     unsafe {
         let dll_w = wide(dll_path);
@@ -122,7 +122,7 @@ pub fn inject_dll(process: HANDLE, dll_path: &str) -> bool {
 ///
 /// On any failure after the primary may be spinning, attempts to release the
 /// gate. Returns whether dual-layer completed successfully.
-pub fn inject_child_dual_layer(
+pub(crate) fn inject_child_dual_layer(
     process: HANDLE,
     thread: HANDLE,
     pid: u32,
@@ -195,7 +195,7 @@ pub fn inject_child_dual_layer(
 
 /// Inject into a suspended child: dual-layer if payload is available, else
 /// classic LoadLibrary-only. Then wait for readiness.
-pub fn inject_child(
+pub(crate) fn inject_child(
     process: HANDLE,
     thread: HANDLE,
     pid: u32,
@@ -253,7 +253,7 @@ fn read_u32(process: HANDLE, addr: u64) -> Option<u32> {
 }
 
 /// The absolute path of the DLL this code lives in.
-pub fn self_dll_path() -> Option<String> {
+pub(crate) fn self_dll_path() -> Option<String> {
     // SAFETY: resolve our module by an address inside it, then read its path.
     unsafe {
         let mut hmod = core::ptr::null_mut();
@@ -275,7 +275,7 @@ pub fn self_dll_path() -> Option<String> {
 }
 
 /// Signal that the current process's shim has installed its hooks.
-pub fn signal_ready() {
+pub(crate) fn signal_ready() {
     // SAFETY: named-event create + set; the leaked handle is process-lifetime.
     unsafe {
         let name = ready_event_name(GetCurrentProcessId());
@@ -287,7 +287,7 @@ pub fn signal_ready() {
 }
 
 /// Wait up to `timeout_ms` for `pid`'s shim to signal readiness.
-pub fn wait_ready(pid: u32, timeout_ms: u32) -> bool {
+pub(crate) fn wait_ready(pid: u32, timeout_ms: u32) -> bool {
     // SAFETY: named-event create + timed wait; handle closed before return.
     unsafe {
         let name = ready_event_name(pid);
@@ -302,7 +302,7 @@ pub fn wait_ready(pid: u32, timeout_ms: u32) -> bool {
 }
 
 /// Re-suspend a child the caller originally asked to keep suspended.
-pub fn re_suspend(thread: HANDLE) {
+pub(crate) fn re_suspend(thread: HANDLE) {
     // SAFETY: thread handle from CreateProcess; best-effort.
     unsafe {
         let _ = SuspendThread(thread);

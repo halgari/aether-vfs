@@ -62,7 +62,7 @@ pub use vfs_provider::overlay_layer_dir;
 /// Pure and in-memory: the marker names are already in the listing, so nothing
 /// here touches the filesystem, and enumeration pays one pass over entries it
 /// was going to copy anyway.
-pub fn strip_whiteout_markers(items: Vec<DirItem>) -> Vec<DirItem> {
+pub(crate) fn strip_whiteout_markers(items: Vec<DirItem>) -> Vec<DirItem> {
     // Two passes, because a marker may sort after the name it hides. A set
     // rather than a scan of a `Vec`: a mod that removes a few hundred files
     // from one directory is an ordinary thing to do, and that is the case
@@ -81,7 +81,7 @@ pub fn strip_whiteout_markers(items: Vec<DirItem>) -> Vec<DirItem> {
 }
 
 /// What the overlay says about a path.
-pub enum OverlayState {
+pub(crate) enum OverlayState {
     /// An overlay file or directory exists here.
     Present {
         path: PathBuf,
@@ -123,12 +123,12 @@ pub enum OverlayState {
 /// `vfs-launch`), and a migrator would have to assume "everything at the old
 /// top level belongs to root 0" — exactly the assumption multi-root `Engine`
 /// (the very next task, now done) makes false.
-pub struct Overlay {
+pub(crate) struct Overlay {
     root: PathBuf,
 }
 
 impl Overlay {
-    pub fn new(overlay_root: &str) -> Overlay {
+    pub(crate) fn new(overlay_root: &str) -> Overlay {
         Overlay {
             root: PathBuf::from(overlay_root),
         }
@@ -143,7 +143,7 @@ impl Overlay {
     }
 
     /// The overlay file path for `root`'s folded `comps`.
-    pub fn file_path(&self, root: RootId, comps: &[String]) -> PathBuf {
+    pub(crate) fn file_path(&self, root: RootId, comps: &[String]) -> PathBuf {
         comps.iter().fold(self.root_dir(root), |a, c| a.join(c))
     }
 
@@ -168,7 +168,7 @@ impl Overlay {
 
     /// Resolve `root`'s `comps` against the overlay: overlay file wins, else
     /// whiteout hides, else absent.
-    pub fn lookup(&self, root: RootId, comps: &[String]) -> OverlayState {
+    pub(crate) fn lookup(&self, root: RootId, comps: &[String]) -> OverlayState {
         if comps.is_empty() {
             return OverlayState::Absent;
         }
@@ -196,7 +196,7 @@ impl Overlay {
     /// NT boundary with nothing anywhere saying why — no copy-up runs for a
     /// truncating/creating write, so not even the copy-up counters see it.
     /// Every caller now reports it (`hookstats::OverlayFail`).
-    pub fn ensure_parent(&self, root: RootId, comps: &[String]) -> std::io::Result<()> {
+    pub(crate) fn ensure_parent(&self, root: RootId, comps: &[String]) -> std::io::Result<()> {
         match self.file_path(root, comps).parent() {
             Some(parent) => std::fs::create_dir_all(parent),
             None => Ok(()),
@@ -205,7 +205,7 @@ impl Overlay {
 
     /// Remove any whiteout marker hiding `root`'s `comps` (a path is being
     /// recreated). No marker is success — there was nothing to clear.
-    pub fn clear_whiteout(&self, root: RootId, comps: &[String]) -> std::io::Result<()> {
+    pub(crate) fn clear_whiteout(&self, root: RootId, comps: &[String]) -> std::io::Result<()> {
         match std::fs::remove_file(self.whiteout_path(root, comps)) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             other => other,
@@ -220,7 +220,7 @@ impl Overlay {
     /// and its absence is the normal case, not a failure. Failing to write
     /// the marker is not: the path stays *visible* afterward, which is a
     /// deleted file that comes back.
-    pub fn whiteout(&self, root: RootId, comps: &[String]) -> std::io::Result<()> {
+    pub(crate) fn whiteout(&self, root: RootId, comps: &[String]) -> std::io::Result<()> {
         self.ensure_parent(root, comps)?;
         let _ = std::fs::remove_file(self.file_path(root, comps));
         std::fs::write(self.whiteout_path(root, comps), b"")
@@ -235,7 +235,12 @@ impl Overlay {
     /// content leaves nothing at `from`, and the rename of an absent file is
     /// the expected shape of that — already counted as a copy-up failure at
     /// its own site. Anything else is reported.
-    pub fn rename(&self, root: RootId, from: &[String], to: &[String]) -> std::io::Result<()> {
+    pub(crate) fn rename(
+        &self,
+        root: RootId,
+        from: &[String],
+        to: &[String],
+    ) -> std::io::Result<()> {
         self.ensure_parent(root, to)?;
         match std::fs::rename(self.file_path(root, from), self.file_path(root, to)) {
             Ok(()) => {}
@@ -247,7 +252,7 @@ impl Overlay {
     }
 
     /// Whether an overlay file exists for `root`'s `comps`.
-    pub fn has_file(&self, root: RootId, comps: &[String]) -> bool {
+    pub(crate) fn has_file(&self, root: RootId, comps: &[String]) -> bool {
         self.file_path(root, comps).exists()
     }
 
@@ -257,7 +262,7 @@ impl Overlay {
     ///
     /// The marker handling itself lives in [`strip_whiteout_markers`], which
     /// the live director listing branch calls too — see that function.
-    pub fn apply_to_listing(
+    pub(crate) fn apply_to_listing(
         &self,
         root: RootId,
         dir_comps: &[String],

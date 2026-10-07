@@ -415,7 +415,7 @@ unsafe fn read_us(us: *const UnicodeString) -> Result<String, NTSTATUS> {
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
-pub unsafe fn query_key(
+pub(crate) unsafe fn query_key(
     real: &Real,
     h: isize,
     class: u32,
@@ -625,12 +625,12 @@ static ENUM_COUNT: AtomicUsize = AtomicUsize::new(0);
 const MAX_ENUM_STATES: usize = 4096;
 
 /// Handles with kept enumeration state.
-pub fn states() -> usize {
+pub(crate) fn states() -> usize {
     ENUMS.lock().map_or(0, |t| t.len())
 }
 
 /// Drop the enumeration state of a handle being closed.
-pub fn forget(h: isize) {
+pub(crate) fn forget(h: isize) {
     if ENUM_COUNT.load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -747,7 +747,7 @@ unsafe fn view<K: Kind>(real: &Real, ctx: &KeyRef, index: u32) -> Result<Arc<Vec
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
-pub unsafe fn enumerate_key(
+pub(crate) unsafe fn enumerate_key(
     real: &Real,
     h: isize,
     index: u32,
@@ -832,7 +832,7 @@ pub unsafe fn enumerate_key(
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
-pub unsafe fn enumerate_value_key(
+pub(crate) unsafe fn enumerate_value_key(
     real: &Real,
     h: isize,
     index: u32,
@@ -899,7 +899,7 @@ fn hit(n: Option<&Node>, folded: &str) -> Hit {
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
-pub unsafe fn query_value_key(
+pub(crate) unsafe fn query_value_key(
     real: &Real,
     h: isize,
     name: *const UnicodeString,
@@ -981,7 +981,7 @@ unsafe fn real_value(real: &Real, h: isize, name: &str) -> Result<Option<Value>,
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
-pub unsafe fn query_multiple_value_key(
+pub(crate) unsafe fn query_multiple_value_key(
     real: &Real,
     h: isize,
     entries: *mut c_void,

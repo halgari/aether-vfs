@@ -18,7 +18,7 @@ pub(super) static PATHS: BoundedTally<String> = BoundedTally::new(4000);
 pub(super) const PATHS_SHOWN: usize = 1000;
 
 /// Record a path an open was attempted on. Cheap no-op when disabled.
-pub fn note_passthrough(path: &str) {
+pub(crate) fn note_passthrough(path: &str) {
     if !enabled() {
         return;
     }
@@ -54,7 +54,7 @@ pub(super) fn format_paths(mut pairs: Vec<(String, u64)>) -> String {
 /// in no path-keyed report. Counting them says whether anything is hiding.
 pub(super) static UNDECODABLE: BoundedTally<String> = BoundedTally::unbounded();
 
-pub fn note_undecodable(name: Option<&str>) {
+pub(crate) fn note_undecodable(name: Option<&str>) {
     if !enabled() {
         return;
     }
@@ -93,7 +93,7 @@ undecodable opens ({} distinct, {total} calls):
 pub(super) static TRACE: Mutex<Option<Vec<String>>> = Mutex::new(None);
 pub(super) const TRACE_MAX: usize = 4000;
 
-pub fn note_trace(op: &str, path: &str, result: &str) {
+pub(crate) fn note_trace(op: &str, path: &str, result: &str) {
     if !enabled() {
         return;
     }
@@ -141,7 +141,7 @@ ordered trace of under-root operations ({}):
 /// the thousands of Windows DLL probes — stays bounded by distinct paths.
 pub(super) static STATS: BoundedTally<String> = BoundedTally::new(4000);
 
-pub fn note_stat(path: &str, outcome: &str) {
+pub(crate) fn note_stat(path: &str, outcome: &str) {
     if !enabled() {
         return;
     }
@@ -215,7 +215,7 @@ pub(super) const OUTCOME_N: usize = 7;
 
 /// Every variant, for iteration in `render_outcomes` and for the test that
 /// checks labels stay distinct.
-pub const ALL_OUTCOMES: [OpenOutcome; OUTCOME_N] = [
+pub(crate) const ALL_OUTCOMES: [OpenOutcome; OUTCOME_N] = [
     OpenOutcome::Routed,
     OpenOutcome::FellThroughRedirect,
     OpenOutcome::FellThroughServe,
@@ -309,11 +309,11 @@ pub(super) static UNROUTED_DIRECTOR_OPENS: AtomicU64 = AtomicU64::new(0);
 /// `vfs-directord`'s `tests/support/mod.rs` matches this string. A rename
 /// there without one here turns the reconciliation back into a silent
 /// inequality.
-pub const UNROUTED_OPEN_LABEL: &str = "director-open: unrouted";
+pub(crate) const UNROUTED_OPEN_LABEL: &str = "director-open: unrouted";
 
 /// Record an `OP_OPEN` the shim issued on its own behalf, or a re-issue of one
 /// already counted as `Routed`. See [`UNROUTED_DIRECTOR_OPENS`].
-pub fn note_unrouted_director_open() {
+pub(crate) fn note_unrouted_director_open() {
     if !enabled() {
         return;
     }
@@ -332,7 +332,7 @@ pub fn unrouted_director_opens() -> u64 {
 /// Wired from every under-root decision site in `hook/file_open.rs`'s `create_hook` /
 /// `open_hook` / `try_fuse_create` — see those for the full site-by-site
 /// argument that each open records exactly once.
-pub fn note_open_outcome(outcome: OpenOutcome, path: &str) {
+pub(crate) fn note_open_outcome(outcome: OpenOutcome, path: &str) {
     if !enabled() {
         return;
     }

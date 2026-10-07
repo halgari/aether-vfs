@@ -66,13 +66,13 @@ use crate::regkeys::{self, KEY_NOTIFY, Real};
 use crate::sync::{CloseLock, lock_for_close};
 
 /// How often the notifier asks the director (ruling R1).
-pub const POLL: Duration = Duration::from_millis(250);
+pub(crate) const POLL: Duration = Duration::from_millis(250);
 
 /// Pending waiters at most; a registration past it fails with `STATUS_INSUFFICIENT_RESOURCES`.
 const MAX_WAITERS: usize = 4096;
 
 /// What a notification hook does with a call.
-pub enum Notify {
+pub(crate) enum Notify {
     /// Not a key the overlay serves: the real call.
     Pass,
     /// Answered here.
@@ -80,7 +80,7 @@ pub enum Notify {
 }
 
 /// The caller's arguments, as the hooks receive them.
-pub struct Args {
+pub(crate) struct Args {
     pub event: HANDLE,
     pub apc: *const c_void,
     pub apc_ctx: *const c_void,
@@ -140,7 +140,7 @@ static STATE: Mutex<State> = Mutex::new(State {
 static PENDING: AtomicUsize = AtomicUsize::new(0);
 
 /// Pending waiters. For tests and diagnostics.
-pub fn pending() -> usize {
+pub(crate) fn pending() -> usize {
     PENDING.load(Ordering::Relaxed)
 }
 
@@ -191,7 +191,7 @@ fn nt() -> Option<&'static NtApi> {
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
-pub unsafe fn notify(real: &Real, h: isize, a: &Args) -> Notify {
+pub(crate) unsafe fn notify(real: &Real, h: isize, a: &Args) -> Notify {
     let regkeys::KeyRef {
         path,
         access,
@@ -489,7 +489,7 @@ fn notifier() {
 }
 
 /// End every waiter on key handle `h`, which is being closed: `STATUS_NOTIFY_CLEANUP`.
-pub fn cleanup(h: isize) {
+pub(crate) fn cleanup(h: isize) {
     if PENDING.load(Ordering::Relaxed) == 0 {
         return;
     }

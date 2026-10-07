@@ -36,7 +36,7 @@ const WARM_BYTES: usize = 2 * 1024 * 1024;
 /// to keep a corrupt size from reserving something absurd. Heavily modded load
 /// orders ship BSAs well past the old 3 GiB ceiling, and returning
 /// `STATUS_SECTION_TOO_BIG` for those makes the game fail the archive outright.
-pub const MAX_LAZY: u64 = 64 * 1024 * 1024 * 1024;
+pub(crate) const MAX_LAZY: u64 = 64 * 1024 * 1024 * 1024;
 
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
@@ -176,7 +176,7 @@ fn fill_bytes(fh: u64, file_off: u64, dest: usize, len: usize) -> Option<usize> 
 /// Reserve VA for a director-backed data section; warm first [`WARM_BYTES`].
 ///
 /// Returns a synthetic section handle for [`crate::synth_section::map_view`].
-pub unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option<isize> {
+pub(crate) unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option<isize> {
     if file_size == 0 || file_size > MAX_LAZY {
         return None;
     }
@@ -217,7 +217,7 @@ pub unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option<isize>
 ///
 /// Without this the shim leaks every eager mapping (up to 256 MiB each) for the
 /// life of the process.
-pub fn track_eager_section(base: usize, size: u64) -> bool {
+pub(crate) fn track_eager_section(base: usize, size: u64) -> bool {
     track(base, align_up(size as usize, PAGE), size, 0, false)
 }
 
@@ -275,7 +275,7 @@ fn reap(g: &mut BTreeMap<usize, OwnedRegion>, key: usize) {
 /// section is closed and no other view remains.
 ///
 /// Call *after* retiring the view in [`crate::synth_section::unmap_view`].
-pub fn on_view_unmapped(addr: usize) {
+pub(crate) fn on_view_unmapped(addr: usize) {
     if let Ok(mut g) = REGIONS.lock() {
         if let Some(key) = region_key(&g, addr) {
             reap(&mut g, key);
@@ -285,7 +285,7 @@ pub fn on_view_unmapped(addr: usize) {
 
 /// Note that the section handle covering `base` was closed. Frees the region
 /// once the last view is unmapped.
-pub fn on_section_closed(base: usize) {
+pub(crate) fn on_section_closed(base: usize) {
     if let Ok(mut g) = REGIONS.lock() {
         if let Some(key) = region_key(&g, base) {
             if let Some(r) = g.get_mut(&key) {
@@ -297,7 +297,7 @@ pub fn on_section_closed(base: usize) {
 }
 
 /// Whether `addr` falls in a demand-paged region (so a fault there is ours).
-pub fn is_lazy_base(addr: usize) -> bool {
+pub(crate) fn is_lazy_base(addr: usize) -> bool {
     REGIONS
         .lock()
         .map(|g| {
@@ -311,7 +311,7 @@ pub fn is_lazy_base(addr: usize) -> bool {
 // ── demand paging ──────────────────────────────────────────────────────────
 
 /// Ensure `[offset, offset+len)` within the lazy region is committed and filled.
-pub unsafe fn ensure_range(base: usize, offset: usize, len: usize) -> bool {
+pub(crate) unsafe fn ensure_range(base: usize, offset: usize, len: usize) -> bool {
     if len == 0 {
         return true;
     }

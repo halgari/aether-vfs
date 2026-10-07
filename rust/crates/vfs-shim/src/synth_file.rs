@@ -26,7 +26,7 @@ struct FuseOpen {
 }
 
 /// What a read through a handle needs, under one lock: see [`lookup_read`].
-pub struct ReadView {
+pub(crate) struct ReadView {
     pub fh: u64,
     pub size: u64,
     pub position: u64,
@@ -36,16 +36,21 @@ pub struct ReadView {
 static TABLE: Mutex<BTreeMap<usize, FuseOpen>> = Mutex::new(BTreeMap::new());
 static NEXT: Mutex<usize> = Mutex::new(1);
 
-pub fn is_fuse_synth(handle: isize) -> bool {
+pub(crate) fn is_fuse_synth(handle: isize) -> bool {
     let h = handle as usize;
     h & SYNTH_FILE_TAG != 0
 }
 
-pub fn open_fuse(fh: u64, size: u64, is_dir: bool) -> Option<isize> {
+pub(crate) fn open_fuse(fh: u64, size: u64, is_dir: bool) -> Option<isize> {
     open_fuse_at(fh, size, is_dir, None)
 }
 
-pub fn open_fuse_at(fh: u64, size: u64, is_dir: bool, abs_path: Option<String>) -> Option<isize> {
+pub(crate) fn open_fuse_at(
+    fh: u64,
+    size: u64,
+    is_dir: bool,
+    abs_path: Option<String>,
+) -> Option<isize> {
     open_fuse_at_ex(fh, size, is_dir, abs_path, false)
 }
 
@@ -56,7 +61,7 @@ pub fn open_fuse_at(fh: u64, size: u64, is_dir: bool, abs_path: Option<String>) 
 /// every caller did before this existed — makes the first append on a
 /// reopened handle overwrite from the start instead, which is silent data
 /// corruption disguised as a successful append.
-pub fn open_fuse_at_ex(
+pub(crate) fn open_fuse_at_ex(
     fh: u64,
     size: u64,
     is_dir: bool,
@@ -84,7 +89,7 @@ pub fn open_fuse_at_ex(
 }
 
 /// Attach the handle's read-cache file (`crate::read_cache::register`).
-pub fn set_cache(handle: isize, cache: vfs_ipc::FileRef) {
+pub(crate) fn set_cache(handle: isize, cache: vfs_ipc::FileRef) {
     if let Ok(mut g) = TABLE.lock() {
         if let Some(e) = g.get_mut(&(handle as usize)) {
             e.cache = Some(cache);
@@ -93,14 +98,14 @@ pub fn set_cache(handle: isize, cache: vfs_ipc::FileRef) {
 }
 
 /// The handle's read-cache file, if it has one.
-pub fn cache(handle: isize) -> Option<vfs_ipc::FileRef> {
+pub(crate) fn cache(handle: isize) -> Option<vfs_ipc::FileRef> {
     let g = TABLE.lock().ok()?;
     g.get(&(handle as usize))?.cache.clone()
 }
 
 /// [`lookup`] for the read path: the director handle, size, position and
 /// read-cache file, taken under the one lock acquisition a read pays for.
-pub fn lookup_read(handle: isize) -> Option<ReadView> {
+pub(crate) fn lookup_read(handle: isize) -> Option<ReadView> {
     let g = TABLE.lock().ok()?;
     let e = g.get(&(handle as usize))?;
     Some(ReadView {
@@ -112,7 +117,7 @@ pub fn lookup_read(handle: isize) -> Option<ReadView> {
 }
 
 /// What a handle's table entry says about its file: see [`lookup`].
-pub struct FileView {
+pub(crate) struct FileView {
     pub fh: u64,
     pub size: u64,
     pub is_dir: bool,
@@ -120,7 +125,7 @@ pub struct FileView {
     pub append_only: bool,
 }
 
-pub fn lookup(handle: isize) -> Option<FileView> {
+pub(crate) fn lookup(handle: isize) -> Option<FileView> {
     let g = TABLE.lock().ok()?;
     let e = g.get(&(handle as usize))?;
     Some(FileView {
@@ -133,7 +138,7 @@ pub fn lookup(handle: isize) -> Option<FileView> {
 }
 
 /// Absolute path recorded for a FUSE handle (for relative RootDirectory opens).
-pub fn abs_path(handle: isize) -> Option<String> {
+pub(crate) fn abs_path(handle: isize) -> Option<String> {
     let g = TABLE.lock().ok()?;
     g.get(&(handle as usize))?.abs_path.clone()
 }
@@ -141,7 +146,7 @@ pub fn abs_path(handle: isize) -> Option<String> {
 /// Record that the file behind `handle` is now at `abs_path`: it was renamed
 /// through this handle, and what the handle is finally named, and its file
 /// id, follow the file.
-pub fn set_abs_path(handle: isize, abs_path: String) {
+pub(crate) fn set_abs_path(handle: isize, abs_path: String) {
     if let Ok(mut g) = TABLE.lock() {
         if let Some(e) = g.get_mut(&(handle as usize)) {
             e.abs_path = Some(abs_path);
@@ -149,7 +154,7 @@ pub fn set_abs_path(handle: isize, abs_path: String) {
     }
 }
 
-pub fn set_position(handle: isize, pos: u64) {
+pub(crate) fn set_position(handle: isize, pos: u64) {
     if let Ok(mut g) = TABLE.lock() {
         if let Some(e) = g.get_mut(&(handle as usize)) {
             e.position = pos;
@@ -159,7 +164,7 @@ pub fn set_position(handle: isize, pos: u64) {
 
 /// Update the cached size after a successful truncate so later reads on this
 /// handle see the new EOF.
-pub fn set_size(handle: isize, size: u64) {
+pub(crate) fn set_size(handle: isize, size: u64) {
     if let Ok(mut g) = TABLE.lock() {
         if let Some(e) = g.get_mut(&(handle as usize)) {
             e.size = size;
@@ -178,7 +183,7 @@ pub fn set_size(handle: isize, size: u64) {
 /// so that reads past it report end of file and the position is pulled back
 /// for the next append to overwrite. The maximum, taken under the table
 /// lock, does not depend on the order they finish in.
-pub fn grow_size(handle: isize, end: u64) {
+pub(crate) fn grow_size(handle: isize, end: u64) {
     if let Ok(mut g) = TABLE.lock() {
         if let Some(e) = g.get_mut(&(handle as usize)) {
             e.size = e.size.max(end);
@@ -186,7 +191,7 @@ pub fn grow_size(handle: isize, end: u64) {
     }
 }
 
-pub fn close_fuse(handle: isize) -> Option<u64> {
+pub(crate) fn close_fuse(handle: isize) -> Option<u64> {
     let mut g = TABLE.lock().ok()?;
     g.remove(&(handle as usize)).map(|e| e.fh)
 }

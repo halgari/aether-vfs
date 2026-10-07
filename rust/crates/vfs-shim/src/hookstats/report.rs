@@ -301,7 +301,7 @@ pub(super) fn write_report(path: &std::ffi::OsStr, body: &str) {
 /// This is the only writer of the report file: there is no exit dump, and
 /// [`banner`] explains at length why not. A process that ends before the first
 /// tick therefore leaves no report at all.
-pub fn start_reporter() {
+pub(crate) fn start_reporter() {
     if !enabled() || REPORTER.swap(true, Ordering::SeqCst) {
         return;
     }

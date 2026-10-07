@@ -18,13 +18,13 @@ fn rd_u64(b: &[u8], o: usize) -> u64 {
 /// bases). Game-local DLLs (steam_api64, bink, …) that are only mapped in
 /// `remote` are resolved by walking the **remote** module's export table via
 /// `ReadProcessMemory` so IAT entries match the child's load addresses.
-pub fn resolve_imports(img: &mut [u8], e_lfanew: usize) -> Result<(), &'static str> {
+pub(crate) fn resolve_imports(img: &mut [u8], e_lfanew: usize) -> Result<(), &'static str> {
     resolve_imports_ex(img, e_lfanew, None)
 }
 
 /// Like [`resolve_imports`], optionally resolving game-local imports against
 /// modules already loaded in `remote`.
-pub fn resolve_imports_ex(
+pub(crate) fn resolve_imports_ex(
     img: &mut [u8],
     e_lfanew: usize,
     remote: Option<isize>,
@@ -37,7 +37,7 @@ pub fn resolve_imports_ex(
 ///
 /// `forced_remote` entries are `(dll_file_name, remote_base)` — matched case-
 /// insensitively on the final path component.
-pub fn resolve_imports_ex_with_bases(
+pub(crate) fn resolve_imports_ex_with_bases(
     img: &mut [u8],
     e_lfanew: usize,
     remote: Option<isize>,

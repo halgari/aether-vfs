@@ -31,7 +31,7 @@ pub(super) static HOOK_PANICS: BoundedTally<&'static str> = BoundedTally::unboun
 
 /// Record a panic caught at a hook's `extern "system"` boundary. `name` is the
 /// hooked export, e.g. `"NtCreateFile"`.
-pub fn note_hook_panic(name: &'static str) {
+pub(crate) fn note_hook_panic(name: &'static str) {
     HOOK_PANICS_TOTAL.fetch_add(1, Ordering::Relaxed);
     HOOK_PANICS.add(name);
 }

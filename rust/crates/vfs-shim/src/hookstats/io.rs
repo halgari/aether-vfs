@@ -22,7 +22,7 @@ pub(super) static BARE_READS: AtomicU64 = AtomicU64::new(0);
 pub(super) static IOCP_BINDS: AtomicU64 = AtomicU64::new(0);
 
 /// A synthetic handle was opened; `synchronous` reflects the CreateOptions.
-pub fn note_open_sync(synchronous: bool) {
+pub(crate) fn note_open_sync(synchronous: bool) {
     if !enabled() {
         return;
     }
@@ -35,7 +35,7 @@ pub fn note_open_sync(synchronous: bool) {
 
 /// A read on a synthetic handle, classified by how the caller expects
 /// completion: APC routine, event, or neither (fully synchronous).
-pub fn note_read_completion(has_apc: bool, has_event: bool) {
+pub(crate) fn note_read_completion(has_apc: bool, has_event: bool) {
     if !enabled() {
         return;
     }
@@ -65,13 +65,13 @@ pub(super) static FILL_BYTES: AtomicU64 = AtomicU64::new(0);
 pub(super) static FILL_NANOS: AtomicU64 = AtomicU64::new(0);
 pub(super) static FILL_MAX_NANOS: AtomicU64 = AtomicU64::new(0);
 
-pub fn note_fill_start() {
+pub(crate) fn note_fill_start() {
     if enabled() {
         FILLS_STARTED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
-pub fn note_fill_end(bytes: usize, nanos: u64, ok: bool) {
+pub(crate) fn note_fill_end(bytes: usize, nanos: u64, ok: bool) {
     if !enabled() {
         return;
     }
@@ -85,7 +85,7 @@ pub fn note_fill_end(bytes: usize, nanos: u64, ok: bool) {
 }
 
 /// The label of the read-cache section, for anything that parses the report.
-pub const READ_CACHE_LABEL: &str = "read cache (small reads of immutable files)";
+pub(crate) const READ_CACHE_LABEL: &str = "read cache (small reads of immutable files)";
 
 /// What the read cache (`crate::read_cache`) did: whether small reads were
 /// answered from memory or still crossed the ring, and why files left it.
@@ -223,7 +223,7 @@ pub(super) fn render_fills(snap: &Snapshot) -> String {
 /// assumption checkable.
 pub(super) static SETINFO_NOOP: BoundedTally<u32> = BoundedTally::unbounded();
 
-pub fn note_setinfo_noop(class: u32) {
+pub(crate) fn note_setinfo_noop(class: u32) {
     if !enabled() {
         return;
     }
@@ -260,7 +260,7 @@ pub(super) fn render_setinfo_noop(snap: &Snapshot) -> String {
 /// from a report rather than from a debugger.
 pub(super) static SYNTH_LOCKS: BoundedTally<String> = BoundedTally::new(2000);
 
-pub fn note_synthetic_lock(op: &str, path: Option<&str>) {
+pub(crate) fn note_synthetic_lock(op: &str, path: Option<&str>) {
     if !enabled() {
         return;
     }
@@ -292,7 +292,7 @@ pub(super) fn render_synth_locks(snap: &Snapshot) -> String {
 }
 
 /// A synthetic handle was bound to an I/O completion port.
-pub fn note_iocp_bind() {
+pub(crate) fn note_iocp_bind() {
     if !enabled() {
         return;
     }
@@ -346,7 +346,7 @@ pub(super) static READDIRS_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// draining branch; the three-way label is what makes a regression back to it
 /// visible in the report rather than only in the bytes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ReadDirSource {
+pub(crate) enum ReadDirSource {
     /// The director's own `OP_READDIR` answered. Authoritative and unmerged:
     /// nothing from the real filesystem can appear in it.
     Director,
@@ -365,7 +365,7 @@ pub enum ReadDirSource {
 impl ReadDirSource {
     /// The token this renders as in the report. Parsed by
     /// `vfs-directord`'s test `support::readdir_records`; keep them in step.
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             ReadDirSource::Director => "director",
             ReadDirSource::ContainedNoDirector => "contained",
@@ -374,7 +374,7 @@ impl ReadDirSource {
     }
 }
 
-pub fn note_readdir(dir: &str, wildcard: Option<&str>, count: usize, source: ReadDirSource) {
+pub(crate) fn note_readdir(dir: &str, wildcard: Option<&str>, count: usize, source: ReadDirSource) {
     if !enabled() {
         return;
     }

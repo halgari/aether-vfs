@@ -43,7 +43,7 @@ use super::*;
 /// responses, and a single counter cannot tell them apart.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[repr(usize)]
-pub enum CopyUp {
+pub(crate) enum CopyUp {
     /// The destination holds the director's bytes, in full.
     Seeded = 0,
     /// No `FuseClient` — nothing was configured to read from.
@@ -69,7 +69,7 @@ pub enum CopyUp {
 pub(super) const COPYUP_N: usize = 7;
 
 /// Every variant, for iteration in `render_copy_ups` and the label test.
-pub const ALL_COPY_UPS: [CopyUp; COPYUP_N] = [
+pub(crate) const ALL_COPY_UPS: [CopyUp; COPYUP_N] = [
     CopyUp::Seeded,
     CopyUp::DeclinedNoDirector,
     CopyUp::DeclinedReentrant,
@@ -83,7 +83,7 @@ impl CopyUp {
     /// Rendered label. Distinct across variants — see
     /// `every_copy_up_outcome_renders_with_a_distinct_label` — for the same
     /// reason `OpenOutcome::label` is.
-    pub fn label(&self) -> &'static str {
+    pub(crate) fn label(&self) -> &'static str {
         match self {
             CopyUp::Seeded => "seeded",
             CopyUp::DeclinedNoDirector => "declined: no director",
@@ -105,7 +105,7 @@ pub(super) static COPYUPS: BoundedTally<String> = BoundedTally::new(2000);
 /// Current value of one copy-up counter. `pub` for the same reason
 /// [`outcome_count`] is: a gate's own test can assert a class went to zero
 /// without reaching into the atomics.
-pub fn copy_up_count(outcome: CopyUp) -> u64 {
+pub(crate) fn copy_up_count(outcome: CopyUp) -> u64 {
     COPYUP_COUNTS[outcome as usize].load(Ordering::Relaxed)
 }
 
@@ -114,7 +114,7 @@ pub fn copy_up_count(outcome: CopyUp) -> u64 {
 ///
 /// Also lands in the ordered trace: a copy-up that failed matters most in
 /// relation to what the game did next, and only the trace preserves that.
-pub fn note_copy_up(outcome: CopyUp, root: u32, vpath: &str, bytes: u64) {
+pub(crate) fn note_copy_up(outcome: CopyUp, root: u32, vpath: &str, bytes: u64) {
     if !enabled() {
         return;
     }
@@ -189,7 +189,7 @@ pub enum OverlayFail {
 pub(super) const OVERLAY_FAIL_N: usize = 6;
 
 /// Every variant, for iteration in `render_overlay_fails` and the label test.
-pub const ALL_OVERLAY_FAILS: [OverlayFail; OVERLAY_FAIL_N] = [
+pub(crate) const ALL_OVERLAY_FAILS: [OverlayFail; OVERLAY_FAIL_N] = [
     OverlayFail::EnsureParent,
     OverlayFail::ClearWhiteout,
     OverlayFail::Whiteout,
@@ -229,14 +229,14 @@ pub fn overlay_fail_count(fail: OverlayFail) -> u64 {
 /// disabled, like every counter here.
 /// Record an overlay mutation that worked. Count only — see
 /// [`OverlayFail::Succeeded`] for why there is no path and no trace entry.
-pub fn note_overlay_ok() {
+pub(crate) fn note_overlay_ok() {
     if !enabled() {
         return;
     }
     OVERLAY_FAIL_COUNTS[OverlayFail::Succeeded as usize].fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn note_overlay_fail(fail: OverlayFail, root: u32, vpath: &str) {
+pub(crate) fn note_overlay_fail(fail: OverlayFail, root: u32, vpath: &str) {
     if !enabled() {
         return;
     }

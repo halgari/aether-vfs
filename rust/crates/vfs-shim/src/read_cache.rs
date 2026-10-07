@@ -28,7 +28,7 @@ static CACHE: OnceLock<Option<ReadCache>> = OnceLock::new();
 
 /// The cache, unless `VFS_SHIM_READ_CACHE` turned it off, with the budget
 /// `VFS_SHIM_READ_CACHE_MIB` sets.
-pub fn get() -> Option<&'static ReadCache> {
+pub(crate) fn get() -> Option<&'static ReadCache> {
     CACHE
         .get_or_init(|| {
             vfs_env::opt_out(vfs_env::SHIM_READ_CACHE).then(|| {
@@ -55,13 +55,13 @@ fn config(mib: Option<&str>) -> CacheConfig {
 }
 
 /// The busiest files, for the stats report.
-pub fn top_files(n: usize) -> Vec<FileReport> {
+pub(crate) fn top_files(n: usize) -> Vec<FileReport> {
     get().map(|c| c.top_files(n)).unwrap_or_default()
 }
 
 /// Register a file handle the director just opened. `None` when the cache is
 /// off (and for directories, which are never read through it).
-pub fn register(
+pub(crate) fn register(
     root: u32,
     vpath: &str,
     resp: &vfs_protocol::OpenResp,
@@ -81,21 +81,21 @@ pub fn register(
 }
 
 /// The file behind a handle changed through this process.
-pub fn invalidate(f: &FileRef) {
+pub(crate) fn invalidate(f: &FileRef) {
     if let Some(c) = get() {
         c.invalidate(f);
     }
 }
 
 /// A path was deleted or renamed (or renamed onto) through this process.
-pub fn invalidate_path(root: u32, vpath: &str) {
+pub(crate) fn invalidate_path(root: u32, vpath: &str) {
     if let Some(c) = get() {
         c.invalidate_path(root, vpath);
     }
 }
 
 /// For the stats report: `None` when the cache is off.
-pub fn stats() -> Option<CacheStats> {
+pub(crate) fn stats() -> Option<CacheStats> {
     get().map(ReadCache::stats)
 }
 

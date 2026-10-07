@@ -55,11 +55,11 @@ const REG_FLAG_VOLATILE: u32 = 1;
 
 /// A rename that copies more keys than this, or more value bytes than [`MAX_COPY_BYTES`],
 /// fails with `STATUS_INSUFFICIENT_RESOURCES` before anything is written.
-pub const MAX_COPY_KEYS: usize = 10_000;
-pub const MAX_COPY_BYTES: usize = 64 << 20;
+pub(crate) const MAX_COPY_KEYS: usize = 10_000;
+pub(crate) const MAX_COPY_BYTES: usize = 64 << 20;
 
 /// What a write hook does with a call.
-pub enum Write {
+pub(crate) enum Write {
     /// Not a key the overlay serves: the real call.
     Pass,
     /// Answered here.
@@ -125,7 +125,7 @@ unsafe fn units<'a>(us: *const UnicodeString) -> Result<Option<&'a [u16]>, NTSTA
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
-pub unsafe fn set_value_key(
+pub(crate) unsafe fn set_value_key(
     real: &Real,
     h: isize,
     name: *const UnicodeString,
@@ -219,7 +219,7 @@ unsafe fn real_has_value(real: &Real, t: &KeyRef, name: &[u16]) -> Result<bool, 
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
-pub unsafe fn delete_value_key(real: &Real, h: isize, name: *const UnicodeString) -> Write {
+pub(crate) unsafe fn delete_value_key(real: &Real, h: isize, name: *const UnicodeString) -> Write {
     let t = match target(real, h) {
         Ok(t) => t,
         Err(w) => return w,
@@ -289,7 +289,7 @@ unsafe fn has_subkeys(real: &Real, t: &KeyRef, state: Lookup) -> Result<bool, NT
 ///
 /// # Safety
 /// `h` is the caller's handle.
-pub unsafe fn delete_key(real: &Real, h: isize) -> Write {
+pub(crate) unsafe fn delete_key(real: &Real, h: isize) -> Write {
     let t = match target(real, h) {
         Ok(t) => t,
         Err(w) => return w,
@@ -330,7 +330,7 @@ unsafe fn exists(real: &Real, p: &str, wow64: u32) -> Result<bool, NTSTATUS> {
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
-pub unsafe fn rename_key(real: &Real, h: isize, new_name: *const UnicodeString) -> Write {
+pub(crate) unsafe fn rename_key(real: &Real, h: isize, new_name: *const UnicodeString) -> Write {
     let t = match target(real, h) {
         Ok(t) => t,
         Err(w) => return w,
@@ -545,7 +545,7 @@ unsafe fn copy_rename(real: &Real, t: &KeyRef, dest: &str) -> Result<(), NTSTATU
 ///
 /// # Safety
 /// The arguments are the caller's NT arguments.
-pub unsafe fn set_information_key(
+pub(crate) unsafe fn set_information_key(
     real: &Real,
     h: isize,
     class: u32,
@@ -590,7 +590,7 @@ fn not_deleted(t: &KeyRef) -> Result<(), NTSTATUS> {
 ///
 /// # Safety
 /// `h` is the caller's handle.
-pub unsafe fn flush_key(real: &Real, h: isize) -> Write {
+pub(crate) unsafe fn flush_key(real: &Real, h: isize) -> Write {
     let t = match target(real, h) {
         Ok(t) => t,
         Err(w) => return w,
