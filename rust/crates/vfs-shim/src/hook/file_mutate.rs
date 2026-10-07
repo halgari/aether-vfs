@@ -2,9 +2,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    ENGINE, PATH_TABLE, TRAMP_DELETE, TRAMP_SETINFO, fuse_root_directory, in_hook_reenter,
+    ENGINE, HANDLES, TRAMP_DELETE, TRAMP_SETINFO, fuse_root_directory, in_hook_reenter,
     object_name_str, parse_rename_target, path_is_ours, path_of_handle, path_of_tracked,
-    redirected_oa, to_nt_path,
+    redirected_oa, to_nt_path, under_root_path,
 };
 use crate::ntdef::{
     FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION, FILE_DISPOSITION_INFORMATION_EX,
@@ -175,10 +175,8 @@ unsafe fn is_delete_request(info: *mut c_void, length: u32, class: u32) -> bool 
 /// process is making, which is what `final_path_for_handle` requires. This
 /// neither closes it nor takes ownership of it.
 unsafe fn setinfo_source_path(handle: HANDLE) -> Option<(String, bool)> {
-    if let Ok(t) = PATH_TABLE.lock() {
-        if let Some(p) = t.get(&(handle as isize)) {
-            return Some((p.clone(), false));
-        }
+    if let Some(p) = under_root_path(handle as isize) {
+        return Some((p, false));
     }
     if let Some(p) = path_of_handle(handle) {
         return Some((p, false));
@@ -264,10 +262,7 @@ pub(super) unsafe fn setinfo_hook_body(
         let is_delete = unsafe { is_delete_request(info, length, class) };
         let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);
         if is_delete || is_rename {
-            let nt = match PATH_TABLE.lock() {
-                Ok(t) => t.get(&(handle as isize)).cloned(),
-                Err(_) => None,
-            };
+            let nt = under_root_path(handle as isize);
             if let (Some(nt), Some(c)) = (nt, crate::director::global()) {
                 if let Some((root, src)) = c.route(&nt) {
                     c.names_changed(root, &src);
@@ -296,8 +291,8 @@ pub(super) unsafe fn setinfo_hook_body(
                                     // path's from here on.
                                     if let Some(t) = target {
                                         let nt = to_nt_path(&t);
-                                        if let Ok(mut table) = PATH_TABLE.lock() {
-                                            table.insert(handle as isize, nt.clone());
+                                        if let Ok(mut table) = HANDLES.lock() {
+                                            table.set_under_root(handle as isize, nt.clone());
                                         }
                                         crate::synth_file::set_abs_path(handle as isize, nt);
                                     }

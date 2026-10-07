@@ -1,7 +1,7 @@
 //! Directory enumeration: `NtQueryDirectoryFile` and `NtQueryDirectoryFileEx`.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{DIR_TABLE, ENGINE, TRAMP_QDIR, TRAMP_QDIREX, path_of_handle};
+use super::{ENGINE, HANDLES, TRAMP_QDIR, TRAMP_QDIREX, path_of_handle};
 use crate::ntdef::{
     SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES,
     STATUS_SUCCESS, STATUS_UNSUCCESSFUL, UnicodeString,
@@ -138,11 +138,11 @@ unsafe fn serve_dir_query(
 
     // Phase 1 (locked): is this a tracked handle, and must we (re)build?
     let (need_build, dir_path) = {
-        let table = match DIR_TABLE.lock() {
+        let table = match HANDLES.lock() {
             Ok(t) => t,
             Err(_) => return passthrough(),
         };
-        match table.get(&key) {
+        match table.dir(key) {
             None => {
                 drop(table);
                 // Untracked: a directory outside the managed root, so the OS
@@ -240,17 +240,17 @@ unsafe fn serve_dir_query(
     // `write_dir_info` writes into a scratch buffer we own and the copy into `info`
     // happens below, unlocked. `info` may lie in one of our own demand-paged regions;
     // touching it can fault into `lazy_section`, whose file I/O re-enters the shim
-    // through `NtClose` and takes `DIR_TABLE` again, and `std::sync::Mutex` is not
+    // through `NtClose` and takes the handle table again, and `std::sync::Mutex` is not
     // reentrant. A scratch buffer rather than cloned entries: the copy is bounded by
     // `length`, a listing is not.
     // See docs/shim-invariants.md, "Enumeration containment".
     let mut scratch = vec![0u8; length as usize];
     let result = {
-        let mut table = match DIR_TABLE.lock() {
+        let mut table = match HANDLES.lock() {
             Ok(t) => t,
             Err(_) => return passthrough(),
         };
-        let tracked = match table.get_mut(&key) {
+        let tracked = match table.dir_mut(key) {
             Some(t) => t,
             None => return passthrough(),
         };

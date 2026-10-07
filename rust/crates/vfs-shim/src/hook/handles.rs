@@ -7,17 +7,101 @@ use std::sync::Mutex;
 use vfs_redirect::nt_to_volume_relative;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
-/// Handle value (`isize`) -> tracking. `BTreeMap::new()` is `const`, so this
-/// needs no lazy init. Populated by the `NtCreateFile` hook, drained by
-/// `NtClose`.
-pub(super) static DIR_TABLE: Mutex<BTreeMap<isize, DirTracked>> = Mutex::new(BTreeMap::new());
+/// What the shim knows about one open handle. Each field is set by its own kind of open and
+/// all of them go when the handle is closed.
+#[derive(Default)]
+pub(super) struct HandleInfo {
+    /// The NT path the handle was opened as, for *every* successful open (`tag_under_root`).
+    /// Bounded by [`HANDLE_PATHS_MAX`] so a handle leak cannot grow it without end.
+    pub(super) opened_as: Option<String>,
+    /// An under-root open's NT path, so a later handle-based delete/rename (`NtSetInformationFile`)
+    /// can act by path (`record_path`).
+    pub(super) under_root: Option<String>,
+    /// A redirected file's virtual volume-relative path, for the identity spoof
+    /// (`record_identity`).
+    pub(super) identity: Option<String>,
+    /// A candidate directory for enumeration virtualisation: an under-root open's cursor state.
+    /// Harmless for file handles (they never receive a dir-enum call).
+    pub(super) dir: Option<DirTracked>,
+}
 
-/// Redirected-file handle -> virtual volume-relative path (identity spoof).
-pub(super) static IDENTITY_TABLE: Mutex<BTreeMap<isize, String>> = Mutex::new(BTreeMap::new());
+/// Handle value (`isize`) -> [`HandleInfo`], one table and one lock for everything the shim tracks
+/// per handle. `NtClose` drops a handle's whole entry in one `try_lock`.
+///
+/// Fields are set one at a time and never cleared before the entry goes: a handle value the OS
+/// reuses before its stale entry was reclaimed (a close that lost its `try_lock`) keeps whatever
+/// the old handle's fields were, exactly as the four tables this replaces (`DIR_TABLE`,
+/// `IDENTITY_TABLE`, `PATH_TABLE`, `HANDLE_PATHS`) did one by one.
+pub(super) struct HandleTable {
+    map: BTreeMap<isize, HandleInfo>,
+    /// Entries with `opened_as` set, which [`HANDLE_PATHS_MAX`] bounds.
+    opened: usize,
+}
 
-/// Any under-root open's handle -> the NT path it was opened as, so a later
-/// handle-based delete/rename (NtSetInformationFile) can act by path.
-pub(super) static PATH_TABLE: Mutex<BTreeMap<isize, String>> = Mutex::new(BTreeMap::new());
+impl HandleTable {
+    const fn new() -> Self {
+        HandleTable {
+            map: BTreeMap::new(),
+            opened: 0,
+        }
+    }
+
+    /// Remember the path a handle was opened as, unless the bound is reached.
+    pub(super) fn set_opened_as(&mut self, key: isize, path: String) {
+        if self.opened >= HANDLE_PATHS_MAX {
+            return;
+        }
+        let entry = self.map.entry(key).or_default();
+        if entry.opened_as.replace(path).is_none() {
+            self.opened += 1;
+        }
+    }
+
+    pub(super) fn set_under_root(&mut self, key: isize, path: String) {
+        self.map.entry(key).or_default().under_root = Some(path);
+    }
+
+    pub(super) fn set_identity(&mut self, key: isize, vpath: String) {
+        self.map.entry(key).or_default().identity = Some(vpath);
+    }
+
+    pub(super) fn set_dir(&mut self, key: isize, dir: DirTracked) {
+        self.map.entry(key).or_default().dir = Some(dir);
+    }
+
+    pub(super) fn opened_as(&self, key: isize) -> Option<&String> {
+        self.map.get(&key)?.opened_as.as_ref()
+    }
+
+    pub(super) fn under_root(&self, key: isize) -> Option<&String> {
+        self.map.get(&key)?.under_root.as_ref()
+    }
+
+    pub(super) fn identity(&self, key: isize) -> Option<&String> {
+        self.map.get(&key)?.identity.as_ref()
+    }
+
+    pub(super) fn dir(&self, key: isize) -> Option<&DirTracked> {
+        self.map.get(&key)?.dir.as_ref()
+    }
+
+    pub(super) fn dir_mut(&mut self, key: isize) -> Option<&mut DirTracked> {
+        self.map.get_mut(&key)?.dir.as_mut()
+    }
+
+    /// Drop everything known about a handle.
+    pub(super) fn remove(&mut self, key: isize) {
+        if let Some(info) = self.map.remove(&key) {
+            if info.opened_as.is_some() {
+                self.opened -= 1;
+            }
+        }
+    }
+}
+
+pub(super) static HANDLES: Mutex<HandleTable> = Mutex::new(HandleTable::new());
+
+const HANDLE_PATHS_MAX: usize = 65_536;
 
 /// Record a freshly-opened handle as a candidate directory for enumeration
 /// virtualization: only when the open succeeded and its path is under the
@@ -68,16 +152,14 @@ pub(super) unsafe fn tag_under_root(
     // only under-root handles (matching the `DIR_TABLE` insert just below)
     // would make case 4 fire for every outside-root ancestor handle too,
     // changing that branch from a rare safety net into a per-open cost.
-    if let Ok(mut t) = HANDLE_PATHS.lock() {
+    if let Ok(mut t) = HANDLES.lock() {
         crate::breadcrumb::set_holder(crate::breadcrumb::holder::TAG_UNDER_ROOT);
-        if t.len() < HANDLE_PATHS_MAX {
-            t.insert(key, path.to_string());
-        }
+        t.set_opened_as(key, path.to_string());
         crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
     }
     if path_is_ours(path) {
-        if let Ok(mut table) = DIR_TABLE.lock() {
-            table.insert(
+        if let Ok(mut table) = HANDLES.lock() {
+            table.set_dir(
                 key,
                 DirTracked {
                     dir_nt_path: path.to_string(),
@@ -88,18 +170,22 @@ pub(super) unsafe fn tag_under_root(
     }
 }
 
-/// Handle -> the NT path it was opened as, for *every* successful open.
-///
-/// Reclaimed by `NtClose`; bounded so a handle leak cannot grow it without end.
-pub(super) static HANDLE_PATHS: Mutex<BTreeMap<isize, String>> = Mutex::new(BTreeMap::new());
-const HANDLE_PATHS_MAX: usize = 65_536;
-
 pub(super) fn path_of_handle(handle: HANDLE) -> Option<String> {
-    let g = HANDLE_PATHS.lock().ok()?;
+    let g = HANDLES.lock().ok()?;
     crate::breadcrumb::set_holder(crate::breadcrumb::holder::PATH_OF_HANDLE);
-    let r = g.get(&(handle as isize)).cloned();
+    let r = g.opened_as(handle as isize).cloned();
     crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
     r
+}
+
+/// The NT path an under-root open recorded for `handle` (`record_path`), if any.
+pub(super) fn under_root_path(handle: isize) -> Option<String> {
+    HANDLES.lock().ok()?.under_root(handle).cloned()
+}
+
+/// The virtual identity a redirected open recorded for `handle` (`record_identity`), if any.
+pub(super) fn identity_of(handle: isize) -> Option<String> {
+    HANDLES.lock().ok()?.identity(handle).cloned()
 }
 
 /// Record a redirected handle's virtual identity: after a successful redirected
@@ -119,9 +205,9 @@ pub(super) unsafe fn record_identity(
         return;
     }
     if let Some(path) = path {
-        if let Ok(mut t) = IDENTITY_TABLE.lock() {
+        if let Ok(mut t) = HANDLES.lock() {
             // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            t.insert(
+            t.set_identity(
                 unsafe { *file_handle } as isize,
                 nt_to_volume_relative(path),
             );
@@ -144,9 +230,9 @@ pub(super) unsafe fn record_path(file_handle: *mut HANDLE, path: Option<&str>, s
     }
     if let Some(path) = path {
         if path_is_ours(path) {
-            if let Ok(mut t) = PATH_TABLE.lock() {
+            if let Ok(mut t) = HANDLES.lock() {
                 // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                t.insert(unsafe { *file_handle } as isize, path.to_string());
+                t.set_under_root(unsafe { *file_handle } as isize, path.to_string());
             }
         }
     }
@@ -172,8 +258,54 @@ pub(super) fn open_synth(handle: HANDLE) -> bool {
 /// The NT path a synthetic handle was opened as, for the lock counters.
 /// `None` for a handle no under-root open recorded.
 pub(super) fn synth_path(handle: HANDLE) -> Option<String> {
-    match PATH_TABLE.lock() {
-        Ok(t) => t.get(&(handle as isize)).cloned(),
-        Err(_) => None,
+    under_root_path(handle as isize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_fields_are_set_one_at_a_time_and_go_together() {
+        let mut t = HandleTable::new();
+        t.set_under_root(8, "under".into());
+        assert_eq!(t.under_root(8).map(String::as_str), Some("under"));
+        assert!(t.opened_as(8).is_none(), "setting one field sets no other");
+        t.set_opened_as(8, "opened".into());
+        t.set_identity(8, "vpath".into());
+        t.set_dir(
+            8,
+            DirTracked {
+                dir_nt_path: "dir".into(),
+                state: None,
+            },
+        );
+        assert_eq!(t.opened_as(8).map(String::as_str), Some("opened"));
+        assert_eq!(t.identity(8).map(String::as_str), Some("vpath"));
+        assert_eq!(t.dir(8).map(|d| d.dir_nt_path.as_str()), Some("dir"));
+        assert!(t.under_root(9).is_none());
+        t.remove(8);
+        assert!(t.opened_as(8).is_none() && t.under_root(8).is_none());
+        assert!(t.identity(8).is_none() && t.dir(8).is_none());
+    }
+
+    #[test]
+    fn the_opened_as_bound_counts_those_entries_only() {
+        let mut t = HandleTable::new();
+        for k in 0..HANDLE_PATHS_MAX as isize {
+            t.set_opened_as(k, "p".into());
+        }
+        // Full: nothing more is recorded (an existing handle is not overwritten either, as
+        // with `len() < MAX` on the table this replaced); the other fields are unaffected.
+        t.set_opened_as(-1, "new".into());
+        assert!(t.opened_as(-1).is_none());
+        t.set_opened_as(5, "again".into());
+        assert_eq!(t.opened_as(5).map(String::as_str), Some("p"));
+        t.set_under_root(-2, "u".into());
+        assert!(t.under_root(-2).is_some());
+        // A removal makes room.
+        t.remove(0);
+        t.set_opened_as(-1, "new".into());
+        assert_eq!(t.opened_as(-1).map(String::as_str), Some("new"));
     }
 }

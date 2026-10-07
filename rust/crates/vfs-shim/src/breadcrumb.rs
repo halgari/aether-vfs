@@ -235,16 +235,17 @@ pub mod mark_close {
     pub const ZIP_DONE: u32 = 1012;
     /// Synthetic zip branch complete.
     pub const ZIP_EXIT: u32 = 1013;
-    /// Ordinary handle: **inside the four table locks**. Observed 2026-09-02 as
+    /// Ordinary handle: **inside the handle table's lock** (it was four locks). Observed 2026-09-02 as
     /// the value a wedged fixture is stuck on, which is what identified this as
     /// a re-entrant acquisition of a shim table lock rather than anything in
     /// the synthetic-handle paths.
     pub const TABLES: u32 = 1020;
-    /// Ordinary handle: `DIR_TABLE` acquired, about to take `HANDLE_PATHS`.
+    /// No longer emitted (the handle tables are one): `DIR_TABLE` acquired, about to take
+    /// `HANDLE_PATHS`.
     pub const TABLE_HANDLE_PATHS: u32 = 1023;
-    /// Ordinary handle: about to take `IDENTITY_TABLE`.
+    /// No longer emitted: about to take `IDENTITY_TABLE`.
     pub const TABLE_IDENTITY: u32 = 1024;
-    /// Ordinary handle: about to take `PATH_TABLE`.
+    /// No longer emitted: about to take `PATH_TABLE`.
     pub const TABLE_PATH: u32 = 1025;
     /// Ordinary handle: about to call real ntdll `NtClose`.
     pub const TRAMP: u32 = 1021;

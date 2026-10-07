@@ -2,8 +2,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    IDENTITY_TABLE, PATH_TABLE, TRAMP_QIF, TRAMP_QOBJ, TRAMP_QVOL, attributes, cwd_from_peb,
-    put_basic, put_network_open, put_standard, put_stat, reg_real,
+    TRAMP_QIF, TRAMP_QOBJ, TRAMP_QVOL, attributes, cwd_from_peb, identity_of, put_basic,
+    put_network_open, put_standard, put_stat, reg_real, under_root_path,
 };
 use crate::ntdef::{
     FILE_ALL_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
@@ -506,10 +506,7 @@ pub(super) unsafe fn qif_hook_body(
     if (class == FILE_NORMALIZED_NAME_INFORMATION || class == FILE_NAME_INFORMATION)
         && !info.is_null()
     {
-        let vpath = match IDENTITY_TABLE.lock() {
-            Ok(t) => t.get(&(handle as isize)).cloned(),
-            Err(_) => None,
-        };
+        let vpath = identity_of(handle as isize);
         if let Some(vpath) = vpath {
             // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
             let buf = unsafe { core::slice::from_raw_parts_mut(info as *mut u8, length as usize) };
@@ -708,10 +705,7 @@ pub(super) unsafe fn qobj_hook_body(
     // An untracked handle must cost nothing but this map lookup — no
     // allocation, no scratch call. It may be an event, a mutex, a section or a
     // registry key, and we have nothing true to say about any of them.
-    let vpath = match PATH_TABLE.lock() {
-        Ok(t) => t.get(&(handle as isize)).cloned(),
-        Err(_) => None,
-    };
+    let vpath = under_root_path(handle as isize);
     let Some(vpath) = vpath else {
         // SAFETY: the original NT function, called with valid NT arguments.
         return unsafe { tramp(handle, class, info, length, ret_len) };

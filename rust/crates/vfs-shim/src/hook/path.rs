@@ -1,7 +1,7 @@
 //! Decoding NT paths: `OBJECT_ATTRIBUTES` to a path, relative opens, rename targets.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{ENGINE, PATH_TABLE, path_of_handle};
+use super::{ENGINE, path_of_handle, under_root_path};
 use crate::ntdef::ObjectAttributes;
 use core::ffi::c_void;
 use vfs_redirect::Decision;
@@ -71,11 +71,7 @@ unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<(String, bool)> {
     // 1. Our own synthetic directory handles.
     if crate::synth_file::is_fuse_synth(root) {
         // Prefer PATH_TABLE (recorded on open); fall back to synth_file abs_path.
-        let p = PATH_TABLE
-            .lock()
-            .ok()
-            .and_then(|t| t.get(&root).cloned())
-            .or_else(|| crate::synth_file::abs_path(root))?;
+        let p = under_root_path(root).or_else(|| crate::synth_file::abs_path(root))?;
         return Some((p, false));
     }
     // 2. A real directory the process opened; we remember every one.
@@ -326,7 +322,7 @@ pub(super) fn to_nt_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hook::HANDLE_PATHS;
+    use crate::hook::HANDLES;
     use crate::hook::test_support::{oa_named, us_raw};
     use crate::ntdef::STATUS_OBJECT_NAME_INVALID;
 
@@ -417,10 +413,10 @@ mod tests {
     #[test]
     fn a_rename_target_relative_to_a_known_handle_becomes_a_full_path() {
         let handle = 0x4321usize;
-        HANDLE_PATHS
+        HANDLES
             .lock()
             .unwrap()
-            .insert(handle as isize, r"\??\C:\root\Data".to_string());
+            .set_opened_as(handle as isize, r"\??\C:\root\Data".to_string());
 
         let mut buf = rename_info(handle, "new.esp");
         assert_eq!(
@@ -429,7 +425,7 @@ mod tests {
             "a handle-relative target must be joined to its parent"
         );
 
-        HANDLE_PATHS.lock().unwrap().remove(&(handle as isize));
+        HANDLES.lock().unwrap().remove(handle as isize);
     }
 
     /// An unknown parent must yield nothing. Returning the bare leaf would be

@@ -2,7 +2,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    PATH_TABLE, ShimIoGuard, TRAMP_CREATE, TRAMP_OPEN, allow_disk_fallthrough, decision_for,
+    HANDLES, ShimIoGuard, TRAMP_CREATE, TRAMP_OPEN, allow_disk_fallthrough, decision_for,
     fuse_root_directory, in_hook_reenter, object_name_str, path_is_ours, path_of_tracked,
     record_identity, record_path, tag_under_root, to_nt_path,
 };
@@ -372,8 +372,8 @@ unsafe fn try_fuse_create(
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, info) };
             // Direct PATH_TABLE insert with absolute path (path_of may be relative OA).
-            if let Ok(mut t) = PATH_TABLE.lock() {
-                t.insert(h, path.clone());
+            if let Ok(mut t) = HANDLES.lock() {
+                t.set_under_root(h, path.clone());
             }
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe { record_path(file_handle, Some(&path), STATUS_SUCCESS) };

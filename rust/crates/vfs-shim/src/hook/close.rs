@@ -1,7 +1,7 @@
 //! `NtClose`.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{DIR_TABLE, HANDLE_PATHS, IDENTITY_TABLE, PATH_TABLE, TRAMP_CLOSE, reg_real};
+use super::{HANDLES, TRAMP_CLOSE, reg_real};
 use crate::ntdef::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
 use crate::sync::{CloseLock, lock_for_close};
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
@@ -57,22 +57,10 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     // entry is keyed by a handle that is about to become invalid.
     // See `sync::lock_for_close` and docs/shim-invariants.md, "Close-path locking".
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLES);
-    if let Some(mut table) = lock_for_close(&DIR_TABLE, &CloseLock::FILE) {
-        table.remove(&(handle as isize));
-    }
-    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_HANDLE_PATHS);
-    if let Some(mut t) = lock_for_close(&HANDLE_PATHS, &CloseLock::FILE) {
+    if let Some(mut t) = lock_for_close(&HANDLES, &CloseLock::FILE) {
         crate::breadcrumb::set_holder(crate::breadcrumb::holder::CLOSE_HOOK);
-        t.remove(&(handle as isize));
+        t.remove(handle as isize);
         crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
-    }
-    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_IDENTITY);
-    if let Some(mut t) = lock_for_close(&IDENTITY_TABLE, &CloseLock::FILE) {
-        t.remove(&(handle as isize));
-    }
-    crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_PATH);
-    if let Some(mut t) = lock_for_close(&PATH_TABLE, &CloseLock::FILE) {
-        t.remove(&(handle as isize));
     }
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP);
     // SAFETY: the original NT function, called with valid NT arguments.

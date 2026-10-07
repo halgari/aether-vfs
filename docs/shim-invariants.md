@@ -12,6 +12,12 @@ The per-handle tables (`DIR_TABLE`, `HANDLE_PATHS`, `IDENTITY_TABLE`, `PATH_TABL
 cleaned up in `close_hook_body` with `try_lock`, never `lock`. A blocking acquisition in the
 close path can hang the whole process.
 
+Those four tables are now one: `HANDLES`, a `HandleTable` of `HandleInfo` records with the
+fields `dir` (was `DIR_TABLE`), `opened_as` (was `HANDLE_PATHS`, still bounded by
+`HANDLE_PATHS_MAX`), `identity` (was `IDENTITY_TABLE`) and `under_root` (was `PATH_TABLE`). A
+close takes one `try_lock` and drops the whole record. The names below, in the incident
+narratives, are the old ones.
+
 There is one policy for every table `NtClose` touches, the file handle tables and the registry
 tables (`SYNTH`, `PASS`, `NOT_OURS`, the enumeration and notification state):
 `sync::lock_for_close(&mutex, &CloseLock)`. It only ever `try_lock`s, a bounded number of times
