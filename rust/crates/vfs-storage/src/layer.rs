@@ -31,7 +31,7 @@
 //! - under `Deferred { max_interval }` (the default), the same operations
 //!   commit exactly as above but skip the fsyncs, unless a durable point is
 //!   due (the last is `max_interval` old, or the catalog holds
-//!   [`crate::storage::DEFERRED_MAX_COMMITS`] non-durable commits) — with one
+//!   [`crate::durable::DEFERRED_MAX_COMMITS`] non-durable commits) — with one
 //!   exception: the `close`, `flush` or `set_attr` size change of a file that
 //!   wrote to a file whose row is already durable (it existed at the last
 //!   durable point) runs one at once. Rewriting such a file in place changes

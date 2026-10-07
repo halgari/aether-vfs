@@ -19,6 +19,7 @@
 mod cached;
 mod catalog;
 mod config;
+mod durable;
 mod evict;
 mod ids;
 mod layer;

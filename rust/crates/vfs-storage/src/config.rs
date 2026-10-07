@@ -144,7 +144,7 @@ impl Default for StorageConfig {
             cache_max_bytes: 32 << 30,
             ram_tier_bytes: 256 << 20,
             durability: Durability::default(),
-            max_deferred_commits: crate::storage::DEFERRED_MAX_COMMITS,
+            max_deferred_commits: crate::durable::DEFERRED_MAX_COMMITS,
             catalog_cache_bytes: crate::catalog::CACHE_BYTES,
             scratch_dirs: Vec::new(),
         }
