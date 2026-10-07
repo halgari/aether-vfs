@@ -56,7 +56,15 @@ impl Source for ProviderSourceService {
         // Stage 3's proto extension.
         let caps = self.provider.capabilities().read_only_clamp();
         let access = match caps.access {
-            Access::SeqRead => 0,
+            // The wire has no sequential-only value (the remote provider
+            // rejects 0), and `get`/`read` here are positional, so a
+            // forward-only provider cannot be served. Say so at the first call
+            // rather than send a value the client would refuse.
+            Access::SeqRead => {
+                return Err(Status::failed_precondition(
+                    "source: sequential-only (SeqRead) providers cannot be served; wrap with seekable()",
+                ))
+            }
             Access::Read => 1,
             Access::ReadWrite => 2,
         };

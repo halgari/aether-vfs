@@ -1,16 +1,10 @@
 //! ZIP central directory (ZIP64-aware).
 //!
-//! - **Preferred:** [`backend::ZipProvider`] implements [`vfs_provider::Provider`]
-//!   (userspace FUSE; no vfs-core types).
-//! - **Legacy:** [`read_layer`] still builds a `vfs-core` Layer with zip-window
-//!   sources for transitional inject/PE helpers.
+//! [`backend::ZipProvider`] implements [`vfs_provider::Provider`] over the
+//! central directory of a Stored-only archive.
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
-
-use vfs_core::encode_zip_window;
-use vfs_core::{EntryKind, InputEntry, Layer, LayerId, SourceId};
 
 pub mod backend;
 pub use backend::ZipProvider;
@@ -78,54 +72,9 @@ fn dos_mtime(date: u16, time: u16) -> i64 {
 struct CdEntry {
     name: String,
     method: u16,
-    crc32: u32,
     uncomp_size: u64,
     local_header_off: u64,
     mtime: i64,
-}
-
-/// Read the whole file into memory? No — the base zip is 16 GB. We seek and read
-/// only the directory + local headers. This opens the file for the lifetime of
-/// the call.
-pub fn read_layer(zip_path: &Path, id: LayerId) -> Result<Layer, ZipError> {
-    let mut f = std::fs::File::open(zip_path)?;
-    let file_len = f.metadata()?.len();
-    let container = zip_path.to_string_lossy().to_string();
-
-    let (cd_off, cd_count) = locate_central_directory(&mut f, file_len)?;
-    let entries = read_central_directory(&mut f, cd_off, cd_count)?;
-
-    let mut out = Vec::with_capacity(entries.len());
-    for e in entries {
-        // Directory entries (trailing '/') become Dir nodes; the tree builder
-        // also implies parents, but emitting them keeps empty dirs.
-        if e.name.ends_with('/') {
-            out.push(InputEntry {
-                vpath: e.name.trim_end_matches('/').to_string(),
-                kind: EntryKind::Dir,
-                source: SourceId::new(Vec::new()),
-                size: 0,
-                mtime: e.mtime,
-            });
-            continue;
-        }
-        if e.method != 0 {
-            return Err(ZipError::Unsupported(format!(
-                "entry {} uses compression method {} (only Stored is supported)",
-                e.name, e.method
-            )));
-        }
-        let data_off = data_offset(&mut f, e.local_header_off)?;
-        out.push(InputEntry {
-            vpath: e.name,
-            kind: EntryKind::File,
-            source: SourceId::new(encode_zip_window(data_off, &container)),
-            size: e.uncomp_size,
-            mtime: e.mtime,
-        });
-        let _ = e.crc32; // reserved for future integrity checks
-    }
-    Ok(Layer { id, entries: out })
 }
 
 /// Find the central directory offset + entry count, honoring ZIP64.
@@ -190,7 +139,6 @@ pub(crate) fn read_central_directory(
         let method = u16le(&fixed, 10);
         let time = u16le(&fixed, 12);
         let date = u16le(&fixed, 14);
-        let crc32 = u32le(&fixed, 16);
         let mut uncomp_size = u32le(&fixed, 24) as u64;
         let name_len = u16le(&fixed, 28) as usize;
         let extra_len = u16le(&fixed, 30) as usize;
@@ -216,7 +164,6 @@ pub(crate) fn read_central_directory(
         entries.push(CdEntry {
             name,
             method,
-            crc32,
             uncomp_size,
             local_header_off,
             mtime: dos_mtime(date, time),
@@ -282,6 +229,7 @@ pub(crate) fn data_offset(f: &mut std::fs::File, local_header_off: u64) -> Resul
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::Path;
 
     /// Write a minimal single-entry Stored zip (no ZIP64) and return its path.
     fn write_plain_zip(dir: &Path, name: &str, content: &[u8]) -> std::path::PathBuf {
@@ -397,32 +345,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_a_plain_stored_zip_entry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().to_path_buf();
-        let content = b"HELLO FROM INSIDE THE ZIP";
-        let zip = write_plain_zip(&dir, "Data/hello.txt", content);
-
-        let layer = read_layer(&zip, LayerId(0)).unwrap();
-        let entry = layer.entries.iter().find(|e| e.vpath == "Data/hello.txt").unwrap();
-        assert_eq!(entry.kind, EntryKind::File);
-        assert_eq!(entry.size, content.len() as u64);
-
-        // The recorded data offset must point at the entry's bytes on disk.
-        let win = vfs_core::decode(&entry.source.0);
-        match win {
-            vfs_core::Source::ZipWindow { offset, .. } => {
-                let mut f = std::fs::File::open(&zip).unwrap();
-                let mut got = vec![0u8; content.len()];
-                f.seek(SeekFrom::Start(offset)).unwrap();
-                f.read_exact(&mut got).unwrap();
-                assert_eq!(&got, content);
-            }
-            other => panic!("expected zip window, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn rejects_a_deflated_entry() {
         // method != 0 in the central header -> Unsupported. Reuse the plain
         // writer but flip the method byte at central offset (10) after writing.
@@ -437,32 +359,30 @@ mod tests {
             .unwrap();
         bytes[cd + 10] = 8;
         std::fs::write(&zip, &bytes).unwrap();
-        assert!(matches!(read_layer(&zip, LayerId(0)), Err(ZipError::Unsupported(_))));
+        assert!(matches!(ZipProvider::open(&zip), Err(ZipError::Unsupported(_))));
     }
 
     #[test]
     fn reads_the_real_skyui_archive() {
+        use vfs_provider::{Provider, VPath};
         let zip = corpus_archive("3. SkyUI 6.11.zip");
         if !zip.exists() {
             return; // skip when the archive is absent
         }
-        let layer = read_layer(&zip, LayerId(2)).unwrap();
-        let esp = layer.entries.iter().find(|e| e.vpath == "Data/SkyUI_SE.esp").unwrap();
-        assert_eq!(esp.size, 2433);
+        let be = ZipProvider::open(&zip).unwrap();
+        let st = be.getattr(VPath::at_default("Data/SkyUI_SE.esp")).unwrap().unwrap();
+        assert_eq!(st.size, 2433);
     }
 
     #[test]
     #[ignore = "reads the 16 GB ZIP64 base archive; run manually"]
     fn reads_the_real_base_archive_zip64() {
+        use vfs_provider::{Provider, VPath};
         let zip = corpus_archive("1. Skyrim Special Edition.zip");
-        let layer = read_layer(&zip, LayerId(0)).unwrap();
+        let be = ZipProvider::open(&zip).unwrap();
         // An entry known to sit past the 4 GB mark exercises ZIP64 offsets.
-        let tex = layer.entries.iter().find(|e| e.vpath == "Data/Skyrim - Textures1.bsa").unwrap();
-        assert_eq!(tex.size, 1_511_492_648);
-        let win = vfs_core::decode(&tex.source.0);
-        if let vfs_core::Source::ZipWindow { offset, .. } = win {
-            assert!(offset > 0xFFFF_FFFF, "expected a 64-bit offset");
-        }
+        let st = be.getattr(VPath::at_default("Data/Skyrim - Textures1.bsa")).unwrap().unwrap();
+        assert_eq!(st.size, 1_511_492_648);
     }
 
     #[test]
@@ -471,6 +391,6 @@ mod tests {
         let dir = tmp.path().to_path_buf();
         let path = dir.join("tiny.bin");
         std::fs::write(&path, b"PK").unwrap(); // 2 bytes, no EOCD
-        assert!(matches!(read_layer(&path, LayerId(0)), Err(ZipError::NotAZip)));
+        assert!(matches!(ZipProvider::open(&path), Err(ZipError::NotAZip)));
     }
 }
