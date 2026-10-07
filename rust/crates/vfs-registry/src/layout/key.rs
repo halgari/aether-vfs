@@ -1,6 +1,7 @@
 //! Key information classes: `NtQueryKey` and `NtEnumerateKey`.
 use super::*;
 use crate::merge::MergedKey;
+use crate::path::leaf;
 
 fn class_bytes(k: &MergedKey) -> Vec<u8> {
     k.class
@@ -9,11 +10,6 @@ fn class_bytes(k: &MergedKey) -> Vec<u8> {
         .iter()
         .flat_map(|u| u.to_le_bytes())
         .collect()
-}
-
-/// The key's own name: the last component of its NT path.
-fn leaf(path: &str) -> &str {
-    path.rsplit('\\').next().unwrap_or(path)
 }
 
 /// Counts and maxima over the merged view, in the units NT reports (bytes for lengths).
