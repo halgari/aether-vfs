@@ -1,4 +1,5 @@
 //! `NtClose`.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{DIR_TABLE, HANDLE_PATHS, IDENTITY_TABLE, PATH_TABLE, TRAMP_CLOSE, reg_real};
 use crate::ntdef::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
@@ -40,7 +41,8 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     // Registry key handles: a synthetic one is answered here, a pass-through one loses its
     // record and is closed for real below (then `after_real_close`).
     let reg_close = if crate::regclient::enabled() {
-        match crate::regkeys::close(&reg_real(), handle as isize) {
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        match unsafe { crate::regkeys::close(&reg_real(), handle as isize) } {
             crate::regkeys::Close::Done(st) => return st,
             crate::regkeys::Close::Real(rec) => Some(rec),
         }
@@ -89,7 +91,8 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
         t.remove(&(handle as isize));
     }
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP);
-    let r = tramp(handle);
+    // SAFETY: the original NT function, called with valid NT arguments.
+    let r = unsafe { tramp(handle) };
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP_DONE);
     if let Some(rec) = reg_close {
         crate::regkeys::after_real_close(handle as isize, rec, r);
