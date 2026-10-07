@@ -9,8 +9,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use vfs_core::fold;
-use vfs_provider::{HandleTable, 
-    Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE,
+use vfs_provider::{
+    HandleTable, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE,
     OPEN_WRITE,
 };
 use vfs_provider::{ST_BAD_FH, ST_BAD_REQUEST, ST_IO_ERROR, ST_NOT_A_DIRECTORY, ST_NOT_FOUND};

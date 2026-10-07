@@ -29,8 +29,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
 use vfs_core::fold;
-use vfs_provider::{HandleTable, 
-    bad_request, not_a_dir, not_found, not_supported, Access, Capabilities,
+use vfs_provider::{
+    HandleTable, bad_request, not_a_dir, not_found, not_supported, Access, Capabilities,
     DirEntry, Handle, Provider, SetAttr, Stat, VPath, COPY_UP_PREFIX, KIND_DIR, OPEN_WRITE,
     WHITEOUT_PREFIX,
 };

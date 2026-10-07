@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use vfs_provider::{HandleTable, 
-    Capabilities, DirEntry, Handle, Provider, SetAttr, Stat, VPath,
+use vfs_provider::{
+    HandleTable, Capabilities, DirEntry, Handle, Provider, SetAttr, Stat, VPath,
 };
 
 use crate::glob;

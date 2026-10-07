@@ -49,8 +49,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use vfs_provider::{HandleTable, 
-    map_io_err, Access, Capabilities, DirEntry, Handle, Provider, RootId, SetAttr, Stat,
+use vfs_provider::{
+    HandleTable, map_io_err, Access, Capabilities, DirEntry, Handle, Provider, RootId, SetAttr, Stat,
     VPath, OPEN_APPEND, OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC,
 };
 

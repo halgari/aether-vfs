@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use vfs_core::fold;
-use vfs_provider::{HandleTable, 
-    not_found, read_only, Access, Capabilities, DirEntry, Handle, Provider,
+use vfs_provider::{
+    HandleTable, not_found, read_only, Access, Capabilities, DirEntry, Handle, Provider,
     SetAttr, Stat, VPath, OPEN_WRITE,
 };
 
