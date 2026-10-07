@@ -275,7 +275,7 @@ pub fn command_line(l: &WineLaunch) -> (String, Vec<String>) {
 /// reads). With [`SteamSide::Off`], only `VFS_INJECT_STEAM_HELPER=off`.
 ///
 /// `VFS_ARENA_OFFSET` *is* exported even though today's client derives the
-/// offset from the ring header: it is what the working `vfs-serve-fb` run
+/// offset from the ring header: it is what the (since deleted) `vfs-serve-fb` run
 /// published, it is what the Windows `IpcServe::apply_env` sets, and a
 /// geometry field that exists at one end and not the other is exactly the
 /// drift `vfs-env` was created to stop.

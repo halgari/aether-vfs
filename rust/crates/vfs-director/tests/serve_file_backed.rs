@@ -21,7 +21,7 @@ use vfs_unix::FileMapping;
 
 /// The vpath the client asks for, and the bytes behind it. Both sides of the
 /// ring name the same constants so a drift fails loudly instead of passing on
-/// a coincidence — the idiom `ring-file-server`/`ring-file-client` already use.
+/// a coincidence.
 const VPATH: &str = "data/hello.txt";
 const CONTENT: &[u8] = b"served-over-a-file-backed-ring\n";
 
