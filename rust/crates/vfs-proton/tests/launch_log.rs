@@ -53,6 +53,7 @@ fn launch(dir: &Path, log_file: Option<PathBuf>) -> WineLaunch {
         config_file: dir.join("shim.cfg"),
         ready_file: dir.join("ready.flag"),
         ring_path: PathBuf::from(r"C:\probe\ring.bin"),
+        ring_host_path: None,
         ring_bytes: 33_751_040,
         arena_offset: 65_536,
         arena_len: 33_554_432,

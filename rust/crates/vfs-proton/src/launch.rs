@@ -71,6 +71,10 @@ pub struct WineLaunch {
     pub ready_file: PathBuf,
     /// The ring file **as Wine sees it** (`C:\…`) — the shim maps it by path.
     pub ring_path: PathBuf,
+    /// The same ring file as a **host** path, so [`spawn`] can check its real
+    /// length against [`ring_bytes`](Self::ring_bytes) (`ring_path` is the Wine
+    /// spelling and means nothing on the host). `None` skips that check.
+    pub ring_host_path: Option<PathBuf>,
     /// The Director's real map size. See this module's docs: defaulting this
     /// is silent at attach and fatal under load.
     pub ring_bytes: usize,
@@ -649,11 +653,14 @@ fn check_geometry(l: &WineLaunch) -> Result<(), LaunchError> {
             l.arena_offset, l.arena_len, l.ring_bytes
         )));
     }
-    match std::fs::metadata(&l.ring_path) {
+    let Some(host_ring) = &l.ring_host_path else {
+        return Ok(());
+    };
+    match std::fs::metadata(host_ring) {
         Ok(m) if (m.len() as usize) < l.ring_bytes => Err(LaunchError::Geometry(format!(
             "ring file {} is {} bytes but ring_bytes is {}; mapping past the end of a file \
              faults on touch rather than failing at map time",
-            l.ring_path.display(),
+            host_ring.display(),
             m.len(),
             l.ring_bytes
         ))),
@@ -718,7 +725,7 @@ mod tests {
         let mut l = sample();
         let p = std::env::temp_dir().join(format!("vfs-launch-short-{}.bin", std::process::id()));
         std::fs::write(&p, [0u8; 128]).unwrap();
-        l.ring_path = p.clone();
+        l.ring_host_path = Some(p.clone());
         l.ring_bytes = 64 * 1024;
         l.arena_offset = 0;
         l.arena_len = 0;
@@ -751,6 +758,7 @@ mod tests {
             config_file: abs("state/shim.cfg"),
             ready_file: abs("state/ready.txt"),
             ring_path: PathBuf::from(r"C:\probe\ring.bin"),
+            ring_host_path: None,
             ring_bytes: 33_751_040,
             arena_offset: 65_536,
             arena_len: 33_554_432,

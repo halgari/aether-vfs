@@ -2214,6 +2214,8 @@ impl Session {
             config_file: config_path,
             ready_file: ready_path,
             ring_path: PathBuf::from(wine_ring),
+            // The host spelling, for the ring-length check in `spawn`.
+            ring_host_path: Some(ring.clone()),
             // The live ring's own numbers. `map_bytes` is the whole mapping
             // (control ring + arena), which is what the shim must map.
             ring_bytes: ipc.map_bytes,
@@ -2447,6 +2449,7 @@ mod registry_layer_tests {
             config_file: p("cfg"),
             ready_file: p("ready"),
             ring_path: p("ring"),
+            ring_host_path: None,
             ring_bytes: 1,
             arena_offset: 1,
             arena_len: 1,
