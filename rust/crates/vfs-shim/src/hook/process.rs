@@ -1,4 +1,5 @@
 //! `CreateProcessInternalW`: injecting the shim into child processes.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{TRAMP_CPIW, child_cwd_root};
 use crate::inject::{inject_child, re_suspend};
@@ -75,34 +76,42 @@ pub(super) unsafe fn cpiw_hook_body(
     };
 
     let forced = flags | CREATE_SUSPENDED;
-    let r = tramp(
-        token,
-        app,
-        cmd,
-        proc_attr,
-        thread_attr,
-        inherit,
-        forced,
-        env,
-        cur_dir_eff,
-        si,
-        pi,
-        ptok,
-    );
+    // SAFETY: the original NT function, called with valid NT arguments.
+    let r = unsafe {
+        tramp(
+            token,
+            app,
+            cmd,
+            proc_attr,
+            thread_attr,
+            inherit,
+            forced,
+            env,
+            cur_dir_eff,
+            si,
+            pi,
+            ptok,
+        )
+    };
     if r != 0 && !pi.is_null() {
-        let pid = (*pi).dwProcessId;
-        let hprocess = (*pi).hProcess;
-        let hthread = (*pi).hThread;
+        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+        let pid = unsafe { (*pi).dwProcessId };
+        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+        let hprocess = unsafe { (*pi).hProcess };
+        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+        let hthread = unsafe { (*pi).hThread };
         if let Some(dll) = SELF_DLL.get() {
             let _ = inject_child(hprocess, hthread, pid, dll, CHILD_READY_TIMEOUT_MS);
             if caller_suspended {
                 re_suspend(hthread);
             }
             if !caller_suspended {
-                ResumeThread(hthread);
+                // SAFETY: FFI call with valid arguments.
+                unsafe { ResumeThread(hthread) };
             }
         } else if !caller_suspended {
-            ResumeThread(hthread);
+            // SAFETY: FFI call with valid arguments.
+            unsafe { ResumeThread(hthread) };
         }
     }
     r
