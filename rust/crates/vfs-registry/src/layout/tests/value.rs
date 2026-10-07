@@ -265,3 +265,17 @@ fn value_entry_store_leaves_the_name_pointer() {
     let expected = cat(&[&pad(8), &n(0x0102_0304), &n(0x10), &n(4), &pad(4)]);
     assert_eq!(slot[..], expected[..]);
 }
+
+#[test]
+fn maximum_length_names_report_their_full_size() {
+    // 16383 UTF-16 units of a surrogate pair plus one BMP unit: the longest legal value name.
+    let name = format!("{}x", "\u{1F600}".repeat(8191));
+    assert_eq!(crate::overlay::utf16_len(&name), 16383);
+    let v = val(&name, 1, &[]);
+    let total = 12 + 16383 * 2;
+    let (r, b) = vq(ValueInfoClass::Basic, &v, total);
+    assert_eq!(r, ok(total as u32));
+    assert_eq!(&b[12..], &w(&name)[..]);
+    let (r, _) = vq(ValueInfoClass::Basic, &v, 12);
+    assert_eq!(r, overflow(total as u32));
+}

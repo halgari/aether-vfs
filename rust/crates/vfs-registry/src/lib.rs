@@ -9,7 +9,10 @@ pub mod merge;
 pub mod overlay;
 pub mod path;
 
-pub use format::{decode, encode, FormatError, MAGIC};
-pub use merge::{merge, MergedKey, RealKey};
-pub use overlay::{utf16_len, Child, Lookup, Node, Overlay, RegError, Value};
+pub use format::{FormatError, MAGIC, decode, encode};
+pub use merge::{KeyView, merge};
+// compat: removed by cleanup stream I
+#[doc(hidden)]
+pub use merge::{MergedKey, RealKey};
+pub use overlay::{Child, Lookup, Node, Overlay, RegError, Value, utf16_len};
 pub use path::PathError;

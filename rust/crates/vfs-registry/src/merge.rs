@@ -3,29 +3,28 @@ use crate::overlay::{Child, Node, Value};
 use crate::path::fold;
 use std::collections::HashSet;
 
-/// What the shim read from the real key (through the unhooked calls).
+/// A key as seen at one point of the merge: the real key as the shim read it (through the
+/// unhooked calls) or the merged result.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RealKey {
+pub struct KeyView {
     pub subkeys: Vec<String>,
     pub values: Vec<Value>,
     pub class: Option<Vec<u16>>,
     pub last_write: u64,
-    /// `MaxClassLen` (bytes) from the real key's `KEY_FULL_INFORMATION`: the longest class of
-    /// any real subkey. Subkey classes are not otherwise visible to the merge.
+    /// `MaxClassLen` (bytes): the longest subkey class. For a real key it is read from the real
+    /// key's `KEY_FULL_INFORMATION` (subkey classes are not otherwise visible to the merge). For
+    /// a merged key, overlay-created keys have no class, so it is the real key's value when the
+    /// real key shows through, else 0. Like Windows (which keeps it as a high-water mark), it is
+    /// not lowered when a real subkey is hidden.
     pub max_subkey_class_len: u32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MergedKey {
-    pub subkeys: Vec<String>,
-    pub values: Vec<Value>,
-    pub class: Option<Vec<u16>>,
-    pub last_write: u64,
-    /// The longest subkey class in bytes. Overlay-created keys have no class, so this is the
-    /// real key's value when the real key shows through, else 0. Like Windows (which keeps it
-    /// as a high-water mark), it is not lowered when a real subkey is hidden.
-    pub max_subkey_class_len: u32,
-}
+// compat: removed by cleanup stream I
+#[doc(hidden)]
+pub type RealKey = KeyView;
+// compat: removed by cleanup stream I
+#[doc(hidden)]
+pub type MergedKey = KeyView;
 
 pub fn merge(real: Option<&RealKey>, node: Option<&Node>, tombstoned: bool) -> Option<MergedKey> {
     if tombstoned || (real.is_none() && node.is_none()) {
