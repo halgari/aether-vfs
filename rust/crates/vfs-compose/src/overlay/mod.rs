@@ -30,8 +30,8 @@ use std::sync::{Arc, RwLock};
 
 use vfs_core::fold;
 use vfs_provider::{
-    HandleTable, bad_request, not_a_dir, not_found, not_supported, Access, Capabilities,
-    DirEntry, Handle, Provider, SetAttr, Stat, VPath, COPY_UP_PREFIX, KIND_DIR, OPEN_WRITE,
+    bad_request, not_a_dir, not_found, not_supported, Access, Capabilities, DirEntry, Handle,
+    HandleTable, Provider, SetAttr, Stat, VPath, COPY_UP_PREFIX, KIND_DIR, OPEN_WRITE,
     WHITEOUT_PREFIX,
 };
 

@@ -50,8 +50,8 @@
 use std::sync::{Arc, Mutex};
 
 use vfs_provider::{
-    HandleTable, map_io_err, Access, Capabilities, DirEntry, Handle, Provider, RootId, SetAttr, Stat,
-    VPath, OPEN_APPEND, OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC,
+    map_io_err, Access, Capabilities, DirEntry, Handle, HandleTable, Provider, RootId, SetAttr,
+    Stat, VPath, OPEN_APPEND, OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC,
 };
 
 /// Bytes discarded per `read_next` while skipping forward. 64 KiB is the block
@@ -241,10 +241,9 @@ impl Provider for SeekableProvider {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use vfs_provider::bad_fh;
     use std::sync::atomic::{AtomicU64, Ordering};
     use vfs_provider::conformance::SeqFixture;
-    use vfs_provider::{CaseMatch, RwMemFixture, ST_NOT_SUPPORTED, OPEN_READ};
+    use vfs_provider::{bad_fh, CaseMatch, RwMemFixture, OPEN_READ, ST_NOT_SUPPORTED};
 
     fn seekable_seq() -> Arc<dyn Provider> {
         Arc::new(SeekableProvider::new(Arc::new(SeqFixture::new())))

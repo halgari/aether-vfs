@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use vfs_core::fold;
 use vfs_provider::{
-    HandleTable, not_found, read_only, Access, Capabilities, DirEntry, Handle, Provider,
-    SetAttr, Stat, VPath, OPEN_WRITE,
+    not_found, read_only, Access, Capabilities, DirEntry, Handle, HandleTable, Provider, SetAttr,
+    Stat, VPath, OPEN_WRITE,
 };
 
 #[derive(Clone, Copy)]

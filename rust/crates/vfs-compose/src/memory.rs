@@ -41,9 +41,9 @@ use std::sync::Mutex;
 
 use vfs_core::fold;
 use vfs_provider::{
-    HandleTable, bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, Access, Capabilities,
-    CaseMatch, DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE,
-    OPEN_EXCL, OPEN_TRUNC,
+    bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, Access, Capabilities,
+    CaseMatch, DirEntry, Handle, HandleTable, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE,
+    OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC,
 };
 
 /// The `"path/"` string a child key must start with, or `""` for the provider
