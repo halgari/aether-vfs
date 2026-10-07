@@ -572,23 +572,28 @@ impl Storage {
     /// also leaves no clean-close mark. What no durable point made durable
     /// before this call is lost and the next open reconciles.
     ///
-    /// The directory the storage is dropped over is put back as it was at this
-    /// call (redb would otherwise publish its non-durable commits as it closes),
-    /// except on Windows, where it cannot be copied while open. To look at a
-    /// crash while everything is still open, copy it with
-    /// [`snapshot_as_killed`](crate::snapshot_as_killed).
+    /// **Unix only.** The directory the storage is dropped over is put back as
+    /// it was at this call, because redb publishes its non-durable commits as
+    /// its database closes. On Windows the directory cannot be copied while it
+    /// is open, so there only the "no durable point" part holds, and redb's
+    /// drop may still publish the catalog's non-durable commits: a test of
+    /// crash loss must not rely on this hook there.
+    ///
+    /// Panics if the copy cannot be made (the test asked for a crash and did not
+    /// get one). Quiesce writers first: see
+    /// [`snapshot_as_killed`](crate::snapshot_as_killed), which is also how to
+    /// look at a crash while everything is still open.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn crash_on_drop_for_tests(&self) {
-        // The image first: nothing after this call may reach it.
+        // The image first: nothing after this call may reach it. The copy is
+        // taken outside the lock, so a failure cannot poison it, and a
+        // failure is reported here: a test that asked for a crash must not
+        // go on believing it got one.
         #[cfg(not(windows))]
-        {
-            let mut image = lock(&self.crash_image);
-            if image.is_none() {
-                *image = Some(
-                    crate::test_util::CrashImage::take(&self.dir)
-                        .expect("copying the storage directory for the crash"),
-                );
-            }
+        if lock(&self.crash_image).is_none() {
+            let image = crate::test_util::CrashImage::take(&self.dir)
+                .unwrap_or_else(|e| panic!("copying the storage directory for the crash: {e}"));
+            *lock(&self.crash_image) = Some(image);
         }
         self.crashed.store(true, Ordering::Release);
         self.shut.store(true, Ordering::Release);
@@ -1003,7 +1008,7 @@ mod tests {
             p.write_at(h, 0, &[7u8; 100_000]).unwrap();
             s.store.flush().unwrap();
             let killed = tempfile::tempdir().unwrap();
-            crate::test_util::snapshot_as_killed(dir.path(), killed.path());
+            crate::test_util::snapshot_as_killed(dir.path(), killed.path()).unwrap();
             p.close(h).unwrap();
             drop(p);
             let k = Storage::open(killed.path(), StorageConfig::default()).unwrap();
@@ -1209,7 +1214,7 @@ mod tests {
         let killed = tempfile::tempdir().unwrap();
         let (from, to) = (dir.path().to_owned(), killed.path().to_owned());
         *lock(&s.before_mark_hook) = Some(Box::new(move |_: &Storage| {
-            crate::test_util::snapshot_as_killed(&from, &to);
+            crate::test_util::snapshot_as_killed(&from, &to).unwrap();
         }));
         s.close().unwrap();
         let k = Storage::open(killed.path(), StorageConfig::default()).unwrap();

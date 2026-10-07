@@ -1312,6 +1312,23 @@ mod tests {
         assert!(p.getattr(at("d")).unwrap().is_none());
     }
 
+    #[test]
+    fn stored_name_is_the_catalog_rows_spelling_for_any_query_case() {
+        let (s, _d) = temp_storage();
+        let p = s.layer("l").unwrap();
+        p.mkdir(at("Saves")).unwrap();
+        write_file(&p, "Saves/One.ESS", 0, b"x");
+        let name = |q: &str| p.stored_name(at(q)).expect("answered, not unsupported");
+        assert_eq!(name("saves").as_deref(), Some("Saves"));
+        assert_eq!(name("SAVES/one.ess").as_deref(), Some("One.ESS"));
+        assert_eq!(name("saves/missing"), None);
+        assert_eq!(name(""), None);
+        // A rename to another spelling is seen at once.
+        p.rename(at("Saves/One.ESS"), at("Saves/two.Ess")).unwrap();
+        assert_eq!(name("saves/ONE.ess"), None);
+        assert_eq!(name("saves/TWO.ESS").as_deref(), Some("two.Ess"));
+    }
+
     /// Opens a kill-time copy of `d`'s storage and its layer `name`.
     #[cfg(not(windows))]
     fn killed_copy(
@@ -1319,7 +1336,7 @@ mod tests {
         name: &str,
     ) -> (Arc<Storage>, Arc<dyn Provider>, tempfile::TempDir) {
         let killed = tempfile::tempdir().unwrap();
-        snapshot_as_killed(d, killed.path());
+        snapshot_as_killed(d, killed.path()).unwrap();
         let k = Storage::open(killed.path(), cfg()).unwrap();
         let kp = k.layer(name).unwrap();
         (k, kp, killed)
@@ -1490,7 +1507,7 @@ mod tests {
         {
             s.store.flush().unwrap();
             let killed = tempfile::tempdir().unwrap();
-            snapshot_as_killed(d.path(), killed.path());
+            snapshot_as_killed(d.path(), killed.path()).unwrap();
             let k = Storage::open(killed.path(), cfg()).unwrap();
             let r = k.last_reconcile();
             assert!(
@@ -1624,7 +1641,7 @@ mod tests {
         #[cfg(not(windows))]
         {
             let killed = tempfile::tempdir().unwrap();
-            snapshot_as_killed(d.path(), killed.path());
+            snapshot_as_killed(d.path(), killed.path()).unwrap();
             let k = Storage::open(killed.path(), cfg()).unwrap();
             let kp = k.layer("saves").unwrap();
             assert_eq!(read_file(&kp, "saves/ONE.ess"), b"saved game");

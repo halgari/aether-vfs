@@ -1238,6 +1238,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn stored_name_takes_the_bases_spelling_then_the_uppers_and_honours_whiteouts() {
+        use crate::MemoryProvider;
+        let base = Arc::new(InlineProvider::from_files([("Data/Skyrim.esm", b"B".as_slice())]));
+        let upper = MemoryProvider::from_files([
+            ("data/skyrim.esm", b"U".as_slice()),
+            ("data/New.ESP", b"N".as_slice()),
+        ]);
+        let ov = OverlayProvider::new(base, upper).unwrap();
+        let name = |q: &str| ov.stored_name(VPath::at_default(q)).expect("answered, not unsupported");
+
+        // A name both sides have keeps the base's spelling, for any query case.
+        assert_eq!(name("data/SKYRIM.ESM").as_deref(), Some("Skyrim.esm"));
+        assert_eq!(name("DATA").as_deref(), Some("Data"));
+        // A name only the upper has is spelled as the upper spells it.
+        assert_eq!(name("Data/new.esp").as_deref(), Some("New.ESP"));
+        assert_eq!(name("data/nope"), None);
+        assert_eq!(name(""), None);
+        // And it agrees with the listing.
+        let listed: Vec<String> = ov
+            .readdir(VPath::at_default("data"))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(listed.contains(&"Skyrim.esm".to_string()) && listed.contains(&"New.ESP".to_string()));
+
+        // A whiteout hides the name from `stored_name` as it does from the listing.
+        ov.remove(VPath::at_default("data/skyrim.esm")).unwrap();
+        assert_eq!(name("data/skyrim.esm"), None);
+    }
+
+    #[test]
     fn overlay_reports_read_write_and_is_never_immutable() {
         let ov = OverlayProvider::new(Arc::new(SlowSeqBase), MemUpper::default()).unwrap();
         let caps = ov.capabilities();
