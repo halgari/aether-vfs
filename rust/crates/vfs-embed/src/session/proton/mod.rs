@@ -308,8 +308,8 @@ impl Session {
     ///   child gets an explicit environment block from
     ///   `vfs_proton::launch::launch_env`, so there is nothing for it to
     ///   inherit and no window in which another session could repoint it.
-    /// - **No `shim.cfg` is written.** Its contents are the managed root and
-    ///   overlay *as the shim sees them*, and those `C:\` names do not exist
+    /// - **No `shim.cfg` is written.** Its contents are the managed root
+    ///   *as the shim sees it*, and that `C:\` name does not exist
     ///   until a Wine prefix does — so [`Session::launch`] writes it.
     #[cfg(unix)]
     pub fn serve(&mut self) -> Result<(), String> {
@@ -485,8 +485,8 @@ impl Session {
     ///    under this one.
     /// 3. **`C:\` names for the session's directories**: every root's backing
     ///    directory is symlinked into `drive_c` at the root's location
-    ///    ([`Session::link_roots`]; removed on drop), the overlay and state
-    ///    directory under `C:\vfs-session` ([`Session::link_into_prefix`]) —
+    ///    ([`Session::link_roots`]; removed on drop), the state directory
+    ///    under `C:\vfs-session` ([`Session::link_into_prefix`]) —
     ///    and `shim.cfg` written *here* rather than in `serve`, since it
     ///    carries root 0's location.
     /// 4. **This ring's real geometry**, taken straight off the live

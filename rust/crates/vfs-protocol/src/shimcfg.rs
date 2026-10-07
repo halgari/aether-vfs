@@ -41,8 +41,8 @@ pub struct ShimConfig {
 /// Why a config did not decode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigError {
-    /// No `VFSC` magic: the file is shorter than a header, or it predates
-    /// versioning (a config written by an older host).
+    /// No `VFSC` magic: the config predates versioning (written by an older
+    /// host). A buffer too short to hold the magic is `Malformed`.
     Unversioned,
     /// A versioned config from a different build.
     Version { found: u32, expected: u32 },
@@ -119,7 +119,10 @@ fn read_field(b: &[u8], off: usize) -> Option<(String, usize)> {
 
 /// Decode a config buffer. Never panics.
 pub fn decode_config(bytes: &[u8]) -> Result<ShimConfig, ConfigError> {
-    if bytes.get(..4) != Some(&CONFIG_MAGIC[..]) {
+    if bytes.len() < 4 {
+        return Err(ConfigError::Malformed);
+    }
+    if bytes[..4] != CONFIG_MAGIC[..] {
         return Err(ConfigError::Unversioned);
     }
     let found = read_u32(bytes, 4).ok_or(ConfigError::Malformed)?;
@@ -217,7 +220,8 @@ mod tests {
         let mut long = good.clone();
         long.push(0);
         assert_eq!(decode_config(&long), Err(ConfigError::Malformed));
-        assert_eq!(decode_config(&[0u8, 1]), Err(ConfigError::Unversioned));
+        assert_eq!(decode_config(&[0u8, 1]), Err(ConfigError::Malformed));
+        assert_eq!(decode_config(&[]), Err(ConfigError::Malformed));
         assert_eq!(decode_config(b"VFSC\x02"), Err(ConfigError::Malformed));
     }
 }

@@ -47,7 +47,7 @@ thread_local! {
     /// (`Resolution::OsConsulted(None)`). That does not lose the answer — it
     /// only refuses to ask the OS *again* for the same fact the outer call is
     /// already in the middle of asking. The re-entrant `CreateFileW`'s own
-    /// hook invocation then takes `Decision::PassThrough` and calls the
+    /// hook invocation then falls through to the
     /// *real* trampoline, which is the actual, unhooked `NtCreateFile` this
     /// whole call chain was trying to reach — so `final_path_for_open`'s
     /// handle open still succeeds against the real filesystem, and the outer

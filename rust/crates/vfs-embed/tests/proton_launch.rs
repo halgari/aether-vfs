@@ -25,9 +25,9 @@
 //!
 //! ## Why the fixture's path is a hard-coded `C:\` string
 //!
-//! `Session::launch` links the session's root, overlay and state directory
-//! into `<prefix>/drive_c/vfs-session/{root,overlay,state}` — a Wine process
-//! can only name what is under one of its drives, and those three live
+//! `Session::launch` links the session's root and state directory
+//! into `<prefix>/drive_c/vfs-session/{root,state}` — a Wine process
+//! can only name what is under one of its drives, and those live
 //! wherever the host put them. So the managed root is always
 //! `C:\vfs-session\root` inside the child, whatever the host path is, and the
 //! virtual file is at `C:\vfs-session\root\data\hello.txt`. That is a private
