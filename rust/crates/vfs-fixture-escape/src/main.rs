@@ -1348,7 +1348,7 @@ fn main() {
 
     // See the module doc's `VFS_ESCAPE_ACCESS` section. Resolved before any
     // vector runs, so every vector in one run exercises the same access.
-    let requested = std::env::var("VFS_ESCAPE_ACCESS").unwrap_or_default();
+    let requested = std::env::var(vfs_env::ESCAPE_ACCESS).unwrap_or_default();
     let _ = ACCESS.set(if requested.eq_ignore_ascii_case("write") {
         Access::Write
     } else {
@@ -1366,7 +1366,7 @@ fn main() {
     // rather than merely left out of the output, so a caller correlating
     // against the shim's own (not vector-keyed) hook-stats report sees
     // exactly one attempt's effect on it.
-    let only_vector = std::env::var("VFS_ESCAPE_ONLY_VECTOR").ok();
+    let only_vector = std::env::var(vfs_env::ESCAPE_ONLY_VECTOR).ok();
     let wanted = |id: &str| match &only_vector {
         Some(o) => o == id,
         None => true,
@@ -1526,7 +1526,7 @@ fn main() {
     // have configured (`VFS_SHIM_STATS_INTERVAL_MS`) rather than a fixed
     // number, so this stays correct if that interval ever changes; a no-op
     // when stats logging is off (nothing to outlive).
-    let interval_ms: u64 = std::env::var("VFS_SHIM_STATS_INTERVAL_MS")
+    let interval_ms: u64 = std::env::var(vfs_env::SHIM_STATS_INTERVAL_MS)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(250);

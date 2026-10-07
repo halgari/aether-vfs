@@ -358,16 +358,16 @@ fn primitive_ladder(path: &str, out: &mut String) {
 }
 
 fn main() {
-    let path = std::env::var("VFS_FIXTURE_INI_PATH").unwrap_or_else(|_| {
-        eprintln!("VFS_FIXTURE_INI_PATH unset");
+    let path = std::env::var(vfs_env::FIXTURE_INI_PATH).unwrap_or_else(|_| {
+        eprintln!("{} unset", vfs_env::FIXTURE_INI_PATH);
         exit(2);
     });
-    let section = std::env::var("VFS_FIXTURE_INI_SECTION").unwrap_or_else(|_| "Display".into());
-    let key = std::env::var("VFS_FIXTURE_INI_KEY").unwrap_or_else(|_| "sTest".into());
+    let section = std::env::var(vfs_env::FIXTURE_INI_SECTION).unwrap_or_else(|_| "Display".into());
+    let key = std::env::var(vfs_env::FIXTURE_INI_KEY).unwrap_or_else(|_| "sTest".into());
 
     let mut out = String::new();
 
-    if let Ok(value) = std::env::var("VFS_FIXTURE_INI_WRITE") {
+    if let Ok(value) = std::env::var(vfs_env::FIXTURE_INI_WRITE) {
         let (ok, err) = write_key(&path, &section, &key, &value);
         out.push_str(&format!("write\t{}\t{err}\n", if ok { "ok" } else { "fail" }));
     }
@@ -385,7 +385,7 @@ fn main() {
 
     primitive_ladder(&path, &mut out);
 
-    match std::env::var("VFS_FIXTURE_INI_OUT") {
+    match std::env::var(vfs_env::FIXTURE_INI_OUT) {
         Ok(dest) => {
             if let Err(e) = std::fs::write(&dest, out.as_bytes()) {
                 eprintln!("FIXTURE FAIL: write results to {dest}: {e}");
@@ -413,10 +413,10 @@ fn main() {
 /// `interval * 2` alone — 10ms at the 5ms interval the e2e tests configure —
 /// does not reliably guarantee even one tick.
 fn outlive_one_stats_tick() {
-    if std::env::var_os("VFS_SHIM_STATS_LOG").is_none() {
+    if std::env::var_os(vfs_env::SHIM_STATS_LOG).is_none() {
         return;
     }
-    let interval_ms: u64 = std::env::var("VFS_SHIM_STATS_INTERVAL_MS")
+    let interval_ms: u64 = std::env::var(vfs_env::SHIM_STATS_INTERVAL_MS)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(250);

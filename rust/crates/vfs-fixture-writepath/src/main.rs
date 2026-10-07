@@ -43,7 +43,7 @@ use std::time::Duration;
 /// bottom layer holds alone, and one an upper layer shadows — a copy-up that
 /// seeded from the wrong layer would produce the wrong bytes and fail here,
 /// inside the process, rather than being inferred afterwards from the host.
-const COW_PATH_ENV: &str = "VFS_FIXTURE_COW_PATH";
+const COW_PATH_ENV: &str = vfs_env::FIXTURE_COW_PATH;
 /// Offset the in-place edit writes at, chosen so both ends of the original
 /// content stay untouched: a truncating or blank-file implementation cannot
 /// produce the expected result, and a seeded-then-clobbered one cannot either.
@@ -264,7 +264,7 @@ fn main() {
     // the process disappears. Derived from the same interval the harness
     // configures (`VFS_SHIM_STATS_INTERVAL_MS`) rather than a fixed number, so
     // this stays correct if that interval ever changes.
-    let interval_ms: u64 = std::env::var("VFS_SHIM_STATS_INTERVAL_MS")
+    let interval_ms: u64 = std::env::var(vfs_env::SHIM_STATS_INTERVAL_MS)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(250);
