@@ -304,6 +304,9 @@ macro_rules! tramp_static {
     (File, $name:ident, $ty:ty) => {
         static $name: Tramp<$ty> = Tramp::new();
     };
+    (Registry, $name:ident, $ty:ty) => {
+        static $name: Tramp<$ty> = Tramp::new();
+    };
     ($other:ident, $name:ident, $ty:ty) => {};
 }
 
@@ -338,7 +341,7 @@ enum Install {
 }
 
 /// Which install pass a detour belongs to.
-// `Registry` and `Process` rows are not generated yet; the allow goes with the last family.
+// `Process` rows are not generated yet; the allow goes with the last family.
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Group {
@@ -348,8 +351,6 @@ enum Group {
     Process,
 }
 
-// `RawFallback` is used by the registry family.
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Flag {
     /// Owned by the early payload in a dual-layer install: not detoured by `install_late`.
@@ -370,8 +371,8 @@ struct Detour {
     flags: &'static [Flag],
 }
 
-macro_rules! detour_row {
-    (File, $export:literal, $hook:ident, $tramp:ident, $kind:ident, $group:ident,
+macro_rules! detour_row_of {
+    ($export:literal, $hook:ident, $tramp:ident, $kind:ident, $group:ident,
      [$($flag:ident),*]) => {
         Some(Detour {
             export: match core::ffi::CStr::from_bytes_with_nul(concat!($export, "\0").as_bytes()) {
@@ -385,8 +386,16 @@ macro_rules! detour_row {
             flags: &[$(Flag::$flag),*],
         })
     };
-    ($other:ident, $export:literal, $hook:ident, $tramp:ident, $kind:ident, $group:ident,
-     [$($flag:ident),*]) => {
+}
+
+macro_rules! detour_row {
+    (File, $($args:tt)*) => {
+        detour_row_of!($($args)*)
+    };
+    (Registry, $($args:tt)*) => {
+        detour_row_of!($($args)*)
+    };
+    ($other:ident, $($args:tt)*) => {
         None
     };
 }
@@ -432,7 +441,19 @@ impl Detour {
         Ok(d)
     }
 
-    /// `prepare` + enable for a row that may be skipped: `true` when it is in. A failure clears
+    /// Put the slot back to what it holds with no detour installed: ntdll's own export for a
+    /// `RawFallback` row (`regkeys` reads key names through it), else empty.
+    unsafe fn reset(&self, lib: HMODULE) {
+        let raw = if self.has(Flag::RawFallback) {
+            GetProcAddress(lib, self.export.as_ptr().cast()).map(|p| p as *const ())
+        } else {
+            None
+        };
+        // SAFETY: ntdll's export has the signature the table gave the slot.
+        self.tramp.store(raw);
+    }
+
+    /// `prepare` + enable for a row that may be skipped: `true` when it is in. A failure resets
     /// the slot again (`BestEffort` leaves it, as the hand-written install did: a detour that is
     /// not enabled never calls its hook). `Optional` and `IfPresent` failures are noted in
     /// [`SKIPPED_DETOURS`].
@@ -448,7 +469,7 @@ impl Detour {
                 return true;
             }
             if self.install != Install::BestEffort {
-                self.tramp.store(None);
+                self.reset(lib);
             }
         }
         if self.install != Install::BestEffort {
@@ -469,47 +490,6 @@ impl Detour {
 const SYNTH_VOLUME_SERIAL: u64 = 0x5646_5300;
 
 static mut TRAMP_CPIW: Option<CreateProcessInternalWFn> = None;
-// Registry overlay (registry_hooks below).
-static mut TRAMP_OPEN_KEY: Option<NtOpenKeyFn> = None;
-static mut TRAMP_OPEN_KEY_EX: Option<NtOpenKeyExFn> = None;
-static mut TRAMP_CREATE_KEY: Option<NtCreateKeyFn> = None;
-static mut TRAMP_DUP: Option<NtDuplicateObjectFn> = None;
-/// The real `NtQueryKey`: the detour's trampoline, or ntdll's own export when the detour could
-/// not be installed (key names for `regkeys` are still read through it).
-static mut TRAMP_QUERY_KEY: Option<NtQueryKeyFn> = None;
-static mut TRAMP_ENUM_KEY: Option<NtEnumerateKeyFn> = None;
-static mut TRAMP_QUERY_VALUE: Option<NtQueryValueKeyFn> = None;
-static mut TRAMP_ENUM_VALUE: Option<NtEnumerateValueKeyFn> = None;
-static mut TRAMP_QUERY_MULTIPLE: Option<NtQueryMultipleValueKeyFn> = None;
-static mut TRAMP_SET_VALUE: Option<NtSetValueKeyFn> = None;
-static mut TRAMP_DELETE_VALUE: Option<NtDeleteValueKeyFn> = None;
-static mut TRAMP_DELETE_KEY: Option<NtDeleteKeyFn> = None;
-static mut TRAMP_RENAME_KEY: Option<NtRenameKeyFn> = None;
-static mut TRAMP_SET_INFO_KEY: Option<NtSetInformationKeyFn> = None;
-static mut TRAMP_FLUSH_KEY: Option<NtFlushKeyFn> = None;
-// Registry notifications, security, handle flags and the out-of-scope calls (spec 3.4, 3.6).
-static mut TRAMP_NOTIFY_KEY: Option<NtNotifyChangeKeyFn> = None;
-static mut TRAMP_NOTIFY_MULTIPLE: Option<NtNotifyChangeMultipleKeysFn> = None;
-static mut TRAMP_QUERY_SECURITY: Option<NtQuerySecurityObjectFn> = None;
-static mut TRAMP_SET_SECURITY: Option<NtSetSecurityObjectFn> = None;
-static mut TRAMP_SET_INFO_OBJECT: Option<NtSetInformationObjectFn> = None;
-static mut TRAMP_CREATE_KEY_TX: Option<NtCreateKeyTransactedFn> = None;
-static mut TRAMP_OPEN_KEY_TX: Option<NtOpenKeyTransactedFn> = None;
-static mut TRAMP_OPEN_KEY_TX_EX: Option<NtOpenKeyTransactedExFn> = None;
-static mut TRAMP_LOAD_KEY: Option<NtLoadKeyFn> = None;
-static mut TRAMP_LOAD_KEY2: Option<NtLoadKey2Fn> = None;
-static mut TRAMP_LOAD_KEY_EX: Option<NtLoadKey8Fn> = None;
-static mut TRAMP_LOAD_KEY3: Option<NtLoadKey8Fn> = None;
-static mut TRAMP_UNLOAD_KEY: Option<NtUnloadKeyFn> = None;
-static mut TRAMP_UNLOAD_KEY2: Option<NtUnloadKey2Fn> = None;
-static mut TRAMP_UNLOAD_KEY_EX: Option<NtUnloadKey2Fn> = None;
-static mut TRAMP_SAVE_KEY: Option<NtSaveKeyFn> = None;
-static mut TRAMP_SAVE_KEY_EX: Option<NtSaveKeyExFn> = None;
-static mut TRAMP_SAVE_MERGED: Option<NtSaveMergedKeysFn> = None;
-static mut TRAMP_REPLACE_KEY: Option<NtReplaceKeyFn> = None;
-static mut TRAMP_RESTORE_KEY: Option<NtRestoreKeyFn> = None;
-static mut TRAMP_COMPRESS_KEY: Option<NtKeyOnlyFn> = None;
-static mut TRAMP_LOCK_REGISTRY_KEY: Option<NtKeyOnlyFn> = None;
 
 /// `kernelbase!CreateProcessInternalW` — the funnel under all CreateProcess*.
 /// 12 params; only `flags` and `pi` are inspected/modified by the hook.
@@ -826,7 +806,6 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     // Every enabled detour must be kept alive here: dropping one silently
     // un-patches it, which reads exactly like "the process never calls this".
     detours.extend(deferred);
-    let qobj_installed = registry_missing.is_empty();
 
     // The registry overlay's detours go in only when the host asked for the overlay
     // (`VFS_REGISTRY`): with it unset this process's registry calls, and its process-wide
@@ -835,7 +814,7 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     // touch the registry tables (`regclient::enabled` is false).
     if vfs_env::opt_in(vfs_env::REGISTRY) {
         let before = detours.len();
-        install_registry_detours(ntdll, &mut detours, qobj_installed);
+        install_registry_detours(ntdll, &rows, &mut detours, registry_missing);
         REG_DETOURS_INSTALLED.store(detours.len() - before, std::sync::atomic::Ordering::Relaxed);
     } else {
         crate::regclient::overlay_off();
@@ -863,47 +842,6 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     Ok(HookGuard { _detours: detours })
 }
 
-/// Detour one optional export: installed when ntdll has it, noted in [`SKIPPED_DETOURS`]
-/// otherwise. `store` receives the trampoline **before** the detour is enabled (and `None`
-/// again if enabling fails), so no call can reach the hook while its trampoline is unset.
-unsafe fn optional_detour(
-    ntdll: HMODULE,
-    name: &'static core::ffi::CStr,
-    label: &'static str,
-    hookfn: *const (),
-    detours: &mut Vec<RawDetour>,
-    store: &mut dyn FnMut(Option<*const ()>),
-) -> bool {
-    if let Ok(d) = make_detour(ntdll, name, hookfn) {
-        store(Some(d.trampoline() as *const ()));
-        if d.enable().is_ok() {
-            detours.push(d);
-            return true;
-        }
-        store(None);
-    }
-    note_skipped_detour(label);
-    false
-}
-
-/// [`optional_detour`] for an export this ntdll may lack altogether (Wine has no `NtCompressKey`,
-/// `NtLockRegistryKey`, `NtSaveKeyEx`, ...). An export that does not exist cannot be called, so
-/// nothing goes unvirtualised without it: it is skipped silently and reads as installed. One that
-/// exists but cannot be detoured is reported as `optional_detour` reports it (`false`).
-unsafe fn detour_if_present(
-    ntdll: HMODULE,
-    name: &'static core::ffi::CStr,
-    label: &'static str,
-    hookfn: *const (),
-    detours: &mut Vec<RawDetour>,
-    store: &mut dyn FnMut(Option<*const ()>),
-) -> bool {
-    if GetProcAddress(ntdll, name.as_ptr().cast()).is_none() {
-        return true;
-    }
-    optional_detour(ntdll, name, label, hookfn, detours, store)
-}
-
 /// Registry detours the install put in (0 with `VFS_REGISTRY` unset). For tests and diagnostics.
 static REG_DETOURS_INSTALLED: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -918,403 +856,30 @@ pub fn registry_detours_installed() -> usize {
 /// `NtQueryObject` are the file hooks'). Installed only when the host turned the overlay on
 /// (`VFS_REGISTRY`, see `install_all_detours`); each still checks `regclient::enabled()` first
 /// and goes straight to its trampoline when it is off (a missing detour turns it off).
-/// Optional in the style of `NtQueryObject`, so a host without one still gets the file VFS.
+/// `Optional` in the style of `NtQueryObject`, so a host without one still gets the file VFS.
 ///
-/// `qobj_installed`: the file hooks' `NtQueryObject` detour is in. The registry needs it (names
-/// and types of synthetic keys, the access of pre-hook handles), so its absence turns the
-/// registry overlay off like a missing registry detour.
+/// Registry virtualisation is all or nothing (`regclient::enabled`): every detour that could
+/// not be installed is collected, and the outcome is recorded once, after the last one.
+/// `missing` arrives holding the file detours the overlay depends on that are not in (the file
+/// hooks' `NtQueryObject`: names and types of synthetic keys, the access of pre-hook handles),
+/// so their absence turns the overlay off like a missing registry detour.
 unsafe fn install_registry_detours(
     ntdll: HMODULE,
+    rows: &[Detour],
     detours: &mut Vec<RawDetour>,
-    qobj_installed: bool,
+    mut missing: Vec<&'static str>,
 ) {
-    let raw_query_key = GetProcAddress(ntdll, c"NtQueryKey".as_ptr().cast())
-        .map(|p| core::mem::transmute::<unsafe extern "system" fn() -> isize, NtQueryKeyFn>(p));
-    TRAMP_QUERY_KEY = raw_query_key;
-    // Registry virtualisation is all or nothing (`regclient::enabled`): every detour that could
-    // not be installed is collected, and the outcome is recorded once, after the last one.
-    let mut missing: Vec<&'static str> = Vec::new();
-    if !qobj_installed {
-        missing.push("NtQueryObject");
+    let registry = || rows.iter().filter(|d| d.group == Group::Registry);
+    // `regkeys` reads key names through the `RawFallback` slot even when its detour is not in.
+    for d in registry().filter(|d| d.has(Flag::RawFallback)) {
+        d.reset(ntdll);
     }
-    let mut reg = |installed: bool, label: &'static str| {
-        if !installed {
-            missing.push(label);
+    // Each trampoline is stored before its detour is enabled.
+    for d in registry() {
+        if !d.install_soft(ntdll, detours) {
+            missing.push(d.label());
         }
-    };
-    // The query hooks (spec 3.1). Each trampoline is stored before its detour is enabled.
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtQueryKey",
-            "NtQueryKey",
-            query_key_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_QUERY_KEY = t
-                    .map(|t| core::mem::transmute::<*const (), NtQueryKeyFn>(t))
-                    .or(raw_query_key)
-            },
-        ),
-        "NtQueryKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtEnumerateKey",
-            "NtEnumerateKey",
-            enum_key_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_ENUM_KEY = t.map(|t| core::mem::transmute::<*const (), NtEnumerateKeyFn>(t))
-            },
-        ),
-        "NtEnumerateKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtQueryValueKey",
-            "NtQueryValueKey",
-            query_value_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_QUERY_VALUE =
-                    t.map(|t| core::mem::transmute::<*const (), NtQueryValueKeyFn>(t))
-            },
-        ),
-        "NtQueryValueKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtEnumerateValueKey",
-            "NtEnumerateValueKey",
-            enum_value_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_ENUM_VALUE =
-                    t.map(|t| core::mem::transmute::<*const (), NtEnumerateValueKeyFn>(t))
-            },
-        ),
-        "NtEnumerateValueKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtQueryMultipleValueKey",
-            "NtQueryMultipleValueKey",
-            query_multiple_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_QUERY_MULTIPLE =
-                    t.map(|t| core::mem::transmute::<*const (), NtQueryMultipleValueKeyFn>(t))
-            },
-        ),
-        "NtQueryMultipleValueKey",
-    );
-    // The write hooks (spec 3.1).
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtSetValueKey",
-            "NtSetValueKey",
-            set_value_key_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_SET_VALUE = t.map(|t| core::mem::transmute::<*const (), NtSetValueKeyFn>(t))
-            },
-        ),
-        "NtSetValueKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtDeleteValueKey",
-            "NtDeleteValueKey",
-            delete_value_key_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_DELETE_VALUE =
-                    t.map(|t| core::mem::transmute::<*const (), NtDeleteValueKeyFn>(t))
-            },
-        ),
-        "NtDeleteValueKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtDeleteKey",
-            "NtDeleteKey",
-            delete_key_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_DELETE_KEY = t.map(|t| core::mem::transmute::<*const (), NtDeleteKeyFn>(t))
-            },
-        ),
-        "NtDeleteKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtRenameKey",
-            "NtRenameKey",
-            rename_key_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_RENAME_KEY = t.map(|t| core::mem::transmute::<*const (), NtRenameKeyFn>(t))
-            },
-        ),
-        "NtRenameKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtSetInformationKey",
-            "NtSetInformationKey",
-            set_info_key_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_SET_INFO_KEY =
-                    t.map(|t| core::mem::transmute::<*const (), NtSetInformationKeyFn>(t))
-            },
-        ),
-        "NtSetInformationKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtFlushKey",
-            "NtFlushKey",
-            flush_key_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_FLUSH_KEY = t.map(|t| core::mem::transmute::<*const (), NtFlushKeyFn>(t))
-            },
-        ),
-        "NtFlushKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtOpenKeyEx",
-            "NtOpenKeyEx",
-            open_key_ex_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_OPEN_KEY_EX = t.map(|t| core::mem::transmute::<*const (), NtOpenKeyExFn>(t))
-            },
-        ),
-        "NtOpenKeyEx",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtOpenKey",
-            "NtOpenKey",
-            open_key_hook as *const (),
-            detours,
-            &mut |t| TRAMP_OPEN_KEY = t.map(|t| core::mem::transmute::<*const (), NtOpenKeyFn>(t)),
-        ),
-        "NtOpenKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtCreateKey",
-            "NtCreateKey",
-            create_key_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_CREATE_KEY = t.map(|t| core::mem::transmute::<*const (), NtCreateKeyFn>(t))
-            },
-        ),
-        "NtCreateKey",
-    );
-    reg(
-        optional_detour(
-            ntdll,
-            c"NtDuplicateObject",
-            "NtDuplicateObject",
-            dup_hook as *const (),
-            detours,
-            &mut |t| {
-                TRAMP_DUP = t.map(|t| core::mem::transmute::<*const (), NtDuplicateObjectFn>(t))
-            },
-        ),
-        "NtDuplicateObject",
-    );
-    // Notifications, security, handle flags and the out-of-scope calls (spec 3.4, 3.6). Each
-    // export this ntdll has must be detoured like the rest; one it lacks is simply skipped.
-    macro_rules! if_present {
-        ($export:literal, $label:literal, $hook:ident, $tramp:ident, $ty:ty) => {
-            reg(
-                detour_if_present(
-                    ntdll,
-                    $export,
-                    $label,
-                    $hook as *const (),
-                    detours,
-                    &mut |t| $tramp = t.map(|t| core::mem::transmute::<*const (), $ty>(t)),
-                ),
-                $label,
-            )
-        };
     }
-    if_present!(
-        c"NtNotifyChangeKey",
-        "NtNotifyChangeKey",
-        notify_key_hook,
-        TRAMP_NOTIFY_KEY,
-        NtNotifyChangeKeyFn
-    );
-    if_present!(
-        c"NtNotifyChangeMultipleKeys",
-        "NtNotifyChangeMultipleKeys",
-        notify_multiple_hook,
-        TRAMP_NOTIFY_MULTIPLE,
-        NtNotifyChangeMultipleKeysFn
-    );
-    if_present!(
-        c"NtQuerySecurityObject",
-        "NtQuerySecurityObject",
-        query_security_hook,
-        TRAMP_QUERY_SECURITY,
-        NtQuerySecurityObjectFn
-    );
-    if_present!(
-        c"NtSetSecurityObject",
-        "NtSetSecurityObject",
-        set_security_hook,
-        TRAMP_SET_SECURITY,
-        NtSetSecurityObjectFn
-    );
-    if_present!(
-        c"NtSetInformationObject",
-        "NtSetInformationObject",
-        set_info_object_hook,
-        TRAMP_SET_INFO_OBJECT,
-        NtSetInformationObjectFn
-    );
-    if_present!(
-        c"NtCreateKeyTransacted",
-        "NtCreateKeyTransacted",
-        create_key_tx_hook,
-        TRAMP_CREATE_KEY_TX,
-        NtCreateKeyTransactedFn
-    );
-    if_present!(
-        c"NtOpenKeyTransacted",
-        "NtOpenKeyTransacted",
-        open_key_tx_hook,
-        TRAMP_OPEN_KEY_TX,
-        NtOpenKeyTransactedFn
-    );
-    if_present!(
-        c"NtOpenKeyTransactedEx",
-        "NtOpenKeyTransactedEx",
-        open_key_tx_ex_hook,
-        TRAMP_OPEN_KEY_TX_EX,
-        NtOpenKeyTransactedExFn
-    );
-    if_present!(
-        c"NtLoadKey",
-        "NtLoadKey",
-        load_key_hook,
-        TRAMP_LOAD_KEY,
-        NtLoadKeyFn
-    );
-    if_present!(
-        c"NtLoadKey2",
-        "NtLoadKey2",
-        load_key2_hook,
-        TRAMP_LOAD_KEY2,
-        NtLoadKey2Fn
-    );
-    if_present!(
-        c"NtLoadKeyEx",
-        "NtLoadKeyEx",
-        load_key_ex_hook,
-        TRAMP_LOAD_KEY_EX,
-        NtLoadKey8Fn
-    );
-    if_present!(
-        c"NtLoadKey3",
-        "NtLoadKey3",
-        load_key3_hook,
-        TRAMP_LOAD_KEY3,
-        NtLoadKey8Fn
-    );
-    if_present!(
-        c"NtUnloadKey",
-        "NtUnloadKey",
-        unload_key_hook,
-        TRAMP_UNLOAD_KEY,
-        NtUnloadKeyFn
-    );
-    if_present!(
-        c"NtUnloadKey2",
-        "NtUnloadKey2",
-        unload_key2_hook,
-        TRAMP_UNLOAD_KEY2,
-        NtUnloadKey2Fn
-    );
-    if_present!(
-        c"NtUnloadKeyEx",
-        "NtUnloadKeyEx",
-        unload_key_ex_hook,
-        TRAMP_UNLOAD_KEY_EX,
-        NtUnloadKey2Fn
-    );
-    if_present!(
-        c"NtSaveKey",
-        "NtSaveKey",
-        save_key_hook,
-        TRAMP_SAVE_KEY,
-        NtSaveKeyFn
-    );
-    if_present!(
-        c"NtSaveKeyEx",
-        "NtSaveKeyEx",
-        save_key_ex_hook,
-        TRAMP_SAVE_KEY_EX,
-        NtSaveKeyExFn
-    );
-    if_present!(
-        c"NtSaveMergedKeys",
-        "NtSaveMergedKeys",
-        save_merged_hook,
-        TRAMP_SAVE_MERGED,
-        NtSaveMergedKeysFn
-    );
-    if_present!(
-        c"NtReplaceKey",
-        "NtReplaceKey",
-        replace_key_hook,
-        TRAMP_REPLACE_KEY,
-        NtReplaceKeyFn
-    );
-    if_present!(
-        c"NtRestoreKey",
-        "NtRestoreKey",
-        restore_key_hook,
-        TRAMP_RESTORE_KEY,
-        NtRestoreKeyFn
-    );
-    if_present!(
-        c"NtCompressKey",
-        "NtCompressKey",
-        compress_key_hook,
-        TRAMP_COMPRESS_KEY,
-        NtKeyOnlyFn
-    );
-    if_present!(
-        c"NtLockRegistryKey",
-        "NtLockRegistryKey",
-        lock_registry_key_hook,
-        TRAMP_LOCK_REGISTRY_KEY,
-        NtKeyOnlyFn
-    );
     crate::regclient::detours_installed(&missing);
 }
 
@@ -1329,14 +894,14 @@ pub fn as_shim_io_for_tests<R>(f: impl FnOnce() -> R) -> R {
 /// The unhooked registry entry points, for `regkeys`.
 pub(crate) unsafe fn reg_real() -> crate::regkeys::Real {
     crate::regkeys::Real {
-        open_ex: TRAMP_OPEN_KEY_EX,
-        query: TRAMP_QUERY_KEY,
+        open_ex: TRAMP_OPEN_KEY_EX.get(),
+        query: TRAMP_QUERY_KEY.get(),
         close: TRAMP_CLOSE.get(),
-        dup: TRAMP_DUP,
-        enum_key: TRAMP_ENUM_KEY,
-        query_value: TRAMP_QUERY_VALUE,
-        enum_value: TRAMP_ENUM_VALUE,
-        query_multiple: TRAMP_QUERY_MULTIPLE,
+        dup: TRAMP_DUP.get(),
+        enum_key: TRAMP_ENUM_KEY.get(),
+        query_value: TRAMP_QUERY_VALUE.get(),
+        enum_value: TRAMP_ENUM_VALUE.get(),
+        query_multiple: TRAMP_QUERY_MULTIPLE.get(),
         query_object: TRAMP_QOBJ.get(),
     }
 }
@@ -1354,7 +919,7 @@ unsafe fn open_key_hook_body(
     oa: *const ObjectAttributes,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::OpenKey);
-    let Some(tramp) = TRAMP_OPEN_KEY else {
+    let Some(tramp) = TRAMP_OPEN_KEY.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
@@ -1384,7 +949,7 @@ unsafe fn open_key_ex_hook_body(
     options: u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::OpenKeyEx);
-    let Some(tramp) = TRAMP_OPEN_KEY_EX else {
+    let Some(tramp) = TRAMP_OPEN_KEY_EX.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
@@ -1418,7 +983,7 @@ unsafe fn create_key_hook_body(
     disposition: *mut u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::CreateKey);
-    let Some(tramp) = TRAMP_CREATE_KEY else {
+    let Some(tramp) = TRAMP_CREATE_KEY.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
@@ -1432,7 +997,7 @@ unsafe fn create_key_hook_body(
     let Some(_io) = ShimIoGuard::enter() else {
         return STATUS_UNSUCCESSFUL;
     };
-    let Some(open_ex) = TRAMP_OPEN_KEY_EX else {
+    let Some(open_ex) = TRAMP_OPEN_KEY_EX.get() else {
         // No way to open an existing key without the real create: refuse rather than write.
         return STATUS_UNSUCCESSFUL;
     };
@@ -1463,7 +1028,7 @@ unsafe fn dup_hook_body(
     options: u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::DuplicateObject);
-    let Some(tramp) = TRAMP_DUP else {
+    let Some(tramp) = TRAMP_DUP.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
@@ -1509,7 +1074,7 @@ unsafe fn query_key_hook_body(
     ret_len: *mut u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QueryKey);
-    let Some(tramp) = TRAMP_QUERY_KEY else {
+    let Some(tramp) = TRAMP_QUERY_KEY.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
@@ -1531,7 +1096,7 @@ unsafe fn enum_key_hook_body(
     ret_len: *mut u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::EnumerateKey);
-    let Some(tramp) = TRAMP_ENUM_KEY else {
+    let Some(tramp) = TRAMP_ENUM_KEY.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
@@ -1561,7 +1126,7 @@ unsafe fn query_value_hook_body(
     ret_len: *mut u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QueryValueKey);
-    let Some(tramp) = TRAMP_QUERY_VALUE else {
+    let Some(tramp) = TRAMP_QUERY_VALUE.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
@@ -1591,7 +1156,7 @@ unsafe fn enum_value_hook_body(
     ret_len: *mut u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::EnumerateValueKey);
-    let Some(tramp) = TRAMP_ENUM_VALUE else {
+    let Some(tramp) = TRAMP_ENUM_VALUE.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
@@ -1621,7 +1186,7 @@ unsafe fn query_multiple_hook_body(
     required: *mut u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QueryMultipleValueKey);
-    let Some(tramp) = TRAMP_QUERY_MULTIPLE else {
+    let Some(tramp) = TRAMP_QUERY_MULTIPLE.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
@@ -1663,7 +1228,7 @@ unsafe fn set_value_key_hook_body(
     size: u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetValueKey);
-    let Some(tramp) = TRAMP_SET_VALUE else {
+    let Some(tramp) = TRAMP_SET_VALUE.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
@@ -1682,7 +1247,7 @@ unsafe fn set_value_key_hook_body(
 /// `NtDeleteValueKey` hook. See `regwrite::delete_value_key`.
 unsafe fn delete_value_key_hook_body(key: HANDLE, name: *const UnicodeString) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::DeleteValueKey);
-    let Some(tramp) = TRAMP_DELETE_VALUE else {
+    let Some(tramp) = TRAMP_DELETE_VALUE.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
@@ -1701,7 +1266,7 @@ unsafe fn delete_value_key_hook_body(key: HANDLE, name: *const UnicodeString) ->
 /// `NtDeleteKey` hook. See `regwrite::delete_key`.
 unsafe fn delete_key_hook_body(key: HANDLE) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::DeleteKey);
-    let Some(tramp) = TRAMP_DELETE_KEY else {
+    let Some(tramp) = TRAMP_DELETE_KEY.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
@@ -1720,7 +1285,7 @@ unsafe fn delete_key_hook_body(key: HANDLE) -> NTSTATUS {
 /// `NtRenameKey` hook. See `regwrite::rename_key`.
 unsafe fn rename_key_hook_body(key: HANDLE, new_name: *const UnicodeString) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::RenameKey);
-    let Some(tramp) = TRAMP_RENAME_KEY else {
+    let Some(tramp) = TRAMP_RENAME_KEY.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
@@ -1744,7 +1309,7 @@ unsafe fn set_info_key_hook_body(
     length: u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetInformationKey);
-    let Some(tramp) = TRAMP_SET_INFO_KEY else {
+    let Some(tramp) = TRAMP_SET_INFO_KEY.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
@@ -1764,7 +1329,7 @@ unsafe fn set_info_key_hook_body(
 /// already write, so the shim's own (re-entrant) calls pass through like the read hooks'.
 unsafe fn flush_key_hook_body(key: HANDLE) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::FlushKey);
-    let Some(tramp) = TRAMP_FLUSH_KEY else {
+    let Some(tramp) = TRAMP_FLUSH_KEY.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
@@ -1796,7 +1361,7 @@ unsafe fn notify_key_hook_body(
     asynchronous: u8,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::NotifyChangeKey);
-    let Some(tramp) = TRAMP_NOTIFY_KEY else {
+    let Some(tramp) = TRAMP_NOTIFY_KEY.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     let pass = || {
@@ -1852,7 +1417,7 @@ unsafe fn notify_multiple_hook_body(
     asynchronous: u8,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::NotifyChangeMultipleKeys);
-    let Some(tramp) = TRAMP_NOTIFY_MULTIPLE else {
+    let Some(tramp) = TRAMP_NOTIFY_MULTIPLE.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     let pass = || {
@@ -1903,7 +1468,7 @@ unsafe fn query_security_hook_body(
     needed: *mut u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::QuerySecurityObject);
-    let Some(tramp) = TRAMP_QUERY_SECURITY else {
+    let Some(tramp) = TRAMP_QUERY_SECURITY.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regkeys::is_synthetic(handle as isize) || reg_bypass() {
@@ -1929,7 +1494,7 @@ unsafe fn query_security_hook_body(
 /// hook is bypassed with the overlay on, gets `STATUS_UNSUCCESSFUL`.
 unsafe fn set_security_hook_body(handle: HANDLE, info: u32, sd: *const c_void) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetSecurityObject);
-    let Some(tramp) = TRAMP_SET_SECURITY else {
+    let Some(tramp) = TRAMP_SET_SECURITY.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
@@ -1955,7 +1520,7 @@ unsafe fn set_info_object_hook_body(
     length: u32,
 ) -> NTSTATUS {
     let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::SetInformationObject);
-    let Some(tramp) = TRAMP_SET_INFO_OBJECT else {
+    let Some(tramp) = TRAMP_SET_INFO_OBJECT.get() else {
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regkeys::is_synthetic(handle as isize) || reg_bypass() {
@@ -1980,7 +1545,7 @@ macro_rules! out_of_scope_body {
         $(#[$attr])*
         unsafe fn $body($($arg: $ty),*) -> NTSTATUS {
             let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::$hook);
-            let Some(tramp) = $tramp else {
+            let Some(tramp) = $tramp.get() else {
                 return STATUS_UNSUCCESSFUL;
             };
             if !crate::regclient::enabled() {
