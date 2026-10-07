@@ -20,7 +20,7 @@ A `Provider` is anything that can answer filesystem questions for a virtual
 tree: does this path exist, what is in this directory, give me a handle to
 this file, read some bytes from it. Concrete examples elsewhere in the
 workspace: a zip archive (`vfs-zip`'s `ZipProvider`), a directory on disk
-(`vfs-director`'s `DiskProvider`), an out-of-process plugin reached over gRPC
+(`vfs-compose`'s `DiskProvider`), an out-of-process plugin reached over gRPC
 (`vfs-source`'s `RemoteProvider`), and several combinators in
 `vfs-compose` that build a provider out of other providers.
 

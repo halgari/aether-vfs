@@ -353,10 +353,10 @@ mod tests {
         !crc
     }
 
-    /// A real archive from the corpus directory: `VFS_ZIP_CORPUS` if set,
+    /// A real archive from the corpus directory: `VFS_TEST_ZIP_CORPUS` if set,
     /// else `C:\GameLayers`.
     fn corpus_archive(name: &str) -> std::path::PathBuf {
-        let dir = std::env::var_os("VFS_ZIP_CORPUS").unwrap_or_else(|| r"C:\GameLayers".into());
+        let dir = std::env::var_os("VFS_TEST_ZIP_CORPUS").unwrap_or_else(|| r"C:\GameLayers".into());
         std::path::Path::new(&dir).join(name)
     }
 

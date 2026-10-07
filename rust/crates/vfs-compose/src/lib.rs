@@ -10,6 +10,8 @@
 //! - [`SubdirProvider`], [`SeekableProvider`] and [`ReadOnlyProvider`]: wrappers
 //!   that map paths, add positional reads over a sequential provider, or
 //!   demote write access.
+//! - [`DiskProvider`]: a directory on disk, served read-write.
+//! - [`MountGraph`]: mounts providers at paths and resolves a path to the mount that serves it.
 //! - [`MemoryProvider`] (read-write) and [`InlineProvider`] (read-only): in-memory
 //!   trees.
 
@@ -47,7 +49,7 @@ use vfs_provider::{DirEntry, Provider};
 /// The entries of a merged directory listing, ordered by folded name.
 ///
 /// `by_folded` maps `vfs_core::fold(entry.name)` to the entry — the map every
-/// merging `readdir` here (and `vfs-director`'s `MountGraph`) already builds
+/// merging `readdir` here (and `MountGraph`) already builds
 /// to make one spelling win. Sorting on those keys gives the order
 /// `sort_by_key(|e| fold(&e.name))` gives, without folding two names on every
 /// comparison: that cost 33 ms for a 3,000-entry directory. The keys are
