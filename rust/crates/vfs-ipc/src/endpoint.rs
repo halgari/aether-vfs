@@ -226,7 +226,7 @@ impl<'a, N: Notifier> RingClient<'a, N> {
 
     /// [`Self::submit`], whose error also says which slot (none or one) was
     /// left with the server.
-    pub fn submit_reporting(
+    pub(crate) fn submit_reporting(
         &self,
         opcode: u32,
         flags: u32,
@@ -259,27 +259,15 @@ impl<'a, N: Notifier> RingClient<'a, N> {
         Ok(Response { status, payload })
     }
 
-    /// **A5:** publish several requests (each on its own slot), wait for all, free slots.
-    /// Returns responses in the same order as `reqs`.
+    /// **A5:** publish several requests (each on its own slot) and wait for all.
+    /// Returns responses in the same order as `reqs`, plus the slots, which stay
+    /// **held**.
     ///
     /// Bulk READ responses only carry `(len, arena_offset)` — the payload lives in
-    /// the shared arena bank for that slot. We **must not free slots until the
-    /// caller has finished reading those banks** (see [`Self::submit_many_held`]).
-    /// Freeing early lets a concurrent claim reuse the bank and corrupt bulk data.
-    pub fn submit_many(
-        &self,
-        reqs: &[(u32, u32, Vec<u8>)],
-    ) -> Result<Vec<Response>, IpcError> {
-        let (out, slots) = self.submit_many_held(reqs)?;
-        for &slot in &slots {
-            let _ = ring::free_slot(self.seg, &self.geom, slot);
-            self.notifier.notify_slot_free();
-        }
-        Ok(out)
-    }
-
-    /// Like [`Self::submit_many`], but leaves slots **held** so bulk arena banks
-    /// stay stable until the caller frees them via [`Self::release_slots`].
+    /// the shared arena bank for that slot. The slots are not freed until the
+    /// caller has finished reading those banks and frees them via
+    /// [`Self::release_slots`]. Freeing early lets a concurrent claim reuse the
+    /// bank and corrupt bulk data.
     pub fn submit_many_held(
         &self,
         reqs: &[(u32, u32, Vec<u8>)],
@@ -293,7 +281,7 @@ impl<'a, N: Notifier> RingClient<'a, N> {
     /// The whole batch has one deadline, counted from when it was published.
     /// A clock per request, awaited in order, let eight requests that each
     /// answered just inside the deadline keep one call for eight deadlines.
-    pub fn submit_many_held_reporting(
+    pub(crate) fn submit_many_held_reporting(
         &self,
         reqs: &[(u32, u32, Vec<u8>)],
     ) -> Result<(Vec<Response>, Vec<u32>), Unanswered> {
