@@ -390,16 +390,22 @@ impl Setup {
                 if same_contents(&c.from, &dst)? {
                     return Ok(false);
                 }
-                std::fs::copy(&c.from, &tmp)?;
-                let mut perm = std::fs::metadata(&tmp)?.permissions();
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
+                    std::fs::copy(&c.from, &tmp)?;
+                    let mut perm = std::fs::metadata(&tmp)?.permissions();
                     perm.set_mode(perm.mode() | 0o220);
+                    std::fs::set_permissions(&tmp, perm)?;
                 }
+                // A fresh file carries no read-only attribute, unlike
+                // `fs::copy`, which copies the source's.
                 #[cfg(not(unix))]
-                perm.set_readonly(false);
-                std::fs::set_permissions(&tmp, perm)?;
+                {
+                    let mut from = std::fs::File::open(&c.from)?;
+                    let mut to = std::fs::File::create(&tmp)?;
+                    io::copy(&mut from, &mut to)?;
+                }
                 std::fs::rename(&tmp, &dst)?;
                 Ok::<_, io::Error>(true)
             })();
