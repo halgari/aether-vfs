@@ -36,6 +36,9 @@
 //! Every claim is about filesystem state, and the file contents are distinct
 //! per path so a survivor can be named.
 
+#[macro_use]
+mod common;
+
 mod ntapi;
 
 use vfs_redirect::RootId;
@@ -52,6 +55,7 @@ const DELETE: u32 = ntapi::DELETE;
 
 #[test]
 fn handle_based_deletes_and_out_of_root_renames_never_touch_the_real_file() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-handle-ops-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

@@ -20,12 +20,16 @@
 //! roots*: `shared.txt` exists in both roots' overlay subtrees with different
 //! bytes, so a root that got lost anywhere in the chain shows up as one root
 //! reading, modifying, or deleting the other's file.
+#[macro_use]
+mod common;
+
 use std::io::Write;
 use vfs_redirect::RootId;
 use vfs_shim::{install, overlay_layer_dir, Engine};
 
 #[test]
 fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
+    isolate!();
     let pid = std::process::id();
     let base = std::env::temp_dir().join(format!("vfs-shim-write-2root-{pid}"));
     let _ = std::fs::remove_dir_all(&base);

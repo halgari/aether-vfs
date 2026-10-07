@@ -59,6 +59,9 @@
 //! directory as the installed one, since `install` moves its engine into a
 //! `OnceLock` the crate does not hand back.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
@@ -69,6 +72,7 @@ const PROVIDER: &[u8] = b"bytes only the director has, copied up while a hook is
 
 #[test]
 fn copy_up_writes_its_destination_without_re_entering_the_hooks() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-cowseed-reent-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

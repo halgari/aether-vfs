@@ -18,6 +18,9 @@
 //! unrouted (under-eager), and it must not cause a genuinely-outside sibling
 //! to be misrouted through the VFS (over-eager).
 
+#[macro_use]
+mod common;
+
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 
@@ -36,6 +39,7 @@ const OUTSIDE_PAYLOAD: &[u8] = b"genuinely-outside-real-bytes";
 
 #[test]
 fn handle_relative_open_via_a_handle_opened_before_injection() {
+    isolate!();
     let pid = std::process::id();
     let base = std::env::temp_dir().join(format!("vfs-shim-unseen-handle-{pid}"));
     // `base` plays the role of `C:\Games`: an ancestor of the managed root,

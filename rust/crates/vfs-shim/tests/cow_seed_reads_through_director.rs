@@ -12,6 +12,9 @@
 //! **only** on real disk under the managed root. Copy-up must take the first
 //! and must never take the second.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use fakedirector::{pattern, Fake, ReadStyle, PAYLOAD_CAP};
@@ -163,6 +166,7 @@ fn fixture() -> &'static Fixture {
 /// against the new one.
 #[test]
 fn copy_up_takes_the_provider_graph_s_bytes() {
+    isolate!();
     let f = fixture();
     let rel = ["Data", "only-in-graph.esp"];
     let dest = f.dest(&["data", "only-in-graph.esp"]);
@@ -194,6 +198,7 @@ fn copy_up_takes_the_provider_graph_s_bytes() {
 /// claim.
 #[test]
 fn copy_up_never_seeds_from_a_real_file_under_the_root() {
+    isolate!();
     let f = fixture();
     let rel = ["Data", "only-on-disk.bin"];
     let dest = f.dest(&["data", "only-on-disk.bin"]);
@@ -237,6 +242,7 @@ fn copy_up_never_seeds_from_a_real_file_under_the_root() {
 /// being configured, which is precisely the gap it was written to close.
 #[test]
 fn copy_up_of_a_large_file_spans_round_trips_and_is_byte_exact() {
+    isolate!();
     let f = fixture();
     let want = pattern(700 * 1024);
     let rel = ["Data", "big.bin"];
@@ -275,6 +281,7 @@ fn copy_up_of_a_large_file_spans_round_trips_and_is_byte_exact() {
 /// bank holds less than the client asked for.
 #[test]
 fn a_short_bulk_read_is_resumed_too() {
+    isolate!();
     let f = fixture();
     let want = pattern(500 * 1024);
     let dest = f.dest(&["data", "bulk-dribble.bin"]);
@@ -304,6 +311,7 @@ fn a_short_bulk_read_is_resumed_too() {
 /// as the end of the file writes 7 bytes and calls it a copy.
 #[test]
 fn a_short_read_is_resumed_rather_than_taken_for_the_end_of_the_file() {
+    isolate!();
     let f = fixture();
     let want = pattern(5_000);
     let rel = ["Data", "dribble.bin"];
@@ -325,6 +333,7 @@ fn a_short_read_is_resumed_rather_than_taken_for_the_end_of_the_file() {
 /// response claimed.
 #[test]
 fn a_director_error_fails_the_copy_up_and_leaves_nothing_behind() {
+    isolate!();
     let f = fixture();
     for name in ["broken.bin", "liar.bin"] {
         let dest = f.dest(&["data", name]);
@@ -342,6 +351,7 @@ fn a_director_error_fails_the_copy_up_and_leaves_nothing_behind() {
 /// moving it, and it must materialise it the same way `decide_open` does.
 #[test]
 fn rename_materialises_its_source_through_the_director_too() {
+    isolate!();
     let f = fixture();
     let from = f.nt(&["Data", "to-rename.esp"]);
     let to = f.nt(&["Data", "renamed.esp"]);
@@ -369,6 +379,7 @@ fn rename_materialises_its_source_through_the_director_too() {
 /// however the harness interleaves.
 #[test]
 fn copy_up_closes_the_handles_it_opens_including_failed_reads() {
+    isolate!();
     let f = fixture();
     // A clean copy-up and a copy-up whose reads all fail.
     for name in ["closecheck.esp", "closecheck-broken.bin"] {
@@ -394,6 +405,7 @@ fn copy_up_closes_the_handles_it_opens_including_failed_reads() {
 /// and a 4088-byte inline response cannot carry it in fewer than 15 READs.
 #[test]
 fn a_sub_threshold_copy_up_fragments_over_the_inline_transport() {
+    isolate!();
     let f = fixture();
     let want = pattern(63 * 1024);
     f.engine.decide_open(
@@ -439,6 +451,7 @@ fn a_sub_threshold_copy_up_fragments_over_the_inline_transport() {
 /// nothing works.
 #[test]
 fn a_write_to_an_alternate_data_stream_seeds_nothing() {
+    isolate!();
     let f = fixture();
     let base = f.dest(&["data", "streamed.esp"]);
     let stream_nt = format!("{}:probe", f.nt(&["Data", "streamed.esp"]));

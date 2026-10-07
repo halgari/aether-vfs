@@ -45,6 +45,9 @@
 //! anything the DRM exceptions contributed, and it is recorded in the Task 6
 //! report rather than fixed here.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
@@ -60,6 +63,7 @@ const GENERIC_WRITE: u32 = 0x4000_0000;
 
 #[test]
 fn a_drm_named_file_with_the_overlay_under_the_root_resolves_one_level_deep() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-drm-recur-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

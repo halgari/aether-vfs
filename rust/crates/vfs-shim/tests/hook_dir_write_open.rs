@@ -30,6 +30,9 @@
 //! Its own binary — the detours, `ENGINE` and the `FuseClient` are all
 //! process-global and resolve once.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use fakedirector::Fake;
@@ -90,6 +93,7 @@ use std::os::windows::ffi::OsStrExt;
 
 #[test]
 fn a_directory_under_a_managed_root_opens_with_write_access() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-dirwrite-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

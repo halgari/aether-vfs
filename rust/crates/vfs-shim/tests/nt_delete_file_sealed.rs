@@ -51,6 +51,9 @@
 //! Its own binary: the detours, the `FuseClient`, the `Engine` and
 //! `hookstats::enabled()` are process-global and resolve once.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 mod ntapi;
 
@@ -80,6 +83,7 @@ const STATUS_OBJECT_NAME_INVALID: i32 = 0xC000_0033u32 as i32;
 
 #[test]
 fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-ntdelete-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

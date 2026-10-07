@@ -1,4 +1,7 @@
 //! Single-test binary: a redirected virtual file reports its VIRTUAL path.
+#[macro_use]
+mod common;
+
 use std::os::windows::io::AsRawHandle;
 use vfs_shim::{install, Engine};
 use windows_sys::Win32::Foundation::HANDLE;
@@ -6,6 +9,7 @@ use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
 
 #[test]
 fn redirected_file_reports_virtual_path() {
+    isolate!();
     let pid = std::process::id();
     let root = std::env::temp_dir().join(format!("vfs-shim-ident-{pid}"));
     let backing_dir = std::env::temp_dir().join(format!("vfs-shim-ident-backing-{pid}"));

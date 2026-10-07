@@ -13,12 +13,16 @@
 //! process, so "with an overlay" and "without one" cannot be the same test
 //! run.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use vfs_shim::{install, Engine};
 
 #[test]
 fn a_refused_write_creates_nothing_on_the_real_filesystem_under_the_root() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-write-seal-noov-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

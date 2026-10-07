@@ -38,6 +38,9 @@
 //! Its own binary: the detours, the `FuseClient` and the `Engine` are
 //! process-global and resolve once.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 mod ntapi;
 
@@ -56,6 +59,7 @@ const DELETE: u32 = ntapi::DELETE;
 
 #[test]
 fn a_rename_into_a_managed_root_from_outside_it_never_lands() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-rename-in-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

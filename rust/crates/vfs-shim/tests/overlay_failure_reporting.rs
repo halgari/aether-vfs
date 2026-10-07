@@ -39,6 +39,9 @@
 //! The filename is now an ordinary one, because the name no longer selects the
 //! route: the switch does.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use fakedirector::Fake;
@@ -46,6 +49,7 @@ use vfs_shim::{install, overlay_fail_count, Engine, OverlayFail};
 
 #[test]
 fn an_overlay_directory_that_cannot_be_created_names_itself_in_the_stats_report() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-ovfail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

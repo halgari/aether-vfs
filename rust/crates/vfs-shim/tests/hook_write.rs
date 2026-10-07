@@ -11,11 +11,15 @@
 //! backing file, and *that* is what this test used to prove.
 //! `cow_seed_reads_through_director.rs` holds the positive half — a real ring,
 //! a real `FuseClient`, and the provider's bytes landing in the overlay.
+#[macro_use]
+mod common;
+
 use std::io::Write;
 use vfs_shim::{install, Engine};
 
 #[test]
 fn writes_land_in_overlay_with_cow() {
+    isolate!();
     let pid = std::process::id();
     let base = std::env::temp_dir().join(format!("vfs-shim-write-{pid}"));
     let root = base.join("root");

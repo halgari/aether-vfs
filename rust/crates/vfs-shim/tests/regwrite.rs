@@ -11,6 +11,9 @@
 //! Every test takes [`LOCK`]: they share one director, and one of them detaches its registry.
 #![cfg(windows)]
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use std::ffi::c_void;
@@ -562,6 +565,7 @@ fn reg_checker() {
 
 #[test]
 fn a_write_through_a_real_handle_goes_to_the_overlay_and_the_handle_then_merges() {
+    isolate!();
     let (_g, f) = fixture();
     let before = f.real_info("Cow");
     let (st, h) = f.open("Cow", NT_KEY_READ | NT_KEY_SET_VALUE);
@@ -615,6 +619,7 @@ fn a_write_through_a_real_handle_goes_to_the_overlay_and_the_handle_then_merges(
 /// `ShimIoGuard` held) is refused, never made for real (the `reg_write_body!` rule).
 #[test]
 fn a_write_bypassed_by_the_shim_guard_is_refused_and_never_reaches_the_real_key() {
+    isolate!();
     let (_g, f) = fixture();
     let (st, h) = f.open("Cow", NT_KEY_READ | NT_KEY_SET_VALUE);
     assert_eq!(st, STATUS_SUCCESS);
@@ -633,6 +638,7 @@ fn a_write_bypassed_by_the_shim_guard_is_refused_and_never_reaches_the_real_key(
 
 #[test]
 fn a_handle_opened_before_the_hooks_writes_to_the_overlay() {
+    isolate!();
     let (_g, f) = fixture();
     let st = unsafe {
         RegSetValueExW(
@@ -652,6 +658,7 @@ fn a_handle_opened_before_the_hooks_writes_to_the_overlay() {
 
 #[test]
 fn delete_value_tombstones_the_name_and_leaves_the_real_value() {
+    isolate!();
     let (_g, f) = fixture();
     let (st, h) = f.open("Cow", NT_KEY_READ | NT_KEY_SET_VALUE);
     assert_eq!(st, STATUS_SUCCESS);
@@ -670,6 +677,7 @@ fn delete_value_tombstones_the_name_and_leaves_the_real_value() {
 
 #[test]
 fn delete_key_refuses_a_key_with_subkeys_and_marks_the_handle_deleted() {
+    isolate!();
     let (_g, f) = fixture();
     let (st, parent) = f.open(r"Del\Parent", NT_KEY_ALL_ACCESS);
     assert_eq!(st, STATUS_SUCCESS);
@@ -741,6 +749,7 @@ fn delete_key_refuses_a_key_with_subkeys_and_marks_the_handle_deleted() {
 
 #[test]
 fn rename_of_a_key_created_here_moves_it() {
+    isolate!();
     let (_g, f) = fixture();
     let (st, h, _) = create_abs(&f.nt(r"Ren\Made"), NT_KEY_ALL_ACCESS);
     assert_eq!(st, STATUS_SUCCESS);
@@ -766,6 +775,7 @@ fn rename_of_a_key_created_here_moves_it() {
 
 #[test]
 fn rename_of_a_real_key_copies_its_merged_subtree() {
+    isolate!();
     let (_g, f) = fixture();
     // Overlay changes in the subtree before the rename: a value, a deleted subkey, a volatile
     // created subkey.
@@ -851,6 +861,7 @@ fn rename_of_a_real_key_copies_its_merged_subtree() {
 
 #[test]
 fn each_write_needs_its_access_right() {
+    isolate!();
     let (_g, f) = fixture();
     let before = f.real_info("Denied");
     // A pass-through handle, and a synthetic one (the key overlaid first).
@@ -906,6 +917,7 @@ fn each_write_needs_its_access_right() {
 
 #[test]
 fn flush_and_set_information_succeed_without_touching_the_real_key() {
+    isolate!();
     let (_g, f) = fixture();
     let before = f.real_info("Info");
     let (st, h) = f.open("Info", NT_KEY_ALL_ACCESS);
@@ -933,6 +945,7 @@ fn flush_and_set_information_succeed_without_touching_the_real_key() {
 
 #[test]
 fn a_dead_director_fails_writes_and_leaves_the_real_key() {
+    isolate!();
     let (_g, f) = fixture();
     let before = f.real_info("Dead");
     let (st, h) = f.open("Dead", NT_KEY_ALL_ACCESS);
@@ -964,6 +977,7 @@ fn a_dead_director_fails_writes_and_leaves_the_real_key() {
 /// (`STATUS_ACCESS_VIOLATION`).
 #[test]
 fn an_odd_value_name_is_truncated_and_a_null_buffer_with_a_length_is_refused() {
+    isolate!();
     let (_g, f) = fixture();
     let (st, h) = f.open("Names", NT_KEY_READ | NT_KEY_SET_VALUE);
     assert_eq!(st, STATUS_SUCCESS);
@@ -1015,6 +1029,7 @@ fn an_odd_value_name_is_truncated_and_a_null_buffer_with_a_length_is_refused() {
 /// `STATUS_ACCESS_VIOLATION`; so is an absolute name. The real call never sees either.
 #[test]
 fn a_key_name_nt_refuses_is_answered_by_the_shim() {
+    isolate!();
     let (_g, f) = fixture();
     regclient::set_value(&f.canon("Names"), "o", REG_DWORD, &1u32.to_le_bytes()).unwrap();
     let (st, root) = f.open("Names", NT_KEY_READ);

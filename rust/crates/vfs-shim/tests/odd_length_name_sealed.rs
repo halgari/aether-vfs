@@ -12,6 +12,9 @@
 //!
 //! Its own binary: the detours, the `FuseClient` and the `Engine` are process-global.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use std::ffi::c_void;
@@ -98,6 +101,7 @@ fn with_odd_name<R>(path: &std::path::Path, f: impl FnOnce(*const ObjectAttribut
 
 #[test]
 fn an_odd_length_name_under_a_managed_root_is_refused_and_touches_nothing() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-odd-name-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

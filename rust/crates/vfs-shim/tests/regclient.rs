@@ -10,6 +10,9 @@
 //! no round trip" flaky rather than false.
 #![cfg(windows)]
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -55,6 +58,7 @@ fn key_path(test: &str) -> String {
 
 #[test]
 fn enabled_with_the_flag_and_a_director() {
+    isolate!();
     let (_g, _f) = fixture();
     assert!(regclient::enabled());
     assert!(regclient::global().is_some());
@@ -63,6 +67,7 @@ fn enabled_with_the_flag_and_a_director() {
 /// Every call through the process's client reaches the director and comes back decoded.
 #[test]
 fn every_call_round_trips() {
+    isolate!();
     let (_g, _f) = fixture();
     let k = key_path("RoundTrip");
 
@@ -123,6 +128,7 @@ fn every_call_round_trips() {
 /// same ring) makes it unusable for every process before that write returns.
 #[test]
 fn a_write_by_another_process_invalidates_every_cache() {
+    isolate!();
     let (_g, f) = fixture();
     let k = key_path("CrossProcess");
     let a = regclient::global().unwrap();
@@ -169,6 +175,7 @@ fn a_write_by_another_process_invalidates_every_cache() {
 /// answer cached while the layer was attached is not served after it is detached.
 #[test]
 fn no_registry_layer_fails_reads_and_writes() {
+    isolate!();
     let (_g, f) = fixture();
     let k = key_path("Detached");
     regclient::set_value(&k, "v", REG_DWORD, &1u32.to_le_bytes()).unwrap();
@@ -209,6 +216,7 @@ fn no_registry_layer_fails_reads_and_writes() {
 /// on, not an error that breaks the key.
 #[test]
 fn a_key_too_large_for_the_ring_is_a_read_failure() {
+    isolate!();
     let (_g, _f) = fixture();
     let k = key_path("TooLarge");
     // Three values that each fit a request but together overflow a 4 KiB reply.
@@ -229,6 +237,7 @@ fn a_key_too_large_for_the_ring_is_a_read_failure() {
 /// counted as fallbacks, and nothing hangs.
 #[test]
 fn a_dead_director_fails_reads_and_writes() {
+    isolate!();
     let (_g, f) = fixture();
     let dead = fakedirector::unserved_client(&f.root, Duration::from_millis(200));
     let c = RegClient::new(&dead);
@@ -249,6 +258,7 @@ fn a_dead_director_fails_reads_and_writes() {
 /// `ST_BAD_REQUEST` and never sent; one that exactly fits is sent and applied.
 #[test]
 fn a_request_too_large_for_the_ring_is_refused_unsent() {
+    isolate!();
     let (_g, f) = fixture();
     let k = key_path("Oversize");
     // `path | name | ty | len | data`, each string with a 4-byte length.

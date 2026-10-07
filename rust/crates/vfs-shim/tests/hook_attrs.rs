@@ -13,6 +13,9 @@
 //! were flipped for exactly that reason and documented at each site; the
 //! "non-virtual real file passes through" case is unchanged, since it never
 //! depended on the deleted mechanism.
+#[macro_use]
+mod common;
+
 use std::ffi::c_void;
 use vfs_shim::{install, Engine};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -26,6 +29,7 @@ fn wide(s: &str) -> Vec<u16> {
 
 #[test]
 fn attribute_queries_reflect_the_vfs() {
+    isolate!();
     let pid = std::process::id();
     let root = std::env::temp_dir().join(format!("vfs-shim-attrs-{pid}"));
     let backing_dir = root.join("backing");

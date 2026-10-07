@@ -31,6 +31,9 @@
 //! `delete_hook` — never asks the client first; that divergence is recorded in
 //! the task report, not fixed here.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 mod ntapi;
 
@@ -119,6 +122,7 @@ fn setup() -> std::path::PathBuf {
 
 #[test]
 fn a_shim_whiteout_is_neither_listed_nor_ineffective_in_a_director_listing() {
+    isolate!();
     let root = session();
     let names = list(&root.join("data"), None);
 
@@ -155,6 +159,7 @@ fn a_shim_whiteout_is_neither_listed_nor_ineffective_in_a_director_listing() {
 /// `serve_dir_query`'s director branch and only this test fails.
 #[test]
 fn the_marker_still_hides_its_target_under_a_wildcard_that_excludes_the_marker() {
+    isolate!();
     let root = session();
     let names = list(&root.join("data"), Some("*.esp"));
 

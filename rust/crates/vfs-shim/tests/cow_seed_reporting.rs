@@ -50,6 +50,9 @@
 //! The fixtures are ordinary filenames now: the name no longer selects the
 //! route, the switch does.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
@@ -63,6 +66,7 @@ const GENERIC_WRITE: u32 = 0x4000_0000;
 
 #[test]
 fn a_failed_copy_up_names_the_file_and_the_reason_in_the_stats_report() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-cowseed-report-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

@@ -5,6 +5,9 @@
 //! Its own binary: `regclient::enabled` is decided once per process, and `install` is one-shot.
 #![cfg(windows)]
 
+#[macro_use]
+mod common;
+
 use std::ffi::c_void;
 
 use vfs_shim::{
@@ -55,6 +58,7 @@ fn with_oa<R>(name: &str, f: impl FnOnce(*const ObjectAttributes) -> R) -> R {
 
 #[test]
 fn every_registry_call_is_the_real_one() {
+    isolate!();
     std::env::remove_var(vfs_env::REGISTRY);
     let root = std::env::temp_dir().join(format!("vfs-shim-regkeys-off-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();

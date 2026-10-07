@@ -27,10 +27,14 @@
 //! authoritative when a real director backs it (`serve_dir_query` in
 //! `hook/`, unchanged by this task) — no director now means no access at
 //! all, not merely "no snapshot contribution".
+#[macro_use]
+mod common;
+
 use vfs_shim::{install, Engine};
 
 #[test]
 fn read_dir_without_a_director_is_denied_outright() {
+    isolate!();
     let pid = std::process::id();
     let root = std::env::temp_dir().join(format!("vfs-shim-direnum-{pid}"));
     // Backing files live OUTSIDE the root so they do not appear in any listing.

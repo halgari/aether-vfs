@@ -10,6 +10,9 @@
 //! the way a watchdog would.
 #![cfg(windows)]
 
+#[macro_use]
+mod common;
+
 use vfs_shim::{install, Engine};
 
 const NONE: u32 = u32::MAX;
@@ -25,6 +28,7 @@ fn read_file_breadcrumb(path: &std::path::Path) -> (u32, u32, u64, u64, u32) {
 
 #[test]
 fn an_outside_reader_can_see_which_hook_the_process_is_in() {
+    isolate!();
     let pid = std::process::id();
     let dir = std::env::temp_dir().join(format!("vfs-bcrb-{pid}"));
     std::fs::create_dir_all(&dir).unwrap();

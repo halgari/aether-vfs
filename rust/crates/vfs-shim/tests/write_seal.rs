@@ -24,6 +24,9 @@
 //! nowhere else to go", but "there was somewhere else to go and it went
 //! nowhere".
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use std::io::Write;
@@ -42,6 +45,7 @@ const READ_ONLY_BYTES: &[u8] = b"served by a read-only layer";
 
 #[test]
 fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-write-seal-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

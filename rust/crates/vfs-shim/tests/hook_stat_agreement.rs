@@ -41,6 +41,9 @@
 //! always has a director, so this is a coverage gap in the test suite, not a
 //! live bypass.
 
+#[macro_use]
+mod common;
+
 use std::ffi::c_void;
 
 mod ntapi;
@@ -53,6 +56,7 @@ const SIZED_CLASSES: [u32; 3] = [34, 68, 77];
 
 #[test]
 fn every_stat_api_agrees_about_existence_and_size() {
+    isolate!();
     let pid = std::process::id();
     let base = std::env::temp_dir().join(format!("vfs-shim-statagree-{pid}"));
     let root = base.join("gameroot");

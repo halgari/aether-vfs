@@ -20,10 +20,14 @@
 //! concurrently in one process would fight. Every hook test in this crate is a
 //! single-test binary for that reason.
 
+#[macro_use]
+mod common;
+
 use vfs_shim::{install, skipped_detours, Engine};
 
 #[test]
 fn a_successful_install_skips_no_detour_on_windows() {
+    isolate!();
     // The registry overlay's detours go in only with `VFS_REGISTRY` set; set it so they are
     // covered too. With no director attached the overlay stays off and they pass through.
     std::env::set_var(vfs_env::REGISTRY, "1");

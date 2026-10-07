@@ -14,6 +14,9 @@
 //! single-test binary for that reason.
 #![cfg(windows)]
 
+#[macro_use]
+mod common;
+
 use vfs_shim::{install, Engine};
 use windows_sys::Win32::Foundation::HANDLE;
 
@@ -50,6 +53,7 @@ fn object_name(h: HANDLE) -> String {
 
 #[test]
 fn an_untracked_handle_is_untouched() {
+    isolate!();
     // NtQueryObject answers about events, mutexes and keys too. A handle the
     // shim knows nothing about must pass through with the host's own answer, or
     // the hook breaks unrelated Windows APIs.

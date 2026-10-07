@@ -16,6 +16,9 @@
 //! Every test takes [`LOCK`]: they share one director, and one of them detaches its registry.
 #![cfg(windows)]
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use std::ffi::c_void;
@@ -621,6 +624,7 @@ fn lw_of(a: &Ans) -> u64 {
 
 #[test]
 fn query_key_answers_like_the_equivalent_real_key() {
+    isolate!();
     let (_g, f) = fixture();
     let m = f.open(r"M\Merge", NT_KEY_READ);
     let x = f.open(r"X\Merge", NT_KEY_READ);
@@ -661,6 +665,7 @@ fn NtCloseAll(hs: &[isize]) {
 
 #[test]
 fn query_key_partial_buffers_follow_the_layout() {
+    isolate!();
     let (_g, f) = fixture();
     let m = f.open(r"M\Merge", NT_KEY_READ);
     let lw = lw_of(&qkey(m, 0, 512));
@@ -694,6 +699,7 @@ fn query_key_partial_buffers_follow_the_layout() {
 
 #[test]
 fn classes_the_layout_does_not_own_go_to_the_real_key() {
+    isolate!();
     let (_g, f) = fixture();
     let m = f.open(r"M\Merge", NT_KEY_READ);
     let x = f.open(r"X\Merge", NT_KEY_READ);
@@ -734,6 +740,7 @@ fn classes_the_layout_does_not_own_go_to_the_real_key() {
 
 #[test]
 fn enumerate_key_lists_real_then_created_subkeys_minus_tombstones() {
+    isolate!();
     let (_g, f) = fixture();
     let m = f.open(r"M\Merge", NT_KEY_READ);
     let x = f.open(r"X\Merge", NT_KEY_READ);
@@ -804,6 +811,7 @@ fn enumerate_key_lists_real_then_created_subkeys_minus_tombstones() {
 
 #[test]
 fn enumerate_value_key_lists_overlay_then_real_values_minus_tombstones() {
+    isolate!();
     let (_g, f) = fixture();
     let m = f.open(r"M\Merge", NT_KEY_READ);
     let x = f.open(r"X\Merge", NT_KEY_READ);
@@ -853,6 +861,7 @@ fn enumerate_value_key_lists_overlay_then_real_values_minus_tombstones() {
 
 #[test]
 fn query_value_key_takes_the_overlay_then_the_real_key() {
+    isolate!();
     let (_g, f) = fixture();
     let m = f.open(r"M\Merge", NT_KEY_READ);
     let x = f.open(r"X\Merge", NT_KEY_READ);
@@ -959,6 +968,7 @@ fn qmulti(h: isize, names: &[&str], len: usize) -> (i32, Vec<ValueEntry>, Vec<u8
 
 #[test]
 fn query_multiple_value_key_follows_the_layout() {
+    isolate!();
     let (_g, f) = fixture();
     let m = f.open(r"M\Merge", NT_KEY_READ);
     let vals = merged_values();
@@ -992,6 +1002,7 @@ fn query_multiple_value_key_follows_the_layout() {
 
 #[test]
 fn a_key_created_again_hides_the_real_contents() {
+    isolate!();
     let (_g, f) = fixture();
     let r = f.open("Revived", NT_KEY_READ);
     assert!(is_synthetic_key_handle(r));
@@ -1012,6 +1023,7 @@ fn a_key_created_again_hides_the_real_contents() {
 
 #[test]
 fn a_handle_to_a_key_deleted_in_the_overlay_reports_it_deleted() {
+    isolate!();
     let (_g, f) = fixture();
     let d = f.open("Doomed", NT_KEY_READ);
     assert!(is_synthetic_key_handle(d));
@@ -1026,6 +1038,7 @@ fn a_handle_to_a_key_deleted_in_the_overlay_reports_it_deleted() {
 
 #[test]
 fn a_pass_through_handle_is_the_real_key_until_its_path_is_touched() {
+    isolate!();
     let (_g, f) = fixture();
     // Untouched: the real key, unchanged.
     let before = registry_enum_states();
@@ -1074,6 +1087,7 @@ fn a_pass_through_handle_is_the_real_key_until_its_path_is_touched() {
 
 #[test]
 fn a_synthetic_handle_needs_the_right_for_each_query() {
+    isolate!();
     let (_g, f) = fixture();
     let e = f.open("Access", KEY_ENUMERATE_SUB_KEYS);
     assert!(is_synthetic_key_handle(e));
@@ -1100,6 +1114,7 @@ fn a_synthetic_handle_needs_the_right_for_each_query() {
 
 #[test]
 fn enumeration_sees_live_overlay_changes_and_close_drops_its_snapshot() {
+    isolate!();
     let (_g, f) = fixture();
     let before = registry_enum_states();
     let l = f.open("Live", NT_KEY_READ);
@@ -1125,6 +1140,7 @@ fn enumeration_sees_live_overlay_changes_and_close_drops_its_snapshot() {
 
 #[test]
 fn a_failing_director_answers_from_the_real_key() {
+    isolate!();
     let (_g, f) = fixture();
     let d = f.open("Down", NT_KEY_READ);
     let e = f.open("Down", KEY_ENUMERATE_SUB_KEYS);
@@ -1145,6 +1161,7 @@ fn a_failing_director_answers_from_the_real_key() {
 
 #[test]
 fn a_handle_opened_before_the_hooks_is_merged_too() {
+    isolate!();
     let (_g, f) = fixture();
     // kernelbase's HKEY_CURRENT_USER is a real handle opened before the hooks went in: neither
     // table knows it, so its path comes from the real key's name.
@@ -1170,6 +1187,7 @@ fn a_handle_opened_before_the_hooks_is_merged_too() {
 
 #[test]
 fn a_node_too_large_to_read_enumerates_the_real_key_alone() {
+    isolate!();
     let (_g, f) = fixture();
     let h = f.open("TooBig", NT_KEY_READ);
     assert!(is_synthetic_key_handle(h));
@@ -1192,6 +1210,7 @@ fn a_node_too_large_to_read_enumerates_the_real_key_alone() {
 
 #[test]
 fn a_handle_opened_before_the_hooks_is_recorded_with_its_granted_access() {
+    isolate!();
     let (_g, f) = fixture();
     // First sight: resolved from its name, recorded as pass-through with the kernel's access.
     assert_eq!(vfs_shim::registry_handle_path(f.pre), None);
@@ -1215,6 +1234,7 @@ fn a_handle_opened_before_the_hooks_is_recorded_with_its_granted_access() {
 
 #[test]
 fn full_needs_only_query_value_even_when_the_key_refuses_key_read() {
+    isolate!();
     let (_g, f) = fixture();
     assert!(
         f.limited_as_expected,

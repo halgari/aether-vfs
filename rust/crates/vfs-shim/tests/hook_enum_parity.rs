@@ -57,6 +57,9 @@
 //! the virtual path tracked for the open (and so what the snapshot/overlay-
 //! listing logic reasons about) is still `root\Data`, unaffected.
 
+#[macro_use]
+mod common;
+
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 
@@ -65,6 +68,7 @@ use ntapi::*;
 
 #[test]
 fn classic_and_ex_enumeration_agree() {
+    isolate!();
     let pid = std::process::id();
     let base = std::env::temp_dir().join(format!("vfs-shim-enumparity-{pid}"));
     let root = base.join("gameroot");

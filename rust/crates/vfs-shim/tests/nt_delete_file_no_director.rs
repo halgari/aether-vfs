@@ -27,6 +27,9 @@
 //! whole subject is the branch taken when `director::global()` is `None`,
 //! and that client is process-global and initialise-once.
 
+#[macro_use]
+mod common;
+
 mod ntapi;
 
 use vfs_redirect::RootId;
@@ -41,6 +44,7 @@ const STATUS_ACCESS_DENIED: i32 = 0xC000_0022u32 as i32;
 
 #[test]
 fn a_path_based_delete_is_contained_by_the_overlay_when_no_director_answers() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-ntdelete-nodir-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

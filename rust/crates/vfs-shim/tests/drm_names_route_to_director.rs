@@ -38,6 +38,9 @@
 //! Its own binary: the detours, the `FuseClient`, the `Engine` and
 //! `hookstats::enabled()` are process-global and resolve once.
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
@@ -80,6 +83,7 @@ const NAMES: &[(&str, &str, &[u8])] = &[
 
 #[test]
 fn the_drm_names_are_answered_by_the_director_and_never_by_the_real_file() {
+    isolate!();
     let base = std::env::temp_dir().join(format!("vfs-drm-close-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");

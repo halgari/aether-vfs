@@ -12,6 +12,9 @@
 //! Every test takes [`LOCK`]: they share one director, and one of them detaches its registry.
 #![cfg(windows)]
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use std::ffi::c_void;
@@ -408,6 +411,7 @@ fn real(h: isize) -> bool {
 
 #[test]
 fn an_untouched_key_gives_the_real_handle() {
+    isolate!();
     let (_g, f) = fixture();
     let (st, h) = f.open("Untouched", NT_KEY_READ);
     assert_eq!(st, STATUS_SUCCESS);
@@ -452,6 +456,7 @@ fn an_untouched_key_gives_the_real_handle() {
 
 #[test]
 fn a_key_with_overlay_content_gives_a_synthetic_handle() {
+    isolate!();
     let (_g, f) = fixture();
     regclient::set_value(&f.canon("Overlaid"), "Fov", 4, &90u32.to_le_bytes()).unwrap();
 
@@ -494,6 +499,7 @@ fn a_key_with_overlay_content_gives_a_synthetic_handle() {
 
 #[test]
 fn an_overlay_only_key_opens_and_a_tombstoned_key_is_not_found() {
+    isolate!();
     let (_g, f) = fixture();
     regclient::create_key(&f.canon("OnlyHere"), false).unwrap();
     let (st, h) = f.open("OnlyHere", NT_KEY_READ);
@@ -516,6 +522,7 @@ fn an_overlay_only_key_opens_and_a_tombstoned_key_is_not_found() {
 
 #[test]
 fn create_reports_dispositions_and_never_creates_a_real_key() {
+    isolate!();
     let (_g, f) = fixture();
 
     // A key that exists for real: the real key, opened.
@@ -588,6 +595,7 @@ fn create_reports_dispositions_and_never_creates_a_real_key() {
 
 #[test]
 fn a_write_open_the_real_key_refuses_gets_a_synthetic_handle() {
+    isolate!();
     let (_g, f) = fixture();
     assert!(
         f.locked_refuses_write,
@@ -615,6 +623,7 @@ fn a_write_open_the_real_key_refuses_gets_a_synthetic_handle() {
 
 #[test]
 fn duplicates_are_tracked_and_closes_release_them() {
+    isolate!();
     let (_g, f) = fixture();
     regclient::set_value(&f.canon("Dup"), "v", 4, &1u32.to_le_bytes()).unwrap();
     let before = vfs_shim::registry_handle_counts();
@@ -706,6 +715,7 @@ fn duplicates_are_tracked_and_closes_release_them() {
 
 #[test]
 fn the_object_name_of_a_synthetic_key_is_its_nt_name() {
+    isolate!();
     let (_g, f) = fixture();
     regclient::set_value(&f.canon("Overlaid"), "Fov", 4, &90u32.to_le_bytes()).unwrap();
     let (_, s) = f.open("Overlaid", NT_KEY_READ);
@@ -745,6 +755,7 @@ fn the_object_name_of_a_synthetic_key_is_its_nt_name() {
 
 #[test]
 fn a_root_that_names_no_key_is_passed_through_and_counted() {
+    isolate!();
     let (_g, _f) = fixture();
     use windows_sys::Win32::System::Threading::CreateEventW;
     let ev = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) } as isize;
@@ -758,6 +769,7 @@ fn a_root_that_names_no_key_is_passed_through_and_counted() {
 
 #[test]
 fn a_failing_director_reads_the_real_registry_and_refuses_creates() {
+    isolate!();
     let (_g, f) = fixture();
     regclient::set_value(&f.canon("Overlaid"), "Fov", 4, &90u32.to_le_bytes()).unwrap();
     let host = f.fake.director().registry().unwrap();
@@ -792,6 +804,7 @@ fn a_failing_director_reads_the_real_registry_and_refuses_creates() {
 
 #[test]
 fn an_overlay_node_with_no_real_key_opens_and_takes_children() {
+    isolate!();
     let (_g, f) = fixture();
     // A value written to a key that does not exist for real: an overlay node that overlays a
     // real key (created:false) whose real key is missing. It exists in the merged view.
@@ -814,6 +827,7 @@ fn an_overlay_node_with_no_real_key_opens_and_takes_children() {
 
 #[test]
 fn a_key_that_refuses_key_read_is_read_with_the_callers_own_rights() {
+    isolate!();
     let (_g, f) = fixture();
     assert!(
         f.read_limited_refuses_key_read,
@@ -852,6 +866,7 @@ fn a_key_that_refuses_key_read_is_read_with_the_callers_own_rights() {
 /// with this handle's own access and attributes, and the handle flags.
 #[test]
 fn a_synthetic_key_answers_type_basic_and_handle_flag_queries() {
+    isolate!();
     let (_g, f) = fixture();
     regclient::set_value(&f.canon("Overlaid"), "Fov", 4, &90u32.to_le_bytes()).unwrap();
     regclient::create_key(&f.canon("TypeOnlyHere"), false).ok();
@@ -913,6 +928,7 @@ fn a_synthetic_key_answers_type_basic_and_handle_flag_queries() {
 
 #[test]
 fn a_failed_duplicate_with_close_source_drops_the_record() {
+    isolate!();
     let (_g, f) = fixture();
     let (_, r) = f.open("Untouched", NT_KEY_READ);
     assert!(registry_handle_path(r).is_some());
@@ -940,6 +956,7 @@ fn a_failed_duplicate_with_close_source_drops_the_record() {
 /// would leak, one per frame.
 #[test]
 fn reg_close_key_releases_synthetic_handles() {
+    isolate!();
     let (_g, f) = fixture();
     regclient::set_value(&f.canon("PerFrame"), "Seed", 4, &0u32.to_le_bytes()).unwrap();
     let before = vfs_shim::registry_handle_counts();

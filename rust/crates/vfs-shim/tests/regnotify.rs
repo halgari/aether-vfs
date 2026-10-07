@@ -14,6 +14,9 @@
 //! Every test takes [`LOCK`]: they share one director, and one of them detaches its registry.
 #![cfg(windows)]
 
+#[macro_use]
+mod common;
+
 mod fakedirector;
 
 use std::ffi::c_void;
@@ -577,6 +580,7 @@ fn reg_checker() {
 
 #[test]
 fn a_notify_on_a_synthetic_key_fires_on_an_overlay_write() {
+    isolate!();
     let (_g, f) = fixture();
     f.touch("Syn");
     let h = f.open("Syn", NT_KEY_READ);
@@ -621,6 +625,7 @@ fn a_notify_on_a_synthetic_key_fires_on_an_overlay_write() {
 
 #[test]
 fn a_notify_with_an_apc_runs_it_on_the_calling_thread() {
+    isolate!();
     let (_g, f) = fixture();
     f.touch("Apc");
     let h = f.open("Apc", NT_KEY_READ | NT_KEY_SET_VALUE);
@@ -684,6 +689,7 @@ fn a_notify_with_an_apc_runs_it_on_the_calling_thread() {
 
 #[test]
 fn a_notify_on_a_pass_through_key_fires_on_a_write_through_the_same_handle() {
+    isolate!();
     let (_g, f) = fixture();
     let before = f.real_info("Pass");
     let h = f.open("Pass", NT_KEY_READ | NT_KEY_SET_VALUE);
@@ -702,6 +708,7 @@ fn a_notify_on_a_pass_through_key_fires_on_a_write_through_the_same_handle() {
 
 #[test]
 fn watch_tree_sees_subkey_writes_and_a_plain_watch_does_not() {
+    isolate!();
     let (_g, f) = fixture();
     // The subkey is in the overlay before the watches start, so the write below changes only
     // the subkey (the first overlay touch of a real subkey also adds it to its parent's list).
@@ -734,6 +741,7 @@ fn watch_tree_sees_subkey_writes_and_a_plain_watch_does_not() {
 
 #[test]
 fn closing_the_handle_ends_a_pending_notify_with_notify_cleanup() {
+    isolate!();
     let (_g, f) = fixture();
     f.touch("Close");
     let h = f.open("Close", NT_KEY_READ);
@@ -766,6 +774,7 @@ fn closing_the_handle_ends_a_pending_notify_with_notify_cleanup() {
 
 #[test]
 fn a_synchronous_notify_blocks_until_a_change_or_a_close() {
+    isolate!();
     let (_g, f) = fixture();
     let sync_notify = |h: isize| {
         std::thread::spawn(move || {
@@ -808,6 +817,7 @@ fn a_synchronous_notify_blocks_until_a_change_or_a_close() {
 
 #[test]
 fn notify_change_multiple_keys_refuses_subordinate_keys_on_a_served_key() {
+    isolate!();
     let (_g, f) = fixture();
     f.touch("Multi");
     let h = f.open("Multi", NT_KEY_READ | NT_KEY_SET_VALUE);
@@ -857,6 +867,7 @@ fn notify_change_multiple_keys_refuses_subordinate_keys_on_a_served_key() {
 
 #[test]
 fn a_waiter_rides_out_a_director_failure_without_firing() {
+    isolate!();
     let (_g, f) = fixture();
     let host = f.fake.director().registry().unwrap();
     f.fake.director().set_registry(None);
@@ -988,6 +999,7 @@ fn assert_writes_refused(f: &Fixture, h: isize, root: isize, name: &str) {
 
 #[test]
 fn the_out_of_scope_calls_are_refused_on_keys_the_overlay_serves() {
+    isolate!();
     let (_g, f) = fixture();
     // A synthetic key: every one of them.
     f.touch("Unsup");
@@ -1130,6 +1142,7 @@ fn sddl(s: &str) -> *mut c_void {
 
 #[test]
 fn security_on_a_synthetic_key_is_the_real_keys_and_a_set_is_ignored() {
+    isolate!();
     let (_g, f) = fixture();
     let set: SetSecurityFn = ntfn("NtSetSecurityObject");
     // The real key's descriptor, through a real handle before the overlay touches it.
@@ -1197,6 +1210,7 @@ fn security_on_a_synthetic_key_is_the_real_keys_and_a_set_is_ignored() {
 
 #[test]
 fn handle_flags_on_a_synthetic_key_round_trip() {
+    isolate!();
     let (_g, f) = fixture();
     let set_info: unsafe extern "system" fn(isize, u32, *const u8, u32) -> i32 =
         ntfn("NtSetInformationObject");
@@ -1258,6 +1272,7 @@ fn handle_flags_on_a_synthetic_key_round_trip() {
 
 #[test]
 fn the_stats_report_has_the_registry_rows() {
+    isolate!();
     let (_g, f) = fixture();
     // Something for each row to count.
     f.touch("Syn");
@@ -1293,6 +1308,7 @@ fn the_stats_report_has_the_registry_rows() {
 
 #[test]
 fn a_caller_that_closes_its_event_first_gets_nothing_else_signalled() {
+    isolate!();
     let (_g, f) = fixture();
     let h = f.open("EvGone", NT_KEY_READ | NT_KEY_SET_VALUE);
     let ev = event();
@@ -1325,6 +1341,7 @@ fn a_caller_that_closes_its_event_first_gets_nothing_else_signalled() {
 
 #[test]
 fn a_real_handle_protected_from_close_keeps_its_notification() {
+    isolate!();
     let (_g, f) = fixture();
     let h = f.open("Protect", NT_KEY_READ | NT_KEY_SET_VALUE);
     assert!(!is_synthetic_key_handle(h));
@@ -1365,6 +1382,7 @@ fn a_real_handle_protected_from_close_keeps_its_notification() {
 
 #[test]
 fn a_synchronous_notify_under_the_loader_lock_is_refused() {
+    isolate!();
     const STATUS_POSSIBLE_DEADLOCK: i32 = 0xC000_0194u32 as i32;
     let (_g, f) = fixture();
     let h = f.open("Loader", NT_KEY_READ);

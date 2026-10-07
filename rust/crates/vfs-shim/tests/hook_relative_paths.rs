@@ -62,6 +62,9 @@
 //! (`Data/Sub/added2.esm`) restores it below for the CWD-relative and
 //! handle-relative sections, alongside the single-component checks that flip
 //! for Task 4's reasons.
+#[macro_use]
+mod common;
+
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 
@@ -77,6 +80,7 @@ const PAYLOAD2: &[u8] = b"multi-component-relative-bytes";
 
 #[test]
 fn relative_names_resolve_on_every_decoding_hook() {
+    isolate!();
     let pid = std::process::id();
     let base = std::env::temp_dir().join(format!("vfs-shim-relpath-{pid}"));
     let root = base.join("gameroot");

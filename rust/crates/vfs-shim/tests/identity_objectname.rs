@@ -10,6 +10,9 @@
 //! `identity_objectname_untracked.rs` rather than beside this test.
 #![cfg(windows)]
 
+#[macro_use]
+mod common;
+
 use vfs_shim::{install, Engine};
 use windows_sys::Win32::Foundation::HANDLE;
 
@@ -50,6 +53,7 @@ fn object_name(h: HANDLE) -> String {
 
 #[test]
 fn a_redirected_handle_reports_its_virtual_name_not_the_backing_one() {
+    isolate!();
     let pid = std::process::id();
     let root = std::env::temp_dir().join(format!("vfs-objname-{pid}"));
     let backing_dir = std::env::temp_dir().join(format!("vfs-objname-backing-{pid}"));
