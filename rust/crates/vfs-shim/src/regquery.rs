@@ -480,22 +480,10 @@ fn node_of(p: &str) -> Result<Option<Node>, NTSTATUS> {
     regclient::key(p).map_err(|_| STATUS_UNSUCCESSFUL)
 }
 
-/// The caller's `UNICODE_STRING`, `None` for a NULL pointer or buffer.
-unsafe fn read_us(us: *const UnicodeString) -> Option<String> {
-    if us.is_null() {
-        return None;
-    }
-    let us = &*us;
-    if us.length == 0 {
-        return Some(String::new());
-    }
-    if us.buffer.is_null() {
-        return None;
-    }
-    Some(String::from_utf16_lossy(core::slice::from_raw_parts(
-        us.buffer,
-        us.length as usize / 2,
-    )))
+/// The caller's `UNICODE_STRING` as a value name: a NULL pointer is `STATUS_ACCESS_VIOLATION`,
+/// as are the other shapes `ntbuf::us_units` rejects (an odd length is `STATUS_OBJECT_NAME_INVALID`).
+unsafe fn read_us(us: *const UnicodeString) -> Result<String, NTSTATUS> {
+    crate::ntbuf::us_string(us)?.ok_or(STATUS_ACCESS_VIOLATION)
 }
 
 // ---- NtQueryKey ----
@@ -587,7 +575,7 @@ unsafe fn merged_key_info(
                     .query
                     .map_or(st, |q| q(r as HANDLE, kc as u32, info, len, ret)),
                 None => STATUS_KEY_DELETED,
-            }
+            };
         }
     };
     let (real_key, real_name) = match read {
@@ -1013,8 +1001,9 @@ pub unsafe fn query_value_key(
     if let Err(st) = check(&ctx, KEY_QUERY_VALUE) {
         return st;
     }
-    let Some(vname) = read_us(name) else {
-        return STATUS_ACCESS_VIOLATION;
+    let vname = match read_us(name) {
+        Ok(v) => v,
+        Err(st) => return st,
     };
     let f = fold(&vname);
     // The director lost since the lookup: the real key alone (counted by `regclient`).
@@ -1099,8 +1088,8 @@ pub unsafe fn query_multiple_value_key(
     for i in 0..n {
         let us = core::ptr::read_unaligned(slot(i) as *const *const UnicodeString);
         match read_us(us) {
-            Some(s) => names.push(s),
-            None => return STATUS_ACCESS_VIOLATION,
+            Ok(s) => names.push(s),
+            Err(st) => return st,
         }
     }
     let folded: Vec<String> = names.iter().map(|s| fold(s)).collect();

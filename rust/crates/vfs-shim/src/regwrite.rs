@@ -157,21 +157,9 @@ fn done(r: Result<(), NTSTATUS>) -> Write {
     })
 }
 
-/// The caller's `UNICODE_STRING` as UTF-16 units: `Ok(None)` for a NULL pointer. An odd length
-/// drops its last byte, as Windows reads it.
+/// The caller's `UNICODE_STRING` as UTF-16 units: `Ok(None)` for a NULL pointer.
 unsafe fn units<'a>(us: *const UnicodeString) -> Result<Option<&'a [u16]>, NTSTATUS> {
-    if us.is_null() {
-        return Ok(None);
-    }
-    let us = &*us;
-    let n = us.length as usize / 2;
-    if n == 0 {
-        return Ok(Some(&[]));
-    }
-    if us.buffer.is_null() {
-        return Err(STATUS_ACCESS_VIOLATION);
-    }
-    Ok(Some(core::slice::from_raw_parts(us.buffer, n)))
+    crate::ntbuf::us_units(us)
 }
 
 fn gone(st: NTSTATUS) -> bool {

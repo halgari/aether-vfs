@@ -14,6 +14,7 @@ mod hook;
 mod hookstats;
 mod inject;
 mod lazy_section;
+mod ntbuf;
 mod ntdef;
 mod overlay;
 mod read_cache;

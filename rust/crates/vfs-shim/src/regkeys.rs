@@ -850,17 +850,15 @@ pub unsafe fn open_or_create(
         return passthrough(pass);
     }
     let oa_ref = &*oa;
-    let us = &*oa_ref.object_name;
-    let name = if us.buffer.is_null() || us.length == 0 {
-        String::new()
-    } else {
-        String::from_utf16_lossy(core::slice::from_raw_parts(
-            us.buffer,
-            us.length as usize / 2,
-        ))
-    };
     let root = oa_ref.root_directory as isize;
     let root_synth = is_synthetic(root);
+    // A name NT would refuse (odd length, NULL buffer with a length) is the real call's to
+    // refuse; a synthetic root has no real call to hand it to, so it gets the status.
+    let name = match crate::ntbuf::us_string(oa_ref.object_name) {
+        Ok(n) => n.unwrap_or_default(),
+        Err(st) if root_synth => return Outcome::fail(st),
+        Err(_) => return passthrough(pass),
+    };
     let base = if root == 0 {
         None
     } else {
@@ -1604,19 +1602,11 @@ pub unsafe fn serves_target(real: &Real, oa: *const ObjectAttributes) -> Serves 
     if is_synthetic(root) {
         return Serves::Yes;
     }
-    let name = if oa_ref.object_name.is_null() {
-        String::new()
-    } else {
-        let us = &*oa_ref.object_name;
-        if us.buffer.is_null() || us.length == 0 {
-            String::new()
-        } else {
-            String::from_utf16_lossy(core::slice::from_raw_parts(
-                us.buffer,
-                us.length as usize / 2,
-            ))
-        }
+    // A name NT would refuse is served by nobody: the real call refuses it.
+    let Ok(name) = crate::ntbuf::us_string(oa_ref.object_name) else {
+        return Serves::No;
     };
+    let name = name.unwrap_or_default();
     let base = if root == 0 {
         None
     } else {

@@ -2590,21 +2590,11 @@ out_of_scope_body! {
         RestoreKey, TRAMP_RESTORE_KEY, modifies = true, refuse = served_key(key);
 }
 
-/// Decode ObjectName as UTF-16 (no root resolution).
+/// Decode ObjectName as UTF-16 (no root resolution). `None` for a NULL `oa` or `ObjectName`,
+/// and for a name `ntbuf::us_units` rejects (odd length, NULL buffer with a length): such a call
+/// is left to the real syscall to refuse.
 unsafe fn object_name_str(oa: *const ObjectAttributes) -> Option<String> {
-    if oa.is_null() {
-        return None;
-    }
-    let oa_ref = &*oa;
-    if oa_ref.object_name.is_null() {
-        return None;
-    }
-    let us = &*oa_ref.object_name;
-    if us.buffer.is_null() {
-        return None;
-    }
-    let units = core::slice::from_raw_parts(us.buffer, us.length as usize / 2);
-    Some(String::from_utf16_lossy(units))
+    crate::ntbuf::oa_name_string(oa).ok().flatten()
 }
 
 /// The process's current-directory handle and its DOS path, read from the PEB.
@@ -2714,15 +2704,6 @@ unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<(String, bool)> {
     // must say so too (`vfs_redirect::UncachedScope`), or the decision could
     // be cached under a string that stops being true later in the session.
     Some((resolved, true))
-}
-
-/// The `ObjectAttributes` name field alone, ignoring `RootDirectory`. Used only
-/// to describe an open we could not resolve to a full path.
-unsafe fn oa_name_only(oa: *const ObjectAttributes) -> Option<String> {
-    if oa.is_null() {
-        return None;
-    }
-    object_name_str(oa)
 }
 
 /// A path decoded from an `OBJECT_ATTRIBUTES`, tagged with whether decoding it
@@ -3783,7 +3764,7 @@ unsafe fn create_hook_body(
         Some(p) => crate::hookstats::note_passthrough(p),
         // An open we cannot decode is an open we cannot serve. If the masters
         // are hiding anywhere, it is here.
-        None => crate::hookstats::note_undecodable(oa_name_only(oa).as_deref()),
+        None => crate::hookstats::note_undecodable(object_name_str(oa).as_deref()),
     }
     // Set by `try_fuse_create` when it already recorded an outcome (the write
     // fallback — the DRM exception was the other one and is gone) for this
@@ -4063,7 +4044,7 @@ unsafe fn open_hook_body(
 
     match path {
         Some(p) => crate::hookstats::note_passthrough(p),
-        None => crate::hookstats::note_undecodable(oa_name_only(oa).as_deref()),
+        None => crate::hookstats::note_undecodable(object_name_str(oa).as_deref()),
     }
     // Set by `try_fuse_create` when it already recorded an outcome (the write
     // fallback — the DRM exception was the other one and is gone) for this
@@ -4641,7 +4622,7 @@ unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
         // An undecodable delete is an undecodable open by another name: it
         // bypasses every decision we would have made. Recorded rather than
         // silently trampolined, so it shows up in the same place.
-        crate::hookstats::note_undecodable(oa_name_only(oa).as_deref());
+        crate::hookstats::note_undecodable(object_name_str(oa).as_deref());
         return tramp(oa);
     };
 
@@ -5914,7 +5895,7 @@ unsafe fn qobj_hook_body(
             Some(Err(st)) => return st,
             Some(Ok(name)) => {
                 return emit_object_name(&name, info, length, ret_len)
-                    .unwrap_or(STATUS_OBJECT_NAME_INVALID)
+                    .unwrap_or(STATUS_OBJECT_NAME_INVALID);
             }
         }
     }
@@ -6765,22 +6746,9 @@ unsafe fn cpiw_hook_body(
 }
 
 /// Extract a search wildcard from a `PUNICODE_STRING`. Null/empty/`*`/`*.*`
-/// mean "match everything" (`None`).
-unsafe fn wildcard_of(file_name: *const UnicodeString) -> Option<String> {
-    if file_name.is_null() {
-        return None;
-    }
-    let us = &*file_name;
-    if us.buffer.is_null() || us.length == 0 {
-        return None;
-    }
-    let units = core::slice::from_raw_parts(us.buffer, us.length as usize / 2);
-    let s = String::from_utf16_lossy(units);
-    if s.is_empty() || s == "*" || s == "*.*" {
-        None
-    } else {
-        Some(s)
-    }
+/// mean "match everything" (`Ok(None)`). A string `ntbuf::us_units` rejects is `Err`.
+unsafe fn wildcard_of(file_name: *const UnicodeString) -> Result<Option<String>, NTSTATUS> {
+    Ok(crate::ntbuf::us_string(file_name)?.filter(|s| !(s.is_empty() || s == "*" || s == "*.*")))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6892,7 +6860,7 @@ unsafe fn serve_dir_query(
                     let dir = path_of_handle(handle).unwrap_or_else(|| "<unknown>".to_string());
                     crate::hookstats::note_readdir(
                         &dir,
-                        wildcard_of(file_name).as_deref(),
+                        wildcard_of(file_name).ok().flatten().as_deref(),
                         0,
                         crate::hookstats::ReadDirSource::Os,
                     );
@@ -6991,7 +6959,10 @@ unsafe fn serve_dir_query(
     // The ring round trip and the overlay's own `read_dir` both call out, so
     // the lock must NOT be held here (NtClose also takes it).
     let rebuilt = if need_build {
-        let wildcard = wildcard_of(file_name);
+        // A wildcard the kernel's own capture would refuse is the real call's to judge.
+        let Ok(wildcard) = wildcard_of(file_name) else {
+            return passthrough();
+        };
         let routed = crate::fuse_client::global()
             .and_then(|c| c.vpath_under_root(&dir_path).map(|hit| (c, hit)));
         match routed {
@@ -7110,7 +7081,7 @@ unsafe fn serve_dir_query(
         if let Some((entries, source)) = rebuilt {
             crate::hookstats::note_readdir(
                 &dir_path,
-                wildcard_of(file_name).as_deref(),
+                wildcard_of(file_name).ok().flatten().as_deref(),
                 entries.len(),
                 source,
             );

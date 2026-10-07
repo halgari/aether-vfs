@@ -688,6 +688,33 @@ pub fn utf16_to_string(units: &[u16]) -> String {
     String::from_utf16_lossy(units)
 }
 
+/// Why a `UNICODE_STRING` header cannot be read as a counted UTF-16 string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountedErr {
+    /// `Length` is odd. NT rejects it (`STATUS_OBJECT_NAME_INVALID`) rather than dropping the
+    /// last byte.
+    OddLength,
+    /// `Buffer` is NULL while `Length` says there are characters (`STATUS_ACCESS_VIOLATION`).
+    NullBuffer,
+}
+
+/// The number of UTF-16 units a `UNICODE_STRING` with this `Length` (in bytes) and
+/// buffer-nullness holds, by NT's rules: an odd length is invalid, a zero length is the empty
+/// string whether or not `Buffer` is NULL, and a NULL `Buffer` with a non-zero length is a bad
+/// pointer. The odd-length check comes first, as the kernel's capture does it before probing.
+pub fn counted_units(length_bytes: u16, buffer_is_null: bool) -> Result<usize, CountedErr> {
+    if length_bytes & 1 != 0 {
+        return Err(CountedErr::OddLength);
+    }
+    if length_bytes == 0 {
+        return Ok(0);
+    }
+    if buffer_is_null {
+        return Err(CountedErr::NullBuffer);
+    }
+    Ok(length_bytes as usize / 2)
+}
+
 /// Encode a `&str` as UTF-16 with NO trailing NUL (`UNICODE_STRING` is counted).
 pub fn string_to_utf16(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
@@ -1196,6 +1223,25 @@ mod tests {
         assert_eq!(utf16_to_string(&string_to_utf16(s)), s);
         // No trailing NUL is appended.
         assert_eq!(*string_to_utf16("ab").last().unwrap(), b'b' as u16);
+    }
+
+    #[test]
+    fn counted_units_follows_nt_rules() {
+        // Even length, buffer present: the unit count.
+        assert_eq!(counted_units(8, false), Ok(4));
+        // Zero length is the empty string, with or without a buffer.
+        assert_eq!(counted_units(0, false), Ok(0));
+        assert_eq!(counted_units(0, true), Ok(0));
+        // An odd length is invalid, never rounded down; it is checked before the buffer.
+        assert_eq!(counted_units(7, false), Err(CountedErr::OddLength));
+        assert_eq!(counted_units(1, true), Err(CountedErr::OddLength));
+        // A NULL buffer with characters promised is a bad pointer.
+        assert_eq!(counted_units(2, true), Err(CountedErr::NullBuffer));
+        assert_eq!(
+            counted_units(u16::MAX - 1, true),
+            Err(CountedErr::NullBuffer)
+        );
+        assert_eq!(counted_units(u16::MAX, false), Err(CountedErr::OddLength));
     }
 
     #[test]
