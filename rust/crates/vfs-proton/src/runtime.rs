@@ -201,6 +201,18 @@ pub fn installed_dirs(root: &Root) -> io::Result<Vec<(String, std::path::PathBuf
     Ok(found)
 }
 
+/// The directory of the newest verified runtime under `root.runtimes()`, or
+/// `None` when none is installed: the runtime a launch uses, so a host that
+/// wants to know "which runtime" asks here rather than re-deriving it from
+/// [`installed_dirs`]. The directory is the one found, never re-joined from
+/// the tag (see [`installed_dirs`]).
+pub fn newest_installed(root: &Root) -> io::Result<Option<std::path::PathBuf>> {
+    Ok(installed_dirs(root)?
+        .into_iter()
+        .next()
+        .map(|(_tag, dir)| dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +371,22 @@ mod tests {
             installed_dirs(&root).unwrap(),
             vec![("GE-Proton11-7".to_string(), link)],
             "listed at the link (never canonicalized); the dangling link is skipped"
+        );
+    }
+
+    #[test]
+    fn newest_installed_is_the_first_of_installed_dirs_or_none() {
+        let base = tmpdir("newest");
+        let root = crate::layout::Root::at(base.join("home"));
+        assert_eq!(newest_installed(&root).unwrap(), None, "no runtimes dir");
+        for (dir, tag) in [("a", "GE-Proton9-1"), ("b", "GE-Proton11-6")] {
+            let d = root.runtimes().join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("version"), format!("1 {tag}\n")).unwrap();
+        }
+        assert_eq!(
+            newest_installed(&root).unwrap(),
+            Some(root.runtimes().join("b"))
         );
     }
 }
