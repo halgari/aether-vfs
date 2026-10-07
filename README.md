@@ -1,9 +1,10 @@
 # aether-vfs
 
-Userspace virtual filesystem for **Windows game modding**: compose base game +
-mods from pluggable sources (disk, zip, remote gRPC plugins), inject a thin
-NT-API shim into the game, and serve remapped I/O from a long-lived **Rust
-director daemon**.
+Userspace virtual filesystem for **Windows game modding**, on Windows and on
+Linux under GE-Proton: compose base game + mods from pluggable sources (disk,
+zip, remote gRPC plugins), inject a thin NT-API shim into the game, and serve
+remapped I/O from a **Rust director**, either embedded in a host program or in
+a long-lived daemon.
 
 The control plane is **gRPC** (any language). The data plane is the existing
 shared-memory ring + inject/payload/shim stack. It is also **embeddable**: a host
@@ -19,8 +20,11 @@ daemon — see [Embedding](#embedding) below.
 | [Architectural overview](rust/docs/architecture.md) | Engineers: how the system fits together, and how the hard parts are solved |
 | [Product overview](docs/product-overview.md) | Non-technical: what it does and why it matters |
 | [Benchmarks](rust/docs/benchmarks/) | Measurements and the analysis behind them |
-| [Code audit](rust/docs/audit-2026-08-13.md) | Full-tree review: findings, what was fixed, what was not |
-| [vfs-summary.md](rust/docs/vfs-summary.md) | Earlier long-form technical narrative |
+| [Durability](rust/docs/durability.md) | What is durable when, for named layers and the registry overlay |
+| [Shim invariants](docs/shim-invariants.md) | The rules the NT hooks keep, and the incidents behind them |
+| [Design docs](docs/superpowers/README.md) | Index of specs, plans and reviews (current and archived) |
+| [Code audit](rust/docs/audit-2026-08-13.md) | Historical full-tree review (names as of 2026-08-13) |
+| [vfs-summary.md](rust/docs/vfs-summary.md) | Earlier long-form technical narrative (historical) |
 
 ## Quick start
 
@@ -85,6 +89,58 @@ The first `bin/build-windows` downloads the MSVC CRT and Windows SDK via
 `cargo build --workspace` on Linux fails; build the Linux crates by name.
 `vfs-directord` — the `vfs` CLI and daemon — is one of them and builds on
 Linux. (The `skyrim-live` harness lives in `vfs-bench` and is Windows-only; it just exits on Linux.)
+
+### Tests
+
+Run from `rust/`. Which crates build depends on the host: `vfs-inject`, `vfs-shim`,
+`vfs-shim-dll` and `vfs-win` are Windows code and do not build for a Linux target, so
+on Linux name the crates (CI's list is in `.github/workflows/ci.yml`):
+
+```bash
+cd rust
+cargo test -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe \
+  -p vfs-source -p vfs-zip -p vfs-core -p vfs-env -p vfs-unix -p vfs-proton \
+  -p vfs-embed -p vfs-directord -p vfs-director -p vfs-block-store -p vfs-storage \
+  -p vfs-registry -p vfs-redirect -p vfs-ntlayout
+```
+
+On Windows, `cargo test --workspace` builds everything (the `vfs-payload` workspace
+separately: `cargo test --manifest-path crates/vfs-payload/Cargo.toml --target-dir target`).
+
+**Proton end-to-end tests** (`vfs-embed`'s `proton_*` tests, `#[ignore]`d) follow the
+policy in [Linux (Proton)](#linux-proton) above: a missing prerequisite prints
+`SKIP <test>: <reason>` and passes, `VFS_TEST_REQUIRE_ALL=1` turns every skip into a
+failure, and the Windows artefacts come from the test's own profile, so a release
+test needs `bin/build-windows --release`.
+
+**The shim's tests run under Wine.** `vfs-shim`'s tests install the real hooks, so they
+are Windows executables. `bin/wine-shim-tests` cross-builds them with cargo-xwin and
+runs each binary in a Wine prefix under `rust/target`, printing `PASS`/`FAIL` per binary:
+
+```bash
+bin/wine-shim-tests                 # build, then run every shim test binary
+bin/wine-shim-tests seal registry   # only these binaries
+bin/wine-shim-tests --no-build      # reuse the last build
+```
+
+It takes Wine from the newest installed GE-Proton runtime (`VFS_TEST_PROTON_RUNTIME`
+names one), else a system `wine`; `WINE=/path/to/wine` overrides both. Do not run it
+while a game is running under Wine. The same steps by hand:
+`cargo xwin test --no-run --target x86_64-pc-windows-msvc -p vfs-shim`, then
+`WINEPREFIX=$PWD/target/wine-prefix wine target/x86_64-pc-windows-msvc/debug/deps/<name>-*.exe`.
+
+**clang-cl build workaround.** `libudis86-sys` (reached through `retour`, i.e. the
+shim) calls `memset` without including `string.h`; `cl.exe` tolerates that and
+clang-cl, which cargo-xwin uses, rejects it. Any direct `cargo xwin` build, test or
+clippy of the shim needs
+`CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declaration` in the
+environment (`bin/build-windows` and `bin/wine-shim-tests` set it for you). The name
+is hyphenated, so in bash pass it through `env`:
+
+```bash
+env CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declaration \
+  cargo xwin clippy --target x86_64-pc-windows-msvc -p vfs-shim --all-targets
+```
 
 ### Daemon + CLI (`vfs`)
 
@@ -235,7 +291,7 @@ file sets both, e.g. `WINEDEBUG=err+all,warn+seh,fixme-all`. The internal
 `wineserver -w` a launch uses to wait for the prefix to go quiet keeps its
 output discarded.
 
-**Upgrade notes (this branch):**
+**Upgrade notes (changes that affected embedders):**
 
 - `vfs-injector`'s default ready timeout is now **180 s** (was 20 s), on
   Windows too; `VFS_READY_TIMEOUT_SECS` or `LaunchOpts::ready_timeout`
@@ -366,14 +422,17 @@ Any language can implement `vfs-source/proto/source.proto` (`Source` service).
 | **The seam.** Embeddable API: session lifecycle, roots, composition, launch | `vfs-embed` |
 | Provider contract, capabilities, conformance suite | `vfs-provider` |
 | Provider builders, gRPC SourceService | `vfs-source` |
-| Layered / router / overlay (read) | `vfs-compose` |
+| Layered / router / overlay (copy-up writes) | `vfs-compose` |
 | Storage: pull-through cache for slow sources, named persistent write layers | `vfs-storage` |
 | Deduplicating, compressing block store (under `vfs-storage`) | `vfs-block-store` |
 | Director kernel + ring server + staging | `vfs-director` |
+| GE-Proton install, prefix and Wine launch (Linux host) | `vfs-proton` |
+| Registry overlay model | `vfs-registry` |
 | Inject / shim / payload | `vfs-inject`, `vfs-shim`, `vfs-payload` |
 
-Docs: [rust/docs/](rust/docs/), design
-[docs/superpowers/specs/2026-08-11-director-daemon-rework-design.md](docs/superpowers/specs/2026-08-11-director-daemon-rework-design.md).
+Docs: [rust/docs/](rust/docs/) (start at the
+[architecture overview](rust/docs/architecture.md), which has the full crate map);
+design docs are indexed in [docs/superpowers/README.md](docs/superpowers/README.md).
 
 ## Packaging
 

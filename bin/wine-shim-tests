@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Run the vfs-shim test binaries under Wine, from Linux.
+#
+# The shim hooks the Windows NT API, so its tests are Windows executables. This
+# cross-builds them with cargo-xwin and runs each one in a throwaway Wine prefix,
+# printing "PASS <name>" or "FAIL <name>" per binary. Each integration #[test]
+# re-executes itself in a fresh process, so one binary is one Wine session.
+#
+# Needs what bin/build-windows needs (rustup target x86_64-pc-windows-msvc,
+# cargo-xwin, clang, lld, llvm), plus a Wine: the GE-Proton runtime that
+# `cargo run -p vfs-proton -- install` fetches, or a system `wine`.
+#
+# Usage: bin/wine-shim-tests [--no-build] [-h|--help] [name...]
+#   name   run only these binaries (default: all)
+#
+# Environment:
+#   VFS_TEST_PROTON_RUNTIME  runtime directory to take Wine from (else the newest
+#                            installed under VFS_HOME / the XDG data home, else
+#                            `wine` on PATH)
+#   WINE                     the wine executable itself; overrides the above
+#
+# The prefix and the logs live under rust/target (wine-prefix/, wine-shim-logs/).
+# Do not run it while a game is running under Wine on the same machine.
+set -euo pipefail
+
+die() {
+  echo "wine-shim-tests: $*" >&2
+  exit 1
+}
+
+build=1
+names=()
+for arg in "$@"; do
+  case "$arg" in
+    --no-build) build=0 ;;
+    -h | --help)
+      sed -n '2,/^set -e/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    -*) die "unknown argument: $arg" ;;
+    *) names+=("$arg") ;;
+  esac
+done
+[[ ${#names[@]} -gt 0 ]] || names=(vfs_shim registry seal file_hooks director_overlay diagnostics)
+
+cd "$(dirname "$0")/../rust"
+target=x86_64-pc-windows-msvc
+
+if [[ $build -eq 1 ]]; then
+  command -v cargo-xwin > /dev/null || die "cargo-xwin not found (cargo install --locked cargo-xwin)"
+  export XWIN_ACCEPT_LICENSE=1
+  # The same clang-cl workaround as bin/build-windows (see the comment there).
+  env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declaration" \
+    cargo xwin test --no-run --target "$target" -p vfs-shim
+fi
+
+wine="${WINE:-}"
+if [[ -z "$wine" ]]; then
+  runtime="${VFS_TEST_PROTON_RUNTIME:-}"
+  if [[ -z "$runtime" ]]; then
+    home="${VFS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/aether-vfs}"
+    runtime="$(ls -d "$home"/runtimes/*/ 2> /dev/null | sort -V | tail -n 1 || true)"
+  fi
+  if [[ -n "$runtime" && -x "$runtime/files/bin/wine" ]]; then
+    wine="$runtime/files/bin/wine"
+  else
+    wine="$(command -v wine || true)"
+  fi
+fi
+[[ -n "$wine" ]] || die "no Wine found (install a runtime, set WINE, or put wine on PATH)"
+
+export WINEPREFIX="$PWD/target/wine-prefix" WINEDEBUG=-all
+logs="$PWD/target/wine-shim-logs"
+mkdir -p "$logs"
+failed=0
+for n in "${names[@]}"; do
+  exe="$(ls -t target/$target/debug/deps/"$n"-*.exe 2> /dev/null | head -n 1 || true)"
+  if [[ -z "$exe" ]]; then
+    echo "MISSING $n"
+    failed=1
+    continue
+  fi
+  if timeout 900 "$wine" "$exe" > "$logs/$n.log" 2>&1; then
+    echo "PASS $n"
+  else
+    echo "FAIL $n ($(grep -cE '^test .* FAILED$' "$logs/$n.log" || true) failed; log: $logs/$n.log)"
+    failed=1
+  fi
+done
+exit $failed
