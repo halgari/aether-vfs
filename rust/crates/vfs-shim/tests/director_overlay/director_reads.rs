@@ -26,6 +26,11 @@
 //! - a named stream is its own content, not the file's
 //!   (`a_write_to_an_alternate_data_stream_seeds_nothing`).
 //!
+//! Three more pin what the conversion could otherwise hide: a read vpath crosses the ring
+//! folded (the fake folds every name, so nothing else would notice the shim stop folding), a
+//! preserving write to a file only on real disk never seeds from it, and a director file shorter
+//! than its OPEN size reads silently truncated (a known issue, pinned).
+//!
 //! Each test runs in its own process (`isolate!`) and installs its own fake director.
 
 use crate::fakedirector;
@@ -305,5 +310,99 @@ fn a_write_to_an_alternate_data_stream_leaves_the_file_s_own_bytes_alone() {
         fake.tally.writes("data/streamed.esp"),
         0,
         "the base file was written on behalf of a stream write"
+    );
+}
+
+/// A read open crosses the ring with the folded vpath. The fake director folds every name it is
+/// sent, so without this a shim that stopped folding would pass every other test here, and a
+/// real provider graph keyed by folded names would then miss the file.
+#[test]
+fn a_read_open_puts_the_folded_vpath_on_the_wire() {
+    isolate!();
+    let (root, fake, hooks) = session(
+        "fold",
+        Fake::new().with("data/mixed.esp", PROVIDER.to_vec(), ReadStyle::Whole),
+        0,
+    );
+    let got = std::fs::read(root.join("Data").join("MiXeD.ESP"));
+    drop(hooks);
+
+    assert_eq!(got.ok().as_deref(), Some(PROVIDER));
+    let reads: Vec<String> = fake
+        .tally
+        .wire_opens()
+        .into_iter()
+        .filter(|(flags, _)| flags & vfs_protocol::OPEN_WRITE == 0)
+        .map(|(_, v)| v)
+        .collect();
+    assert!(
+        reads.iter().any(|v| v == "data/mixed.esp"),
+        "the read open did not send the folded vpath: {reads:?}"
+    );
+    assert!(
+        reads.iter().all(|v| v == &v.to_lowercase()),
+        "a read open sent an unfolded vpath: {reads:?}"
+    );
+}
+
+/// A preserving write (`OPEN_ALWAYS`, append) to a file that exists only on real disk under the
+/// root, inside a writable mount: the director creates it, and its prior content is nothing —
+/// never the real file's bytes. The real file is untouched.
+#[test]
+fn a_preserving_write_to_a_file_only_on_real_disk_never_seeds_from_it() {
+    isolate!();
+    let (root, fake, hooks) = session("seed", Fake::new().writable_under("data/"), 0);
+    let real = root.join("Data").join("disk-only.esp");
+    vfs_shim::as_shim_io_for_tests(|| std::fs::write(&real, ON_DISK)).unwrap();
+    let written = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&real)
+        .and_then(|mut f| f.write_all(b"+"));
+    drop(hooks);
+
+    written.expect("a preserving create under a writable mount must succeed");
+    assert_eq!(
+        fake.contents("data/disk-only.esp").as_deref(),
+        Some(&b"+"[..]),
+        "the director's copy must hold only what was written: no bytes from the real file"
+    );
+    assert_eq!(
+        std::fs::read(&real).ok().as_deref(),
+        Some(ON_DISK),
+        "the real file under the root was written to"
+    );
+}
+
+/// **Known issue, pinned.** The director serves 9 000 bytes of a file its `OP_OPEN` and
+/// `OP_GETATTR` call 50 000 bytes long. The read hook answers the read at offset 9 000 with
+/// `STATUS_SUCCESS` and 0 bytes, which every caller takes for the end of the file, so the read
+/// succeeds, silently truncated. (Copy-up, removed by task C8, failed this case instead.) This
+/// test records the behaviour so a change to it is noticed; when the read hook is made to fail a
+/// short-of-size read, flip it.
+#[test]
+fn a_file_shorter_than_its_open_size_reads_silently_truncated_known_issue() {
+    isolate!();
+    let (root, _fake, hooks) = session(
+        "liar",
+        Fake::new().with(
+            "data/liar.bin",
+            pattern(50_000),
+            ReadStyle::ShorterThanClaimed(9_000),
+        ),
+        0,
+    );
+    let got = std::fs::read(root.join("Data").join("liar.bin"));
+    drop(hooks);
+
+    let got = got.expect("today the read does not fail");
+    assert_eq!(
+        got.len(),
+        9_000,
+        "today the read stops where the director's data stops"
+    );
+    assert!(
+        got == pattern(50_000)[..9_000],
+        "and what it does return is the right prefix"
     );
 }

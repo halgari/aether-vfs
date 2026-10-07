@@ -129,6 +129,9 @@ pub(crate) struct Tally {
     renames: Mutex<HashMap<String, u64>>,
     /// Registry requests, keyed by `"<opcode> <path>"`.
     reg: Mutex<HashMap<String, u64>>,
+    /// Every `OP_OPEN`'s `(flags, vpath)` exactly as it crossed the ring, before the table
+    /// folds it ([`key`]): the one place a test can see the spelling the shim sent.
+    wire_opens: Mutex<Vec<(u32, String)>>,
 }
 
 impl Tally {
@@ -177,6 +180,10 @@ impl Tally {
     }
     /// Registry requests with `opcode` for `path` (as sent) that reached the server: zero for
     /// a read means it was answered from the shim's cache.
+    /// `(flags, vpath)` of every `OP_OPEN` so far, as sent.
+    pub(crate) fn wire_opens(&self) -> Vec<(u32, String)> {
+        self.wire_opens.lock().unwrap().clone()
+    }
     pub(crate) fn reg(&self, opcode: u32, path: &str) -> u64 {
         Self::get(&self.reg, &format!("{opcode} {path}"))
     }
@@ -432,6 +439,11 @@ impl Fake {
                 let Some((root, flags, vpath)) = P::decode_open_req(payload) else {
                     return (P::ST_BAD_REQUEST, Vec::new());
                 };
+                self.tally
+                    .wire_opens
+                    .lock()
+                    .unwrap()
+                    .push((flags, vpath.clone()));
                 let vpath = key(root, &vpath);
                 if flags & P::OPEN_WRITE != 0 && self.write_fails(&vpath) {
                     return (P::ST_IO_ERROR, Vec::new());
