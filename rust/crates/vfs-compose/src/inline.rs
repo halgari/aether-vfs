@@ -1,12 +1,20 @@
 //! In-memory file tree backend for tests (Clojure `inline-provider`).
+//!
+//! **Not built on `MemoryProvider` (audit T16, rejected).** The two fold
+//! directories differently on purpose. This provider folds whole paths, so
+//! `Data/Skyrim.esm` and `data/textures/x.dds` share one merged `Data`
+//! directory. `MemoryProvider` gives byte-exact spellings precedence, so
+//! `Data` and `data` stay two directories. Re-implementing this on top of
+//! `MemoryProvider` changed `readdir("Data")` and `getattr("Data/TEXTURES")`
+//! (see the regression test below), so the two stay separate.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use vfs_provider::{
-    bad_fh, bad_request, map_io_err, not_a_dir, not_found, Capabilities, DirEntry,
-    Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
+    bad_fh, bad_request, map_io_err, not_a_dir, not_found, Capabilities, DirEntry, Handle,
+    Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
 
 use crate::casefold::{fold_components, fold_strip_prefix};
@@ -230,5 +238,32 @@ mod tests {
                 .is_some(),
             "Unicode fold-equal spelling did not resolve"
         );
+    }
+
+    /// Pins the merged view: directories that differ only in case are one
+    /// directory here, whichever spelling asks. (`MemoryProvider` keeps them
+    /// apart; see the module docs.)
+    #[test]
+    fn differently_cased_directories_merge_into_one_view() {
+        let p = InlineProvider::from_files([
+            ("Data/Skyrim.esm", &b"esm"[..]),
+            ("data/textures/x.dds", &b"dds"[..]),
+        ]);
+        for dir in ["Data", "data", "DATA"] {
+            let mut names: Vec<String> = p
+                .readdir(VPath::at_default(dir))
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            names.sort();
+            assert_eq!(names, ["Skyrim.esm", "textures"], "readdir({dir})");
+        }
+        for path in ["Data/TEXTURES", "DATA/textures", "data/Textures/X.DDS"] {
+            assert!(
+                p.getattr(VPath::at_default(path)).unwrap().is_some(),
+                "getattr({path}) did not resolve"
+            );
+        }
     }
 }

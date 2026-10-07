@@ -16,7 +16,8 @@
 //! it cannot be written to (they assert a write with no writable provider is
 //! refused). Making `InlineProvider` writable would change behavior under
 //! every one of those callers rather than add a capability, so this is a
-//! sibling instead, not a promotion.
+//! sibling instead, not a promotion. The two also fold directories differently
+//! on purpose (see `inline.rs`'s module docs), so they are not merged.
 //!
 //! **Why this lives in `vfs-compose` and not `vfs-provider` or `vfs-source`.**
 //! `vfs-provider` already has an in-memory `ReadWrite` type
