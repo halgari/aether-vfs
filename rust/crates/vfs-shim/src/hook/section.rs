@@ -437,6 +437,7 @@ pub(super) unsafe fn map_view_hook_body(
 /// the last reference to one does not tear the memory down here — the region
 /// belongs to whoever mapped it (see `lazy_section::on_section_closed`).
 pub(super) unsafe fn unmap_view_hook_body(process: HANDLE, base: *mut c_void) -> NTSTATUS {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::UnmapView);
     let tramp = match TRAMP_UNMAP_VIEW.get() {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,

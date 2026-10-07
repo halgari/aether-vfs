@@ -54,6 +54,7 @@ pub(super) unsafe fn cpiw_hook_body(
     pi: *mut PROCESS_INFORMATION,
     ptok: *mut HANDLE,
 ) -> i32 {
+    let _hs = crate::hookstats::Timed::new(crate::hookstats::Hook::Cpiw);
     let tramp = match TRAMP_CPIW.get() {
         Some(t) => t,
         None => return 0, // STATUS/BOOL FALSE — invariant violation, should not occur

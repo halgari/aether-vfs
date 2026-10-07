@@ -51,7 +51,9 @@ fn hook_names_cover_every_variant() {
     assert_eq!(NAMES.len(), N);
     // The last variant must index the last name, or a hook silently
     // reports under a neighbour's label.
-    assert_eq!(Hook::LockRegistryKey as usize, N - 1);
+    assert_eq!(Hook::Cpiw as usize, N - 1);
+    assert_eq!(NAMES[Hook::UnmapView as usize], "NtUnmapViewOfSection");
+    assert_eq!(NAMES[Hook::Cpiw as usize], "CreateProcessInternalW");
     assert_eq!(NAMES[Hook::FlushKey as usize], "NtFlushKey");
     assert_eq!(NAMES[Hook::NotifyChangeKey as usize], "NtNotifyChangeKey");
     assert_eq!(

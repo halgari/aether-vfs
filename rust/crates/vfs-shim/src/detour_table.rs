@@ -269,7 +269,7 @@ macro_rules! detour_table {
             }
             {
                 export: "NtUnmapViewOfSection",
-                stat: [],
+                stat: [UnmapView = 57],
                 tramp: TRAMP_UNMAP_VIEW: NtUnmapViewOfSectionFn,
                 install: Required, group: File, flags: [],
                 hook: unmap_view_hook = unmap_view_hook_body(
@@ -884,7 +884,7 @@ macro_rules! detour_table {
             // Installed best-effort after the registry rows, and only when the shim's own DLL path is known.
             {
                 export: "CreateProcessInternalW",
-                stat: [],
+                stat: [Cpiw = 58],
                 tramp: TRAMP_CPIW: CreateProcessInternalWFn,
                 install: BestEffort, group: Process, flags: [],
                 /// The one entry point here that is **not** an ntdll `NTSTATUS` call, and
