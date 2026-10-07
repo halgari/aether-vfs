@@ -158,7 +158,7 @@ pub fn write_dir_info(
             let eof = it.size as i64;
             buf[off + 40..off + 48].copy_from_slice(&eof.to_le_bytes());
             buf[off + 48..off + 56].copy_from_slice(&eof.to_le_bytes());
-            let attrs: u32 = if it.is_dir { 0x10 } else { 0x80 };
+            let attrs = crate::attributes(it.is_dir);
             buf[off + 56..off + 60].copy_from_slice(&attrs.to_le_bytes());
         }
         buf[off + name_len_off..off + name_len_off + 4]

@@ -60,7 +60,11 @@ pub const FILE_OVERWRITTEN: usize = 3;
 /// failure, which is the same reason getting this predicate right matters
 /// more, not less.)
 pub fn is_write_open(access: u32, disposition: u32) -> bool {
-    (access & WRITE_ACCESS) != 0 || matches!(disposition, 0 | 2 | 3 | 4 | 5)
+    (access & WRITE_ACCESS) != 0
+        || matches!(
+            disposition,
+            FILE_SUPERSEDE | FILE_CREATE | FILE_OPEN_IF | FILE_OVERWRITE | FILE_OVERWRITE_IF
+        )
 }
 
 /// True for NT's append-only access grant: `FILE_APPEND_DATA` without
@@ -124,11 +128,10 @@ pub fn is_append_only(access: u32) -> bool {
 pub fn open_create_flags(disposition: u32) -> u32 {
     use vfs_protocol::{OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC};
     match disposition {
-        0 => OPEN_CREATE | OPEN_TRUNC,
-        2 => OPEN_CREATE | OPEN_EXCL,
-        3 => OPEN_CREATE,
-        4 => OPEN_TRUNC,
-        5 => OPEN_CREATE | OPEN_TRUNC,
+        FILE_SUPERSEDE | FILE_OVERWRITE_IF => OPEN_CREATE | OPEN_TRUNC,
+        FILE_CREATE => OPEN_CREATE | OPEN_EXCL,
+        FILE_OPEN_IF => OPEN_CREATE,
+        FILE_OVERWRITE => OPEN_TRUNC,
         _ => 0, // FILE_OPEN (1), and anything unrecognized.
     }
 }
@@ -156,7 +159,7 @@ pub fn open_create_flags(disposition: u32) -> u32 {
 /// Directory *creates* never reach this at all: `try_fuse_mkdir` runs first
 /// and takes `FILE_DIRECTORY_FILE` with a creating disposition.
 pub fn dir_open_downgrades(disposition: u32) -> bool {
-    matches!(disposition, 1 | 3)
+    matches!(disposition, FILE_OPEN | FILE_OPEN_IF)
 }
 
 /// True for the three dispositions whose successful `IoStatusBlock`
@@ -165,7 +168,10 @@ pub fn dir_open_downgrades(disposition: u32) -> bool {
 /// `disposition_information`. The other three have one fixed outcome and
 /// need no probe.
 pub fn disposition_needs_existence_probe(disposition: u32) -> bool {
-    matches!(disposition, 0 | 3 | 5)
+    matches!(
+        disposition,
+        FILE_SUPERSEDE | FILE_OPEN_IF | FILE_OVERWRITE_IF
+    )
 }
 
 /// The correct `IoStatusBlock.Information` for a *successful* create/open,
@@ -189,23 +195,23 @@ pub fn disposition_needs_existence_probe(disposition: u32) -> bool {
 ///   `disposition_needs_existence_probe` singles these three out.
 pub fn disposition_information(disposition: u32, existed_before: bool) -> usize {
     match disposition {
-        0 => {
+        FILE_SUPERSEDE => {
             if existed_before {
                 FILE_SUPERSEDED
             } else {
                 FILE_CREATED
             }
         }
-        2 => FILE_CREATED,
-        3 => {
+        FILE_CREATE => FILE_CREATED,
+        FILE_OPEN_IF => {
             if existed_before {
                 FILE_OPENED
             } else {
                 FILE_CREATED
             }
         }
-        4 => FILE_OVERWRITTEN,
-        5 => {
+        FILE_OVERWRITE => FILE_OVERWRITTEN,
+        FILE_OVERWRITE_IF => {
             if existed_before {
                 FILE_OVERWRITTEN
             } else {
