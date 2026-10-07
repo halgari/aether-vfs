@@ -58,10 +58,10 @@ struct OwnedRegion {
 
 impl OwnedRegion {
     /// NT keeps a section's pages alive while any view is mapped, even after
-    /// the handle is closed. `zipserve` owns the view refcounts, so ask it
+    /// the handle is closed. `synth_section` owns the view refcounts, so ask it
     /// rather than keeping a second tally that can drift out of step.
     fn is_dead(&self) -> bool {
-        !self.section_open && !crate::zipserve::has_view_in(self.base, self.reserved)
+        !self.section_open && !crate::synth_section::has_view_in(self.base, self.reserved)
     }
 }
 
@@ -175,7 +175,7 @@ fn fill_bytes(fh: u64, file_off: u64, dest: usize, len: usize) -> Option<usize> 
 
 /// Reserve VA for a director-backed data section; warm first [`WARM_BYTES`].
 ///
-/// Returns a synthetic section handle for [`crate::zipserve::map_view`].
+/// Returns a synthetic section handle for [`crate::synth_section::map_view`].
 pub unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option<isize> {
     if file_size == 0 || file_size > MAX_LAZY {
         return None;
@@ -203,7 +203,7 @@ pub unsafe fn create_lazy_data_section(fh: u64, file_size: u64) -> Option<isize>
     if warm > 0 {
         let _ = ensure_range(base_u, 0, warm);
     }
-    match crate::zipserve::register_mapped_image(base_u, file_size) {
+    match crate::synth_section::register_mapped_image(base_u, file_size) {
         Some(h) => Some(h),
         None => {
             forget(base_u);
@@ -274,7 +274,7 @@ fn reap(g: &mut BTreeMap<usize, OwnedRegion>, key: usize) {
 /// Note that a mapped view over `addr` went away. Frees the region only if its
 /// section is closed and no other view remains.
 ///
-/// Call *after* retiring the view in [`crate::zipserve::unmap_view`].
+/// Call *after* retiring the view in [`crate::synth_section::unmap_view`].
 pub fn on_view_unmapped(addr: usize) {
     if let Ok(mut g) = REGIONS.lock() {
         if let Some(key) = region_key(&g, addr) {
@@ -553,17 +553,17 @@ mod tests {
 
     /// Mirrors `map_view_hook` / `unmap_view_hook`. Keep in step with hook.rs.
     fn hook_map(h: isize, off: u64, want: u64) -> usize {
-        let (base, _) = crate::zipserve::map_view(h, off, want).expect("map_view");
+        let (base, _) = crate::synth_section::map_view(h, off, want).expect("map_view");
         base
     }
 
     fn hook_unmap(base: usize) {
-        crate::zipserve::unmap_view(base);
+        crate::synth_section::unmap_view(base);
         on_view_unmapped(base);
     }
 
     fn hook_close(h: isize) {
-        if let Some(window) = crate::zipserve::close_section(h) {
+        if let Some(window) = crate::synth_section::close_section(h) {
             on_section_closed(window);
         }
     }
@@ -663,7 +663,7 @@ mod tests {
 
         hook_unmap(a);
         assert!(
-            crate::zipserve::is_synth_view(b),
+            crate::synth_section::is_synth_view(b),
             "first unmap forgot a base the process still has mapped"
         );
         assert_ne!(va_state(b), MEM_FREE);
@@ -687,7 +687,7 @@ mod tests {
         } as usize;
         assert!(base != 0);
         assert!(track_eager_section(base, size));
-        let h = crate::zipserve::register_mapped_image(base, size).expect("register");
+        let h = crate::synth_section::register_mapped_image(base, size).expect("register");
 
         let mapped = hook_map(h, 0, 0);
         assert!(

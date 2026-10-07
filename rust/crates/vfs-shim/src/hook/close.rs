@@ -14,9 +14,9 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+    if crate::synth_file::is_fuse_synth(handle as isize) {
         crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_TABLE);
-        if let Some(fh) = crate::fuse_synth::close_fuse(handle as isize) {
+        if let Some(fh) = crate::synth_file::close_fuse(handle as isize) {
             crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_CLIENT);
             if let Some(c) = crate::director::global() {
                 crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_RING);
@@ -27,10 +27,10 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
         crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_EXIT);
         return STATUS_SUCCESS;
     }
-    if crate::zipserve::is_synth_section(handle as isize) {
+    if crate::synth_section::is_synth_section(handle as isize) {
         crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_TABLE);
         // Releasing shim-owned VA waits for the last view (NT semantics).
-        if let Some(window) = crate::zipserve::close_section(handle as isize) {
+        if let Some(window) = crate::synth_section::close_section(handle as isize) {
             crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_REGION);
             crate::lazy_section::on_section_closed(window);
             crate::breadcrumb::mark(crate::breadcrumb::mark_close::ZIP_DONE);

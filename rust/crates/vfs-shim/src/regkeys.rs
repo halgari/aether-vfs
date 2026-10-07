@@ -65,7 +65,7 @@ use crate::ntdef::{
 /// **Clear of real handles.** Wine's process-local handles are `(index + 1) << 2` with fewer
 /// than 2^24 entries, so below `0x0400_0000`; its global handles are a local one XOR
 /// `0x544a4def`, whose bit 29 is clear. The sign bit is clear, so the value is never a
-/// pseudo-handle, and none of `zipserve`'s (2^45) or `fuse_synth`'s (2^47) tag bits is set.
+/// pseudo-handle, and none of `synth_section`'s (2^45) or `synth_file`'s (2^47) tag bits is set.
 pub const REG_TAG: usize = 0x6000_0000;
 /// Slot bits below the tag (shifted left by 2, so handles stay multiples of 4 as kernel handles
 /// are): 2^27 slots, reused once they wrap (a live handle's slot is skipped).

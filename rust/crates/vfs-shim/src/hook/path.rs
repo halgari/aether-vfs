@@ -69,13 +69,13 @@ pub(super) unsafe fn cwd_from_peb() -> Option<(isize, String)> {
 unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<(String, bool)> {
     let root = root_handle as isize;
     // 1. Our own synthetic directory handles.
-    if crate::fuse_synth::is_fuse_synth(root) {
-        // Prefer PATH_TABLE (recorded on open); fall back to fuse_synth abs_path.
+    if crate::synth_file::is_fuse_synth(root) {
+        // Prefer PATH_TABLE (recorded on open); fall back to synth_file abs_path.
         let p = PATH_TABLE
             .lock()
             .ok()
             .and_then(|t| t.get(&root).cloned())
-            .or_else(|| crate::fuse_synth::abs_path(root))?;
+            .or_else(|| crate::synth_file::abs_path(root))?;
         return Some((p, false));
     }
     // 2. A real directory the process opened; we remember every one.
@@ -314,7 +314,7 @@ pub(super) unsafe fn fuse_root_directory(oa: *const ObjectAttributes) -> bool {
     }
     // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
     let root = unsafe { (*oa).root_directory };
-    !root.is_null() && crate::fuse_synth::is_fuse_synth(root as isize)
+    !root.is_null() && crate::synth_file::is_fuse_synth(root as isize)
 }
 
 /// Absolute `\??\` NT path for a Win32 or NT path string: `vfs_redirect::to_nt` after trimming

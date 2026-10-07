@@ -14,7 +14,6 @@ mod engine;
 // compat: removed by cleanup stream I
 #[doc(hidden)]
 pub use director as fuse_client;
-mod fuse_synth;
 mod hook;
 mod hookstats;
 mod inject;
@@ -29,8 +28,9 @@ mod regkeys;
 mod regnotify;
 mod regquery;
 mod regwrite;
+mod synth_file;
+mod synth_section;
 mod tramp;
-mod zipserve;
 
 pub use bootstrap::{
     BootstrapError, bootstrap_from_config_path, bootstrap_from_config_path_with_payload,

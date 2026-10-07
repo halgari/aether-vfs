@@ -1,6 +1,6 @@
 //! Synthetic *section* bookkeeping for live PE image mapping.
 //!
-//! **This file used to be two unrelated things.** The half it is named for —
+//! **This file used to be two unrelated things.** The half it was named for —
 //! serving zip-window bytes out of memory-mapped container files behind
 //! synthetic *file* handles — is gone (gate 4 task 7). Zip-backed content is
 //! the director's to serve over the ring; the shim no longer opens, maps, or
@@ -13,9 +13,8 @@
 //! takes a PE image [`crate::lazy_section`] or `fuse_create_section`'s
 //! `SEC_IMAGE` path has already mapped into this process and hands back a
 //! handle that `NtMapViewOfSection` can answer from — no second mapping, and no
-//! file behind it at all. The module keeps its old name only because renaming
-//! it would churn every call site in `hook.rs` and `lazy_section.rs` for no
-//! behavioural gain.
+//! file behind it at all. (It was called `zipserve` while it still served
+//! zip-window bytes.)
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -24,7 +23,7 @@ use std::sync::Mutex;
 /// result); real kernel handles never reach this magnitude. The sign bit
 /// (2^63) stays clear so the value is a positive handle, never confused with
 /// pseudo-handles (-1..-6) or `INVALID_HANDLE_VALUE`. Distinct from
-/// `fuse_synth`'s `FUSE_TAG` (2^47), which marks synthetic *file* handles.
+/// `synth_file`'s `FUSE_TAG` (2^47), which marks synthetic *file* handles.
 const SYNTH_SECTION_TAG: usize = 0x0000_2000_0000_0000;
 
 /// A synthetic section: the base address of the region it covers and its byte

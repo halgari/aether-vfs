@@ -41,7 +41,7 @@ const SYNTH_VOLUME_SERIAL: u64 = 0x5646_5300;
 ///
 /// [`FuseClient::final_path`]: crate::director::FuseClient::final_path
 fn synth_final_path(handle: HANDLE) -> Option<String> {
-    let opened = crate::fuse_synth::abs_path(handle as isize)?;
+    let opened = crate::synth_file::abs_path(handle as isize)?;
     let named = crate::director::global().and_then(|c| c.final_path(&opened));
     Some(named.unwrap_or_else(|| {
         crate::director::strip_nt_device(&opened)
@@ -60,7 +60,7 @@ fn synth_final_path(handle: HANDLE) -> Option<String> {
 /// gives one id, and no director round trip is spent on a query as common as
 /// `GetFileInformationByHandle`.
 fn synth_file_id(handle: HANDLE) -> i64 {
-    crate::fuse_synth::abs_path(handle as isize)
+    crate::synth_file::abs_path(handle as isize)
         .and_then(|opened| path_file_id(&opened))
         .unwrap_or(handle as i64)
 }
@@ -150,7 +150,7 @@ unsafe fn fuse_query_information(
     length: u32,
     class: u32,
 ) -> NTSTATUS {
-    let Some((_, size, is_dir, pos, _append_only)) = crate::fuse_synth::lookup(handle as isize)
+    let Some((_, size, is_dir, pos, _append_only)) = crate::synth_file::lookup(handle as isize)
     else {
         return STATUS_INVALID_HANDLE;
     };
@@ -518,7 +518,7 @@ pub(super) unsafe fn qvol_hook_body(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+    if crate::synth_file::is_fuse_synth(handle as isize) {
         if class == FILE_FS_DEVICE_INFORMATION {
             if info.is_null() || (length as usize) < core::mem::size_of::<FileFsDeviceInformation>()
             {
@@ -592,7 +592,7 @@ pub(super) unsafe fn qif_hook_body(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+    if crate::synth_file::is_fuse_synth(handle as isize) {
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         return unsafe { fuse_query_information(handle, iosb, info, length, class) };
     }
@@ -784,7 +784,7 @@ pub(super) unsafe fn qobj_hook_body(
     // else, failed for every virtual file and directory, and
     // `std::filesystem::canonical` threw on them. The name is the handle's
     // final path, in the convention the host uses for real files.
-    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+    if crate::synth_file::is_fuse_synth(handle as isize) {
         let Some(path) = synth_final_path(handle) else {
             return STATUS_INVALID_HANDLE;
         };

@@ -95,7 +95,7 @@ fn is_write_open(access: u32, disposition: u32) -> bool {
 /// to the current end of file, ignoring any caller-supplied offset, because
 /// the kernel enforces it at the file-object level. A synthetic handle has no
 /// kernel object to do that for it, so the open path has to seed the tracked
-/// position at the file's current size (`fuse_synth::open_fuse_at_ex`) and
+/// position at the file's current size (`synth_file::open_fuse_at_ex`) and
 /// `write_hook` has to keep pinning it there — see both for the other half.
 ///
 /// `Rust`'s `OpenOptions::append(true)` without `.write(true)` — the fixture's
@@ -287,7 +287,7 @@ unsafe fn try_fuse_create(
     // `None` (`open_fuse_at_ex(...)?` on a poisoned synth table) is not reachable:
     // nothing inside those critical sections can unwind. `contain_panic` would not
     // make it safe, since the guard's drop has already poisoned the lock. Re-check
-    // that argument if `fuse_synth` grows a fallible or reentrant operation under its
+    // that argument if `synth_file` grows a fallible or reentrant operation under its
     // locks.
     // See docs/shim-invariants.md, "Sealed root: opens".
     // (Primary stack is expanded to 16 MiB by vfs-inject; open is a shallow ring op.)
@@ -346,7 +346,7 @@ unsafe fn try_fuse_create(
         Ok(resp) => {
             // Record absolute path on the handle so later relative opens
             // (RootDirectory=this handle) resolve through the director.
-            let h = crate::fuse_synth::open_fuse_at_ex(
+            let h = crate::synth_file::open_fuse_at_ex(
                 resp.fh,
                 resp.size,
                 resp.is_dir,
@@ -357,7 +357,7 @@ unsafe fn try_fuse_create(
             // write or mutable open drops what it holds of it; an immutable
             // read open may be served from it.
             if let Some(cache) = crate::read_cache::register(root.0, vp, &resp, write) {
-                crate::fuse_synth::set_cache(h, cache);
+                crate::synth_file::set_cache(h, cache);
             }
             if !file_handle.is_null() {
                 // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
@@ -582,7 +582,7 @@ unsafe fn try_fuse_mkdir(
             // close(0) is a harmless no-op. The caller (CreateDirectoryW) only
             // needs a handle to receive and immediately close; later metadata
             // reads are path-based (qattr/getattr), not through this handle.
-            let h = crate::fuse_synth::open_fuse(0, 0, true)?;
+            let h = crate::synth_file::open_fuse(0, 0, true)?;
             if !file_handle.is_null() {
                 // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
                 unsafe {
@@ -611,7 +611,7 @@ unsafe fn try_fuse_mkdir(
                 if disp == 2 {
                     Some(STATUS_OBJECT_NAME_COLLISION)
                 } else {
-                    let h = crate::fuse_synth::open_fuse(0, 0, true)?;
+                    let h = crate::synth_file::open_fuse(0, 0, true)?;
                     if !file_handle.is_null() {
                         // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
                         unsafe {
@@ -702,7 +702,7 @@ pub(super) unsafe fn create_hook_body(
     if let Some(st) = unsafe { try_fuse_mkdir(file_handle, path, iosb, opts, disp) } {
         return st;
     }
-    // Prefer director FUSE for managed-root content (no in-shim zipserve).
+    // Prefer director FUSE for managed-root content (no in-shim synth_section).
     match path {
         Some(p) => crate::hookstats::note_passthrough(p),
         // An open we cannot decode is an open we cannot serve. If the masters

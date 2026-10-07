@@ -81,7 +81,7 @@ accepts, client declines" cannot arise; `RootMap::decide` denies
 `NotFound`/`Dir`/`Tombstone` before any tramp call; neither
 `Decision::Redirect` arm calls `tag_under_root`, so a redirected handle
 never enters `DIR_TABLE`; and a director-served directory is a
-`fuse_synth` handle the drain could not drain. Reaching the branch in a
+`synth_file` handle the drain could not drain. Reaching the branch in a
 test took reverting gate 3 task 5 *as well* as forcing the predicate
 disagreement. The value of removing it is that enumeration no longer
 depends, silently and untested, on another gate's invariant.
@@ -271,7 +271,7 @@ not. `rust/Cargo.toml` sets `panic = "unwind"` for both profiles,
 deliberately, so "a panic cannot unwind here" is simply false and
 nothing about poisoning is ruled out by the profile. What rules it out
 instead is that nothing inside those critical sections can unwind.
-`fuse_synth` holds `TABLE`/`NEXT` across `usize` arithmetic, `BTreeMap`
+`synth_file` holds `TABLE`/`NEXT` across `usize` arithmetic, `BTreeMap`
 insert/get/get_mut/remove keyed by `usize`, and `String` clone/drop --
 no `unwrap`, no slice indexing, no caller-supplied closure, no `Ord` or
 `Drop` impl that can panic. Allocation failure aborts rather than
@@ -281,7 +281,7 @@ and there is no panic here to unwind.
 Note that `contain_panic` does NOT make this safe by itself: it catches
 a panic at the hook boundary, but the guard's drop has already set the
 poison flag by then, so later calls would see it. Re-check the argument
-above if `fuse_synth` ever grows a fallible or reentrant operation
+above if `synth_file` ever grows a fallible or reentrant operation
 under those locks.
 
 ## Sealed root: statuses
@@ -854,7 +854,7 @@ From `hook/file_io.rs`.
 
 `NtLockFile` hook — grants byte-range locks on synthetic handles locally.
 
-**Why this exists.** A synthetic handle is a tagged value in `fuse_synth`'s
+**Why this exists.** A synthetic handle is a tagged value in `synth_file`'s
 table, not a kernel file object, so any NT call without a detour hands that
 value to the real kernel and gets `STATUS_INVALID_HANDLE` back. Measured
 2026-08-14: `GetPrivateProfileStringW` — how Skyrim loads `SkyrimPrefs.ini`

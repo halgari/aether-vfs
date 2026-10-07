@@ -216,7 +216,7 @@ pub(super) unsafe fn setinfo_hook_body(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if crate::fuse_synth::is_fuse_synth(handle as isize) {
+    if crate::synth_file::is_fuse_synth(handle as isize) {
         if class == FILE_COMPLETION_INFORMATION {
             // Binding a synthetic handle to a completion port: the kernel will
             // never post a packet for it, so any caller waiting on that port
@@ -230,7 +230,7 @@ pub(super) unsafe fn setinfo_hook_body(
             // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
             let pos = unsafe { (*(info as *const FilePositionInformation)).current_byte_offset };
             if pos >= 0 {
-                crate::fuse_synth::set_position(handle as isize, pos as u64);
+                crate::synth_file::set_position(handle as isize, pos as u64);
             }
             return STATUS_SUCCESS;
         }
@@ -241,15 +241,15 @@ pub(super) unsafe fn setinfo_hook_body(
         {
             // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
             let eof = unsafe { (*(info as *const FileEndOfFileInformation)).end_of_file };
-            if let Some(f) = crate::fuse_synth::cache(handle as isize) {
+            if let Some(f) = crate::synth_file::cache(handle as isize) {
                 crate::read_cache::invalidate(&f);
             }
             if let (Some((fh, _, _, _, _)), Some(c)) = (
-                crate::fuse_synth::lookup(handle as isize),
+                crate::synth_file::lookup(handle as isize),
                 crate::director::global(),
             ) {
                 if eof >= 0 && c.truncate(fh, eof as u64).is_ok() {
-                    crate::fuse_synth::set_size(handle as isize, eof as u64);
+                    crate::synth_file::set_size(handle as isize, eof as u64);
                     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
                     unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
                     return STATUS_SUCCESS;
@@ -298,7 +298,7 @@ pub(super) unsafe fn setinfo_hook_body(
                                         if let Ok(mut table) = PATH_TABLE.lock() {
                                             table.insert(handle as isize, nt.clone());
                                         }
-                                        crate::fuse_synth::set_abs_path(handle as isize, nt);
+                                        crate::synth_file::set_abs_path(handle as isize, nt);
                                     }
                                 }
                                 renamed

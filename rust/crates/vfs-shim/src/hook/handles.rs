@@ -165,8 +165,8 @@ pub(super) unsafe fn record_path(file_handle: *mut HANDLE, path: Option<&str>, s
 /// (`read_hook`, `fuse_query_information`), which is why this exists rather
 /// than the bare tag test the lock trio first shipped with.
 pub(super) fn open_synth(handle: HANDLE) -> bool {
-    crate::fuse_synth::is_fuse_synth(handle as isize)
-        && crate::fuse_synth::lookup(handle as isize).is_some()
+    crate::synth_file::is_fuse_synth(handle as isize)
+        && crate::synth_file::lookup(handle as isize).is_some()
 }
 
 /// The NT path a synthetic handle was opened as, for the lock counters.

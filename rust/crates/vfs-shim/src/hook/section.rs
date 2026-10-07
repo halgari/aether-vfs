@@ -38,7 +38,7 @@ unsafe fn real_image_section(
     // Our own file I/O must not re-enter the hooks that brought us here.
     let _io = ShimIoGuard::enter();
 
-    let vpath = crate::fuse_synth::abs_path(file_handle as isize)?;
+    let vpath = crate::synth_file::abs_path(file_handle as isize)?;
     // Named by the vpath and the image's bytes: a same-size different build
     // (a patch, an update) never reuses a stale copy.
     let name = vfs_pe::image_cache_name(&vpath, pe);
@@ -110,7 +110,7 @@ unsafe fn fuse_create_section(
     file_handle: HANDLE,
     tramp: NtCreateSectionFn,
 ) -> NTSTATUS {
-    let Some((fh, size, is_dir, _, _)) = crate::fuse_synth::lookup(file_handle as isize) else {
+    let Some((fh, size, is_dir, _, _)) = crate::synth_file::lookup(file_handle as isize) else {
         return STATUS_INVALID_HANDLE;
     };
     if is_dir || size == 0 {
@@ -164,7 +164,7 @@ unsafe fn fuse_create_section(
 
         return match vfs_inject::map_image_from_pe_bytes_local(&pe) {
             Ok((base, img_size)) => {
-                match crate::zipserve::register_mapped_image(base as usize, img_size as u64) {
+                match crate::synth_section::register_mapped_image(base as usize, img_size as u64) {
                     Some(h) => {
                         if !section_handle.is_null() {
                             // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
@@ -270,7 +270,7 @@ unsafe fn fuse_create_section(
     // Track the allocation so NtClose frees it — otherwise every eager section
     // leaks up to EAGER_MAX for the life of the process.
     crate::lazy_section::track_eager_section(base as usize, size);
-    match crate::zipserve::register_mapped_image(base as usize, size) {
+    match crate::synth_section::register_mapped_image(base as usize, size) {
         Some(h) => {
             if !section_handle.is_null() {
                 // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
@@ -310,7 +310,7 @@ pub(super) unsafe fn create_section_hook_body(
     };
     // FUSE synthetic file handles: lazy data section or eager SEC_IMAGE.
     // Without this, NtCreateSection fails on fake handles (game mmap of BSAs).
-    if crate::fuse_synth::is_fuse_synth(file_handle as isize) {
+    if crate::synth_file::is_fuse_synth(file_handle as isize) {
         // Debug: VFS_REJECT_FUSE_SECTION=1 forces ReadFile path (no section map).
         if vfs_env::present(vfs_env::REJECT_FUSE_SECTION) {
             return STATUS_INVALID_FILE_FOR_SECTION;
@@ -363,7 +363,7 @@ pub(super) unsafe fn map_view_hook_body(
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if crate::zipserve::is_synth_section(section as isize) {
+    if crate::synth_section::is_synth_section(section as isize) {
         // Only the current process: cross-process map of our private VA is N/A.
         let off = if section_offset.is_null() {
             0u64
@@ -381,14 +381,14 @@ pub(super) unsafe fn map_view_hook_body(
             // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
             unsafe { *view_size as u64 }
         };
-        match crate::zipserve::map_view(section as isize, off, want) {
+        match crate::synth_section::map_view(section as isize, off, want) {
             Some((base, size)) => {
                 if !base_address.is_null() {
                     // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
                     let preferred = unsafe { *base_address };
                     if !preferred.is_null() && preferred as usize != base {
                         // Caller demanded a specific VA we cannot satisfy.
-                        crate::zipserve::unmap_view(base);
+                        crate::synth_section::unmap_view(base);
                         return STATUS_UNSUCCESSFUL;
                     }
                     // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
@@ -437,12 +437,12 @@ pub(super) unsafe fn unmap_view_hook_body(process: HANDLE, base: *mut c_void) ->
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    if !base.is_null() && crate::zipserve::is_synth_view(base as usize) {
+    if !base.is_null() && crate::synth_section::is_synth_view(base as usize) {
         let b = base as usize;
         // Retire one reference; the backing VA outlives it unless the section
         // handle is already closed and this was the last view — a BSA reader
         // slides views over one open section and must keep the others.
-        crate::zipserve::unmap_view(b);
+        crate::synth_section::unmap_view(b);
         crate::lazy_section::on_view_unmapped(b);
         return STATUS_SUCCESS;
     }
