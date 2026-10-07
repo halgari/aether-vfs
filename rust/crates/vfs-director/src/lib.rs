@@ -10,7 +10,7 @@
 //! What remains here, and what a host reaches for *through* `vfs-embed`:
 //! * [`Director`] — the root → provider table and the handle namespace
 //! * [`ipc::IpcServe`] — the shared-memory ring + workers
-//! * [`DiskProvider`] / [`MountGraph`] — leaf and prefix-routing primitives
+//! * `DiskProvider` / `MountGraph` live in `vfs-compose` now (compat re-exports here)
 //! * [`stage`] — putting a launch image on real disk for `CreateProcess`
 //! * [`io_stats`] — process-wide counters, including rejected writes
 //!
@@ -20,7 +20,6 @@
 #![deny(unsafe_code)]
 
 pub mod director;
-pub mod disk;
 pub mod io_stats;
 // The shared-memory ring is how an injected shim reaches this kernel — on
 // Windows directly, and under Proton from inside Wine, where the ring lives in
@@ -33,20 +32,22 @@ pub mod io_stats;
 // protocol translation on top of the transport, depending only on
 // `vfs-protocol`, `vfs-ipc`, `vfs-compose` and `Director`.
 pub mod ipc;
-pub mod mount_graph;
 // compat: removed by cleanup stream I
 #[doc(hidden)]
 pub mod ops;
-pub mod path;
 pub mod registry;
 pub mod ring_dispatch;
 pub mod stage;
 
 pub use director::{Director, OpenInfo};
-pub use disk::DiskProvider;
 pub use ipc::IpcServe;
 pub use io_stats::{mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report};
-pub use mount_graph::MountGraph;
+// compat: removed by cleanup stream I
+#[doc(hidden)]
+pub use vfs_compose::{DiskProvider, MountGraph};
+// compat: removed by cleanup stream I
+#[doc(hidden)]
+pub use vfs_compose::path;
 pub use vfs_provider::{Provider, Handle, DirEntry, RootId, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
 pub use registry::{RegistryGenSink, RegistryGeneration};
 // compat: removed by cleanup stream I

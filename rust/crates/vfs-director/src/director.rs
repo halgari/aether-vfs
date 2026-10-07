@@ -41,7 +41,7 @@ struct OpenRec {
 /// the layer-ordered mount list and its reverse-iteration merge. Composition
 /// across several sources — layering at the same path, or placing one at a
 /// distinct sub-path within a root — now happens explicitly in the provider
-/// graph *before* it reaches `mount` (see [`crate::mount_graph::MountGraph`]
+/// graph *before* it reaches `mount` (see [`vfs_compose::MountGraph`]
 /// and `vfs_compose::stack_layers`), where it is visible rather than
 /// implicit here.
 pub struct Director {
@@ -425,7 +425,7 @@ mod tests {
     /// that has been copied up into the writable layer.
     #[test]
     fn open_info_reports_immutability_per_handle_through_an_overlay() {
-        let base = crate::mount_graph::MountGraph::new(vec![(
+        let base = vfs_compose::MountGraph::new(vec![(
             String::new(),
             Arc::new(vfs_compose::InlineProvider::from_files([
                 ("a.esm", b"base-a".as_slice()),
@@ -668,7 +668,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vfs-dirshadow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let graph = crate::mount_graph::MountGraph::new(vec![
+        let graph = vfs_compose::MountGraph::new(vec![
             ("/".to_string(), Arc::new(crate::DiskProvider::new(&dir)) as Arc<dyn Provider>),
             (
                 "/".to_string(),

@@ -11,11 +11,11 @@
 //! It survives because distinct, non-overlapping prefixes are a genuinely
 //! different thing than layering at the same path: layering (several
 //! sources answering the *same* path, later wins) has a direct replacement
-//! in `vfs_compose::layered`/`stack_layers`. Placing one source at a
+//! in `crate::layered`/`stack_layers`. Placing one source at a
 //! specific sub-path within a root (e.g. a single mod at `Data/SomeMod`,
 //! distinct from the root's own content) does not — there is no existing
 //! combinator that strips an outer prefix before forwarding to an inner
-//! provider addressed at its own root (`vfs_compose::SubdirProvider` does
+//! provider addressed at its own root (`crate::SubdirProvider` does
 //! the opposite: it *descends into* an inner provider's subtree to expose
 //! it as an outer root, the shape used for stripping a zip's wrapping
 //! folder). So this module is the mount-placement primitive, relocated
@@ -164,7 +164,7 @@ impl Provider for MountGraph {
                 continue;
             }
             if let Some(name) =
-                vfs_compose::stored_name(m.backend.as_ref(), VPath::new(p.root, &rel))?
+                crate::stored_name(m.backend.as_ref(), VPath::new(p.root, &rel))?
             {
                 return Ok(Some(name));
             }
@@ -243,7 +243,7 @@ impl Provider for MountGraph {
             }
             return Err(not_found());
         }
-        Ok(vfs_compose::sorted_by_folded_name(map))
+        Ok(crate::sorted_by_folded_name(map))
     }
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
@@ -282,7 +282,7 @@ impl Provider for MountGraph {
                     // `Director`'s own coarse pre-check never fires and this was
                     // the only place left that could still see the rejection
                     // for this specific mount.
-                    vfs_compose::record_rejected_write(&path);
+                    crate::record_rejected_write(&path);
                     return Err(read_only());
                 }
                 continue;
@@ -409,21 +409,21 @@ mod tests {
         let g = graph(vec![
             (
                 "",
-                Arc::new(vfs_compose::InlineProvider::from_files([
+                Arc::new(crate::InlineProvider::from_files([
                     ("Data/Interface/a.swf", b"x".as_slice()),
                     ("Data/Skyrim.esm", b"x".as_slice()),
                 ])),
             ),
             (
                 "",
-                Arc::new(vfs_compose::InlineProvider::from_files([(
+                Arc::new(crate::InlineProvider::from_files([(
                     "DATA/interface/b.swf",
                     b"x".as_slice(),
                 )])),
             ),
             (
                 "Data/Mods/Deep",
-                Arc::new(vfs_compose::InlineProvider::from_files([(
+                Arc::new(crate::InlineProvider::from_files([(
                     "f",
                     b"x".as_slice(),
                 )])),
@@ -464,7 +464,7 @@ mod tests {
         // non-root mount can be opened by a known path but never discovered.
         let g = graph(vec![(
             "data/somemod",
-            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+            Arc::new(crate::InlineProvider::from_files([("f", b"x".as_slice())])),
         )]);
 
         let entries = g.readdir(VPath::at_default("data")).unwrap();
@@ -480,7 +480,7 @@ mod tests {
         // ("data/a/b/c") must contribute only "a", not "a/b/c".
         let g = graph(vec![(
             "data/a/b/c",
-            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+            Arc::new(crate::InlineProvider::from_files([("f", b"x".as_slice())])),
         )]);
 
         let entries = g.readdir(VPath::at_default("data")).unwrap();
@@ -497,14 +497,14 @@ mod tests {
         let g = graph(vec![
             (
                 "data",
-                Arc::new(vfs_compose::InlineProvider::from_files([(
+                Arc::new(crate::InlineProvider::from_files([(
                     "somemod",
                     b"real-file-not-a-directory".as_slice(),
                 )])),
             ),
             (
                 "data/somemod",
-                Arc::new(vfs_compose::InlineProvider::from_files([("f", b"y".as_slice())])),
+                Arc::new(crate::InlineProvider::from_files([("f", b"y".as_slice())])),
             ),
         ]);
 
@@ -578,7 +578,7 @@ mod tests {
         // for itself.
         let g = graph(vec![(
             "data",
-            Arc::new(vfs_compose::InlineProvider::from_files([("a.txt", b"x".as_slice())])),
+            Arc::new(crate::InlineProvider::from_files([("a.txt", b"x".as_slice())])),
         )]);
 
         let entries = g.readdir(VPath::at_default("data")).unwrap();
@@ -594,7 +594,7 @@ mod tests {
         // logic's relocation out of `Director`.
         let g = graph(vec![(
             "data/somemod",
-            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+            Arc::new(crate::InlineProvider::from_files([("f", b"x".as_slice())])),
         )]);
 
         let entries = g.readdir(VPath::at_default("")).unwrap();
@@ -610,7 +610,7 @@ mod tests {
         // lowercased vpath the shim always produces.
         let g = graph(vec![(
             "Data/SomeMod",
-            Arc::new(vfs_compose::InlineProvider::from_files([("f.txt", b"x".as_slice())])),
+            Arc::new(crate::InlineProvider::from_files([("f.txt", b"x".as_slice())])),
         )]);
 
         assert!(g.getattr(VPath::at_default("data/somemod/f.txt")).unwrap().is_some());
@@ -628,7 +628,7 @@ mod tests {
         // through to the mounts it composes.
         let g = graph(vec![(
             "data/somemod",
-            Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+            Arc::new(crate::InlineProvider::from_files([("f", b"x".as_slice())])),
         )]);
         let st = g
             .getattr(VPath::new(RootId(1), "data/somemod/f"))
@@ -654,7 +654,7 @@ mod tests {
             ("rw", Arc::new(crate::DiskProvider::new(&dir)) as Arc<dyn Provider>),
             (
                 "ro",
-                Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
+                Arc::new(crate::InlineProvider::from_files([("f", b"x".as_slice())])),
             ),
         ]);
         assert_eq!(
@@ -663,10 +663,10 @@ mod tests {
             "the graph as a whole must report writable — the masking Finding 1 warned about"
         );
 
-        vfs_compose::reset_rejected_writes();
+        crate::reset_rejected_writes();
         let result = g.open(VPath::at_default("ro/f"), vfs_provider::OPEN_WRITE);
         assert_eq!(result, Err(vfs_provider::ST_READ_ONLY));
-        let rejected = vfs_compose::rejected_writes();
+        let rejected = crate::rejected_writes();
         assert!(
             rejected.iter().any(|(path, count)| path == "ro/f" && *count >= 1),
             "a write refused by one mount in a graph containing a writable \
@@ -699,7 +699,7 @@ mod tests {
             ("", Arc::new(crate::DiskProvider::new(&dir)) as Arc<dyn Provider>),
             (
                 "",
-                Arc::new(vfs_compose::InlineProvider::from_files([(
+                Arc::new(crate::InlineProvider::from_files([(
                     "only-in-archive.txt",
                     b"ARCHIVE".as_slice(),
                 )])),
@@ -722,7 +722,7 @@ mod tests {
         // The discovery instrument must stay quiet for a write that
         // succeeded: a rejection recorded here would send the gate-4 workflow
         // hunting for a provider that is already mounted.
-        let rejected = vfs_compose::rejected_writes();
+        let rejected = crate::rejected_writes();
         assert!(
             !rejected.iter().any(|(path, _)| path == "only-on-disk.txt"),
             "a write that the graph served must not be recorded as rejected, got {rejected:?}"
