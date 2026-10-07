@@ -25,8 +25,9 @@ pub enum Durability {
     /// namespace change (`mkdir`, `remove`, `rename`, a size change by
     /// `set_attr`) commit without fsyncs; a real durable point piggybacks
     /// on such an operation once the last one is at least `max_interval`
-    /// old, or once the catalog holds 10,000 non-durable commits (redb keeps
-    /// their bookkeeping in memory until a durable commit).
+    /// old, or once the catalog holds [`StorageConfig::max_deferred_commits`]
+    /// non-durable commits (default 10,000; redb keeps their bookkeeping in
+    /// memory until a durable commit).
     ///
     /// One exception: the `close`, `flush` or `set_attr` size change after
     /// writing to a file that **already existed at the last durable point**

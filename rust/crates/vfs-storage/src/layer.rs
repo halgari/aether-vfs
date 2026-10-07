@@ -18,39 +18,9 @@
 //! does. The overlay above relies on it: a copy-up of `sub/b.txt` into an
 //! upper that has no `sub` writes `sub/.cu.N.b.txt` there first.
 //!
-//! **Durability (spec §6).** A *durable point* is `BlockStore::flush()`, then
-//! the catalog's durable commit, under the exclusive durability gate
-//! ([`Storage::gate`]), so no file's row update can slip into the durable
-//! catalog commit without its blocks being in the store flush. Every other
-//! catalog write is non-durable. When durable points happen is
-//! [`crate::Durability`]'s choice:
-//!
-//! - under `OnEveryClose`, a handle's `flush`, the `close` of a handle that
-//!   wrote, and every namespace change (`mkdir`, `remove`, `rename`, a size
-//!   change by `set_attr`) commit and then run one before returning;
-//! - under `Deferred { max_interval }` (the default), the same operations
-//!   commit exactly as above but skip the fsyncs, unless a durable point is
-//!   due (the last is `max_interval` old, or the catalog holds
-//!   [`crate::durable::DEFERRED_MAX_COMMITS`] non-durable commits) — with one
-//!   exception: the `close`, `flush` or `set_attr` size change of a file that
-//!   wrote to a file whose row is already durable (it existed at the last
-//!   durable point) runs one at once. Rewriting such a file in place changes
-//!   store data a durable row describes; left non-durable, a store
-//!   auto-flush in the middle of the rewrite could publish a store state the
-//!   durable row does not match, and a crash would leave the file emptied or
-//!   torn. Files created since the last durable point (tracked per layer in
-//!   `fresh`) stay deferred, and so do namespace changes;
-//! - under both, [`Storage::sync`], [`Storage::close`] and a provider's `Drop`
-//!   always run one (skipping the fsyncs when nothing is non-durable), as do
-//!   layer creation, import and deletion.
-//!
-//! A file whose row is removed or replaced is deleted from the store only
-//! after a durable point has made the row's removal durable (catalog first,
-//! store second), and only once no handle has it open: until then its GUID
-//! waits in the storage's `doomed` list, for as long as the policy defers.
-//! A crash therefore loses at most the changes since the last durable point,
-//! and reconciliation at the next open repairs the store to match
-//! (see [`crate::Durability`] for what a deferred crash leaves).
+//! **Durability (spec §6).** When a change becomes durable, and the exceptions,
+//! are written once, in `rust/docs/durability.md` (module `crate::durable`);
+//! `changed` here only calls [`Storage::after_change`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

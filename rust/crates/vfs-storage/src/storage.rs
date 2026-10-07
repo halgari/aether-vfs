@@ -133,31 +133,10 @@ pub struct Storage {
     pub(crate) cfg: StorageConfig,
     /// Pull-through cache bookkeeping shared by every cached source.
     pub(crate) cache: CacheState,
-    /// The durability gate (spec §6: every durable catalog row references
-    /// durable store data). Held **shared** across every "write store data,
-    /// then write the catalog row that describes it" pair: a layer commit
-    /// (`FileCell::commit` and the row update), a layer file create (row, then
-    /// `set_len`) and a cache fetch (for a file's first block, its row and
-    /// `set_len`; then `write_blocks`, then the access-log update a later row
-    /// commit persists). Held **exclusive** across `store.flush()` +
-    /// `catalog.commit_durable()` wherever that pair runs: a layer's durable
-    /// point, `delete_layer`, `close` and reconciliation. So no row can land
-    /// between a flush and the durable commit that would publish it ahead of
-    /// its data. (The store's own auto-flush and compaction commits can still
-    /// make a store state durable mid-commit; reconciliation repairs those.)
-    ///
-    /// **Lock order**, outermost first:
-    /// - layers: a file cell's `state` → `gate` → the layer's `ns` → the
-    ///   layer's leaf locks (`cells`, `handles`, `fresh`, a cell's `path`
-    ///   and `mtime_override`) and the storage's `doomed`;
-    /// - the `layers` registry → `gate` (a new layer is made durable while
-    ///   the registry is held; nothing holding the gate takes the registry);
-    /// - cache: `gate` → `open_counts` → `access`.
-    ///
-    /// The gate is never taken recursively (shared or exclusive) by a thread
-    /// that holds it. The exclusive holder takes nothing else during the
-    /// fsyncs (a durable point takes `doomed` only briefly, before them, and
-    /// no layer lock at all).
+    /// The durability gate (spec §6): shared around each "write store data,
+    /// then the catalog row that describes it" pair, exclusive around a flush
+    /// plus durable commit. What it guards, who takes it how, and the **lock
+    /// order** are in `rust/docs/durability.md` (module `crate::durable`).
     pub(crate) gate: RwLock<()>,
     /// Every layer with a provider, by name: live, or dropped and still
     /// inside its `Drop` (a last commit and durable point). A provider removes
@@ -236,16 +215,9 @@ impl Storage {
     /// the directory open.
     ///
     /// After a clean close ([`Storage::close`], or the drop of the last
-    /// reference) nothing can disagree between the catalog and the store, so
-    /// reconciliation (a lookup per file, slow on a large store) is skipped
-    /// and [`Storage::last_reconcile`] says so. The close left the same
-    /// random token in the catalog and as the block store's clean-shutdown
-    /// value; the skip needs the catalog to have existed before this open and
-    /// the two tokens to match exactly. The catalog's token is removed,
-    /// durably, before anything else is written, and every block store open
-    /// (of any build) overwrites the store's at once, so a crash of this
-    /// open, or anything else that opened the store since, makes the next
-    /// open reconcile. So does a store from before the token existed.
+    /// reference) reconciliation (a lookup per file, slow on a large store) is
+    /// skipped and [`Storage::last_reconcile`] says so. The close-token
+    /// handshake that makes this safe is in `rust/docs/durability.md`.
     pub fn open(dir: impl AsRef<Path>, cfg: StorageConfig) -> Result<Arc<Storage>, StorageError> {
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir)?;

@@ -34,15 +34,9 @@
 //! Store ids of any other shape are not `vfs-storage`'s: they are logged and
 //! left alone.
 //!
-//! None of this can follow a clean close ([`Storage::close`], or the drop of
-//! the last reference) of a session that left nothing for this pass: every
-//! write is then durable on both sides, in order, and the catalog and the
-//! block store hold the same random clean-close token. A session that left a
-//! repair here (a store delete that failed, a failed commit, a write that
-//! panicked, corruption found: see `Storage::needs_reconcile`) leaves no
-//! token. An open that finds matching tokens removes the catalog's durably
-//! before anything else and skips this pass
-//! ([`ReconcileReport::skipped_after_clean_close`]).
+//! None of this runs after a clean close of a session that left nothing for
+//! it ([`ReconcileReport::skipped_after_clean_close`]): the token handshake is
+//! in `rust/docs/durability.md`.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;

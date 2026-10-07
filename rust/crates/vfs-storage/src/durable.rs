@@ -1,4 +1,4 @@
-//! Durability: ...(doc written later)
+#![doc = include_str!("../../../docs/durability.md")]
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -16,14 +16,9 @@
 //!
 //! ## Durability
 //!
-//! Every row write commits with `Durability::None`, and
-//! [`Catalog::commit_durable`] makes everything before it durable (so do the
-//! clean-close mark and its removal, which commit durably themselves). The catalog
-//! and the block store commit separately, so the caller orders them:
-//! `BlockStore::flush()` first, then `commit_durable`, so that every durable
-//! catalog row references durable store data. A durable commit makes *all*
-//! earlier non-durable commits durable too, which is why the catalog never
-//! makes one on its own initiative.
+//! Every row write commits with `Durability::None`; [`Catalog::commit_durable`]
+//! publishes everything before it. The caller orders it after the block store's
+//! flush: the policy is in `rust/docs/durability.md` (module `crate::durable`).
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -5,16 +5,10 @@
 //! cached files' eviction bookkeeping), and a RAM tier of decompressed
 //! blocks. See `docs/superpowers/specs/2026-09-29-vfs-storage-design.md`.
 //!
-//! **Durability.** Layer writes and namespace changes commit non-durably;
-//! a *durable point* (store fsync + durable index commit, then the catalog's
-//! durable commit) publishes them. [`StorageConfig::durability`] chooses when
-//! one runs: by default ([`Durability::Deferred`]) at most every five minutes
-//! (or 10,000 catalog commits) while layers change, at once after a rewrite in
-//! place of a file that was already durable, and at [`Storage::sync`],
-//! [`Storage::close`] and a layer provider's drop; [`Durability::OnEveryClose`]
-//! runs one at every close, flush and namespace change. A crash loses at most
-//! the changes since the last durable point, and the store always reopens
-//! consistent.
+//! **Durability.** Layer writes commit non-durably; a *durable point* publishes
+//! them. The rules (when one runs, the exceptions, the clean-close skip, lock
+//! order, what a crash leaves) are in the `durable` module's docs, which render
+//! `rust/docs/durability.md`.
 
 mod cached;
 mod catalog;
