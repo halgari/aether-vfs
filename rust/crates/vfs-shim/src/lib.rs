@@ -14,9 +14,9 @@ mod engine;
 // compat: removed by cleanup stream I
 #[doc(hidden)]
 pub use director as fuse_client;
+mod child;
 mod hook;
 mod hookstats;
-mod inject;
 mod lazy_section;
 mod ntbuf;
 mod ntdef;

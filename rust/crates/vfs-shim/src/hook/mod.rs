@@ -2,7 +2,7 @@
 //!
 //! # Unsafe convention
 //!
-//! This tree holds most of the crate's `unsafe`, not all of it: `bootstrap`, `inject`,
+//! This tree holds most of the crate's `unsafe`, not all of it: `bootstrap`, `child`,
 //! `lazy_section`, `regkeys`, `regquery`, `regwrite`, `regnotify`, `director` and `breadcrumb`
 //! allow `unsafe_code` as well.
 //!

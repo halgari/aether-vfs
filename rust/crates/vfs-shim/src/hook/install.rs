@@ -15,8 +15,8 @@ use super::{
     set_security_hook, set_value_key_hook, setinfo_hook, unload_key_ex_hook, unload_key_hook,
     unload_key2_hook, unlock_hook, unmap_view_hook, write_hook,
 };
+use crate::child::self_dll_path;
 use crate::engine::Engine;
-use crate::inject::self_dll_path;
 use crate::ntdef::{
     NtCloseFn, NtCreateFileFn, NtCreateKeyFn, NtCreateKeyTransactedFn, NtCreateSectionFn,
     NtDeleteFileFn, NtDeleteKeyFn, NtDeleteValueKeyFn, NtDuplicateObjectFn, NtEnumerateKeyFn,

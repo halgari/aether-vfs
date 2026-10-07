@@ -163,7 +163,7 @@ pub fn bootstrap_from_config_path_with_payload(
             if let Some(file) = vfs_env::text(vfs_env::PAYLOAD_CFG_FILE) {
                 candidates.push(std::path::PathBuf::from(file));
             }
-            candidates.push(crate::inject::payload_cfg_path_for_pid(std::process::id()));
+            candidates.push(crate::child::payload_cfg_path_for_pid(std::process::id()));
             candidates
                 .into_iter()
                 .find_map(|file| {
@@ -185,7 +185,7 @@ pub fn bootstrap_from_config_path_with_payload(
         unsafe { install_late(engine, cfg_ptr).map_err(BootstrapError::Install)? }
     };
     // Tell any spawning parent (that force-suspended us) our hooks are live.
-    crate::inject::signal_ready();
+    crate::child::signal_ready();
     Ok(guard)
 }
 

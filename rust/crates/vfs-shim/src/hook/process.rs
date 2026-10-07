@@ -2,7 +2,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{TRAMP_CPIW, child_cwd_root};
-use crate::inject::{inject_child, re_suspend};
+use crate::child::{inject_child, re_suspend};
 use core::ffi::c_void;
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::HANDLE;
