@@ -41,7 +41,7 @@
 use crate::fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{install, outcome_count, Engine, OpenOutcome};
+use vfs_shim::{Engine, OpenOutcome, install, outcome_count};
 
 /// Bytes on the real filesystem under the managed root. One per name, so a
 /// failure says *which* file was reached rather than only that one was.
@@ -101,7 +101,7 @@ fn the_drm_names_are_answered_by_the_director_and_never_by_the_real_file() {
     // to `Decision::Redirect` and returned host bytes, which is the failure
     // this test has to be able to see. See the module doc.
     let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
+        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
         let entries = NAMES
             .iter()
             .map(|(name, vpath, host)| InputEntry {
