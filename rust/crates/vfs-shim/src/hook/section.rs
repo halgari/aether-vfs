@@ -1,4 +1,5 @@
 //! Sections and views: `NtCreateSection`, `NtMapViewOfSection`, `NtUnmapViewOfSection`.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{ShimIoGuard, TRAMP_CREATE_SECTION, TRAMP_MAP_VIEW, TRAMP_UNMAP_VIEW};
 use crate::ntdef::{
@@ -71,15 +72,18 @@ unsafe fn real_image_section(
         .share_mode(0x0000_0001 | 0x0000_0002) // FILE_SHARE_READ | FILE_SHARE_WRITE
         .open(&path)
         .ok()?;
-    let st = tramp(
-        section_handle,
-        access,
-        oa,
-        max_size,
-        page_prot,
-        alloc_attrs,
-        f.as_raw_handle() as HANDLE,
-    );
+    // SAFETY: the original NT function, called with valid NT arguments.
+    let st = unsafe {
+        tramp(
+            section_handle,
+            access,
+            oa,
+            max_size,
+            page_prot,
+            alloc_attrs,
+            f.as_raw_handle() as HANDLE,
+        )
+    };
     // The section holds its own reference to the file object, so closing ours
     // here (on drop) does not disturb it.
     if st < 0 {
@@ -141,17 +145,20 @@ unsafe fn fuse_create_section(
         // hundreds of assemblies and the CLR faulted inside its own code
         // (`c0000005`) on that difference. A genuine section gets all of it
         // from the kernel for the price of one cached file on disk.
-        if let Some(st) = real_image_section(
-            &pe,
-            file_handle,
-            section_handle,
-            access,
-            oa,
-            max_size,
-            page_prot,
-            alloc_attrs,
-            tramp,
-        ) {
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        if let Some(st) = unsafe {
+            real_image_section(
+                &pe,
+                file_handle,
+                section_handle,
+                access,
+                oa,
+                max_size,
+                page_prot,
+                alloc_attrs,
+                tramp,
+            )
+        } {
             return st;
         }
 
@@ -160,7 +167,10 @@ unsafe fn fuse_create_section(
                 match crate::zipserve::register_mapped_image(base as usize, img_size as u64) {
                     Some(h) => {
                         if !section_handle.is_null() {
-                            *section_handle = h as HANDLE;
+                            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                            unsafe {
+                                *section_handle = h as HANDLE;
+                            }
                         }
                         STATUS_SUCCESS
                     }
@@ -171,7 +181,8 @@ unsafe fn fuse_create_section(
         };
     }
     if !max_size.is_null() {
-        let want = core::ptr::read_unaligned(max_size);
+        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+        let want = unsafe { core::ptr::read_unaligned(max_size) };
         if want > 0 && (want as u64) > size {
             return STATUS_SECTION_TOO_BIG;
         }
@@ -194,10 +205,14 @@ unsafe fn fuse_create_section(
         return STATUS_SECTION_TOO_BIG;
     }
     if size > EAGER_MAX {
-        return match crate::lazy_section::create_lazy_data_section(fh, size) {
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        return match unsafe { crate::lazy_section::create_lazy_data_section(fh, size) } {
             Some(h) => {
                 if !section_handle.is_null() {
-                    *section_handle = h as HANDLE;
+                    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                    unsafe {
+                        *section_handle = h as HANDLE;
+                    }
                 }
                 STATUS_SUCCESS
             }
@@ -213,16 +228,20 @@ unsafe fn fuse_create_section(
         MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
     };
     let map_len = size as usize;
-    let base = VirtualAlloc(
-        core::ptr::null(),
-        map_len,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_READWRITE,
-    );
+    // SAFETY: FFI call with valid arguments.
+    let base = unsafe {
+        VirtualAlloc(
+            core::ptr::null(),
+            map_len,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        )
+    };
     if base.is_null() {
         return STATUS_UNSUCCESSFUL;
     }
-    let dest = core::slice::from_raw_parts_mut(base as *mut u8, map_len);
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let dest = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, map_len) };
     let fill_ok = match client.read_fragmented(fh, 0, dest) {
         Ok(n) if n == map_len => true,
         Ok(n) if n > 0 => {
@@ -244,7 +263,8 @@ unsafe fn fuse_create_section(
         }
     }
     if !fill_ok {
-        VirtualFree(base, 0, MEM_RELEASE);
+        // SAFETY: FFI call with valid arguments.
+        unsafe { VirtualFree(base, 0, MEM_RELEASE) };
         return STATUS_UNSUCCESSFUL;
     }
     // Track the allocation so NtClose frees it — otherwise every eager section
@@ -253,7 +273,10 @@ unsafe fn fuse_create_section(
     match crate::zipserve::register_mapped_image(base as usize, size) {
         Some(h) => {
             if !section_handle.is_null() {
-                *section_handle = h as HANDLE;
+                // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                unsafe {
+                    *section_handle = h as HANDLE;
+                }
             }
             STATUS_SUCCESS
         }
@@ -292,7 +315,23 @@ pub(super) unsafe fn create_section_hook_body(
         if vfs_env::present(vfs_env::REJECT_FUSE_SECTION) {
             return STATUS_INVALID_FILE_FOR_SECTION;
         }
-        return fuse_create_section(
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        return unsafe {
+            fuse_create_section(
+                section_handle,
+                access,
+                oa,
+                max_size,
+                page_prot,
+                alloc_attrs,
+                file_handle,
+                tramp,
+            )
+        };
+    }
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe {
+        tramp(
             section_handle,
             access,
             oa,
@@ -300,18 +339,8 @@ pub(super) unsafe fn create_section_hook_body(
             page_prot,
             alloc_attrs,
             file_handle,
-            tramp,
-        );
+        )
     }
-    tramp(
-        section_handle,
-        access,
-        oa,
-        max_size,
-        page_prot,
-        alloc_attrs,
-        file_handle,
-    )
 }
 
 /// `NtMapViewOfSection` hook: synthetic sections return a pointer into the
@@ -339,7 +368,8 @@ pub(super) unsafe fn map_view_hook_body(
         let off = if section_offset.is_null() {
             0u64
         } else {
-            let v = core::ptr::read_unaligned(section_offset);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            let v = unsafe { core::ptr::read_unaligned(section_offset) };
             if v < 0 {
                 return STATUS_UNSUCCESSFUL;
             }
@@ -348,42 +378,54 @@ pub(super) unsafe fn map_view_hook_body(
         let want = if view_size.is_null() {
             0u64
         } else {
-            *view_size as u64
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { *view_size as u64 }
         };
         match crate::zipserve::map_view(section as isize, off, want) {
             Some((base, size)) => {
                 if !base_address.is_null() {
-                    let preferred = *base_address;
+                    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                    let preferred = unsafe { *base_address };
                     if !preferred.is_null() && preferred as usize != base {
                         // Caller demanded a specific VA we cannot satisfy.
                         crate::zipserve::unmap_view(base);
                         return STATUS_UNSUCCESSFUL;
                     }
-                    *base_address = base as *mut c_void;
+                    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                    unsafe {
+                        *base_address = base as *mut c_void;
+                    }
                 }
                 if !view_size.is_null() {
-                    *view_size = size as usize;
+                    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                    unsafe {
+                        *view_size = size as usize;
+                    }
                 }
                 if !section_offset.is_null() {
-                    core::ptr::write_unaligned(section_offset, off as i64);
+                    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                    unsafe { core::ptr::write_unaligned(section_offset, off as i64) };
                 }
                 STATUS_SUCCESS
             }
             None => STATUS_UNSUCCESSFUL,
         }
     } else {
-        tramp(
-            section,
-            process,
-            base_address,
-            zero_bits,
-            commit_size,
-            section_offset,
-            view_size,
-            inherit,
-            alloc_type,
-            protect,
-        )
+        // SAFETY: the original NT function, called with valid NT arguments.
+        unsafe {
+            tramp(
+                section,
+                process,
+                base_address,
+                zero_bits,
+                commit_size,
+                section_offset,
+                view_size,
+                inherit,
+                alloc_type,
+                protect,
+            )
+        }
     }
 }
 
@@ -404,5 +446,6 @@ pub(super) unsafe fn unmap_view_hook_body(process: HANDLE, base: *mut c_void) ->
         crate::lazy_section::on_view_unmapped(b);
         return STATUS_SUCCESS;
     }
-    tramp(process, base)
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe { tramp(process, base) }
 }
