@@ -16,130 +16,46 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-/// Hooks attributed separately: one entry per instrumented hook (there is no catch-all variant).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(usize)]
-pub enum Hook {
-    Create = 0,
-    Open = 1,
-    QAttr = 2,
-    QFull = 3,
-    Read = 4,
-    Write = 5,
-    Close = 6,
-    QDirEx = 7,
-    QueryInfo = 8,
-    CreateSection = 9,
-    MapView = 10,
-    QDir = 11,
-    QByName = 12,
-    SetInfo = 13,
-    QVol = 14,
-    Lock = 15,
-    Unlock = 16,
-    FlushBuffers = 17,
-    DeleteFile = 18,
-    QObj = 19,
-    OpenKey = 20,
-    OpenKeyEx = 21,
-    CreateKey = 22,
-    DuplicateObject = 23,
-    QueryKey = 24,
-    EnumerateKey = 25,
-    QueryValueKey = 26,
-    EnumerateValueKey = 27,
-    QueryMultipleValueKey = 28,
-    SetValueKey = 29,
-    DeleteValueKey = 30,
-    DeleteKey = 31,
-    RenameKey = 32,
-    SetInformationKey = 33,
-    FlushKey = 34,
-    NotifyChangeKey = 35,
-    NotifyChangeMultipleKeys = 36,
-    QuerySecurityObject = 37,
-    SetSecurityObject = 38,
-    SetInformationObject = 39,
-    CreateKeyTransacted = 40,
-    OpenKeyTransacted = 41,
-    OpenKeyTransactedEx = 42,
-    LoadKey = 43,
-    LoadKey2 = 44,
-    LoadKeyEx = 45,
-    LoadKey3 = 46,
-    UnloadKey = 47,
-    UnloadKey2 = 48,
-    UnloadKeyEx = 49,
-    SaveKey = 50,
-    SaveKeyEx = 51,
-    SaveMergedKeys = 52,
-    ReplaceKey = 53,
-    RestoreKey = 54,
-    CompressKey = 55,
-    LockRegistryKey = 56,
+/// Generates [`Hook`], its count and its names from `detour_table!`: one `Variant = id` per row
+/// that has a `stat` column.
+///
+/// The ids are written in the table, not counted, because they are the breadcrumb's hook ids
+/// (a reader outside the process decodes them) and so must not move when a row is inserted or
+/// reordered. The `const` block below fails the build if the ids are not exactly `0..N` with
+/// no gaps or repeats.
+macro_rules! hook_stats_from_table {
+    ($(
+        {
+            export: $export:literal,
+            stat: [$($variant:ident = $id:expr)?],
+            $($rest:tt)*
+        }
+    )*) => {
+        /// Hooks attributed separately: one entry per instrumented hook (there is no catch-all variant).
+        #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+        #[repr(usize)]
+        pub enum Hook {
+            $($($variant = $id,)?)*
+        }
+
+        /// Number of [`Hook`]s.
+        const N: usize = [$($(stringify!($variant),)?)*].len();
+
+        /// The export name of each [`Hook`], indexed by its id.
+        const NAMES: [&str; N] = {
+            let mut names = [""; N];
+            $($(names[$id] = $export;)?)*
+            let mut i = 0;
+            while i < N {
+                assert!(!names[i].is_empty(), "hook ids in detour_table! are not exactly 0..N");
+                i += 1;
+            }
+            names
+        };
+    };
 }
 
-const N: usize = 57;
-
-const NAMES: [&str; N] = [
-    "NtCreateFile",
-    "NtOpenFile",
-    "NtQueryAttributesFile",
-    "NtQueryFullAttributesFile",
-    "NtReadFile",
-    "NtWriteFile",
-    "NtClose",
-    "NtQueryDirectoryFileEx",
-    "NtQueryInformationFile",
-    "NtCreateSection",
-    "NtMapViewOfSection",
-    "NtQueryDirectoryFile",
-    "NtQueryInformationByName",
-    "NtSetInformationFile",
-    "NtQueryVolumeInformationFile",
-    "NtLockFile",
-    "NtUnlockFile",
-    "NtFlushBuffersFile",
-    "NtDeleteFile",
-    "NtQueryObject",
-    "NtOpenKey",
-    "NtOpenKeyEx",
-    "NtCreateKey",
-    "NtDuplicateObject",
-    "NtQueryKey",
-    "NtEnumerateKey",
-    "NtQueryValueKey",
-    "NtEnumerateValueKey",
-    "NtQueryMultipleValueKey",
-    "NtSetValueKey",
-    "NtDeleteValueKey",
-    "NtDeleteKey",
-    "NtRenameKey",
-    "NtSetInformationKey",
-    "NtFlushKey",
-    "NtNotifyChangeKey",
-    "NtNotifyChangeMultipleKeys",
-    "NtQuerySecurityObject",
-    "NtSetSecurityObject",
-    "NtSetInformationObject",
-    "NtCreateKeyTransacted",
-    "NtOpenKeyTransacted",
-    "NtOpenKeyTransactedEx",
-    "NtLoadKey",
-    "NtLoadKey2",
-    "NtLoadKeyEx",
-    "NtLoadKey3",
-    "NtUnloadKey",
-    "NtUnloadKey2",
-    "NtUnloadKeyEx",
-    "NtSaveKey",
-    "NtSaveKeyEx",
-    "NtSaveMergedKeys",
-    "NtReplaceKey",
-    "NtRestoreKey",
-    "NtCompressKey",
-    "NtLockRegistryKey",
-];
+detour_table!(hook_stats_from_table);
 
 static CALLS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
 static NANOS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];

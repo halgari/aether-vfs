@@ -84,7 +84,7 @@ impl Drop for ShimIoGuard {
 /// `cpiw_hook` is the one exception and is not an exception to the principle:
 /// `CreateProcessInternalW` returns a Win32 `BOOL`, where this constant's bit
 /// pattern is *non-zero* and therefore reads as success. It returns `FALSE`
-/// instead — see the `on_panic` expression in the `hook_entry_points!` list.
+/// instead — see the `on_panic` column of the `CreateProcessInternalW` row in `detour_table!`.
 ///
 /// Note that several hooks already return this same status when their
 /// trampoline is missing, so the value alone does not distinguish a panic from
@@ -168,7 +168,8 @@ pub fn contain_panic<R>(
 /// differently for different hooks — and so a hook added later cannot quietly
 /// skip it. `no_extern_hook_bypasses_the_panic_containment_macro` in this
 /// module's tests enforces that by scanning the source: this macro must be the
-/// only place in `hook.rs` that defines an `extern "system"` function.
+/// only place in `hook.rs` that defines an `extern "system"` function. The real detours reach
+/// it through [`entry_points_from_table`], so their export names come from `detour_table!`.
 macro_rules! hook_entry_points {
     ($(
         $(#[$attr:meta])*
@@ -189,470 +190,29 @@ macro_rules! hook_entry_points {
     )*};
 }
 
-hook_entry_points! {
-    fn create_hook = create_hook_body(
-        file_handle: *mut HANDLE,
-        access: u32,
-        oa: *const ObjectAttributes,
-        iosb: *mut c_void,
-        alloc: *const i64,
-        attrs: u32,
-        share: u32,
-        disp: u32,
-        opts: u32,
-        ea: *const c_void,
-        ealen: u32,
-    ) -> NTSTATUS as "NtCreateFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn open_hook = open_hook_body(
-        file_handle: *mut HANDLE,
-        access: u32,
-        oa: *const ObjectAttributes,
-        iosb: *mut c_void,
-        share: u32,
-        opts: u32,
-    ) -> NTSTATUS as "NtOpenFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn qibn_hook = qibn_hook_body(
-        oa: *const ObjectAttributes,
-        iosb: *mut c_void,
-        info: *mut c_void,
-        length: u32,
-        class_raw: u32,
-    ) -> NTSTATUS as "NtQueryInformationByName", on_panic STATUS_HOOK_PANICKED;
-
-    fn qattr_hook = qattr_hook_body(
-        oa: *const ObjectAttributes,
-        info: *mut FileBasicInformation,
-    ) -> NTSTATUS as "NtQueryAttributesFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn qfull_hook = qfull_hook_body(
-        oa: *const ObjectAttributes,
-        info: *mut FileNetworkOpenInformation,
-    ) -> NTSTATUS as "NtQueryFullAttributesFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn close_hook = close_hook_body(handle: HANDLE) -> NTSTATUS
-        as "NtClose", on_panic STATUS_HOOK_PANICKED;
-
-    fn delete_hook = delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS
-        as "NtDeleteFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn qif_hook = qif_hook_body(
-        handle: HANDLE,
-        iosb: *mut c_void,
-        info: *mut c_void,
-        length: u32,
-        class: u32,
-    ) -> NTSTATUS as "NtQueryInformationFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn qobj_hook = qobj_hook_body(
-        handle: HANDLE,
-        class: u32,
-        info: *mut c_void,
-        length: u32,
-        ret_len: *mut u32,
-    ) -> NTSTATUS as "NtQueryObject", on_panic STATUS_HOOK_PANICKED;
-
-    fn setinfo_hook = setinfo_hook_body(
-        handle: HANDLE,
-        iosb: *mut c_void,
-        info: *mut c_void,
-        length: u32,
-        class: u32,
-    ) -> NTSTATUS as "NtSetInformationFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn qvol_hook = qvol_hook_body(
-        handle: HANDLE,
-        iosb: *mut c_void,
-        info: *mut c_void,
-        length: u32,
-        class: u32,
-    ) -> NTSTATUS as "NtQueryVolumeInformationFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn lock_hook = lock_hook_body(
-        handle: HANDLE,
-        event: HANDLE,
-        apc: *const c_void,
-        apc_ctx: *const c_void,
-        iosb: *mut c_void,
-        byte_offset: *const i64,
-        length: *const i64,
-        key: u32,
-        fail_immediately: u8,
-        exclusive: u8,
-    ) -> NTSTATUS as "NtLockFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn unlock_hook = unlock_hook_body(
-        handle: HANDLE,
-        iosb: *mut c_void,
-        byte_offset: *const i64,
-        length: *const i64,
-        key: u32,
-    ) -> NTSTATUS as "NtUnlockFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn flush_hook = flush_hook_body(handle: HANDLE, iosb: *mut c_void) -> NTSTATUS
-        as "NtFlushBuffersFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn write_hook = write_hook_body(
-        handle: HANDLE,
-        event: HANDLE,
-        apc: *const c_void,
-        apc_ctx: *const c_void,
-        iosb: *mut c_void,
-        buffer: *mut c_void,
-        length: u32,
-        byte_offset: *const i64,
-        key: *const u32,
-    ) -> NTSTATUS as "NtWriteFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn read_hook = read_hook_body(
-        handle: HANDLE,
-        event: HANDLE,
-        apc: *const c_void,
-        apc_ctx: *const c_void,
-        iosb: *mut c_void,
-        buffer: *mut c_void,
-        length: u32,
-        byte_offset: *const i64,
-        key: *const u32,
-    ) -> NTSTATUS as "NtReadFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn create_section_hook = create_section_hook_body(
-        section_handle: *mut HANDLE,
-        access: u32,
-        oa: *const ObjectAttributes,
-        max_size: *mut i64,
-        page_prot: u32,
-        alloc_attrs: u32,
-        file_handle: HANDLE,
-    ) -> NTSTATUS as "NtCreateSection", on_panic STATUS_HOOK_PANICKED;
-
-    fn map_view_hook = map_view_hook_body(
-        section: HANDLE,
-        process: HANDLE,
-        base_address: *mut *mut c_void,
-        zero_bits: usize,
-        commit_size: usize,
-        section_offset: *mut i64,
-        view_size: *mut usize,
-        inherit: u32,
-        alloc_type: u32,
-        protect: u32,
-    ) -> NTSTATUS as "NtMapViewOfSection", on_panic STATUS_HOOK_PANICKED;
-
-    fn unmap_view_hook = unmap_view_hook_body(process: HANDLE, base: *mut c_void) -> NTSTATUS
-        as "NtUnmapViewOfSection", on_panic STATUS_HOOK_PANICKED;
-
-    fn qdirex_hook = qdirex_hook_body(
-        handle: HANDLE,
-        event: HANDLE,
-        apc: *const c_void,
-        apc_ctx: *const c_void,
-        iosb: *mut c_void,
-        info: *mut c_void,
-        length: u32,
-        class_raw: u32,
-        flags: u32,
-        file_name: *const UnicodeString,
-    ) -> NTSTATUS as "NtQueryDirectoryFileEx", on_panic STATUS_HOOK_PANICKED;
-
-    fn qdir_hook = qdir_hook_body(
-        handle: HANDLE,
-        event: HANDLE,
-        apc: *const c_void,
-        apc_ctx: *const c_void,
-        iosb: *mut c_void,
-        info: *mut c_void,
-        length: u32,
-        class_raw: u32,
-        single: u8,
-        file_name: *const UnicodeString,
-        restart: u8,
-    ) -> NTSTATUS as "NtQueryDirectoryFile", on_panic STATUS_HOOK_PANICKED;
-
-    fn open_key_hook = open_key_hook_body(
-        key: *mut HANDLE,
-        access: u32,
-        oa: *const ObjectAttributes,
-    ) -> NTSTATUS as "NtOpenKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn open_key_ex_hook = open_key_ex_hook_body(
-        key: *mut HANDLE,
-        access: u32,
-        oa: *const ObjectAttributes,
-        options: u32,
-    ) -> NTSTATUS as "NtOpenKeyEx", on_panic STATUS_HOOK_PANICKED;
-
-    fn create_key_hook = create_key_hook_body(
-        key: *mut HANDLE,
-        access: u32,
-        oa: *const ObjectAttributes,
-        title_index: u32,
-        class: *const UnicodeString,
-        options: u32,
-        disposition: *mut u32,
-    ) -> NTSTATUS as "NtCreateKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn dup_hook = dup_hook_body(
-        src_process: HANDLE,
-        src: HANDLE,
-        dst_process: HANDLE,
-        dst: *mut HANDLE,
-        access: u32,
-        attributes: u32,
-        options: u32,
-    ) -> NTSTATUS as "NtDuplicateObject", on_panic STATUS_HOOK_PANICKED;
-
-    fn query_key_hook = query_key_hook_body(
-        key: HANDLE,
-        class: u32,
-        info: *mut c_void,
-        length: u32,
-        ret_len: *mut u32,
-    ) -> NTSTATUS as "NtQueryKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn enum_key_hook = enum_key_hook_body(
-        key: HANDLE,
-        index: u32,
-        class: u32,
-        info: *mut c_void,
-        length: u32,
-        ret_len: *mut u32,
-    ) -> NTSTATUS as "NtEnumerateKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn query_value_hook = query_value_hook_body(
-        key: HANDLE,
-        name: *const UnicodeString,
-        class: u32,
-        info: *mut c_void,
-        length: u32,
-        ret_len: *mut u32,
-    ) -> NTSTATUS as "NtQueryValueKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn enum_value_hook = enum_value_hook_body(
-        key: HANDLE,
-        index: u32,
-        class: u32,
-        info: *mut c_void,
-        length: u32,
-        ret_len: *mut u32,
-    ) -> NTSTATUS as "NtEnumerateValueKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn query_multiple_hook = query_multiple_hook_body(
-        key: HANDLE,
-        entries: *mut c_void,
-        count: u32,
-        buffer: *mut c_void,
-        buffer_len: *mut u32,
-        required: *mut u32,
-    ) -> NTSTATUS as "NtQueryMultipleValueKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn set_value_key_hook = set_value_key_hook_body(
-        key: HANDLE,
-        name: *const UnicodeString,
-        title_index: u32,
-        ty: u32,
-        data: *const c_void,
-        size: u32,
-    ) -> NTSTATUS as "NtSetValueKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn delete_value_key_hook = delete_value_key_hook_body(
-        key: HANDLE,
-        name: *const UnicodeString,
-    ) -> NTSTATUS as "NtDeleteValueKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn delete_key_hook = delete_key_hook_body(key: HANDLE) -> NTSTATUS
-        as "NtDeleteKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn rename_key_hook = rename_key_hook_body(
-        key: HANDLE,
-        new_name: *const UnicodeString,
-    ) -> NTSTATUS as "NtRenameKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn set_info_key_hook = set_info_key_hook_body(
-        key: HANDLE,
-        class: u32,
-        info: *const c_void,
-        length: u32,
-    ) -> NTSTATUS as "NtSetInformationKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn flush_key_hook = flush_key_hook_body(key: HANDLE) -> NTSTATUS
-        as "NtFlushKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn notify_key_hook = notify_key_hook_body(
-        key: HANDLE,
-        event: HANDLE,
-        apc: *const c_void,
-        apc_ctx: *const c_void,
-        iosb: *mut c_void,
-        filter: u32,
-        subtree: u8,
-        buffer: *mut c_void,
-        buffer_len: u32,
-        asynchronous: u8,
-    ) -> NTSTATUS as "NtNotifyChangeKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn notify_multiple_hook = notify_multiple_hook_body(
-        key: HANDLE,
-        count: u32,
-        subordinates: *const ObjectAttributes,
-        event: HANDLE,
-        apc: *const c_void,
-        apc_ctx: *const c_void,
-        iosb: *mut c_void,
-        filter: u32,
-        subtree: u8,
-        buffer: *mut c_void,
-        buffer_len: u32,
-        asynchronous: u8,
-    ) -> NTSTATUS as "NtNotifyChangeMultipleKeys", on_panic STATUS_HOOK_PANICKED;
-
-    fn query_security_hook = query_security_hook_body(
-        handle: HANDLE,
-        info: u32,
-        sd: *mut c_void,
-        length: u32,
-        needed: *mut u32,
-    ) -> NTSTATUS as "NtQuerySecurityObject", on_panic STATUS_HOOK_PANICKED;
-
-    fn set_security_hook = set_security_hook_body(
-        handle: HANDLE,
-        info: u32,
-        sd: *const c_void,
-    ) -> NTSTATUS as "NtSetSecurityObject", on_panic STATUS_HOOK_PANICKED;
-
-    fn set_info_object_hook = set_info_object_hook_body(
-        handle: HANDLE,
-        class: u32,
-        info: *const c_void,
-        length: u32,
-    ) -> NTSTATUS as "NtSetInformationObject", on_panic STATUS_HOOK_PANICKED;
-
-    fn create_key_tx_hook = create_key_tx_hook_body(
-        key: *mut HANDLE,
-        access: u32,
-        oa: *const ObjectAttributes,
-        title_index: u32,
-        class: *const UnicodeString,
-        options: u32,
-        transaction: HANDLE,
-        disposition: *mut u32,
-    ) -> NTSTATUS as "NtCreateKeyTransacted", on_panic STATUS_HOOK_PANICKED;
-
-    fn open_key_tx_hook = open_key_tx_hook_body(
-        key: *mut HANDLE,
-        access: u32,
-        oa: *const ObjectAttributes,
-        transaction: HANDLE,
-    ) -> NTSTATUS as "NtOpenKeyTransacted", on_panic STATUS_HOOK_PANICKED;
-
-    fn open_key_tx_ex_hook = open_key_tx_ex_hook_body(
-        key: *mut HANDLE,
-        access: u32,
-        oa: *const ObjectAttributes,
-        options: u32,
-        transaction: HANDLE,
-    ) -> NTSTATUS as "NtOpenKeyTransactedEx", on_panic STATUS_HOOK_PANICKED;
-
-    fn load_key_hook = load_key_hook_body(
-        target: *const ObjectAttributes,
-        source: *const ObjectAttributes,
-    ) -> NTSTATUS as "NtLoadKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn load_key2_hook = load_key2_hook_body(
-        target: *const ObjectAttributes,
-        source: *const ObjectAttributes,
-        flags: u32,
-    ) -> NTSTATUS as "NtLoadKey2", on_panic STATUS_HOOK_PANICKED;
-
-    fn load_key_ex_hook = load_key_ex_hook_body(
-        target: *const ObjectAttributes,
-        source: *const ObjectAttributes,
-        flags: u32,
-        a4: usize,
-        a5: usize,
-        a6: usize,
-        a7: usize,
-        a8: usize,
-    ) -> NTSTATUS as "NtLoadKeyEx", on_panic STATUS_HOOK_PANICKED;
-
-    fn load_key3_hook = load_key3_hook_body(
-        target: *const ObjectAttributes,
-        source: *const ObjectAttributes,
-        flags: u32,
-        a4: usize,
-        a5: usize,
-        a6: usize,
-        a7: usize,
-        a8: usize,
-    ) -> NTSTATUS as "NtLoadKey3", on_panic STATUS_HOOK_PANICKED;
-
-    fn unload_key_hook = unload_key_hook_body(target: *const ObjectAttributes) -> NTSTATUS
-        as "NtUnloadKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn unload_key2_hook = unload_key2_hook_body(
-        target: *const ObjectAttributes,
-        a2: usize,
-    ) -> NTSTATUS as "NtUnloadKey2", on_panic STATUS_HOOK_PANICKED;
-
-    fn unload_key_ex_hook = unload_key_ex_hook_body(
-        target: *const ObjectAttributes,
-        a2: usize,
-    ) -> NTSTATUS as "NtUnloadKeyEx", on_panic STATUS_HOOK_PANICKED;
-
-    fn save_key_hook = save_key_hook_body(key: HANDLE, file: HANDLE) -> NTSTATUS
-        as "NtSaveKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn save_key_ex_hook = save_key_ex_hook_body(key: HANDLE, file: HANDLE, format: u32)
-        -> NTSTATUS as "NtSaveKeyEx", on_panic STATUS_HOOK_PANICKED;
-
-    fn save_merged_hook = save_merged_hook_body(high: HANDLE, low: HANDLE, file: HANDLE)
-        -> NTSTATUS as "NtSaveMergedKeys", on_panic STATUS_HOOK_PANICKED;
-
-    fn replace_key_hook = replace_key_hook_body(
-        new_file: *const ObjectAttributes,
-        key: HANDLE,
-        old_file: *const ObjectAttributes,
-    ) -> NTSTATUS as "NtReplaceKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn restore_key_hook = restore_key_hook_body(key: HANDLE, file: HANDLE, flags: u32)
-        -> NTSTATUS as "NtRestoreKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn compress_key_hook = compress_key_hook_body(key: HANDLE) -> NTSTATUS
-        as "NtCompressKey", on_panic STATUS_HOOK_PANICKED;
-
-    fn lock_registry_key_hook = lock_registry_key_hook_body(key: HANDLE) -> NTSTATUS
-        as "NtLockRegistryKey", on_panic STATUS_HOOK_PANICKED;
-
-    /// The one entry point here that is **not** an ntdll `NTSTATUS` call, and
-    /// the one place a uniform `STATUS_UNSUCCESSFUL` would be actively
-    /// dangerous. `CreateProcessInternalW` returns a Win32 `BOOL`, in which
-    /// `STATUS_UNSUCCESSFUL`'s bit pattern is non-zero and therefore reads as
-    /// **success** — the caller would then go on to use a `PROCESS_INFORMATION`
-    /// nothing ever filled in, and close or wait on two garbage handles. `FALSE`
-    /// is the failure value in this ABI, and `SetLastError` is part of the
-    /// contract: a `BOOL`-returning Win32 function that fails without setting it
-    /// leaves the caller reporting whatever error some unrelated earlier call
-    /// happened to leave behind.
-    fn cpiw_hook = cpiw_hook_body(
-        token: HANDLE,
-        app: *const u16,
-        cmd: *mut u16,
-        proc_attr: *const c_void,
-        thread_attr: *const c_void,
-        inherit: i32,
-        flags: u32,
-        env: *const c_void,
-        cur_dir: *const u16,
-        si: *const STARTUPINFOW,
-        pi: *mut PROCESS_INFORMATION,
-        ptok: *mut HANDLE,
-    ) -> i32 as "CreateProcessInternalW", on_panic {
-        // SAFETY: plain TLS write in the current process; no pointers involved.
-        unsafe { windows_sys::Win32::Foundation::SetLastError(ERROR_INTERNAL_ERROR) };
-        0
+/// Feeds `detour_table!`'s rows to [`hook_entry_points!`]: one wrapper per row.
+macro_rules! entry_points_from_table {
+    ($(
+        {
+            export: $export:literal,
+            stat: [$($stat:tt)*],
+            $(#[$attr:meta])*
+            hook: $wrapper:ident = $body:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty,
+            on_panic: $fallback:expr,
+            $($rest:tt)*
+        }
+    )*) => {
+        hook_entry_points! {
+            $(
+                $(#[$attr])*
+                fn $wrapper = $body($($arg: $ty),*) -> $ret
+                    as $export, on_panic $fallback;
+            )*
+        }
     };
 }
+
+detour_table!(entry_points_from_table);
 
 /// Opt-in only: when `VFS_ALLOW_DISK_FALLTHROUGH=1`, under-root FUSE NOT_FOUND
 /// may open the host path (legacy / debug). Default **off** — game content must
@@ -7838,12 +7398,12 @@ mod tests {
                      aborts the game process (0xC0000409) instead of returning a failure. \
                      Wrap the body: `contain_panic(\"{name}\", || …, || <failure value>)`, \
                      the same containment all the ntdll detours use. If it is an ntdll \
-                     detour, add it to `hook_entry_points!` and get the wrapper for free."
+                     detour, add a row to `detour_table!` and get the wrapper for free."
                 );
             }
         }
-        // The detours and test hooks in this file's `hook_entry_points!` are all
-        // one generated `$wrapper`, so the count is small on purpose: the macro,
+        // The detours (via `detour_table!`) and test hooks in this file's `hook_entry_points!`
+        // are all one generated `$wrapper`, so the count is small on purpose: the macro,
         // `veh_handler`, `DllMain`, `vfs_shim_sync_bootstrap`.
         assert!(
             checked >= 4,

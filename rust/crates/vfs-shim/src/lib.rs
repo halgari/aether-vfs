@@ -4,6 +4,8 @@
 //! backing files. Supports standalone in-process install and dual-layer
 //! install_late (early payload owns the four path/attr stubs).
 
+#[macro_use]
+mod detour_table;
 mod bootstrap;
 /// Lock-free record of the hook currently executing, in a shared file.
 pub mod breadcrumb;
