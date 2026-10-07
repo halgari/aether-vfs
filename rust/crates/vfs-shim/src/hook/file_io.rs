@@ -10,63 +10,25 @@ use crate::ntdef::{
 use core::ffi::c_void;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
-/// `NtLockFile` hook — grants byte-range locks on synthetic handles locally.
+/// `NtLockFile` hook: grants byte-range locks on synthetic handles locally.
 ///
-/// **Why this exists.** A synthetic handle is a tagged value in `fuse_synth`'s
-/// table, not a kernel file object, so any NT call without a detour hands that
-/// value to the real kernel and gets `STATUS_INVALID_HANDLE` back. Measured
-/// 2026-08-14: `GetPrivateProfileStringW` — how Skyrim loads `SkyrimPrefs.ini`
-/// — issues `NtOpenFile → NtLockFile → NtQueryInformationFile → NtReadFile →
-/// NtUnlockFile → NtClose`, and with `NtLockFile` unhooked the sequence
-/// stopped dead at step 2. The API then returned the *caller's default* for
-/// every key, so the game received no INI data at all — not stale data, not
-/// real-disk data. `WritePrivateProfileStringW` failed the same way one
-/// operation earlier. Neither showed up as a read or write at the director;
-/// both showed up as an open and nothing else.
+/// A synthetic handle is a tagged value in `fuse_synth`'s table, not a kernel file
+/// object, so an unhooked lock call gets `STATUS_INVALID_HANDLE` back, and
+/// `GetPrivateProfileStringW` (how Skyrim loads `SkyrimPrefs.ini`) then returns the
+/// caller's default for every key.
 ///
-/// **The deliberate semantic gap.** This grants a lock that does not exist.
-/// Nothing is recorded, nothing conflicts, and two callers asking for the same
-/// exclusive byte range both get `STATUS_SUCCESS`. That is chosen, not
-/// overlooked:
+/// **The grant is fake, on purpose.** Nothing is recorded and nothing conflicts:
+/// two callers asking for the same exclusive range both get `STATUS_SUCCESS`. There
+/// is no cross-process lock table to consult, and refusing would leave the profile
+/// APIs as broken as an unhooked call. The cost is real: two injected writers on
+/// one INI can lose each other's update. `hookstats::note_synthetic_lock` counts
+/// every grant by path, so contention shows up in a report.
 ///
-/// - Inside a sealed managed root the director is the only route to the bytes,
-///   and there is no cross-process byte-range locking anywhere in the design
-///   today — so there is no lock table for a real answer to consult.
-/// - Refusing instead (`STATUS_LOCK_NOT_GRANTED`) would leave the profile APIs
-///   exactly as broken as an unhooked call did; it swaps a wrong status for a
-///   different wrong status.
-///
-/// **Do not read that as "there is only one writer".** There is not, by
-/// design: `cpiw_hook` propagates injection into child processes, so a
-/// launcher and a game — or a game and a mod manager's helper — are routinely
-/// in one session. And the API that exposed this bug is the worst case for a
-/// fake lock: `WritePrivateProfileString` is a read-modify-write, and the lock
-/// it takes here is exactly what stops two of those from losing each other's
-/// updates. Two injected writers on one INI will both be granted the same
-/// exclusive range and one update will disappear.
-///
-/// That is a real hole, not a theoretical one; it is accepted because the
-/// alternative on offer was every INI staying unreadable, not because it is
-/// harmless. Closing it needs a byte-range table in the director — the only
-/// component both processes share. Until then
-/// `hookstats::note_synthetic_lock` counts every grant by path, so the
-/// contention shows up in a report instead of only in corrupted settings.
-///
-/// **Which handles this answers.** Only ones [`open_synth`] resolves. The
-/// bit-47 tag test alone would also catch `INVALID_HANDLE_VALUE` and any
-/// closed or never-issued synthetic handle, and answering `STATUS_SUCCESS` for
-/// those would report a lock held on a file the caller never opened.
-///
-/// **Completion.** Answered synchronously: `STATUS_SUCCESS`, a completed
-/// `IO_STATUS_BLOCK`, and `SetEvent` if the caller supplied one — the same
-/// shape `read_hook` uses, including its one limitation, that we do not run
-/// the caller's APC. That limitation is counted rather than assumed away:
-/// `note_read_completion` classifies every synthetic lock by the completion
-/// its caller expected, so an APC-supplied lock — the shape that would wait
-/// forever on a callback we never make — shows up in the report's async
-/// section instead of passing for an ordinary grant. `FailImmediately` needs
-/// no branch: `false` means the caller is willing to block for the lock, and
-/// an immediate grant satisfies that strictly better than waiting.
+/// Only handles [`open_synth`] resolves are answered (the tag test alone would also
+/// catch `INVALID_HANDLE_VALUE` and closed handles). Answered synchronously, like
+/// `read_hook`: `STATUS_SUCCESS`, a completed `IO_STATUS_BLOCK`, and `SetEvent` if
+/// given. The caller's APC is not run; `note_read_completion` counts that case.
+/// See docs/shim-invariants.md, "Lock semantics".
 #[allow(clippy::too_many_arguments)]
 pub(super) unsafe fn lock_hook_body(
     handle: HANDLE,

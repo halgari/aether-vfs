@@ -164,90 +164,12 @@ unsafe fn serve_dir_query(
         }
     };
 
-    // Phase 2 (unlocked): build the listing. The handle only reached
-    // `DIR_TABLE` because `tag_under_root` found `path_is_ours` true for it,
-    // so *every* listing built here is a listing under a managed root — and
-    // the governing invariant says the real filesystem beneath a managed root
-    // is unreachable by any spelling. A directory listing is a spelling. So
-    // there are exactly two things that may appear in one:
-    //
-    // 1. What the director serves. When the FUSE client recognises the
-    //    directory its `readdir` is the whole answer, authoritative and
-    //    unmerged.
-    // 2. Failing that, the shim-local write overlay's own entries — content
-    //    this process created through gate 4's write path, which physically
-    //    lives outside the root and which the director may not know about.
-    //
-    // What may **not** appear is the real directory behind the mount. Until
-    // gate 4 task 8b this function had a third branch that drained exactly
-    // that (`drain_real` over the handle) whenever the client was absent or
-    // did not recognise the path, and put the overlay on top of it — so a
-    // real, unserved file under a managed root would be listed. Reads,
-    // metadata and writes were each sealed and proven by the escape matrix;
-    // enumeration was only ever *argued* to follow from read-open containment,
-    // and it does not follow: separate predicates, and no test on either side.
-    //
-    // **That drain was latent, not live** — say it here, not three paragraphs
-    // down, because "task 8b closed a real-disk leak" read alone is the wrong
-    // impression. `path_is_ours` is engine-OR-client while the client's
-    // `RootMap` is the engine's roots plus the staging alias, so "engine
-    // accepts, client declines" cannot arise; `RootMap::decide` denies
-    // `NotFound`/`Dir`/`Tombstone` before any tramp call; neither
-    // `Decision::Redirect` arm calls `tag_under_root`, so a redirected handle
-    // never enters `DIR_TABLE`; and a director-served directory is a
-    // `fuse_synth` handle the drain could not drain. Reaching the branch in a
-    // test took reverting gate 3 task 5 *as well* as forcing the predicate
-    // disagreement. The value of removing it is that enumeration no longer
-    // depends, silently and untested, on another gate's invariant.
-    //
-    // `drain_real`, `drain_real_classic` and `parse_full_dir_info` are deleted
-    // with it, so containment here is structural rather than conditional:
-    // no code remains that can read a real directory into a served listing.
-    //
-    // The two ways of reaching case 2 answer the same way and are counted
-    // separately, because they are different failures:
-    //
-    // - **No client at all.** Standalone mode is retired (see
-    //   `fuse_client::FuseInitError`): bootstrap aborts the launch when the
-    //   ring cannot be attached, and `try_init_from_env` runs before the
-    //   engine is built and before any detour installs, so an injected process
-    //   always has a client by the time a hook can fire.
-    // - **A client that does not recognise this directory.** The engine's root
-    //   notion accepted the path at open time and the client's did not — which
-    //   the superset argument above says cannot happen, but these two
-    //   predicates *have* drifted apart before, for five spellings at once,
-    //   and the comment on `path_is_ours` says plainly that they "can differ".
-    //   Its own counter (`contained`) so a future drift is a number in the
-    //   report rather than a directory that mysteriously lists nothing.
-    //
-    // **Nothing reaches either one today, including this crate's own tests.**
-    // An earlier draft claimed `hook_enum_parity`/`hook_relative_paths` did,
-    // since they install with no ring; they do not. Their `Data` is
-    // overlay-backed, so `Engine::decide` answers `Redirect`, which never
-    // tags the handle — those listings leave on the untracked branch above,
-    // against the overlay's own physical path. Measured with a probe in each
-    // branch, not argued: zero hits on both, in all three shim enumeration
-    // tests. So this arm and `Engine::overlay_listing`'s only call site are
-    // dead code. Keep both anyway: a branch that would otherwise fail *open*
-    // is exactly the one worth having fail closed, and the day it comes back
-    // to life is the day someone changes a predicate.
-    //
-    // One consequence worth stating, because a reviewer read the other way
-    // round: this arm calls `overlay_listing` with an **empty base**, so
-    // `Overlay::apply_to_listing`'s handling of a `merged` listing is
-    // unreachable from production even if this arm revives with today's call
-    // shape.
-    //
-    // **Gate 5, Task 7 changed what that costs.** It used to mean the only
-    // implementation of marker-hiding sat behind two dead callers while the
-    // live director branch below went without. The filtering now lives in
-    // `overlay::strip_whiteout_markers`, which that branch calls directly and
-    // `apply_to_listing` also calls — so the dead pair is kept for the
-    // fail-closed reason above and no longer holds a second, divergent copy
-    // of anything that matters. What is left dead in `apply_to_listing` is
-    // its *physical* overlay-directory scan, which answers a case the live
-    // branch does not have (a marker on disk that the incoming listing does
-    // not carry).
+    // Phase 2 (unlocked): build the listing. Every listing built here is under a
+    // managed root, so it may hold only what the director serves (its `readdir`, whole
+    // and unmerged) or, failing that, the shim-local overlay's own entries. The real
+    // directory behind the mount is never read into one. The overlay-only arm is not
+    // reached today; it stays so that a drifted predicate fails closed.
+    // See docs/shim-invariants.md, "Enumeration containment".
     //
     // The ring round trip and the overlay's own `read_dir` both call out, so
     // the lock must NOT be held here (NtClose also takes it).
@@ -274,20 +196,10 @@ unsafe fn serve_dir_query(
                                 mtime: e.mtime,
                             })
                             .collect();
-                        // **Gate 5, Task 7 — the phantom whiteout marker,
-                        // closed.** This branch used to hand the director's
-                        // answer to the game verbatim, and the director's
-                        // answer carries the shim's own markers: it mounts the
-                        // shim overlay directory as its write layer
-                        // (`overlay_layer_dir`) and spells whiteouts
-                        // `.wh.<name>`, not `<name>.__vfs_wh__`, so ours come
-                        // back as ordinary files. That showed the game a
-                        // phantom `<file>.__vfs_wh__` entry *and* left the
-                        // file it names listed.
-                        //
-                        // **Before the wildcard filter, not after** — see
-                        // `strip_whiteout_markers`, which also records why the
-                        // fix is here rather than in a shared spelling.
+                        // The director mounts our overlay directory as its write layer and spells
+                        // whiteouts `.wh.<name>`, so our own `<name>.__vfs_wh__` markers come back as
+                        // ordinary files. Strip them before the wildcard filter (`strip_whiteout_markers`).
+                        // See docs/shim-invariants.md, "Enumeration containment".
                         let mut items = crate::overlay::strip_whiteout_markers(items);
                         if let Some(ref w) = wildcard {
                             items.retain(|i| {
@@ -299,28 +211,10 @@ unsafe fn serve_dir_query(
                     }
                     Err(_) => Vec::new(),
                 };
-                // Two things this does **not** fix, both re-derived for this
-                // task rather than inherited from the note that used to sit
-                // here (which blamed a route gate 5 Task 4 had already
-                // deleted):
-                //
-                // 1. **Enumeration only.** A marker still does not hide its
-                //    target from an `open` through the director:
-                //    `OverlayProvider::hidden_by_whiteout` looks for its own
-                //    `.wh.` spelling, and there is no per-open hook here that
-                //    could ask without a `stat` on every read.
-                // 2. **New markers can still be minted under a live
-                //    director.** `delete_hook` asks the client before
-                //    `Engine::whiteout`, so a path-based delete routes; but
-                //    `setinfo_hook`'s engine branch asks the engine *only*, so
-                //    a handle-based delete on a non-synthetic under-root
-                //    handle (inherited, pre-injection, or
-                //    `allow_disk_fallthrough`) writes a shim-spelled marker
-                //    into the director's own upper without the director ever
-                //    hearing about the delete. That is a divergence between
-                //    the two delete routes, not a listing defect, and it is
-                //    recorded in gate 5's Task 7/8 report rather than changed
-                //    at the end of a gate.
+                // Not fixed here: a marker still does not hide its target from an open through
+                // the director, and `setinfo_hook`'s engine branch can still write a shim-spelled
+                // marker into the director's upper on a handle-based delete.
+                // See docs/shim-invariants.md, "Enumeration containment".
                 Some((items, crate::hookstats::ReadDirSource::Director))
             }
             None => {
@@ -343,22 +237,14 @@ unsafe fn serve_dir_query(
 
     // Phase 3 (locked): store the built listing (if rebuilt) and serve a slice.
     //
-    // **The caller's buffer is filled after the guard is released, never under
-    // it.** `write_dir_info` writes into a scratch buffer we own; the copy into
-    // `info` happens below, unlocked.
-    //
-    // That ordering is the fix for the intermittent hang traced on 2026-09-02.
-    // `info` belongs to the caller and may lie inside one of our own
-    // demand-paged regions, so touching it can fault into `lazy_section`, which
-    // does file I/O, whose `NtClose` re-enters the shim and takes
-    // `DIR_TABLE.lock()` again. `std::sync::Mutex` is not reentrant, so that
-    // second acquisition blocked forever on a lock the same thread already
-    // held: zero CPU, one thread, and immune to `TerminateProcess`. Measured
-    // three times with `VFS_SHIM_BREADCRUMB` — `threads=1`, `entries - exits =
-    // 2`, `mark=TABLES`.
-    //
-    // A scratch buffer rather than cloning the entries: the copy is bounded by
-    // `length`, whereas a directory listing is unbounded.
+    // The caller's buffer is filled after the guard is released, never under it:
+    // `write_dir_info` writes into a scratch buffer we own and the copy into `info`
+    // happens below, unlocked. `info` may lie in one of our own demand-paged regions;
+    // touching it can fault into `lazy_section`, whose file I/O re-enters the shim
+    // through `NtClose` and takes `DIR_TABLE` again, and `std::sync::Mutex` is not
+    // reentrant. A scratch buffer rather than cloned entries: the copy is bounded by
+    // `length`, a listing is not.
+    // See docs/shim-invariants.md, "Enumeration containment".
     let mut scratch = vec![0u8; length as usize];
     let result = {
         let mut table = match DIR_TABLE.lock() {

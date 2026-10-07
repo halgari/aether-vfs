@@ -49,29 +49,12 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     } else {
         None
     };
-    // **`try_lock`, never `lock`.** This is best-effort reclamation, and a
-    // blocking acquisition here hangs the process permanently.
-    //
-    // Traced 2026-09-02 with `VFS_SHIM_BREADCRUMB`, three reproductions:
-    // `threads=1`, `current=NtClose`, `mark=TABLE_HANDLE_PATHS`,
-    // `holder=CLOSE_HOOK`, `entries - exits = 2`, zero CPU, and immune to
-    // `TerminateProcess`. The holder is `close_hook_body` — but the only
-    // statement it holds the guard across is a `BTreeMap<isize, String>`
-    // remove, which cannot close a handle and so cannot be a live outer frame
-    // re-entering. The holder is a **dead** frame.
-    //
-    // A thread terminated while holding a `std::sync::Mutex` leaves it locked
-    // **forever, and not poisoned** — so every `if let Ok(..)` in this crate is
-    // no defence against it. At process exit Windows terminates every thread
-    // but one before `DLL_PROCESS_DETACH`, and the surviving thread then closes
-    // handles on its way out. `vfs_shim_dll`'s own `DllMain` records this exact
-    // hazard for a different lock: "one killed mid-write leaves a lock the flush
-    // waits on forever".
-    //
-    // `try_lock` cannot deadlock. Losing a reclamation is harmless: the entry
-    // is keyed by a handle value that is about to become invalid, `HANDLE_PATHS`
-    // is bounded by `HANDLE_PATHS_MAX` against unbounded growth, and the
-    // process is on its way out in the case that matters.
+    // `try_lock`, never `lock`: this is best-effort reclamation, and a blocking
+    // acquisition here can hang the process for good. A thread killed while holding a
+    // `std::sync::Mutex` leaves it locked and not poisoned, and an exiting process
+    // closes handles from the one thread left. Losing a reclamation is harmless: the
+    // entry is keyed by a handle that is about to become invalid.
+    // See docs/shim-invariants.md, "Close-path locking".
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLES);
     if let Ok(mut table) = DIR_TABLE.try_lock() {
         table.remove(&(handle as isize));

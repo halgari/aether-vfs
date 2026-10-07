@@ -273,73 +273,23 @@ unsafe fn try_fuse_create(
     let (root, vp) = client.route(&path)?;
     let vp = vp.as_str();
 
-    // **Gate 5, Task 4 — the DRM/identity exceptions, closed.** Four basenames
-    // (`steam_appid.txt`, `SkyrimSELauncher.exe`, `steam_api{,64}.dll`,
-    // `SkyrimSE.exe`) used to be matched here, case-insensitively at any depth,
-    // and returned `None` *before the ring was consulted* — sending the open on
-    // to `decision_for`, which either redirected it at a real disk path or
-    // passed it straight through to the real filesystem under the managed root.
-    // That was the last route by which a path under a managed root reached
-    // something other than the director.
-    //
-    // The reason recorded for keeping them was "serving `SkyrimSE.exe` through
-    // FUSE produced a Steam Error, caused by an open that fails to resolve
-    // (FUSE-relative `OBJECT_ATTRIBUTES` reaching the kernel)". That reason was
-    // self-cancelling: the unresolvable OA only ever arose on the *excepted*
-    // arm, which is the one that has to hand the kernel an OA whose root is a
-    // synthetic handle (see `tramp_create_abs`). With the exception gone the
-    // kernel is never called for these names at all — the open either gets a
-    // synthetic handle from the director or is sealed.
-    //
-    // Two things the deleted comment got right and are worth keeping: Steam
-    // does **not** compare the in-memory image against the on-disk PE (measured
-    // — the whole loaded image was once overwritten with zip PE bytes at a
-    // relocated base and DRM still verified), and what actually needs the
-    // on-disk exe is outside this hook: `CreateProcess` of the host image, and
-    // Steam's own path association from a separate, un-injected process.
-    //
-    // `OpenOutcome::FellThroughDrmException` is deliberately kept in the enum
-    // and in the report reading **zero**: a removed counter cannot prove the
-    // class stayed closed, and the shim/director reconciliation asserts on it.
-    //
-    // The tracer stays wired for the live acceptance run — it is off unless
-    // `VFS_DRM_EXE_LOG` names a file, and it now sees the opens it never could
-    // before, since these names finally arrive here.
+    // No basename exceptions: `steam_appid.txt`, `SkyrimSELauncher.exe`,
+    // `steam_api{,64}.dll` and `SkyrimSE.exe` are served or sealed like any other path
+    // under the root, so nothing under a managed root reaches the real disk by name.
+    // `OpenOutcome::FellThroughDrmException` stays in the enum and reads zero.
+    // See docs/shim-invariants.md, "Sealed root: opens".
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
     drm_exe_trace(&path, unsafe { fuse_root_directory(oa) }, write);
 
-    // Every under-root open — read *and* write — goes through the
-    // director (zip / composed / writable layer), and every answer it gives,
-    // including the failures, is this function's answer too: since gate 4's
-    // Task 5 no *decision* below returns `None`, except behind the explicit
-    // `allow_disk_fallthrough` opt-out.
-    //
-    // One `None` below is not a decision: `open_fuse_at_ex(...)?` on the
-    // success path gives up its handle if the synth table's mutex is poisoned,
-    // which sends the caller to `decision_for` after the director has already
-    // opened the file — and leaks that `fh`, since nothing closes it. It
-    // pre-dates this task, and it is a real hole in "the director's answer is
-    // the caller's answer", so do not read the paragraph above as more
-    // absolute than it is.
-    //
-    // It is still not a live route — but not for the reason this comment used
-    // to give. It claimed the crate builds with `panic = "abort"`; it does
-    // not. `rust/Cargo.toml` sets `panic = "unwind"` for both profiles,
-    // deliberately, so "a panic cannot unwind here" is simply false and
-    // nothing about poisoning is ruled out by the profile. What rules it out
-    // instead is that nothing inside those critical sections can unwind.
-    // `fuse_synth` holds `TABLE`/`NEXT` across `usize` arithmetic, `BTreeMap`
-    // insert/get/get_mut/remove keyed by `usize`, and `String` clone/drop --
-    // no `unwrap`, no slice indexing, no caller-supplied closure, no `Ord` or
-    // `Drop` impl that can panic. Allocation failure aborts rather than
-    // unwinding. Poisoning requires a panic to unwind *out of a held guard*,
-    // and there is no panic here to unwind.
-    //
-    // Note that `contain_panic` does NOT make this safe by itself: it catches
-    // a panic at the hook boundary, but the guard's drop has already set the
-    // poison flag by then, so later calls would see it. Re-check the argument
-    // above if `fuse_synth` ever grows a fallible or reentrant operation
-    // under those locks.
+    // Every under-root open, read and write, goes through the director, and every
+    // answer it gives, failures included, is this function's answer: no decision below
+    // returns `None` except behind the `allow_disk_fallthrough` opt-out. The one other
+    // `None` (`open_fuse_at_ex(...)?` on a poisoned synth table) is not reachable:
+    // nothing inside those critical sections can unwind. `contain_panic` would not
+    // make it safe, since the guard's drop has already poisoned the lock. Re-check
+    // that argument if `fuse_synth` grows a fallible or reentrant operation under its
+    // locks.
+    // See docs/shim-invariants.md, "Sealed root: opens".
     // (Primary stack is expanded to 16 MiB by vfs-inject; open is a shallow ring op.)
     // Only the three "conditional" dispositions need to know whether the
     // path pre-existed to report the right `IoStatusBlock.Information` (see
@@ -435,21 +385,11 @@ unsafe fn try_fuse_create(
             director_open_trace(&path, resp.size);
             Some(STATUS_SUCCESS)
         }
-        // Not in director: seal the path, for reads and writes alike. The
-        // *only* way out of this arm without a status is the explicit
-        // `VFS_ALLOW_DISK_FALLTHROUGH` opt-out, which unseals the root
-        // wholesale (see `allow_disk_fallthrough`) and is off by default and
-        // cleared defensively by `skyrim-live`.
-        //
-        // **Gate 4, Task 5 — this is the write fall-through, closed.** A write
-        // used to return `None` here unconditionally, which sends
-        // `create_hook`/`open_hook` on to `decision_for` -> `Engine::decide_open`:
-        // an overlay redirect where one is configured, and a plain pass-through
-        // to the real filesystem *under the managed root* where one is not.
-        // Both spellings put content the provider graph never saw somewhere the
-        // director cannot account for; the pass-through one physically creates a
-        // file under a root whose whole contract is that the real filesystem
-        // beneath it is unreachable.
+        // Not in director: seal the path, for reads and writes alike. The only way out of
+        // this arm without a status is the `VFS_ALLOW_DISK_FALLTHROUGH` opt-out, which
+        // unseals the root wholesale (see `allow_disk_fallthrough`). A write used to fall
+        // through to `decision_for` here; it no longer does.
+        // See docs/shim-invariants.md, "Sealed root: statuses".
         Err(st) if st == vfs_protocol::ST_NOT_FOUND => {
             if allow_disk_fallthrough() {
                 // The root is unsealed by operator opt-in. A write really does
@@ -468,26 +408,12 @@ unsafe fn try_fuse_create(
                 }
                 None
             } else if write {
-                // Two different failures wear `ST_NOT_FOUND` on a write open,
-                // and NT distinguishes them, so this must too:
-                //
-                // - The open asked to **create** (any of SUPERSEDE / CREATE /
-                //   OPEN_IF / OVERWRITE_IF set `OPEN_CREATE`) and the director
-                //   still said not-found: no writable provider is mounted
-                //   anywhere over this path. The name is not what is missing —
-                //   the caller was going to supply it — so this is
-                //   `STATUS_OBJECT_PATH_NOT_FOUND` (`ERROR_PATH_NOT_FOUND`),
-                //   the same answer NTFS gives for a create whose containing
-                //   directory does not exist.
-                // - The open did **not** ask to create (FILE_OPEN /
-                //   FILE_OVERWRITE with write access — "open the existing
-                //   file for writing"). Then the file itself is simply absent
-                //   and the honest answer is the ordinary
-                //   `STATUS_OBJECT_NAME_NOT_FOUND` (`ERROR_FILE_NOT_FOUND`) —
-                //   the same one the read seal below returns. Answering
-                //   PATH_NOT_FOUND here would mislead the very common
-                //   "open-for-write, and on ERROR_FILE_NOT_FOUND create it"
-                //   idiom into thinking the directory was gone.
+                // Two failures wear `ST_NOT_FOUND` on a write open, and NT distinguishes them:
+                // - a create (`OPEN_CREATE`) that no writable provider can serve is
+                //   `STATUS_OBJECT_PATH_NOT_FOUND`, as NTFS answers a create whose directory is
+                //   missing;
+                // - an open of an absent file is `STATUS_OBJECT_NAME_NOT_FOUND`, the same as the
+                //   read seal below, so the open-for-write-then-create idiom still works.
                 Some(if create_flags & vfs_protocol::OPEN_CREATE != 0 {
                     STATUS_OBJECT_PATH_NOT_FOUND
                 } else {
@@ -504,37 +430,13 @@ unsafe fn try_fuse_create(
         // create silently "succeeding" against an existing file. Report the
         // real collision instead of falling through.
         Err(st) if st == vfs_protocol::ST_EXISTS => Some(STATUS_OBJECT_NAME_COLLISION),
-        // Any other director error on a write. **Gate 4, Task 5:** this used to
-        // return `None` — "the director rejects OPEN_WRITE, so let the write
-        // land in the shim-local overlay instead" — which is the second half of
-        // the fall-through this task closes.
-        //
-        // Deliberately *not* merged with the `ST_NOT_FOUND` arm above. That one
-        // is a path no provider serves; this one is a provider that served the
-        // path and then refused or failed the write, and the two want different
-        // answers at the NT boundary:
-        //
-        // - `ST_READ_ONLY` is the director's own policy status, meaning "no
-        //   `ReadWrite` provider serves this path" (`Director::open`, which
-        //   also records it for `vfs stats` discovery). That is a permission
-        //   fact, not a fault, and `STATUS_ACCESS_DENIED` is what a real
-        //   read-only filesystem answers — a status callers already have code
-        //   for, unlike `STATUS_UNSUCCESSFUL`'s `ERROR_GEN_FAILURE`.
-        // - `ST_IS_DIR` means the path is a directory and the caller asked to
-        //   create or replace a file over it (`OverlayProvider::open_for_write`
-        //   refuses rather than letting a `DiskProvider` upper create a file
-        //   named after the directory). The two non-creating dispositions
-        //   never get here — `dir_open_downgrades` already turned them into
-        //   the directory open the caller meant — so what is left genuinely
-        //   is a file create aimed at a directory, and NT has a status that
-        //   says exactly that.
-        // - Anything else (I/O error, bad request, a provider that broke) is a
-        //   genuine failure: `STATUS_UNSUCCESSFUL`, matching the read-side
-        //   `Err(_)` arm below, which likewise refuses to fall through.
-        //
-        // Note there is no `allow_disk_fallthrough` escape here, again matching
-        // the read side: that switch relaxes "the director does not have this",
-        // never "the director failed".
+        // Any other director error on a write, by cause:
+        // - `ST_READ_ONLY` (no `ReadWrite` provider serves the path) is `STATUS_ACCESS_DENIED`;
+        // - `ST_IS_DIR` (a file create aimed at a directory) is `STATUS_FILE_IS_A_DIRECTORY`;
+        // - anything else is `STATUS_UNSUCCESSFUL`, like the read side.
+        // No `allow_disk_fallthrough` escape: that relaxes "the director does not have
+        // this", never "the director failed".
+        // See docs/shim-invariants.md, "Sealed root: statuses".
         Err(st) if write => Some(match st {
             vfs_protocol::ST_READ_ONLY => STATUS_ACCESS_DENIED,
             vfs_protocol::ST_IS_DIR => STATUS_FILE_IS_A_DIRECTORY,

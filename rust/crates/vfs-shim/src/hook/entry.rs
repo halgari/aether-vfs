@@ -45,19 +45,11 @@ pub(super) fn in_hook_reenter() -> bool {
 /// ntdll — which is the point: copy-up writes its destination file while the
 /// hook that asked for the copy-up is still on the stack.
 ///
-/// **This is the only way to raise the counter, and that is deliberate rather
-/// than tidy.** There used to be a `hook_reenter_begin`/`hook_reenter_end`
-/// pair as well, and three in-module callers used it raw: `install_panic_hook`,
-/// `drm_exe_trace` and `director_open_trace`. Each of those does file I/O
-/// between the two calls, and a panic anywhere in that span skipped the `end`.
-/// That failure is permanent and completely silent: the counter stays at 1 for
-/// the life of the thread, so every later hook call from it takes the
-/// `in_hook_reenter` fast path to real ntdll, and the process quietly stops
-/// being virtualized on that thread while every counter keeps reporting
-/// ordinary activity. Now that `hook::contain_panic` catches panics instead of
-/// letting them abort the process, that "later" actually exists — so the pair
-/// is gone and the counter can only be raised by a value whose `Drop` lowers
-/// it, unwinding included.
+/// This is the only way to raise the counter, deliberately: a raw begin/end pair
+/// skipped `end` when a panic fell between the two, and a counter stuck at 1
+/// silently stops virtualizing that thread for good. Here `Drop` lowers it,
+/// unwinding included.
+/// See docs/shim-invariants.md, "Panic containment".
 pub(crate) struct ShimIoGuard(());
 
 impl ShimIoGuard {
@@ -81,89 +73,47 @@ impl Drop for ShimIoGuard {
 
 /// What every hook returns when [`contain_panic`] catches a panic in its body.
 ///
-/// **The choice that matters is that it is a failure**, with the NTSTATUS
-/// severity bits set, so no caller can mistake it for a completed operation. A
-/// hook that panicked half way through has written nothing to the caller's
-/// output buffer and stored nothing in its `*mut HANDLE`; answering
-/// `STATUS_SUCCESS` would hand the game an uninitialised handle value and a
-/// buffer of stack garbage to parse, which is materially worse than the abort
-/// this replaces — a crash at least stops at the fault.
+/// It is a failure (severity bits set), so no caller mistakes it for a completed
+/// operation or reads an output buffer the hook never filled. It is the generic
+/// `STATUS_UNSUCCESSFUL` and nothing more specific: a panic means the shim does not
+/// know what happened, and a specific status is a claim it cannot make
+/// (`NAME_NOT_FOUND` gets baked into a load order, `NO_MORE_FILES` truncates a
+/// listing). `cpiw_hook` returns `FALSE` instead, since `CreateProcessInternalW`
+/// returns a `BOOL` and this constant's bit pattern reads as `TRUE` there; see the
+/// `on_panic` column of its row in `detour_table!`.
 ///
-/// It is `STATUS_UNSUCCESSFUL` and not something more specific for the opposite
-/// reason. A panic means the shim does not know what happened, and every
-/// *specific* status is a claim it is not entitled to make: returning
-/// `STATUS_OBJECT_NAME_NOT_FOUND` tells the game the file does not exist, and
-/// Skyrim will happily bake that into a load order and carry on without the
-/// plugin; `STATUS_ACCESS_DENIED` invites a retry loop; `STATUS_NO_MORE_FILES`
-/// from an enumeration hook silently truncates a directory listing. Generic
-/// failure is the only answer that says "this operation did not happen" without
-/// also asserting why.
-///
-/// It is uniform across every ntdll entry point because a panic is the
-/// same event in each of them, and because a per-hook table of "best" statuses
-/// would be one more chance per hook to pick one that a caller treats as benign.
-/// `cpiw_hook` is the one exception and is not an exception to the principle:
-/// `CreateProcessInternalW` returns a Win32 `BOOL`, where this constant's bit
-/// pattern is *non-zero* and therefore reads as success. It returns `FALSE`
-/// instead — see the `on_panic` column of the `CreateProcessInternalW` row in `detour_table!`.
-///
-/// Note that several hooks already return this same status when their
-/// trampoline is missing, so the value alone does not distinguish a panic from
-/// that. The distinguishing record is `hookstats::note_hook_panic` plus the
-/// shim panic log, both of which a panic writes and a missing trampoline does
-/// not.
+/// Several hooks return this same status when their trampoline is missing, so the
+/// value alone does not say a panic happened: `hookstats::note_hook_panic` and the
+/// shim panic log do.
+/// See docs/shim-invariants.md, "Panic containment".
 pub(super) const STATUS_HOOK_PANICKED: NTSTATUS = STATUS_UNSUCCESSFUL;
 
 /// Run one hook body with its panic contained at the `extern "system"`
 /// boundary, and report `on_panic`'s value to the caller if it faults.
 ///
-/// **What this changes, and what it does not.** Measured on this toolchain
-/// (2026-08-16, `rustc` with `panic = "unwind"`): a panic inside an
-/// `extern "system"` fn runs the `Drop` impls of every Rust frame below the
-/// boundary, in order, and *then* hits rustc's forced
-/// `core::panicking::panic_cannot_unwind` and takes the process down with
-/// `0xC0000409`. Adding this wrapper does not change which destructors run —
-/// the same unwind runs the same ones — it changes only where the unwind stops
-/// and what happens there. The unwind never reached the game's frames before
-/// (the forced abort is at *our* boundary, not theirs) and still does not; what
-/// the game gets now is a returned status instead of a dead process.
-///
-/// That the inner destructors run is a requirement here, not a tolerated cost:
-/// [`ShimIoGuard`]'s `Drop` is what releases this thread's reentrancy counter,
-/// and a panic that skipped it would leave every later hook call on that thread
-/// falling through to real ntdll — a silent un-virtualization far harder to
-/// diagnose than a crash.
+/// A panic inside an `extern "system"` fn unwinds the Rust frames below the
+/// boundary and then hits rustc's forced `panic_cannot_unwind`, killing the process
+/// with `0xC0000409`. This wrapper changes only where the unwind stops: the same
+/// destructors run, and the game gets a returned status instead of a dead process.
+/// The inner destructors running is a requirement: [`ShimIoGuard`]'s `Drop` releases
+/// the thread's reentrancy counter.
 ///
 /// # `AssertUnwindSafe`
 ///
-/// Every hook body captures raw pointers from the NT call and touches process
-/// statics, so none of these closures is `UnwindSafe` and the assertion is
-/// unavoidable. It is also true here, for a reason narrower than the general
-/// case: `UnwindSafe` guards against *observing* state that a caught unwind
-/// left half-updated, and this function observes nothing. On the `Err` arm it
-/// reads nothing out of the closure, touches none of the captured pointers, and
-/// returns a constant. Every process-wide table this crate shares between hooks
-/// (`DIR_TABLE`, `IDENTITY_TABLE`, `PATH_TABLE`, `HANDLE_PATHS`, and
-/// `hookstats`' accumulators) is behind a `std::sync::Mutex`, which poisons on
-/// a panic taken while held, and every lock site in this crate already treats
-/// `Err` as "no entry". So a later call cannot read a torn value out of one; it
-/// reads nothing, which is the same thing it does on any other lock failure.
-///
-/// The honest consequence of that, which the abort did not have because there
-/// was no "later": a panic taken while one of those tables is locked poisons it
-/// for the rest of the process, and the handle tracking it backs degrades to
-/// permanently empty. That is a real loss of fidelity and it is why the caught
-/// panic is counted loudly rather than swallowed.
+/// The closures capture raw pointers and touch statics, so none is `UnwindSafe`; the
+/// assertion is sound because the `Err` arm observes nothing from the closure.
+/// Process-wide tables sit behind `Mutex`es that poison on a panic taken while held,
+/// and every lock site treats `Err` as "no entry". The cost: a panic under one of
+/// those locks degrades its handle tracking to empty for the rest of the process,
+/// which is why a caught panic is counted loudly.
 ///
 /// # Visibility
 ///
-/// `pub` because the shim's `extern "system"` surface is not confined to this
-/// crate: `vfs-shim-dll` owns `DllMain` and `vfs_shim_sync_bootstrap`, which are
-/// entry points Windows and the OEP stub call, and which must contain their
-/// panics for the same reason and by the same route. One containment function for
-/// the whole injected DLL is what lets
-/// `no_extern_hook_bypasses_the_panic_containment_macro` check both crates
-/// against a single marker.
+/// `pub` because `vfs-shim-dll` owns entry points (`DllMain`,
+/// `vfs_shim_sync_bootstrap`) that must contain their panics by the same route;
+/// `no_extern_hook_bypasses_the_panic_containment_macro` checks both crates against
+/// this one marker.
+/// See docs/shim-invariants.md, "Panic containment".
 pub fn contain_panic<R>(
     name: &'static str,
     body: impl FnOnce() -> R,
@@ -237,47 +187,16 @@ macro_rules! entry_points_from_table {
 
 detour_table!(entry_points_from_table);
 
-/// Record shim panics — which no longer take the game down, and that is the
-/// change that matters most about this comment.
+/// Record shim panics: message, location and thread go to `VFS_SHIM_PANIC_LOG`,
+/// else `<state dir>/shim-panic.log`, else a fixed fallback (a panic here must
+/// never be silent for want of a path).
 ///
-/// **A panic in a hook used to end the process, and does not any more.** The
-/// history is worth keeping because two successive versions of this comment
-/// were wrong about why. The first claimed the workspace builds with
-/// `panic = "abort"`; it does not — `rust/Cargo.toml` sets `panic = "unwind"`
-/// for both profiles, deliberately, so a future binding can turn a panic into
-/// a host-language exception. The second, correct as far as it went, was that
-/// the process died anyway because every hook is `extern "system"` and rustc
-/// plants a forced abort wherever an unwind would cross that boundary:
-/// measured, a panic inside such a function printed `thread caused
-/// non-unwinding panic. aborting.` and exited **0xC0000409**
-/// (`FAST_FAIL_FATAL_APP_EXIT`). That is no longer what happens, because
-/// [`contain_panic`] now catches at each boundary and returns
-/// [`STATUS_HOOK_PANICKED`] instead. The old behaviour is still one edit away
-/// and reproducible on demand — deleting the `catch_unwind` makes
-/// `a_panicking_hook_returns_a_failure_status_instead_of_aborting` kill the
-/// *test process* with exactly that code.
-///
-/// So this hook's job changed from "attribute the crash" to "be the only
-/// record there was a fault at all". It matters more now, not less: a
-/// contained panic is invisible from outside the process — the game gets a
-/// failed file operation and carries on — and this log is the only place the
-/// message, location and thread survive. (`hookstats`' caught-panic counters
-/// are the aggregate, but they only reach a reader if `VFS_SHIM_STATS_LOG` is
-/// set.) The 0xC0000409 attribution still matters for the panics that *do*
-/// abort — a panic inside this hook, or in code the containment does not
-/// cover — where the exit is otherwise an unattributable
-/// `STATUS_STACK_BUFFER_OVERRUN`, indistinguishable from a genuine
-/// stack-cookie or CFG failure in the game, and localisable only by bisecting
-/// (see the 0xC0000409 hunt behind commit 5f8f2eb).
-///
-/// `set_hook`'s hook runs at panic time, before any unwinding begins, so the
-/// message is written whether the unwind is later caught or aborts. A logged
-/// message therefore does **not** imply the process died, and now for two
-/// reasons rather than one: a panic on the stats reporter thread kills only
-/// that thread and never reaches an `extern` boundary at all, and a panic in a
-/// hook is caught at that boundary and answered with a status.
-/// Writes to `VFS_SHIM_PANIC_LOG`, else `<state dir>/shim-panic.log`, else a
-/// fixed fallback — a panic here must never be silent for want of a path.
+/// A contained panic is invisible from outside the process, so this log is the only
+/// place its message survives; `hookstats`' counters are the aggregate. The hook runs
+/// at panic time, before any unwinding, so a logged message does not imply the
+/// process died. For the panics that still abort (inside this hook, or outside the
+/// containment) it also attributes the `0xC0000409` exit.
+/// See docs/shim-invariants.md, "Panic containment".
 pub(super) fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {

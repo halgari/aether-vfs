@@ -574,31 +574,12 @@ pub(super) unsafe fn qvol_hook_body(
 /// redirected handle -> the virtual path, so `GetFinalPathNameByHandleW`
 /// reports where the mod file appears to live. Everything else passes through.
 ///
-/// # Why class 9 is spoofed too, having once been documented as unspoofable
-///
-/// This comment used to read "spoofing class 9 breaks
-/// `GetFinalPathNameByHandleW`", and that was a true measurement of the shim as
-/// it then stood — but the cause was consistency, not class 9 itself.
-/// `GetFinalPathNameByHandleW` builds its answer from three sources and treats
-/// them as describing one file:
-///
-/// 1. `NtQueryObject(ObjectNameInformation)` — the full NT name;
-/// 2. `NtQueryInformationFile(FileNameInformation)` (class 9) — used for its
-///    **length only**: the device prefix is taken to be
-///    `ObjectName[.. ObjectName.len - class9.len]`;
-/// 3. `NtQueryInformationFile(FileNormalizedNameInformation)` (class 48) —
-///    appended to the drive letter that prefix maps to.
-///
-/// Spoof any one of those and the subtraction in (2) slices at the wrong
-/// offset. Measured 2026-09-01 with class 1 spoofed and class 9 left truthful:
-/// ObjectName `\Device\HarddiskVolume3\vfstmp\vfs-diag\mod.esp` (53 chars)
-/// minus the backing file's class 9 `\vfstmp\vfs-diag-backing\backing_blob.dat`
-/// (47 chars) gave a 6-character "device" of `\Devic`, which maps to no drive,
-/// so the call failed with `ERROR_FILE_NOT_FOUND`.
-///
-/// The rule is therefore **all three or none**: classes 1, 9 and 48 must
-/// describe the same path. They now do, and the subtraction lands on the real
-/// device prefix again because both operands moved by the same amount.
+/// Class 9 is spoofed too: `NtQueryObject` class 1 and `NtQueryInformationFile`
+/// classes 9 and 48 must all describe the same path, because
+/// `GetFinalPathNameByHandleW` takes the device prefix as
+/// `ObjectName[.. ObjectName.len - class9.len]`. Spoof one and the subtraction
+/// slices at the wrong offset.
+/// See docs/shim-invariants.md, "Name-query consistency".
 pub(super) unsafe fn qif_hook_body(
     handle: HANDLE,
     iosb: *mut c_void,
@@ -708,27 +689,18 @@ fn spoofed_object_name(
     }
 }
 
-/// `NtQueryObject` hook. Answers `ObjectNameInformation` (class 1) for a handle
-/// the shim redirected -> the VIRTUAL path, in the prefix convention this host
+/// `NtQueryObject` hook. Answers `ObjectNameInformation` (class 1) for a handle the
+/// shim redirected -> the VIRTUAL path, in the prefix convention this host
 /// actually uses. Every other class, and every handle we do not track, passes
 /// through untouched: this API answers about events, mutexes, sections and
 /// registry keys too, and inventing a name for one of those would break
 /// unrelated Windows APIs.
 ///
-/// Why the convention is discovered rather than assumed: measured 2026-09-01,
-/// Windows returns `\Device\HarddiskVolume3\...` while Wine returns `\??\C:\...`,
-/// and `QueryDosDeviceW("C:")` reports `\Device\HarddiskVolume1` on Wine — it
-/// disagrees with Wine's own `NtQueryObject`. So building a device path from it
-/// would emit a form Wine never produces. Instead the trampoline runs first and
-/// its answer's prefix is reused.
-///
-/// **This closes a pre-existing leak on Windows, not only on Wine.**
-/// `GetFinalPathNameByHandleW` happens to route through
-/// `NtQueryInformationFile(FileNormalizedNameInformation)` on Windows — hooked
-/// by [`qif_hook_body`] — so the leak hid there; any caller reaching
-/// `NtQueryObject` directly got the backing path, silently. Wine routes
-/// `GetFinalPathNameByHandleW` through this entry point instead, which is how
-/// the leak became visible at all.
+/// The convention is discovered, not assumed (Windows answers
+/// `\Device\HarddiskVolumeN\...`, Wine `\??\C:\...`): the trampoline runs first
+/// and its answer's prefix is reused. This also closes a leak on Windows: a caller
+/// reaching `NtQueryObject` directly used to get the backing path.
+/// See docs/shim-invariants.md, "Name-query consistency".
 ///
 /// # The too-small-buffer contract (measured 2026-09-01, both hosts)
 ///
