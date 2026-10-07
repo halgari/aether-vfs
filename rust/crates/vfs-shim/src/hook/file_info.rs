@@ -1,4 +1,5 @@
 //! Information queries on handles: `NtQueryInformationFile`, `NtQueryVolumeInformationFile`, `NtQueryObject`.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
     IDENTITY_TABLE, PATH_TABLE, TRAMP_QIF, TRAMP_QOBJ, TRAMP_QVOL, cwd_from_peb, reg_real,
@@ -164,21 +165,42 @@ unsafe fn fuse_query_information(
                 return STATUS_BUFFER_OVERFLOW;
             }
             let bi = info as *mut FileBasicInformation;
-            (*bi).creation_time = SYNTH_FILETIME;
-            (*bi).last_access_time = SYNTH_FILETIME;
-            (*bi).last_write_time = SYNTH_FILETIME;
-            (*bi).change_time = SYNTH_FILETIME;
-            (*bi).file_attributes = if is_dir {
-                FILE_ATTRIBUTE_DIRECTORY
-            } else {
-                FILE_ATTRIBUTE_NORMAL
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*bi).creation_time = SYNTH_FILETIME;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*bi).last_access_time = SYNTH_FILETIME;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*bi).last_write_time = SYNTH_FILETIME;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*bi).change_time = SYNTH_FILETIME;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*bi).file_attributes = if is_dir {
+                    FILE_ATTRIBUTE_DIRECTORY
+                } else {
+                    FILE_ATTRIBUTE_NORMAL
+                };
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*bi)._reserved = 0;
+            }
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe {
+                crate::ntbuf::iosb_set(
+                    iosb,
+                    STATUS_SUCCESS,
+                    core::mem::size_of::<FileBasicInformation>(),
+                )
             };
-            (*bi)._reserved = 0;
-            crate::ntbuf::iosb_set(
-                iosb,
-                STATUS_SUCCESS,
-                core::mem::size_of::<FileBasicInformation>(),
-            );
             STATUS_SUCCESS
         }
         FILE_STANDARD_INFORMATION => {
@@ -186,41 +208,74 @@ unsafe fn fuse_query_information(
                 return STATUS_BUFFER_OVERFLOW;
             }
             let si = info as *mut FileStandardInformation;
-            (*si).allocation_size = size as i64;
-            (*si).end_of_file = size as i64;
-            (*si).number_of_links = 1;
-            (*si).delete_pending = 0;
-            (*si).directory = if is_dir { 1 } else { 0 };
-            (*si)._pad = 0;
-            crate::ntbuf::iosb_set(
-                iosb,
-                STATUS_SUCCESS,
-                core::mem::size_of::<FileStandardInformation>(),
-            );
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*si).allocation_size = size as i64;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*si).end_of_file = size as i64;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*si).number_of_links = 1;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*si).delete_pending = 0;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*si).directory = if is_dir { 1 } else { 0 };
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*si)._pad = 0;
+            }
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe {
+                crate::ntbuf::iosb_set(
+                    iosb,
+                    STATUS_SUCCESS,
+                    core::mem::size_of::<FileStandardInformation>(),
+                )
+            };
             STATUS_SUCCESS
         }
         FILE_INTERNAL_INFORMATION => {
             if (length as usize) < core::mem::size_of::<FileInternalInformation>() {
                 return STATUS_BUFFER_OVERFLOW;
             }
-            (*(info as *mut FileInternalInformation)).index_number = synth_file_id(handle);
-            crate::ntbuf::iosb_set(
-                iosb,
-                STATUS_SUCCESS,
-                core::mem::size_of::<FileInternalInformation>(),
-            );
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*(info as *mut FileInternalInformation)).index_number = synth_file_id(handle);
+            }
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe {
+                crate::ntbuf::iosb_set(
+                    iosb,
+                    STATUS_SUCCESS,
+                    core::mem::size_of::<FileInternalInformation>(),
+                )
+            };
             STATUS_SUCCESS
         }
         FILE_POSITION_INFORMATION => {
             if (length as usize) < core::mem::size_of::<FilePositionInformation>() {
                 return STATUS_BUFFER_OVERFLOW;
             }
-            (*(info as *mut FilePositionInformation)).current_byte_offset = pos as i64;
-            crate::ntbuf::iosb_set(
-                iosb,
-                STATUS_SUCCESS,
-                core::mem::size_of::<FilePositionInformation>(),
-            );
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*(info as *mut FilePositionInformation)).current_byte_offset = pos as i64;
+            }
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe {
+                crate::ntbuf::iosb_set(
+                    iosb,
+                    STATUS_SUCCESS,
+                    core::mem::size_of::<FilePositionInformation>(),
+                )
+            };
             STATUS_SUCCESS
         }
         FILE_NETWORK_OPEN_INFORMATION => {
@@ -228,22 +283,46 @@ unsafe fn fuse_query_information(
                 return STATUS_BUFFER_OVERFLOW;
             }
             let ni = info as *mut FileNetworkOpenInformation;
-            (*ni).creation_time = SYNTH_FILETIME;
-            (*ni).last_access_time = SYNTH_FILETIME;
-            (*ni).last_write_time = SYNTH_FILETIME;
-            (*ni).change_time = SYNTH_FILETIME;
-            (*ni).allocation_size = size as i64;
-            (*ni).end_of_file = size as i64;
-            (*ni).file_attributes = if is_dir {
-                FILE_ATTRIBUTE_DIRECTORY
-            } else {
-                FILE_ATTRIBUTE_NORMAL
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*ni).creation_time = SYNTH_FILETIME;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*ni).last_access_time = SYNTH_FILETIME;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*ni).last_write_time = SYNTH_FILETIME;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*ni).change_time = SYNTH_FILETIME;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*ni).allocation_size = size as i64;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*ni).end_of_file = size as i64;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*ni).file_attributes = if is_dir {
+                    FILE_ATTRIBUTE_DIRECTORY
+                } else {
+                    FILE_ATTRIBUTE_NORMAL
+                };
+            }
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe {
+                crate::ntbuf::iosb_set(
+                    iosb,
+                    STATUS_SUCCESS,
+                    core::mem::size_of::<FileNetworkOpenInformation>(),
+                )
             };
-            crate::ntbuf::iosb_set(
-                iosb,
-                STATUS_SUCCESS,
-                core::mem::size_of::<FileNetworkOpenInformation>(),
-            );
             STATUS_SUCCESS
         }
         FILE_ALL_INFORMATION => {
@@ -257,25 +336,36 @@ unsafe fn fuse_query_information(
                 return STATUS_BUFFER_OVERFLOW;
             }
             let p = info as *mut u8;
-            core::ptr::write_bytes(p, 0, PREFIX);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_bytes(p, 0, PREFIX) };
             let attrs = if is_dir {
                 FILE_ATTRIBUTE_DIRECTORY
             } else {
                 FILE_ATTRIBUTE_NORMAL
             };
             // Basic.FileAttributes @ 32
-            core::ptr::write_unaligned(p.add(32) as *mut u32, attrs);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(32) as *mut u32, attrs) };
             // Standard.AllocationSize @ 40, EndOfFile @ 48, NumberOfLinks @ 56
-            core::ptr::write_unaligned(p.add(40) as *mut i64, size as i64);
-            core::ptr::write_unaligned(p.add(48) as *mut i64, size as i64);
-            core::ptr::write_unaligned(p.add(56) as *mut u32, 1);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(40) as *mut i64, size as i64) };
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(48) as *mut i64, size as i64) };
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(56) as *mut u32, 1) };
             // Standard.Directory (BOOLEAN) @ 61
-            *p.add(61) = if is_dir { 1 } else { 0 };
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                *p.add(61) = if is_dir { 1 } else { 0 };
+            }
             // Internal.IndexNumber @ 64
-            core::ptr::write_unaligned(p.add(64) as *mut i64, synth_file_id(handle));
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(64) as *mut i64, synth_file_id(handle)) };
             // Position.CurrentByteOffset @ 80
-            core::ptr::write_unaligned(p.add(80) as *mut i64, pos as i64);
-            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, PREFIX);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(80) as *mut i64, pos as i64) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, PREFIX) };
             STATUS_SUCCESS
         }
         FILE_NAME_INFORMATION | FILE_NORMALIZED_NAME_INFORMATION => {
@@ -305,16 +395,19 @@ unsafe fn fuse_query_information(
                 .collect();
             let fits = name.len().min((length as usize - 4) / 2);
             let p = info as *mut u8;
-            core::ptr::write_unaligned(p as *mut u32, (name.len() * 2) as u32);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p as *mut u32, (name.len() * 2) as u32) };
             for (i, unit) in name[..fits].iter().enumerate() {
-                core::ptr::write_unaligned(p.add(4 + i * 2) as *mut u16, *unit);
+                // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                unsafe { core::ptr::write_unaligned(p.add(4 + i * 2) as *mut u16, *unit) };
             }
             let status = if fits == name.len() {
                 STATUS_SUCCESS
             } else {
                 STATUS_BUFFER_OVERFLOW
             };
-            crate::ntbuf::iosb_set(iosb, status, 4 + fits * 2);
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { crate::ntbuf::iosb_set(iosb, status, 4 + fits * 2) };
             status
         }
         FILE_ID_INFORMATION => {
@@ -327,10 +420,14 @@ unsafe fn fuse_query_information(
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
             let p = info as *mut u8;
-            core::ptr::write_bytes(p, 0, LEN);
-            core::ptr::write_unaligned(p as *mut u64, SYNTH_VOLUME_SERIAL);
-            core::ptr::write_unaligned(p.add(8) as *mut i64, synth_file_id(handle));
-            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_bytes(p, 0, LEN) };
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p as *mut u64, SYNTH_VOLUME_SERIAL) };
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(8) as *mut i64, synth_file_id(handle)) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN) };
             STATUS_SUCCESS
         }
         FILE_STAT_INFORMATION => {
@@ -353,23 +450,32 @@ unsafe fn fuse_query_information(
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
             let p = info as *mut u8;
-            core::ptr::write_bytes(p, 0, LEN);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_bytes(p, 0, LEN) };
             let attrs = if is_dir {
                 FILE_ATTRIBUTE_DIRECTORY
             } else {
                 FILE_ATTRIBUTE_NORMAL
             };
-            core::ptr::write_unaligned(p as *mut i64, synth_file_id(handle));
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p as *mut i64, synth_file_id(handle)) };
             for off in [8, 16, 24, 32] {
-                core::ptr::write_unaligned(p.add(off) as *mut i64, SYNTH_FILETIME);
+                // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                unsafe { core::ptr::write_unaligned(p.add(off) as *mut i64, SYNTH_FILETIME) };
             }
-            core::ptr::write_unaligned(p.add(40) as *mut i64, size as i64);
-            core::ptr::write_unaligned(p.add(48) as *mut i64, size as i64);
-            core::ptr::write_unaligned(p.add(56) as *mut u32, attrs);
-            core::ptr::write_unaligned(p.add(64) as *mut u32, 1);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(40) as *mut i64, size as i64) };
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(48) as *mut i64, size as i64) };
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(56) as *mut u32, attrs) };
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(64) as *mut u32, 1) };
             // FILE_GENERIC_READ.
-            core::ptr::write_unaligned(p.add(68) as *mut u32, 0x0012_0089);
-            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(68) as *mut u32, 0x0012_0089) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN) };
             STATUS_SUCCESS
         }
         FILE_ATTRIBUTE_TAG_INFORMATION => {
@@ -384,13 +490,17 @@ unsafe fn fuse_query_information(
             } else {
                 FILE_ATTRIBUTE_NORMAL
             };
-            core::ptr::write_unaligned(p as *mut u32, attrs);
-            core::ptr::write_unaligned(p.add(4) as *mut u32, 0);
-            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p as *mut u32, attrs) };
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_unaligned(p.add(4) as *mut u32, 0) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN) };
             STATUS_SUCCESS
         }
         _ => {
-            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
             STATUS_SUCCESS
         }
     }
@@ -417,33 +527,48 @@ pub(super) unsafe fn qvol_hook_body(
                 return STATUS_BUFFER_OVERFLOW;
             }
             let di = info as *mut FileFsDeviceInformation;
-            (*di).device_type = FILE_DEVICE_DISK;
-            (*di).characteristics = 0;
-            crate::ntbuf::iosb_set(
-                iosb,
-                STATUS_SUCCESS,
-                core::mem::size_of::<FileFsDeviceInformation>(),
-            );
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*di).device_type = FILE_DEVICE_DISK;
+            }
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                (*di).characteristics = 0;
+            }
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe {
+                crate::ntbuf::iosb_set(
+                    iosb,
+                    STATUS_SUCCESS,
+                    core::mem::size_of::<FileFsDeviceInformation>(),
+                )
+            };
             return STATUS_SUCCESS;
         }
         // Soft-success for other volume classes (size/attr) with zeros.
         if !info.is_null() && length > 0 {
-            core::ptr::write_bytes(info as *mut u8, 0, length as usize);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe { core::ptr::write_bytes(info as *mut u8, 0, length as usize) };
         }
         // `FileFsVolumeInformation` (class 1): VolumeCreationTime 0 |
         // VolumeSerialNumber 8 | VolumeLabelLength 12 | SupportsObjects 16 |
         // label. Zeros but for the serial number, which is the one
         // `FileIdInformation` reports for the same handle.
         if class == 1 && !info.is_null() && length >= 12 {
-            core::ptr::write_unaligned(
-                (info as *mut u8).add(8) as *mut u32,
-                SYNTH_VOLUME_SERIAL as u32,
-            );
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            unsafe {
+                core::ptr::write_unaligned(
+                    (info as *mut u8).add(8) as *mut u32,
+                    SYNTH_VOLUME_SERIAL as u32,
+                )
+            };
         }
-        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, length as usize);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, length as usize) };
         return STATUS_SUCCESS;
     }
-    tramp(handle, iosb, info, length, class)
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe { tramp(handle, iosb, info, length, class) }
 }
 
 /// `NtQueryInformationFile` hook. Spoofs the two name classes —
@@ -489,7 +614,8 @@ pub(super) unsafe fn qif_hook_body(
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
-        return fuse_query_information(handle, iosb, info, length, class);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        return unsafe { fuse_query_information(handle, iosb, info, length, class) };
     }
     if (class == FILE_NORMALIZED_NAME_INFORMATION || class == FILE_NAME_INFORMATION)
         && !info.is_null()
@@ -499,17 +625,20 @@ pub(super) unsafe fn qif_hook_body(
             Err(_) => None,
         };
         if let Some(vpath) = vpath {
-            let buf = core::slice::from_raw_parts_mut(info as *mut u8, length as usize);
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            let buf = unsafe { core::slice::from_raw_parts_mut(info as *mut u8, length as usize) };
             let r = write_file_name_info(&vpath, buf);
             let status = match r.status {
                 DirStatus::Success => STATUS_SUCCESS,
                 _ => STATUS_BUFFER_OVERFLOW,
             };
-            crate::ntbuf::iosb_set(iosb, status, r.bytes);
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { crate::ntbuf::iosb_set(iosb, status, r.bytes) };
             return status;
         }
     }
-    tramp(handle, iosb, info, length, class)
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe { tramp(handle, iosb, info, length, class) }
 }
 
 /// Resolve a DOS drive spec (`"C:"`) to the host's device path for it.
@@ -640,26 +769,31 @@ pub(super) unsafe fn qobj_hook_body(
     // classes from `regkeys::query_object`.
     if crate::regkeys::is_synthetic(handle as isize) && crate::regclient::enabled() {
         if class != OBJECT_NAME_INFORMATION {
-            return crate::regkeys::query_object(
-                &reg_real(),
-                tramp,
-                handle as isize,
-                class,
-                info,
-                length,
-                ret_len,
-            );
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            return unsafe {
+                crate::regkeys::query_object(
+                    &reg_real(),
+                    tramp,
+                    handle as isize,
+                    class,
+                    info,
+                    length,
+                    ret_len,
+                )
+            };
         }
         let name = match crate::regkeys::object_name(handle as isize) {
             None => return STATUS_INVALID_HANDLE,
             Some(Err(st)) => return st,
             Some(Ok(n)) => n,
         };
-        return emit_object_name(&name, info, length, ret_len)
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        return unsafe { emit_object_name(&name, info, length, ret_len) }
             .unwrap_or(STATUS_OBJECT_NAME_INVALID);
     }
     if class != OBJECT_NAME_INFORMATION {
-        return tramp(handle, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(handle, class, info, length, ret_len) };
     }
     // A real key handle deleted or renamed through the overlay: the real key no longer names it.
     if crate::regclient::enabled() {
@@ -667,7 +801,8 @@ pub(super) unsafe fn qobj_hook_body(
             None => {}
             Some(Err(st)) => return st,
             Some(Ok(name)) => {
-                return emit_object_name(&name, info, length, ret_len)
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                return unsafe { emit_object_name(&name, info, length, ret_len) }
                     .unwrap_or(STATUS_OBJECT_NAME_INVALID);
             }
         }
@@ -685,7 +820,8 @@ pub(super) unsafe fn qobj_hook_body(
             return STATUS_INVALID_HANDLE;
         };
         return match spoofed_object_name(host_name_convention(), &path, device_for_drive)
-            .and_then(|name| emit_object_name(&name, info, length, ret_len))
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            .and_then(|name| unsafe { emit_object_name(&name, info, length, ret_len) })
         {
             Some(status) => status,
             // A path with no drive letter to name a device for, or too long
@@ -701,7 +837,8 @@ pub(super) unsafe fn qobj_hook_body(
         Err(_) => None,
     };
     let Some(vpath) = vpath else {
-        return tramp(handle, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(handle, class, info, length, ret_len) };
     };
 
     // The host's own answer, for its prefix convention. Sized generously so
@@ -709,30 +846,37 @@ pub(super) unsafe fn qobj_hook_body(
     // (A synthetic handle never gets here: it was answered above.)
     let mut scratch = vec![0u8; 2048];
     let mut need: u32 = 0;
-    let mut st = tramp(
-        handle,
-        class,
-        scratch.as_mut_ptr().cast(),
-        scratch.len() as u32,
-        &mut need,
-    );
-    if (st == STATUS_BUFFER_OVERFLOW || st == STATUS_INFO_LENGTH_MISMATCH)
-        && need as usize > scratch.len()
-    {
-        scratch = vec![0u8; need as usize];
-        st = tramp(
+    // SAFETY: the original NT function, called with valid NT arguments.
+    let mut st = unsafe {
+        tramp(
             handle,
             class,
             scratch.as_mut_ptr().cast(),
             scratch.len() as u32,
             &mut need,
-        );
+        )
+    };
+    if (st == STATUS_BUFFER_OVERFLOW || st == STATUS_INFO_LENGTH_MISMATCH)
+        && need as usize > scratch.len()
+    {
+        scratch = vec![0u8; need as usize];
+        // SAFETY: the original NT function, called with valid NT arguments.
+        st = unsafe {
+            tramp(
+                handle,
+                class,
+                scratch.as_mut_ptr().cast(),
+                scratch.len() as u32,
+                &mut need,
+            )
+        };
     }
     if st < 0 {
         // A real failure — an unnamed object, a revoked handle, a synthetic
         // handle. Let the host answer the caller directly rather than
         // substituting a success it did not earn.
-        return tramp(handle, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(handle, class, info, length, ret_len) };
     }
     let real = {
         // SAFETY: the trampoline reported success into `scratch`, so its first
@@ -743,7 +887,8 @@ pub(super) unsafe fn qobj_hook_body(
         let hdr = OBJECT_NAME_INFORMATION_HEADER;
         let n = u16::from_le_bytes([scratch[0], scratch[1]]) as usize;
         if n == 0 || !n.is_multiple_of(2) || hdr + n > scratch.len() {
-            return tramp(handle, class, info, length, ret_len);
+            // SAFETY: the original NT function, called with valid NT arguments.
+            return unsafe { tramp(handle, class, info, length, ret_len) };
         }
         let units: Vec<u16> = scratch[hdr..hdr + n]
             .as_chunks::<2>()
@@ -755,12 +900,15 @@ pub(super) unsafe fn qobj_hook_body(
     };
 
     let Some(name) = spoofed_object_name(&real, &vpath, device_for_drive) else {
-        return tramp(handle, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(handle, class, info, length, ret_len) };
     };
 
-    match emit_object_name(&name, info, length, ret_len) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe { emit_object_name(&name, info, length, ret_len) } {
         Some(status) => status,
-        None => tramp(handle, class, info, length, ret_len),
+        // SAFETY: the original NT function, called with valid NT arguments.
+        None => unsafe { tramp(handle, class, info, length, ret_len) },
     }
 }
 
@@ -785,7 +933,8 @@ unsafe fn emit_object_name(
     // Set unconditionally and before any short-buffer return: both hosts fill
     // `ReturnLength` even when they write nothing at all.
     if !ret_len.is_null() {
-        core::ptr::write_unaligned(ret_len, required as u32);
+        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+        unsafe { core::ptr::write_unaligned(ret_len, required as u32) };
     }
     if info.is_null() || (length as usize) < OBJECT_NAME_INFORMATION_HEADER {
         return Some(STATUS_INFO_LENGTH_MISMATCH);
