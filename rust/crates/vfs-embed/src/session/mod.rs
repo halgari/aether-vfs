@@ -268,7 +268,7 @@ impl Session {
     ///
     /// On Windows root 0's location is `virtual_root` and each extra root's is
     /// its declared host directory. On unix root 0's is its declared location,
-    /// else [`DEFAULT_ROOT0_LOCATION`], and each extra root's is its declared
+    /// else `C:\vfs-session\root`, and each extra root's is its declared
     /// `C:\…` location. [`crate::image::classify_image`] resolves launch
     /// images against exactly this list.
     pub fn root_locations(&self) -> Vec<RootLocation> {
@@ -307,12 +307,12 @@ impl Session {
         &self.state_dir
     }
 
-    /// Whether IPC workers are running (required before [`launch`]).
+    /// Whether IPC workers are running (required before [`Session::launch`]).
     pub fn is_serving(&self) -> bool {
         self.ipc.is_some()
     }
 
-    /// Access the live IPC server (after [`serve`]) for probes / diagnostics.
+    /// Access the live IPC server (after [`Session::serve`]) for probes / diagnostics.
     ///
     /// Portable, now that both transports are wired: `IpcServe` exists on unix
     /// too, holding a file-backed ring. This is also the honest way to read a

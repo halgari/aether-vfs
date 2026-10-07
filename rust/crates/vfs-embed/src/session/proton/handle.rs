@@ -14,6 +14,8 @@ use vfs_proton::{
 use crate::session::LaunchExit;
 #[cfg(doc)]
 use super::ProtonState;
+#[cfg(doc)]
+use crate::session::{LaunchOpts, Session};
 
 /// An anonymous Wine prefix a session booted: its id under `home`'s
 /// `sessions/`, and the runtime whose `wineserver` serves it.

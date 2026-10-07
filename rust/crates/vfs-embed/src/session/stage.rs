@@ -10,6 +10,9 @@ use vfs_director::stage::{stage_launch_into, ImageSource};
 use vfs_director::{Director, DiskProvider};
 use vfs_provider::{Provider, RootId};
 
+#[cfg(doc)]
+use vfs_director::stage::StagedDir;
+
 use super::read::read_whole;
 use super::{LaunchOpts, Session, StageOpts};
 use crate::image::{self, ImageTarget};
@@ -51,7 +54,7 @@ impl Session {
     ///   root is fully virtual, a real file under it that no provider serves is
     ///   invisible.
     /// * It is mounted **below** the host's own mounts. See
-    ///   [`RootComposition::staging`] — a staged copy outranking curated
+    ///   `RootComposition::staging` — a staged copy outranking curated
     ///   content is a silent wrong answer on exactly the paths staging touches.
     ///
     /// Staging again replaces the previous directory (and deletes it), the same

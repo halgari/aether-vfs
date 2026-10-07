@@ -3,6 +3,14 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+// Named only by the rustdoc links below.
+#[cfg(all(doc, unix))]
+use super::LaunchHandle;
+#[cfg(doc)]
+use super::Session;
+#[cfg(doc)]
+use vfs_director::stage::StagedDir;
+
 /// Options for [`Session::launch`].
 #[derive(Clone, Debug)]
 pub struct LaunchOpts {

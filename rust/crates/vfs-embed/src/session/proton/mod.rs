@@ -447,7 +447,7 @@ impl Session {
 
     /// Launch `opts.image` under GE-Proton with the shim injected, served by
     /// this native director over the file-backed ring [`Session::serve`]
-    /// started. Requires [`serve`] first, like the Windows body.
+    /// started. Requires [`Session::serve`] first, like the Windows body.
     ///
     /// ## How `image` is resolved
     ///
