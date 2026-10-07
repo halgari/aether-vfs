@@ -44,6 +44,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
       # `TMP`/`TEMP` above only name the directory; nothing creates it, and code
       # that writes straight into `temp_dir()` without a `create_dir_all` first
       # would fail on a path that does not exist.
@@ -95,21 +98,43 @@ jobs:
       # tests. Until the `vproxy.dll.lib` link ordering was fixed, it failed at
       # compile on every push, so the truncation had never been observable.
       #
-      # DEVIATION from the task 4 brief, which asked for `-p vfs-proton` here as
-      # well as in the Linux job. This command takes no `-p` flags: it is an
-      # unfiltered workspace run, so `vfs-proton` (a workspace member since task
-      # 1) is already covered, and *adding* `-p vfs-proton` would narrow the run
-      # from 116 test binaries to one. The Linux job's command is a `-p` list and
-      # did genuinely need the addition.
+      # This command takes no `-p` flags: it is an unfiltered workspace run, so
+      # every member (vfs-proton included) is covered, shim tests among them.
       - name: Rust tests (full engine — includes Windows-only crates)
         run: cargo test --no-fail-fast
         working-directory: rust
 
   rust-linux-portable:
     runs-on: ubuntu-latest
+    env:
+      # Every crate that builds on Linux. The rest (vfs-shim, vfs-shim-dll,
+      # vfs-inject, vfs-win, vfs-fixture-*) pull Windows-only code (`retour`,
+      # Win32) and are linted and tested by the Windows job; vfs-redirect is
+      # portable and is listed here.
+      LINUX_CRATES: >-
+        -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe
+        -p vfs-source -p vfs-zip -p vfs-core -p vfs-env -p vfs-unix -p vfs-proton
+        -p vfs-embed -p vfs-director -p vfs-directord -p vfs-block-store
+        -p vfs-storage -p vfs-registry -p vfs-testkit -p vfs-bench -p vfs-ntlayout
+        -p vfs-redirect -p vfs-control
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      # One style for the workspace, set in rust/rustfmt.toml.
+      - name: Format (cargo fmt --check)
+        run: cargo fmt --all --check
+        working-directory: rust
+      # The Windows job lints the workspace on a Windows target; this lints the
+      # `#[cfg(unix)]` half (Proton launch, vfs-unix, the unix side of
+      # vfs-director, the `proton_*` tests) that nothing else compiles.
+      - name: Clippy (Linux crates, all targets, warnings are errors)
+        run: cargo clippy $LINUX_CRATES --all-targets -- -D warnings
+        working-directory: rust
       # `vfs-core` and `vfs-env` were portable before anyone
       # claimed it: measured 2026-09-01 in a WSL Arch box on an ext4
       # checkout, they contribute passing tests with a Linux dependency graph
@@ -133,12 +158,24 @@ jobs:
       # resolution, no route off the machine. The one real download belongs to
       # the `proton-linux` job below, pinned and cached rather than per run.
       #
+      # `vfs-testkit`, `vfs-bench` and `vfs-ntlayout` are portable and carry
+      # their own tests.
+      #
       # `vfs-embed` is here because `Session::serve`/`launch` have a unix
       # implementation (the file-backed ring and the Proton launch) whose
-      # non-ignored tests run on any Linux box; its one Wine test is
+      # non-ignored tests run on any Linux box; its Wine tests are
       # `#[ignore]`d and run by `proton-linux`.
       - name: Portable Rust crates (compile+test on Linux)
-        run: cargo test --no-fail-fast -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe -p vfs-source -p vfs-zip -p vfs-core -p vfs-env -p vfs-unix -p vfs-proton -p vfs-embed -p vfs-directord -p vfs-block-store -p vfs-storage -p vfs-registry
+        run: cargo test --no-fail-fast $LINUX_CRATES
+        working-directory: rust
+      # Feature-gated code the default run compiles out: the storage crate's
+      # test hooks and the block store's abort-at-crash-point hooks that its
+      # subprocess crash tests drive.
+      - name: Feature-gated tests (test-hooks, crash-points)
+        run: |
+          cargo test -p vfs-storage --features test-hooks
+          cargo test -p vfs-block-store --features crash-points
+          cargo clippy -p vfs-storage --features test-hooks --all-targets -- -D warnings
         working-directory: rust
       # The block store's own gates, carried over from its repository:
       # `crash-points` compiles in the abort hooks its subprocess crash tests
@@ -154,23 +191,22 @@ jobs:
         env:
           PROPTEST_CASES: "512"
         working-directory: rust
-      # The director kernel itself, which stopped being Windows-only in
-      # increment 1 of the Linux port. Its own unit tests run here; its ring
-      # modules and their dev-dependencies are `cfg(windows)`, so what Linux
-      # builds is the kernel and the portable provider stack under it. A
-      # regression here means someone reintroduced a Windows edge into the
-      # kernel — see
-      # docs/superpowers/specs/2026-08-31-linux-fuse-proton-portability-design.md.
-      - name: Director kernel (compile+test on Linux)
-        run: cargo test -p vfs-director
+      # Doc build: warn-only for now. rustdoc reports about 35 broken or
+      # private intra-doc links across vfs-embed, vfs-ipc, vfs-redirect,
+      # vfs-director, vfs-proton and others (plus one in generated prost
+      # code). Clear them, then drop `continue-on-error` and add
+      # `RUSTDOCFLAGS: -D warnings`.
+      - name: Docs (cargo doc --no-deps, warn-only)
+        run: cargo doc --no-deps $LINUX_CRATES
         working-directory: rust
+        continue-on-error: true
 
   # The Proton path end to end, on Linux: the shim is always a Windows PE,
   # injected into a Windows program inside GE-Proton's Wine, while the Director
   # serving it is native Linux. So this job cross-builds the Windows half
   # (`bin/build-windows`, MSVC target via cargo-xwin — the same ABI and link
   # flags the Windows jobs use), then runs the `#[ignore]`d
-  # `proton_launch` test, whose fixture reads a file that exists only in the
+  # `proton_launch` and `proton_registry` tests, whose fixture reads a file that exists only in the
   # Linux Director's provider.
   proton-linux:
     runs-on: ubuntu-latest
@@ -185,6 +221,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-xwin
@@ -225,6 +264,14 @@ jobs:
         run: timeout 900 cargo test -p vfs-embed --test proton_launch -- --ignored --nocapture
         working-directory: rust
         # A missing runtime or artefact is a failure here, not a SKIP.
+        env:
+          VFS_TEST_REQUIRE_ALL: "1"
+      # The registry overlay end to end: the scripted Win32 registry sequence
+      # must give the same transcript with and without the overlay. Same
+      # runtime and (debug) artefacts as above.
+      - name: Registry overlay end-to-end (Windows fixture under Wine)
+        run: timeout 900 cargo test -p vfs-embed --test proton_registry -- --ignored --nocapture
+        working-directory: rust
         env:
           VFS_TEST_REQUIRE_ALL: "1"
       # Both `#[ignore]`d tests in the file: the disk write layer, and the
