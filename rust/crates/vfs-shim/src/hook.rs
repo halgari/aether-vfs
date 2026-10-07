@@ -2593,8 +2593,9 @@ out_of_scope_body! {
 }
 
 /// Decode ObjectName as UTF-16 (no root resolution). `None` for a NULL `oa` or `ObjectName`,
-/// and for a name `ntbuf::us_units` rejects (odd length, NULL buffer with a length): such a call
-/// is left to the real syscall to refuse.
+/// and for a name `ntbuf::us_units` rejects (odd length, NULL buffer with a length). Only the
+/// hookstats undecodable-name counters use it; routing decisions go through `path_of`, and the
+/// real syscall refuses such a name itself.
 unsafe fn object_name_str(oa: *const ObjectAttributes) -> Option<String> {
     crate::ntbuf::oa_name_string(oa).ok().flatten()
 }

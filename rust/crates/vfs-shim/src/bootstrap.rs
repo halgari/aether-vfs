@@ -324,11 +324,11 @@ mod tests {
     use super::*;
     use vfs_protocol::shimcfg::{encode_config, encode_config_full, encode_config_with_overlay};
 
-    // Pins `encode_config` byte-for-byte to the inline golden bytes built in
-    // `xtask-descriptor::golden_vectors()` (vector
+    // Pins `encode_config` byte-for-byte to the inline golden bytes in the
+    // golden vectors under `vfs-protocol/tests/golden` (vector
     // "shim-config-root-runtime-empty-snapshot") and, transitively, to the
     // Clojure `aether.vfs.os.windows.shim-config/encode` mirror. Kept in this
-    // (Windows-only) crate — not in `xtask-descriptor` — so the portable
+    // (Windows-only) crate — not in `vfs-protocol` — so the portable
     // ubuntu CI job never needs a `vfs-shim` dependency; this test runs in
     // the full Windows `cargo test` job instead.
     #[test]
