@@ -180,4 +180,36 @@ mod tests {
         ];
         assert_eq!(here, vfs_protocol::OPCODES);
     }
+
+    /// The historical numbers (from the retired protocol descriptor), as
+    /// literals: a change here is a wire break.
+    #[test]
+    fn layout_numbers_are_the_historical_ones() {
+        assert_eq!(MAGIC, 0x5646_4950);
+        assert_eq!(VERSION, 4);
+        assert_eq!(
+            [ST_FREE, ST_CLAIMED, ST_SUBMITTED, ST_PROCESSING, ST_COMPLETED, ST_ABANDONED],
+            [0, 1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            [
+                RH_MAGIC,
+                RH_VERSION,
+                RH_SLOT_COUNT,
+                RH_SLOT_STRIDE,
+                RH_PAYLOAD_CAP,
+                RH_WORKER_HINT,
+                RH_REQ_SEQ,
+                RH_SUBMIT_SEQ,
+                RH_REG_GEN
+            ],
+            [0, 4, 8, 12, 16, 20, 24, 32, 40]
+        );
+        assert_eq!(RING_HEADER_SIZE, 48);
+        assert_eq!(
+            [SH_STATE, SH_OPCODE, SH_FLAGS, SH_PAYLOAD_LEN, SH_STATUS, SH_ACK, SH_REQ_ID],
+            [0, 4, 8, 12, 16, 20, 24]
+        );
+        assert_eq!(SLOT_HEADER_SIZE, 32);
+    }
 }

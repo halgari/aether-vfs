@@ -897,16 +897,57 @@ mod tests {
         assert_eq!(decode_setattr_req(&encode_setattr_req(&req)), Some(req));
     }
 
+    /// The wire numbers as literals, taken from the retired protocol
+    /// descriptor (75db467). A change here is a wire break.
     #[test]
-    fn opcode_and_status_tables_are_complete_and_distinct() {
-        let ops: Vec<u32> = OPCODES.iter().map(|&(_, v)| v).collect();
-        assert!(ops.windows(2).all(|w| w[0] < w[1]), "sorted, no duplicates");
-        assert_eq!(ops.len(), 20);
-        for reserved in [4, 12] {
-            assert!(!ops.contains(&reserved), "{reserved} is reserved");
-        }
-        let sts: Vec<i32> = STATUSES.iter().map(|&(_, v)| v).collect();
-        assert_eq!(sts, (-11..=0).rev().collect::<Vec<i32>>());
+    fn wire_numbers_are_the_historical_ones() {
+        let want: &[(&str, u32)] = &[
+            ("getattr", 1),
+            ("readdir", 2),
+            ("open", 3),
+            ("read", 5),
+            ("write", 6),
+            ("setattr", 7),
+            ("rename", 8),
+            ("delete", 9),
+            ("mkdir", 10),
+            ("close", 11),
+            ("heartbeat", 13),
+            ("stored-names", 14),
+            ("reg-lookup", 15),
+            ("reg-key", 16),
+            ("reg-set-value", 17),
+            ("reg-delete-value", 18),
+            ("reg-create-key", 19),
+            ("reg-delete-key", 20),
+            ("reg-rename-key", 21),
+            ("reg-changed", 22),
+        ];
+        assert_eq!(OPCODES, want);
+        let sts: &[(&str, i32)] = &[
+            ("ok", 0),
+            ("not-found", -1),
+            ("not-a-directory", -2),
+            ("bad-request", -3),
+            ("io-error", -4),
+            ("is-dir", -5),
+            ("bad-fh", -6),
+            ("no-space", -7),
+            ("not-supported", -8),
+            ("read-only", -9),
+            ("exists", -10),
+            ("reply-too-large", -11),
+        ];
+        assert_eq!(STATUSES, sts);
+        assert_eq!(OPEN_READ, 1);
+        assert_eq!(OPEN_WRITE, 2);
+        assert_eq!(OPEN_CREATE, 4);
+        assert_eq!(OPEN_EXCL, 8);
+        assert_eq!(OPEN_TRUNC, 16);
+        assert_eq!(OPEN_APPEND, 32);
+        assert_eq!(FLAG_READ_BULK, 1);
+        assert_eq!(READ_RESP_BULK_BIT, 0x8000_0000);
+        assert_eq!(OPEN_RESP_IMMUTABLE, 1);
     }
 
     #[test]
@@ -968,6 +1009,30 @@ mod tests {
         }]);
         d.push(0);
         assert_eq!(decode_readdir_resp(&d).unwrap().len(), 1);
+        let mut w = encode_write_req(&WriteReq { fh: 1, offset: 2, len: 2 }, b"hi");
+        w.extend_from_slice(&[7, 7]);
+        let (wr, data) = decode_write_req(&w).unwrap();
+        assert_eq!((wr.len, data), (2, b"hi".to_vec()));
+        let mut rq = encode_read_req(&req);
+        rq.push(9);
+        assert_eq!(decode_read_req(&rq), Some(req));
+        // bulk read reply: trailing bytes ignored, inline decoders refuse it
+        let mut bulk = encode_read_resp_bulk(5, 65536);
+        bulk.push(1);
+        assert_eq!(decode_read_bulk_resp(&bulk), Some((5, 65536)));
+        assert!(is_read_resp_bulk(&bulk));
+        assert!(decode_read_resp_into(&bulk, &mut [0u8; 8]).is_none());
+        assert!(decode_read_bulk_resp(&encode_read_resp(b"ab")).is_none());
+        // readdir is_dir: any non-zero byte is true
+        let mut dd = encode_readdir_resp(&[DirEntryWire {
+            name: "a".into(),
+            is_dir: false,
+            size: 1,
+            mtime: 2,
+        }]);
+        let at = 4 + 4 + 1;
+        dd[at] = 2;
+        assert!(decode_readdir_resp(&dd).unwrap()[0].is_dir);
         // a READ reply whose data is cut short is still malformed
         assert!(decode_read_resp(&encode_read_resp(b"abc")[..10]).is_none());
         assert!(decode_write_req(&encode_write_req(

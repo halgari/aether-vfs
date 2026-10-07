@@ -4,7 +4,7 @@
 //! The file is the contract with the injected shim. If an encoder changes on
 //! purpose, bump the ring `VERSION` where the layout changed, then regenerate
 //! with `GOLDEN_UPDATE=1 cargo test -p vfs-protocol --test golden` and review
-//! the diff. A changed existing line is a wire break.
+//! the diff (the update run itself fails, by design, so it cannot pass in CI). A changed existing line is a wire break.
 
 use std::fmt::Write as _;
 use vfs_protocol as P;
@@ -142,7 +142,7 @@ fn encoders_match_committed_golden() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/vectors.txt");
     if std::env::var_os("GOLDEN_UPDATE").is_some() {
         std::fs::write(path, render()).unwrap();
-        return;
+        panic!("rewrote tests/golden/vectors.txt; review the diff and rerun without GOLDEN_UPDATE");
     }
     let committed = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
     let rendered = render();

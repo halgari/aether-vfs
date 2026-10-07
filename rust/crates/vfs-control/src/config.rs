@@ -95,7 +95,7 @@ pub enum SourceSpec {
     /// RPC surface carries today, and because `vfs_source::build_provider`
     /// really does build it. Wiring it end to end is a proto change: add
     /// `MemorySource { map<string, bytes> files }` to `source.proto`, regenerate
-    /// (`bin/regen-protocol`), and handle it in `add_source`. Nobody has needed
+    /// the bindings, and handle it in `add_source`. Nobody has needed
     /// it over the wire — the hosts that want an in-memory provider compose one
     /// in code — so it is stated, not built.
     Memory { files: BTreeMap<String, String> },
