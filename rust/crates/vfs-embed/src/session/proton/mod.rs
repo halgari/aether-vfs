@@ -380,7 +380,7 @@ impl Session {
     /// **A Wine process can only name what is under one of its drives**, and
     /// these live wherever the host put them — normally under `/tmp`, outside
     /// the prefix entirely. Symlinks into `drive_c` rather than a `dosdevices`
-    /// letter each ([`Prefix::map_drive`]): one location instead of a letter
+    /// letter each ([`Prefix::link_location`]): one location instead of a letter
     /// per directory, [`Prefix::windows_path`] renders the result, and every
     /// path the shim is handed is a subdirectory rather than a bare drive root.
     ///

@@ -1,10 +1,9 @@
-//! Per-session Wine prefixes: creation, drive-letter rerouting, and dropping
-//! `dosdevices/z:` for containment.
+//! Per-session Wine prefixes: creation, root links into `drive_c`, the
+//! per-launch lock and `wineserver` control.
 //!
-//! A fresh Wine prefix maps `dosdevices/z: -> /`, putting the entire host
-//! filesystem inside the game's namespace. `unmap_drive('z', ..)` is how this
-//! crate removes that: containment Windows does not have, and worth keeping
-//! as a first-class, tested operation rather than an incidental side effect.
+//! A session reaches host directories through symlinks inside `drive_c`
+//! ([`Prefix::link_location`]) rather than drive letters, so a prefix needs no
+//! `dosdevices` edits.
 
 mod init;
 mod links;
@@ -28,7 +27,7 @@ pub struct Prefix {
     pub dir: PathBuf,
 }
 
-/// Why [`ensure`], [`Prefix::map_drive`], or [`Prefix::unmap_drive`] failed.
+/// Why preparing or using a prefix failed.
 #[derive(Debug)]
 pub enum PrefixError {
     /// Filesystem I/O failed, including "the session id was rejected" and
@@ -101,7 +100,10 @@ impl From<io::Error> for PrefixError {
 
 /// Held for one launch; the OS releases the lock when the file closes.
 #[derive(Debug)]
-pub struct PrefixLock(#[allow(dead_code)] std::fs::File);
+pub struct PrefixLock {
+    // Held, never read: closing the file releases the lock.
+    _file: std::fs::File,
+}
 
 /// How long [`Prefix::lock`] keeps retrying a lock that looks held before it
 /// reports [`PrefixError::Busy`].
@@ -115,14 +117,6 @@ pub fn remove_session(root: &Root, session: &str) -> io::Result<()> {
     match std::fs::remove_dir_all(&dir) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         r => r,
-    }
-}
-
-fn remove_link_if_present(link: &Path) -> Result<(), PrefixError> {
-    match std::fs::remove_file(link) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(PrefixError::Io(e)),
     }
 }
 
@@ -146,7 +140,7 @@ impl Prefix {
         let mut pause = std::time::Duration::from_millis(1);
         loop {
             match f.try_lock() {
-                Ok(()) => return Ok(PrefixLock(f)),
+                Ok(()) => return Ok(PrefixLock { _file: f }),
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if std::time::Instant::now() >= deadline {
                         return Err(PrefixError::Busy(self.dir.clone()));
@@ -162,40 +156,6 @@ impl Prefix {
     /// `<prefix>/drive_c`, the root of the Windows-visible filesystem.
     pub fn drive_c(&self) -> PathBuf {
         self.dir.join("drive_c")
-    }
-
-    /// Points `dosdevices/<letter>:` at `target`, replacing any existing
-    /// mapping (a session reuses a prefix across launches, so remapping must
-    /// not fail just because a link is already there).
-    pub fn map_drive(&self, letter: char, target: &Path) -> Result<(), PrefixError> {
-        let link = self.dosdevices_link(letter);
-        remove_link_if_present(&link)?;
-
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(target, &link)?;
-            Ok(())
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = target;
-            Err(PrefixError::Io(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "dosdevices drive mapping is a unix (Wine) concept only",
-            )))
-        }
-    }
-
-    /// Removes `dosdevices/<letter>:`. In particular, removing `z:` — which
-    /// a fresh prefix maps to `/`, the whole host filesystem — is how this
-    /// crate achieves containment; it is a supported, intentional case, not
-    /// an edge case.
-    pub fn unmap_drive(&self, letter: char) -> Result<(), PrefixError> {
-        remove_link_if_present(&self.dosdevices_link(letter))
-    }
-
-    fn dosdevices_link(&self, letter: char) -> PathBuf {
-        self.dir.join("dosdevices").join(format!("{letter}:"))
     }
 
     /// Renders a host path under `drive_c` as the `C:\...` form Wine sees.
@@ -244,37 +204,6 @@ mod tests {
             None,
             "a path outside the prefix has no C: form and must not be invented"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn map_drive_points_dosdevices_at_the_target_and_unmap_removes_it() {
-        let p = Prefix { dir: scratch("drv") };
-        std::fs::create_dir_all(p.dir.join("dosdevices")).unwrap();
-        let target = scratch("drv-target");
-        p.map_drive('d', &target).unwrap();
-        let link = p.dir.join("dosdevices").join("d:");
-        assert_eq!(std::fs::read_link(&link).unwrap(), target);
-        // Remapping must replace, not fail: a session reuses a prefix.
-        let target2 = scratch("drv-target2");
-        p.map_drive('d', &target2).unwrap();
-        assert_eq!(std::fs::read_link(&link).unwrap(), target2);
-        p.unmap_drive('d').unwrap();
-        assert!(!link.exists(), "unmap must remove the link");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unmapping_z_is_how_containment_is_achieved() {
-        // `dosdevices/z: -> /` maps the whole host filesystem into the game's
-        // namespace. Removing it gives containment Windows does not have, so
-        // this is a feature and needs to keep working.
-        let p = Prefix { dir: scratch("z") };
-        let dd = p.dir.join("dosdevices");
-        std::fs::create_dir_all(&dd).unwrap();
-        std::os::unix::fs::symlink("/", dd.join("z:")).unwrap();
-        p.unmap_drive('z').unwrap();
-        assert!(!dd.join("z:").exists());
     }
 
     /// A lock dropped while another thread of this process forks must not look
