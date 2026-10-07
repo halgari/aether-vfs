@@ -497,6 +497,25 @@ the same root, and is routed, or it touches no root at all, and passes
 through. Everything else is refused, and nothing under a root reaches the
 kernel.
 
+### Hard links (`FileLinkInformation`, `FileLinkInformationEx`)
+
+From `hook/file_mutate.rs` (`refuse_link_touching_root`; the synthetic-handle arm in
+`setinfo_hook_body`). The link classes are laid out exactly as the rename classes
+(`ReplaceIfExists`/`Flags` at 0, `RootDirectory` at 8, name length at 16, name at 20), so the target
+is read with `parse_rename_target`. The director protocol has no link operation, so a link has no
+route: it either touches no root and passes through, or it is refused.
+
+- A synthetic handle as the source: refused, `STATUS_ACCESS_DENIED`.
+- A real handle whose resolved path is under a root (`setinfo_source_path`, which asks the OS for a
+  handle no table knows): refused.
+- A target under a root, from a source outside every root: refused. This is the write escape: the
+  kernel would otherwise create a real file under a root that seals everything the graph does not
+  serve.
+- Both ends outside every root, or an unparseable target against a source outside every root:
+  passes to the trampoline.
+
+Each refusal is counted (`hookstats::link_refused_count`).
+
 ### `setinfo_hook_body`: a rename to a different root
 
 From `hook/file_mutate.rs`.

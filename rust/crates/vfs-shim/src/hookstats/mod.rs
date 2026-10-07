@@ -28,6 +28,7 @@ mod tally;
 mod tests;
 
 pub use io::delete_on_close_refused_count;
+pub use io::link_refused_count;
 pub(crate) use io::*;
 pub use open::*;
 pub use panics::*;

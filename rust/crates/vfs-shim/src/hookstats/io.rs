@@ -241,6 +241,25 @@ pub(crate) fn note_delete_on_close_refused(path: &str, status: i32) {
     note_trace("delete-on-close", path, "REFUSED");
 }
 
+/// Hard links (`FileLinkInformation`/`Ex`) refused because an end of the link is under a managed
+/// root. The director has no link operation, and a link the kernel made would put a real file
+/// under (or alias one in) a root that seals everything the provider graph does not serve.
+pub(super) static LINK_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// A hard link touching a managed root was refused. `path` is the root-side NT path, for the trace.
+pub(crate) fn note_link_refused(path: &str) {
+    LINK_REFUSED.fetch_add(1, Ordering::Relaxed);
+    if !enabled() {
+        return;
+    }
+    note_trace("link", path, "REFUSED");
+}
+
+/// How many hard links the shim has refused so far.
+pub fn link_refused_count() -> u64 {
+    LINK_REFUSED.load(Ordering::Relaxed)
+}
+
 /// How many deletes on close the director has refused so far.
 pub fn delete_on_close_refused_count() -> u64 {
     DELETE_ON_CLOSE_REFUSED.load(Ordering::Relaxed)

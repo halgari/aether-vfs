@@ -233,6 +233,9 @@ pub(crate) const FILE_DISPOSITION_DELETE: u32 = 0x1;
 /// `[16] FileNameLength (ULONG)`, `[20] FileName (WCHAR[])`.
 pub(crate) const FILE_RENAME_INFORMATION: u32 = 10;
 pub(crate) const FILE_RENAME_INFORMATION_EX: u32 = 65;
+/// `FILE_LINK_INFORMATION` and its `_EX` form: laid out exactly as the rename classes.
+pub(crate) const FILE_LINK_INFORMATION: u32 = 11;
+pub(crate) const FILE_LINK_INFORMATION_EX: u32 = 72;
 
 /// `FileEndOfFileInformation` (class 20): a single `LARGE_INTEGER EndOfFile`.
 /// Set via `NtSetInformationFile` — this is how `File::set_len` truncates.

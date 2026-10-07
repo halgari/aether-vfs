@@ -15,6 +15,7 @@ mod ntapi;
 
 mod delete_on_close;
 mod handle_ops_out_of_root_sealed;
+mod link_into_root_sealed;
 mod nt_delete_file_sealed;
 mod odd_length_name_sealed;
 mod rename_into_root_sealed;

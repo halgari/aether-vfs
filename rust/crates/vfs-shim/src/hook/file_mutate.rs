@@ -8,7 +8,8 @@ use super::{
 };
 use crate::ntdef::{
     FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION, FILE_DISPOSITION_INFORMATION_EX,
-    FILE_END_OF_FILE_INFORMATION, FILE_POSITION_INFORMATION, FILE_RENAME_INFORMATION,
+    FILE_END_OF_FILE_INFORMATION, FILE_LINK_INFORMATION, FILE_LINK_INFORMATION_EX,
+    FILE_POSITION_INFORMATION, FILE_RENAME_INFORMATION,
     FILE_RENAME_INFORMATION_EX, FileEndOfFileInformation, FilePositionInformation, NtDeleteFileFn,
     ObjectAttributes, STATUS_ACCESS_DENIED, STATUS_FILE_IS_A_DIRECTORY,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
@@ -307,6 +308,13 @@ pub(super) unsafe fn setinfo_hook_body(
             }
             return STATUS_UNSUCCESSFUL;
         }
+        // A hard link from a virtual handle: the director has no link operation, and the
+        // kernel must not see a synthetic handle. Refused, never a soft no-op.
+        if matches!(class, FILE_LINK_INFORMATION | FILE_LINK_INFORMATION_EX) {
+            let src = under_root_path(handle as isize);
+            crate::hookstats::note_link_refused(src.as_deref().unwrap_or("<synthetic handle>"));
+            return STATUS_ACCESS_DENIED;
+        }
         // Delete / rename of a virtual handle → ring OP_DELETE / OP_RENAME, keyed
         // by the NT path recorded (record_path) when the handle was opened.
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
@@ -388,6 +396,50 @@ pub(super) unsafe fn setinfo_hook_body(
             }
         }
     }
+    if matches!(class, FILE_LINK_INFORMATION | FILE_LINK_INFORMATION_EX) {
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        if let Some(st) = unsafe { refuse_link_touching_root(handle, info, length) } {
+            return st;
+        }
+    }
     // SAFETY: the original NT function, called with valid NT arguments.
     unsafe { tramp(handle, iosb, info, length, class) }
+}
+
+/// A hard link (`FileLinkInformation`/`Ex`) with an end under a managed root is refused with
+/// `STATUS_ACCESS_DENIED`, as a rename into a root from outside is. The director has no link
+/// operation, so there is nowhere to route it: a link *into* a root would have the kernel create
+/// a real file under a root that seals everything the provider graph does not serve, and a link
+/// *from* a root file would alias a path the graph owns. `None` when neither end is under a root
+/// (the call passes through). An undecodable target is not guessed at: it passes, as a rename's
+/// does, because only a parsed target can be shown to be under a root.
+///
+/// The layouts are the rename classes', so the target is read with `parse_rename_target`.
+///
+/// # Safety
+/// `info`/`length` are the caller's `NtSetInformationFile` arguments.
+unsafe fn refuse_link_touching_root(
+    handle: HANDLE,
+    info: *mut c_void,
+    length: u32,
+) -> Option<NTSTATUS> {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let source = unsafe { setinfo_source_path(handle) };
+    let _uncached_guard = source
+        .as_ref()
+        .is_some_and(|(_, os_consulted)| *os_consulted)
+        .then(vfs_redirect::UncachedScope::enter);
+    if let Some((nt, _)) = source.as_ref() {
+        if path_is_ours(nt) {
+            crate::hookstats::note_link_refused(nt);
+            return Some(STATUS_ACCESS_DENIED);
+        }
+    }
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let target = unsafe { parse_rename_target(info, length) }?;
+    if path_is_ours(&target) {
+        crate::hookstats::note_link_refused(&target);
+        return Some(STATUS_ACCESS_DENIED);
+    }
+    None
 }

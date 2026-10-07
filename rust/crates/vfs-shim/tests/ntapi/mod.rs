@@ -184,6 +184,9 @@ pub(crate) fn nt_delete_file(path: &str) -> i32 {
 pub(crate) const DELETE: u32 = 0x0001_0000;
 pub(crate) const FILE_RENAME_INFORMATION: u32 = 10;
 pub(crate) const FILE_RENAME_INFORMATION_EX: u32 = 65;
+pub(crate) const STATUS_ACCESS_DENIED: i32 = 0xC000_0022u32 as i32;
+pub(crate) const FILE_LINK_INFORMATION: u32 = 11;
+pub(crate) const FILE_LINK_INFORMATION_EX: u32 = 72;
 
 /// Open an absolute path with an explicit access mask (`DELETE` for the rename
 /// below, which is what `MoveFileExW` itself asks for).
