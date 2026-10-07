@@ -1,7 +1,7 @@
 //! Trampoline slots: where a detour's "call the original" pointer lives.
 //!
 //! Each hooked export has one [`Tramp`] static. The install stores the trampoline there
-//! **before** it enables the detour, and the hook body reads it on every call. It replaces 60
+//! **before** it enables the detour, and the hook body reads it on every call. It replaces 59
 //! `static mut` trampolines (`Option<fn>`), whose reads and writes were each a `static_mut_refs`
 //! hazard and whose "stored before enabled, cleared if enabling fails" rule was repeated by
 //! hand at every install site.
@@ -48,13 +48,46 @@ impl RawTramp {
     }
 }
 
+/// The types a [`Tramp`] may hold: the `unsafe extern "system" fn` pointers of the hooked
+/// exports, and nothing else. `Tramp` reads and writes the slot by bit-copying `F`, which is
+/// only sound for a pointer-sized function pointer; a marker keeps any other pointer-sized
+/// `Copy` type (a `usize`, a raw pointer) out.
+pub(crate) trait TrampFn: Copy {}
+
+macro_rules! tramp_fn_arities {
+    ($(($($arg:ident),*))*) => {
+        $(impl<R, $($arg),*> TrampFn for unsafe extern "system" fn($($arg),*) -> R {})*
+    };
+}
+
+tramp_fn_arities! {
+    ()
+    (A)
+    (A, B)
+    (A, B, C)
+    (A, B, C, D)
+    (A, B, C, D, E)
+    (A, B, C, D, E, F)
+    (A, B, C, D, E, F, G)
+    (A, B, C, D, E, F, G, H)
+    (A, B, C, D, E, F, G, H, I)
+    (A, B, C, D, E, F, G, H, I, J)
+    (A, B, C, D, E, F, G, H, I, J, K)
+    (A, B, C, D, E, F, G, H, I, J, K, L)
+}
+
+/// Stand-in for the tests, which cannot define `extern "system"` fns (the panic-containment
+/// scan forbids them).
+#[cfg(test)]
+impl TrampFn for fn(u32) -> u32 {}
+
 /// A trampoline slot for a hook whose original has the function-pointer type `F`.
-pub(crate) struct Tramp<F: Copy> {
+pub(crate) struct Tramp<F: TrampFn> {
     raw: RawTramp,
     _ty: PhantomData<F>,
 }
 
-impl<F: Copy> Tramp<F> {
+impl<F: TrampFn> Tramp<F> {
     /// An empty slot.
     pub(crate) const fn new() -> Self {
         Tramp {

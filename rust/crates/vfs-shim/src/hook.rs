@@ -661,6 +661,24 @@ fn install_panic_hook() {
     });
 }
 
+/// True when the `Early` rows of the detour table are exactly the four slots `install_late`
+/// fills from the early payload: create, open, qattr and qfull.
+fn early_rows_are_the_payload_slots() -> bool {
+    let payload: [*const RawTramp; 4] = [
+        TRAMP_CREATE.raw(),
+        TRAMP_OPEN.raw(),
+        TRAMP_QATTR.raw(),
+        TRAMP_QFULL.raw(),
+    ];
+    let rows = detour_rows();
+    let early: Vec<*const RawTramp> = rows
+        .iter()
+        .filter(|d| d.has(Flag::Early))
+        .map(|d| d.tramp as *const RawTramp)
+        .collect();
+    early.len() == payload.len() && payload.iter().all(|p| early.contains(p))
+}
+
 /// Dual-layer install: early payload already owns open/create/qattr/qfull.
 /// Wire trampolines to the early Config's tramp buffers, publish secondary
 /// dispatch pointers into that Config, and detour only the remaining stubs.
@@ -685,6 +703,14 @@ pub unsafe fn install_late(
     ENGINE
         .set(engine)
         .map_err(|_| InstallError::AlreadyInstalled)?;
+
+    // `install_all_detours(false)` below skips the `Early` rows, and the block below fills the
+    // slots of exactly the four rows that are `Early`. A fifth `Early` row would be left with an
+    // empty slot, and a hook that is not `Early` would lose its trampoline.
+    debug_assert!(
+        early_rows_are_the_payload_slots(),
+        "the `Early` rows of detour_table! are not the four payload slots install_late sets"
+    );
 
     // SAFETY: cfg is the live early Config in this process; tramp addresses
     // are RWX pages the injector allocated; secondary pointers are our hooks.
@@ -6058,6 +6084,11 @@ unsafe fn serve_dir_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_early_rows_are_the_four_payload_slots() {
+        assert!(early_rows_are_the_payload_slots());
+    }
 
     fn us_raw(length: u16, buffer: *mut u16) -> UnicodeString {
         UnicodeString {
