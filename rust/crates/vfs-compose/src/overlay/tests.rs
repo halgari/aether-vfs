@@ -1,6 +1,6 @@
 use super::*;
-use crate::InlineProvider;
-use vfs_provider::{CaseMatch, KIND_FILE, OPEN_CREATE, OPEN_EXCL, OPEN_READ, OPEN_TRUNC};
+use crate::{InlineProvider, MemoryProvider};
+use vfs_provider::{CaseMatch, KIND_FILE, OPEN_CREATE, OPEN_READ};
 
 /// Slow and immutable, but sequential-only — exercises both the
 /// pass-through fields and the forced access/immutable overrides at once.
@@ -32,249 +32,6 @@ impl Provider for SlowSeqBase {
     }
     fn read_at(&self, _h: Handle, _o: u64, _b: &mut [u8]) -> Result<usize, i32> {
         Ok(0)
-    }
-}
-
-/// A genuinely empty in-memory `ReadWrite` provider, for use as an
-/// overlay upper. Deliberately NOT `vfs_provider::RwMemFixture`: that one
-/// is a conformance fixture and is permanently obligated to serve
-/// `FIXTURE_FILES` so it can pass the suite on its own — which means an
-/// overlay built on it would pass its tests even while ignoring its base
-/// entirely. An overlay's upper must start empty.
-///
-/// `pub(crate)` so `SubdirProvider`'s writable-inner conformance test can
-/// reuse it: `RwMemFixture` always serves `FIXTURE_FILES` at its own
-/// root, which does not fit behind `SubdirProvider`'s path-prefix
-/// rewrite, but a blank writable store that the test can seed under the
-/// prefix itself does.
-#[derive(Default)]
-pub(crate) struct MemUpper {
-    files: Mutex<HashMap<String, Vec<u8>>>,
-    dirs: Mutex<HashSet<String>>,
-    next: AtomicU64,
-    opens: Mutex<HashMap<Handle, String>>,
-}
-
-impl Provider for MemUpper {
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            access: Access::ReadWrite,
-            immutable: false,
-            slow: false,
-            preferred_block: None,
-            // Exact-keyed HashMap below: byte-exact, not fold-equal.
-            case: CaseMatch::Sensitive,
-        }
-    }
-
-    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
-        if p.rel.is_empty() {
-            return Ok(Some(Stat {
-                kind: KIND_DIR,
-                size: 0,
-                mtime: 0,
-            }));
-        }
-        if let Some(body) = self.files.lock().unwrap().get(p.rel) {
-            return Ok(Some(Stat {
-                kind: KIND_FILE,
-                size: body.len() as u64,
-                mtime: 0,
-            }));
-        }
-        if self.dirs.lock().unwrap().contains(p.rel) {
-            return Ok(Some(Stat {
-                kind: KIND_DIR,
-                size: 0,
-                mtime: 0,
-            }));
-        }
-        Ok(None)
-    }
-
-    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
-        let prefix = if p.rel.is_empty() {
-            String::new()
-        } else {
-            format!("{}/", p.rel)
-        };
-        let mut seen: HashMap<String, DirEntry> = HashMap::new();
-        for (rel, body) in self.files.lock().unwrap().iter() {
-            let Some(rest) = rel.strip_prefix(prefix.as_str()) else {
-                continue;
-            };
-            if rest.is_empty() || rest.contains('/') {
-                continue;
-            }
-            seen.insert(
-                rest.to_string(),
-                DirEntry {
-                    name: rest.to_string(),
-                    stat: Stat {
-                        kind: KIND_FILE,
-                        size: body.len() as u64,
-                        mtime: 0,
-                    },
-                },
-            );
-        }
-        for d in self.dirs.lock().unwrap().iter() {
-            let Some(rest) = d.strip_prefix(prefix.as_str()) else {
-                continue;
-            };
-            if rest.is_empty() || rest.contains('/') {
-                continue;
-            }
-            seen.entry(rest.to_string()).or_insert(DirEntry {
-                name: rest.to_string(),
-                stat: Stat {
-                    kind: KIND_DIR,
-                    size: 0,
-                    mtime: 0,
-                },
-            });
-        }
-        if seen.is_empty() && !p.rel.is_empty() {
-            return Err(not_found());
-        }
-        let mut out: Vec<DirEntry> = seen.into_values().collect();
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(out)
-    }
-
-    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
-        let mut files = self.files.lock().unwrap();
-        let exists = files.contains_key(p.rel);
-        if flags & OPEN_WRITE == 0 {
-            if !exists {
-                return Err(not_found());
-            }
-        } else {
-            if flags & OPEN_EXCL != 0 && exists {
-                return Err(bad_request());
-            }
-            if flags & OPEN_CREATE != 0 {
-                files.entry(p.rel.to_string()).or_default();
-            } else if !exists {
-                return Err(not_found());
-            }
-            if flags & OPEN_TRUNC != 0 {
-                files.insert(p.rel.to_string(), Vec::new());
-            }
-        }
-        let size = files.get(p.rel).map(|b| b.len()).unwrap_or(0) as u64;
-        drop(files);
-        let h = self.next.fetch_add(1, Ordering::Relaxed);
-        self.opens.lock().unwrap().insert(h, p.rel.to_string());
-        Ok((h, size, false))
-    }
-
-    fn close(&self, h: Handle) -> Result<(), i32> {
-        self.opens.lock().unwrap().remove(&h).ok_or_else(bad_fh)?;
-        Ok(())
-    }
-
-    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-        let path = self
-            .opens
-            .lock()
-            .unwrap()
-            .get(&h)
-            .cloned()
-            .ok_or_else(bad_fh)?;
-        let files = self.files.lock().unwrap();
-        let body = files.get(&path).ok_or_else(bad_fh)?;
-        let start = (offset as usize).min(body.len());
-        let n = (body.len() - start).min(buf.len());
-        buf[..n].copy_from_slice(&body[start..start + n]);
-        Ok(n)
-    }
-
-    fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
-        let path = self
-            .opens
-            .lock()
-            .unwrap()
-            .get(&h)
-            .cloned()
-            .ok_or_else(bad_fh)?;
-        let mut files = self.files.lock().unwrap();
-        let body = files.entry(path).or_default();
-        let end = offset as usize + buf.len();
-        if body.len() < end {
-            body.resize(end, 0);
-        }
-        body[offset as usize..end].copy_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn set_len(&self, h: Handle, len: u64) -> Result<(), i32> {
-        let path = self
-            .opens
-            .lock()
-            .unwrap()
-            .get(&h)
-            .cloned()
-            .ok_or_else(bad_fh)?;
-        self.files
-            .lock()
-            .unwrap()
-            .entry(path)
-            .or_default()
-            .resize(len as usize, 0);
-        Ok(())
-    }
-
-    fn flush(&self, _h: Handle) -> Result<(), i32> {
-        Ok(())
-    }
-
-    fn mkdir(&self, p: VPath) -> Result<(), i32> {
-        self.dirs.lock().unwrap().insert(p.rel.to_string());
-        Ok(())
-    }
-
-    /// Refuses a directory that still holds something, with `ST_IS_DIR`.
-    ///
-    /// This fixture used to drop the `dirs` entry and answer `Ok(())` with
-    /// the children untouched, which is the same silent no-op
-    /// `MemoryProvider` had — and `OverlayProvider::remove` propagates its
-    /// upper's answer verbatim, so the overlay inherited it. The shared
-    /// conformance suite's non-empty-directory case is what surfaced it.
-    fn remove(&self, p: VPath) -> Result<(), i32> {
-        let mut files = self.files.lock().unwrap();
-        let mut dirs = self.dirs.lock().unwrap();
-        if files.remove(p.rel).is_some() {
-            return Ok(());
-        }
-        let prefix = if p.rel.is_empty() {
-            String::new()
-        } else {
-            format!("{}/", p.rel)
-        };
-        if files.keys().any(|k| k.starts_with(&prefix))
-            || dirs.iter().any(|d| d.starts_with(&prefix))
-        {
-            return Err(vfs_provider::is_dir());
-        }
-        if dirs.remove(p.rel) {
-            return Ok(());
-        }
-        Err(not_found())
-    }
-
-    fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
-        if from.root != to.root {
-            return Err(bad_request());
-        }
-        let mut files = self.files.lock().unwrap();
-        let body = files.remove(from.rel).ok_or_else(not_found)?;
-        files.insert(to.rel.to_string(), body);
-        Ok(())
-    }
-
-    fn set_attr(&self, _p: VPath, _attr: SetAttr) -> Result<(), i32> {
-        Ok(())
     }
 }
 
@@ -325,7 +82,7 @@ impl<P: Provider> Provider for CountingOpens<P> {
 /// so this is the only thing that can hold the read path to a budget.
 #[derive(Default)]
 struct CountingUpper {
-    inner: MemUpper,
+    inner: MemoryProvider,
     getattrs: AtomicU64,
     readdirs: AtomicU64,
     /// Runs once, after the next `readdir` has read the directory and
@@ -482,7 +239,7 @@ fn stored_name_takes_the_bases_spelling_then_the_uppers_and_honours_whiteouts() 
 
 #[test]
 fn overlay_reports_read_write_and_is_never_immutable() {
-    let ov = OverlayProvider::new(Arc::new(SlowSeqBase), MemUpper::default()).unwrap();
+    let ov = OverlayProvider::new(Arc::new(SlowSeqBase), MemoryProvider::default()).unwrap();
     let caps = ov.capabilities();
     assert_eq!(
         caps.access,
@@ -504,7 +261,7 @@ fn overlay_over_the_fixture_tree_with_an_empty_upper_passes_conformance() {
         vfs_provider::FIXTURE_FILES.iter().copied(),
     ));
     let p: Arc<dyn Provider> =
-        Arc::new(OverlayProvider::new(base, MemUpper::default()).unwrap());
+        Arc::new(OverlayProvider::new(base, MemoryProvider::default()).unwrap());
     vfs_provider::assert_conformance(p);
 }
 
@@ -514,7 +271,7 @@ fn upper_wins_and_whiteout_hides() {
         ("a.txt", b"BASE".as_slice()),
         ("gone.txt", b"X".as_slice()),
     ]));
-    let upper = MemUpper::default();
+    let upper = MemoryProvider::default();
     let (h, _, _) = upper
         .open(VPath::at_default("a.txt"), OPEN_WRITE | OPEN_CREATE)
         .unwrap();
@@ -543,7 +300,7 @@ fn overlay_declares_read_write_over_a_read_only_base() {
     let base = Arc::new(InlineProvider::from_files(
         vfs_provider::FIXTURE_FILES.iter().copied(),
     ));
-    let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
+    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
     assert_eq!(ov.capabilities().access, Access::ReadWrite);
 }
 
@@ -563,7 +320,7 @@ fn overlay_rejects_a_read_only_upper_at_construction() {
 fn writing_a_base_file_copies_it_up_and_leaves_base_untouched() {
     use vfs_provider::{Provider, VPath, OPEN_READ, OPEN_WRITE};
     let base = Arc::new(InlineProvider::from_files([("a.txt", b"BASE".as_slice())]));
-    let ov = OverlayProvider::new(base.clone(), MemUpper::default()).unwrap();
+    let ov = OverlayProvider::new(base.clone(), MemoryProvider::default()).unwrap();
 
     let f = VPath::at_default("a.txt");
     let (h, _, _) = ov.open(f, OPEN_WRITE).expect("open for write copies up");
@@ -587,7 +344,7 @@ fn writing_a_base_file_copies_it_up_and_leaves_base_untouched() {
 fn removing_a_base_file_writes_a_whiteout() {
     use vfs_provider::{Provider, VPath};
     let base = Arc::new(InlineProvider::from_files([("a.txt", b"BASE".as_slice())]));
-    let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
+    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
     let f = VPath::at_default("a.txt");
     ov.remove(f).expect("remove");
     assert!(
@@ -613,7 +370,7 @@ fn concurrent_opens_copy_up_exactly_once() {
     )])));
     let base: Arc<dyn Provider> = counted.clone();
     let ov: StdArc<OverlayProvider> =
-        StdArc::new(OverlayProvider::new(base, MemUpper::default()).unwrap());
+        StdArc::new(OverlayProvider::new(base, MemoryProvider::default()).unwrap());
 
     let mut hs = Vec::new();
     for _ in 0..8 {
@@ -725,7 +482,7 @@ fn whiteouts_hide_through_folds_that_change_a_names_length() {
         ("top/plain/E.TXT", b"6".as_slice()),
         ("ÄÖ/ü.txt", b"7".as_slice()),
     ]));
-    let upper = MemUpper::default();
+    let upper = MemoryProvider::default();
     // Markers spelled in a different case from the names they hide: one
     // on a file two levels down, one on a directory, one at the root.
     // (The directories are spelled as the base spells them: the test
@@ -799,7 +556,7 @@ fn the_whiteout_walk_tells_a_paths_own_marker_from_an_ancestors() {
         ("x/y/z.txt", b"2".as_slice()),
         ("top.txt", b"3".as_slice()),
     ]));
-    let upper = MemUpper::default();
+    let upper = MemoryProvider::default();
     for marker in ["a/b/.wh.c.txt", ".wh.x", ".wh.top.txt"] {
         let (h, _, _) = upper
             .open(VPath::at_default(marker), OPEN_WRITE | OPEN_CREATE)
@@ -892,7 +649,7 @@ fn a_whiteout_written_during_a_directorys_first_scan_still_hides() {
 fn a_whiteout_written_after_its_directory_was_scanned_still_hides() {
     use vfs_provider::{Provider, VPath, OPEN_CREATE, OPEN_WRITE};
     let base = Arc::new(InlineProvider::from_files([("dir/a.txt", b"BASE".as_slice())]));
-    let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
+    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
     let f = VPath::at_default("dir/a.txt");
 
     // Read first, so "dir" and the root are already scanned and cached as
@@ -925,7 +682,7 @@ fn a_whiteout_written_after_its_directory_was_scanned_still_hides() {
 fn creating_a_marker_named_file_through_the_overlay_is_seen_by_the_index() {
     use vfs_provider::{Provider, VPath, OPEN_CREATE, OPEN_WRITE};
     let base = Arc::new(InlineProvider::from_files([("dir/x.txt", b"BASE".as_slice())]));
-    let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
+    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
 
     // Scan "dir" while it holds no markers.
     assert!(ov.getattr(VPath::at_default("dir/x.txt")).unwrap().is_some());
@@ -951,7 +708,7 @@ fn overlay_passes_write_conformance() {
         vfs_provider::FIXTURE_FILES.iter().copied(),
     ));
     let ov: Arc<dyn vfs_provider::Provider> =
-        Arc::new(OverlayProvider::new(base, MemUpper::default()).unwrap());
+        Arc::new(OverlayProvider::new(base, MemoryProvider::default()).unwrap());
     vfs_provider::assert_conformance(ov);
 }
 
@@ -961,7 +718,7 @@ fn a_failed_copy_up_leaves_the_destination_absent_not_truncated() {
     let base = Arc::new(FlakyReadBase {
         body: vec![7u8; 200_000],
     });
-    let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
+    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
     let f = VPath::at_default("big.bin");
 
     let err = ov
@@ -991,7 +748,7 @@ fn a_failed_copy_up_leaves_the_destination_absent_not_truncated() {
     // the failed attempt left the path genuinely untouched, not stuck.
     let ov2 = OverlayProvider::new(
         Arc::new(InlineProvider::from_files([("big.bin", b"ok".as_slice())])),
-        MemUpper::default(),
+        MemoryProvider::default(),
     )
     .unwrap();
     let (h, _, _) = ov2.open(f, OPEN_WRITE | OPEN_CREATE).expect("unrelated retry works");
@@ -1002,7 +759,7 @@ fn a_failed_copy_up_leaves_the_destination_absent_not_truncated() {
 fn creating_under_a_removed_ancestor_directory_is_refused_until_mkdir_recreates_it() {
     use vfs_provider::{Provider, VPath, OPEN_CREATE, OPEN_WRITE};
     let base = Arc::new(InlineProvider::from_files([("dir/a.txt", b"BASE".as_slice())]));
-    let ov = OverlayProvider::new(base, MemUpper::default()).unwrap();
+    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
 
     // Opaquely remove the whole base directory.
     ov.remove(VPath::at_default("dir")).expect("whiteout the base directory");

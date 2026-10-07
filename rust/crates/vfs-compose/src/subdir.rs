@@ -224,15 +224,15 @@ mod tests {
     ///
     /// `vfs_provider::RwMemFixture` cannot stand in for `inner` here: it
     /// always serves `FIXTURE_FILES` at its own root, but `SubdirProvider`
-    /// addresses `inner` at `mounted/*`. `overlay::tests::MemUpper` is a
+    /// addresses `inner` at `mounted/*`. `MemoryProvider` is a
     /// blank writable store instead, so the fixture tree is seeded here,
     /// under the prefix, exactly where `map_path` will look for it.
     #[test]
     fn subdir_over_a_writable_inner_passes_conformance() {
-        use crate::overlay::tests::MemUpper;
+        use crate::MemoryProvider;
         use vfs_provider::{OPEN_CREATE, OPEN_WRITE};
 
-        let inner: Arc<dyn vfs_provider::Provider> = Arc::new(MemUpper::default());
+        let inner: Arc<dyn vfs_provider::Provider> = Arc::new(MemoryProvider::default());
         inner.mkdir(VPath::at_default("mounted")).unwrap();
         inner.mkdir(VPath::at_default("mounted/sub")).unwrap();
         for (rel, body) in vfs_provider::FIXTURE_FILES {
