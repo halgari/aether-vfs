@@ -12,17 +12,76 @@
 # The first run downloads the MSVC CRT and Windows SDK into ~/.cache/cargo-xwin
 # (XWIN_ACCEPT_LICENSE=1 accepts Microsoft's license for that download).
 #
-# Usage: bin/build-windows [--release]
+# The artefacts are the ones the Proton tests and `Session::launch` look for:
+# `locate_wine_artifacts` in vfs-embed (injector, shim, payload) and the
+# fixtures named by crates/vfs-embed/tests/proton_*.rs. Keep ARTIFACTS and the
+# cargo -p list below in step with them.
+#
+# Usage: bin/build-windows [--release] [-h|--help]
 set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: bin/build-windows [--release]
+
+Cross-builds the Windows half of the Proton path with cargo-xwin and copies
+the artefacts into rust/target/<profile>/ (debug by default).
+
+  --release   build with the release profile
+  -h, --help  show this help
+
+Needs: rustup target x86_64-pc-windows-msvc, cargo-xwin, clang, lld, llvm.
+EOF
+}
+
+die() {
+  echo "build-windows: $*" >&2
+  exit 1
+}
+
+profile=debug
+flags=()
+for arg in "$@"; do
+  case "$arg" in
+    --release)
+      profile=release
+      flags=(--release)
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      die "unknown argument: $arg"
+      ;;
+  esac
+done
+
+# Check the toolchain up front, so a missing tool is named here rather than
+# surfacing as an opaque failure deep inside cargo.
+command -v cargo > /dev/null || die "cargo not found (install Rust via rustup)"
+cargo xwin --version > /dev/null 2>&1 \
+  || die "cargo-xwin not found (cargo install --locked cargo-xwin)"
+command -v rustup > /dev/null || die "rustup not found (needed for the Windows target)"
+rustup target list --installed 2> /dev/null | grep -qx 'x86_64-pc-windows-msvc' \
+  || die "rust target missing (rustup target add x86_64-pc-windows-msvc)"
+for tool in clang lld-link; do
+  command -v "$tool" > /dev/null || die "$tool not found (install clang, lld and llvm)"
+done
+
 cd "$(dirname "$0")/../rust"
 
 target=x86_64-pc-windows-msvc
-profile=debug
-flags=()
-if [[ "${1:-}" == "--release" ]]; then
-  profile=release
-  flags=(--release)
-fi
+ARTIFACTS=(
+  vfs-injector.exe
+  vfs_shim_dll.dll
+  vfs_payload.dll
+  vfs-fixture-read.exe
+  vfs-fixture-steam.exe
+  vfs-fixture-nvapi.exe
+  vfs-fixture-registry.exe
+)
 
 export XWIN_ACCEPT_LICENSE=1
 
@@ -50,8 +109,8 @@ cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declarati
 src="target/$target/$profile"
 dst="target/$profile"
 mkdir -p "$dst"
-for f in vfs-injector.exe vfs_shim_dll.dll vfs_payload.dll vfs-fixture-read.exe \
-  vfs-fixture-steam.exe vfs-fixture-nvapi.exe vfs-fixture-registry.exe; do
+for f in "${ARTIFACTS[@]}"; do
+  [[ -f "$src/$f" ]] || die "the build succeeded but did not produce $src/$f"
   cp -f "$src/$f" "$dst/$f"
   echo "  $dst/$f"
 done
