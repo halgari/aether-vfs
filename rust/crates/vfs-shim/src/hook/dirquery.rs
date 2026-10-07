@@ -1,7 +1,7 @@
 //! Directory enumeration: `NtQueryDirectoryFile` and `NtQueryDirectoryFileEx`.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{HANDLES, TRAMP_QDIR, TRAMP_QDIREX, path_of_handle};
+use super::{HANDLES, TRAMP_QDIR, TRAMP_QDIREX, path_of_handle, strip_whiteout_markers};
 use crate::ntdef::{
     SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES,
     STATUS_SUCCESS, STATUS_UNSUCCESSFUL, UnicodeString,
@@ -201,7 +201,7 @@ unsafe fn serve_dir_query(
                         // `.wh.<name>`, so those markers come back as ordinary files. Strip them
                         // before the wildcard filter (`strip_whiteout_markers`).
                         // See docs/shim-invariants.md, "Enumeration containment".
-                        let mut items = crate::overlay::strip_whiteout_markers(items);
+                        let mut items = strip_whiteout_markers(items);
                         if let Some(ref w) = wildcard {
                             items.retain(|i| {
                                 vfs_core::wildcard_match(w, &i.name)

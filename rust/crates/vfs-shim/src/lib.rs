@@ -22,7 +22,6 @@ mod hookstats;
 mod lazy_section;
 mod ntbuf;
 mod ntdef;
-mod overlay;
 mod read_cache;
 /// The registry hooks' client for the director's registry overlay.
 pub mod regclient;

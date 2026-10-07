@@ -31,6 +31,7 @@ mod registry;
 mod section;
 #[cfg(test)]
 mod test_support;
+mod whiteout;
 
 pub(crate) use self::entry::ShimIoGuard;
 pub use self::entry::{as_shim_io_for_tests, contain_panic};
@@ -55,6 +56,7 @@ use self::path::*;
 use self::process::*;
 use self::registry::*;
 use self::section::*;
+use self::whiteout::*;
 
 use std::sync::OnceLock;
 
