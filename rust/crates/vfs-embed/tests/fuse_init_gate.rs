@@ -59,11 +59,15 @@ fn ensure_fixtures() {
             .canonicalize()
             .expect("workspace root");
 
+        // Build for the profile this test runs in: `profile_dir()` is that profile's
+        // directory, so a debug build under `cargo test --release` would land elsewhere.
+        let release: &[&str] = if cfg!(debug_assertions) { &[] } else { &["--release"] };
         let status = std::process::Command::new(&cargo)
             .current_dir(&workspace)
             .args([
                 "build", "-p", "vfs-shim-dll", "-p", "vfs-inject", "--bin", "vfs-probe", "--quiet",
             ])
+            .args(release)
             .status()
             .expect("spawn cargo to build shim + vfs-probe");
         assert!(status.success(), "shim/vfs-probe build failed: {status}");
@@ -78,6 +82,7 @@ fn ensure_fixtures() {
                 "crates/vfs-payload/Cargo.toml",
                 "--quiet",
             ])
+            .args(release)
             .status()
             .expect("spawn cargo to build vfs-payload");
         assert!(status.success(), "vfs-payload build failed: {status}");
