@@ -9,11 +9,9 @@
 //! (see the regression test below), so the two stay separate.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
-use vfs_provider::{
-    bad_fh, bad_request, map_io_err, not_a_dir, not_found, Capabilities, DirEntry, Handle,
+use vfs_provider::{HandleTable, 
+    bad_request, not_a_dir, not_found, Capabilities, DirEntry, Handle,
     Provider, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_WRITE,
 };
 
@@ -30,8 +28,7 @@ pub struct InlineProvider {
     /// is immutable after construction, so unlike `MemoryProvider`'s index this
     /// one needs no maintenance and no lock.
     by_fold: HashMap<String, String>,
-    next: AtomicU64,
-    opens: Mutex<HashMap<u64, (String, Vec<u8>)>>,
+    opens: HandleTable<(String, Vec<u8>)>,
 }
 
 impl InlineProvider {
@@ -58,8 +55,7 @@ impl InlineProvider {
         Self {
             files,
             by_fold,
-            next: AtomicU64::new(1),
-            opens: Mutex::new(HashMap::new()),
+            opens: HandleTable::new(),
         }
     }
 
@@ -177,34 +173,25 @@ impl Provider for InlineProvider {
         let path = normalize(path);
         let key = self.canonical(&path).ok_or_else(not_found)?;
         let f = &self.files[key];
-        let h = self.next.fetch_add(1, Ordering::Relaxed);
         let size = f.bytes.len() as u64;
-        self.opens
-            .lock()
-            .map_err(|_| map_io_err())?
-            .insert(h, (key.clone(), f.bytes.clone()));
+        let h = self.opens.insert((key.clone(), f.bytes.clone()))?;
         Ok((h, size, false))
     }
 
     fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-        let g = self.opens.lock().map_err(|_| map_io_err())?;
-        let (_, bytes) = g.get(&h).ok_or_else(bad_fh)?;
-        if offset as usize >= bytes.len() {
-            return Ok(0);
-        }
-        let start = offset as usize;
-        let n = buf.len().min(bytes.len() - start);
-        buf[..n].copy_from_slice(&bytes[start..start + n]);
-        Ok(n)
+        self.opens.with(h, |(_, bytes)| {
+            if offset as usize >= bytes.len() {
+                return 0;
+            }
+            let start = offset as usize;
+            let n = buf.len().min(bytes.len() - start);
+            buf[..n].copy_from_slice(&bytes[start..start + n]);
+            n
+        })
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        self.opens
-            .lock()
-            .map_err(|_| map_io_err())?
-            .remove(&h)
-            .ok_or_else(bad_fh)?;
-        Ok(())
+        self.opens.remove(h).map(|_| ())
     }
 }
 

@@ -7,11 +7,9 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 use vfs_core::fold;
-use vfs_provider::{
+use vfs_provider::{HandleTable, 
     Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, Stat, VPath, KIND_DIR, KIND_FILE,
     OPEN_WRITE,
 };
@@ -44,8 +42,7 @@ pub struct ZipProvider {
     /// with before they cross the ring — an ASCII-only fold here would miss
     /// every entry whose case only Unicode knows how to lower.
     by_fold: HashMap<String, String>,
-    next: AtomicU64,
-    opens: Mutex<HashMap<u64, Live>>,
+    opens: HandleTable<Live>,
 }
 
 impl ZipProvider {
@@ -100,8 +97,7 @@ impl ZipProvider {
             container: zip_path.to_path_buf(),
             nodes,
             by_fold,
-            next: AtomicU64::new(1),
-            opens: Mutex::new(HashMap::new()),
+            opens: HandleTable::new(),
         })
     }
 
@@ -249,27 +245,18 @@ impl Provider for ZipProvider {
         let path = p.rel;
         let p = path.trim_start_matches('/');
         if p.is_empty() {
-            let bh = self.next.fetch_add(1, Ordering::Relaxed);
-            return Ok((bh, 0, true));
+            return Ok((self.opens.fresh(), 0, true));
         }
         let node = self.get(p).ok_or(ST_NOT_FOUND)?;
         if node.is_dir {
-            let bh = self.next.fetch_add(1, Ordering::Relaxed);
-            return Ok((bh, 0, true));
+            return Ok((self.opens.fresh(), 0, true));
         }
         let file = File::open(&self.container).map_err(|_| ST_IO_ERROR)?;
-        let bh = self.next.fetch_add(1, Ordering::Relaxed);
-        self.opens
-            .lock()
-            .map_err(|_| ST_IO_ERROR)?
-            .insert(
-                bh,
-                Live {
-                    file,
-                    base: node.data_off,
-                    size: node.size,
-                },
-            );
+        let bh = self.opens.insert(Live {
+            file,
+            base: node.data_off,
+            size: node.size,
+        })?;
         Ok((bh, node.size, false))
     }
 
@@ -277,23 +264,26 @@ impl Provider for ZipProvider {
         // Serialize seek+read on the live File. Concurrent try_clone + seek from
         // multiple director workers was part of the post-seal 0xC0000409 regression
         // (corrupted / racy BSA streams). Revisit with per-handle File handles later.
-        let mut g = self.opens.lock().map_err(|_| ST_IO_ERROR)?;
-        let live = g.get_mut(&h).ok_or(ST_BAD_FH)?;
-        if offset >= live.size {
-            return Ok(0);
-        }
-        let max = ((live.size - offset) as usize).min(buf.len());
-        let abs = live.base + offset;
-        live.file
-            .seek(SeekFrom::Start(abs))
-            .map_err(|_| ST_IO_ERROR)?;
-        live.file.read(&mut buf[..max]).map_err(|_| ST_IO_ERROR)
+        self.opens.with(h, |live| {
+            if offset >= live.size {
+                return Ok(0);
+            }
+            let max = ((live.size - offset) as usize).min(buf.len());
+            let abs = live.base + offset;
+            live.file
+                .seek(SeekFrom::Start(abs))
+                .map_err(|_| ST_IO_ERROR)?;
+            live.file.read(&mut buf[..max]).map_err(|_| ST_IO_ERROR)
+        })?
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        let mut g = self.opens.lock().map_err(|_| ST_IO_ERROR)?;
-        let _ = g.remove(&h);
-        Ok(())
+        // Closing a handle that is not open (a directory's, or one already
+        // closed) is not an error; only a poisoned table is.
+        match self.opens.remove(h) {
+            Ok(_) | Err(ST_BAD_FH) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 

@@ -23,12 +23,12 @@
 //! `changed` here only calls [`Storage::after_change`].
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 
 use vfs_core::fold;
-use vfs_provider::{
-    bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, Access, Capabilities,
+use vfs_provider::{HandleTable, 
+    bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, Access, Capabilities,
     CaseMatch, DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE,
     OPEN_EXCL, OPEN_TRUNC, OPEN_WRITE,
 };
@@ -78,8 +78,7 @@ pub(crate) struct LayerProvider {
     id: u64,
     ns: Mutex<()>,
     cells: Mutex<HashMap<Guid, Weak<FileCell>>>,
-    handles: Mutex<HashMap<Handle, Arc<OpenFile>>>,
-    next: AtomicU64,
+    handles: HandleTable<Arc<OpenFile>>,
     /// Files created since the last durable point (the policy is in
     /// [`crate::durable`]).
     fresh: FreshFiles,
@@ -100,8 +99,7 @@ impl LayerProvider {
             id,
             ns: Mutex::new(()),
             cells: Mutex::new(HashMap::new()),
-            handles: Mutex::new(HashMap::new()),
-            next: AtomicU64::new(1),
+            handles: HandleTable::new(),
             fresh: FreshFiles::new(),
             #[cfg(test)]
             fail_store_create: AtomicBool::new(false),
@@ -278,7 +276,7 @@ impl LayerProvider {
     }
 
     fn handle(&self, h: Handle) -> Result<Arc<OpenFile>, i32> {
-        lock_status(&self.handles)?.get(&h).cloned().ok_or_else(bad_fh)
+        self.handles.get(h)
     }
 
     fn file_of(&self, h: Handle) -> Result<(Arc<OpenFile>, Arc<FileCell>), i32> {
@@ -288,9 +286,7 @@ impl LayerProvider {
     }
 
     fn track(&self, of: OpenFile) -> Result<Handle, i32> {
-        let h = self.next.fetch_add(1, Ordering::Relaxed);
-        lock_status(&self.handles)?.insert(h, Arc::new(of));
-        Ok(h)
+        self.handles.insert(Arc::new(of))
     }
 
     /// `set_len` on `cell` with its commit.
@@ -315,10 +311,13 @@ impl Drop for LayerProvider {
             }
         }
         let _leave = Leave(self);
-        let open: Vec<Arc<FileCell>> = match self.handles.lock() {
-            Ok(h) => h.values().filter_map(|of| of.cell.clone()).collect(),
-            Err(_) => Vec::new(),
-        };
+        let open: Vec<Arc<FileCell>> = self
+            .handles
+            .values()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|of| of.cell.clone())
+            .collect();
         for cell in open {
             if let Ok(mut st) = cell.state.write() {
                 let _ = self.commit(&cell, &mut st);

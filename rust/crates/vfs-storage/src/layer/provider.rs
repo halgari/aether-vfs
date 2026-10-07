@@ -88,7 +88,7 @@ impl Provider for LayerProvider {
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        let of = lock_status(&self.handles)?.remove(&h).ok_or_else(bad_fh)?;
+        let of = self.handles.remove(h)?;
         let Some(cell) = &of.cell else {
             return Ok(());
         };

@@ -47,12 +47,10 @@
 //! not. That matters because a host applying the recommended wrapping
 //! everywhere (spec §6's `vfs.auto`) should not pay for it where it is a no-op.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use vfs_provider::{
-    bad_fh, map_io_err, Access, Capabilities, DirEntry, Handle, Provider, RootId, SetAttr, Stat,
+use vfs_provider::{HandleTable, 
+    map_io_err, Access, Capabilities, DirEntry, Handle, Provider, RootId, SetAttr, Stat,
     VPath, OPEN_APPEND, OPEN_CREATE, OPEN_EXCL, OPEN_TRUNC,
 };
 
@@ -82,8 +80,7 @@ pub struct SeekableProvider {
     /// Whether the inner provider actually needs the cursor. `false` makes
     /// `read_at` a straight forward.
     sequential: bool,
-    next: AtomicU64,
-    opens: Mutex<HashMap<Handle, Arc<Mutex<OpenRec>>>>,
+    opens: HandleTable<Arc<Mutex<OpenRec>>>,
 }
 
 impl SeekableProvider {
@@ -92,8 +89,7 @@ impl SeekableProvider {
         SeekableProvider {
             inner,
             sequential,
-            next: AtomicU64::new(1),
-            opens: Mutex::new(HashMap::new()),
+            opens: HandleTable::new(),
         }
     }
 
@@ -105,8 +101,7 @@ impl SeekableProvider {
     /// Clone one handle's record out of the map, holding the map's lock only
     /// for the lookup — see the module docs on why this is two locks.
     fn rec(&self, h: Handle) -> Result<Arc<Mutex<OpenRec>>, i32> {
-        let g = self.opens.lock().map_err(|_| map_io_err())?;
-        g.get(&h).map(Arc::clone).ok_or_else(bad_fh)
+        self.opens.get(h)
     }
 
     /// The inner handle, for the ops that neither seek nor stream.
@@ -172,25 +167,18 @@ impl Provider for SeekableProvider {
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
         let (inner, size, is_dir) = self.inner.open(p, flags)?;
-        let h = self.next.fetch_add(1, Ordering::Relaxed);
-        self.opens.lock().map_err(|_| map_io_err())?.insert(
-            h,
-            Arc::new(Mutex::new(OpenRec {
-                inner,
-                root: p.root,
-                path: p.rel.to_string(),
-                flags,
-                cursor: 0,
-            })),
-        );
+        let h = self.opens.insert(Arc::new(Mutex::new(OpenRec {
+            inner,
+            root: p.root,
+            path: p.rel.to_string(),
+            flags,
+            cursor: 0,
+        })))?;
         Ok((h, size, is_dir))
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        let rec = {
-            let mut g = self.opens.lock().map_err(|_| map_io_err())?;
-            g.remove(&h).ok_or_else(bad_fh)?
-        };
+        let rec = self.opens.remove(h)?;
         let inner = rec.lock().map_err(|_| map_io_err())?.inner;
         self.inner.close(inner)
     }
@@ -252,6 +240,9 @@ impl Provider for SeekableProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use vfs_provider::bad_fh;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use vfs_provider::conformance::SeqFixture;
     use vfs_provider::{CaseMatch, RwMemFixture, ST_NOT_SUPPORTED, OPEN_READ};
 

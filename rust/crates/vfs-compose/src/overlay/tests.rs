@@ -1,7 +1,9 @@
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use crate::{InlineProvider, MemoryProvider};
 use vfs_core::fold;
-use vfs_provider::{CaseMatch, KIND_FILE, OPEN_CREATE, OPEN_READ};
+use vfs_provider::{map_io_err, CaseMatch, KIND_FILE, OPEN_CREATE, OPEN_READ};
 
 /// Slow and immutable, but sequential-only — exercises both the
 /// pass-through fields and the forced access/immutable overrides at once.

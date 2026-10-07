@@ -25,12 +25,12 @@ mod copy_up;
 mod whiteout;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, RwLock};
 
 use vfs_core::fold;
-use vfs_provider::{
-    bad_fh, bad_request, map_io_err, not_a_dir, not_found, not_supported, Access, Capabilities,
+use vfs_provider::{HandleTable, 
+    bad_request, not_a_dir, not_found, not_supported, Access, Capabilities,
     DirEntry, Handle, Provider, SetAttr, Stat, VPath, COPY_UP_PREFIX, KIND_DIR, OPEN_WRITE,
     WHITEOUT_PREFIX,
 };
@@ -48,8 +48,9 @@ enum Layer {
 pub struct OverlayProvider {
     base: Arc<dyn Provider>,
     upper: Arc<dyn Provider>,
+    opens: HandleTable<(Layer, Handle)>,
+    /// Numbers the `.cu.` staging files of copy-ups.
     next: AtomicU64,
-    opens: Mutex<HashMap<u64, (Layer, Handle)>>,
     /// Paths currently being copied up (keyed by root and folded path), so
     /// two concurrent writers to the same base-only path copy exactly once
     /// instead of racing.
@@ -120,29 +121,19 @@ impl OverlayProvider {
         Ok(Self {
             base,
             upper,
+            opens: HandleTable::new(),
             next: AtomicU64::new(1),
-            opens: Mutex::new(HashMap::new()),
             copying: InFlight::default(),
             whiteouts: RwLock::new(WhiteoutIndex::default()),
         })
     }
 
     fn track(&self, layer: Layer, inner: Handle) -> Result<Handle, i32> {
-        let h = self.next.fetch_add(1, Ordering::Relaxed);
-        self.opens
-            .lock()
-            .map_err(|_| map_io_err())?
-            .insert(h, (layer, inner));
-        Ok(h)
+        self.opens.insert((layer, inner))
     }
 
     fn lookup(&self, h: Handle) -> Result<(Layer, Handle), i32> {
-        self.opens
-            .lock()
-            .map_err(|_| map_io_err())?
-            .get(&h)
-            .copied()
-            .ok_or_else(bad_fh)
+        self.opens.get(h)
     }
 }
 
@@ -280,12 +271,7 @@ impl Provider for OverlayProvider {
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        let (layer, inner) = self
-            .opens
-            .lock()
-            .map_err(|_| map_io_err())?
-            .remove(&h)
-            .ok_or_else(bad_fh)?;
+        let (layer, inner) = self.opens.remove(h)?;
         match layer {
             Layer::Upper => self.upper.close(inner),
             Layer::Base => self.base.close(inner),

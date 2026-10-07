@@ -1,11 +1,9 @@
 //! Glob-based routing to providers (Clojure `aether.vfs.router`).
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use vfs_provider::{
-    bad_fh, map_io_err, Capabilities, DirEntry, Handle, Provider, SetAttr, Stat, VPath,
+use vfs_provider::{HandleTable, 
+    Capabilities, DirEntry, Handle, Provider, SetAttr, Stat, VPath,
 };
 
 use crate::glob;
@@ -26,8 +24,7 @@ type OpenEntry = (Arc<dyn Provider>, Handle);
 pub struct RouterProvider {
     default: Arc<dyn Provider>,
     routes: Vec<Route>,
-    next: AtomicU64,
-    opens: Mutex<HashMap<u64, OpenEntry>>,
+    opens: HandleTable<OpenEntry>,
 }
 
 impl RouterProvider {
@@ -35,8 +32,7 @@ impl RouterProvider {
         Self {
             default,
             routes,
-            next: AtomicU64::new(1),
-            opens: Mutex::new(HashMap::new()),
+            opens: HandleTable::new(),
         }
     }
 
@@ -81,64 +77,38 @@ impl Provider for RouterProvider {
         let path = p.rel;
         let provider = self.provider_for(path);
         let (inner, size, is_dir) = provider.open(p, flags)?;
-        let h = self.next.fetch_add(1, Ordering::Relaxed);
-        self.opens
-            .lock()
-            .map_err(|_| map_io_err())?
-            .insert(h, (provider, inner));
+        let h = self.opens.insert((provider, inner))?;
         Ok((h, size, is_dir))
     }
 
     fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-        let (provider, inner) = {
-            let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let (b, i) = g.get(&h).ok_or_else(bad_fh)?;
-            (Arc::clone(b), *i)
-        };
+        let (provider, inner) = self.opens.get(h)?;
         provider.read_at(inner, offset, buf)
     }
 
     /// The route that opened the handle answers.
     fn is_immutable(&self, h: Handle) -> bool {
-        let routed = match self.opens.lock() {
-            Ok(g) => g.get(&h).map(|(b, i)| (Arc::clone(b), *i)),
-            Err(_) => None,
-        };
+        let routed = self.opens.get(h).ok();
         routed.is_some_and(|(provider, inner)| provider.is_immutable(inner))
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        let (provider, inner) = {
-            let mut g = self.opens.lock().map_err(|_| map_io_err())?;
-            g.remove(&h).ok_or_else(bad_fh)?
-        };
+        let (provider, inner) = self.opens.remove(h)?;
         provider.close(inner)
     }
 
     fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
-        let (provider, inner) = {
-            let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let (b, i) = g.get(&h).ok_or_else(bad_fh)?;
-            (Arc::clone(b), *i)
-        };
+        let (provider, inner) = self.opens.get(h)?;
         provider.write_at(inner, offset, buf)
     }
 
     fn set_len(&self, h: Handle, len: u64) -> Result<(), i32> {
-        let (provider, inner) = {
-            let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let (b, i) = g.get(&h).ok_or_else(bad_fh)?;
-            (Arc::clone(b), *i)
-        };
+        let (provider, inner) = self.opens.get(h)?;
         provider.set_len(inner, len)
     }
 
     fn flush(&self, h: Handle) -> Result<(), i32> {
-        let (provider, inner) = {
-            let g = self.opens.lock().map_err(|_| map_io_err())?;
-            let (b, i) = g.get(&h).ok_or_else(bad_fh)?;
-            (Arc::clone(b), *i)
-        };
+        let (provider, inner) = self.opens.get(h)?;
         provider.flush(inner)
     }
 

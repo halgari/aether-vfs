@@ -1,12 +1,11 @@
 //! Top-wins layering of two providers (Clojure `layered-provider`).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use vfs_core::fold;
-use vfs_provider::{
-    bad_fh, map_io_err, not_found, read_only, Access, Capabilities, DirEntry, Handle, Provider,
+use vfs_provider::{HandleTable, 
+    not_found, read_only, Access, Capabilities, DirEntry, Handle, Provider,
     SetAttr, Stat, VPath, OPEN_WRITE,
 };
 
@@ -21,8 +20,7 @@ enum Layer {
 pub struct LayeredProvider {
     top: Arc<dyn Provider>,
     bottom: Arc<dyn Provider>,
-    next: AtomicU64,
-    opens: Mutex<HashMap<u64, (Layer, Handle)>>,
+    opens: HandleTable<(Layer, Handle)>,
 }
 
 impl LayeredProvider {
@@ -30,8 +28,7 @@ impl LayeredProvider {
         Self {
             top,
             bottom,
-            next: AtomicU64::new(1),
-            opens: Mutex::new(HashMap::new()),
+            opens: HandleTable::new(),
         }
     }
 
@@ -57,9 +54,7 @@ impl LayeredProvider {
     /// Shared handle lookup for the ops below that address an existing open
     /// handle rather than a path.
     fn lookup(&self, h: Handle) -> Result<(Layer, Handle), i32> {
-        let g = self.opens.lock().map_err(|_| map_io_err())?;
-        let (l, i) = g.get(&h).ok_or_else(bad_fh)?;
-        Ok((*l, *i))
+        self.opens.get(h)
     }
 }
 
@@ -144,11 +139,7 @@ impl Provider for LayeredProvider {
             }
         };
         let (bh, size, is_dir) = inner;
-        let h = self.next.fetch_add(1, Ordering::Relaxed);
-        self.opens
-            .lock()
-            .map_err(|_| map_io_err())?
-            .insert(h, (layer, bh));
+        let h = self.opens.insert((layer, bh))?;
         Ok((h, size, is_dir))
     }
 
@@ -167,10 +158,7 @@ impl Provider for LayeredProvider {
     }
 
     fn close(&self, h: Handle) -> Result<(), i32> {
-        let (layer, inner) = {
-            let mut g = self.opens.lock().map_err(|_| map_io_err())?;
-            g.remove(&h).ok_or_else(bad_fh)?
-        };
+        let (layer, inner) = self.opens.remove(h)?;
         self.routed(&layer).close(inner)
     }
 
