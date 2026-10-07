@@ -5,7 +5,7 @@
 use core::ffi::c_void;
 
 use crate::engine::{Engine, EngineError};
-use crate::hook::{install, install_late, HookGuard, InstallError};
+use crate::hook::{HookGuard, InstallError, install, install_late};
 use vfs_inject::PayloadConfig;
 
 /// True when `p` looks like a live early-payload Config in *this* process
@@ -20,7 +20,7 @@ fn payload_cfg_usable(p: *mut PayloadConfig) -> bool {
     unsafe {
         use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
         use windows_sys::Win32::System::Memory::{
-            VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT,
+            MEM_COMMIT, MEMORY_BASIC_INFORMATION, VirtualQuery,
         };
         let mut mbi = core::mem::MaybeUninit::<MEMORY_BASIC_INFORMATION>::uninit();
         let n = VirtualQuery(
@@ -93,16 +93,16 @@ pub fn bootstrap_from_config_path_with_payload(
     // eliminate. It now fails exactly like a named ring that failed to
     // attach (`ConnectFailed`): before the `Engine` is built or any hook
     // installs.
-    match crate::fuse_client::try_init_from_env() {
+    match crate::director::try_init_from_env() {
         Ok(()) => {}
-        Err(crate::fuse_client::FuseInitError::NotConfigured) => {
+        Err(crate::director::FuseInitError::NotConfigured) => {
             return Err(BootstrapError::Fuse(
                 "no VFS_RING_SECTION configured: standalone (no-director) shim launches are \
                  retired — a director must be attached"
                     .to_string(),
             ));
         }
-        Err(crate::fuse_client::FuseInitError::ConnectFailed(msg)) => {
+        Err(crate::director::FuseInitError::ConnectFailed(msg)) => {
             return Err(BootstrapError::Fuse(msg));
         }
     }
@@ -136,7 +136,7 @@ pub fn bootstrap_from_config_path_with_payload(
     // path the engine then treats as managed — see `hook.rs::path_is_ours` and
     // `serve_dir_query`'s `ContainedNoDirector` arm, both of which are dead
     // only because that shape cannot arise.
-    let roots = crate::fuse_client::roots_from_env(&root);
+    let roots = crate::director::roots_from_env(&root);
     let engine = if overlay.is_empty() {
         Engine::with_roots(&roots, snapshot)
     } else {

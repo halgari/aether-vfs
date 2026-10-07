@@ -16,14 +16,14 @@ use core::cell::Cell;
 use core::ffi::c_void;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, OnceLock};
 
 use windows_sys::Win32::System::Diagnostics::Debug::{
     AddVectoredExceptionHandler, EXCEPTION_POINTERS,
 };
 use windows_sys::Win32::System::Memory::{
-    VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE,
+    MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc, VirtualFree,
 };
 
 const PAGE: usize = 4096;
@@ -125,7 +125,7 @@ fn ensure_worker() {
             .spawn(move || {
                 IS_FILL_WORKER.with(|c| c.set(true));
                 while let Ok(job) = rx.recv() {
-                    let n = crate::fuse_client::global().and_then(|client| {
+                    let n = crate::director::global().and_then(|client| {
                         // SAFETY: requester owns `dest` and blocks until reply.
                         let dest = unsafe {
                             core::slice::from_raw_parts_mut(job.dest as *mut u8, job.len)
@@ -165,7 +165,7 @@ fn fill_bytes(fh: u64, file_off: u64, dest: usize, len: usize) -> Option<usize> 
             }
         }
     }
-    let client = crate::fuse_client::global()?;
+    let client = crate::director::global()?;
     // SAFETY: caller committed `[dest, dest+len)` before asking for the fill.
     let out = unsafe { core::slice::from_raw_parts_mut(dest as *mut u8, len) };
     client.read_fragmented(fh, file_off, out).ok()
@@ -511,7 +511,7 @@ unsafe fn fill_chunk_at(addr: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_FREE};
+    use windows_sys::Win32::System::Memory::{MEM_FREE, MEMORY_BASIC_INFORMATION, VirtualQuery};
 
     /// Serialises the tests that reserve and release virtual address space.
     ///

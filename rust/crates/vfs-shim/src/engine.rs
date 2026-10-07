@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use vfs_redirect::{classify_open, to_nt, Decision, DirItem, RootId, RootMap, VolumeMap};
+use vfs_redirect::{Decision, DirItem, RootId, RootMap, VolumeMap, classify_open, to_nt};
 use vfs_shared::{LayoutError, SnapshotReader};
 
 use crate::hookstats::OverlayFail;
@@ -157,7 +157,7 @@ impl Engine {
     /// id to declare an alias, exactly as [`RootMap::with_roots`] defines it.
     ///
     /// `bootstrap.rs` builds this list with the *same* function the FUSE
-    /// client uses (`fuse_client::roots_from_env`), so the two halves of the
+    /// client uses (`director::roots_from_env`), so the two halves of the
     /// shim cannot disagree about which roots exist.
     pub fn with_roots(roots: &[(RootId, String)], snapshot: Vec<u8>) -> Result<Self, EngineError> {
         Self::build(roots, None, snapshot)
@@ -324,7 +324,7 @@ impl Engine {
             Some(OverlayState::Present { path, .. }) => {
                 return Decision::Redirect {
                     target_nt: to_nt(&path.to_string_lossy()),
-                }
+                };
             }
             Some(OverlayState::Whiteout) => return Decision::Deny,
             Some(OverlayState::Absent) | None => {}
@@ -460,7 +460,7 @@ impl Engine {
     /// seeded either, because the suffixed vpath came back not-found — so this
     /// preserves the old behaviour rather than restoring something.
     fn copy_up(&self, root: RootId, nt_path: &str, rel: &[String], dest: &Path) {
-        use crate::hookstats::{note_copy_up, CopyUp};
+        use crate::hookstats::{CopyUp, note_copy_up};
         if vfs_redirect::split_stream_suffix(nt_path).1.is_some() {
             note_copy_up(CopyUp::DeclinedStream, root.0, &rel.join("/"), 0);
             return;
@@ -537,7 +537,7 @@ impl Engine {
     /// Every exit is counted and named in the shim's stats report — see
     /// [`Engine::copy_up`] for why a silent best-effort was not good enough.
     fn cow_seed(&self, root: RootId, rel: &[String], dest: &Path) -> bool {
-        use crate::hookstats::{note_copy_up, CopyUp};
+        use crate::hookstats::{CopyUp, note_copy_up};
         if rel.is_empty() {
             return false;
         }
@@ -545,7 +545,7 @@ impl Engine {
         // No director, no copy-up. The old code's answer here was to read the
         // disk, which is the whole bug; a shim with no ring has no legitimate
         // source for these bytes.
-        let Some(client) = crate::fuse_client::global() else {
+        let Some(client) = crate::director::global() else {
             note_copy_up(CopyUp::DeclinedNoDirector, root.0, &vpath, 0);
             return false;
         };
@@ -728,7 +728,7 @@ impl Engine {
 ///
 /// Returns the outcome to record plus the bytes written (0 unless seeded).
 fn seed_from_director(
-    client: &crate::fuse_client::FuseClient,
+    client: &crate::director::FuseClient,
     root: RootId,
     vpath: &str,
     dest: &Path,
@@ -764,7 +764,7 @@ fn seed_from_director(
 /// zero-length read (the director having less than it said) as a failure —
 /// which is also what makes the loop provably terminate.
 fn write_director_file(
-    client: &crate::fuse_client::FuseClient,
+    client: &crate::director::FuseClient,
     fh: u64,
     size: u64,
     dest: &Path,
@@ -803,7 +803,7 @@ mod tests {
     use vfs_redirect::Decision;
 
     fn snapshot_bytes() -> Vec<u8> {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
+        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
         let tree = build(vec![Layer {
             id: LayerId(0),
             entries: vec![InputEntry {

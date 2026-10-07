@@ -3,7 +3,7 @@
 //! # Unsafe convention
 //!
 //! This tree holds most of the crate's `unsafe`, not all of it: `bootstrap`, `inject`,
-//! `lazy_section`, `regkeys`, `regquery`, `regwrite`, `regnotify`, `fuse_client` and `breadcrumb`
+//! `lazy_section`, `regkeys`, `regquery`, `regwrite`, `regnotify`, `director` and `breadcrumb`
 //! allow `unsafe_code` as well.
 //!
 //! Each module here denies `unsafe_op_in_unsafe_fn`, so the body of an `unsafe fn` is not an

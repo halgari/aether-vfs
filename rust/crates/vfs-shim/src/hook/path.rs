@@ -261,7 +261,7 @@ pub(super) fn path_is_ours(path: &str) -> bool {
     if ENGINE.get().is_some_and(|e| e.is_under_root(path)) {
         return true;
     }
-    crate::fuse_client::global().is_some_and(|c| c.vpath_under_root(path).is_some())
+    crate::director::global().is_some_and(|c| c.vpath_under_root(path).is_some())
 }
 
 /// Parse the target path from a `FILE_RENAME_INFORMATION`(`_EX`) buffer. Only
@@ -320,7 +320,7 @@ pub(super) unsafe fn fuse_root_directory(oa: *const ObjectAttributes) -> bool {
 /// Absolute `\??\` NT path for a Win32 or NT path string: `vfs_redirect::to_nt` after trimming
 /// and normalising a `\\?\` long prefix to `\??\`.
 pub(super) fn to_nt_path(path: &str) -> String {
-    vfs_redirect::to_nt(crate::fuse_client::strip_nt_device(path.trim()))
+    vfs_redirect::to_nt(crate::director::strip_nt_device(path.trim()))
 }
 
 #[cfg(test)]

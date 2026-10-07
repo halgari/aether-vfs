@@ -9,16 +9,16 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
 use windows_sys::Win32::System::LibraryLoader::{
-    GetModuleFileNameW, GetModuleHandleExW, GetModuleHandleW, GetProcAddress,
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    GetModuleFileNameW, GetModuleHandleExW, GetModuleHandleW, GetProcAddress,
 };
-use windows_sys::Win32::System::Memory::{VirtualAllocEx, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx};
 use windows_sys::Win32::System::Threading::{
-    CreateEventW, CreateRemoteThread, GetCurrentProcessId, ResumeThread, SetEvent, SuspendThread,
-    WaitForSingleObject, LPTHREAD_START_ROUTINE,
+    CreateEventW, CreateRemoteThread, GetCurrentProcessId, LPTHREAD_START_ROUTINE, ResumeThread,
+    SetEvent, SuspendThread, WaitForSingleObject,
 };
 
-use vfs_inject::{arm_preinit_payload_ex, PreinitRedirect};
+use vfs_inject::{PreinitRedirect, arm_preinit_payload_ex};
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()

@@ -18,7 +18,7 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
         crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_TABLE);
         if let Some(fh) = crate::fuse_synth::close_fuse(handle as isize) {
             crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_CLIENT);
-            if let Some(c) = crate::fuse_client::global() {
+            if let Some(c) = crate::director::global() {
                 crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_RING);
                 let _ = c.close(fh);
                 crate::breadcrumb::mark(crate::breadcrumb::mark_close::FUSE_DONE);

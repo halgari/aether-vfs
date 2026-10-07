@@ -44,22 +44,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use vfs_registry::layout::{
-    self, KeyInfoClass, ValueEntry, ValueInfoClass, Written, KEY_VALUE_ENTRY_SIZE,
+    self, KEY_VALUE_ENTRY_SIZE, KeyInfoClass, ValueEntry, ValueInfoClass, Written,
 };
 use vfs_registry::path::{self, fold};
-use vfs_registry::{merge, Child, Lookup, MergedKey, Node, RealKey, Value};
+use vfs_registry::{Child, Lookup, MergedKey, Node, RealKey, Value, merge};
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 use crate::ntdef::{
-    UnicodeString, KEY_BASIC_INFORMATION, KEY_FULL_INFORMATION, KEY_NAME_INFORMATION,
-    KEY_NODE_INFORMATION, KEY_VALUE_BASIC_INFORMATION, KEY_VALUE_PARTIAL_INFORMATION,
-    STATUS_ACCESS_DENIED, STATUS_ACCESS_VIOLATION, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
+    KEY_BASIC_INFORMATION, KEY_FULL_INFORMATION, KEY_NAME_INFORMATION, KEY_NODE_INFORMATION,
+    KEY_VALUE_BASIC_INFORMATION, KEY_VALUE_PARTIAL_INFORMATION, STATUS_ACCESS_DENIED,
+    STATUS_ACCESS_VIOLATION, STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL,
     STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER, STATUS_KEY_DELETED, STATUS_NO_MORE_ENTRIES,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS,
-    STATUS_UNSUCCESSFUL,
+    STATUS_UNSUCCESSFUL, UnicodeString,
 };
 use crate::regclient;
-use crate::regkeys::{self, Real, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, WOW64_MASK};
+use crate::regkeys::{self, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, Real, WOW64_MASK};
 
 /// `KeyValueFullInformation`, read from real keys when a merge needs value data.
 const KEY_VALUE_FULL_INFORMATION: u32 = 1;

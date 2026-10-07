@@ -33,20 +33,20 @@ use std::collections::HashSet;
 use vfs_protocol::{ST_BAD_REQUEST, ST_EXISTS, ST_NOT_FOUND};
 use vfs_registry::overlay::{MAX_DATA, MAX_KEY_NAME, MAX_VALUE_NAME};
 use vfs_registry::path::{self, fold};
-use vfs_registry::{merge, utf16_len, Child, Lookup, Node, RealKey, Value};
+use vfs_registry::{Child, Lookup, Node, RealKey, Value, merge, utf16_len};
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 use crate::ntdef::{
-    UnicodeString, KEY_VALUE_BASIC_INFORMATION, STATUS_ACCESS_DENIED, STATUS_ACCESS_VIOLATION,
+    KEY_VALUE_BASIC_INFORMATION, STATUS_ACCESS_DENIED, STATUS_ACCESS_VIOLATION,
     STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_CANNOT_DELETE,
     STATUS_INFO_LENGTH_MISMATCH, STATUS_INSUFFICIENT_RESOURCES, STATUS_INVALID_HANDLE,
     STATUS_INVALID_INFO_CLASS, STATUS_INVALID_PARAMETER, STATUS_KEY_DELETED,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SUCCESS,
-    STATUS_UNSUCCESSFUL,
+    STATUS_UNSUCCESSFUL, UnicodeString,
 };
 use crate::regclient;
 use crate::regkeys::{
-    self, Real, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WRITE, WOW64_MASK,
+    self, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WRITE, Real, WOW64_MASK,
 };
 
 /// `DELETE`, the right `NtDeleteKey` needs.

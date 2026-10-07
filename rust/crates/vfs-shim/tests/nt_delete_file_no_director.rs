@@ -24,7 +24,7 @@
 //! - A file outside every root must really be deleted.
 //!
 //! Its own binary, and deliberately with **no** `fakedirector`: this test's
-//! whole subject is the branch taken when `fuse_client::global()` is `None`,
+//! whole subject is the branch taken when `director::global()` is `None`,
 //! and that client is process-global and initialise-once.
 
 mod ntapi;

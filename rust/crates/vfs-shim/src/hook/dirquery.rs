@@ -180,8 +180,7 @@ unsafe fn serve_dir_query(
             Ok(w) => w,
             Err(st) => return st,
         };
-        let routed =
-            crate::fuse_client::global().and_then(|c| c.route(&dir_path).map(|hit| (c, hit)));
+        let routed = crate::director::global().and_then(|c| c.route(&dir_path).map(|hit| (c, hit)));
         match routed {
             Some((client, (root, vp))) => {
                 let vp = vp.as_str();

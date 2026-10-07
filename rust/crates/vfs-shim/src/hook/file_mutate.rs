@@ -68,7 +68,7 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
         return unsafe { tramp(oa) };
     };
 
-    if let Some(client) = crate::fuse_client::global() {
+    if let Some(client) = crate::director::global() {
         if let Some((root, vp)) = client.route(path) {
             let vp = vp.as_str();
             client.names_changed(root, vp);
@@ -246,7 +246,7 @@ pub(super) unsafe fn setinfo_hook_body(
             }
             if let (Some((fh, _, _, _, _)), Some(c)) = (
                 crate::fuse_synth::lookup(handle as isize),
-                crate::fuse_client::global(),
+                crate::director::global(),
             ) {
                 if eof >= 0 && c.truncate(fh, eof as u64).is_ok() {
                     crate::fuse_synth::set_size(handle as isize, eof as u64);
@@ -267,7 +267,7 @@ pub(super) unsafe fn setinfo_hook_body(
                 Ok(t) => t.get(&(handle as isize)).cloned(),
                 Err(_) => None,
             };
-            if let (Some(nt), Some(c)) = (nt, crate::fuse_client::global()) {
+            if let (Some(nt), Some(c)) = (nt, crate::director::global()) {
                 if let Some((root, src)) = c.route(&nt) {
                     c.names_changed(root, &src);
                     crate::read_cache::invalidate_path(root.0, &src);

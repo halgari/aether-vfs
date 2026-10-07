@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
 use vfs_core::{fold, wildcard_match};
-use vfs_redirect::{is_whiteout, whiteout_marker, DirItem, RootId};
+use vfs_redirect::{DirItem, RootId, is_whiteout, whiteout_marker};
 
 // Moved to `vfs-provider` so the director can reach it without depending on
 // this crate — that edge pulled `retour`/`libudis86-sys` into the kernel's

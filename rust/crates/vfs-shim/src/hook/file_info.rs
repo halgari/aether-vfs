@@ -39,12 +39,12 @@ const SYNTH_VOLUME_SERIAL: u64 = 0x5646_5300;
 ///
 /// `None` only for a handle with no recorded path, which no open produces.
 ///
-/// [`FuseClient::final_path`]: crate::fuse_client::FuseClient::final_path
+/// [`FuseClient::final_path`]: crate::director::FuseClient::final_path
 fn synth_final_path(handle: HANDLE) -> Option<String> {
     let opened = crate::fuse_synth::abs_path(handle as isize)?;
-    let named = crate::fuse_client::global().and_then(|c| c.final_path(&opened));
+    let named = crate::director::global().and_then(|c| c.final_path(&opened));
     Some(named.unwrap_or_else(|| {
-        crate::fuse_client::strip_nt_device(&opened)
+        crate::director::strip_nt_device(&opened)
             .trim_end_matches('\\')
             .to_string()
     }))
@@ -68,7 +68,7 @@ fn synth_file_id(handle: HANDLE) -> i64 {
 /// The file id of whatever is at `path` under a managed root — the number a
 /// handle to it reports. `None` for a path under no root.
 pub(super) fn path_file_id(path: &str) -> Option<i64> {
-    let (root, vpath) = crate::fuse_client::global()?.vpath_under_root(path)?;
+    let (root, vpath) = crate::director::global()?.vpath_under_root(path)?;
     Some(vfs_core::finalname::path_id(&format!("{}:{vpath}", root.0)) as i64)
 }
 

@@ -673,7 +673,7 @@ pub fn install(virtual_dir: &std::path::Path, fake: Fake, arena_len: usize) -> &
         std::env::set_var(vfs_env::ARENA_OFFSET, arena_offset.to_string());
         std::env::set_var(vfs_env::ARENA_LEN, arena_len.to_string());
         std::env::set_var(vfs_env::VIRTUAL_DIR, virtual_dir);
-        vfs_shim::fuse_client::try_init_from_env().expect("fuse client");
+        vfs_shim::director::try_init_from_env().expect("fuse client");
         fake
     })
 }
@@ -694,9 +694,9 @@ fn section_name() -> String {
 
 /// Another client on the ring [`install`] serves, as a second injected process of the session
 /// would have: its own mapping of the section, its own `FuseClient`.
-pub fn second_client(virtual_dir: &std::path::Path) -> vfs_shim::fuse_client::FuseClient {
+pub fn second_client(virtual_dir: &std::path::Path) -> vfs_shim::director::FuseClient {
     let bytes: usize = std::env::var(vfs_env::RING_BYTES).unwrap().parse().unwrap();
-    vfs_shim::fuse_client::FuseClient::connect(
+    vfs_shim::director::FuseClient::connect(
         &section_name(),
         &[(
             vfs_redirect::RootId::DEFAULT,
@@ -714,14 +714,14 @@ pub fn second_client(virtual_dir: &std::path::Path) -> vfs_shim::fuse_client::Fu
 pub fn unserved_client(
     virtual_dir: &std::path::Path,
     deadline: std::time::Duration,
-) -> vfs_shim::fuse_client::FuseClient {
+) -> vfs_shim::director::FuseClient {
     let name = format!("Local\\vfs-shim-dead-{}", std::process::id());
     let bytes = 256 * 1024;
     let mapping: &'static SharedMapping = Box::leak(Box::new(
         SharedMapping::create(&name, bytes).expect("section"),
     ));
     vfs_ipc::ring::init(mapping.seg(), SLOTS, PAYLOAD_CAP).expect("ring init");
-    vfs_shim::fuse_client::FuseClient::connect(
+    vfs_shim::director::FuseClient::connect(
         &name,
         &[(
             vfs_redirect::RootId::DEFAULT,

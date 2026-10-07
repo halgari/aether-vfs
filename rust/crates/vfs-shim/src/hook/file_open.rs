@@ -268,7 +268,7 @@ unsafe fn try_fuse_create(
     // open — see the callers' use of it for the full argument.
     outcome_recorded: &mut bool,
 ) -> Option<NTSTATUS> {
-    let client = crate::fuse_client::global()?;
+    let client = crate::director::global()?;
     let path = path?.to_string();
     let (root, vp) = client.route(&path)?;
     let vp = vp.as_str();
@@ -479,7 +479,7 @@ fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool) {
     {
         return;
     }
-    let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
+    let p = crate::director::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
     append_trace_line(
         path,
         &format!(
@@ -528,7 +528,7 @@ fn director_open_trace(nt_or_win_path: &str, size: u64) {
     else {
         return;
     };
-    let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
+    let p = crate::director::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
     let lower = p.to_ascii_lowercase();
     if !(lower.contains("\\data\\")
         || lower.ends_with(".esm")
@@ -567,7 +567,7 @@ unsafe fn try_fuse_mkdir(
     if !matches!(disp, 2 | 3 | 5) {
         return None;
     }
-    let client = crate::fuse_client::global()?;
+    let client = crate::director::global()?;
     let path = path?;
     // A directory is named as it is created: the caller's spelling, not the
     // folded path. See `FuseClient::vpath_as_spelled`.

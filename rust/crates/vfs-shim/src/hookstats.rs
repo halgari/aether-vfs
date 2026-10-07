@@ -1979,9 +1979,11 @@ pub fn start_reporter() {
     let interval = report_interval();
     let _ = std::thread::Builder::new()
         .name("vfs-shim-stats".into())
-        .spawn(move || loop {
-            std::thread::sleep(interval);
-            write_report(&path, &render_report());
+        .spawn(move || {
+            loop {
+                std::thread::sleep(interval);
+                write_report(&path, &render_report());
+            }
         });
 }
 

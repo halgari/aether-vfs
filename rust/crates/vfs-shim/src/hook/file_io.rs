@@ -192,7 +192,7 @@ pub(super) unsafe fn write_hook_body(
             } else {
                 // SAFETY: NtWriteFile contract — buffer is readable for `length` bytes.
                 let slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, want) };
-                match crate::fuse_client::global()
+                match crate::director::global()
                     .ok_or(vfs_protocol::ST_IO_ERROR)
                     .and_then(|c| c.write(fh, off, slice))
                 {
@@ -296,12 +296,12 @@ pub(super) unsafe fn read_hook_body(
                 // would be; `None` is the uncached read below, unchanged.
                 let cached = match &view.cache {
                     Some(f) if apc.is_null() && event.is_null() && f.size() == Some(size) => {
-                        crate::fuse_client::global().and_then(|c| c.read_cached(f, fh, off, slice))
+                        crate::director::global().and_then(|c| c.read_cached(f, fh, off, slice))
                     }
                     _ => None,
                 };
                 match cached.ok_or(()).or_else(|()| {
-                    crate::fuse_client::global()
+                    crate::director::global()
                         .ok_or(vfs_protocol::ST_IO_ERROR)
                         .and_then(|c| c.read_fragmented(fh, off, slice))
                 }) {

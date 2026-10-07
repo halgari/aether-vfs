@@ -121,7 +121,7 @@ unsafe fn fuse_create_section(
         if size > 256 * 1024 * 1024 {
             return STATUS_INVALID_FILE_FOR_SECTION;
         }
-        let Some(client) = crate::fuse_client::global() else {
+        let Some(client) = crate::director::global() else {
             return STATUS_UNSUCCESSFUL;
         };
         let mut pe = vec![0u8; size as usize];
@@ -221,7 +221,7 @@ unsafe fn fuse_create_section(
     }
     // Eager path (≤256 MiB): stream on this thread into VirtualAlloc.
     // Known-good with expand_primary_stack — avoid CreateThread from NtCreateSection.
-    let Some(client) = crate::fuse_client::global() else {
+    let Some(client) = crate::director::global() else {
         return STATUS_UNSUCCESSFUL;
     };
     use windows_sys::Win32::System::Memory::{

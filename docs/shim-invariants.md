@@ -94,7 +94,7 @@ The two ways of reaching case 2 answer the same way and are counted
 separately, because they are different failures:
 
 - **No client at all.** Standalone mode is retired (see
-  `fuse_client::FuseInitError`): bootstrap aborts the launch when the
+  `director::FuseInitError`): bootstrap aborts the launch when the
   ring cannot be attached, and `try_init_from_env` runs before the
   engine is built and before any detour installs, so an injected process
   always has a client by the time a hook can fire.

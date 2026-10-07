@@ -26,16 +26,15 @@ use std::hash::Hash;
 use std::sync::{Mutex, OnceLock};
 
 use vfs_protocol::{
-    decode_reg_changed_reply, decode_reg_key_reply, decode_reg_lookup_reply,
-    decode_reg_version_reply, encode_reg_changed, encode_reg_create_key, encode_reg_delete_value,
-    encode_reg_path, encode_reg_rename_key, encode_reg_set_value, OP_REG_CHANGED,
-    OP_REG_CREATE_KEY, OP_REG_DELETE_KEY, OP_REG_DELETE_VALUE, OP_REG_KEY, OP_REG_LOOKUP,
-    OP_REG_RENAME_KEY, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_EXISTS, ST_IO_ERROR, ST_NOT_FOUND,
-    ST_NOT_SUPPORTED,
+    OP_REG_CHANGED, OP_REG_CREATE_KEY, OP_REG_DELETE_KEY, OP_REG_DELETE_VALUE, OP_REG_KEY,
+    OP_REG_LOOKUP, OP_REG_RENAME_KEY, OP_REG_SET_VALUE, ST_BAD_REQUEST, ST_EXISTS, ST_IO_ERROR,
+    ST_NOT_FOUND, ST_NOT_SUPPORTED, decode_reg_changed_reply, decode_reg_key_reply,
+    decode_reg_lookup_reply, decode_reg_version_reply, encode_reg_changed, encode_reg_create_key,
+    encode_reg_delete_value, encode_reg_path, encode_reg_rename_key, encode_reg_set_value,
 };
-use vfs_registry::{path::fold, Lookup, Node};
+use vfs_registry::{Lookup, Node, path::fold};
 
-use crate::fuse_client::{self, FuseClient};
+use crate::director::{self, FuseClient};
 
 /// Entries per map before the cache starts over. A game reads far fewer distinct keys than
 /// this between two writes; the bound only stops a pathological enumeration from growing it
@@ -54,7 +53,7 @@ pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     DETOURS.get() == Some(&Ok(()))
         && *ON.get_or_init(|| vfs_env::opt_in(vfs_env::REGISTRY))
-        && fuse_client::global().is_some()
+        && director::global().is_some()
 }
 
 /// The outcome of installing the registry detours: `Err(label)` names one that is missing.
@@ -104,10 +103,10 @@ pub fn detours_outcome() -> Option<Result<(), &'static str>> {
     DETOURS.get().copied()
 }
 
-/// The process's registry client, over [`fuse_client::global`].
+/// The process's registry client, over [`director::global`].
 pub fn global() -> Option<&'static RegClient<'static>> {
     static CLIENT: OnceLock<RegClient<'static>> = OnceLock::new();
-    let fc = fuse_client::global()?;
+    let fc = director::global()?;
     Some(CLIENT.get_or_init(|| RegClient::new(fc)))
 }
 
@@ -141,7 +140,7 @@ pub fn with_key<R>(path: &str, f: impl FnOnce(Option<&Node>) -> R) -> Result<R, 
 /// The registry generation the director last published (0: none, so nothing is cached). An
 /// answer read after this returned it is current for as long as it stays the same.
 pub fn generation() -> u64 {
-    fuse_client::global().map_or(0, |c| c.reg_generation())
+    director::global().map_or(0, |c| c.reg_generation())
 }
 
 pub fn set_value(path: &str, name: &str, ty: u32, data: &[u8]) -> Result<(), i32> {
