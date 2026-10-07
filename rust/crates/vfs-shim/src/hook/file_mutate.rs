@@ -1,4 +1,5 @@
 //! Delete and rename: `NtDeleteFile` and `NtSetInformationFile`.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
     ENGINE, PATH_TABLE, TRAMP_DELETE, TRAMP_SETINFO, fuse_root_directory, in_hook_reenter,
@@ -67,14 +68,16 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
     // Shim-initiated I/O (overlay writes, the panic log, copy-up) must reach
     // the real ntdll, exactly as in `create_hook`/`open_hook`.
     if in_hook_reenter() {
-        return tramp(oa);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(oa) };
     }
     // Decode once, and hold the `UncachedScope` for as long as this call
     // decides with the result — `vpath_under_root`, `whiteout` and
     // `path_is_ours` are all `RootMap`-backed and cached the same way
     // `decision_for` is. See `parent_dir_of_handle`'s case 4 and
     // `DecodedPath`'s doc comment.
-    let decoded = match path_of_tracked(oa) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let decoded = match unsafe { path_of_tracked(oa) } {
         Ok(d) => d,
         Err(st) => return st,
     };
@@ -86,8 +89,10 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
         // An undecodable delete is an undecodable open by another name: it
         // bypasses every decision we would have made. Recorded rather than
         // silently trampolined, so it shows up in the same place.
-        crate::hookstats::note_undecodable(object_name_str(oa).as_deref());
-        return tramp(oa);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        crate::hookstats::note_undecodable(unsafe { object_name_str(oa) }.as_deref());
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(oa) };
     };
 
     if let Some(client) = crate::fuse_client::global() {
@@ -113,10 +118,13 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
     // kernel even here, so rebuild the OA absolute rather than hand the
     // synthetic handle over — the same narrow disagreement case
     // `tramp_create_abs` documents.
-    if fuse_root_directory(oa) {
-        return tramp_delete_abs(tramp, oa, path);
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    if unsafe { fuse_root_directory(oa) } {
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        return unsafe { tramp_delete_abs(tramp, oa, path) };
     }
-    tramp(oa)
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe { tramp(oa) }
 }
 
 /// The NT status for a director `OP_DELETE` refusal.
@@ -158,11 +166,13 @@ unsafe fn tramp_delete_abs(
     abs_path: &str,
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
-    let new_oa = match redirected_oa(oa, &nt) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let new_oa = match unsafe { redirected_oa(oa, &nt) } {
         Ok(o) => o,
         Err(st) => return st,
     };
-    tramp(new_oa.as_ptr())
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe { tramp(new_oa.as_ptr()) }
 }
 
 /// True when this `NtSetInformationFile` call requests a delete (either
@@ -170,10 +180,12 @@ unsafe fn tramp_delete_abs(
 unsafe fn is_delete_request(info: *mut c_void, length: u32, class: u32) -> bool {
     !info.is_null()
         && match class {
-            FILE_DISPOSITION_INFORMATION => length >= 1 && *(info as *const u8) != 0,
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            FILE_DISPOSITION_INFORMATION => unsafe { length >= 1 && *(info as *const u8) != 0 },
             FILE_DISPOSITION_INFORMATION_EX => {
                 length >= 4
-                    && core::ptr::read_unaligned(info as *const u32) & FILE_DISPOSITION_DELETE != 0
+                    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                    && unsafe { core::ptr::read_unaligned(info as *const u32) } & FILE_DISPOSITION_DELETE != 0
             }
             _ => false,
         }
@@ -229,7 +241,8 @@ unsafe fn setinfo_source_path(handle: HANDLE) -> Option<(String, bool)> {
     if let Some(p) = path_of_handle(handle) {
         return Some((p, false));
     }
-    vfs_win::final_path_for_handle(handle).map(|p| (p, true))
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe { vfs_win::final_path_for_handle(handle).map(|p| (p, true)) }
 }
 
 /// `FileCompletionInformation` — binds a handle to an I/O completion port.
@@ -280,7 +293,8 @@ pub(super) unsafe fn setinfo_hook_body(
             && !info.is_null()
             && length as usize >= core::mem::size_of::<FilePositionInformation>()
         {
-            let pos = (*(info as *const FilePositionInformation)).current_byte_offset;
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            let pos = unsafe { (*(info as *const FilePositionInformation)).current_byte_offset };
             if pos >= 0 {
                 crate::fuse_synth::set_position(handle as isize, pos as u64);
             }
@@ -291,7 +305,8 @@ pub(super) unsafe fn setinfo_hook_body(
             && !info.is_null()
             && length as usize >= core::mem::size_of::<FileEndOfFileInformation>()
         {
-            let eof = (*(info as *const FileEndOfFileInformation)).end_of_file;
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            let eof = unsafe { (*(info as *const FileEndOfFileInformation)).end_of_file };
             if let Some(f) = crate::fuse_synth::cache(handle as isize) {
                 crate::read_cache::invalidate(&f);
             }
@@ -301,7 +316,8 @@ pub(super) unsafe fn setinfo_hook_body(
             ) {
                 if eof >= 0 && c.truncate(fh, eof as u64).is_ok() {
                     crate::fuse_synth::set_size(handle as isize, eof as u64);
-                    crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
+                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                    unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
                     return STATUS_SUCCESS;
                 }
             }
@@ -309,7 +325,8 @@ pub(super) unsafe fn setinfo_hook_body(
         }
         // Delete / rename of a virtual handle → ring OP_DELETE / OP_RENAME, keyed
         // by the NT path recorded (record_path) when the handle was opened.
-        let is_delete = is_delete_request(info, length, class);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        let is_delete = unsafe { is_delete_request(info, length, class) };
         let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);
         if is_delete || is_rename {
             let nt = match PATH_TABLE.lock() {
@@ -327,7 +344,8 @@ pub(super) unsafe fn setinfo_hook_body(
                         // as the caller spelled it — which is also how a
                         // rename that changes only the letter case says what
                         // the new case is. See `FuseClient::vpath_as_spelled`.
-                        let target = parse_rename_target(info, length);
+                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                        let target = unsafe { parse_rename_target(info, length) };
                         match target.as_deref().and_then(|t| c.route_as_spelled(t)) {
                             // A rename whose target lands under a *different*
                             // root is refused rather than guessed at: the
@@ -366,7 +384,8 @@ pub(super) unsafe fn setinfo_hook_body(
                         }
                     };
                     if ok {
-                        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
+                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                        unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
                         return STATUS_SUCCESS;
                     }
                     return STATUS_UNSUCCESSFUL;
@@ -385,7 +404,8 @@ pub(super) unsafe fn setinfo_hook_body(
         crate::hookstats::note_setinfo_noop(class);
         return STATUS_SUCCESS;
     }
-    let is_delete = is_delete_request(info, length, class);
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let is_delete = unsafe { is_delete_request(info, length, class) };
     let is_rename = matches!(class, FILE_RENAME_INFORMATION | FILE_RENAME_INFORMATION_EX);
 
     if is_delete || is_rename {
@@ -393,7 +413,8 @@ pub(super) unsafe fn setinfo_hook_body(
         // entry there, and reading that miss as "not ours" is what let a
         // delete on an inherited or pre-injection under-root handle reach the
         // real file. See `setinfo_source_path`.
-        let source = setinfo_source_path(handle);
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        let source = unsafe { setinfo_source_path(handle) };
         // Held for every `RootMap`-backed question asked with an OS-consulted
         // source path below (`Engine::whiteout`/`rename`, `path_is_ours`) —
         // that string is a fact about the handle's target right now, not a
@@ -407,7 +428,8 @@ pub(super) unsafe fn setinfo_hook_body(
             let handled = if is_delete {
                 engine.whiteout(&nt)
             } else {
-                match parse_rename_target(info, length) {
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                match unsafe { parse_rename_target(info, length) } {
                     Some(target) => match engine.rename(&nt, &target) {
                         crate::engine::RenameOutcome::Handled => true,
                         // Both sides under managed roots, but different ones.
@@ -426,7 +448,8 @@ pub(super) unsafe fn setinfo_hook_body(
             };
             if handled {
                 // Suppress the real delete/rename; report success to the caller.
-                crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0);
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
                 return STATUS_SUCCESS;
             }
             // **The source is under a managed root and nothing above absorbed
@@ -491,12 +514,14 @@ pub(super) unsafe fn setinfo_hook_body(
         // already records for `engine.rename`, not a new one — it is listed
         // there rather than fixed here so both callers are fixed at once.
         if is_rename {
-            if let Some(target) = parse_rename_target(info, length) {
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            if let Some(target) = unsafe { parse_rename_target(info, length) } {
                 if path_is_ours(&target) {
                     return STATUS_ACCESS_DENIED;
                 }
             }
         }
     }
-    tramp(handle, iosb, info, length, class)
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe { tramp(handle, iosb, info, length, class) }
 }
