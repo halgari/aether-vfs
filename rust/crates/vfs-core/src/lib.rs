@@ -30,9 +30,12 @@ mod wildcard;
 
 pub use cachekey::compute_cache_key;
 pub use model::{
-    BuildError, CacheKey, DirEntry, EntryKind, InputEntry, Layer, LayerId, NodeKind, Resolution,
-    SourceId, Stat, VfsError,
+    BuildError, CacheKey, EntryKind, InputEntry, Layer, LayerId, Resolution, SourceId, TreeEntry,
+    TreeStat, VfsError,
 };
+// compat: removed by cleanup stream I
+#[doc(hidden)]
+pub use model::NodeKind;
 pub use casefold::fold;
 pub use path::{
     normalize_rel, normalize_vpath, rel_components, split_parent, trim_rel, BadComponent, PathError,

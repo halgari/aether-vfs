@@ -10,11 +10,16 @@ pub struct Layer {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a path is: an input entry's kind, and a tree node's.
 pub enum EntryKind {
     File,
     Dir,
     Tombstone,
 }
+
+// compat: removed by cleanup stream I
+#[doc(hidden)]
+pub type NodeKind = EntryKind;
 
 #[derive(Clone, Debug)]
 pub struct InputEntry {
@@ -40,24 +45,19 @@ impl From<&str> for SourceId {
     }
 }
 
+/// A tree node's metadata. Not [`vfs_provider`]'s `Stat`, whose `kind` is a `u8`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NodeKind {
-    File,
-    Dir,
-    Tombstone,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Stat {
-    pub kind: NodeKind,
+pub struct TreeStat {
+    pub kind: EntryKind,
     pub size: u64,
     pub mtime: i64,
 }
 
+/// One entry of a tree directory listing; compare `vfs_provider::DirEntry`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DirEntry {
+pub struct TreeEntry {
     pub name: String,
-    pub kind: NodeKind,
+    pub kind: EntryKind,
     pub size: u64,
     pub mtime: i64,
 }
