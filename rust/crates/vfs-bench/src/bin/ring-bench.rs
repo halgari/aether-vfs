@@ -914,6 +914,6 @@ fn main() {
 }
 
 // `vfs-unix` and the director's file-backed ring are unix-only; this keeps a
-// Windows build of this crate green, like its `ring-file-server` sibling.
+// Windows build of this crate green.
 #[cfg(not(unix))]
 fn main() {}
