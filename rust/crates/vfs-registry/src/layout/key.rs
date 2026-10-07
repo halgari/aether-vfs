@@ -1,9 +1,9 @@
 //! Key information classes: `NtQueryKey` and `NtEnumerateKey`.
 use super::*;
-use crate::merge::MergedKey;
+use crate::merge::KeyView;
 use crate::path::leaf;
 
-fn class_bytes(k: &MergedKey) -> Vec<u8> {
+fn class_bytes(k: &KeyView) -> Vec<u8> {
     k.class
         .as_deref()
         .unwrap_or(&[])
@@ -22,7 +22,7 @@ struct Counts {
     max_value_data: u32,
 }
 
-fn counts(k: &MergedKey) -> Counts {
+fn counts(k: &KeyView) -> Counts {
     Counts {
         subkeys: len32(k.subkeys.len()),
         max_name: k.subkeys.iter().map(|s| utf16_bytes(s)).max().unwrap_or(0),
@@ -44,7 +44,7 @@ fn counts(k: &MergedKey) -> Counts {
 }
 
 /// KEY_BASIC_INFORMATION: LastWriteTime@0 TitleIndex@8 NameLength@12 Name@16.
-fn key_basic(name: &str, k: &MergedKey, buf: &mut [u8]) -> Written {
+fn key_basic(name: &str, k: &KeyView, buf: &mut [u8]) -> Written {
     let name = utf16le(name);
     let total = 16 + name.len();
     if buf.len() < 16 {
@@ -65,7 +65,7 @@ fn key_basic(name: &str, k: &MergedKey, buf: &mut [u8]) -> Written {
 /// NameLength@20 Name@24; the class at ALIGN4(24 + NameLength), or ClassOffset = -1 without one.
 /// ResultLength is 24 + NameLength + ClassLength, without the alignment padding (WRK
 /// `CmpQueryKeyData`), so a buffer of exactly ResultLength can overflow by 2 bytes.
-fn key_node(name: &str, k: &MergedKey, buf: &mut [u8]) -> Written {
+fn key_node(name: &str, k: &KeyView, buf: &mut [u8]) -> Written {
     let name = utf16le(name);
     let class = class_bytes(k);
     let total = 24 + name.len() + class.len();
@@ -93,7 +93,7 @@ fn key_node(name: &str, k: &MergedKey, buf: &mut [u8]) -> Written {
 
 /// KEY_FULL_INFORMATION: LastWriteTime@0 TitleIndex@8 ClassOffset@12 ClassLength@16 SubKeys@20
 /// MaxNameLen@24 MaxClassLen@28 Values@32 MaxValueNameLen@36 MaxValueDataLen@40 Class@44.
-fn key_full(k: &MergedKey, buf: &mut [u8]) -> Written {
+fn key_full(k: &KeyView, buf: &mut [u8]) -> Written {
     let class = class_bytes(k);
     let total = 44 + class.len();
     if buf.len() < 44 {
@@ -138,7 +138,7 @@ fn key_name(path: &str, buf: &mut [u8]) -> Written {
 /// KEY_CACHED_INFORMATION, sizeof 40: LastWriteTime@0 TitleIndex@8 SubKeys@12 MaxNameLen@16
 /// Values@20 MaxValueNameLen@24 MaxValueDataLen@28 NameLength@32, padding 36..40. The name is
 /// not copied (WRK `CmpQueryKeyDataFromCache`), so a short buffer is only ever too small.
-fn key_cached(path: &str, k: &MergedKey, buf: &mut [u8]) -> Written {
+fn key_cached(path: &str, k: &KeyView, buf: &mut [u8]) -> Written {
     if buf.len() < 40 {
         return too_small(40);
     }
@@ -176,7 +176,7 @@ fn key_zeroed(size: usize, buf: &mut [u8]) -> Written {
 /// returns it, and Basic, Node and Cached report its last component, the key's own name.
 pub fn write_key_info(
     class: KeyInfoClass,
-    key: &MergedKey,
+    key: &KeyView,
     name_for_name_class: &str,
     buf: &mut [u8],
 ) -> Written {
@@ -197,7 +197,7 @@ pub fn write_key_info(
 pub fn write_subkey_info(
     class: KeyInfoClass,
     name: &str,
-    sub: &MergedKey,
+    sub: &KeyView,
     buf: &mut [u8],
 ) -> Written {
     match class {

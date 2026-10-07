@@ -126,8 +126,8 @@ const P: &str = r"\Registry\Machine\Software\Mod";
 
 /// A key whose counts depend on the merge: a tombstoned real subkey and value, an overlay
 /// subkey with the longest name, an overlay value shadowing nothing.
-fn merged() -> MergedKey {
-    let real = RealKey {
+fn merged() -> KeyView {
+    let real = KeyView {
         subkeys: vec!["alphabetical".into(), "Be".into()],
         values: vec![
             val("x", 1, &[1, 2, 3]),

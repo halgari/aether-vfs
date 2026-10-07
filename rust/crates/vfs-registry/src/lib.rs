@@ -11,8 +11,5 @@ pub mod path;
 
 pub use format::{FormatError, MAGIC, decode, encode};
 pub use merge::{KeyView, merge};
-// compat: removed by cleanup stream I
-#[doc(hidden)]
-pub use merge::{MergedKey, RealKey};
 pub use overlay::{Child, Lookup, Node, Overlay, RegError, Value, utf16_len};
 pub use path::PathError;

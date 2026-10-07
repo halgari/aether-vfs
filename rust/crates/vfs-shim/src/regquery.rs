@@ -47,7 +47,7 @@ use vfs_registry::layout::{
     self, KEY_VALUE_ENTRY_SIZE, KeyInfoClass, ValueEntry, ValueInfoClass, Written,
 };
 use vfs_registry::path::{self, fold};
-use vfs_registry::{Child, Lookup, MergedKey, Node, RealKey, Value, merge};
+use vfs_registry::{Child, KeyView, Lookup, Node, Value, merge};
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 use crate::ntdef::{
@@ -302,12 +302,12 @@ impl Need {
     }
 }
 
-/// A `RealKey` (as much as `need` asks for) and the real key's own name.
+/// A `KeyView` (as much as `need` asks for) and the real key's own name.
 unsafe fn read_real(
     real: &Real,
     h: isize,
     need: Need,
-) -> Result<(RealKey, Option<String>), NTSTATUS> {
+) -> Result<(KeyView, Option<String>), NTSTATUS> {
     let info = real_info(real, h, need.full)?;
     let (subkeys, values) = if need.lists {
         (real_subkeys(real, h)?, real_values(real, h, true)?)
@@ -315,7 +315,7 @@ unsafe fn read_real(
         (Vec::new(), Vec::new())
     };
     Ok((
-        RealKey {
+        KeyView {
             subkeys,
             values,
             class: info.class,
@@ -455,7 +455,7 @@ pub(crate) unsafe fn query_key(
             }
             let name = path::to_nt(&ctx.path, regkeys::user_sid());
             emit(info, len, ret, |b| {
-                layout::write_key_info(KeyInfoClass::Name, &MergedKey::default(), &name, b)
+                layout::write_key_info(KeyInfoClass::Name, &KeyView::default(), &name, b)
             })
         }
         Some(
@@ -469,7 +469,7 @@ pub(crate) unsafe fn query_key(
             Some(r) => tramp(r as HANDLE, class, info, len, ret),
             None => match kc {
                 Some(kc) => emit(info, len, ret, |b| {
-                    layout::write_key_info(kc, &MergedKey::default(), &ctx.path, b)
+                    layout::write_key_info(kc, &KeyView::default(), &ctx.path, b)
                 }),
                 None => STATUS_INVALID_PARAMETER,
             },
@@ -1088,8 +1088,8 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    fn real_key(subs: &[&str], vals: &[&str]) -> RealKey {
-        RealKey {
+    fn real_key(subs: &[&str], vals: &[&str]) -> KeyView {
+        KeyView {
             subkeys: names(subs),
             values: vals
                 .iter()
@@ -1099,7 +1099,7 @@ mod tests {
                     data: vec![],
                 })
                 .collect(),
-            ..RealKey::default()
+            ..KeyView::default()
         }
     }
 

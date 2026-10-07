@@ -1,5 +1,5 @@
 use super::*;
-use crate::merge::{MergedKey, RealKey, merge};
+use crate::merge::{KeyView, merge};
 use crate::overlay::{Overlay, Value};
 
 mod key;
@@ -53,11 +53,11 @@ fn too_small(len: u32) -> Written {
         result_length: len,
     }
 }
-fn key(class: Option<&str>) -> MergedKey {
-    MergedKey {
+fn key(class: Option<&str>) -> KeyView {
+    KeyView {
         last_write: LW,
         class: class.map(|c| c.encode_utf16().collect()),
-        ..MergedKey::default()
+        ..KeyView::default()
     }
 }
 fn val(name: &str, ty: u32, data: &[u8]) -> Value {
@@ -67,7 +67,7 @@ fn val(name: &str, ty: u32, data: &[u8]) -> Value {
         data: data.into(),
     }
 }
-fn kq(class: KeyInfoClass, k: &MergedKey, len: usize) -> (Written, Vec<u8>) {
+fn kq(class: KeyInfoClass, k: &KeyView, len: usize) -> (Written, Vec<u8>) {
     run(len, |b| write_key_info(class, k, KEY, b))
 }
 fn vq(class: ValueInfoClass, v: &Value, len: usize) -> (Written, Vec<u8>) {

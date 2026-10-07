@@ -24,7 +24,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use fakedirector::Fake;
 use reg::{Paths, UnicodeString, open_abs, reg_create_class, wide};
 use vfs_registry::layout::{self, KeyInfoClass, ValueEntry, ValueInfoClass, Written};
-use vfs_registry::{MergedKey, Value};
+use vfs_registry::{KeyView, Value};
 use vfs_shim::{is_synthetic_key_handle, regclient, registry_enum_states};
 use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::System::Registry::{
@@ -471,8 +471,8 @@ fn class_units(s: &str) -> Vec<u16> {
 }
 
 /// `M\Merge` as the merge should show it.
-fn merge_expected(last_write: u64) -> MergedKey {
-    MergedKey {
+fn merge_expected(last_write: u64) -> KeyView {
+    KeyView {
         subkeys: vec!["Sa".into(), "Sb".into(), "Sc".into()],
         values: merged_values(),
         class: Some(class_units("MCls")),
@@ -633,7 +633,7 @@ fn enumerate_key_lists_real_then_created_subkeys_minus_tombstones() {
     // Partial buffers of the entries the merge writes, against the layout.
     let sb = f.open(r"M\Merge\Sb", NT_KEY_READ);
     let sb_lw = lw_of(&qkey(sb, 0, 64));
-    let sb_view = MergedKey {
+    let sb_view = KeyView {
         subkeys: vec!["Deep".into()],
         values: vec![
             val("z", REG_DWORD, &dword(9)),
@@ -644,9 +644,9 @@ fn enumerate_key_lists_real_then_created_subkeys_minus_tombstones() {
         max_subkey_class_len: 0,
     };
     let sc = f.open(r"M\Merge\Sc", NT_KEY_READ);
-    let sc_view = MergedKey {
+    let sc_view = KeyView {
         last_write: lw_of(&qkey(sc, 0, 64)),
-        ..MergedKey::default()
+        ..KeyView::default()
     };
     for (i, name, view) in [(1u32, "Sb", &sb_view), (2, "Sc", &sc_view)] {
         for kc in [KeyInfoClass::Basic, KeyInfoClass::Node, KeyInfoClass::Full] {

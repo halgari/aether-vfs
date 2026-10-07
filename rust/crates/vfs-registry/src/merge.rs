@@ -19,24 +19,17 @@ pub struct KeyView {
     pub max_subkey_class_len: u32,
 }
 
-// compat: removed by cleanup stream I
-#[doc(hidden)]
-pub type RealKey = KeyView;
-// compat: removed by cleanup stream I
-#[doc(hidden)]
-pub type MergedKey = KeyView;
-
-pub fn merge(real: Option<&RealKey>, node: Option<&Node>, tombstoned: bool) -> Option<MergedKey> {
+pub fn merge(real: Option<&KeyView>, node: Option<&Node>, tombstoned: bool) -> Option<KeyView> {
     if tombstoned || (real.is_none() && node.is_none()) {
         return None;
     }
     // A key created in the overlay has no real counterpart allowed to show through.
     let real = real.filter(|_| !node.is_some_and(|n| n.created));
-    let mut out = MergedKey {
+    let mut out = KeyView {
         class: real.and_then(|r| r.class.clone()),
         last_write: real.map_or(0, |r| r.last_write),
         max_subkey_class_len: real.map_or(0, |r| r.max_subkey_class_len),
-        ..MergedKey::default()
+        ..KeyView::default()
     };
     let Some(node) = node else {
         let r = real?;
@@ -98,8 +91,8 @@ mod tests {
             data: data.into(),
         }
     }
-    fn real(subs: &[&str], vals: Vec<Value>, lw: u64) -> RealKey {
-        RealKey {
+    fn real(subs: &[&str], vals: Vec<Value>, lw: u64) -> KeyView {
+        KeyView {
             subkeys: subs.iter().map(|s| s.to_string()).collect(),
             values: vals,
             class: Some(vec![1, 2]),

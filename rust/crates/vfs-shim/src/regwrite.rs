@@ -33,7 +33,7 @@ use std::collections::HashSet;
 use vfs_protocol::{ST_BAD_REQUEST, ST_EXISTS, ST_NOT_FOUND};
 use vfs_registry::overlay::{MAX_DATA, MAX_KEY_NAME, MAX_VALUE_NAME};
 use vfs_registry::path::{self, fold};
-use vfs_registry::{Child, Lookup, Node, RealKey, Value, merge, utf16_len};
+use vfs_registry::{Child, KeyView, Lookup, Node, Value, merge, utf16_len};
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 use crate::ntdef::{
@@ -380,7 +380,7 @@ unsafe fn read_real_key(
     real: &Real,
     p: &str,
     wow64: u32,
-) -> Result<Option<(RealKey, bool)>, NTSTATUS> {
+) -> Result<Option<(KeyView, bool)>, NTSTATUS> {
     let h = match regkeys::open_private(real, p, KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | wow64) {
         Ok(h) => h,
         Err(st) if gone(st) => return Ok(None),
@@ -390,10 +390,10 @@ unsafe fn read_real_key(
         let subkeys = crate::regquery::real_subkeys(real, h)?;
         let values = crate::regquery::real_values(real, h, true)?;
         Ok((
-            RealKey {
+            KeyView {
                 subkeys,
                 values,
-                ..RealKey::default()
+                ..KeyView::default()
             },
             real_volatile(real, h),
         ))
@@ -441,7 +441,7 @@ const COPY_LIMITS: Limits = Limits {
 type KeyRead<'a> = dyn FnMut(&str, bool) -> KeyReadResult + 'a;
 
 /// What a [`KeyRead`] returns.
-type KeyReadResult = Result<(Option<Node>, Option<(RealKey, bool)>), NTSTATUS>;
+type KeyReadResult = Result<(Option<Node>, Option<(KeyView, bool)>), NTSTATUS>;
 
 /// The merged view of the subtree at `root`, parents before children, each key's subkeys in
 /// merged order. Bounded by `limits` (for a rename, [`MAX_COPY_KEYS`] and [`MAX_COPY_BYTES`]):
@@ -702,7 +702,7 @@ mod tests {
         let mut o = vfs_registry::Overlay::new();
         o.set_value(P, "same", 1, b"o\0", 1).unwrap();
         o.delete_key(&format!(r"{P}\Gone"), 2).unwrap();
-        let real_root = RealKey {
+        let real_root = KeyView {
             subkeys: vec!["Kept".into(), "Gone".into()],
             values: vec![
                 Value {
@@ -716,12 +716,12 @@ mod tests {
                     data: b"d\0".to_vec(),
                 },
             ],
-            ..RealKey::default()
+            ..KeyView::default()
         };
         let mut read = |p: &str, may: bool| {
             let rk = match (p == P, may) {
                 (true, _) => Some((real_root.clone(), true)),
-                (false, true) => Some((RealKey::default(), false)),
+                (false, true) => Some((KeyView::default(), false)),
                 (false, false) => None,
             };
             Ok((o.node(p).cloned(), rk))

@@ -17,10 +17,6 @@ pub enum EntryKind {
     Tombstone,
 }
 
-// compat: removed by cleanup stream I
-#[doc(hidden)]
-pub type NodeKind = EntryKind;
-
 #[derive(Clone, Debug)]
 pub struct InputEntry {
     pub vpath: String,
