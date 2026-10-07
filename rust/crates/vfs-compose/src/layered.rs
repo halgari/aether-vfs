@@ -16,7 +16,8 @@ enum Layer {
     Bottom,
 }
 
-/// `top` shadows `bottom` on the same path; readdir unions with top-wins names.
+/// `top` shadows `bottom` on the same path; readdir unions the two, with the
+/// top's entry winning but a shared name keeping the bottom's spelling.
 pub struct LayeredProvider {
     top: Arc<dyn Provider>,
     bottom: Arc<dyn Provider>,
@@ -105,14 +106,22 @@ impl Provider for LayeredProvider {
         // top-layer override of a non-ASCII-cased file stops overriding.
         let mut seen: HashMap<String, DirEntry> =
             HashMap::with_capacity(bottom_entries.len() + top_entries.len());
-        // Bottom first, top overwrites.
+        // Bottom first; the top's entry is the live one but a name the
+        // bottom also has keeps the bottom's spelling — the rule the overlay
+        // uses (`merge_upper_entry`).
         for e in bottom_entries {
             seen.insert(fold(&e.name), e);
         }
         for e in top_entries {
-            seen.insert(fold(&e.name), e);
+            crate::merge_upper_entry(&mut seen, fold(&e.name), e);
         }
         Ok(crate::sorted_by_folded_name(seen))
+    }
+
+    /// The same rule as `readdir`, for one name: the bottom's spelling if
+    /// the bottom has the name, the top's otherwise.
+    fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+        crate::merge_stored_name(self.bottom.as_ref(), self.top.as_ref(), p)
     }
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
@@ -246,6 +255,48 @@ mod tests {
         let n = layered.read_at(h, 0, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"MOD-WIN");
         layered.close(h).unwrap();
+    }
+
+    /// Behaviour change (T21): a name both layers have used to show the top's
+    /// spelling; it now shows the bottom's, as the overlay does, while the
+    /// entry itself (size, time) is still the top's.
+    #[test]
+    fn a_shared_name_keeps_the_bottoms_spelling_and_the_tops_entry() {
+        let bottom = Arc::new(InlineProvider::from_files([
+            ("Data/Skyrim.esm", b"BASE".as_slice()),
+        ]));
+        let top = Arc::new(InlineProvider::from_files([
+            ("data/skyrim.esm", b"TOP-LONGER".as_slice()),
+            ("data/new.esp", b"N".as_slice()),
+        ]));
+        let layered = LayeredProvider::new(top, bottom);
+
+        let root = layered.readdir(VPath::at_default("")).unwrap();
+        let names: Vec<&str> = root.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["Data"]);
+
+        let data = layered.readdir(VPath::at_default("Data")).unwrap();
+        let by_name: Vec<(&str, u64)> = data.iter().map(|e| (e.name.as_str(), e.stat.size)).collect();
+        assert_eq!(by_name, [("new.esp", 1), ("Skyrim.esm", 10)]);
+
+        // `stored_name` follows the listing, for each spelling of the query.
+        for q in ["data", "DATA", "Data"] {
+            assert_eq!(
+                layered.stored_name(VPath::at_default(q)).unwrap().as_deref(),
+                Some("Data")
+            );
+        }
+        assert_eq!(
+            layered.stored_name(VPath::at_default("DATA/SKYRIM.ESM")).unwrap().as_deref(),
+            Some("Skyrim.esm")
+        );
+        // A name only the top has is spelled as the top spells it.
+        assert_eq!(
+            layered.stored_name(VPath::at_default("data/NEW.ESP")).unwrap().as_deref(),
+            Some("new.esp")
+        );
+        assert_eq!(layered.stored_name(VPath::at_default("data/nope")).unwrap(), None);
+        assert_eq!(layered.stored_name(VPath::at_default("")).unwrap(), None);
     }
 
     #[test]
