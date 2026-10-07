@@ -429,4 +429,28 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn stored_name_gives_the_central_directory_spelling_of_any_query_case() {
+        use vfs_provider::Provider;
+        let dir = std::env::temp_dir().join(format!("vfs-zipname-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let zip = dir.join("t.zip");
+        write_zip(&zip, &[("Meshes/Armor/Iron.NIF", b"x"), ("Data/Skyrim.ESM", b"y")]);
+        let p = ZipProvider::open(&zip).expect("open zip");
+        let name = |q: &str| p.stored_name(VPath::at_default(q)).unwrap();
+
+        // The file, and the directories above it, in the case they were stored.
+        assert_eq!(name("meshes/armor/iron.nif").as_deref(), Some("Iron.NIF"));
+        assert_eq!(name("MESHES/ARMOR/IRON.NIF").as_deref(), Some("Iron.NIF"));
+        assert_eq!(name("meshes/armor").as_deref(), Some("Armor"));
+        assert_eq!(name("MESHES").as_deref(), Some("Meshes"));
+        assert_eq!(name("data/skyrim.esm").as_deref(), Some("Skyrim.ESM"));
+        // Slashes around the query do not matter; the root and a miss are None.
+        assert_eq!(name("/meshes/").as_deref(), Some("Meshes"));
+        assert_eq!(name(""), None);
+        assert_eq!(name("meshes/armor/nope.nif"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

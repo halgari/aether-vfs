@@ -236,3 +236,97 @@ mod stack_tests {
         vfs_provider::assert_conformance(stack_layers(vec![bottom, top]).unwrap());
     }
 }
+
+#[cfg(test)]
+mod stored_name_forwarding_tests {
+    use super::*;
+    use vfs_provider::{Capabilities, Handle, Stat, VPath};
+
+    /// Answers `stored_name` with a marker no listing could produce, naming the
+    /// path it was asked about. A wrapper that does not forward the call falls
+    /// back to the default (unsupported) and the listing, and never says this.
+    struct Marker;
+
+    impl Provider for Marker {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::read_only()
+        }
+        fn getattr(&self, _p: VPath) -> Result<Option<Stat>, i32> {
+            Ok(None)
+        }
+        fn readdir(&self, _p: VPath) -> Result<Vec<DirEntry>, i32> {
+            Ok(Vec::new())
+        }
+        fn open(&self, _p: VPath, _flags: u32) -> Result<(Handle, u64, bool), i32> {
+            Err(vfs_provider::not_found())
+        }
+        fn close(&self, _h: Handle) -> Result<(), i32> {
+            Ok(())
+        }
+        fn read_at(&self, _h: Handle, _o: u64, _b: &mut [u8]) -> Result<usize, i32> {
+            Err(vfs_provider::bad_fh())
+        }
+        fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+            Ok(Some(format!("marker:{}", p.rel)))
+        }
+    }
+
+    fn ask(p: &dyn Provider, rel: &str) -> Option<String> {
+        p.stored_name(VPath::at_default(rel)).expect("forwarded, not unsupported")
+    }
+
+    #[test]
+    fn readonly_forwards_stored_name() {
+        let p = ReadOnlyProvider::new(Arc::new(Marker));
+        assert_eq!(ask(&p, "a/B").as_deref(), Some("marker:a/B"));
+    }
+
+    #[test]
+    fn seekable_forwards_stored_name() {
+        let p = SeekableProvider::new(Arc::new(Marker));
+        assert_eq!(ask(&p, "a/B").as_deref(), Some("marker:a/B"));
+    }
+
+    #[test]
+    fn subdir_forwards_stored_name_under_its_prefix() {
+        let p = SubdirProvider::new(Arc::new(Marker), "root");
+        assert_eq!(ask(&p, "a/B").as_deref(), Some("marker:root/a/B"));
+    }
+
+    #[test]
+    fn router_forwards_stored_name_to_the_routed_provider() {
+        struct Other;
+        impl Provider for Other {
+            fn capabilities(&self) -> Capabilities {
+                Capabilities::read_only()
+            }
+            fn getattr(&self, _p: VPath) -> Result<Option<Stat>, i32> {
+                Ok(None)
+            }
+            fn readdir(&self, _p: VPath) -> Result<Vec<DirEntry>, i32> {
+                Ok(Vec::new())
+            }
+            fn open(&self, _p: VPath, _f: u32) -> Result<(Handle, u64, bool), i32> {
+                Err(vfs_provider::not_found())
+            }
+            fn close(&self, _h: Handle) -> Result<(), i32> {
+                Ok(())
+            }
+            fn read_at(&self, _h: Handle, _o: u64, _b: &mut [u8]) -> Result<usize, i32> {
+                Err(vfs_provider::bad_fh())
+            }
+            fn stored_name(&self, _p: VPath) -> Result<Option<String>, i32> {
+                Ok(Some("other".to_string()))
+            }
+        }
+        let p = RouterProvider::new(
+            Arc::new(Marker),
+            vec![Route {
+                pattern: "special/**".to_string(),
+                provider: Arc::new(Other),
+            }],
+        );
+        assert_eq!(ask(&p, "plain/X").as_deref(), Some("marker:plain/X"));
+        assert_eq!(ask(&p, "special/X").as_deref(), Some("other"));
+    }
+}

@@ -1019,6 +1019,43 @@ mod tests {
         })
     }
 
+    /// Answers `stored_name` with a marker no listing could produce.
+    struct Marked(Arc<Slow>);
+
+    impl Provider for Marked {
+        fn capabilities(&self) -> Capabilities {
+            self.0.capabilities()
+        }
+        fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+            self.0.getattr(p)
+        }
+        fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+            self.0.readdir(p)
+        }
+        fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+            self.0.open(p, flags)
+        }
+        fn close(&self, h: Handle) -> Result<(), i32> {
+            self.0.close(h)
+        }
+        fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+            self.0.read_at(h, offset, buf)
+        }
+        fn stored_name(&self, p: VPath) -> Result<Option<String>, i32> {
+            Ok(Some(format!("marker:{}", p.rel)))
+        }
+    }
+
+    #[test]
+    fn cached_provider_forwards_stored_name_to_its_source() {
+        let (s, _d) = temp_storage();
+        let p = s.cached(Arc::new(Marked(slow_fixture())), key());
+        let got = p
+            .stored_name(VPath::at_default("sub/B.txt"))
+            .expect("forwarded, not unsupported");
+        assert_eq!(got.as_deref(), Some("marker:sub/B.txt"));
+    }
+
     fn slow_fixture() -> Arc<Slow> {
         slow(Arc::new(vfs_provider::conformance::MemFixture::new()))
     }
