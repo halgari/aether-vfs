@@ -412,7 +412,7 @@ impl IpcServe {
         // removed, so nothing a previous session in this process left behind
         // can reach the child. The removals that matter most:
         // - `VFS_RING_PATH` **wins** over `VFS_RING_SECTION` in the shim (see
-        //   `fuse_client::ring_source`), so a stale value from an earlier
+        //   `director::ring_source` in vfs-shim), so a stale value from an earlier
         //   file-backed session would send the child to that old ring file
         //   (a director that is gone, or one another session still serves)
         //   while this session's section sat unused and every log said the

@@ -180,9 +180,8 @@ impl Session {
     }
 
     /// The physical subdirectory of this session's overlay that `root`'s
-    /// writes actually land in — see `vfs_shim::overlay_layer_dir`, which
-    /// this delegates to, and `Overlay::root_dir` on the shim side (the
-    /// same directory `Engine`'s local write overlay resolves against).
+    /// writes actually land in — see `vfs_provider::overlay_layer_dir`, which
+    /// this delegates to.
     ///
     /// A host mounting its *own* read layer over the overlay directory
     /// (e.g. a `DiskProvider`, so the director sees content the shim's

@@ -125,7 +125,7 @@ pub struct Config {
 
     /// Full-shim secondary dispatch (0 until `install_late` publishes them).
     /// When non-zero, unmatched opens/attrs are forwarded here instead of the
-    /// original ntdll trampoline — so the Engine rides on early-owned stubs.
+    /// original ntdll trampoline — so the full shim rides on early-owned stubs.
     pub secondary_open: usize,
     pub secondary_create: usize,
     pub secondary_qattr: usize,

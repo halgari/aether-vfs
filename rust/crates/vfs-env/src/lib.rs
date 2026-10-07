@@ -178,7 +178,7 @@ pub const CHILD_REFUSED_SUFFIX: &str = ".child-refused";
 pub const PAYLOAD_CFG_FILE: &str = "VFS_PAYLOAD_CFG_FILE";
 /// Set when the launch uses the dual-layer (pre-init payload + full shim) path.
 pub const DUAL_LAYER: &str = "VFS_DUAL_LAYER";
-/// Test-only: force `vfs_shim::fuse_client::try_init_from_env` to report a
+/// Test-only: force `vfs_shim::director::try_init_from_env` to report a
 /// connect failure, regardless of ring configuration. Exists to exercise a
 /// director-launched process's abort path without a director that is
 /// actually broken.
@@ -429,15 +429,12 @@ pub const ESCAPE_ACCESS: &str = "VFS_ESCAPE_ACCESS";
 /// cleaning up) its own junction exactly as before, for a standalone
 /// (uninjected) reproduction where no such pre-existing junction is set up.
 ///
-/// Needed once `vfs-redirect`'s `RootMap` volume/junction table is resolved
-/// lazily on a session's first real decision rather than eagerly at
-/// bootstrap (see `vfs-shim::Engine::map`): the fixture's own `mklink /J`
-/// spawn is itself real, hooked file activity in the injected process, so
-/// if the fixture created the junction *after* that first decision had
-/// already fired — which it reliably had, since spawning `cmd.exe` to run
-/// `mklink` is exactly such activity — the junction would not exist yet at
-/// the moment resolution ran, and would never be picked up afterward (the
-/// table is resolved once, not on a schedule). Creating the junction from
+/// Needed because `vfs-redirect`'s `RootMap` volume/junction table is
+/// resolved once, when the shim bootstraps (`FuseClient::connect_source` in
+/// `vfs-shim`): a junction the fixture created *after* that would not exist
+/// yet at the moment resolution ran, and would never be picked up afterward
+/// (the table is resolved once, not on a schedule). The fixture only runs once
+/// the shim is up, so a `mklink /J` it spawned itself always comes too late. Creating the junction from
 /// the test harness process (never injected) before the fixture is even
 /// launched sidesteps the ordering question entirely — indistinguishable,
 /// from the shim's perspective, from a junction a real mod manager already

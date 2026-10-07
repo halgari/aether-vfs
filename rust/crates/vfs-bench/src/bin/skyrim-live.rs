@@ -876,12 +876,10 @@ const SKYRIM_SE_APP_ID: &str = "489830";
 /// Valve steam_appid.txt: lets SteamAPI_Init talk to the running client without
 /// RestartAppIfNecessary → steam://run (Remote Play / UI relaunch).
 ///
-/// The overlay copy is written directly with `std::fs`, not through the
-/// shim's `Overlay` type (this runs before a `Session`/`Engine` exists at
-/// all) — but it still has to land exactly where `Engine`'s local overlay
-/// will look for it once the shim is live: `Engine::decide`'s DRM-exception
-/// path for `steam_appid.txt` (`hook.rs`) checks the overlay *before* ever
-/// reaching the director, so this write and that lookup must agree on the
+/// The overlay copy is written directly with `std::fs` (this runs before a
+/// `Session` exists at all) — but it still has to land exactly where the
+/// director's mounted layer will look for it once the session is live, so
+/// this write and that lookup must agree on the
 /// physical path or the file is invisible to the VFS (gate 4, Task 2's
 /// review round 1: this used to be `overrides.join("steam_appid.txt")`,
 /// which stopped matching once the overlay became root-scoped). Root 0 is
@@ -894,9 +892,8 @@ fn write_steam_appid(root: &Path, overrides: &Path) -> Result<(), String> {
     let on_disk = root.join("steam_appid.txt");
     std::fs::write(&on_disk, &body).map_err(|e| format!("write {}: {e}", on_disk.display()))?;
     // Overlay so dual-layer/VFS open of <root>\steam_appid.txt sees it too —
-    // at the same root-scoped subdirectory `Engine`'s local overlay (and the
-    // director's own mounted layer over it, see `overlay_layer_dir`'s doc
-    // comment) both resolve against.
+    // at the root-scoped subdirectory the director's mounted layer
+    // resolves against (see `overlay_layer_dir`'s doc comment).
     let overlay_dir = vfs_embed::overlay_layer_dir(overrides, RootId::DEFAULT);
     std::fs::create_dir_all(&overlay_dir)
         .map_err(|e| format!("mkdir {}: {e}", overlay_dir.display()))?;

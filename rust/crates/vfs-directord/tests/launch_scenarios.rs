@@ -665,7 +665,7 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
 ///   `LayeredProvider` at all. Hence three sources here — archive, then two
 ///   mod directories — which is also what an ordinary modded game looks like.
 /// - **The registry's own source wrapping under the overlay.** This bullet
-///   was written when every registry source went through `vfs-cache`'s
+///   was written when every registry source went through the old `vfs-cache` crate's
 ///   `CachingProvider`, so a copy-up seeded through the block cache had never
 ///   happened live. That crate is gone: `vfs-storage` caches only slow,
 ///   immutable sources, so the archive and directories here are mounted as

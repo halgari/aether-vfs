@@ -77,7 +77,7 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
     // Outside every root. A FUSE-synthetic `RootDirectory` is invalid to the
     // kernel even here, so rebuild the OA absolute rather than hand the
     // synthetic handle over — the same narrow disagreement case
-    // `tramp_create_abs` documents.
+    // `route_open` (`file_open.rs`) documents.
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
     if unsafe { fuse_root_directory(oa) } {
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
@@ -107,8 +107,8 @@ fn delete_status_for(st: i32) -> NTSTATUS {
 }
 
 /// `NtDeleteFile` via the trampoline with an absolute NT path and a **null**
-/// `RootDirectory`. The `NtDeleteFile` counterpart of [`super::file_open::tramp_create_abs`];
-/// see that function for when a synthetic root reaches a fall-through at all.
+/// `RootDirectory`. The `NtDeleteFile` counterpart of the absolute-OA rebuild in
+/// `route_open` (`file_open.rs`); see the comment there for when a synthetic root reaches a fall-through at all.
 unsafe fn tramp_delete_abs(
     tramp: NtDeleteFileFn,
     oa: *const ObjectAttributes,

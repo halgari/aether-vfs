@@ -113,10 +113,8 @@ fn tmp(name: &str) -> std::path::PathBuf {
 /// unconditionally writes its output file as its one and only act — must
 /// never have run.
 ///
-/// Before this task this returned `Ok`: `fuse_client::try_init_from_env`'s
-/// error was discarded, hooks installed anyway over an empty local snapshot
-/// (`Session::serve` deliberately ships one — real content only ever came
-/// from the ring), the ready file was written regardless, and the launched
+/// Before this task this returned `Ok`: `vfs_shim::director::try_init_from_env`'s
+/// error was discarded, hooks installed anyway with nothing to serve from, the ready file was written regardless, and the launched
 /// process ran to completion fully un-virtualized with nothing anywhere
 /// reporting it.
 #[test]

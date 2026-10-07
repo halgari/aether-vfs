@@ -8,7 +8,7 @@
 //! differently: the shim-local overlay (removed by task C8) appended
 //! `vfs_redirect::WHITEOUT_SUFFIX` (`<name>.__vfs_wh__`);
 //! `vfs_compose::OverlayProvider` prefixes `.wh.<name>`. Live,
-//! `skyrim-live`/`vfs-launch` hand the director a write layer rooted at
+//! `skyrim-live` and the daemon hand the director a write layer rooted at
 //! `overlay_layer_dir(overlay, RootId::DEFAULT)` — the *same* directory the
 //! shim-local overlay wrote into. So a marker an older shim wrote is, to the
 //! director, a zero-byte file with an odd name, and `client.readdir` hands it

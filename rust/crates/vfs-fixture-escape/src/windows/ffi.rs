@@ -71,7 +71,7 @@ extern "system" {
     /// itself routes this to `NtQueryAttributesFile`/`NtQueryFullAttributesFile`
     /// or (Windows 11) `NtQueryInformationByName`'s `FileStatBasicInformation`
     /// class, exactly the hook family (`qattr_hook`/`qfull_hook`/`qibn_hook`,
-    /// `vfs-shim/src/hook.rs`) the metadata-gap test (vector `4m`, below)
+    /// `vfs-shim/src/hook/file_attr.rs`) the metadata-gap test (vector `4m`, below)
     /// exercises. Returns `INVALID_FILE_ATTRIBUTES` on failure; call
     /// `GetLastError` for why.
     pub fn GetFileAttributesW(lpFileName: *const u16) -> u32;

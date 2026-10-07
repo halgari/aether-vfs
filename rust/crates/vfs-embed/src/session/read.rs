@@ -74,8 +74,8 @@ impl Session {
     /// Same reason as [`Session::readdir`]: it was reached for through
     /// `kernel()` by two hosts. It is the cheapest way to answer the question
     /// this project keeps needing answered — *does my graph actually serve the
-    /// path I think it does* — without opening anything, and `vfs-launch` uses
-    /// it for precisely that before it stages a launch image.
+    /// path I think it does* — without opening anything. A host can use it for
+    /// precisely that before it stages a launch image.
     pub fn getattr(&self, root: RootId, vpath: &str) -> Result<Option<Stat>, i32> {
         self.kernel.getattr(root, vpath)
     }

@@ -9,8 +9,8 @@
 //! merely a retired assertion: static-import (PE import table) redirection
 //! via dual-layer preinit is a real, still-supported mechanism unrelated to
 //! the FUSE virtualisation bypass this gate closes, and nothing today proves
-//! it end-to-end through a real director — `vfs_director::Session::launch`
-//! (`crates/vfs-director/src/session.rs`) hardcodes `preinit_redirects:
+//! it end-to-end through a real director — `vfs_embed::Session::launch`
+//! (`crates/vfs-embed/src/session/`) hardcodes `preinit_redirects:
 //! vec![]` and has no config-file static-import plumbing either. Restoring
 //! this coverage needs either a director-mediated static-import path (a
 //! `vfs-director` feature change) or a minimal in-process test-only ring

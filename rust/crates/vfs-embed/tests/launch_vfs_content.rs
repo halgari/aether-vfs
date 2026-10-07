@@ -161,8 +161,8 @@ fn a_staged_copy_must_not_shadow_curated_content_at_the_same_path() {
 /// SKSE's `skse64_loader.exe` starts `SkyrimSE.exe` with an ordinary
 /// `CreateProcess` that nothing of ours intercepts, so the game has to be a
 /// real file where the loader resolves it before the loader runs — the reason
-/// [`LaunchOpts::stage_also`] exists, and the reason `vfs-launch`'s default
-/// invocation needs it.
+/// [`LaunchOpts::stage_also`] exists, and the reason a launch of a mod loader
+/// needs it.
 ///
 /// Staging lands **inside the virtual root, at each image's vpath**. Two
 /// consequences, both asserted here: a companion that is the launcher's

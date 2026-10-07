@@ -34,9 +34,10 @@
 //! - **The directory downgrade** (`vfs_shim::hook`): a write-flavoured open of
 //!   a directory the director refuses is re-issued as a read open. One
 //!   `Routed`, two `OP_OPEN`s.
-//! - **Copy-up** (`vfs_shim::Engine::cow_seed` → `seed_from_director`): the
-//!   shim opens the file itself, to read its prior content into the overlay.
-//!   The game never made that open, so no outcome classifier ever saw it.
+//! - **Copy-up** (removed with the shim-local `Engine`'s `cow_seed`): the shim
+//!   used to open the file itself, to read its prior content into the overlay.
+//!   The game never made that open, so no outcome classifier ever saw it. The
+//!   director's overlay provider does the copy-up now, behind the one `OP_WRITE`.
 //!
 //! Those are the only two — `client.open`/`client.open_write` have exactly
 //! three call sites in `vfs-shim`, and the third is the primary open that

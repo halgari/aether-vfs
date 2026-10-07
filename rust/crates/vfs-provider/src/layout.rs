@@ -20,7 +20,7 @@ use crate::path::RootId;
 /// the shim and the director ever talking to each other about it — the
 /// filesystem is the shared state. That caller needs the exact subtree the
 /// overlay actually uses, not a re-derived or hardcoded guess at it. See
-/// `vfs-director::Session::overlay_layer_dir` and its caller in
+/// `vfs-embed`'s `Session::overlay_layer_dir` and its caller in
 /// `vfs-bench/src/bin/skyrim-live.rs`, which mounts
 /// `overlay_layer_dir(&overrides, RootId::DEFAULT)` instead of `&overrides`
 /// itself for exactly this reason.

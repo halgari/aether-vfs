@@ -461,7 +461,7 @@ impl Provider for MemoryProvider {
     /// worse than refusing it — a host has no way to notice.
     ///
     /// `ST_IS_DIR` rather than a new `ST_NOT_EMPTY`: the shim already translates
-    /// it (`delete_status_for`, `vfs-shim/src/hook.rs`) to
+    /// it (`delete_status_for`, `vfs-shim/src/hook/file_mutate.rs`) to
     /// `STATUS_FILE_IS_A_DIRECTORY`, which `RtlNtStatusToDosError` folds to the
     /// `ERROR_ACCESS_DENIED` a real `DeleteFileW` returns for a directory. A
     /// status appended at `-11` would land in that function's catch-all and cross

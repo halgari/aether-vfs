@@ -361,7 +361,7 @@ impl Drop for VehGuard {
 ///
 /// It is not an ntdll detour, so `hook_entry_points!` does not generate it — and
 /// that is exactly why it was missed. Task 1's structural guard read
-/// `include_str!("hook.rs")` and nothing else, so this file was outside the check
+/// `include_str!` of the one hook source file and nothing else, so this file was outside the check
 /// for the whole of stage 4 while holding an uncontained entry point. The guard
 /// now derives its file set from `src/`; see
 /// `no_extern_hook_bypasses_the_panic_containment_macro` in [`crate::hook`].

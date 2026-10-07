@@ -63,8 +63,8 @@ pub struct RootMap {
 
 impl RootMap {
     /// A single root, answering as [`RootId::DEFAULT`] — the shape tests and
-    /// one-root callers want. Both production callers (`vfs-shim`'s `Engine`
-    /// and its `FuseClient`) now declare every session root through
+    /// one-root callers want. The production caller (`vfs-shim`'s `FuseClient`)
+    /// declares every session root through
     /// [`RootMap::with_roots`] instead.
     ///
     /// `root` may be NT (`\??\C:\Games\Skyrim`) or Win32 (`C:\Games\Skyrim`).
@@ -110,7 +110,7 @@ impl RootMap {
             // everything under this root rather than routing it. Fail
             // closed at construction instead of at every lookup: reachable
             // today via `VFS_VIRTUAL_DIR=""` (checked for unset, not empty,
-            // at `fuse_client.rs`'s env entry point) and newly plausible now
+            // at `vfs-shim`'s `director::try_init_from_env`) and newly plausible now
             // that a second declared root can be malformed independently of
             // the first.
             if norm.is_empty() {

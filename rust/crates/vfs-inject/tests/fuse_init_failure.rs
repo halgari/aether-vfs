@@ -1,9 +1,9 @@
 //! Task 2 (gate 3): when the shim's FUSE client fails to attach to a
 //! configured director, the launch must abort loudly — not log the failure
-//! and let the game run fully un-virtualized, which is what `fuse_client`
+//! and let the game run fully un-virtualized, which is what the shim's `director` module
 //! returning `None` used to mean and nothing reported.
 //!
-//! `run_target_with_shim` is the exact function `vfs_director::Session::launch`
+//! `run_target_with_shim` is the exact function `vfs_embed::Session::launch`
 //! calls (it only wraps the error into a `String`), so exercising it here
 //! proves the production launch path aborts, not just some lower-level detail.
 mod common;
@@ -19,7 +19,7 @@ use vfs_inject::{run_target_with_shim, InjectError, RunConfig};
 /// game code executes.
 ///
 /// Before this task, `bootstrap_from_config_path_with_payload` discarded this
-/// exact error (`let _ = fuse_client::try_init_from_env();`), hooks installed
+/// exact error (`let _ = director::try_init_from_env();`), hooks installed
 /// anyway over an empty local snapshot, the ready file was written "ready"
 /// regardless, and the launch returned `Ok` with the process running fully
 /// un-virtualized. Nothing anywhere reported it.

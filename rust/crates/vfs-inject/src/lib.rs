@@ -3,7 +3,7 @@
 //! Launch a target process with VFS injection.
 //!
 //! - [`run_target_with_shim`] — dual-layer: pre-init early payload + full shim
-//!   (static imports + full Engine) via spin-gate handoff.
+//!   (static imports + the full shim) via spin-gate handoff.
 //! - [`run_target_with_preinit`] — early payload only (static-import fixture).
 
 use std::time::Duration;

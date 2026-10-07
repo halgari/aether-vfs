@@ -62,7 +62,7 @@ fn positive_expectation(vector: &str) -> Option<&'static str> {
     // Why they were `not-found` in between: those five are recognised as
     // under-root *only* by `RootMap::compute_under_root`'s canonicalisation
     // (`vfs-redirect`'s device/volume-GUID/GLOBALROOT/UNC-admin-share/
-    // junction-alias tables), and `fuse_client::vpath_under_root` — the
+    // junction-alias tables), and `FuseClient::vpath_under_root` — the
     // shim-side router deciding whether an open reaches the director at all —
     // used to be a *second*, plain string-prefix predicate with none of those
     // tables. So `try_fuse_create` gave up for all five spellings and fell
@@ -73,7 +73,7 @@ fn positive_expectation(vector: &str) -> Option<&'static str> {
     // these five from `opened`-via-real-disk into `not-found`.
     //
     // What changed: task 5 deleted the second predicate.
-    // `fuse_client::vpath_under_root` *is* a `RootMap` now, so these five
+    // `FuseClient::vpath_under_root` *is* a `RootMap` now, so these five
     // spellings route to the director like any ordinary path, and the
     // director genuinely has the positive canary's content — so they open
     // through the director rather than by reading the byte-identical real
@@ -123,11 +123,11 @@ fn positive_expectation(vector: &str) -> Option<&'static str> {
 ///   child runs with **no shim injected** and so reads the real, physical
 ///   negative-canary bytes directly. **Measured otherwise in gate 4 task 8**:
 ///   the shim hooks `CreateProcessInternalW` and injects into children
-///   (`vfs-shim/src/hook.rs`), so the child is injected and this line actually
+///   (`vfs-shim/src/hook/process.rs`), so the child is injected and this line actually
 ///   reports `error:cmd-exit:1` — the real bytes were *not* reachable. Still
-///   unasserted, because that injection is explicitly best-effort (force
-///   suspend, inject, give up on timeout), so asserting it would be asserting
-///   a scheduling outcome. See `rust/docs/escape-matrix.md`, "Gate 4, Task 8".
+///   unasserted here; the shim's `child_inject_fails_closed` test covers the
+///   case where the injection fails (the child is killed, never released
+///   unhooked). See `rust/docs/escape-matrix.md`, "Gate 4, Task 8".
 ///
 /// Every other buildable vector must now come back `not-found`: Gate 3 Task
 /// 5 stopped `RootMap::decide` passing `NotFound`/`Dir` through, and the
@@ -156,15 +156,15 @@ fn negative_expectation(vector: &str) -> Option<&'static str> {
 /// comment used to give**. It said the child runs with no shim injected at
 /// all, so its open happens in a process whose hook stats this test can never
 /// see. The shim in fact detours `CreateProcessInternalW` and injects into
-/// children (`vfs-shim/src/hook.rs`; measured in gate 4 task 8 — see
+/// children (`vfs-shim/src/hook/process.rs`; measured in gate 4 task 8 — see
 /// `rust/docs/escape-matrix.md`), so the child is hooked and, inheriting
 /// `VFS_SHIM_STATS_LOG`, may even report into this same file.
 ///
 /// The exclusion stands anyway, and is now the stronger claim rather than the
 /// weaker one: whatever appears is a *different process's* classification of
 /// its own open, not this vector's, and whether it appears at all depends on
-/// a best-effort inject that is allowed to time out. Presence and absence are
-/// both scheduling outcomes here, so neither is evidence about gate 2.
+/// when that child runs relative to this test's read of the file. Presence and
+/// absence are both scheduling outcomes here, so neither is evidence about gate 2.
 ///
 /// `"5b"` is excluded too, but for the opposite reason: it *is* an
 /// in-process, hooked open, but one whose `OBJECT_ATTRIBUTES.RootDirectory`
@@ -233,8 +233,8 @@ fn classification_marker(vector: &str, basename: &str) -> Option<String> {
 ///     This is the assertion that closes that gap: a vector that is merely
 ///     classified while still opening the real bytes now fails this test.
 ///     Scoped to reads only, because when this was written a **write** open
-///     still reached the negative canary through `Engine::cow_seed`'s
-///     last-resort branch. Gate 4's Task 5 deleted that branch, and
+///     still reached the negative canary through the shim-local
+///     engine's `cow_seed` last-resort branch (since deleted). Gate 4's Task 5 deleted that branch, and
 ///     `escape_matrix_write_access_positive_and_negative_canary` below now
 ///     asserts the write half — so the scope note describes this test's
 ///     coverage, not a remaining hole. `5b` (undecodable handle-relative
@@ -456,8 +456,8 @@ async fn escape_matrix_positive_and_negative_canary() {
     // `session.root` (see "A second, structural finding" in
     // `rust/docs/escape-matrix.md` — vectors 1/3/4/7/9 were exactly this).
     // Scoped to reads only, per the brief. When that scope was set, a write
-    // open still reached this same file through `Engine::cow_seed`'s
-    // last-resort branch; gate 4's Task 5 deleted it, and the write half is
+    // open still reached this same file through the shim-local
+    // engine's `cow_seed` last-resort branch (since deleted); gate 4's Task 5 deleted it, and the write half is
     // asserted by `escape_matrix_write_access_positive_and_negative_canary`.
     for line in &neg_lines {
         let Some(want) = negative_expectation(&line.vector) else { continue };
@@ -547,16 +547,16 @@ async fn escape_matrix_positive_and_negative_canary() {
 ///
 /// This harness needs the name in order to *tolerate* it in the real-disk
 /// listing, and only it. Vector 14's containment rests on the shim's
-/// `CreateProcessInternalW` hook injecting the child (`vfs-shim/src/hook.rs`),
-/// which is explicitly best-effort — it force-suspends, injects, and gives up
-/// on a timeout. Observed here the child *is* injected and its write is
+/// `CreateProcessInternalW` hook injecting the child (`vfs-shim/src/hook/process.rs`),
+/// which fails closed — a child that cannot be injected is killed and never
+/// runs unhooked. Observed here the child *is* injected and its write is
 /// answered by the director like any other (see this file's
 /// `negative_write_expectation` and the finding recorded in
 /// `rust/docs/escape-matrix.md`), so this file does not normally appear on
-/// disk at all. But a timed-out inject would leave it there through no fault
-/// of the canonicaliser, and turning that into a flaky containment failure
-/// would teach the next person to weaken the assertion. It is the one name
-/// this harness accepts; anything else in the directory is an escape.
+/// disk at all. But a write that did reach the real disk would leave it there
+/// through no fault of the canonicaliser, and treating that as a containment
+/// failure would teach the next person to weaken the assertion. It is the one
+/// name this harness accepts; anything else in the directory is an escape.
 const V14_WRITE_SUFFIX: &str = ".v14-child-write.txt";
 
 /// The alternate-stream name `vfs-fixture-escape`'s vector 11 builds. In
@@ -618,7 +618,7 @@ fn negative_write_expectation(vector: &str) -> Option<&'static str> {
 
 /// The only two names this harness accepts in a canary directory's real-disk
 /// listing after a write run: the canary it put there itself, and vector 14's
-/// best-effort-injected child (see [`V14_WRITE_SUFFIX`]).
+/// injected child (see [`V14_WRITE_SUFFIX`]).
 ///
 /// Vector 8's hardlink is deliberately **not** on this list. It is created by
 /// `CreateHardLinkW`, which the shim does not hook by name — but the NT opens
@@ -1249,8 +1249,8 @@ async fn escape_matrix_holds_against_a_second_root() {
 /// found `docs/escape-matrix.md`'s claim of containment for metadata queries
 /// "by the same `RootMap::decide` mechanism... regardless of which hook
 /// asked" to be false. `qattr_hook`/`qfull_hook`/`qibn_hook`
-/// (`vfs-shim/src/hook.rs`) never reach `RootMap::decide` at all — they
-/// consult `fuse_path_attr`, which asked `fuse_client::vpath_under_root`,
+/// (`vfs-shim/src/hook/file_attr.rs`) never reach `RootMap::decide` at all — they
+/// consult `fuse_path_attr`, which asked `FuseClient::vpath_under_root`,
 /// the *client's own* string-prefix predicate. That predicate had none of
 /// `RootMap::compute_under_root`'s canonicalisation tables (no
 /// device-prefix, volume-GUID, `GLOBALROOT`-unwrap, UNC-admin-share, or

@@ -65,12 +65,11 @@
 //! — the shim detours `CreateProcessInternalW` and injects into children, so
 //! under a session the child's write is answered by the director like any
 //! other (measured in gate 4 task 8; see `rust/docs/escape-matrix.md`). The
-//! sibling is used anyway, because that injection is explicitly best-effort:
-//! it force-suspends, injects, and gives up on a timeout. On the run where it
-//! does time out, a vector 14 aimed at the target would overwrite the very
-//! bytes the caller's real-filesystem assertions read, turning a scheduling
-//! hiccup into a false containment failure. Aimed at a sibling it shows
-//! exactly what it always showed and costs the caller nothing.
+//! sibling is used anyway, so that this vector can never overwrite the very
+//! bytes the caller's real-filesystem assertions read, whatever the child does.
+//! (Child injection fails closed: a child that cannot be injected is killed and
+//! never runs unhooked.) Aimed at a sibling it shows exactly what it always
+//! showed and costs the caller nothing.
 //!
 //! `<vector-id>` is `1`..`14` matching the design doc's table, with three
 //! expansions:
@@ -133,15 +132,15 @@
 //! the fourteen-vector matrix above.** Built to prove/document a gap the
 //! final whole-branch review of Gate 3 found in `docs/escape-matrix.md`'s own
 //! claim of metadata containment: `qattr_hook`/`qfull_hook`/`qibn_hook`
-//! (`vfs-shim/src/hook.rs`) never call `RootMap::decide` at all. They consult
-//! `fuse_path_attr`, which asks `fuse_client::vpath_under_root` — which was
+//! (`vfs-shim/src/hook/file_attr.rs`) never call `RootMap::decide` at all. They consult
+//! `fuse_path_attr`, which asks `FuseClient::vpath_under_root` — which was
 //! the client's own string-prefix predicate, not the canonicaliser this whole
 //! matrix is about — before falling through to the real filesystem. `4m`
 //! reuses vector 4's own spelling (a volume-GUID path) but calls
 //! `GetFileAttributesW` instead of `CreateFileW`, so it exercises that hook
 //! family directly rather than the open path vectors 1-14 already cover.
 //!
-//! **That gap closed in stage 2b task 5**: `fuse_client::vpath_under_root` is
+//! **That gap closed in stage 2b task 5**: `FuseClient::vpath_under_root` is
 //! now a `RootMap` — the same canonicaliser — so `4m` is expected to report
 //! `not-found`, not `found`, under a session whose providers do not serve the
 //! target. The vector is kept (and still opt-in) as the standing evidence
@@ -1340,7 +1339,8 @@ fn vector13_preexisting_handle(abs: &str) -> Line {
 // the shim. It does not — the shim detours CreateProcessInternalW and injects
 // into children, so the child is hooked and the director answers it (measured
 // in gate 4 task 8; see rust/docs/escape-matrix.md). Still reported, not
-// closed: that inject is best-effort, so neither outcome here is assertable.
+// closed: the child's injection fails closed (see the shim's
+// `child_inject_fails_closed` test), but this fixture does not assert it.
 // ---------------------------------------------------------------------
 fn vector14_child_without_shim(abs: &str) -> Line {
     match access() {
@@ -1377,11 +1377,8 @@ fn vector14_child_without_shim(abs: &str) -> Line {
         // A **sibling** of the target, not the target — see the module doc's
         // `VFS_ESCAPE_ACCESS` section. Not because this vector reaches real
         // disk by construction (it does not: the shim injects into children,
-        // measured in gate 4 task 8), but because that injection is
-        // best-effort. On the run where it times out, a vector 14 aimed at
-        // the target would overwrite the very bytes the caller's containment
-        // assertions read, turning a scheduling hiccup into a false
-        // containment failure.
+        // measured in gate 4 task 8), but so that it can never overwrite
+        // the very bytes the caller's containment assertions read.
         Access::Write => {
             let note = "reported, not closed in this gate: this vector spawns a child process, \
                         on the assumption that it runs without the shim. MEASURED OTHERWISE in \

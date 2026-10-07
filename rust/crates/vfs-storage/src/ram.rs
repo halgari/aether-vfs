@@ -1,6 +1,6 @@
 //! The RAM tier: decompressed blocks, sharded, evicted by CLOCK.
 //!
-//! Ported from `vfs-cache`'s `BlockCache` (its RAM half; the `.blk` disk tier
+//! Ported from the old `vfs-cache` crate's `BlockCache` (since removed) (its RAM half; the `.blk` disk tier
 //! is gone, since the block store is the disk tier now). Keys are
 //! `(store file id, block index)`; see [`crate::ids`] for the ids.
 //!
@@ -310,7 +310,7 @@ impl RamTier {
     /// what this guarantees is that a read strictly *after* a completed write
     /// and its invalidation does not see the old bytes. Closing the window
     /// completely needs a per-file epoch checked by `put`, which is the
-    /// caller's to add if it needs it (ported from `vfs-cache`'s
+    /// caller's to add if it needs it (ported from the old `vfs-cache`'s
     /// `invalidate_file`, where the refill came from the `.blk` disk tier).
     pub fn invalidate_file(&self, file_id: &[u8; 17]) {
         for s in self.shards.iter() {

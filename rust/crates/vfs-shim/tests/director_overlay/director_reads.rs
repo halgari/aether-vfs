@@ -3,7 +3,7 @@
 //!
 //! These were the copy-up tests (`cow_seed_reads_through_director.rs`): the shim-local overlay
 //! materialised a file's existing content through the director before a preserving write, and
-//! each test drove that loop through `Engine::decide_open` directly. Task C8 removed the overlay,
+//! each test drove that loop through the removed shim-local `Engine::decide_open` directly. Task C8 removed the overlay,
 //! and with it the shim's own copy loop: a preserving write is now the director's (`OPEN_WRITE`
 //! without truncation, copy-up inside the provider graph). What the tests were really about —
 //! the client's fragmented read over awkward answers, and where the bytes come from — is the

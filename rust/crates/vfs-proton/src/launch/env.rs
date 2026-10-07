@@ -17,7 +17,7 @@ pub const DEFAULT_WINEDEBUG: &str = "-all";
 /// The environment for a launch: Wine's own three, plus exactly the `VFS_*`
 /// names the shim's `try_init_from_env` consults in file-backed mode.
 ///
-/// Mined from `vfs-shim/src/fuse_client.rs` rather than from memory:
+/// Mined from `vfs-shim/src/director.rs` rather than from memory:
 /// `VFS_RING_PATH` (which *wins* over `VFS_RING_SECTION`), `VFS_RING_BYTES`,
 /// `VFS_RING_PAYLOAD_CAP`, `VFS_ARENA_LEN` and `VFS_VIRTUAL_DIR` — the last
 /// being the only one with no default, because "which tree is virtualised"

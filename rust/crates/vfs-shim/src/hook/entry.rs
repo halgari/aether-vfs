@@ -476,7 +476,8 @@ mod tests {
     ///
     /// ## Its first version had a hole, and the hole was real
     ///
-    /// The check used to be `include_str!("hook.rs")` and an assertion that the
+    /// The check used to be an `include_str!` of the one `hook.rs` source file (before it
+    /// became the `hook/` modules) and an assertion that the
     /// only definition found was the macro's `$wrapper`. That is a *hand-written
     /// file list of one*, and it missed `lazy_section.rs`'s `veh_handler` — an
     /// uncontained `extern "system"` entry point which additionally carried a raw

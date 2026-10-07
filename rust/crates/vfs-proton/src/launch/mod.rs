@@ -12,7 +12,7 @@
 //!    payload as its config. There is no error to observe.
 //! 2. **The environment is the whole handshake.** The shim decides whether it
 //!    is configured at all from [`vfs_env`] names it reads inside the Wine
-//!    process (see `vfs-shim/src/fuse_client.rs::try_init_from_env`), and two
+//!    process (see `vfs-shim/src/director.rs::try_init_from_env`), and two
 //!    of those values are silently wrong-by-default rather than absent.
 //!
 //! So [`command_line`] and [`launch_env`] are separate from [`run`], and the

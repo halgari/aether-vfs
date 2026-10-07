@@ -103,7 +103,7 @@ impl Notifier for EventNotifier {
     }
     /// Spin while the ring is hot, sleep once it goes quiet.
     ///
-    /// The client half is `SpinNotifier` (see `vfs-shim`'s `fuse_client`), whose
+    /// The client half is `SpinNotifier` (see `vfs-shim`'s `director` module), whose
     /// `notify_server` is a **no-op** — nothing ever signals `server_ev`. So this
     /// wait only ever ended on its 1 ms timeout, and a 1 ms timeout does not
     /// wake in 1 ms: Windows' default timer resolution is 15.6 ms. The director
