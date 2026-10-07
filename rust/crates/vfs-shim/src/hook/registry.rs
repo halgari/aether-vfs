@@ -1,4 +1,5 @@
 //! The registry hooks.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
     ShimIoGuard, TRAMP_CLOSE, TRAMP_COMPRESS_KEY, TRAMP_CREATE_KEY, TRAMP_CREATE_KEY_TX,
@@ -47,22 +48,27 @@ pub(super) unsafe fn open_key_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
-        return tramp(key, access, oa);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, access, oa) };
     }
     // Held for the whole call: a registry or file call this thread makes while the hook works
     // (the shim's own) goes straight to ntdll.
     let Some(_io) = ShimIoGuard::enter() else {
-        return tramp(key, access, oa);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, access, oa) };
     };
-    crate::regkeys::open_or_create(
-        &reg_real(),
-        key,
-        access,
-        oa,
-        crate::regkeys::Call::Open,
-        &mut |oa| tramp(key, access, oa),
-    )
-    .status
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe {
+        crate::regkeys::open_or_create(
+            &reg_real(),
+            key,
+            access,
+            oa,
+            crate::regkeys::Call::Open,
+            &mut |oa| tramp(key, access, oa),
+        )
+        .status
+    }
 }
 
 /// `NtOpenKeyEx` hook. See `regkeys::open_or_create`.
@@ -77,20 +83,25 @@ pub(super) unsafe fn open_key_ex_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
-        return tramp(key, access, oa, options);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, access, oa, options) };
     }
     let Some(_io) = ShimIoGuard::enter() else {
-        return tramp(key, access, oa, options);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, access, oa, options) };
     };
-    crate::regkeys::open_or_create(
-        &reg_real(),
-        key,
-        access,
-        oa,
-        crate::regkeys::Call::Open,
-        &mut |oa| tramp(key, access, oa, options),
-    )
-    .status
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe {
+        crate::regkeys::open_or_create(
+            &reg_real(),
+            key,
+            access,
+            oa,
+            crate::regkeys::Call::Open,
+            &mut |oa| tramp(key, access, oa, options),
+        )
+        .status
+    }
 }
 
 /// `NtCreateKey` hook. With the overlay on, the real `NtCreateKey` is never called: a key that
@@ -111,7 +122,8 @@ pub(super) unsafe fn create_key_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
-        return tramp(key, access, oa, title_index, class, options, disposition);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, access, oa, title_index, class, options, disposition) };
     }
     // With the overlay on the real create is never made, not even for the shim's own work: a
     // create that cannot be examined here is refused.
@@ -126,16 +138,22 @@ pub(super) unsafe fn create_key_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     let open_options = crate::regkeys::open_options_of_create(options);
-    let out = crate::regkeys::open_or_create(
-        &reg_real(),
-        key,
-        access,
-        oa,
-        crate::regkeys::Call::Create { options },
-        &mut |oa| open_ex(key, access, oa, open_options),
-    );
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let out = unsafe {
+        crate::regkeys::open_or_create(
+            &reg_real(),
+            key,
+            access,
+            oa,
+            crate::regkeys::Call::Create { options },
+            &mut |oa| open_ex(key, access, oa, open_options),
+        )
+    };
     if out.status >= 0 && !disposition.is_null() {
-        *disposition = out.disposition;
+        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+        unsafe {
+            *disposition = out.disposition;
+        }
     }
     out.status
 }
@@ -156,28 +174,23 @@ pub(super) unsafe fn dup_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
-        return tramp(
-            src_process,
-            src,
-            dst_process,
-            dst,
-            access,
-            attributes,
-            options,
-        );
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe {
+            tramp(
+                src_process,
+                src,
+                dst_process,
+                dst,
+                access,
+                attributes,
+                options,
+            )
+        };
     }
-    match crate::regkeys::duplicate(
-        &reg_real(),
-        src_process,
-        src,
-        dst_process,
-        dst,
-        access,
-        attributes,
-        options,
-    ) {
-        Some(st) => st,
-        None => tramp(
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe {
+        crate::regkeys::duplicate(
+            &reg_real(),
             src_process,
             src,
             dst_process,
@@ -185,7 +198,21 @@ pub(super) unsafe fn dup_hook_body(
             access,
             attributes,
             options,
-        ),
+        )
+    } {
+        Some(st) => st,
+        // SAFETY: the original NT function, called with valid NT arguments.
+        None => unsafe {
+            tramp(
+                src_process,
+                src,
+                dst_process,
+                dst,
+                access,
+                attributes,
+                options,
+            )
+        },
     }
 }
 
@@ -202,12 +229,15 @@ pub(super) unsafe fn query_key_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
-        return tramp(key, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, class, info, length, ret_len) };
     }
     let Some(_io) = ShimIoGuard::enter() else {
-        return tramp(key, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, class, info, length, ret_len) };
     };
-    crate::regquery::query_key(&reg_real(), key as isize, class, info, length, ret_len)
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe { crate::regquery::query_key(&reg_real(), key as isize, class, info, length, ret_len) }
 }
 
 /// `NtEnumerateKey` hook. See `regquery::enumerate_key`.
@@ -224,20 +254,25 @@ pub(super) unsafe fn enum_key_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
-        return tramp(key, index, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, index, class, info, length, ret_len) };
     }
     let Some(_io) = ShimIoGuard::enter() else {
-        return tramp(key, index, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, index, class, info, length, ret_len) };
     };
-    crate::regquery::enumerate_key(
-        &reg_real(),
-        key as isize,
-        index,
-        class,
-        info,
-        length,
-        ret_len,
-    )
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe {
+        crate::regquery::enumerate_key(
+            &reg_real(),
+            key as isize,
+            index,
+            class,
+            info,
+            length,
+            ret_len,
+        )
+    }
 }
 
 /// `NtQueryValueKey` hook. See `regquery::query_value_key`.
@@ -254,20 +289,25 @@ pub(super) unsafe fn query_value_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
-        return tramp(key, name, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, name, class, info, length, ret_len) };
     }
     let Some(_io) = ShimIoGuard::enter() else {
-        return tramp(key, name, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, name, class, info, length, ret_len) };
     };
-    crate::regquery::query_value_key(
-        &reg_real(),
-        key as isize,
-        name,
-        class,
-        info,
-        length,
-        ret_len,
-    )
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe {
+        crate::regquery::query_value_key(
+            &reg_real(),
+            key as isize,
+            name,
+            class,
+            info,
+            length,
+            ret_len,
+        )
+    }
 }
 
 /// `NtEnumerateValueKey` hook. See `regquery::enumerate_value_key`.
@@ -284,20 +324,25 @@ pub(super) unsafe fn enum_value_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
-        return tramp(key, index, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, index, class, info, length, ret_len) };
     }
     let Some(_io) = ShimIoGuard::enter() else {
-        return tramp(key, index, class, info, length, ret_len);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, index, class, info, length, ret_len) };
     };
-    crate::regquery::enumerate_value_key(
-        &reg_real(),
-        key as isize,
-        index,
-        class,
-        info,
-        length,
-        ret_len,
-    )
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe {
+        crate::regquery::enumerate_value_key(
+            &reg_real(),
+            key as isize,
+            index,
+            class,
+            info,
+            length,
+            ret_len,
+        )
+    }
 }
 
 /// `NtQueryMultipleValueKey` hook. See `regquery::query_multiple_value_key`.
@@ -314,20 +359,25 @@ pub(super) unsafe fn query_multiple_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
-        return tramp(key, entries, count, buffer, buffer_len, required);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, entries, count, buffer, buffer_len, required) };
     }
     let Some(_io) = ShimIoGuard::enter() else {
-        return tramp(key, entries, count, buffer, buffer_len, required);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, entries, count, buffer, buffer_len, required) };
     };
-    crate::regquery::query_multiple_value_key(
-        &reg_real(),
-        key as isize,
-        entries,
-        count,
-        buffer,
-        buffer_len,
-        required,
-    )
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe {
+        crate::regquery::query_multiple_value_key(
+            &reg_real(),
+            key as isize,
+            entries,
+            count,
+            buffer,
+            buffer_len,
+            required,
+        )
+    }
 }
 
 /// Whether a registry *write* hook may go on with the overlay on: not when this thread is inside
@@ -356,15 +406,19 @@ pub(super) unsafe fn set_value_key_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
-        return tramp(key, name, title_index, ty, data, size);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, name, title_index, ty, data, size) };
     }
     let Some(_io) = reg_write_guard() else {
         return STATUS_UNSUCCESSFUL;
     };
     let _ws = crate::regclient::WriteScope::enter();
-    match crate::regwrite::set_value_key(&reg_real(), key as isize, name, ty, data, size) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe { crate::regwrite::set_value_key(&reg_real(), key as isize, name, ty, data, size) }
+    {
         crate::regwrite::Write::Done(st) => st,
-        crate::regwrite::Write::Pass => tramp(key, name, title_index, ty, data, size),
+        // SAFETY: the original NT function, called with valid NT arguments.
+        crate::regwrite::Write::Pass => unsafe { tramp(key, name, title_index, ty, data, size) },
     }
 }
 
@@ -378,15 +432,18 @@ pub(super) unsafe fn delete_value_key_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
-        return tramp(key, name);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, name) };
     }
     let Some(_io) = reg_write_guard() else {
         return STATUS_UNSUCCESSFUL;
     };
     let _ws = crate::regclient::WriteScope::enter();
-    match crate::regwrite::delete_value_key(&reg_real(), key as isize, name) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe { crate::regwrite::delete_value_key(&reg_real(), key as isize, name) } {
         crate::regwrite::Write::Done(st) => st,
-        crate::regwrite::Write::Pass => tramp(key, name),
+        // SAFETY: the original NT function, called with valid NT arguments.
+        crate::regwrite::Write::Pass => unsafe { tramp(key, name) },
     }
 }
 
@@ -397,15 +454,18 @@ pub(super) unsafe fn delete_key_hook_body(key: HANDLE) -> NTSTATUS {
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
-        return tramp(key);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key) };
     }
     let Some(_io) = reg_write_guard() else {
         return STATUS_UNSUCCESSFUL;
     };
     let _ws = crate::regclient::WriteScope::enter();
-    match crate::regwrite::delete_key(&reg_real(), key as isize) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe { crate::regwrite::delete_key(&reg_real(), key as isize) } {
         crate::regwrite::Write::Done(st) => st,
-        crate::regwrite::Write::Pass => tramp(key),
+        // SAFETY: the original NT function, called with valid NT arguments.
+        crate::regwrite::Write::Pass => unsafe { tramp(key) },
     }
 }
 
@@ -416,15 +476,18 @@ pub(super) unsafe fn rename_key_hook_body(key: HANDLE, new_name: *const UnicodeS
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
-        return tramp(key, new_name);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, new_name) };
     }
     let Some(_io) = reg_write_guard() else {
         return STATUS_UNSUCCESSFUL;
     };
     let _ws = crate::regclient::WriteScope::enter();
-    match crate::regwrite::rename_key(&reg_real(), key as isize, new_name) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe { crate::regwrite::rename_key(&reg_real(), key as isize, new_name) } {
         crate::regwrite::Write::Done(st) => st,
-        crate::regwrite::Write::Pass => tramp(key, new_name),
+        // SAFETY: the original NT function, called with valid NT arguments.
+        crate::regwrite::Write::Pass => unsafe { tramp(key, new_name) },
     }
 }
 
@@ -440,15 +503,20 @@ pub(super) unsafe fn set_info_key_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
-        return tramp(key, class, info, length);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key, class, info, length) };
     }
     let Some(_io) = reg_write_guard() else {
         return STATUS_UNSUCCESSFUL;
     };
     let _ws = crate::regclient::WriteScope::enter();
-    match crate::regwrite::set_information_key(&reg_real(), key as isize, class, info, length) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe {
+        crate::regwrite::set_information_key(&reg_real(), key as isize, class, info, length)
+    } {
         crate::regwrite::Write::Done(st) => st,
-        crate::regwrite::Write::Pass => tramp(key, class, info, length),
+        // SAFETY: the original NT function, called with valid NT arguments.
+        crate::regwrite::Write::Pass => unsafe { tramp(key, class, info, length) },
     }
 }
 
@@ -460,15 +528,19 @@ pub(super) unsafe fn flush_key_hook_body(key: HANDLE) -> NTSTATUS {
         return STATUS_UNSUCCESSFUL;
     };
     if reg_bypass() {
-        return tramp(key);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key) };
     }
     let Some(_io) = ShimIoGuard::enter() else {
-        return tramp(key);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(key) };
     };
     let _ws = crate::regclient::WriteScope::enter();
-    match crate::regwrite::flush_key(&reg_real(), key as isize) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe { crate::regwrite::flush_key(&reg_real(), key as isize) } {
         crate::regwrite::Write::Done(st) => st,
-        crate::regwrite::Write::Pass => tramp(key),
+        // SAFETY: the original NT function, called with valid NT arguments.
+        crate::regwrite::Write::Pass => unsafe { tramp(key) },
     }
 }
 
@@ -492,18 +564,21 @@ pub(super) unsafe fn notify_key_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     let pass = || {
-        tramp(
-            key,
-            event,
-            apc,
-            apc_ctx,
-            iosb,
-            filter,
-            subtree,
-            buffer,
-            buffer_len,
-            asynchronous,
-        )
+        // SAFETY: the original NT function, called with valid NT arguments.
+        unsafe {
+            tramp(
+                key,
+                event,
+                apc,
+                apc_ctx,
+                iosb,
+                filter,
+                subtree,
+                buffer,
+                buffer_len,
+                asynchronous,
+            )
+        }
     };
     if reg_bypass() {
         return pass();
@@ -520,7 +595,8 @@ pub(super) unsafe fn notify_key_hook_body(
         asynchronous: asynchronous != 0,
         count: 0,
     };
-    match crate::regnotify::notify(&reg_real(), key as isize, &args) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe { crate::regnotify::notify(&reg_real(), key as isize, &args) } {
         crate::regnotify::Notify::Done(st) => st,
         crate::regnotify::Notify::Pass => pass(),
     }
@@ -548,20 +624,23 @@ pub(super) unsafe fn notify_multiple_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     let pass = || {
-        tramp(
-            key,
-            count,
-            subordinates,
-            event,
-            apc,
-            apc_ctx,
-            iosb,
-            filter,
-            subtree,
-            buffer,
-            buffer_len,
-            asynchronous,
-        )
+        // SAFETY: the original NT function, called with valid NT arguments.
+        unsafe {
+            tramp(
+                key,
+                count,
+                subordinates,
+                event,
+                apc,
+                apc_ctx,
+                iosb,
+                filter,
+                subtree,
+                buffer,
+                buffer_len,
+                asynchronous,
+            )
+        }
     };
     if reg_bypass() {
         return pass();
@@ -578,7 +657,8 @@ pub(super) unsafe fn notify_multiple_hook_body(
         asynchronous: asynchronous != 0,
         count,
     };
-    match crate::regnotify::notify(&reg_real(), key as isize, &args) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe { crate::regnotify::notify(&reg_real(), key as isize, &args) } {
         crate::regnotify::Notify::Done(st) => st,
         crate::regnotify::Notify::Pass => pass(),
     }
@@ -599,20 +679,25 @@ pub(super) unsafe fn query_security_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regkeys::is_synthetic(handle as isize) || reg_bypass() {
-        return tramp(handle, info, sd, length, needed);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(handle, info, sd, length, needed) };
     }
     let Some(_io) = ShimIoGuard::enter() else {
-        return tramp(handle, info, sd, length, needed);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(handle, info, sd, length, needed) };
     };
-    crate::regkeys::query_security(
-        &reg_real(),
-        tramp,
-        handle as isize,
-        info,
-        sd,
-        length,
-        needed,
-    )
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe {
+        crate::regkeys::query_security(
+            &reg_real(),
+            tramp,
+            handle as isize,
+            info,
+            sd,
+            length,
+            needed,
+        )
+    }
 }
 
 /// `NtSetSecurityObject` hook: on a key the overlay serves (synthetic, or a real key on a
@@ -629,16 +714,19 @@ pub(super) unsafe fn set_security_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regclient::enabled() {
-        return tramp(handle, info, sd);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(handle, info, sd) };
     }
     // With the overlay on, a security change this hook cannot examine (the shim's own call, or
     // no guard) is refused, as the write hooks refuse theirs: it may be on a virtualised key.
     let Some(_io) = reg_write_guard() else {
         return STATUS_UNSUCCESSFUL;
     };
-    match crate::regkeys::set_security(&reg_real(), handle as isize, info, sd) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe { crate::regkeys::set_security(&reg_real(), handle as isize, info, sd) } {
         Some(st) => st,
-        None => tramp(handle, info, sd),
+        // SAFETY: the original NT function, called with valid NT arguments.
+        None => unsafe { tramp(handle, info, sd) },
     }
 }
 
@@ -655,11 +743,14 @@ pub(super) unsafe fn set_info_object_hook_body(
         return STATUS_UNSUCCESSFUL;
     };
     if !crate::regkeys::is_synthetic(handle as isize) || reg_bypass() {
-        return tramp(handle, class, info, length);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(handle, class, info, length) };
     }
-    match crate::regkeys::set_handle_flags(handle as isize, class, info, length) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    match unsafe { crate::regkeys::set_handle_flags(handle as isize, class, info, length) } {
         Some(st) => st,
-        None => tramp(handle, class, info, length),
+        // SAFETY: the original NT function, called with valid NT arguments.
+        None => unsafe { tramp(handle, class, info, length) },
     }
 }
 
@@ -670,6 +761,10 @@ pub(super) unsafe fn set_info_object_hook_body(
 /// create/open). When the hook is bypassed with the overlay on (the shim's own call, or no
 /// guard) such a call is refused with `STATUS_UNSUCCESSFUL`, as the write hooks refuse theirs
 /// (`reg_write_guard`); the harmless ones (Save, Compress, Lock) still get the real call.
+///
+/// `refuse` is evaluated inside the generated `unsafe fn` but is not itself in an unsafe block:
+/// an invocation whose `refuse` calls an `unsafe fn` (`served_key`, `served_target`) wraps that
+/// call, with the same NT-pointer contract as the generated fn (hook/mod.rs).
 macro_rules! out_of_scope_body {
     ($(#[$attr:meta])* fn $body:ident($($arg:ident: $ty:ty),* $(,)?), $hook:ident, $tramp:ident,
      modifies = $modifies:expr, refuse = $refuse:expr;) => {
@@ -680,18 +775,21 @@ macro_rules! out_of_scope_body {
                 return STATUS_UNSUCCESSFUL;
             };
             if !crate::regclient::enabled() {
-                return tramp($($arg),*);
+                // SAFETY: the original NT function, called with valid NT arguments.
+                return unsafe { tramp($($arg),*) };
             }
             let Some(_io) = reg_write_guard() else {
                 if $modifies {
                     return STATUS_UNSUCCESSFUL;
                 }
-                return tramp($($arg),*);
+                // SAFETY: the original NT function, called with valid NT arguments.
+                return unsafe { tramp($($arg),*) };
             };
             if let Some(st) = $refuse {
                 return st;
             }
-            tramp($($arg),*)
+            // SAFETY: the original NT function, called with valid NT arguments.
+            unsafe { tramp($($arg),*) }
         }
     };
 }
@@ -719,13 +817,15 @@ fn refusal(serves: crate::regkeys::Serves) -> Option<NTSTATUS> {
 /// A key the overlay serves (synthetic, or real on a virtualised path): a call that would change
 /// the real key through it is refused.
 unsafe fn served_key(key: HANDLE) -> Option<NTSTATUS> {
-    refusal(crate::regkeys::serves_handle(&reg_real(), key as isize))
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    refusal(unsafe { crate::regkeys::serves_handle(&reg_real(), key as isize) })
 }
 
 /// A key name the overlay serves: a transacted open of it, or a hive loaded over or unloaded
 /// from it, is refused.
 unsafe fn served_target(oa: *const ObjectAttributes) -> Option<NTSTATUS> {
-    refusal(crate::regkeys::serves_target(&reg_real(), oa))
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    refusal(unsafe { crate::regkeys::serves_target(&reg_real(), oa) })
 }
 
 out_of_scope_body! {
@@ -739,7 +839,7 @@ out_of_scope_body! {
         options: u32,
         transaction: HANDLE,
         disposition: *mut u32,
-    ), CreateKeyTransacted, TRAMP_CREATE_KEY_TX, modifies = true, refuse = served_target(oa);
+    ), CreateKeyTransacted, TRAMP_CREATE_KEY_TX, modifies = true, refuse = unsafe { served_target(oa) };
 }
 out_of_scope_body! {
     fn open_key_tx_hook_body(
@@ -747,7 +847,7 @@ out_of_scope_body! {
         access: u32,
         oa: *const ObjectAttributes,
         transaction: HANDLE,
-    ), OpenKeyTransacted, TRAMP_OPEN_KEY_TX, modifies = true, refuse = served_target(oa);
+    ), OpenKeyTransacted, TRAMP_OPEN_KEY_TX, modifies = true, refuse = unsafe { served_target(oa) };
 }
 out_of_scope_body! {
     fn open_key_tx_ex_hook_body(
@@ -756,18 +856,18 @@ out_of_scope_body! {
         oa: *const ObjectAttributes,
         options: u32,
         transaction: HANDLE,
-    ), OpenKeyTransactedEx, TRAMP_OPEN_KEY_TX_EX, modifies = true, refuse = served_target(oa);
+    ), OpenKeyTransactedEx, TRAMP_OPEN_KEY_TX_EX, modifies = true, refuse = unsafe { served_target(oa) };
 }
 out_of_scope_body! {
     fn load_key_hook_body(target: *const ObjectAttributes, source: *const ObjectAttributes),
-        LoadKey, TRAMP_LOAD_KEY, modifies = true, refuse = served_target(target);
+        LoadKey, TRAMP_LOAD_KEY, modifies = true, refuse = unsafe { served_target(target) };
 }
 out_of_scope_body! {
     fn load_key2_hook_body(
         target: *const ObjectAttributes,
         source: *const ObjectAttributes,
         flags: u32,
-    ), LoadKey2, TRAMP_LOAD_KEY2, modifies = true, refuse = served_target(target);
+    ), LoadKey2, TRAMP_LOAD_KEY2, modifies = true, refuse = unsafe { served_target(target) };
 }
 out_of_scope_body! {
     #[allow(clippy::too_many_arguments)]
@@ -780,7 +880,7 @@ out_of_scope_body! {
         a6: usize,
         a7: usize,
         a8: usize,
-    ), LoadKeyEx, TRAMP_LOAD_KEY_EX, modifies = true, refuse = served_target(target);
+    ), LoadKeyEx, TRAMP_LOAD_KEY_EX, modifies = true, refuse = unsafe { served_target(target) };
 }
 out_of_scope_body! {
     #[allow(clippy::too_many_arguments)]
@@ -793,19 +893,19 @@ out_of_scope_body! {
         a6: usize,
         a7: usize,
         a8: usize,
-    ), LoadKey3, TRAMP_LOAD_KEY3, modifies = true, refuse = served_target(target);
+    ), LoadKey3, TRAMP_LOAD_KEY3, modifies = true, refuse = unsafe { served_target(target) };
 }
 out_of_scope_body! {
     fn unload_key_hook_body(target: *const ObjectAttributes),
-        UnloadKey, TRAMP_UNLOAD_KEY, modifies = true, refuse = served_target(target);
+        UnloadKey, TRAMP_UNLOAD_KEY, modifies = true, refuse = unsafe { served_target(target) };
 }
 out_of_scope_body! {
     fn unload_key2_hook_body(target: *const ObjectAttributes, a2: usize),
-        UnloadKey2, TRAMP_UNLOAD_KEY2, modifies = true, refuse = served_target(target);
+        UnloadKey2, TRAMP_UNLOAD_KEY2, modifies = true, refuse = unsafe { served_target(target) };
 }
 out_of_scope_body! {
     fn unload_key_ex_hook_body(target: *const ObjectAttributes, a2: usize),
-        UnloadKeyEx, TRAMP_UNLOAD_KEY_EX, modifies = true, refuse = served_target(target);
+        UnloadKeyEx, TRAMP_UNLOAD_KEY_EX, modifies = true, refuse = unsafe { served_target(target) };
 }
 // Saving, compressing and locking a real key read it or touch only the hive file: passed
 // through on real keys, refused on synthetic ones only.
@@ -836,9 +936,9 @@ out_of_scope_body! {
         new_file: *const ObjectAttributes,
         key: HANDLE,
         old_file: *const ObjectAttributes,
-    ), ReplaceKey, TRAMP_REPLACE_KEY, modifies = true, refuse = served_key(key);
+    ), ReplaceKey, TRAMP_REPLACE_KEY, modifies = true, refuse = unsafe { served_key(key) };
 }
 out_of_scope_body! {
     fn restore_key_hook_body(key: HANDLE, file: HANDLE, flags: u32),
-        RestoreKey, TRAMP_RESTORE_KEY, modifies = true, refuse = served_key(key);
+        RestoreKey, TRAMP_RESTORE_KEY, modifies = true, refuse = unsafe { served_key(key) };
 }
