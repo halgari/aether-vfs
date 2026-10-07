@@ -7,16 +7,15 @@
 //! `inis = vfs.memory({"Skyrim.ini": ini_bytes}); ...; inis.read("Skyrim.ini")`
 //! (`docs/superpowers/specs/2026-08-13-pluggable-providers-design.md`).
 //!
-//! **Why this is not `InlineProvider`.** `InlineProvider` (`inline.rs`) looks
-//! like the same thing, but it declares `Access::Read` and `immutable: true`
-//! by contract, and a wide swath of this workspace's tests key off exactly
-//! that: `stack_layers`'s "weakest access of its children" case, its
+//! **`InlineProvider` is built on this.** `InlineProvider` (`inline.rs`) wraps
+//! a `MemoryProvider` and declares `Access::Read` and `immutable: true`,
+//! refusing every write. It stays a type of its own, not a mode of this one,
+//! because a wide swath of this workspace's tests key off exactly that
+//! contract: `stack_layers`'s "weakest access of its children" case, its
 //! immutability under layering, `OPEN_WRITE` being refused outright, and
 //! several `vfs-director`/`vfs-embed` tests that use it specifically *because*
-//! it cannot be written to (they assert a write with no writable provider is
-//! refused). Making `InlineProvider` writable would change behavior under
-//! every one of those callers rather than add a capability, so this is a
-//! sibling instead, not a promotion.
+//! it cannot be written to. This type is the writable sibling, also used as
+//! the overlay tests' empty upper.
 //!
 //! **Why this lives in `vfs-compose` and not `vfs-provider` or `vfs-source`.**
 //! `vfs-provider` already has an in-memory `ReadWrite` type
@@ -137,14 +136,12 @@ fn stat_of(files: &HashMap<String, Vec<u8>>, dirs: &HashSet<String>, path: &str)
 /// correctness: there isn't a "right" answer once the tree itself holds two
 /// spellings of the same name, only a stable one.
 ///
-/// Deliberately does not reuse `crate::casefold::fold_strip_prefix` for the
-/// per-component walk: that helper (rightly, for `InlineProvider`, which has
-/// no byte-exact-precedence requirement) matches candidates by folding the
-/// *whole* ancestor chain, so it cannot tell a real child of `Data` from a
-/// real child of the fold-equal-but-distinct `DATA` — precisely the
-/// conflation this function exists to prevent. The scan below instead
-/// filters candidates by the byte-exact prefix of the ancestor already
-/// locked in, and folds only the one remaining component being resolved.
+/// The scan below filters candidates by the byte-exact prefix of the ancestor
+/// already locked in, and folds only the one remaining component being
+/// resolved. Folding the *whole* ancestor chain instead (as a sibling
+/// `InlineProvider` once did) cannot tell a real child of `Data` from a real
+/// child of the fold-equal-but-distinct `DATA` — precisely the conflation
+/// this function exists to prevent.
 ///
 /// Takes borrows rather than locking for itself, so a caller that goes on to
 /// mutate does so under the same guard it resolved under. An earlier version
@@ -331,8 +328,7 @@ impl Provider for MemoryProvider {
         }
 
         // Children are matched by the byte-exact prefix of `path` — not by
-        // folding `path` and comparing folded components (the way
-        // `crate::casefold::fold_strip_prefix` does for `InlineProvider`).
+        // folding `path` and comparing folded components.
         // `path` just came back from `canonical_in`, which already picked
         // the real, byte-exact spelling this directory has (its own, if it
         // exists under that spelling, or the resolved ancestor's, if it's
