@@ -113,9 +113,7 @@ impl ZipProvider {
 
 fn ensure_parents(nodes: &mut HashMap<String, Node>, vpath: &str) {
     // Only intermediate directories (exclude the leaf — caller inserts the leaf).
-    let Some((parent, _)) = vpath.rsplit_once('/') else {
-        return;
-    };
+    let (parent, _) = vfs_core::split_parent(vpath);
     let mut acc = String::new();
     for part in parent.split('/') {
         if part.is_empty() {
@@ -171,7 +169,7 @@ impl Provider for ZipProvider {
             return Ok(None);
         }
         Ok(self.by_fold.get(&fold(rel)).map(|canon| {
-            canon.rsplit_once('/').map_or(canon.as_str(), |(_, last)| last).to_string()
+            vfs_core::split_parent(canon).1.to_string()
         }))
     }
 

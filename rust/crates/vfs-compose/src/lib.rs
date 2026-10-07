@@ -95,7 +95,7 @@ pub fn stored_name(provider: &dyn Provider, p: vfs_provider::VPath) -> Result<Op
     if rel.is_empty() {
         return Ok(None);
     }
-    let (parent, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let (parent, name) = vfs_core::split_parent(rel);
     let entries = match provider.readdir(vfs_provider::VPath::new(p.root, parent)) {
         Ok(entries) => entries,
         Err(e) if e == vfs_provider::not_found() || e == vfs_provider::not_a_dir() => {

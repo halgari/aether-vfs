@@ -30,15 +30,6 @@ impl OverlayProvider {
         }
     }
 
-    /// `(parent directory, name)` for `rel`; the parent of a top-level name
-    /// is the empty root path.
-    pub(super) fn split_parent(rel: &str) -> (&str, &str) {
-        match rel.rsplit_once('/') {
-            Some((parent, name)) => (parent, name),
-            None => ("", rel),
-        }
-    }
-
     /// Every name the upper's `dir` hides with a `.wh.` marker, folded. A
     /// directory the upper does not have (or has as a file) hides nothing.
     pub(super) fn scan_whiteouts(&self, dir: VPath) -> Result<HashSet<String>, i32> {
@@ -98,8 +89,8 @@ impl OverlayProvider {
                 let (mut raw, mut fol) = (p.rel, folded.as_str());
                 let mut check = own;
                 loop {
-                    let (raw_parent, _) = Self::split_parent(raw);
-                    let (fol_parent, fol_name) = Self::split_parent(fol);
+                    let (raw_parent, _) = vfs_core::split_parent(raw);
+                    let (fol_parent, fol_name) = vfs_core::split_parent(fol);
                     if check {
                         match dirs.and_then(|d| d.get(fol_parent)) {
                             Some(hidden) if hidden.contains(fol_name) => return Ok(true),
@@ -142,7 +133,7 @@ impl OverlayProvider {
     /// have read the directory before this change, is discarded by the
     /// generation bump.
     pub(super) fn note_whiteout(&self, p: VPath, hidden: bool) {
-        let (parent, name) = Self::split_parent(p.rel);
+        let (parent, name) = vfs_core::split_parent(p.rel);
         let Ok(mut g) = self.whiteouts.write() else {
             return;
         };
@@ -168,7 +159,7 @@ impl OverlayProvider {
     /// `getattr`/`open` (which read the index) would disagree about whether
     /// the sibling it names is hidden.
     pub(super) fn invalidate_if_marker(&self, p: VPath) {
-        let (parent, name) = Self::split_parent(p.rel);
+        let (parent, name) = vfs_core::split_parent(p.rel);
         if !name.starts_with(WHITEOUT_PREFIX) {
             return;
         }

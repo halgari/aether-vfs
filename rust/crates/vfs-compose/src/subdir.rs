@@ -17,11 +17,7 @@ pub struct SubdirProvider {
 
 impl SubdirProvider {
     pub fn new(inner: Arc<dyn Provider>, prefix: impl Into<String>) -> Self {
-        let prefix = prefix
-            .into()
-            .replace('\\', "/")
-            .trim_matches('/')
-            .to_string();
+        let prefix = vfs_core::trim_rel(&prefix.into());
         Self { inner, prefix }
     }
 
@@ -59,7 +55,7 @@ impl SubdirProvider {
     /// property being lost if stripping logic is ever added here — not
     /// because `map_path` currently strips anything.
     fn map_path(&self, path: &str) -> String {
-        let path = path.replace('\\', "/").trim_matches('/').to_string();
+        let path = vfs_core::trim_rel(path);
         if path.is_empty() {
             self.prefix.clone()
         } else {

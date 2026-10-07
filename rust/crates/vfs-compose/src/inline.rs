@@ -40,7 +40,7 @@ impl InlineProvider {
     {
         let mut files = HashMap::new();
         for (p, b) in entries {
-            let path = normalize(p.as_ref());
+            let path = vfs_core::trim_rel(p.as_ref());
             files.insert(
                 path,
                 FileData {
@@ -99,10 +99,6 @@ impl InlineProvider {
     }
 }
 
-fn normalize(path: &str) -> String {
-    path.replace('\\', "/").trim_matches('/').to_string()
-}
-
 /// True if any of `keys` has `query` as a proper fold-equal directory prefix.
 fn dir_has_fold_prefix<'a>(keys: impl Iterator<Item = &'a str>, query: &str) -> bool {
     let query = fold_components(query);
@@ -120,13 +116,13 @@ impl Provider for InlineProvider {
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
         let path = p.rel;
-        let path = normalize(path);
+        let path = vfs_core::trim_rel(path);
         self.stat(&path)
     }
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
         let path = p.rel;
-        let path = normalize(path);
+        let path = vfs_core::trim_rel(path);
         if self.stat(&path)?.map(|s| s.kind) != Some(KIND_DIR) {
             if self.canonical(&path).is_some() {
                 return Err(not_a_dir());
@@ -170,7 +166,7 @@ impl Provider for InlineProvider {
         if flags & OPEN_WRITE != 0 {
             return Err(bad_request());
         }
-        let path = normalize(path);
+        let path = vfs_core::trim_rel(path);
         let key = self.canonical(&path).ok_or_else(not_found)?;
         let f = &self.files[key];
         let size = f.bytes.len() as u64;

@@ -23,9 +23,7 @@ pub fn matches(pattern: &str, path: &str) -> bool {
 /// consumes one UTF-8 byte, not one character), unchanged by this and
 /// unrelated to case.
 fn normalize(s: &str) -> String {
-    let s = s.replace('\\', "/");
-    let s = s.trim_matches('/');
-    vfs_core::fold(s)
+    vfs_core::fold(&vfs_core::trim_rel(s))
 }
 
 fn split_segs(s: &str) -> Vec<&str> {

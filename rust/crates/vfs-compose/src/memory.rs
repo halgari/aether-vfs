@@ -46,10 +46,6 @@ use vfs_provider::{HandleTable,
     OPEN_EXCL, OPEN_TRUNC,
 };
 
-fn normalize(path: &str) -> String {
-    path.replace('\\', "/").trim_matches('/').to_string()
-}
-
 /// The `"path/"` string a child key must start with, or `""` for the provider
 /// root (whose children carry no prefix at all). The same convention `readdir`
 /// uses, kept in one place so "what lives under this directory" cannot mean two
@@ -277,7 +273,7 @@ impl MemoryProvider {
         let mut files = HashMap::new();
         let mut by_fold = HashMap::new();
         for (p, b) in entries {
-            let key = normalize(p.as_ref());
+            let key = vfs_core::trim_rel(p.as_ref());
             by_fold.insert(fold(&key), key.clone());
             files.insert(key, b.as_ref().to_vec());
         }
@@ -308,7 +304,7 @@ impl Provider for MemoryProvider {
     }
 
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
-        let path = normalize(p.rel);
+        let path = vfs_core::trim_rel(p.rel);
         let files = self.files.lock().map_err(|_| map_io_err())?;
         let dirs = self.dirs.lock().map_err(|_| map_io_err())?;
         let by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
@@ -317,7 +313,7 @@ impl Provider for MemoryProvider {
     }
 
     fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
-        let path = normalize(p.rel);
+        let path = vfs_core::trim_rel(p.rel);
         let files = self.files.lock().map_err(|_| map_io_err())?;
         let dirs = self.dirs.lock().map_err(|_| map_io_err())?;
         let by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
@@ -359,7 +355,7 @@ impl Provider for MemoryProvider {
     }
 
     fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
-        let path = normalize(p.rel);
+        let path = vfs_core::trim_rel(p.rel);
         let mut files = self.files.lock().map_err(|_| map_io_err())?;
         let dirs = self.dirs.lock().map_err(|_| map_io_err())?;
         let mut by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
@@ -443,7 +439,7 @@ impl Provider for MemoryProvider {
     }
 
     fn mkdir(&self, p: VPath) -> Result<(), i32> {
-        let path = normalize(p.rel);
+        let path = vfs_core::trim_rel(p.rel);
         let files = self.files.lock().map_err(|_| map_io_err())?;
         let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
         let mut by_fold = self.by_fold.lock().map_err(|_| map_io_err())?;
@@ -472,7 +468,7 @@ impl Provider for MemoryProvider {
     /// the process boundary as `STATUS_UNSUCCESSFUL` instead — strictly less
     /// information, for a new number every host would have to learn.
     fn remove(&self, p: VPath) -> Result<(), i32> {
-        let path = normalize(p.rel);
+        let path = vfs_core::trim_rel(p.rel);
         // files before dirs, the order every method here takes them in.
         let mut files = self.files.lock().map_err(|_| map_io_err())?;
         let mut dirs = self.dirs.lock().map_err(|_| map_io_err())?;
@@ -522,8 +518,8 @@ impl Provider for MemoryProvider {
         if from.root != to.root {
             return Err(bad_request());
         }
-        let from_p = normalize(from.rel);
-        let to_p = normalize(to.rel);
+        let from_p = vfs_core::trim_rel(from.rel);
+        let to_p = vfs_core::trim_rel(to.rel);
         if from_p == to_p {
             return Ok(());
         }
