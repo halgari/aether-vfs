@@ -152,7 +152,10 @@ struct FlakyReadBase {
 impl Provider for FlakyReadBase {
     fn capabilities(&self) -> Capabilities {
         // getattr below compares `p.rel` to "big.bin" by byte equality.
-        Capabilities { case: CaseMatch::Sensitive, ..Capabilities::read_only() }
+        Capabilities {
+            case: CaseMatch::Sensitive,
+            ..Capabilities::read_only()
+        }
     }
     fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
         if p.rel.is_empty() {
@@ -208,13 +211,19 @@ impl Provider for FlakyReadBase {
 #[test]
 fn stored_name_takes_the_bases_spelling_then_the_uppers_and_honours_whiteouts() {
     use crate::MemoryProvider;
-    let base = Arc::new(InlineProvider::from_files([("Data/Skyrim.esm", b"B".as_slice())]));
+    let base = Arc::new(InlineProvider::from_files([(
+        "Data/Skyrim.esm",
+        b"B".as_slice(),
+    )]));
     let upper = MemoryProvider::from_files([
         ("data/skyrim.esm", b"U".as_slice()),
         ("data/New.ESP", b"N".as_slice()),
     ]);
     let ov = OverlayProvider::new(base, upper).unwrap();
-    let name = |q: &str| ov.stored_name(VPath::at_default(q)).expect("answered, not unsupported");
+    let name = |q: &str| {
+        ov.stored_name(VPath::at_default(q))
+            .expect("answered, not unsupported")
+    };
 
     // A name both sides have keeps the base's spelling, for any query case.
     assert_eq!(name("data/SKYRIM.ESM").as_deref(), Some("Skyrim.esm"));
@@ -330,7 +339,11 @@ fn writing_a_base_file_copies_it_up_and_leaves_base_untouched() {
     let (h, _, _) = ov.open(f, OPEN_READ).expect("reopen");
     let mut buf = [0u8; 8];
     let n = ov.read_at(h, 0, &mut buf).expect("read");
-    assert_eq!(&buf[..n], b"UPSE", "copy-up must preserve the untouched tail");
+    assert_eq!(
+        &buf[..n],
+        b"UPSE",
+        "copy-up must preserve the untouched tail"
+    );
     ov.close(h).expect("close");
 
     // The base is never mutated.
@@ -376,7 +389,9 @@ fn concurrent_opens_copy_up_exactly_once() {
     for _ in 0..8 {
         let ov = StdArc::clone(&ov);
         hs.push(std::thread::spawn(move || {
-            let (h, _, _) = ov.open(VPath::at_default("a.txt"), OPEN_WRITE).expect("open");
+            let (h, _, _) = ov
+                .open(VPath::at_default("a.txt"), OPEN_WRITE)
+                .expect("open");
             ov.close(h).expect("close");
         }));
     }
@@ -384,7 +399,9 @@ fn concurrent_opens_copy_up_exactly_once() {
         h.join().expect("thread");
     }
     // Content must still be the base content, not a truncated or doubled copy.
-    let (h, size, _) = ov.open(VPath::at_default("a.txt"), vfs_provider::OPEN_READ).unwrap();
+    let (h, size, _) = ov
+        .open(VPath::at_default("a.txt"), vfs_provider::OPEN_READ)
+        .unwrap();
     assert_eq!(size, 4, "concurrent copy-up corrupted the file");
     ov.close(h).unwrap();
 
@@ -494,7 +511,10 @@ fn warm_reads_cost_one_upper_lookup_regardless_of_path_depth() {
         .getattr(VPath::at_default("a/b/c/d/sibling.txt"))
         .unwrap()
         .is_some());
-    assert!(ov.getattr(VPath::at_default("shallow.txt")).unwrap().is_some());
+    assert!(ov
+        .getattr(VPath::at_default("shallow.txt"))
+        .unwrap()
+        .is_some());
     // A path that does not exist anywhere must not reopen the question
     // either.
     assert!(ov
@@ -701,7 +721,10 @@ fn a_whiteout_written_during_a_directorys_first_scan_still_hides() {
 #[test]
 fn a_whiteout_written_after_its_directory_was_scanned_still_hides() {
     use vfs_provider::{Provider, VPath, OPEN_CREATE, OPEN_WRITE};
-    let base = Arc::new(InlineProvider::from_files([("dir/a.txt", b"BASE".as_slice())]));
+    let base = Arc::new(InlineProvider::from_files([(
+        "dir/a.txt",
+        b"BASE".as_slice(),
+    )]));
     let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
     let f = VPath::at_default("dir/a.txt");
 
@@ -734,11 +757,17 @@ fn a_whiteout_written_after_its_directory_was_scanned_still_hides() {
 #[test]
 fn creating_a_marker_named_file_through_the_overlay_is_seen_by_the_index() {
     use vfs_provider::{Provider, VPath, OPEN_CREATE, OPEN_WRITE};
-    let base = Arc::new(InlineProvider::from_files([("dir/x.txt", b"BASE".as_slice())]));
+    let base = Arc::new(InlineProvider::from_files([(
+        "dir/x.txt",
+        b"BASE".as_slice(),
+    )]));
     let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
 
     // Scan "dir" while it holds no markers.
-    assert!(ov.getattr(VPath::at_default("dir/x.txt")).unwrap().is_some());
+    assert!(ov
+        .getattr(VPath::at_default("dir/x.txt"))
+        .unwrap()
+        .is_some());
 
     let (h, _, _) = ov
         .open(VPath::at_default("dir/.wh.x.txt"), OPEN_WRITE | OPEN_CREATE)
@@ -747,7 +776,10 @@ fn creating_a_marker_named_file_through_the_overlay_is_seen_by_the_index() {
 
     let listed = ov.readdir(VPath::at_default("dir")).unwrap();
     let listed_x = listed.iter().any(|e| e.name == "x.txt");
-    let stat_x = ov.getattr(VPath::at_default("dir/x.txt")).unwrap().is_some();
+    let stat_x = ov
+        .getattr(VPath::at_default("dir/x.txt"))
+        .unwrap()
+        .is_some();
     assert_eq!(
         listed_x, stat_x,
         "readdir and getattr disagree about whether `x.txt` is hidden: listed={listed_x}, \
@@ -790,10 +822,7 @@ fn a_failed_copy_up_leaves_the_destination_absent_not_truncated() {
     );
     // And no orphaned `.cu.` temp file should linger either.
     assert!(
-        ov.upper
-            .readdir(VPath::at_default(""))
-            .unwrap()
-            .is_empty(),
+        ov.upper.readdir(VPath::at_default("")).unwrap().is_empty(),
         "a failed copy-up left a stray temp file behind in upper"
     );
 
@@ -804,19 +833,28 @@ fn a_failed_copy_up_leaves_the_destination_absent_not_truncated() {
         MemoryProvider::default(),
     )
     .unwrap();
-    let (h, _, _) = ov2.open(f, OPEN_WRITE | OPEN_CREATE).expect("unrelated retry works");
+    let (h, _, _) = ov2
+        .open(f, OPEN_WRITE | OPEN_CREATE)
+        .expect("unrelated retry works");
     ov2.close(h).unwrap();
 }
 
 #[test]
 fn creating_under_a_removed_ancestor_directory_is_refused_until_mkdir_recreates_it() {
     use vfs_provider::{Provider, VPath, OPEN_CREATE, OPEN_WRITE};
-    let base = Arc::new(InlineProvider::from_files([("dir/a.txt", b"BASE".as_slice())]));
+    let base = Arc::new(InlineProvider::from_files([(
+        "dir/a.txt",
+        b"BASE".as_slice(),
+    )]));
     let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
 
     // Opaquely remove the whole base directory.
-    ov.remove(VPath::at_default("dir")).expect("whiteout the base directory");
-    assert!(ov.getattr(VPath::at_default("dir/a.txt")).unwrap().is_none());
+    ov.remove(VPath::at_default("dir"))
+        .expect("whiteout the base directory");
+    assert!(ov
+        .getattr(VPath::at_default("dir/a.txt"))
+        .unwrap()
+        .is_none());
 
     // Creating a brand-new file underneath the removed directory is
     // refused outright, even with OPEN_CREATE. Clearing the ancestor's
@@ -832,10 +870,14 @@ fn creating_under_a_removed_ancestor_directory_is_refused_until_mkdir_recreates_
     assert_eq!(err, vfs_provider::not_found());
 
     // The explicit way back: mkdir clears exactly "dir"'s own whiteout.
-    ov.mkdir(VPath::at_default("dir")).expect("mkdir recreates the directory");
+    ov.mkdir(VPath::at_default("dir"))
+        .expect("mkdir recreates the directory");
     let (h, _, _) = ov
         .open(VPath::at_default("dir/new.txt"), OPEN_WRITE | OPEN_CREATE)
         .expect("create succeeds once the ancestor is explicitly recreated");
     ov.close(h).unwrap();
-    assert!(ov.getattr(VPath::at_default("dir/new.txt")).unwrap().is_some());
+    assert!(ov
+        .getattr(VPath::at_default("dir/new.txt"))
+        .unwrap()
+        .is_some());
 }

@@ -30,7 +30,10 @@ impl InFlight {
             keys = self.done.wait(keys).map_err(|_| map_io_err())?;
         }
         keys.insert(key.clone());
-        Ok(CopyGuard { in_flight: self, key })
+        Ok(CopyGuard {
+            in_flight: self,
+            key,
+        })
     }
 }
 
@@ -120,7 +123,9 @@ impl OverlayProvider {
         let (uh, _, _) = self
             .upper
             .open(dest, OPEN_WRITE | OPEN_CREATE | OPEN_TRUNC)?;
-        let copied = self.copy_loop(bh, uh, size).and_then(|_| self.upper.flush(uh));
+        let copied = self
+            .copy_loop(bh, uh, size)
+            .and_then(|_| self.upper.flush(uh));
         let closed = self.upper.close(uh);
         // Prefer the copy/flush error over the close error: it happened
         // first and is almost always the more useful one to report, but

@@ -30,9 +30,9 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use vfs_core::fold;
 use vfs_provider::{
-    bad_fh, bad_request, map_io_err, not_a_dir, not_found, not_supported, Access,
-    Capabilities, DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR,
-    OPEN_WRITE, COPY_UP_PREFIX, WHITEOUT_PREFIX,
+    bad_fh, bad_request, map_io_err, not_a_dir, not_found, not_supported, Access, Capabilities,
+    DirEntry, Handle, Provider, SetAttr, Stat, VPath, COPY_UP_PREFIX, KIND_DIR, OPEN_WRITE,
+    WHITEOUT_PREFIX,
 };
 
 use copy_up::InFlight;
@@ -144,7 +144,6 @@ impl OverlayProvider {
             .copied()
             .ok_or_else(bad_fh)
     }
-
 }
 
 impl Provider for OverlayProvider {

@@ -90,7 +90,9 @@ mod tests {
     fn folding_is_unicode_not_ascii() {
         let p = InlineProvider::from_files([("Über/A.esp", &b"x"[..])]);
         assert!(
-            p.getattr(VPath::at_default("über/a.esp")).unwrap().is_some(),
+            p.getattr(VPath::at_default("über/a.esp"))
+                .unwrap()
+                .is_some(),
             "Unicode fold-equal spelling did not resolve"
         );
     }
