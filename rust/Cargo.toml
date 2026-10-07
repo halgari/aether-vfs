@@ -83,6 +83,11 @@ publish = false
 [workspace.lints.rust]
 unsafe_code = "deny"
 
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+
 [workspace.dependencies]
 # Internal crates.
 vfs-block-store = { path = "crates/vfs-block-store" }
