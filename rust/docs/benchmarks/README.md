@@ -17,6 +17,8 @@ Numbers for the director FUSE control ring (shared-memory RPC) and related delta
 | [node-binding-surface.md](./node-binding-surface.md) | The `aethervfs` binding's performance surface, held by `pnpm bench` as a tiered gate. Includes a live `main → worker` crossing figure (22.3 µs against a recorded 47 µs) |
 | [node-typescript-js-layer.md](./node-typescript-js-layer.md) | Did the TypeScript migration cost anything? No — 3.9 ns on a forwarded property read, and 1.00–1.02x on everything that crosses into Rust |
 
+The twelve raw timestamped `fuse-rpc-2026-07-15T*.md` dumps behind `fuse-rpc-latest.md` are kept in [archive/](./archive/).
+
 Architecture context: [../architecture.md](../architecture.md) §5.
 
 ## Run

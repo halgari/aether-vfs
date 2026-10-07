@@ -1,6 +1,2 @@
-.cpcache/
-.nrepl-port
 target/
-.clj-kondo/.cache/
-.lsp/.cache/
 .superpowers/
