@@ -31,31 +31,14 @@ pub mod steam;
 mod test_tmp;
 
 // The module paths (`launch::`, `prefix::`, `nvapi::`, ...) are canonical. The
-// flat re-exports below are kept for callers that already use them; the ones
-// nothing in this repository or Haskill imports are hidden from the docs.
-#[cfg(feature = "acquire")]
-#[doc(hidden)]
-pub use install::{InstallError, Installed};
+// flat re-exports below are the ones the `vfs-proton` binary and this
+// repository's tests use.
 #[cfg(feature = "acquire")]
 pub use install::{extract_tar_gz, install_release, parse_sha512sum, partial_path, verify_digest};
-#[doc(hidden)]
-pub use launch::{
-    BASE_DLL_OVERRIDES, LaunchError, check_extra_env, command_line, describe_injector_error,
-    injector_error_path, is_reserved_env, wine_binary,
-};
 pub use launch::{DEFAULT_WINEDEBUG, WineLaunch, finish, launch_env, merge_dll_overrides, spawn};
 pub use layout::Root;
-#[doc(hidden)]
-pub use prefix::PrefixError;
 pub use prefix::{Prefix, PrefixInit, ensure, ensure_with};
 #[cfg(feature = "acquire")]
 pub use release::{Release, fetch_releases, pick};
-#[cfg(feature = "acquire")]
-#[doc(hidden)]
-pub use release::{ResolveError, parse_releases};
-#[doc(hidden)]
-pub use runtime::{VerifyError, runtime_lib_env, runtime_lib_env_host};
 pub use runtime::{cmp_tags, installed, installed_dirs, verify_ge};
 pub use steam::{HelperStatus, SteamLaunch, SteamSide};
-#[doc(hidden)]
-pub use steam::{STEAM_HELPER, STEAM_HELPER_OVERRIDE};

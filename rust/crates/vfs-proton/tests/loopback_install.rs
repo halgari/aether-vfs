@@ -38,7 +38,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sha2::{Digest as _, Sha512};
-use vfs_proton::{InstallError, Release, Root, install_release};
+use vfs_proton::install::InstallError;
+use vfs_proton::{Release, Root, install_release};
 
 // ─── the loopback server ─────────────────────────────────────────────────────
 
