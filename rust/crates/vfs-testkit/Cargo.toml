@@ -9,3 +9,6 @@ description = "Dev-only test helpers shared by the workspace's integration tests
 [lib]
 name = "vfs_testkit"
 path = "src/lib.rs"
+
+[dependencies]
+tempfile = "3"
