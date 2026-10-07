@@ -8,6 +8,8 @@
 #[doc(hidden)]
 pub mod ops;
 pub mod shimcfg;
+mod wire;
+use wire::{put_str, Rd};
 
 pub use vfs_provider::{
     bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, not_supported, ok,
@@ -570,61 +572,7 @@ fn take_u8(p: &[u8], off: &mut usize) -> Option<u8> {
 // ---------------------------------------------------------------------------
 
 use vfs_registry::overlay::{MAX_DATA, MAX_KEY_NAME, MAX_VALUE_NAME};
-use vfs_registry::{utf16_len, Child, Node, Value};
-
-fn put_str(b: &mut Vec<u8>, s: &str) {
-    b.extend_from_slice(&(s.len() as u32).to_le_bytes());
-    b.extend_from_slice(s.as_bytes());
-}
-
-/// Bounds-checked cursor over a payload.
-struct Rd<'a>(&'a [u8]);
-
-impl<'a> Rd<'a> {
-    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        if self.0.len() < n {
-            return None;
-        }
-        let (h, t) = self.0.split_at(n);
-        self.0 = t;
-        Some(h)
-    }
-    fn u8(&mut self) -> Option<u8> {
-        Some(self.take(1)?[0])
-    }
-    fn bool(&mut self) -> Option<bool> {
-        match self.u8()? {
-            0 => Some(false),
-            1 => Some(true),
-            _ => None,
-        }
-    }
-    fn u32(&mut self) -> Option<u32> {
-        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
-    }
-    fn u64(&mut self) -> Option<u64> {
-        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
-    }
-    fn bytes(&mut self, max: usize) -> Option<&'a [u8]> {
-        let n = self.u32()? as usize;
-        if n > max {
-            return None;
-        }
-        self.take(n)
-    }
-    fn str(&mut self) -> Option<&'a str> {
-        let n = self.u32()? as usize;
-        core::str::from_utf8(self.take(n)?).ok()
-    }
-    /// A string whose length in UTF-16 units is at most `max_units`.
-    fn str_max(&mut self, max_units: usize) -> Option<&'a str> {
-        let s = self.str()?;
-        (utf16_len(s) <= max_units).then_some(s)
-    }
-    fn done(&self) -> Option<()> {
-        self.0.is_empty().then_some(())
-    }
-}
+use vfs_registry::{Child, Node, Value};
 
 /// A request that is only a path (also `REG_KEY`, `REG_LOOKUP`, `REG_DELETE_KEY`).
 pub fn encode_reg_path(path: &str) -> Vec<u8> {
