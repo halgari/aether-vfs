@@ -22,42 +22,18 @@ fn ntdll_proc(name: &core::ffi::CStr) -> Option<*const ()> {
     }
 }
 
-fn rd_u32(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
-}
-fn pe_layout(raw: &[u8]) -> Result<(Vec<u8>, u64, u32, usize), &'static str> {
-    let (img, base, e_lfanew) = crate::map::build_image(raw)?;
-    let opt = e_lfanew + 24;
-    let entry_rva = rd_u32(&img, opt + 16);
-    let size_of_image = rd_u32(&img, opt + 56) as usize;
-    Ok((img, base, entry_rva, size_of_image))
-}
-
-// Moved to `vfs-pe` (pure parsing). `pe_looks_like_image` is re-exported so
-// `map_image_from_pe_bytes_local` below and `vfs-shim`'s hook path
-// (`vfs-shim/src/hook.rs`) keep their existing spelling — both still call it.
-// `is_system_import_dll` is re-exported too, but retained for API
-// compatibility with no remaining in-workspace caller: its last caller was
-// `vfs-director/src/stage.rs`, which now calls `vfs_pe::is_system_import_dll`
-// directly.
-pub use vfs_pe::{is_system_import_dll, pe_looks_like_image};
-
-// `keep_host_steam_api` lived here, re-exported from `lib.rs`, and had no
-// callers anywhere in the workspace — so the warning it carried about needing
-// to agree with `vfs-shim`'s same-named function, and the deliberately opposite
-// defaults that warning justified, protected nothing. Deleted by gate 5, Task 4
-// with the shim-side exception it was supposed to mirror.
+use crate::map::rd_u32;
 
 pub fn map_image_from_pe_bytes_local(pe: &[u8]) -> Result<(*mut c_void, usize), &'static str> {
     use windows_sys::Win32::System::Memory::{
         VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
     };
 
-    if !pe_looks_like_image(pe) {
+    if !vfs_pe::pe_looks_like_image(pe) {
         return Err("not a PE");
     }
-    let (mut img, preferred_base, _entry, size_of_image) = pe_layout(pe)?;
-    let e_lfanew = rd_u32(&img, 0x3C) as usize;
+    let (mut img, preferred_base, e_lfanew) = vfs_pe::build_image(pe)?;
+    let size_of_image = rd_u32(&img, e_lfanew + 24 + 56) as usize;
 
     unsafe {
         let mut base = VirtualAlloc(
@@ -79,7 +55,7 @@ pub fn map_image_from_pe_bytes_local(pe: &[u8]) -> Result<(*mut c_void, usize), 
         }
         let base_u = base as u64;
         if base_u != preferred_base {
-            crate::map::apply_relocs(&mut img, e_lfanew, preferred_base, base_u);
+            vfs_pe::apply_relocs(&mut img, e_lfanew, preferred_base, base_u);
         }
         // No-op for PE32 (see resolve_imports_ex_with_bases).
         crate::map::resolve_imports(&mut img, e_lfanew)?;
@@ -90,9 +66,9 @@ pub fn map_image_from_pe_bytes_local(pe: &[u8]) -> Result<(*mut c_void, usize), 
         // RtlAddFunctionTable over a directory read at the PE32+ offset would
         // be pointing at whatever field happens to live there.
         if let Some(rtl) =
-            ntdll_proc(c"RtlAddFunctionTable").filter(|_| crate::map::is_pe32_plus(&img, e_lfanew))
+            ntdll_proc(c"RtlAddFunctionTable").filter(|_| vfs_pe::is_pe32_plus(&img, e_lfanew))
         {
-            let ex_dir = crate::map::dd_base(&img, e_lfanew) + 3 * 8;
+            let ex_dir = vfs_pe::dd_base(&img, e_lfanew) + 3 * 8;
             if ex_dir + 8 <= img.len() {
                 let ex_rva = rd_u32(&img, ex_dir) as usize;
                 let ex_size = rd_u32(&img, ex_dir + 4);

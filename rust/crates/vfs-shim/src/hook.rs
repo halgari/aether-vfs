@@ -6409,7 +6409,7 @@ unsafe fn fuse_create_section(
             Ok(n) if n > 0 => pe.truncate(n),
             _ => return STATUS_INVALID_FILE_FOR_SECTION,
         }
-        if !vfs_inject::pe_looks_like_image(&pe) {
+        if !vfs_pe::pe_looks_like_image(&pe) {
             return STATUS_INVALID_FILE_FOR_SECTION;
         }
 

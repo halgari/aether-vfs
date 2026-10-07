@@ -24,11 +24,11 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::artifacts::resolve_payload_for_run;
-use crate::map::{apply_relocs, build_image, export_rva};
 use crate::payload_cfg::{PayloadConfig, RedirectEntry, MAX_REDIRECTS};
 use crate::static_imports::{load_preinit_from_config_file, StaticImport};
 use crate::stub::build_stub;
 use crate::{InjectError, PreinitConfig, PreinitRedirect, RunConfig};
+use vfs_pe::{apply_relocs, build_image, export_rva};
 
 /// The exit code of `process` if it has already exited.
 ///

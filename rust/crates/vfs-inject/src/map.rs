@@ -3,28 +3,9 @@
 //! suspended target without LoadLibrary.
 #![allow(unsafe_code)]
 
-// The pure parsing half of this module now lives in `vfs-pe` — a PE is a file
-// format, not a platform, and the director has to stage Windows executables on
-// hosts where none of the Windows API below exists. Re-exported rather than
-// re-pathed at each call site so this module's internal callers keep the
-// spellings they already use: `inject.rs` and `pe.rs` reach these five through
-// `crate::map::`. `lib.rs` no longer does — its own `map::build_image` call
-// was removed in the same change that delegated `import_dll_names_of_pe`
-// straight to `vfs-pe`.
-//
-// `import_dll_names` is not among them: after this task `lib.rs`'s
-// `import_dll_names_of_pe` delegates straight to `vfs-pe`'s combined helper,
-// so `map::import_dll_names` has no production caller left. Its only user is
-// this module's own test below, which names `vfs_pe::import_dll_names`
-// directly instead of importing it here.
-pub use vfs_pe::{apply_relocs, build_image, dd_base, export_rva, is_pe32_plus};
+use vfs_pe::{dd_base, is_pe32_plus};
 
-// `vfs-pe`'s byte readers are private to that crate on purpose — they are
-// byte-reading plumbing, not PE interface. The Windows-only remote-process
-// helpers below still need to read little-endian fields out of a locally
-// mapped image, so those three one-liners are duplicated here rather than
-// exported from `vfs-pe`.
-fn rd_u32(b: &[u8], o: usize) -> u32 {
+pub(crate) fn rd_u32(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
 }
 fn rd_u64(b: &[u8], o: usize) -> u64 {
@@ -400,6 +381,7 @@ fn remote_proc_by_ordinal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vfs_pe::build_image;
 
     #[test]
     fn import_dll_names_reads_kernel32_from_self() {
