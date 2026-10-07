@@ -1,5 +1,6 @@
 use super::*;
 use crate::{InlineProvider, MemoryProvider};
+use vfs_core::fold;
 use vfs_provider::{CaseMatch, KIND_FILE, OPEN_CREATE, OPEN_READ};
 
 /// Slow and immutable, but sequential-only — exercises both the
@@ -32,6 +33,103 @@ impl Provider for SlowSeqBase {
     }
     fn read_at(&self, _h: Handle, _o: u64, _b: &mut [u8]) -> Result<usize, i32> {
         Ok(0)
+    }
+}
+
+/// An empty in-memory `ReadWrite` upper that matches names **byte-exactly**
+/// and says so (`CaseMatch::Sensitive`), like a case-sensitive disk. It wraps
+/// `MemoryProvider`, which folds, by escaping every character that folding
+/// would change (`~<hex>~`) on the way in and undoing that on the way out, so
+/// two spellings of one name are two entries. The overlay tests run on this
+/// so the overlay's behaviour over a case-sensitive upper stays covered;
+/// `MemoryProvider` itself, a case-insensitive upper, is used where a test
+/// wants that (`stored_name`).
+#[derive(Default)]
+struct ExactUpper {
+    inner: MemoryProvider,
+}
+
+fn escape_exact(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let one = c.to_string();
+        if c == '~' || fold(&one) != one {
+            out.push_str(&format!("~{:x}~", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn unescape_exact(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('~') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 1..];
+        let end = tail.find('~').expect("escaped name has a closing ~");
+        let code = u32::from_str_radix(&tail[..end], 16).expect("hex code point");
+        out.push(char::from_u32(code).expect("valid char"));
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+impl Provider for ExactUpper {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            case: CaseMatch::Sensitive,
+            ..self.inner.capabilities()
+        }
+    }
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        self.inner.getattr(VPath::new(p.root, &escape_exact(p.rel)))
+    }
+    fn readdir(&self, p: VPath) -> Result<Vec<DirEntry>, i32> {
+        let mut entries = self
+            .inner
+            .readdir(VPath::new(p.root, &escape_exact(p.rel)))?;
+        for e in &mut entries {
+            e.name = unescape_exact(&e.name);
+        }
+        Ok(entries)
+    }
+    fn open(&self, p: VPath, flags: u32) -> Result<(Handle, u64, bool), i32> {
+        self.inner
+            .open(VPath::new(p.root, &escape_exact(p.rel)), flags)
+    }
+    fn close(&self, h: Handle) -> Result<(), i32> {
+        self.inner.close(h)
+    }
+    fn read_at(&self, h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        self.inner.read_at(h, offset, buf)
+    }
+    fn write_at(&self, h: Handle, offset: u64, buf: &[u8]) -> Result<usize, i32> {
+        self.inner.write_at(h, offset, buf)
+    }
+    fn set_len(&self, h: Handle, len: u64) -> Result<(), i32> {
+        self.inner.set_len(h, len)
+    }
+    fn flush(&self, h: Handle) -> Result<(), i32> {
+        self.inner.flush(h)
+    }
+    fn mkdir(&self, p: VPath) -> Result<(), i32> {
+        self.inner.mkdir(VPath::new(p.root, &escape_exact(p.rel)))
+    }
+    fn remove(&self, p: VPath) -> Result<(), i32> {
+        self.inner.remove(VPath::new(p.root, &escape_exact(p.rel)))
+    }
+    fn rename(&self, from: VPath, to: VPath) -> Result<(), i32> {
+        self.inner.rename(
+            VPath::new(from.root, &escape_exact(from.rel)),
+            VPath::new(to.root, &escape_exact(to.rel)),
+        )
+    }
+    fn set_attr(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
+        self.inner
+            .set_attr(VPath::new(p.root, &escape_exact(p.rel)), attr)
     }
 }
 
@@ -82,7 +180,7 @@ impl<P: Provider> Provider for CountingOpens<P> {
 /// so this is the only thing that can hold the read path to a budget.
 #[derive(Default)]
 struct CountingUpper {
-    inner: MemoryProvider,
+    inner: ExactUpper,
     getattrs: AtomicU64,
     readdirs: AtomicU64,
     /// Runs once, after the next `readdir` has read the directory and
@@ -248,7 +346,7 @@ fn stored_name_takes_the_bases_spelling_then_the_uppers_and_honours_whiteouts() 
 
 #[test]
 fn overlay_reports_read_write_and_is_never_immutable() {
-    let ov = OverlayProvider::new(Arc::new(SlowSeqBase), MemoryProvider::default()).unwrap();
+    let ov = OverlayProvider::new(Arc::new(SlowSeqBase), ExactUpper::default()).unwrap();
     let caps = ov.capabilities();
     assert_eq!(
         caps.access,
@@ -269,8 +367,7 @@ fn overlay_over_the_fixture_tree_with_an_empty_upper_passes_conformance() {
     let base: Arc<dyn Provider> = Arc::new(InlineProvider::from_files(
         vfs_provider::FIXTURE_FILES.iter().copied(),
     ));
-    let p: Arc<dyn Provider> =
-        Arc::new(OverlayProvider::new(base, MemoryProvider::default()).unwrap());
+    let p: Arc<dyn Provider> = Arc::new(OverlayProvider::new(base, ExactUpper::default()).unwrap());
     vfs_provider::assert_conformance(p);
 }
 
@@ -280,7 +377,7 @@ fn upper_wins_and_whiteout_hides() {
         ("a.txt", b"BASE".as_slice()),
         ("gone.txt", b"X".as_slice()),
     ]));
-    let upper = MemoryProvider::default();
+    let upper = ExactUpper::default();
     let (h, _, _) = upper
         .open(VPath::at_default("a.txt"), OPEN_WRITE | OPEN_CREATE)
         .unwrap();
@@ -309,7 +406,7 @@ fn overlay_declares_read_write_over_a_read_only_base() {
     let base = Arc::new(InlineProvider::from_files(
         vfs_provider::FIXTURE_FILES.iter().copied(),
     ));
-    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
+    let ov = OverlayProvider::new(base, ExactUpper::default()).unwrap();
     assert_eq!(ov.capabilities().access, Access::ReadWrite);
 }
 
@@ -329,7 +426,7 @@ fn overlay_rejects_a_read_only_upper_at_construction() {
 fn writing_a_base_file_copies_it_up_and_leaves_base_untouched() {
     use vfs_provider::{Provider, VPath, OPEN_READ, OPEN_WRITE};
     let base = Arc::new(InlineProvider::from_files([("a.txt", b"BASE".as_slice())]));
-    let ov = OverlayProvider::new(base.clone(), MemoryProvider::default()).unwrap();
+    let ov = OverlayProvider::new(base.clone(), ExactUpper::default()).unwrap();
 
     let f = VPath::at_default("a.txt");
     let (h, _, _) = ov.open(f, OPEN_WRITE).expect("open for write copies up");
@@ -357,7 +454,7 @@ fn writing_a_base_file_copies_it_up_and_leaves_base_untouched() {
 fn removing_a_base_file_writes_a_whiteout() {
     use vfs_provider::{Provider, VPath};
     let base = Arc::new(InlineProvider::from_files([("a.txt", b"BASE".as_slice())]));
-    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
+    let ov = OverlayProvider::new(base, ExactUpper::default()).unwrap();
     let f = VPath::at_default("a.txt");
     ov.remove(f).expect("remove");
     assert!(
@@ -383,7 +480,7 @@ fn concurrent_opens_copy_up_exactly_once() {
     )])));
     let base: Arc<dyn Provider> = counted.clone();
     let ov: StdArc<OverlayProvider> =
-        StdArc::new(OverlayProvider::new(base, MemoryProvider::default()).unwrap());
+        StdArc::new(OverlayProvider::new(base, ExactUpper::default()).unwrap());
 
     let mut hs = Vec::new();
     for _ in 0..8 {
@@ -467,6 +564,152 @@ fn copy_up_keys_include_the_root() {
     rx.recv_timeout(Duration::from_secs(10))
         .expect("a claim under another root waited for an unrelated copy-up");
     other.join().unwrap();
+}
+
+/// A one-file base whose first `open` of `block_root` parks until the test
+/// releases it, then fails if `fail` is set. Lets a test hold a copy-up
+/// in flight, with the overlay's slot claimed, while another thread arrives.
+struct GatedBase {
+    block_root: u32,
+    fail: bool,
+    first: AtomicU64,
+    entered: Mutex<std::sync::mpsc::Sender<()>>,
+    gate: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl GatedBase {
+    fn new(
+        block_root: u32,
+        fail: bool,
+    ) -> (
+        Arc<Self>,
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel();
+        let base = Arc::new(GatedBase {
+            block_root,
+            fail,
+            first: AtomicU64::new(0),
+            entered: Mutex::new(entered_tx),
+            gate: Mutex::new(gate_rx),
+        });
+        (base, entered_rx, gate_tx)
+    }
+}
+
+impl Provider for GatedBase {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::read_only()
+    }
+    fn getattr(&self, p: VPath) -> Result<Option<Stat>, i32> {
+        Ok((p.rel == "a.txt").then_some(Stat {
+            kind: KIND_FILE,
+            size: 4,
+            mtime: 0,
+        }))
+    }
+    fn readdir(&self, _p: VPath) -> Result<Vec<DirEntry>, i32> {
+        Ok(Vec::new())
+    }
+    fn open(&self, p: VPath, _f: u32) -> Result<(Handle, u64, bool), i32> {
+        if p.root.0 == self.block_root && self.first.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.entered.lock().unwrap().send(()).unwrap();
+            self.gate.lock().unwrap().recv().unwrap();
+            if self.fail {
+                return Err(map_io_err());
+            }
+        }
+        Ok((1, 4, false))
+    }
+    fn close(&self, _h: Handle) -> Result<(), i32> {
+        Ok(())
+    }
+    fn read_at(&self, _h: Handle, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
+        let body = b"BASE";
+        let start = (offset as usize).min(body.len());
+        let n = (body.len() - start).min(buf.len());
+        buf[..n].copy_from_slice(&body[start..start + n]);
+        Ok(n)
+    }
+}
+
+/// A caller waiting on a copy-up that fails is woken, takes the slot, and
+/// makes its own attempt; it is not left asleep and not served a half copy.
+#[test]
+fn a_waiter_proceeds_after_the_copy_it_waited_on_fails() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let (base, entered, gate) = GatedBase::new(0, true);
+    let ov = Arc::new(OverlayProvider::new(base, ExactUpper::default()).unwrap());
+    let f = VPath::at_default("a.txt");
+
+    let first = {
+        let ov = Arc::clone(&ov);
+        std::thread::spawn(move || ov.open(f, OPEN_WRITE).map(|_| ()))
+    };
+    entered.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let second = {
+        let ov = Arc::clone(&ov);
+        std::thread::spawn(move || tx.send(ov.open(f, OPEN_WRITE).map(|(h, _, _)| h)).unwrap())
+    };
+    assert!(
+        rx.recv_timeout(Duration::from_millis(150)).is_err(),
+        "the second writer did not wait for the copy-up in flight"
+    );
+    gate.send(()).unwrap();
+    assert_eq!(first.join().unwrap(), Err(map_io_err()));
+    let h = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the waiter was never woken after the copy-up failed")
+        .expect("the waiter's own copy-up should succeed");
+    second.join().unwrap();
+    ov.close(h).unwrap();
+    assert_eq!(ov.getattr(f).unwrap().unwrap().size, 4);
+}
+
+/// The same relative path under two roots is two copy-ups: one parked in
+/// the base for root 1 must not hold up root 2.
+#[test]
+fn copy_ups_of_the_same_path_under_two_roots_run_in_parallel() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use vfs_provider::RootId;
+    let (base, entered, gate) = GatedBase::new(1, false);
+    let ov = Arc::new(OverlayProvider::new(base, ExactUpper::default()).unwrap());
+
+    let root1 = {
+        let ov = Arc::clone(&ov);
+        std::thread::spawn(move || {
+            ov.open(VPath::new(RootId(1), "a.txt"), OPEN_WRITE)
+                .map(|_| ())
+        })
+    };
+    entered.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let root2 = {
+        let ov = Arc::clone(&ov);
+        std::thread::spawn(move || {
+            tx.send(
+                ov.open(VPath::new(RootId(2), "a.txt"), OPEN_WRITE)
+                    .map(|_| ()),
+            )
+            .unwrap()
+        })
+    };
+    let r2 = rx.recv_timeout(Duration::from_secs(10));
+    gate.send(()).unwrap(); // release root 1 either way, so nothing hangs
+    assert_eq!(
+        r2.expect("root 2's copy-up waited on root 1's"),
+        Ok(()),
+        "root 2's copy-up failed"
+    );
+    root2.join().unwrap();
+    assert_eq!(root1.join().unwrap(), Ok(()));
 }
 
 /// Gate 4, Task 6 review. The whiteout check runs on **every** read, and
@@ -555,12 +798,12 @@ fn whiteouts_hide_through_folds_that_change_a_names_length() {
         ("top/plain/E.TXT", b"6".as_slice()),
         ("ÄÖ/ü.txt", b"7".as_slice()),
     ]));
-    let upper = MemoryProvider::default();
+    let upper = ExactUpper::default();
     // Markers spelled in a different case from the names they hide: one
     // on a file two levels down, one on a directory, one at the root.
-    // (The directories are spelled as the base spells them: the test
-    // upper is case-sensitive, and a directory's markers are read by the
-    // spelling of the first lookup through it.)
+    // (The directories are spelled as the base spells them: `ExactUpper` is
+    // case-sensitive, and a directory's markers are read by the spelling of
+    // the first lookup through it.)
     for marker in ["İstanbul/Sub/.wh.A.TXT", "top/.wh.kELVIN", ".wh.äö"] {
         let (h, _, _) = upper
             .open(VPath::at_default(marker), OPEN_WRITE | OPEN_CREATE)
@@ -629,7 +872,7 @@ fn the_whiteout_walk_tells_a_paths_own_marker_from_an_ancestors() {
         ("x/y/z.txt", b"2".as_slice()),
         ("top.txt", b"3".as_slice()),
     ]));
-    let upper = MemoryProvider::default();
+    let upper = ExactUpper::default();
     for marker in ["a/b/.wh.c.txt", ".wh.x", ".wh.top.txt"] {
         let (h, _, _) = upper
             .open(VPath::at_default(marker), OPEN_WRITE | OPEN_CREATE)
@@ -725,7 +968,7 @@ fn a_whiteout_written_after_its_directory_was_scanned_still_hides() {
         "dir/a.txt",
         b"BASE".as_slice(),
     )]));
-    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
+    let ov = OverlayProvider::new(base, ExactUpper::default()).unwrap();
     let f = VPath::at_default("dir/a.txt");
 
     // Read first, so "dir" and the root are already scanned and cached as
@@ -761,7 +1004,7 @@ fn creating_a_marker_named_file_through_the_overlay_is_seen_by_the_index() {
         "dir/x.txt",
         b"BASE".as_slice(),
     )]));
-    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
+    let ov = OverlayProvider::new(base, ExactUpper::default()).unwrap();
 
     // Scan "dir" while it holds no markers.
     assert!(ov
@@ -793,7 +1036,7 @@ fn overlay_passes_write_conformance() {
         vfs_provider::FIXTURE_FILES.iter().copied(),
     ));
     let ov: Arc<dyn vfs_provider::Provider> =
-        Arc::new(OverlayProvider::new(base, MemoryProvider::default()).unwrap());
+        Arc::new(OverlayProvider::new(base, ExactUpper::default()).unwrap());
     vfs_provider::assert_conformance(ov);
 }
 
@@ -803,7 +1046,7 @@ fn a_failed_copy_up_leaves_the_destination_absent_not_truncated() {
     let base = Arc::new(FlakyReadBase {
         body: vec![7u8; 200_000],
     });
-    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
+    let ov = OverlayProvider::new(base, ExactUpper::default()).unwrap();
     let f = VPath::at_default("big.bin");
 
     let err = ov
@@ -830,7 +1073,7 @@ fn a_failed_copy_up_leaves_the_destination_absent_not_truncated() {
     // the failed attempt left the path genuinely untouched, not stuck.
     let ov2 = OverlayProvider::new(
         Arc::new(InlineProvider::from_files([("big.bin", b"ok".as_slice())])),
-        MemoryProvider::default(),
+        ExactUpper::default(),
     )
     .unwrap();
     let (h, _, _) = ov2
@@ -846,7 +1089,7 @@ fn creating_under_a_removed_ancestor_directory_is_refused_until_mkdir_recreates_
         "dir/a.txt",
         b"BASE".as_slice(),
     )]));
-    let ov = OverlayProvider::new(base, MemoryProvider::default()).unwrap();
+    let ov = OverlayProvider::new(base, ExactUpper::default()).unwrap();
 
     // Opaquely remove the whole base directory.
     ov.remove(VPath::at_default("dir"))
