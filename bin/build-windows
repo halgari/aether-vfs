@@ -12,10 +12,10 @@
 # The first run downloads the MSVC CRT and Windows SDK into ~/.cache/cargo-xwin
 # (XWIN_ACCEPT_LICENSE=1 accepts Microsoft's license for that download).
 #
-# The artefacts are the ones the Proton tests and `Session::launch` look for:
-# `locate_wine_artifacts` in vfs-embed (injector, shim, payload) and the
-# fixtures named by crates/vfs-embed/tests/proton_*.rs. Keep ARTIFACTS and the
-# cargo -p list below in step with them.
+# The artefacts are the ones the Proton tests and `Session::launch` look for.
+# Their one list in Rust is `vfs_proton::artifacts::WINDOWS_ARTIFACTS`; the
+# ARTIFACTS array below must equal it (a vfs-proton test asserts that). Keep
+# the cargo -p list below in step with it by hand.
 #
 # Usage: bin/build-windows [--release] [-h|--help]
 set -euo pipefail

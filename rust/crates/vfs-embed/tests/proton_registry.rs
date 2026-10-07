@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use vfs_embed::{DiskProvider, LaunchOpts, MemoryProvider, Provider, Session, VPath};
 
-const FIXTURE: &str = "vfs-fixture-registry.exe";
+const FIXTURE: &str = vfs_proton::artifacts::FIXTURE_REGISTRY;
 /// The scratch key's leaf, the same in both runs.
 const RUN_ID: &str = "e2e";
 const PREFIX: &str = "registry-e2e";

@@ -39,7 +39,7 @@ fn probe(log: &str) -> BTreeMap<String, String> {
             bin/build-windows, a Steam install, and an NVIDIA GPU with its driver"]
 fn a_launched_program_initialises_nvapi_and_not_when_turned_off() {
     const TEST: &str = "proton_nvapi::a_launched_program_initialises_nvapi_and_not_when_turned_off";
-    let Some(rig) = support::rig(TEST, "nvapi", &["vfs-fixture-nvapi.exe"]) else {
+    let Some(rig) = support::rig(TEST, "nvapi", &[vfs_proton::artifacts::FIXTURE_NVAPI]) else {
         return;
     };
     let runtime = support::runtime_dir().expect("rig found a runtime");
@@ -62,7 +62,7 @@ fn a_launched_program_initialises_nvapi_and_not_when_turned_off() {
 
     let root = tmp("root");
     std::fs::copy(
-        rig.art.path("vfs-fixture-nvapi.exe"),
+        rig.art.path(vfs_proton::artifacts::FIXTURE_NVAPI),
         root.join("probe.exe"),
     )
     .unwrap();

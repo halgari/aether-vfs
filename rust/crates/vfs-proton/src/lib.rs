@@ -15,6 +15,7 @@
 // behind the `acquire` feature (default on). See the manifest for why: it
 // carries `ureq` -> `rustls` -> `ring`, a C cross-compile in a build script,
 // and `vfs-embed` consumes this crate on unix to *launch*, not to install.
+pub mod artifacts;
 #[cfg(feature = "acquire")]
 pub mod install;
 pub mod launch;

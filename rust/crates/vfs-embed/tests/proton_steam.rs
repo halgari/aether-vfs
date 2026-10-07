@@ -76,7 +76,7 @@ struct Probe {
 /// `SKIP` line, when this machine lacks the runtime, the artifacts, a Steam
 /// client or a `steam_api64.dll`.
 fn probe_session(test: &str, tag: &str, prefix: &str) -> Option<Probe> {
-    let rig = support::rig(test, "steam", &["vfs-fixture-steam.exe"])?;
+    let rig = support::rig(test, "steam", &[vfs_proton::artifacts::FIXTURE_STEAM])?;
     let client = match support::steam_client() {
         Ok(c) => c,
         Err(why) => {
@@ -99,7 +99,7 @@ fn probe_session(test: &str, tag: &str, prefix: &str) -> Option<Probe> {
 
     let root = tmp(&format!("{tag}-root"));
     std::fs::copy(
-        rig.art.path("vfs-fixture-steam.exe"),
+        rig.art.path(vfs_proton::artifacts::FIXTURE_STEAM),
         root.join("probe.exe"),
     )
     .unwrap();

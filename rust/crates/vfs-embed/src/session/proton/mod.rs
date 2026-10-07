@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use vfs_director::ipc::IpcServe;
 use vfs_proton::{
+    artifacts,
     launch::{LaunchFiles, RingGeometry, WineLaunch},
     layout::Root as ProtonRoot,
     prefix::{Prefix, PrefixInit, PrefixLock},
@@ -1098,13 +1099,13 @@ fn locate_wine_artifacts_in(
         .shim_dll
         .clone()
         .map(PathBuf::from)
-        .unwrap_or_else(|| base.join("vfs_shim_dll.dll"));
+        .unwrap_or_else(|| base.join(artifacts::SHIM_DLL));
     let payload = opts
         .payload_dll
         .clone()
         .map(PathBuf::from)
-        .unwrap_or_else(|| base.join("vfs_payload.dll"));
-    let injector = base.join("vfs-injector.exe");
+        .unwrap_or_else(|| base.join(artifacts::PAYLOAD_DLL));
+    let injector = base.join(artifacts::INJECTOR);
 
     let missing: Vec<String> = [&injector, &shim, &payload]
         .iter()
@@ -1345,21 +1346,21 @@ mod tests {
     #[test]
     fn windows_artifacts_come_from_the_named_directory_unless_shim_dll_is_set() {
         let dir = scratch("artifacts");
-        for n in ["vfs-injector.exe", "vfs_shim_dll.dll", "vfs_payload.dll"] {
+        for n in artifacts::LAUNCH {
             std::fs::write(dir.join(n), b"x").unwrap();
         }
         let (inj, shim, payload) =
             locate_wine_artifacts_in(&LaunchOpts::default(), Some(&dir)).unwrap();
-        assert_eq!(inj, dir.join("vfs-injector.exe"));
-        assert_eq!(shim, dir.join("vfs_shim_dll.dll"));
-        assert_eq!(payload, dir.join("vfs_payload.dll"));
+        assert_eq!(inj, dir.join(artifacts::INJECTOR));
+        assert_eq!(shim, dir.join(artifacts::SHIM_DLL));
+        assert_eq!(payload, dir.join(artifacts::PAYLOAD_DLL));
 
         // An explicit shim_dll wins over the directory.
         let other = scratch("artifacts-other");
         let opts = LaunchOpts {
             shim_dll: Some(
                 other
-                    .join("vfs_shim_dll.dll")
+                    .join(artifacts::SHIM_DLL)
                     .to_string_lossy()
                     .into_owned(),
             ),
@@ -1372,7 +1373,7 @@ mod tests {
         );
 
         // A directory missing some of them names each one.
-        std::fs::remove_file(dir.join("vfs_payload.dll")).unwrap();
+        std::fs::remove_file(dir.join(artifacts::PAYLOAD_DLL)).unwrap();
         let e = locate_wine_artifacts_in(&LaunchOpts::default(), Some(&dir)).unwrap_err();
         assert!(
             e.contains("vfs_payload.dll") && !e.contains("vfs-injector.exe,"),

@@ -156,11 +156,11 @@ fn session(tag: &str, home: &Path) -> (Session, PathBuf, String) {
     s.set_steam_helper(false);
     std::fs::write(s.virtual_root().join("game.exe"), b"MZ").unwrap();
     let art = tmp(&format!("{tag}-art"));
-    for f in ["vfs-injector.exe", "vfs_shim_dll.dll", "vfs_payload.dll"] {
+    for f in vfs_proton::artifacts::LAUNCH {
         std::fs::write(art.join(f), b"MZ").unwrap();
     }
     s.serve().unwrap();
-    let shim = art.join("vfs_shim_dll.dll").to_string_lossy().into_owned();
+    let shim = art.join(vfs_proton::artifacts::SHIM_DLL).to_string_lossy().into_owned();
     let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
     (s, pfx, shim)
 }
@@ -170,7 +170,7 @@ fn opts(shim: &str, mode: &str, wait: bool) -> LaunchOpts {
         image: "game.exe".into(),
         wait,
         shim_dll: Some(shim.to_string()),
-        payload_dll: Some(shim.replace("vfs_shim_dll", "vfs_payload")),
+        payload_dll: Some(shim.replace(vfs_proton::artifacts::SHIM_DLL, vfs_proton::artifacts::PAYLOAD_DLL)),
         env: BTreeMap::from([("FAKE_WINE_MODE".to_string(), mode.to_string())]),
         ..Default::default()
     }
@@ -405,10 +405,10 @@ fn with_a_running_steam_client_the_launch_asks_for_the_helper_and_sets_steams_en
     let args = std::fs::read_to_string(pfx.join("fake-wine.args")).unwrap();
     let args: Vec<&str> = args.split_whitespace().collect();
     assert_eq!(args.len(), 6, "{args:?}");
-    assert!(args[0].ends_with("vfs-injector.exe"), "{args:?}");
+    assert!(args[0].ends_with(vfs_proton::artifacts::INJECTOR), "{args:?}");
     assert_eq!(args[1], r"C:\Games\Fake\game.exe");
-    assert!(args[2].ends_with("vfs_shim_dll.dll"), "{args:?}");
-    assert!(args[3].ends_with("vfs_payload.dll"), "{args:?}");
+    assert!(args[2].ends_with(vfs_proton::artifacts::SHIM_DLL), "{args:?}");
+    assert!(args[3].ends_with(vfs_proton::artifacts::PAYLOAD_DLL), "{args:?}");
     assert!(args[4].ends_with("shim.cfg"), "{args:?}");
     assert!(args[5].ends_with("ready.flag"), "{args:?}");
 
@@ -593,11 +593,11 @@ fn a_second_launch_while_one_is_running_is_refused_before_staging_can_clobber_it
     std::fs::write(content.join("game.exe"), bare_pe()).unwrap();
     s.mount("", Arc::new(DiskProvider::new(&content))).unwrap();
     let art = tmp("second-art");
-    for f in ["vfs-injector.exe", "vfs_shim_dll.dll", "vfs_payload.dll"] {
+    for f in vfs_proton::artifacts::LAUNCH {
         std::fs::write(art.join(f), b"MZ").unwrap();
     }
     s.serve().unwrap();
-    let shim = art.join("vfs_shim_dll.dll").to_string_lossy().into_owned();
+    let shim = art.join(vfs_proton::artifacts::SHIM_DLL).to_string_lossy().into_owned();
     let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
 
     assert_eq!(s.launch(&opts(&shim, "sleep", false)).unwrap(), 0);
@@ -820,11 +820,11 @@ fn a_kept_detached_handle_blocks_a_second_launch_and_is_stopped_by_stop_launch()
     std::fs::write(content.join("game.exe"), bare_pe()).unwrap();
     s.mount("", Arc::new(DiskProvider::new(&content))).unwrap();
     let art = tmp("kept-art");
-    for f in ["vfs-injector.exe", "vfs_shim_dll.dll", "vfs_payload.dll"] {
+    for f in vfs_proton::artifacts::LAUNCH {
         std::fs::write(art.join(f), b"MZ").unwrap();
     }
     s.serve().unwrap();
-    let shim = art.join("vfs_shim_dll.dll").to_string_lossy().into_owned();
+    let shim = art.join(vfs_proton::artifacts::SHIM_DLL).to_string_lossy().into_owned();
     let pfx = home.join("sessions").join("fake").join("compat").join("pfx");
 
     let mut h = s.launch_detached(&opts(&shim, "sleep", true)).unwrap();

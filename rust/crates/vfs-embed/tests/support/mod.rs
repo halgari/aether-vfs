@@ -95,7 +95,7 @@ pub fn skip(test: &str, why: impl Display) {
 // ---------------------------------------------------------------------------
 
 /// The engine binaries every Proton launch needs.
-pub const ENGINE: [&str; 3] = ["vfs-injector.exe", "vfs_shim_dll.dll", "vfs_payload.dll"];
+pub const ENGINE: [&str; 3] = vfs_proton::artifacts::LAUNCH;
 
 /// `target/<profile>` of the running test binary.
 pub fn profile_dir() -> PathBuf {
@@ -129,12 +129,12 @@ impl Artifacts {
 
     /// `LaunchOpts::shim_dll`. The injector is looked for beside it.
     pub fn shim_dll(&self) -> String {
-        self.path("vfs_shim_dll.dll").to_string_lossy().into_owned()
+        self.path(vfs_proton::artifacts::SHIM_DLL).to_string_lossy().into_owned()
     }
 
     /// `LaunchOpts::payload_dll`.
     pub fn payload_dll(&self) -> String {
-        self.path("vfs_payload.dll").to_string_lossy().into_owned()
+        self.path(vfs_proton::artifacts::PAYLOAD_DLL).to_string_lossy().into_owned()
     }
 }
 
