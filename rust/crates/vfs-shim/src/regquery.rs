@@ -62,6 +62,7 @@ use crate::regclient;
 use crate::regkeys::{
     self, KEY_ENUMERATE_SUB_KEYS, KEY_QUERY_VALUE, KeyHandle, KeyRef, Mode, Real,
 };
+use crate::sync::{CloseLock, lock_for_close};
 
 /// The rights a read of a real key needs on the private handle that replaces one lacking them.
 const READS: u32 = KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS;
@@ -633,7 +634,7 @@ pub fn forget(h: isize) {
     if ENUM_COUNT.load(Ordering::Relaxed) == 0 {
         return;
     }
-    if let Some(mut t) = regkeys::lock_for_close(&ENUMS) {
+    if let Some(mut t) = lock_for_close(&ENUMS, &CloseLock::REGISTRY) {
         if t.remove(&h).is_some() {
             ENUM_COUNT.store(t.len(), Ordering::Relaxed);
         }

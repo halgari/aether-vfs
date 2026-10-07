@@ -12,6 +12,17 @@ The per-handle tables (`DIR_TABLE`, `HANDLE_PATHS`, `IDENTITY_TABLE`, `PATH_TABL
 cleaned up in `close_hook_body` with `try_lock`, never `lock`. A blocking acquisition in the
 close path can hang the whole process.
 
+There is one policy for every table `NtClose` touches, the file handle tables and the registry
+tables (`SYNTH`, `PASS`, `NOT_OURS`, the enumeration and notification state):
+`sync::lock_for_close(&mutex, &CloseLock)`. It only ever `try_lock`s, a bounded number of times
+(a `yield_now` between two attempts that found the lock held), and then gives up and returns
+`None`; a poisoned lock is given up at once. It never blocks. The budget is the one thing that
+differs, in two named constants:
+
+- `CloseLock::FILE`: one attempt, silent. Every `NtClose` of every handle pays for it.
+- `CloseLock::REGISTRY`: up to 10,000 attempts, each give-up counted in `hookstats`
+  (`reg_close_lock_given_up`), because a lost registry record leaves a stale key handle behind.
+
 ### `close_hook_body`: `try_lock`, never `lock`
 
 From `hook/close.rs`.

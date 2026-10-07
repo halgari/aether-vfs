@@ -559,7 +559,7 @@ pub fn reg_unresolved_count() -> u64 {
 }
 
 /// Times a registry handle-table removal on the close path gave up waiting for its lock
-/// (`regkeys::lock_for_close`): each one left a record behind for a handle that was closed.
+/// (`sync::lock_for_close`): each one left a record behind for a handle that was closed.
 /// Counted whether or not stats are on.
 static REG_CLOSE_LOCK_GIVEN_UP: AtomicU64 = AtomicU64::new(0);
 

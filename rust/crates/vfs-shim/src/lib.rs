@@ -29,6 +29,7 @@ mod regkeys;
 mod regnotify;
 mod regquery;
 mod regwrite;
+mod sync;
 mod synth_file;
 mod synth_section;
 mod tramp;

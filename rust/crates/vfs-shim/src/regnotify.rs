@@ -63,6 +63,7 @@ use crate::ntdef::{
 };
 use crate::regclient;
 use crate::regkeys::{self, KEY_NOTIFY, Real};
+use crate::sync::{CloseLock, lock_for_close};
 
 /// How often the notifier asks the director (ruling R1).
 pub const POLL: Duration = Duration::from_millis(250);
@@ -493,7 +494,7 @@ pub fn cleanup(h: isize) {
         return;
     }
     let gone: Vec<Waiter> = {
-        let Some(mut s) = regkeys::lock_for_close(&STATE) else {
+        let Some(mut s) = lock_for_close(&STATE, &CloseLock::REGISTRY) else {
             return;
         };
         let mut gone = Vec::new();

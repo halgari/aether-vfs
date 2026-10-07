@@ -3,6 +3,7 @@
 
 use super::{DIR_TABLE, HANDLE_PATHS, IDENTITY_TABLE, PATH_TABLE, TRAMP_CLOSE, reg_real};
 use crate::ntdef::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
+use crate::sync::{CloseLock, lock_for_close};
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 /// Reclaim any tracking for a closing handle before the OS (possibly) reuses
@@ -54,23 +55,23 @@ pub(super) unsafe fn close_hook_body(handle: HANDLE) -> NTSTATUS {
     // `std::sync::Mutex` leaves it locked and not poisoned, and an exiting process
     // closes handles from the one thread left. Losing a reclamation is harmless: the
     // entry is keyed by a handle that is about to become invalid.
-    // See docs/shim-invariants.md, "Close-path locking".
+    // See `sync::lock_for_close` and docs/shim-invariants.md, "Close-path locking".
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLES);
-    if let Ok(mut table) = DIR_TABLE.try_lock() {
+    if let Some(mut table) = lock_for_close(&DIR_TABLE, &CloseLock::FILE) {
         table.remove(&(handle as isize));
     }
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_HANDLE_PATHS);
-    if let Ok(mut t) = HANDLE_PATHS.try_lock() {
+    if let Some(mut t) = lock_for_close(&HANDLE_PATHS, &CloseLock::FILE) {
         crate::breadcrumb::set_holder(crate::breadcrumb::holder::CLOSE_HOOK);
         t.remove(&(handle as isize));
         crate::breadcrumb::set_holder(crate::breadcrumb::holder::NOBODY);
     }
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_IDENTITY);
-    if let Ok(mut t) = IDENTITY_TABLE.try_lock() {
+    if let Some(mut t) = lock_for_close(&IDENTITY_TABLE, &CloseLock::FILE) {
         t.remove(&(handle as isize));
     }
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TABLE_PATH);
-    if let Ok(mut t) = PATH_TABLE.try_lock() {
+    if let Some(mut t) = lock_for_close(&PATH_TABLE, &CloseLock::FILE) {
         t.remove(&(handle as isize));
     }
     crate::breadcrumb::mark(crate::breadcrumb::mark_close::TRAMP);

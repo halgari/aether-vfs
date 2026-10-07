@@ -29,7 +29,7 @@ use crate::handle_tags::REG_TAG;
 use core::ffi::c_void;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
+use std::sync::{Mutex, OnceLock};
 
 use vfs_protocol::{ST_BAD_REQUEST, ST_EXISTS};
 use vfs_registry::Lookup;
@@ -51,6 +51,7 @@ use crate::ntdef::{
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_OBJECT_TYPE_MISMATCH,
     STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
+use crate::sync::{CloseLock, lock_for_close};
 
 /// Slot bits below the tag (shifted left by 2, so handles stay multiples of 4 as kernel handles
 /// are): 2^27 slots, reused once they wrap (a live handle's slot is skipped).
@@ -130,22 +131,6 @@ pub fn is_synthetic(h: isize) -> bool {
     h > 0 && (h as usize) >> 29 == REG_TAG >> 29
 }
 
-/// Lock a table for a removal on the close path. Never blocks for good: a thread killed while
-/// holding a `std::sync::Mutex` leaves it locked and not poisoned (see `close_hook_body`), so
-/// this spins a bounded number of times and then gives up. A record lost that way belongs to a
-/// handle that is going away.
-pub(crate) fn lock_for_close<T>(m: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
-    for _ in 0..10_000 {
-        match m.try_lock() {
-            Ok(g) => return Some(g),
-            Err(TryLockError::Poisoned(_)) => break,
-            Err(TryLockError::WouldBlock) => std::thread::yield_now(),
-        }
-    }
-    crate::hookstats::note_reg_close_lock_given_up();
-    None
-}
-
 /// Register a synthetic key handle and return its value.
 pub fn insert_synthetic(rec: SynthKey) -> Option<isize> {
     let mut t = SYNTH.lock().ok()?;
@@ -176,7 +161,7 @@ pub fn synthetic(h: isize) -> Option<SynthKey> {
 
 /// Remove a synthetic key handle's record (the caller closes its private real handle).
 fn remove_synthetic(h: isize) -> Option<SynthKey> {
-    let mut t = lock_for_close(&SYNTH)?;
+    let mut t = lock_for_close(&SYNTH, &CloseLock::REGISTRY)?;
     let k = t.remove(&h);
     crate::hookstats::note_reg_virtual_handles(t.len());
     k
@@ -199,7 +184,7 @@ pub fn tracked(h: isize) -> Option<KeyRec> {
 /// The record goes *before* the real close, because the handle value may be reused the moment
 /// that returns; it comes back for [`after_real_close`] to restore if the close fails.
 fn untrack(h: isize) -> Option<KeyRec> {
-    let rec = lock_for_close(&PASS).and_then(|mut t| {
+    let rec = lock_for_close(&PASS, &CloseLock::REGISTRY).and_then(|mut t| {
         let r = t.remove(&h);
         if r.is_some() {
             crate::hookstats::note_reg_passthrough_handles(t.len());
@@ -517,7 +502,7 @@ fn forget_not_ours(h: isize) {
     if NOT_OURS_COUNT.load(Ordering::Relaxed) == 0 {
         return;
     }
-    if let Some(mut t) = lock_for_close(&NOT_OURS) {
+    if let Some(mut t) = lock_for_close(&NOT_OURS, &CloseLock::REGISTRY) {
         t.remove(&h);
         NOT_OURS_COUNT.store(t.len(), Ordering::Relaxed);
     }
