@@ -134,6 +134,30 @@ pub use session::{LaunchHandle, LaunchStopper};
 /// How a Proton launch sets up its Wine prefix — see [`Session::set_prefix_init`].
 #[cfg(unix)]
 pub use vfs_proton::prefix::{PrefixInit, PROTON_GRAPHICS_OVERRIDES};
+/// The pieces of the Proton (Wine) delivery a host names besides a
+/// [`Session`]: where aether-vfs keeps runtimes and prefixes, which runtime a
+/// launch would use, a prefix's directory and lock, the NVAPI status, and the
+/// Windows build artefacts' names. Re-exported from `vfs-proton`, so a host
+/// names only this crate (see the crate docs). Unix only, as the launch is.
+#[cfg(unix)]
+pub mod proton {
+    pub use vfs_proton::layout::Root;
+    pub use vfs_proton::prefix::{prefix_dir, Prefix, PrefixInit, PrefixLock};
+
+    /// The names of the Windows binaries `bin/build-windows` produces and a
+    /// Proton launch needs ([`LaunchOpts`](crate::LaunchOpts)).
+    pub use vfs_proton::artifacts;
+
+    /// What NVAPI and DLSS need and whether this machine has it.
+    pub mod nvapi {
+        pub use vfs_proton::nvapi::{status, Capability, GpuModel, NvapiStatus};
+    }
+
+    /// GE-Proton runtimes under a `Root`.
+    pub mod runtime {
+        pub use vfs_proton::runtime::{cmp_tags, installed_dirs, newest_installed, verify_ge};
+    }
+}
 /// What became of Proton's Steam helper in a launch — see
 /// [`LaunchHandle::steam_helper_status`].
 #[cfg(unix)]
