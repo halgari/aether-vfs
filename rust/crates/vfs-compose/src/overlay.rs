@@ -601,22 +601,10 @@ impl Provider for OverlayProvider {
                     if e.name.starts_with(".cu.") {
                         continue;
                     }
-                    // The upper's entry is the live one — its size, its time,
-                    // its kind — but a name the base also has keeps the
-                    // base's spelling. The upper's spelling of such a name is
-                    // an accident of whoever wrote there first (a directory
-                    // created as a parent is spelled as that caller's path
-                    // was, which from the shim is lower case), and letting it
-                    // win renamed `Data` to `data` for every caller the first
-                    // time anything was written beneath it.
-                    match map.entry(fold(&e.name)) {
-                        std::collections::hash_map::Entry::Occupied(mut base) => {
-                            base.get_mut().stat = e.stat;
-                        }
-                        std::collections::hash_map::Entry::Vacant(free) => {
-                            free.insert(e);
-                        }
-                    }
+                    // The upper's entry is the live one, but a name the base
+                    // also has keeps the base's spelling (see
+                    // `merge_upper_entry`).
+                    crate::merge_upper_entry(&mut map, fold(&e.name), e);
                 }
             }
             Err(e) if e == not_found() => {}
@@ -793,10 +781,7 @@ impl Provider for OverlayProvider {
         if p.rel.is_empty() || self.hidden_by_whiteout(p)? {
             return Ok(None);
         }
-        if let Some(name) = crate::stored_name(self.base.as_ref(), p)? {
-            return Ok(Some(name));
-        }
-        crate::stored_name(self.upper.as_ref(), p)
+        crate::merge_stored_name(self.base.as_ref(), self.upper.as_ref(), p)
     }
 }
 

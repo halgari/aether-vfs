@@ -41,6 +41,45 @@ pub fn sorted_by_folded_name(by_folded: HashMap<String, DirEntry>) -> Vec<DirEnt
     keyed.into_iter().map(|(_, e)| e).collect()
 }
 
+/// The merge rule for a listing with a lower and an upper side, shared by
+/// `LayeredProvider` and `OverlayProvider`: the upper's entry is the live one
+/// (its size, time and kind), but a name the lower side also has keeps the
+/// lower side's spelling. The upper's spelling of such a name is an accident of
+/// whoever wrote there first, and letting it win renames `Data` to `data` for
+/// every caller.
+///
+/// `by_folded` holds the lower side's entries keyed by `vfs_core::fold`;
+/// `key` is the fold of `upper.name`. A name only the upper has is added as
+/// it is.
+pub(crate) fn merge_upper_entry(
+    by_folded: &mut HashMap<String, DirEntry>,
+    key: String,
+    upper: DirEntry,
+) {
+    match by_folded.entry(key) {
+        std::collections::hash_map::Entry::Occupied(mut lower) => {
+            lower.get_mut().stat = upper.stat;
+        }
+        std::collections::hash_map::Entry::Vacant(free) => {
+            free.insert(upper);
+        }
+    }
+}
+
+/// The single-name form of [`merge_upper_entry`]: the spelling a merged
+/// listing of `lower` and `upper` shows for the last component of `p` — the
+/// lower's if it has the name, the upper's otherwise.
+pub(crate) fn merge_stored_name(
+    lower: &dyn Provider,
+    upper: &dyn Provider,
+    p: vfs_provider::VPath,
+) -> Result<Option<String>, i32> {
+    if let Some(name) = stored_name(lower, p)? {
+        return Ok(Some(name));
+    }
+    stored_name(upper, p)
+}
+
 /// The stored spelling of the last component of `p` in `provider`, or `None`
 /// if it has no such entry: [`Provider::stored_name`], and for a provider
 /// that does not implement it, the matching name from a listing of the
