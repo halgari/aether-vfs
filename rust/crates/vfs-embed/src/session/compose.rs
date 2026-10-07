@@ -21,8 +21,7 @@ use super::Session;
 /// `MountGraph` nor `stack_layers` can express: an overlay upper is what
 /// makes a write to content only a read-only source holds **copy up** rather
 /// than fail. A surface that composes its own graph instead gets a session
-/// that reads correctly and cannot be written to, which is how the daemon
-/// surface lost copy-on-write while the harness kept it (gate 4, Task 6b).
+/// that reads correctly and cannot be written to.
 ///
 /// `ST_BAD_REQUEST` if the upper is not `Access::ReadWrite`, if any mount
 /// declares `Access::SeqRead` (see [`reject_sequential`]), or if a mount prefix

@@ -1,4 +1,4 @@
-//! **The increment's definition of done**: the public API — `Session::serve()`
+//! **The Proton path end to end**: the public API — `Session::serve()`
 //! then `Session::launch()` — starts a real Windows executable under
 //! GE-Proton on Linux, with the shim injected, and the child reads a file that
 //! exists **only** inside this native Linux Director's provider.
@@ -32,9 +32,8 @@
 //! `C:\vfs-session\root` inside the child, whatever the host path is, and the
 //! virtual file is at `C:\vfs-session\root\data\hello.txt`. That is a private
 //! constant of `Session` (`WINE_LINK_DIR`), not public API; there is no
-//! accessor for it yet, and inventing one is a change to a shipped struct that
-//! this increment does not make. If the two ever drift, this test fails with
-//! the fixture reporting the path it could not read, which names the drift.
+//! accessor for it. If the two ever drift, this test fails with the fixture
+//! reporting the path it could not read, which names the drift.
 #![cfg(unix)]
 
 mod support;
@@ -76,7 +75,7 @@ fn tmp(name: &str) -> PathBuf {
 // The run
 // ---------------------------------------------------------------------------
 
-/// **The whole increment.** `Session::serve()` + `Session::launch()` start a
+/// **The whole path.** `Session::serve()` + `Session::launch()` start a
 /// Windows executable under GE-Proton, the injected shim routes its
 /// `NtCreateFile`/`NtReadFile` back over a file-backed ring to this native
 /// Linux Director, and the file it reads exists on no filesystem the Wine
@@ -117,11 +116,10 @@ fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider(
     std::fs::create_dir_all(content.join("data")).unwrap();
     std::fs::write(content.join("data").join("hello.txt"), [FILL; LEN]).unwrap();
 
-    // The image must be a **real file** under the managed root: `CreateProcess`
-    // inside Wine reads it before any hook of ours exists in the child, and
-    // staging a graph-only image is not wired to the Proton path (`launch`
-    // refuses it by name). So the fixture is copied in, and the *data* is what
-    // stays virtual.
+    // The image is a **real file** under the managed root, not staged out of
+    // the graph (`launch` stages a graph-only image on this path too): this
+    // test is about the *data* going over the ring, so the fixture is copied in
+    // and the data is what stays virtual.
     let image = root.join("fixture.exe");
     std::fs::copy(art.path("vfs-fixture-read.exe"), &image)
         .expect("copy the fixture into the root");

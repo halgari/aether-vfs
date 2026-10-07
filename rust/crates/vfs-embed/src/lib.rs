@@ -1,8 +1,9 @@
 //! **The public embeddable API.** Session lifecycle, roots, composition,
 //! launch — design spec §4.
 //!
-//! Everything above this crate is a *host*: `vfs.exe` and its daemon, the Node
-//! binding, the Python binding after it. Everything below it is the engine:
+//! Everything above this crate is a *host*: `vfs.exe` and its daemon, or any
+//! program that embeds a session (a language binding, a launcher). Everything
+//! below it is the engine:
 //! the [`Director`] kernel, the provider contract, and the composition
 //! primitives. A host is expected to name **only this crate**; if a host has
 //! to `use vfs_director::…` or `use vfs_directord::…` to get something done,
@@ -46,8 +47,8 @@
 //! the ring the injected shim talks over, and the launch. It does not own a
 //! *table* of sessions, a control plane, or a config file format. The daemon
 //! in `vfs-directord` keeps those, because they are properties of that
-//! particular host rather than of embedding — a Node host addresses its
-//! sessions with JavaScript object references, not with `"s1"` strings over
+//! particular host rather than of embedding — an embedding host addresses its
+//! sessions with its own object references, not with `"s1"` strings over
 //! gRPC, and composes its graph from code rather than from TOML (spec §6:
 //! "Config is a serialization of the graph, not the other way round").
 //!
@@ -82,20 +83,21 @@
 //!
 //! ## What a host still has to build for itself
 //!
-//! Written down because the alternative is each new binding rediscovering it.
+//! Written down because the alternative is each new host rediscovering it.
 //!
 //! * **Locate its own `vfs_shim_dll.dll` / `vfs_payload.dll`.** Left unset,
 //!   [`LaunchOpts::shim_dll`] searches next to `std::env::current_exe()`,
-//!   which for a Node addon is `node.exe` and for a Python extension is
-//!   `python.exe` — neither anywhere near the shipped DLLs. A binding must
-//!   resolve both from its own module path and set them; they are effectively
-//!   mandatory outside this workspace's own binaries.
+//!   which for any host that is not one of this workspace's binaries (a
+//!   language runtime loading the host as a module, say) is nowhere near the
+//!   shipped DLLs. Such a host must resolve both from its own module path and
+//!   set them; they are effectively mandatory outside this workspace's own
+//!   binaries.
 //! * **Keep its threads away from `std::env` — Windows only.** There,
 //!   `CreateProcessW` inherits by null environment, so [`Session::serve`] and
 //!   [`Session::launch`] write process-global `VFS_*` variables under a lock.
 //!   The lock orders *our* writers and cannot order a host's:
-//!   `std::env::set_var` is unsound in a multi-threaded process, and a Node
-//!   or Python host is multi-threaded by construction. On unix `Session::serve`
+//!   `std::env::set_var` is unsound in a multi-threaded process, and an
+//!   embedding host is multi-threaded by construction. On unix `Session::serve`
 //!   and `Session::launch` never write process env: a Wine child's
 //!   environment block is built explicitly by `vfs_proton::launch::launch_env`.
 //! * **Its own [`Storage`], if it wants caching or persistent layers.** A
@@ -378,11 +380,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // Drives the live shared-memory ring end to end, so it is Windows-only:
-    // `Session::serve` has no non-Windows body yet and `Session::ipc` (used
-    // below) does not exist there at all — increment 2 of
-    // docs/superpowers/specs/2026-09-01-wine-hosted-shim-design.md.
-    #[cfg(windows)]
+    // Drives the live ring end to end through `Session::ipc`'s in-process
+    // client: a named section on Windows, the file-backed ring on unix.
     #[test]
     fn session_serve_and_ring_read() {
         use vfs_protocol::{
@@ -390,9 +389,8 @@ mod tests {
             ReadReq, OPEN_READ, OP_OPEN, OP_READ, ST_OK,
         };
 
-        let dir = std::env::temp_dir().join(format!("vfs-sess-ring-{}", std::process::id()));
-        let state = std::env::temp_dir().join(format!("vfs-sess-st-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = crate::test_scratch::scratch_created("sess-ring");
+        let state = crate::test_scratch::scratch_dir("sess-st");
         std::fs::write(dir.join("payload.bin"), b"ring-bytes").unwrap();
 
         let mut s = Session::new();

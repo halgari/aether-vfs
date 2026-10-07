@@ -44,15 +44,14 @@ pub struct LaunchOpts {
     ///
     /// Left `None`, they are searched for **next to `std::env::current_exe()`**
     /// — and that is only the right answer when the host process *is* one of
-    /// this workspace's binaries. For a language binding it is not: inside a
-    /// Node addon `current_exe()` is `node.exe`, wherever the user's Node
-    /// happens to be installed, and inside a Python extension it is
-    /// `python.exe`. The DLLs live beside the addon, which nothing here can
-    /// find from the executable.
+    /// this workspace's binaries. For a host loaded into another program
+    /// (a language runtime, say) it is not: `current_exe()` is that program,
+    /// wherever it happens to be installed, and the DLLs live beside the host
+    /// module, which nothing here can find from the executable.
     ///
-    /// **So for any embedding host these are mandatory, not optional.** A
-    /// binding should resolve them from its own module path (Node:
-    /// `__dirname`) and set both. The symptom otherwise is
+    /// **So for any embedding host these are mandatory, not optional.** It
+    /// should resolve them from its own module path and set both. The symptom
+    /// otherwise is
     /// "`vfs_shim_dll.dll` not found" from a host that shipped the DLL, with
     /// nothing pointing at why the search looked where it did.
     ///
@@ -76,7 +75,7 @@ pub struct LaunchOpts {
     /// **Windows: not child-only.** `CreateProcessW` is called with a null environment
     /// block — inheritance *is* the mechanism — so [`Session::launch`] writes
     /// each one into **this process's** environment with `std::env::set_var`,
-    /// launches, and restores the previous value. [`LAUNCH_ENV_LOCK`] serializes
+    /// launches, and restores the previous value. `LAUNCH_ENV_LOCK` serializes
     /// that against every other env write this crate performs, so two sessions
     /// cannot interleave; it cannot serialize a host's *own* threads, and
     /// `set_var` in a multi-threaded process races anything else reading the
@@ -120,13 +119,11 @@ pub struct LaunchOpts {
 impl Default for LaunchOpts {
     fn default() -> Self {
         LaunchOpts {
-            // Deliberately empty rather than a plausible-looking game exe.
-            // This used to default to `"SkyrimSE.exe"`, which is both
-            // scenario-specific in a general API and the exact relative-image
-            // case that cannot work (see the field's doc): a host that wrote
-            // `..Default::default()` and forgot `image` got a launch attempt
-            // for a file nobody named. `launch` refuses an empty image by
-            // name instead.
+            // Deliberately empty rather than a plausible-looking game exe: a
+            // default image is scenario-specific in a general API, and a host
+            // that wrote `..Default::default()` and forgot `image` would get a
+            // launch attempt for a file nobody named. `launch` refuses an
+            // empty image by name instead.
             image: String::new(),
             args: Vec::new(),
             wait: true,

@@ -65,9 +65,8 @@ pub struct Session {
     /// convenience, and `vfs-directord`'s `SessionRegistry` (which drives the
     /// multi-root gRPC/TOML surface) both land here. Composing anywhere else
     /// — calling `kernel().mount` with a hand-built graph — silently drops
-    /// whatever the *other* half of the composition contributed, which is
-    /// exactly how the daemon surface lost copy-on-write while the harness
-    /// kept it (gate 4, Task 6b).
+    /// whatever the *other* half of the composition contributed (copy-on-write,
+    /// in practice).
     roots: Mutex<BTreeMap<u32, RootComposition>>,
     /// The session's roots **beyond root 0**, as declared — see
     /// [`Session::declare_root`]. On Windows each is the host directory the
@@ -190,7 +189,7 @@ impl Session {
     /// (e.g. a `DiskProvider`, so the director sees content the shim's
     /// overlay has written — see `vfs-directord/src/bin/skyrim-live.rs`)
     /// must mount exactly this path, not [`Session::set_overlay`]'s bare
-    /// path: the shim's overlay is root-scoped on disk (gate 4, Task 2), so
+    /// path: the shim's overlay is root-scoped on disk, so
     /// mounting the bare overlay directory would show nothing the overlay
     /// has actually written, and any writer/reader pair that disagrees on
     /// this path silently desyncs.

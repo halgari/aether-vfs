@@ -1,12 +1,12 @@
 //! **Copy-on-write over read-only layered content**, in the mount shape a
 //! live session actually builds.
 //!
-//! Gate 4 Task 5 sealed the shim's write fall-through: a write the director
-//! will not serve now fails instead of quietly landing in a shim-local
-//! overlay. That exposed a regression nothing in the suite covered, because
-//! nothing in the suite composed the production shape.
+//! The shim's write fall-through is sealed: a write the director will not serve
+//! fails instead of quietly landing in a shim-local overlay. So a composition
+//! that cannot copy up is a live failure, and the suite has to compose the
+//! production shape to see it.
 //!
-//! `skyrim-live` mounted its writable `overrides` directory as one more
+//! The failure mode: mounting a writable `overrides` directory as one more
 //! *sibling* layer in the same `MountGraph` as the read-only zip. A
 //! `MountGraph` can route a write to whichever mount will take it; it cannot
 //! seed a destination from a lower layer first. So an in-place edit of zip
@@ -313,8 +313,8 @@ fn a_write_open_of_a_layered_directory_does_not_create_a_file_over_it() {
 /// …and if such a file gets into the write layer by any other route, it must
 /// cost the caller that one entry — not the whole directory's contents.
 ///
-/// `OverlayProvider::readdir` used to propagate the upper's `not_a_dir`,
-/// where `MountGraph` tolerated it. For a game's `Data` directory that is the
+/// `OverlayProvider::readdir` must not propagate the upper's `not_a_dir`,
+/// as `MountGraph` does not. For a game's `Data` directory that is the
 /// difference between "one stray file is invisible" and "the game sees no
 /// content at all", which is what turns a narrow bug into a broad one.
 #[test]

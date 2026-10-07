@@ -1020,13 +1020,13 @@ fn join_wine(base: &str, rel: &Path) -> Result<String, String> {
 /// `vfs-injector.exe`, `vfs_shim_dll.dll` and `vfs_payload.dll` are Windows
 /// targets, cross-built separately from the Linux host (`bin/build-windows`,
 /// which copies them beside the Linux binaries) — so this resolves what is
-/// already there rather than producing anything, and says so in the failure. [`LaunchOpts::shim_dll`] / [`LaunchOpts::payload_dll`]
-/// win when set; the documented default location is the directory holding
-/// `shim_dll` if only that is set, else `VFS_WINDOWS_ARTIFACTS`, else the
-/// directory holding `current_exe()`. The injector has no `LaunchOpts` field of its own (adding
-/// one is a change to a public struct, which this increment does not make), so
-/// that same directory is where it is looked for — the one `cargo build` puts
-/// all three in.
+/// already there rather than producing anything, and says so in the failure.
+/// [`LaunchOpts::shim_dll`] / [`LaunchOpts::payload_dll`] win when set; the
+/// documented default location is the directory holding `shim_dll` if only
+/// that is set, else `VFS_WINDOWS_ARTIFACTS`, else the
+/// directory holding `current_exe()`. The injector has no `LaunchOpts` field of
+/// its own, so that same directory is where it is looked for — the one
+/// `cargo build` puts all three in.
 ///
 /// All three are checked before any of them is used, and every missing one is
 /// listed: a launch that reported them one at a time would cost a Wine

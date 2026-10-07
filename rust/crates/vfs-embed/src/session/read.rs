@@ -47,11 +47,10 @@ impl Session {
     /// List a directory in `root`'s graph, host-side.
     ///
     /// The companion to [`Session::read_file_at`], and the reason it is here
-    /// rather than in each host is that **every host was reaching past the seam
-    /// for it**: the Node binding called `session.kernel().readdir(...)` and
-    /// `vfs-launch` called `session.kernel()` four times for exactly these two
-    /// questions. This crate's own doc says "if a host has to reach past this
-    /// crate, the fix belongs here" — so it does.
+    /// rather than in each host is that a host should not have to reach past
+    /// the seam for it: listing and stat-ing a graph through `session.kernel()`
+    /// is the same two questions every host asks. This crate's own doc says
+    /// "if a host has to reach past this crate, the fix belongs here".
     ///
     /// It is not a convenience. Two of spec §6's rules are statements about
     /// `readdir` and nothing else can check them from a host: `layered`

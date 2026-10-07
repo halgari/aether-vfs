@@ -22,9 +22,9 @@ use super::{check_image, LaunchOpts, Session};
 /// The lock is not only about interleaving. `std::env::set_var` is **unsound
 /// in a multi-threaded process** — it mutates a global the C runtime may be
 /// reading concurrently, which is why Rust 2024 marks it `unsafe` — and the
-/// hosts this crate exists for are multi-threaded by construction: a Node
-/// addon has libuv's threadpool and V8 alongside it, an Electron main process
-/// more still. Serializing our own writers is the floor, not the fix; the fix
+/// hosts this crate exists for are multi-threaded by construction: a language
+/// runtime's thread pool, a GUI main process. Serializing our own writers is
+/// the floor, not the fix; the fix
 /// is to stop touching process env at all and hand `CreateProcessW` an
 /// explicit environment block built for the child (see [`Session::launch`]).
 ///
@@ -45,10 +45,10 @@ impl Session {
     ///
     /// No `id != 0` filter: [`Session::declare_root`] routes id 0 to
     /// `virtual_root`, which `apply_env_roots` is handed separately, so
-    /// nothing here can be root 0. The filter that used to live here was the
-    /// mechanism by which a `declare_root(0, …)` was silently discarded —
-    /// dropping it keeps the invariant in one place, where it is enforced
-    /// rather than compensated for.
+    /// nothing here can be root 0; filtering id 0 here would silently discard a
+    /// `declare_root(0, …)`, so the invariant is enforced in one place instead
+    /// of compensated for.
+    ///
     /// Windows-only: its one caller is `serve`'s `apply_env_roots`, which is
     /// itself `#[cfg(windows)]` — it publishes the named-section handshake
     /// (`VFS_RING_SECTION` plus the two event names). The file-backed ring has
@@ -168,8 +168,8 @@ impl Session {
     /// `opts.env` entries, then restore them. [`LAUNCH_ENV_LOCK`] serializes
     /// that, which is enough for two sessions in one host and **not** enough
     /// for a host with unrelated threads: `std::env::set_var` races anything
-    /// else reading the environment, and a Node or Python binding always has
-    /// such threads.
+    /// else reading the environment, and a language binding always has such
+    /// threads.
     ///
     /// Removing the hazard means never writing process env: build the child's
     /// environment block explicitly and pass it to `CreateProcessW`. That is a
