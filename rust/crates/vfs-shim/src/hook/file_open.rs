@@ -1,4 +1,5 @@
 //! `NtCreateFile` and `NtOpenFile`, and the director round trip that serves an under-root open.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
     PATH_TABLE, ShimIoGuard, TRAMP_CREATE, TRAMP_OPEN, allow_disk_fallthrough, decision_for,
@@ -304,7 +305,8 @@ unsafe fn try_fuse_create(
     // The tracer stays wired for the live acceptance run — it is off unless
     // `VFS_DRM_EXE_LOG` names a file, and it now sees the opens it never could
     // before, since these names finally arrive here.
-    drm_exe_trace(&path, fuse_root_directory(oa), write);
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    drm_exe_trace(&path, unsafe { fuse_root_directory(oa) }, write);
 
     // Every under-root open — read *and* write — goes through the
     // director (zip / composed / writable layer), and every answer it gives,
@@ -408,21 +410,27 @@ unsafe fn try_fuse_create(
                 crate::fuse_synth::set_cache(h, cache);
             }
             if !file_handle.is_null() {
-                *file_handle = h as HANDLE;
+                // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                unsafe {
+                    *file_handle = h as HANDLE;
+                }
             }
             let info = if write {
                 disposition_information(disposition, existed_before)
             } else {
                 crate::ntdef::FILE_OPENED
             };
-            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, info);
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, info) };
             // Direct PATH_TABLE insert with absolute path (path_of may be relative OA).
             if let Ok(mut t) = PATH_TABLE.lock() {
                 t.insert(h, path.clone());
             }
-            record_path(file_handle, Some(&path), STATUS_SUCCESS);
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { record_path(file_handle, Some(&path), STATUS_SUCCESS) };
             if resp.is_dir {
-                tag_under_root(file_handle, Some(&path), STATUS_SUCCESS);
+                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                unsafe { tag_under_root(file_handle, Some(&path), STATUS_SUCCESS) };
             }
             director_open_trace(&path, resp.size);
             Some(STATUS_SUCCESS)
@@ -674,11 +682,17 @@ unsafe fn try_fuse_mkdir(
             // reads are path-based (qattr/getattr), not through this handle.
             let h = crate::fuse_synth::open_fuse(0, 0, true)?;
             if !file_handle.is_null() {
-                *file_handle = h as HANDLE;
+                // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                unsafe {
+                    *file_handle = h as HANDLE;
+                }
             }
-            crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, FILE_CREATED);
-            record_path(file_handle, Some(path), STATUS_SUCCESS);
-            tag_under_root(file_handle, Some(path), STATUS_SUCCESS);
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, FILE_CREATED) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { record_path(file_handle, Some(path), STATUS_SUCCESS) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { tag_under_root(file_handle, Some(path), STATUS_SUCCESS) };
             Some(STATUS_SUCCESS)
         }
         // Parent missing → name-not-found (do not fall through to a real on-disk
@@ -697,11 +711,19 @@ unsafe fn try_fuse_mkdir(
                 } else {
                     let h = crate::fuse_synth::open_fuse(0, 0, true)?;
                     if !file_handle.is_null() {
-                        *file_handle = h as HANDLE;
+                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                        unsafe {
+                            *file_handle = h as HANDLE;
+                        }
                     }
-                    crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, crate::ntdef::FILE_OPENED);
-                    record_path(file_handle, Some(path), STATUS_SUCCESS);
-                    tag_under_root(file_handle, Some(path), STATUS_SUCCESS);
+                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                    unsafe {
+                        crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, crate::ntdef::FILE_OPENED)
+                    };
+                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                    unsafe { record_path(file_handle, Some(path), STATUS_SUCCESS) };
+                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                    unsafe { tag_under_root(file_handle, Some(path), STATUS_SUCCESS) };
                     Some(STATUS_SUCCESS)
                 }
             }
@@ -735,24 +757,28 @@ pub(super) unsafe fn create_hook_body(
     };
     // Re-entrant host probes (is_file / log append) must hit the real ntdll.
     if in_hook_reenter() {
-        return tramp(
-            file_handle,
-            access,
-            oa,
-            iosb,
-            alloc,
-            attrs,
-            share,
-            disp,
-            opts,
-            ea,
-            ealen,
-        );
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe {
+            tramp(
+                file_handle,
+                access,
+                oa,
+                iosb,
+                alloc,
+                attrs,
+                share,
+                disp,
+                opts,
+                ea,
+                ealen,
+            )
+        };
     }
     // Decode once for the whole call and thread the result through every
     // function below that used to call `path_of(oa)` independently — see
     // `tag_under_root`'s doc comment for the cost argument.
-    let decoded = match path_of_tracked(oa) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let decoded = match unsafe { path_of_tracked(oa) } {
         Ok(d) => d,
         Err(st) => return st,
     };
@@ -770,7 +796,8 @@ pub(super) unsafe fn create_hook_body(
     // Directory create under the managed root → ring OP_MKDIR (must precede the
     // generic file open below, which would otherwise create a FILE named as the
     // directory via the write-create path).
-    if let Some(st) = try_fuse_mkdir(file_handle, path, iosb, opts, disp) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    if let Some(st) = unsafe { try_fuse_mkdir(file_handle, path, iosb, opts, disp) } {
         return st;
     }
     // Prefer director FUSE for managed-root content (no in-shim zipserve).
@@ -778,7 +805,8 @@ pub(super) unsafe fn create_hook_body(
         Some(p) => crate::hookstats::note_passthrough(p),
         // An open we cannot decode is an open we cannot serve. If the masters
         // are hiding anywhere, it is here.
-        None => crate::hookstats::note_undecodable(object_name_str(oa).as_deref()),
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        None => crate::hookstats::note_undecodable(unsafe { object_name_str(oa) }.as_deref()),
     }
     // Set by `try_fuse_create` when it already recorded an outcome (the write
     // fallback — the DRM exception was the other one and is gone) for this
@@ -786,17 +814,20 @@ pub(super) unsafe fn create_hook_body(
     // that must suppress the `decision_for`-based recording that always runs
     // next.
     let mut outcome_recorded = false;
-    if let Some(st) = try_fuse_create(
-        file_handle,
-        oa,
-        path,
-        iosb,
-        is_write_open(access, disp),
-        disp,
-        open_create_flags(disp),
-        is_append_only(access),
-        &mut outcome_recorded,
-    ) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    if let Some(st) = unsafe {
+        try_fuse_create(
+            file_handle,
+            oa,
+            path,
+            iosb,
+            is_write_open(access, disp),
+            disp,
+            open_create_flags(disp),
+            is_append_only(access),
+            &mut outcome_recorded,
+        )
+    } {
         if crate::hookstats::enabled() {
             if let Some(p) = path {
                 crate::hookstats::note_trace("open", p, if st >= 0 { "ok" } else { "FAIL" });
@@ -819,25 +850,31 @@ pub(super) unsafe fn create_hook_body(
                 outcome_recorded,
                 crate::hookstats::OpenOutcome::FellThroughRedirect,
             );
-            let new_oa = match redirected_oa(oa, &target_nt) {
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            let new_oa = match unsafe { redirected_oa(oa, &target_nt) } {
                 Ok(o) => o,
                 Err(st) => return st,
             };
-            let status = tramp(
-                file_handle,
-                access,
-                new_oa.as_ptr(),
-                iosb,
-                alloc,
-                attrs,
-                share,
-                disp,
-                opts,
-                ea,
-                ealen,
-            );
-            record_identity(file_handle, path, status);
-            record_path(file_handle, path, status);
+            // SAFETY: the original NT function, called with valid NT arguments.
+            let status = unsafe {
+                tramp(
+                    file_handle,
+                    access,
+                    new_oa.as_ptr(),
+                    iosb,
+                    alloc,
+                    attrs,
+                    share,
+                    disp,
+                    opts,
+                    ea,
+                    ealen,
+                )
+            };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { record_identity(file_handle, path, status) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { record_path(file_handle, path, status) };
             status
         }
         Some(Decision::Deny) => {
@@ -856,44 +893,55 @@ pub(super) unsafe fn create_hook_body(
             // rebuild an absolute OA from the decoded path instead. The DRM
             // exceptions were this arm's reason to exist and are gone (gate 5,
             // Task 4); see `tramp_create_abs` for what still reaches it.
-            if fuse_root_directory(oa) {
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            if unsafe { fuse_root_directory(oa) } {
                 if let Some(path) = path {
-                    let status = tramp_create_abs(
-                        tramp,
-                        file_handle,
-                        access,
-                        oa,
-                        iosb,
-                        alloc,
-                        attrs,
-                        share,
-                        disp,
-                        opts,
-                        ea,
-                        ealen,
-                        path,
-                    );
-                    tag_under_root(file_handle, Some(path), status);
-                    record_path(file_handle, Some(path), status);
+                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                    let status = unsafe {
+                        tramp_create_abs(
+                            tramp,
+                            file_handle,
+                            access,
+                            oa,
+                            iosb,
+                            alloc,
+                            attrs,
+                            share,
+                            disp,
+                            opts,
+                            ea,
+                            ealen,
+                            path,
+                        )
+                    };
+                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                    unsafe { tag_under_root(file_handle, Some(path), status) };
+                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                    unsafe { record_path(file_handle, Some(path), status) };
                     return status;
                 }
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
-            let status = tramp(
-                file_handle,
-                access,
-                oa,
-                iosb,
-                alloc,
-                attrs,
-                share,
-                disp,
-                opts,
-                ea,
-                ealen,
-            );
-            tag_under_root(file_handle, path, status);
-            record_path(file_handle, path, status);
+            // SAFETY: the original NT function, called with valid NT arguments.
+            let status = unsafe {
+                tramp(
+                    file_handle,
+                    access,
+                    oa,
+                    iosb,
+                    alloc,
+                    attrs,
+                    share,
+                    disp,
+                    opts,
+                    ea,
+                    ealen,
+                )
+            };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { tag_under_root(file_handle, path, status) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { record_path(file_handle, path, status) };
             status
         }
     }
@@ -904,7 +952,8 @@ pub(super) unsafe fn redirected_oa(
     oa: *const ObjectAttributes,
     nt: &str,
 ) -> Result<Box<OwnedOa>, NTSTATUS> {
-    Ok(OwnedOa::absolute(Some(&*oa), nt, false)?.with_length((*oa).length))
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    unsafe { Ok(OwnedOa::absolute(Some(&*oa), nt, false)?.with_length((*oa).length)) }
 }
 
 /// Open via trampoline with an absolute NT path and **null** RootDirectory.
@@ -937,23 +986,27 @@ unsafe fn tramp_create_abs(
     abs_path: &str,
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
-    let new_oa = match redirected_oa(oa, &nt) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let new_oa = match unsafe { redirected_oa(oa, &nt) } {
         Ok(o) => o,
         Err(st) => return st,
     };
-    tramp(
-        file_handle,
-        access,
-        new_oa.as_ptr(),
-        iosb,
-        alloc,
-        attrs,
-        share,
-        disp,
-        opts,
-        ea,
-        ealen,
-    )
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe {
+        tramp(
+            file_handle,
+            access,
+            new_oa.as_ptr(),
+            iosb,
+            alloc,
+            attrs,
+            share,
+            disp,
+            opts,
+            ea,
+            ealen,
+        )
+    }
 }
 
 /// Arity mirrors `NtOpenFile` exactly; it is not ours to reduce.
@@ -969,11 +1022,13 @@ unsafe fn tramp_open_abs(
     abs_path: &str,
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
-    let new_oa = match redirected_oa(oa, &nt) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let new_oa = match unsafe { redirected_oa(oa, &nt) } {
         Ok(o) => o,
         Err(st) => return st,
     };
-    tramp(file_handle, access, new_oa.as_ptr(), iosb, share, opts)
+    // SAFETY: the original NT function, called with valid NT arguments.
+    unsafe { tramp(file_handle, access, new_oa.as_ptr(), iosb, share, opts) }
 }
 
 /// `NtOpenFile` hook. Mirrors `create_hook` (redirect / deny / pass-through +
@@ -993,11 +1048,13 @@ pub(super) unsafe fn open_hook_body(
         None => return STATUS_UNSUCCESSFUL,
     };
     if in_hook_reenter() {
-        return tramp(file_handle, access, oa, iosb, share, opts);
+        // SAFETY: the original NT function, called with valid NT arguments.
+        return unsafe { tramp(file_handle, access, oa, iosb, share, opts) };
     }
     // Decode once for the whole call — see `create_hook` and `tag_under_root`'s
     // doc comment for why, and for what the `UncachedScope` guard is for.
-    let decoded = match path_of_tracked(oa) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let decoded = match unsafe { path_of_tracked(oa) } {
         Ok(d) => d,
         Err(st) => return st,
     };
@@ -1007,7 +1064,8 @@ pub(super) unsafe fn open_hook_body(
 
     match path {
         Some(p) => crate::hookstats::note_passthrough(p),
-        None => crate::hookstats::note_undecodable(object_name_str(oa).as_deref()),
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        None => crate::hookstats::note_undecodable(unsafe { object_name_str(oa) }.as_deref()),
     }
     // Set by `try_fuse_create` when it already recorded an outcome (the write
     // fallback — the DRM exception was the other one and is gone) for this
@@ -1019,17 +1077,20 @@ pub(super) unsafe fn open_hook_body(
     // create/overwrite set and would misclassify every open as a write.
     // create_flags is always 0 here: an open-only call never creates,
     // truncates, or excludes.
-    if let Some(st) = try_fuse_create(
-        file_handle,
-        oa,
-        path,
-        iosb,
-        is_write_open(access, vfs_redirect::FILE_OPEN),
-        vfs_redirect::FILE_OPEN,
-        0,
-        is_append_only(access),
-        &mut outcome_recorded,
-    ) {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    if let Some(st) = unsafe {
+        try_fuse_create(
+            file_handle,
+            oa,
+            path,
+            iosb,
+            is_write_open(access, vfs_redirect::FILE_OPEN),
+            vfs_redirect::FILE_OPEN,
+            0,
+            is_append_only(access),
+            &mut outcome_recorded,
+        )
+    } {
         if crate::hookstats::enabled() {
             if let Some(p) = path {
                 crate::hookstats::note_trace("open", p, if st >= 0 { "ok" } else { "FAIL" });
@@ -1049,13 +1110,17 @@ pub(super) unsafe fn open_hook_body(
                 outcome_recorded,
                 crate::hookstats::OpenOutcome::FellThroughRedirect,
             );
-            let new_oa = match redirected_oa(oa, &target_nt) {
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            let new_oa = match unsafe { redirected_oa(oa, &target_nt) } {
                 Ok(o) => o,
                 Err(st) => return st,
             };
-            let status = tramp(file_handle, access, new_oa.as_ptr(), iosb, share, opts);
-            record_identity(file_handle, path, status);
-            record_path(file_handle, path, status);
+            // SAFETY: the original NT function, called with valid NT arguments.
+            let status = unsafe { tramp(file_handle, access, new_oa.as_ptr(), iosb, share, opts) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { record_identity(file_handle, path, status) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { record_path(file_handle, path, status) };
             status
         }
         Some(Decision::Deny) => {
@@ -1070,19 +1135,26 @@ pub(super) unsafe fn open_hook_body(
             if is_passthrough {
                 note_passthrough_outcome(path, outcome_recorded);
             }
-            if fuse_root_directory(oa) {
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            if unsafe { fuse_root_directory(oa) } {
                 if let Some(path) = path {
                     let status =
-                        tramp_open_abs(tramp, file_handle, access, oa, iosb, share, opts, path);
-                    tag_under_root(file_handle, Some(path), status);
-                    record_path(file_handle, Some(path), status);
+                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                        unsafe { tramp_open_abs(tramp, file_handle, access, oa, iosb, share, opts, path) };
+                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                    unsafe { tag_under_root(file_handle, Some(path), status) };
+                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                    unsafe { record_path(file_handle, Some(path), status) };
                     return status;
                 }
                 return STATUS_OBJECT_NAME_NOT_FOUND;
             }
-            let status = tramp(file_handle, access, oa, iosb, share, opts);
-            tag_under_root(file_handle, path, status);
-            record_path(file_handle, path, status);
+            // SAFETY: the original NT function, called with valid NT arguments.
+            let status = unsafe { tramp(file_handle, access, oa, iosb, share, opts) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { tag_under_root(file_handle, path, status) };
+            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+            unsafe { record_path(file_handle, path, status) };
             status
         }
     }
