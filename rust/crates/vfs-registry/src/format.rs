@@ -9,15 +9,16 @@
 //!
 //! `decode` validates everything and never panics: a damaged file is a [`FormatError`].
 use crate::overlay::{
-    Child, MAX_DATA, MAX_KEY_DEPTH, MAX_KEY_NAME, MAX_VALUE_NAME, Node, Overlay, Value,
+    Child, MAX_DATA, MAX_DECODE_DEPTH, MAX_KEY_NAME, MAX_VALUE_NAME, Node, Overlay, Value,
 };
 use crate::path::fold;
 use std::collections::BTreeSet;
 
 pub const MAGIC: &[u8; 8] = b"AEREG\0\0\x01";
 
-/// Deepest key nesting `decode` accepts (bounds recursion); the same cap the overlay enforces.
-const MAX_DEPTH: usize = MAX_KEY_DEPTH;
+/// Deepest key nesting `decode` accepts (bounds recursion). Above the 512 write cap so files
+/// from the old, uncapped writer still load.
+const MAX_DEPTH: usize = MAX_DECODE_DEPTH;
 const FLAG_CREATED: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,8 +522,18 @@ mod tests {
     }
 
     #[test]
-    fn tree_at_max_depth_round_trips_and_one_deeper_is_rejected() {
-        use crate::overlay::MAX_KEY_DEPTH;
+    fn write_depth_round_trips_and_decode_accepts_older_deeper_files() {
+        // Debug-build recursion frames at 1024 levels outgrow the default 2 MiB test stack.
+        std::thread::Builder::new()
+            .stack_size(32 << 20)
+            .spawn(write_depth_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn write_depth_body() {
+        use crate::overlay::{MAX_WRITE_DEPTH, RegError};
         let chain = |n: usize| {
             let mut p = String::from(r"\Registry");
             for i in 0..n {
@@ -531,23 +542,38 @@ mod tests {
             p
         };
         let mut o = Overlay::new();
-        let deepest = chain(MAX_KEY_DEPTH);
+        let deepest = chain(MAX_WRITE_DEPTH);
         o.create_key(&deepest, false, false, 7).unwrap();
         o.set_value(&deepest, "v", 1, b"x", 8).unwrap();
-        let bytes = encode(&o);
-        let back = decode(&bytes).unwrap();
+        let back = decode(&encode(&o)).unwrap();
         assert_eq!(back.node(&deepest), o.node(&deepest));
         assert_eq!(back.node(&deepest).unwrap().values.len(), 1);
 
-        // A hand-built file one level deeper than the cap is refused on decode.
-        let mut b = vec![1u8];
-        b.extend(node(&s("Registry"), 0, 0, 0, 0, 1));
-        for _ in 0..MAX_KEY_DEPTH {
-            b.extend(node(&s("k"), 0, 0, 0, 0, 1));
+        // A file the old, uncapped writer could have made: `depth` nested "k" keys.
+        let file = |depth: usize| {
+            let mut b = vec![1u8];
+            b.extend(node(&s("Registry"), 0, 0, 0, 0, 1));
+            for _ in 1..depth {
+                b.extend(node(&s("k"), 0, 0, 0, 0, 1));
+            }
+            b.extend(node(&s("k"), 0, 0, 0, 0, 0));
+            seal(&b)
+        };
+        let old = decode(&file(MAX_WRITE_DEPTH + 100)).expect("deeper than the write cap decodes");
+        // It re-encodes and reloads, but a new write that deep is refused.
+        assert!(decode(&encode(&old)).is_ok());
+        let mut p = String::from(r"\Registry");
+        for _ in 0..MAX_WRITE_DEPTH + 100 {
+            p.push_str(r"\k");
         }
-        b.extend(node(&s("k"), 0, 0, 0, 0, 0));
+        let mut old = old;
+        assert!(old.node(&p).is_some());
+        p.push_str(r"\new");
+        assert_eq!(old.create_key(&p, false, false, 9), Err(RegError::TooDeep));
+
+        assert!(decode(&file(MAX_DECODE_DEPTH)).is_ok());
         assert!(matches!(
-            decode(&seal(&b)),
+            decode(&file(MAX_DECODE_DEPTH + 1)),
             Err(FormatError::Invalid("keys nested too deeply"))
         ));
     }

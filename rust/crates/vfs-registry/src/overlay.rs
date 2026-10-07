@@ -13,12 +13,17 @@ use std::collections::BTreeMap;
 pub const MAX_KEY_NAME: usize = 255;
 pub const MAX_VALUE_NAME: usize = 16383;
 pub const MAX_DATA: usize = 1 << 20;
-/// Deepest key nesting, counted as components below `\Registry` (Windows' own limit).
+/// Deepest key nesting a new write may create, counted as components below `\Registry`
+/// (Windows' own limit).
 /// Most distinct deletion records kept for `changed_since`. On overflow they are all dropped
 /// and `deleted_floor` rises to the newest of them: a spurious change notification for an
 /// absent key, never a missed one.
 pub const MAX_DELETED_AT: usize = 16384;
-pub const MAX_KEY_DEPTH: usize = 512;
+pub const MAX_WRITE_DEPTH: usize = 512;
+/// Deepest key nesting a persisted overlay may rebuild with (`format::decode`, `insert_node`).
+/// Higher than [`MAX_WRITE_DEPTH`] because the old writer had no cap, so files with keys up to
+/// 1024 deep may exist and must keep loading; new writes are refused above 512.
+pub const MAX_DECODE_DEPTH: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Value {
@@ -62,7 +67,7 @@ pub enum RegError {
     NotFound,
     AlreadyExists,
     InvalidPath,
-    /// More than [`MAX_KEY_DEPTH`] levels below `\Registry`.
+    /// More than [`MAX_WRITE_DEPTH`] levels below `\Registry`.
     TooDeep,
 }
 
@@ -127,9 +132,9 @@ fn check_key_name(p: &str) -> Result<(), RegError> {
     Ok(())
 }
 
-fn check_depth(p: &str) -> Result<(), RegError> {
+fn check_depth(p: &str, max: usize) -> Result<(), RegError> {
     // `p` is a valid path: the empty lead and `Registry` are not levels.
-    if p.split('\\').count() - 2 > MAX_KEY_DEPTH {
+    if p.split('\\').count() - 2 > max {
         return Err(RegError::TooDeep);
     }
     Ok(())
@@ -218,7 +223,7 @@ impl Overlay {
         if !valid_path(path) {
             return Err(RegError::InvalidPath);
         }
-        check_depth(path)?;
+        check_depth(path, MAX_DECODE_DEPTH)?;
         let f = fold(path);
         for (cf, (_, st)) in &node.children {
             if *st == Child::Tombstone {
@@ -250,7 +255,7 @@ impl Overlay {
             return Err(RegError::InvalidPath);
         }
         check_key_name(path)?;
-        check_depth(path)?;
+        check_depth(path, MAX_WRITE_DEPTH)?;
         if utf16_len(name) > MAX_VALUE_NAME {
             return Err(RegError::NameTooLong);
         }
@@ -318,7 +323,7 @@ impl Overlay {
             return Err(RegError::InvalidPath);
         }
         check_key_name(path)?;
-        check_depth(path)?;
+        check_depth(path, MAX_WRITE_DEPTH)?;
         if self.entries.contains_key(&fold(path)) {
             return Err(RegError::AlreadyExists);
         }
@@ -607,19 +612,24 @@ mod tests {
             p
         };
         let mut o = Overlay::new();
-        assert!(o.create_key(&chain(MAX_KEY_DEPTH), false, false, 1).is_ok());
-        let deep = chain(MAX_KEY_DEPTH + 1);
+        assert!(
+            o.create_key(&chain(MAX_WRITE_DEPTH), false, false, 1)
+                .is_ok()
+        );
+        let deep = chain(MAX_WRITE_DEPTH + 1);
         assert_eq!(o.create_key(&deep, false, false, 2), Err(RegError::TooDeep));
         assert_eq!(
             o.set_value(&deep, "v", REG_SZ, b"a", 2),
             Err(RegError::TooDeep)
         );
+        // The rebuild path accepts what the old writer could have saved, up to the decode cap.
+        assert!(o.insert_node(&deep, Node::default(), 2).is_ok());
+        let too_deep = chain(MAX_DECODE_DEPTH + 1);
         assert_eq!(
-            o.insert_node(&deep, Node::default(), 2),
+            o.insert_node(&too_deep, Node::default(), 2),
             Err(RegError::TooDeep)
         );
-        assert!(o.node(&deep).is_none());
-        // The refused write left the version alone.
+        // The refused writes left the version alone.
         assert_eq!(o.version(), 1);
     }
 
