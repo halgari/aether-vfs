@@ -3,14 +3,14 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use vfs_director::ipc::IpcServe;
 use vfs_proton::{
     launch::WineLaunch,
     layout::Root as ProtonRoot,
-    prefix::{Prefix, PrefixInit},
+    prefix::{Prefix, PrefixInit, PrefixLock},
     steam::SteamSide,
 };
 
@@ -555,42 +555,104 @@ impl Session {
             .to_path_buf();
 
         check_image(opts)?;
+        let _starting = self.begin_launch()?;
+
+        // Before the runtime lookup: a bad image fails fast, and staging
+        // behaves as on Windows.
+        let resolved = self.resolve_launch_image(opts)?;
+
+        let booted = self.ensure_prefix()?;
+        let wine = self.wine_launch(opts, ipc, &ring, resolved, &booted)?;
+
+        let child = vfs_proton::launch::spawn(&wine).map_err(|e| format!("launch: {e}"))?;
+        let BootedPrefix {
+            runtime,
+            prefix,
+            lock,
+        } = booted;
+        let handle = LaunchHandle {
+            child,
+            stopper: LaunchStopper(Arc::new(StopInner {
+                prefix,
+                runtime,
+                requested: AtomicBool::new(false),
+                ended: Mutex::new(false),
+            })),
+            wine,
+            wine_status: None,
+            quiet: None,
+            outcome: None,
+            _prefix_lock: lock,
+        };
+        // Before `starting` clears (the guard drops on return), so there is
+        // no moment in which a second launch sees neither.
+        *self
+            .proton
+            .latest
+            .lock()
+            .map_err(|_| "latest launch lock poisoned".to_string())? =
+            Arc::downgrade(&handle.stopper.0);
+        if self.proton.stop_pending.swap(false, Ordering::SeqCst) {
+            // `stop_launch` ran while this launch was still between spawning
+            // and being recorded in `detached`/`waiting`, found nothing to
+            // act on, and left this instead of losing the request — honour
+            // it now rather than handing back a handle for a program that
+            // was supposed to never run.
+            let _ = handle.stop();
+            return Err(
+                "launch: stopped during startup (stop_launch was called before the launch \
+                 finished starting)"
+                    .to_string(),
+            );
+        }
+        Ok(handle)
+    }
+
+    /// Refuses a second launch while one runs, and claims "a `launch_detached`
+    /// is in flight" until the returned guard drops.
+    ///
+    /// Refused up front, before `resolve_launch_image` can stage anything:
+    /// staging replaces `self.staged`, and the old `StagedDir`'s `Drop`
+    /// deletes the running launch's staged files out from under it —
+    /// `prefix.lock()` would refuse this launch anyway, but only after that
+    /// damage is done. `starting.swap` both checks and claims in one step, so
+    /// two calls racing each other (neither yet recorded in
+    /// `detached`/`waiting`) can't both pass.
+    fn begin_launch(&self) -> Result<StartingGuard<'_>, String> {
         // A detached launch that has ended still holds the prefix lock.
         self.reap_detached();
-        // Refused up front, before `resolve_launch_image` can stage anything:
-        // staging replaces `self.staged`, and the old `StagedDir`'s `Drop`
-        // deletes the running launch's staged files out from under it —
-        // `prefix.lock()` further down would refuse this launch anyway, but
-        // only after that damage is done. `starting.swap` both checks and
-        // claims "a launch_detached is in flight" in one step, so two calls
-        // racing each other (neither yet recorded in `detached`/`waiting`)
-        // can't both pass.
         if self
-            .proton.detached
+            .proton
+            .detached
             .lock()
             .map_err(|_| "detached launch lock poisoned".to_string())?
             .is_some()
             || self
-                .proton.waiting
+                .proton
+                .waiting
                 .lock()
                 .map_err(|_| "waiting launch lock poisoned".to_string())?
                 .is_some()
             // A handle `launch_detached` handed back and its caller kept is
             // in neither slot above; `latest` still sees it.
             || self.latest_running().is_some()
-            || self.proton.starting.swap(true, std::sync::atomic::Ordering::SeqCst)
+            || self.proton.starting.swap(true, Ordering::SeqCst)
         {
             return Err(
                 "launch: a launch is already running in this session — stop_launch() first"
                     .to_string(),
             );
         }
-        let _starting = StartingGuard { starting: &self.proton.starting, stop_pending: &self.proton.stop_pending };
+        Ok(StartingGuard {
+            starting: &self.proton.starting,
+            stop_pending: &self.proton.stop_pending,
+        })
+    }
 
-        // Before the runtime lookup: a bad image fails fast, and staging
-        // behaves as on Windows.
-        let resolved = self.resolve_launch_image(opts)?;
-
+    /// The newest verified runtime and this session's prefix, locked and set
+    /// up. An anonymous prefix is recorded for `Drop` before it is booted, so
+    /// a boot that fails half-way is still deleted.
+    fn ensure_prefix(&self) -> Result<BootedPrefix, String> {
         let home = self.proton_home()?;
         // `installed_dirs`, not `installed` + `runtime_dir`: the tag comes from
         // the tree's `version` file and the directory name from the release it
@@ -614,8 +676,9 @@ impl Session {
             Some(name) => name.clone(),
             None => self.wine_session_id(),
         };
-        let prefix_dir = vfs_proton::prefix::prefix_dir(&home, &prefix_id, &self.proton.prefix_init)
-            .map_err(|e| format!("launch: wine prefix: {e}"))?;
+        let prefix_dir =
+            vfs_proton::prefix::prefix_dir(&home, &prefix_id, &self.proton.prefix_init)
+                .map_err(|e| format!("launch: wine prefix: {e}"))?;
         if self.proton.prefix_name.is_none() {
             // Recorded before `ensure`, so a boot that fails half-way is
             // still deleted on drop.
@@ -623,7 +686,8 @@ impl Session {
             // prefix from where it is rather than wherever the environment
             // points by then.
             *self
-                .proton.anon
+                .proton
+                .anon
                 .lock()
                 .map_err(|_| "anon prefix lock poisoned".to_string())? = Some(AnonPrefix {
                 id: prefix_id.clone(),
@@ -635,15 +699,37 @@ impl Session {
         // Locked before `ensure_with`: setting a prefix up — and a Proton
         // prefix recorded by another runtime is set up *again* — must not
         // run under a program another process is running in it.
-        let prefix_lock = Prefix { dir: prefix_dir }
+        let lock = Prefix { dir: prefix_dir }
             .lock()
             .map_err(|e| format!("launch: {e}"))?;
-        let prefix = vfs_proton::prefix::ensure_with(&home, &runtime, &prefix_id, &self.proton.prefix_init)
-            .map_err(|e| format!("launch: wine prefix: {e}"))?;
+        let prefix =
+            vfs_proton::prefix::ensure_with(&home, &runtime, &prefix_id, &self.proton.prefix_init)
+                .map_err(|e| format!("launch: wine prefix: {e}"))?;
+        Ok(BootedPrefix {
+            runtime,
+            prefix,
+            lock,
+        })
+    }
 
-        let (wine_overlay, wine_state) = self.link_into_prefix(&prefix)?;
+    /// Everything the injector and the shim are told about this launch, under
+    /// the prefix lock `booted` holds: the session's directories and roots
+    /// linked into the prefix, `shim.cfg` and the ready flag, the three
+    /// Windows artifacts, the Steam side and NVAPI.
+    fn wine_launch(
+        &self,
+        opts: &LaunchOpts,
+        ipc: &IpcServe,
+        ring: &Path,
+        resolved: ResolvedImage,
+        booted: &BootedPrefix,
+    ) -> Result<WineLaunch, String> {
+        let BootedPrefix {
+            runtime, prefix, ..
+        } = booted;
+        let (wine_overlay, wine_state) = self.link_into_prefix(prefix)?;
         let roots = self.root_locations();
-        self.link_roots(&prefix, &roots)?;
+        self.link_roots(prefix, &roots)?;
 
         // The ring as the shim sees it. Its bytes are the same inode `serve`
         // created; only the name differs.
@@ -664,47 +750,22 @@ impl Session {
         };
         let root0 = roots[0].location.clone();
         let cwd = wine_cwd(opts.cwd.as_deref(), &root0, &target)?;
-        let extra: Vec<(u32, String)> =
-            roots[1..].iter().map(|r| (r.id, r.location.clone())).collect();
+        let extra: Vec<(u32, String)> = roots[1..]
+            .iter()
+            .map(|r| (r.id, r.location.clone()))
+            .collect();
 
         // Written here, not in `serve`: root 0's location and the overlay *as
         // the shim sees them*, and the overlay had no `C:\` name until the
-        // prefix above did. The snapshot must still be a valid empty tree —
-        // `Engine::build` rejects zero-length snapshot bytes, which would abort
-        // dual-layer bootstrap before hooks install.
+        // prefix above did.
         let config_path = self.write_shim_config(&root0, &wine_overlay)?;
         let ready_path = self.fresh_ready_flag();
 
         let (injector, shim_dll, payload_dll) = locate_wine_artifacts(opts)?;
         let (steam, mut notes) = self.steam_launch(&opts.env);
-        // Under the prefix lock taken above, like the rest of the prefix's
-        // setup. `PROTON_DISABLE_NVAPI` turns it off as it does for the
-        // script: the launch's own value, else this process's. A file that
-        // cannot be put in place or taken out is a note, not a failed launch:
-        // the program runs without NVAPI, and the script only logs these too.
-        let host_disable = std::env::var("PROTON_DISABLE_NVAPI").ok();
-        let disable = opts
-            .env
-            .get("PROTON_DISABLE_NVAPI")
-            .map(String::as_str)
-            .or(host_disable.as_deref());
-        let nvapi = if opts.nvapi && !vfs_proton::nvapi::disabled_by(disable) {
-            vfs_proton::nvapi::setup(&vfs_proton::nvapi::Host::real(), &runtime)
-        } else {
-            if let Err(e) = vfs_proton::nvapi::remove(&prefix.dir) {
-                notes.push(format!(
-                    "nvapi: could not remove NVAPI from the prefix: {e}"
-                ));
-            }
-            None
-        };
-        if let Some(nv) = &nvapi {
-            for failed in nv.install(&prefix.dir).failed {
-                notes.push(format!("nvapi: could not install {failed}"));
-            }
-        }
+        let nvapi = nvapi_for_launch(opts, runtime, prefix, &mut notes);
 
-        let wine = WineLaunch {
+        Ok(WineLaunch {
             runtime: runtime.clone(),
             prefix: prefix.dir.clone(),
             injector,
@@ -715,7 +776,7 @@ impl Session {
             ready_file: ready_path,
             ring_path: PathBuf::from(wine_ring),
             // The host spelling, for the ring-length check in `spawn`.
-            ring_host_path: Some(ring.clone()),
+            ring_host_path: Some(ring.to_path_buf()),
             // The live ring's own numbers. `map_bytes` is the whole mapping
             // (control ring + arena), which is what the shim must map.
             ring_bytes: ipc.map_bytes,
@@ -735,44 +796,7 @@ impl Session {
             notes,
             nvapi,
             registry: self.registry_attached(),
-        };
-
-        let child = vfs_proton::launch::spawn(&wine).map_err(|e| format!("launch: {e}"))?;
-        let handle = LaunchHandle {
-            child,
-            stopper: LaunchStopper(Arc::new(StopInner {
-                prefix,
-                runtime,
-                requested: std::sync::atomic::AtomicBool::new(false),
-                ended: Mutex::new(false),
-            })),
-            wine,
-            wine_status: None,
-            quiet: None,
-            outcome: None,
-            _prefix_lock: prefix_lock,
-        };
-        // Before `starting` clears (the guard drops on return), so there is
-        // no moment in which a second launch sees neither.
-        *self
-            .proton.latest
-            .lock()
-            .map_err(|_| "latest launch lock poisoned".to_string())? =
-            Arc::downgrade(&handle.stopper.0);
-        if self.proton.stop_pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
-            // `stop_launch` ran while this launch was still between spawning
-            // and being recorded in `detached`/`waiting`, found nothing to
-            // act on, and left this instead of losing the request — honour
-            // it now rather than handing back a handle for a program that
-            // was supposed to never run.
-            let _ = handle.stop();
-            return Err(
-                "launch: stopped during startup (stop_launch was called before the launch \
-                 finished starting)"
-                    .to_string(),
-            );
-        }
-        Ok(handle)
+        })
     }
 
     /// Unix: stops the session's running launch — the one a `wait: false`
@@ -812,8 +836,8 @@ impl Session {
         if let Some(stopper) = self.latest_running() {
             return stopper.stop().map(|()| true);
         }
-        if self.proton.starting.load(std::sync::atomic::Ordering::SeqCst) {
-            self.proton.stop_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+        if self.proton.starting.load(Ordering::SeqCst) {
+            self.proton.stop_pending.store(true, Ordering::SeqCst);
         }
         Ok(false)
     }
@@ -877,6 +901,50 @@ impl Session {
             let _ = vfs_proton::prefix::remove_session(&home, &id);
         }
     }
+}
+
+/// A prefix `ensure_prefix` set up: the runtime that serves it, and the lock
+/// that keeps every other launch out of it until the launch that holds this
+/// ends.
+struct BootedPrefix {
+    runtime: PathBuf,
+    prefix: Prefix,
+    lock: PrefixLock,
+}
+
+/// NVAPI and NGX for a launch (`vfs_proton::nvapi`), under the prefix lock,
+/// like the rest of the prefix's setup. `PROTON_DISABLE_NVAPI` turns it off
+/// as it does for the script: the launch's own value, else this process's. A
+/// file that cannot be put in place or taken out is a note, not a failed
+/// launch: the program runs without NVAPI, and the script only logs these too.
+fn nvapi_for_launch(
+    opts: &LaunchOpts,
+    runtime: &Path,
+    prefix: &Prefix,
+    notes: &mut Vec<String>,
+) -> Option<vfs_proton::nvapi::Setup> {
+    let host_disable = std::env::var("PROTON_DISABLE_NVAPI").ok();
+    let disable = opts
+        .env
+        .get("PROTON_DISABLE_NVAPI")
+        .map(String::as_str)
+        .or(host_disable.as_deref());
+    let nvapi = if opts.nvapi && !vfs_proton::nvapi::disabled_by(disable) {
+        vfs_proton::nvapi::setup(&vfs_proton::nvapi::Host::real(), runtime)
+    } else {
+        if let Err(e) = vfs_proton::nvapi::remove(&prefix.dir) {
+            notes.push(format!(
+                "nvapi: could not remove NVAPI from the prefix: {e}"
+            ));
+        }
+        None
+    };
+    if let Some(nv) = &nvapi {
+        for failed in nv.install(&prefix.dir).failed {
+            notes.push(format!("nvapi: could not install {failed}"));
+        }
+    }
+    nvapi
 }
 
 /// The working directory a Proton launch starts `target` in: `requested` as
