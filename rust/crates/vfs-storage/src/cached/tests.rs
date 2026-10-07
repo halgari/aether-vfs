@@ -12,12 +12,11 @@ use vfs_provider::{
 
 use super::*;
 use crate::config::StorageConfig;
-use crate::ids::layer_file_id;
 use crate::storage::Storage;
 
-const BS: usize = 4096;
+pub(crate) const BS: usize = 4096;
 
-fn small_cfg() -> StorageConfig {
+pub(crate) fn small_cfg() -> StorageConfig {
     StorageConfig {
         store: StoreConfig {
             block_size: BS as u32,
@@ -27,11 +26,11 @@ fn small_cfg() -> StorageConfig {
     }
 }
 
-fn temp_storage() -> (Arc<Storage>, tempfile::TempDir) {
+pub(crate) fn temp_storage() -> (Arc<Storage>, tempfile::TempDir) {
     temp_storage_with(small_cfg())
 }
 
-fn temp_storage_with(cfg: StorageConfig) -> (Arc<Storage>, tempfile::TempDir) {
+pub(crate) fn temp_storage_with(cfg: StorageConfig) -> (Arc<Storage>, tempfile::TempDir) {
     let d = tempfile::tempdir().unwrap();
     (Storage::open(d.path(), cfg).unwrap(), d)
 }
@@ -58,7 +57,7 @@ impl Gate {
 
 /// Wraps any provider, declares it immutable and slow, and counts
 /// `read_at` calls. `max_read` caps each read to force short reads.
-struct Slow {
+pub(crate) struct Slow {
     inner: Arc<dyn Provider>,
     reads: AtomicU64,
     max_read: usize,
@@ -68,7 +67,7 @@ struct Slow {
 }
 
 impl Slow {
-    fn reads(&self) -> u64 {
+    pub(crate) fn reads(&self) -> u64 {
         self.reads.load(Ordering::SeqCst)
     }
 }
@@ -105,7 +104,7 @@ impl Provider for Slow {
     }
 }
 
-fn slow(inner: Arc<dyn Provider>) -> Arc<Slow> {
+pub(crate) fn slow(inner: Arc<dyn Provider>) -> Arc<Slow> {
     Arc::new(Slow {
         inner,
         reads: AtomicU64::new(0),
@@ -163,20 +162,20 @@ fn cached_provider_forwards_stored_name_to_its_source() {
     assert_eq!(got.as_deref(), Some("marker:sub/B.txt"));
 }
 
-fn slow_fixture() -> Arc<Slow> {
+pub(crate) fn slow_fixture() -> Arc<Slow> {
     slow(Arc::new(vfs_provider::conformance::MemFixture::new()))
 }
 
 /// A flat, root-blind, mutable map of files: `(body, mtime)`.
 #[derive(Default)]
-struct MapSource {
+pub(crate) struct MapSource {
     files: Mutex<HashMap<String, (Vec<u8>, i64)>>,
     next: AtomicU64,
     opens: Mutex<HashMap<Handle, Vec<u8>>>,
 }
 
 impl MapSource {
-    fn with(files: &[(&str, Vec<u8>)]) -> Arc<Self> {
+    pub(crate) fn with(files: &[(&str, Vec<u8>)]) -> Arc<Self> {
         let s = MapSource::default();
         for (n, b) in files {
             s.set(n, b.clone(), 1);
@@ -243,7 +242,7 @@ impl Provider for MapSource {
     }
 }
 
-fn pattern(len: usize, seed: u8) -> Vec<u8> {
+pub(crate) fn pattern(len: usize, seed: u8) -> Vec<u8> {
     (0..len)
         .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
         .collect()
@@ -265,11 +264,11 @@ fn read_all_at(p: &Arc<dyn Provider>, root: RootId, rel: &str) -> Vec<u8> {
     out
 }
 
-fn read_all(p: &Arc<dyn Provider>, rel: &str) -> Vec<u8> {
+pub(crate) fn read_all(p: &Arc<dyn Provider>, rel: &str) -> Vec<u8> {
     read_all_at(p, RootId::DEFAULT, rel)
 }
 
-fn key() -> SourceKey {
+pub(crate) fn key() -> SourceKey {
     SourceKey("k".into())
 }
 
@@ -667,139 +666,6 @@ fn concurrent_misses_fetch_once() {
     assert_eq!(s.cache_stats().misses, 1);
 }
 
-/// `n` files of 1000 bytes each, named `f1..=fn`.
-fn thousand_byte_files(n: u8) -> Arc<MapSource> {
-    let files: Vec<(String, Vec<u8>)> = (1..=n)
-        .map(|i| (format!("f{i}"), pattern(1000, i)))
-        .collect();
-    let refs: Vec<(&str, Vec<u8>)> =
-        files.iter().map(|(n, b)| (n.as_str(), b.clone())).collect();
-    MapSource::with(&refs)
-}
-
-#[test]
-fn eviction_keeps_the_budget_and_evicts_least_recent_first() {
-    let (s, _d) = temp_storage_with(StorageConfig {
-        cache_max_bytes: 3000,
-        ..small_cfg()
-    });
-    let src = slow(thousand_byte_files(4));
-    let p = s.cached(src.clone(), key());
-    for f in ["f1", "f2", "f3", "f1", "f4"] {
-        read_all(&p, f);
-    }
-    s.wait_for_eviction();
-    let st = s.cache_stats();
-    assert!(
-        st.cached_logical_bytes <= 2700,
-        "evicted to 90% of the budget: {st:?}"
-    );
-
-    let before = src.reads();
-    read_all(&p, "f1");
-    read_all(&p, "f4");
-    assert_eq!(src.reads(), before, "f1 (touched again) and f4 are kept");
-    read_all(&p, "f2");
-    assert!(
-        src.reads() > before,
-        "f2, the least recently used, was evicted"
-    );
-}
-
-/// A file read further while an eviction runs (after it took its
-/// snapshot) is subtracted with what it holds when it is evicted, not
-/// what the snapshot said, so the running total cannot drift upward.
-#[test]
-fn eviction_subtracts_what_a_file_holds_when_it_goes() {
-    let (s, _d) = temp_storage_with(StorageConfig {
-        cache_max_bytes: 4 * BS as u64,
-        ..small_cfg()
-    });
-    let src = slow(MapSource::with(&[
-        ("a", pattern(4 * BS, 1)),
-        ("b", pattern(4 * BS, 2)),
-    ]));
-    let p = s.cached(src, key());
-    s.cache.evicting.store(true, Ordering::SeqCst); // no background runs
-    let (h, _, _) = p.open(VPath::at_default("a"), OPEN_READ).unwrap();
-    p.read_at(h, 0, &mut [0u8; 10]).unwrap(); // one block of a
-    p.close(h).unwrap();
-    read_all(&p, "b");
-    assert_eq!(s.cache_stats().cached_logical_bytes, 5 * BS as u64);
-
-    let p2 = Arc::clone(&p);
-    *s.cache.after_snapshot.lock().unwrap() = Some(Box::new(move || {
-        read_all(&p2, "a"); // a now holds four blocks
-    }));
-    assert_eq!(s.enforce_cache_budget().unwrap(), 2);
-    assert_eq!(s.cache_stats().cached_logical_bytes, 0);
-    assert!(s.catalog.cache_all().unwrap().is_empty());
-    s.cache.evicting.store(false, Ordering::SeqCst);
-}
-
-/// A run that finds the cache within budget sets the running total to
-/// what the catalog and the access log say, so a drifted count cannot
-/// keep starting no-op runs.
-#[test]
-fn a_run_within_budget_resyncs_the_total() {
-    let (s, _d) = temp_storage_with(StorageConfig {
-        cache_max_bytes: 8 * BS as u64,
-        ..small_cfg()
-    });
-    let src = slow(MapSource::with(&[("b", pattern(4 * BS, 2))]));
-    let p = s.cached(src, key());
-    read_all(&p, "b");
-    s.wait_for_eviction();
-    s.cache.cached_logical.fetch_add(1 << 40, Ordering::SeqCst);
-    assert_eq!(s.enforce_cache_budget().unwrap(), 0);
-    assert_eq!(s.cache_stats().cached_logical_bytes, 4 * BS as u64);
-}
-
-#[test]
-fn eviction_skips_open_files_and_never_touches_layer_files() {
-    let (s, _d) = temp_storage_with(StorageConfig {
-        cache_max_bytes: 3000,
-        ..small_cfg()
-    });
-    let layer = layer_file_id(&[7; 16]);
-    s.store.set_len(&layer, 10).unwrap();
-    s.store.write_blocks(&layer, 0, &[1u8; 10]).unwrap();
-
-    let src = slow(thousand_byte_files(4));
-    let p = s.cached(src.clone(), key());
-    read_all(&p, "f1");
-    // f1 is the least recently used, but a handle holds it open.
-    let (h, _, _) = p.open(VPath::at_default("f1"), OPEN_READ).unwrap();
-    for f in ["f2", "f3", "f4"] {
-        read_all(&p, f);
-    }
-    s.wait_for_eviction();
-    assert!(s.enforce_cache_budget().is_ok());
-
-    let before = src.reads();
-    let mut buf = [0u8; 1000];
-    assert_eq!(p.read_at(h, 0, &mut buf).unwrap(), 1000);
-    assert_eq!(&buf[..], &pattern(1000, 1)[..]);
-    assert_eq!(src.reads(), before, "the open file was not evicted");
-    p.close(h).unwrap();
-    assert!(s.cache_stats().cached_logical_bytes <= 2700);
-
-    let mut lb = [0u8; 10];
-    let r = s.store.read(&layer, 0, &mut lb).unwrap();
-    assert!(r.missing.is_empty());
-    assert_eq!(lb, [1u8; 10], "layer files are never evicted");
-}
-
-#[test]
-fn enforce_under_budget_evicts_nothing() {
-    let (s, _d) = temp_storage();
-    let p = s.cached(slow_fixture(), key());
-    read_all(&p, "a.txt");
-    assert_eq!(s.enforce_cache_budget().unwrap(), 0);
-    let before = s.cache_stats();
-    assert_eq!(before.cached_logical_bytes, 5);
-}
-
 #[test]
 fn unit_blocks_rounds_the_hint_up_to_whole_blocks_and_clamps_it() {
     assert_eq!(unit_blocks(None, 4096), 1);
@@ -1029,7 +895,7 @@ fn cached_coverage_reports_what_the_cache_holds_of_a_file() {
     assert_eq!(src.reads(), reads, "coverage never reads the source");
 }
 
-fn write_layer_file(s: &Arc<Storage>, layer: &str, rel: &str, body: &[u8]) {
+pub(crate) fn write_layer_file(s: &Arc<Storage>, layer: &str, rel: &str, body: &[u8]) {
     use vfs_provider::{OPEN_CREATE, OPEN_WRITE};
     let l = s.layer(layer).unwrap();
     let (h, _, _) = l
@@ -1040,81 +906,6 @@ fn write_layer_file(s: &Arc<Storage>, layer: &str, rel: &str, body: &[u8]) {
         off += l.write_at(h, off as u64, &body[off..]).unwrap();
     }
     l.close(h).unwrap();
-}
-
-#[test]
-fn clear_cache_drops_cache_files_and_keeps_layers() {
-    let (s, _d) = temp_storage();
-    let (a, b, c) = (pattern(5 * BS + 7, 1), pattern(3 * BS, 2), pattern(BS, 3));
-    let src = slow(MapSource::with(&[
-        ("a", a.clone()),
-        ("b", b.clone()),
-        ("c", c.clone()),
-    ]));
-    let p = s.cached(src.clone(), key());
-    assert_eq!(read_all(&p, "a"), a);
-    assert_eq!(read_all(&p, "b"), b);
-    // "c" stays open across the clear: it is left alone.
-    let (hc, _, _) = p.open(VPath::at_default("c"), OPEN_READ).unwrap();
-    let mut buf = vec![0u8; c.len()];
-    assert_eq!(p.read_at(hc, 0, &mut buf).unwrap(), c.len());
-    let body = pattern(4 * BS + 1, 9);
-    write_layer_file(&s, "saves", "save1.ess", &body);
-    let before = s.space_usage().unwrap();
-    assert_eq!(before.cache.files, 3);
-    assert_eq!(
-        before.cache.logical_bytes,
-        (a.len() + b.len() + c.len()) as u64
-    );
-    assert_eq!(before.layers["saves"].logical_bytes, body.len() as u64);
-
-    let r = s.clear_cache().unwrap();
-    assert_eq!((r.files, r.open_skipped), (2, 1));
-    assert_eq!(r.logical_bytes, (a.len() + b.len()) as u64);
-    assert_eq!(s.cache_stats().cached_logical_bytes, c.len() as u64);
-    let after = s.space_usage().unwrap();
-    assert_eq!(after.cache.files, 1);
-    assert_eq!(after.cache.logical_bytes, c.len() as u64);
-    assert_eq!(after.layers["saves"], before.layers["saves"]);
-    p.close(hc).unwrap();
-
-    // The next read fetches from the source again; the layer is intact.
-    let reads = src.reads();
-    assert_eq!(read_all(&p, "a"), a);
-    assert!(src.reads() > reads);
-    let l = s.layer("saves").unwrap();
-    assert_eq!(read_all(&l, "save1.ess"), body);
-    drop((p, l));
-    s.close().unwrap();
-}
-
-#[test]
-fn clear_cache_survives_a_reopen() {
-    let d = tempfile::tempdir().unwrap();
-    let a = pattern(6 * BS, 4);
-    let body = pattern(2 * BS + 3, 5);
-    {
-        let s = Storage::open(d.path(), small_cfg()).unwrap();
-        let p = s.cached(slow(MapSource::with(&[("a", a.clone())])), key());
-        assert_eq!(read_all(&p, "a"), a);
-        write_layer_file(&s, "content", "c/1", &body);
-        drop(p);
-        s.close().unwrap();
-    }
-    {
-        let s = Storage::open(d.path(), small_cfg()).unwrap();
-        assert_eq!(s.clear_cache().unwrap().files, 1);
-        s.close().unwrap();
-    }
-    let s = Storage::open(d.path(), small_cfg()).unwrap();
-    let u = s.space_usage().unwrap();
-    assert_eq!(u.cache, Default::default());
-    assert_eq!(u.layers["content"].logical_bytes, body.len() as u64);
-    assert_eq!(s.cache_stats().cached_logical_bytes, 0);
-    let src = slow(MapSource::with(&[("a", a.clone())]));
-    let p = s.cached(src.clone(), key());
-    assert_eq!(read_all(&p, "a"), a);
-    assert!(src.reads() > 0, "fetched again");
 }
 
 #[test]
