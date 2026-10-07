@@ -10,10 +10,9 @@ a suite of assertions that runs against any `Arc<dyn Provider>`.
 
 Design background: [`docs/superpowers/specs/2026-08-13-pluggable-providers-design.md`](../../../docs/superpowers/specs/2026-08-13-pluggable-providers-design.md),
 §5 (the contract) and §6 (primitives and composition). That spec describes the
-full end state across five stages; this crate implements Stage 1 — the
-contract, addressing, capabilities, and conformance. Writes, the registry, and
-the combinators-as-designed are later stages and are not implemented here (see
-[below](#what-stage-1-does-not-include)).
+full end state across five stages; this crate is the contract, addressing,
+capabilities, and conformance suite. The registry and the combinators-as-designed
+are later stages (see [below](#what-this-crate-and-vfs-compose-do-not-include)).
 
 ## What a provider is
 
@@ -22,7 +21,7 @@ tree: does this path exist, what is in this directory, give me a handle to
 this file, read some bytes from it. Concrete examples elsewhere in the
 workspace: a zip archive (`vfs-zip`'s `ZipProvider`), a directory on disk
 (`vfs-director`'s `DiskProvider`), an out-of-process plugin reached over gRPC
-(`vfs-source`'s `RemoteProvider`), and several read-only combinators in
+(`vfs-source`'s `RemoteProvider`), and several combinators in
 `vfs-compose` that build a provider out of other providers.
 
 A provider does not decide how it is combined with others, does not know
@@ -243,31 +242,31 @@ tier.
 
 Every provider ported to this contract elsewhere in the workspace is held to
 this same suite: `ZipProvider`, `DiskProvider`, `RemoteProvider`, and the
-read-only combinators in `vfs-compose` (`InlineProvider`, `LayeredProvider`)
+combinators in `vfs-compose` (`InlineProvider`, `LayeredProvider`, `OverlayProvider`)
 all call `assert_conformance` in their own test suites.
 
-## What Stage 1 does not include
+## What this crate and `vfs-compose` do not include
 
 The design spec describes a larger end state than what exists in this crate
 and in `vfs-compose` today. To avoid documenting aspiration as fact:
 
-- **No write path.** `write_at`, `set_len`, `mkdir`, `remove`, `rename`, and
-  `set_attr` exist on the trait (so the wire opcodes they mirror have
-  somewhere to route to later) but nothing in the workspace implements them
-  yet, and the conformance suite has no `ReadWrite` cases.
+- **The write path is on the trait and implemented elsewhere.** `write_at`,
+  `set_len`, `mkdir`, `remove`, `rename` and `set_attr` are optional methods;
+  `MemoryProvider`, `OverlayProvider`, `DiskProvider` and `vfs-storage`'s
+  layer provider implement them, and the conformance suite has `ReadWrite`
+  cases (see `RwMemFixture`).
 - **`vfs-compose`'s combinators are narrower than the spec's catalog.**
-  `layered`, `router`, `subdir`, and `inline` exist; `overlay` exists but is
-  read-only for now (`OverlayProvider::open` rejects `OPEN_WRITE`, and
-  `capabilities()` always reports `Access::Read` regardless of what its base
-  provider declares); `router`'s `readdir` is single-dispatch (it returns one
-  route's listing, not the union across routes the design calls for).
-  `seekable`, `cached` (as a combinator — `vfs-storage` has
-  `Storage::cached` today, but not as a `vfs-compose` primitive), `casefold`,
-  and `readonly` are not implemented.
+  `layered`, `router`, `subdir`, `inline`, `memory`, `seekable`, `readonly`
+  and `overlay` exist. `overlay` is writable: it declares `Access::ReadWrite`
+  (its upper must too), copies a base-only file up whole on the first write,
+  and hides a removed base path with a `.wh.<name>` marker in the upper.
+  `router`'s `readdir` is single-dispatch (it returns one route's listing, not
+  the union across routes the design calls for). `cached` is not a
+  `vfs-compose` primitive: `vfs-storage` has `Storage::cached`.
 - **No registry.** There is no `register_provider` and no `type` string →
   factory mapping; providers are constructed directly in Rust.
-- **No `vfs-embed` and no Python binding.** Those are Stage 4 in the design
-  spec.
+- **No Python binding.** That is later work in the design spec (the Rust
+  embedding is `vfs-embed`).
 
 See the design spec's §12 staging table for the full plan.
 

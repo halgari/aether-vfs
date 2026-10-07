@@ -1,4 +1,4 @@
-//! In-memory file tree backend for tests (Clojure `inline-provider`).
+//! Read-only in-memory file tree, for tests.
 //!
 //! **Not built on `MemoryProvider` (audit T16, rejected).** The two fold
 //! directories differently on purpose. This provider folds whole paths, so

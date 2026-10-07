@@ -1,4 +1,4 @@
-//! Top-wins layering of two providers (Clojure `layered-provider`).
+//! Top-wins layering of two providers.
 
 use std::collections::HashMap;
 use std::sync::Arc;

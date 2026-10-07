@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-//! `vfs-core`: pure, OS-independent read-only resolver for a merged/overlaid
+//! `vfs-core`: pure, OS-independent resolver for a merged/overlaid
 //! virtual filesystem. Fed enumerated layers (data-in); does no I/O.
 //!
 //! ```

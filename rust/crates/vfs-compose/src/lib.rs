@@ -1,7 +1,17 @@
-//! Composition backends (ported from Clojure `router` / `layered` / overlay reads).
+//! Composition backends: providers built out of other providers.
 //!
-//! Full CoW write path (copy-up on first write) is partial: read-side whiteouts
-//! and upper-wins are implemented; create/write-through is M-Write follow-up.
+//! - [`OverlayProvider`]: a writable upper over a base. Reads fall through to
+//!   the base; the first write to a base-only file copies the whole file up
+//!   (staged as `.cu.<n>.<name>`, then renamed into place), and removing a
+//!   base-visible path writes a `.wh.<name>` whiteout into the upper. The
+//!   base is never mutated.
+//! - [`LayeredProvider`]: top-wins layering of two providers.
+//! - [`RouterProvider`]: glob-based routing to a provider per path.
+//! - [`SubdirProvider`], [`SeekableProvider`] and [`ReadOnlyProvider`]: wrappers
+//!   that map paths, add positional reads over a sequential provider, or
+//!   demote write access.
+//! - [`MemoryProvider`] (read-write) and [`InlineProvider`] (read-only): in-memory
+//!   trees.
 
 mod casefold;
 mod glob;

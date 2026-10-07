@@ -1,4 +1,4 @@
-//! Glob-based routing to providers (Clojure `aether.vfs.router`).
+//! Glob-based routing to providers.
 
 use std::sync::Arc;
 
@@ -18,9 +18,9 @@ pub struct Route {
 /// One open handle: the provider that answered, and the handle it returned.
 type OpenEntry = (Arc<dyn Provider>, Handle);
 
-/// Routes by glob pattern to a provider. Stage 1 keeps single-dispatch
-/// `readdir` (only the matching route's — or default's — listing is
-/// returned); a later stage unions across routes.
+/// Routes by glob pattern to a provider. `readdir` is
+/// single-dispatch: only the matching route's (or the default's) listing is
+/// returned, not a union across routes.
 pub struct RouterProvider {
     default: Arc<dyn Provider>,
     routes: Vec<Route>,
