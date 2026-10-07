@@ -3307,8 +3307,8 @@ fn remove_memory_ring(backing: Option<&Path>, named: &Path) {
 /// which copies them beside the Linux binaries) — so this resolves what is
 /// already there rather than producing anything, and says so in the failure. [`LaunchOpts::shim_dll`] / [`LaunchOpts::payload_dll`]
 /// win when set; the documented default location is the directory holding
-/// `shim_dll` if only that is set, else the directory holding
-/// `current_exe()`. The injector has no `LaunchOpts` field of its own (adding
+/// `shim_dll` if only that is set, else `VFS_WINDOWS_ARTIFACTS`, else the
+/// directory holding `current_exe()`. The injector has no `LaunchOpts` field of its own (adding
 /// one is a change to a public struct, which this increment does not make), so
 /// that same directory is where it is looked for — the one `cargo build` puts
 /// all three in.
@@ -3318,12 +3318,24 @@ fn remove_memory_ring(backing: Option<&Path>, named: &Path) {
 /// round-trip per file.
 #[cfg(unix)]
 fn locate_wine_artifacts(opts: &LaunchOpts) -> Result<(PathBuf, PathBuf, PathBuf), String> {
-    let base = match &opts.shim_dll {
-        Some(s) => Path::new(s)
+    let dir = vfs_env::path(vfs_env::WINDOWS_ARTIFACTS).filter(|p| !p.as_os_str().is_empty());
+    locate_wine_artifacts_in(opts, dir.as_deref())
+}
+
+/// [`locate_wine_artifacts`] with `VFS_WINDOWS_ARTIFACTS`'s value passed in, so
+/// a test can name it without writing the process environment.
+#[cfg(unix)]
+fn locate_wine_artifacts_in(
+    opts: &LaunchOpts,
+    env_dir: Option<&Path>,
+) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    let base = match (&opts.shim_dll, env_dir) {
+        (Some(s), _) => Path::new(s)
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from(".")),
-        None => std::env::current_exe()
+        (None, Some(dir)) => dir.to_path_buf(),
+        (None, None) => std::env::current_exe()
             .map_err(|e| format!("launch: current_exe: {e}"))?
             .parent()
             .map(Path::to_path_buf)
@@ -3350,7 +3362,8 @@ fn locate_wine_artifacts(opts: &LaunchOpts) -> Result<(PathBuf, PathBuf, PathBuf
         return Err(format!(
             "launch: these Windows artifacts are missing: {}. Cross-build them with \
              `bin/build-windows` (which copies them beside the Linux binaries), put all three \
-             in {}, or set LaunchOpts.shim_dll and LaunchOpts.payload_dll to where they are \
+             in {}, set VFS_WINDOWS_ARTIFACTS to the directory holding them, or set \
+             LaunchOpts.shim_dll and LaunchOpts.payload_dll to where they are \
              (vfs-injector.exe is then looked for beside shim_dll).",
             missing.join(", "),
             base.display()
@@ -3978,6 +3991,34 @@ mod launch_image_tests {
         s.serve().unwrap();
         assert_eq!(s.ipc().unwrap().worker_count(), 12);
         s.stop_serve();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn windows_artifacts_come_from_the_named_directory_unless_shim_dll_is_set() {
+        let dir = scratch("artifacts");
+        for n in ["vfs-injector.exe", "vfs_shim_dll.dll", "vfs_payload.dll"] {
+            std::fs::write(dir.join(n), b"x").unwrap();
+        }
+        let (inj, shim, payload) =
+            locate_wine_artifacts_in(&LaunchOpts::default(), Some(&dir)).unwrap();
+        assert_eq!(inj, dir.join("vfs-injector.exe"));
+        assert_eq!(shim, dir.join("vfs_shim_dll.dll"));
+        assert_eq!(payload, dir.join("vfs_payload.dll"));
+
+        // An explicit shim_dll wins over the directory.
+        let other = scratch("artifacts-other");
+        let opts = LaunchOpts {
+            shim_dll: Some(other.join("vfs_shim_dll.dll").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let e = locate_wine_artifacts_in(&opts, Some(&dir)).unwrap_err();
+        assert!(e.contains(&other.display().to_string()) && e.contains("VFS_WINDOWS_ARTIFACTS"), "{e}");
+
+        // A directory missing some of them names each one.
+        std::fs::remove_file(dir.join("vfs_payload.dll")).unwrap();
+        let e = locate_wine_artifacts_in(&LaunchOpts::default(), Some(&dir)).unwrap_err();
+        assert!(e.contains("vfs_payload.dll") && !e.contains("vfs-injector.exe,"), "{e}");
     }
 
     #[cfg(unix)]
