@@ -59,9 +59,9 @@ process is on its way out in the case that matters.
 
 ## Enumeration containment
 
-A directory listing under a managed root is built from the director's `readdir`, or, when the
-director cannot answer, from the shim-local overlay's own entries. The real directory behind
-the mount never appears in one. The caller's buffer is filled after the table lock is released.
+A directory listing under a managed root is the director's `readdir`, whole and unmerged. The
+real directory behind the mount never appears in one. The caller's buffer is filled after the
+table lock is released.
 
 ### `serve_dir_query`, phase 2: what a listing may contain
 
@@ -72,86 +72,29 @@ Phase 2 (unlocked): build the listing. The handle only reached
 so *every* listing built here is a listing under a managed root — and
 the governing invariant says the real filesystem beneath a managed root
 is unreachable by any spelling. A directory listing is a spelling. So
-there are exactly two things that may appear in one:
+exactly one thing may appear in one: what the director serves. When the
+director's client routes the directory, its `readdir` is the whole
+answer, authoritative and unmerged.
 
-1. What the director serves. When the FUSE client recognises the
-   directory its `readdir` is the whole answer, authoritative and
-   unmerged.
-2. Failing that, the shim-local write overlay's own entries — content
-   this process created through gate 4's write path, which physically
-   lives outside the root and which the director may not know about.
+Two other sources have been removed. Until gate 4 task 8b a branch
+drained the real directory behind the mount (`drain_real` over the
+handle) whenever the client was absent or did not recognise the path,
+so a real, unserved file under a managed root would be listed; reads,
+metadata and writes were each sealed and proven by the escape matrix,
+but enumeration was only ever *argued* to follow from read-open
+containment. `drain_real`, `drain_real_classic` and
+`parse_full_dir_info` went with it, so no code remains that can read a
+real directory into a served listing. Until task C8 a second branch
+listed the shim-local write overlay's own entries; that overlay is
+gone, and with it every source but the director.
 
-What may **not** appear is the real directory behind the mount. Until
-gate 4 task 8b this function had a third branch that drained exactly
-that (`drain_real` over the handle) whenever the client was absent or
-did not recognise the path, and put the overlay on top of it — so a
-real, unserved file under a managed root would be listed. Reads,
-metadata and writes were each sealed and proven by the escape matrix;
-enumeration was only ever *argued* to follow from read-open containment,
-and it does not follow: separate predicates, and no test on either side.
-
-**That drain was latent, not live** — say it here, not three paragraphs
-down, because "task 8b closed a real-disk leak" read alone is the wrong
-impression. `path_is_ours` is engine-OR-client while the client's
-`RootMap` is the engine's roots plus the staging alias, so "engine
-accepts, client declines" cannot arise; `RootMap::decide` denies
-`NotFound`/`Dir`/`Tombstone` before any tramp call; neither
-`Decision::Redirect` arm calls `tag_under_root`, so a redirected handle
-never enters `DIR_TABLE`; and a director-served directory is a
-`synth_file` handle the drain could not drain. Reaching the branch in a
-test took reverting gate 3 task 5 *as well* as forcing the predicate
-disagreement. The value of removing it is that enumeration no longer
-depends, silently and untested, on another gate's invariant.
-
-`drain_real`, `drain_real_classic` and `parse_full_dir_info` are deleted
-with it, so containment here is structural rather than conditional:
-no code remains that can read a real directory into a served listing.
-
-The two ways of reaching case 2 answer the same way and are counted
-separately, because they are different failures:
-
-- **No client at all.** Standalone mode is retired (see
-  `director::FuseInitError`): bootstrap aborts the launch when the
-  ring cannot be attached, and `try_init_from_env` runs before the
-  engine is built and before any detour installs, so an injected process
-  always has a client by the time a hook can fire.
-- **A client that does not recognise this directory.** The engine's root
-  notion accepted the path at open time and the client's did not — which
-  the superset argument above says cannot happen, but these two
-  predicates *have* drifted apart before, for five spellings at once,
-  and the comment on `path_is_ours` says plainly that they "can differ".
-  Its own counter (`contained`) so a future drift is a number in the
-  report rather than a directory that mysteriously lists nothing.
-
-**Nothing reaches either one today, including this crate's own tests.**
-An earlier draft claimed `hook_enum_parity`/`hook_relative_paths` did,
-since they install with no ring; they do not. Their `Data` is
-overlay-backed, so `Engine::decide` answers `Redirect`, which never
-tags the handle — those listings leave on the untracked branch above,
-against the overlay's own physical path. Measured with a probe in each
-branch, not argued: zero hits on both, in all three shim enumeration
-tests. So this arm and `Engine::overlay_listing`'s only call site are
-dead code. Keep both anyway: a branch that would otherwise fail *open*
-is exactly the one worth having fail closed, and the day it comes back
-to life is the day someone changes a predicate.
-
-One consequence worth stating, because a reviewer read the other way
-round: this arm calls `overlay_listing` with an **empty base**, so
-`Overlay::apply_to_listing`'s handling of a `merged` listing is
-unreachable from production even if this arm revives with today's call
-shape.
-
-**Gate 5, Task 7 changed what that costs.** It used to mean the only
-implementation of marker-hiding sat behind two dead callers while the
-live director branch below went without. The filtering now lives in
-`overlay::strip_whiteout_markers`, which that branch calls directly and
-`apply_to_listing` also calls — so the dead pair is kept for the
-fail-closed reason above and no longer holds a second, divergent copy
-of anything that matters. What is left dead in `apply_to_listing` is
-its *physical* overlay-directory scan, which answers a case the live
-branch does not have (a marker on disk that the incoming listing does
-not carry).
-
+A tracked directory the client does not route gets an **empty** listing,
+counted `contained` in the report. It is not reached: `path_is_ours`
+(which decides tracking) and `FuseClient::route` (which decides the
+listing) are the same question, `vpath_under_root`. It is kept because a
+branch that would otherwise fail *open* is exactly the one worth having
+fail closed, and those two predicates *have* drifted apart before, for
+five spellings at once, when they were two different `RootMap`s.
 
 ### `serve_dir_query`: whiteout markers in the director's listing
 
@@ -161,43 +104,40 @@ From `hook/dirquery.rs`.
 closed.** This branch used to hand the director's
 answer to the game verbatim, and the director's
 answer carries the shim's own markers: it mounts the
-shim overlay directory as its write layer
-(`overlay_layer_dir`) and spells whiteouts
-`.wh.<name>`, not `<name>.__vfs_wh__`, so ours come
-back as ordinary files. That showed the game a
-phantom `<file>.__vfs_wh__` entry *and* left the
-file it names listed.
+directory the shim-local overlay wrote into as its
+write layer (`overlay_layer_dir`) and spells
+whiteouts `.wh.<name>`, not `<name>.__vfs_wh__`, so
+the shim's came back as ordinary files. That showed
+the game a phantom `<file>.__vfs_wh__` entry *and*
+left the file it names listed.
 
 **Before the wildcard filter, not after** — see
-`strip_whiteout_markers`, which also records why the
-fix is here rather than in a shared spelling.
+`hook/whiteout.rs::strip_whiteout_markers`, which
+also records why the fix is here rather than in a
+shared spelling.
+
+The shim writes no markers since task C8 (its overlay
+is gone, and a handle-based delete under a root asks
+the director, like a path-based one). The filter
+stays: write layers already on users' disks hold
+markers older shims wrote.
 
 ### `serve_dir_query`: what the whiteout fix does not cover
 
 From `hook/dirquery.rs`.
 
-Two things this does **not** fix, both re-derived for this
-task rather than inherited from the note that used to sit
-here (which blamed a route gate 5 Task 4 had already
-deleted):
+**Enumeration only.** A marker still does not hide its
+target from an `open` through the director:
+`OverlayProvider::hidden_by_whiteout` looks for its own
+`.wh.` spelling, and there is no per-open hook here that
+could ask without a `stat` on every read. Only markers
+older shims left behind are affected.
 
-1. **Enumeration only.** A marker still does not hide its
-   target from an `open` through the director:
-   `OverlayProvider::hidden_by_whiteout` looks for its own
-   `.wh.` spelling, and there is no per-open hook here that
-   could ask without a `stat` on every read.
-2. **New markers can still be minted under a live
-   director.** `delete_hook` asks the client before
-   `Engine::whiteout`, so a path-based delete routes; but
-   `setinfo_hook`'s engine branch asks the engine *only*, so
-   a handle-based delete on a non-synthetic under-root
-   handle (inherited, pre-injection, or
-   `allow_disk_fallthrough`) writes a shim-spelled marker
-   into the director's own upper without the director ever
-   hearing about the delete. That is a divergence between
-   the two delete routes, not a listing defect, and it is
-   recorded in gate 5's Task 7/8 report rather than changed
-   at the end of a gate.
+(This section used to list a second gap: `setinfo_hook`'s
+engine branch, which minted new markers under a live
+director for a handle-based delete on a real under-root
+handle. Task C8 removed it; that delete goes to the
+director.)
 
 ### `serve_dir_query`, phase 3: fill the caller's buffer outside the lock
 
@@ -235,8 +175,9 @@ From `hook/file_open.rs`.
 (`steam_appid.txt`, `SkyrimSELauncher.exe`, `steam_api{,64}.dll`,
 `SkyrimSE.exe`) used to be matched here, case-insensitively at any depth,
 and returned `None` *before the ring was consulted* — sending the open on
-to `decision_for`, which either redirected it at a real disk path or
-passed it straight through to the real filesystem under the managed root.
+to the shim-local engine (removed by task C8), which either redirected it
+at a real disk path or passed it straight through to the real filesystem
+under the managed root.
 That was the last route by which a path under a managed root reached
 something other than the director.
 
@@ -276,7 +217,7 @@ Task 5 no *decision* below returns `None`, except behind the explicit
 
 One `None` below is not a decision: `open_fuse_at_ex(...)?` on the
 success path gives up its handle if the synth table's mutex is poisoned,
-which sends the caller to `decision_for` after the director has already
+which sends the caller to the real call after the director has already
 opened the file — and leaks that `fh`, since nothing closes it. It
 pre-dates this task, and it is a real hole in "the director's answer is
 the caller's answer", so do not read the paragraph above as more
@@ -314,13 +255,17 @@ Not in director: seal the path, for reads and writes alike. The
 *only* way out of this arm without a status is the explicit
 `VFS_ALLOW_DISK_FALLTHROUGH` opt-out, which unseals the root
 wholesale (see `allow_disk_fallthrough`) and is off by default and
-cleared defensively by `skyrim-live`.
+cleared defensively by `skyrim-live`. Behind it an under-root miss
+passes through to the real file, for reads and writes; before task C8
+it went to the shim-local engine instead, which denied a read and sent
+a write to its own overlay.
 
 **Gate 4, Task 5 — this is the write fall-through, closed.** A write
-used to return `None` here unconditionally, which sends
-`create_hook`/`open_hook` on to `decision_for` -> `Engine::decide_open`:
-an overlay redirect where one is configured, and a plain pass-through
-to the real filesystem *under the managed root* where one is not.
+used to return `None` here unconditionally, which sent
+`create_hook`/`open_hook` on to the shim-local engine (removed by task
+C8): an overlay redirect where one was configured, and a plain
+pass-through to the real filesystem *under the managed root* where one
+was not.
 Both spellings put content the provider graph never saw somewhere the
 director cannot account for; the pass-through one physically creates a
 file under a root whose whole contract is that the real filesystem
@@ -410,31 +355,19 @@ unreachable.
 **The decision is made on the path, like `create_hook`/`open_hook`, and by
 the same machinery.** `path_of_tracked` decodes the `OBJECT_ATTRIBUTES`
 (including a handle-relative name, and including the FUSE-synthetic
-`RootDirectory` a virtual directory handle produces), and the three
-questions asked of that path below are the three the open hooks already ask,
-in the same order:
-
-1. `FuseClient::vpath_under_root` — the director's own notion of the root.
-   If it claims the path, the director's answer is the caller's answer, both
-   ways: `OP_DELETE` accepted is `STATUS_SUCCESS`, `OP_DELETE` refused is a
-   failure the caller sees. It never continues to the kernel from here, for
-   the same reason `try_fuse_create` does not: a refusal that falls through
-   is not a refusal.
-2. `Engine::whiteout` — the shim-local overlay, which is what
-   `setinfo_hook`'s non-synthetic branch already does for a *handle*-based
-   delete of the same path. Live when the director is absent (a `FuseClient`
-   that failed to attach still leaves an `Engine` with every declared root
-   and its overlay), and having both delete routes answer through the same
-   call is the point — two predicates that disagree about one path is the
-   failure mode this project has paid for twice.
-3. `path_is_ours` — the backstop. `Engine::whiteout` answers `false` for a
-   path it resolves with an *empty* remainder (the root directory itself)
-   and for an engine with no overlay at all, and `false` there must not mean
-   "let the kernel have it". Under a managed root that is the escape, not a
-   fallback, so it fails closed with `STATUS_ACCESS_DENIED` — distinct from
-   the director's own `STATUS_UNSUCCESSFUL` refusal above, because these are
-   different answers: one is "the graph said no", the other is "nothing here
-   is willing to answer, and the real file is not on offer".
+`RootDirectory` a virtual directory handle produces), and the question asked
+of that path is the one the open hooks ask:
+`FuseClient::route` — the director's notion of the root. If it claims the
+path, the director's answer is the caller's answer, both ways: `OP_DELETE`
+accepted is `STATUS_SUCCESS`, `OP_DELETE` refused is a failure the caller
+sees. It never continues to the kernel from here, for the same reason
+`try_fuse_create` does not: a refusal that falls through is not a refusal.
+`setinfo_hook` gives a handle-based delete of the same path the same answer
+(`director_delete_or_rename`). Until task C8 there were two more steps,
+the shim-local engine's whiteout and a `path_is_ours` backstop
+(`STATUS_ACCESS_DENIED`) for the paths it declined; with the engine gone
+`path_is_ours` is the client's own question, so a path the first step does
+not claim is one the backstop would not claim either.
 
 Outside every root the call is trampolined unchanged, which is most of them
 — a hook with an opinion about every delete in the process would break the
@@ -491,12 +424,12 @@ So ask the OS, exactly as `parent_dir_of_handle`'s case 4 already does for
 reopen, since the caller is handing us a handle it currently holds.
 
 **The order is correctness, not only cost.** `PATH_TABLE` holds the path the
-caller *named*, and for a handle that came off `create_hook`'s
-`Decision::Redirect` arm that is the virtual path while the handle itself
-targets the overlay copy. Asking the OS first would hand back the overlay
-file's own location, which resolves under no managed root, so the whiteout
-would be skipped and the operation would go to the kernel — reintroducing the
-escape from the other end. The recorded name wins wherever there is one:
+caller *named*. While the shim-local engine existed (until task C8), a handle
+that came off its `Decision::Redirect` arm was named by its virtual path but
+targeted the overlay copy, and asking the OS first would have handed back a
+location under no managed root, so the operation went to the kernel. No
+handle is redirected any more, but the recorded name is still the one the
+caller used, so it wins wherever there is one:
 
 1. `PATH_TABLE` — an intercepted open whose path was under a managed root.
 2. `HANDLE_PATHS` — every other intercepted open. A handle here but not in
@@ -512,12 +445,15 @@ escape from the other end. The recorded name wins wherever there is one:
 
 From `hook/file_mutate.rs`.
 
-`NtSetInformationFile` hook. For director FUSE (pure-ring) virtual handles it
-routes truncate (`FileEndOfFileInformation`), delete, and rename to the director
-overlay over the ring. For legacy local-overlay handles it converts a delete
-or rename of a tracked under-root handle into an overlay whiteout/rename and
-suppresses the real operation, so the mod backing / real file is preserved
-but the path reads as gone/moved.
+`NtSetInformationFile` hook. For a synthetic (director-served) handle it
+routes truncate (`FileEndOfFileInformation`), delete and rename over the ring.
+A real handle whose path is under a root (opened before injection, inherited,
+duplicated in, or a fall-through open) gets the same delete and rename answer
+from the same function (`director_delete_or_rename`), and the real operation
+never runs, so the real file is preserved while the path reads as gone or
+moved. Until task C8 that real-handle branch asked the shim-local engine
+instead, which wrote a whiteout marker into the director's own upper without
+the director hearing about the delete.
 
 Two things sit on top of that, both from gate 5's Task 5, and each has its
 own comment at the check itself:
@@ -532,8 +468,8 @@ own comment at the check itself:
 
 Between them the rule is one sentence: a rename either has both sides under
 the same root, and is routed, or it touches no root at all, and passes
-through. Everything else is refused, and a delete of an under-root path that
-nothing here absorbed is refused with it rather than reaching the kernel.
+through. Everything else is refused, and nothing under a root reaches the
+kernel.
 
 ### `setinfo_hook_body`: a rename to a different root
 
@@ -545,48 +481,41 @@ wire carries one root for both sides, and the
 provider contract has no cross-root move.
 
 It does **not** fall through — an earlier
-version of this comment claimed it did, and
-`Engine::rename` was written to match that
-description, which is how the engine-side
-branch below ended up handing cross-root moves
-to the real filesystem. What actually happens is
-`ok = false` and `STATUS_UNSUCCESSFUL` twelve
-lines down, the same as any other refused
-delete/rename on a virtual handle. The engine
-branch now fails closed the same way.
+version of this comment claimed it did, and the
+shim-local engine's `rename` was written to
+match that description, which is how its branch
+ended up handing cross-root moves to the real
+filesystem. What actually happens is
+`STATUS_UNSUCCESSFUL`, the same as any other
+refused delete/rename, for both kinds of
+handle.
 
-### `setinfo_hook_body`: the source is under a root and nothing absorbed the operation
+### `setinfo_hook_body`: the source is under a root
 
 From `hook/file_mutate.rs`.
 
-**The source is under a managed root and nothing above absorbed
-the operation.** `tramp` below would hand it to the kernel,
-which acts on the real file — and this arm is reached by three
-routes that all end that way:
+**The source is under a managed root, so the director answers.**
+`tramp` would hand the operation to the kernel, which acts on the real
+file, and three kinds of operation used to end that way through the
+shim-local engine's branch:
 
- - A **delete** that `Engine::whiteout` declined (no overlay
-   configured, or a path resolving with an empty remainder).
-   The path-based `delete_hook` has had a `path_is_ours`
-   backstop for exactly this since it was written; leaving its
-   sibling fail-open is the same divergence, and the next reader
-   would have had two deletes to copy from and no way to tell
-   which was right.
+ - A **delete** the engine declined (no overlay configured, or a
+   path resolving with an empty remainder, the root itself).
  - A **rename out** of a managed root to a target outside every
-   one of them. `Engine::rename` answers `Declined` (its `to`
-   side resolves nowhere) and the kernel then performs the move,
-   which *unlinks a real file under a managed root*. That the
-   destination is legitimately outside does not make the source
-   side any less of a breach, and it is the same one the
-   target-keyed check below closes in the other direction.
+   one of them, which *unlinks a real file under a managed root*.
+   That the destination is legitimately outside does not make the
+   source side any less of a breach.
  - A **rename whose target cannot be parsed at all**
    (`parse_rename_target` -> `None`, e.g. a target named against
-   a directory handle we cannot resolve). An operation on an
-   under-root path whose other half we cannot even read is the
-   last thing that should be forwarded blind.
+   a directory handle we cannot resolve).
 
-The rule this leaves is one sentence: a rename either has both
-sides under the same root, and is routed, or it does not touch a
-root at all, and is trampolined. Everything between is refused.
+Since task C8 all three go to `director_delete_or_rename`, which
+answers every operation on a routed source: the delete is the
+director's, and a rename whose target is not under the same root is
+refused with `STATUS_UNSUCCESSFUL`. The rule this leaves is one
+sentence: a rename either has both sides under the same root, and is
+routed, or it does not touch a root at all, and is trampolined.
+Everything between is refused.
 
 ### `setinfo_hook_body`: a rename whose target lands under a root
 
@@ -596,7 +525,7 @@ From `hook/file_mutate.rs`.
 Task 5). Everything above is keyed on the *source*, and for a source
 outside every root none of it runs: `record_path` inserts into
 `PATH_TABLE` only when `path_is_ours(path)`, so an outside handle is
-never recorded, the engine arm above is skipped, and `tramp` below
+never recorded, the source-keyed arm above is skipped, and `tramp` below
 performed the move — physically creating a file under the
 destination root, where it then read back as missing because that
 root seals every path the provider graph does not serve.
@@ -619,8 +548,8 @@ NOTE: `parse_rename_target` discards `parent_dir_of_handle`'s
 OS-consulted provenance bit, so a target named against a directory
 handle the shim never saw opened reaches `path_is_ours` here without
 an `UncachedScope`. That is the known gap `parse_rename_target`
-already records for `engine.rename`, not a new one — it is listed
-there rather than fixed here so both callers are fixed at once.
+already records, not a new one — it is listed there rather than fixed
+here so both callers are fixed at once.
 
 ## Panic containment
 
@@ -637,8 +566,11 @@ RAII form of [`HOOK_REENTER`] for shim-initiated file I/O. `enter()` returns
 that it is already running *inside* the shim's own I/O and must not start
 more. While it is held, every NT file call this thread makes takes
 `create_hook`/`open_hook`'s `in_hook_reenter` fast path straight to the real
-ntdll — which is the point: copy-up writes its destination file while the
-hook that asked for the copy-up is still on the stack.
+ntdll — which is the point: the shim's own file I/O (the stats report, the
+panic log, the diagnostic traces) must reach the real filesystem rather than
+be re-decided by the hooks it runs inside. (The shim-local copy-up, which
+wrote its destination file from inside the hook that asked for it, was the
+first user; task C8 removed it.)
 
 **This is the only way to raise the counter, and that is deliberate rather
 than tidy.** There used to be a `hook_reenter_begin`/`hook_reenter_end`

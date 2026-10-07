@@ -364,7 +364,7 @@ pub unsafe fn install_late(
 }
 
 /// `patch_early_owned`: when true, also detour the four path/attr stubs
-/// (standalone install). When false, only remainder detours (dual-layer).
+/// (the full install). When false, only remainder detours (dual-layer).
 ///
 /// The file detours are walked in `detour_table!` order, which is the install order:
 ///

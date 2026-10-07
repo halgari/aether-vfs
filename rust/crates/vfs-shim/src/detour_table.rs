@@ -31,8 +31,8 @@ macro_rules! detour_table {
     ($cb:ident) => {
         $cb! {
             // --- file hooks ---
-            // The four path/attr stubs the early payload owns. `install` (standalone) detours these
-            // first; `install_late` wires their trampolines to the payload's and skips them.
+            // The four path/attr stubs the early payload owns. `install` (the full install) detours
+            // these first; `install_late` wires their trampolines to the payload's and skips them.
             {
                 export: "NtCreateFile",
                 stat: [Create = 0],
