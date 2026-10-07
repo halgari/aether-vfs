@@ -332,13 +332,7 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
     env.insert(vfs_env::ARENA_OFFSET.to_string(), l.arena_offset.to_string());
     env.insert(vfs_env::ARENA_LEN.to_string(), l.arena_len.to_string());
     env.insert(vfs_env::VIRTUAL_DIR.to_string(), l.virtual_dir.clone());
-    if !l.virtual_roots.is_empty() {
-        let spec = l
-            .virtual_roots
-            .iter()
-            .map(|(id, loc)| format!("{id}={loc}"))
-            .collect::<Vec<_>>()
-            .join(";");
+    if let Some(spec) = vfs_env::handshake::encode_roots(&l.virtual_roots) {
         env.insert(vfs_env::VIRTUAL_ROOTS.to_string(), spec);
     }
 
@@ -418,24 +412,10 @@ fn caller_then_host(l: &WineLaunch, name: &str) -> Option<std::ffi::OsString> {
 /// names compare without case, so `vfs_virtual_dir` would reach the shim as
 /// the same variable.
 pub fn is_reserved_env(name: &str) -> bool {
-    [
-        "WINEPREFIX",
-        "PROTONPATH",
-        vfs_env::RING_PATH,
-        vfs_env::RING_SECTION,
-        vfs_env::RING_BYTES,
-        vfs_env::RING_PAYLOAD_CAP,
-        vfs_env::ARENA_OFFSET,
-        vfs_env::ARENA_LEN,
-        vfs_env::SERVER_EV,
-        vfs_env::CLIENT_EV,
-        vfs_env::VIRTUAL_DIR,
-        vfs_env::VIRTUAL_ROOTS,
-        vfs_env::INJECT_CWD,
-        vfs_env::INJECT_STEAM_HELPER,
-    ]
-    .iter()
-    .any(|r| r.eq_ignore_ascii_case(name))
+    ["WINEPREFIX", "PROTONPATH"]
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(name))
+        || vfs_env::handshake::is_handshake(name)
 }
 
 /// Refuses an `extra_env` that names a reserved variable ([`is_reserved_env`]).
@@ -583,22 +563,12 @@ pub fn spawn(l: &WineLaunch) -> Result<std::process::Child, LaunchError> {
 }
 
 /// The inherited variables a launch clears because it did not set them itself,
-/// given the environment [`launch_env`] built. `VFS_REGISTRY` is here so a host
-/// that has it set cannot turn the registry hooks on for a launch with no
-/// registry layer.
+/// given the environment [`launch_env`] built: every
+/// [`vfs_env::handshake`] transport and injector name it left unset. That
+/// includes `VFS_REGISTRY`, so a host that has it set cannot turn the registry
+/// hooks on for a launch with no registry layer.
 fn stale_env(env: &BTreeMap<String, String>) -> Vec<&'static str> {
-    [
-        "VFS_RING_SECTION",
-        "VFS_SERVER_EV",
-        "VFS_CLIENT_EV",
-        "VFS_VIRTUAL_ROOTS",
-        "VFS_INJECT_CWD",
-        "VFS_INJECT_STEAM_HELPER",
-        vfs_env::REGISTRY,
-    ]
-    .into_iter()
-    .filter(|n| !env.contains_key(*n))
-    .collect()
+    vfs_env::handshake::stale(|n| env.contains_key(n)).collect()
 }
 
 /// Creates `path` (and its parent directories) for a launch's output,
@@ -822,6 +792,20 @@ mod tests {
         assert!(stale_env(&launch_env(&l)).contains(&"VFS_REGISTRY"));
         l.registry = true;
         assert!(!stale_env(&launch_env(&l)).contains(&"VFS_REGISTRY"));
+    }
+
+    #[test]
+    fn every_transport_name_the_launch_does_not_set_is_cleared() {
+        let l = sample();
+        let env = launch_env(&l);
+        let stale = stale_env(&env);
+        for n in vfs_env::handshake::TRANSPORT.iter().chain(vfs_env::handshake::INJECT) {
+            assert!(
+                env.contains_key(*n) != stale.contains(n),
+                "{n} must be exactly one of set or cleared"
+            );
+        }
+        assert!(stale.contains(&vfs_env::FUSE_CFG), "VFS_FUSE_CFG was missing from the old list");
     }
 
     #[test]
@@ -1173,7 +1157,12 @@ mod tests {
             vfs_env::RING_PATH,
             vfs_env::VIRTUAL_DIR,
             vfs_env::INJECT_CWD,
+            vfs_env::REGISTRY,
+            vfs_env::FUSE_CFG,
         ] {
+            assert!(is_reserved_env(k), "{k}");
+        }
+        for k in vfs_env::handshake::all() {
             assert!(is_reserved_env(k), "{k}");
         }
         assert!(is_reserved_env("vfs_virtual_dir"), "Wine's environment names ignore case");
