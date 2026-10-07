@@ -1,12 +1,8 @@
 //! Synthetic handles that store director FUSE file handles.
 
+use crate::handle_tags::SYNTH_FILE_TAG;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-
-/// Fuse *file* handles use 2^47. Distinct from `synth_section`'s synthetic *section*
-/// tag (2^45), the only other tag still in use — 2^46 belonged to the
-/// zip-window file handles gate 4 task 7 removed and is now unassigned.
-const FUSE_TAG: usize = 0x0000_8000_0000_0000;
 
 struct FuseOpen {
     fh: u64,
@@ -42,7 +38,7 @@ static NEXT: Mutex<usize> = Mutex::new(1);
 
 pub fn is_fuse_synth(handle: isize) -> bool {
     let h = handle as usize;
-    h & FUSE_TAG != 0
+    h & SYNTH_FILE_TAG != 0
 }
 
 pub fn open_fuse(fh: u64, size: u64, is_dir: bool) -> Option<isize> {
@@ -70,7 +66,7 @@ pub fn open_fuse_at_ex(
     let mut next = NEXT.lock().ok()?;
     let slot = *next;
     *next = next.wrapping_add(1);
-    let handle = (slot & !FUSE_TAG) | FUSE_TAG;
+    let handle = (slot & !SYNTH_FILE_TAG) | SYNTH_FILE_TAG;
     let mut g = TABLE.lock().ok()?;
     g.insert(
         handle,

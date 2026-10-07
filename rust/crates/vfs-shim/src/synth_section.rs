@@ -16,15 +16,9 @@
 //! file behind it at all. (It was called `zipserve` while it still served
 //! zip-window bytes.)
 
+use crate::handle_tags::SYNTH_SECTION_TAG;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-
-/// Tag bit (2^45) marking a synthetic *section* handle (an `NtCreateSection`
-/// result); real kernel handles never reach this magnitude. The sign bit
-/// (2^63) stays clear so the value is a positive handle, never confused with
-/// pseudo-handles (-1..-6) or `INVALID_HANDLE_VALUE`. Distinct from
-/// `synth_file`'s `FUSE_TAG` (2^47), which marks synthetic *file* handles.
-const SYNTH_SECTION_TAG: usize = 0x0000_2000_0000_0000;
 
 /// A synthetic section: the base address of the region it covers and its byte
 /// length. The region is always memory the shim itself mapped — there is no

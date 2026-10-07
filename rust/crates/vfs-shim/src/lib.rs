@@ -15,6 +15,7 @@ mod engine;
 #[doc(hidden)]
 pub use director as fuse_client;
 mod child;
+mod handle_tags;
 mod hook;
 mod hookstats;
 mod lazy_section;
