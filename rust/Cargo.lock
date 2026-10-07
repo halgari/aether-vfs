@@ -2691,6 +2691,7 @@ dependencies = [
  "vfs-redirect",
  "vfs-registry",
  "vfs-shim",
+ "vfs-testkit",
  "vfs-unix",
  "vfs-win",
  "vfs-zip",
@@ -2716,6 +2717,7 @@ dependencies = [
  "vfs-env",
  "vfs-protocol",
  "vfs-source",
+ "vfs-testkit",
 ]
 
 [[package]]
@@ -2915,6 +2917,10 @@ dependencies = [
  "vfs-core",
  "vfs-provider",
 ]
+
+[[package]]
+name = "vfs-testkit"
+version = "0.1.0"
 
 [[package]]
 name = "vfs-unix"

@@ -1,0 +1,11 @@
+[package]
+name = "vfs-testkit"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+description = "Dev-only test helpers shared by the workspace's integration tests: stored-zip writer, build-artefact locator"
+
+[lib]
+name = "vfs_testkit"
+path = "src/lib.rs"

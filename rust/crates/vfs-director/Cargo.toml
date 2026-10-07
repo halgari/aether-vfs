@@ -50,3 +50,6 @@ vfs-shim = { path = "../vfs-shim" }
 # `RootMap` the shim uses, rather than lowercasing a string in the test — the
 # whole point being that the two sides of the ring must fold identically.
 vfs-redirect = { path = "../vfs-redirect" }
+
+[dev-dependencies]
+vfs-testkit = { path = "../vfs-testkit" }

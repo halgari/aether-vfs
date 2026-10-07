@@ -14,6 +14,8 @@ members = [
   "crates/vfs-control",
   "crates/vfs-source",
   "crates/vfs-compose",
+  # Dev-only helpers shared by integration tests (stored-zip writer, artefact locator).
+  "crates/vfs-testkit",
   # Registry overlay model (paths, copy-on-write tree). Portable: depends only on
   # vfs-core. See docs/superpowers/specs/2026-10-05-registry-overlay-design.md.
   "crates/vfs-registry",
