@@ -84,7 +84,7 @@ CLI: `vfs` (the `vfs-directord` binary).
 | Doc | Use |
 |-----|-----|
 | [vfs-summary.md](./vfs-summary.md) | Full deep dive / whitepaper source |
-| [superpowers/specs/](./superpowers/specs/) | Design specs by feature |
+| [../../docs/superpowers/README.md](../../docs/superpowers/README.md) | Design specs by feature (index; old ones archived) |
 | [benchmarks/](./benchmarks/) | RPC latency/throughput |
 | [performance-rpc-analysis.md](./performance-rpc-analysis.md) | Performance analysis notes |
 

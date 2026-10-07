@@ -8,7 +8,7 @@ Userspace virtual filesystem for Windows game modding: serve base game + mods **
 |----------|-------------|
 | **[docs/overview.md](docs/overview.md)** | Short product/architecture overview |
 | **[docs/vfs-summary.md](docs/vfs-summary.md)** | Full technical summary (whitepaper-oriented, multi-page) |
-| [docs/superpowers/specs/](docs/superpowers/specs/) | Feature design specs |
+| [../docs/superpowers/README.md](../docs/superpowers/README.md) | Design specs and plans (index; old ones archived) |
 | [docs/benchmarks/](docs/benchmarks/) | FUSE RPC benchmarks |
 
 ## Quick start (Skyrim SE + SKSE + SkyUI layout)

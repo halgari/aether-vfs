@@ -11,7 +11,7 @@
 
 This document describes **what** the system is, **why** it exists, **how** it works end-to-end, and **what was learned** building a usermode virtual filesystem that launches a modern DRM-bound Windows game with mods served from multi-gigabyte ZIP archives without extraction.
 
-A short product overview lives in [overview.md](./overview.md). Design history lives under [superpowers/specs/](./superpowers/specs/).
+A short product overview lives in [overview.md](./overview.md). Design history is indexed in [docs/superpowers/README.md](../../docs/superpowers/README.md).
 
 ---
 
@@ -501,11 +501,11 @@ Evidence lives under `docs/benchmarks/` and `docs/performance-rpc-analysis.md`.
 | Path | Content |
 |------|---------|
 | [overview.md](./overview.md) | Short overview |
-| [superpowers/specs/2026-07-15-director-fuse-thin-shim-design.md](./superpowers/specs/2026-07-15-director-fuse-thin-shim-design.md) | Thin shim + director FUSE |
-| [superpowers/specs/2026-07-15-userspace-fuse-director-c-abi-design.md](./superpowers/specs/2026-07-15-userspace-fuse-director-c-abi-design.md) | Session + C ABI |
-| [superpowers/specs/2026-07-14-zip-backed-layers-design.md](./superpowers/specs/2026-07-14-zip-backed-layers-design.md) | Zip windows |
-| [superpowers/specs/2026-07-14-dual-layer-inject-handoff-design.md](./superpowers/specs/2026-07-14-dual-layer-inject-handoff-design.md) | Dual-layer inject |
-| [superpowers/specs/2026-07-13-vfs-ipc-control-ring-design.md](./superpowers/specs/2026-07-13-vfs-ipc-control-ring-design.md) | Control ring |
+| [docs/superpowers/specs/2026-07-15-director-fuse-thin-shim-design.md](../../docs/superpowers/specs/2026-07-15-director-fuse-thin-shim-design.md) | Thin shim + director FUSE |
+| [docs/superpowers/archive/specs/2026-07-15-userspace-fuse-director-c-abi-design.md](../../docs/superpowers/archive/specs/2026-07-15-userspace-fuse-director-c-abi-design.md) | Session + C ABI |
+| [docs/superpowers/specs/2026-07-14-zip-backed-layers-design.md](../../docs/superpowers/specs/2026-07-14-zip-backed-layers-design.md) | Zip windows |
+| [docs/superpowers/specs/2026-07-14-dual-layer-inject-handoff-design.md](../../docs/superpowers/specs/2026-07-14-dual-layer-inject-handoff-design.md) | Dual-layer inject |
+| [docs/superpowers/specs/2026-07-13-vfs-ipc-control-ring-design.md](../../docs/superpowers/specs/2026-07-13-vfs-ipc-control-ring-design.md) | Control ring |
 | [benchmarks/](./benchmarks/) | Latency/throughput |
 | [performance-rpc-analysis.md](./performance-rpc-analysis.md) | Perf analysis |
 
@@ -533,4 +533,4 @@ Evidence lives under `docs/benchmarks/` and `docs/performance-rpc-analysis.md`.
 
 ---
 
-*End of summary. For implementation plans and historical task breakdowns, see `docs/superpowers/plans/`.*
+*End of summary. For implementation plans and historical task breakdowns, see `docs/superpowers/archive/plans/` (indexed in `docs/superpowers/README.md`).*

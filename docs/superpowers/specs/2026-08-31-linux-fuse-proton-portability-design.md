@@ -28,7 +28,7 @@ an abstraction that did the real work. That abstraction is what survived the por
 to Rust, which is why re-adding Linux is tractable rather than a rewrite.
 
 The intent is also already on record.
-`docs/superpowers/specs/2026-07-26-unified-cross-platform-vfs-design.md` — "one
+`docs/superpowers/archive/specs/2026-07-26-unified-cross-platform-vfs-design.md` — "one
 interface, two OS-specific delivery adapters" — remains the correct shape. Only
 its premise changed: the consumer is no longer Clojure/JVM but Rust, with a
 TypeScript binding over it.
