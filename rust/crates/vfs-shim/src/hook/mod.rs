@@ -1,4 +1,17 @@
-//! The ntdll detours. ALL `unsafe` in the crate lives here.
+//! The ntdll detours, one module per concern.
+//!
+//! # Unsafe convention
+//!
+//! This tree holds most of the crate's `unsafe`, not all of it: `bootstrap`, `inject`,
+//! `lazy_section`, `regkeys`, `regquery`, `regwrite`, `regnotify`, `fuse_client` and `breadcrumb`
+//! allow `unsafe_code` as well.
+//!
+//! Each module here denies `unsafe_op_in_unsafe_fn`, so the body of an `unsafe fn` is not an
+//! unsafe context: every unsafe operation sits in its own `unsafe { }` block, with a `// SAFETY:`
+//! line. Most of those lines point back at this paragraph. An `unsafe fn` in this tree is an NT
+//! entry point or a helper of one. Its pointer arguments are what the NT caller passed, and NT's
+//! own contract for the call (valid, and sized and aligned for the access the call defines) is the
+//! `unsafe fn`'s contract. A comment says more only where a pointer comes from somewhere else.
 #![allow(unsafe_code)]
 
 mod close;
