@@ -20,7 +20,6 @@ use self::tally::BoundedTally;
 
 mod io;
 mod open;
-mod overlay;
 mod panics;
 mod registry;
 mod report;
@@ -30,7 +29,6 @@ mod tests;
 
 pub(crate) use io::*;
 pub use open::*;
-pub use overlay::*;
 pub use panics::*;
 pub use registry::*;
 pub(crate) use report::*;

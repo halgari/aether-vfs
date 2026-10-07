@@ -59,16 +59,7 @@ fn relative_names_resolve_on_every_decoding_hook() {
             .with("data/real_marker.txt", b"m".to_vec(), ReadStyle::Whole),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let _guard =
-        vfs_shim::install(vfs_shim::Engine::new(root.to_str().unwrap(), snapshot).unwrap())
-            .expect("install");
+    let _guard = vfs_shim::install().expect("install");
 
     // ── baseline: the absolute spelling, which already worked ───────────────
     let abs = root.join("Data").join("added.esm");

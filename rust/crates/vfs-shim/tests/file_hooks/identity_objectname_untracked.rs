@@ -9,11 +9,11 @@
 //! that broke all of Skyrim's INI loading undetected.
 //!
 //! Its own process because `install` is one-shot per process
-//! (`ENGINE.set` returns `AlreadyInstalled` on a second call) and patches
+//! (a second call returns `AlreadyInstalled`) and patches
 //! process-global ntdll trampolines. Every test in these binaries re-executes
 //! itself in a fresh process for that reason (see `tests/common/mod.rs`).
 
-use vfs_shim::{install, Engine};
+use vfs_shim::install;
 use windows_sys::Win32::Foundation::HANDLE;
 
 #[link(name = "ntdll")]
@@ -68,17 +68,7 @@ fn an_untracked_handle_is_untouched() {
 
     let root = std::env::temp_dir().join(format!("vfs-objname-plain-root-{pid}"));
     std::fs::create_dir_all(&root).unwrap();
-    let snapshot = {
-        use vfs_core::{build, Layer, LayerId};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let _guard = install(engine).expect("install");
+    let _guard = install().expect("install");
 
     let after = {
         let f = std::fs::File::open(&plain).unwrap();

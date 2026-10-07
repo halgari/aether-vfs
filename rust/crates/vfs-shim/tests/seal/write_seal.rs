@@ -3,8 +3,9 @@
 //!
 //! Until this task, a write open the director would not serve returned `None`
 //! from `try_fuse_create`, which sent `create_hook`/`open_hook` on to
-//! `Engine::decide_open` — the shim-local overlay where one is configured, and
-//! the real filesystem under the managed root where one is not. Either way the
+//! the shim-local engine (since removed) — its own write overlay where one was
+//! configured, and the real filesystem under the managed root where one was
+//! not. Either way the
 //! bytes ended up somewhere the provider graph never agreed to and cannot
 //! account for. This binary drives real `NtCreateFile`/`NtOpenFile` detours
 //! against a real ring and asserts the four answers the boundary now gives, by
@@ -12,23 +13,16 @@
 //! `ERROR_FILE_NOT_FOUND` and `ERROR_PATH_NOT_FOUND` into the same `NotFound`,
 //! which is precisely the distinction under test).
 //!
-//! One test function, one process, on purpose: `ENGINE`, the detours, the
-//! `FuseClient` and `hookstats::enabled()` are all process-global and
+//! One test function, one process, on purpose: the detours, the `FuseClient`
+//! and `hookstats::enabled()` are all process-global and
 //! resolve-once (the `VA_LOCK` convention — a test asserting on process-global
 //! state either takes the lock or lives alone). The steps also share state
 //! deliberately: step 1 writes the file step 2 reads back.
-//!
-//! The overlay is configured here, which is the live shape (`skyrim-live` sets
-//! one and mounts the same directory into the director's own graph). That
-//! makes the refusals below the *strong* form of the claim: not "the write had
-//! nowhere else to go", but "there was somewhere else to go and it went
-//! nowhere".
 
 use crate::fakedirector;
 
 use std::io::Write;
-use vfs_redirect::RootId;
-use vfs_shim::{Engine, OpenOutcome, install, outcome_count, overlay_layer_dir};
+use vfs_shim::{OpenOutcome, install, outcome_count};
 
 /// `ERROR_FILE_NOT_FOUND` — `STATUS_OBJECT_NAME_NOT_FOUND`.
 const ERROR_FILE_NOT_FOUND: i32 = 2;
@@ -46,11 +40,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
     let base = std::env::temp_dir().join(format!("vfs-write-seal-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let root = base.join("root");
-    let overlay = base.join("overlay");
     std::fs::create_dir_all(root.join("data")).unwrap();
-    std::fs::create_dir_all(&overlay).unwrap();
-    let ovl0 = overlay_layer_dir(&overlay, RootId::DEFAULT);
-    std::fs::create_dir_all(&ovl0).unwrap();
 
     // Instrumentation on for the whole process: `hookstats::enabled()` is
     // resolved once and cached, so this must precede `install`. The interval
@@ -60,22 +50,6 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
     let report = base.join("shim-stats.log");
     std::env::set_var(vfs_env::SHIM_STATS_LOG, &report);
     std::env::set_var(vfs_env::SHIM_STATS_INTERVAL_MS, "3600000");
-
-    let snapshot = {
-        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![InputEntry {
-                vpath: "unrelated.txt".into(),
-                kind: EntryKind::File,
-                source: r"D:\nowhere\unrelated.txt".into(),
-                size: 0,
-                mtime: 0,
-            }],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
 
     // A provider graph with one writable mount (`write/`) and one read-only
     // area (`data/`) — the ordinary modded-game shape, and the one that makes
@@ -92,9 +66,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
         0,
     );
 
-    let engine =
-        Engine::with_overlay(root.to_str().unwrap(), overlay.to_str().unwrap(), snapshot).unwrap();
-    let hooks = install(engine).expect("install");
+    let hooks = install().expect("install");
 
     // --- 1. A write the director CAN serve still succeeds ------------------
     //
@@ -123,7 +95,7 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
     let unserved = root.join("data").join("unserved.bin");
     let err = std::fs::File::create(&unserved).expect_err(
         "a create under a managed root that no provider serves must fail, not fall through \
-         to the shim-local overlay",
+         to anything else",
     );
     let unserved_errno = err.raw_os_error();
 
@@ -216,16 +188,18 @@ fn a_write_under_a_managed_root_is_answered_only_by_the_director() {
          access-denied assertion above proves nothing about writes specifically"
     );
 
-    // Nothing anywhere in the overlay: not the served write (it crossed the
-    // ring), and not one of the three refusals (they were refused, not
-    // diverted). This is the bypass the gate closes, so an empty tree here is
-    // the headline claim.
+    // Nothing anywhere on the real tree under the root: not the served write
+    // (it crossed the ring), and not one of the three refusals (they were
+    // refused, not diverted). This is the bypass the gate closes, so an empty
+    // tree here is the headline claim. (It used to be checked on the shim-local
+    // overlay too, the other place a write could be diverted to, until task C8
+    // removed it.)
     let mut stray: Vec<std::path::PathBuf> = Vec::new();
-    collect_files(&overlay, &mut stray);
+    collect_files(&root, &mut stray);
     assert!(
         stray.is_empty(),
-        "the shim-local overlay must be empty — every one of these is a write that escaped \
-         the provider graph: {stray:?}"
+        "the real tree under the root must hold no file — every one of these is a write that \
+         escaped the provider graph: {stray:?}"
     );
 
     assert_eq!(

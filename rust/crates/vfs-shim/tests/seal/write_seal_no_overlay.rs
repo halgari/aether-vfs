@@ -1,21 +1,17 @@
-//! The write seal with **no overlay configured** (gate 4, Task 5).
+//! The write seal against a provider graph with **no writable mount at all** (gate 4, Task 5).
 //!
-//! `write_seal.rs` proves the refusal in the live-shaped configuration, where
-//! a fall-through would have been captured by the shim-local overlay. This
-//! binary removes the overlay, which is the configuration where the same
-//! fall-through is not a misplacement but a genuine escape:
-//! `Engine::decide_open` answers `PassThrough` for a write when there is no
-//! overlay, so before this task the create was carried out by the real
+//! The name is historical: this was the write seal with no shim-local overlay
+//! configured, the configuration in which a fall-through was not a misplacement
+//! but a genuine escape — the shim-local engine answered `PassThrough` for a
+//! write with no overlay, so the create was carried out by the real
 //! `NtCreateFile` and a real file appeared **physically under the managed
-//! root** — the one thing the root's whole contract says cannot happen.
-//!
-//! It runs in a separate process because `ENGINE` is a `OnceLock`: one engine per
-//! process, so "with an overlay" and "without one" cannot be the same test
-//! run.
+//! root**. The shim-local overlay is gone (task C8), so there is one
+//! configuration left, and the claim is unchanged: a write the director refuses
+//! creates nothing on the real filesystem under the root.
 
 use crate::fakedirector;
 
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 
 #[test]
 fn a_refused_write_creates_nothing_on_the_real_filesystem_under_the_root() {
@@ -29,34 +25,17 @@ fn a_refused_write_creates_nothing_on_the_real_filesystem_under_the_root() {
     // this test pass for the wrong reason.
     std::fs::create_dir_all(root.join("data")).unwrap();
 
-    let snapshot = {
-        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![InputEntry {
-                vpath: "unrelated.txt".into(),
-                kind: EntryKind::File,
-                source: r"D:\nowhere\unrelated.txt".into(),
-                size: 0,
-                mtime: 0,
-            }],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-
     // A graph with no writable mount at all: every create under the root is
     // refused with `ST_NOT_FOUND`.
     fakedirector::install(&root, fakedirector::Fake::new(), 0);
 
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let hooks = install(engine).expect("install");
+    let hooks = install().expect("install");
 
     let escaped = root.join("data").join("escaped.bin");
     let result = std::fs::write(&escaped, b"content the provider graph never agreed to");
 
     // The real filesystem under the root is only observable with the detours
-    // down — a hooked `exists()` asks the engine, which answers "no" for
+    // down — a hooked `exists()` asks the director, which answers "no" for
     // anything the VFS does not serve, and would pass vacuously.
     drop(hooks);
 

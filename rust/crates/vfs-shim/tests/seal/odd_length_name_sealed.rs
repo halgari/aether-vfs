@@ -10,14 +10,14 @@
 //! director serves other bytes for the same vpath, and after the odd-length calls the real file
 //! must be unchanged and the absent name must not exist.
 //!
-//! Its own process: the detours, the `FuseClient` and the `Engine` are process-global.
+//! Its own process: the detours and the `FuseClient` are process-global.
 
 use crate::fakedirector;
 
 use std::ffi::c_void;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 
 const HOST: &[u8] = b"host: data/x.esp";
 const DIR: &[u8] = b"director: data/x.esp";
@@ -110,21 +110,6 @@ fn an_odd_length_name_under_a_managed_root_is_refused_and_touches_nothing() {
     std::env::set_var(vfs_env::SHIM_STATS_LOG, base.join("shim-stats.log"));
     std::env::set_var(vfs_env::SHIM_STATS_INTERVAL_MS, "3600000");
 
-    let snapshot = {
-        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![InputEntry {
-                vpath: "data/x.esp".into(),
-                kind: EntryKind::File,
-                source: real.to_string_lossy().as_ref().into(),
-                size: 0,
-                mtime: 0,
-            }],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
     let _fake = fakedirector::install(
         &root,
         Fake::new()
@@ -133,8 +118,7 @@ fn an_odd_length_name_under_a_managed_root_is_refused_and_touches_nothing() {
             .writable_under("data/"),
         0,
     );
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let hooks = install(engine).expect("install");
+    let hooks = install().expect("install");
 
     let create = |p: &std::path::Path| {
         with_odd_name(p, |oa| {

@@ -42,8 +42,9 @@ pub(super) fn in_hook_reenter() -> bool {
 /// that it is already running *inside* the shim's own I/O and must not start
 /// more. While it is held, every NT file call this thread makes takes
 /// `create_hook`/`open_hook`'s `in_hook_reenter` fast path straight to the real
-/// ntdll — which is the point: copy-up writes its destination file while the
-/// hook that asked for the copy-up is still on the stack.
+/// ntdll — which is the point: the shim's own file I/O (the stats report, the
+/// panic log, the diagnostic traces) must reach the real filesystem, not be
+/// re-decided by the hooks it runs inside.
 ///
 /// This is the only way to raise the counter, deliberately: a raw begin/end pair
 /// skipped `end` when a panic fell between the two, and a counter stuck at 1

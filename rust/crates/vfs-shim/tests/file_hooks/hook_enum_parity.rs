@@ -48,16 +48,7 @@ fn classic_and_ex_enumeration_agree() {
             .with("data/real.txt", b"r".to_vec(), ReadStyle::Whole),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let _guard =
-        vfs_shim::install(vfs_shim::Engine::new(root.to_str().unwrap(), snapshot).unwrap())
-            .expect("install");
+    let _guard = vfs_shim::install().expect("install");
 
     // `read_dir` goes through NtQueryDirectoryFileEx.
     let mut via_ex: Vec<String> = std::fs::read_dir(&data_dir)

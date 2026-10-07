@@ -14,7 +14,7 @@ use crate::fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
 use std::ffi::c_void;
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, GetFileAttributesExW, GetFileAttributesW, GetFileExInfoStandard,
     INVALID_FILE_ATTRIBUTES, WIN32_FILE_ATTRIBUTE_DATA,
@@ -50,14 +50,7 @@ fn attribute_queries_reflect_the_vfs() {
             .with_dir("moddir"),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let _guard = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
+    let _guard = install().expect("install");
 
     let a = unsafe { GetFileAttributesW(wide(vfile.to_str().unwrap()).as_ptr()) };
     assert_ne!(

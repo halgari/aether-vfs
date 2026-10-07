@@ -23,7 +23,7 @@
 use crate::fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{Engine, install, skipped_detours};
+use vfs_shim::{install, skipped_detours};
 
 #[test]
 fn a_successful_install_skips_no_detour_on_windows() {
@@ -41,18 +41,10 @@ fn a_successful_install_skips_no_detour_on_windows() {
         Fake::new().with("mod.esp", b"the-real-bytes".to_vec(), ReadStyle::Whole),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
 
     // Assert *after* a successful install: `SKIPPED_DETOURS` is only written by
     // `install`, so checking it before would pass vacuously.
-    let guard = install(engine).expect("install");
+    let guard = install().expect("install");
 
     assert!(
         vfs_shim::registry_detours_installed() > 0,
@@ -67,7 +59,7 @@ fn a_successful_install_skips_no_detour_on_windows() {
     );
 
     // Prove the install is the real thing and not a no-op that trivially skips
-    // nothing: the virtual path resolves through the engine, not through disk,
+    // nothing: the virtual path resolves through the director, not through disk,
     // where `mod.esp` does not exist.
     assert_eq!(
         std::fs::read(root.join("mod.esp")).unwrap(),

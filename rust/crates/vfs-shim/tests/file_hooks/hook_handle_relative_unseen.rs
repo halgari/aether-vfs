@@ -70,16 +70,7 @@ fn handle_relative_open_via_a_handle_opened_before_injection() {
         Fake::new().with("data/added.esm", VIRTUAL_PAYLOAD.to_vec(), ReadStyle::Whole),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let _guard =
-        vfs_shim::install(vfs_shim::Engine::new(root.to_str().unwrap(), snapshot).unwrap())
-            .expect("install");
+    let _guard = vfs_shim::install().expect("install");
 
     // ── under-eager direction: the in-root child must resolve through the VFS ──
     let h = nt_create_relative(ancestor, r"gameroot\Data\added.esm");

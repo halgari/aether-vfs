@@ -16,7 +16,7 @@ use crate::fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
 use std::io::Write;
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 
 /// What the director serves for `mod.esp`.
 const DIR_MOD: &[u8] = b"ORIG";
@@ -42,14 +42,7 @@ fn writes_land_in_overlay_with_cow() {
             .writable_under(""),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let hooks = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
+    let hooks = install().expect("install");
 
     // --- Create a brand-new file under the root ---
     let newfile = root.join("created.txt");

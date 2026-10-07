@@ -7,9 +7,7 @@
 use crate::reg;
 
 use reg::{close, object_name, open_abs};
-use vfs_shim::{
-    Engine, install, is_synthetic_key_handle, registry_handle_counts, registry_handle_path,
-};
+use vfs_shim::{install, is_synthetic_key_handle, registry_handle_counts, registry_handle_path};
 
 #[test]
 fn every_registry_call_is_the_real_one() {
@@ -17,16 +15,7 @@ fn every_registry_call_is_the_real_one() {
     std::env::remove_var(vfs_env::REGISTRY);
     let root = std::env::temp_dir().join(format!("vfs-shim-regkeys-off-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
-    let snapshot = {
-        use vfs_core::{Layer, LayerId, build};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-    let _hooks = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
+    let _hooks = install().expect("install");
     assert!(!vfs_shim::regclient::enabled());
     assert_eq!(
         vfs_shim::registry_detours_installed(),

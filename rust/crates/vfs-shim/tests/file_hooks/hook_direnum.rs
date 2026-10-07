@@ -11,7 +11,7 @@
 use crate::fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 
 #[test]
 fn read_dir_lists_only_what_the_director_serves() {
@@ -33,14 +33,7 @@ fn read_dir_lists_only_what_the_director_serves() {
             .with_dir("served_dir"),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let _guard = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
+    let _guard = install().expect("install");
 
     let mut names: Vec<String> = std::fs::read_dir(&root)
         .expect("the managed root must open and list through the director")

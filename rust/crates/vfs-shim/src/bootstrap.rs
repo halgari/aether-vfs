@@ -1,10 +1,9 @@
 //! Bootstrap glue: a tiny config codec and a config-file entry point used by the
-//! injected DLL to build an `Engine` and install the hook.
+//! injected DLL to attach the director's client and install the hooks.
 #![allow(unsafe_code)] // payload_cfg_usable VirtualQuery validation
 
 use core::ffi::c_void;
 
-use crate::engine::{Engine, EngineError};
 use crate::hook::{HookGuard, InstallError, install, install_late};
 use vfs_inject::PayloadConfig;
 
@@ -55,20 +54,26 @@ pub enum BootstrapError {
     /// The config bytes were malformed.
     BadConfig,
     /// A director was configured (a ring was named) but the FUSE client
-    /// failed to attach. Fails before the `Engine` is even built, hooks are
-    /// never installed, and the game's primary thread stays parked behind
+    /// failed to attach. Fails before any hook is installed, and the game's
+    /// primary thread stays parked behind
     /// the pre-init spin gate — nothing has run yet, so the caller can (and
     /// must) tear the process down rather than let it start un-virtualised.
     Fuse(String),
-    /// The engine could not be built (bad root or snapshot).
-    Engine(EngineError),
+    /// The config's snapshot bytes failed layout validation. The snapshot is
+    /// otherwise unused (the director answers every path under a root); it is
+    /// still validated, as it was when the shim-local engine read it, until the
+    /// config stops carrying it (cleanup stream I, D3).
+    Snapshot(vfs_shared::LayoutError),
     /// The hook could not be installed.
     Install(InstallError),
 }
 
-/// Read a config file, build an `Engine`, and install the hooks. Returns the
-/// guard keeping the hooks alive (the injected DLL leaks it). An empty
-/// `overlay_root` means read-only (no write overlay).
+/// Read a config file, attach the director's client, and install the hooks. Returns the
+/// guard keeping the hooks alive (the injected DLL leaks it).
+///
+/// The config's `overlay` field is decoded and ignored: it named the shim-local write overlay,
+/// which is gone (every write under a root is the director's). The field stays in the wire
+/// format, which this crate does not change.
 ///
 /// When `payload_cfg` is non-null, uses dual-layer [`install_late`] (early
 /// payload already owns the four path/attr stubs). Otherwise full [`install`].
@@ -83,16 +88,16 @@ pub fn bootstrap_from_config_path_with_payload(
     payload_cfg: *mut PayloadConfig,
 ) -> Result<HookGuard, BootstrapError> {
     let bytes = std::fs::read(path).map_err(|_| BootstrapError::Io)?;
-    let (root, overlay, snapshot) = decode_config(&bytes).ok_or(BootstrapError::BadConfig)?;
+    let (_root, _overlay, snapshot) = decode_config(&bytes).ok_or(BootstrapError::BadConfig)?;
     // Attach to the parent director's FUSE ring. Standalone (no-director)
     // shim launches are retired: a process that names no ring at all
     // (`NotConfigured`) used to be treated as a legitimate deployment, with
-    // the `Engine` snapshot below governing composition on its own — but that
-    // is exactly the mode in which a game runs completely un-virtualised
-    // while appearing to work, which this whole programme exists to
-    // eliminate. It now fails exactly like a named ring that failed to
-    // attach (`ConnectFailed`): before the `Engine` is built or any hook
-    // installs.
+    // the config's snapshot governing composition on its own — but that is
+    // exactly the mode in which a game runs completely un-virtualised while
+    // appearing to work, which this whole programme exists to eliminate. It
+    // fails exactly like a named ring that failed to attach (`ConnectFailed`):
+    // before any hook installs. The client's roots (`director::roots_from_env`)
+    // are the only notion of "under a root" the hooks have.
     match crate::director::try_init_from_env() {
         Ok(()) => {}
         Err(crate::director::FuseInitError::NotConfigured) => {
@@ -106,43 +111,7 @@ pub fn bootstrap_from_config_path_with_payload(
             return Err(BootstrapError::Fuse(msg));
         }
     }
-    // Every root the session declared, not just the one the config file names.
-    //
-    // The config wire format carries a single root and deliberately still
-    // does: the extra roots are published into the child's environment
-    // (`VFS_VIRTUAL_ROOTS`, written by `IpcServe::apply_env_roots`) and this
-    // is the *same* function the FUSE client parses them with, seeded from
-    // the same root-0 path. One parse, one declaration list — the two halves
-    // of the shim cannot end up disagreeing about which roots exist, which is
-    // exactly the drift stage 2b collapsed on the predicate side.
-    //
-    // Note what is deliberately NOT here: the staged-launch alias
-    // (`stage_root_from_env`) the client appends as a second spelling of root
-    // 0.
-    //
-    // **The original reason is gone.** The staged directory physically holds
-    // the game EXE and its import closure, and the four DRM exceptions in
-    // `hook/file_open.rs::try_fuse_create` worked by returning `None` so the open
-    // trampolined to that real file — which required this engine to answer
-    // `PassThrough`, i.e. to consider the staged directory outside its roots.
-    // Gate 5's Task 4 deleted those exceptions, so nothing depends on that
-    // answer any more: a staged-directory open is now answered by the FUSE
-    // client, which does know the alias, long before the engine is consulted.
-    //
-    // The omission stays anyway, for a different and now load-bearing reason:
-    // it makes the client's declared root set a strict **superset** of the
-    // engine's. That is what rules out "under an engine root but outside every
-    // client root", the one shape in which `try_fuse_create` would decline a
-    // path the engine then treats as managed — see `hook/path.rs::path_is_ours` and
-    // `serve_dir_query`'s `ContainedNoDirector` arm, both of which are dead
-    // only because that shape cannot arise.
-    let roots = crate::director::roots_from_env(&root);
-    let engine = if overlay.is_empty() {
-        Engine::with_roots(&roots, snapshot)
-    } else {
-        Engine::with_roots_and_overlay(&roots, &overlay, snapshot)
-    }
-    .map_err(BootstrapError::Engine)?;
+    vfs_shared::SnapshotReader::open(&snapshot).map_err(BootstrapError::Snapshot)?;
 
     // Dual-layer cfg sources (first usable wins):
     // 1. explicit pointer (sync bootstrap / tests)
@@ -178,11 +147,11 @@ pub fn bootstrap_from_config_path_with_payload(
     };
 
     let guard = if cfg_ptr.is_null() {
-        install(engine).map_err(BootstrapError::Install)?
+        install().map_err(BootstrapError::Install)?
     } else {
         // SAFETY: `cfg_ptr` was parsed from the address the injector published
         // for this process, and is non-null on this branch.
-        unsafe { install_late(engine, cfg_ptr).map_err(BootstrapError::Install)? }
+        unsafe { install_late(cfg_ptr).map_err(BootstrapError::Install)? }
     };
     // Tell any spawning parent (that force-suspended us) our hooks are live.
     crate::child::signal_ready();

@@ -56,7 +56,6 @@ use self::process::*;
 use self::registry::*;
 use self::section::*;
 
-use crate::engine::Engine;
 use std::sync::OnceLock;
 
 /// Opt-in only: when `VFS_ALLOW_DISK_FALLTHROUGH=1`, under-root FUSE NOT_FOUND
@@ -80,5 +79,3 @@ fn child_cwd_root() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| vfs_env::opt_out(vfs_env::CHILD_CWD_ROOT))
 }
-
-static ENGINE: OnceLock<Engine> = OnceLock::new();

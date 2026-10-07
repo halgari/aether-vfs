@@ -53,7 +53,7 @@ pub fn global() -> Option<&'static FuseClient> {
 ///
 /// Both variants are fatal to the caller (`bootstrap.rs` aborts the launch on
 /// either). Standalone shim launches — no ring named at all, the local
-/// `Engine` snapshot governing composition alone — used to be treated as a
+/// snapshot governing composition alone — used to be treated as a
 /// legitimate deployment, and plenty of this crate's own tests used to run
 /// exactly that way. That mode is retired: it is precisely the one in which a
 /// game runs completely un-virtualised while looking like a normal launch —
@@ -918,11 +918,6 @@ fn wire_vpath(vpath: String) -> String {
 /// single-root case. An entry whose id will not parse is skipped rather than
 /// failing the launch; an entry naming id 0 replaces `VIRTUAL_DIR`'s path,
 /// because a caller that spelled root 0 explicitly meant it.
-///
-/// `pub(crate)` because `bootstrap.rs` builds the `Engine`'s root list with
-/// this same function: the engine and the client must agree on which roots
-/// exist, and the cheapest way to guarantee that is for there to be one
-/// parse rather than two.
 pub(crate) fn roots_from_env(virtual_dir: &str) -> Vec<(RootId, String)> {
     merge_extra_roots(
         virtual_dir,

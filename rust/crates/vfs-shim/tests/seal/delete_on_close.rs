@@ -15,7 +15,7 @@ use crate::fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
 use std::os::windows::ffi::OsStrExt;
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DELETE, FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -65,14 +65,7 @@ fn a_delete_on_close_open_deletes_at_the_director_when_closed() {
             .writable_under("data/"),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let hooks = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
+    let hooks = install().expect("install");
 
     let temp_opened = open_and_close(
         &root.join("data").join("temp.esp"),

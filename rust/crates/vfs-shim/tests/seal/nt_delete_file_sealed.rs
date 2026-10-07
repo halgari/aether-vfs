@@ -52,14 +52,14 @@
 //! which is genuinely outside and must be trampolined — by way of the absolute
 //! rebuild, since the kernel cannot be handed a synthetic root.
 //!
-//! Its own process: the detours, the `FuseClient`, the `Engine` and
+//! Its own process: the detours, the `FuseClient` and
 //! `hookstats::enabled()` are process-global and resolve once.
 
 use crate::fakedirector;
 use crate::ntapi;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 
 /// Bytes on the real filesystem under the managed root.
 const HOST_SERVED: &[u8] = b"host: data/served.esp";
@@ -101,40 +101,6 @@ fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
     std::env::set_var(vfs_env::SHIM_STATS_LOG, base.join("shim-stats.log"));
     std::env::set_var(vfs_env::SHIM_STATS_INTERVAL_MS, "3600000");
 
-    // A snapshot that knows every name at its *real* on-disk path, so the
-    // engine has somewhere to send a fall-through. Without it a pass here
-    // could mean "the path was not recognised" rather than "the delete was
-    // contained" — the same reasoning `drm_names_route_to_director` records.
-    let snapshot = {
-        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
-        let entries = [
-            "data/served.esp",
-            "data/unserved.bin",
-            "data/relative.esp",
-            "readonly/locked.esp",
-        ]
-        .iter()
-        .map(|vpath| InputEntry {
-            vpath: (*vpath).into(),
-            kind: EntryKind::File,
-            source: vpath
-                .split('/')
-                .fold(root.clone(), |a, c| a.join(c))
-                .to_string_lossy()
-                .as_ref()
-                .into(),
-            size: 0,
-            mtime: 0,
-        })
-        .collect();
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries,
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-
     // `data/` is the writable mount; `readonly/` is served but by no writable
     // layer, which is how the director produces its two distinct refusals.
     // `data` itself is declared a directory so the relative cases below can get
@@ -150,8 +116,7 @@ fn a_path_based_delete_under_a_managed_root_never_reaches_the_real_file() {
         0,
     );
 
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let hooks = install(engine).expect("install");
+    let hooks = install().expect("install");
 
     let served_status =
         ntapi::nt_delete_file(&root.join("data").join("served.esp").to_string_lossy());

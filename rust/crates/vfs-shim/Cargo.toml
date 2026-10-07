@@ -8,12 +8,11 @@ license = "GPL-3.0-only"
 vfs-redirect = { path = "../vfs-redirect" }
 # Pure NT layouts and decisions the hooks apply.
 vfs-ntlayout = { path = "../vfs-ntlayout" }
+# The config's snapshot is validated (`SnapshotReader::open`) and otherwise unused; it goes
+# with cleanup stream I (D3).
 vfs-shared = { path = "../vfs-shared" }
 vfs-core = { path = "../vfs-core" }
 vfs-protocol = { path = "../vfs-protocol" }
-# `overlay_layer_dir` only — moved to vfs-provider (see overlay.rs) so the
-# director can reach it without depending on this crate.
-vfs-provider = { path = "../vfs-provider" }
 vfs-ipc = { path = "../vfs-ipc" }
 vfs-win = { path = "../vfs-win" }
 # Dual-layer vehicle (reflective map + RIP-redirect + spin gate) for children.
@@ -36,10 +35,9 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-# `tests/fakedirector` mounts `RwMemFixture`.
+# `tests/fakedirector` mounts `RwMemFixture`; the seal tests name the write layer's directory
+# (`overlay_layer_dir`).
 vfs-provider = { path = "../vfs-provider", features = ["conformance"] }
-# `bridge` (test-only) provides `flatten` for building snapshot fixtures.
-vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",

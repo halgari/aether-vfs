@@ -2,9 +2,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    ENGINE, HANDLES, TRAMP_DELETE, TRAMP_SETINFO, fuse_root_directory, in_hook_reenter,
-    object_name_str, parse_rename_target, path_is_ours, path_of_handle, path_of_tracked,
-    redirected_oa, to_nt_path, under_root_path,
+    HANDLES, TRAMP_DELETE, TRAMP_SETINFO, fuse_root_directory, in_hook_reenter, object_name_str,
+    parse_rename_target, path_is_ours, path_of_handle, path_of_tracked, redirected_oa, to_nt_path,
+    under_root_path,
 };
 use crate::ntdef::{
     FILE_DISPOSITION_DELETE, FILE_DISPOSITION_INFORMATION, FILE_DISPOSITION_INFORMATION_EX,
@@ -20,16 +20,10 @@ use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 /// `NtDeleteFile` hook: the **path-based** delete. It takes only an
 /// `OBJECT_ATTRIBUTES`, so unhooked it would unlink the real file under a managed
 /// root; there is no handle to be wrong about. The decision is made on the path
-/// (`path_of_tracked`), in the order the open hooks use:
-///
-/// 1. `FuseClient::vpath_under_root`: if the director claims the path, its answer is
-///    the caller's answer, both ways. It never continues to the kernel from here.
-/// 2. `Engine::whiteout`: the shim-local overlay, which is also what `setinfo_hook`'s
-///    non-synthetic branch does for a handle-based delete of the same path.
-/// 3. `path_is_ours`: the backstop. Where the engine declines, an under-root path
-///    fails closed with `STATUS_ACCESS_DENIED` (not the director's
-///    `STATUS_UNSUCCESSFUL`: that one is "the graph said no", this is "nothing here
-///    is willing to answer").
+/// (`path_of_tracked`): if the director's client places it under a root
+/// (`FuseClient::route`), the director's answer is the caller's answer, both ways,
+/// and the call never continues to the kernel. `setinfo_hook` gives a handle-based
+/// delete of the same path the same answer (`director_delete_or_rename`).
 ///
 /// Outside every root the call is trampolined unchanged.
 /// See docs/shim-invariants.md, "Sealed root: deletes and renames".
@@ -39,17 +33,16 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
         Some(t) => t,
         None => return STATUS_UNSUCCESSFUL,
     };
-    // Shim-initiated I/O (overlay writes, the panic log, copy-up) must reach
-    // the real ntdll, exactly as in `create_hook`/`open_hook`.
+    // Shim-initiated I/O (the panic log, the stats report) must reach the real
+    // ntdll, exactly as in `create_hook`/`open_hook`.
     if in_hook_reenter() {
         // SAFETY: the original NT function, called with valid NT arguments.
         return unsafe { tramp(oa) };
     }
     // Decode once, and hold the `UncachedScope` for as long as this call
-    // decides with the result — `vpath_under_root`, `whiteout` and
-    // `path_is_ours` are all `RootMap`-backed and cached the same way
-    // `decision_for` is. See `parent_dir_of_handle`'s case 4 and
-    // `DecodedPath`'s doc comment.
+    // decides with the result — `FuseClient::route` is `RootMap`-backed and
+    // cached. See `parent_dir_of_handle`'s case 4 and `DecodedPath`'s doc
+    // comment.
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
     let decoded = match unsafe { path_of_tracked(oa) } {
         Ok(d) => d,
@@ -79,14 +72,6 @@ pub(super) unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
                 Err(st) => delete_status_for(st),
             };
         }
-    }
-    if let Some(engine) = ENGINE.get() {
-        if engine.whiteout(path) {
-            return STATUS_SUCCESS;
-        }
-    }
-    if path_is_ours(path) {
-        return STATUS_ACCESS_DENIED;
     }
     // Outside every root. A FUSE-synthetic `RootDirectory` is invalid to the
     // kernel even here, so rebuild the OA absolute rather than hand the
@@ -249,12 +234,12 @@ unsafe fn director_delete_or_rename(
     }
 }
 
-/// `NtSetInformationFile` hook. For director FUSE (pure-ring) virtual handles it
-/// routes truncate (`FileEndOfFileInformation`), delete, and rename to the director
-/// overlay over the ring. For legacy local-overlay handles it converts a delete
-/// or rename of a tracked under-root handle into an overlay whiteout/rename and
-/// suppresses the real operation, so the mod backing / real file is preserved
-/// but the path reads as gone/moved.
+/// `NtSetInformationFile` hook. For a synthetic (director-served) handle it routes
+/// truncate (`FileEndOfFileInformation`), delete and rename over the ring. A real
+/// handle whose path is under a root (opened before injection, inherited,
+/// duplicated in, or a fall-through open) gets the same delete and rename answer
+/// (`director_delete_or_rename`), and the real operation never runs, so the real
+/// file is preserved while the path reads as gone or moved.
 ///
 /// Two checks sit on top of that, each commented where it is made: the source is
 /// resolved even when no table knows the handle (`setinfo_source_path`), and a
@@ -356,7 +341,7 @@ pub(super) unsafe fn setinfo_hook_body(
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         let source = unsafe { setinfo_source_path(handle) };
         // Held for every `RootMap`-backed question asked with an OS-consulted
-        // source path below (`Engine::whiteout`/`rename`, `path_is_ours`) —
+        // source path below (`FuseClient::route`, `path_is_ours`) —
         // that string is a fact about the handle's target right now, not a
         // pure function of its own bytes. See `vfs_redirect::UncachedScope`.
         let _uncached_guard = source
@@ -365,7 +350,9 @@ pub(super) unsafe fn setinfo_hook_body(
             .then(vfs_redirect::UncachedScope::enter);
         let nt = source.map(|(p, _)| p);
         // A real handle under a root is the director's, exactly as a synthetic one is and as
-        // `delete_hook` already treats the same path.
+        // `delete_hook` treats the same path. Every outcome under a root returns here: a
+        // routed delete or rename, or a refusal (a rename out of the root, across roots, or
+        // with a target that cannot be parsed). Nothing under a root reaches `tramp`.
         if let Some(nt) = nt.as_deref() {
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             if let Some(st) =
@@ -374,48 +361,8 @@ pub(super) unsafe fn setinfo_hook_body(
                 return st;
             }
         }
-        if let (Some(nt), Some(engine)) = (nt, ENGINE.get()) {
-            let handled = if is_delete {
-                engine.whiteout(&nt)
-            } else {
-                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                match unsafe { parse_rename_target(info, length) } {
-                    Some(target) => match engine.rename(&nt, &target) {
-                        crate::engine::RenameOutcome::Handled => true,
-                        // Both sides under managed roots, but different ones.
-                        // Trampolining here is what let the kernel physically
-                        // move an overlay-captured file out onto real disk
-                        // under the destination root — where it then reads
-                        // back as missing, because that root seals anything
-                        // the provider graph does not serve. Fail closed, with
-                        // the same status the FUSE-handle branch above already
-                        // returns for the identical case.
-                        crate::engine::RenameOutcome::CrossRoot => return STATUS_UNSUCCESSFUL,
-                        crate::engine::RenameOutcome::Declined => false,
-                    },
-                    None => false,
-                }
-            };
-            if handled {
-                // Suppress the real delete/rename; report success to the caller.
-                // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, 0) };
-                return STATUS_SUCCESS;
-            }
-            // The source is under a managed root and nothing above absorbed the operation, so
-            // `tramp` would hand it to the kernel, which acts on the real file. Three routes
-            // end here: a delete `Engine::whiteout` declined (as `delete_hook` already
-            // refuses), a rename out of the root to a target outside every root, and a rename
-            // target that cannot be parsed. The rule: a rename either has both sides under the
-            // same root and is routed, or does not touch a root at all and is trampolined;
-            // everything between is refused.
-            // See docs/shim-invariants.md, "Sealed root: deletes and renames".
-            if path_is_ours(&nt) {
-                return STATUS_ACCESS_DENIED;
-            }
-        }
-        // A rename whose *target* lands under a managed root. The arms above are keyed on
-        // the source, and for a source outside every root none of them runs, so `tramp`
+        // A rename whose *target* lands under a managed root. The arm above is keyed on
+        // the source, and for a source outside every root it does not run, so `tramp`
         // would physically create a file under a root that seals everything the provider
         // graph does not serve. Refused with `STATUS_ACCESS_DENIED`; the cross-root arm's
         // `STATUS_UNSUCCESSFUL` is a different answer ("the graph cannot express this
@@ -425,8 +372,7 @@ pub(super) unsafe fn setinfo_hook_body(
         // NOTE: `parse_rename_target` discards `parent_dir_of_handle`'s OS-consulted
         // provenance bit, so a target named against a directory handle the shim never saw
         // opened reaches `path_is_ours` here without an `UncachedScope`. That is the known
-        // gap `parse_rename_target` already records for `engine.rename`; both callers are
-        // fixed at once there.
+        // gap `parse_rename_target` already records; both callers are fixed at once there.
         // See docs/shim-invariants.md, "Sealed root: deletes and renames".
         if is_rename {
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).

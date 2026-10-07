@@ -60,16 +60,7 @@ fn every_stat_api_agrees_about_existence_and_size() {
         ),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let _guard =
-        vfs_shim::install(vfs_shim::Engine::new(root.to_str().unwrap(), snapshot).unwrap())
-            .expect("install");
+    let _guard = vfs_shim::install().expect("install");
 
     // Some `NtQueryInformationByName` classes are unsupported for a plain
     // by-name query on some Windows builds/paths even for a perfectly

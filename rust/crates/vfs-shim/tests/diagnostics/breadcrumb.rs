@@ -12,7 +12,7 @@
 use crate::fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 
 const NONE: u32 = u32::MAX;
 const MAGIC: u32 = 0x4252_4342;
@@ -49,15 +49,7 @@ fn an_outside_reader_can_see_which_hook_the_process_is_in() {
         Fake::new().with("mod.esp", b"breadcrumbed".to_vec(), ReadStyle::Whole),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let _guard = install(engine).expect("install");
+    let _guard = install().expect("install");
 
     assert!(
         vfs_shim::breadcrumb::is_active(),

@@ -54,11 +54,6 @@ pub(super) struct Snapshot {
     pub(super) reg_unresolved: u64,
     pub(super) reg_close_lock_given_up: u64,
     pub(super) reg: RegCounters,
-    pub(super) copy_up_counts: [u64; COPYUP_N],
-    pub(super) copy_up_bytes: u64,
-    pub(super) copy_ups: HashMap<String, u64>,
-    pub(super) overlay_fail_counts: [u64; OVERLAY_FAIL_N],
-    pub(super) overlay_fails: HashMap<String, u64>,
     pub(super) hook_panics_total: u64,
     pub(super) hook_panics: HashMap<&'static str, u64>,
     /// `None` when `VFS_SHIM_READ_CACHE` turned the cache off.
@@ -135,11 +130,6 @@ pub(super) fn snapshot() -> Snapshot {
         reg_unresolved: reg_unresolved_count(),
         reg_close_lock_given_up: reg_close_lock_given_up_count(),
         reg: reg_counters(),
-        copy_up_counts: std::array::from_fn(|i| copy_up_count(ALL_COPY_UPS[i])),
-        copy_up_bytes: COPYUP_BYTES.load(Ordering::Relaxed),
-        copy_ups: COPYUPS.snapshot(),
-        overlay_fail_counts: std::array::from_fn(|i| overlay_fail_count(ALL_OVERLAY_FAILS[i])),
-        overlay_fails: OVERLAY_FAILS.snapshot(),
         hook_panics_total: hook_panics_total(),
         hook_panics: HOOK_PANICS.snapshot(),
         read_cache: crate::read_cache::stats(),
@@ -265,7 +255,7 @@ pub(super) fn banner() -> String {
 pub(super) fn render_report() -> String {
     let snap = snapshot();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         banner(),
         render_hook_panics(&snap),
         render(&snap),
@@ -281,9 +271,7 @@ pub(super) fn render_report() -> String {
         render_passthrough(&snap),
         render_setinfo_noop(&snap),
         render_synth_locks(&snap),
-        render_outcomes(&snap),
-        render_copy_ups(&snap),
-        render_overlay_fails(&snap)
+        render_outcomes(&snap)
     )
 }
 

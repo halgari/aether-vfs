@@ -36,7 +36,7 @@ use crate::fakedirector;
 use crate::ntapi;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 
 const HOST_EXPORT: &[u8] = b"host: data/export.esp";
 const HOST_MOVED: &[u8] = b"host: data/moved.esp";
@@ -103,15 +103,7 @@ fn handle_based_deletes_and_out_of_root_renames_never_touch_the_real_file() {
             .writable_under("data/"),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let hooks = install(engine).expect("install");
+    let hooks = install().expect("install");
 
     // 2a. The rename out, the Win32 way. `MoveFileExW` opens the source (which
     //     the shim *does* see, so the handle is synthetic) and issues a set-info

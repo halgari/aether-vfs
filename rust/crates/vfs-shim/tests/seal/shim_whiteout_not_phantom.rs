@@ -4,14 +4,16 @@
 //!
 //! ## Why the fixture looks like this
 //!
-//! The shim and the director share one physical directory and spell whiteouts
-//! differently. `Overlay::whiteout_path` appends `vfs_redirect::WHITEOUT_SUFFIX`
-//! (`<name>.__vfs_wh__`); `vfs_compose::OverlayProvider` prefixes `.wh.<name>`.
-//! Live, `skyrim-live`/`vfs-launch` hand the director a write layer rooted at
-//! `overlay_layer_dir(overlay, RootId::DEFAULT)` — the *same* directory
-//! `Engine`'s local overlay writes into. So a marker the shim wrote is, to the
+//! The shim and the director shared one physical directory and spell whiteouts
+//! differently: the shim-local overlay (removed by task C8) appended
+//! `vfs_redirect::WHITEOUT_SUFFIX` (`<name>.__vfs_wh__`);
+//! `vfs_compose::OverlayProvider` prefixes `.wh.<name>`. Live,
+//! `skyrim-live`/`vfs-launch` hand the director a write layer rooted at
+//! `overlay_layer_dir(overlay, RootId::DEFAULT)` — the *same* directory the
+//! shim-local overlay wrote into. So a marker an older shim wrote is, to the
 //! director, a zero-byte file with an odd name, and `client.readdir` hands it
-//! back like any other entry.
+//! back like any other entry. The shim writes no more of them, but write layers
+//! already on disk still hold them.
 //!
 //! That is why the fake serves the marker as an ordinary file rather than
 //! filtering it: filtering it in the fixture would test a director that does
@@ -26,16 +28,16 @@
 //! Only enumeration. A stale marker still does not hide its target from an
 //! `open` through the director: `OverlayProvider::hidden_by_whiteout` looks for
 //! its own `.wh.` spelling, and the shim has no per-open hook that could ask
-//! without a `stat` on every read. The route that mints such a marker while a
-//! director is live is `setinfo_hook`'s engine branch, which — unlike
-//! `delete_hook` — never asks the client first; that divergence is recorded in
-//! the task report, not fixed here.
+//! without a `stat` on every read. (The route that minted such a marker while a
+//! director was live, `setinfo_hook`'s engine branch, asks the director since
+//! task C8.)
 
 use crate::fakedirector;
 use crate::ntapi;
 
+use vfs_provider::overlay_layer_dir;
 use vfs_redirect::RootId;
-use vfs_shim::{Engine, install, overlay_layer_dir};
+use vfs_shim::install;
 
 const KEPT: &[u8] = b"kept";
 const GONE: &[u8] = b"gone";
@@ -69,8 +71,8 @@ fn setup() -> std::path::PathBuf {
     let layer = overlay_layer_dir(&overlay, RootId::DEFAULT);
     std::fs::create_dir_all(layer.join("data")).unwrap();
 
-    // The marker physically present in the shared directory, written the way
-    // `Overlay::whiteout` writes it. The director's write layer is a
+    // The marker physically present in the shared directory, the way an older
+    // shim's overlay wrote it. The director's write layer is a
     // `DiskProvider` over exactly this directory, so it reads it back as a
     // file — which is what the fake below reproduces.
     std::fs::write(
@@ -101,19 +103,7 @@ fn setup() -> std::path::PathBuf {
         0,
     );
 
-    let engine = Engine::with_overlay(
-        root.to_str().unwrap(),
-        overlay.to_str().unwrap(),
-        vfs_shared::bridge::flatten(
-            &vfs_core::build(vec![vfs_core::Layer {
-                id: vfs_core::LayerId(0),
-                entries: Vec::new(),
-            }])
-            .unwrap(),
-        ),
-    )
-    .unwrap();
-    std::mem::forget(install(engine).expect("install"));
+    std::mem::forget(install().expect("install"));
     root
 }
 

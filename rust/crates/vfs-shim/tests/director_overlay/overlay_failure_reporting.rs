@@ -23,7 +23,7 @@
 use crate::fakedirector;
 
 use fakedirector::Fake;
-use vfs_shim::{Engine, OpenOutcome, install, outcome_count};
+use vfs_shim::{OpenOutcome, install, outcome_count};
 
 /// `ERROR_GEN_FAILURE` — `STATUS_UNSUCCESSFUL`.
 const ERROR_GEN_FAILURE: i32 = 31;
@@ -44,14 +44,7 @@ fn a_director_failure_on_a_write_fails_closed_even_with_disk_fallthrough_on() {
     std::env::set_var(vfs_env::ALLOW_DISK_FALLTHROUGH, "1");
 
     fakedirector::install(&root, Fake::new().failing_writes_under("data/"), 0);
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let hooks = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
+    let hooks = install().expect("install");
 
     let failed = root.join("Data").join("mod.esp");
     let failed_result = std::fs::write(&failed, b"bytes the provider could not take");

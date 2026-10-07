@@ -340,7 +340,7 @@ pub(super) static READDIRS_DROPPED: AtomicU64 = AtomicU64::new(0);
 /// handed to the OS" — and that is not the distinction containment turns on.
 /// Both of `serve_dir_query`'s under-root branches recorded `served: true`,
 /// including the one that drained the *real* directory behind the mount and
-/// merged the shim-local overlay onto it, so the one counter that could have
+/// merged the (since removed) shim-local overlay onto it, so the one counter that could have
 /// shown an under-root listing coming off real disk reported it identically
 /// to a director-authored one. Gate 4 task 8b split the two and deleted the
 /// draining branch; the three-way label is what makes a regression back to it
@@ -350,12 +350,11 @@ pub(crate) enum ReadDirSource {
     /// The director's own `OP_READDIR` answered. Authoritative and unmerged:
     /// nothing from the real filesystem can appear in it.
     Director,
-    /// Under a managed root, but the director could not be asked about this
-    /// directory (no client installed, or its `vpath_under_root` does not
-    /// recognise the path the engine's own root notion accepted). The listing
-    /// is the shim-local write overlay's entries and nothing else — real disk
-    /// is never drained under a managed root. A nonzero count here in a live
-    /// session means the two under-root predicates have drifted apart again.
+    /// A tracked directory the director could not be asked about: its client
+    /// does not route the path the handle was tracked under. The listing is
+    /// empty — real disk is never drained under a managed root. Not reached
+    /// (tracking asks the client the same question); a nonzero count here in a
+    /// live session means the two have drifted apart.
     ContainedNoDirector,
     /// Outside every managed root: the OS answered it verbatim, and the
     /// recorded count is `0` because the shim never sees the entries.

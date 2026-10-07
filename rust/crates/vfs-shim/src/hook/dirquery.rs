@@ -1,7 +1,7 @@
 //! Directory enumeration: `NtQueryDirectoryFile` and `NtQueryDirectoryFileEx`.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{ENGINE, HANDLES, TRAMP_QDIR, TRAMP_QDIREX, path_of_handle};
+use super::{HANDLES, TRAMP_QDIR, TRAMP_QDIREX, path_of_handle};
 use crate::ntdef::{
     SL_RESTART_SCAN, SL_RETURN_SINGLE_ENTRY, STATUS_BUFFER_OVERFLOW, STATUS_NO_MORE_FILES,
     STATUS_SUCCESS, STATUS_UNSUCCESSFUL, UnicodeString,
@@ -166,13 +166,14 @@ unsafe fn serve_dir_query(
 
     // Phase 2 (unlocked): build the listing. Every listing built here is under a
     // managed root, so it may hold only what the director serves (its `readdir`, whole
-    // and unmerged) or, failing that, the shim-local overlay's own entries. The real
-    // directory behind the mount is never read into one. The overlay-only arm is not
-    // reached today; it stays so that a drifted predicate fails closed.
+    // and unmerged). The real directory behind the mount is never read into one. A
+    // tracked directory the client does not route gets an empty listing: not reached
+    // (a directory is tracked only when `path_is_ours`, the same question), and kept so
+    // that a drifted predicate fails closed.
     // See docs/shim-invariants.md, "Enumeration containment".
     //
-    // The ring round trip and the overlay's own `read_dir` both call out, so
-    // the lock must NOT be held here (NtClose also takes it).
+    // The ring round trip calls out, so the lock must NOT be held here (NtClose also
+    // takes it).
     let rebuilt = if need_build {
         // A wildcard NT's own capture refuses gets NT's answer.
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
@@ -195,9 +196,10 @@ unsafe fn serve_dir_query(
                                 mtime: e.mtime,
                             })
                             .collect();
-                        // The director mounts our overlay directory as its write layer and spells
-                        // whiteouts `.wh.<name>`, so our own `<name>.__vfs_wh__` markers come back as
-                        // ordinary files. Strip them before the wildcard filter (`strip_whiteout_markers`).
+                        // The director's write layer is the directory older shims wrote their own
+                        // `<name>.__vfs_wh__` whiteout markers into, and it spells whiteouts
+                        // `.wh.<name>`, so those markers come back as ordinary files. Strip them
+                        // before the wildcard filter (`strip_whiteout_markers`).
                         // See docs/shim-invariants.md, "Enumeration containment".
                         let mut items = crate::overlay::strip_whiteout_markers(items);
                         if let Some(ref w) = wildcard {
@@ -211,24 +213,13 @@ unsafe fn serve_dir_query(
                     Err(_) => Vec::new(),
                 };
                 // Not fixed here: a marker still does not hide its target from an open through
-                // the director, and `setinfo_hook`'s engine branch can still write a shim-spelled
-                // marker into the director's upper on a handle-based delete.
-                // See docs/shim-invariants.md, "Enumeration containment".
+                // the director. See docs/shim-invariants.md, "Enumeration containment".
                 Some((items, crate::hookstats::ReadDirSource::Director))
             }
-            None => {
-                // No real base to layer onto — that is the whole point. An
-                // overlay-only listing is `overlay_listing` over an empty
-                // base, which also means every entry now passes through the
-                // wildcard filter: `apply_to_listing` only filters what it
-                // *adds*, so the drained base used to skip the filter
-                // entirely and answer `*.esp` with the whole directory.
-                let items = match ENGINE.get() {
-                    Some(engine) => engine.overlay_listing(&dir_path, &[], wildcard.as_deref()),
-                    None => Vec::new(),
-                };
-                Some((items, crate::hookstats::ReadDirSource::ContainedNoDirector))
-            }
+            None => Some((
+                Vec::new(),
+                crate::hookstats::ReadDirSource::ContainedNoDirector,
+            )),
         }
     } else {
         None

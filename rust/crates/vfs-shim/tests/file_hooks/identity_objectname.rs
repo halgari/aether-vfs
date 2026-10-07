@@ -16,7 +16,7 @@
 use crate::fakedirector;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 use windows_sys::Win32::Foundation::HANDLE;
 
 #[link(name = "ntdll")]
@@ -66,14 +66,7 @@ fn a_redirected_handle_reports_its_virtual_name_not_the_backing_one() {
         Fake::new().with("mod.esp", b"the-real-bytes".to_vec(), ReadStyle::Whole),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let _guard = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
+    let _guard = install().expect("install");
 
     use std::os::windows::io::AsRawHandle;
     let f = std::fs::File::open(&vfile).expect("open the virtual file");

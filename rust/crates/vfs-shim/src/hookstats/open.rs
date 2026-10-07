@@ -278,17 +278,13 @@ pub fn outcome_count(outcome: OpenOutcome) -> u64 {
 /// This exists to keep one specific invariant true. Four recorded sessions
 /// have used `routed == opens_ok + opens_err` (the director's own arrived-open
 /// total) as this project's health check, on the reading that any drift means
-/// an open one side saw and the other did not — a bypass. Gate 4 added two
-/// places where the shim asks the director to open something *without* that
-/// open being a `Routed` decision, which breaks the equality without any
-/// bypass existing:
-///
-///  - **The directory downgrade** (`hook/file_open.rs`): a write-flavoured open of a
-///    directory is re-issued as a read open, so one `Routed` produces two
-///    `OP_OPEN`s.
-///  - **Copy-up** (`Engine::cow_seed` → `seed_from_director`): the shim opens
-///    the file itself to read its prior content. That open is the shim's, not
-///    the game's, so nothing ever classified it as an outcome.
+/// an open one side saw and the other did not — a bypass. The shim asks the
+/// director to open something *without* that open being a `Routed` decision in
+/// one place, which breaks the equality without any bypass existing: **the
+/// directory downgrade** (`hook/file_open.rs`), where a write-flavoured open of a
+/// directory is re-issued as a read open, so one `Routed` produces two
+/// `OP_OPEN`s. (The shim-local copy-up was the second such place, until task C8
+/// removed it.)
 ///
 /// Counting them rather than tolerating them keeps the reconciliation exact:
 /// `routed + unrouted_director_opens == opens_ok + opens_err`, still an

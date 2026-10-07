@@ -2,21 +2,20 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    CreateProcessInternalWFn, ENGINE, SELF_DLL, close_hook, compress_key_hook, cpiw_hook,
-    create_hook, create_key_hook, create_key_tx_hook, create_section_hook, delete_hook,
-    delete_key_hook, delete_value_key_hook, dup_hook, enum_key_hook, enum_value_hook, flush_hook,
-    flush_key_hook, host_name_convention, install_panic_hook, load_key_ex_hook, load_key_hook,
-    load_key2_hook, load_key3_hook, lock_hook, lock_registry_key_hook, map_view_hook,
-    notify_key_hook, notify_multiple_hook, open_hook, open_key_ex_hook, open_key_hook,
-    open_key_tx_ex_hook, open_key_tx_hook, qattr_hook, qdir_hook, qdirex_hook, qfull_hook,
-    qibn_hook, qif_hook, qobj_hook, query_key_hook, query_multiple_hook, query_security_hook,
-    query_value_hook, qvol_hook, read_hook, rename_key_hook, replace_key_hook, restore_key_hook,
-    save_key_ex_hook, save_key_hook, save_merged_hook, set_info_key_hook, set_info_object_hook,
-    set_security_hook, set_value_key_hook, setinfo_hook, unload_key_ex_hook, unload_key_hook,
-    unload_key2_hook, unlock_hook, unmap_view_hook, write_hook,
+    CreateProcessInternalWFn, SELF_DLL, close_hook, compress_key_hook, cpiw_hook, create_hook,
+    create_key_hook, create_key_tx_hook, create_section_hook, delete_hook, delete_key_hook,
+    delete_value_key_hook, dup_hook, enum_key_hook, enum_value_hook, flush_hook, flush_key_hook,
+    host_name_convention, install_panic_hook, load_key_ex_hook, load_key_hook, load_key2_hook,
+    load_key3_hook, lock_hook, lock_registry_key_hook, map_view_hook, notify_key_hook,
+    notify_multiple_hook, open_hook, open_key_ex_hook, open_key_hook, open_key_tx_ex_hook,
+    open_key_tx_hook, qattr_hook, qdir_hook, qdirex_hook, qfull_hook, qibn_hook, qif_hook,
+    qobj_hook, query_key_hook, query_multiple_hook, query_security_hook, query_value_hook,
+    qvol_hook, read_hook, rename_key_hook, replace_key_hook, restore_key_hook, save_key_ex_hook,
+    save_key_hook, save_merged_hook, set_info_key_hook, set_info_object_hook, set_security_hook,
+    set_value_key_hook, setinfo_hook, unload_key_ex_hook, unload_key_hook, unload_key2_hook,
+    unlock_hook, unmap_view_hook, write_hook,
 };
 use crate::child::self_dll_path;
-use crate::engine::Engine;
 use crate::ntdef::{
     NtCloseFn, NtCreateFileFn, NtCreateKeyFn, NtCreateKeyTransactedFn, NtCreateSectionFn,
     NtDeleteFileFn, NtDeleteKeyFn, NtDeleteValueKeyFn, NtDuplicateObjectFn, NtEnumerateKeyFn,
@@ -36,6 +35,7 @@ use crate::tramp::{RawTramp, Tramp};
 use retour::RawDetour;
 use std::collections::BTreeSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows_sys::Win32::Foundation::HMODULE;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 
@@ -256,17 +256,30 @@ unsafe fn make_detour(
     unsafe { RawDetour::new(proc as *const (), hookfn) }.map_err(|_| InstallError::Detour)
 }
 
-/// Install all detours backed by `engine` (in-process / no early payload).
-/// Idempotent-guarded. Patches the four path/attr stubs itself.
-pub fn install(engine: Engine) -> Result<HookGuard, InstallError> {
+/// Set by the first `install`/`install_late`; a second one is `AlreadyInstalled`.
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Claim the one install this process gets.
+fn claim_install() -> Result<(), InstallError> {
+    if INSTALLED.swap(true, Ordering::SeqCst) {
+        return Err(InstallError::AlreadyInstalled);
+    }
+    Ok(())
+}
+
+/// Install all detours (in-process / no early payload). Once per process. Patches the four
+/// path/attr stubs itself.
+///
+/// What is under a managed root is decided by the director's client
+/// (`crate::director::global`), which the caller attaches first: bootstrap refuses to get here
+/// without one. With no client attached nothing is under a root, and every call passes through.
+pub fn install() -> Result<HookGuard, InstallError> {
     install_panic_hook();
     // Before the detours go live: creating the breadcrumb file is real I/O, and
     // once hooks are installed that I/O re-enters them.
     crate::breadcrumb::init();
     crate::hookstats::start_reporter();
-    ENGINE
-        .set(engine)
-        .map_err(|_| InstallError::AlreadyInstalled)?;
+    claim_install()?;
     // SAFETY: ntdll lookup + detour install; each hook matches its ABI.
     unsafe { install_all_detours(true) }
 }
@@ -299,7 +312,6 @@ fn early_rows_are_the_payload_slots() -> bool {
 /// `payload_cfg` must point at a live [`PayloadConfig`](vfs_inject::PayloadConfig)
 /// written by the injector into this process, and stay valid for the call.
 pub unsafe fn install_late(
-    engine: Engine,
     payload_cfg: *mut vfs_inject::PayloadConfig,
 ) -> Result<HookGuard, InstallError> {
     if payload_cfg.is_null() {
@@ -310,9 +322,7 @@ pub unsafe fn install_late(
     // once hooks are installed that I/O re-enters them.
     crate::breadcrumb::init();
     crate::hookstats::start_reporter();
-    ENGINE
-        .set(engine)
-        .map_err(|_| InstallError::AlreadyInstalled)?;
+    claim_install()?;
 
     // `install_all_detours(false)` below skips the `Early` rows, and the block below fills the
     // slots of exactly the four rows that are `Early`. A fifth `Early` row would be left with an
@@ -341,7 +351,8 @@ pub unsafe fn install_late(
             NtQueryFullAttributesFileFn,
         >(cfg.qfull_tramp)));
 
-        // Publish secondary last-ish: hooks become Engine-backed for non-table paths.
+        // Publish secondary last-ish: from here the early payload hands every path it does not
+        // redirect itself to these hooks.
         core::ptr::write_volatile(&mut cfg.secondary_create, create_hook as *const () as usize);
         core::ptr::write_volatile(&mut cfg.secondary_open, open_hook as *const () as usize);
         core::ptr::write_volatile(&mut cfg.secondary_qattr, qattr_hook as *const () as usize);
@@ -426,7 +437,7 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
         let before = detours.len();
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         unsafe { install_registry_detours(ntdll, &rows, &mut detours, registry_missing) };
-        REG_DETOURS_INSTALLED.store(detours.len() - before, std::sync::atomic::Ordering::Relaxed);
+        REG_DETOURS_INSTALLED.store(detours.len() - before, Ordering::Relaxed);
     } else {
         crate::regclient::overlay_off();
     }
@@ -459,7 +470,7 @@ static REG_DETOURS_INSTALLED: std::sync::atomic::AtomicUsize =
 /// How many registry overlay detours this process's install put in: 0 when the overlay is off
 /// (`VFS_REGISTRY` unset). For tests and diagnostics.
 pub fn registry_detours_installed() -> usize {
-    REG_DETOURS_INSTALLED.load(std::sync::atomic::Ordering::Relaxed)
+    REG_DETOURS_INSTALLED.load(Ordering::Relaxed)
 }
 
 /// The registry overlay's detours (spec section 3.1: open, create, duplicate; `NtClose` and

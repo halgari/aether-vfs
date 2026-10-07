@@ -1,8 +1,10 @@
 #![deny(unsafe_code)]
 
-//! `vfs-shim`: installs NT detours that redirect virtualized paths to mod
-//! backing files. Supports standalone in-process install and dual-layer
-//! install_late (early payload owns the four path/attr stubs).
+//! `vfs-shim`: installs NT detours that answer every operation on a path under a
+//! managed root from the director, over its ring. Supports a full in-process
+//! install and the dual-layer `install_late` (the early payload owns the four
+//! path/attr stubs). There is no shim-local answer: without the director's
+//! client attached nothing is under a root.
 
 #[macro_use]
 mod detour_table;
@@ -10,7 +12,6 @@ mod bootstrap;
 /// Lock-free record of the hook currently executing, in a shared file.
 pub mod breadcrumb;
 pub mod director;
-mod engine;
 // compat: removed by cleanup stream I
 #[doc(hidden)]
 pub use director as fuse_client;
@@ -44,7 +45,6 @@ pub use bootstrap::{
 // build a shim config too. Re-exported here so every existing caller
 // (`vfs-embed`, `vfs-inject`'s tests, `vfs-shim/tests/diagnostics/exit_stall_repro.rs`)
 // keeps compiling unchanged against `vfs_shim::`.
-pub use engine::{Engine, EngineError, RenameOutcome};
 #[doc(hidden)]
 pub use hook::as_shim_io_for_tests;
 /// Run one `extern "system"` entry point's body with its panic contained.
@@ -65,9 +65,9 @@ pub use hook::{
 /// [`hookstats::outcome_count`]. A class nobody asserts on is a class that can
 /// quietly start (or stop) counting again.
 pub use hookstats::{
-    OpenOutcome, OverlayFail, RegNotify, hook_panic_count, hook_panics_total, outcome_count,
-    overlay_fail_count, reg_notify_count, reg_overlay_disabled_by, reg_read_fallback_count,
-    reg_unresolved_count, reg_write_refused_count, unrouted_director_opens,
+    OpenOutcome, RegNotify, hook_panic_count, hook_panics_total, outcome_count, reg_notify_count,
+    reg_overlay_disabled_by, reg_read_fallback_count, reg_unresolved_count,
+    reg_write_refused_count, unrouted_director_opens,
 };
 pub use vfs_protocol::shimcfg::{
     StaticImport, encode_config, encode_config_full, encode_config_with_overlay,
@@ -104,5 +104,4 @@ pub fn registry_notify_pending() -> usize {
 pub fn is_synthetic_key_handle(handle: isize) -> bool {
     regkeys::is_synthetic(handle)
 }
-pub use overlay::overlay_layer_dir;
 pub use vfs_inject::PayloadConfig;

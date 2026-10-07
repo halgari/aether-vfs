@@ -1,6 +1,6 @@
 //! An in-process stand-in for the director's ring server.
 //!
-//! `Engine::cow_seed` reads copy-up content through the director, so a test
+//! Every byte under a managed root comes from the director, so a test
 //! that wants to know *where the bytes came from* has to be able to put bytes
 //! somewhere only the director can see. There is no way to fake that with
 //! files: the whole claim under test is that content on the real filesystem
@@ -681,8 +681,8 @@ impl Fake {
 /// they must outlive every test in the binary, and the process is the only
 /// thing that can decide when that is.
 ///
-/// `virtual_dir` becomes `VFS_VIRTUAL_DIR` — root 0 for both halves of the
-/// shim, so the `RootId` the `Engine` resolves is the one the client sends.
+/// `virtual_dir` becomes `VFS_VIRTUAL_DIR`: root 0 of the shim's client. A
+/// test that declares more roots sets `VFS_VIRTUAL_ROOTS` before this.
 ///
 /// `arena_len` of 0 forces every READ inline; [`ARENA_LEN`] gives the section
 /// a real bulk arena laid out the way `IpcServe::start` lays one out, so a

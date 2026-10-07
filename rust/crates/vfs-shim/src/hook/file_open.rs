@@ -2,9 +2,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    HANDLES, ShimIoGuard, TRAMP_CREATE, TRAMP_OPEN, allow_disk_fallthrough, decision_for,
-    fuse_root_directory, in_hook_reenter, object_name_str, path_is_ours, path_of_tracked,
-    record_identity, record_path, reset_handle, reset_key, tag_under_root, to_nt_path,
+    HANDLES, ShimIoGuard, TRAMP_CREATE, TRAMP_OPEN, allow_disk_fallthrough, fuse_root_directory,
+    in_hook_reenter, object_name_str, path_is_ours, path_of_tracked, record_path, reset_handle,
+    reset_key, tag_under_root, to_nt_path,
 };
 use crate::ntbuf::OwnedOa;
 use crate::ntdef::{
@@ -19,47 +19,23 @@ use vfs_ntlayout::{
     dir_open_downgrades, disposition_information, disposition_needs_existence_probe,
     is_append_only, is_write_open, open_create_flags,
 };
-use vfs_redirect::Decision;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
-/// Record a `decision_for` fallthrough outcome (`Redirect`/`Deny`),
-/// unless `already` is set — meaning `try_fuse_create` already classified this
-/// same physical open (the write fallback, and only that: the DRM exception
-/// was the other classifier here until gate 5 Task 4 deleted it) before
-/// returning `None`. Both `create_hook` and `open_hook` call `decision_for`
-/// unconditionally whenever `try_fuse_create` returns `None`, regardless of
-/// *why* it returned `None`, so without this guard an open already recorded
-/// there would be counted a second time here.
+/// Record an open the director did not answer that passes through to the real filesystem,
+/// unless `already` is set — meaning `try_fuse_create` already classified this same physical
+/// open (the write fallback behind `allow_disk_fallthrough`) before returning `None`.
 ///
-/// Cheap when disabled: the caller passes an already-decoded `path` rather
-/// than this function re-decoding `oa` itself (see `tag_under_root`'s doc
-/// comment for why re-decoding independently, per caller, is the thing to
-/// avoid), and `note_open_outcome` itself is a no-op when stats are disabled.
-fn note_decision_outcome(
-    path: Option<&str>,
-    already: bool,
-    outcome: crate::hookstats::OpenOutcome,
-) {
-    if already || !crate::hookstats::enabled() {
-        return;
-    }
-    if let Some(p) = path {
-        crate::hookstats::note_open_outcome(outcome, p);
-    }
-}
-
-/// Same purpose as [`note_decision_outcome`], specialised for
-/// `Decision::PassThrough`: the brief scopes that outcome to opens **under a
-/// managed root** — a `PassThrough` decision also fires for paths outside
-/// every root (the ordinary case, e.g. `kernel32.dll`), and counting those
-/// would drown the fall-through signal in background noise unrelated to any
-/// bypass. `path_is_ours` is the one helper that already answers "under a
-/// managed root" correctly for both the engine's and the FUSE client's
-/// notions of the root (see its own doc comment).
+/// Scoped to opens **under a managed root**: a pass-through also fires for every path outside
+/// every root (the ordinary case, e.g. `kernel32.dll`), and counting those would drown the
+/// fall-through signal in background noise unrelated to any bypass. Under a root it is reached
+/// only behind `allow_disk_fallthrough`.
 ///
-/// Caller's responsibility: hold a `vfs_redirect::UncachedScope` around this
-/// call if `path` came from an OS-consulted decode — `path_is_ours` reaches
-/// the same cached `RootMap::under_root` `decision_for` does.
+/// Cheap when disabled: the caller passes an already-decoded `path` (see `tag_under_root`'s doc
+/// comment for why re-decoding per caller is the thing to avoid), and `note_open_outcome` is a
+/// no-op when stats are disabled.
+///
+/// Caller's responsibility: hold a `vfs_redirect::UncachedScope` around this call if `path` came
+/// from an OS-consulted decode — `path_is_ours` is `RootMap`-backed and cached.
 fn note_passthrough_outcome(path: Option<&str>, already: bool) {
     if already || !crate::hookstats::enabled() {
         return;
@@ -89,13 +65,10 @@ unsafe fn try_fuse_create(
     create_flags: u32,
     append_only: bool,
     // Set to `true` when this call already recorded an `OpenOutcome` for the
-    // physical open before returning `None`. Exactly one site does that now —
-    // the write fallback behind `allow_disk_fallthrough`; the DRM exception
-    // was the other, and gate 5 Task 4 deleted it.
-    // Both callers (`create_hook`/`open_hook`) still unconditionally call
-    // `decision_for` afterward for the actual routing decision, and without
-    // this out-param that second classification would double-count the same
-    // open — see the callers' use of it for the full argument.
+    // physical open before returning `None`. Exactly one site does that — the
+    // write fallback behind `allow_disk_fallthrough`. The caller records a
+    // pass-through for every `None`, and without this out-param would count
+    // the same open twice (`note_passthrough_outcome`).
     outcome_recorded: &mut bool,
 ) -> Option<NTSTATUS> {
     let client = crate::director::global()?;
@@ -219,7 +192,7 @@ unsafe fn try_fuse_create(
         // Not in director: seal the path, for reads and writes alike. The only way out of
         // this arm without a status is the `VFS_ALLOW_DISK_FALLTHROUGH` opt-out, which
         // unseals the root wholesale (see `allow_disk_fallthrough`). A write used to fall
-        // through to `decision_for` here; it no longer does.
+        // through to the (since removed) shim-local engine here; it no longer does.
         // See docs/shim-invariants.md, "Sealed root: statuses".
         Err(st) if st == vfs_protocol::ST_NOT_FOUND => {
             if allow_disk_fallthrough() {
@@ -228,8 +201,7 @@ unsafe fn try_fuse_create(
                 // the last site that can move `FellThroughWriteFallback` off
                 // zero, and a live report showing it non-zero now means
                 // exactly one thing: this switch is on. (Reads stay
-                // unrecorded here, as before: `decision_for` classifies them
-                // a few lines up the stack.)
+                // unrecorded here: the caller records them as a pass-through.)
                 if write {
                     crate::hookstats::note_open_outcome(
                         crate::hookstats::OpenOutcome::FellThroughWriteFallback,
@@ -256,7 +228,7 @@ unsafe fn try_fuse_create(
         }
         // `OPEN_EXCL` (CREATE_NEW / FILE_CREATE) against a path that already
         // exists. Without this arm it fell into the generic `Err(_) if write`
-        // guard below and fell through to the shim-local overlay, which
+        // guard below and fell through to the (since removed) shim-local overlay, which
         // *created the file there and reported success* — an exclusive
         // create silently "succeeding" against an existing file. Report the
         // real collision instead of falling through.
@@ -567,8 +539,9 @@ pub(super) struct OpenCall {
 }
 
 /// The routing of an `NtCreateFile` or `NtOpenFile` call past the in-hook re-entry check: the
-/// director's answer for an under-root open, else redirect, deny or pass-through. `real` makes
-/// the original call with the `OBJECT_ATTRIBUTES` it is given.
+/// director's answer for an under-root open, else the real call (a path outside every root, or
+/// an under-root miss behind `allow_disk_fallthrough`). `real` makes the original call with the
+/// `OBJECT_ATTRIBUTES` it is given.
 ///
 /// A name the call carries that cannot be decoded is refused (`path_of_tracked`'s status, the
 /// C2 fail-closed rule), before anything else happens.
@@ -602,7 +575,7 @@ unsafe fn route_open(
     // Held for the rest of this call whenever `path` is itself a snapshot of
     // a live OS query (an unseen handle's current target — `parent_dir_of_handle`
     // case 4) rather than a pure function of its own bytes: every
-    // `RootMap`-backed decision made below with `path` (`decision_for`, and
+    // `RootMap`-backed decision made below with `path` (`FuseClient::route`, and
     // `path_is_ours` via `tag_under_root`/`record_path`/
     // `note_passthrough_outcome`) must not be cached under it. See
     // `vfs_redirect::UncachedScope`'s doc comment.
@@ -626,9 +599,8 @@ unsafe fn route_open(
         None => crate::hookstats::note_undecodable(unsafe { object_name_str(oa) }.as_deref()),
     }
     // Set by `try_fuse_create` when it already recorded an outcome (the write
-    // fallback — the DRM exception was the other one and is gone) for this
-    // open before returning `None` — see `note_decision_outcome` for why that
-    // must suppress the `decision_for`-based recording that always runs next.
+    // fallback) for this open before returning `None` — see
+    // `note_passthrough_outcome` for why that suppresses the recording below.
     let mut outcome_recorded = false;
     // `open_create_flags(FILE_OPEN)` is 0: an open-only call never creates,
     // truncates, or excludes.
@@ -671,84 +643,45 @@ unsafe fn route_open(
         }
         return st;
     }
-    let decision = decision_for(path, access, disp);
-    let is_passthrough = matches!(&decision, Some(Decision::PassThrough));
-    match decision {
-        Some(Decision::Redirect { target_nt }) => {
-            note_decision_outcome(
-                path,
-                outcome_recorded,
-                crate::hookstats::OpenOutcome::FellThroughRedirect,
-            );
+    // The director did not answer: the path is outside every root, or under one behind
+    // `allow_disk_fallthrough`. Either way the real filesystem answers.
+    note_passthrough_outcome(path, outcome_recorded);
+    // Never pass a FUSE RootDirectory to the kernel (invalid handle): rebuild an absolute OA
+    // (null RootDirectory) from the decoded path instead. The case is narrow: a synthetic
+    // `RootDirectory` whose recorded path joined with the relative name lands under no root
+    // (a `..` climbing out of the root), so `try_fuse_create` declined it, and the synthetic
+    // handle would fail at the kernel with a misleading status.
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    if unsafe { fuse_root_directory(oa) } {
+        if let Some(path) = path {
+            let nt = to_nt_path(path);
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            let new_oa = match unsafe { redirected_oa(oa, &target_nt) } {
-                Ok(o) => o,
-                Err(st) => return st,
+            let status = match unsafe { redirected_oa(oa, &nt) } {
+                Ok(new_oa) => real(new_oa.as_ptr()),
+                Err(st) => st,
             };
-            let status = real(new_oa.as_ptr());
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { reset_handle(file_handle, path, status) };
+            unsafe { reset_handle(file_handle, Some(path), status) };
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { record_identity(file_handle, path, status) };
+            unsafe { tag_under_root(file_handle, Some(path), status) };
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { record_path(file_handle, path, status) };
-            status
+            unsafe { record_path(file_handle, Some(path), status) };
+            return status;
         }
-        Some(Decision::Deny) => {
-            note_decision_outcome(
-                path,
-                outcome_recorded,
-                crate::hookstats::OpenOutcome::Denied,
-            );
-            STATUS_OBJECT_NAME_NOT_FOUND
-        }
-        Some(Decision::PassThrough) | None => {
-            if is_passthrough {
-                note_passthrough_outcome(path, outcome_recorded);
-            }
-            // Never pass a FUSE RootDirectory to the kernel (invalid handle):
-            // rebuild an absolute OA (null RootDirectory) from the decoded path
-            // instead. The DRM exceptions were this arm's reason to exist and are
-            // gone (gate 5, Task 4). What is left is the narrow disagreement
-            // case: a synthetic `RootDirectory` whose `PATH_TABLE` entry resolves
-            // to a path that `FuseClient::vpath_under_root` does *not* place
-            // under any root, so `try_fuse_create` declined it. That is a genuine
-            // inconsistency between the two root notions rather than a policy,
-            // and passing the synthetic handle to the kernel would fail with a
-            // misleading status, so the absolute rebuild stays.
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            if unsafe { fuse_root_directory(oa) } {
-                if let Some(path) = path {
-                    let nt = to_nt_path(path);
-                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                    let status = match unsafe { redirected_oa(oa, &nt) } {
-                        Ok(new_oa) => real(new_oa.as_ptr()),
-                        Err(st) => st,
-                    };
-                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                    unsafe { reset_handle(file_handle, Some(path), status) };
-                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                    unsafe { tag_under_root(file_handle, Some(path), status) };
-                    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-                    unsafe { record_path(file_handle, Some(path), status) };
-                    return status;
-                }
-                return STATUS_OBJECT_NAME_NOT_FOUND;
-            }
-            let status = real(oa);
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { reset_handle(file_handle, path, status) };
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { tag_under_root(file_handle, path, status) };
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { record_path(file_handle, path, status) };
-            status
-        }
+        return STATUS_OBJECT_NAME_NOT_FOUND;
     }
+    let status = real(oa);
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe { reset_handle(file_handle, path, status) };
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe { tag_under_root(file_handle, path, status) };
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe { record_path(file_handle, path, status) };
+    status
 }
 
-/// `NtOpenFile` hook. Mirrors `create_hook` (redirect / deny / pass-through +
-/// dir tagging) for the open path that Rust `std` and many Win32 callers use to
+/// `NtOpenFile` hook. Mirrors `create_hook` (director / pass-through + dir
+/// tagging) for the open path that Rust `std` and many Win32 callers use to
 /// open existing files and directories.
 pub(super) unsafe fn open_hook_body(
     file_handle: *mut HANDLE,

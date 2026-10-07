@@ -5,9 +5,10 @@
 //!
 //! 1. `record_path` inserts into `PATH_TABLE` only when `path_is_ours(path)`,
 //!    so a handle on a file outside every root is never recorded.
-//! 2. `setinfo_hook`'s non-synthetic branch consults `Engine::rename` only for
-//!    a handle that *is* in `PATH_TABLE`, so the engine is never asked.
-//! 3. `Engine::rename` answers `CrossRoot` only when **both** sides resolve
+//! 2. `setinfo_hook`'s non-synthetic branch consulted the shim-local engine's
+//!    `rename` (since removed) only for a handle that *is* in `PATH_TABLE`, so
+//!    the engine was never asked.
+//! 3. That `rename` answered `CrossRoot` only when **both** sides resolved
 //!    under managed roots, so even if it had been asked it would have declined.
 //!
 //! The call therefore reached `tramp`, and the real `NtSetInformationFile`
@@ -35,14 +36,14 @@
 //! set-info. Testing only the raw NT form would leave the question of whether
 //! Win32 even routes through the hooked class unanswered.
 //!
-//! Its own process: the detours, the `FuseClient` and the `Engine` are
+//! Its own process: the detours and the `FuseClient` are
 //! process-global and resolve once.
 
 use crate::fakedirector;
 use crate::ntapi;
 
 use fakedirector::{Fake, ReadStyle};
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 
 /// Bytes of the file being moved in from outside. Distinct from anything the
 /// director holds, so a copy that appears anywhere can be attributed.
@@ -70,27 +71,6 @@ fn a_rename_into_a_managed_root_from_outside_it_never_lands() {
     std::env::set_var(vfs_env::SHIM_STATS_LOG, base.join("shim-stats.log"));
     std::env::set_var(vfs_env::SHIM_STATS_INTERVAL_MS, "3600000");
 
-    let snapshot = {
-        use vfs_core::{EntryKind, InputEntry, Layer, LayerId, build};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![InputEntry {
-                vpath: "data/existing.esp".into(),
-                kind: EntryKind::File,
-                source: root
-                    .join("data")
-                    .join("existing.esp")
-                    .to_string_lossy()
-                    .as_ref()
-                    .into(),
-                size: DIR_EXISTING.len() as u64,
-                mtime: 0,
-            }],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-
     // `data/` is a writable mount: the destination is somewhere the director
     // would happily accept a *create*, so a refusal here cannot be explained
     // away as "the root was read-only anyway".
@@ -102,8 +82,7 @@ fn a_rename_into_a_managed_root_from_outside_it_never_lands() {
         0,
     );
 
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    let hooks = install(engine).expect("install");
+    let hooks = install().expect("install");
 
     // 1. The Win32 route a real caller takes.
     let std_result = std::fs::rename(

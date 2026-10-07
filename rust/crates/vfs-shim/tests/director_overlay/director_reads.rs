@@ -32,7 +32,7 @@ use crate::fakedirector;
 
 use fakedirector::{ARENA_LEN, Fake, PAYLOAD_CAP, ReadStyle, pattern};
 use std::io::Write;
-use vfs_shim::{Engine, HookGuard, install};
+use vfs_shim::{HookGuard, install};
 
 /// Bytes only the director has.
 const PROVIDER: &[u8] = b"the provider graph's bytes, which only the director can hand over";
@@ -52,14 +52,7 @@ fn session(
     let root = base.join("root");
     std::fs::create_dir_all(root.join("Data")).unwrap();
     let fake = fakedirector::install(&root, fake, arena_len);
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let hooks = install(Engine::new(root.to_str().unwrap(), snapshot).unwrap()).expect("install");
+    let hooks = install().expect("install");
     (root, fake, hooks)
 }
 

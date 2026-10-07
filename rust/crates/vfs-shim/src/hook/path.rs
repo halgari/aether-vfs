@@ -1,10 +1,9 @@
 //! Decoding NT paths: `OBJECT_ATTRIBUTES` to a path, relative opens, rename targets.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use super::{ENGINE, path_of_handle, under_root_path};
+use super::{path_of_handle, under_root_path};
 use crate::ntdef::ObjectAttributes;
 use core::ffi::c_void;
-use vfs_redirect::Decision;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 /// Decode ObjectName as UTF-16 (no root resolution). `None` for a NULL `oa` or `ObjectName`,
@@ -102,8 +101,8 @@ unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<(String, bool)> {
     //    Its answer is `VOLUME_NAME_DOS` (`\\?\`-prefixed), not the `\??\`
     //    spelling a real NT open presents, but that is not parsed here —
     //    `path_of`'s callers always re-canonicalise the assembled path
-    //    (`decision_for` -> `RootMap::under_root`, `path_is_ours` ->
-    //    `RootMap::contains`), and `canonicalise` already treats `\\?\` as a
+    //    (`FuseClient::route` and `path_is_ours`, both `RootMap::resolve`),
+    //    and `canonicalise` already treats `\\?\` as a
     //    recognised prefix. Handing back the OS string unparsed is exactly
     //    what `vfs_redirect::expand_short_name`'s callers already do with
     //    this same result shape (see its doc comment) — hand-parsing it here
@@ -138,8 +137,8 @@ unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<(String, bool)> {
 /// the shim's own tables, the raw name string, or the process's own PEB.
 ///
 /// `os_consulted` is the caller-side half of `vfs_redirect::UncachedScope`'s
-/// contract: any `RootMap`-backed decision made with `path` — directly via
-/// `decision_for`, or indirectly via `path_is_ours` — must hold that guard
+/// contract: any `RootMap`-backed decision made with `path` — `FuseClient::route`,
+/// or `path_is_ours` — must hold that guard
 /// for as long as it is deciding with `path`, because the answer is itself
 /// only a fact about a handle's target *at this moment*, not a pure function
 /// of `path`'s bytes that would be safe to cache under them.
@@ -210,53 +209,17 @@ pub(super) unsafe fn path_of(oa: *const ObjectAttributes) -> Result<Option<Strin
     Ok(unsafe { path_of_tracked(oa) }?.map(|d| d.path))
 }
 
-/// Decide what to do with an already-decoded `path`, given its access mask
-/// and create disposition (write-path aware). Takes the path rather than
-/// `oa` so a single invocation's decode (`path_of_tracked`, done once by
-/// `create_hook`/`open_hook`) is reused rather than re-run here — see
-/// `tag_under_root`'s doc comment for why re-running it matters for cost, not
-/// just style.
+/// Is this path one we are responsible for: under a root the director's client declared?
 ///
-/// Caller's responsibility, not this function's: if the path came from an
-/// OS-consulted decode, hold a `vfs_redirect::UncachedScope` around this call
-/// (and any other `RootMap`-backed call made with the same path) so the
-/// answer is never cached under it.
-pub(super) fn decision_for(path: Option<&str>, access: u32, disposition: u32) -> Option<Decision> {
-    let engine = ENGINE.get()?;
-    let path = path?;
-    Some(engine.decide_open(path, access, disposition))
-}
-
-/// Is this path one we are responsible for?
+/// The same question `FuseClient::route` answers, asked without building the wire vpath. Every
+/// caller must ask through here rather than test a root list of its own: when `tag_under_root`
+/// asked a narrower question, the enumeration of `<stage>\Data` (the staging alias of root 0)
+/// went untracked and fell through to the real staging folder, which returned nothing — and an
+/// empty `Data` listing is an empty load order.
 ///
-/// There are two notions of "ours" and they are still not quite the same.
-/// Both are `RootMap`s now, both canonicalise identically, and since gate 4
-/// Task 3 both are told about every root the session declared — `bootstrap.rs`
-/// builds the engine's list with the client's own `roots_from_env`. What is
-/// left is one deliberate difference: the client also declares the staging
-/// directory as an alias for root 0 (a staged game's working directory is
-/// that staging directory, so it reaches our content by that name), and the
-/// engine deliberately does not. **The reason for that asymmetry was the DRM
-/// exceptions, which gate 5 Task 4 deleted** — they trampolined to real files
-/// in exactly that directory and needed the engine to call it outside. The
-/// omission is now inert rather than load-bearing: staged-directory opens are
-/// answered by the client before the engine is consulted at all. It is kept
-/// because the client's root set being a superset of the engine's is what makes
-/// "under an engine root but outside every client root" impossible, which
-/// several arms rely on — see `bootstrap.rs` for the full argument.
-///
-/// So the narrow question still disowns the aliased half, and every caller
-/// must keep asking through here.
-///
-/// Every caller must ask through here. When `tag_under_root` asked the narrow
-/// question, the enumeration of `<stage>\Data` went untracked and fell through
-/// to the real staging folder, which returned nothing — and an empty `Data`
-/// listing is an empty load order. The alias itself was unit-tested and correct;
-/// what drifted was which callers consulted it.
+/// With no client attached (only a test that installs the detours without a ring) nothing is
+/// ours.
 pub(super) fn path_is_ours(path: &str) -> bool {
-    if ENGINE.get().is_some_and(|e| e.is_under_root(path)) {
-        return true;
-    }
     crate::director::global().is_some_and(|c| c.vpath_under_root(path).is_some())
 }
 
@@ -276,11 +239,11 @@ pub(super) unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Opti
     //
     // NOTE: discards `parent_dir_of_handle`'s OS-consulted provenance bit.
     // Its case-4 fallback can fire here exactly as it can for a handle-relative
-    // create/open, and this rename/delete path's callers (`engine.rename`/
-    // `engine.whiteout`) are `RootMap`-backed and cached the same way
-    // `decision_for` is — so an OS-consulted rename target has the same
-    // caching exposure `create_hook`/`open_hook` were fixed for, not yet
-    // closed here. Tracked as a known gap rather than silently assumed safe.
+    // create/open, and this rename path's callers (`FuseClient::route_as_spelled`,
+    // `path_is_ours`) are `RootMap`-backed and cached — so an OS-consulted rename
+    // target has the same caching exposure `create_hook`/`open_hook` were fixed
+    // for, not yet closed here. Tracked as a known gap rather than silently
+    // assumed safe.
     // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
     let (parent, _os_consulted) = unsafe { parent_dir_of_handle(root_dir as HANDLE) }?;
     let parent = parent.trim_end_matches(['\\', '/']);

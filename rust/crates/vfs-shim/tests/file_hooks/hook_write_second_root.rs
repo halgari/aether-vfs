@@ -18,7 +18,7 @@ use crate::fakedirector;
 
 use fakedirector::{Fake, ReadStyle, key};
 use std::io::Write;
-use vfs_shim::{Engine, install};
+use vfs_shim::install;
 
 #[test]
 fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
@@ -47,14 +47,7 @@ fn writes_under_a_second_root_stay_in_that_root_s_overlay() {
             .writable_under(&key(1, "")),
         0,
     );
-    let snapshot = vfs_shared::bridge::flatten(
-        &vfs_core::build(vec![vfs_core::Layer {
-            id: vfs_core::LayerId(0),
-            entries: Vec::new(),
-        }])
-        .unwrap(),
-    );
-    let guard = install(Engine::new(root0.to_str().unwrap(), snapshot).unwrap()).expect("install");
+    let guard = install().expect("install");
 
     // --- Reads resolve against the root the path actually lies under ---
     let read0 = std::fs::read(root0.join("shared.txt"));

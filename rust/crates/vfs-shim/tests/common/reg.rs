@@ -19,7 +19,7 @@ use windows_sys::Win32::System::Registry::{
 };
 
 use super::fakedirector::{self, Fake};
-use vfs_shim::{Engine, install, regclient};
+use vfs_shim::{install, regclient};
 
 pub(crate) const STATUS_SUCCESS: i32 = 0;
 pub(crate) const OBJ_CASE_INSENSITIVE: u32 = 0x40;
@@ -420,18 +420,8 @@ pub(crate) fn start_director(tag: &str) -> (&'static Fake, std::path::PathBuf) {
 
 /// [`start_director`], then the shim's hooks over an empty root. Never uninstalled.
 pub(crate) fn install_hooks(tag: &str) -> &'static Fake {
-    let (fake, root) = start_director(tag);
-    let snapshot = {
-        use vfs_core::{Layer, LayerId, build};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-    let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-    std::mem::forget(install(engine).expect("install"));
+    let (fake, _root) = start_director(tag);
+    std::mem::forget(install().expect("install"));
     assert_eq!(
         vfs_shim::reg_overlay_disabled_by(),
         None,

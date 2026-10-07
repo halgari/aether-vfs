@@ -27,14 +27,14 @@
 //! Directory *creates* never arrive here at all: `try_fuse_mkdir` takes those
 //! before `try_fuse_create` runs.
 //!
-//! Its own process — the detours, `ENGINE` and the `FuseClient` are all
+//! Its own process — the detours and the `FuseClient` are all
 //! process-global and resolve once.
 
 use crate::fakedirector;
 
 use fakedirector::Fake;
 use std::ffi::c_void;
-use vfs_shim::{install, Engine};
+use vfs_shim::install;
 
 const GENERIC_READ: u32 = 0x8000_0000;
 const GENERIC_WRITE: u32 = 0x4000_0000;
@@ -98,22 +98,6 @@ fn a_directory_under_a_managed_root_opens_with_write_access() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&overlay).unwrap();
 
-    let snapshot = {
-        use vfs_core::{build, EntryKind, InputEntry, Layer, LayerId};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![InputEntry {
-                vpath: "unrelated.txt".into(),
-                kind: EntryKind::File,
-                source: r"D:\nowhere\unrelated.txt".into(),
-                size: 0,
-                mtime: 0,
-            }],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-
     // `data` sits outside every writable prefix (read-only mount:
     // `ST_READ_ONLY`); `write/sub` sits inside one (writable mount, which
     // still cannot open a directory read+write: `ST_IO_ERROR`). One fix has
@@ -127,9 +111,7 @@ fn a_directory_under_a_managed_root_opens_with_write_access() {
         0,
     );
 
-    let engine =
-        Engine::with_overlay(root.to_str().unwrap(), overlay.to_str().unwrap(), snapshot).unwrap();
-    let hooks = install(engine).expect("install");
+    let hooks = install().expect("install");
 
     let read_only_dir = open_directory_for_write(&root.join("Data"), OPEN_EXISTING);
     let writable_dir = open_directory_for_write(&root.join("write").join("sub"), OPEN_EXISTING);
