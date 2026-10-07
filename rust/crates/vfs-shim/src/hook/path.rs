@@ -1,4 +1,5 @@
 //! Decoding NT paths: `OBJECT_ATTRIBUTES` to a path, relative opens, rename targets.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{ENGINE, PATH_TABLE, path_of_handle};
 use crate::ntdef::ObjectAttributes;
@@ -11,7 +12,8 @@ use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 /// hookstats undecodable-name counters use it; routing decisions go through `path_of`, and the
 /// real syscall refuses such a name itself.
 pub(super) unsafe fn object_name_str(oa: *const ObjectAttributes) -> Option<String> {
-    crate::ntbuf::oa_name_string(oa).ok().flatten()
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    unsafe { crate::ntbuf::oa_name_string(oa) }.ok().flatten()
 }
 
 /// The process's current-directory handle and its DOS path, read from the PEB.
@@ -22,27 +24,36 @@ pub(super) unsafe fn cwd_from_peb() -> Option<(isize, String)> {
     // x64: TEB.ProcessEnvironmentBlock @ 0x60, PEB.ProcessParameters @ 0x20,
     // params.CurrentDirectory @ 0x38 = { UNICODE_STRING DosPath; HANDLE Handle }.
     let teb: usize;
-    core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, preserves_flags));
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    unsafe {
+        core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb, options(nostack, preserves_flags))
+    };
     if teb == 0 {
         return None;
     }
-    let peb = *((teb + 0x60) as *const usize);
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let peb = unsafe { *((teb + 0x60) as *const usize) };
     if peb == 0 {
         return None;
     }
-    let params = *((peb + 0x20) as *const usize);
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let params = unsafe { *((peb + 0x20) as *const usize) };
     if params == 0 {
         return None;
     }
-    let units = *((params + 0x38) as *const u16) as usize / 2;
-    let buf = *((params + 0x40) as *const *const u16);
-    let handle = *((params + 0x48) as *const isize);
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let units = unsafe { *((params + 0x38) as *const u16) } as usize / 2;
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let buf = unsafe { *((params + 0x40) as *const *const u16) };
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let handle = unsafe { *((params + 0x48) as *const isize) };
     if buf.is_null() || units == 0 || handle == 0 {
         return None;
     }
     Some((
         handle,
-        String::from_utf16_lossy(core::slice::from_raw_parts(buf, units)),
+        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+        String::from_utf16_lossy(unsafe { core::slice::from_raw_parts(buf, units) }),
     ))
 }
 
@@ -74,7 +85,8 @@ unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<(String, bool)> {
     // 3. The current-directory handle. The OS creates it, so it is in no table
     //    of ours, yet it is the parent for every relative open a CRT makes:
     //    `CreateFileW("Data\X")` becomes (CWD handle + "Data\X").
-    if let Some((cwd_handle, dos)) = cwd_from_peb() {
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    if let Some((cwd_handle, dos)) = unsafe { cwd_from_peb() } {
         if cwd_handle == root {
             return Some((format!(r"\??\{}", dos.trim_end_matches(['\\', '/'])), false));
         }
@@ -114,7 +126,8 @@ unsafe fn parent_dir_of_handle(root_handle: HANDLE) -> Option<(String, bool)> {
     //    construction a currently-valid, open handle owned by the caller
     //    (the game), which is exactly what `final_path_for_handle` requires.
     //    This function does not close it or otherwise take ownership of it.
-    let resolved = vfs_win::final_path_for_handle(root_handle)?;
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let resolved = unsafe { vfs_win::final_path_for_handle(root_handle) }?;
     // `true`: this string is a snapshot of the handle's target *right now*,
     // not a pure function of anything in `root_handle`/the relative name
     // bytes — every caller that turns this into a `RootMap`-backed decision
@@ -154,11 +167,14 @@ pub(super) unsafe fn path_of_tracked(
     if oa.is_null() {
         return Ok(None);
     }
-    let oa_ref = &*oa;
-    let Some(name) = crate::ntbuf::oa_name_string(oa)? else {
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let oa_ref = unsafe { &*oa };
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let Some(name) = unsafe { crate::ntbuf::oa_name_string(oa) }? else {
         return Ok(None);
     };
-    Ok(decode_relative(oa_ref, name))
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    Ok(unsafe { decode_relative(oa_ref, name) })
 }
 
 /// The path for an already-decoded `name` and the OA's `RootDirectory`.
@@ -173,7 +189,8 @@ unsafe fn decode_relative(oa_ref: &ObjectAttributes, name: String) -> Option<Dec
             })
         };
     }
-    let (parent, os_consulted) = parent_dir_of_handle(oa_ref.root_directory)?;
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let (parent, os_consulted) = unsafe { parent_dir_of_handle(oa_ref.root_directory) }?;
     let parent = parent.trim_end_matches(['\\', '/']);
     let rel = name.trim_start_matches(['\\', '/']);
     let path = if rel.is_empty() {
@@ -193,7 +210,8 @@ unsafe fn decode_relative(oa_ref: &ObjectAttributes, name: String) -> Option<Dec
 /// `RootDirectory=<game dir FUSE handle>, Name=steam_appid.txt` hit the kernel
 /// with a fake handle → fail → **Steam Error**.
 pub(super) unsafe fn path_of(oa: *const ObjectAttributes) -> Result<Option<String>, NTSTATUS> {
-    Ok(path_of_tracked(oa)?.map(|d| d.path))
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    Ok(unsafe { path_of_tracked(oa) }?.map(|d| d.path))
 }
 
 /// Decide what to do with an already-decoded `path`, given its access mask
@@ -254,12 +272,15 @@ pub(super) unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Opti
         return None;
     }
     let b = info as *const u8;
-    let root_dir = core::ptr::read_unaligned(b.add(8) as *const usize);
-    let namelen = core::ptr::read_unaligned(b.add(16) as *const u32) as usize;
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let root_dir = unsafe { core::ptr::read_unaligned(b.add(8) as *const usize) };
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let namelen = unsafe { core::ptr::read_unaligned(b.add(16) as *const u32) } as usize;
     if 20 + namelen > len {
         return None;
     }
-    let units = core::slice::from_raw_parts(b.add(20) as *const u16, namelen / 2);
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let units = unsafe { core::slice::from_raw_parts(b.add(20) as *const u16, namelen / 2) };
     let name = String::from_utf16_lossy(units);
     if root_dir == 0 {
         return Some(name);
@@ -276,7 +297,8 @@ pub(super) unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Opti
     // `decision_for` is — so an OS-consulted rename target has the same
     // caching exposure `create_hook`/`open_hook` were fixed for, not yet
     // closed here. Tracked as a known gap rather than silently assumed safe.
-    let (parent, _os_consulted) = parent_dir_of_handle(root_dir as HANDLE)?;
+    // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+    let (parent, _os_consulted) = unsafe { parent_dir_of_handle(root_dir as HANDLE) }?;
     let parent = parent.trim_end_matches(['\\', '/']);
     let rel = name.trim_start_matches(['\\', '/']);
     if rel.is_empty() {
@@ -290,7 +312,8 @@ pub(super) unsafe fn fuse_root_directory(oa: *const ObjectAttributes) -> bool {
     if oa.is_null() {
         return false;
     }
-    let root = (*oa).root_directory;
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let root = unsafe { (*oa).root_directory };
     !root.is_null() && crate::fuse_synth::is_fuse_synth(root as isize)
 }
 
