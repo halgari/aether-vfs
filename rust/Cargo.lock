@@ -2852,7 +2852,6 @@ name = "vfs-redirect"
 version = "0.1.0"
 dependencies = [
  "vfs-core",
- "vfs-ntlayout",
  "vfs-provider",
  "vfs-win",
 ]

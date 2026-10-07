@@ -233,7 +233,7 @@ fn ring_client_reads_are_byte_exact() {
     let root = dir.to_string_lossy().into_owned();
 
     let roots = [(vfs_protocol::RootId::DEFAULT, root)];
-    let client = vfs_shim::fuse_client::FuseClient::connect(
+    let client = vfs_shim::director::FuseClient::connect(
         &section, &roots, payload_cap, ring_bytes, arena_len,
     )
     .expect("client connect");

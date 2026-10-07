@@ -10,12 +10,6 @@ pub mod service;
 pub mod sessions;
 mod storage;
 
-// compat: removed by cleanup stream I
-#[doc(hidden)]
-pub mod registry {
-    pub use super::sessions::*;
-}
-
 pub use apply::*;
 pub use client::*;
 pub use discovery::{Discovery, default_discovery_path, read_discovery, write_discovery};

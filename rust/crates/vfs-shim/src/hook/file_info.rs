@@ -22,7 +22,7 @@ use crate::synth_file::FileView;
 use core::ffi::c_void;
 use std::sync::OnceLock;
 use vfs_ntlayout::spoofed_object_name;
-use vfs_redirect::SYNTH_FILETIME;
+use vfs_ntlayout::SYNTH_FILETIME;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 /// The volume every synthetic handle says it is on, where a volume serial

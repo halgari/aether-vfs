@@ -10,7 +10,7 @@ use crate::ntdef::{
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 use core::ffi::c_void;
-use vfs_redirect::SYNTH_FILETIME;
+use vfs_ntlayout::SYNTH_FILETIME;
 use windows_sys::Win32::Foundation::NTSTATUS;
 
 /// Path-based getattr via director OP_GETATTR when FUSE client is live.

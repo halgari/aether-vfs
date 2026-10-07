@@ -12,9 +12,6 @@ mod bootstrap;
 /// Lock-free record of the hook currently executing, in a shared file.
 pub mod breadcrumb;
 pub mod director;
-// compat: removed by cleanup stream I
-#[doc(hidden)]
-pub use director as fuse_client;
 mod child;
 mod handle_tags;
 mod hook;

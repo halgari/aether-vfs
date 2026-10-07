@@ -718,7 +718,7 @@ pub(super) unsafe fn open_hook_body(
         access,
         oa,
         iosb,
-        disp: vfs_redirect::FILE_OPEN,
+        disp: vfs_ntlayout::FILE_OPEN,
         opts,
         create: false,
     };

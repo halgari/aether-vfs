@@ -5,8 +5,6 @@ edition = "2021"
 license = "GPL-3.0-only"
 
 [dependencies]
-# Dispositions, access masks, directory-info writers: re-exported from here.
-vfs-ntlayout = { path = "../vfs-ntlayout" }
 vfs-core = { path = "../vfs-core" }
 # `RootId` only — the vocabulary type a multi-root `RootMap` answers with, so
 # the shim's client predicate and the director's wire name the same roots by

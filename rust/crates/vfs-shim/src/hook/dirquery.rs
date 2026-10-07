@@ -7,7 +7,7 @@ use crate::ntdef::{
     STATUS_SUCCESS, STATUS_UNSUCCESSFUL, UnicodeString,
 };
 use core::ffi::c_void;
-use vfs_redirect::{DirInfoClass, DirItem, DirStatus, write_dir_info};
+use vfs_ntlayout::{DirInfoClass, DirItem, DirStatus, write_dir_info};
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 /// Per-handle enumeration cursor over a built directory listing.

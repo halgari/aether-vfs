@@ -3,7 +3,8 @@
 use std::collections::HashSet;
 
 use vfs_core::fold;
-use vfs_redirect::{DirItem, is_whiteout};
+use vfs_ntlayout::DirItem;
+use vfs_redirect::is_whiteout;
 
 /// Remove the shim's whiteout markers from a directory listing, and with each one
 /// the name it hides.
