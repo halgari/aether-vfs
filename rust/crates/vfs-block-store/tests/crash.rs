@@ -85,7 +85,7 @@ fn scenario(name: &str, dir: &Path) {
 
 /// Runs `scenario` in a child process that aborts at `point`, then returns the store directory.
 fn crash_child(scenario: &str, point: &str) -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let status = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_entry", "--nocapture", "--test-threads=1"])
         .env(ROLE, scenario)
@@ -220,7 +220,7 @@ fn copy_dir(from: &Path, to: &Path) {
 fn retired_pack_whose_file_is_already_gone() {
     let dir = crash_child("compact", "compact_after_retire");
     // Find the files open deletes (the retired pack, and any orphans) by opening a copy.
-    let probe = tempfile::tempdir().unwrap();
+    let probe = vfs_testkit::tempdir().unwrap();
     copy_dir(dir.path(), probe.path());
     drop(open(probe.path()));
     let after = pack_files(probe.path());

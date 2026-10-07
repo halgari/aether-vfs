@@ -218,7 +218,7 @@ fn main() {
         t.elapsed().as_secs_f64(),
         run / 1024
     );
-    let tmp = std::env::temp_dir();
+    let tmp = vfs_testkit::scratch_root();
     for name in configs.split(',') {
         let dir = tempfile::Builder::new()
             .prefix("gpu-bench-")

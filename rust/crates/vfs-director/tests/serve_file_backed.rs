@@ -28,7 +28,7 @@ const CONTENT: &[u8] = b"served-over-a-file-backed-ring\n";
 
 #[test]
 fn a_file_backed_serve_answers_a_getattr_and_a_read() {
-    let dir = std::env::temp_dir().join(format!("vfs-serve-fb-{}", std::process::id()));
+    let dir = vfs_testkit::scratch_path("vfs-serve-fb");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     // `VPATH` is `data/hello.txt`, and `DiskProvider` maps a vpath straight
@@ -110,7 +110,7 @@ fn a_file_backed_serve_answers_a_getattr_and_a_read() {
 fn starting_twice_on_one_path_does_not_truncate_the_first_ring() {
     // `FileMapping::create` is grow-only precisely so this cannot SIGBUS the
     // first server; assert the file did not shrink.
-    let dir = std::env::temp_dir().join(format!("vfs-serve-fb2-{}", std::process::id()));
+    let dir = vfs_testkit::scratch_path("vfs-serve-fb2");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let ring = dir.join("ring.bin");
@@ -130,7 +130,7 @@ fn worker_counts_are_clamped_to_what_the_ring_can_use() {
     assert_eq!(clamp_workers(12), 12);
     assert_eq!(clamp_workers(1000), 32, "no more workers than ring slots");
 
-    let dir = std::env::temp_dir().join(format!("vfs-serve-fb3-{}", std::process::id()));
+    let dir = vfs_testkit::scratch_path("vfs-serve-fb3");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let ring = dir.join("ring.bin");
@@ -202,7 +202,7 @@ impl Provider for Blocking {
 #[test]
 fn requests_blocked_in_a_provider_do_not_stall_the_ring_when_workers_outnumber_them() {
     const BLOCKERS: usize = 4;
-    let dir = std::env::temp_dir().join(format!("vfs-serve-fb4-{}", std::process::id()));
+    let dir = vfs_testkit::scratch_path("vfs-serve-fb4");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("data")).unwrap();
     std::fs::create_dir_all(dir.join("block")).unwrap();

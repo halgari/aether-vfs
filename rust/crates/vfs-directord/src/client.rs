@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn concurrent_spawn_logs_leave_no_holes() {
         use std::io::Write;
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let log = d.path().join("d.json.daemon.log");
         let mut first = open_spawn_log(&log, false).unwrap();
         first.write_all(b"first daemon starting\n").unwrap();
@@ -271,7 +271,7 @@ mod tests {
     /// connect to the winner, not report its own daemon's exit.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_spawned_daemon_that_lost_the_race_yields_to_the_winner() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let discovery = dir.path().join("discovery.json");
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         // The winner: started a moment after "our" child has already exited.
@@ -307,7 +307,7 @@ mod tests {
     /// arrives after the short grace window, not the full timeout.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_spawned_daemon_that_exited_alone_reports_its_log() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let discovery = dir.path().join("discovery.json");
         std::fs::write(daemon_log_path(&discovery), "cannot open storage at X").unwrap();
         let start = std::time::Instant::now();

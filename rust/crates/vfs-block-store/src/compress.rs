@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn write_stats_count_per_class_and_dedup() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let cfg = StoreConfig {
             bulk: BulkCompression::Zstd(1),
             ..test_config()
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn usage_is_summed_per_class_of_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let store = BlockStore::open(dir.path(), test_config()).unwrap();
         let a = texty(3, 4 * BS);
         let r = random_bytes(4, BS + 10);

@@ -315,7 +315,7 @@ fn concurrent_reads_see_whole_changes_and_never_an_older_one() {
     const SHORT: usize = BS as usize / 2;
     const LAST: u8 = 150;
     for ram_tier_bytes in [cfg().ram_tier_bytes, 2 * BS, 0] {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(
             d.path(),
             StorageConfig {

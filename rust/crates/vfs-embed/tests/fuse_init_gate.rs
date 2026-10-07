@@ -101,7 +101,7 @@ fn ensure_fixtures() {
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("vfs-fuse-gate-{}-{name}", std::process::id()));
+    let d = vfs_testkit::scratch_path(&format!("vfs-fuse-gate-{name}"));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d

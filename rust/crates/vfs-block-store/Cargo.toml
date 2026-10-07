@@ -20,6 +20,7 @@ zstd = "0.14"
 gzc-gpu = { git = "https://github.com/halgari/gpu-zstd-comp", rev = "655fb68b77b9ad01cd402817a526c2a2ebf4ace2", optional = true }
 
 [dev-dependencies]
+vfs-testkit = { path = "../vfs-testkit" }
 criterion = "0.8"
 proptest = "1.11"
 memory-stats = "1.2"

@@ -199,7 +199,7 @@ mod tests {
     /// names the directory and the way to pick another.
     #[test]
     fn a_locked_storage_dir_is_refused_by_name() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let held = open_daemon_storage(dir.path(), None).expect("first open");
         let e = open_daemon_storage(dir.path(), None)
             .err()
@@ -217,7 +217,7 @@ mod tests {
     /// different failure and must not be blamed on one.
     #[test]
     fn only_a_locked_storage_dir_blames_another_daemon() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let file = dir.path().join("not-a-dir");
         std::fs::write(&file, b"x").unwrap();
         let e = open_daemon_storage(&file, None)
@@ -233,7 +233,7 @@ mod tests {
     /// cached block evictable at once.
     #[test]
     fn a_zero_cache_budget_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let e = open_daemon_storage(dir.path(), Some(0))
             .err()
             .expect("0 refused");

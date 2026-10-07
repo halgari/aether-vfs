@@ -48,7 +48,7 @@ struct Layout {
 }
 
 fn layout() -> Layout {
-    let base = tempfile::tempdir().expect("tempdir");
+    let base = vfs_testkit::tempdir().expect("tempdir");
     let zip = base.path().join("content.zip");
     write_stored_zip(&zip, ZIP_ENTRY, ORIGINAL);
     let mods = base.path().join("mods");
@@ -370,7 +370,7 @@ async fn a_write_layer_declared_over_grpc_gives_the_session_copy_on_write() {
     // has to make it rather than failing on the first edit.
     // (`session.root` is root 0's *location* — on Linux a `C:\…` path inside
     // the Wine prefix — so it is no place to put a host directory.)
-    let overwrite_parent = tempfile::tempdir().unwrap();
+    let overwrite_parent = vfs_testkit::tempdir().unwrap();
     let overrides = overwrite_parent.path().join("declared-overwrite");
     client
         .add_source(AddSourceReq {
@@ -502,7 +502,7 @@ async fn a_write_layer_declared_over_grpc_gives_the_session_copy_on_write() {
 async fn a_config_file_declaring_a_write_layer_gives_the_session_copy_on_write() {
     let l = layout();
     let zip_before = std::fs::read(&l.zip).unwrap();
-    let overwrite = tempfile::tempdir().unwrap();
+    let overwrite = vfs_testkit::tempdir().unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -578,3 +578,10 @@ fn toml_quote(s: &str) -> String {
     format!("{s:?}")
 }
 
+
+/// Sessions default to a directory under the system temp dir, and the daemons
+/// these tests spawn inherit this process's environment. Point both at `target/`.
+#[ctor::ctor]
+fn scratch_tmpdir() {
+    vfs_testkit::use_scratch_as_tmpdir();
+}

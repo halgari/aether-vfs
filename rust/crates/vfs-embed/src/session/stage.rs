@@ -326,8 +326,7 @@ mod launch_image_tests {
         let c = content("r1");
         let mut s = Session::new();
         let loc1 = if cfg!(windows) {
-            std::env::temp_dir()
-                .join(format!("vfs-li-r1loc-{}", std::process::id()))
+            vfs_testkit::scratch_path("vfs-li-r1loc")
                 .to_string_lossy()
                 .into_owned()
         } else {

@@ -198,7 +198,7 @@ fn a_rename_to_another_case_respells_the_entry() {
 /// this, whose name is the folded one, still reads as that.
 #[test]
 fn created_spellings_survive_a_reopen_and_folded_rows_still_read() {
-    let d = tempfile::tempdir().unwrap();
+    let d = vfs_testkit::tempdir().unwrap();
     {
         let s = Storage::open(d.path(), cfg()).unwrap();
         let p = s.layer("write").unwrap();

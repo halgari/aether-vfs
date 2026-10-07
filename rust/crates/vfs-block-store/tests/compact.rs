@@ -17,7 +17,7 @@ fn fill(store: &vfs_block_store::BlockStore, files: u64) -> Vec<Vec<u8>> {
 
 #[test]
 fn compaction_reclaims_space_and_keeps_data() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     let data = fill(&store, 40);
     for i in (0..40).filter(|i| i % 4 != 0) {
@@ -48,7 +48,7 @@ fn compaction_reclaims_space_and_keeps_data() {
 
 #[test]
 fn compaction_respects_threshold_and_budget() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     fill(&store, 40);
     // Nothing deleted: no pack qualifies.
@@ -74,7 +74,7 @@ fn compaction_respects_threshold_and_budget() {
 
 #[test]
 fn compacted_store_survives_reopen() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let data = {
         let store = open(dir.path());
         let data = fill(&store, 20);
@@ -92,7 +92,7 @@ fn compacted_store_survives_reopen() {
 
 #[test]
 fn reads_and_writes_during_compaction() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     let data = fill(&store, 60);
     for i in (0..60).filter(|i| i % 3 != 0) {
@@ -130,7 +130,7 @@ fn reads_and_writes_during_compaction() {
 
 #[test]
 fn compaction_heals_a_corrupt_live_record() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let data = {
         let store = open(dir.path());
         let data = fill(&store, 40);
@@ -162,7 +162,7 @@ fn compaction_heals_a_corrupt_live_record() {
 
 #[test]
 fn compaction_evacuates_records_behind_a_corrupt_header() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let data = {
         let store = open(dir.path());
         let data = fill(&store, 40);

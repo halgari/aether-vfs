@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn clear_cache_survives_a_reopen() {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let a = pattern(6 * BS, 4);
         let body = pattern(2 * BS + 3, 5);
         {

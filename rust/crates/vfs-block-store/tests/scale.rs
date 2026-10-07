@@ -40,7 +40,7 @@ fn hundred_gigabytes() {
     let dir = match std::env::var("BLOCK_STORE_SCALE_DIR") {
         Ok(d) => std::path::PathBuf::from(d),
         Err(_) => {
-            tmp = tempfile::tempdir().unwrap();
+            tmp = vfs_testkit::tempdir().unwrap();
             tmp.path().to_path_buf()
         }
     };

@@ -52,7 +52,10 @@ pub(crate) struct CrashImage {
 #[cfg(all(any(test, feature = "test-hooks"), not(windows)))]
 impl CrashImage {
     pub(crate) fn take(dir: &std::path::Path) -> std::io::Result<Self> {
-        let image = tempfile::tempdir()?;
+        // Beside the directory, not in the host's temp dir: a test's directories
+        // are already somewhere it chose.
+        let parent = dir.parent().filter(|p| !p.as_os_str().is_empty());
+        let image = tempfile::tempdir_in(parent.unwrap_or(std::path::Path::new(".")))?;
         snapshot_as_killed(dir, image.path())?;
         Ok(CrashImage { dir: dir.to_path_buf(), image })
     }

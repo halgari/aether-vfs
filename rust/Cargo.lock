@@ -528,6 +528,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctor"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
+dependencies = [
+ "quote",
+ "syn 2.0.118",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2622,6 +2632,7 @@ dependencies = [
  "vfs-protocol",
  "vfs-provider",
  "vfs-storage",
+ "vfs-testkit",
  "vfs-win",
  "vfs-zip",
  "windows-sys 0.61.2",
@@ -2641,6 +2652,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "vfs-testkit",
  "xxhash-rust",
  "zstd",
 ]
@@ -2651,6 +2663,7 @@ version = "0.1.0"
 dependencies = [
  "vfs-core",
  "vfs-provider",
+ "vfs-testkit",
 ]
 
 [[package]]
@@ -2666,6 +2679,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "vfs-testkit",
 ]
 
 [[package]]
@@ -2702,6 +2716,7 @@ name = "vfs-directord"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ctor",
  "prost",
  "serde",
  "serde_json",
@@ -2735,6 +2750,7 @@ dependencies = [
  "vfs-provider",
  "vfs-shim",
  "vfs-storage",
+ "vfs-testkit",
  "vfs-zip",
 ]
 
@@ -2907,6 +2923,7 @@ dependencies = [
  "vfs-compose",
  "vfs-control",
  "vfs-provider",
+ "vfs-testkit",
  "vfs-zip",
 ]
 
@@ -2923,11 +2940,15 @@ dependencies = [
  "vfs-compose",
  "vfs-core",
  "vfs-provider",
+ "vfs-testkit",
 ]
 
 [[package]]
 name = "vfs-testkit"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "vfs-unix"
@@ -2935,6 +2956,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "vfs-ipc",
+ "vfs-testkit",
 ]
 
 [[package]]
@@ -2953,6 +2975,7 @@ dependencies = [
  "tempfile",
  "vfs-core",
  "vfs-provider",
+ "vfs-testkit",
 ]
 
 [[package]]

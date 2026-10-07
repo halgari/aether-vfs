@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn append_rotate_and_read_back() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let mut w = PackWriter::new(dir.path().to_path_buf(), 100);
         assert!(w.needs_new_pack(10));
         assert_eq!(w.start_pack(1).unwrap(), None);
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn resume_continues_at_end() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let mut w = PackWriter::new(dir.path().to_path_buf(), 1000);
         w.start_pack(5).unwrap();
         w.append(b"abc", b"def").unwrap();
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn failed_append_abandons_the_pack() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let mut w = PackWriter::new(dir.path().to_path_buf(), 1000);
         w.start_pack(1).unwrap();
         assert_eq!(w.append(b"head", b"payload").unwrap(), (1, 0));
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn closed_pack_can_be_deleted() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let mut w = PackWriter::new(dir.path().to_path_buf(), 1000);
         w.start_pack(1).unwrap();
         w.append(b"a", b"b").unwrap();

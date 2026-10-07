@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn disk_provider_declares_read_write() {
         use vfs_provider::{Access, Provider};
-        let dir = std::env::temp_dir().join(format!("vfs-diskrw-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-diskrw");
         vfs_provider::write_fixture_tree(&dir);
         let p = DiskProvider::new(&dir);
         let caps = p.capabilities();
@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn disk_provider_passes_write_conformance() {
-        let dir = std::env::temp_dir().join(format!("vfs-diskwconf-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-diskwconf");
         vfs_provider::write_fixture_tree(&dir);
         let p: std::sync::Arc<dyn vfs_provider::Provider> = std::sync::Arc::new(DiskProvider::new(&dir));
         vfs_provider::assert_conformance(p);
@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     fn resolve_rejects_a_dotdot_component() {
-        let dir = std::env::temp_dir().join(format!("vfs-diskdotdot-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-diskdotdot");
         vfs_provider::write_fixture_tree(&dir);
 
         assert_eq!(
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn resolve_accepts_a_filename_that_merely_starts_with_dotdot() {
-        let dir = std::env::temp_dir().join(format!("vfs-diskdotdotfoo-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-diskdotdotfoo");
         vfs_provider::write_fixture_tree(&dir);
 
         let resolved = DiskProvider::new(&dir)
@@ -562,7 +562,7 @@ mod tests {
         // Guards the OPEN_CREATE escalation directly: before this fix, an
         // OPEN_CREATE with a .. component would create_dir_all a directory
         // outside root. Confirm the parent of `dir` gains nothing.
-        let parent = std::env::temp_dir();
+        let parent = vfs_testkit::scratch_root();
         let dir = parent.join(format!("vfs-diskdotdotopen-{}", std::process::id()));
         vfs_provider::write_fixture_tree(&dir);
         let sibling = parent.join(format!("vfs-diskdotdotopen-{}-escaped", std::process::id()));
@@ -590,7 +590,7 @@ mod tests {
     /// FUSE mount serving a Windows program needs it either way.
     #[test]
     fn fold_equal_spellings_resolve_on_any_filesystem() {
-        let dir = std::env::temp_dir().join(format!("vfs-disk-fold-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-disk-fold");
         let _ = std::fs::create_dir_all(dir.join("Data"));
         std::fs::write(dir.join("Data").join("A.esp"), b"body").unwrap();
 
@@ -615,7 +615,7 @@ mod tests {
     /// pins that the ancestor resolution survives the leaf being a miss.
     #[test]
     fn open_create_under_a_fold_equal_directory_does_not_fork_it() {
-        let dir = std::env::temp_dir().join(format!("vfs-diskcreatefold-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-diskcreatefold");
         let _ = std::fs::create_dir_all(dir.join("Data"));
 
         use vfs_provider::{Provider, OPEN_CREATE, OPEN_WRITE};

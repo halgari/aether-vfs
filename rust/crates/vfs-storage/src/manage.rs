@@ -507,7 +507,7 @@ mod tests {
     }
 
     fn temp_storage() -> (Arc<Storage>, tempfile::TempDir) {
-        let d = tempfile::tempdir().unwrap();
+        let d = vfs_testkit::tempdir().unwrap();
         let s = Storage::open(d.path().join("store"), cfg()).unwrap();
         (s, d)
     }

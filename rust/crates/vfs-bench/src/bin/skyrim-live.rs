@@ -1990,7 +1990,7 @@ mod steam_gate_tests {
 
     #[test]
     fn inject_overlay_off_inserts_and_is_idempotent() {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = vfs_testkit::scratch_root().join(format!(
             "vfs-overlay-test-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2043,7 +2043,7 @@ mod staging_layer_tests {
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
+        let d = vfs_testkit::scratch_root().join(format!(
             "vfs-skyrim-live-test-{}-{name}-{}",
             std::process::id(),
             std::time::SystemTime::now()

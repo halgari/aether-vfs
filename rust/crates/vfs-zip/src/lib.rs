@@ -323,7 +323,7 @@ mod tests {
     fn zip_backend_getattr_open_read() {
         use vfs_provider::{Provider, VPath, OPEN_READ};
 
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = vfs_testkit::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
         let content = b"HELLO FROM INSIDE THE ZIP";
         let zip = write_plain_zip(&dir, "Data/hello.txt", content);
@@ -348,7 +348,7 @@ mod tests {
     fn rejects_a_deflated_entry() {
         // method != 0 in the central header -> Unsupported. Reuse the plain
         // writer but flip the method byte at central offset (10) after writing.
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = vfs_testkit::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
         let zip = write_plain_zip(&dir, "a.bin", b"xxxx");
         let mut bytes = std::fs::read(&zip).unwrap();
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn a_too_small_file_is_not_a_zip() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = vfs_testkit::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
         let path = dir.join("tiny.bin");
         std::fs::write(&path, b"PK").unwrap(); // 2 bytes, no EOCD

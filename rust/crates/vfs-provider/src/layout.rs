@@ -91,7 +91,7 @@ mod overlay_layer_dir_tests {
     /// to this string is a change to that contract.
     #[test]
     fn layer_dir_is_root_n_under_the_overlay_root() {
-        let base = std::path::Path::new("/tmp/ov");
+        let base = std::path::Path::new("/srv/ov");
         assert_eq!(overlay_layer_dir(base, RootId::DEFAULT), base.join("root-0"));
         assert_eq!(overlay_layer_dir(base, RootId(1)), base.join("root-1"));
         assert_eq!(overlay_layer_dir(base, RootId(42)), base.join("root-42"));
@@ -101,7 +101,7 @@ mod overlay_layer_dir_tests {
     /// whole reason the helper takes a RootId.
     #[test]
     fn distinct_roots_get_distinct_directories() {
-        let base = std::path::Path::new("/tmp/ov");
+        let base = std::path::Path::new("/srv/ov");
         assert_ne!(overlay_layer_dir(base, RootId(0)), overlay_layer_dir(base, RootId(1)));
     }
 }

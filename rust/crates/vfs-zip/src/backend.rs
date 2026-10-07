@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn zip_provider_declares_immutable_read_access() {
         use vfs_provider::{Access, Provider};
-        let dir = std::env::temp_dir().join(format!("vfs-zipcaps-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-zipcaps");
         let _ = std::fs::create_dir_all(&dir);
         let zip = dir.join("t.zip");
         write_conformance_zip(&zip);
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn zip_provider_passes_conformance() {
-        let dir = std::env::temp_dir().join(format!("vfs-zipconf-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-zipconf");
         let _ = std::fs::create_dir_all(&dir);
         let zip = dir.join("t.zip");
         write_conformance_zip(&zip);
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn stored_name_gives_the_central_directory_spelling_of_any_query_case() {
         use vfs_provider::Provider;
-        let dir = std::env::temp_dir().join(format!("vfs-zipname-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-zipname");
         let _ = std::fs::create_dir_all(&dir);
         let zip = dir.join("t.zip");
         write_zip(&zip, &[("Meshes/Armor/Iron.NIF", b"x"), ("Data/Skyrim.ESM", b"y")]);

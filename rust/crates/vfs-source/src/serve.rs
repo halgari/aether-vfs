@@ -346,7 +346,7 @@ mod tests {
         // the read-only MemFixture the other tests use) — this proves the
         // refusal is enforced at the RPC boundary, not just a side effect of
         // the backing provider being read-only.
-        let dir = std::env::temp_dir().join(format!("vfs-source-write-refuse-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-source-write-refuse");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let svc = ProviderSourceService::new(Arc::new(vfs_compose::DiskProvider::new(&dir)));

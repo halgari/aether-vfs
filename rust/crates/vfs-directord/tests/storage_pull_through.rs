@@ -134,7 +134,7 @@ async fn a_remote_source_is_served_from_the_store_on_the_second_pass() {
     });
 
     // The daemon, with storage in a temp dir.
-    let store_dir = tempfile::tempdir().unwrap();
+    let store_dir = vfs_testkit::tempdir().unwrap();
     let storage = Storage::open(store_dir.path(), StorageConfig::default()).unwrap();
     let registry = SessionRegistry::with_storage(Arc::clone(&storage));
     let daemon_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -262,4 +262,11 @@ async fn a_remote_source_is_served_from_the_store_on_the_second_pass() {
     // Best effort: release the store's lock and files before the temp dir
     // is removed (Windows cannot delete open files).
     let _ = storage.close();
+}
+
+/// Sessions default to a directory under the system temp dir, and the daemons
+/// these tests spawn inherit this process's environment. Point both at `target/`.
+#[ctor::ctor]
+fn scratch_tmpdir() {
+    vfs_testkit::use_scratch_as_tmpdir();
 }

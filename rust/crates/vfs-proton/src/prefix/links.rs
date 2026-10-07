@@ -422,7 +422,7 @@ mod tests {
             r"C:\",
             "C:",
             "Games",
-            "/tmp/x",
+            "/srv/x",
             r"\\srv\share\x",
             "",
         ] {
@@ -441,7 +441,7 @@ mod tests {
         for bad in [r"D:\Games", r"C:\a\..\b", r"C:\", "Games", r"\\srv\share\x"] {
             assert!(
                 matches!(
-                    p.link_location(bad, Path::new("/tmp")),
+                    p.link_location(bad, Path::new("/srv")),
                     Err(PrefixError::BadLocation(_))
                 ),
                 "{bad} must be refused"

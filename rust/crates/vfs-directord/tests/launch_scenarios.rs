@@ -40,7 +40,7 @@ async fn scenario_toml_disk_source_fixture_read() {
     // Give the server a moment to accept.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let content_dir = tempfile::tempdir().expect("tempdir");
+    let content_dir = vfs_testkit::tempdir().expect("tempdir");
     std::fs::write(content_dir.path().join("hello.txt"), b"hello").unwrap();
 
     let fixture = locate_artifact("vfs-fixture-read.exe");
@@ -198,13 +198,13 @@ async fn scenario_toml_disk_source_fixture_writepath() {
     // Empty scratch directory: the DiskProvider's backing store. Nothing
     // pre-exists, so every byte the assertions find had to be written by the
     // launched fixture through the real provider graph.
-    let content_dir = tempfile::tempdir().expect("tempdir");
+    let content_dir = vfs_testkit::tempdir().expect("tempdir");
 
     // A separate directory (not the DiskProvider's backing store) for the
     // shim's own stats report, so `VFS_SHIM_STATS_LOG`'s temp/rename dance
     // never shows up as a stray entry when the write-path assertions below
     // list content_dir.
-    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_dir = vfs_testkit::tempdir().expect("stats tempdir");
     let stats_log = stats_dir.path().join("shim-stats.log");
 
     let fixture = locate_artifact("vfs-fixture-writepath.exe");
@@ -464,14 +464,14 @@ async fn scenario_toml_two_disk_sources_fixture_writepath() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Two empty scratch directories, mounted as two separate root sources.
-    let bottom_dir = tempfile::tempdir().expect("tempdir bottom");
-    let top_dir = tempfile::tempdir().expect("tempdir top");
+    let bottom_dir = vfs_testkit::tempdir().expect("tempdir bottom");
+    let top_dir = vfs_testkit::tempdir().expect("tempdir top");
 
     // Separate from both source directories, same reasoning as the
     // single-source test above: keeps the shim's `VFS_SHIM_STATS_LOG`
     // temp/rename dance out of the bottom/top directory listings the
     // assertions below rely on being exactly the fixture's own writes.
-    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_dir = vfs_testkit::tempdir().expect("stats tempdir");
     let stats_log = stats_dir.path().join("shim-stats.log");
 
     let fixture = locate_artifact("vfs-fixture-writepath.exe");
@@ -721,7 +721,7 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
     // untouched" is a byte comparison rather than a timestamp check.
     const ZIP_ENTRY: &str = "Data/x.esp";
     const ORIGINAL: &[u8] = b"ORIGINAL-ESP-BYTES";
-    let content_dir = tempfile::tempdir().expect("tempdir");
+    let content_dir = vfs_testkit::tempdir().expect("tempdir");
     let zip = content_dir.path().join("content.zip");
     support::write_stored_zip(&zip, ZIP_ENTRY, ORIGINAL);
     let zip_before = std::fs::read(&zip).expect("read zip");
@@ -733,8 +733,8 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
     const MOD_ENTRY: &str = "Data/mod.esp";
     const MOD_BOTTOM: &[u8] = b"BOTTOM-MOD-BYTES!!";
     const MOD_TOP: &[u8] = b"TOP-MOD-BYTES-WIN!";
-    let mods_bottom = tempfile::tempdir().expect("mods-bottom tempdir");
-    let mods_top = tempfile::tempdir().expect("mods-top tempdir");
+    let mods_bottom = vfs_testkit::tempdir().expect("mods-bottom tempdir");
+    let mods_top = vfs_testkit::tempdir().expect("mods-top tempdir");
     for (dir, bytes) in [(&mods_bottom, MOD_BOTTOM), (&mods_top, MOD_TOP)] {
         std::fs::create_dir_all(dir.path().join("Data")).expect("mkdir Data");
         std::fs::write(dir.path().join(MOD_ENTRY), bytes).expect("write mod entry");
@@ -743,10 +743,10 @@ async fn scenario_layered_sources_with_write_layer_copy_up_in_place() {
     // The declared write layer: a directory of the user's choosing, not the
     // session's own overlay. Left uncreated on purpose — an overwrite folder
     // need not exist before the first write.
-    let overwrite_parent = tempfile::tempdir().expect("overwrite tempdir");
+    let overwrite_parent = vfs_testkit::tempdir().expect("overwrite tempdir");
     let overwrite = overwrite_parent.path().join("overwrite");
 
-    let stats_dir = tempfile::tempdir().expect("stats tempdir");
+    let stats_dir = vfs_testkit::tempdir().expect("stats tempdir");
     let stats_log = stats_dir.path().join("shim-stats.log");
 
     let fixture = locate_artifact("vfs-fixture-writepath.exe");
@@ -1003,7 +1003,7 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // The disk source holds a COPY of the fixture plus hello.txt.
-    let content = tempfile::tempdir().expect("content tempdir");
+    let content = vfs_testkit::tempdir().expect("content tempdir");
     std::fs::copy(
         locate_artifact("vfs-fixture-read.exe"),
         content.path().join("fixture.exe"),
@@ -1013,7 +1013,7 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
 
     // Root 0's location: a fresh path that does not exist yet (the first
     // launch creates it), so fixture.exe is graph-only relative to it.
-    let base = tempfile::tempdir().expect("base tempdir");
+    let base = vfs_testkit::tempdir().expect("base tempdir");
     let loc = base.path().join("Game").to_string_lossy().replace('/', "\\");
     assert!(!Path::new(&loc).exists());
 
@@ -1099,4 +1099,11 @@ async fn rooted_launch_by_name_and_absolute_path_stages_a_graph_only_image() {
 fn toml_string(s: &str) -> String {
     // Quote a path for TOML (escape backslashes).
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Sessions default to a directory under the system temp dir, and the daemons
+/// these tests spawn inherit this process's environment. Point both at `target/`.
+#[ctor::ctor]
+fn scratch_tmpdir() {
+    vfs_testkit::use_scratch_as_tmpdir();
 }

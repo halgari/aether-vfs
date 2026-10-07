@@ -585,7 +585,7 @@ pub(crate) mod tests {
     /// them, not one each.
     #[test]
     fn writers_crossing_the_flush_threshold_together_flush_once() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let threshold = 256 << 10;
         let store = BlockStore::open(
             dir.path(),
@@ -626,7 +626,7 @@ pub(crate) mod tests {
     /// error rather than panic again; the next open finds no clean shutdown.
     #[test]
     fn a_poisoned_writer_fails_shutdown_without_panicking() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let store = BlockStore::open(dir.path(), test_config()).unwrap();
         put(&store, b"a", &random_bytes(1, BS)).unwrap();
         store.flush().unwrap();
@@ -648,7 +648,7 @@ pub(crate) mod tests {
 
     #[test]
     fn failed_append_moves_later_writes_to_a_new_pack() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = vfs_testkit::tempdir().unwrap();
         let a = random_bytes(1, 2 * BS);
         let b = random_bytes(2, 2 * BS);
         let c = random_bytes(3, 2 * BS);

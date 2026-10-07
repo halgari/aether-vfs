@@ -36,7 +36,7 @@ pub(super) fn temp_storage_every_close() -> (Arc<Storage>, tempfile::TempDir) {
 }
 
 pub(super) fn temp_storage_with(durability: Durability) -> (Arc<Storage>, tempfile::TempDir) {
-    let d = tempfile::tempdir().unwrap();
+    let d = vfs_testkit::tempdir().unwrap();
     let s = Storage::open(
         d.path(),
         StorageConfig {

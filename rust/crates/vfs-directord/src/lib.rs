@@ -21,3 +21,13 @@ pub use storage::*;
 
 /// Bind address used when the caller does not pin one (ephemeral port).
 pub const DEFAULT_BIND: &str = "127.0.0.1:0";
+
+#[cfg(test)]
+mod scratch_tmpdir {
+    /// Sessions default to a directory under the system temp dir, and the daemons
+    /// these tests spawn inherit this process's environment. Point both at `target/`.
+    #[ctor::ctor]
+    fn scratch_tmpdir() {
+        vfs_testkit::use_scratch_as_tmpdir();
+    }
+}

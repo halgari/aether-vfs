@@ -5,7 +5,7 @@ use vfs_block_store::{BlockStore, Error, StoreConfig};
 
 #[test]
 fn set_len_creates_and_stat_reports_length() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     assert!(store.stat(b"f").unwrap().is_none());
     store.set_len(b"f", 10 * BS as u64 + 7).unwrap();
@@ -17,7 +17,7 @@ fn set_len_creates_and_stat_reports_length() {
 
 #[test]
 fn delete_removes_file() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     store.set_len(b"f", 100).unwrap();
     store.delete(b"f").unwrap();
@@ -28,7 +28,7 @@ fn delete_removes_file() {
 
 #[test]
 fn file_id_length_is_capped() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     assert!(matches!(store.stat(&[0u8; 257]), Err(Error::FileIdTooLong)));
     assert!(matches!(
@@ -40,7 +40,7 @@ fn file_id_length_is_capped() {
 
 #[test]
 fn metadata_survives_close_and_reopen() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     {
         let store = open(dir.path());
         store.set_len(b"f", 12345).unwrap();
@@ -52,7 +52,7 @@ fn metadata_survives_close_and_reopen() {
 
 #[test]
 fn flush_makes_writes_durable_without_close() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     store.set_len(b"f", 99).unwrap();
     store.flush().unwrap();
@@ -63,7 +63,7 @@ fn flush_makes_writes_durable_without_close() {
 
 #[test]
 fn has_unflushed_tracks_writes_since_the_last_flush() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     assert!(!store.has_unflushed(), "fresh store");
     store.set_len(b"f", 99).unwrap();
@@ -79,7 +79,7 @@ fn has_unflushed_tracks_writes_since_the_last_flush() {
 
 #[test]
 fn second_open_is_locked() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let _store = open(dir.path());
     assert!(matches!(
         BlockStore::open(dir.path(), test_config()),
@@ -89,7 +89,7 @@ fn second_open_is_locked() {
 
 #[test]
 fn block_size_is_fixed_at_creation() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     open(dir.path()).close().unwrap();
     let cfg = StoreConfig {
         block_size: 8192,
@@ -103,7 +103,7 @@ fn block_size_is_fixed_at_creation() {
 
 #[test]
 fn invalid_config_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     for cfg in [
         StoreConfig {
             block_size: 1000,
@@ -184,7 +184,7 @@ fn write_more_and_check(store: &BlockStore, a: &[u8]) {
 
 #[test]
 fn orphan_pack_file_is_deleted_on_open() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let a = store_with_two_packs(dir.path());
     let orphan = pack_ids(dir.path()).last().unwrap() + 1;
     std::fs::write(pack_path(dir.path(), orphan), b"not referenced").unwrap();
@@ -199,7 +199,7 @@ fn orphan_pack_file_is_deleted_on_open() {
 #[test]
 fn undeletable_orphan_pack_file_does_not_block_open() {
     use std::os::windows::fs::OpenOptionsExt;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let a = store_with_two_packs(dir.path());
     let orphan = pack_ids(dir.path()).last().unwrap() + 1;
     let path = pack_path(dir.path(), orphan);
@@ -224,7 +224,7 @@ fn undeletable_orphan_pack_file_does_not_block_open() {
 
 #[test]
 fn auto_flush_after_many_commits() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let cfg = StoreConfig {
         auto_flush_commits: 3,
         ..test_config()
@@ -254,7 +254,7 @@ fn auto_flush_after_many_commits() {
 
 #[test]
 fn set_len_rejects_lengths_the_manifest_cannot_hold() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     assert!(matches!(
         store.set_len(b"f", u64::MAX),
@@ -271,7 +271,7 @@ fn set_len_rejects_lengths_the_manifest_cannot_hold() {
 
 #[test]
 fn file_ids_lists_every_file_once() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store =
         vfs_block_store::BlockStore::open(dir.path(), vfs_block_store::StoreConfig::default())
             .unwrap();
@@ -306,7 +306,7 @@ fn snapshot(from: &std::path::Path, to: &std::path::Path) {
 /// open or plain shutdown replaces it.
 #[test]
 fn clean_shutdown_and_its_token_are_reported() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let store = open(dir.path());
     assert!(!store.opened_after_clean_shutdown(), "a new store");
     assert_eq!(store.clean_shutdown_token(), None);
@@ -346,7 +346,7 @@ fn clean_shutdown_and_its_token_are_reported() {
         let store = open(dir.path());
         assert_eq!(store.clean_shutdown_token(), Some(77));
         store.flush().unwrap();
-        let killed = tempfile::tempdir().unwrap();
+        let killed = vfs_testkit::tempdir().unwrap();
         snapshot(dir.path(), killed.path());
         let k = open(killed.path());
         assert!(!k.opened_after_clean_shutdown());

@@ -26,8 +26,8 @@ fn layer_zip(dir: &Path, entry: &str, content: &[u8]) -> std::path::PathBuf {
 
 #[test]
 fn registry_layered_disk_sources_top_wins() {
-    let base = tempfile::tempdir().unwrap();
-    let mod_dir = tempfile::tempdir().unwrap();
+    let base = vfs_testkit::tempdir().unwrap();
+    let mod_dir = vfs_testkit::tempdir().unwrap();
     std::fs::write(base.path().join("shared.txt"), b"FROM-BASE").unwrap();
     std::fs::write(base.path().join("only-base.txt"), b"BASE").unwrap();
     std::fs::write(mod_dir.path().join("shared.txt"), b"MOD-WIN").unwrap();
@@ -60,7 +60,7 @@ fn registry_layered_disk_sources_top_wins() {
 
 #[test]
 fn registry_zip_source_reads_entry() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let zip = layer_zip(dir.path(), "Data/proof.dat", b"ZIP-BYTES");
     let reg = SessionRegistry::new();
     let summary = reg.create("zip".into()).unwrap();
@@ -81,7 +81,7 @@ fn registry_zip_source_reads_entry() {
 /// cache: the second full read is served from it, not from the source.
 #[test]
 fn registry_cache_hits_on_second_read() {
-    let store_dir = tempfile::tempdir().unwrap();
+    let store_dir = vfs_testkit::tempdir().unwrap();
     let storage = Storage::open(store_dir.path(), StorageConfig::default()).unwrap();
     let reg = SessionRegistry::with_storage(Arc::clone(&storage));
     let summary = reg.create("cache".into()).unwrap();
@@ -171,7 +171,7 @@ impl Provider for SlowImmutable {
 /// to prove case is no longer a live concern either.
 #[test]
 fn non_root_mount_matches_lowercase_open_and_is_discoverable_via_parent_readdir() {
-    let root_dir = tempfile::tempdir().unwrap();
+    let root_dir = vfs_testkit::tempdir().unwrap();
     // A real, physical "Data" directory the root disk mount can enumerate,
     // standing in for the base game content a real session always has.
     let data_dir = root_dir.path().join("Data");
@@ -180,7 +180,7 @@ fn non_root_mount_matches_lowercase_open_and_is_discoverable_via_parent_readdir(
 
     // The mod's staging directory — physically anywhere else entirely, never
     // nested under `root_dir`, exactly the MO2 shape the matrix documents.
-    let mod_dir = tempfile::tempdir().unwrap();
+    let mod_dir = vfs_testkit::tempdir().unwrap();
     std::fs::write(mod_dir.path().join("foo.esp"), b"MOD-BYTES").unwrap();
 
     let reg = SessionRegistry::new();
@@ -259,7 +259,7 @@ async fn stats_rpc_reports_sessions_and_cache() {
         .await
         .unwrap()
         .into_inner();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     std::fs::write(dir.path().join("f.txt"), b"hi").unwrap();
     client
         .add_source(AddSourceReq {
@@ -321,7 +321,7 @@ async fn stats_rpc_reports_open_counts_after_session_activity() {
         .await
         .unwrap()
         .into_inner();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     std::fs::write(dir.path().join("f.txt"), b"hi").unwrap();
     client
         .add_source(AddSourceReq {
@@ -390,7 +390,7 @@ async fn add_zip_source_via_grpc() {
     });
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let zip = layer_zip(dir.path(), "hello.txt", b"hello");
     let mut client = connect(&format!("{addr}")).await.unwrap();
     let session = client
@@ -436,7 +436,7 @@ async fn add_zip_source_via_grpc() {
 
 #[test]
 fn config_load_toml_file() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = vfs_testkit::tempdir().unwrap();
     let path = dir.path().join("scenario.toml");
     std::fs::write(
         &path,
@@ -463,4 +463,11 @@ wait = false
     // entry always has.
     assert_eq!(cfg.sources[0].root, 0);
     assert!(!cfg.launch.unwrap().wait);
+}
+
+/// Sessions default to a directory under the system temp dir, and the daemons
+/// these tests spawn inherit this process's environment. Point both at `target/`.
+#[ctor::ctor]
+fn scratch_tmpdir() {
+    vfs_testkit::use_scratch_as_tmpdir();
 }

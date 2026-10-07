@@ -527,8 +527,7 @@ mod tests {
         // this; a `DiskProvider` pointed at a directory that was never
         // created genuinely reports `None` for `getattr("")`, exactly the
         // "registered but resolves to nothing" case the probe must catch.
-        let dir = std::env::temp_dir()
-            .join(format!("vfs-mg-nonexistent-mount-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-mg-nonexistent-mount");
         let _ = std::fs::remove_dir_all(&dir);
         // Deliberately do not create `dir` — the mount's own root must not
         // resolve.
@@ -549,7 +548,7 @@ mod tests {
         // must be surfaced as a file with its real size, not an assumed
         // KIND_DIR/0 placeholder — the same probe that confirms the mount
         // resolves at all also supplies its real shape.
-        let dir = std::env::temp_dir().join(format!("vfs-mg-filemount-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-mg-filemount");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("payload.bin"), b"12345").unwrap();
@@ -646,8 +645,7 @@ mod tests {
         // left that can see a write refused by one *specific* mount. Gate
         // 4's whole workflow ("launch, ask what was rejected, add a
         // provider for it") depends on this staying discoverable.
-        let dir = std::env::temp_dir()
-            .join(format!("vfs-mg-rejected-write-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-mg-rejected-write");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let g = graph(vec![
@@ -690,8 +688,7 @@ mod tests {
         // serve. The `getattr` probe is what distinguishes "this mount owns
         // the path and it is read-only" (still refused, see the test above)
         // from "this mount merely covers the prefix" (keep looking).
-        let dir = std::env::temp_dir()
-            .join(format!("vfs-mg-ro-passthrough-{}", std::process::id()));
+        let dir = vfs_testkit::scratch_path("vfs-mg-ro-passthrough");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("only-on-disk.txt"), b"DISK").unwrap();

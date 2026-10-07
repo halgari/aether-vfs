@@ -1090,11 +1090,7 @@ mod root_graph_tests {
     /// tried. `create`'s single call to this is verified by reading.
     #[test]
     fn prepare_session_base_clears_a_previous_runs_directory() {
-        let base = std::env::temp_dir().join(format!(
-            "vfs-prepare-base-{}-{}",
-            std::process::id(),
-            line!()
-        ));
+        let base = vfs_testkit::scratch_path(&format!("vfs-prepare-base-{}", line!()));
         let stale = base.join("overlay").join("root-0").join("data");
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("x.esp"), b"PREVIOUS-RUN").unwrap();
@@ -1121,8 +1117,8 @@ mod root_graph_tests {
     /// refusing it.
     #[test]
     fn a_write_layer_source_composes_as_the_roots_writable_upper() {
-        let content = tempfile::tempdir().unwrap();
-        let overwrite = tempfile::tempdir().unwrap();
+        let content = vfs_testkit::tempdir().unwrap();
+        let overwrite = vfs_testkit::tempdir().unwrap();
         std::fs::write(content.path().join("x.esp"), b"ORIGINAL").unwrap();
 
         let cfg = SessionConfig {
@@ -1175,8 +1171,8 @@ mod root_graph_tests {
     /// relative path to different bytes under each root.
     #[test]
     fn two_roots_with_one_provider_each_resolve_independently() {
-        let game_dir = tempfile::tempdir().unwrap();
-        let docs_dir = tempfile::tempdir().unwrap();
+        let game_dir = vfs_testkit::tempdir().unwrap();
+        let docs_dir = vfs_testkit::tempdir().unwrap();
         std::fs::write(game_dir.path().join("same.txt"), b"GAME-BYTES").unwrap();
         std::fs::write(docs_dir.path().join("same.txt"), b"DOCS-BYTES").unwrap();
 
@@ -1224,8 +1220,8 @@ root = 1
     /// — the single-root behaviour every existing config relies on.
     #[test]
     fn flat_source_list_sugar_desugars_to_layered_root_zero() {
-        let base = tempfile::tempdir().unwrap();
-        let mod_dir = tempfile::tempdir().unwrap();
+        let base = vfs_testkit::tempdir().unwrap();
+        let mod_dir = vfs_testkit::tempdir().unwrap();
         std::fs::write(base.path().join("shared.txt"), b"BASE").unwrap();
         std::fs::write(mod_dir.path().join("shared.txt"), b"MOD-WINS").unwrap();
 
@@ -1273,8 +1269,8 @@ root = 1
     /// `Director::open`/`RootId`, not the graph builder.
     #[test]
     fn two_roots_resolve_independently_through_the_live_director() {
-        let game_dir = tempfile::tempdir().unwrap();
-        let docs_dir = tempfile::tempdir().unwrap();
+        let game_dir = vfs_testkit::tempdir().unwrap();
+        let docs_dir = vfs_testkit::tempdir().unwrap();
         std::fs::write(game_dir.path().join("same.txt"), b"GAME-BYTES").unwrap();
         std::fs::write(docs_dir.path().join("same.txt"), b"DOCS-BYTES").unwrap();
 
@@ -1516,7 +1512,7 @@ root = 1
     fn declare_root_refuses_a_location_the_prefix_cannot_hold() {
         let reg = SessionRegistry::new();
         let s = reg.create("bad-loc".into()).unwrap();
-        for bad in [r"D:\Games", "/tmp/host-dir", r"C:\", r"C:\a\..\b"] {
+        for bad in [r"D:\Games", "/srv/host-dir", r"C:\", r"C:\a\..\b"] {
             for root in [0, 1] {
                 let e = reg
                     .declare_root(&s.id, root, Path::new(bad), "R")
@@ -1585,7 +1581,7 @@ root = 1
     #[test]
     fn layer_write_layer_persists_across_registries() {
         use vfs_embed::{OPEN_CREATE, OPEN_WRITE};
-        let store_dir = tempfile::tempdir().unwrap();
+        let store_dir = vfs_testkit::tempdir().unwrap();
 
         let reg = SessionRegistry::with_storage(open_storage(store_dir.path()));
         let s = reg.create("layer-a".into()).unwrap();
@@ -1625,7 +1621,7 @@ root = 1
     /// call created it, and never deletes one that already existed.
     #[test]
     fn a_refused_layer_write_layer_deletes_only_a_layer_it_created() {
-        let store_dir = tempfile::tempdir().unwrap();
+        let store_dir = vfs_testkit::tempdir().unwrap();
         let reg = SessionRegistry::with_storage(open_storage(store_dir.path()));
         let storage = Arc::clone(reg.storage().unwrap());
         drop(storage.layer("existing").unwrap());
@@ -1673,7 +1669,7 @@ root = 1
     /// session; once the session is down the layer can go.
     #[test]
     fn delete_layer_names_the_session_using_it() {
-        let store_dir = tempfile::tempdir().unwrap();
+        let store_dir = vfs_testkit::tempdir().unwrap();
         let reg = SessionRegistry::with_storage(open_storage(store_dir.path()));
         let s = reg.create("user".into()).unwrap();
         reg.set_layer_write_layer(&s.id, 0, "busy").unwrap();
@@ -1694,7 +1690,7 @@ root = 1
     /// keyed by the caller's key; a fast or mutable source is not wrapped.
     #[test]
     fn add_source_keyed_caches_slow_immutable_sources() {
-        let store_dir = tempfile::tempdir().unwrap();
+        let store_dir = vfs_testkit::tempdir().unwrap();
         let reg = SessionRegistry::with_storage(open_storage(store_dir.path()));
         let s = reg.create("cached".into()).unwrap();
         let slow: Arc<dyn Provider> = Arc::new(SlowImmutable(

@@ -4,7 +4,7 @@ use super::*;
 fn write_opcode_round_trips_through_dispatch() {
     use vfs_protocol::{encode_open_req, encode_write_req, decode_open_resp, decode_write_resp,
                        WriteReq, OP_OPEN, OP_WRITE, OPEN_CREATE, OPEN_WRITE, ST_OK};
-    let dir = std::env::temp_dir().join(format!("vfs-rdw-{}", std::process::id()));
+    let dir = vfs_testkit::scratch_path("vfs-rdw");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let d = Director::new();
@@ -73,7 +73,7 @@ fn stored_names_opcode_answers_the_spelling_of_each_component() {
 #[test]
 fn delete_opcode_removes_the_file() {
     use vfs_protocol::{encode_path_req, OP_DELETE, ST_OK};
-    let dir = std::env::temp_dir().join(format!("vfs-rdd-{}", std::process::id()));
+    let dir = vfs_testkit::scratch_path("vfs-rdd");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("gone.txt"), b"x").unwrap();

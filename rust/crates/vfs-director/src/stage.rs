@@ -706,7 +706,7 @@ mod tests {
     }
 
     fn tmp_root(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("vfs-stage-test-{}-{name}", std::process::id()));
+        let d = vfs_testkit::scratch_path(&format!("vfs-stage-test-{name}"));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

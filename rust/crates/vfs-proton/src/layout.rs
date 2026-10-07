@@ -120,22 +120,22 @@ mod tests {
 
     #[test]
     fn at_places_everything_under_the_given_base() {
-        let r = Root::at(std::path::PathBuf::from("/tmp/aebase"));
-        assert_eq!(r.runtimes(), std::path::Path::new("/tmp/aebase/runtimes"));
+        let r = Root::at(std::path::PathBuf::from("/srv/aebase"));
+        assert_eq!(r.runtimes(), std::path::Path::new("/srv/aebase/runtimes"));
         assert_eq!(
             r.runtime_dir("GE-Proton11-6"),
-            std::path::Path::new("/tmp/aebase/runtimes/GE-Proton11-6")
+            std::path::Path::new("/srv/aebase/runtimes/GE-Proton11-6")
         );
-        assert_eq!(r.downloads(), std::path::Path::new("/tmp/aebase/downloads"));
+        assert_eq!(r.downloads(), std::path::Path::new("/srv/aebase/downloads"));
     }
 
     #[test]
     fn sessions_places_each_session_under_the_sessions_directory() {
-        let r = Root::at(std::path::PathBuf::from("/tmp/aebase"));
-        assert_eq!(r.sessions(), std::path::Path::new("/tmp/aebase/sessions"));
+        let r = Root::at(std::path::PathBuf::from("/srv/aebase"));
+        assert_eq!(r.sessions(), std::path::Path::new("/srv/aebase/sessions"));
         assert_eq!(
             r.try_session_dir("abc123").unwrap(),
-            std::path::Path::new("/tmp/aebase/sessions/abc123")
+            std::path::Path::new("/srv/aebase/sessions/abc123")
         );
     }
 
@@ -145,7 +145,7 @@ mod tests {
         // guard as a runtime tag.
         for evil in ["../../etc", "..", "a/../../b", "/absolute", "a/b", ""] {
             assert!(
-                Root::at(std::path::PathBuf::from("/tmp/aebase"))
+                Root::at(std::path::PathBuf::from("/srv/aebase"))
                     .try_session_dir(evil)
                     .is_err(),
                 "session id {evil:?} must be refused"
@@ -159,13 +159,13 @@ mod tests {
         // a traversal attempt must not resolve outside `runtimes()`.
         for evil in ["../../etc", "..", "a/../../b", "/absolute", "a/b"] {
             assert!(
-                Root::at(std::path::PathBuf::from("/tmp/aebase"))
+                Root::at(std::path::PathBuf::from("/srv/aebase"))
                     .try_runtime_dir(evil)
                     .is_err(),
                 "tag {evil:?} must be refused"
             );
         }
-        assert!(Root::at(std::path::PathBuf::from("/tmp/aebase"))
+        assert!(Root::at(std::path::PathBuf::from("/srv/aebase"))
             .try_runtime_dir("GE-Proton11-6")
             .is_ok());
     }
