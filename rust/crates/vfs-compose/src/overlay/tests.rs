@@ -1,6 +1,6 @@
 use super::*;
 use crate::InlineProvider;
-use vfs_provider::{CaseMatch, OPEN_EXCL, OPEN_READ};
+use vfs_provider::{CaseMatch, KIND_FILE, OPEN_CREATE, OPEN_EXCL, OPEN_READ, OPEN_TRUNC};
 
 /// Slow and immutable, but sequential-only — exercises both the
 /// pass-through fields and the forced access/immutable overrides at once.
