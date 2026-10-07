@@ -278,3 +278,10 @@ fn production_launch_leaves_an_absolute_image_untouched() {
     })
     .unwrap();
 }
+
+/// Sessions default to a directory under the system temp dir, and the daemons
+/// these tests spawn inherit this process's environment. Point both at `target/`.
+#[ctor::ctor]
+fn scratch_tmpdir() {
+    vfs_testkit::use_scratch_as_tmpdir();
+}

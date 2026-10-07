@@ -40,6 +40,7 @@ vfs-director = { path = "../vfs-director" }
 vfs-protocol = { path = "../vfs-protocol" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 tempfile = "3"
+ctor = "0.2"
 toml = "0.8"
 tonic = "0.14"
 tokio-stream = { version = "0.1", features = ["net"] }

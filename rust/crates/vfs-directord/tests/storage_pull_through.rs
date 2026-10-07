@@ -263,3 +263,10 @@ async fn a_remote_source_is_served_from_the_store_on_the_second_pass() {
     // is removed (Windows cannot delete open files).
     let _ = storage.close();
 }
+
+/// Sessions default to a directory under the system temp dir, and the daemons
+/// these tests spawn inherit this process's environment. Point both at `target/`.
+#[ctor::ctor]
+fn scratch_tmpdir() {
+    vfs_testkit::use_scratch_as_tmpdir();
+}

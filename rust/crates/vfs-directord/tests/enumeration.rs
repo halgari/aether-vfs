@@ -239,3 +239,10 @@ async fn directory_enumeration_under_a_managed_root_hides_an_unserved_real_file(
         .expect("teardown");
     server.abort();
 }
+
+/// Sessions default to a directory under the system temp dir, and the daemons
+/// these tests spawn inherit this process's environment. Point both at `target/`.
+#[ctor::ctor]
+fn scratch_tmpdir() {
+    vfs_testkit::use_scratch_as_tmpdir();
+}

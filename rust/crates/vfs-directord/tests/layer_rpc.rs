@@ -183,3 +183,10 @@ async fn layer_rpcs_round_trip_through_a_session() {
 
     server.abort();
 }
+
+/// Sessions default to a directory under the system temp dir, and the daemons
+/// these tests spawn inherit this process's environment. Point both at `target/`.
+#[ctor::ctor]
+fn scratch_tmpdir() {
+    vfs_testkit::use_scratch_as_tmpdir();
+}

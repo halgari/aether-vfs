@@ -94,3 +94,13 @@ impl Drop for Scratch {
 pub fn tempdir() -> std::io::Result<tempfile::TempDir> {
     tempfile::tempdir_in(scratch_root())
 }
+
+/// Point the process's `TMPDIR` at [`scratch_root`], so code under test that
+/// defaults to the system temp dir (a daemon's per-session directories, say)
+/// and the child processes it spawns land under `target/` too.
+///
+/// Changes the process environment, so call it before any thread exists: from
+/// a `#[ctor::ctor]` function, which runs before `main`.
+pub fn use_scratch_as_tmpdir() {
+    std::env::set_var("TMPDIR", scratch_root());
+}
