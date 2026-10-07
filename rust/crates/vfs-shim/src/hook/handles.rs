@@ -1,4 +1,5 @@
 //! Per-handle tracking tables: directory cursors, identities and paths of open handles.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{DirTracked, path_is_ours};
 use std::collections::BTreeMap;
@@ -52,7 +53,8 @@ pub(super) unsafe fn tag_under_root(
         return;
     }
     let Some(path) = path else { return };
-    let key = *file_handle as isize;
+    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+    let key = unsafe { *file_handle } as isize;
     // Remember every handle's path, not just the ones under the root. NT lets a
     // caller open a file as (directory handle + leaf name), and without the
     // parent's path such an open cannot be decoded at all -- it is invisible to
@@ -118,7 +120,11 @@ pub(super) unsafe fn record_identity(
     }
     if let Some(path) = path {
         if let Ok(mut t) = IDENTITY_TABLE.lock() {
-            t.insert(*file_handle as isize, nt_to_volume_relative(path));
+            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+            t.insert(
+                unsafe { *file_handle } as isize,
+                nt_to_volume_relative(path),
+            );
         }
     }
 }
@@ -139,7 +145,8 @@ pub(super) unsafe fn record_path(file_handle: *mut HANDLE, path: Option<&str>, s
     if let Some(path) = path {
         if path_is_ours(path) {
             if let Ok(mut t) = PATH_TABLE.lock() {
-                t.insert(*file_handle as isize, path.to_string());
+                // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                t.insert(unsafe { *file_handle } as isize, path.to_string());
             }
         }
     }
