@@ -15,10 +15,6 @@ use crate::image::RootLocation;
 use vfs_director::ipc::IpcServe;
 use vfs_director::stage::StagedDir;
 use vfs_director::Director;
-// The Proton delivery mechanism is the unix counterpart of the `vfs-inject` +
-// `vfs-shim` pair (see `proton`); gated in the manifest too.
-#[cfg(unix)]
-use vfs_proton::prefix::PrefixInit;
 use vfs_provider::{overlay_layer_dir, RootId};
 
 mod compose;
@@ -39,7 +35,7 @@ pub use registry::{registry_sync_for, RegistrySync};
 
 use compose::RootComposition;
 #[cfg(unix)]
-use proton::{remove_memory_ring, AnonPrefix, StopInner, DEFAULT_ROOT0_LOCATION, RING_FILE};
+use proton::ProtonState;
 
 /// Host entrypoint: one configured director + optional IPC + launch.
 ///
@@ -58,11 +54,6 @@ pub struct Session {
     /// because [`Session::is_serving`] and [`Session::stop_serve`] then have
     /// one thing to consult and cannot disagree with each other by target.
     ipc: Option<IpcServe>,
-    /// The ring's file when it lives in memory rather than in `state_dir`
-    /// (see [`Session::serve`]), so that [`Session::stop_serve`] can delete
-    /// it: left behind it would hold its pages until the user logs out.
-    #[cfg(unix)]
-    ring_backing: Option<PathBuf>,
     /// Per-root composition inputs, keyed by the raw `u32` a `RootId` wraps.
     /// `Director` holds exactly one provider per root rather than a mergeable
     /// list, so every change to a root's inputs recomposes that root whole
@@ -82,76 +73,12 @@ pub struct Session {
     /// root virtualizes; on unix it is the root's **location** inside the Wine
     /// prefix (`C:\…`), backed by `state_dir/roots/<id>`.
     extra_roots: Vec<(u32, PathBuf)>,
-    /// Root 0's location as the Wine child sees it, when declared; `None` is
-    /// [`DEFAULT_ROOT0_LOCATION`]. `virtual_root` stays its **host** backing
-    /// directory.
-    #[cfg(unix)]
-    root0_location: Option<String>,
-    /// A persistent prefix name ([`Session::set_prefix_name`]); `None` boots
-    /// an anonymous prefix keyed by `state_dir` and deleted on drop.
-    #[cfg(unix)]
-    prefix_name: Option<String>,
-    /// The anonymous prefix this session booted, if any — what `Drop`
-    /// deletes, with the home and runtime `launch` used for it. A named
-    /// prefix is never recorded here.
-    #[cfg(unix)]
-    anon: Mutex<Option<AnonPrefix>>,
-    /// `(prefix dir, link, target)` for every root link `launch` placed in a
-    /// prefix, so `Drop` can remove them through
-    /// [`Prefix::unlink_location`] — only while each is still a symlink to
-    /// what we linked, so a later session's relink of the same location
-    /// survives.
-    #[cfg(unix)]
-    prefix_links: Mutex<Vec<(PathBuf, PathBuf, PathBuf)>>,
     /// Ring serve threads [`Session::serve`] starts; `None` is
     /// `vfs_director::ipc::DEFAULT_IO_WORKERS`.
     io_workers: Option<usize>,
-    /// The aether-vfs home [`Session::set_home`] chose; `None` resolves it
-    /// from the environment at launch.
+    /// Everything the session holds only for the Proton (Wine) delivery.
     #[cfg(unix)]
-    home: Option<PathBuf>,
-    /// How `launch` sets up the prefix — see [`Session::set_prefix_init`].
-    #[cfg(unix)]
-    prefix_init: PrefixInit,
-    /// Whether `launch` starts Proton's Steam helper — see
-    /// [`Session::set_steam_helper`].
-    #[cfg(unix)]
-    steam_helper: bool,
-    /// Where the Steam client keeps `steam.pid`; `None` is `$HOME/.steam` —
-    /// see [`Session::set_steam_state_dir`].
-    #[cfg(unix)]
-    steam_state_dir: Option<PathBuf>,
-    /// The launch `launch` is waiting on, for [`Session::stop_launch`].
-    #[cfg(unix)]
-    waiting: Mutex<Option<LaunchStopper>>,
-    /// The launch a `wait: false` `launch` started, held until it is
-    /// stopped, replaced by a later launch after it ended, or the session
-    /// drops (which stops it).
-    #[cfg(unix)]
-    detached: Mutex<Option<LaunchHandle>>,
-    /// Set for the span of a [`Session::launch_detached`] call, from just
-    /// after it refuses a second launch to just before it returns — the
-    /// window in which neither `detached` nor `waiting` yet holds the
-    /// handle, so [`Session::stop_launch`] has nothing to act on directly.
-    /// Doubles as the second half of that refusal: a `launch_detached` that
-    /// finds it already set (another one is mid-flight) refuses too.
-    #[cfg(unix)]
-    starting: std::sync::atomic::AtomicBool,
-    /// Set by [`Session::stop_launch`] when it finds `starting` set but
-    /// nothing in `detached`/`waiting` yet — a stop requested while a launch
-    /// is between spawning and being recorded. `launch_detached` checks this
-    /// the moment it has a handle, right after spawning, so the request is
-    /// honoured instead of silently lost to that race.
-    #[cfg(unix)]
-    stop_pending: std::sync::atomic::AtomicBool,
-    /// The most recent Proton launch's stop state, weakly: whoever holds the
-    /// launch — `detached`, a waiting `launch`, or a caller of
-    /// [`Session::launch_detached`] that kept its [`LaunchHandle`] — this
-    /// sees it while it runs. A new launch is refused while it has not
-    /// ended, [`Session::stop_launch`] stops it, and dropping the session
-    /// stops it before the ring goes.
-    #[cfg(unix)]
-    latest: Mutex<std::sync::Weak<StopInner>>,
+    proton: ProtonState,
     /// The most recent staged launch directory, held here because
     /// [`StagedDir`]'s `Drop` removes the staged files — not the virtual root
     /// they now live in — and Windows keeps the image file mapped for as long
@@ -190,36 +117,10 @@ impl Session {
             ipc: None,
             roots: Mutex::new(BTreeMap::new()),
             extra_roots: Vec::new(),
-            #[cfg(unix)]
-            root0_location: None,
-            #[cfg(unix)]
-            prefix_name: None,
-            #[cfg(unix)]
-            anon: Mutex::new(None),
-            #[cfg(unix)]
-            prefix_links: Mutex::new(Vec::new()),
             io_workers: None,
             #[cfg(unix)]
-            home: None,
-            #[cfg(unix)]
-            prefix_init: PrefixInit::default(),
-            #[cfg(unix)]
-            steam_helper: true,
-            #[cfg(unix)]
-            steam_state_dir: None,
-            #[cfg(unix)]
-            waiting: Mutex::new(None),
-            #[cfg(unix)]
-            detached: Mutex::new(None),
-            #[cfg(unix)]
-            latest: Mutex::new(std::sync::Weak::new()),
-            #[cfg(unix)]
-            starting: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(unix)]
-            stop_pending: std::sync::atomic::AtomicBool::new(false),
+            proton: ProtonState::default(),
             staged: Mutex::new(None),
-            #[cfg(unix)]
-            ring_backing: None,
         }
     }
 
@@ -339,7 +240,8 @@ impl Session {
         if id == 0 {
             #[cfg(unix)]
             {
-                self.root0_location = Some(path.to_string_lossy().into_owned());
+                self.proton
+                    .set_root0_location(path.to_string_lossy().into_owned());
             }
             #[cfg(not(unix))]
             {
@@ -371,10 +273,7 @@ impl Session {
     /// images against exactly this list.
     pub fn root_locations(&self) -> Vec<RootLocation> {
         #[cfg(unix)]
-        let root0 = self
-            .root0_location
-            .clone()
-            .unwrap_or_else(|| DEFAULT_ROOT0_LOCATION.to_string());
+        let root0 = self.proton.root0_location();
         #[cfg(not(unix))]
         let root0 = self.virtual_root.to_string_lossy().into_owned();
         std::iter::once(RootLocation { id: 0, location: root0 })
@@ -436,9 +335,7 @@ impl Session {
         // After the workers are gone. A child that still maps the ring keeps
         // its pages until it exits; the name is what goes.
         #[cfg(unix)]
-        if let Some(backing) = self.ring_backing.take() {
-            remove_memory_ring(Some(&backing), &self.state_dir.join(RING_FILE));
-        }
+        self.proton.release_ring(&self.state_dir);
     }
 }
 

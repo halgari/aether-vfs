@@ -3,7 +3,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, Weak};
 
 use vfs_director::ipc::IpcServe;
 use vfs_proton::{
@@ -21,10 +22,116 @@ mod handle;
 mod ring;
 
 pub use handle::{LaunchHandle, LaunchStopper};
-pub(super) use handle::{AnonPrefix, StopInner};
-use handle::StartingGuard;
-pub(super) use ring::remove_memory_ring;
-use ring::ring_in_memory;
+use handle::{AnonPrefix, StartingGuard, StopInner};
+use ring::{remove_memory_ring, ring_in_memory};
+
+/// What a session holds only for the Proton (Wine) delivery: the prefix it
+/// boots, the roots it links into it, the Steam settings, and the launches
+/// it is running. One field of [`Session`] on unix, absent on Windows.
+pub(in crate::session) struct ProtonState {
+    /// The ring's file when it lives in memory rather than in `state_dir`
+    /// (see [`Session::serve`]), so that [`Session::stop_serve`] can delete
+    /// it: left behind it would hold its pages until the user logs out.
+    ring_backing: Option<PathBuf>,
+    /// Root 0's location as the Wine child sees it, when declared; `None` is
+    /// [`DEFAULT_ROOT0_LOCATION`]. `virtual_root` stays its **host** backing
+    /// directory.
+    root0_location: Option<String>,
+    /// A persistent prefix name ([`Session::set_prefix_name`]); `None` boots
+    /// an anonymous prefix keyed by `state_dir` and deleted on drop.
+    prefix_name: Option<String>,
+    /// The anonymous prefix this session booted, if any — what `Drop`
+    /// deletes, with the home and runtime `launch` used for it. A named
+    /// prefix is never recorded here.
+    anon: Mutex<Option<AnonPrefix>>,
+    /// `(prefix dir, link, target)` for every root link `launch` placed in a
+    /// prefix, so `Drop` can remove them through
+    /// [`Prefix::unlink_location`] — only while each is still a symlink to
+    /// what we linked, so a later session's relink of the same location
+    /// survives.
+    prefix_links: Mutex<Vec<(PathBuf, PathBuf, PathBuf)>>,
+    /// The aether-vfs home [`Session::set_home`] chose; `None` resolves it
+    /// from the environment at launch.
+    home: Option<PathBuf>,
+    /// How `launch` sets up the prefix — see [`Session::set_prefix_init`].
+    prefix_init: PrefixInit,
+    /// Whether `launch` starts Proton's Steam helper — see
+    /// [`Session::set_steam_helper`].
+    steam_helper: bool,
+    /// Where the Steam client keeps `steam.pid`; `None` is `$HOME/.steam` —
+    /// see [`Session::set_steam_state_dir`].
+    steam_state_dir: Option<PathBuf>,
+    /// The launch `launch` is waiting on, for [`Session::stop_launch`].
+    waiting: Mutex<Option<LaunchStopper>>,
+    /// The launch a `wait: false` `launch` started, held until it is
+    /// stopped, replaced by a later launch after it ended, or the session
+    /// drops (which stops it).
+    detached: Mutex<Option<LaunchHandle>>,
+    /// Set for the span of a [`Session::launch_detached`] call, from just
+    /// after it refuses a second launch to just before it returns — the
+    /// window in which neither `detached` nor `waiting` yet holds the
+    /// handle, so [`Session::stop_launch`] has nothing to act on directly.
+    /// Doubles as the second half of that refusal: a `launch_detached` that
+    /// finds it already set (another one is mid-flight) refuses too.
+    starting: AtomicBool,
+    /// Set by [`Session::stop_launch`] when it finds `starting` set but
+    /// nothing in `detached`/`waiting` yet — a stop requested while a launch
+    /// is between spawning and being recorded. `launch_detached` checks this
+    /// the moment it has a handle, right after spawning, so the request is
+    /// honoured instead of silently lost to that race.
+    stop_pending: AtomicBool,
+    /// The most recent Proton launch's stop state, weakly: whoever holds the
+    /// launch — `detached`, a waiting `launch`, or a caller of
+    /// [`Session::launch_detached`] that kept its [`LaunchHandle`] — this
+    /// sees it while it runs. A new launch is refused while it has not
+    /// ended, [`Session::stop_launch`] stops it, and dropping the session
+    /// stops it before the ring goes.
+    latest: Mutex<Weak<StopInner>>,
+}
+
+impl Default for ProtonState {
+    fn default() -> Self {
+        ProtonState {
+            ring_backing: None,
+            root0_location: None,
+            prefix_name: None,
+            anon: Mutex::new(None),
+            prefix_links: Mutex::new(Vec::new()),
+            home: None,
+            prefix_init: PrefixInit::default(),
+            steam_helper: true,
+            steam_state_dir: None,
+            waiting: Mutex::new(None),
+            detached: Mutex::new(None),
+            starting: AtomicBool::new(false),
+            stop_pending: AtomicBool::new(false),
+            latest: Mutex::new(Weak::new()),
+        }
+    }
+}
+
+impl ProtonState {
+    /// Declares root 0's location as the Wine child sees it
+    /// ([`Session::declare_root`]).
+    pub(in crate::session) fn set_root0_location(&mut self, location: String) {
+        self.root0_location = Some(location);
+    }
+
+    /// Root 0's location: the declared one, else [`DEFAULT_ROOT0_LOCATION`].
+    pub(in crate::session) fn root0_location(&self) -> String {
+        self.root0_location
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ROOT0_LOCATION.to_string())
+    }
+
+    /// Deletes the in-memory ring's file and link, if the ring lives there
+    /// ([`Session::stop_serve`]).
+    pub(in crate::session) fn release_ring(&mut self, state_dir: &Path) {
+        if let Some(backing) = self.ring_backing.take() {
+            remove_memory_ring(Some(&backing), &state_dir.join(RING_FILE));
+        }
+    }
+}
 
 impl Session {
     /// Unix: the aether-vfs home `launch` takes GE-Proton runtimes
@@ -33,14 +140,14 @@ impl Session {
     /// environment to choose it.
     #[cfg(unix)]
     pub fn set_home(&mut self, home: impl Into<PathBuf>) {
-        self.home = Some(home.into());
+        self.proton.home = Some(home.into());
     }
 
     /// The aether-vfs home `launch` uses: [`Session::set_home`]'s, else the
     /// environment's (`vfs_proton::layout::Root::from_env`).
     #[cfg(unix)]
     fn proton_home(&self) -> Result<ProtonRoot, String> {
-        match &self.home {
+        match &self.proton.home {
             Some(h) => Ok(ProtonRoot::at(h.clone())),
             None => ProtonRoot::from_env()
                 .map_err(|e| format!("launch: no aether-vfs home (set_home, or VFS_HOME): {e}")),
@@ -58,7 +165,7 @@ impl Session {
     /// prefix rather than converting the old one.
     #[cfg(unix)]
     pub fn set_prefix_init(&mut self, init: PrefixInit) {
-        self.prefix_init = init;
+        self.proton.prefix_init = init;
     }
 
     /// Unix: whether a launch in a [`PrefixInit::Proton`] prefix starts
@@ -76,7 +183,7 @@ impl Session {
     /// [`LaunchHandle::steam_helper_status`] says what the injector did.
     #[cfg(unix)]
     pub fn set_steam_helper(&mut self, on: bool) {
-        self.steam_helper = on;
+        self.proton.steam_helper = on;
     }
 
     /// Unix: the directory the Steam client keeps its runtime state in
@@ -84,7 +191,7 @@ impl Session {
     /// the pid file is read, to tell whether a client is running.
     #[cfg(unix)]
     pub fn set_steam_state_dir(&mut self, dir: impl Into<PathBuf>) {
-        self.steam_state_dir = Some(dir.into());
+        self.proton.steam_state_dir = Some(dir.into());
     }
 
     /// The Steam side of a launch with `env` as its [`LaunchOpts::env`], and
@@ -98,18 +205,18 @@ impl Session {
         let PrefixInit::Proton {
             steam_client,
             app_id,
-        } = &self.prefix_init
+        } = &self.proton.prefix_init
         else {
             return (SteamSide::Untouched, Vec::new());
         };
         let app_id = app_id
             .or_else(|| env.get("SteamAppId").and_then(|v| v.trim().parse().ok()))
             .filter(|id| *id != 0);
-        let (true, Some(app_id)) = (self.steam_helper, app_id) else {
+        let (true, Some(app_id)) = (self.proton.steam_helper, app_id) else {
             return (SteamSide::Off, Vec::new());
         };
         let Some(state) = self
-            .steam_state_dir
+            .proton.steam_state_dir
             .clone()
             .or_else(vfs_proton::steam::state_dir)
         else {
@@ -163,7 +270,7 @@ impl Session {
         ProtonRoot::at(PathBuf::new())
             .try_session_dir(name)
             .map_err(|e| format!("prefix name {name:?} must be one plain path component: {e}"))?;
-        self.prefix_name = Some(name.to_string());
+        self.proton.prefix_name = Some(name.to_string());
         Ok(())
     }
 
@@ -237,7 +344,7 @@ impl Session {
             None => start(&named)?,
         };
 
-        self.ring_backing = backing;
+        self.proton.ring_backing = backing;
         self.ipc = Some(ipc);
         Ok(())
     }
@@ -333,7 +440,7 @@ impl Session {
                 .link_location(&loc.location, &backing)
                 .map_err(|e| format!("launch: root {}: {e}", loc.id))?;
             let mut links = self
-                .prefix_links
+                .proton.prefix_links
                 .lock()
                 .map_err(|_| "prefix links lock poisoned".to_string())?;
             links.retain(|(d, l, _)| !(*d == prefix.dir && *l == link));
@@ -403,14 +510,14 @@ impl Session {
         let mut handle = self.launch_detached(opts)?;
         if !opts.wait {
             *self
-                .detached
+                .proton.detached
                 .lock()
                 .map_err(|_| "detached launch lock poisoned".to_string())? = Some(handle);
             return Ok(0);
         }
         let stopper = handle.stopper();
         *self
-            .waiting
+            .proton.waiting
             .lock()
             .map_err(|_| "waiting launch lock poisoned".to_string())? = Some(stopper);
         // Not `handle.wait()`: that consumes `handle`, so its `_prefix_lock`
@@ -421,7 +528,7 @@ impl Session {
         // one's. Blocking in place keeps `handle`, and so the lock, alive
         // until `waiting` is cleared first.
         let exit = handle.block();
-        if let Ok(mut w) = self.waiting.lock() {
+        if let Ok(mut w) = self.proton.waiting.lock() {
             *w = None;
         }
         drop(handle);
@@ -468,26 +575,26 @@ impl Session {
         // racing each other (neither yet recorded in `detached`/`waiting`)
         // can't both pass.
         if self
-            .detached
+            .proton.detached
             .lock()
             .map_err(|_| "detached launch lock poisoned".to_string())?
             .is_some()
             || self
-                .waiting
+                .proton.waiting
                 .lock()
                 .map_err(|_| "waiting launch lock poisoned".to_string())?
                 .is_some()
             // A handle `launch_detached` handed back and its caller kept is
             // in neither slot above; `latest` still sees it.
             || self.latest_running().is_some()
-            || self.starting.swap(true, std::sync::atomic::Ordering::SeqCst)
+            || self.proton.starting.swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             return Err(
                 "launch: a launch is already running in this session — stop_launch() first"
                     .to_string(),
             );
         }
-        let _starting = StartingGuard { starting: &self.starting, stop_pending: &self.stop_pending };
+        let _starting = StartingGuard { starting: &self.proton.starting, stop_pending: &self.proton.stop_pending };
 
         // Before the runtime lookup: a bad image fails fast, and staging
         // behaves as on Windows.
@@ -512,20 +619,20 @@ impl Session {
                 )
             })?;
 
-        let prefix_id = match &self.prefix_name {
+        let prefix_id = match &self.proton.prefix_name {
             Some(name) => name.clone(),
             None => self.wine_session_id(),
         };
-        let prefix_dir = vfs_proton::prefix::prefix_dir(&home, &prefix_id, &self.prefix_init)
+        let prefix_dir = vfs_proton::prefix::prefix_dir(&home, &prefix_id, &self.proton.prefix_init)
             .map_err(|e| format!("launch: wine prefix: {e}"))?;
-        if self.prefix_name.is_none() {
+        if self.proton.prefix_name.is_none() {
             // Recorded before `ensure`, so a boot that fails half-way is
             // still deleted on drop.
             // With the home and runtime used here, so `Drop` deletes this
             // prefix from where it is rather than wherever the environment
             // points by then.
             *self
-                .anon
+                .proton.anon
                 .lock()
                 .map_err(|_| "anon prefix lock poisoned".to_string())? = Some(AnonPrefix {
                 id: prefix_id.clone(),
@@ -540,7 +647,7 @@ impl Session {
         let prefix_lock = Prefix { dir: prefix_dir }
             .lock()
             .map_err(|e| format!("launch: {e}"))?;
-        let prefix = vfs_proton::prefix::ensure_with(&home, &runtime, &prefix_id, &self.prefix_init)
+        let prefix = vfs_proton::prefix::ensure_with(&home, &runtime, &prefix_id, &self.proton.prefix_init)
             .map_err(|e| format!("launch: wine prefix: {e}"))?;
 
         let (wine_overlay, wine_state) = self.link_into_prefix(&prefix)?;
@@ -665,11 +772,11 @@ impl Session {
         // Before `starting` clears (the guard drops on return), so there is
         // no moment in which a second launch sees neither.
         *self
-            .latest
+            .proton.latest
             .lock()
             .map_err(|_| "latest launch lock poisoned".to_string())? =
             Arc::downgrade(&handle.stopper.0);
-        if self.stop_pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        if self.proton.stop_pending.swap(false, std::sync::atomic::Ordering::SeqCst) {
             // `stop_launch` ran while this launch was still between spawning
             // and being recorded in `detached`/`waiting`, found nothing to
             // act on, and left this instead of losing the request — honour
@@ -700,7 +807,7 @@ impl Session {
     #[cfg(unix)]
     pub fn stop_launch(&self) -> Result<bool, String> {
         let detached = self
-            .detached
+            .proton.detached
             .lock()
             .map_err(|_| "detached launch lock poisoned".to_string())?
             .take();
@@ -711,7 +818,7 @@ impl Session {
             }
         }
         let waiting = self
-            .waiting
+            .proton.waiting
             .lock()
             .map_err(|_| "waiting launch lock poisoned".to_string())?
             .clone();
@@ -722,16 +829,16 @@ impl Session {
         if let Some(stopper) = self.latest_running() {
             return stopper.stop().map(|()| true);
         }
-        if self.starting.load(std::sync::atomic::Ordering::SeqCst) {
-            self.stop_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+        if self.proton.starting.load(std::sync::atomic::Ordering::SeqCst) {
+            self.proton.stop_pending.store(true, std::sync::atomic::Ordering::SeqCst);
         }
         Ok(false)
     }
 
-    /// The most recent launch, if it has not ended — see [`Session::latest`].
+    /// The most recent launch, if it has not ended — see [`ProtonState::latest`].
     #[cfg(unix)]
     fn latest_running(&self) -> Option<LaunchStopper> {
-        let inner = self.latest.lock().ok()?.upgrade()?;
+        let inner = self.proton.latest.lock().ok()?.upgrade()?;
         let stopper = LaunchStopper(inner);
         (!stopper.has_ended()).then_some(stopper)
     }
@@ -739,7 +846,7 @@ impl Session {
     /// Drops a detached launch that has ended, releasing its prefix lock.
     #[cfg(unix)]
     fn reap_detached(&self) {
-        if let Ok(mut d) = self.detached.lock() {
+        if let Ok(mut d) = self.proton.detached.lock() {
             if d.as_mut().is_some_and(|h| !h.is_running()) {
                 *d = None;
             }
@@ -750,7 +857,7 @@ impl Session {
     /// removes the root links `launch` placed and deletes the anonymous prefix.
     pub(super) fn drop_proton(&mut self) {
         // Before the ring goes: a detached program still reads through it.
-        let detached = match self.detached.get_mut() {
+        let detached = match self.proton.detached.get_mut() {
             Ok(d) => d.take(),
             Err(p) => p.into_inner().take(),
         };
@@ -763,7 +870,7 @@ impl Session {
             let _ = stopper.stop();
         }
         self.stop_serve();
-        let links = match self.prefix_links.get_mut() {
+        let links = match self.proton.prefix_links.get_mut() {
             Ok(l) => std::mem::take(l),
             Err(p) => std::mem::take(p.into_inner()),
         };
@@ -775,7 +882,7 @@ impl Session {
         for (dir, link, target) in links.into_iter().rev() {
             let _ = Prefix { dir }.unlink_location(&link, &target);
         }
-        let anon = match self.anon.get_mut() {
+        let anon = match self.proton.anon.get_mut() {
             Ok(a) => a.take(),
             Err(p) => p.into_inner().take(),
         };
@@ -816,7 +923,7 @@ fn wine_cwd(requested: Option<&str>, root0: &str, target: &str) -> Result<String
 /// as a constant because [`Session::launch`] has to render the same file as a
 /// `C:\` path for the shim, and the two must not drift apart.
 #[cfg(unix)]
-pub(in crate::session) const RING_FILE: &str = "ring.bin";
+const RING_FILE: &str = "ring.bin";
 
 /// Where [`Session::launch`] links the session's directories inside the
 /// prefix's `drive_c` — see [`Session::link_into_prefix`].
@@ -827,7 +934,7 @@ const WINE_LINK_DIR: &str = "vfs-session";
 /// always had, `C:\` + [`WINE_LINK_DIR`] + `\root`, so existing hosts and tests
 /// see no change.
 #[cfg(unix)]
-pub(in crate::session) const DEFAULT_ROOT0_LOCATION: &str = r"C:\vfs-session\root";
+const DEFAULT_ROOT0_LOCATION: &str = r"C:\vfs-session\root";
 
 /// Inline ring payload capacity for the file-backed ring.
 ///
@@ -1105,7 +1212,7 @@ mod tests {
         // the home recorded at launch, never re-read `VFS_HOME`.
         {
             let a = Session::new();
-            *a.anon.lock().unwrap() = Some(AnonPrefix {
+            *a.proton.anon.lock().unwrap() = Some(AnonPrefix {
                 id: "anon-x".into(),
                 home: root.clone(),
                 // No `wineserver` here: stopping it fails fast and is ignored.

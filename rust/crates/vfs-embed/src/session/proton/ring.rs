@@ -138,7 +138,7 @@ pub(super) fn ring_in_memory(state_dir: &Path, named: &Path) -> Option<PathBuf> 
 /// Undo [`ring_in_memory`]: the file, its directory, and the link at `named`
 /// if it still points at that file. Best effort.
 #[cfg(unix)]
-pub(in crate::session) fn remove_memory_ring(backing: Option<&Path>, named: &Path) {
+pub(super) fn remove_memory_ring(backing: Option<&Path>, named: &Path) {
     let Some(file) = backing else {
         return;
     };

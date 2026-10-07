@@ -12,11 +12,13 @@ use vfs_proton::{
 };
 
 use crate::session::LaunchExit;
+#[cfg(doc)]
+use super::ProtonState;
 
 /// An anonymous Wine prefix a session booted: its id under `home`'s
 /// `sessions/`, and the runtime whose `wineserver` serves it.
 #[cfg(unix)]
-pub(in crate::session) struct AnonPrefix {
+pub(super) struct AnonPrefix {
     pub(super) id: String,
     pub(super) home: ProtonRoot,
     pub(super) runtime: PathBuf,
@@ -65,7 +67,7 @@ pub struct LaunchStopper(pub(super) Arc<StopInner>);
 
 #[cfg(unix)]
 #[derive(Debug)]
-pub(in crate::session) struct StopInner {
+pub(super) struct StopInner {
     pub(super) prefix: Prefix,
     pub(super) runtime: PathBuf,
     pub(super) requested: std::sync::atomic::AtomicBool,
@@ -135,9 +137,9 @@ impl LaunchStopper {
     }
 }
 
-/// Resets [`Session::starting`] to `false` when a
+/// Resets [`ProtonState::starting`] to `false` when a
 /// [`Session::launch_detached`] call ends, on every path — success or an
-/// early `?` return alike. Clears [`Session::stop_pending`] the same way:
+/// early `?` return alike. Clears [`ProtonState::stop_pending`] the same way:
 /// a `stop_launch` landing while this call is in flight but before it
 /// reaches the spawn checkpoint (an early error — a bad image, a prefix
 /// that won't `ensure`) would otherwise leave that flag set with nothing
