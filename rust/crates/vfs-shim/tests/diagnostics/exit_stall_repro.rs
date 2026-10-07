@@ -258,11 +258,7 @@ fn a_process_carrying_the_shim_still_exits() {
     let cfg = base.join("shim.cfg");
     std::fs::write(
         &cfg,
-        vfs_shim::encode_config_with_overlay(
-            vroot.to_str().unwrap(),
-            base.join("overlay").to_str().unwrap(),
-            &[],
-        ),
+        vfs_shim::encode_config(vroot.to_str().unwrap()),
     )
     .unwrap();
 

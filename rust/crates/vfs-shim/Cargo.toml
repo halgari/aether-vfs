@@ -8,9 +8,6 @@ license = "GPL-3.0-only"
 vfs-redirect = { path = "../vfs-redirect" }
 # Pure NT layouts and decisions the hooks apply.
 vfs-ntlayout = { path = "../vfs-ntlayout" }
-# The config's snapshot is validated (`SnapshotReader::open`) and otherwise unused; it goes
-# with cleanup stream I (D3).
-vfs-shared = { path = "../vfs-shared" }
 vfs-core = { path = "../vfs-core" }
 vfs-protocol = { path = "../vfs-protocol" }
 vfs-ipc = { path = "../vfs-ipc" }

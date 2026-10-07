@@ -6,6 +6,8 @@ license = "GPL-3.0-only"
 
 [dependencies]
 vfs-env = { path = "../vfs-env" }
+# The shim config codec (`shimcfg`), for the static-import rows.
+vfs-protocol = { path = "../vfs-protocol" }
 vfs-core = { path = "../vfs-core" }
 vfs-pe = { path = "../vfs-pe" }
 vfs-zip = { path = "../vfs-zip" }
@@ -32,8 +34,6 @@ vfs-shim = { path = "../vfs-shim" }
 # second time as its own artifact target, and both units wrote
 # `deps/vfs_shim_dll.dll`, which is the cargo#6313 collision that made
 # `--all-targets` unusable.
-vfs-core = { path = "../vfs-core" }
-vfs-shared = { path = "../vfs-shared", features = ["bridge"] }
 vfs-zip = { path = "../vfs-zip" }
 # PE fixtures (payload, vproxy, staticimp) are built by build.rs via a nested
 # `cargo build -p …` (cannot be normal deps: vfs-payload is no_std/panic=abort).

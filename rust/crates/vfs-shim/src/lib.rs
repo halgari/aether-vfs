@@ -36,8 +36,7 @@ mod tramp;
 
 pub use bootstrap::{
     BootstrapError, bootstrap_from_config_path, bootstrap_from_config_path_with_payload,
-    decode_config, decode_config_full, load_static_imports_from_config_path,
-    static_imports_to_preinit, sync_bootstrap,
+    load_static_imports_from_config_path, static_imports_to_preinit, sync_bootstrap,
 };
 // The encoders (and `StaticImport`) live in `vfs_protocol::shimcfg` — pure
 // byte assembly with no Windows dependency — so a native Linux Director can
@@ -71,7 +70,7 @@ pub use hookstats::{
     unrouted_director_opens,
 };
 pub use vfs_protocol::shimcfg::{
-    StaticImport, encode_config, encode_config_full, encode_config_with_overlay,
+    StaticImport, encode_config, encode_config_full,
 };
 
 /// The canonical path the registry hooks recorded for a key handle (synthetic or

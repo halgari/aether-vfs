@@ -378,9 +378,8 @@ impl Session {
         format!("session-{:016x}", h.finish())
     }
 
-    /// Links the overlay and the state directory into
-    /// `prefix/drive_c/vfs-session/`, and returns the two `C:\` paths they
-    /// are reachable at, in that order. The roots are linked at their own
+    /// Links the state directory into `prefix/drive_c/vfs-session/`, and returns the `C:\` path
+    /// it is reachable at. The roots are linked at their own
     /// locations by [`Session::link_roots`].
     ///
     /// **A Wine process can only name what is under one of its drives**, and
@@ -391,10 +390,10 @@ impl Session {
     /// path the shim is handed is a subdirectory rather than a bare drive root.
     ///
     /// Each link is replaced, not created-if-absent: a session relaunches into
-    /// the prefix it already booted, and `set_overlay`/`set_state_dir` may
+    /// the prefix it already booted, and `set_state_dir` may
     /// have moved the target in between.
     #[cfg(unix)]
-    fn link_into_prefix(&self, prefix: &Prefix) -> Result<(String, String), String> {
+    fn link_into_prefix(&self, prefix: &Prefix) -> Result<String, String> {
         let base = prefix.drive_c().join(WINE_LINK_DIR);
         std::fs::create_dir_all(&base)
             .map_err(|e| format!("launch: create {}: {e}", base.display()))?;
@@ -416,10 +415,7 @@ impl Session {
                 )
             })
         };
-        Ok((
-            link("overlay", &self.overlay)?,
-            link("state", &self.state_dir)?,
-        ))
+        link("state", &self.state_dir)
     }
 
     /// Links every root's host backing directory into `prefix` at the root's
@@ -762,7 +758,7 @@ impl Session {
         let BootedPrefix {
             runtime, prefix, ..
         } = booted;
-        let (wine_overlay, wine_state) = self.link_into_prefix(prefix)?;
+        let wine_state = self.link_into_prefix(prefix)?;
         let roots = self.root_locations();
         self.link_roots(prefix, &roots)?;
 
@@ -790,10 +786,9 @@ impl Session {
             .map(|r| (r.id, r.location.clone()))
             .collect();
 
-        // Written here, not in `serve`: root 0's location and the overlay *as
-        // the shim sees them*, and the overlay had no `C:\` name until the
-        // prefix above did.
-        let config_path = self.write_shim_config(&root0, &wine_overlay)?;
+        // Written here, not in `serve`: root 0's location *as the shim sees it*, which had no
+        // `C:\` name until the prefix above did.
+        let config_path = self.write_shim_config(&root0)?;
         let ready_path = self.fresh_ready_flag();
 
         let (injector, shim_dll, payload_dll) = locate_wine_artifacts(opts)?;

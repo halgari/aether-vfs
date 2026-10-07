@@ -9,8 +9,6 @@ vfs-provider = { path = "../vfs-provider" }
 vfs-registry = { path = "../vfs-registry" }
 
 [dev-dependencies]
-# Golden vectors for the ring header and the tree snapshot live beside the
-# codec vectors. Dev-only: vfs-ipc itself depends on this crate.
+# Golden vectors for the ring header live beside the codec vectors.
+# Dev-only: vfs-ipc itself depends on this crate.
 vfs-ipc = { path = "../vfs-ipc" }
-vfs-core = { path = "../vfs-core" }
-vfs-shared = { path = "../vfs-shared", features = ["bridge"] }

@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 use vfs_protocol as P;
-use vfs_protocol::shimcfg::{encode_config, encode_config_full, StaticImport};
+use vfs_protocol::shimcfg::{decode_config, encode_config, encode_config_full, StaticImport};
 use vfs_protocol::{AttrResp, DirEntryWire, OpenResp, ReadReq, SetattrReq, WriteReq};
 use vfs_registry::{Child, Node, Value};
 
@@ -32,8 +32,8 @@ fn sample_node() -> Node {
 fn vectors() -> Vec<(&'static str, Vec<u8>)> {
     vec![
         (
-            "shim-config-root-runtime-empty-snapshot",
-            encode_config(r"C:\GameLayers\runtime", &[]),
+            "shim-config-v2-root-runtime",
+            encode_config(r"C:\GameLayers\runtime"),
         ),
         ("open-req-read-skyrim", P::encode_open_req(0, P::OPEN_READ, "Data/Skyrim.esm")),
         (
@@ -69,11 +69,6 @@ fn vectors() -> Vec<(&'static str, Vec<u8>)> {
             vfs_ipc::ring::init(owned.seg(), 4, 256).unwrap();
             owned.seg().read_bytes(0, vfs_ipc::layout::RING_HEADER_SIZE).unwrap()
         }),
-        ("empty-tree-snapshot", {
-            use vfs_core::{build, Layer, LayerId};
-            let tree = build(vec![Layer { id: LayerId(0), entries: vec![] }]).unwrap();
-            vfs_shared::bridge::flatten(&tree)
-        }),
         // Added with the descriptor's removal: the flags, stored names,
         // shim-config extras and every registry codec.
         (
@@ -93,15 +88,13 @@ fn vectors() -> Vec<(&'static str, Vec<u8>)> {
             P::encode_names_resp(&["Data".to_string(), "Skyrim.esm".to_string()]),
         ),
         (
-            "shim-config-full-overlay-one-static-import",
+            "shim-config-v2-one-static-import",
             encode_config_full(
                 r"C:\GameLayers\runtime",
-                r"C:\GameLayers\overlay",
                 &[StaticImport {
                     dll_name: "d3d11.dll".into(),
                     backing_path: r"C:\GameLayers\d3d11.dll".into(),
                 }],
-                &[7, 8],
             ),
         ),
         ("reg-path", P::encode_reg_path(r"\Registry\Machine\Software")),
@@ -187,6 +180,15 @@ fn golden_bytes_decode_to_their_inputs() {
     assert_eq!(
         P::decode_open_resp(&line("open-resp-immutable-gen-0xa1b2c3d4")),
         Some(OpenResp { fh: 42, size: 1000, is_dir: false, immutable: true, mount_gen: 0xA1B2_C3D4 })
+    );
+    let cfg = decode_config(&line("shim-config-v2-one-static-import")).unwrap();
+    assert_eq!(cfg.root, r"C:\GameLayers\runtime");
+    assert_eq!(
+        cfg.static_imports,
+        vec![StaticImport {
+            dll_name: "d3d11.dll".into(),
+            backing_path: r"C:\GameLayers\d3d11.dll".into(),
+        }]
     );
     assert_eq!(
         P::decode_names_req(&line("names-req-root2-skip1")),

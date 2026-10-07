@@ -115,6 +115,13 @@ fn bootstrap() {
                 );
             }
         }
+        // A config from another build: say so in the ready file as well as the boot log.
+        Err(vfs_shim::BootstrapError::Config(e)) => {
+            log_boot(&format!("shim config refused: {e}"));
+            if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
+                let _ = std::fs::write(&ready, format!("{}{e}", vfs_env::READY_FUSE_FAILED_PREFIX));
+            }
+        }
         Err(e) => {
             log_boot(&format!(
                 "bootstrap_from_config_path({config}) failed: {e:?}"

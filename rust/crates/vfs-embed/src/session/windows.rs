@@ -197,8 +197,7 @@ impl Session {
         // thin config from the current one so the shim is told the root this
         // child sees.
         let root_s = self.virtual_root.to_string_lossy().into_owned();
-        let overlay_s = self.overlay.to_string_lossy().into_owned();
-        let config_path = self.write_shim_config(&root_s, &overlay_s)?;
+        let config_path = self.write_shim_config(&root_s)?;
         let thin = self.state_dir.join("fuse.cfg");
         ipc.write_thin_config(&thin, &root_s)?;
         let ready_path = self.fresh_ready_flag();

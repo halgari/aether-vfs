@@ -36,7 +36,6 @@ pub use registry::{RegistrySync, registry_sync_for};
 use compose::RootComposition;
 #[cfg(unix)]
 use proton::ProtonState;
-use stage::empty_tree_snapshot;
 
 /// Host entrypoint: one configured director + optional IPC + launch.
 ///
@@ -366,21 +365,12 @@ impl Session {
             .ok_or_else(|| "serve() before launch()".to_string())
     }
 
-    /// Writes `state_dir/shim.cfg` for the shim: `root` and `overlay` as the
-    /// shim sees them, and an empty tree snapshot (`Engine::build` rejects
-    /// zero-length snapshot bytes, which would abort dual-layer bootstrap
-    /// before hooks install). Returns the file's path.
-    fn write_shim_config(&self, root: &str, overlay: &str) -> Result<PathBuf, String> {
+    /// Writes `state_dir/shim.cfg` for the shim: the `root` as the shim sees it (the
+    /// versioned `vfs_protocol::shimcfg` format). Returns the file's path.
+    fn write_shim_config(&self, root: &str) -> Result<PathBuf, String> {
         let path = self.state_dir.join("shim.cfg");
-        std::fs::write(
-            &path,
-            vfs_protocol::shimcfg::encode_config_with_overlay(
-                root,
-                overlay,
-                &empty_tree_snapshot(),
-            ),
-        )
-        .map_err(|e| format!("launch: write {}: {e}", path.display()))?;
+        std::fs::write(&path, vfs_protocol::shimcfg::encode_config(root))
+            .map_err(|e| format!("launch: write {}: {e}", path.display()))?;
         Ok(path)
     }
 

@@ -1,54 +1,15 @@
-//! Parse the config-file static-import table (shared wire format with vfs-shim).
-//! Kept here so vfs-inject does not depend on vfs-shim (avoids a dep cycle:
-//! vfs-shim → vfs-inject for child dual-layer).
+//! Read the config-file static-import table (the codec is `vfs_protocol::shimcfg`, shared with
+//! vfs-shim, which depends on vfs-inject for child dual-layer).
 
 use crate::PreinitRedirect;
-use crate::payload_cfg::MAX_REDIRECTS;
 
-const CONFIG_MAGIC: &[u8; 4] = b"VFS1";
+pub use vfs_protocol::shimcfg::StaticImport;
 
-/// One static-import row from the config file.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StaticImport {
-    pub dll_name: String,
-    pub backing_path: String,
-}
-
-fn read_field(b: &[u8], off: usize) -> Option<(String, usize)> {
-    let len = u32::from_le_bytes(b.get(off..off + 4)?.try_into().ok()?) as usize;
-    let start = off + 4;
-    let end = start.checked_add(len)?;
-    let s = std::str::from_utf8(b.get(start..end)?).ok()?.to_string();
-    Some((s, end))
-}
-
-/// Decode static imports from a full config blob (same layout as vfs-shim).
-pub(crate) fn decode_static_imports(bytes: &[u8]) -> Option<Vec<StaticImport>> {
-    let (_root, after_root) = read_field(bytes, 0)?;
-    let (_overlay, after_overlay) = read_field(bytes, after_root)?;
-    let rest = bytes.get(after_overlay..)?;
-    if rest.len() < 4 || &rest[..4] != CONFIG_MAGIC {
-        return Some(Vec::new());
-    }
-    let mut off = 4usize;
-    let n = u32::from_le_bytes(rest.get(off..off + 4)?.try_into().ok()?) as usize;
-    off += 4;
-    let mut statics = Vec::with_capacity(n.min(MAX_REDIRECTS));
-    for _ in 0..n {
-        let (name, o1) = read_field(rest, off)?;
-        let (backing, o2) = read_field(rest, o1)?;
-        off = o2;
-        statics.push(StaticImport {
-            dll_name: name,
-            backing_path: backing,
-        });
-    }
-    Some(statics)
-}
-
+/// Static imports from a config file. `None` when the file is unreadable or does not decode
+/// (including a config from another build: the shim's bootstrap refuses that by name).
 pub(crate) fn load_static_imports_from_path(path: &str) -> Option<Vec<StaticImport>> {
     let bytes = std::fs::read(path).ok()?;
-    decode_static_imports(&bytes)
+    Some(vfs_protocol::shimcfg::decode_config(&bytes).ok()?.static_imports)
 }
 
 /// Convert static-import rows into early-payload redirects (stat backings, NT paths).

@@ -36,12 +36,10 @@ fn merge_preinit_loads_config_statics() {
     std::fs::write(&bak, b"x").unwrap();
     let cfg = encode_config_full(
         r"C:\Game",
-        "",
         &[StaticImport {
             dll_name: "d3d11.dll".into(),
             backing_path: bak.to_str().unwrap().to_string(),
         }],
-        &[0u8, 1, 2],
     );
     let path = base.join("c.cfg");
     std::fs::write(&path, &cfg).unwrap();

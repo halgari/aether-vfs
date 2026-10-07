@@ -24,12 +24,10 @@ fn explicit_preinit_overrides_config_same_suffix() {
     std::fs::write(&extra_bak, b"bbbb").unwrap();
     let cfg = encode_config_full(
         r"C:\G",
-        "",
         &[StaticImport {
             dll_name: "vproxy.dll".into(),
             backing_path: cfg_bak.to_str().unwrap().to_string(),
         }],
-        &[0],
     );
     let path = base.join("c.cfg");
     std::fs::write(&path, cfg).unwrap();

@@ -1,11 +1,13 @@
-//! Bootstrap glue: a tiny config codec and a config-file entry point used by the
-//! injected DLL to attach the director's client and install the hooks.
+//! Bootstrap glue: the config-file entry point used by the injected DLL to attach
+//! the director's client and install the hooks. The config codec is
+//! `vfs_protocol::shimcfg`.
 #![allow(unsafe_code)] // payload_cfg_usable VirtualQuery validation
 
 use core::ffi::c_void;
 
 use crate::hook::{HookGuard, InstallError, install, install_late};
 use vfs_inject::PayloadConfig;
+use vfs_protocol::shimcfg::{self, ConfigError, StaticImport};
 
 /// True when `p` looks like a live early-payload Config in *this* process
 /// (readable page + nt_protect matches our ntdll). Rejects inherited parent
@@ -51,29 +53,22 @@ fn payload_cfg_usable(p: *mut PayloadConfig) -> bool {
 pub enum BootstrapError {
     /// The config file could not be read.
     Io,
-    /// The config bytes were malformed.
-    BadConfig,
+    /// The config did not decode: truncated or malformed, or written by a host from a
+    /// different build (no version header, or another version). The message names both
+    /// versions; a launcher shows it, because the fix is rebuilding the pair together.
+    Config(ConfigError),
     /// A director was configured (a ring was named) but the FUSE client
     /// failed to attach. Fails before any hook is installed, and the game's
     /// primary thread stays parked behind
     /// the pre-init spin gate — nothing has run yet, so the caller can (and
     /// must) tear the process down rather than let it start un-virtualised.
     Fuse(String),
-    /// The config's snapshot bytes failed layout validation. The snapshot is
-    /// otherwise unused (the director answers every path under a root); it is
-    /// still validated, as it was when the shim-local engine read it, until the
-    /// config stops carrying it (cleanup stream I, D3).
-    Snapshot(vfs_shared::LayoutError),
     /// The hook could not be installed.
     Install(InstallError),
 }
 
 /// Read a config file, attach the director's client, and install the hooks. Returns the
 /// guard keeping the hooks alive (the injected DLL leaks it).
-///
-/// The config's `overlay` field is decoded and ignored: it named the shim-local write overlay,
-/// which is gone (every write under a root is the director's). The field stays in the wire
-/// format, which this crate does not change.
 ///
 /// When `payload_cfg` is non-null, uses dual-layer [`install_late`] (early
 /// payload already owns the four path/attr stubs). Otherwise full [`install`].
@@ -88,11 +83,13 @@ pub fn bootstrap_from_config_path_with_payload(
     payload_cfg: *mut PayloadConfig,
 ) -> Result<HookGuard, BootstrapError> {
     let bytes = std::fs::read(path).map_err(|_| BootstrapError::Io)?;
-    let (_root, _overlay, snapshot) = decode_config(&bytes).ok_or(BootstrapError::BadConfig)?;
+    // The root is the director's to answer for (the client's roots come from the environment), so
+    // decoding is only the version and shape check: a config from another build fails here, loudly.
+    shimcfg::decode_config(&bytes).map_err(BootstrapError::Config)?;
     // Attach to the parent director's FUSE ring. Standalone (no-director)
     // shim launches are retired: a process that names no ring at all
     // (`NotConfigured`) used to be treated as a legitimate deployment, with
-    // the config's snapshot governing composition on its own — but that is
+    // the shim composing the tree on its own — but that is
     // exactly the mode in which a game runs completely un-virtualised while
     // appearing to work, which this whole programme exists to eliminate. It
     // fails exactly like a named ring that failed to attach (`ConnectFailed`):
@@ -111,7 +108,6 @@ pub fn bootstrap_from_config_path_with_payload(
             return Err(BootstrapError::Fuse(msg));
         }
     }
-    vfs_shared::SnapshotReader::open(&snapshot).map_err(BootstrapError::Snapshot)?;
 
     // Dual-layer cfg sources (first usable wins):
     // 1. explicit pointer (sync bootstrap / tests)
@@ -190,67 +186,26 @@ pub fn sync_bootstrap(payload_cfg: *mut c_void) -> u32 {
             }
             3
         }
+        // A config from another build (or a damaged one): same ready-file spelling, so the
+        // launcher kills the parked process and reports why instead of timing out.
+        Err(BootstrapError::Config(e)) => {
+            if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
+                let _ = std::fs::write(
+                    &ready,
+                    format!("{}{e}", vfs_env::READY_FUSE_FAILED_PREFIX),
+                );
+            }
+            2
+        }
         Err(_) => 2,
     }
 }
 
-// `StaticImport`, `encode_config`, `encode_config_full`, and
-// `encode_config_with_overlay` moved to `vfs_protocol::shimcfg` (portable —
-// only this module's `decode_config_full` needs the Windows-only bits).
-// Re-exported from `lib.rs` so callers see no difference.
-use vfs_protocol::shimcfg::StaticImport;
-
-/// Magic after root+overlay marking the extended config section (static imports).
-/// Legacy configs omit this and treat the remainder as the snapshot blob.
-const CONFIG_MAGIC: &[u8; 4] = b"VFS1";
-
-/// Decode a config buffer. Returns `(root, overlay, static_imports, snapshot)`.
-/// `None` on truncation or invalid UTF-8. Never panics.
-pub fn decode_config_full(bytes: &[u8]) -> Option<(String, String, Vec<StaticImport>, Vec<u8>)> {
-    let read_field = |b: &[u8], off: usize| -> Option<(String, usize)> {
-        let len = u32::from_le_bytes(b.get(off..off + 4)?.try_into().ok()?) as usize;
-        let start = off + 4;
-        let end = start.checked_add(len)?;
-        let s = std::str::from_utf8(b.get(start..end)?).ok()?.to_string();
-        Some((s, end))
-    };
-    let (root, after_root) = read_field(bytes, 0)?;
-    let (overlay, after_overlay) = read_field(bytes, after_root)?;
-    let rest = bytes.get(after_overlay..)?;
-    if rest.len() >= 4 && &rest[..4] == CONFIG_MAGIC {
-        let mut off = 4usize;
-        let n = u32::from_le_bytes(rest.get(off..off + 4)?.try_into().ok()?) as usize;
-        off += 4;
-        let mut statics = Vec::with_capacity(n.min(16));
-        for _ in 0..n {
-            let (name, o1) = read_field(rest, off)?;
-            let (backing, o2) = read_field(rest, o1)?;
-            off = o2;
-            statics.push(StaticImport {
-                dll_name: name,
-                backing_path: backing,
-            });
-        }
-        let snapshot = rest.get(off..)?.to_vec();
-        Some((root, overlay, statics, snapshot))
-    } else {
-        // Legacy: remainder is pure snapshot.
-        Some((root, overlay, Vec::new(), rest.to_vec()))
-    }
-}
-
-/// Decode legacy-compatible shape: `(root, overlay, snapshot)`. Static imports
-/// discarded — use [`decode_config_full`] when you need them.
-pub fn decode_config(bytes: &[u8]) -> Option<(String, String, Vec<u8>)> {
-    let (root, overlay, _statics, snapshot) = decode_config_full(bytes)?;
-    Some((root, overlay, snapshot))
-}
-
-/// Load static-import entries from a config file on disk.
+/// Load static-import entries from a config file on disk. `None` when the file cannot be read or
+/// does not decode (bootstrap reports that; this reader only serves the early-payload rows).
 pub fn load_static_imports_from_config_path(path: &str) -> Option<Vec<StaticImport>> {
     let bytes = std::fs::read(path).ok()?;
-    let (_r, _o, statics, _s) = decode_config_full(&bytes)?;
-    Some(statics)
+    Some(shimcfg::decode_config(&bytes).ok()?.static_imports)
 }
 
 /// Convert config static imports into early-payload redirect rows (NT paths +
@@ -291,108 +246,6 @@ pub fn static_imports_to_preinit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vfs_protocol::shimcfg::{encode_config, encode_config_full, encode_config_with_overlay};
-
-    // Pins `encode_config` byte-for-byte to the inline golden bytes in the
-    // golden vectors under `vfs-protocol/tests/golden` (vector
-    // "shim-config-root-runtime-empty-snapshot") and, transitively, to the
-    // Clojure `aether.vfs.os.windows.shim-config/encode` mirror. Kept in this
-    // (Windows-only) crate — not in `vfs-protocol` — so the portable
-    // ubuntu CI job never needs a `vfs-shim` dependency; this test runs in
-    // the full Windows `cargo test` job instead.
-    #[test]
-    fn encode_config_matches_xtask_descriptor_golden_inline_bytes() {
-        let root = r"C:\GameLayers\runtime";
-        let expected = {
-            let root_b = root.as_bytes();
-            let mut out = Vec::new();
-            out.extend_from_slice(&(root_b.len() as u32).to_le_bytes());
-            out.extend_from_slice(root_b);
-            out.extend_from_slice(&0u32.to_le_bytes()); // overlay_len = 0
-            out.extend_from_slice(b"VFS1");
-            out.extend_from_slice(&0u32.to_le_bytes()); // n_static = 0
-            out
-        };
-        assert_eq!(encode_config(root, &[]), expected);
-    }
-
-    #[test]
-    fn config_round_trips() {
-        let snapshot = vec![1u8, 2, 3, 4, 5];
-        let bytes = encode_config(r"\??\C:\Games\Skyrim", &snapshot);
-        let (root, overlay, snap) = decode_config(&bytes).unwrap();
-        assert_eq!(root, r"\??\C:\Games\Skyrim");
-        assert_eq!(overlay, ""); // encode_config -> no overlay
-        assert_eq!(snap, snapshot);
-        let (_r, _o, statics, _s) = decode_config_full(&bytes).unwrap();
-        assert!(statics.is_empty());
-    }
-
-    #[test]
-    fn config_with_overlay_round_trips() {
-        let snapshot = vec![9u8, 8, 7];
-        let bytes = encode_config_with_overlay(r"C:\Game", r"C:\Overlay", &snapshot);
-        let (root, overlay, snap) = decode_config(&bytes).unwrap();
-        assert_eq!(root, r"C:\Game");
-        assert_eq!(overlay, r"C:\Overlay");
-        assert_eq!(snap, snapshot);
-    }
-
-    #[test]
-    fn config_with_static_imports_round_trips() {
-        let snapshot = vec![1u8, 2, 3];
-        let statics = vec![
-            StaticImport {
-                dll_name: "d3d11.dll".into(),
-                backing_path: r"C:\Mods\d3d11_proxy.dll".into(),
-            },
-            StaticImport {
-                dll_name: "dxgi.dll".into(),
-                backing_path: r"\??\C:\Mods\dxgi_proxy.dll".into(),
-            },
-        ];
-        let bytes = encode_config_full(r"C:\Game", r"C:\Overlay", &statics, &snapshot);
-        let (root, overlay, got, snap) = decode_config_full(&bytes).unwrap();
-        assert_eq!(root, r"C:\Game");
-        assert_eq!(overlay, r"C:\Overlay");
-        assert_eq!(got, statics);
-        assert_eq!(snap, snapshot);
-        // Legacy decode still returns the snapshot correctly.
-        let (_r, _o, snap2) = decode_config(&bytes).unwrap();
-        assert_eq!(snap2, snapshot);
-    }
-
-    #[test]
-    fn legacy_config_without_magic_still_decodes() {
-        // Hand-build pre-VFS1 layout: root + overlay + raw snapshot.
-        let mut bytes = Vec::new();
-        let root = b"C:\\G";
-        let overlay = b"";
-        let snap = b"SNAP";
-        bytes.extend_from_slice(&(root.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(root);
-        bytes.extend_from_slice(&(overlay.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(overlay);
-        bytes.extend_from_slice(snap);
-        let (r, o, statics, s) = decode_config_full(&bytes).unwrap();
-        assert_eq!(r, "C:\\G");
-        assert_eq!(o, "");
-        assert!(statics.is_empty());
-        assert_eq!(s, snap);
-    }
-
-    #[test]
-    fn decode_rejects_truncated() {
-        // Claims root_len = 100 but no bytes follow.
-        let mut bytes = 100u32.to_le_bytes().to_vec();
-        bytes.extend_from_slice(b"short");
-        assert!(decode_config(&bytes).is_none());
-    }
-
-    #[test]
-    fn decode_rejects_too_short_for_header() {
-        assert!(decode_config(&[0u8, 1]).is_none());
-    }
 
     // Use `matches!` on the whole Result rather than `.unwrap_err()`: the latter
     // needs the Ok type `HookGuard: Debug`, which it deliberately is not (it owns
@@ -439,7 +292,34 @@ mod tests {
         std::fs::write(&path, [0u8, 1]).unwrap(); // too short for the header
         assert!(matches!(
             bootstrap_from_config_path(path.to_str().unwrap()),
-            Err(BootstrapError::BadConfig)
+            Err(BootstrapError::Config(_))
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A config from another build is refused at bootstrap, before the ring is touched, with an
+    /// error that names the versions.
+    #[test]
+    fn bootstrap_refuses_a_config_from_another_build() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("vfs-shim-oldcfg-{}.bin", std::process::id()));
+        // A version-1 config: root, overlay, "VFS1", n_static, snapshot.
+        let mut v1 = Vec::new();
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        v1.push(b'R');
+        v1.extend_from_slice(&0u32.to_le_bytes());
+        v1.extend_from_slice(b"VFS1");
+        v1.extend_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&path, &v1).unwrap();
+        let r = bootstrap_from_config_path(path.to_str().unwrap());
+        assert!(matches!(r, Err(BootstrapError::Config(ConfigError::Unversioned))));
+        let mut v3 = shimcfg::encode_config("R");
+        v3[4..8].copy_from_slice(&3u32.to_le_bytes());
+        std::fs::write(&path, &v3).unwrap();
+        let r = bootstrap_from_config_path(path.to_str().unwrap());
+        assert!(matches!(
+            r,
+            Err(BootstrapError::Config(ConfigError::Version { found: 3, .. }))
         ));
         let _ = std::fs::remove_file(&path);
     }

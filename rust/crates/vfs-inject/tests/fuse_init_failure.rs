@@ -33,16 +33,7 @@ fn fuse_init_failure_aborts_the_launch() {
 
     // Content is irrelevant: the decisive assertion is that the process never
     // runs at all, so it never gets far enough to read anything.
-    let snapshot = {
-        use vfs_core::{build, Layer, LayerId};
-        let tree = build(vec![Layer {
-            id: LayerId(0),
-            entries: vec![],
-        }])
-        .unwrap();
-        vfs_shared::bridge::flatten(&tree)
-    };
-    let config_bytes = vfs_shim::encode_config(root.to_str().unwrap(), &snapshot);
+    let config_bytes = vfs_shim::encode_config(root.to_str().unwrap());
     let config_path = base.join("shim.cfg");
     std::fs::write(&config_path, &config_bytes).unwrap();
 

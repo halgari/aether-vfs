@@ -52,9 +52,8 @@ pub fn global() -> Option<&'static FuseClient> {
 /// Why [`try_init_from_env`] did not leave a live [`FuseClient`] installed.
 ///
 /// Both variants are fatal to the caller (`bootstrap.rs` aborts the launch on
-/// either). Standalone shim launches — no ring named at all, the local
-/// snapshot governing composition alone — used to be treated as a
-/// legitimate deployment, and plenty of this crate's own tests used to run
+/// either). Standalone shim launches — no ring named at all, the shim
+/// composing the tree itself — used to be treated as a legitimate deployment, and plenty of this crate's own tests used to run
 /// exactly that way. That mode is retired: it is precisely the one in which a
 /// game runs completely un-virtualised while looking like a normal launch —
 /// the bypass this type exists to make impossible to ignore. The two cases
