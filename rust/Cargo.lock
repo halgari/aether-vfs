@@ -2897,7 +2897,6 @@ dependencies = [
  "tonic-prost-build",
  "vfs-compose",
  "vfs-control",
- "vfs-director",
  "vfs-provider",
  "vfs-zip",
 ]
