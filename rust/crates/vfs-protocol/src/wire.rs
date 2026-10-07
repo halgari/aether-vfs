@@ -29,6 +29,11 @@ impl<'a> Rd<'a> {
             _ => None,
         }
     }
+    /// A boolean read as `!= 0`, for the file-op decoders, which have always
+    /// accepted any non-zero byte. Registry decoders use [`Rd::bool`].
+    pub(crate) fn flag(&mut self) -> Option<bool> {
+        Some(self.u8()? != 0)
+    }
     pub(crate) fn u32(&mut self) -> Option<u32> {
         Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
@@ -50,6 +55,12 @@ impl<'a> Rd<'a> {
     pub(crate) fn str_max(&mut self, max_units: usize) -> Option<&'a str> {
         let s = self.str()?;
         (utf16_len(s) <= max_units).then_some(s)
+    }
+    /// Everything that is left, as a string: the path at the tail of a
+    /// path-carrying request.
+    pub(crate) fn rest_str(&mut self) -> Option<&'a str> {
+        let rest = self.take(self.0.len())?;
+        core::str::from_utf8(rest).ok()
     }
     pub(crate) fn done(&self) -> Option<()> {
         self.0.is_empty().then_some(())

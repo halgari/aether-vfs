@@ -161,11 +161,9 @@ pub fn encode_path_req(root: u32, vpath: &str) -> Vec<u8> {
 }
 
 pub fn decode_path_req(payload: &[u8]) -> Option<(u32, String)> {
-    if payload.len() < 4 {
-        return None;
-    }
-    let root = u32::from_le_bytes(payload[0..4].try_into().ok()?);
-    let path = core::str::from_utf8(&payload[4..]).ok()?.to_string();
+    let mut r = Rd(payload);
+    let root = r.u32()?;
+    let path = r.rest_str()?.to_string();
     Some((root, path))
 }
 
@@ -179,14 +177,14 @@ pub fn encode_getattr_resp(r: &AttrResp) -> Vec<u8> {
 }
 
 pub fn decode_getattr_resp(p: &[u8]) -> Option<AttrResp> {
-    if p.len() < 18 {
-        return None;
-    }
-    let size = u64::from_le_bytes(p[2..10].try_into().ok()?);
-    let mtime = i64::from_le_bytes(p[10..18].try_into().ok()?);
+    let mut r = Rd(p);
+    let found = r.flag()?;
+    let is_dir = r.flag()?;
+    let size = r.u64()?;
+    let mtime = r.u64()? as i64;
     Some(AttrResp {
-        found: p[0] != 0,
-        is_dir: p[1] != 0,
+        found,
+        is_dir,
         size,
         mtime,
     })
@@ -207,17 +205,14 @@ pub fn encode_readdir_resp(entries: &[DirEntryWire]) -> Vec<u8> {
 }
 
 pub fn decode_readdir_resp(p: &[u8]) -> Option<Vec<DirEntryWire>> {
-    let mut off = 0usize;
-    let count = take_u32(p, &mut off)?;
+    let mut r = Rd(p);
+    let count = r.u32()?;
     let mut out = Vec::new();
     for _ in 0..count {
-        let nlen = take_u32(p, &mut off)? as usize;
-        let end = off.checked_add(nlen)?;
-        let name = core::str::from_utf8(p.get(off..end)?).ok()?.to_string();
-        off = end;
-        let is_dir = take_u8(p, &mut off)? != 0;
-        let size = take_u64(p, &mut off)?;
-        let mtime = take_u64(p, &mut off)? as i64;
+        let name = r.str()?.to_string();
+        let is_dir = r.flag()?;
+        let size = r.u64()?;
+        let mtime = r.u64()? as i64;
         out.push(DirEntryWire {
             name,
             is_dir,
@@ -241,12 +236,10 @@ pub fn encode_open_req(root: u32, flags: u32, path: &str) -> Vec<u8> {
 
 /// Returns `(root, flags, path)`.
 pub fn decode_open_req(p: &[u8]) -> Option<(u32, u32, String)> {
-    if p.len() < 8 {
-        return None;
-    }
-    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    let flags = u32::from_le_bytes(p[4..8].try_into().ok()?);
-    let path = core::str::from_utf8(&p[8..]).ok()?.to_string();
+    let mut r = Rd(p);
+    let root = r.u32()?;
+    let flags = r.u32()?;
+    let path = r.rest_str()?.to_string();
     Some((root, flags, path))
 }
 
@@ -271,14 +264,13 @@ pub fn encode_open_resp(r: &OpenResp) -> Vec<u8> {
 }
 
 pub fn decode_open_resp(p: &[u8]) -> Option<OpenResp> {
-    if p.len() < 24 {
-        return None;
-    }
-    let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
-    let size = u64::from_le_bytes(p[8..16].try_into().ok()?);
-    let is_dir = p[16] != 0;
-    let immutable = p[17] & OPEN_RESP_IMMUTABLE != 0;
-    let mount_gen = u32::from_le_bytes(p[20..24].try_into().ok()?);
+    let mut r = Rd(p);
+    let fh = r.u64()?;
+    let size = r.u64()?;
+    let is_dir = r.flag()?;
+    let immutable = r.u8()? & OPEN_RESP_IMMUTABLE != 0;
+    r.take(2)?; // padding
+    let mount_gen = r.u32()?;
     Some(OpenResp {
         fh,
         size,
@@ -299,12 +291,11 @@ pub fn encode_read_req(r: &ReadReq) -> Vec<u8> {
 }
 
 pub fn decode_read_req(p: &[u8]) -> Option<ReadReq> {
-    if p.len() < 20 {
-        return None;
-    }
-    let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
-    let offset = u64::from_le_bytes(p[8..16].try_into().ok()?);
-    let len = u32::from_le_bytes(p[16..20].try_into().ok()?);
+    // The trailing `pad:u32` is not required: a 20-byte request decodes.
+    let mut r = Rd(p);
+    let fh = r.u64()?;
+    let offset = r.u64()?;
+    let len = r.u32()?;
     Some(ReadReq { fh, offset, len })
 }
 
@@ -318,33 +309,25 @@ pub fn encode_read_resp(data: &[u8]) -> Vec<u8> {
 }
 
 pub fn decode_read_resp(p: &[u8]) -> Option<Vec<u8>> {
-    if p.len() < 8 {
-        return None;
-    }
-    let n = u32::from_le_bytes(p[0..4].try_into().ok()?) as usize;
-    if p.len() < 8 + n {
-        return None;
-    }
-    Some(p[8..8 + n].to_vec())
+    let mut r = Rd(p);
+    let n = r.u32()? as usize;
+    r.take(4)?; // pad
+    Some(r.take(n)?.to_vec())
 }
 
 /// **A3:** copy READ response data into `out` without allocating a second Vec.
 /// Returns bytes copied (may be less than `out.len()` on short/EOF reads).
 /// Inline responses only (not bulk).
 pub fn decode_read_resp_into(p: &[u8], out: &mut [u8]) -> Option<usize> {
-    if p.len() < 8 {
-        return None;
-    }
-    let raw = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    let mut r = Rd(p);
+    let raw = r.u32()?;
     if raw & READ_RESP_BULK_BIT != 0 {
         return None; // use decode_read_bulk_resp + arena
     }
-    let n = raw as usize;
-    if p.len() < 8 + n {
-        return None;
-    }
-    let n = n.min(out.len());
-    out[..n].copy_from_slice(&p[8..8 + n]);
+    r.take(4)?; // pad
+    let data = r.take(raw as usize)?;
+    let n = data.len().min(out.len());
+    out[..n].copy_from_slice(&data[..n]);
     Some(n)
 }
 
@@ -359,20 +342,18 @@ pub fn encode_read_resp_bulk(bytes_read: u32, arena_offset: u64) -> Vec<u8> {
 
 /// Returns `(bytes_read, arena_offset)` for a bulk response, or `None` if inline/malformed.
 pub fn decode_read_bulk_resp(p: &[u8]) -> Option<(u32, u64)> {
-    if p.len() < 16 {
-        return None;
-    }
-    let raw = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    let mut r = Rd(p);
+    let raw = r.u32()?;
     if raw & READ_RESP_BULK_BIT == 0 {
         return None;
     }
-    let n = raw & !READ_RESP_BULK_BIT;
-    let off = u64::from_le_bytes(p[8..16].try_into().ok()?);
-    Some((n, off))
+    r.take(4)?; // pad
+    let off = r.u64()?;
+    Some((raw & !READ_RESP_BULK_BIT, off))
 }
 
 pub fn is_read_resp_bulk(p: &[u8]) -> bool {
-    p.len() >= 4 && (u32::from_le_bytes(p[0..4].try_into().unwrap_or([0; 4])) & READ_RESP_BULK_BIT) != 0
+    Rd(p).u32().is_some_and(|raw| raw & READ_RESP_BULK_BIT != 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,23 +375,13 @@ pub fn encode_write_req(r: &WriteReq, data: &[u8]) -> Vec<u8> {
 }
 
 pub fn decode_write_req(p: &[u8]) -> Option<(WriteReq, Vec<u8>)> {
-    if p.len() < 24 {
-        return None;
-    }
-    let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
-    let offset = u64::from_le_bytes(p[8..16].try_into().ok()?);
-    let len = u32::from_le_bytes(p[16..20].try_into().ok()?) as usize;
-    if p.len() < 24 + len {
-        return None;
-    }
-    Some((
-        WriteReq {
-            fh,
-            offset,
-            len: len as u32,
-        },
-        p[24..24 + len].to_vec(),
-    ))
+    let mut r = Rd(p);
+    let fh = r.u64()?;
+    let offset = r.u64()?;
+    let len = r.u32()?;
+    r.take(4)?; // pad
+    let data = r.take(len as usize)?.to_vec();
+    Some((WriteReq { fh, offset, len }, data))
 }
 
 /// WRITE resp: `bytes_written:u32 | pad:u32`
@@ -422,10 +393,7 @@ pub fn encode_write_resp(n: u32) -> Vec<u8> {
 }
 
 pub fn decode_write_resp(p: &[u8]) -> Option<u32> {
-    if p.len() < 4 {
-        return None;
-    }
-    Some(u32::from_le_bytes(p[0..4].try_into().ok()?))
+    Rd(p).u32()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,12 +415,10 @@ pub fn encode_mkdir_req(root: u32, mode: u32, path: &str) -> Vec<u8> {
 
 /// Returns `(root, mode, path)`.
 pub fn decode_mkdir_req(p: &[u8]) -> Option<(u32, u32, String)> {
-    if p.len() < 8 {
-        return None;
-    }
-    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    let mode = u32::from_le_bytes(p[4..8].try_into().ok()?);
-    let path = core::str::from_utf8(&p[8..]).ok()?.to_string();
+    let mut r = Rd(p);
+    let root = r.u32()?;
+    let mode = r.u32()?;
+    let path = r.rest_str()?.to_string();
     Some((root, mode, path))
 }
 
@@ -471,12 +437,10 @@ pub fn encode_names_req(root: u32, skip: u32, path: &str) -> Vec<u8> {
 
 /// Returns `(root, skip, path)`.
 pub fn decode_names_req(p: &[u8]) -> Option<(u32, u32, String)> {
-    if p.len() < 8 {
-        return None;
-    }
-    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    let skip = u32::from_le_bytes(p[4..8].try_into().ok()?);
-    let path = core::str::from_utf8(&p[8..]).ok()?.to_string();
+    let mut r = Rd(p);
+    let root = r.u32()?;
+    let skip = r.u32()?;
+    let path = r.rest_str()?.to_string();
     Some((root, skip, path))
 }
 
@@ -507,14 +471,11 @@ pub fn encode_rename_req(root: u32, from: &str, to: &str) -> Vec<u8> {
 
 /// Returns `(root, from, to)`.
 pub fn decode_rename_req(p: &[u8]) -> Option<(u32, String, String)> {
-    if p.len() < 8 {
-        return None;
-    }
-    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    let from_len = u32::from_le_bytes(p[4..8].try_into().ok()?) as usize;
-    let end = 8usize.checked_add(from_len)?;
-    let from = core::str::from_utf8(p.get(8..end)?).ok()?.to_string();
-    let to = core::str::from_utf8(p.get(end..)?).ok()?.to_string();
+    let mut r = Rd(p);
+    let root = r.u32()?;
+    let from_len = r.u32()? as usize;
+    let from = core::str::from_utf8(r.take(from_len)?).ok()?.to_string();
+    let to = r.rest_str()?.to_string();
     Some((root, from, to))
 }
 
@@ -527,11 +488,9 @@ pub fn encode_setattr_req(r: &SetattrReq) -> Vec<u8> {
 }
 
 pub fn decode_setattr_req(p: &[u8]) -> Option<SetattrReq> {
-    if p.len() < 16 {
-        return None;
-    }
-    let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
-    let size = u64::from_le_bytes(p[8..16].try_into().ok()?);
+    let mut r = Rd(p);
+    let fh = r.u64()?;
+    let size = r.u64()?;
     Some(SetattrReq { fh, size })
 }
 
@@ -540,28 +499,7 @@ pub fn encode_close_req(fh: u64) -> Vec<u8> {
 }
 
 pub fn decode_close_req(p: &[u8]) -> Option<u64> {
-    if p.len() < 8 {
-        return None;
-    }
-    Some(u64::from_le_bytes(p[0..8].try_into().ok()?))
-}
-
-fn take_u32(p: &[u8], off: &mut usize) -> Option<u32> {
-    let end = off.checked_add(4)?;
-    let s = p.get(*off..end)?;
-    *off = end;
-    Some(u32::from_le_bytes(s.try_into().ok()?))
-}
-fn take_u64(p: &[u8], off: &mut usize) -> Option<u64> {
-    let end = off.checked_add(8)?;
-    let s = p.get(*off..end)?;
-    *off = end;
-    Some(u64::from_le_bytes(s.try_into().ok()?))
-}
-fn take_u8(p: &[u8], off: &mut usize) -> Option<u8> {
-    let v = *p.get(*off)?;
-    *off += 1;
-    Some(v)
+    Rd(p).u64()
 }
 
 // ---------------------------------------------------------------------------
@@ -983,6 +921,60 @@ mod tests {
         assert!(decode_rename_req(&[0, 0, 0, 0]).is_none());
         assert!(decode_read_req(&[0u8; 10]).is_none());
         assert!(decode_read_resp(&[1, 0, 0]).is_none());
+    }
+
+    /// The file-op decoders are deliberately lenient (unlike the registry
+    /// ones): trailing bytes are ignored, any non-zero byte is true, and a
+    /// READ request may omit its trailing pad. Pinned so the shared cursor
+    /// cannot tighten them by accident.
+    #[test]
+    fn file_op_decoders_stay_lenient() {
+        let mut g = encode_getattr_resp(&AttrResp {
+            found: true,
+            is_dir: true,
+            size: 5,
+            mtime: 6,
+        });
+        g[0] = 7;
+        g[1] = 0xff;
+        g.extend_from_slice(&[9, 9]);
+        let a = decode_getattr_resp(&g).unwrap();
+        assert!(a.found && a.is_dir);
+        assert_eq!((a.size, a.mtime), (5, 6));
+
+        let mut c = encode_close_req(3);
+        c.push(0);
+        assert_eq!(decode_close_req(&c), Some(3));
+        let mut s = encode_setattr_req(&SetattrReq { fh: 1, size: 2 });
+        s.push(0);
+        assert_eq!(decode_setattr_req(&s), Some(SetattrReq { fh: 1, size: 2 }));
+        let req = ReadReq { fh: 1, offset: 2, len: 3 };
+        let r = encode_read_req(&req);
+        assert_eq!(decode_read_req(&r[..20]), Some(req));
+        assert_eq!(decode_write_resp(&encode_write_resp(4)[..4]), Some(4));
+        let mut rr = encode_read_resp(b"xy");
+        rr.push(0);
+        assert_eq!(decode_read_resp(&rr).as_deref(), Some(&b"xy"[..]));
+        let mut o = encode_open_resp(&OpenResp::default());
+        o[16] = 2;
+        o[18] = 0xaa;
+        o.push(0);
+        assert!(decode_open_resp(&o).unwrap().is_dir);
+        let mut d = encode_readdir_resp(&[DirEntryWire {
+            name: "a".into(),
+            is_dir: true,
+            size: 1,
+            mtime: 2,
+        }]);
+        d.push(0);
+        assert_eq!(decode_readdir_resp(&d).unwrap().len(), 1);
+        // a READ reply whose data is cut short is still malformed
+        assert!(decode_read_resp(&encode_read_resp(b"abc")[..10]).is_none());
+        assert!(decode_write_req(&encode_write_req(
+            &WriteReq { fh: 1, offset: 0, len: 3 },
+            b"abc"
+        )[..25])
+        .is_none());
     }
 
     #[test]
