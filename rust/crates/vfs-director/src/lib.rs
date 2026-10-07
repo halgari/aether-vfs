@@ -57,6 +57,7 @@ pub use vfs_provider::overlay_layer_dir;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vfs_compose::DiskProvider;
     use std::io::Write;
     use std::sync::Arc;
 

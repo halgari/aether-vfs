@@ -10,7 +10,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use vfs_director::ipc::{clamp_workers, DEFAULT_IO_WORKERS};
-use vfs_director::{DirEntry, Director, DiskProvider, Handle, IpcServe, Provider, RootId, Stat};
+use vfs_compose::DiskProvider;
+use vfs_director::{DirEntry, Director, Handle, IpcServe, Provider, RootId, Stat};
 use vfs_ipc::{RingClient, SpinNotifier};
 use vfs_protocol::{
     decode_getattr_resp, decode_open_resp, decode_read_resp, encode_open_req, encode_path_req,

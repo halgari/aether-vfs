@@ -81,8 +81,7 @@ answers `resolve(vpath)`. It knows about:
   enumeration).
 - **Wildcards** — enumeration filters (`*.esm`) are matched here, not in the hook.
 
-snapshot of that tree.
-snapshot of that tree, with a seqlock so a reader never observes a torn update.
+`vfs-shared` holds the bitness-neutral flat layout of a snapshot of that tree.
 
 Keeping this layer pure is what makes the merge semantics testable without a
 game, a driver, or even a filesystem.

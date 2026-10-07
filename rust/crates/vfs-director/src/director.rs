@@ -8,7 +8,7 @@ use vfs_provider::{
     bad_request, is_dir, map_io_err, not_found, read_only, Access, DirEntry, Handle, Provider,
     RootId, SetAttr, Stat, VPath, OPEN_WRITE,
 };
-use crate::path::normalize;
+use vfs_compose::path::normalize;
 use crate::registry::{RegistryGenSink, RegistryGeneration, RegistryHost};
 use vfs_provider::OPEN_APPEND;
 
@@ -534,7 +534,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f"), b"disk").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
         let disk = d.open_info(RootId::DEFAULT, "f", OPEN_READ).unwrap();
         assert!(!disk.immutable, "a real directory can change underneath us");
 
@@ -592,7 +592,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
 
         let (fh, _, _) = d
             .open(RootId::DEFAULT, "w.txt", OPEN_WRITE | vfs_provider::OPEN_CREATE)
@@ -616,7 +616,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("log.txt"), b"one").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
 
         let (fh, _, _) = d
             .open(RootId::DEFAULT, "log.txt", OPEN_WRITE | vfs_provider::OPEN_APPEND)
@@ -635,7 +635,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("log.txt"), b"0123456789").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
 
         let (fh, _, _) = d
             .open(RootId::DEFAULT, "log.txt", OPEN_WRITE | vfs_provider::OPEN_APPEND)
@@ -669,7 +669,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let graph = vfs_compose::MountGraph::new(vec![
-            ("/".to_string(), Arc::new(crate::DiskProvider::new(&dir)) as Arc<dyn Provider>),
+            ("/".to_string(), Arc::new(vfs_compose::DiskProvider::new(&dir)) as Arc<dyn Provider>),
             (
                 "/".to_string(),
                 Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
@@ -693,7 +693,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("x.txt"), b"x").unwrap();
         let d = Director::new();
-        d.mount(RootId::DEFAULT, Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+        d.mount(RootId::DEFAULT, Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
         assert!(d.getattr(RootId::DEFAULT, "x.txt").unwrap().is_some());
         d.unmount(RootId::DEFAULT).unwrap();
         assert!(d.getattr(RootId::DEFAULT, "x.txt").unwrap().is_none());

@@ -133,7 +133,7 @@ Principles:
 
 ```text
 ┌──────────────────────────── Host process ─────────────────────────────┐
-│  vfs-launch / custom host / C language binding                          │
+│  vfs / custom host / C language binding                               │
 │                                                                         │
 │  Session                                                                │
 │   ├─ virtual_root, overlay, state_dir                                   │

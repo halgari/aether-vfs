@@ -118,7 +118,7 @@ fn stat_of(files: &HashMap<String, Vec<u8>>, dirs: &HashSet<String>, path: &str)
 /// function's git history for the reproductions.
 ///
 /// Ancestors resolve independently of the leaf, one path component at a
-/// time — mirroring `vfs-director/src/disk.rs`'s `resolve_fold_equal`, and
+/// time — mirroring `vfs-compose/src/disk.rs`'s `resolve_fold_equal`, and
 /// for the same reason: `fold` is not length-preserving (`İ` is 2 bytes,
 /// folds to 3), so a folded prefix can never be sliced off an unfolded key
 /// by byte length, only walked component by component. The moment a

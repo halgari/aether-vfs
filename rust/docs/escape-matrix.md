@@ -131,7 +131,7 @@ half was deleted and `fuse_client::vpath_under_root` *is* a `RootMap` now
 (`FuseClient` holds one, built over every declared root plus the staged
 launch directory as an alias for root 0), so those five spellings are
 recognised and routed by the same canonicalisation that classified them.
-`crates/vfs-directord/tests/e2e.rs`'s
+`crates/vfs-directord/tests/escape_matrix.rs`'s
 `metadata_queries_are_sealed_for_canonicaliser_only_spellings` — the same
 test that used to record the gap, flipped rather than deleted — now asserts
 `not-found` for vector 4's isolated `GetFileAttributesW` against the
@@ -190,7 +190,7 @@ build it (the source open passed through and succeeded). This is a further
 containment strengthening, not a regression: an operation that itself
 requires reading the sealed file is sealed too, one level earlier than the
 vector's own intended open. See the matrix row below and
-`negative_expectation`'s doc comment in `e2e.rs` for how this is handled
+`negative_expectation`'s doc comment in `tests/escape_matrix.rs` for how this is handled
 (both the classification loop and the new unreachability loop skip
 `unbuildable:` lines, exactly as the positive canary does).
 
@@ -239,7 +239,7 @@ unchanged throughout: a file no provider serves stays sealed.
 
 **These rows are asserted against every declared root, not just the first.**
 `escape_matrix_holds_against_a_second_root`
-(`crates/vfs-directord/tests/e2e.rs`) runs the identical fixture, canaries
+(`crates/vfs-directord/tests/escape_matrix.rs`) runs the identical fixture, canaries
 and expectation tables against a target under `RootId(1)` of a two-root
 session.
 
@@ -258,7 +258,7 @@ session.
 | 7 | Junction / reparse point | opened✓ (restored, stage 2b Task 5) | classified✓ | Negative-canary classification **closed for a junction within two ancestor levels of the managed root (this project's own session layout) — not junctions in general; see "Vectors 7 and 9 closed: session-start alias resolution" below for the residual.** Was a verified, open gate-2 gap; fixed by resolving such a junction into a `VolumeMap` alias once per session. **Positive canary flipped to `not-found` in Gate 3 Task 5 and back to `opened✓` in stage 2b Task 5** — closed classification never made this spelling reachable *through the director* until the predicates were unified; see "A second, structural finding" below. |
 | 8 | Hardlink (new filename, same underlying bytes) | `not-found` (not `opened` — see "Vector 8's exception" below) | `unbuildable:std::fs::hard_link failed: ... (os error 2)` (flip from `classified✓`, Gate 3 Task 6 — see above) | Positive canary: sealed by the content-addressed provider policy, not a classification failure — `RootMap`/the canonicaliser is never even consulted for this vector when FUSE-routing claims the path first. **Negative canary, Gate 3 Task 6 finding:** `CreateHardLinkW` needs a handle on the source (the negative canary itself) to create the link; `RootMap::decide` now denies that open, so the hardlink can no longer even be constructed — reproduced identically across five separate runs. Before Task 5 this was buildable (the source open passed through) and `classified✓`; the row above reflects current, post-Task-5 behaviour. |
 | 9 | UNC / `subst` / mapped drive (administrative loopback share, `\\localhost\C$\...`) | opened✓ (restored, stage 2b Task 5) | classified✓ | Negative-canary classification **closed — see "Vectors 7 and 9 closed: session-start alias resolution" below.** Was a verified, open gate-2 gap; fixed by registering the admin-share's real NT spelling as a session-start alias. **Positive canary flipped to `not-found` in Gate 3 Task 5 and back to `opened✓` in stage 2b Task 5** — same reason as vector 7; see "A second, structural finding" below. |
-| 10a | Case-flipped, `\\?\`-prefixed (verbatim) | opened✓ | classified✓ (`not-found`) | NTFS resolves case regardless of the `\\?\` prefix; standalone-`opened` behaviour, unaffected by session or gate 2. The e2e loop's negative-canary check skips only `unbuildable:` outcomes plus `5b`/`14` explicitly (see `classification_marker`/the skip check in `e2e.rs`) — `10a`'s outcome is neither, so it **is** asserted for the negative canary, and passes: the spelling lands in the shim's classified-paths set, correctly sealed (`not-found`) rather than left unclassified. |
+| 10a | Case-flipped, `\\?\`-prefixed (verbatim) | opened✓ | classified✓ (`not-found`) | NTFS resolves case regardless of the `\\?\` prefix; standalone-`opened` behaviour, unaffected by session or gate 2. The e2e loop's negative-canary check skips only `unbuildable:` outcomes plus `5b`/`14` explicitly (see `classification_marker`/the skip check in `tests/escape_matrix.rs`) — `10a`'s outcome is neither, so it **is** asserted for the negative canary, and passes: the spelling lands in the shim's classified-paths set, correctly sealed (`not-found`) rather than left unclassified. |
 | 10b | Trailing dot, verbatim (`...\name.esp.`) | opened✓ (flip from standalone `not-found` — see "The 10/12 flip" below) | classified✓ | |
 | 10c | Trailing space, verbatim (`...\name.esp `) | opened✓ (flip) | classified✓ | |
 | 11 | Alternate data stream (`name.esp:probe`) | `not-found` (expected — see note) | classified✓ | Read-only `OPEN_EXISTING` against a stream this fixture never pre-creates; `not-found` means the stream doesn't exist, not that streams are unsupported. Same result standalone and under a session. Stage 2b Task 5 note: `canonicalise` discards an ADS suffix (right for unifying spellings of a *file*), so the unified client predicate re-attaches it when building the vpath — without that, this row would read `opened` and be answering a named-stream request with the base file's bytes. See `FuseClient::vpath_under_root`. |
@@ -715,7 +715,7 @@ returns `Some(...)`, recorded as `Routed`, never reaching `decision_for`/
 `RootMap` at all): the shim's pre-existing, gate-2-independent
 `fuse_client::vpath_under_root` matcher does simple prefix-stripping and
 happily passes the messy remainder through to the director, and the
-director's own **pre-existing** (`vfs-director/src/path.rs::normalize`,
+director's own **pre-existing** (`vfs-compose/src/path.rs::normalize`,
 predates this branch) lexical `.`/`..` collapsing, plus ordinary
 (non-verbatim) Win32 file access in the *director's own, uninjected*
 process tolerating trailing dots/spaces the same way any ordinary
@@ -1094,7 +1094,7 @@ Two things came with it, both structural rather than incidental:
   bytes read as a root id.
 
 The five affected vectors' `positive_expectation` entries in
-`crates/vfs-directord/tests/e2e.rs` are back in the catch-all `opened` case
+`crates/vfs-directord/tests/escape_matrix.rs` are back in the catch-all `opened` case
 they started in — and their `negative_expectation` entries are unchanged at
 `not-found`, which is the pair that makes it containment rather than an
 access regression in either direction.
@@ -1207,7 +1207,7 @@ that escapes leaves a file on disk for the harness to find; and it preserves,
 so it is the shape that asks the director for a copy-up.
 
 The test is `escape_matrix_write_access_positive_and_negative_canary`
-(`crates/vfs-directord/tests/e2e.rs`).
+(`crates/vfs-directord/tests/escape_matrix.rs`).
 
 ### The geometry differs from the read matrix, and it has to
 
@@ -1402,7 +1402,7 @@ test on either side of the dependency, while this document asserted the
 dependency was sound "by the reasoning above".
 
 Nothing tested either branch. No fixture called `read_dir` or
-`FindFirstFileW` under a session; every `read_dir` in `e2e.rs` and
+`FindFirstFileW` under a session; every `read_dir` in the directord tests and
 `write_seal.rs` ran in the uninjected harness against physical disk. The
 shim-level enumeration tests (`hook_direnum.rs`, `hook_enum_parity.rs`,
 `hook_relative_paths.rs`) install real detours but attach no director, and
@@ -1471,7 +1471,7 @@ identically to a director-authored one. It is a three-way `ReadDirSource` now
 ### The test
 
 `directory_enumeration_under_a_managed_root_hides_an_unserved_real_file`
-(`crates/vfs-directord/tests/e2e.rs`) runs `vfs-fixture-escape`'s new,
+(`crates/vfs-directord/tests/enumeration.rs`) runs `vfs-fixture-escape`'s new,
 opt-in-only `enum` vector under a real composed session against the same
 two-canary geometry the read matrix uses: a served canary in both the
 provider's backing store and physically under the root, and an unserved canary

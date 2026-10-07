@@ -1,7 +1,7 @@
 # Load benchmark — debug vs release
 
 Wall clock from `skyrim-live` start to **the game's window on screen**, measured by
-`vfs_director::bench` (`VFS_BENCH=1`). Unlike `vfs-fuse-bench`, which times ring
+`vfs_bench::launch_bench` (`VFS_BENCH=1`). Unlike `vfs-fuse-bench`, which times ring
 round-trips in isolation, this covers the whole path a player waits on: zip index,
 PE staging, injection, hollow, and content streaming.
 
@@ -112,7 +112,7 @@ Start-Process "$root\skse64_loader.exe" -WorkingDirectory $root
 ```
 
 Then poll for a visible `SkyrimSE.exe` window with a non-zero client rect, the
-same end condition `vfs_director::bench` uses.
+same end condition `vfs_bench::launch_bench` uses.
 
 ## Hook-level attribution
 

@@ -8,7 +8,7 @@ fn write_opcode_round_trips_through_dispatch() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let d = Director::new();
-    d.mount(RootId::DEFAULT, std::sync::Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+    d.mount(RootId::DEFAULT, std::sync::Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
 
     let (st, payload) = dispatch_director(
         &d, OP_OPEN, &encode_open_req(0, OPEN_WRITE | OPEN_CREATE, "w.txt"), 0, 4096, None);
@@ -78,7 +78,7 @@ fn delete_opcode_removes_the_file() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("gone.txt"), b"x").unwrap();
     let d = Director::new();
-    d.mount(RootId::DEFAULT, std::sync::Arc::new(crate::DiskProvider::new(&dir))).unwrap();
+    d.mount(RootId::DEFAULT, std::sync::Arc::new(vfs_compose::DiskProvider::new(&dir))).unwrap();
 
     let (st, _) = dispatch_director(
         &d, OP_DELETE, &encode_path_req(0, "gone.txt"), 0, 4096, None);

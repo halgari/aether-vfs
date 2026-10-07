@@ -232,6 +232,8 @@ pub fn record_write(fh: u64, n: usize, err: bool) {
 
 // The rejected-write list lives in `vfs-compose` so `MountGraph` can record
 // into it without depending on this crate; these keep the old paths.
+// compat: removed by cleanup stream I
+#[doc(hidden)]
 pub use vfs_compose::{record_rejected_write, rejected_writes, reset_rejected_writes};
 
 pub fn record_close(fh: u64) {

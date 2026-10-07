@@ -27,7 +27,8 @@ use tonic::transport::Server;
 use vfs_control::pb::director_server::DirectorServer;
 use vfs_control::pb::{source_spec, AddSourceReq, CreateSessionReq, DiskSource, ZipSource};
 use vfs_control::SourceSpec;
-use vfs_director::{DiskProvider, Provider, RootId, OPEN_WRITE};
+use vfs_director::{Provider, RootId, OPEN_WRITE};
+use vfs_embed::DiskProvider;
 use vfs_directord::{connect, DirectorService, SessionRegistry};
 use vfs_source::build_provider;
 
