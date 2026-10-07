@@ -1,8 +1,10 @@
 [package]
 name = "vfs-fixture-staticimp"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 build = "build.rs"
 
 [[bin]]
@@ -15,3 +17,6 @@ path = "src/main.rs"
 # LNK1104. build.rs links the import lib by path instead, and the one harness
 # that needs both — vfs-inject's `tests/common` — builds vproxy first in its
 # own cargo invocation so the ordering is explicit rather than inferred.
+
+[lints]
+workspace = true

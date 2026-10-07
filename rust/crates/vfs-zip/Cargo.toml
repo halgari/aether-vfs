@@ -1,15 +1,19 @@
 [package]
 name = "vfs-zip"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-only"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
-vfs-core = { path = "../vfs-core" }
-vfs-provider = { path = "../vfs-provider" }
+vfs-core.workspace = true
+vfs-provider.workspace = true
 
 [dev-dependencies]
-vfs-testkit = { path = "../vfs-testkit" }
-vfs-provider = { path = "../vfs-provider", features = ["conformance"] }
-tempfile = "3"
+vfs-testkit.workspace = true
+vfs-provider = { workspace = true, features = ["conformance"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

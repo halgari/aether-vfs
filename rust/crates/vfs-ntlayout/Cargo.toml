@@ -1,10 +1,15 @@
 [package]
 name = "vfs-ntlayout"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 description = "Pure NT byte layouts and decisions (info classes, directory records, dispositions): no OS API, host-testable."
 
 [dependencies]
 # `OPEN_*` flag bits that `open_create_flags` maps a disposition onto.
-vfs-protocol = { path = "../vfs-protocol" }
+vfs-protocol.workspace = true
+
+[lints]
+workspace = true

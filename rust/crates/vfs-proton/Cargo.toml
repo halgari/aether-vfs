@@ -1,9 +1,10 @@
 [package]
 name = "vfs-proton"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-only"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 description = "GE-Proton acquisition and (later) launch: aether-vfs's self-contained runtime"
 
 [lib]
@@ -47,6 +48,9 @@ ureq = { version = "3.4", optional = true }
 sha2 = { version = "0.11", optional = true }
 tar = { version = "0.4", optional = true }
 flate2 = { version = "1.1", optional = true }
-vfs-env = { path = "../vfs-env" }
-serde_json = { version = "1", optional = true }
-clap = { version = "4", features = ["derive"], optional = true }
+vfs-env.workspace = true
+serde_json = { workspace = true, optional = true }
+clap = { workspace = true, features = ["derive"], optional = true }
+
+[lints]
+workspace = true

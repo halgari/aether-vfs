@@ -1,9 +1,10 @@
 [package]
 name = "vfs-unix"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-only"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 description = "Unix-side OS handles for the ring: file-backed shared memory"
 
 [lib]
@@ -11,7 +12,7 @@ name = "vfs_unix"
 path = "src/lib.rs"
 
 [dependencies]
-vfs-ipc = { path = "../vfs-ipc" }
+vfs-ipc.workspace = true
 
 # The single external dependency, and the reason this crate exists rather than
 # the mapping living in `vfs-ipc`: Rust's std has no `mmap`, `vfs-ipc` has no
@@ -22,4 +23,7 @@ vfs-ipc = { path = "../vfs-ipc" }
 libc = "0.2"
 
 [dev-dependencies]
-vfs-testkit = { path = "../vfs-testkit" }
+vfs-testkit.workspace = true
+
+[lints]
+workspace = true

@@ -1,9 +1,10 @@
 [package]
 name = "vfs-fixture-registry"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-only"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 description = "Registry probe: a scripted Win32 registry sequence whose transcript must be the same with and without the registry overlay"
 
 [[bin]]
@@ -11,9 +12,12 @@ name = "vfs-fixture-registry"
 path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_System_Registry",
   "Win32_System_Threading",
 ] }
+
+[lints]
+workspace = true

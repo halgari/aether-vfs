@@ -1,9 +1,10 @@
 [package]
 name = "vfs-source"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-only"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 description = "Source facade: Provider builders, gRPC SourceService"
 
 [lib]
@@ -21,23 +22,26 @@ path = "src/bin/vfs-source-plugin.rs"
 conformance = ["vfs-provider/conformance"]
 
 [dependencies]
-vfs-provider = { path = "../vfs-provider" }
-vfs-zip = { path = "../vfs-zip" }
-vfs-control = { path = "../vfs-control" }
+vfs-provider.workspace = true
+vfs-zip.workspace = true
+vfs-control.workspace = true
 # `DiskProvider` for `SourceSpec::Disk` and `MemoryProvider` for
 # `SourceSpec::Memory`.
-vfs-compose = { path = "../vfs-compose" }
-tonic = "0.14"
-tonic-prost = "0.14"
-prost = "0.14"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
-tokio-stream = { version = "0.1", features = ["net"] }
-clap = { version = "4", features = ["derive"] }
+vfs-compose.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-stream = { workspace = true, features = ["net"] }
+clap = { workspace = true, features = ["derive"] }
 
 [build-dependencies]
-tonic-prost-build = "0.14"
-protoc-bin-vendored = "3"
+tonic-prost-build.workspace = true
+protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
-vfs-testkit = { path = "../vfs-testkit" }
-vfs-provider = { path = "../vfs-provider", features = ["conformance"] }
+vfs-testkit.workspace = true
+vfs-provider = { workspace = true, features = ["conformance"] }
+
+[lints]
+workspace = true

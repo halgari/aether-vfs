@@ -1,9 +1,10 @@
 [package]
 name = "vfs-bench"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-only"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 description = "Benchmarks and live harnesses: ring-bench (ring round trips) and skyrim-live (a real Skyrim launch)"
 
 [lib]
@@ -11,34 +12,34 @@ name = "vfs_bench"
 path = "src/lib.rs"
 
 [dependencies]
-vfs-ipc = { path = "../vfs-ipc" }
-vfs-protocol = { path = "../vfs-protocol" }
+vfs-ipc.workspace = true
+vfs-protocol.workspace = true
 # `skyrim-live` and `launch_bench` read `stage` and `io_stats`; `ring-bench`
 # drives the real Director and its serve workers, not a hand-written server:
 # the worker loop and its notifier are half of what a round trip costs.
-vfs-director = { path = "../vfs-director" }
+vfs-director.workspace = true
 # `skyrim-live`: the embeddable session, the composition providers it mounts
 # and the zip it launches from.
-vfs-embed = { path = "../vfs-embed" }
-vfs-compose = { path = "../vfs-compose" }
-vfs-zip = { path = "../vfs-zip" }
-vfs-env = { path = "../vfs-env" }
+vfs-embed.workspace = true
+vfs-compose.workspace = true
+vfs-zip.workspace = true
+vfs-env.workspace = true
 
 # `ring-bench` is Unix-only: its Windows `main` just exits.
 [target.'cfg(unix)'.dependencies]
-vfs-provider = { path = "../vfs-provider" }
+vfs-provider.workspace = true
 # `ring-bench names`: a base whose names are in an index (a `vfs-storage`
 # layer), and the shim's own final-path code (`vfs-core`).
-vfs-storage = { path = "../vfs-storage" }
-vfs-core = { path = "../vfs-core" }
+vfs-storage.workspace = true
+vfs-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # GetFinalPathNameByHandleW, for resolving the second (Documents\My Games)
 # root's junction to its real target in `skyrim-live`
 # (`resolve_second_root_target`).
-vfs-win = { path = "../vfs-win" }
+vfs-win.workspace = true
 # Window + process enumeration for the load benchmark (`launch_bench`).
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
   "Win32_System_Diagnostics_ToolHelp",
@@ -55,4 +56,7 @@ name = "skyrim-live"
 path = "src/bin/skyrim-live.rs"
 
 [dev-dependencies]
-vfs-testkit = { path = "../vfs-testkit" }
+vfs-testkit.workspace = true
+
+[lints]
+workspace = true

@@ -1,9 +1,10 @@
 [package]
 name = "vfs-embed"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-only"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 description = "Public embeddable API: session lifecycle, roots, composition, launch"
 
 [lib]
@@ -25,35 +26,35 @@ conformance = ["vfs-provider/conformance"]
 [dependencies]
 # The kernel this API is a seam over: `Director`, its ring/IPC server, the
 # disk leaf, and the staging helpers. A host never names this crate.
-vfs-director = { path = "../vfs-director" }
+vfs-director.workspace = true
 # The provider contract itself. Re-exported wholesale, because a host that
 # writes a provider needs every one of these names and must not have to
 # discover which internal crate they live in.
-vfs-provider = { path = "../vfs-provider" }
+vfs-provider.workspace = true
 # Combinator primitives (spec §6). `OverlayProvider` is load-bearing here —
 # `compose_root` builds a root's writable upper out of it — and the rest are
 # re-exported so a host composes a graph without a second dependency.
-vfs-compose = { path = "../vfs-compose" }
+vfs-compose.workspace = true
 # Persistent storage — the pull-through cache for slow, immutable sources and
 # named write layers — re-exported for the same reason: a host opens its own
 # `Storage` and wraps its providers with it (vfs-storage spec §3).
-vfs-storage = { path = "../vfs-storage" }
-tracing = "0.1"
-vfs-env = { path = "../vfs-env" }
-vfs-zip = { path = "../vfs-zip", optional = true }
+vfs-storage.workspace = true
+tracing.workspace = true
+vfs-env.workspace = true
+vfs-zip = { workspace = true, optional = true }
 # The portable shim-config encoder (`vfs_protocol::shimcfg`), used by both
 # targets' `launch` (`vfs-shim` re-exports the same function, but cannot be
 # built on unix: `retour` -> `libudis86-sys`), and the ring wire codecs the
 # tests drive a served session with.
-vfs-protocol = { path = "../vfs-protocol" }
+vfs-protocol.workspace = true
 
 # Injection and the NT-hook shim are the Windows delivery mechanism. They are
 # gated in the manifest, not with cfg in source: `vfs-shim` pulls `retour` ->
 # `libudis86-sys`, whose build script is a C cross-compile that fails for a Linux
 # target before any of our code is reached.
 [target.'cfg(windows)'.dependencies]
-vfs-inject = { path = "../vfs-inject" }
-vfs-shim = { path = "../vfs-shim" }
+vfs-inject.workspace = true
+vfs-shim.workspace = true
 
 # The Proton (Wine) delivery mechanism: the unix counterpart of the pair above.
 # GE-Proton discovery and verification, the per-session Wine prefix, and the
@@ -67,10 +68,10 @@ vfs-shim = { path = "../vfs-shim" }
 # embedding this API launches a runtime; it does not download one.
 vfs-proton = { path = "../vfs-proton", default-features = false }
 # `DEFAULT_PAYLOAD_CAP`, the one ring payload capacity both transports use.
-vfs-ipc = { path = "../vfs-ipc" }
+vfs-ipc.workspace = true
 
 [dev-dependencies]
-vfs-testkit = { path = "../vfs-testkit" }
+vfs-testkit.workspace = true
 # `vfs-zip` is optional above (the `zip` feature); tests use `ZipProvider`
 # whether or not that feature is on, so it is unconditional here. `vfs-shim`
 # is NOT repeated — it is a `cfg(windows)` dependency above, and the one test
@@ -79,6 +80,9 @@ vfs-testkit = { path = "../vfs-testkit" }
 # `retour` -> `libudis86-sys` into the Linux dev graph, where its build script
 # is a C cross-compile that fails before any of our code is reached — the same
 # reason the dependency is gated in the first place.
-vfs-zip = { path = "../vfs-zip" }
+vfs-zip.workspace = true
 # `conformance::SeqFixture` in the lib tests.
-vfs-provider = { path = "../vfs-provider", features = ["conformance"] }
+vfs-provider = { workspace = true, features = ["conformance"] }
+
+[lints]
+workspace = true

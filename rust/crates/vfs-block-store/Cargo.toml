@@ -1,18 +1,18 @@
 [package]
 name = "vfs-block-store"
-version = "0.1.0"
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 edition = "2024"
-rust-version = "1.89"
 description = "Deduplicating, compressing block store for a virtual file system cache"
-license = "GPL-3.0-only"
-publish = false
 
 [dependencies]
-blake3 = "1.8"
+blake3.workspace = true
 rayon = "1.12"
-redb = "4.3"
-thiserror = "2"
-tracing = "0.1"
+redb.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.14"
 # GPU zstd for bulk writes (feature `gpu-zstd`). Pinned: the crate has no releases (and no
@@ -20,11 +20,11 @@ zstd = "0.14"
 gzc-gpu = { git = "https://github.com/halgari/gpu-zstd-comp", rev = "655fb68b77b9ad01cd402817a526c2a2ebf4ace2", optional = true }
 
 [dev-dependencies]
-vfs-testkit = { path = "../vfs-testkit" }
+vfs-testkit.workspace = true
 criterion = "0.8"
-proptest = "1.11"
+proptest.workspace = true
 memory-stats = "1.2"
-tempfile = "3.27"
+tempfile.workspace = true
 
 [features]
 # Enables crash_point() calls that abort the process when BLOCK_STORE_CRASH_AT matches.
@@ -40,3 +40,6 @@ harness = false
 [[example]]
 name = "gpu_bench"
 required-features = ["gpu-zstd"]
+
+[lints]
+workspace = true

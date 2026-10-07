@@ -20,8 +20,8 @@ members = [
   "crates/vfs-registry",
   # Deduplicating, compressing block store (redb index + zstd packs),
   # imported with its history from aether-vfs-block-store. vfs-storage below
-  # is its one consumer. Edition 2024 and MIT OR Apache-2.0, as it was
-  # upstream.
+  # is its one consumer. Edition 2024, as it was upstream; GPL-3.0-only like
+  # the rest.
   "crates/vfs-block-store",
   # The block store as pull-through cache and layer storage: one BlockStore,
   # a redb catalog beside it and a RAM tier of decompressed blocks: the
@@ -66,6 +66,62 @@ members = [
   "crates/vfs-bench",
 ]
 exclude = ["crates/vfs-payload"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+# Floor the code needs: `File::try_lock` (1.89). CI runs `stable`.
+rust-version = "1.89"
+publish = false
+
+[workspace.lints]
+
+[workspace.dependencies]
+# Internal crates.
+vfs-block-store = { path = "crates/vfs-block-store" }
+vfs-compose = { path = "crates/vfs-compose" }
+vfs-control = { path = "crates/vfs-control" }
+vfs-core = { path = "crates/vfs-core" }
+vfs-director = { path = "crates/vfs-director" }
+vfs-embed = { path = "crates/vfs-embed" }
+vfs-env = { path = "crates/vfs-env" }
+vfs-inject = { path = "crates/vfs-inject" }
+vfs-ipc = { path = "crates/vfs-ipc" }
+vfs-ntlayout = { path = "crates/vfs-ntlayout" }
+vfs-pe = { path = "crates/vfs-pe" }
+vfs-protocol = { path = "crates/vfs-protocol" }
+vfs-provider = { path = "crates/vfs-provider" }
+vfs-redirect = { path = "crates/vfs-redirect" }
+vfs-registry = { path = "crates/vfs-registry" }
+vfs-shim = { path = "crates/vfs-shim" }
+vfs-source = { path = "crates/vfs-source" }
+vfs-storage = { path = "crates/vfs-storage" }
+vfs-testkit = { path = "crates/vfs-testkit" }
+vfs-unix = { path = "crates/vfs-unix" }
+vfs-win = { path = "crates/vfs-win" }
+vfs-zip = { path = "crates/vfs-zip" }
+
+# Shared external crates: one version spec each. Members add their own
+# `features` / `optional` on top.
+blake3 = "1.8"
+clap = "4"
+proptest = "1.11"
+tempfile = "3.27"
+serde = "1"
+serde_json = "1"
+thiserror = "2"
+tokio = "1"
+tokio-stream = "0.1"
+toml = "0.8"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
+tracing = "0.1"
+protoc-bin-vendored = "3"
+redb = "4.3"
+windows-sys = "0.61"
 
 # `vfs-payload` is excluded from this workspace (it is #![no_std] with a custom
 # panic_handler and must abort). Everything here unwinds so the library can

@@ -1,9 +1,13 @@
 [package]
 name = "vfs-registry"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-only"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
-vfs-core = { path = "../vfs-core" }
+vfs-core.workspace = true
+
+[lints]
+workspace = true

@@ -1,26 +1,28 @@
 [package]
 name = "vfs-shim"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
-vfs-redirect = { path = "../vfs-redirect" }
+vfs-redirect.workspace = true
 # Pure NT layouts and decisions the hooks apply.
-vfs-ntlayout = { path = "../vfs-ntlayout" }
-vfs-core = { path = "../vfs-core" }
-vfs-protocol = { path = "../vfs-protocol" }
-vfs-ipc = { path = "../vfs-ipc" }
-vfs-win = { path = "../vfs-win" }
+vfs-ntlayout.workspace = true
+vfs-core.workspace = true
+vfs-protocol.workspace = true
+vfs-ipc.workspace = true
+vfs-win.workspace = true
 # Dual-layer vehicle (reflective map + RIP-redirect + spin gate) for children.
-vfs-env = { path = "../vfs-env" }
-vfs-inject = { path = "../vfs-inject" }
+vfs-env.workspace = true
+vfs-inject.workspace = true
 # Names of the on-disk copies backing image sections.
-vfs-pe = { path = "../vfs-pe" }
+vfs-pe.workspace = true
 # `Lookup`, `Node` and `fold` for the registry client (`regclient.rs`).
-vfs-registry = { path = "../vfs-registry" }
+vfs-registry.workspace = true
 retour = { version = "0.3", default-features = false }
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_System_LibraryLoader",
@@ -34,8 +36,8 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 # `tests/fakedirector` mounts `RwMemFixture`; the seal tests name the write layer's directory
 # (`overlay_layer_dir`).
-vfs-provider = { path = "../vfs-provider", features = ["conformance"] }
-windows-sys = { version = "0.61", features = [
+vfs-provider = { workspace = true, features = ["conformance"] }
+windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
   # `tests/registry/regkeys*.rs`: scratch real keys, a restrictive DACL, the user SID.
@@ -50,4 +52,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 # `tests/registry/regclient.rs`: the fake director answers the registry opcodes with the real
 # `dispatch_director` over a real `RegistryHost`.
-vfs-director = { path = "../vfs-director" }
+vfs-director.workspace = true
+
+[lints]
+workspace = true
