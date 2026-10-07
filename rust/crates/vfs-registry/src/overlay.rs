@@ -13,12 +13,12 @@ use std::collections::BTreeMap;
 pub const MAX_KEY_NAME: usize = 255;
 pub const MAX_VALUE_NAME: usize = 16383;
 pub const MAX_DATA: usize = 1 << 20;
-/// Deepest key nesting a new write may create, counted as components below `\Registry`
-/// (Windows' own limit).
 /// Most distinct deletion records kept for `changed_since`. On overflow they are all dropped
 /// and `deleted_floor` rises to the newest of them: a spurious change notification for an
 /// absent key, never a missed one.
 pub const MAX_DELETED_AT: usize = 16384;
+/// Deepest key nesting a new write may create, counted as components below `\Registry`
+/// (Windows' own limit).
 pub const MAX_WRITE_DEPTH: usize = 512;
 /// Deepest key nesting a persisted overlay may rebuild with (`format::decode`, `insert_node`).
 /// Higher than [`MAX_WRITE_DEPTH`] because the old writer had no cap, so files with keys up to
