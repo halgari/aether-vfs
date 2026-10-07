@@ -248,9 +248,9 @@ For distribution of already-built game/mod packages as Stored archives:
 
 Deflated packages would require a different design (inflate-to-cache, seekable compression, or extract).
 
-### 6.3 Legacy `read_layer`
+### 6.3 One parse per zip
 
-`vfs-zip::read_layer` still builds a `vfs-core::Layer` of zip-window **source blobs** for transitional inject/snapshot code. The **launch content path** no longer double-parses every zip solely to discard PE bytes: mounts use `ZipBackend` once; PE hollow reads through the Session/VFS.
+The launch content path parses each zip once: mounts use `ZipBackend`, and the launch image is read through the Session/VFS. (The old `read_layer`, which built a second set of zip-window source blobs for the hollow-launch path, is gone.)
 
 ---
 

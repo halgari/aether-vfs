@@ -557,6 +557,27 @@ fn classify_ready(content: &str) -> ReadyState {
     }
 }
 
+/// The one way a launch gives up on a target that has not been released: kill
+/// it, close both handles, and hand back the error to return.
+///
+/// Every failure between `CreateProcess` and the release of the spin gate ends
+/// here, because the only alternative (releasing the gate, or leaving the
+/// process parked) is a game running without the shim, or a leaked process.
+/// Cases where the target has already exited only close the handles.
+///
+/// # Safety
+/// `pi` must hold the live handles from this launch's `CreateProcessW`, not
+/// yet closed.
+unsafe fn fail_closed(pi: &PROCESS_INFORMATION, e: InjectError) -> InjectError {
+    // SAFETY: per the contract above.
+    unsafe {
+        let _ = TerminateProcess(pi.hProcess, 1);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    e
+}
+
 /// Launch the target with dual-layer injection:
 /// 1. Pre-init early payload (RIP-redirect) installs hooks then **spins**  
 /// 2. Injector LoadLibrary full shim (remote thread) — loader init with early
@@ -650,13 +671,8 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
             true, // spin gate
         ) {
             Ok(a) => a,
-            Err(e) => {
-                // Never resume it: without the payload nothing virtualises it.
-                let _ = TerminateProcess(pi.hProcess, 1);
-                CloseHandle(pi.hThread);
-                CloseHandle(pi.hProcess);
-                return Err(e);
-            }
+            // Never resume it: without the payload nothing virtualises it.
+            Err(e) => return Err(fail_closed(&pi, e)),
         };
 
         // Publish cfg address for install_late (bootstrap reads this file).
@@ -686,10 +702,7 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
             }
             if Instant::now() >= deadline {
                 // Parked behind the spin gate; do not leave it alive.
-                let _ = TerminateProcess(pi.hProcess, 1);
-                CloseHandle(pi.hThread);
-                CloseHandle(pi.hProcess);
-                return Err(InjectError::Timeout);
+                return Err(fail_closed(&pi, InjectError::Timeout));
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -698,10 +711,7 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
         // early hooks already live. DllMain spawns bootstrap → install_late.
         if let Err(e) = inject_dll(pi.hProcess, &cfg.dll_path) {
             // Releasing the gate would run the game without the full shim.
-            let _ = TerminateProcess(pi.hProcess, 1);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            return Err(e);
+            return Err(fail_closed(&pi, e));
         }
 
         // Wait for the full shim's ready marker. Its *content*, not merely its
@@ -726,10 +736,7 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
                 Err(_) => None,
             };
             if let Some(e) = failure {
-                let _ = TerminateProcess(pi.hProcess, 1);
-                CloseHandle(pi.hThread);
-                CloseHandle(pi.hProcess);
-                return Err(e);
+                return Err(fail_closed(&pi, e));
             }
             if let Some(code) = exited(pi.hProcess) {
                 CloseHandle(pi.hThread);
@@ -740,10 +747,7 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
                 // No word from the shim. Releasing the gate here would let the
                 // game run with whatever the shim did or did not manage to
                 // install, its writes reaching the real disk. Kill it.
-                let _ = TerminateProcess(pi.hProcess, 1);
-                CloseHandle(pi.hThread);
-                CloseHandle(pi.hProcess);
-                return Err(InjectError::Timeout);
+                return Err(fail_closed(&pi, InjectError::Timeout));
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -751,9 +755,9 @@ pub fn run_target_with_shim(cfg: RunConfig) -> Result<i32, InjectError> {
         // Release primary thread into RtlUserThreadStart / rest of init + main.
         let one = 1u32.to_le_bytes();
         if wpm(pi.hProcess, arm.release_flag, &one).is_err() {
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            return Err(InjectError::Write);
+            // The gate may or may not have opened; a process that might be
+            // running un-virtualised is not left alive.
+            return Err(fail_closed(&pi, InjectError::Write));
         }
 
         if cfg.detach {

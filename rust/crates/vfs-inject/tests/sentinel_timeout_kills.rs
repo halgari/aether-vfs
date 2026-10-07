@@ -44,5 +44,7 @@ fn an_immediate_timeout_kills_the_parked_process() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(!output_path.exists(), "the target ran after the timeout");
+    // Not merely unrun: gone. A parked process satisfies the check above.
+    common::assert_no_child_processes();
     let _ = std::fs::remove_dir_all(&base);
 }

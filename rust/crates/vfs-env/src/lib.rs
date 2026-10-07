@@ -178,7 +178,7 @@ pub const READY_FUSE_FAILED_PREFIX: &str = "fuse-failed:";
 /// reason that is not the director: a config from another build or a damaged
 /// one, an unreadable config file, a hook that would not install. Followed by
 /// the reason. The launcher kills the parked process on it, as for
-/// [`READY_FUSE_FAILED_PREFIX`]. (A config error used spell itself with the
+/// [`READY_FUSE_FAILED_PREFIX`]. (An older shim spelled a config error with the
 /// fuse prefix; an injector still reads that spelling, as a fuse failure.)
 pub const READY_BOOTSTRAP_FAILED_PREFIX: &str = "bootstrap-failed:";
 

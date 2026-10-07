@@ -62,5 +62,7 @@ fn a_shim_that_never_reports_ready_gets_the_process_killed() {
         !output_path.exists(),
         "probe output exists at {output_path:?}: the process was released after the ready timeout"
     );
+    // Not merely unrun: gone. A parked process satisfies the check above.
+    common::assert_no_child_processes();
     let _ = std::fs::remove_dir_all(&base);
 }

@@ -10,12 +10,11 @@
 //! What remains here, and what a host reaches for *through* `vfs-embed`:
 //! * [`Director`] — the root → provider table and the handle namespace
 //! * [`ipc::IpcServe`] — the shared-memory ring + workers
-//! * `DiskProvider` / `MountGraph` live in `vfs-compose` now (compat re-exports here)
+//! * `DiskProvider` / `MountGraph` live in `vfs-compose`
 //! * [`stage`] — putting a launch image on real disk for `CreateProcess`
 //! * [`io_stats`] — process-wide counters, including rejected writes
 //!
-//! `Provider` trait lives in [`vfs_protocol`] (ops module, re-exported from
-//! `vfs-provider`) so zip stays free of host deps.
+//! The `Provider` trait lives in [`vfs_protocol`] so zip stays free of host deps.
 
 #![deny(unsafe_code)]
 

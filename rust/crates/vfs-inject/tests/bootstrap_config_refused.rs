@@ -1,8 +1,9 @@
 //! A shim config from another build must reach the injector as a killed
 //! process carrying the message, not as a timeout and not as a running game.
 //!
-//! The hop under test: `decode_config` refuses the version, `sync_bootstrap`
-//! writes `bootstrap-failed:<message>` to the ready file, the injector reads
+//! The hop under test: `decode_config` refuses the version, the shim DLL's
+//! bootstrap thread (started by `DllMain`; `sync_bootstrap` is the OEP-stub
+//! entry, not used by this launch) writes `bootstrap-failed:<message>` to the ready file, the injector reads
 //! it while the primary thread is still parked behind the spin gate and
 //! terminates the process. Mirrors `fuse_not_configured.rs`, whose config is
 //! valid and whose failure is the missing ring.
@@ -66,5 +67,7 @@ fn a_config_version_mismatch_kills_the_process_with_the_message() {
         !output_path.exists(),
         "probe output exists at {output_path:?}: the process ran after a refused config"
     );
+    // Not merely unrun: gone. A parked process satisfies the check above.
+    common::assert_no_child_processes();
     let _ = std::fs::remove_dir_all(&base);
 }
