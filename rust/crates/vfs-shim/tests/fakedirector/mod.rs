@@ -48,6 +48,8 @@
 //! file takes the bulk path**. A fixture with no arena tests fragment
 //! reassembly only on the transport production does not use, and silent
 //! truncation of a large file is the worst failure available here.
+
+// Compiled into several test binaries, each using a different subset.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -62,20 +64,20 @@ use vfs_win::SharedMapping;
 /// any fixture bigger than that is guaranteed to span several ring round
 /// trips. A test that only ever moved one payload's worth of data would pass
 /// against an implementation that reads once and calls it done.
-pub const PAYLOAD_CAP: u32 = 4096;
-pub const SLOTS: u32 = 8;
+pub(crate) const PAYLOAD_CAP: u32 = 4096;
+pub(crate) const SLOTS: u32 = 8;
 
 /// Requests at or above this go bulk, matching `dispatch_director`'s and
 /// `FuseClient::read_fragmented`'s own constant. A fixture below it stays
 /// inline whatever the arena is, which is how one ring covers both transports.
-pub const BULK_THRESHOLD: u32 = 64 * 1024;
+pub(crate) const BULK_THRESHOLD: u32 = 64 * 1024;
 
 /// An arena of `SLOTS` × 256 KiB. The bank size the client computes
 /// (`arena_len / slot_count`, clamped to at least 256 KiB) then agrees exactly
 /// with the one the server hands out, so a bulk read is not silently truncated
 /// to a smaller bank and resumed — which would still pass a byte-exactness
 /// test while hiding whether the bank sizing was right.
-pub const ARENA_LEN: usize = SLOTS as usize * 256 * 1024;
+pub(crate) const ARENA_LEN: usize = SLOTS as usize * 256 * 1024;
 
 /// Control ring length, and therefore the arena's offset within the section —
 /// same layout `IpcServe::start` uses (`arena_offset = ring_bytes`).
@@ -86,7 +88,7 @@ fn ring_bytes() -> usize {
 
 /// How the fake answers READ for one file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ReadStyle {
+pub(crate) enum ReadStyle {
     /// Serve as much as was asked for (up to EOF) — an ordinary provider.
     Whole,
     /// Never serve more than `n` bytes per READ, however much was asked for
@@ -112,7 +114,7 @@ struct Entry {
 /// an assertion at all for "every handle was closed". A vpath used by one test
 /// gives that test a private, exact count.
 #[derive(Default)]
-pub struct Tally {
+pub(crate) struct Tally {
     opened: Mutex<HashMap<String, u64>>,
     closed: Mutex<HashMap<String, u64>>,
     reads: Mutex<HashMap<String, u64>>,
@@ -132,41 +134,41 @@ impl Tally {
         m.lock().unwrap().get(vpath).copied().unwrap_or(0)
     }
     /// OPENs that issued a handle (a not-found OPEN issues none).
-    pub fn opens(&self, vpath: &str) -> u64 {
+    pub(crate) fn opens(&self, vpath: &str) -> u64 {
         Self::get(&self.opened, vpath)
     }
-    pub fn closes(&self, vpath: &str) -> u64 {
+    pub(crate) fn closes(&self, vpath: &str) -> u64 {
         Self::get(&self.closed, vpath)
     }
     /// READ requests that reached the server for this file — the ring round
     /// trips a copy-up of it actually cost.
-    pub fn reads(&self, vpath: &str) -> u64 {
+    pub(crate) fn reads(&self, vpath: &str) -> u64 {
         Self::get(&self.reads, vpath)
     }
     /// Of those, the ones answered through the shared **arena** rather than
     /// inline. This is what says a test covered the transport a real copy-up
     /// of a large file uses, rather than only the small-file one.
-    pub fn bulk_reads(&self, vpath: &str) -> u64 {
+    pub(crate) fn bulk_reads(&self, vpath: &str) -> u64 {
         Self::get(&self.bulk_reads, vpath)
     }
     /// WRITE requests that reached the server for this file. Zero here with
     /// bytes on disk somewhere means the write never crossed the ring.
-    pub fn writes(&self, vpath: &str) -> u64 {
+    pub(crate) fn writes(&self, vpath: &str) -> u64 {
         Self::get(&self.writes, vpath)
     }
     /// DELETE requests that reached the server for this vpath. A zero here
     /// with the real file gone means the delete went to the filesystem.
-    pub fn deletes(&self, vpath: &str) -> u64 {
+    pub(crate) fn deletes(&self, vpath: &str) -> u64 {
         Self::get(&self.deletes, vpath)
     }
     /// RENAME requests that reached the server, counted against the *source*
     /// vpath.
-    pub fn renames(&self, vpath: &str) -> u64 {
+    pub(crate) fn renames(&self, vpath: &str) -> u64 {
         Self::get(&self.renames, vpath)
     }
     /// Registry requests with `opcode` for `path` (as sent) that reached the server: zero for
     /// a read means it was answered from the shim's cache.
-    pub fn reg(&self, opcode: u32, path: &str) -> u64 {
+    pub(crate) fn reg(&self, opcode: u32, path: &str) -> u64 {
         Self::get(&self.reg, &format!("{opcode} {path}"))
     }
 }
@@ -177,7 +179,7 @@ fn reg_request_path(payload: &[u8]) -> Option<&str> {
     core::str::from_utf8(payload.get(4..4 + n)?).ok()
 }
 
-pub struct Fake {
+pub(crate) struct Fake {
     /// Behind a `Mutex` because a WRITE mutates it and an OPEN with
     /// `OPEN_CREATE` adds to it — the ring server hands `handle` a `&self`.
     files: Mutex<HashMap<String, Entry>>,
@@ -190,11 +192,11 @@ pub struct Fake {
     writable: Vec<String>,
     /// Answers the registry opcodes when set ([`Fake::with_registry`]).
     director: Option<Arc<vfs_director::Director>>,
-    pub tally: Tally,
+    pub(crate) tally: Tally,
 }
 
 impl Fake {
-    pub fn new() -> Fake {
+    pub(crate) fn new() -> Fake {
         Fake {
             files: Mutex::new(HashMap::new()),
             dirs: Vec::new(),
@@ -209,7 +211,7 @@ impl Fake {
     /// Serve the registry opcodes from a real director with an empty registry layer attached
     /// (an in-memory provider). Without this they answer `ST_NOT_SUPPORTED`, as a director
     /// with no registry layer does.
-    pub fn with_registry(mut self) -> Fake {
+    pub(crate) fn with_registry(mut self) -> Fake {
         let d = vfs_director::Director::new();
         let layer = Arc::new(vfs_provider::RwMemFixture::new());
         d.set_registry(Some(
@@ -220,7 +222,7 @@ impl Fake {
     }
 
     /// The director behind the registry opcodes, for a test that attaches or detaches layers.
-    pub fn director(&self) -> &vfs_director::Director {
+    pub(crate) fn director(&self) -> &vfs_director::Director {
         self.director.as_ref().expect("Fake::with_registry")
     }
     /// Add a directory to the provider graph.
@@ -234,7 +236,7 @@ impl Fake {
     /// `is_write_open` reads as write access are `FILE_ADD_FILE` /
     /// `FILE_ADD_SUBDIRECTORY`, which every `FILE_FLAG_BACKUP_SEMANTICS`
     /// directory open carries.
-    pub fn with_dir(mut self, vpath: &str) -> Fake {
+    pub(crate) fn with_dir(mut self, vpath: &str) -> Fake {
         self.dirs.push(vpath.to_string());
         self
     }
@@ -252,7 +254,7 @@ impl Fake {
     ///
     /// With no prefix declared at all (the default) the whole graph is
     /// read-only, which is the shape every pre-Task-5 fixture here wanted.
-    pub fn writable_under(mut self, prefix: &str) -> Fake {
+    pub(crate) fn writable_under(mut self, prefix: &str) -> Fake {
         self.writable.push(prefix.to_string());
         self
     }
@@ -263,7 +265,7 @@ impl Fake {
 
     /// Add a file to the provider graph. `vpath` is the folded, `/`-joined
     /// remainder the shim builds from the path (`Data\A.esp` -> `data/a.esp`).
-    pub fn with(mut self, vpath: &str, bytes: Vec<u8>, style: ReadStyle) -> Fake {
+    pub(crate) fn with(mut self, vpath: &str, bytes: Vec<u8>, style: ReadStyle) -> Fake {
         self.files
             .get_mut()
             .unwrap()
@@ -274,7 +276,7 @@ impl Fake {
     /// The bytes the graph currently holds for `vpath` — what a WRITE that
     /// crossed the ring actually left behind, readable by a test without
     /// going back through the shim.
-    pub fn contents(&self, vpath: &str) -> Option<Vec<u8>> {
+    pub(crate) fn contents(&self, vpath: &str) -> Option<Vec<u8>> {
         self.files
             .lock()
             .unwrap()
@@ -617,7 +619,7 @@ impl Fake {
 /// request at or above [`BULK_THRESHOLD`] takes the same transport it takes
 /// live. Below the threshold reads stay inline either way, so one ring can
 /// cover both.
-pub fn install(virtual_dir: &std::path::Path, fake: Fake, arena_len: usize) -> &'static Fake {
+pub(crate) fn install(virtual_dir: &std::path::Path, fake: Fake, arena_len: usize) -> &'static Fake {
     static FAKE: OnceLock<&'static Fake> = OnceLock::new();
     FAKE.get_or_init(|| {
         let fake: &'static Fake = Box::leak(Box::new(fake));
@@ -694,7 +696,7 @@ fn section_name() -> String {
 
 /// Another client on the ring [`install`] serves, as a second injected process of the session
 /// would have: its own mapping of the section, its own `FuseClient`.
-pub fn second_client(virtual_dir: &std::path::Path) -> vfs_shim::director::FuseClient {
+pub(crate) fn second_client(virtual_dir: &std::path::Path) -> vfs_shim::director::FuseClient {
     let bytes: usize = std::env::var(vfs_env::RING_BYTES).unwrap().parse().unwrap();
     vfs_shim::director::FuseClient::connect(
         &section_name(),
@@ -711,7 +713,7 @@ pub fn second_client(virtual_dir: &std::path::Path) -> vfs_shim::director::FuseC
 
 /// A client on a ring nobody serves (a director that died), giving up on each request after
 /// `deadline`.
-pub fn unserved_client(
+pub(crate) fn unserved_client(
     virtual_dir: &std::path::Path,
     deadline: std::time::Duration,
 ) -> vfs_shim::director::FuseClient {
@@ -738,7 +740,7 @@ pub fn unserved_client(
 /// A byte pattern no accidental fill can imitate, and whose every position is
 /// distinguishable — a copy that drops, duplicates or reorders a fragment
 /// fails a full comparison against it rather than matching by luck.
-pub fn pattern(len: usize) -> Vec<u8> {
+pub(crate) fn pattern(len: usize) -> Vec<u8> {
     let mut v = Vec::with_capacity(len);
     let mut x: u32 = 0x9E37_79B9;
     for i in 0..len {

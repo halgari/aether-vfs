@@ -404,7 +404,7 @@ mod tests {
     /// enumeration: `serve_dir_query`'s director branch now calls
     /// [`strip_whiteout_markers`], which is the same function this test's
     /// subject delegates its marker handling to. This test is still not the
-    /// evidence for that — `tests/shim_whiteout_not_phantom.rs` drives the
+    /// evidence for that — `tests/seal/shim_whiteout_not_phantom.rs` drives the
     /// live branch through a real ring and is — but the two no longer
     /// describe different behaviours. It *remains* true that a marker does
     /// not hide its target from an `open`; see `strip_whiteout_markers` and

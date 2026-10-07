@@ -335,7 +335,7 @@ mod tests {
     }
 
     /// The decoders behind every file hook return NT's status for a name it refuses, and the
-    /// hooks answer with it (`tests/odd_length_name_sealed.rs` checks that end to end).
+    /// hooks answer with it (`tests/seal/odd_length_name_sealed.rs` checks that end to end).
     #[test]
     fn path_of_tracked_reports_a_name_nt_refuses() {
         let mut w: Vec<u16> = "C:\\a".encode_utf16().collect();

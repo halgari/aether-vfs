@@ -1,4 +1,4 @@
-//! Single-test binary: writes go to the overlay; the mod backing file is never
+//! Runs in its own process: writes go to the overlay; the mod backing file is never
 //! mutated.
 //!
 //! **The copy-on-write half moved out from under this test in gate 4, task 4**

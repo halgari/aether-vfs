@@ -1,4 +1,4 @@
-//! Single-test binary: a relative name must resolve through the VFS on **every**
+//! Runs in its own process: a relative name must resolve through the VFS on **every**
 //! hook that decodes one.
 //!
 //! NT lets a caller name a file as (directory handle + relative name) instead of

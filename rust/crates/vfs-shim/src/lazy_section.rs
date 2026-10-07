@@ -525,9 +525,9 @@ mod tests {
     /// Any test in this crate that *asserts on process-global state* — the VA
     /// reservation map here, the hook tables, the fuse-synth handle table, the
     /// stats counters — must take a lock like this one rather than assume test
-    /// order, or it must live in its own test binary (as the `hook_*.rs`
-    /// integration tests do, one `#[test]` each) so the OS process boundary
-    /// provides the isolation. Take the guard as the first line of the test:
+    /// order, or it must be an integration test (under `tests/`, whose
+    /// `#[test]`s each re-execute in their own process, see `tests/common/mod.rs`) so the
+    /// OS process boundary provides the isolation. Take the guard as the first line of the test:
     /// `let _va = VA_LOCK.lock().unwrap_or_else(|e| e.into_inner());`
     /// (`unwrap_or_else(into_inner)` so one panicking test does not poison the
     /// lock and cascade into spurious failures in its siblings).

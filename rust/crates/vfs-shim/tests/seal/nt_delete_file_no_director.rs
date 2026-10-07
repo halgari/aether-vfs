@@ -23,7 +23,7 @@
 //!   not a fallback, so the answer is `STATUS_ACCESS_DENIED`.
 //! - A file outside every root must really be deleted.
 //!
-//! Its own binary, and deliberately with **no** `fakedirector`: this test's
+//! Its own process, and deliberately with **no** `fakedirector`: this test's
 //! whole subject is the branch taken when `director::global()` is `None`,
 //! and that client is process-global and initialise-once.
 

@@ -1,4 +1,4 @@
-//! Single-test binary: a redirected virtual file reports its VIRTUAL path.
+//! Runs in its own process: a redirected virtual file reports its VIRTUAL path.
 use std::os::windows::io::AsRawHandle;
 use vfs_shim::{install, Engine};
 use windows_sys::Win32::Foundation::HANDLE;

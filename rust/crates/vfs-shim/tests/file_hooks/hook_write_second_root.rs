@@ -1,4 +1,4 @@
-//! Single-test binary: the same write path as `hook_write.rs`, one root over.
+//! Runs in its own process: the same write path as `hook_write.rs`, one root over.
 //!
 //! `hook_write.rs` proves writes land in the overlay for root 0. This proves
 //! the *root* survives the trip, which is a different claim and the one gate

@@ -27,7 +27,7 @@
 //! Directory *creates* never arrive here at all: `try_fuse_mkdir` takes those
 //! before `try_fuse_create` runs.
 //!
-//! Its own binary — the detours, `ENGINE` and the `FuseClient` are all
+//! Its own process — the detours, `ENGINE` and the `FuseClient` are all
 //! process-global and resolve once.
 
 use crate::fakedirector;

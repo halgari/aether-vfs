@@ -35,7 +35,7 @@
 //!   `steam_appid.txt` must still hold its original bytes afterwards, and the
 //!   payload must be in the director's own table.
 //!
-//! Its own binary: the detours, the `FuseClient`, the `Engine` and
+//! Its own process: the detours, the `FuseClient`, the `Engine` and
 //! `hookstats::enabled()` are process-global and resolve once.
 
 use crate::fakedirector;

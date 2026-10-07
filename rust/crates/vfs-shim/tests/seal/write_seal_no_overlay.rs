@@ -9,7 +9,7 @@
 //! `NtCreateFile` and a real file appeared **physically under the managed
 //! root** — the one thing the root's whole contract says cannot happen.
 //!
-//! It is a separate binary because `ENGINE` is a `OnceLock`: one engine per
+//! It runs in a separate process because `ENGINE` is a `OnceLock`: one engine per
 //! process, so "with an overlay" and "without one" cannot be the same test
 //! run.
 

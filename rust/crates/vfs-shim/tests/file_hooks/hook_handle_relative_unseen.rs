@@ -1,4 +1,4 @@
-//! Single-test binary: `OBJECT_ATTRIBUTES.RootDirectory` set to a real
+//! Runs in its own process: `OBJECT_ATTRIBUTES.RootDirectory` set to a real
 //! directory handle the shim never saw opened.
 //!
 //! `hook_relative_paths.rs` already covers the handle-relative shape for a

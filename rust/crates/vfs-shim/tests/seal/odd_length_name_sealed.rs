@@ -10,7 +10,7 @@
 //! director serves other bytes for the same vpath, and after the odd-length calls the real file
 //! must be unchanged and the absent name must not exist.
 //!
-//! Its own binary: the detours, the `FuseClient` and the `Engine` are process-global.
+//! Its own process: the detours, the `FuseClient` and the `Engine` are process-global.
 
 use crate::fakedirector;
 

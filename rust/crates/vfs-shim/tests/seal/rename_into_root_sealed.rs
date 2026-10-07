@@ -35,7 +35,7 @@
 //! set-info. Testing only the raw NT form would leave the question of whether
 //! Win32 even routes through the hooked class unanswered.
 //!
-//! Its own binary: the detours, the `FuseClient` and the `Engine` are
+//! Its own process: the detours, the `FuseClient` and the `Engine` are
 //! process-global and resolve once.
 
 use crate::fakedirector;

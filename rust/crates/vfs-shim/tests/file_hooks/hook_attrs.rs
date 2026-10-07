@@ -1,4 +1,4 @@
-//! Single-test binary: path-based attribute queries reflect the VFS.
+//! Runs in its own process: path-based attribute queries reflect the VFS.
 //!
 //! Task 4: this binary installs the shim with **no director** attached
 //! (`vfs_shim::install`, not a real launch). Before Task 4, attribute queries

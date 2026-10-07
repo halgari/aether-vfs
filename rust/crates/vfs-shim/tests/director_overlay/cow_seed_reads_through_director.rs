@@ -1,6 +1,6 @@
 //! Copy-up sources its bytes from the director (gate 4, task 4).
 //!
-//! Its own test binary because it installs a process-global `FuseClient`
+//! Its own process because it installs a process-global `FuseClient`
 //! (`director::try_init_from_env`) and sets the environment that names the
 //! ring — the convention this workspace states at `VA_LOCK`: a test asserting
 //! on process-global state either takes the lock or lives alone. Every test

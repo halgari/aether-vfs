@@ -1,4 +1,4 @@
-//! Single-test binary: every way of asking "does this exist, and how big is it"
+//! Runs in its own process: every way of asking "does this exist, and how big is it"
 //! must give the same answer.
 //!
 //! Windows has several: `NtQueryAttributesFile`, `NtQueryFullAttributesFile`,

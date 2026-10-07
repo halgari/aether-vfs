@@ -8,10 +8,10 @@
 //! catches, and it does so silently — the same shape as the `NtLockFile` gap
 //! that broke all of Skyrim's INI loading undetected.
 //!
-//! Its own test binary because `install` is one-shot per process
+//! Its own process because `install` is one-shot per process
 //! (`ENGINE.set` returns `AlreadyInstalled` on a second call) and patches
-//! process-global ntdll trampolines. Every hook test in this crate is a
-//! single-test binary for that reason.
+//! process-global ntdll trampolines. Every test in these binaries re-executes
+//! itself in a fresh process for that reason (see `tests/common/mod.rs`).
 
 use vfs_shim::{install, Engine};
 use windows_sys::Win32::Foundation::HANDLE;

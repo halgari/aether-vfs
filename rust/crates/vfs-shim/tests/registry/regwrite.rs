@@ -18,8 +18,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use fakedirector::Fake;
 use reg::{
-    Checker, ObjectAttributes, Paths, UnicodeString, close, hex, object_name,
-    open_abs, reg_create, wide, with_us,
+    Checker, ObjectAttributes, Paths, UnicodeString, close, hex, object_name, open_abs, reg_create,
+    wide, with_us,
 };
 use vfs_registry::Lookup;
 use vfs_shim::{is_synthetic_key_handle, regclient, registry_handle_path};
@@ -272,10 +272,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         real_key("Pre", &[]);
         real_key("Names", &[("orig", 1)]);
         let paths = Paths::new(BASE);
-        let (st, pre) = open_abs(
-            &paths.nt("Pre"),
-            NT_KEY_ALL_ACCESS,
-        );
+        let (st, pre) = open_abs(&paths.nt("Pre"), NT_KEY_ALL_ACCESS);
         assert_eq!(st, STATUS_SUCCESS);
 
         // The checker: started now, so it has no hooks.

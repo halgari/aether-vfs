@@ -1,4 +1,4 @@
-//! Single-test binary: both directory-enumeration entry points show one view.
+//! Runs in its own process: both directory-enumeration entry points show one view.
 //!
 //! ntdll exports `NtQueryDirectoryFile` and `NtQueryDirectoryFileEx`, and which
 //! one a caller reaches is not our choice. If only one is hooked, the other

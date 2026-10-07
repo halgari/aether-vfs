@@ -1,4 +1,4 @@
-//! Single-test binary: without a director, nothing under the managed root is
+//! Runs in its own process: without a director, nothing under the managed root is
 //! reachable at all — not even a directory listing of real, on-disk files.
 //!
 //! Gate 3, Task 5 flip (was `read_dir_without_a_director_is_exactly_the_real_directory`,

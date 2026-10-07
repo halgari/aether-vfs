@@ -12,7 +12,7 @@
 //! `ERROR_FILE_NOT_FOUND` and `ERROR_PATH_NOT_FOUND` into the same `NotFound`,
 //! which is precisely the distinction under test).
 //!
-//! One test function, one binary, on purpose: `ENGINE`, the detours, the
+//! One test function, one process, on purpose: `ENGINE`, the detours, the
 //! `FuseClient` and `hookstats::enabled()` are all process-global and
 //! resolve-once (the `VA_LOCK` convention — a test asserting on process-global
 //! state either takes the lock or lives alone). The steps also share state

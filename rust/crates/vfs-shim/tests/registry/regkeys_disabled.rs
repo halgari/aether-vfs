@@ -2,13 +2,13 @@
 //! every call goes straight to the real registry: real handles, nothing tracked, and a create
 //! creates the real key. The shared `NtClose` / `NtQueryObject` hooks keep working.
 //!
-//! Its own binary: `regclient::enabled` is decided once per process, and `install` is one-shot.
+//! Its own process: `regclient::enabled` is decided once per process, and `install` is one-shot.
 
 use crate::reg;
 
 use reg::{close, object_name, open_abs};
 use vfs_shim::{
-    install, is_synthetic_key_handle, registry_handle_counts, registry_handle_path, Engine,
+    Engine, install, is_synthetic_key_handle, registry_handle_counts, registry_handle_path,
 };
 
 #[test]
@@ -18,7 +18,7 @@ fn every_registry_call_is_the_real_one() {
     let root = std::env::temp_dir().join(format!("vfs-shim-regkeys-off-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let snapshot = {
-        use vfs_core::{build, Layer, LayerId};
+        use vfs_core::{Layer, LayerId, build};
         let tree = build(vec![Layer {
             id: LayerId(0),
             entries: vec![],
@@ -61,8 +61,8 @@ fn every_registry_call_is_the_real_one() {
     // A volatile scratch key under HKCU, through Win32 (so through `NtCreateKey`): created
     // for real, then deleted for real.
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS,
-        REG_CREATED_NEW_KEY, REG_OPTION_VOLATILE,
+        HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_CREATED_NEW_KEY, REG_OPTION_VOLATILE,
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyW,
     };
     let sub: Vec<u16> = r"Software\AetherVfsRegKeysOffTest"
         .encode_utf16()

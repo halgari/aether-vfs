@@ -638,8 +638,9 @@ than work that errors. Tests are shaped around that.
   transitions.
 - **Hook behaviour is tested in-process.** Integration binaries install the real
   detours into the test process and then use ordinary `std::fs` and raw NT calls
-  against a live engine. One install per process, so one test binary per
-  scenario.
+  against a live engine. One install per process, so every
+  `#[test]` in `vfs-shim/tests/` re-executes itself in a fresh process (`tests/common`), and the
+  scenarios are grouped into a few binaries by concern.
 - **Every naming form is covered, not just the convenient one.** The
   relative-name battery exercises each decoding hook through a real directory
   handle, because Win32 decides on its own whether a relative path becomes an

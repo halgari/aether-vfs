@@ -1,4 +1,4 @@
-//! Single-test binary: **every hook this build knows about is live.**
+//! Runs in its own process: **every hook this build knows about is live.**
 //!
 //! `install` builds each detour with `make_detour`, which fails when
 //! `GetProcAddress` finds no such export in ntdll, and records the name in
@@ -15,10 +15,10 @@
 //! session on. A future `if let Ok(..)` added for Wine's benefit that also
 //! disables a hook on Windows fails here rather than in a game.
 //!
-//! Its own test binary, not a second `#[test]` inside an existing one:
-//! `install` patches process-global ntdll trampolines, so two tests installing
-//! concurrently in one process would fight. Every hook test in this crate is a
-//! single-test binary for that reason.
+//! Its own process, not shared with another test: `install` patches
+//! process-global ntdll trampolines, so two tests installing concurrently in one
+//! process would fight. Every test in these binaries re-executes itself in a
+//! fresh process for that reason (see `tests/common/mod.rs`).
 
 use vfs_shim::{install, skipped_detours, Engine};
 

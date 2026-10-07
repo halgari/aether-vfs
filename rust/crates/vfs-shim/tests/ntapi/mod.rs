@@ -4,50 +4,52 @@
 //! a (directory handle + relative name) pair, so a test that only goes through
 //! `std::fs` cannot guarantee it exercised the second form. These call the NT
 //! layer directly so the handle-relative shape is certain to be covered.
+
+// Compiled into several test binaries, each using a different subset.
 #![allow(dead_code)]
 
 use std::ffi::c_void;
 
-pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
-pub const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+pub(crate) const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+pub(crate) const OBJ_CASE_INSENSITIVE: u32 = 0x40;
 
 #[repr(C)]
-pub struct UnicodeString {
-    pub length: u16,
-    pub maximum_length: u16,
-    pub buffer: *mut u16,
+pub(crate) struct UnicodeString {
+    pub(crate) length: u16,
+    pub(crate) maximum_length: u16,
+    pub(crate) buffer: *mut u16,
 }
 
 #[repr(C)]
-pub struct ObjectAttributes {
-    pub length: u32,
-    pub root_directory: *mut c_void,
-    pub object_name: *const UnicodeString,
-    pub attributes: u32,
-    pub security_descriptor: *mut c_void,
-    pub security_qos: *mut c_void,
-}
-
-#[repr(C)]
-#[derive(Default)]
-pub struct FileBasicInformation {
-    pub creation_time: i64,
-    pub last_access_time: i64,
-    pub last_write_time: i64,
-    pub change_time: i64,
-    pub file_attributes: u32,
+pub(crate) struct ObjectAttributes {
+    pub(crate) length: u32,
+    pub(crate) root_directory: *mut c_void,
+    pub(crate) object_name: *const UnicodeString,
+    pub(crate) attributes: u32,
+    pub(crate) security_descriptor: *mut c_void,
+    pub(crate) security_qos: *mut c_void,
 }
 
 #[repr(C)]
 #[derive(Default)]
-pub struct FileNetworkOpenInformation {
-    pub creation_time: i64,
-    pub last_access_time: i64,
-    pub last_write_time: i64,
-    pub change_time: i64,
-    pub allocation_size: i64,
-    pub end_of_file: i64,
-    pub file_attributes: u32,
+pub(crate) struct FileBasicInformation {
+    pub(crate) creation_time: i64,
+    pub(crate) last_access_time: i64,
+    pub(crate) last_write_time: i64,
+    pub(crate) change_time: i64,
+    pub(crate) file_attributes: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub(crate) struct FileNetworkOpenInformation {
+    pub(crate) creation_time: i64,
+    pub(crate) last_access_time: i64,
+    pub(crate) last_write_time: i64,
+    pub(crate) change_time: i64,
+    pub(crate) allocation_size: i64,
+    pub(crate) end_of_file: i64,
+    pub(crate) file_attributes: u32,
 }
 
 type NtCreateFileFn = unsafe extern "system" fn(
@@ -98,13 +100,13 @@ fn ntdll_proc(name: &str) -> Option<*const c_void> {
 }
 
 /// Builds an `OBJECT_ATTRIBUTES` naming `rel` beneath the directory `dir`.
-pub struct RelName {
+pub(crate) struct RelName {
     _wide: Vec<u16>,
     _us: Box<UnicodeString>,
-    pub oa: ObjectAttributes,
+    pub(crate) oa: ObjectAttributes,
 }
 
-pub fn rel_name(dir: *mut c_void, rel: &str) -> RelName {
+pub(crate) fn rel_name(dir: *mut c_void, rel: &str) -> RelName {
     let mut wide: Vec<u16> = rel.encode_utf16().collect();
     let bytes = (wide.len() * 2) as u16;
     let us = Box::new(UnicodeString {
@@ -131,14 +133,14 @@ pub fn rel_name(dir: *mut c_void, rel: &str) -> RelName {
 /// `RootDirectory` — the shape `NtDeleteFile` is reached with in practice, and
 /// the one that leaves the path itself as the only thing the call can be
 /// decided on.
-pub struct AbsName {
+pub(crate) struct AbsName {
     _wide: Vec<u16>,
     _us: Box<UnicodeString>,
-    pub oa: ObjectAttributes,
+    pub(crate) oa: ObjectAttributes,
 }
 
 /// `\??\`-prefix a Win32 path; pass an NT path through unchanged.
-pub fn to_nt(path: &str) -> String {
+pub(crate) fn to_nt(path: &str) -> String {
     if path.starts_with(r"\??\") || path.starts_with(r"\Device\") {
         path.to_string()
     } else {
@@ -146,7 +148,7 @@ pub fn to_nt(path: &str) -> String {
     }
 }
 
-pub fn abs_name(path: &str) -> AbsName {
+pub(crate) fn abs_name(path: &str) -> AbsName {
     let mut wide: Vec<u16> = to_nt(path).encode_utf16().collect();
     let bytes = (wide.len() * 2) as u16;
     let us = Box::new(UnicodeString {
@@ -170,7 +172,7 @@ pub fn abs_name(path: &str) -> AbsName {
 }
 
 /// `NtDeleteFile` against an absolute path. Returns the raw `NTSTATUS`.
-pub fn nt_delete_file(path: &str) -> i32 {
+pub(crate) fn nt_delete_file(path: &str) -> i32 {
     let Some(p) = ntdll_proc("NtDeleteFile") else {
         return -1;
     };
@@ -179,13 +181,13 @@ pub fn nt_delete_file(path: &str) -> i32 {
     unsafe { f(&n.oa) }
 }
 
-pub const DELETE: u32 = 0x0001_0000;
-pub const FILE_RENAME_INFORMATION: u32 = 10;
-pub const FILE_RENAME_INFORMATION_EX: u32 = 65;
+pub(crate) const DELETE: u32 = 0x0001_0000;
+pub(crate) const FILE_RENAME_INFORMATION: u32 = 10;
+pub(crate) const FILE_RENAME_INFORMATION_EX: u32 = 65;
 
 /// Open an absolute path with an explicit access mask (`DELETE` for the rename
 /// below, which is what `MoveFileExW` itself asks for).
-pub fn nt_open_abs(path: &str, access: u32) -> (i32, *mut c_void) {
+pub(crate) fn nt_open_abs(path: &str, access: u32) -> (i32, *mut c_void) {
     let Some(p) = ntdll_proc("NtOpenFile") else {
         return (-1, core::ptr::null_mut());
     };
@@ -206,12 +208,12 @@ pub fn nt_open_abs(path: &str, access: u32) -> (i32, *mut c_void) {
     (st, h)
 }
 
-pub const FILE_DISPOSITION_INFORMATION: u32 = 13;
-pub const FILE_LIST_DIRECTORY: u32 = 0x0001;
+pub(crate) const FILE_DISPOSITION_INFORMATION: u32 = 13;
+pub(crate) const FILE_LIST_DIRECTORY: u32 = 0x0001;
 
 /// Open an absolute path as a **directory** (`FILE_DIRECTORY_FILE`), which is
 /// what a caller holding a directory handle to name children against has.
-pub fn nt_open_dir_abs(path: &str, access: u32) -> (i32, *mut c_void) {
+pub(crate) fn nt_open_dir_abs(path: &str, access: u32) -> (i32, *mut c_void) {
     const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
     let Some(p) = ntdll_proc("NtOpenFile") else {
         return (-1, core::ptr::null_mut());
@@ -236,7 +238,7 @@ pub fn nt_open_dir_abs(path: &str, access: u32) -> (i32, *mut c_void) {
 /// `NtDeleteFile` naming `rel` beneath the directory handle `dir` — the
 /// handle-relative `OBJECT_ATTRIBUTES` shape. Win32 decides on its own whether
 /// to build one, so a test that wants it certain has to build it here.
-pub fn nt_delete_relative(dir: *mut c_void, rel: &str) -> i32 {
+pub(crate) fn nt_delete_relative(dir: *mut c_void, rel: &str) -> i32 {
     let Some(p) = ntdll_proc("NtDeleteFile") else {
         return -1;
     };
@@ -249,7 +251,7 @@ pub fn nt_delete_relative(dir: *mut c_void, rel: &str) -> i32 {
 /// `FILE_DISPOSITION_INFORMATION { DeleteFile = TRUE }`. The unlink itself
 /// happens when the last handle closes, so a caller must close before looking
 /// at the filesystem.
-pub fn nt_set_disposition_delete(h: *mut c_void) -> i32 {
+pub(crate) fn nt_set_disposition_delete(h: *mut c_void) -> i32 {
     let Some(p) = ntdll_proc("NtSetInformationFile") else {
         return -1;
     };
@@ -273,7 +275,7 @@ pub fn nt_set_disposition_delete(h: *mut c_void) -> i32 {
 /// Layout, and it must match `hook/path.rs::parse_rename_target` exactly:
 /// `ReplaceIfExists`/`Flags` at 0, `RootDirectory` at 8, `FileNameLength` at
 /// 16, `FileName` at 20.
-pub fn nt_rename(h: *mut c_void, target: &str, class: u32) -> i32 {
+pub(crate) fn nt_rename(h: *mut c_void, target: &str, class: u32) -> i32 {
     let Some(p) = ntdll_proc("NtSetInformationFile") else {
         return -1;
     };
@@ -306,7 +308,7 @@ const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
 const FILE_NON_DIRECTORY_FILE: u32 = 0x40;
 
 /// `(status, handle)` from `NtCreateFile` against a directory handle.
-pub fn nt_create_relative(dir: *mut c_void, rel: &str) -> (i32, *mut c_void) {
+pub(crate) fn nt_create_relative(dir: *mut c_void, rel: &str) -> (i32, *mut c_void) {
     let Some(p) = ntdll_proc("NtCreateFile") else {
         return (-1, core::ptr::null_mut());
     };
@@ -332,7 +334,7 @@ pub fn nt_create_relative(dir: *mut c_void, rel: &str) -> (i32, *mut c_void) {
     (st, h)
 }
 
-pub fn nt_open_relative(dir: *mut c_void, rel: &str) -> (i32, *mut c_void) {
+pub(crate) fn nt_open_relative(dir: *mut c_void, rel: &str) -> (i32, *mut c_void) {
     let Some(p) = ntdll_proc("NtOpenFile") else {
         return (-1, core::ptr::null_mut());
     };
@@ -354,7 +356,7 @@ pub fn nt_open_relative(dir: *mut c_void, rel: &str) -> (i32, *mut c_void) {
 }
 
 /// `(status, FileAttributes)`.
-pub fn nt_query_attributes_relative(dir: *mut c_void, rel: &str) -> (i32, u32) {
+pub(crate) fn nt_query_attributes_relative(dir: *mut c_void, rel: &str) -> (i32, u32) {
     let Some(p) = ntdll_proc("NtQueryAttributesFile") else {
         return (-1, 0);
     };
@@ -366,7 +368,7 @@ pub fn nt_query_attributes_relative(dir: *mut c_void, rel: &str) -> (i32, u32) {
 }
 
 /// `(status, EndOfFile)`.
-pub fn nt_query_full_attributes_relative(dir: *mut c_void, rel: &str) -> (i32, i64) {
+pub(crate) fn nt_query_full_attributes_relative(dir: *mut c_void, rel: &str) -> (i32, i64) {
     let Some(p) = ntdll_proc("NtQueryFullAttributesFile") else {
         return (-1, 0);
     };
@@ -379,7 +381,7 @@ pub fn nt_query_full_attributes_relative(dir: *mut c_void, rel: &str) -> (i32, i
 
 /// `(status, EndOfFile)` for the by-name stat classes, or `None` when the export
 /// is absent (pre-1709 Windows).
-pub fn nt_query_by_name_relative(dir: *mut c_void, rel: &str, class: u32) -> Option<(i32, i64)> {
+pub(crate) fn nt_query_by_name_relative(dir: *mut c_void, rel: &str, class: u32) -> Option<(i32, i64)> {
     let p = ntdll_proc("NtQueryInformationByName")?;
     let f: NtQueryInformationByNameFn = unsafe { core::mem::transmute(p) };
     let n = rel_name(dir, rel);
@@ -407,7 +409,7 @@ pub fn nt_query_by_name_relative(dir: *mut c_void, rel: &str, class: u32) -> Opt
     ))
 }
 
-pub fn read_all(h: *mut c_void) -> Vec<u8> {
+pub(crate) fn read_all(h: *mut c_void) -> Vec<u8> {
     // Read through the handle with NtReadFile so the test stays on the NT
     // surface it is exercising.
     type NtReadFileFn = unsafe extern "system" fn(
@@ -445,7 +447,7 @@ pub fn read_all(h: *mut c_void) -> Vec<u8> {
     out
 }
 
-pub fn close(h: *mut c_void) {
+pub(crate) fn close(h: *mut c_void) {
     use windows_sys::Win32::Foundation::CloseHandle;
     if !h.is_null() {
         unsafe { CloseHandle(h as _) };
@@ -471,7 +473,7 @@ type NtQueryDirectoryFileFn = unsafe extern "system" fn(
 /// ntdll exports two enumeration entry points and a caller may use either. They
 /// must return the same view, so this exists to be compared against the `Ex`
 /// form that `std::fs::read_dir` uses.
-pub fn nt_enum_classic(dir: *mut c_void) -> Vec<String> {
+pub(crate) fn nt_enum_classic(dir: *mut c_void) -> Vec<String> {
     nt_enum_classic_filtered(dir, None)
 }
 
@@ -483,7 +485,7 @@ pub fn nt_enum_classic(dir: *mut c_void) -> Vec<String> {
 /// the order it runs in relative to the shim's other listing work is
 /// observable: a name the wildcard rejects is one the shim's later stages never
 /// see.
-pub fn nt_enum_classic_filtered(dir: *mut c_void, wildcard: Option<&str>) -> Vec<String> {
+pub(crate) fn nt_enum_classic_filtered(dir: *mut c_void, wildcard: Option<&str>) -> Vec<String> {
     const FILE_DIRECTORY_INFORMATION: u32 = 1;
     let mut wide: Vec<u16> = wildcard.unwrap_or("").encode_utf16().collect();
     let us = UnicodeString {

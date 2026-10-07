@@ -15,7 +15,7 @@
 //! which is the only form of observability that helps at the moment it
 //! matters.
 //!
-//! Its own binary: it turns instrumentation on for the whole process
+//! Its own process: it turns instrumentation on for the whole process
 //! (`hookstats::enabled` is resolved once and cached), installs the
 //! process-global detours, and installs the process-global `FuseClient`.
 //!

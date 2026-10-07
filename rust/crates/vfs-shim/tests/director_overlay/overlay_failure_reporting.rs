@@ -14,7 +14,7 @@
 //! bisection. So the assertion is not "a counter moved" but "the live
 //! session's own report names the operation and the file".
 //!
-//! Its own binary, for the reasons `cow_seed_reporting.rs` gives:
+//! Its own process, for the reasons `cow_seed_reporting.rs` gives:
 //! `hookstats::enabled` resolves once per process, and the detours and
 //! `FuseClient` are process-global.
 //!

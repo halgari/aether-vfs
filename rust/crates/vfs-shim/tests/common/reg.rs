@@ -3,20 +3,19 @@
 //!
 //! A test file keeps only what is its own: its `BASE` key, the real keys it makes, and the
 //! extras its `Fixture` carries. Declare this module in the test binary as
-//! `#[path = "common/reg.rs"] mod reg;` (the checker is then `reg::reg_checker`, see
+//! `#[path = "../common/reg.rs"] mod reg;` (the checker is then `reg::reg_checker`, see
 //! [`CHECKER_TEST`]).
-#![allow(dead_code)] // each registry test file uses a different subset
 
 use std::ffi::c_void;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 
-use windows_sys::Win32::Foundation::{FILETIME, LocalFree, HANDLE};
+use windows_sys::Win32::Foundation::{FILETIME, HANDLE, LocalFree};
 use windows_sys::Win32::System::Registry::{
-    RegSetKeySecurity,
     HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ, REG_OPTION_NON_VOLATILE, RegCloseKey,
     RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW,
+    RegSetKeySecurity,
 };
 
 use super::fakedirector::{self, Fake};
@@ -188,7 +187,10 @@ unsafe fn apply_sddl(k: HKEY, sddl: &str) {
         },
         0
     );
-    assert_eq!(unsafe { RegSetKeySecurity(k, DACL_SECURITY_INFORMATION, sd) }, 0);
+    assert_eq!(
+        unsafe { RegSetKeySecurity(k, DACL_SECURITY_INFORMATION, sd) },
+        0
+    );
     unsafe { LocalFree(sd) };
 }
 
@@ -258,7 +260,7 @@ impl Paths {
 /// The unhooked process that answers what is really in the registry: this test binary, started
 /// before the hooks went in, running the ignored [`reg_checker`].
 pub(crate) struct Checker {
-    child: Child,
+    _child: Child,
     /// The checker process's handle, for tests that duplicate handles into it.
     pub(crate) process: isize,
     io: Mutex<(ChildStdin, BufReader<ChildStdout>)>,
@@ -268,7 +270,13 @@ impl Checker {
     /// Start it. Call before the hooks are installed.
     pub(crate) fn spawn() -> Checker {
         let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([CHECKER_TEST, "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+            .args([
+                CHECKER_TEST,
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env(CHECKER_ENV, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -279,7 +287,7 @@ impl Checker {
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Checker {
-            child,
+            _child: child,
             process,
             io: Mutex::new((stdin, stdout)),
         }

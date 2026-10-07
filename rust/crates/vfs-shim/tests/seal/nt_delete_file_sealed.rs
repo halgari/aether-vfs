@@ -48,7 +48,7 @@
 //! which is genuinely outside and must be trampolined — by way of the absolute
 //! rebuild, since the kernel cannot be handed a synthetic root.
 //!
-//! Its own binary: the detours, the `FuseClient`, the `Engine` and
+//! Its own process: the detours, the `FuseClient`, the `Engine` and
 //! `hookstats::enabled()` are process-global and resolve once.
 
 use crate::fakedirector;

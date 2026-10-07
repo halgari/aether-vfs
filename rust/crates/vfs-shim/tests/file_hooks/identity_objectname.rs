@@ -4,7 +4,7 @@
 //! `NtQueryInformationFile` on Windows, `NtQueryObject` on Wine — so a shim that
 //! only spoofs the first answers correctly on one host and leaks on the other.
 //!
-//! Single-test binary: `install` is one-shot per process (`ENGINE.set` returns
+//! Runs in its own process: `install` is one-shot per process (`ENGINE.set` returns
 //! `AlreadyInstalled` on a second call) and patches process-global ntdll
 //! trampolines, so the untracked-handle half of this contract lives in
 //! `identity_objectname_untracked.rs` rather than beside this test.

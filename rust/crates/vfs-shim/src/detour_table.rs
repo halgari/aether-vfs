@@ -359,7 +359,7 @@ macro_rules! detour_table {
             // here on Wine, so leaving this one unhooked leaks the backing path on whichever host takes the
             // other route. Optional in the same style as the two above only because a host might not
             // export it: both hosts measured here do, so `skipped_detours()` stays empty and
-            // `tests/hook_coverage.rs` asserts it.
+            // `tests/diagnostics/hook_coverage.rs` asserts it.
             // `NeededByRegistry`: the registry overlay needs it (names and types of synthetic keys, the
             // access of pre-hook handles), so its absence is recorded in the registry's `missing` set.
             {

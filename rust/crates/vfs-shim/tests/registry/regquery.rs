@@ -22,14 +22,14 @@ use std::ops::Deref;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use fakedirector::Fake;
-use reg::{open_abs, reg_create_class, wide, Paths, UnicodeString};
+use reg::{Paths, UnicodeString, open_abs, reg_create_class, wide};
 use vfs_registry::layout::{self, KeyInfoClass, ValueEntry, ValueInfoClass, Written};
 use vfs_registry::{MergedKey, Value};
 use vfs_shim::{is_synthetic_key_handle, regclient, registry_enum_states};
 use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryInfoKeyW,
+    RegQueryValueExW, RegSetValueExW,
 };
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -303,10 +303,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         let limited_as_expected = !grants("Limited", KEY_READ)
             && grants("Limited", KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS);
         let paths = Paths::new(BASE);
-        let (st, pre) = open_abs(
-            &paths.nt("Pre"),
-            KEY_ENUMERATE_SUB_KEYS,
-        );
+        let (st, pre) = open_abs(&paths.nt("Pre"), KEY_ENUMERATE_SUB_KEYS);
         assert_eq!(st, STATUS_SUCCESS);
         let fake = reg::install_hooks("regquery");
         let f = Fixture {

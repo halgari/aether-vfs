@@ -1,7 +1,7 @@
 //! Copy-up's own file I/O must not be re-decided by the hook that asked for it
 //! (gate 4, task 4).
 //!
-//! Single-test binary twice over: it installs the process-global detours
+//! Own-process test twice over: it installs the process-global detours
 //! (`ENGINE` is a `OnceLock`, so one engine per process) *and* the
 //! process-global `FuseClient`.
 //!

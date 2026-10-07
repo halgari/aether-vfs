@@ -42,7 +42,7 @@ pub use bootstrap::{
 // The encoders (and `StaticImport`) live in `vfs_protocol::shimcfg` — pure
 // byte assembly with no Windows dependency — so a native Linux Director can
 // build a shim config too. Re-exported here so every existing caller
-// (`vfs-embed`, `vfs-inject`'s tests, `vfs-shim/tests/exit_stall_repro.rs`)
+// (`vfs-embed`, `vfs-inject`'s tests, `vfs-shim/tests/diagnostics/exit_stall_repro.rs`)
 // keeps compiling unchanged against `vfs_shim::`.
 pub use engine::{Engine, EngineError, RenameOutcome};
 #[doc(hidden)]
