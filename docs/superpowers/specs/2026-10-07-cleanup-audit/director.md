@@ -74,7 +74,7 @@ Scope: vfs-director, vfs-directord, vfs-source, vfs-control, vfs-ipc, vfs-protoc
   - `SnapshotBuilder` and `bridge::flatten` appear only in tests, xtask-descriptor, vfs-server and ring-harness.
   - vfs-redirect's `SnapResolution` branch (`vfs-redirect/src/lib.rs:452-473`) therefore always resolves against an empty tree in production.
 - **Change**
-  - Step 1: make the snapshot optional in `vfs_protocol::shimcfg` (say, zero bytes means "no snapshot") and stop shipping the hex constant.
+  - Step 1: remove the snapshot from `vfs_protocol::shimcfg` and stop shipping the hex constant. (As done in stream I: once the shim's Engine was gone the snapshot was only decoded and ignored, so it was dropped from the config rather than made optional, and the config was given a version.)
   - Step 2: delete `seqlock.rs`.
   - Step 3, together with whoever audits the shim and redirect: decide whether vfs-shared's snapshot reader and vfs-core's tree survive at all.
 - **What breaks**
@@ -335,6 +335,6 @@ Scope: vfs-director, vfs-directord, vfs-source, vfs-control, vfs-ipc, vfs-protoc
 | xtask-descriptor | CI drift check only | **Yes**, once the golden test moves | Move the golden vectors into `vfs-protocol/tests`; delete `bin/regen-protocol`, `resources/` and `ci.yml:169-172` |
 | vfs-directord | nothing in the workspace; it is the `vfs` CLI | **No**: reference CLI, `proton_cli` CI job, README | Only extract skyrim-live (D2) |
 | vfs-control | vfs-directord, vfs-source | **No** (could fold into directord, D16) | Move `SourceSpec` into vfs-source first |
-| vfs-shared | vfs-shim, vfs-redirect, vfs-inject, vfs-server, xtask-descriptor, ring-harness | **Not yet**: the seqlock is deletable now | D3: make the snapshot optional in shimcfg and the shim's `Engine` |
+| vfs-shared | vfs-shim, vfs-redirect, vfs-inject, vfs-server, xtask-descriptor, ring-harness | **Not yet**: the seqlock is deletable now | D3: remove the snapshot from shimcfg (done in stream I; the shim's `Engine` was already gone) |
 | vfs-unix / vfs-win | vfs-director, vfs-shim, vfs-redirect, … | No | — |
 | vfs-source | vfs-directord | No | D9 removes its vfs-director dependency |

@@ -135,8 +135,13 @@ parallel without editing the same files.
    - The Wine suite must stay green.
 2. **D3, the snapshot path:**
    - The seqlock goes in stream B.
-   - The snapshot is made optional in the shim's config and Engine. vfs-embed then stops
-     sending the empty one, and the snapshot code is removed.
+   - Stream C removed the shim's Engine, so the shim only decoded and validated the config's
+     snapshot (and its `overlay` field) and then ignored them. Stream I removes both fields from
+     the shim config instead of making them optional: vfs-embed stops sending them, and
+     `vfs-shared`, the redirect snapshot decision code and the other snapshot-only code are deleted.
+   - The config is now versioned (`"VFSC"` + a `u32` version, in `vfs_protocol::shimcfg`). A config
+     with no version header or another version fails shim bootstrap with a `BootstrapError::Config`
+     that names both versions. Changing the layout again bumps the version.
    - This is stream I, after B, C and M have merged.
 3. **Haskill-facing API changes are in scope** (E10, E24, E25, E21, T19). They land in aether
    first, then in Haskill in the same session (stream H).
