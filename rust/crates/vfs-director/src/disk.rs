@@ -115,8 +115,9 @@ impl DiskProvider {
 /// is what Wine does, and what `ciopfs` exists to avoid doing repeatedly.
 ///
 /// Compares with [`vfs_core::fold`], never `to_ascii_lowercase`, and never
-/// hands a folded spelling to the filesystem: `casefold.rs` warns the fold is
-/// not NTFS-case-equivalence (`İ` folds to a genuinely different name), so the
+/// hands a folded spelling to the filesystem: `vfs-core`'s `casefold.rs`
+/// (`crates/vfs-core/src/casefold.rs`) warns the fold is not
+/// NTFS-case-equivalence (`İ` folds to a genuinely different name), so the
 /// resolved *original* entry name is what gets opened.
 ///
 /// `rel` is assumed already validated by the caller (`resolve_case_aware`
