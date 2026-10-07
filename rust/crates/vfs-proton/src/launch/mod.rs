@@ -45,8 +45,8 @@ mod injector;
 
 use env::stale_env;
 pub use env::{
-    check_extra_env, is_reserved_env, launch_env, merge_dll_overrides, BASE_DLL_OVERRIDES,
-    DEFAULT_WINEDEBUG,
+    BASE_DLL_OVERRIDES, DEFAULT_WINEDEBUG, check_extra_env, is_reserved_env, launch_env,
+    merge_dll_overrides,
 };
 pub use injector::{describe_injector_error, injector_error_path};
 
@@ -406,14 +406,12 @@ fn open_log(path: &Path) -> io::Result<std::fs::File> {
 pub fn finish(l: &WineLaunch, status: std::process::ExitStatus) -> Result<i32, LaunchError> {
     match status.code() {
         // 2 and 3 are the injector's own "the target never ran" exits.
-        Some(code @ (2 | 3)) => {
-            match std::fs::read_to_string(injector_error_path(&l.ready_file)) {
-                Ok(raw) if !raw.trim().is_empty() => {
-                    Err(LaunchError::Injector(describe_injector_error(&raw)))
-                }
-                _ => Err(LaunchError::NonZeroWine(code)),
+        Some(code @ (2 | 3)) => match std::fs::read_to_string(injector_error_path(&l.ready_file)) {
+            Ok(raw) if !raw.trim().is_empty() => {
+                Err(LaunchError::Injector(describe_injector_error(&raw)))
             }
-        }
+            _ => Err(LaunchError::NonZeroWine(code)),
+        },
         Some(code) => Ok(code),
         None => Err(LaunchError::Spawn(format!(
             "{} exited without a code (signalled): {status}",
@@ -604,13 +602,22 @@ mod tests {
     fn a_ready_timeout_travels_to_the_injector_and_beats_extra_env() {
         let mut l = sample();
         l.ready_timeout_secs = Some(0);
-        l.extra_env.insert(vfs_env::READY_TIMEOUT_SECS.to_string(), "5".to_string());
-        assert_eq!(launch_env(&l)[vfs_env::READY_TIMEOUT_SECS], "1", "the field wins, and 0 means 1");
+        l.extra_env
+            .insert(vfs_env::READY_TIMEOUT_SECS.to_string(), "5".to_string());
+        assert_eq!(
+            launch_env(&l)[vfs_env::READY_TIMEOUT_SECS],
+            "1",
+            "the field wins, and 0 means 1"
+        );
     }
 
     #[cfg(unix)]
     fn exit_status(code: i32) -> std::process::ExitStatus {
-        std::process::Command::new("sh").arg("-c").arg(format!("exit {code}")).status().unwrap()
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("exit {code}"))
+            .status()
+            .unwrap()
     }
 
     #[cfg(unix)]
@@ -622,9 +629,20 @@ mod tests {
         let mut l = sample();
         l.ready_file = dir.join("ready.flag");
         assert_eq!(finish(&l, exit_status(0)).unwrap(), 0);
-        assert_eq!(finish(&l, exit_status(7)).unwrap(), 7, "a target's own code is Ok");
-        assert!(matches!(finish(&l, exit_status(3)), Err(LaunchError::NonZeroWine(3))));
-        std::fs::write(injector_error_path(&l.ready_file), "target-exited:0xc0000135").unwrap();
+        assert_eq!(
+            finish(&l, exit_status(7)).unwrap(),
+            7,
+            "a target's own code is Ok"
+        );
+        assert!(matches!(
+            finish(&l, exit_status(3)),
+            Err(LaunchError::NonZeroWine(3))
+        ));
+        std::fs::write(
+            injector_error_path(&l.ready_file),
+            "target-exited:0xc0000135",
+        )
+        .unwrap();
         match finish(&l, exit_status(3)) {
             Err(LaunchError::Injector(m)) => assert!(m.contains("STATUS_DLL_NOT_FOUND"), "{m}"),
             other => panic!("expected Injector, got {other:?}"),
@@ -648,12 +666,19 @@ mod tests {
         for k in vfs_env::handshake::all() {
             assert!(is_reserved_env(k), "{k}");
         }
-        assert!(is_reserved_env("vfs_virtual_dir"), "Wine's environment names ignore case");
+        assert!(
+            is_reserved_env("vfs_virtual_dir"),
+            "Wine's environment names ignore case"
+        );
         assert!(is_reserved_env("WinePrefix"));
-        assert!(!is_reserved_env("VFS_FIXTURE_PATH"), "a fixture's own switches pass through");
+        assert!(
+            !is_reserved_env("VFS_FIXTURE_PATH"),
+            "a fixture's own switches pass through"
+        );
         assert!(!is_reserved_env(vfs_env::READY_TIMEOUT_SECS));
         let mut l = sample(); // its runtime does not exist: NotGe would come first
-        l.extra_env.insert(vfs_env::RING_PATH.to_string(), "C:\\elsewhere".to_string());
+        l.extra_env
+            .insert(vfs_env::RING_PATH.to_string(), "C:\\elsewhere".to_string());
         match run(&l) {
             Err(LaunchError::ReservedEnv(k)) => assert_eq!(k, vfs_env::RING_PATH),
             other => panic!("expected ReservedEnv, got {other:?}"),
@@ -683,6 +708,10 @@ mod tests {
         // A host `wine` on `PATH` is not the verified GE build, and using it
         // would make the GE gate decorative.
         let w = wine_binary(Path::new(&abs("GE-Proton11-6-x86_64")));
-        assert!(w.ends_with(Path::new("files").join("bin").join("wine")), "{}", w.display());
+        assert!(
+            w.ends_with(Path::new("files").join("bin").join("wine")),
+            "{}",
+            w.display()
+        );
     }
 }

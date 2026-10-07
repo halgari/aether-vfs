@@ -14,9 +14,9 @@ use crate::runtime::verify_ge;
 /// Idempotent: if `drive_c/windows/system32` already exists, the prefix is
 /// treated as initialised and `wineboot` is not run again.
 pub fn ensure(root: &Root, runtime: &Path, session: &str) -> Result<Prefix, PrefixError> {
-    let session_dir = root.try_session_dir(session).map_err(|e| {
-        PrefixError::Io(io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))
-    })?;
+    let session_dir = root
+        .try_session_dir(session)
+        .map_err(|e| PrefixError::Io(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     let dir = session_dir.join("prefix");
 
     if !is_initialised(&dir) {
@@ -79,9 +79,9 @@ pub const PROTON_INIT_LOG: &str = "aether-proton-init.log";
 /// creating anything: `sessions/<session>/prefix`, or
 /// `sessions/<session>/compat/pfx` for [`PrefixInit::Proton`].
 pub fn prefix_dir(root: &Root, session: &str, init: &PrefixInit) -> Result<PathBuf, PrefixError> {
-    let session_dir = root.try_session_dir(session).map_err(|e| {
-        PrefixError::Io(io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))
-    })?;
+    let session_dir = root
+        .try_session_dir(session)
+        .map_err(|e| PrefixError::Io(io::Error::new(io::ErrorKind::InvalidInput, e.to_string())))?;
     Ok(match init {
         PrefixInit::Wineboot => session_dir.join("prefix"),
         PrefixInit::Proton { .. } => session_dir.join("compat").join("pfx"),
@@ -100,7 +100,11 @@ pub fn ensure_with(
     session: &str,
     init: &PrefixInit,
 ) -> Result<Prefix, PrefixError> {
-    let PrefixInit::Proton { steam_client, app_id } = init else {
+    let PrefixInit::Proton {
+        steam_client,
+        app_id,
+    } = init
+    else {
         return ensure(root, runtime, session);
     };
     let dir = prefix_dir(root, session, init)?;
@@ -172,7 +176,7 @@ fn run_proton_init(
             return Err(PrefixError::ProtonInit(format!(
                 "could not run {} (a Python 3 script: is python3 installed?): {e}",
                 proton.display()
-            )))
+            )));
         }
     };
     match status {
@@ -286,8 +290,16 @@ mod tests {
 
     #[cfg(unix)]
     fn calls(root: &Root, session: &str) -> Vec<String> {
-        let f = root.try_session_dir(session).unwrap().join("compat").join("calls");
-        std::fs::read_to_string(f).unwrap_or_default().lines().map(str::to_string).collect()
+        let f = root
+            .try_session_dir(session)
+            .unwrap()
+            .join("compat")
+            .join("calls");
+        std::fs::read_to_string(f)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     #[test]
@@ -301,16 +313,28 @@ mod tests {
             "proton_x",
         ];
         let cleared = inherited_proton_env(names.iter().map(std::ffi::OsString::from));
-        assert_eq!(cleared, ["WINEDLLOVERRIDES", "PROTON_USE_WINED3D", "PROTON_LOG"]);
+        assert_eq!(
+            cleared,
+            ["WINEDLLOVERRIDES", "PROTON_USE_WINED3D", "PROTON_LOG"]
+        );
     }
 
     #[test]
     fn prefix_dir_follows_the_init() {
         let root = Root::at(PathBuf::from("/home/x"));
         let s = root.try_session_dir("s").unwrap();
-        assert_eq!(prefix_dir(&root, "s", &PrefixInit::Wineboot).unwrap(), s.join("prefix"));
-        let proton = PrefixInit::Proton { steam_client: PathBuf::from("/steam"), app_id: None };
-        assert_eq!(prefix_dir(&root, "s", &proton).unwrap(), s.join("compat").join("pfx"));
+        assert_eq!(
+            prefix_dir(&root, "s", &PrefixInit::Wineboot).unwrap(),
+            s.join("prefix")
+        );
+        let proton = PrefixInit::Proton {
+            steam_client: PathBuf::from("/steam"),
+            app_id: None,
+        };
+        assert_eq!(
+            prefix_dir(&root, "s", &proton).unwrap(),
+            s.join("compat").join("pfx")
+        );
         assert!(prefix_dir(&root, "../x", &proton).is_err());
     }
 
@@ -320,16 +344,26 @@ mod tests {
         let root = Root::at(scratch("pi-home"));
         let steam = scratch("pi-steam");
         let rt = fake_proton_runtime("pi-rt", "GE-Proton99-1", "");
-        let init = PrefixInit::Proton { steam_client: steam.clone(), app_id: Some(489830) };
+        let init = PrefixInit::Proton {
+            steam_client: steam.clone(),
+            app_id: Some(489830),
+        };
         let p = ensure_with(&root, &rt, "s", &init).unwrap();
         assert_eq!(p.dir, prefix_dir(&root, "s", &init).unwrap());
         assert!(p.drive_c().join("windows").join("system32").is_dir());
         assert_eq!(
             calls(&root, "s"),
-            [format!("run cmd /c exit|{}|489830|489830|1", steam.display())]
+            [format!(
+                "run cmd /c exit|{}|489830|489830|1",
+                steam.display()
+            )]
         );
         ensure_with(&root, &rt, "s", &init).unwrap();
-        assert_eq!(calls(&root, "s").len(), 1, "an up-to-date prefix is not set up again");
+        assert_eq!(
+            calls(&root, "s").len(),
+            1,
+            "an up-to-date prefix is not set up again"
+        );
     }
 
     #[cfg(unix)]
@@ -338,7 +372,10 @@ mod tests {
         let root = Root::at(scratch("pu-home"));
         let steam = scratch("pu-steam");
         let rt = fake_proton_runtime("pu-rt", "GE-Proton99-1", "");
-        let init = PrefixInit::Proton { steam_client: steam, app_id: None };
+        let init = PrefixInit::Proton {
+            steam_client: steam,
+            app_id: None,
+        };
         ensure_with(&root, &rt, "s", &init).unwrap();
         std::fs::write(rt.join("version"), "2 GE-Proton99-2\n").unwrap();
         ensure_with(&root, &rt, "s", &init).unwrap();
@@ -346,18 +383,31 @@ mod tests {
         assert_eq!(c.len(), 2, "{c:?}");
         assert!(c[1].ends_with("|0|0|1"), "no app id is sent as 0: {}", c[1]);
         let compat = root.try_session_dir("s").unwrap().join("compat");
-        assert_eq!(proton_prefix_version(&compat).as_deref(), Some("GE-Proton99-2"));
+        assert_eq!(
+            proton_prefix_version(&compat).as_deref(),
+            Some("GE-Proton99-2")
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn a_failing_proton_setup_reports_its_log() {
         let root = Root::at(scratch("pf-home"));
-        let rt = fake_proton_runtime("pf-rt", "GE-Proton99-1", "echo boom-from-proton >&2; exit 7");
-        let init = PrefixInit::Proton { steam_client: scratch("pf-steam"), app_id: None };
+        let rt = fake_proton_runtime(
+            "pf-rt",
+            "GE-Proton99-1",
+            "echo boom-from-proton >&2; exit 7",
+        );
+        let init = PrefixInit::Proton {
+            steam_client: scratch("pf-steam"),
+            app_id: None,
+        };
         match ensure_with(&root, &rt, "s", &init) {
             Err(PrefixError::ProtonInit(m)) => {
-                assert!(m.contains("boom-from-proton") && m.contains(PROTON_INIT_LOG), "{m}")
+                assert!(
+                    m.contains("boom-from-proton") && m.contains(PROTON_INIT_LOG),
+                    "{m}"
+                )
             }
             other => panic!("expected ProtonInit, got {other:?}"),
         }
@@ -368,7 +418,10 @@ mod tests {
     fn proton_setup_that_leaves_no_prefix_is_an_error() {
         let root = Root::at(scratch("pn-home"));
         let rt = fake_proton_runtime("pn-rt", "GE-Proton99-1", "exit 0");
-        let init = PrefixInit::Proton { steam_client: scratch("pn-steam"), app_id: None };
+        let init = PrefixInit::Proton {
+            steam_client: scratch("pn-steam"),
+            app_id: None,
+        };
         match ensure_with(&root, &rt, "s", &init) {
             Err(PrefixError::ProtonInit(m)) => assert!(m.contains("system32"), "{m}"),
             other => panic!("expected ProtonInit, got {other:?}"),
@@ -380,11 +433,22 @@ mod tests {
     fn a_missing_steam_client_or_a_non_ge_runtime_is_refused_before_proton_runs() {
         let root = Root::at(scratch("pm-home"));
         let rt = fake_proton_runtime("pm-rt", "GE-Proton99-1", "");
-        let missing = PrefixInit::Proton { steam_client: scratch("pm-x").join("nope"), app_id: None };
-        assert!(matches!(ensure_with(&root, &rt, "s", &missing), Err(PrefixError::ProtonInit(m)) if m.contains("nope")));
+        let missing = PrefixInit::Proton {
+            steam_client: scratch("pm-x").join("nope"),
+            app_id: None,
+        };
+        assert!(
+            matches!(ensure_with(&root, &rt, "s", &missing), Err(PrefixError::ProtonInit(m)) if m.contains("nope"))
+        );
         std::fs::write(rt.join("version"), "1 proton-9.0-4\n").unwrap();
-        let init = PrefixInit::Proton { steam_client: scratch("pm-steam"), app_id: None };
-        assert!(matches!(ensure_with(&root, &rt, "s", &init), Err(PrefixError::NotGe(_))));
+        let init = PrefixInit::Proton {
+            steam_client: scratch("pm-steam"),
+            app_id: None,
+        };
+        assert!(matches!(
+            ensure_with(&root, &rt, "s", &init),
+            Err(PrefixError::NotGe(_))
+        ));
         assert!(calls(&root, "s").is_empty(), "proton never ran");
     }
 }

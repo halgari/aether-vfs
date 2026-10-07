@@ -7,7 +7,10 @@ use std::io;
 /// child still running at the deadline is killed and reaped. `Ok(true)` when
 /// it finished by itself (whatever its exit status), `Ok(false)` when it had
 /// to be killed.
-pub(crate) fn run_bounded(cmd: &mut std::process::Command, timeout: std::time::Duration) -> io::Result<bool> {
+pub(crate) fn run_bounded(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> io::Result<bool> {
     Ok(run_bounded_status(cmd, timeout)?.is_some())
 }
 
@@ -108,13 +111,31 @@ mod tests {
     fn run_bounded_kills_a_child_past_its_deadline() {
         use std::time::{Duration, Instant};
         let start = Instant::now();
-        let finished =
-            run_bounded(std::process::Command::new("sleep").arg("30"), Duration::from_millis(200))
-                .unwrap();
+        let finished = run_bounded(
+            std::process::Command::new("sleep").arg("30"),
+            Duration::from_millis(200),
+        )
+        .unwrap();
         assert!(!finished, "a child past its deadline is reported as killed");
-        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
-        assert!(run_bounded(&mut std::process::Command::new("true"), Duration::from_secs(10)).unwrap());
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(
+            run_bounded(
+                &mut std::process::Command::new("true"),
+                Duration::from_secs(10)
+            )
+            .unwrap()
+        );
         // A failing exit status still counts as finished.
-        assert!(run_bounded(&mut std::process::Command::new("false"), Duration::from_secs(10)).unwrap());
+        assert!(
+            run_bounded(
+                &mut std::process::Command::new("false"),
+                Duration::from_secs(10)
+            )
+            .unwrap()
+        );
     }
 }

@@ -50,7 +50,8 @@ mod test_support {
     use std::path::{Path, PathBuf};
 
     pub(super) fn tmpdir(tag: &str) -> PathBuf {
-        let d = crate::test_tmp::dir().join(format!("vfs-proton-nvapi-{}-{tag}", std::process::id()));
+        let d =
+            crate::test_tmp::dir().join(format!("vfs-proton-nvapi-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

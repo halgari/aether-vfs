@@ -218,7 +218,12 @@ impl Line {
         outcome: impl Into<String>,
         note: impl Into<String>,
     ) -> Self {
-        Line { vector, spelling: spelling.into(), outcome: outcome.into(), note: note.into() }
+        Line {
+            vector,
+            spelling: spelling.into(),
+            outcome: outcome.into(),
+            note: note.into(),
+        }
     }
 
     fn render(&self) -> String {
@@ -235,8 +240,17 @@ impl Line {
 /// A result line never gets to be blank or missing: a construction that
 /// cannot be attempted here reports `unbuildable` with its reason, in the
 /// same shape as every other outcome.
-fn unbuildable(vector: &'static str, spelling: impl Into<String>, reason: impl Into<String>) -> Line {
-    Line::new(vector, spelling, format!("unbuildable:{}", reason.into()), "")
+fn unbuildable(
+    vector: &'static str,
+    spelling: impl Into<String>,
+    reason: impl Into<String>,
+) -> Line {
+    Line::new(
+        vector,
+        spelling,
+        format!("unbuildable:{}", reason.into()),
+        "",
+    )
 }
 
 /// Tab/newline-safe for the one-line-per-attempt contract; attempted
@@ -387,7 +401,9 @@ fn nt_outcome(result: Result<ffi::Handle, ffi::NtCreateError>) -> String {
         {
             "not-found".to_string()
         }
-        Err(ffi::NtCreateError::Status(status)) => format!("error:ntstatus:0x{:08X}", status as u32),
+        Err(ffi::NtCreateError::Status(status)) => {
+            format!("error:ntstatus:0x{:08X}", status as u32)
+        }
     }
 }
 
@@ -519,7 +535,9 @@ fn normalize_target(input: &str) -> String {
     let abs = if p.is_absolute() {
         p.to_path_buf()
     } else {
-        std::env::current_dir().map(|cwd| cwd.join(p)).unwrap_or_else(|_| p.to_path_buf())
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
     };
     abs.to_string_lossy().replace('/', "\\")
 }
@@ -563,7 +581,11 @@ fn vector1_short_name(abs: &str) -> Line {
         unsafe { ffi::GetShortPathNameW(wide_abs.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) }
     });
     match short {
-        None => unbuildable("1", abs, format!("GetShortPathNameW failed: win32:{}", last_error())),
+        None => unbuildable(
+            "1",
+            abs,
+            format!("GetShortPathNameW failed: win32:{}", last_error()),
+        ),
         Some(short) if short.eq_ignore_ascii_case(abs) => unbuildable(
             "1",
             short,
@@ -594,10 +616,18 @@ fn vector2_extended_length(abs: &str) -> Line {
 // ---------------------------------------------------------------------
 fn vector3_device_path(abs: &str) -> Line {
     let Some((drive, rest)) = split_drive(abs) else {
-        return unbuildable("3", abs, "target path has no drive letter to resolve a device for");
+        return unbuildable(
+            "3",
+            abs,
+            "target path has no drive letter to resolve a device for",
+        );
     };
     match ffi::query_dos_device(drive) {
-        None => unbuildable("3", abs, format!("QueryDosDeviceW({drive}:) failed: win32:{}", last_error())),
+        None => unbuildable(
+            "3",
+            abs,
+            format!("QueryDosDeviceW({drive}:) failed: win32:{}", last_error()),
+        ),
         Some(device) if !device.to_ascii_lowercase().starts_with(r"\device\") => unbuildable(
             "3",
             abs,
@@ -709,13 +739,20 @@ fn vector3d_global_symlink(abs: &str) -> Line {
 // ---------------------------------------------------------------------
 fn vector4_volume_guid(abs: &str) -> Line {
     let Some((drive, rest)) = split_drive(abs) else {
-        return unbuildable("4", abs, "target path has no drive letter to resolve a volume GUID for");
+        return unbuildable(
+            "4",
+            abs,
+            "target path has no drive letter to resolve a volume GUID for",
+        );
     };
     match ffi::volume_guid_for_drive(drive) {
         None => unbuildable(
             "4",
             abs,
-            format!("GetVolumeNameForVolumeMountPointW({drive}:\\) failed: win32:{}", last_error()),
+            format!(
+                "GetVolumeNameForVolumeMountPointW({drive}:\\) failed: win32:{}",
+                last_error()
+            ),
         ),
         Some(guid) => {
             let spelling = format!("{}{}", guid.trim_end_matches('\\'), rest);
@@ -733,13 +770,20 @@ fn vector4_volume_guid(abs: &str) -> Line {
 // ---------------------------------------------------------------------
 fn vector4_metadata_query(abs: &str) -> Line {
     let Some((drive, rest)) = split_drive(abs) else {
-        return unbuildable("4m", abs, "target path has no drive letter to resolve a volume GUID for");
+        return unbuildable(
+            "4m",
+            abs,
+            "target path has no drive letter to resolve a volume GUID for",
+        );
     };
     match ffi::volume_guid_for_drive(drive) {
         None => unbuildable(
             "4m",
             abs,
-            format!("GetVolumeNameForVolumeMountPointW({drive}:\\) failed: win32:{}", last_error()),
+            format!(
+                "GetVolumeNameForVolumeMountPointW({drive}:\\) failed: win32:{}",
+                last_error()
+            ),
         ),
         Some(guid) => {
             let spelling = format!("{}{}", guid.trim_end_matches('\\'), rest);
@@ -772,7 +816,11 @@ const ENUM_NAME_SEP: char = '|';
 
 fn vector_enum_listing(abs: &str) -> Line {
     let Some((dir, _name)) = parent_dir_and_filename(abs) else {
-        return unbuildable("enum", abs, "target path has no parent directory to enumerate");
+        return unbuildable(
+            "enum",
+            abs,
+            "target path has no parent directory to enumerate",
+        );
     };
     // `std::fs::read_dir` is `FindFirstFileW`/`FindNextFileW` on Windows,
     // which reaches `NtOpenFile` on the directory plus
@@ -801,7 +849,12 @@ fn vector_enum_listing(abs: &str) -> Line {
             // caller can assert presence *and* absence, and a listing that
             // came back empty is never mistaken for one that was not
             // attempted.
-            Line::new("enum", dir, format!("listed:{}", names.len()), names.join(&ENUM_NAME_SEP.to_string()))
+            Line::new(
+                "enum",
+                dir,
+                format!("listed:{}", names.len()),
+                names.join(&ENUM_NAME_SEP.to_string()),
+            )
         }
     }
 }
@@ -849,7 +902,8 @@ fn vector5b_unresolvable_handle(abs: &str) -> Line {
     let mut write_handle: ffi::Handle = std::ptr::null_mut();
     // SAFETY: FFI. Both out-pointers are valid locals; `nSize` 0 asks for
     // the system default buffer size.
-    let created = unsafe { ffi::CreatePipe(&mut read_handle, &mut write_handle, std::ptr::null_mut(), 0) };
+    let created =
+        unsafe { ffi::CreatePipe(&mut read_handle, &mut write_handle, std::ptr::null_mut(), 0) };
     if created == 0 {
         return unbuildable(
             "5b",
@@ -915,7 +969,12 @@ fn vector7_junction(abs: &str) -> Line {
     if let Ok(link_dir_str) = std::env::var("VFS_ESCAPE_VECTOR7_LINK_DIR") {
         let spelling = format!(r"{link_dir_str}\{name}");
         let outcome = attempt("7", &spelling);
-        return Line::new("7", spelling, outcome, "pre-existing junction supplied by the caller");
+        return Line::new(
+            "7",
+            spelling,
+            outcome,
+            "pre-existing junction supplied by the caller",
+        );
     }
 
     let link_dir = std::env::temp_dir().join(format!("vfs-escape-junction-{}", std::process::id()));
@@ -944,11 +1003,17 @@ fn vector7_junction(abs: &str) -> Line {
                 detail.push_str(" / stderr: ");
                 detail.push_str(stderr.trim());
             }
-            unbuildable("7", format!(r"{link_dir_str}\{name}"), format!("mklink /J failed: {detail}"))
+            unbuildable(
+                "7",
+                format!(r"{link_dir_str}\{name}"),
+                format!("mklink /J failed: {detail}"),
+            )
         }
-        Err(e) => {
-            unbuildable("7", format!(r"{link_dir_str}\{name}"), format!("could not spawn cmd for mklink: {e}"))
-        }
+        Err(e) => unbuildable(
+            "7",
+            format!(r"{link_dir_str}\{name}"),
+            format!("could not spawn cmd for mklink: {e}"),
+        ),
     }
 }
 
@@ -1073,7 +1138,10 @@ fn vector9_alias_drive(abs: &str) -> Line {
 fn free_drive_letter() -> Option<char> {
     // SAFETY: FFI, no arguments, no preconditions.
     let mask = unsafe { ffi::GetLogicalDrives() };
-    (b'D'..=b'Z').rev().map(|b| b as char).find(|c| mask & (1u32 << (*c as u32 - 'A' as u32)) == 0)
+    (b'D'..=b'Z')
+        .rev()
+        .map(|b| b as char)
+        .find(|c| mask & (1u32 << (*c as u32 - 'A' as u32)) == 0)
 }
 
 fn case_flip(s: &str) -> String {
@@ -1100,7 +1168,11 @@ fn case_flip(s: &str) -> String {
 fn vector10a_case_fold(abs: &str) -> Line {
     let flipped = case_flip(abs);
     if flipped == abs {
-        return unbuildable("10a", abs, "target path has no alphabetic characters to case-flip");
+        return unbuildable(
+            "10a",
+            abs,
+            "target path has no alphabetic characters to case-flip",
+        );
     }
     let spelling = format!(r"\\?\{flipped}");
     let outcome = attempt("10a", &spelling);
@@ -1283,15 +1355,23 @@ fn vector14_child_without_shim(abs: &str) -> Line {
                         (force-suspend, inject, give up on timeout), so a pass here would be a \
                         pass about scheduling. See rust/docs/escape-matrix.md, 'Gate 4, Task 8'.";
             let spelling = format!("cmd /C type {abs}");
-            match std::process::Command::new("cmd").arg("/C").arg("type").arg(abs).output() {
+            match std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("type")
+                .arg(abs)
+                .output()
+            {
                 Ok(out) if out.status.success() => Line::new("14", spelling, "opened", note),
                 Ok(out) => {
                     let code = out.status.code().unwrap_or(-1);
                     Line::new("14", spelling, format!("error:cmd-exit:{code}"), note)
                 }
-                Err(e) => {
-                    Line::new("14", spelling, format!("unbuildable:could not spawn cmd: {e}"), note)
-                }
+                Err(e) => Line::new(
+                    "14",
+                    spelling,
+                    format!("unbuildable:could not spawn cmd: {e}"),
+                    note,
+                ),
             }
         }
         // A **sibling** of the target, not the target — see the module doc's
@@ -1324,15 +1404,22 @@ fn vector14_child_without_shim(abs: &str) -> Line {
             // rediscovered).
             use std::os::windows::process::CommandExt;
             let command = format!("echo v14-child-write>\"{sibling}\"");
-            match std::process::Command::new("cmd").arg("/C").raw_arg(&command).output() {
+            match std::process::Command::new("cmd")
+                .arg("/C")
+                .raw_arg(&command)
+                .output()
+            {
                 Ok(out) if out.status.success() => Line::new("14", spelling, "written", note),
                 Ok(out) => {
                     let code = out.status.code().unwrap_or(-1);
                     Line::new("14", spelling, format!("error:cmd-exit:{code}"), note)
                 }
-                Err(e) => {
-                    Line::new("14", spelling, format!("unbuildable:could not spawn cmd: {e}"), note)
-                }
+                Err(e) => Line::new(
+                    "14",
+                    spelling,
+                    format!("unbuildable:could not spawn cmd: {e}"),
+                    note,
+                ),
             }
         }
     }
@@ -1429,7 +1516,9 @@ pub fn main() {
         lines.push(guarded("3", || vector3_device_path(&abs)));
     }
     if wanted("3b") {
-        lines.push(guarded("3b", || vector3b_globalroot_global_dosdevices(&abs)));
+        lines.push(guarded("3b", || {
+            vector3b_globalroot_global_dosdevices(&abs)
+        }));
     }
     if wanted("3c") {
         lines.push(guarded("3c", || vector3c_globalroot_dosdevices(&abs)));

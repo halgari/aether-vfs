@@ -82,7 +82,11 @@ extern "system" {
         cchBufferLength: u32,
     ) -> i32;
 
-    pub fn GetShortPathNameW(lpszLongPath: *const u16, lpszShortPath: *mut u16, cchBuffer: u32) -> u32;
+    pub fn GetShortPathNameW(
+        lpszLongPath: *const u16,
+        lpszShortPath: *mut u16,
+        cchBuffer: u32,
+    ) -> u32;
 
     pub fn GetModuleHandleW(lpModuleName: *const u16) -> Handle;
     pub fn GetProcAddress(hModule: Handle, lpProcName: *const u8) -> *mut c_void;
@@ -253,7 +257,12 @@ pub fn nt_create_relative(
     root_directory: Handle,
     relative_name: &str,
 ) -> Result<Handle, NtCreateError> {
-    nt_create_relative_with(root_directory, relative_name, GENERIC_READ | SYNCHRONIZE, FILE_OPEN)
+    nt_create_relative_with(
+        root_directory,
+        relative_name,
+        GENERIC_READ | SYNCHRONIZE,
+        FILE_OPEN,
+    )
 }
 
 /// [`nt_create_relative`] for the write half of the matrix: read+write access
@@ -442,7 +451,13 @@ pub fn read_all(handle: Handle) -> Option<Vec<u8>> {
         // `read` is a valid local `u32` out-pointer. `lpOverlapped` is null,
         // matching the synchronous handles every caller here opens.
         let ok = unsafe {
-            ReadFile(handle, buf.as_mut_ptr() as *mut c_void, CHUNK as u32, &mut read, std::ptr::null_mut())
+            ReadFile(
+                handle,
+                buf.as_mut_ptr() as *mut c_void,
+                CHUNK as u32,
+                &mut read,
+                std::ptr::null_mut(),
+            )
         };
         if ok == 0 {
             return if i == 0 { None } else { Some(out) };

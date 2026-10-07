@@ -60,7 +60,7 @@ pub fn status_on(host: &Host, runtime: &Path, disabled: bool) -> NvapiStatus {
                 "an NVIDIA GPU is present but the NVIDIA driver is not loaded \
                  (NVAPI and DLSS need NVIDIA's own driver, not nouveau or nova)"
                     .to_string(),
-            )
+            );
         }
         Gpu::Nvidia(_) => {}
     }

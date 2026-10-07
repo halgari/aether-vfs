@@ -3,9 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use super::{absolute, path_string, LaunchError, WineLaunch};
+use super::{LaunchError, WineLaunch, absolute, path_string};
 use crate::runtime::runtime_lib_env;
-use crate::steam::{SteamSide, STEAM_HELPER, STEAM_HELPER_OVERRIDE};
+use crate::steam::{STEAM_HELPER, STEAM_HELPER_OVERRIDE, SteamSide};
 
 /// `WINEDLLOVERRIDES` every launch carries: Mono and Gecko prompts would
 /// otherwise block a launch on a fresh prefix.
@@ -96,8 +96,14 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
 
     env.insert(vfs_env::RING_PATH.to_string(), path_string(&l.ring_path));
     env.insert(vfs_env::RING_BYTES.to_string(), l.ring_bytes.to_string());
-    env.insert(vfs_env::RING_PAYLOAD_CAP.to_string(), l.payload_cap.to_string());
-    env.insert(vfs_env::ARENA_OFFSET.to_string(), l.arena_offset.to_string());
+    env.insert(
+        vfs_env::RING_PAYLOAD_CAP.to_string(),
+        l.payload_cap.to_string(),
+    );
+    env.insert(
+        vfs_env::ARENA_OFFSET.to_string(),
+        l.arena_offset.to_string(),
+    );
     env.insert(vfs_env::ARENA_LEN.to_string(), l.arena_len.to_string());
     env.insert(vfs_env::VIRTUAL_DIR.to_string(), l.virtual_dir.clone());
     if let Some(spec) = vfs_env::handshake::encode_roots(&l.virtual_roots) {
@@ -153,7 +159,10 @@ pub fn launch_env(l: &WineLaunch) -> BTreeMap<String, String> {
     // After `extra_env`: an explicit timeout on the launch beats an inherited
     // or host-supplied one.
     if let Some(secs) = l.ready_timeout_secs {
-        env.insert(vfs_env::READY_TIMEOUT_SECS.to_string(), secs.max(1).to_string());
+        env.insert(
+            vfs_env::READY_TIMEOUT_SECS.to_string(),
+            secs.max(1).to_string(),
+        );
     }
     env
 }
@@ -222,7 +231,10 @@ pub fn merge_dll_overrides(base: &str, extra: &str) -> String {
             }
         }
     }
-    out.into_iter().map(|(_, e)| e).collect::<Vec<_>>().join(";")
+    out.into_iter()
+        .map(|(_, e)| e)
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 /// The inherited variables a launch clears because it did not set them itself,
@@ -252,14 +264,20 @@ mod tests {
             "{}",
             env["LD_LIBRARY_PATH"]
         );
-        assert!(env["WINEDLLPATH"].starts_with(&format!("{rt}/files/lib/vkd3d:{rt}/files/lib/wine")));
-        assert!(env.contains_key("ORIG_LD_LIBRARY_PATH") || std::env::var_os("ORIG_LD_LIBRARY_PATH").is_some());
+        assert!(
+            env["WINEDLLPATH"].starts_with(&format!("{rt}/files/lib/vkd3d:{rt}/files/lib/wine"))
+        );
+        assert!(
+            env.contains_key("ORIG_LD_LIBRARY_PATH")
+                || std::env::var_os("ORIG_LD_LIBRARY_PATH").is_some()
+        );
     }
 
     #[test]
     fn an_extra_env_ld_library_path_goes_after_the_runtime_dirs() {
         let mut l = sample();
-        l.extra_env.insert("LD_LIBRARY_PATH".to_string(), "/mine/lib".to_string());
+        l.extra_env
+            .insert("LD_LIBRARY_PATH".to_string(), "/mine/lib".to_string());
         let ld = launch_env(&l).remove("LD_LIBRARY_PATH").unwrap();
         let rt = path_string(&l.runtime);
         let rt_dirs = format!("{rt}/files/lib/x86_64-linux-gnu:{rt}/files/lib/i386-linux-gnu");
@@ -292,13 +310,19 @@ mod tests {
         let l = sample();
         let env = launch_env(&l);
         let stale = stale_env(&env);
-        for n in vfs_env::handshake::TRANSPORT.iter().chain(vfs_env::handshake::INJECT) {
+        for n in vfs_env::handshake::TRANSPORT
+            .iter()
+            .chain(vfs_env::handshake::INJECT)
+        {
             assert!(
                 env.contains_key(*n) != stale.contains(n),
                 "{n} must be exactly one of set or cleared"
             );
         }
-        assert!(stale.contains(&vfs_env::FUSE_CFG), "VFS_FUSE_CFG was missing from the old list");
+        assert!(
+            stale.contains(&vfs_env::FUSE_CFG),
+            "VFS_FUSE_CFG was missing from the old list"
+        );
     }
 
     #[test]
@@ -306,7 +330,10 @@ mod tests {
         let mut l = sample();
         assert!(!launch_env(&l).contains_key(vfs_env::REGISTRY));
         l.registry = true;
-        assert_eq!(launch_env(&l).get("VFS_REGISTRY").map(String::as_str), Some("1"));
+        assert_eq!(
+            launch_env(&l).get("VFS_REGISTRY").map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]
@@ -319,7 +346,10 @@ mod tests {
         let mut l = sample();
         l.ring_bytes = 33_751_040;
         let env = launch_env(&l);
-        assert_eq!(env.get("VFS_RING_BYTES").map(String::as_str), Some("33751040"));
+        assert_eq!(
+            env.get("VFS_RING_BYTES").map(String::as_str),
+            Some("33751040")
+        );
         assert!(env.contains_key("VFS_ARENA_LEN"));
         assert!(env.contains_key("VFS_ARENA_OFFSET"));
         assert!(env.contains_key("VFS_RING_PAYLOAD_CAP"));
@@ -384,7 +414,10 @@ mod tests {
 
     #[test]
     fn dll_overrides_merge_with_the_caller_winning_per_dll() {
-        assert_eq!(merge_dll_overrides(BASE_DLL_OVERRIDES, ""), "mscoree=d;mshtml=d");
+        assert_eq!(
+            merge_dll_overrides(BASE_DLL_OVERRIDES, ""),
+            "mscoree=d;mshtml=d"
+        );
         assert_eq!(
             merge_dll_overrides(BASE_DLL_OVERRIDES, "d3dx9_42=n,b"),
             "mscoree=d;mshtml=d;d3dx9_42=n,b",
@@ -395,7 +428,10 @@ mod tests {
             "mscoree=d;MSHTML=n;dxgi=n;d3d11=n",
             "the caller's entry replaces ours in place; a group splits per DLL"
         );
-        assert_eq!(merge_dll_overrides("a=d", "winemenubuilder"), "a=d;winemenubuilder");
+        assert_eq!(
+            merge_dll_overrides("a=d", "winemenubuilder"),
+            "a=d;winemenubuilder"
+        );
     }
 
     #[test]

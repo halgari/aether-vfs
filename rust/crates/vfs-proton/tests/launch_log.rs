@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use vfs_proton::launch::{run, LaunchFiles, RingGeometry, WineLaunch};
+use vfs_proton::launch::{LaunchFiles, RingGeometry, WineLaunch, run};
 
 fn scratch(tag: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR"))

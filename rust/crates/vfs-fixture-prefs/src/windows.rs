@@ -270,23 +270,36 @@ fn primitive_ladder(path: &str, out: &mut String) {
         let err = GetLastError();
         out.push_str(&format!(
             "setfilepointer\t{}\t{err}\n",
-            if pos == INVALID_SET_FILE_POINTER && err != 0 { "fail" } else { "ok" }
+            if pos == INVALID_SET_FILE_POINTER && err != 0 {
+                "fail"
+            } else {
+                "ok"
+            }
         ));
 
         SetLastError(0);
         let ok = LockFile(handle, 0, 0, LOCK_LEN, 0);
         let err = GetLastError();
-        out.push_str(&format!("lockfile\t{}\t{err}\n", if ok != 0 { "ok" } else { "fail" }));
+        out.push_str(&format!(
+            "lockfile\t{}\t{err}\n",
+            if ok != 0 { "ok" } else { "fail" }
+        ));
 
         SetLastError(0);
         let ok = UnlockFile(handle, 0, 0, LOCK_LEN, 0);
         let err = GetLastError();
-        out.push_str(&format!("unlockfile\t{}\t{err}\n", if ok != 0 { "ok" } else { "fail" }));
+        out.push_str(&format!(
+            "unlockfile\t{}\t{err}\n",
+            if ok != 0 { "ok" } else { "fail" }
+        ));
 
         SetLastError(0);
         let ok = FlushFileBuffers(handle);
         let err = GetLastError();
-        out.push_str(&format!("flushbuffers\t{}\t{err}\n", if ok != 0 { "ok" } else { "fail" }));
+        out.push_str(&format!(
+            "flushbuffers\t{}\t{err}\n",
+            if ok != 0 { "ok" } else { "fail" }
+        ));
 
         // An *asynchronous-shaped* lock: `LockFileEx` hands the OVERLAPPED's
         // event down to `NtLockFile` as its `Event`. This is the caller shape
@@ -312,7 +325,10 @@ fn primitive_ladder(path: &str, out: &mut String) {
             &mut ov,
         );
         let err = GetLastError();
-        out.push_str(&format!("lockfileex\t{}\t{err}\n", if ok != 0 { "ok" } else { "fail" }));
+        out.push_str(&format!(
+            "lockfileex\t{}\t{err}\n",
+            if ok != 0 { "ok" } else { "fail" }
+        ));
         if ok != 0 {
             SetLastError(0);
             UnlockFile(handle, 0, 0, LOCK_LEN, 0);
@@ -369,7 +385,10 @@ pub fn main() {
 
     if let Ok(value) = std::env::var(vfs_env::FIXTURE_INI_WRITE) {
         let (ok, err) = write_key(&path, &section, &key, &value);
-        out.push_str(&format!("write\t{}\t{err}\n", if ok { "ok" } else { "fail" }));
+        out.push_str(&format!(
+            "write\t{}\t{err}\n",
+            if ok { "ok" } else { "fail" }
+        ));
     }
 
     let (value, err) = read_key(&path, &section, &key);

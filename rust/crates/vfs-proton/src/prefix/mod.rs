@@ -10,10 +10,10 @@ mod links;
 mod wineserver;
 
 pub use init::{
-    ensure, ensure_with, prefix_dir, PrefixInit, PROTON_GRAPHICS_OVERRIDES, PROTON_INIT_LOG,
-    PROTON_INIT_TIMEOUT,
+    PROTON_GRAPHICS_OVERRIDES, PROTON_INIT_LOG, PROTON_INIT_TIMEOUT, PrefixInit, ensure,
+    ensure_with, prefix_dir,
 };
-pub use links::{parse_location, LINK_MANIFEST};
+pub use links::{LINK_MANIFEST, parse_location};
 pub use wineserver::WINESERVER_STOP_TIMEOUT;
 
 use std::io;
@@ -210,7 +210,9 @@ mod tests {
     /// held: the forked child briefly owns a copy of the descriptor.
     #[test]
     fn a_lock_released_while_another_thread_forks_is_not_busy() {
-        let p = Prefix { dir: scratch("lock-fork") };
+        let p = Prefix {
+            dir: scratch("lock-fork"),
+        };
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let forker = {
             let stop = stop.clone();
@@ -230,7 +232,9 @@ mod tests {
 
     #[test]
     fn a_second_lock_is_busy_and_the_lock_is_released_on_drop() {
-        let p = Prefix { dir: scratch("lock") };
+        let p = Prefix {
+            dir: scratch("lock"),
+        };
         let held = p.lock().unwrap();
         assert!(matches!(p.lock(), Err(PrefixError::Busy(_))));
         drop(held);

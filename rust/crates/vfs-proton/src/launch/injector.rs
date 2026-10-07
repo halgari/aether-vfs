@@ -37,7 +37,8 @@ pub fn describe_injector_error(raw: &str) -> String {
     }
     format!(
         "injection failed: {}",
-        raw.strip_prefix(vfs_env::INJECTOR_FAILED_PREFIX).unwrap_or(raw)
+        raw.strip_prefix(vfs_env::INJECTOR_FAILED_PREFIX)
+            .unwrap_or(raw)
     )
 }
 
@@ -48,12 +49,21 @@ mod tests {
     #[test]
     fn injector_reports_are_described() {
         let dll = describe_injector_error("target-exited:0xc0000135\n");
-        assert!(dll.contains("0xc0000135") && dll.contains("STATUS_DLL_NOT_FOUND"), "{dll}");
+        assert!(
+            dll.contains("0xc0000135") && dll.contains("STATUS_DLL_NOT_FOUND"),
+            "{dll}"
+        );
         let other = describe_injector_error("target-exited:0x1");
-        assert!(other.contains("0x1") && other.contains("before the shim reported ready"), "{other}");
+        assert!(
+            other.contains("0x1") && other.contains("before the shim reported ready"),
+            "{other}"
+        );
         let t = describe_injector_error("ready-timeout:180");
         assert!(t.contains("180 s"), "{t}");
-        assert_eq!(describe_injector_error("inject:CreateProcess"), "injection failed: CreateProcess");
+        assert_eq!(
+            describe_injector_error("inject:CreateProcess"),
+            "injection failed: CreateProcess"
+        );
         assert_eq!(
             injector_error_path(Path::new("/s/ready.flag")),
             Path::new("/s/ready.flag.injector-error")

@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 
 use super::{Prefix, PrefixError};
 
-
-
 #[cfg(unix)]
 fn make_symlink(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -82,8 +80,6 @@ pub fn parse_location(location: &str) -> Result<Vec<String>, PrefixError> {
     Ok(comps)
 }
 
-
-
 #[cfg(unix)]
 fn path_bytes(p: &Path) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
@@ -94,8 +90,6 @@ fn path_bytes(p: &Path) -> Vec<u8> {
 fn path_bytes(p: &Path) -> Vec<u8> {
     p.to_string_lossy().into_owned().into_bytes()
 }
-
-
 
 #[cfg(unix)]
 fn path_from_bytes(b: &[u8]) -> PathBuf {
@@ -279,11 +273,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn link_location_reuses_existing_parents_case_insensitively() {
-        let p = Prefix { dir: scratch("ll-case") };
+        let p = Prefix {
+            dir: scratch("ll-case"),
+        };
         std::fs::create_dir_all(p.drive_c().join("users").join("steamuser")).unwrap();
         let target = scratch("ll-case-target");
-        let link = p.link_location(r"C:\Users\SteamUser\Saves", &target).unwrap();
-        assert_eq!(link, p.drive_c().join("users").join("steamuser").join("Saves"));
+        let link = p
+            .link_location(r"C:\Users\SteamUser\Saves", &target)
+            .unwrap();
+        assert_eq!(
+            link,
+            p.drive_c().join("users").join("steamuser").join("Saves")
+        );
         assert_eq!(std::fs::read_link(&link).unwrap(), target);
         assert!(
             !p.drive_c().join("Users").exists(),
@@ -291,22 +292,32 @@ mod tests {
         );
         // Relinking under another spelling finds and replaces our own link.
         let target2 = scratch("ll-case-target2");
-        let link2 = p.link_location(r"c:\USERS\steamuser\saves", &target2).unwrap();
+        let link2 = p
+            .link_location(r"c:\USERS\steamuser\saves", &target2)
+            .unwrap();
         let entries: Vec<_> = std::fs::read_dir(p.drive_c().join("users").join("steamuser"))
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(entries.len(), 1, "the old link must be replaced, not joined: {entries:?}");
+        assert_eq!(
+            entries.len(),
+            1,
+            "the old link must be replaced, not joined: {entries:?}"
+        );
         assert_eq!(std::fs::read_link(&link2).unwrap(), target2);
     }
 
     #[cfg(unix)]
     #[test]
     fn link_location_refuses_a_real_directory_spelled_differently() {
-        let p = Prefix { dir: scratch("ll-case-real") };
+        let p = Prefix {
+            dir: scratch("ll-case-real"),
+        };
         let real = p.drive_c().join("games").join("mine");
         std::fs::create_dir_all(&real).unwrap();
-        let err = p.link_location(r"C:\Games\Mine", &scratch("ll-case-t")).unwrap_err();
+        let err = p
+            .link_location(r"C:\Games\Mine", &scratch("ll-case-t"))
+            .unwrap_err();
         assert!(matches!(err, PrefixError::BadLocation(_)), "{err}");
         assert!(real.is_dir() && !real.is_symlink());
     }
@@ -314,13 +325,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn link_location_refuses_to_replace_a_real_directory() {
-        let p = Prefix { dir: scratch("ll-real") };
+        let p = Prefix {
+            dir: scratch("ll-real"),
+        };
         let real = p.drive_c().join("Games").join("Mine");
         std::fs::create_dir_all(&real).unwrap();
         std::fs::write(real.join("keep.txt"), b"keep").unwrap();
-        let err = p.link_location(r"C:\Games\Mine", &scratch("ll-t")).unwrap_err();
+        let err = p
+            .link_location(r"C:\Games\Mine", &scratch("ll-t"))
+            .unwrap_err();
         assert!(matches!(err, PrefixError::BadLocation(_)), "{err}");
-        assert!(real.join("keep.txt").is_file(), "a real directory must never be removed");
+        assert!(
+            real.join("keep.txt").is_file(),
+            "a real directory must never be removed"
+        );
     }
 
     /// A user's own symlink at a root location in a persistent prefix is not
@@ -328,17 +346,25 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn link_location_refuses_a_symlink_it_did_not_create() {
-        let p = Prefix { dir: scratch("ll-foreign") };
+        let p = Prefix {
+            dir: scratch("ll-foreign"),
+        };
         let theirs = scratch("ll-foreign-theirs");
         std::fs::create_dir_all(p.drive_c().join("Games")).unwrap();
         let at = p.drive_c().join("Games").join("Skyrim");
         std::os::unix::fs::symlink(&theirs, &at).unwrap();
-        let err = p.link_location(r"C:\Games\Skyrim", &scratch("ll-foreign-t")).unwrap_err();
+        let err = p
+            .link_location(r"C:\Games\Skyrim", &scratch("ll-foreign-t"))
+            .unwrap_err();
         assert!(
             matches!(&err, PrefixError::BadLocation(m) if m.contains("did not create")),
             "{err}"
         );
-        assert_eq!(std::fs::read_link(&at).unwrap(), theirs, "their link must survive");
+        assert_eq!(
+            std::fs::read_link(&at).unwrap(),
+            theirs,
+            "their link must survive"
+        );
         assert!(p.read_manifest().unwrap().is_empty());
         // Nor does `unlink_location` touch it, even naming its exact target.
         assert!(!p.unlink_location(&at, &theirs).unwrap());
@@ -348,7 +374,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn our_links_are_recorded_and_unlink_removes_them_from_the_manifest() {
-        let p = Prefix { dir: scratch("ll-manifest") };
+        let p = Prefix {
+            dir: scratch("ll-manifest"),
+        };
         let t1 = scratch("ll-manifest-t1");
         let t2 = scratch("ll-manifest-t2");
         let a = p.link_location(r"C:\Games\A", &t1).unwrap();
@@ -380,9 +408,24 @@ mod tests {
 
     #[test]
     fn parse_location_names_components_under_drive_c() {
-        assert_eq!(parse_location(r"C:\Games\Fixture").unwrap(), ["Games", "Fixture"]);
-        assert_eq!(parse_location("c:/Games/./Fixture/").unwrap(), ["Games", "Fixture"]);
-        for bad in [r"D:\Games", r"C:\a\..\b", r"C:\", "C:", "Games", "/tmp/x", r"\\srv\share\x", ""] {
+        assert_eq!(
+            parse_location(r"C:\Games\Fixture").unwrap(),
+            ["Games", "Fixture"]
+        );
+        assert_eq!(
+            parse_location("c:/Games/./Fixture/").unwrap(),
+            ["Games", "Fixture"]
+        );
+        for bad in [
+            r"D:\Games",
+            r"C:\a\..\b",
+            r"C:\",
+            "C:",
+            "Games",
+            "/tmp/x",
+            r"\\srv\share\x",
+            "",
+        ] {
             match parse_location(bad) {
                 Err(PrefixError::BadLocation(m)) => assert!(m.starts_with(bad), "{bad}: {m}"),
                 other => panic!("{bad:?} must be refused, got {other:?}"),
@@ -392,10 +435,15 @@ mod tests {
 
     #[test]
     fn link_location_refuses_other_drives_and_dot_dot() {
-        let p = Prefix { dir: scratch("ll-bad") };
+        let p = Prefix {
+            dir: scratch("ll-bad"),
+        };
         for bad in [r"D:\Games", r"C:\a\..\b", r"C:\", "Games", r"\\srv\share\x"] {
             assert!(
-                matches!(p.link_location(bad, Path::new("/tmp")), Err(PrefixError::BadLocation(_))),
+                matches!(
+                    p.link_location(bad, Path::new("/tmp")),
+                    Err(PrefixError::BadLocation(_))
+                ),
                 "{bad} must be refused"
             );
         }
