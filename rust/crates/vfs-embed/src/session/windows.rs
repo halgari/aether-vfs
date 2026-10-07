@@ -9,7 +9,7 @@ use std::time::Duration;
 use vfs_director::ipc::IpcServe;
 
 use super::stage::ResolvedImage;
-use super::{check_image, LaunchOpts, Session};
+use super::{LaunchOpts, Session, check_image};
 
 /// Serializes **every** process-global env mutation this crate performs —
 /// [`Session::serve`]'s as well as [`Session::launch`]'s.
@@ -207,11 +207,8 @@ impl Session {
         // Remote LoadLibrary resolves relative to the *child* cwd (managed root,
         // which is intentionally empty). Always use absolute DLL paths.
         // Strip the `\\?\` verbatim prefix — some LoadLibrary paths reject it.
-        let strip_verbatim = |s: String| {
-            s.strip_prefix(r"\\?\")
-                .map(|t| t.to_string())
-                .unwrap_or(s)
-        };
+        let strip_verbatim =
+            |s: String| s.strip_prefix(r"\\?\").map(|t| t.to_string()).unwrap_or(s);
         let dll = strip_verbatim(
             std::fs::canonicalize(&dll)
                 .map(|p| p.to_string_lossy().into_owned())

@@ -77,7 +77,10 @@ impl Session {
     pub(super) fn flush_registry(&self) {
         if let Some(host) = self.kernel.registry() {
             if let Err(st) = host.durable() {
-                tracing::error!(status = st, "registry overlay: durable point at stop failed");
+                tracing::error!(
+                    status = st,
+                    "registry overlay: durable point at stop failed"
+                );
             }
         }
     }
@@ -185,7 +188,10 @@ mod registry_layer_tests {
         assert!(s.registry_attached());
         assert!(s.kernel().registry().is_some());
         #[cfg(unix)]
-        assert_eq!(launch_env_of(&s).get("VFS_REGISTRY").map(String::as_str), Some("1"));
+        assert_eq!(
+            launch_env_of(&s).get("VFS_REGISTRY").map(String::as_str),
+            Some("1")
+        );
         s.set_registry_layer(None, None).unwrap();
         assert!(!s.registry_attached());
         assert!(s.kernel().registry().is_none());
@@ -212,13 +218,21 @@ mod registry_layer_tests {
         let second = read(&layer, "overlay.reg").unwrap();
         assert!(second.windows(3).any(|w| w == b"two"));
         assert!(!second.windows(3).any(|w| w == b"one"));
-        assert!(read(&layer, "overlay.reg.tmp").is_none(), "the temp file must be renamed away");
+        assert!(
+            read(&layer, "overlay.reg.tmp").is_none(),
+            "the temp file must be renamed away"
+        );
 
         // Replacing the layer flushes the old one first.
         host.set_value(KEY, "v", 1, b"six\0").unwrap();
         let (dir2, other) = storage_layer("flush2");
         s.set_registry_layer(Some(other), None).unwrap();
-        assert!(read(&layer, "overlay.reg").unwrap().windows(3).any(|w| w == b"six"));
+        assert!(
+            read(&layer, "overlay.reg")
+                .unwrap()
+                .windows(3)
+                .any(|w| w == b"six")
+        );
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(dir2);
     }

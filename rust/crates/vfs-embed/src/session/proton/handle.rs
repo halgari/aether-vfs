@@ -11,9 +11,9 @@ use vfs_proton::{
     steam::SteamSide,
 };
 
-use crate::session::LaunchExit;
 #[cfg(doc)]
 use super::ProtonState;
+use crate::session::LaunchExit;
 #[cfg(doc)]
 use crate::session::{LaunchOpts, Session};
 
@@ -116,7 +116,9 @@ impl LaunchStopper {
         if *ended {
             return Ok(());
         }
-        self.0.requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.0
+            .requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let result = self
             .0
             .prefix
@@ -156,8 +158,10 @@ pub(super) struct StartingGuard<'a> {
 #[cfg(unix)]
 impl Drop for StartingGuard<'_> {
     fn drop(&mut self) {
-        self.starting.store(false, std::sync::atomic::Ordering::SeqCst);
-        self.stop_pending.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.starting
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.stop_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -286,7 +290,12 @@ impl LaunchHandle {
     /// launch open forever would be worse than ending it with `wine`.
     fn prefix_quiet(&mut self, block: bool) -> Result<bool, String> {
         if self.quiet.is_none() {
-            match self.stopper.0.prefix.spawn_wineserver_wait(&self.stopper.0.runtime) {
+            match self
+                .stopper
+                .0
+                .prefix
+                .spawn_wineserver_wait(&self.stopper.0.runtime)
+            {
                 Ok(watch) => self.quiet = Some(watch),
                 Err(_) => return Ok(true),
             }
@@ -296,7 +305,10 @@ impl LaunchHandle {
             watch.wait().map_err(|e| format!("launch: {e}"))?;
             return Ok(true);
         }
-        Ok(watch.try_wait().map_err(|e| format!("launch: {e}"))?.is_some())
+        Ok(watch
+            .try_wait()
+            .map_err(|e| format!("launch: {e}"))?
+            .is_some())
     }
 
     /// Kills and reaps whatever of the launch this handle still has a

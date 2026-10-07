@@ -6,7 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use vfs_director::stage::{stage_launch_into, ImageSource};
+use vfs_director::stage::{ImageSource, stage_launch_into};
 use vfs_director::{Director, DiskProvider};
 use vfs_provider::{Provider, RootId};
 
@@ -346,9 +346,21 @@ mod launch_image_tests {
         s.mount("", Arc::new(DiskProvider::new(&c))).unwrap();
         let loc0 = s.root_locations()[0].location.clone();
         let img = image::join_location(&loc0, "game.exe");
-        let host = s.resolve_for_test(&LaunchOpts { image: img, ..Default::default() }).unwrap();
-        assert!(host.is_file(), "staged image must exist on the host: {}", host.display());
-        assert!(host.starts_with(s.virtual_root()), "staged into root 0's backing dir");
+        let host = s
+            .resolve_for_test(&LaunchOpts {
+                image: img,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            host.is_file(),
+            "staged image must exist on the host: {}",
+            host.display()
+        );
+        assert!(
+            host.starts_with(s.virtual_root()),
+            "staged into root 0's backing dir"
+        );
     }
 
     #[test]
@@ -356,15 +368,21 @@ mod launch_image_tests {
         let c = content("r1");
         let mut s = Session::new();
         let loc1 = if cfg!(windows) {
-            std::env::temp_dir().join(format!("vfs-li-r1loc-{}", std::process::id()))
-                .to_string_lossy().into_owned()
+            std::env::temp_dir()
+                .join(format!("vfs-li-r1loc-{}", std::process::id()))
+                .to_string_lossy()
+                .into_owned()
         } else {
             r"C:\users\steamuser\Saves".to_string()
         };
         s.declare_root(1, &loc1);
-        s.mount_at(RootId(1), "", Arc::new(DiskProvider::new(&c))).unwrap();
+        s.mount_at(RootId(1), "", Arc::new(DiskProvider::new(&c)))
+            .unwrap();
         let e = s
-            .resolve_for_test(&LaunchOpts { image: image::join_location(&loc1, "game.exe"), ..Default::default() })
+            .resolve_for_test(&LaunchOpts {
+                image: image::join_location(&loc1, "game.exe"),
+                ..Default::default()
+            })
             .unwrap_err();
         assert!(e.contains("root 1") && e.contains("root 0"), "{e}");
     }
@@ -372,10 +390,18 @@ mod launch_image_tests {
     #[test]
     fn an_image_no_root_serves_is_refused() {
         let s = Session::new();
-        let e = s.resolve_for_test(&LaunchOpts { image: "missing.exe".into(), ..Default::default() }).unwrap_err();
+        let e = s
+            .resolve_for_test(&LaunchOpts {
+                image: "missing.exe".into(),
+                ..Default::default()
+            })
+            .unwrap_err();
         // "nothing to stage" is the Windows launch's refusal text, which
         // `embed_api.rs`'s Windows-only launch test asserts on.
-        assert!(e.contains("missing.exe") && e.contains("nothing to stage"), "{e}");
+        assert!(
+            e.contains("missing.exe") && e.contains("nothing to stage"),
+            "{e}"
+        );
     }
 
     /// A drive-relative `C:foo.exe` is relative to `classify_image`, so it
@@ -392,9 +418,15 @@ mod launch_image_tests {
         }
         for img in ["C:foo.exe", r"bin\D:x.exe"] {
             let e = s
-                .resolve_for_test(&LaunchOpts { image: img.into(), ..Default::default() })
+                .resolve_for_test(&LaunchOpts {
+                    image: img.into(),
+                    ..Default::default()
+                })
                 .unwrap_err();
-            assert!(e.contains(&format!("{img:?}")) && e.contains("':'"), "{img}: {e}");
+            assert!(
+                e.contains(&format!("{img:?}")) && e.contains("':'"),
+                "{img}: {e}"
+            );
         }
     }
 
@@ -405,14 +437,23 @@ mod launch_image_tests {
         assert_eq!(s.root_locations()[0].location, r"C:\vfs-session\root");
         s.declare_root(0, r"C:\Games\Fixture");
         assert_eq!(s.root_locations()[0].location, r"C:\Games\Fixture");
-        assert_ne!(s.virtual_root(), Path::new(r"C:\Games\Fixture"), "virtual_root stays the host dir");
+        assert_ne!(
+            s.virtual_root(),
+            Path::new(r"C:\Games\Fixture"),
+            "virtual_root stays the host dir"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn unix_host_path_outside_every_root_is_refused() {
         let s = Session::new();
-        let e = s.resolve_for_test(&LaunchOpts { image: "/usr/bin/true".into(), ..Default::default() }).unwrap_err();
+        let e = s
+            .resolve_for_test(&LaunchOpts {
+                image: "/usr/bin/true".into(),
+                ..Default::default()
+            })
+            .unwrap_err();
         assert!(e.contains("no drive"), "{e}");
     }
 
@@ -426,7 +467,10 @@ mod launch_image_tests {
         let real = s.virtual_root().join("bin").join("real.exe");
         std::fs::write(&real, bare_pe()).unwrap();
         let host = s
-            .resolve_for_test(&LaunchOpts { image: real.to_string_lossy().into_owned(), ..Default::default() })
+            .resolve_for_test(&LaunchOpts {
+                image: real.to_string_lossy().into_owned(),
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(host, real);
     }

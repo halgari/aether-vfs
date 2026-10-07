@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use vfs_director::MountGraph;
-use vfs_provider::{bad_request, exists, map_io_err, Access, Provider, RootId};
+use vfs_provider::{Access, Provider, RootId, bad_request, exists, map_io_err};
 
 use super::Session;
 
@@ -40,8 +40,7 @@ pub fn compose_root(
     let graph: Arc<dyn Provider> = Arc::new(MountGraph::new(mounts)?);
     match write_layer {
         Some(upper) => Ok(Arc::new(
-            vfs_compose::OverlayProvider::from_arcs(graph, upper)
-                .map_err(|_| bad_request())?,
+            vfs_compose::OverlayProvider::from_arcs(graph, upper).map_err(|_| bad_request())?,
         )),
         None => Ok(graph),
     }
@@ -195,11 +194,7 @@ impl Session {
     /// session exactly as it was. Recording first and letting
     /// [`Session::recompose`] refuse would park a list that cannot compose,
     /// making every later `mount_at` on this root fail too.
-    pub fn set_root_mounts(
-        &self,
-        root: RootId,
-        mounts: crate::RootMounts,
-    ) -> Result<(), i32> {
+    pub fn set_root_mounts(&self, root: RootId, mounts: crate::RootMounts) -> Result<(), i32> {
         reject_sequential(mounts.iter().map(|(_, p)| p))?;
         {
             let mut roots = self.roots.lock().map_err(|_| map_io_err())?;
@@ -315,10 +310,7 @@ impl Session {
     /// callers as evidence the operation is unnecessary — read it as this
     /// project not yet having a host that tears a root down mid-session.
     pub fn clear_root(&self, root: RootId) -> Result<(), i32> {
-        self.roots
-            .lock()
-            .map_err(|_| map_io_err())?
-            .remove(&root.0);
+        self.roots.lock().map_err(|_| map_io_err())?.remove(&root.0);
         self.kernel.unmount(root)
     }
 
@@ -414,22 +406,39 @@ mod root_ownership_tests {
             "the hand-mounted provider must still be serving root 1"
         );
         assert!(
-            s.kernel().getattr(RootId(1), "session.txt").unwrap().is_none(),
+            s.kernel()
+                .getattr(RootId(1), "session.txt")
+                .unwrap()
+                .is_none(),
             "the refused mount must not be serving anything"
         );
 
         // Root 0 is unaffected: this is per-root ownership, not a session-wide
         // freeze.
-        s.mount("", Arc::new(DiskProvider::new(&session_layer))).unwrap();
-        assert!(s.kernel().getattr(RootId::DEFAULT, "session.txt").unwrap().is_some());
+        s.mount("", Arc::new(DiskProvider::new(&session_layer)))
+            .unwrap();
+        assert!(
+            s.kernel()
+                .getattr(RootId::DEFAULT, "session.txt")
+                .unwrap()
+                .is_some()
+        );
 
         // And the root can be handed over deliberately.
         s.clear_root(RootId(1)).unwrap();
         s.mount_at(RootId(1), "", Arc::new(DiskProvider::new(&session_layer)))
             .expect("an unmounted root may be taken over");
-        assert!(s.kernel().getattr(RootId(1), "session.txt").unwrap().is_some());
         assert!(
-            s.kernel().getattr(RootId(1), "hand.txt").unwrap_or(None).is_none(),
+            s.kernel()
+                .getattr(RootId(1), "session.txt")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            s.kernel()
+                .getattr(RootId(1), "hand.txt")
+                .unwrap_or(None)
+                .is_none(),
             "after the handover the hand-mounted provider is gone, as asked for"
         );
     }
@@ -447,8 +456,10 @@ mod root_ownership_tests {
         let content = dir("with-source", "content.txt");
 
         let s = Session::new();
-        s.mount_at(RootId(1), "", Arc::new(DiskProvider::new(&content))).unwrap();
-        s.set_write_layer_at(RootId(2), Arc::new(DiskProvider::new(&upper))).unwrap();
+        s.mount_at(RootId(1), "", Arc::new(DiskProvider::new(&content)))
+            .unwrap();
+        s.set_write_layer_at(RootId(2), Arc::new(DiskProvider::new(&upper)))
+            .unwrap();
 
         assert_eq!(
             s.composed_roots(),
@@ -469,8 +480,10 @@ mod root_ownership_tests {
         let second = dir("second", "second.txt");
 
         let s = Session::new();
-        s.mount_at(RootId(2), "", Arc::new(DiskProvider::new(&first))).unwrap();
-        s.mount_at(RootId(2), "", Arc::new(DiskProvider::new(&second))).unwrap();
+        s.mount_at(RootId(2), "", Arc::new(DiskProvider::new(&first)))
+            .unwrap();
+        s.mount_at(RootId(2), "", Arc::new(DiskProvider::new(&second)))
+            .unwrap();
         s.set_write_layer_at(RootId(2), Arc::new(DiskProvider::new(&second)))
             .unwrap();
         s.set_root_mounts(
@@ -479,13 +492,20 @@ mod root_ownership_tests {
         )
         .unwrap();
 
-        assert!(s.kernel().getattr(RootId(2), "first.txt").unwrap().is_some());
+        assert!(
+            s.kernel()
+                .getattr(RootId(2), "first.txt")
+                .unwrap()
+                .is_some()
+        );
         assert!(
             s.has_write_layer(RootId(2)),
             "the write layer must survive a later set_root_mounts"
         );
         assert!(
-            s.kernel().open(RootId(2), "first.txt", vfs_provider::OPEN_WRITE).is_ok(),
+            s.kernel()
+                .open(RootId(2), "first.txt", vfs_provider::OPEN_WRITE)
+                .is_ok(),
             "with a write layer, an in-place edit of the read side must copy up"
         );
 

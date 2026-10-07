@@ -15,14 +15,14 @@ use vfs_proton::{
 };
 
 use super::stage::ResolvedImage;
-use super::{check_image, LaunchExit, LaunchOpts, Session, STOPPED_EXIT_CODE};
+use super::{LaunchExit, LaunchOpts, STOPPED_EXIT_CODE, Session, check_image};
 use crate::image::{self, RootLocation};
 
 mod handle;
 mod ring;
 
-pub use handle::{LaunchHandle, LaunchStopper};
 use handle::{AnonPrefix, StartingGuard, StopInner};
+pub use handle::{LaunchHandle, LaunchStopper};
 use ring::{remove_memory_ring, ring_in_memory};
 
 /// What a session holds only for the Proton (Wine) delivery: the prefix it
@@ -216,7 +216,8 @@ impl Session {
             return (SteamSide::Off, Vec::new());
         };
         let Some(state) = self
-            .proton.steam_state_dir
+            .proton
+            .steam_state_dir
             .clone()
             .or_else(vfs_proton::steam::state_dir)
         else {
@@ -409,7 +410,10 @@ impl Session {
                 )
             })
         };
-        Ok((link("overlay", &self.overlay)?, link("state", &self.state_dir)?))
+        Ok((
+            link("overlay", &self.overlay)?,
+            link("state", &self.state_dir)?,
+        ))
     }
 
     /// Links every root's host backing directory into `prefix` at the root's
@@ -430,13 +434,15 @@ impl Session {
             let backing = self
                 .root_backing_dir(loc.id)
                 .ok_or_else(|| format!("launch: root {} has no backing directory", loc.id))?;
-            std::fs::create_dir_all(&backing)
-                .map_err(|e| format!("launch: root {}: create {}: {e}", loc.id, backing.display()))?;
+            std::fs::create_dir_all(&backing).map_err(|e| {
+                format!("launch: root {}: create {}: {e}", loc.id, backing.display())
+            })?;
             let link = prefix
                 .link_location(&loc.location, &backing)
                 .map_err(|e| format!("launch: root {}: {e}", loc.id))?;
             let mut links = self
-                .proton.prefix_links
+                .proton
+                .prefix_links
                 .lock()
                 .map_err(|_| "prefix links lock poisoned".to_string())?;
             links.retain(|(d, l, _)| !(*d == prefix.dir && *l == link));
@@ -506,14 +512,16 @@ impl Session {
         let mut handle = self.launch_detached(opts)?;
         if !opts.wait {
             *self
-                .proton.detached
+                .proton
+                .detached
                 .lock()
                 .map_err(|_| "detached launch lock poisoned".to_string())? = Some(handle);
             return Ok(0);
         }
         let stopper = handle.stopper();
         *self
-            .proton.waiting
+            .proton
+            .waiting
             .lock()
             .map_err(|_| "waiting launch lock poisoned".to_string())? = Some(stopper);
         // Not `handle.wait()`: that consumes `handle`, so its `_prefix_lock`
@@ -814,7 +822,8 @@ impl Session {
     #[cfg(unix)]
     pub fn stop_launch(&self) -> Result<bool, String> {
         let detached = self
-            .proton.detached
+            .proton
+            .detached
             .lock()
             .map_err(|_| "detached launch lock poisoned".to_string())?
             .take();
@@ -825,7 +834,8 @@ impl Session {
             }
         }
         let waiting = self
-            .proton.waiting
+            .proton
+            .waiting
             .lock()
             .map_err(|_| "waiting launch lock poisoned".to_string())?
             .clone();
@@ -893,7 +903,13 @@ impl Session {
             Ok(a) => a.take(),
             Err(p) => p.into_inner().take(),
         };
-        if let Some(AnonPrefix { id, home, runtime, prefix_dir }) = anon {
+        if let Some(AnonPrefix {
+            id,
+            home,
+            runtime,
+            prefix_dir,
+        }) = anon
+        {
             // `wineserver` lingers after the child and rewrites the
             // registry into the prefix as it exits; stop it first (bounded)
             // or the deleted prefix comes back.
@@ -1007,7 +1023,7 @@ fn join_wine(base: &str, rel: &Path) -> Result<String, String> {
                     "launch: {} cannot be named under {base}: {other:?} is not a plain path \
                      component",
                     rel.display()
-                ))
+                ));
             }
         }
     }
@@ -1104,7 +1120,10 @@ mod tests {
         Session::check_root_location("c:/users/steamuser/Saves").unwrap();
         for bad in [r"D:\Games", "/tmp/host-dir", r"C:\", r"C:\a\..\b", "Games"] {
             let e = Session::check_root_location(bad).unwrap_err();
-            assert!(e.contains("bad root location") && e.contains(bad), "{bad}: {e}");
+            assert!(
+                e.contains("bad root location") && e.contains(bad),
+                "{bad}: {e}"
+            );
         }
     }
 
@@ -1139,7 +1158,12 @@ mod tests {
         let mut s = Session::new();
         s.set_root(scratch(&format!("{tag}-root")));
         s.set_state_dir(scratch(&format!("{tag}-state")));
-        (s, Prefix { dir: scratch(&format!("{tag}-prefix")) })
+        (
+            s,
+            Prefix {
+                dir: scratch(&format!("{tag}-prefix")),
+            },
+        )
     }
 
     /// Ruling 3: a root nested in another root's location links *inside* the
@@ -1158,14 +1182,21 @@ mod tests {
             }
             s.link_roots(&prefix, &roots).unwrap();
             let outer = prefix.drive_c().join("G");
-            assert_eq!(std::fs::read_link(&outer).unwrap(), s.virtual_root(), "{tag}");
+            assert_eq!(
+                std::fs::read_link(&outer).unwrap(),
+                s.virtual_root(),
+                "{tag}"
+            );
             let inner = s.virtual_root().join("Saves");
             assert_eq!(
                 std::fs::read_link(&inner).unwrap(),
                 s.state_dir().join("roots").join("1"),
                 "{tag}: the inner link must land inside root 0's backing dir"
             );
-            assert!(outer.join("Saves").is_dir(), "{tag}: the inner root resolves through the outer");
+            assert!(
+                outer.join("Saves").is_dir(),
+                "{tag}: the inner root resolves through the outer"
+            );
         }
         // Two extra roots, inner declared first.
         let (mut s, prefix) = linked_session("n-extra");
@@ -1173,7 +1204,10 @@ mod tests {
         s.declare_root(2, r"C:\G");
         s.link_roots(&prefix, &s.root_locations()).unwrap();
         let outer_backing = s.state_dir().join("roots").join("2");
-        assert_eq!(std::fs::read_link(prefix.drive_c().join("G")).unwrap(), outer_backing);
+        assert_eq!(
+            std::fs::read_link(prefix.drive_c().join("G")).unwrap(),
+            outer_backing
+        );
         assert_eq!(
             std::fs::read_link(outer_backing.join("Saves")).unwrap(),
             s.state_dir().join("roots").join("1")
@@ -1182,7 +1216,11 @@ mod tests {
         let links = [prefix.drive_c().join("G"), outer_backing.join("Saves")];
         drop(s);
         for l in links {
-            assert!(std::fs::symlink_metadata(&l).is_err(), "{} must be removed on drop", l.display());
+            assert!(
+                std::fs::symlink_metadata(&l).is_err(),
+                "{} must be removed on drop",
+                l.display()
+            );
         }
         assert!(
             prefix.read_manifest().unwrap().is_empty(),
@@ -1204,7 +1242,11 @@ mod tests {
         let e = s.link_roots(&prefix, &s.root_locations()).unwrap_err();
         assert!(e.contains("root 1") && e.contains("did not create"), "{e}");
         drop(s);
-        assert_eq!(std::fs::read_link(&at).unwrap(), theirs, "their link must survive");
+        assert_eq!(
+            std::fs::read_link(&at).unwrap(),
+            theirs,
+            "their link must survive"
+        );
     }
 
     /// Another session relinked the same location after this one launched:
@@ -1215,12 +1257,20 @@ mod tests {
         let (mut s, prefix) = linked_session("d-repoint");
         s.declare_root(1, r"C:\users\steamuser\Saves");
         s.link_roots(&prefix, &s.root_locations()).unwrap();
-        let link = prefix.drive_c().join("users").join("steamuser").join("Saves");
+        let link = prefix
+            .drive_c()
+            .join("users")
+            .join("steamuser")
+            .join("Saves");
         let theirs = scratch("d-repoint-theirs");
         std::fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(&theirs, &link).unwrap();
         drop(s);
-        assert_eq!(std::fs::read_link(&link).unwrap(), theirs, "another session's link must survive");
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            theirs,
+            "another session's link must survive"
+        );
     }
 
     /// Something replaced the recorded link with a real directory: drop must
@@ -1262,7 +1312,10 @@ mod tests {
             let mut n = Session::new();
             n.set_prefix_name("named-x").unwrap();
         }
-        assert!(!anon_dir.exists(), "anonymous prefix must be deleted on drop");
+        assert!(
+            !anon_dir.exists(),
+            "anonymous prefix must be deleted on drop"
+        );
         assert!(named_dir.exists(), "a named prefix is persistent");
     }
 
@@ -1282,32 +1335,58 @@ mod tests {
         // An explicit shim_dll wins over the directory.
         let other = scratch("artifacts-other");
         let opts = LaunchOpts {
-            shim_dll: Some(other.join("vfs_shim_dll.dll").to_string_lossy().into_owned()),
+            shim_dll: Some(
+                other
+                    .join("vfs_shim_dll.dll")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             ..Default::default()
         };
         let e = locate_wine_artifacts_in(&opts, Some(&dir)).unwrap_err();
-        assert!(e.contains(&other.display().to_string()) && e.contains("VFS_WINDOWS_ARTIFACTS"), "{e}");
+        assert!(
+            e.contains(&other.display().to_string()) && e.contains("VFS_WINDOWS_ARTIFACTS"),
+            "{e}"
+        );
 
         // A directory missing some of them names each one.
         std::fs::remove_file(dir.join("vfs_payload.dll")).unwrap();
         let e = locate_wine_artifacts_in(&LaunchOpts::default(), Some(&dir)).unwrap_err();
-        assert!(e.contains("vfs_payload.dll") && !e.contains("vfs-injector.exe,"), "{e}");
+        assert!(
+            e.contains("vfs_payload.dll") && !e.contains("vfs-injector.exe,"),
+            "{e}"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn wine_cwd_defaults_to_the_image_directory() {
-        assert_eq!(wine_cwd(None, r"C:\G", r"C:\G\bin\x.exe").unwrap(), r"C:\G\bin");
+        assert_eq!(
+            wine_cwd(None, r"C:\G", r"C:\G\bin\x.exe").unwrap(),
+            r"C:\G\bin"
+        );
         assert_eq!(wine_cwd(None, r"C:\G", r"C:\x.exe").unwrap(), r"C:\");
-        assert_eq!(wine_cwd(None, r"C:\G", "C:/tools/probe.exe").unwrap(), "C:/tools");
+        assert_eq!(
+            wine_cwd(None, r"C:\G", "C:/tools/probe.exe").unwrap(),
+            "C:/tools"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn wine_cwd_takes_absolute_paths_as_given_and_relative_ones_under_root_zero() {
-        assert_eq!(wine_cwd(Some(r"D:\x"), r"C:\G", r"C:\G\a.exe").unwrap(), r"D:\x");
-        assert_eq!(wine_cwd(Some("Data/SKSE/"), r"C:\G", r"C:\G\a.exe").unwrap(), r"C:\G\Data\SKSE");
-        assert_eq!(wine_cwd(Some(r"\Data"), r"C:\G\", r"C:\G\a.exe").unwrap(), r"C:\G\Data");
+        assert_eq!(
+            wine_cwd(Some(r"D:\x"), r"C:\G", r"C:\G\a.exe").unwrap(),
+            r"D:\x"
+        );
+        assert_eq!(
+            wine_cwd(Some("Data/SKSE/"), r"C:\G", r"C:\G\a.exe").unwrap(),
+            r"C:\G\Data\SKSE"
+        );
+        assert_eq!(
+            wine_cwd(Some(r"\Data"), r"C:\G\", r"C:\G\a.exe").unwrap(),
+            r"C:\G\Data"
+        );
     }
 
     #[cfg(unix)]

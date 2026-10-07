@@ -1,6 +1,6 @@
 //! Host-side reads out of a session's composed graph.
 
-use vfs_provider::{DirEntry, RootId, Stat, OPEN_READ};
+use vfs_provider::{DirEntry, OPEN_READ, RootId, Stat};
 
 use vfs_director::Director;
 

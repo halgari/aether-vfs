@@ -12,10 +12,10 @@ use crate::image::RootLocation;
 // (`IpcServe::start_file_backed`), which is how a shim inside Wine reaches a
 // native Linux director. So neither this import nor the `ipc` field below is
 // gated; only the two bodies that pick a transport are.
+use vfs_director::Director;
 use vfs_director::ipc::IpcServe;
 use vfs_director::stage::StagedDir;
-use vfs_director::Director;
-use vfs_provider::{overlay_layer_dir, RootId};
+use vfs_provider::{RootId, overlay_layer_dir};
 
 mod compose;
 mod opts;
@@ -31,12 +31,12 @@ pub use compose::compose_root;
 pub use opts::{LaunchOpts, StageOpts};
 #[cfg(unix)]
 pub use proton::{LaunchHandle, LaunchStopper};
-pub use registry::{registry_sync_for, RegistrySync};
+pub use registry::{RegistrySync, registry_sync_for};
 
 use compose::RootComposition;
-use stage::empty_tree_snapshot;
 #[cfg(unix)]
 use proton::ProtonState;
+use stage::empty_tree_snapshot;
 
 /// Host entrypoint: one configured director + optional IPC + launch.
 ///
@@ -106,8 +106,7 @@ impl Session {
     pub fn new() -> Self {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp = std::env::temp_dir()
-            .join(format!("vfs-session-{}-{seq}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("vfs-session-{}-{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         Session {
             kernel: Arc::new(Director::new()),
@@ -141,7 +140,8 @@ impl Session {
     /// The serve thread count the next [`Session::serve`] uses, clamped.
     pub fn io_workers(&self) -> usize {
         vfs_director::ipc::clamp_workers(
-            self.io_workers.unwrap_or(vfs_director::ipc::DEFAULT_IO_WORKERS),
+            self.io_workers
+                .unwrap_or(vfs_director::ipc::DEFAULT_IO_WORKERS),
         )
     }
 
@@ -276,12 +276,15 @@ impl Session {
         let root0 = self.proton.root0_location();
         #[cfg(not(unix))]
         let root0 = self.virtual_root.to_string_lossy().into_owned();
-        std::iter::once(RootLocation { id: 0, location: root0 })
-            .chain(self.extra_roots.iter().map(|(id, p)| RootLocation {
-                id: *id,
-                location: p.to_string_lossy().into_owned(),
-            }))
-            .collect()
+        std::iter::once(RootLocation {
+            id: 0,
+            location: root0,
+        })
+        .chain(self.extra_roots.iter().map(|(id, p)| RootLocation {
+            id: *id,
+            location: p.to_string_lossy().into_owned(),
+        }))
+        .collect()
     }
 
     /// The host directory that backs `root`: root 0's is `virtual_root`; a
@@ -350,8 +353,7 @@ impl Session {
         if self.ipc.is_some() {
             return Ok(false);
         }
-        std::fs::create_dir_all(&self.virtual_root)
-            .map_err(|e| format!("create root: {e}"))?;
+        std::fs::create_dir_all(&self.virtual_root).map_err(|e| format!("create root: {e}"))?;
         std::fs::create_dir_all(&self.overlay).map_err(|e| format!("create overlay: {e}"))?;
         std::fs::create_dir_all(&self.state_dir).map_err(|e| format!("create state: {e}"))?;
         Ok(true)
@@ -436,7 +438,6 @@ pub enum LaunchExit {
     Stopped,
 }
 
-
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -450,7 +451,10 @@ mod tests {
         s.declare_root(1, r"C:\a");
         let ids: Vec<u32> = s.root_locations().iter().map(|r| r.id).collect();
         assert_eq!(ids, [0, 2, 1]);
-        assert_eq!(s.root_backing_dir(2), Some(s.state_dir().join("roots").join("2")));
+        assert_eq!(
+            s.root_backing_dir(2),
+            Some(s.state_dir().join("roots").join("2"))
+        );
         assert_eq!(s.root_backing_dir(0).as_deref(), Some(s.virtual_root()));
         assert_eq!(s.root_backing_dir(7), None);
     }
