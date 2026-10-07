@@ -87,7 +87,6 @@ pub(super) fn host_name_convention() -> &'static str {
     CONVENTION.get_or_init(|| {
         // SAFETY: reads this process's own PEB, and hands the trampoline a
         // buffer of the length it is told.
-        #[allow(unsafe_code)]
         let probed = unsafe {
             match (TRAMP_QOBJ.get(), cwd_from_peb()) {
                 (Some(tramp), Some((cwd, _))) => {
@@ -130,7 +129,6 @@ pub(super) fn host_name_convention() -> &'static str {
 fn host_is_wine() -> bool {
     // SAFETY: both names are NUL-terminated; a missing module or export is a
     // null return, not a fault.
-    #[allow(unsafe_code)]
     unsafe {
         let ntdll = windows_sys::Win32::System::LibraryLoader::GetModuleHandleA(
             c"ntdll.dll".as_ptr().cast(),
@@ -650,7 +648,6 @@ fn device_for_drive(drive: &str) -> Option<String> {
     let mut out = [0u16; 512];
     // SAFETY: `name` is NUL-terminated and `out` is writable for its own length,
     // which is what `QueryDosDeviceW` requires. It reports 0 on failure.
-    #[allow(unsafe_code)]
     let n = unsafe {
         windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW(
             name.as_ptr(),
@@ -945,7 +942,6 @@ unsafe fn emit_object_name(
     // SAFETY: `info` is non-null and the caller declared `length` writable
     // bytes, and `length >= required` was just checked, so every write below
     // lands inside the caller's buffer.
-    #[allow(unsafe_code)]
     unsafe {
         let p = info as *mut u8;
         core::ptr::write_unaligned(p as *mut u16, name_bytes as u16);
