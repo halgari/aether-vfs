@@ -29,9 +29,7 @@ use std::fmt::Display;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use vfs_embed::{
-    Capabilities, DirEntry, DiskProvider, Handle, Provider, SetAttr, Stat, VPath,
-};
+use vfs_embed::{Capabilities, DirEntry, DiskProvider, Handle, Provider, SetAttr, Stat, VPath};
 
 // ---------------------------------------------------------------------------
 // Scratch
@@ -39,10 +37,8 @@ use vfs_embed::{
 
 /// A fresh, empty directory `target/tmp/<group>-<pid>-<tag>`.
 pub fn scratch(group: &str, tag: &str) -> PathBuf {
-    let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "{group}-{}-{tag}",
-        std::process::id()
-    ));
+    let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("{group}-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -114,7 +110,10 @@ impl Artifacts {
     }
 }
 
-fn find_in(dir: &Path, names: &[&'static str]) -> (BTreeMap<&'static str, PathBuf>, Vec<&'static str>) {
+fn find_in(
+    dir: &Path,
+    names: &[&'static str],
+) -> (BTreeMap<&'static str, PathBuf>, Vec<&'static str>) {
     let mut found = BTreeMap::new();
     let mut missing = Vec::new();
     for &name in names {
@@ -134,8 +133,16 @@ fn find_in(dir: &Path, names: &[&'static str]) -> (BTreeMap<&'static str, PathBu
 /// [`ENGINE`] plus `extra`, looked up by the single artefact rule (see the module docs).
 /// `Err` is the skip reason.
 pub fn windows_artifacts(extra: &[&'static str]) -> Result<Artifacts, String> {
-    let names: Vec<&'static str> = ENGINE.iter().copied().chain(extra.iter().copied()).collect();
-    let mine = if cfg!(debug_assertions) { "debug" } else { "release" };
+    let names: Vec<&'static str> = ENGINE
+        .iter()
+        .copied()
+        .chain(extra.iter().copied())
+        .collect();
+    let mine = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     if let Some(dir) = std::env::var_os("VFS_WINDOWS_ARTIFACTS").map(PathBuf::from) {
         let (found, missing) = find_in(&dir, &names);
         return if missing.is_empty() {
@@ -159,7 +166,11 @@ pub fn windows_artifacts(extra: &[&'static str]) -> Result<Artifacts, String> {
     let other = profile.with_file_name(other_name);
     let (_, other_missing) = find_in(&other, &names);
     let hint = if other_missing.is_empty() {
-        let other_flag = if other_name == "release" { " --release" } else { "" };
+        let other_flag = if other_name == "release" {
+            " --release"
+        } else {
+            ""
+        };
         format!(
             "; the {other_name} build has them, so either run `cargo test{other_flag} ...` \
              or build for this {mine} test with `bin/build-windows{}`",
