@@ -243,7 +243,8 @@ decides: is this path ours? If yes, serve it (from the director, or from a
 synthetic handle); if no, call the original function so the rest of the system
 is untouched.
 
-**The shim always runs with a director.** There is no standalone engine and no
+**The shim always runs with a director.** Its client (`FuseClient`, in
+`vfs-shim/src/director.rs`) owns the ring. There is no standalone engine and no
 shim-local answer: the shim holds no tree and no write overlay of its own, and
 without the director's client attached nothing is under a managed root. Writes,
 copy-up and whiteouts are the director's overlay provider's (§3.2); the shim

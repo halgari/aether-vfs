@@ -1,5 +1,15 @@
 # Escape matrix: Gate 2
 
+> **Historical, names as of 2026-08-14.** This is a dated record of the gate 2 and gate 4
+> measurements. Since then `hook.rs` became the `vfs-shim/src/hook/` modules (the matching
+> `hook.rs:NNNN` line references are gone), the `fuse_client` module became
+> `vfs-shim/src/director.rs` (the client type is still `FuseClient`), and the shim-local `Engine` (with its snapshot,
+> `decide`, `cow_seed` and `whiteout`) was deleted: the shim always has a director and the
+> overlay's copy-up lives in `vfs-compose`. `vfs-directord::registry` is gone with the daemon's
+> old registry, and `vfs-launch` with the CLI. A child process is now injected **fail closed**:
+> see vector 14 below. Read the names in this document as the names of their day; the
+> invariants the code keeps now are in [`../../docs/shim-invariants.md`](../../docs/shim-invariants.md).
+
 **Provenance.** `crates/vfs-directord/tests/escape_matrix.rs`'s
 `escape_matrix_positive_and_negative_canary` runs `vfs-fixture-escape.exe`
 under a real, composed session — daemon, director, injected shim, the
@@ -1335,12 +1345,15 @@ not what happens. `vfs-shim/src/hook.rs` detours
 - write matrix, negative canary: `error:cmd-exit:1`, and no file on disk.
 
 So vector 14 is contained in practice for a child spawned by an
-already-injected process. It is still not asserted, and should not be on this
-evidence alone: `inject_child` is explicitly best-effort — force-suspend,
-inject, give up on timeout — so a green assertion here would be an assertion
-about scheduling. Closing it properly means deciding what happens when that
-inject fails, which is not gate 4's question. What has changed is that the
-reason for leaving it open is now recorded correctly.
+already-injected process. It was not asserted at the time, and should not have
+been on that evidence alone: `inject_child` then gave up on a timeout and let the
+child run, so a green assertion here would have been an assertion about
+scheduling. The question gate 4 left open, what happens when the inject fails,
+has since been answered: child injection **fails closed**. A child that cannot be
+injected, whose shim reports a bootstrap failure, that dies early, or that is not
+ready in time is killed and its `CreateProcess` returns `FALSE`; it is never
+released without the shim. The shim's `child_inject_fails_closed` test holds
+that.
 
 ### Two unwired fixtures deleted
 

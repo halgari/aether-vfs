@@ -1,5 +1,7 @@
 # Bypass baseline: Gate 1
 
+> **Historical, names as of 2026-08-14.** A dated measurement record. `hook.rs` is now the `vfs-shim/src/hook/` modules, `fuse_client` is `vfs-shim/src/director.rs`, the shim-local `Engine` and snapshot are gone, `vfs-director::Session` is `vfs_embed::Session`, and `vfs-launch` was removed. See [architecture.md](./architecture.md) for the current design.
+
 **Provenance: this is a real game run, not a fixture.** Skyrim Special
 Edition was launched under `skyrim-live` via `tools/gamectl.ps1`, driven to
 the main menu, dropped into the world with `coc riverwood`, played for

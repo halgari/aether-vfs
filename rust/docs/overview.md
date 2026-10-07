@@ -2,6 +2,8 @@
 
 > **Partly out of date (2026-08-13).** PE hollowing has been removed in favour of
 > the staged launch. See [architecture.md](./architecture.md) for the current design.
+> The C ABI, `vfs-launch`, the shim-local `Engine` and `FuseClient` as named below are gone or
+> renamed (the client is in `vfs-shim/src/director.rs`); `Session` lives in `vfs-embed`.
 
 **Status:** Active development (2026-07)  
 **Repo:** private `halgari/vfs`  

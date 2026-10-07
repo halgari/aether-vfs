@@ -1,5 +1,7 @@
 # Director FUSE RPC — Performance Analysis & Optimization Wins
 
+> **Historical, names as of 2026-07-15.** A dated analysis. `vfs-server` and `fuse_client.rs` no longer exist (the ring server is `vfs-director`'s `ipc`, the shim's client is `vfs-shim/src/director.rs`, type `FuseClient`), and `hook.rs` is now the `vfs-shim/src/hook/` modules. Numbers are as measured then. See [architecture.md](./architecture.md) for the current design.
+
 **Date:** 2026-07-15  
 **Scope:** Shipped pure-RPC path (`vfs-ipc` ring + `vfs-server` open table + thin `FuseClient` / hooks).  
 **Bench baseline:** `docs/benchmarks/fuse-rpc-performance.md` (~200–380 MiB/s sequential RPC; ~40 µs small READ RTT; OpenTable direct ~1.3 GiB/s; std::fs ~3 GiB/s).

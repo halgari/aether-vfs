@@ -3,6 +3,12 @@
 > **Superseded in part (2026-08-13).** Sections on process hollowing describe a
 > mechanism that has since been removed — the staged launch replaced it. See
 > [architecture.md](./architecture.md) §4.2 for what the launch path does now.
+>
+> **Historical, names as of 2026-07-16 for the rest.** `Session` now lives in `vfs-embed`
+> (not `vfs-director`), the shim-local `Engine`, the snapshot and `vfs-shared` are deleted,
+> `FuseClient` is in `vfs-shim/src/director.rs`, `hook.rs` is the `vfs-shim/src/hook/`
+> modules, and `vfs-launch` was removed. `Session::mount_zip` is `Session::mount` with a
+> `ZipProvider`. The ring `VERSION` is now 4. Linux/Proton is a supported host.
 
 **Document type:** Deep technical summary (whitepaper source material)  
 **Codebase:** `C:\oss\vfs` / private `halgari/vfs`  
