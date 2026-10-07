@@ -2,13 +2,12 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    ENGINE, TRAMP_QATTR, TRAMP_QFULL, TRAMP_QIBN, allow_disk_fallthrough, in_hook_reenter,
-    path_file_id, path_of,
+    ENGINE, TRAMP_QATTR, TRAMP_QFULL, TRAMP_QIBN, allow_disk_fallthrough, attributes,
+    in_hook_reenter, path_file_id, path_of, put_basic, put_network_open, put_standard, put_stat,
 };
 use crate::ntdef::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FileBasicInformation,
-    FileNetworkOpenInformation, ObjectAttributes, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
-    STATUS_UNSUCCESSFUL,
+    FileBasicInformation, FileNetworkOpenInformation, ObjectAttributes,
+    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
 };
 use crate::overlay::OverlayState;
 use core::ffi::c_void;
@@ -47,11 +46,7 @@ unsafe fn fill_by_name(
     is_dir: bool,
     size: u64,
 ) -> Option<usize> {
-    let attrs = if is_dir {
-        FILE_ATTRIBUTE_DIRECTORY
-    } else {
-        FILE_ATTRIBUTE_NORMAL
-    };
+    let attrs = attributes(is_dir);
     // Byte layouts per FILE_INFORMATION_CLASS. Written field-by-field with
     // unaligned writes because the caller's buffer has no alignment guarantee.
     let need: usize = match class_raw {
@@ -68,43 +63,15 @@ unsafe fn fill_by_name(
     let p = info as *mut u8;
     // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
     unsafe { core::ptr::write_bytes(p, 0, need) };
-    match class_raw {
-        4 => {
-            // 4x LARGE_INTEGER times, then FileAttributes.
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(32) as *mut u32, attrs) };
+    // SAFETY: `info` holds `need` bytes (checked above); the writers' contract (hook/mod.rs).
+    unsafe {
+        match class_raw {
+            4 => put_basic(p, 0, attrs),
+            5 => put_standard(p, size, is_dir),
+            34 => put_network_open(p, 0, size, attrs),
+            68 | 77 => put_stat(p, 0, 0, size, attrs, 0),
+            _ => return None,
         }
-        5 => {
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p as *mut i64, size as i64) }; // AllocationSize
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(8) as *mut i64, size as i64) }; // EndOfFile
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(16) as *mut u32, 1) }; // NumberOfLinks
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(21), u8::from(is_dir)) }; // Directory
-        }
-        34 => {
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(32) as *mut i64, size as i64) }; // AllocationSize
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(40) as *mut i64, size as i64) }; // EndOfFile
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(48) as *mut u32, attrs) };
-        }
-        68 | 77 => {
-            // Both begin FileId, 4x time, AllocationSize, EndOfFile,
-            // FileAttributes, ReparseTag, NumberOfLinks.
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(40) as *mut i64, size as i64) }; // AllocationSize
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(48) as *mut i64, size as i64) }; // EndOfFile
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(56) as *mut u32, attrs) };
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(64) as *mut u32, 1) }; // NumberOfLinks
-        }
-        _ => return None,
     }
     Some(need)
 }
@@ -231,30 +198,8 @@ pub(super) unsafe fn qattr_hook_body(
             match res {
                 Ok((is_dir, _size, _mtime)) => {
                     if !info.is_null() {
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).creation_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).last_access_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).last_write_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).change_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).file_attributes = if is_dir {
-                                FILE_ATTRIBUTE_DIRECTORY
-                            } else {
-                                FILE_ATTRIBUTE_NORMAL
-                            };
-                        }
+                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                        unsafe { put_basic(info as *mut u8, SYNTH_FILETIME, attributes(is_dir)) };
                     }
                     return STATUS_SUCCESS;
                 }
@@ -274,30 +219,8 @@ pub(super) unsafe fn qattr_hook_body(
             match engine.overlay_state(&path) {
                 Some(OverlayState::Present { is_dir, .. }) => {
                     if !info.is_null() {
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).creation_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).last_access_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).last_write_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).change_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).file_attributes = if is_dir {
-                                FILE_ATTRIBUTE_DIRECTORY
-                            } else {
-                                FILE_ATTRIBUTE_NORMAL
-                            };
-                        }
+                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+                        unsafe { put_basic(info as *mut u8, SYNTH_FILETIME, attributes(is_dir)) };
                     }
                     return STATUS_SUCCESS;
                 }
@@ -345,38 +268,15 @@ pub(super) unsafe fn qfull_hook_body(
             match res {
                 Ok((is_dir, size, _mtime)) => {
                     if !info.is_null() {
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
                         unsafe {
-                            (*info).creation_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).last_access_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).last_write_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).change_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).allocation_size = size as i64;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).end_of_file = size as i64;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).file_attributes = if is_dir {
-                                FILE_ATTRIBUTE_DIRECTORY
-                            } else {
-                                FILE_ATTRIBUTE_NORMAL
-                            };
-                        }
+                            put_network_open(
+                                info as *mut u8,
+                                SYNTH_FILETIME,
+                                size,
+                                attributes(is_dir),
+                            )
+                        };
                     }
                     return STATUS_SUCCESS;
                 }
@@ -394,38 +294,15 @@ pub(super) unsafe fn qfull_hook_body(
             match engine.overlay_state(&path) {
                 Some(OverlayState::Present { is_dir, size, .. }) => {
                     if !info.is_null() {
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
+                        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
                         unsafe {
-                            (*info).creation_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).last_access_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).last_write_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).change_time = SYNTH_FILETIME;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).allocation_size = size as i64;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).end_of_file = size as i64;
-                        }
-                        // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                        unsafe {
-                            (*info).file_attributes = if is_dir {
-                                FILE_ATTRIBUTE_DIRECTORY
-                            } else {
-                                FILE_ATTRIBUTE_NORMAL
-                            };
-                        }
+                            put_network_open(
+                                info as *mut u8,
+                                SYNTH_FILETIME,
+                                size,
+                                attributes(is_dir),
+                            )
+                        };
                     }
                     return STATUS_SUCCESS;
                 }
@@ -441,6 +318,7 @@ pub(super) unsafe fn qfull_hook_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ntdef::FILE_ATTRIBUTE_DIRECTORY;
 
     const CLASS_BASIC: u32 = 4;
     const CLASS_STANDARD: u32 = 5;
