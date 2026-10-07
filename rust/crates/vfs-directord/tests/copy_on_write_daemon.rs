@@ -18,8 +18,8 @@
 //! `AddSource` on the wire, since that — not the Rust API — is what a config
 //! file reaches.
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use vfs_testkit::zip::write_stored_zip;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
@@ -577,58 +577,3 @@ fn toml_quote(s: &str) -> String {
     format!("{s:?}")
 }
 
-// ── a one-entry Stored zip, as `copy_on_write_composition.rs` writes one ──
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
-}
-
-fn write_stored_zip(path: &Path, entry: &str, content: &[u8]) {
-    let mut buf = Vec::new();
-    let crc = crc32(content);
-    let n = entry.len() as u16;
-    buf.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 4]);
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&n.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(entry.as_bytes());
-    buf.extend_from_slice(content);
-    let cd_start = buf.len() as u32;
-    buf.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 6]);
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&(content.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&n.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 8]);
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(entry.as_bytes());
-    let cd_size = buf.len() as u32 - cd_start;
-    buf.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 4]);
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&cd_size.to_le_bytes());
-    buf.extend_from_slice(&cd_start.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    std::fs::File::create(path).unwrap().write_all(&buf).unwrap();
-}

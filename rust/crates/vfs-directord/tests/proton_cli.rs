@@ -17,6 +17,7 @@
 //! runs it.
 #![cfg(unix)]
 
+use vfs_testkit::zip::write_stored_zip;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -62,62 +63,6 @@ fn run(label: &str, scratch: &Path, mut cmd: Command) -> std::process::Output {
         },
         None => panic!("{label} did not finish within {WAIT:?} and was killed"),
     }
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-    }
-    !crc
-}
-
-/// A one-entry Stored zip.
-fn write_stored_zip(path: &Path, entry: &str, content: &[u8]) {
-    let mut buf = Vec::new();
-    let crc = crc32(content);
-    let n = entry.len() as u16;
-    let len = content.len() as u32;
-    buf.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 4]);
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&len.to_le_bytes());
-    buf.extend_from_slice(&len.to_le_bytes());
-    buf.extend_from_slice(&n.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(entry.as_bytes());
-    buf.extend_from_slice(content);
-    let cd_start = buf.len() as u32;
-    buf.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 6]);
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&crc.to_le_bytes());
-    buf.extend_from_slice(&len.to_le_bytes());
-    buf.extend_from_slice(&len.to_le_bytes());
-    buf.extend_from_slice(&n.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 8]);
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(entry.as_bytes());
-    let cd_size = buf.len() as u32 - cd_start;
-    buf.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-    buf.extend_from_slice(&[0u8; 4]);
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes());
-    buf.extend_from_slice(&cd_size.to_le_bytes());
-    buf.extend_from_slice(&cd_start.to_le_bytes());
-    buf.extend_from_slice(&0u16.to_le_bytes());
-    std::fs::write(path, &buf).unwrap();
 }
 
 /// Tears the session down even when the test panics: `vfs down` against the
