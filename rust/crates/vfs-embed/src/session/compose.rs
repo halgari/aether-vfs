@@ -2,6 +2,7 @@
 //! the director serves for it.
 
 use std::collections::BTreeMap;
+#[cfg(feature = "zip")]
 use std::path::Path;
 use std::sync::Arc;
 
