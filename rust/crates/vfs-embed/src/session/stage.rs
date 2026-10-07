@@ -131,12 +131,6 @@ impl Session {
     /// under `virtual_root` (an accepted form before roots had locations), or
     /// refused if it is not under it.
     pub(super) fn resolve_launch_image(&self, opts: &LaunchOpts) -> Result<ResolvedImage, String> {
-        let resolved = self.resolve_image(opts)?;
-        resolved.trace();
-        Ok(resolved)
-    }
-
-    fn resolve_image(&self, opts: &LaunchOpts) -> Result<ResolvedImage, String> {
         #[cfg(unix)]
         let image: String = {
             let host = Path::new(&opts.image);
@@ -180,7 +174,7 @@ impl Session {
                     .ok_or_else(|| format!("launch: root {root} has no backing directory"))?;
                 let host = vpath.split('/').fold(base, |p, c| p.join(c));
                 if host.is_file() {
-                    return Ok(ResolvedImage::InRoot { root, vpath, host });
+                    return Ok(ResolvedImage::in_root(root, vpath, host));
                 }
                 let served = self
                     .kernel
@@ -218,7 +212,7 @@ impl Session {
                         },
                     )
                     .map_err(|e| format!("launch: staging {vpath:?}: {e}"))?;
-                Ok(ResolvedImage::InRoot { root, vpath, host })
+                Ok(ResolvedImage::in_root(root, vpath, host))
             }
         }
     }
@@ -234,14 +228,20 @@ impl Session {
     }
 }
 
-/// What [`Session::resolve_launch_image`] resolved an image to.
+/// What [`Session::resolve_launch_image`] resolved an image to, with only what
+/// each target launches from: unix names the child's image by `root`'s location
+/// and `vpath`, Windows launches the real file `host`. (Tests read `host` on
+/// both.)
 #[derive(Debug)]
 pub(super) enum ResolvedImage {
     /// Inside `root`'s location at `vpath`; `host` is the real file backing
     /// it — already there, or just staged into root 0's backing directory.
     InRoot {
+        #[cfg(unix)]
         root: u32,
+        #[cfg(unix)]
         vpath: String,
+        #[cfg(any(windows, test))]
         host: PathBuf,
     },
     /// Outside every root: a real program, launched as given.
@@ -249,21 +249,14 @@ pub(super) enum ResolvedImage {
 }
 
 impl ResolvedImage {
-    /// Logs what the launch image resolved to. Each target launches from a
-    /// different half (unix names the child's image by `root` and `vpath`,
-    /// Windows launches `host`), so this is also what reads every field on
-    /// both.
-    fn trace(&self) {
-        match self {
-            ResolvedImage::InRoot { root, vpath, host } => tracing::debug!(
-                root,
-                vpath,
-                host = %host.display(),
-                "launch image resolved inside a root"
-            ),
-            ResolvedImage::Outside(p) => {
-                tracing::debug!(image = %p, "launch image is outside every root")
-            }
+    fn in_root(_root: u32, _vpath: String, _host: PathBuf) -> Self {
+        ResolvedImage::InRoot {
+            #[cfg(unix)]
+            root: _root,
+            #[cfg(unix)]
+            vpath: _vpath,
+            #[cfg(any(windows, test))]
+            host: _host,
         }
     }
 }
