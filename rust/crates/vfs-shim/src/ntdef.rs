@@ -67,10 +67,6 @@ pub type NtCreateFileFn = unsafe extern "system" fn(
     u32,           // EaLength
 ) -> NTSTATUS;
 
-/// `FILE_ATTRIBUTE_DIRECTORY` / `FILE_ATTRIBUTE_NORMAL`.
-pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
-pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
-
 /// Layout-compatible with `FILE_BASIC_INFORMATION` (40 bytes).
 #[repr(C)]
 pub struct FileBasicInformation {
@@ -214,7 +210,7 @@ pub const OBJECT_NAME_INFORMATION: u32 = 1;
 /// (x64: `u16` Length, `u16` MaximumLength, 4 bytes padding, `*mut u16` Buffer).
 /// Measured on both hosts: `Buffer` points exactly this far into the caller's
 /// own buffer.
-pub const OBJECT_NAME_INFORMATION_HEADER: usize = 16;
+pub use vfs_ntlayout::OBJECT_NAME_INFORMATION_HEADER;
 
 /// `ntdll!NtSetInformationFile` (same ABI as NtQueryInformationFile).
 pub type NtSetInformationFileFn = unsafe extern "system" fn(
@@ -768,3 +764,42 @@ pub const STATUS_INVALID_BUFFER_SIZE: NTSTATUS = 0xC000_0206u32 as i32;
 pub const STATUS_HANDLE_NOT_CLOSABLE: NTSTATUS = 0xC000_0235u32 as i32;
 /// `STATUS_INVALID_SECURITY_DESCR`.
 pub const STATUS_INVALID_SECURITY_DESCR: NTSTATUS = 0xC000_0079u32 as i32;
+
+/// The typed structures above are the layouts `vfs_ntlayout`'s byte writers fill: this pins the two
+/// together, so a field moved on either side fails on a Windows host.
+#[cfg(test)]
+#[allow(unsafe_code)]
+mod layout_pins {
+    use super::*;
+    use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn the_writers_offsets_are_the_structures_fields() {
+        assert_eq!(size_of::<FileBasicInformation>(), vfs_ntlayout::BASIC_LEN);
+        assert_eq!(offset_of!(FileBasicInformation, creation_time), 0);
+        assert_eq!(offset_of!(FileBasicInformation, last_access_time), 8);
+        assert_eq!(offset_of!(FileBasicInformation, last_write_time), 16);
+        assert_eq!(offset_of!(FileBasicInformation, change_time), 24);
+        assert_eq!(offset_of!(FileBasicInformation, file_attributes), 32);
+
+        assert_eq!(
+            size_of::<FileNetworkOpenInformation>(),
+            vfs_ntlayout::NETWORK_OPEN_LEN
+        );
+        assert_eq!(offset_of!(FileNetworkOpenInformation, change_time), 24);
+        assert_eq!(offset_of!(FileNetworkOpenInformation, allocation_size), 32);
+        assert_eq!(offset_of!(FileNetworkOpenInformation, end_of_file), 40);
+        assert_eq!(offset_of!(FileNetworkOpenInformation, file_attributes), 48);
+    }
+
+    #[test]
+    fn a_writer_fills_the_typed_structure() {
+        let mut b = [0u8; vfs_ntlayout::BASIC_LEN];
+        vfs_ntlayout::put_basic(&mut b, 7, vfs_ntlayout::attributes(true));
+        // SAFETY: `b` is 40 bytes and `FileBasicInformation` is plain data of that size.
+        let b: FileBasicInformation = unsafe { core::ptr::read_unaligned(b.as_ptr().cast()) };
+        assert_eq!(b.creation_time, 7);
+        assert_eq!(b.change_time, 7);
+        assert_eq!(b.file_attributes, 0x10);
+    }
+}

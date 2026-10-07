@@ -5,8 +5,12 @@
 
 mod dirinfo;
 mod disposition;
+mod info;
 mod objname;
+mod rename;
 
 pub use dirinfo::*;
 pub use disposition::*;
-pub use objname::spoofed_object_name;
+pub use info::*;
+pub use objname::*;
+pub use rename::*;

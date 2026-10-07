@@ -263,21 +263,9 @@ pub(super) fn path_is_ours(path: &str) -> bool {
 /// Parse the target path from a `FILE_RENAME_INFORMATION`(`_EX`) buffer. Only
 /// absolute targets (RootDirectory == NULL) are handled; otherwise `None`.
 pub(super) unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Option<String> {
-    let len = length as usize;
-    if info.is_null() || len < 20 {
-        return None;
-    }
-    let b = info as *const u8;
-    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-    let root_dir = unsafe { core::ptr::read_unaligned(b.add(8) as *const usize) };
-    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-    let namelen = unsafe { core::ptr::read_unaligned(b.add(16) as *const u32) } as usize;
-    if 20 + namelen > len {
-        return None;
-    }
-    // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-    let units = unsafe { core::slice::from_raw_parts(b.add(20) as *const u16, namelen / 2) };
-    let name = String::from_utf16_lossy(units);
+    // SAFETY: `info` is NULL or valid for `length` bytes (hook/mod.rs).
+    let buf = unsafe { super::caller_buf(info, length as usize) };
+    let vfs_ntlayout::RenameTarget { root_dir, name } = vfs_ntlayout::parse_rename_info(buf)?;
     if root_dir == 0 {
         return Some(name);
     }

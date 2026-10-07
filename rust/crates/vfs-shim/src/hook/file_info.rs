@@ -2,12 +2,13 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{
-    TRAMP_QIF, TRAMP_QOBJ, TRAMP_QVOL, attributes, cwd_from_peb, identity_of, put_basic,
-    put_network_open, put_standard, put_stat, reg_real, under_root_path,
+    ALL_PREFIX_LEN, ATTRIBUTE_TAG_LEN, BASIC_LEN, Fit, ID_LEN, NETWORK_OPEN_LEN, STANDARD_LEN,
+    STAT_LEN, TRAMP_QIF, TRAMP_QOBJ, TRAMP_QVOL, attributes, caller_buf, cwd_from_peb, identity_of,
+    put_all_prefix, put_attribute_tag, put_basic, put_file_name, put_id, put_network_open,
+    put_object_name, put_standard, put_stat, reg_real, under_root_path,
 };
 use crate::ntdef::{
-    FILE_ALL_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_TAG_INFORMATION, FILE_BASIC_INFORMATION, FILE_DEVICE_DISK,
+    FILE_ALL_INFORMATION, FILE_ATTRIBUTE_TAG_INFORMATION, FILE_BASIC_INFORMATION, FILE_DEVICE_DISK,
     FILE_FS_DEVICE_INFORMATION, FILE_ID_INFORMATION, FILE_INTERNAL_INFORMATION,
     FILE_NAME_INFORMATION, FILE_NETWORK_OPEN_INFORMATION, FILE_NORMALIZED_NAME_INFORMATION,
     FILE_POSITION_INFORMATION, FILE_STANDARD_INFORMATION, FILE_STAT_INFORMATION,
@@ -170,13 +171,10 @@ unsafe fn fuse_query_information(
             if (length as usize) < core::mem::size_of::<FileBasicInformation>() {
                 return STATUS_BUFFER_OVERFLOW;
             }
-            let bi = info as *mut FileBasicInformation;
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { put_basic(bi as *mut u8, SYNTH_FILETIME, attributes(is_dir)) };
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe {
-                (*bi)._reserved = 0;
-            }
+            // SAFETY: `info` is non-null and `length` covers the structure (checked above).
+            let buf = unsafe { caller_buf(info, BASIC_LEN) };
+            buf.fill(0);
+            put_basic(buf, SYNTH_FILETIME, attributes(is_dir));
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe {
                 crate::ntbuf::iosb_set(
@@ -191,8 +189,8 @@ unsafe fn fuse_query_information(
             if (length as usize) < core::mem::size_of::<FileStandardInformation>() {
                 return STATUS_BUFFER_OVERFLOW;
             }
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { put_standard(info as *mut u8, size, is_dir) };
+            // SAFETY: `info` is non-null and `length` covers the structure (checked above).
+            put_standard(unsafe { caller_buf(info, STANDARD_LEN) }, size, is_dir);
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe {
                 crate::ntbuf::iosb_set(
@@ -243,8 +241,9 @@ unsafe fn fuse_query_information(
             if (length as usize) < core::mem::size_of::<FileNetworkOpenInformation>() {
                 return STATUS_BUFFER_OVERFLOW;
             }
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { put_network_open(info as *mut u8, SYNTH_FILETIME, size, attributes(is_dir)) };
+            // SAFETY: `info` is non-null and `length` covers the structure (checked above).
+            let buf = unsafe { caller_buf(info, NETWORK_OPEN_LEN) };
+            put_network_open(buf, SYNTH_FILETIME, size, attributes(is_dir));
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
             unsafe {
                 crate::ntbuf::iosb_set(
@@ -261,27 +260,14 @@ unsafe fn fuse_query_information(
             // Standard.Directory flag — and leave the trailing name empty. Prefix
             // layout: Basic 40 | Standard 24 | Internal 8 | Ea 4 | Access 4 |
             // Position 8 | Mode 4 | Alignment 4 | Name 4 = 100.
-            const PREFIX: usize = 100;
-            if (length as usize) < PREFIX {
+            if (length as usize) < ALL_PREFIX_LEN {
                 return STATUS_BUFFER_OVERFLOW;
             }
-            let p = info as *mut u8;
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_bytes(p, 0, PREFIX) };
-            // Basic @ 0 (its times stay zero), Standard @ 40.
+            // SAFETY: `info` is non-null and `length` covers the prefix (checked above).
+            let buf = unsafe { caller_buf(info, ALL_PREFIX_LEN) };
+            put_all_prefix(buf, is_dir, size, synth_file_id(handle), pos as i64);
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe {
-                put_basic(p, 0, attributes(is_dir));
-                put_standard(p.add(40), size, is_dir);
-            }
-            // Internal.IndexNumber @ 64
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(64) as *mut i64, synth_file_id(handle)) };
-            // Position.CurrentByteOffset @ 80
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(80) as *mut i64, pos as i64) };
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, PREFIX) };
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, ALL_PREFIX_LEN) };
             STATUS_SUCCESS
         }
         FILE_NAME_INFORMATION | FILE_NORMALIZED_NAME_INFORMATION => {
@@ -298,32 +284,20 @@ unsafe fn fuse_query_information(
                 return STATUS_INVALID_HANDLE;
             };
             // `FILE_NAME_INFORMATION` is a u32 byte length and then the name.
-            // NT refuses a buffer smaller than the structure (8 bytes with
-            // its one-character name field) outright; given one too small
-            // for the whole name it writes the full length, as much of the
-            // name as fits, and says overflow. A caller sizing a buffer
+            // NT refuses a buffer smaller than the structure outright; given one
+            // too small for the whole name it writes the full length, as much of
+            // the name as fits, and says overflow. A caller sizing a buffer
             // reads the length.
-            if (length as usize) < 8 {
-                return STATUS_INFO_LENGTH_MISMATCH;
-            }
-            let name: Vec<u16> = vfs_core::finalname::volume_relative(&path)
-                .encode_utf16()
-                .collect();
-            let fits = name.len().min((length as usize - 4) / 2);
-            let p = info as *mut u8;
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p as *mut u32, (name.len() * 2) as u32) };
-            for (i, unit) in name[..fits].iter().enumerate() {
-                // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-                unsafe { core::ptr::write_unaligned(p.add(4 + i * 2) as *mut u16, *unit) };
-            }
-            let status = if fits == name.len() {
-                STATUS_SUCCESS
-            } else {
-                STATUS_BUFFER_OVERFLOW
+            // SAFETY: `info` is non-null and valid for `length` bytes (hook/mod.rs).
+            let buf = unsafe { caller_buf(info, length as usize) };
+            let (fit, written) = put_file_name(vfs_core::finalname::volume_relative(&path), buf);
+            let status = match fit {
+                Fit::Mismatch => return STATUS_INFO_LENGTH_MISMATCH,
+                Fit::Overflow => STATUS_BUFFER_OVERFLOW,
+                Fit::Fits => STATUS_SUCCESS,
             };
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { crate::ntbuf::iosb_set(iosb, status, 4 + fits * 2) };
+            unsafe { crate::ntbuf::iosb_set(iosb, status, written) };
             status
         }
         FILE_ID_INFORMATION => {
@@ -331,19 +305,17 @@ unsafe fn fuse_query_information(
             // `GetFileInformationByHandleEx(FileIdInfo)` asks, which is how
             // `std::filesystem::equivalent` tells whether two paths are one
             // file. Unanswered, it compared two uninitialised buffers.
-            const LEN: usize = 24;
-            if (length as usize) < LEN {
+            if (length as usize) < ID_LEN {
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
-            let p = info as *mut u8;
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_bytes(p, 0, LEN) };
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p as *mut u64, SYNTH_VOLUME_SERIAL) };
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(8) as *mut i64, synth_file_id(handle)) };
+            // SAFETY: `info` is non-null and `length` covers the structure (checked above).
+            put_id(
+                unsafe { caller_buf(info, ID_LEN) },
+                SYNTH_VOLUME_SERIAL,
+                synth_file_id(handle),
+            );
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN) };
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, ID_LEN) };
             STATUS_SUCCESS
         }
         FILE_STAT_INFORMATION => {
@@ -358,50 +330,37 @@ unsafe fn fuse_query_information(
             // Layout: FileId 0 | Creation 8 | LastAccess 16 | LastWrite 24 |
             // Change 32 | AllocationSize 40 | EndOfFile 48 | FileAttributes 56
             // | ReparseTag 60 | NumberOfLinks 64 | EffectiveAccess 68 = 72.
-            const LEN: usize = 72;
-            if (length as usize) < LEN {
+            if (length as usize) < STAT_LEN {
                 // What NT answers for a fixed-size class. `BUFFER_OVERFLOW`
                 // means "the fixed part was written", which some callers
                 // take as success — and nothing was.
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
-            let p = info as *mut u8;
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_bytes(p, 0, LEN) };
+            // SAFETY: `info` is non-null and `length` covers the structure (checked above).
+            let buf = unsafe { caller_buf(info, STAT_LEN) };
+            buf.fill(0);
             // FILE_GENERIC_READ is the effective access.
+            put_stat(
+                buf,
+                synth_file_id(handle),
+                SYNTH_FILETIME,
+                size,
+                attributes(is_dir),
+                0x0012_0089,
+            );
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe {
-                put_stat(
-                    p,
-                    synth_file_id(handle),
-                    SYNTH_FILETIME,
-                    size,
-                    attributes(is_dir),
-                    0x0012_0089,
-                )
-            };
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN) };
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, STAT_LEN) };
             STATUS_SUCCESS
         }
         FILE_ATTRIBUTE_TAG_INFORMATION => {
             // FileAttributes 0 | ReparseTag 4 = 8. Never a reparse point.
-            const LEN: usize = 8;
-            if (length as usize) < LEN {
+            if (length as usize) < ATTRIBUTE_TAG_LEN {
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
-            let p = info as *mut u8;
-            let attrs = if is_dir {
-                FILE_ATTRIBUTE_DIRECTORY
-            } else {
-                FILE_ATTRIBUTE_NORMAL
-            };
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p as *mut u32, attrs) };
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            unsafe { core::ptr::write_unaligned(p.add(4) as *mut u32, 0) };
+            // SAFETY: `info` is non-null and `length` covers the structure (checked above).
+            put_attribute_tag(unsafe { caller_buf(info, ATTRIBUTE_TAG_LEN) }, is_dir);
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, LEN) };
+            unsafe { crate::ntbuf::iosb_set(iosb, STATUS_SUCCESS, ATTRIBUTE_TAG_LEN) };
             STATUS_SUCCESS
         }
         _ => {
@@ -750,43 +709,18 @@ unsafe fn emit_object_name(
     length: u32,
     ret_len: *mut u32,
 ) -> Option<NTSTATUS> {
-    let name16: Vec<u16> = name.encode_utf16().collect();
-    let name_bytes = name16.len() * 2;
-    // `UNICODE_STRING::MaximumLength` is a u16 and must cover the NUL. A name
-    // that cannot be described in that field is one we must not try to emit.
-    if name_bytes + 2 > u16::MAX as usize {
-        return None;
-    }
-    let required = OBJECT_NAME_INFORMATION_HEADER + name_bytes + 2;
+    // SAFETY: `info` is NULL or valid for `length` bytes (hook/mod.rs).
+    let buf = unsafe { caller_buf(info, length as usize) };
+    let reply = put_object_name(name, buf, info as usize)?;
     // Set unconditionally and before any short-buffer return: both hosts fill
     // `ReturnLength` even when they write nothing at all.
     if !ret_len.is_null() {
         // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-        unsafe { core::ptr::write_unaligned(ret_len, required as u32) };
+        unsafe { core::ptr::write_unaligned(ret_len, reply.required as u32) };
     }
-    if info.is_null() || (length as usize) < OBJECT_NAME_INFORMATION_HEADER {
-        return Some(STATUS_INFO_LENGTH_MISMATCH);
-    }
-    if (length as usize) < required {
-        return Some(STATUS_BUFFER_OVERFLOW);
-    }
-    // SAFETY: `info` is non-null and the caller declared `length` writable
-    // bytes, and `length >= required` was just checked, so every write below
-    // lands inside the caller's buffer.
-    unsafe {
-        let p = info as *mut u8;
-        core::ptr::write_unaligned(p as *mut u16, name_bytes as u16);
-        core::ptr::write_unaligned(p.add(2) as *mut u16, (name_bytes + 2) as u16);
-        // Both hosts point `Buffer` at the caller's own buffer, 16 bytes in.
-        core::ptr::write_unaligned(
-            p.add(8) as *mut usize,
-            p.add(OBJECT_NAME_INFORMATION_HEADER) as usize,
-        );
-        let dst = p.add(OBJECT_NAME_INFORMATION_HEADER);
-        for (i, u) in name16.iter().enumerate() {
-            core::ptr::write_unaligned(dst.add(i * 2) as *mut u16, *u);
-        }
-        core::ptr::write_unaligned(dst.add(name_bytes) as *mut u16, 0u16);
-    }
-    Some(STATUS_SUCCESS)
+    Some(match reply.fit {
+        Fit::Mismatch => STATUS_INFO_LENGTH_MISMATCH,
+        Fit::Overflow => STATUS_BUFFER_OVERFLOW,
+        Fit::Fits => STATUS_SUCCESS,
+    })
 }

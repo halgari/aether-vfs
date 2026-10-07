@@ -1,5 +1,7 @@
 //! The name `NtQueryObject` reports for a redirected handle.
 
+use crate::info::Fit;
+
 /// The `ObjectNameInformation` name to emit for a redirected handle, given the
 /// host's own answer for the same handle (`real`) and the virtual NT path the
 /// caller opened (`vpath`).
@@ -41,6 +43,60 @@ pub fn spoofed_object_name(
     } else {
         None
     }
+}
+
+/// Bytes of the `UNICODE_STRING` header an `OBJECT_NAME_INFORMATION` opens with (two lengths, 4
+/// bytes of padding, and the `Buffer` pointer on a 64-bit target).
+pub const OBJECT_NAME_INFORMATION_HEADER: usize = 16;
+
+/// What [`put_object_name`] found: how much room the answer needs, and whether the buffer had it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectNameReply {
+    /// The size the whole answer needs, for `ReturnLength`. It is reported whether or not
+    /// anything was written.
+    pub required: usize,
+    /// Whether the caller's buffer held the header, and the whole answer.
+    pub fit: Fit,
+}
+
+/// Write `name` as an `OBJECT_NAME_INFORMATION` into `buf`, following the too-small-buffer
+/// contract measured on Windows 11 and Wine 11 alike: under the 16-byte header is
+/// `STATUS_INFO_LENGTH_MISMATCH`, the header or more but under `required` is
+/// `STATUS_BUFFER_OVERFLOW`, and in both nothing is written. A caller that size-probes loops or
+/// fails unless this is exact.
+///
+/// `buffer_addr` is the address `buf` starts at: both hosts point the `UNICODE_STRING::Buffer`
+/// at the caller's own buffer, 16 bytes in, so the answer has to carry it.
+///
+/// `None` if the name cannot be described at all (it does not fit a `UNICODE_STRING`, whose
+/// `MaximumLength` is a `u16` that must cover the NUL), in which case nothing was written.
+pub fn put_object_name(name: &str, buf: &mut [u8], buffer_addr: usize) -> Option<ObjectNameReply> {
+    let units: Vec<u16> = name.encode_utf16().collect();
+    let name_bytes = units.len() * 2;
+    if name_bytes + 2 > u16::MAX as usize {
+        return None;
+    }
+    let required = OBJECT_NAME_INFORMATION_HEADER + name_bytes + 2;
+    let fit = if buf.len() < OBJECT_NAME_INFORMATION_HEADER {
+        Fit::Mismatch
+    } else if buf.len() < required {
+        Fit::Overflow
+    } else {
+        Fit::Fits
+    };
+    if fit == Fit::Fits {
+        buf[0..2].copy_from_slice(&(name_bytes as u16).to_le_bytes());
+        buf[2..4].copy_from_slice(&((name_bytes + 2) as u16).to_le_bytes());
+        buf[4..8].fill(0);
+        let ptr = buffer_addr.wrapping_add(OBJECT_NAME_INFORMATION_HEADER);
+        buf[8..8 + core::mem::size_of::<usize>()].copy_from_slice(&ptr.to_le_bytes());
+        let dst = &mut buf[OBJECT_NAME_INFORMATION_HEADER..required];
+        for (i, u) in units.iter().enumerate() {
+            dst[i * 2..i * 2 + 2].copy_from_slice(&u.to_le_bytes());
+        }
+        dst[name_bytes..].fill(0);
+    }
+    Some(ObjectNameReply { required, fit })
 }
 
 #[cfg(test)]
@@ -153,5 +209,61 @@ mod tests {
                 "vpath = {vpath}"
             );
         }
+    }
+
+    #[test]
+    fn the_answer_carries_lengths_a_pointer_into_the_buffer_and_a_nul() {
+        let mut b = vec![0xEEu8; 64];
+        let r = put_object_name(r"\??\C:\x", &mut b, 0x1000).unwrap();
+        let name_bytes = r"\??\C:\x".len() * 2;
+        assert_eq!(
+            r,
+            ObjectNameReply {
+                required: 16 + name_bytes + 2,
+                fit: Fit::Fits
+            }
+        );
+        assert_eq!(u16::from_le_bytes([b[0], b[1]]) as usize, name_bytes);
+        assert_eq!(u16::from_le_bytes([b[2], b[3]]) as usize, name_bytes + 2);
+        assert_eq!(usize::from_le_bytes(b[8..16].try_into().unwrap()), 0x1010);
+        assert_eq!(&b[16..18], &[b'\\', 0]);
+        assert_eq!(
+            &b[16 + name_bytes..16 + name_bytes + 2],
+            &[0, 0],
+            "NUL-terminated"
+        );
+    }
+
+    /// The measured contract: 0 and 8 bytes are a length mismatch, 16 (header only) and
+    /// `required - 1` are an overflow, `required` fits; `required` is reported in all of them.
+    #[test]
+    fn the_too_small_buffer_contract() {
+        let required = 16 + 4 + 2;
+        for (len, fit) in [
+            (0, Fit::Mismatch),
+            (8, Fit::Mismatch),
+            (15, Fit::Mismatch),
+            (16, Fit::Overflow),
+            (required - 1, Fit::Overflow),
+            (required, Fit::Fits),
+        ] {
+            let mut b = vec![0xEEu8; len];
+            let r = put_object_name("ab", &mut b, 0).unwrap();
+            assert_eq!((r.required, r.fit), (required, fit), "buffer of {len}");
+            if fit != Fit::Fits {
+                assert!(
+                    b.iter().all(|x| *x == 0xEE),
+                    "wrote into a short buffer of {len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_name_too_long_for_a_unicode_string_is_refused() {
+        let mut b = vec![0u8; 0x10000];
+        assert_eq!(put_object_name(&"a".repeat(0x8000), &mut b, 0), None);
+        assert!(b.iter().all(|x| *x == 0));
+        assert!(put_object_name(&"a".repeat(0x7FFE), &mut b, 0).is_some());
     }
 }
