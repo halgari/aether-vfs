@@ -1,5 +1,9 @@
 //! Force a STATIC PE import of vproxy.dll by linking its import library.
 fn main() {
+    // Only a Windows target imports vproxy.dll; elsewhere the binary is a stub.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
     let out = std::env::var("OUT_DIR").unwrap();
     // OUT_DIR = <target_dir>/<profile>/build/<pkg>-<hash>/out → up 3 = profile dir
     let profile_dir = std::path::Path::new(&out)

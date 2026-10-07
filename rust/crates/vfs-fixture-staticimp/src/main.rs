@@ -4,6 +4,7 @@
 
 // Force a PE import of vproxy.dll (not a static link of the rlib). Combined
 // with build.rs link-search for the import library.
+#[cfg(windows)]
 #[link(name = "vproxy.dll", kind = "dylib")]
 extern "C" {
     fn vproxy_value() -> i32;
@@ -28,6 +29,13 @@ extern "C" {
 // purpose. The claim survived because a developer tree always happens to have
 // the import lib lying around, so the gap only ever showed up on clean CI.
 
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("vfs-staticimp is a Windows program; build it with bin/build-windows");
+    std::process::exit(11);
+}
+
+#[cfg(windows)]
 fn main() {
     let v = unsafe { vproxy_value() };
     let line = format!("vproxy_value={v}\n");
