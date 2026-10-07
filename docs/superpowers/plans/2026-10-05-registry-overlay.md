@@ -1,5 +1,7 @@
 # Registry overlay — implementation plan
 
+**Status:** executed and merged; kept as the reference for how it was built. The spec is `specs/2026-10-05-registry-overlay-design.md`; what is durable when is in `rust/docs/durability.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Processes the shim injects see the real Windows registry merged with a per-profile

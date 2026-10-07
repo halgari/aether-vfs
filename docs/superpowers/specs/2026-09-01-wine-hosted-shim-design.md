@@ -1,6 +1,7 @@
 # Linux delivery via the Wine-hosted shim — design
 
-**Status:** approved 2026-09-01. Supersedes the `vfs-fuse` half of
+**Status:** implemented (approved 2026-09-01); this is the live Linux launch path (`vfs-proton`,
+`vfs-embed`). Supersedes the `vfs-fuse` half of
 `2026-08-31-linux-fuse-proton-portability-design.md` (increments 2–4 of that
 document). Increment 1 of that spec — making the Director OS-agnostic — landed
 and stands.

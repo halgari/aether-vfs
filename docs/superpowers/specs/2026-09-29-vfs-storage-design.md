@@ -1,7 +1,7 @@
 # `vfs-storage`: the block store as cache and layer storage — design
 
-**Status:** approved in conversation 2026-09-29; this document is the written
-form for review.
+**Status:** implemented (approved in conversation 2026-09-29): `vfs-storage`. What is durable
+when is in `rust/docs/durability.md`.
 
 ## 1. Goal
 
@@ -139,6 +139,11 @@ evicted. (Logical bytes overstate disk use, because of dedup and compression;
 they are predictable, which matters more for a budget.)
 
 ## 5. Layers: `LayerProvider`
+
+> **Durability as built** is written down in one place, `rust/docs/durability.md` (terms, the
+> gate, durable points, what a crash can lose, the registry overlay's use of it). The
+> *Durability* bullet below is the design as amended 2026-09-30; where it and that file
+> differ, the file describes the code.
 
 A **layer** is a named, persistent namespace in the catalog. `layer_entries`
 maps `(layer, folded path)` to `{ name (original case), kind (file|dir),

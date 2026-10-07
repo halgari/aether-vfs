@@ -1,6 +1,9 @@
 # Director-Centric Userland FUSE + Thin Shim — Design Spec
 
-**Status:** Approved (design dialogue 2026-07-15); ready for implementation planning.  
+**Status:** Implemented. The director/thin-shim split is the architecture; the FUSE half is
+superseded by the wine-hosted shim (`2026-09-01-wine-hosted-shim-design.md`). Names below are as of
+2026-07-15: `vfs-server` and `vfs-launch` are gone, `SnapshotReader`/`Decision::Serve` and the
+shim-local engine were deleted, and `Session` lives in `vfs-embed`.  
 **Date:** 2026-07-15  
 **Type:** Architecture / next-phase production design  
 **Depends on:** `vfs-core`, `vfs-zip`, `vfs-ipc`, `vfs-server` (starter opcodes), `vfs-win`, `vfs-shim` hooks, `vfs-launch`  

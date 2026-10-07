@@ -6,7 +6,8 @@ against it later without touching the Windows shim path. This spec covers that
 enabling refactor in full, and fixes the target architecture the refactor aims
 at so the two increments cannot drift.
 
-**Status:** proposed, 2026-08-31.
+**Status:** increment 1 (an OS-agnostic director) implemented; the FUSE half (increments 2-4) is
+superseded by `2026-09-01-wine-hosted-shim-design.md` (proposed 2026-08-31).
 
 ---
 

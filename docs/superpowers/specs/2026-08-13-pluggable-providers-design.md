@@ -1,7 +1,8 @@
 # Pluggable Providers and the Embeddable Library — Design Spec
 
 **Date:** 2026-08-13
-**Status:** Approved, not implemented.
+**Status:** Implemented (`vfs-provider`, `vfs-compose`, `vfs-embed`); the reference for them. Its
+Node and cache sections are historical.
 **Scope:** Windows-first. The provider contract itself is OS-independent; the
 shim, launch, and root-resolution work is Windows-only as before.
 

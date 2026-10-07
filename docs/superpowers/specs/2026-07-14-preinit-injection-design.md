@@ -1,6 +1,6 @@
 # Pre-init Injection — Reflective-map + RIP-redirect
 
-**Status:** Production design (not a spike).
+**Status:** Implemented (production design, not a spike): `vfs-payload` and `vfs-inject`.
 **Date:** 2026-07-14
 **Context:** Virtualize a game EXE's own static PE imports (d3d/dxgi-style)
 with zero files written into the game directory. Spike B (instrumentation

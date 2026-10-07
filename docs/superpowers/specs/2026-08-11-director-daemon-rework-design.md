@@ -1,7 +1,8 @@
 # Director Daemon Rework — Design Spec
 
 **Date:** 2026-08-11
-**Status:** Implemented through M4 (read-only path). Overlay CoW writes remain partial (read-side whiteouts only).
+**Status:** Implemented through M4, and the overlay's copy-up writes have since landed
+(`vfs-compose`'s `OverlayProvider`). The live daemon architecture.
 **Scope:** Windows-first. Linux (director outside Proton) is a later phase, explicitly deferred.
 
 ## 1. Goal

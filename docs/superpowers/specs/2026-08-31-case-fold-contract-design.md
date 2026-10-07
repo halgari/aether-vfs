@@ -6,7 +6,7 @@ boundaries. Closes spec §6b, and is the prerequisite that lets a FUSE adapter
 pass paths through unfolded instead of reimplementing the shim's folding a
 second time.
 
-**Status:** proposed, 2026-08-31. Increment 2 of the Linux portability arc;
+**Status:** implemented (proposed 2026-08-31). Increment 2 of the Linux portability arc;
 increment 1 (`2026-08-31-linux-fuse-proton-portability-design.md`) is merged.
 
 ---

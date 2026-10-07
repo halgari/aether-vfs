@@ -1,7 +1,7 @@
 # aether-vfs — Registry overlay: per-profile copy-on-write of registry keys
 
 Date: 2026-10-05
-Status: implemented on the `registry-overlay` branch. This document describes what was built; the
+Status: implemented and merged. This document describes what was built; the
 rulings made during implementation are recorded in the plan ledger
 (`.superpowers/sdd/2026-10-05-registry-overlay/progress.md`).
 

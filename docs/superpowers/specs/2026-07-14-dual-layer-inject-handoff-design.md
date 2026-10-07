@@ -1,6 +1,8 @@
 # Dual-Layer Inject Handoff — Design Spec
 
-**Status:** Ready for planning / implementation.
+**Status:** Implemented (`vfs-inject`, `vfs-payload`, the shim's `install_late`). Injection now
+fails closed, for the top-level process and for children; `rust/docs/architecture.md` §3.6 and
+§4.1 are the current description.
 **Date:** 2026-07-14
 **Type:** Production design (modding infrastructure — USVFS/MO2 lineage).
 **Depends on:** [Pre-init injection](2026-07-14-preinit-injection-design.md)

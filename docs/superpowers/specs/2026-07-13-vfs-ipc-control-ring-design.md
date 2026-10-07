@@ -1,7 +1,8 @@
 # vfs-ipc Control Ring — Design Spec
 
-**Status:** Approved-to-proceed (user delegated the full cycle), ready for
-implementation planning.
+**Status:** Implemented (`vfs-ipc`). The wire `VERSION` is now 4, and the slot state
+machine has grown `ABANDONED` since this was written; `rust/docs/architecture.md` §3.4 is the
+current description.
 **Date:** 2026-07-13
 **Slice:** Third implementable slice — the `vfs-ipc` **control ring transport
 mechanics**: message framing, a fixed-slot ring with an atomic slot state

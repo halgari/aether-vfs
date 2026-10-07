@@ -1,7 +1,8 @@
 # No Bypass and Real Roots — Design Spec
 
 **Date:** 2026-08-13
-**Status:** Approved, not implemented. Stage 2 of the five-stage plan in
+**Status:** Implemented (gates 1-5 and stage 2b); still the contract the shim enforces. The shim
+no longer has a local engine or snapshot: the director is always the answer. Stage 2 of the five-stage plan in
 [2026-08-13-pluggable-providers-design.md](2026-08-13-pluggable-providers-design.md).
 **Scope:** Windows-only. This is entirely about the shim/director boundary.
 

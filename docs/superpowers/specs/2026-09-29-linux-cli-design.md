@@ -1,7 +1,6 @@
 # The `vfs` CLI and daemon on Linux, and rooted launches — design
 
-**Status:** approved in conversation 2026-09-29; this document is the written
-form for review.
+**Status:** implemented (approved in conversation 2026-09-29): the `vfs` CLI and daemon on Linux.
 
 ## 1. Goal
 

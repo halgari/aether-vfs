@@ -1,7 +1,7 @@
 # Zip-Backed Layers — Serve Mod Files Directly From Stored ZIP Archives
 
 **Date:** 2026-07-14
-**Status:** Approved (brainstorm), ready for planning.
+**Status:** Implemented (`vfs-zip`, served through `vfs-provider`'s contract).
 
 ## Goal
 

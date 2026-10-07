@@ -1,7 +1,7 @@
 # Block Store Design
 
 Date: 2026-09-23
-Status: Approved. Amended during implementation planning; section 14 lists the amendments.
+Status: Implemented (`vfs-block-store`). Amended during implementation planning; section 14 lists the amendments.
 
 ## 1. Purpose
 
