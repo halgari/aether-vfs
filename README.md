@@ -57,12 +57,26 @@ bin/build-windows --release
 cd rust && cargo test --release -p vfs-embed --test proton_registry -- --ignored
 ```
 
-The Proton tests skip silently (they print why on stderr and pass) when the
-Windows artefacts or a verified GE-Proton runtime are missing; a `cargo test`
-whose profile differs from the last `bin/build-windows` finds no artefacts and
-skips. The ring layout is versioned (ring `VERSION` 4 since the registry
-overlay added the `reg_gen` header field), and a shim built against another
-version does not attach: rerun `bin/build-windows` after pulling a ring change.
+The Proton tests are all `#[ignore]`d. Run with `-- --ignored`: a test whose prerequisite is
+missing (runtime, Windows artifacts, Steam client, `steam_api64.dll`, local Skyrim, NVIDIA
+GPU) prints `SKIP <test>: <reason>` on stderr, names the command to run, and passes; use
+`--nocapture` to see it. `VFS_TEST_REQUIRE_ALL=1` turns every skip into a failure, for a
+fully provisioned machine. The tests never use `/tmp` or your aether home: scratch, Wine
+prefixes and sessions live under `rust/target/tmp`. The runtime is only read: it is the
+newest verified one under `VFS_HOME` (else the XDG data home, `~/.local/share/aether-vfs`),
+or the directory `VFS_TEST_PROTON_RUNTIME` names. `VFS_HOME` is not required.
+
+The Windows artifacts live in `target/<profile>` (`bin/build-windows` for debug,
+`bin/build-windows --release` for release), and a test looks only in its own profile, because
+a shim from another build can carry another ring `VERSION` and refuse to attach. If they are
+missing there but present in the other profile, the skip message says so. Set
+`VFS_WINDOWS_ARTIFACTS=<dir>` to use one directory instead. The ring layout is versioned
+(ring `VERSION` 4 since the registry overlay added the `reg_gen` header field): rerun
+`bin/build-windows` after pulling a ring change.
+
+Other test variables: `VFS_TEST_STEAM_CLIENT` (default `~/.local/share/Steam`),
+`VFS_TEST_STEAM_API_DLL`, `VFS_TEST_STEAM_APP_ID`, `VFS_TEST_SKYRIM_DIR` (and the
+`VFS_TEST_SKYRIM_*` knobs in `proton_skyrim.rs`), `VFS_TEST_WINEDEBUG`.
 
 The first `bin/build-windows` downloads the MSVC CRT and Windows SDK via
 `cargo-xwin` (accepting Microsoft's license). Wine also needs a 32-bit loader
