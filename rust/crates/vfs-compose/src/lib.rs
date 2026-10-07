@@ -14,21 +14,28 @@
 //!   trees.
 
 mod casefold;
+mod disk;
 mod glob;
 mod inline;
 mod layered;
 mod memory;
+mod mount_graph;
 mod overlay;
+pub mod path;
 mod readonly;
+mod rejected_writes;
 mod router;
 mod seekable;
 mod subdir;
 
+pub use disk::DiskProvider;
 pub use inline::InlineProvider;
 pub use layered::LayeredProvider;
 pub use memory::MemoryProvider;
+pub use mount_graph::MountGraph;
 pub use overlay::OverlayProvider;
 pub use readonly::ReadOnlyProvider;
+pub use rejected_writes::{record_rejected_write, rejected_writes, reset_rejected_writes};
 pub use router::{Route, RouterProvider};
 pub use seekable::SeekableProvider;
 pub use subdir::SubdirProvider;

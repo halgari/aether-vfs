@@ -17,7 +17,7 @@ message Empty {}
 // 1 = Stage 1 read-only contract. Bumped when the wire shape changes.
 message CapsResp {
   uint32 contract_version = 1;
-  uint32 access = 2;          // 0 = SeqRead, 1 = Read, 2 = ReadWrite
+  uint32 access = 2;          // 1 = Read, 2 = ReadWrite (0 = SeqRead is rejected by RemoteProvider)
   bool   immutable = 3;
   bool   slow = 4;
   uint32 preferred_block = 5; // 0 = unset

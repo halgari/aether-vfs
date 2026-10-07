@@ -44,7 +44,7 @@ impl std::error::Error for BuildError {}
 /// Build a live provider from a declarative spec.
 pub fn build_provider(spec: &SourceSpec) -> Result<Arc<dyn Provider>, BuildError> {
     match spec {
-        SourceSpec::Disk { path } => Ok(Arc::new(vfs_director::DiskProvider::new(path))),
+        SourceSpec::Disk { path } => Ok(Arc::new(vfs_compose::DiskProvider::new(path))),
         SourceSpec::Zip { path } => {
             let p = vfs_zip::ZipProvider::open(std::path::Path::new(path))
                 .map_err(|e| BuildError::Open(format!("{path}: {e:?}")))?;
@@ -74,7 +74,7 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
     use tonic::transport::Server;
-    use vfs_director::DiskProvider;
+    use vfs_compose::DiskProvider;
 
     #[test]
     fn builds_disk_provider() {

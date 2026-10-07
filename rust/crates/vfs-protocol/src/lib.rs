@@ -1,11 +1,17 @@
-//! Pure FUSE contracts for the VFS stack: wire codecs, status/opcodes, and
-//! the provider contract (re-exported from `vfs-provider`). No OS I/O. Registry ops use `vfs-registry`'s portable node model.
+//! Pure wire and provider contracts for the VFS stack: wire codecs, status/opcodes, and
+//! the provider contract (re-exported from `vfs-provider`). No OS I/O. The vocabulary
+//! is FUSE-style RPC, but nothing here touches `/dev/fuse`. Registry ops use
+//! `vfs-registry`'s portable node model.
 #![forbid(unsafe_code)]
 
+// compat: removed by cleanup stream I
+#[doc(hidden)]
 pub mod ops;
 pub mod shimcfg;
+mod wire;
+use wire::{put_str, Rd};
 
-pub use ops::{
+pub use vfs_provider::{
     bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, not_supported, ok,
     read_only, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId, SetAttr, Stat,
     VPath, KIND_DIR, KIND_FILE, KIND_TOMBSTONE,
@@ -16,12 +22,14 @@ pub use vfs_provider::{
     ST_NOT_SUPPORTED, ST_NO_SPACE, ST_OK, ST_READ_ONLY, ST_REPLY_TOO_LARGE,
 };
 
-// Opcode catalog — must match `vfs_ipc::layout` values (do not renumber).
+// The opcode catalog. This is the only definition: `vfs_ipc::layout`
+// re-exports it. Numbers 4 and 12 are reserved (once `materialize` and
+// `register-process`); nothing sends them and the director answers
+// `ST_BAD_REQUEST`. Never renumber.
 
 pub const OP_GETATTR: u32 = 1;
 pub const OP_READDIR: u32 = 2;
 pub const OP_OPEN: u32 = 3;
-pub const OP_MATERIALIZE: u32 = 4;
 pub const OP_READ: u32 = 5;
 pub const OP_WRITE: u32 = 6;
 pub const OP_SETATTR: u32 = 7;
@@ -29,7 +37,6 @@ pub const OP_RENAME: u32 = 8;
 pub const OP_DELETE: u32 = 9;
 pub const OP_MKDIR: u32 = 10;
 pub const OP_CLOSE: u32 = 11;
-pub const OP_REGISTER_PROCESS: u32 = 12;
 pub const OP_HEARTBEAT: u32 = 13;
 /// The stored spelling of a path's components: see [`encode_names_req`].
 pub const OP_STORED_NAMES: u32 = 14;
@@ -43,6 +50,46 @@ pub const OP_REG_CREATE_KEY: u32 = 19;
 pub const OP_REG_DELETE_KEY: u32 = 20;
 pub const OP_REG_RENAME_KEY: u32 = 21;
 pub const OP_REG_CHANGED: u32 = 22;
+
+/// Every live opcode with its name, in number order.
+pub const OPCODES: &[(&str, u32)] = &[
+    ("getattr", OP_GETATTR),
+    ("readdir", OP_READDIR),
+    ("open", OP_OPEN),
+    ("read", OP_READ),
+    ("write", OP_WRITE),
+    ("setattr", OP_SETATTR),
+    ("rename", OP_RENAME),
+    ("delete", OP_DELETE),
+    ("mkdir", OP_MKDIR),
+    ("close", OP_CLOSE),
+    ("heartbeat", OP_HEARTBEAT),
+    ("stored-names", OP_STORED_NAMES),
+    ("reg-lookup", OP_REG_LOOKUP),
+    ("reg-key", OP_REG_KEY),
+    ("reg-set-value", OP_REG_SET_VALUE),
+    ("reg-delete-value", OP_REG_DELETE_VALUE),
+    ("reg-create-key", OP_REG_CREATE_KEY),
+    ("reg-delete-key", OP_REG_DELETE_KEY),
+    ("reg-rename-key", OP_REG_RENAME_KEY),
+    ("reg-changed", OP_REG_CHANGED),
+];
+
+/// Every status code with its name, in number order.
+pub const STATUSES: &[(&str, i32)] = &[
+    ("ok", ST_OK),
+    ("not-found", ST_NOT_FOUND),
+    ("not-a-directory", ST_NOT_A_DIRECTORY),
+    ("bad-request", ST_BAD_REQUEST),
+    ("io-error", ST_IO_ERROR),
+    ("is-dir", ST_IS_DIR),
+    ("bad-fh", ST_BAD_FH),
+    ("no-space", ST_NO_SPACE),
+    ("not-supported", ST_NOT_SUPPORTED),
+    ("read-only", ST_READ_ONLY),
+    ("exists", ST_EXISTS),
+    ("reply-too-large", ST_REPLY_TOO_LARGE),
+];
 
 /// Ring/request flag: prefer bulk-arena READ (data in shared arena, not ring payload).
 pub const FLAG_READ_BULK: u32 = 0x1;
@@ -114,11 +161,9 @@ pub fn encode_path_req(root: u32, vpath: &str) -> Vec<u8> {
 }
 
 pub fn decode_path_req(payload: &[u8]) -> Option<(u32, String)> {
-    if payload.len() < 4 {
-        return None;
-    }
-    let root = u32::from_le_bytes(payload[0..4].try_into().ok()?);
-    let path = core::str::from_utf8(&payload[4..]).ok()?.to_string();
+    let mut r = Rd(payload);
+    let root = r.u32()?;
+    let path = r.rest_str()?.to_string();
     Some((root, path))
 }
 
@@ -132,14 +177,14 @@ pub fn encode_getattr_resp(r: &AttrResp) -> Vec<u8> {
 }
 
 pub fn decode_getattr_resp(p: &[u8]) -> Option<AttrResp> {
-    if p.len() < 18 {
-        return None;
-    }
-    let size = u64::from_le_bytes(p[2..10].try_into().ok()?);
-    let mtime = i64::from_le_bytes(p[10..18].try_into().ok()?);
+    let mut r = Rd(p);
+    let found = r.flag()?;
+    let is_dir = r.flag()?;
+    let size = r.u64()?;
+    let mtime = r.u64()? as i64;
     Some(AttrResp {
-        found: p[0] != 0,
-        is_dir: p[1] != 0,
+        found,
+        is_dir,
         size,
         mtime,
     })
@@ -160,17 +205,14 @@ pub fn encode_readdir_resp(entries: &[DirEntryWire]) -> Vec<u8> {
 }
 
 pub fn decode_readdir_resp(p: &[u8]) -> Option<Vec<DirEntryWire>> {
-    let mut off = 0usize;
-    let count = take_u32(p, &mut off)?;
+    let mut r = Rd(p);
+    let count = r.u32()?;
     let mut out = Vec::new();
     for _ in 0..count {
-        let nlen = take_u32(p, &mut off)? as usize;
-        let end = off.checked_add(nlen)?;
-        let name = core::str::from_utf8(p.get(off..end)?).ok()?.to_string();
-        off = end;
-        let is_dir = take_u8(p, &mut off)? != 0;
-        let size = take_u64(p, &mut off)?;
-        let mtime = take_u64(p, &mut off)? as i64;
+        let name = r.str()?.to_string();
+        let is_dir = r.flag()?;
+        let size = r.u64()?;
+        let mtime = r.u64()? as i64;
         out.push(DirEntryWire {
             name,
             is_dir,
@@ -194,12 +236,10 @@ pub fn encode_open_req(root: u32, flags: u32, path: &str) -> Vec<u8> {
 
 /// Returns `(root, flags, path)`.
 pub fn decode_open_req(p: &[u8]) -> Option<(u32, u32, String)> {
-    if p.len() < 8 {
-        return None;
-    }
-    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    let flags = u32::from_le_bytes(p[4..8].try_into().ok()?);
-    let path = core::str::from_utf8(&p[8..]).ok()?.to_string();
+    let mut r = Rd(p);
+    let root = r.u32()?;
+    let flags = r.u32()?;
+    let path = r.rest_str()?.to_string();
     Some((root, flags, path))
 }
 
@@ -224,14 +264,13 @@ pub fn encode_open_resp(r: &OpenResp) -> Vec<u8> {
 }
 
 pub fn decode_open_resp(p: &[u8]) -> Option<OpenResp> {
-    if p.len() < 24 {
-        return None;
-    }
-    let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
-    let size = u64::from_le_bytes(p[8..16].try_into().ok()?);
-    let is_dir = p[16] != 0;
-    let immutable = p[17] & OPEN_RESP_IMMUTABLE != 0;
-    let mount_gen = u32::from_le_bytes(p[20..24].try_into().ok()?);
+    let mut r = Rd(p);
+    let fh = r.u64()?;
+    let size = r.u64()?;
+    let is_dir = r.flag()?;
+    let immutable = r.u8()? & OPEN_RESP_IMMUTABLE != 0;
+    r.take(2)?; // padding
+    let mount_gen = r.u32()?;
     Some(OpenResp {
         fh,
         size,
@@ -252,12 +291,11 @@ pub fn encode_read_req(r: &ReadReq) -> Vec<u8> {
 }
 
 pub fn decode_read_req(p: &[u8]) -> Option<ReadReq> {
-    if p.len() < 20 {
-        return None;
-    }
-    let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
-    let offset = u64::from_le_bytes(p[8..16].try_into().ok()?);
-    let len = u32::from_le_bytes(p[16..20].try_into().ok()?);
+    // The trailing `pad:u32` is not required: a 20-byte request decodes.
+    let mut r = Rd(p);
+    let fh = r.u64()?;
+    let offset = r.u64()?;
+    let len = r.u32()?;
     Some(ReadReq { fh, offset, len })
 }
 
@@ -271,33 +309,25 @@ pub fn encode_read_resp(data: &[u8]) -> Vec<u8> {
 }
 
 pub fn decode_read_resp(p: &[u8]) -> Option<Vec<u8>> {
-    if p.len() < 8 {
-        return None;
-    }
-    let n = u32::from_le_bytes(p[0..4].try_into().ok()?) as usize;
-    if p.len() < 8 + n {
-        return None;
-    }
-    Some(p[8..8 + n].to_vec())
+    let mut r = Rd(p);
+    let n = r.u32()? as usize;
+    r.take(4)?; // pad
+    Some(r.take(n)?.to_vec())
 }
 
 /// **A3:** copy READ response data into `out` without allocating a second Vec.
 /// Returns bytes copied (may be less than `out.len()` on short/EOF reads).
 /// Inline responses only (not bulk).
 pub fn decode_read_resp_into(p: &[u8], out: &mut [u8]) -> Option<usize> {
-    if p.len() < 8 {
-        return None;
-    }
-    let raw = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    let mut r = Rd(p);
+    let raw = r.u32()?;
     if raw & READ_RESP_BULK_BIT != 0 {
         return None; // use decode_read_bulk_resp + arena
     }
-    let n = raw as usize;
-    if p.len() < 8 + n {
-        return None;
-    }
-    let n = n.min(out.len());
-    out[..n].copy_from_slice(&p[8..8 + n]);
+    r.take(4)?; // pad
+    let data = r.take(raw as usize)?;
+    let n = data.len().min(out.len());
+    out[..n].copy_from_slice(&data[..n]);
     Some(n)
 }
 
@@ -312,20 +342,18 @@ pub fn encode_read_resp_bulk(bytes_read: u32, arena_offset: u64) -> Vec<u8> {
 
 /// Returns `(bytes_read, arena_offset)` for a bulk response, or `None` if inline/malformed.
 pub fn decode_read_bulk_resp(p: &[u8]) -> Option<(u32, u64)> {
-    if p.len() < 16 {
-        return None;
-    }
-    let raw = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    let mut r = Rd(p);
+    let raw = r.u32()?;
     if raw & READ_RESP_BULK_BIT == 0 {
         return None;
     }
-    let n = raw & !READ_RESP_BULK_BIT;
-    let off = u64::from_le_bytes(p[8..16].try_into().ok()?);
-    Some((n, off))
+    r.take(4)?; // pad
+    let off = r.u64()?;
+    Some((raw & !READ_RESP_BULK_BIT, off))
 }
 
 pub fn is_read_resp_bulk(p: &[u8]) -> bool {
-    p.len() >= 4 && (u32::from_le_bytes(p[0..4].try_into().unwrap_or([0; 4])) & READ_RESP_BULK_BIT) != 0
+    Rd(p).u32().is_some_and(|raw| raw & READ_RESP_BULK_BIT != 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -347,23 +375,13 @@ pub fn encode_write_req(r: &WriteReq, data: &[u8]) -> Vec<u8> {
 }
 
 pub fn decode_write_req(p: &[u8]) -> Option<(WriteReq, Vec<u8>)> {
-    if p.len() < 24 {
-        return None;
-    }
-    let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
-    let offset = u64::from_le_bytes(p[8..16].try_into().ok()?);
-    let len = u32::from_le_bytes(p[16..20].try_into().ok()?) as usize;
-    if p.len() < 24 + len {
-        return None;
-    }
-    Some((
-        WriteReq {
-            fh,
-            offset,
-            len: len as u32,
-        },
-        p[24..24 + len].to_vec(),
-    ))
+    let mut r = Rd(p);
+    let fh = r.u64()?;
+    let offset = r.u64()?;
+    let len = r.u32()?;
+    r.take(4)?; // pad
+    let data = r.take(len as usize)?.to_vec();
+    Some((WriteReq { fh, offset, len }, data))
 }
 
 /// WRITE resp: `bytes_written:u32 | pad:u32`
@@ -375,10 +393,7 @@ pub fn encode_write_resp(n: u32) -> Vec<u8> {
 }
 
 pub fn decode_write_resp(p: &[u8]) -> Option<u32> {
-    if p.len() < 4 {
-        return None;
-    }
-    Some(u32::from_le_bytes(p[0..4].try_into().ok()?))
+    Rd(p).u32()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,12 +415,10 @@ pub fn encode_mkdir_req(root: u32, mode: u32, path: &str) -> Vec<u8> {
 
 /// Returns `(root, mode, path)`.
 pub fn decode_mkdir_req(p: &[u8]) -> Option<(u32, u32, String)> {
-    if p.len() < 8 {
-        return None;
-    }
-    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    let mode = u32::from_le_bytes(p[4..8].try_into().ok()?);
-    let path = core::str::from_utf8(&p[8..]).ok()?.to_string();
+    let mut r = Rd(p);
+    let root = r.u32()?;
+    let mode = r.u32()?;
+    let path = r.rest_str()?.to_string();
     Some((root, mode, path))
 }
 
@@ -424,13 +437,23 @@ pub fn encode_names_req(root: u32, skip: u32, path: &str) -> Vec<u8> {
 
 /// Returns `(root, skip, path)`.
 pub fn decode_names_req(p: &[u8]) -> Option<(u32, u32, String)> {
-    if p.len() < 8 {
-        return None;
-    }
-    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    let skip = u32::from_le_bytes(p[4..8].try_into().ok()?);
-    let path = core::str::from_utf8(&p[8..]).ok()?.to_string();
+    let mut r = Rd(p);
+    let root = r.u32()?;
+    let skip = r.u32()?;
+    let path = r.rest_str()?.to_string();
     Some((root, skip, path))
+}
+
+/// STORED_NAMES reply: the names joined by `/` (a name has no `/` in it).
+pub fn encode_names_resp(names: &[String]) -> Vec<u8> {
+    names.join("/").into_bytes()
+}
+
+/// The names of a STORED_NAMES reply, or `None` if it is not UTF-8. An empty
+/// payload is one empty name, as `str::split` has it.
+pub fn decode_names_resp(p: &[u8]) -> Option<Vec<String>> {
+    let text = core::str::from_utf8(p).ok()?;
+    Some(text.split('/').map(str::to_string).collect())
 }
 
 /// RENAME req: `root:u32 | from_len:u32 | from_utf8 | to_utf8`
@@ -448,14 +471,11 @@ pub fn encode_rename_req(root: u32, from: &str, to: &str) -> Vec<u8> {
 
 /// Returns `(root, from, to)`.
 pub fn decode_rename_req(p: &[u8]) -> Option<(u32, String, String)> {
-    if p.len() < 8 {
-        return None;
-    }
-    let root = u32::from_le_bytes(p[0..4].try_into().ok()?);
-    let from_len = u32::from_le_bytes(p[4..8].try_into().ok()?) as usize;
-    let end = 8usize.checked_add(from_len)?;
-    let from = core::str::from_utf8(p.get(8..end)?).ok()?.to_string();
-    let to = core::str::from_utf8(p.get(end..)?).ok()?.to_string();
+    let mut r = Rd(p);
+    let root = r.u32()?;
+    let from_len = r.u32()? as usize;
+    let from = core::str::from_utf8(r.take(from_len)?).ok()?.to_string();
+    let to = r.rest_str()?.to_string();
     Some((root, from, to))
 }
 
@@ -468,11 +488,9 @@ pub fn encode_setattr_req(r: &SetattrReq) -> Vec<u8> {
 }
 
 pub fn decode_setattr_req(p: &[u8]) -> Option<SetattrReq> {
-    if p.len() < 16 {
-        return None;
-    }
-    let fh = u64::from_le_bytes(p[0..8].try_into().ok()?);
-    let size = u64::from_le_bytes(p[8..16].try_into().ok()?);
+    let mut r = Rd(p);
+    let fh = r.u64()?;
+    let size = r.u64()?;
     Some(SetattrReq { fh, size })
 }
 
@@ -481,28 +499,7 @@ pub fn encode_close_req(fh: u64) -> Vec<u8> {
 }
 
 pub fn decode_close_req(p: &[u8]) -> Option<u64> {
-    if p.len() < 8 {
-        return None;
-    }
-    Some(u64::from_le_bytes(p[0..8].try_into().ok()?))
-}
-
-fn take_u32(p: &[u8], off: &mut usize) -> Option<u32> {
-    let end = off.checked_add(4)?;
-    let s = p.get(*off..end)?;
-    *off = end;
-    Some(u32::from_le_bytes(s.try_into().ok()?))
-}
-fn take_u64(p: &[u8], off: &mut usize) -> Option<u64> {
-    let end = off.checked_add(8)?;
-    let s = p.get(*off..end)?;
-    *off = end;
-    Some(u64::from_le_bytes(s.try_into().ok()?))
-}
-fn take_u8(p: &[u8], off: &mut usize) -> Option<u8> {
-    let v = *p.get(*off)?;
-    *off += 1;
-    Some(v)
+    Rd(p).u64()
 }
 
 // ---------------------------------------------------------------------------
@@ -513,61 +510,7 @@ fn take_u8(p: &[u8], off: &mut usize) -> Option<u8> {
 // ---------------------------------------------------------------------------
 
 use vfs_registry::overlay::{MAX_DATA, MAX_KEY_NAME, MAX_VALUE_NAME};
-use vfs_registry::{utf16_len, Child, Node, Value};
-
-fn put_str(b: &mut Vec<u8>, s: &str) {
-    b.extend_from_slice(&(s.len() as u32).to_le_bytes());
-    b.extend_from_slice(s.as_bytes());
-}
-
-/// Bounds-checked cursor over a payload.
-struct Rd<'a>(&'a [u8]);
-
-impl<'a> Rd<'a> {
-    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        if self.0.len() < n {
-            return None;
-        }
-        let (h, t) = self.0.split_at(n);
-        self.0 = t;
-        Some(h)
-    }
-    fn u8(&mut self) -> Option<u8> {
-        Some(self.take(1)?[0])
-    }
-    fn bool(&mut self) -> Option<bool> {
-        match self.u8()? {
-            0 => Some(false),
-            1 => Some(true),
-            _ => None,
-        }
-    }
-    fn u32(&mut self) -> Option<u32> {
-        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
-    }
-    fn u64(&mut self) -> Option<u64> {
-        Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
-    }
-    fn bytes(&mut self, max: usize) -> Option<&'a [u8]> {
-        let n = self.u32()? as usize;
-        if n > max {
-            return None;
-        }
-        self.take(n)
-    }
-    fn str(&mut self) -> Option<&'a str> {
-        let n = self.u32()? as usize;
-        core::str::from_utf8(self.take(n)?).ok()
-    }
-    /// A string whose length in UTF-16 units is at most `max_units`.
-    fn str_max(&mut self, max_units: usize) -> Option<&'a str> {
-        let s = self.str()?;
-        (utf16_len(s) <= max_units).then_some(s)
-    }
-    fn done(&self) -> Option<()> {
-        self.0.is_empty().then_some(())
-    }
-}
+use vfs_registry::{Child, Node, Value};
 
 /// A request that is only a path (also `REG_KEY`, `REG_LOOKUP`, `REG_DELETE_KEY`).
 pub fn encode_reg_path(path: &str) -> Vec<u8> {
@@ -807,6 +750,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn names_resp_roundtrip() {
+        let names = vec!["Data".to_string(), "Skyrim.esm".to_string()];
+        assert_eq!(encode_names_resp(&names), b"Data/Skyrim.esm");
+        assert_eq!(decode_names_resp(&encode_names_resp(&names)), Some(names));
+        assert_eq!(decode_names_resp(&[0xff]), None);
+    }
+
+    #[test]
     fn open_req_roundtrip() {
         let p = encode_open_req(0, OPEN_READ, "Data/Skyrim.esm");
         let (root, f, path) = decode_open_req(&p).unwrap();
@@ -946,14 +897,57 @@ mod tests {
         assert_eq!(decode_setattr_req(&encode_setattr_req(&req)), Some(req));
     }
 
+    /// The wire numbers as literals, taken from the retired protocol
+    /// descriptor (75db467). A change here is a wire break.
     #[test]
-    fn opcode_constants_match_ipc_catalog() {
-        assert_eq!(OP_OPEN, 3);
-        assert_eq!(OP_READ, 5);
-        assert_eq!(OP_CLOSE, 11);
-        assert_eq!(OP_GETATTR, 1);
-        assert_eq!(OP_READDIR, 2);
-        assert_eq!(OP_HEARTBEAT, 13);
+    fn wire_numbers_are_the_historical_ones() {
+        let want: &[(&str, u32)] = &[
+            ("getattr", 1),
+            ("readdir", 2),
+            ("open", 3),
+            ("read", 5),
+            ("write", 6),
+            ("setattr", 7),
+            ("rename", 8),
+            ("delete", 9),
+            ("mkdir", 10),
+            ("close", 11),
+            ("heartbeat", 13),
+            ("stored-names", 14),
+            ("reg-lookup", 15),
+            ("reg-key", 16),
+            ("reg-set-value", 17),
+            ("reg-delete-value", 18),
+            ("reg-create-key", 19),
+            ("reg-delete-key", 20),
+            ("reg-rename-key", 21),
+            ("reg-changed", 22),
+        ];
+        assert_eq!(OPCODES, want);
+        let sts: &[(&str, i32)] = &[
+            ("ok", 0),
+            ("not-found", -1),
+            ("not-a-directory", -2),
+            ("bad-request", -3),
+            ("io-error", -4),
+            ("is-dir", -5),
+            ("bad-fh", -6),
+            ("no-space", -7),
+            ("not-supported", -8),
+            ("read-only", -9),
+            ("exists", -10),
+            ("reply-too-large", -11),
+        ];
+        assert_eq!(STATUSES, sts);
+        assert_eq!(OPEN_READ, 1);
+        assert_eq!(OPEN_WRITE, 2);
+        assert_eq!(OPEN_CREATE, 4);
+        assert_eq!(OPEN_EXCL, 8);
+        assert_eq!(OPEN_TRUNC, 16);
+        assert_eq!(OPEN_APPEND, 32);
+        assert_eq!(FLAG_READ_BULK, 1);
+        assert_eq!(READ_RESP_BULK_BIT, 0x8000_0000);
+        assert_eq!(OPEN_RESP_IMMUTABLE, 1);
     }
 
     #[test]
@@ -968,6 +962,84 @@ mod tests {
         assert!(decode_rename_req(&[0, 0, 0, 0]).is_none());
         assert!(decode_read_req(&[0u8; 10]).is_none());
         assert!(decode_read_resp(&[1, 0, 0]).is_none());
+    }
+
+    /// The file-op decoders are deliberately lenient (unlike the registry
+    /// ones): trailing bytes are ignored, any non-zero byte is true, and a
+    /// READ request may omit its trailing pad. Pinned so the shared cursor
+    /// cannot tighten them by accident.
+    #[test]
+    fn file_op_decoders_stay_lenient() {
+        let mut g = encode_getattr_resp(&AttrResp {
+            found: true,
+            is_dir: true,
+            size: 5,
+            mtime: 6,
+        });
+        g[0] = 7;
+        g[1] = 0xff;
+        g.extend_from_slice(&[9, 9]);
+        let a = decode_getattr_resp(&g).unwrap();
+        assert!(a.found && a.is_dir);
+        assert_eq!((a.size, a.mtime), (5, 6));
+
+        let mut c = encode_close_req(3);
+        c.push(0);
+        assert_eq!(decode_close_req(&c), Some(3));
+        let mut s = encode_setattr_req(&SetattrReq { fh: 1, size: 2 });
+        s.push(0);
+        assert_eq!(decode_setattr_req(&s), Some(SetattrReq { fh: 1, size: 2 }));
+        let req = ReadReq { fh: 1, offset: 2, len: 3 };
+        let r = encode_read_req(&req);
+        assert_eq!(decode_read_req(&r[..20]), Some(req));
+        assert_eq!(decode_write_resp(&encode_write_resp(4)[..4]), Some(4));
+        let mut rr = encode_read_resp(b"xy");
+        rr.push(0);
+        assert_eq!(decode_read_resp(&rr).as_deref(), Some(&b"xy"[..]));
+        let mut o = encode_open_resp(&OpenResp::default());
+        o[16] = 2;
+        o[18] = 0xaa;
+        o.push(0);
+        assert!(decode_open_resp(&o).unwrap().is_dir);
+        let mut d = encode_readdir_resp(&[DirEntryWire {
+            name: "a".into(),
+            is_dir: true,
+            size: 1,
+            mtime: 2,
+        }]);
+        d.push(0);
+        assert_eq!(decode_readdir_resp(&d).unwrap().len(), 1);
+        let mut w = encode_write_req(&WriteReq { fh: 1, offset: 2, len: 2 }, b"hi");
+        w.extend_from_slice(&[7, 7]);
+        let (wr, data) = decode_write_req(&w).unwrap();
+        assert_eq!((wr.len, data), (2, b"hi".to_vec()));
+        let mut rq = encode_read_req(&req);
+        rq.push(9);
+        assert_eq!(decode_read_req(&rq), Some(req));
+        // bulk read reply: trailing bytes ignored, inline decoders refuse it
+        let mut bulk = encode_read_resp_bulk(5, 65536);
+        bulk.push(1);
+        assert_eq!(decode_read_bulk_resp(&bulk), Some((5, 65536)));
+        assert!(is_read_resp_bulk(&bulk));
+        assert!(decode_read_resp_into(&bulk, &mut [0u8; 8]).is_none());
+        assert!(decode_read_bulk_resp(&encode_read_resp(b"ab")).is_none());
+        // readdir is_dir: any non-zero byte is true
+        let mut dd = encode_readdir_resp(&[DirEntryWire {
+            name: "a".into(),
+            is_dir: false,
+            size: 1,
+            mtime: 2,
+        }]);
+        let at = 4 + 4 + 1;
+        dd[at] = 2;
+        assert!(decode_readdir_resp(&dd).unwrap()[0].is_dir);
+        // a READ reply whose data is cut short is still malformed
+        assert!(decode_read_resp(&encode_read_resp(b"abc")[..10]).is_none());
+        assert!(decode_write_req(&encode_write_req(
+            &WriteReq { fh: 1, offset: 0, len: 3 },
+            b"abc"
+        )[..25])
+        .is_none());
     }
 
     #[test]

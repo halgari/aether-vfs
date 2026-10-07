@@ -710,7 +710,7 @@ impl Session {
     ///
     /// A host mounting its *own* read layer over the overlay directory
     /// (e.g. a `DiskProvider`, so the director sees content the shim's
-    /// overlay has written — see `vfs-directord/src/bin/skyrim-live.rs`)
+    /// overlay has written — see `vfs-bench/src/bin/skyrim-live.rs`)
     /// must mount exactly this path, not [`Session::set_overlay`]'s bare
     /// path: the shim's overlay is root-scoped on disk (gate 4, Task 2), so
     /// mounting the bare overlay directory would show nothing the overlay

@@ -44,18 +44,7 @@ impl RemoteProvider {
                 caps_resp.contract_version
             ));
         }
-        let access = match caps_resp.access {
-            0 => Access::SeqRead,
-            1 => Access::Read,
-            2 => Access::ReadWrite,
-            other => {
-                return Err(format!(
-                    "remote source: contract v{} sent unrecognized access value {other} \
-                     (expected 0=SeqRead, 1=Read, 2=ReadWrite)",
-                    caps_resp.contract_version
-                ));
-            }
-        };
+        let access = access_from_wire(caps_resp.access, caps_resp.contract_version)?;
         let caps = Capabilities {
             access,
             immutable: caps_resp.immutable,
@@ -86,6 +75,20 @@ impl RemoteProvider {
 
     pub fn connect_blocking(endpoint: &str) -> Result<Self, String> {
         block_on(Self::connect(endpoint))
+    }
+}
+
+/// Wire access value to `Access`. `0` (sequential-only) is rejected: this
+/// provider implements `read_at` only, so declaring `SeqRead` would make every
+/// read fail once the mount is wrapped for sequential access.
+fn access_from_wire(access: u32, contract_version: u32) -> Result<Access, String> {
+    match access {
+        1 => Ok(Access::Read),
+        2 => Ok(Access::ReadWrite),
+        other => Err(format!(
+            "remote source: contract v{contract_version} sent unsupported access value {other} \
+             (expected 1=Read, 2=ReadWrite; 0=SeqRead is not supported by the remote provider)"
+        )),
     }
 }
 
@@ -256,5 +259,18 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[test]
+    fn handshake_rejects_sequential_only_access() {
+        let err = access_from_wire(0, 1).unwrap_err();
+        assert!(err.contains("unsupported access value 0"), "{err}");
+    }
+
+    #[test]
+    fn handshake_accepts_read_and_read_write_and_rejects_unknown() {
+        assert_eq!(access_from_wire(1, 1), Ok(Access::Read));
+        assert_eq!(access_from_wire(2, 1), Ok(Access::ReadWrite));
+        assert!(access_from_wire(3, 1).is_err());
     }
 }

@@ -1,3 +1,5 @@
+> Historical: measured against crates that have since been removed (`vfs-server`, `vfs-fuse-bench`); numbers are kept as a record, not current guidance.
+
 # Director FUSE RPC Performance
 
 Measured **round-trip** cost of the shipped director control-ring path (`vfs-server` + `vfs-ipc` + `vfs-protocol`) used by the thin shim.

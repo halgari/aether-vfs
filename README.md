@@ -70,7 +70,7 @@ The first `bin/build-windows` downloads the MSVC CRT and Windows SDK via
 `vfs-shim`, …) do not build for a Linux *host*, so a bare
 `cargo build --workspace` on Linux fails; build the Linux crates by name.
 `vfs-directord` — the `vfs` CLI and daemon — is one of them and builds on
-Linux (its `skyrim-live` harness is Windows-only and just exits there).
+Linux. (The `skyrim-live` harness lives in `vfs-bench` and is Windows-only; it just exits on Linux.)
 
 ### Daemon + CLI (`vfs`)
 

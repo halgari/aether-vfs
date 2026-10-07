@@ -28,8 +28,9 @@ use crate::ring_dispatch::dispatch_director;
 
 /// The ring's shared-memory backing, chosen by target.
 ///
-/// Both types expose `seg()`, `len()` and `as_mut_ptr()` with identical
-/// meaning — deliberately, so everything above this line is written once.
+/// Both types implement [`vfs_ipc::RingBacking`] (`seg()`, `len()` and
+/// `as_mut_ptr()` with identical meaning) — deliberately, so everything above
+/// this line is written once.
 /// `SharedMapping` is a named page-file-backed section; `FileMapping` is an
 /// `mmap` over a real file, which is what lets a shim inside Wine and a native
 /// Linux Director share one ring.
@@ -37,6 +38,13 @@ use crate::ring_dispatch::dispatch_director;
 type RingMapping = vfs_win::SharedMapping;
 #[cfg(unix)]
 type RingMapping = vfs_unix::FileMapping;
+
+// The contract itself, checked where the backing is chosen: a target whose
+// mapping type drifts from `RingBacking` fails here, not somewhere above.
+const _: fn() = || {
+    fn assert_ring_backing<T: vfs_ipc::RingBacking>() {}
+    assert_ring_backing::<RingMapping>();
+};
 
 pub const DEFAULT_SLOT_COUNT: u32 = 32;
 /// Re-export for callers; keep in sync with [`vfs_ipc::DEFAULT_ARENA_BYTES`].
@@ -107,8 +115,7 @@ impl Inner {
 
 /// Running IPC server bound to a director kernel (keeps workers alive).
 ///
-/// This is the **production ring host** for remapped child I/O (not the legacy
-/// `vfs_server::Server` tree path).
+/// This is the **production ring host** for remapped child I/O.
 pub struct IpcServe {
     /// Windows-only, with the three event-name fields below: they name the
     /// *named-section* handshake, which has no counterpart in the file-backed
@@ -382,14 +389,9 @@ impl IpcServe {
         std::fs::write(path, body).map_err(|e| format!("write thin config: {e}"))
     }
 
-    /// Windows-only, with [`Self::apply_env_roots`]: it publishes the section
-    /// name and both event names, none of which exist in the file-backed mode.
-    #[cfg(windows)]
-    pub fn apply_env(&self, virtual_root: &str, thin_cfg: &std::path::Path) {
-        self.apply_env_roots(virtual_root, &[], thin_cfg, false)
-    }
-
-    /// [`Self::apply_env`] for a session that virtualizes more than one root.
+    /// Windows-only: publishes the section name and both event names, none of
+    /// which exist in the file-backed mode. For a session that virtualizes
+    /// more than one root, pass the extra roots.
     ///
     /// `extra_roots` is `(id, path)` for every root **beyond root 0**, which
     /// `virtual_root` names. The shim needs the full set because the root id

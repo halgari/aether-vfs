@@ -81,8 +81,7 @@ answers `resolve(vpath)`. It knows about:
   enumeration).
 - **Wildcards** — enumeration filters (`*.esm`) are matched here, not in the hook.
 
-`vfs-shared` is the bitness-neutral shared-memory layout for publishing a
-snapshot of that tree, with a seqlock so a reader never observes a torn update.
+`vfs-shared` holds the bitness-neutral flat layout of a snapshot of that tree.
 
 Keeping this layer pure is what makes the merge semantics testable without a
 game, a driver, or even a filesystem.
@@ -321,7 +320,7 @@ enableable by accident), and `opt_out` is on unless explicitly disabled.
 `vfs_env::describe()` prints the whole surface; the rustdoc on each constant is
 the reference.
 
-### 3.8 Control plane — `vfs-control`, `vfs-directord`, `vfs-launch`
+### 3.8 Control plane — `vfs-control`, `vfs-directord`
 
 A gRPC contract plus a declarative config schema, a daemon that can hold many
 sessions, and CLIs. The control plane is language-agnostic; the data plane is
@@ -707,7 +706,7 @@ observer before concluding the process is idle.
 | crate | role |
 |---|---|
 | `vfs-core` | pure merged-tree resolver: layers, tombstones, case folding, wildcards |
-| `vfs-shared` | bitness-neutral shared snapshot layout + seqlock |
+| `vfs-shared` | bitness-neutral shared snapshot layout |
 | `vfs-provider` | provider contract: `Capabilities`, `VPath`, `Provider`, conformance suite |
 | `vfs-protocol` | ring wire codecs and opcodes (re-exports the provider contract for existing importers) |
 | `vfs-ipc` | control ring + bulk arena, OS-free |
@@ -719,15 +718,15 @@ observer before concluding the process is idle.
 | `vfs-source` | declarative spec → provider, incl. `RemoteProvider` gRPC plugins |
 | `vfs-director` | FUSE kernel, session, staging, launch |
 | `vfs-registry` | registry overlay tree, its file format, the merge with a real key, NT query layouts |
-| `vfs-directord` | daemon + CLI; `skyrim-live` harness |
+| `vfs-directord` | daemon + CLI |
 | `vfs-control` | gRPC contract + config schema |
 | `vfs-env` | every `VFS_*` switch, defined once, with a drift test |
 | `vfs-redirect` | pure redirect-decision core |
 | `vfs-shim` / `vfs-shim-dll` | NT detours, FUSE client, synthetic handles, sections |
 | `vfs-payload` | `no_std` pre-init hook payload |
 | `vfs-inject` | injection, PE parsing, process creation |
-| `vfs-launch` | end-user launcher |
-| `vfs-fixture-*`, `vfs-ring-harness` | test fixtures |
+| `vfs-fixture-*` | test fixtures |
+| `vfs-bench` | `ring-bench` (ring round trips) and `skyrim-live` (live Skyrim launch harness, Windows) |
 
 Dependency direction is enforced by the split: pure crates never learn about the
 OS, and the zip provider never learns about the host.

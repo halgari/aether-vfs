@@ -47,29 +47,14 @@ pub const ST_COMPLETED: u32 = 4;
 /// read by a later request.
 pub const ST_ABANDONED: u32 = 5;
 
-// Opcode catalog — reference values; the ring never interprets these.
-pub const OP_GETATTR: u32 = 1;
-pub const OP_READDIR: u32 = 2;
-pub const OP_OPEN: u32 = 3;
-pub const OP_MATERIALIZE: u32 = 4;
-pub const OP_READ: u32 = 5;
-pub const OP_WRITE: u32 = 6;
-pub const OP_SETATTR: u32 = 7;
-pub const OP_RENAME: u32 = 8;
-pub const OP_DELETE: u32 = 9;
-pub const OP_MKDIR: u32 = 10;
-pub const OP_CLOSE: u32 = 11;
-pub const OP_REGISTER_PROCESS: u32 = 12;
-pub const OP_HEARTBEAT: u32 = 13;
-pub const OP_STORED_NAMES: u32 = 14;
-pub const OP_REG_LOOKUP: u32 = 15;
-pub const OP_REG_KEY: u32 = 16;
-pub const OP_REG_SET_VALUE: u32 = 17;
-pub const OP_REG_DELETE_VALUE: u32 = 18;
-pub const OP_REG_CREATE_KEY: u32 = 19;
-pub const OP_REG_DELETE_KEY: u32 = 20;
-pub const OP_REG_RENAME_KEY: u32 = 21;
-pub const OP_REG_CHANGED: u32 = 22;
+// Opcode catalog: defined once, in `vfs-protocol`; the ring never interprets
+// these. Re-exported here so `layout::OP_*` keeps working.
+pub use vfs_protocol::{
+    OP_CLOSE, OP_DELETE, OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN, OP_READ, OP_READDIR,
+    OP_REG_CHANGED, OP_REG_CREATE_KEY, OP_REG_DELETE_KEY, OP_REG_DELETE_VALUE, OP_REG_KEY,
+    OP_REG_LOOKUP, OP_REG_RENAME_KEY, OP_REG_SET_VALUE, OP_RENAME, OP_SETATTR, OP_STORED_NAMES,
+    OP_WRITE,
+};
 
 #[repr(C)]
 pub struct RingHeader {
@@ -165,5 +150,66 @@ mod tests {
         assert_eq!(align8(1), 8);
         assert_eq!(align8(32), 32);
         assert_eq!(align8(33), 40);
+    }
+
+    /// Every `layout::OP_*` is the vfs-protocol opcode of the same name, and
+    /// vfs-protocol lists no opcode the layout lacks.
+    #[test]
+    fn every_opcode_here_is_the_protocol_opcode() {
+        let here: &[(&str, u32)] = &[
+            ("getattr", OP_GETATTR),
+            ("readdir", OP_READDIR),
+            ("open", OP_OPEN),
+            ("read", OP_READ),
+            ("write", OP_WRITE),
+            ("setattr", OP_SETATTR),
+            ("rename", OP_RENAME),
+            ("delete", OP_DELETE),
+            ("mkdir", OP_MKDIR),
+            ("close", OP_CLOSE),
+            ("heartbeat", OP_HEARTBEAT),
+            ("stored-names", OP_STORED_NAMES),
+            ("reg-lookup", OP_REG_LOOKUP),
+            ("reg-key", OP_REG_KEY),
+            ("reg-set-value", OP_REG_SET_VALUE),
+            ("reg-delete-value", OP_REG_DELETE_VALUE),
+            ("reg-create-key", OP_REG_CREATE_KEY),
+            ("reg-delete-key", OP_REG_DELETE_KEY),
+            ("reg-rename-key", OP_REG_RENAME_KEY),
+            ("reg-changed", OP_REG_CHANGED),
+        ];
+        assert_eq!(here, vfs_protocol::OPCODES);
+    }
+
+    /// The historical numbers (from the retired protocol descriptor), as
+    /// literals: a change here is a wire break.
+    #[test]
+    fn layout_numbers_are_the_historical_ones() {
+        assert_eq!(MAGIC, 0x5646_4950);
+        assert_eq!(VERSION, 4);
+        assert_eq!(
+            [ST_FREE, ST_CLAIMED, ST_SUBMITTED, ST_PROCESSING, ST_COMPLETED, ST_ABANDONED],
+            [0, 1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            [
+                RH_MAGIC,
+                RH_VERSION,
+                RH_SLOT_COUNT,
+                RH_SLOT_STRIDE,
+                RH_PAYLOAD_CAP,
+                RH_WORKER_HINT,
+                RH_REQ_SEQ,
+                RH_SUBMIT_SEQ,
+                RH_REG_GEN
+            ],
+            [0, 4, 8, 12, 16, 20, 24, 32, 40]
+        );
+        assert_eq!(RING_HEADER_SIZE, 48);
+        assert_eq!(
+            [SH_STATE, SH_OPCODE, SH_FLAGS, SH_PAYLOAD_LEN, SH_STATUS, SH_ACK, SH_REQ_ID],
+            [0, 4, 8, 12, 16, 20, 24]
+        );
+        assert_eq!(SLOT_HEADER_SIZE, 32);
     }
 }
