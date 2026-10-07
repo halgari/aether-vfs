@@ -375,6 +375,10 @@ fn find_entry_ci(dir: &Path, name: &str) -> io::Result<Option<std::ffi::OsString
     Ok(None)
 }
 
+/// How long [`Prefix::lock`] keeps retrying a lock that looks held before it
+/// reports [`PrefixError::Busy`].
+const LOCK_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The file in a prefix directory listing every root link aether-vfs
 /// created there ([`Prefix::link_location`]), one host path per line. A
 /// symlink at a root location that is **not** listed is someone else's — a
@@ -598,10 +602,26 @@ impl Prefix {
             .truncate(false)
             .write(true)
             .open(self.dir.join(".aether-vfs.lock"))?;
-        match f.try_lock() {
-            Ok(()) => Ok(PrefixLock(f)),
-            Err(std::fs::TryLockError::WouldBlock) => Err(PrefixError::Busy(self.dir.clone())),
-            Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+        // `flock` belongs to the open file description, and a `fork` in another
+        // thread of this process copies the descriptor until the child execs
+        // (the fd is close-on-exec). A lock dropped an instant ago can
+        // therefore still look held, for microseconds to milliseconds. Retry
+        // `WouldBlock` briefly, as `spawn_retrying_busy` does for `ETXTBSY`;
+        // a live holder still fails, just `LOCK_RETRY_BUDGET` later.
+        let deadline = std::time::Instant::now() + LOCK_RETRY_BUDGET;
+        let mut pause = std::time::Duration::from_millis(1);
+        loop {
+            match f.try_lock() {
+                Ok(()) => return Ok(PrefixLock(f)),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(PrefixError::Busy(self.dir.clone()));
+                    }
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(std::time::Duration::from_millis(20));
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            }
         }
     }
 
@@ -1006,26 +1026,36 @@ mod tests {
         }
     }
 
+    /// A lock dropped while another thread of this process forks must not look
+    /// held: the forked child briefly owns a copy of the descriptor.
+    #[test]
+    fn a_lock_released_while_another_thread_forks_is_not_busy() {
+        let p = Prefix { dir: scratch("lock-fork") };
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let forker = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            })
+        };
+        for i in 0..300 {
+            let l = p.lock().unwrap_or_else(|e| panic!("lock {i}: {e}"));
+            drop(l);
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        forker.join().unwrap();
+    }
+
     #[test]
     fn a_second_lock_is_busy_and_the_lock_is_released_on_drop() {
         let p = Prefix { dir: scratch("lock") };
         let held = p.lock().unwrap();
         assert!(matches!(p.lock(), Err(PrefixError::Busy(_))));
         drop(held);
-        // A child another test thread is forking in this instant holds a
-        // copy of the lock's descriptor (close-on-exec, so only until it
-        // execs), and `flock` stays held while any copy is open: retry
-        // briefly rather than read that window as a leak.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            match p.lock() {
-                Ok(_) => break,
-                Err(PrefixError::Busy(_)) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(e) => panic!("the lock must be released on drop: {e}"),
-            }
-        }
+        // `lock` itself rides out a sibling thread's half-forked child.
+        p.lock().expect("the lock must be released on drop");
     }
 
     #[test]
