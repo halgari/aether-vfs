@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use vfs_core::fold;
 use vfs_provider::map_io_err;
 
-use crate::cached::lock;
+use crate::util::lock;
 use crate::config::{Durability, ScratchDir};
 use crate::ids::Guid;
 use crate::layer_io::FileCell;

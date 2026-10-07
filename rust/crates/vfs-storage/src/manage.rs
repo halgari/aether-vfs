@@ -13,7 +13,8 @@ use vfs_provider::{
     is_overlay_marker, Provider, SetAttr, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_READ, OPEN_TRUNC, OPEN_WRITE,
 };
 
-use crate::cached::{lock, CacheStats};
+use crate::cached::CacheStats;
+use crate::util::lock;
 use crate::ids::{classify_store_id, layer_file_id, Guid, StoreIdKind};
 use crate::layer::LayerProvider;
 use crate::storage::{Storage, StorageError};
@@ -436,7 +437,7 @@ fn import_file(
     meta: &fs::Metadata,
 ) -> Result<(), StorageError> {
     #[cfg(test)]
-    if crate::cached::lock(&p.storage().fail_import_at).as_deref() == Some(rel) {
+    if crate::util::lock(&p.storage().fail_import_at).as_deref() == Some(rel) {
         return Err(StorageError::Io(std::io::Error::other(
             "injected import failure",
         )));

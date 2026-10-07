@@ -220,7 +220,7 @@ impl FileCell {
             Ok(r) if r.missing.is_empty() && r.bytes == want => {
                 #[cfg(test)]
                 {
-                    let hook = crate::cached::lock(&s.layer_fill_hook).clone();
+                    let hook = crate::util::lock(&s.layer_fill_hook).clone();
                     if let Some(hook) = hook {
                         hook();
                     }
@@ -267,7 +267,7 @@ impl FileCell {
     ) -> Result<usize, i32> {
         #[cfg(test)]
         {
-            let hook = crate::cached::lock(&s.layer_read_hook).clone();
+            let hook = crate::util::lock(&s.layer_read_hook).clone();
             if let Some(hook) = hook {
                 hook();
             }

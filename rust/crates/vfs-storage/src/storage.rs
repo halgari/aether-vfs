@@ -9,7 +9,8 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use vfs_block_store::BlockStore;
 use vfs_provider::Provider;
 
-use crate::cached::{lock, CacheState};
+use crate::cached::CacheState;
+use crate::util::lock;
 use crate::catalog::Catalog;
 use crate::config::{Durability, StorageConfig};
 use crate::durable::{fold_scratch_dirs, DurableClock};

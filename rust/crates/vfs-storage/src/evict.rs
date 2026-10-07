@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use vfs_block_store::CompactOptions;
 
-use crate::cached::{lock, now_minute, sub_logical};
+use crate::cached::sub_logical;
+use crate::util::{lock, now_minute};
 use crate::ids::{cache_file_id, classify_store_id, StoreIdKind};
 use crate::storage::{Storage, StorageError};
 

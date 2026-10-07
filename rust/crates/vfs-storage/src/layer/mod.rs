@@ -332,7 +332,7 @@ impl Drop for LayerProvider {
         }
         #[cfg(test)]
         {
-            let hook = crate::cached::lock(&self.storage.drop_hook).take();
+            let hook = crate::util::lock(&self.storage.drop_hook).take();
             if let Some(hook) = hook {
                 hook();
             }

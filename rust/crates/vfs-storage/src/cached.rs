@@ -23,7 +23,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use vfs_provider::{
     bad_fh, map_io_err, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId, Stat,
@@ -33,6 +32,7 @@ use vfs_provider::{
 use crate::catalog::CacheRec;
 use crate::ids::cache_file_id;
 use crate::storage::{Storage, StorageError};
+use crate::util::{lock, now_minute};
 
 /// Names a source stably across runs: a remote source's endpoint, or the
 /// `cache_key` a config sets on it. Part of every cached file's identity.
@@ -166,19 +166,6 @@ pub(crate) struct CacheState {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     pub(crate) after_snapshot: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-}
-
-/// Locks `m`, entering a poisoned lock: every critical section here leaves its
-/// map consistent at each step, so a panic elsewhere is no reason to stop.
-pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-pub(crate) fn now_minute() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() / 60)
-        .unwrap_or(0)
 }
 
 impl CacheState {

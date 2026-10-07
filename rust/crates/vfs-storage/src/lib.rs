@@ -24,6 +24,7 @@ mod reconcile;
 mod storage;
 #[cfg(any(test, feature = "test-hooks"))]
 mod test_util;
+mod util;
 
 pub use cached::{CacheStats, SourceKey};
 pub use config::{Durability, ScratchDir, StorageConfig};
