@@ -484,7 +484,7 @@ pub const ALL: &[Var] = &[
     Var { name: LAZY_NO_VEH, kind: Kind::Behaviour, default: "false (VEH installed)" },
     Var { name: SHIM_READ_CACHE, kind: Kind::Behaviour, default: "on" },
     Var { name: SHIM_READ_CACHE_MIB, kind: Kind::Behaviour, default: "256" },
-    Var { name: REGISTRY, kind: Kind::Behaviour, default: "false (registry not virtualised)" },
+    Var { name: REGISTRY, kind: Kind::Handshake, default: "false (registry not virtualised)" },
     Var { name: WAIT, kind: Kind::Behaviour, default: "false (detach)" },
     Var { name: BENCH, kind: Kind::Behaviour, default: "false" },
     Var { name: SHIM_STATS_LOG, kind: Kind::Diagnostic, default: "off" },
@@ -620,6 +620,136 @@ pub fn describe() -> String {
         }
     }
     out
+}
+
+/// The handshake: every name the host writes and the child reads, in one place.
+///
+/// Three crates had to agree on this set by hand: `vfs-proton`'s stale list,
+/// the Windows `IpcServe::apply_env_roots`, and the reserved-name check for
+/// `LaunchOpts::env`. They disagreed (`VFS_REGISTRY` and `VFS_FUSE_CFG` were in
+/// some and not others). They now all read these tables, and a test ties the
+/// tables to [`ALL`]: a new [`Kind::Handshake`] name that is in no table fails
+/// the build of this crate's tests.
+pub mod handshake {
+    use super::*;
+
+    /// The names a launch **sets or clears every time**, so a value inherited
+    /// from an earlier session in the host process can never reach the child:
+    /// the ring transport, its geometry, the roots, and the registry switch.
+    pub const TRANSPORT: &[&str] = &[
+        RING_PATH,
+        RING_SECTION,
+        RING_BYTES,
+        RING_PAYLOAD_CAP,
+        ARENA_OFFSET,
+        ARENA_LEN,
+        SERVER_EV,
+        CLIENT_EV,
+        FUSE_CFG,
+        VIRTUAL_DIR,
+        VIRTUAL_ROOTS,
+        REGISTRY,
+    ];
+
+    /// The names only the injector reads. A Wine launch sets or clears them
+    /// like [`TRANSPORT`]; the Windows in-process serve leaves them alone,
+    /// because there the host may have set them for its own injector.
+    pub const INJECT: &[&str] = &[INJECT_CWD, INJECT_STEAM_HELPER];
+
+    /// The remaining handshake names: configuration the host hands the shim,
+    /// the payload or the staging step. A launch does not set them, but
+    /// `LaunchOpts::env` may not either.
+    pub const CONFIG: &[&str] = &[
+        STATE_DIR,
+        HOME,
+        LAUNCH_IMAGE,
+        DISCOVERY_PATH,
+        SHIM_CONFIG,
+        SHIM_READY,
+        PAYLOAD_PATH,
+        PAYLOAD_CFG_FILE,
+        DUAL_LAYER,
+    ];
+
+    /// Every handshake name.
+    pub fn all() -> impl Iterator<Item = &'static str> {
+        TRANSPORT.iter().chain(INJECT).chain(CONFIG).copied()
+    }
+
+    /// Whether `name` is a handshake name. ASCII case-insensitive: Wine hands
+    /// the Windows side an environment whose names compare without case.
+    pub fn is_handshake(name: &str) -> bool {
+        all().any(|n| n.eq_ignore_ascii_case(name))
+    }
+
+    /// The names a Wine launch must remove from the child's inherited
+    /// environment: every [`TRANSPORT`] and [`INJECT`] name `is_set` says the
+    /// launch did not set itself.
+    pub fn stale<'a>(is_set: impl Fn(&str) -> bool + 'a) -> impl Iterator<Item = &'static str> + 'a {
+        TRANSPORT.iter().chain(INJECT).copied().filter(move |n| !is_set(n))
+    }
+
+    /// The `id=location;id=location` encoding of `VFS_VIRTUAL_ROOTS`, or `None`
+    /// for no extra roots (the variable is then unset, not empty).
+    pub fn encode_roots(roots: &[(u32, String)]) -> Option<String> {
+        if roots.is_empty() {
+            return None;
+        }
+        Some(
+            roots
+                .iter()
+                .map(|(id, loc)| format!("{id}={loc}"))
+                .collect::<Vec<_>>()
+                .join(";"),
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_tables_cover_exactly_the_handshake_names() {
+            let mut table: Vec<&str> = all().collect();
+            let mut listed: Vec<&str> = ALL
+                .iter()
+                .filter(|v| v.kind == Kind::Handshake)
+                .map(|v| v.name)
+                .collect();
+            let n = table.len();
+            table.sort_unstable();
+            table.dedup();
+            assert_eq!(n, table.len(), "a name is in two handshake tables");
+            listed.sort_unstable();
+            assert_eq!(table, listed, "handshake tables and Kind::Handshake disagree");
+        }
+
+        #[test]
+        fn registry_and_fuse_cfg_are_launch_cleared_handshake_names() {
+            for n in [REGISTRY, FUSE_CFG, RING_PATH, INJECT_CWD] {
+                assert!(is_handshake(n), "{n}");
+                assert!(stale(|_| false).any(|s| s == n), "{n} not cleared");
+            }
+            assert!(is_handshake("vfs_registry"), "case-insensitive");
+            assert!(!is_handshake("VFS_BENCH"));
+        }
+
+        #[test]
+        fn stale_skips_what_the_launch_set() {
+            let s: Vec<_> = stale(|n| n == REGISTRY || n == RING_PATH).collect();
+            assert!(!s.contains(&REGISTRY) && !s.contains(&RING_PATH));
+            assert!(s.contains(&RING_SECTION));
+        }
+
+        #[test]
+        fn roots_encode_as_id_equals_location_joined_by_semicolons() {
+            assert_eq!(encode_roots(&[]), None);
+            assert_eq!(
+                encode_roots(&[(1, r"C:\a".into()), (2, r"C:\b".into())]).as_deref(),
+                Some(r"1=C:\a;2=C:\b")
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -760,10 +890,7 @@ mod tests {
                 visit(&p, f);
             } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
                 // Skip this file: it necessarily contains every name.
-                if p.ends_with("vfs-env/src/lib.rs") || p.file_name().and_then(|s| s.to_str()) == Some("lib.rs")
-                    && p.parent().and_then(|d| d.parent()).and_then(|d| d.file_name())
-                        .and_then(|s| s.to_str()) == Some("vfs-env")
-                {
+                if p.ends_with("vfs-env/src/lib.rs") {
                     continue;
                 }
                 if let Ok(text) = std::fs::read_to_string(&p) {
