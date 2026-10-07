@@ -6,7 +6,7 @@
 //! Real scratch keys live under `HKCU\Software\AetherVfsRegWriteTest`, made before the hooks go
 //! in. What the *real* registry holds afterwards is asked of a checker: this same test binary,
 //! started before the hooks were installed (so it has none), running the ignored `reg_checker`
-//! test, which answers over its stdin and stdout.
+//! test (see `common/reg.rs`), which answers over its stdin and stdout.
 //!
 //! Every test takes [`LOCK`]: they share one director, and one of them detaches its registry.
 #![cfg(windows)]
@@ -15,26 +15,24 @@
 mod common;
 
 mod fakedirector;
+#[path = "common/reg.rs"]
+mod reg;
 
-use std::ffi::c_void;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::ops::Deref;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use fakedirector::Fake;
-use vfs_registry::Lookup;
-use vfs_shim::{Engine, install, is_synthetic_key_handle, regclient, registry_handle_path};
-use windows_sys::Win32::Foundation::{FILETIME, HANDLE, LocalFree};
-use windows_sys::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ, REG_OPTION_NON_VOLATILE, RegCloseKey,
-    RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW,
-    RegSetValueExW,
+use reg::{
+    Checker, ObjectAttributes, Paths, UnicodeString, close, hex, object_name,
+    open_abs, reg_create, wide, with_us,
 };
+use vfs_registry::Lookup;
+use vfs_shim::{is_synthetic_key_handle, regclient, registry_handle_path};
+use windows_sys::Win32::System::Registry::{HKEY, RegCloseKey, RegSetValueExW};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
 const BASE: &str = r"Software\AetherVfsRegWriteTest";
-const CHECKER_ENV: &str = "AETHER_VFS_REGWRITE_CHECKER";
 
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_UNSUCCESSFUL: i32 = 0xC000_0001u32 as i32;
@@ -54,31 +52,13 @@ const NT_KEY_READ: u32 = 0x2_0019;
 const NT_KEY_WRITE: u32 = 0x2_0006;
 const NT_KEY_ALL_ACCESS: u32 = 0xF_003F;
 const DELETE: u32 = 0x1_0000;
-const OBJ_CASE_INSENSITIVE: u32 = 0x40;
-const OBJECT_NAME_INFORMATION: u32 = 1;
+const OBJ_CASE_INSENSITIVE: u32 = reg::OBJ_CASE_INSENSITIVE;
 const KEY_VALUE_PARTIAL_INFORMATION: u32 = 2;
 const KEY_NAME_INFORMATION: u32 = 3;
 const REG_SZ: u32 = 1;
 const REG_BINARY: u32 = 3;
 const REG_DWORD: u32 = 4;
 const REG_CREATED_NEW_KEY: u32 = 1;
-
-#[repr(C)]
-struct UnicodeString {
-    length: u16,
-    maximum_length: u16,
-    buffer: *const u16,
-}
-
-#[repr(C)]
-struct ObjectAttributes {
-    length: u32,
-    root_directory: isize,
-    object_name: *const UnicodeString,
-    attributes: u32,
-    security_descriptor: *const c_void,
-    security_qos: *const c_void,
-}
 
 #[link(name = "ntdll")]
 extern "system" {
@@ -93,8 +73,6 @@ extern "system" {
         disposition: *mut u32,
     ) -> i32;
     fn NtLoadKey(target: *const ObjectAttributes, source: *const ObjectAttributes) -> i32;
-    fn NtClose(h: isize) -> i32;
-    fn NtQueryObject(h: isize, class: u32, info: *mut u8, len: u32, ret: *mut u32) -> i32;
     fn NtQueryKey(h: isize, class: u32, info: *mut u8, len: u32, ret: *mut u32) -> i32;
     fn NtQueryValueKey(
         h: isize,
@@ -119,33 +97,6 @@ extern "system" {
     fn NtFlushKey(h: isize) -> i32;
 }
 
-/// `f` with a `UNICODE_STRING` for `s`.
-fn with_us<R>(s: &str, f: impl FnOnce(*const UnicodeString) -> R) -> R {
-    let w: Vec<u16> = s.encode_utf16().collect();
-    let us = UnicodeString {
-        length: (w.len() * 2) as u16,
-        maximum_length: (w.len() * 2) as u16,
-        buffer: w.as_ptr(),
-    };
-    f(&us)
-}
-
-fn open_abs(name: &str, access: u32) -> (i32, isize) {
-    let mut h = 0isize;
-    let st = with_us(name, |us| {
-        let oa = ObjectAttributes {
-            length: std::mem::size_of::<ObjectAttributes>() as u32,
-            root_directory: 0,
-            object_name: us,
-            attributes: OBJ_CASE_INSENSITIVE,
-            security_descriptor: std::ptr::null(),
-            security_qos: std::ptr::null(),
-        };
-        unsafe { NtOpenKeyEx(&mut h, access, &oa, 0) }
-    });
-    (st, h)
-}
-
 fn create_abs(name: &str, access: u32) -> (i32, isize, u32) {
     let mut h = 0isize;
     let mut disp = 0u32;
@@ -161,10 +112,6 @@ fn create_abs(name: &str, access: u32) -> (i32, isize, u32) {
         unsafe { NtCreateKey(&mut h, access, &oa, 0, std::ptr::null(), 0, &mut disp) }
     });
     (st, h, disp)
-}
-
-fn close(h: isize) -> i32 {
-    unsafe { NtClose(h) }
 }
 
 fn set(h: isize, name: &str, ty: u32, data: &[u8]) -> i32 {
@@ -233,50 +180,6 @@ fn key_name(h: isize) -> Result<String, i32> {
     Ok(String::from_utf16_lossy(units))
 }
 
-/// `NtQueryObject(ObjectNameInformation)`.
-fn object_name(h: isize) -> Result<String, i32> {
-    let mut buf = vec![0u64; 512];
-    let mut ret = 0u32;
-    let st = unsafe {
-        NtQueryObject(
-            h,
-            OBJECT_NAME_INFORMATION,
-            buf.as_mut_ptr().cast(),
-            4096,
-            &mut ret,
-        )
-    };
-    if st != STATUS_SUCCESS {
-        return Err(st);
-    }
-    let us = unsafe { &*(buf.as_ptr() as *const UnicodeString) };
-    let s = unsafe { std::slice::from_raw_parts(us.buffer, us.length as usize / 2) };
-    Ok(String::from_utf16_lossy(s))
-}
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(Some(0)).collect()
-}
-
-fn reg_create(sub: &str) -> HKEY {
-    let mut k: HKEY = std::ptr::null_mut();
-    let st = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            wide(sub).as_ptr(),
-            0,
-            std::ptr::null(),
-            REG_OPTION_NON_VOLATILE,
-            KEY_ALL_ACCESS,
-            std::ptr::null(),
-            &mut k,
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(st, 0, "RegCreateKeyExW {sub}");
-    k
-}
-
 /// Make the real key `HKCU\BASE\<rel>` with DWORD values.
 fn real_key(rel: &str, values: &[(&str, u32)]) {
     let k = reg_create(&format!(r"{BASE}\{rel}"));
@@ -313,98 +216,47 @@ fn real_raw(rel: &str, name: &str, ty: u32, data: &[u8]) {
     unsafe { RegCloseKey(k) };
 }
 
-fn user_sid() -> String {
-    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    unsafe {
-        let mut token: HANDLE = std::ptr::null_mut();
-        assert_ne!(
-            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token),
-            0
-        );
-        let mut buf = vec![0u64; 64];
-        let mut need = 0;
-        assert_ne!(
-            GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), 512, &mut need),
-            0
-        );
-        let tu = &*(buf.as_ptr() as *const TOKEN_USER);
-        let mut s: *mut u16 = std::ptr::null_mut();
-        assert_ne!(ConvertSidToStringSidW(tu.User.Sid, &mut s), 0);
-        let len = (0..).take_while(|&i| *s.add(i) != 0).count();
-        let out = String::from_utf16_lossy(std::slice::from_raw_parts(s, len));
-        LocalFree(s.cast());
-        out
-    }
-}
-
-struct Checker {
-    _child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-}
-
 struct Fixture {
     fake: &'static Fake,
-    sid: String,
-    checker: Mutex<Checker>,
+    paths: Paths,
+    checker: Checker,
     /// `HKCU\BASE\Pre`, opened KEY_ALL_ACCESS before the hooks (so neither table knows it).
     pre: isize,
 }
 
+impl Deref for Fixture {
+    type Target = Paths;
+    fn deref(&self) -> &Paths {
+        &self.paths
+    }
+}
+
 impl Fixture {
-    fn nt(&self, rel: &str) -> String {
-        format!(r"\REGISTRY\USER\{}\{BASE}\{rel}", self.sid)
-    }
-
-    fn canon(&self, rel: &str) -> String {
-        format!(r"\Registry\User\<CurrentUser>\{BASE}\{rel}")
-    }
-
     fn open(&self, rel: &str, access: u32) -> (i32, isize) {
         open_abs(&self.nt(rel), access)
     }
 
-    fn ask(&self, q: &str) -> String {
-        let mut c = self.checker.lock().unwrap_or_else(|e| e.into_inner());
-        writeln!(c.stdin, "{q}").unwrap();
-        c.stdin.flush().unwrap();
-        loop {
-            let mut line = String::new();
-            assert_ne!(c.stdout.read_line(&mut line).unwrap(), 0, "checker exited");
-            // libtest's own `test reg_checker ... ` may lead the first answer's line.
-            if let Some(i) = line.find("CHECK:") {
-                return line[i + 6..].trim().to_string();
-            }
-        }
-    }
-
     /// Whether the key exists in the real registry.
     fn really_exists(&self, rel: &str) -> bool {
-        self.ask(&format!(r"K|{BASE}\{rel}")) == "1"
+        self.checker.really_exists(&format!(r"{BASE}\{rel}"))
     }
 
     /// The real value's data as hex, or `none`.
     fn real_value(&self, rel: &str, name: &str) -> String {
-        self.ask(&format!(r"V|{BASE}\{rel}|{name}"))
+        self.checker.real_value(&format!(r"{BASE}\{rel}"), name)
     }
 
     /// The real key's last-write time, its value count and its subkey count.
     fn real_info(&self, rel: &str) -> String {
-        self.ask(&format!(r"I|{BASE}\{rel}"))
+        self.checker.real_info(&format!(r"{BASE}\{rel}"))
     }
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     static F: OnceLock<Fixture> = OnceLock::new();
     let f = F.get_or_init(|| {
-        unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, wide(BASE).as_ptr()) };
+        reg::reset_base(BASE, &[]);
         real_key("Cow", &[("orig", 1), ("dv", 7)]);
         real_key("Seen", &[]);
         real_key(r"Del\Parent\Child", &[]);
@@ -424,143 +276,24 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         real_key("Dead", &[("v", 1)]);
         real_key("Pre", &[]);
         real_key("Names", &[("orig", 1)]);
-        let sid = user_sid();
+        let paths = Paths::new(BASE);
         let (st, pre) = open_abs(
-            &format!(r"\REGISTRY\USER\{sid}\{BASE}\Pre"),
+            &paths.nt("Pre"),
             NT_KEY_ALL_ACCESS,
         );
         assert_eq!(st, STATUS_SUCCESS);
 
         // The checker: started now, so it has no hooks.
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "reg_checker",
-                "--exact",
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(CHECKER_ENV, "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("checker");
-        let stdin = child.stdin.take().unwrap();
-        let stdout = BufReader::new(child.stdout.take().unwrap());
-
-        let root = std::env::temp_dir().join(format!("vfs-shim-regwrite-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::env::set_var(vfs_env::REGISTRY, "1");
-        let fake = fakedirector::install(&root, Fake::new().with_registry(), 0);
-        let snapshot = {
-            use vfs_core::{Layer, LayerId, build};
-            let tree = build(vec![Layer {
-                id: LayerId(0),
-                entries: vec![],
-            }])
-            .unwrap();
-            vfs_shared::bridge::flatten(&tree)
-        };
-        let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-        std::mem::forget(install(engine).expect("install"));
-        assert_eq!(
-            vfs_shim::reg_overlay_disabled_by(),
-            None,
-            "every registry detour is in"
-        );
-        assert!(regclient::enabled());
+        let checker = Checker::spawn();
+        let fake = reg::install_hooks("regwrite");
         Fixture {
             fake,
-            sid,
-            checker: Mutex::new(Checker {
-                _child: child,
-                stdin,
-                stdout,
-            }),
+            paths,
+            checker,
             pre,
         }
     });
     (guard, f)
-}
-
-/// Not a test of its own: the checker process [`Fixture::ask`] asks. Each stdin line is a
-/// query on the real registry under HKCU: `K|key` (exists: 1 or 0), `V|key|name` (the value's
-/// data in hex, or `none`), `I|key` (last-write time, value and subkey counts).
-#[test]
-#[ignore]
-fn reg_checker() {
-    if std::env::var_os(CHECKER_ENV).is_none() {
-        return;
-    }
-    let mut out = std::io::stdout();
-    for line in std::io::stdin().lines() {
-        let line = line.unwrap();
-        let parts: Vec<&str> = line.trim().split('|').collect();
-        let mut k: HKEY = std::ptr::null_mut();
-        let st = unsafe {
-            RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                wide(parts[1]).as_ptr(),
-                0,
-                KEY_READ,
-                &mut k,
-            )
-        };
-        let answer = match (parts[0], st) {
-            ("K", st) => (if st == 0 { "1" } else { "0" }).to_string(),
-            (_, st) if st != 0 => "nokey".to_string(),
-            ("V", _) => {
-                let mut buf = [0u8; 256];
-                let mut len = 256u32;
-                let mut ty = 0u32;
-                let r = unsafe {
-                    RegQueryValueExW(
-                        k,
-                        wide(parts[2]).as_ptr(),
-                        std::ptr::null(),
-                        &mut ty,
-                        buf.as_mut_ptr(),
-                        &mut len,
-                    )
-                };
-                if r == 0 {
-                    hex(&buf[..len as usize])
-                } else {
-                    "none".to_string()
-                }
-            }
-            _ => {
-                let (mut subs, mut vals) = (0u32, 0u32);
-                let mut ft = FILETIME {
-                    dwLowDateTime: 0,
-                    dwHighDateTime: 0,
-                };
-                let n = std::ptr::null_mut();
-                unsafe {
-                    RegQueryInfoKeyW(
-                        k,
-                        std::ptr::null_mut(),
-                        n,
-                        std::ptr::null(),
-                        &mut subs,
-                        n,
-                        n,
-                        &mut vals,
-                        n,
-                        n,
-                        n,
-                        &mut ft,
-                    )
-                };
-                format!("{}:{}:{vals}:{subs}", ft.dwHighDateTime, ft.dwLowDateTime)
-            }
-        };
-        if st == 0 {
-            unsafe { RegCloseKey(k) };
-        }
-        writeln!(out, "CHECK:{answer}").unwrap();
-        out.flush().unwrap();
-    }
 }
 
 #[test]

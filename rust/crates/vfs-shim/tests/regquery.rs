@@ -20,19 +20,21 @@
 mod common;
 
 mod fakedirector;
+#[path = "common/reg.rs"]
+mod reg;
 
-use std::ffi::c_void;
+use std::ops::Deref;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use fakedirector::Fake;
+use reg::{open_abs, reg_create_class, wide, Paths, UnicodeString};
 use vfs_registry::layout::{self, KeyInfoClass, ValueEntry, ValueInfoClass, Written};
 use vfs_registry::{MergedKey, Value};
-use vfs_shim::{install, is_synthetic_key_handle, regclient, registry_enum_states, Engine};
-use windows_sys::Win32::Foundation::{FILETIME, HANDLE};
+use vfs_shim::{is_synthetic_key_handle, regclient, registry_enum_states};
+use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegOpenKeyExW, RegQueryInfoKeyW,
-    RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ,
-    REG_OPTION_NON_VOLATILE,
+    RegCloseKey, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, KEY_READ,
 };
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -50,7 +52,6 @@ const STATUS_KEY_DELETED: i32 = 0xC000_017Cu32 as i32;
 const KEY_QUERY_VALUE: u32 = 0x1;
 const KEY_ENUMERATE_SUB_KEYS: u32 = 0x8;
 const NT_KEY_READ: u32 = 0x2_0019;
-const OBJ_CASE_INSENSITIVE: u32 = 0x40;
 
 const REG_SZ: u32 = 1;
 const REG_BINARY: u32 = 3;
@@ -58,23 +59,6 @@ const REG_DWORD: u32 = 4;
 
 /// Sentinel for bytes a call must not touch.
 const S: u8 = 0xCC;
-
-#[repr(C)]
-struct UnicodeString {
-    length: u16,
-    maximum_length: u16,
-    buffer: *const u16,
-}
-
-#[repr(C)]
-struct ObjectAttributes {
-    length: u32,
-    root_directory: isize,
-    object_name: *const UnicodeString,
-    attributes: u32,
-    security_descriptor: *const c_void,
-    security_qos: *const c_void,
-}
 
 /// x64 `KEY_VALUE_ENTRY`.
 #[repr(C)]
@@ -88,7 +72,6 @@ struct KeyValueEntry {
 
 #[link(name = "ntdll")]
 extern "system" {
-    fn NtOpenKeyEx(key: *mut isize, access: u32, oa: *const ObjectAttributes, options: u32) -> i32;
     fn NtClose(h: isize) -> i32;
     fn NtQueryKey(h: isize, class: u32, info: *mut u8, len: u32, ret: *mut u32) -> i32;
     fn NtEnumerateKey(
@@ -125,10 +108,6 @@ extern "system" {
     ) -> i32;
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(Some(0)).collect()
-}
-
 /// `s` as REG_SZ data: UTF-16 with its terminating NUL.
 fn sz(s: &str) -> Vec<u8> {
     wide(s).iter().flat_map(|u| u.to_le_bytes()).collect()
@@ -154,47 +133,11 @@ fn us(units: &[u16]) -> UnicodeString {
     }
 }
 
-fn open_abs(name: &str, access: u32) -> (i32, isize) {
-    let w: Vec<u16> = name.encode_utf16().collect();
-    let u = us(&w);
-    let oa = ObjectAttributes {
-        length: std::mem::size_of::<ObjectAttributes>() as u32,
-        root_directory: 0,
-        object_name: &u,
-        attributes: OBJ_CASE_INSENSITIVE,
-        security_descriptor: std::ptr::null(),
-        security_qos: std::ptr::null(),
-    };
-    let mut h = 0isize;
-    let st = unsafe { NtOpenKeyEx(&mut h, access, &oa, 0) };
-    (st, h)
-}
-
 // ---- Real keys, made before the hooks ----
-
-fn reg_create(sub: &str, class: Option<&str>) -> HKEY {
-    let mut k: HKEY = std::ptr::null_mut();
-    let class_w = class.map(wide);
-    let st = unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            wide(sub).as_ptr(),
-            0,
-            class_w.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
-            REG_OPTION_NON_VOLATILE,
-            KEY_ALL_ACCESS,
-            std::ptr::null(),
-            &mut k,
-            std::ptr::null_mut(),
-        )
-    };
-    assert_eq!(st, 0, "RegCreateKeyExW {sub}");
-    k
-}
 
 /// Create `BASE\rel` (with `class`) and set `values` on it, in order.
 fn make(rel: &str, class: Option<&str>, values: &[Value]) {
-    let k = reg_create(&format!(r"{BASE}\{rel}"), class);
+    let k = reg_create_class(&format!(r"{BASE}\{rel}"), class);
     for v in values {
         let st = unsafe {
             RegSetValueExW(
@@ -257,7 +200,7 @@ fn merged_values() -> Vec<Value> {
 }
 
 fn build_real_keys() {
-    unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, wide(BASE).as_ptr()) };
+    reg::reset_base(BASE, &["Limited"]);
     // The key the overlay changes, and its children.
     make(r"M\Merge", Some("MCls"), &merge_real_values());
     make(r"M\Merge\Sa", None, &[val("x", REG_DWORD, &dword(1))]);
@@ -308,33 +251,7 @@ fn build_real_keys() {
     // Grants KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS only: KEY_READ is refused.
     make("Limited", None, &[val("l", REG_DWORD, &dword(1))]);
     make(r"Limited\LSub", None, &[]);
-    set_dacl(r"Limited", "D:P(A;;0x9;;;WD)");
-}
-
-/// Set `BASE\rel`'s DACL from SDDL.
-fn set_dacl(rel: &str, sddl: &str) {
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    };
-    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
-    use windows_sys::Win32::System::Registry::RegSetKeySecurity;
-    let k = reg_create(&format!(r"{BASE}\{rel}"), None);
-    unsafe {
-        let mut sd: *mut c_void = std::ptr::null_mut();
-        assert_ne!(
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                wide(sddl).as_ptr(),
-                SDDL_REVISION_1,
-                &mut sd,
-                std::ptr::null_mut(),
-            ),
-            0
-        );
-        assert_eq!(RegSetKeySecurity(k, DACL_SECURITY_INFORMATION, sd), 0);
-        LocalFree(sd);
-        RegCloseKey(k);
-    }
+    reg::set_dacl(&format!(r"{BASE}\Limited"), "D:P(A;;0x9;;;WD)");
 }
 
 /// Whether a Win32 open of `BASE\rel` with `access` succeeds (before the hooks).
@@ -355,36 +272,9 @@ fn grants(rel: &str, access: u32) -> bool {
     st == 0
 }
 
-fn user_sid() -> String {
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    unsafe {
-        let mut token: HANDLE = std::ptr::null_mut();
-        assert_ne!(
-            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token),
-            0
-        );
-        let mut buf = vec![0u64; 64];
-        let mut need = 0;
-        assert_ne!(
-            GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), 512, &mut need),
-            0
-        );
-        let tu = &*(buf.as_ptr() as *const TOKEN_USER);
-        let mut s: *mut u16 = std::ptr::null_mut();
-        assert_ne!(ConvertSidToStringSidW(tu.User.Sid, &mut s), 0);
-        let len = (0..).take_while(|&i| *s.add(i) != 0).count();
-        let out = String::from_utf16_lossy(std::slice::from_raw_parts(s, len));
-        LocalFree(s.cast());
-        out
-    }
-}
-
 struct Fixture {
     fake: &'static Fake,
-    sid: String,
+    paths: Paths,
     /// `M\Merge`'s real last-write time, read before the hooks.
     merge_real_lw: u64,
     /// `Pre`, opened `KEY_ENUMERATE_SUB_KEYS` before the hooks: neither table knows it.
@@ -394,15 +284,14 @@ struct Fixture {
     limited_as_expected: bool,
 }
 
+impl Deref for Fixture {
+    type Target = Paths;
+    fn deref(&self) -> &Paths {
+        &self.paths
+    }
+}
+
 impl Fixture {
-    fn nt(&self, rel: &str) -> String {
-        format!(r"\REGISTRY\USER\{}\{BASE}\{rel}", self.sid)
-    }
-
-    fn canon(&self, rel: &str) -> String {
-        format!(r"\Registry\User\<CurrentUser>\{BASE}\{rel}")
-    }
-
     fn open(&self, rel: &str, access: u32) -> isize {
         let (st, h) = open_abs(&self.nt(rel), access);
         assert_eq!(st, STATUS_SUCCESS, "open {rel}");
@@ -418,31 +307,16 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         let merge_real_lw = last_write_of(r"M\Merge");
         let limited_as_expected = !grants("Limited", KEY_READ)
             && grants("Limited", KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS);
-        let sid = user_sid();
+        let paths = Paths::new(BASE);
         let (st, pre) = open_abs(
-            &format!(r"\REGISTRY\USER\{sid}\{BASE}\Pre"),
+            &paths.nt("Pre"),
             KEY_ENUMERATE_SUB_KEYS,
         );
         assert_eq!(st, STATUS_SUCCESS);
-        let root = std::env::temp_dir().join(format!("vfs-shim-regquery-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::env::set_var(vfs_env::REGISTRY, "1");
-        let fake = fakedirector::install(&root, Fake::new().with_registry(), 0);
-        let snapshot = {
-            use vfs_core::{build, Layer, LayerId};
-            let tree = build(vec![Layer {
-                id: LayerId(0),
-                entries: vec![],
-            }])
-            .unwrap();
-            vfs_shared::bridge::flatten(&tree)
-        };
-        let engine = Engine::new(root.to_str().unwrap(), snapshot).unwrap();
-        std::mem::forget(install(engine).expect("install"));
-        assert!(regclient::enabled());
+        let fake = reg::install_hooks("regquery");
         let f = Fixture {
             fake,
-            sid,
+            paths,
             merge_real_lw,
             pre,
             limited_as_expected,

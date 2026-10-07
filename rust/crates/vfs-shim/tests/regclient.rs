@@ -14,6 +14,8 @@
 mod common;
 
 mod fakedirector;
+#[path = "common/reg.rs"]
+mod reg;
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -39,11 +41,8 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     static F: OnceLock<Fixture> = OnceLock::new();
     let f = F.get_or_init(|| {
-        let root = std::env::temp_dir().join(format!("vfs-shim-regclient-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        // What the host sets while a registry layer is attached; read once by `enabled`.
-        std::env::set_var(vfs_env::REGISTRY, "1");
-        let fake = fakedirector::install(&root, Fake::new().with_registry(), 0);
+        // What the host sets while a registry layer is attached, read once by `enabled`.
+        let (fake, root) = reg::start_director("regclient");
         // This binary drives the client without installing the hooks; record the outcome an
         // install with every registry detour in would, which `enabled` requires.
         regclient::detours_installed(&[]);

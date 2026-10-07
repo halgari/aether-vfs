@@ -8,53 +8,15 @@
 #[macro_use]
 mod common;
 
-use std::ffi::c_void;
+// `reg` needs the fake director's module; this file never starts it.
+mod fakedirector;
+#[path = "common/reg.rs"]
+mod reg;
 
+use reg::{close, object_name, open_abs};
 use vfs_shim::{
     install, is_synthetic_key_handle, registry_handle_counts, registry_handle_path, Engine,
 };
-
-#[repr(C)]
-struct UnicodeString {
-    length: u16,
-    maximum_length: u16,
-    buffer: *const u16,
-}
-
-#[repr(C)]
-struct ObjectAttributes {
-    length: u32,
-    root_directory: isize,
-    object_name: *const UnicodeString,
-    attributes: u32,
-    security_descriptor: *const c_void,
-    security_qos: *const c_void,
-}
-
-#[link(name = "ntdll")]
-extern "system" {
-    fn NtOpenKeyEx(key: *mut isize, access: u32, oa: *const ObjectAttributes, options: u32) -> i32;
-    fn NtClose(h: isize) -> i32;
-    fn NtQueryObject(h: isize, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
-}
-
-fn with_oa<R>(name: &str, f: impl FnOnce(*const ObjectAttributes) -> R) -> R {
-    let w: Vec<u16> = name.encode_utf16().collect();
-    let us = UnicodeString {
-        length: (w.len() * 2) as u16,
-        maximum_length: (w.len() * 2) as u16,
-        buffer: w.as_ptr(),
-    };
-    let oa = ObjectAttributes {
-        length: std::mem::size_of::<ObjectAttributes>() as u32,
-        root_directory: 0,
-        object_name: &us,
-        attributes: 0x40,
-        security_descriptor: std::ptr::null(),
-        security_qos: std::ptr::null(),
-    };
-    f(&oa)
-}
 
 #[test]
 fn every_registry_call_is_the_real_one() {
@@ -90,25 +52,12 @@ fn every_registry_call_is_the_real_one() {
     );
 
     let name = r"\Registry\Machine\Software";
-    let mut h = 0isize;
-    assert_eq!(
-        with_oa(name, |oa| unsafe { NtOpenKeyEx(&mut h, 0x2_0019, oa, 0) }),
-        0
-    );
+    let (st, h) = open_abs(name, 0x2_0019);
+    assert_eq!(st, 0);
     assert!(!is_synthetic_key_handle(h));
     assert_eq!(registry_handle_path(h), None, "nothing is tracked");
     // The shared `NtQueryObject` hook answers a real key's name from the real call.
-    let mut buf = [0u64; 128];
-    let mut ret = 0u32;
-    assert_eq!(
-        unsafe { NtQueryObject(h, 1, buf.as_mut_ptr().cast(), 1024, &mut ret) },
-        0,
-        "object name of a real key"
-    );
-    let name_len = (buf[0] & 0xffff) as usize / 2;
-    let name_ptr = buf[1] as *const u16;
-    let real_name =
-        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(name_ptr, name_len) });
+    let real_name = object_name(h).expect("object name of a real key");
     assert!(
         real_name
             .to_ascii_uppercase()
@@ -148,6 +97,6 @@ fn every_registry_call_is_the_real_one() {
     unsafe {
         RegCloseKey(k);
         assert_eq!(RegDeleteKeyW(HKEY_CURRENT_USER, sub.as_ptr()), 0);
-        NtClose(h);
+        close(h);
     }
 }
