@@ -16,9 +16,7 @@ pub use vfs_provider::RootId;
 
 pub use cache::UncachedScope;
 pub use canon::{canonicalise, split_stream_suffix, VolumeMap};
-pub use nt::{
-    counted_units, nt_to_volume_relative, string_to_utf16, to_nt, utf16_to_string, CountedErr,
-};
+pub use nt::{counted_units, nt_to_volume_relative, to_nt, utf16_to_string, CountedErr};
 pub use rootmap::{Decision, RootMap};
 pub use vfs_ntlayout::{
     classify_open, filetime_of, write_dir_info, write_file_name_info, DirInfoClass, DirItem,

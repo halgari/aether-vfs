@@ -6,11 +6,6 @@ pub fn utf16_to_string(units: &[u16]) -> String {
     String::from_utf16_lossy(units)
 }
 
-/// Encode a `&str` as UTF-16 with NO trailing NUL (`UNICODE_STRING` is counted).
-pub fn string_to_utf16(s: &str) -> Vec<u16> {
-    s.encode_utf16().collect()
-}
-
 /// Why a `UNICODE_STRING` header cannot be read as a counted UTF-16 string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CountedErr {
@@ -71,9 +66,8 @@ mod tests {
     #[test]
     fn utf16_round_trips() {
         let s = "C:\\Games\\Skyrim\\Data\\foo.esp";
-        assert_eq!(utf16_to_string(&string_to_utf16(s)), s);
-        // No trailing NUL is appended.
-        assert_eq!(*string_to_utf16("ab").last().unwrap(), b'b' as u16);
+        let units: Vec<u16> = s.encode_utf16().collect();
+        assert_eq!(utf16_to_string(&units), s);
     }
 
     #[test]
