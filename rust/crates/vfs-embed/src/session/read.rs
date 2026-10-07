@@ -19,7 +19,7 @@ impl Session {
     /// dimension is a change to that path, not to this accessor. See the
     /// free-function form, [`crate::rejected_writes`].
     pub fn rejected_writes(&self) -> Vec<(String, u64)> {
-        vfs_director::io_stats::rejected_writes()
+        vfs_compose::rejected_writes()
     }
 
     /// Occasional host-side full-file read (not the primary API).

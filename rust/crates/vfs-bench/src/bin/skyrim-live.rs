@@ -1331,7 +1331,7 @@ fn is_safe_to_wipe(root: &Path) -> bool {
 /// this task can report without changing `vfs-director` itself.
 fn print_open_totals(root1: &CountingProvider) {
     let (ok, err) = vfs_director::io_stats::open_totals();
-    let rejected = vfs_director::io_stats::rejected_writes();
+    let rejected = vfs_compose::rejected_writes();
     let rejected_total: u64 = rejected.iter().map(|(_, c)| *c).sum();
     eprintln!(
         "  vfs-io opens: ok={ok} err={err} (reconciliation target ok+err={}) rejected_writes={} distinct path(s), {rejected_total} total (both roots combined — see per-root breakdown below)",

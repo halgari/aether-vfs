@@ -4,15 +4,12 @@
 //! `vfs-registry`'s portable node model.
 #![forbid(unsafe_code)]
 
-// compat: removed by cleanup stream I
-#[doc(hidden)]
-pub mod ops;
 pub mod shimcfg;
 mod wire;
 use wire::{put_str, Rd};
 
 pub use vfs_provider::{
-    bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, not_supported, ok,
+    bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, not_supported,
     read_only, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId, SetAttr, Stat,
     VPath, KIND_DIR, KIND_FILE, KIND_TOMBSTONE,
 };

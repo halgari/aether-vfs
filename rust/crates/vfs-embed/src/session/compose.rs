@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use vfs_director::MountGraph;
+use vfs_compose::MountGraph;
 use vfs_provider::{Access, Provider, RootId, bad_request, exists, map_io_err};
 
 use super::Session;
@@ -368,7 +368,7 @@ impl Session {
 mod root_ownership_tests {
     use super::*;
     use std::path::PathBuf;
-    use vfs_director::DiskProvider;
+    use vfs_compose::DiskProvider;
     use vfs_provider::ST_EXISTS;
 
     fn dir(tag: &str, file: &str) -> PathBuf {

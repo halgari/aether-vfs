@@ -32,9 +32,6 @@ pub const ST_REPLY_TOO_LARGE: i32 = -11;
 use std::io;
 use std::sync::{Mutex, MutexGuard};
 
-pub fn ok() -> i32 {
-    ST_OK
-}
 pub fn not_found() -> i32 {
     ST_NOT_FOUND
 }

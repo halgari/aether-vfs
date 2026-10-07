@@ -272,7 +272,7 @@ impl Director {
             // A configuration fact, not a caller mistake: this root has no
             // writable provider. Recorded by path so a later `vfs stats`
             // pass can surface it for discovery.
-            crate::io_stats::record_rejected_write(&path);
+            vfs_compose::record_rejected_write(&path);
             return Err(read_only());
         }
         let (bh, size, is_dir_flag) = provider.open(VPath::new(root, &path), flags)?;
@@ -577,9 +577,9 @@ mod tests {
             Arc::new(vfs_compose::InlineProvider::from_files([("f", b"x".as_slice())])),
         )
         .unwrap();
-        crate::io_stats::reset_rejected_writes();
+        vfs_compose::reset_rejected_writes();
         let _ = d.open(RootId::DEFAULT, "f", OPEN_WRITE);
-        let rejected = crate::io_stats::rejected_writes();
+        let rejected = vfs_compose::rejected_writes();
         assert!(
             rejected.iter().any(|(path, count)| path == "f" && *count >= 1),
             "a rejected write must be discoverable, got {rejected:?}"

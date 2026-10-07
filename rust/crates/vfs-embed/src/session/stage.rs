@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use vfs_director::stage::{ImageSource, stage_launch_into};
-use vfs_director::{Director, DiskProvider};
+use vfs_compose::DiskProvider;
+use vfs_director::Director;
 use vfs_provider::{Provider, RootId};
 
 #[cfg(doc)]
@@ -273,7 +274,7 @@ fn no_drive_names(p: &str) -> String {
 #[cfg(test)]
 mod launch_image_tests {
     use super::*;
-    use vfs_director::DiskProvider;
+    use vfs_compose::DiskProvider;
 
     /// Minimal PE32+ with no imports — staging parses the import table, so
     /// the bytes must be a real (if empty) PE. Same shape as

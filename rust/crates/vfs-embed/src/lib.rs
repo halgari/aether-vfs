@@ -174,7 +174,7 @@ pub use sources::{RootMounts, RootSources};
 // each one lives in.
 // ---------------------------------------------------------------------------
 pub use vfs_provider::{
-    bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, not_supported, ok,
+    bad_fh, bad_request, exists, is_dir, map_io_err, not_a_dir, not_found, not_supported,
     read_only, Access, Capabilities, CaseMatch, DirEntry, Handle, Provider, RootId, SetAttr, Stat,
     VPath, KIND_DIR, KIND_FILE, KIND_TOMBSTONE, OPEN_APPEND, OPEN_CREATE, OPEN_EXCL, OPEN_READ,
     OPEN_TRUNC, OPEN_WRITE, ST_BAD_FH, ST_BAD_REQUEST, ST_EXISTS, ST_IO_ERROR, ST_IS_DIR,
@@ -211,7 +211,7 @@ pub use vfs_compose::{
     stack_layers, InlineProvider, LayeredProvider, MemoryProvider, OverlayProvider,
     ReadOnlyProvider, Route, RouterProvider, SeekableProvider, SubdirProvider,
 };
-pub use vfs_director::DiskProvider;
+pub use vfs_compose::DiskProvider;
 #[cfg(feature = "zip")]
 pub use vfs_zip::ZipProvider;
 
@@ -238,7 +238,7 @@ pub use vfs_storage::{
 /// [`Session::overlay_layer_dir`], which is the same thing bound to a session.
 /// The free function exists for a host that must write into that directory
 /// *before* a `Session` exists.
-pub use vfs_director::overlay_layer_dir;
+pub use vfs_provider::overlay_layer_dir;
 pub use vfs_director::stage;
 pub use vfs_director::Director;
 
@@ -255,13 +255,13 @@ pub use vfs_director::Director;
 /// is left unchanged here; a host with one live session — every host so far —
 /// reads it correctly.
 pub fn rejected_writes() -> Vec<(String, u64)> {
-    vfs_director::io_stats::rejected_writes()
+    vfs_compose::rejected_writes()
 }
 
 /// Clear rejected-write tracking. Process-wide, with the same caveat as
 /// [`rejected_writes`]: useful before a probe, and used by tests.
 pub fn reset_rejected_writes() {
-    vfs_director::io_stats::reset_rejected_writes()
+    vfs_compose::reset_rejected_writes()
 }
 
 /// Opens that reached the director, as `(succeeded, failed)`.

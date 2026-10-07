@@ -32,9 +32,6 @@ pub mod io_stats;
 // protocol translation on top of the transport, depending only on
 // `vfs-protocol`, `vfs-ipc`, `vfs-compose` and `Director`.
 pub mod ipc;
-// compat: removed by cleanup stream I
-#[doc(hidden)]
-pub mod ops;
 pub mod registry;
 pub mod ring_dispatch;
 pub mod stage;
@@ -42,17 +39,8 @@ pub mod stage;
 pub use director::{Director, OpenInfo};
 pub use ipc::IpcServe;
 pub use io_stats::{mark_launch as io_mark_launch, reset as io_stats_reset, snapshot_report as io_stats_report};
-// compat: removed by cleanup stream I
-#[doc(hidden)]
-pub use vfs_compose::{DiskProvider, MountGraph};
-// compat: removed by cleanup stream I
-#[doc(hidden)]
-pub use vfs_compose::path;
 pub use vfs_provider::{Provider, Handle, DirEntry, RootId, Stat, KIND_DIR, KIND_FILE, OPEN_READ, OPEN_WRITE};
 pub use registry::{RegistryGenSink, RegistryGeneration};
-// compat: removed by cleanup stream I
-#[doc(hidden)]
-pub use vfs_provider::overlay_layer_dir;
 
 #[cfg(test)]
 mod tests {
