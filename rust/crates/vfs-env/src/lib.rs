@@ -115,6 +115,11 @@ pub const STORAGE_DIR: &str = "VFS_STORAGE_DIR";
 pub const LAUNCH_IMAGE: &str = "VFS_LAUNCH_IMAGE";
 /// Where the daemon publishes its endpoint for clients to discover.
 pub const DISCOVERY_PATH: &str = "VFS_DISCOVERY_PATH";
+/// Directory holding the Windows artefacts a Proton launch needs
+/// (`vfs-injector.exe`, `vfs_shim_dll.dll`, `vfs_payload.dll`), used instead of
+/// the directory beside the running executable. An explicit
+/// `LaunchOpts::shim_dll` still wins. The Proton tests read it too.
+pub const WINDOWS_ARTIFACTS: &str = "VFS_WINDOWS_ARTIFACTS";
 /// Seconds to wait for the child's hooks to report ready before giving up.
 pub const READY_TIMEOUT_SECS: &str = "VFS_READY_TIMEOUT_SECS";
 /// Working directory `vfs-injector` starts its target in, as the target sees
@@ -467,6 +472,7 @@ pub const ALL: &[Var] = &[
     Var { name: STORAGE_DIR, kind: Kind::Behaviour, default: "$VFS_HOME/storage" },
     Var { name: LAUNCH_IMAGE, kind: Kind::Handshake, default: "none; staging derives it" },
     Var { name: DISCOVERY_PATH, kind: Kind::Handshake, default: "platform default" },
+    Var { name: WINDOWS_ARTIFACTS, kind: Kind::Behaviour, default: "beside the running executable" },
     Var { name: READY_TIMEOUT_SECS, kind: Kind::Behaviour, default: "180" },
     Var { name: INJECT_CWD, kind: Kind::Handshake, default: "the injector's own directory" },
     Var { name: INJECT_STEAM_HELPER, kind: Kind::Handshake, default: "no Steam helper" },
