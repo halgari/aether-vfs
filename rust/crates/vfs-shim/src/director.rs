@@ -15,9 +15,9 @@ use vfs_ipc::{DataGate, Geom, ReadPlan, RingClient};
 use vfs_protocol::{
     AttrResp, DirEntryWire, OP_CLOSE, OP_DELETE, OP_GETATTR, OP_HEARTBEAT, OP_MKDIR, OP_OPEN,
     OP_READDIR, OP_RENAME, OP_SETATTR, OP_STORED_NAMES, OP_WRITE, OPEN_READ, OPEN_WRITE, OpenResp,
-    ST_OK, SetattrReq, WriteReq, decode_getattr_resp, decode_open_resp, decode_readdir_resp,
-    decode_write_resp, encode_close_req, encode_mkdir_req, encode_names_req, encode_open_req,
-    encode_path_req, encode_rename_req, encode_setattr_req, encode_write_req,
+    ST_OK, SetattrReq, WriteReq, decode_getattr_resp, decode_names_resp, decode_open_resp,
+    decode_readdir_resp, decode_write_resp, encode_close_req, encode_mkdir_req, encode_names_req,
+    encode_open_req, encode_path_req, encode_rename_req, encode_setattr_req, encode_write_req,
 };
 use vfs_redirect::{RootId, RootMap};
 use vfs_win::SharedMapping;
@@ -792,11 +792,10 @@ impl FuseClient {
             )
             .ok()
             .filter(|r| r.status == ST_OK)
-            .and_then(|r| String::from_utf8(r.payload).ok());
+            .and_then(|r| decode_names_resp(&r.payload));
         let Some(rest) = asked else {
             return known;
         };
-        let rest: Vec<String> = rest.split('/').map(str::to_string).collect();
         // One name per component asked about, or the reply is not an answer
         // to this question (an older director, say) and nothing is learned.
         if rest.len() != under.len() - known.len() {
