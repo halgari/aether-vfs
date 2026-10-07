@@ -148,6 +148,18 @@ impl FileMapping {
     }
 }
 
+impl vfs_ipc::RingBacking for FileMapping {
+    fn seg(&self) -> &SharedSeg {
+        FileMapping::seg(self)
+    }
+    fn len(&self) -> usize {
+        FileMapping::len(self)
+    }
+    fn as_mut_ptr(&self) -> *mut u8 {
+        FileMapping::as_mut_ptr(self)
+    }
+}
+
 impl Drop for FileMapping {
     fn drop(&mut self) {
         // SAFETY: FFI. `ptr`/`len` came from `mmap` above and are unmapped

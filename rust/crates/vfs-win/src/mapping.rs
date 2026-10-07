@@ -217,6 +217,18 @@ impl SharedMapping {
     }
 }
 
+impl vfs_ipc::RingBacking for SharedMapping {
+    fn seg(&self) -> &SharedSeg {
+        SharedMapping::seg(self)
+    }
+    fn len(&self) -> usize {
+        SharedMapping::len(self)
+    }
+    fn as_mut_ptr(&self) -> *mut u8 {
+        SharedMapping::as_mut_ptr(self)
+    }
+}
+
 impl Drop for SharedMapping {
     fn drop(&mut self) {
         // SAFETY: FFI. `view`/`handle` were produced by MapViewOfFile /

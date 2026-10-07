@@ -28,8 +28,9 @@ use crate::ring_dispatch::dispatch_director;
 
 /// The ring's shared-memory backing, chosen by target.
 ///
-/// Both types expose `seg()`, `len()` and `as_mut_ptr()` with identical
-/// meaning — deliberately, so everything above this line is written once.
+/// Both types implement [`vfs_ipc::RingBacking`] (`seg()`, `len()` and
+/// `as_mut_ptr()` with identical meaning) — deliberately, so everything above
+/// this line is written once.
 /// `SharedMapping` is a named page-file-backed section; `FileMapping` is an
 /// `mmap` over a real file, which is what lets a shim inside Wine and a native
 /// Linux Director share one ring.
@@ -37,6 +38,13 @@ use crate::ring_dispatch::dispatch_director;
 type RingMapping = vfs_win::SharedMapping;
 #[cfg(unix)]
 type RingMapping = vfs_unix::FileMapping;
+
+// The contract itself, checked where the backing is chosen: a target whose
+// mapping type drifts from `RingBacking` fails here, not somewhere above.
+const _: fn() = || {
+    fn assert_ring_backing<T: vfs_ipc::RingBacking>() {}
+    assert_ring_backing::<RingMapping>();
+};
 
 pub const DEFAULT_SLOT_COUNT: u32 = 32;
 /// Re-export for callers; keep in sync with [`vfs_ipc::DEFAULT_ARENA_BYTES`].
