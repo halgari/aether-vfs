@@ -26,6 +26,7 @@ mod regkeys;
 mod regnotify;
 mod regquery;
 mod regwrite;
+mod tramp;
 mod zipserve;
 
 pub use bootstrap::{
