@@ -35,6 +35,52 @@ pub fn overlay_layer_dir(overlay_root: &Path, root: RootId) -> PathBuf {
     overlay_root.join(format!("root-{}", root.0))
 }
 
+/// The prefix of a whiteout marker: an overlay hides `<name>` of its base by
+/// writing `.wh.<name>` next to where it would be, in the overlay's upper.
+///
+/// The marker convention lives here, with the rest of the on-disk layout, so
+/// the overlay that writes the markers (`vfs-compose`) and whatever reads an
+/// upper without it (`vfs-storage`'s layer export) cannot drift apart.
+pub const WHITEOUT_PREFIX: &str = ".wh.";
+
+/// The prefix of a copy-up staging file, `.cu.<n>.<name>`: the half-finished
+/// copy an overlay writes before renaming it over `<name>`. One a crash left
+/// behind is never served.
+pub const COPY_UP_PREFIX: &str = ".cu.";
+
+/// The whiteout marker that hides `name`: `.wh.<name>`.
+pub fn whiteout_name(name: &str) -> String {
+    format!("{WHITEOUT_PREFIX}{name}")
+}
+
+/// The staging name for copying `name` up, as the `n`th attempt:
+/// `.cu.<n>.<name>`.
+pub fn copy_up_name(n: u64, name: &str) -> String {
+    format!("{COPY_UP_PREFIX}{n}.{name}")
+}
+
+/// Whether `name` (one path component) is an overlay marker rather than real
+/// content: a whiteout or a copy-up staging file.
+pub fn is_overlay_marker(name: &str) -> bool {
+    name.starts_with(WHITEOUT_PREFIX) || name.starts_with(COPY_UP_PREFIX)
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::*;
+
+    #[test]
+    fn names_round_trip_through_the_prefixes() {
+        assert_eq!(whiteout_name("a.txt"), ".wh.a.txt");
+        assert_eq!(copy_up_name(7, "a.txt"), ".cu.7.a.txt");
+        assert_eq!(whiteout_name("a.txt").strip_prefix(WHITEOUT_PREFIX), Some("a.txt"));
+        assert!(is_overlay_marker(&whiteout_name("x")));
+        assert!(is_overlay_marker(&copy_up_name(1, "x")));
+        assert!(!is_overlay_marker("wh.x"));
+        assert!(!is_overlay_marker("a.wh.x"));
+    }
+}
+
 #[cfg(test)]
 mod overlay_layer_dir_tests {
     use super::*;

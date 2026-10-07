@@ -10,22 +10,13 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use vfs_block_store::{ClassWriteStats, CompactOptions, Usage, WriteClass, WriteStats};
 use vfs_provider::{
-    Provider, SetAttr, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_READ, OPEN_TRUNC, OPEN_WRITE,
+    is_overlay_marker, Provider, SetAttr, VPath, KIND_DIR, KIND_FILE, OPEN_CREATE, OPEN_READ, OPEN_TRUNC, OPEN_WRITE,
 };
 
 use crate::cached::{lock, CacheStats};
 use crate::ids::{classify_store_id, layer_file_id, Guid, StoreIdKind};
 use crate::layer::LayerProvider;
 use crate::storage::{Storage, StorageError};
-
-/// The overlay's whiteout prefix: `OverlayProvider` hides `<name>` by writing
-/// `.wh.<name>` into its upper (`vfs-compose/src/overlay.rs`, which does not
-/// export it as a constant). Duplicated here; keep the two in step.
-const WHITEOUT_PREFIX: &str = ".wh.";
-/// The overlay's copy-up staging prefix, `.cu.<n>.<name>`
-/// (`vfs-compose/src/overlay.rs`): a half-finished copy a crash left behind,
-/// which the overlay never serves either.
-const COPY_UP_PREFIX: &str = ".cu.";
 
 /// Bytes moved per read or write when exporting or importing.
 const CHUNK: usize = 1 << 20;
@@ -63,11 +54,6 @@ pub struct SpaceUsage {
     /// Store files that belong to no catalog row (layer files waiting for
     /// deletion at the next durable point, orphans).
     pub unlisted: Usage,
-}
-
-/// Names the overlay reserves in its upper; `export_layer` skips them.
-fn is_overlay_marker(name: &str) -> bool {
-    name.starts_with(WHITEOUT_PREFIX) || name.starts_with(COPY_UP_PREFIX)
 }
 
 fn at(rel: &str) -> VPath<'_> {
@@ -615,16 +601,17 @@ mod tests {
         ov.remove(at(victim)).unwrap();
         drop(ov);
         let marker = match victim.rsplit_once('/') {
-            Some((dir, name)) => format!("{dir}/.wh.{name}"),
-            None => format!(".wh.{victim}"),
+            Some((dir, name)) => format!("{dir}/{}", vfs_provider::whiteout_name(name)),
+            None => vfs_provider::whiteout_name(victim),
         };
         assert!(upper.getattr(at(&marker)).unwrap().is_some());
         // A copy-up temp file a crash left behind.
         write_file(&upper, "Sub/.cu.3.b.bin", b"half");
         let want: Vec<_> = tree(&upper, "")
             .into_iter()
-            .filter(|(p, ..)| !p.contains("/.wh.") && !p.starts_with(".wh."))
-            .filter(|(p, ..)| !p.contains(".cu."))
+            .filter(|(p, ..)| {
+                !p.rsplit('/').next().is_some_and(vfs_provider::is_overlay_marker)
+            })
             .collect();
 
         let out = d.path().join("out");
@@ -633,7 +620,8 @@ mod tests {
         assert!(
             names
                 .iter()
-                .all(|n| !n.contains(".wh.") && !n.contains(".cu.")),
+                .all(|n| !n.contains(vfs_provider::WHITEOUT_PREFIX)
+                    && !n.contains(vfs_provider::COPY_UP_PREFIX)),
             "{names:?}"
         );
         for n in ["Empty/", "Sub/", "Sub/Deep/", "Sub/Deep/b.bin", "a.txt"] {

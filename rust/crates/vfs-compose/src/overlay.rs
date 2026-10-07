@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use vfs_core::fold;
 use vfs_provider::{
-    bad_fh, bad_request, is_dir, map_io_err, not_a_dir, not_found, not_supported, Access,
+    bad_fh, copy_up_name, whiteout_name, COPY_UP_PREFIX, WHITEOUT_PREFIX, bad_request, is_dir, map_io_err, not_a_dir, not_found, not_supported, Access,
     Capabilities, DirEntry, Handle, Provider, SetAttr, Stat, VPath, KIND_DIR, KIND_FILE,
     OPEN_CREATE, OPEN_READ, OPEN_TRUNC, OPEN_WRITE,
 };
@@ -166,8 +166,8 @@ impl OverlayProvider {
     /// `.wh.<name>` sibling of `path`, in the same directory.
     fn whiteout_path(&self, path: &str) -> String {
         match path.rsplit_once('/') {
-            Some((parent, name)) => format!("{parent}/.wh.{name}"),
-            None => format!(".wh.{path}"),
+            Some((parent, name)) => format!("{parent}/{}", whiteout_name(name)),
+            None => whiteout_name(path),
         }
     }
 
@@ -176,8 +176,8 @@ impl OverlayProvider {
     /// (and, for a disk-backed upper, one volume) and is atomic.
     fn temp_copy_path(&self, path: &str, n: u64) -> String {
         match path.rsplit_once('/') {
-            Some((parent, name)) => format!("{parent}/.cu.{n}.{name}"),
-            None => format!(".cu.{n}.{path}"),
+            Some((parent, name)) => format!("{parent}/{}", copy_up_name(n, name)),
+            None => copy_up_name(n, path),
         }
     }
 
@@ -197,7 +197,7 @@ impl OverlayProvider {
         match self.upper.readdir(dir) {
             Ok(entries) => {
                 for e in entries {
-                    if let Some(base) = e.name.strip_prefix(".wh.") {
+                    if let Some(base) = e.name.strip_prefix(WHITEOUT_PREFIX) {
                         hidden.insert(fold(base));
                     }
                 }
@@ -320,7 +320,7 @@ impl OverlayProvider {
     /// the sibling it names is hidden.
     fn invalidate_if_marker(&self, p: VPath) {
         let (parent, name) = Self::split_parent(p.rel);
-        if !name.starts_with(".wh.") {
+        if !name.starts_with(WHITEOUT_PREFIX) {
             return;
         }
         if let Ok(mut g) = self.whiteouts.write() {
@@ -592,13 +592,13 @@ impl Provider for OverlayProvider {
             Ok(entries) => {
                 upper_is_dir = true;
                 for e in entries {
-                    if let Some(target) = e.name.strip_prefix(".wh.") {
+                    if let Some(target) = e.name.strip_prefix(WHITEOUT_PREFIX) {
                         map.remove(&fold(target));
                         continue;
                     }
                     // A crashed copy-up's temp file must never surface as a
                     // visible entry.
-                    if e.name.starts_with(".cu.") {
+                    if e.name.starts_with(COPY_UP_PREFIX) {
                         continue;
                     }
                     // The upper's entry is the live one, but a name the base
