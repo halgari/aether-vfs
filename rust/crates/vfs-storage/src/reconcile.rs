@@ -46,6 +46,7 @@ use std::sync::RwLock;
 use vfs_block_store::{BlockStore, CompactOptions};
 
 use crate::catalog::Catalog;
+use crate::layer_io::RUN_BLOCKS;
 use crate::ids::{cache_file_id, classify_store_id, layer_file_id, StoreIdKind};
 use crate::storage::{Storage, StorageError};
 
@@ -102,9 +103,6 @@ fn repair_failed(report: &mut ReconcileReport, what: String, e: &StorageError) {
     tracing::error!(error = %e, "reconcile: {what} failed; left for the next open");
     report.failed_repairs.push(format!("{what}: {e}"));
 }
-
-/// Blocks per `write_blocks` call when zero-filling.
-const RUN_BLOCKS: u64 = 64;
 
 /// Brings `catalog` and `store` back into agreement (see the module docs),
 /// then flushes the store and commits the catalog durably, in that order,
@@ -370,7 +368,7 @@ mod tests {
 
     use crate::catalog::{CacheRec, EntryRec};
     use crate::config::{Durability, StorageConfig};
-    use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, StoreIdKind};
+use crate::ids::{cache_file_id, classify_store_id, layer_file_id, new_guid, StoreIdKind};
     use crate::storage::Storage;
 
     const BS: u64 = 4096;

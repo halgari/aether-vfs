@@ -94,7 +94,7 @@ impl LayerProvider {
                     // No row names them: their data goes now (or, if this
                     // fails too, at the next open's reconciliation).
                     for id in &ids {
-                        if self.storage.store.delete(id).is_err() {
+                        if self.storage.store_delete(id).is_err() {
                             self.storage.needs_reconcile(
                                 "rolling back a failed batch's store files failed",
                             );

@@ -219,7 +219,33 @@ impl Provider for LayerProvider {
     }
 
     fn set_attr(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
-        self.set_attr_impl(p, attr)
+        let p = LPath::parse(p.rel)?;
+        if let Some(size) = attr.size {
+            let ns = lock_status(&self.ns)?;
+            let rec = self.get(&p.folded)?.ok_or_else(not_found)?;
+            if rec.kind != KIND_FILE {
+                return Err(is_dir());
+            }
+            let cell = self.acquire(&rec, &p.folded)?;
+            drop(ns);
+            let resized = self.resize(&cell, size);
+            let doomed = self.release(&cell);
+            resized?;
+            doomed?;
+            self.changed(Some(&cell))?;
+        }
+        if let Some(mtime) = attr.mtime {
+            let _ns = lock_status(&self.ns)?;
+            let mut rec = self.get(&p.folded)?.ok_or_else(not_found)?;
+            rec.mtime = mtime;
+            self.put(&p.folded, &rec)?;
+            if rec.kind == KIND_FILE {
+                if let Some(c) = self.live_cell(&rec.guid) {
+                    *lock_status(&c.mtime_override)? = Some(mtime);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// One catalog row: the name is stored beside the folded key.

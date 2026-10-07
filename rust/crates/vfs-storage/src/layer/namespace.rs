@@ -95,7 +95,7 @@ impl LayerProvider {
         })();
         if made.is_err() {
             let unrow = !row || self.storage.catalog.remove(self.id, &p.folded).is_ok();
-            let unstore = !stored || self.storage.store.delete(&id).is_ok();
+            let unstore = !stored || self.storage.store_delete(&id).is_ok();
             if !(unrow && unstore) {
                 self.storage
                     .needs_reconcile("rolling back a failed layer file create failed");
@@ -152,36 +152,6 @@ impl LayerProvider {
             };
             if moved.is_some() {
                 *path = moved;
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn set_attr_impl(&self, p: VPath, attr: SetAttr) -> Result<(), i32> {
-        let p = LPath::parse(p.rel)?;
-        if let Some(size) = attr.size {
-            let ns = lock_status(&self.ns)?;
-            let rec = self.get(&p.folded)?.ok_or_else(not_found)?;
-            if rec.kind != KIND_FILE {
-                return Err(is_dir());
-            }
-            let cell = self.acquire(&rec, &p.folded)?;
-            drop(ns);
-            let resized = self.resize(&cell, size);
-            let doomed = self.release(&cell);
-            resized?;
-            doomed?;
-            self.changed(Some(&cell))?;
-        }
-        if let Some(mtime) = attr.mtime {
-            let _ns = lock_status(&self.ns)?;
-            let mut rec = self.get(&p.folded)?.ok_or_else(not_found)?;
-            rec.mtime = mtime;
-            self.put(&p.folded, &rec)?;
-            if rec.kind == KIND_FILE {
-                if let Some(c) = self.live_cell(&rec.guid) {
-                    *lock_status(&c.mtime_override)? = Some(mtime);
-                }
             }
         }
         Ok(())

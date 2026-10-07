@@ -57,7 +57,7 @@ use crate::ids::{layer_file_id, Guid};
 use crate::storage::Storage;
 
 /// Blocks per `write_blocks` call when a commit writes a long run.
-const RUN_BLOCKS: u64 = 64;
+pub(crate) const RUN_BLOCKS: u64 = 64;
 
 /// [`RUN_BLOCKS`] for a bulk write ([`vfs_block_store::WriteClass::Bulk`]):
 /// its blocks may be compressed on the GPU, where each call waits for a
