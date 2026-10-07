@@ -3,7 +3,7 @@
 
 use super::{
     ALL_PREFIX_LEN, ATTRIBUTE_TAG_LEN, BASIC_LEN, Fit, ID_LEN, NETWORK_OPEN_LEN, STANDARD_LEN,
-    STAT_LEN, TRAMP_QIF, TRAMP_QOBJ, TRAMP_QVOL, attributes, caller_buf, cwd_from_peb, identity_of,
+    STAT_LEN, TRAMP_QIF, TRAMP_QOBJ, TRAMP_QVOL, attributes, caller_buf, cwd_from_peb,
     put_all_prefix, put_attribute_tag, put_basic, put_file_name, put_id, put_network_open,
     put_object_name, put_standard, put_stat, reg_real, under_root_path,
 };
@@ -22,7 +22,7 @@ use crate::synth_file::FileView;
 use core::ffi::c_void;
 use std::sync::OnceLock;
 use vfs_ntlayout::spoofed_object_name;
-use vfs_redirect::{DirStatus, SYNTH_FILETIME, write_file_name_info};
+use vfs_redirect::SYNTH_FILETIME;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 /// The volume every synthetic handle says it is on, where a volume serial
@@ -436,16 +436,13 @@ pub(super) unsafe fn qvol_hook_body(
     unsafe { tramp(handle, iosb, info, length, class) }
 }
 
-/// `NtQueryInformationFile` hook. Spoofs the two name classes —
-/// `FileNameInformation` (9) and `FileNormalizedNameInformation` (48) — on a
-/// redirected handle -> the virtual path, so `GetFinalPathNameByHandleW`
-/// reports where the mod file appears to live. Everything else passes through.
+/// `NtQueryInformationFile` hook. A synthetic (director-served) handle is answered
+/// here (`fuse_query_information`), including the name classes `FileNameInformation`
+/// (9) and `FileNormalizedNameInformation` (48); every real handle passes through.
 ///
-/// Class 9 is spoofed too: `NtQueryObject` class 1 and `NtQueryInformationFile`
-/// classes 9 and 48 must all describe the same path, because
-/// `GetFinalPathNameByHandleW` takes the device prefix as
-/// `ObjectName[.. ObjectName.len - class9.len]`. Spoof one and the subtraction
-/// slices at the wrong offset.
+/// `NtQueryObject` class 1 and `NtQueryInformationFile` classes 9 and 48 must all
+/// describe the same path, because `GetFinalPathNameByHandleW` takes the device
+/// prefix as `ObjectName[.. ObjectName.len - class9.len]`.
 /// See docs/shim-invariants.md, "Name-query consistency".
 pub(super) unsafe fn qif_hook_body(
     handle: HANDLE,
@@ -462,23 +459,6 @@ pub(super) unsafe fn qif_hook_body(
     if crate::synth_file::is_fuse_synth(handle as isize) {
         // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
         return unsafe { fuse_query_information(handle, iosb, info, length, class) };
-    }
-    if (class == FILE_NORMALIZED_NAME_INFORMATION || class == FILE_NAME_INFORMATION)
-        && !info.is_null()
-    {
-        let vpath = identity_of(handle as isize);
-        if let Some(vpath) = vpath {
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            let buf = unsafe { core::slice::from_raw_parts_mut(info as *mut u8, length as usize) };
-            let r = write_file_name_info(&vpath, buf);
-            let status = match r.status {
-                DirStatus::Success => STATUS_SUCCESS,
-                _ => STATUS_BUFFER_OVERFLOW,
-            };
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            unsafe { crate::ntbuf::iosb_set(iosb, status, r.bytes) };
-            return status;
-        }
     }
     // SAFETY: the original NT function, called with valid NT arguments.
     unsafe { tramp(handle, iosb, info, length, class) }

@@ -1,10 +1,9 @@
-//! Per-handle tracking tables: directory cursors, identities and paths of open handles.
+//! Per-handle tracking tables: directory cursors and paths of open handles.
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{DirTracked, path_is_ours};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use vfs_redirect::nt_to_volume_relative;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 /// What the shim knows about one open handle. Each field is set by its own kind of open and
@@ -17,9 +16,6 @@ pub(super) struct HandleInfo {
     /// An under-root open's NT path, so a later handle-based delete/rename (`NtSetInformationFile`)
     /// can act by path (`record_path`).
     pub(super) under_root: Option<String>,
-    /// A redirected file's virtual volume-relative path, for the identity spoof
-    /// (`record_identity`).
-    pub(super) identity: Option<String>,
     /// A candidate directory for enumeration virtualisation: an under-root open's cursor state.
     /// Harmless for file handles (they never receive a dir-enum call).
     pub(super) dir: Option<DirTracked>,
@@ -30,8 +26,8 @@ pub(super) struct HandleInfo {
 ///
 /// Fields are set one at a time and never cleared before the entry goes: a handle value the OS
 /// reuses before its stale entry was reclaimed (a close that lost its `try_lock`) keeps whatever
-/// the old handle's fields were, exactly as the four tables this replaces (`DIR_TABLE`,
-/// `IDENTITY_TABLE`, `PATH_TABLE`, `HANDLE_PATHS`) did one by one.
+/// the old handle's fields were, exactly as the tables this replaces (`DIR_TABLE`, `PATH_TABLE`,
+/// `HANDLE_PATHS`) did one by one.
 pub(super) struct HandleTable {
     map: BTreeMap<isize, HandleInfo>,
     /// Entries with `opened_as` set, which [`HANDLE_PATHS_MAX`] bounds.
@@ -61,10 +57,6 @@ impl HandleTable {
         self.map.entry(key).or_default().under_root = Some(path);
     }
 
-    pub(super) fn set_identity(&mut self, key: isize, vpath: String) {
-        self.map.entry(key).or_default().identity = Some(vpath);
-    }
-
     pub(super) fn set_dir(&mut self, key: isize, dir: DirTracked) {
         self.map.entry(key).or_default().dir = Some(dir);
     }
@@ -75,10 +67,6 @@ impl HandleTable {
 
     pub(super) fn under_root(&self, key: isize) -> Option<&String> {
         self.map.get(&key)?.under_root.as_ref()
-    }
-
-    pub(super) fn identity(&self, key: isize) -> Option<&String> {
-        self.map.get(&key)?.identity.as_ref()
     }
 
     pub(super) fn dir(&self, key: isize) -> Option<&DirTracked> {
@@ -143,8 +131,7 @@ pub(super) unsafe fn reset_handle(file_handle: *mut HANDLE, path: Option<&str>, 
 /// Takes the already-decoded `path` rather than `oa`: `create_hook`/
 /// `open_hook` decode once per invocation (`path_of_tracked`) and thread the
 /// result through every function that used to call `path_of(oa)`
-/// independently — including this one, `record_path`, `record_identity`,
-/// `note_decision_outcome`, and `note_passthrough_outcome`. Before that, a
+/// independently — including this one, `record_path` and `note_passthrough_outcome`. Before that, a
 /// single hooked `NtCreateFile` could re-run the decode 2-5 times over; for
 /// an unresolved handle-relative open that decode is `parent_dir_of_handle`'s
 /// OS-consulted case 4 (a `GetFinalPathNameByHandleW` call), so re-running it
@@ -157,7 +144,7 @@ pub(super) unsafe fn reset_handle(file_handle: *mut HANDLE, path: Option<&str>, 
 ///
 /// Caller's responsibility: hold a `vfs_redirect::UncachedScope` around this
 /// call if `path` came from an OS-consulted decode — `path_is_ours` below
-/// reaches the same cached `RootMap::under_root` `decision_for` does.
+/// is `RootMap`-backed and cached.
 pub(super) unsafe fn tag_under_root(
     file_handle: *mut HANDLE,
     path: Option<&str>,
@@ -214,38 +201,6 @@ pub(super) fn under_root_path(handle: isize) -> Option<String> {
     HANDLES.lock().ok()?.under_root(handle).cloned()
 }
 
-/// The virtual identity a redirected open recorded for `handle` (`record_identity`), if any.
-pub(super) fn identity_of(handle: isize) -> Option<String> {
-    HANDLES.lock().ok()?.identity(handle).cloned()
-}
-
-/// Record a redirected handle's virtual identity: after a successful redirected
-/// open, map the handle to the volume-relative form of the ORIGINAL virtual
-/// path (the caller's `oa` still held it — only a local `new_oa` was
-/// rewritten before the trampoline call). Reclaimed by `NtClose`. Enables the
-/// `NtQueryInformationFile` class-48 spoof.
-///
-/// Takes the already-decoded `path` — see `tag_under_root`'s doc comment for
-/// why callers thread this through rather than re-decoding independently.
-pub(super) unsafe fn record_identity(
-    file_handle: *mut HANDLE,
-    path: Option<&str>,
-    status: NTSTATUS,
-) {
-    if status < 0 || file_handle.is_null() {
-        return;
-    }
-    if let Some(path) = path {
-        if let Ok(mut t) = HANDLES.lock() {
-            // SAFETY: raw access under the NT-pointer contract (hook/mod.rs).
-            t.set_identity(
-                unsafe { *file_handle } as isize,
-                nt_to_volume_relative(path),
-            );
-        }
-    }
-}
-
 /// Record a successful under-root open's handle -> folded vpath components, so
 /// a later handle-based delete/rename can act by vpath. Shared by both open
 /// hooks across all decision branches.
@@ -254,7 +209,7 @@ pub(super) unsafe fn record_identity(
 /// why callers thread this through rather than re-decoding independently.
 /// Caller's responsibility: hold a `vfs_redirect::UncachedScope` around this
 /// call if `path` came from an OS-consulted decode (`path_is_ours` below
-/// reaches the same cached `RootMap::under_root` `decision_for` does).
+/// is `RootMap`-backed and cached).
 pub(super) unsafe fn record_path(file_handle: *mut HANDLE, path: Option<&str>, status: NTSTATUS) {
     if status < 0 || file_handle.is_null() {
         return;
@@ -303,7 +258,6 @@ mod tests {
         assert_eq!(t.under_root(8).map(String::as_str), Some("under"));
         assert!(t.opened_as(8).is_none(), "setting one field sets no other");
         t.set_opened_as(8, "opened".into());
-        t.set_identity(8, "vpath".into());
         t.set_dir(
             8,
             DirTracked {
@@ -312,12 +266,11 @@ mod tests {
             },
         );
         assert_eq!(t.opened_as(8).map(String::as_str), Some("opened"));
-        assert_eq!(t.identity(8).map(String::as_str), Some("vpath"));
         assert_eq!(t.dir(8).map(|d| d.dir_nt_path.as_str()), Some("dir"));
         assert!(t.under_root(9).is_none());
         t.remove(8);
         assert!(t.opened_as(8).is_none() && t.under_root(8).is_none());
-        assert!(t.identity(8).is_none() && t.dir(8).is_none());
+        assert!(t.dir(8).is_none());
     }
 
     #[test]
@@ -329,7 +282,6 @@ mod tests {
             // The record a close left behind when it lost its try_lock.
             t.set_under_root(h, "stale".into());
             t.set_opened_as(h, "stale".into());
-            t.set_identity(h, "stale".into());
             t.set_dir(
                 h,
                 DirTracked {
@@ -347,7 +299,7 @@ mod tests {
         {
             let t = HANDLES.lock().unwrap();
             assert!(t.under_root(h).is_none() && t.opened_as(h).is_none());
-            assert!(t.identity(h).is_none() && t.dir(h).is_none());
+            assert!(t.dir(h).is_none());
         }
         HANDLES.lock().unwrap().set_under_root(h, "stale".into());
         unsafe { reset_handle(&mut slot, None, 0) };
