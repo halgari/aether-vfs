@@ -24,7 +24,7 @@
 mod copy_up;
 mod whiteout;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -35,6 +35,7 @@ use vfs_provider::{
     OPEN_WRITE, COPY_UP_PREFIX, WHITEOUT_PREFIX,
 };
 
+use copy_up::InFlight;
 use whiteout::WhiteoutIndex;
 
 #[derive(Clone, Copy)]
@@ -49,9 +50,10 @@ pub struct OverlayProvider {
     upper: Arc<dyn Provider>,
     next: AtomicU64,
     opens: Mutex<HashMap<u64, (Layer, Handle)>>,
-    /// Paths currently being copied up, so two concurrent writers to the same
-    /// base-only path copy exactly once instead of racing.
-    copying: Mutex<HashSet<String>>,
+    /// Paths currently being copied up (keyed by root and folded path), so
+    /// two concurrent writers to the same base-only path copy exactly once
+    /// instead of racing.
+    copying: InFlight,
     /// Which names each upper directory hides with a `.wh.` marker, keyed by
     /// root and then by folded parent path, and holding the *folded base
     /// names* the markers refer to. A present entry means that directory has
@@ -120,7 +122,7 @@ impl OverlayProvider {
             upper,
             next: AtomicU64::new(1),
             opens: Mutex::new(HashMap::new()),
-            copying: Mutex::new(HashSet::new()),
+            copying: InFlight::default(),
             whiteouts: RwLock::new(WhiteoutIndex::default()),
         })
     }

@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use vfs_core::fold;
 use vfs_provider::{
@@ -13,18 +13,40 @@ use vfs_provider::{
 
 use super::{Layer, OverlayProvider};
 
-/// Removes `path` from the in-flight set on drop, including on early return —
+/// The copy-ups in flight, keyed by `(root, folded path)`. A thread that
+/// finds its key taken sleeps on `done` until the copy ends; it never spins.
+#[derive(Default)]
+pub(super) struct InFlight {
+    keys: Mutex<HashSet<(u32, String)>>,
+    done: Condvar,
+}
+
+impl InFlight {
+    /// Claims `key`, waiting for whoever holds it to finish first. The
+    /// returned guard releases the claim and wakes the waiters on drop.
+    pub(super) fn claim(&self, key: (u32, String)) -> Result<CopyGuard<'_>, i32> {
+        let mut keys = self.keys.lock().map_err(|_| map_io_err())?;
+        while keys.contains(&key) {
+            keys = self.done.wait(keys).map_err(|_| map_io_err())?;
+        }
+        keys.insert(key.clone());
+        Ok(CopyGuard { in_flight: self, key })
+    }
+}
+
+/// Removes its key from the in-flight set on drop, including on early return —
 /// so a failed copy still releases the slot for the next attempt.
-struct CopyGuard<'a> {
-    copying: &'a Mutex<HashSet<String>>,
-    path: &'a str,
+pub(super) struct CopyGuard<'a> {
+    in_flight: &'a InFlight,
+    key: (u32, String),
 }
 
 impl Drop for CopyGuard<'_> {
     fn drop(&mut self) {
-        if let Ok(mut g) = self.copying.lock() {
-            g.remove(self.path);
+        if let Ok(mut g) = self.in_flight.keys.lock() {
+            g.remove(&self.key);
         }
+        self.in_flight.done.notify_all();
     }
 }
 
@@ -43,7 +65,7 @@ impl OverlayProvider {
     /// A no-op if `p` is absent from base too, or is a directory (directories
     /// are represented implicitly, never copied). Guarded by `copying` so two
     /// concurrent callers for the same path copy exactly once: whoever loses
-    /// the race waits for the winner's slot to clear, then re-checks upper
+    /// the race sleeps until the winner's slot clears, then re-checks upper
     /// before ever touching base.
     pub(super) fn copy_up_if_needed(&self, p: VPath) -> Result<(), i32> {
         if self.upper.getattr(p)?.is_some() {
@@ -59,20 +81,9 @@ impl OverlayProvider {
         // Folded: two callers that spell one file differently must wait for
         // each other. Keyed by the spelling, each would copy the file up on
         // its own, and the second copy's rename would replace the file the
-        // first caller had already opened for writing.
-        let path = fold(p.rel);
-        loop {
-            let mut inflight = self.copying.lock().map_err(|_| map_io_err())?;
-            if inflight.insert(path.clone()) {
-                break;
-            }
-            drop(inflight);
-            std::thread::yield_now();
-        }
-        let _guard = CopyGuard {
-            copying: &self.copying,
-            path: &path,
-        };
+        // first caller had already opened for writing. Keyed with the root:
+        // the same relative path under two roots is two files.
+        let _guard = self.copying.claim((p.root.0, fold(p.rel)))?;
 
         // Re-check: another thread may have finished the copy between our
         // first getattr above and winning the slot just now.

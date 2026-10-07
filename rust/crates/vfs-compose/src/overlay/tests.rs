@@ -399,6 +399,59 @@ fn concurrent_opens_copy_up_exactly_once() {
     );
 }
 
+/// The in-flight set sleeps its waiters rather than spinning, and a second
+/// claim on a held key proceeds as soon as the holder drops its guard.
+#[test]
+fn a_held_copy_up_key_makes_the_next_claim_wait_until_it_is_released() {
+    use super::copy_up::InFlight;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let flight = Arc::new(InFlight::default());
+    let guard = flight.claim((1, "a.txt".to_string())).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let waiter = {
+        let flight = Arc::clone(&flight);
+        std::thread::spawn(move || {
+            let _g = flight.claim((1, "a.txt".to_string())).unwrap();
+            tx.send(()).unwrap();
+        })
+    };
+    assert!(
+        rx.recv_timeout(Duration::from_millis(150)).is_err(),
+        "a second claim on a held key did not wait"
+    );
+    drop(guard);
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("the waiter was not woken when the key was released");
+    waiter.join().unwrap();
+}
+
+/// The same relative path under two roots is two files: holding one must not
+/// make the other wait.
+#[test]
+fn copy_up_keys_include_the_root() {
+    use super::copy_up::InFlight;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let flight = Arc::new(InFlight::default());
+    let _held = flight.claim((1, "a.txt".to_string())).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let other = {
+        let flight = Arc::clone(&flight);
+        std::thread::spawn(move || {
+            let _g = flight.claim((2, "a.txt".to_string())).unwrap();
+            tx.send(()).unwrap();
+        })
+    };
+    rx.recv_timeout(Duration::from_secs(10))
+        .expect("a claim under another root waited for an unrelated copy-up");
+    other.join().unwrap();
+}
+
 /// Gate 4, Task 6 review. The whiteout check runs on **every** read, and
 /// the obvious implementation costs one `upper.getattr` per ancestor —
 /// so a five-deep asset path pays six filesystem calls to answer a
