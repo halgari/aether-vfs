@@ -25,9 +25,11 @@ possible.
 - **Gate.** `Storage::gate`, an `RwLock<()>`. Held **shared** around every "write
   store data, then write the catalog row that describes it" pair (layer commit,
   layer file create, a cache fetch's first block). Held **exclusive** around
-  flush + durable commit (a durable point, `delete_layer`, `close`, and
-  reconciliation). No row can land between a flush and the durable commit that
-  would publish it ahead of its data.
+  flush + durable commit (a durable point, `delete_layer`, the `sync` inside
+  `close`, and reconciliation). No row can land between a flush and the durable commit that
+  would publish it ahead of its data. Within `close`, only the `sync` takes the
+  exclusive gate; `shutdown_with_token` and `mark_clean_close` run without it, which
+  is safe because only one reference to the storage remains by then.
 - **Epoch.** `DurableClock::epoch`, bumped by every durable point (fsynced or not),
   under the exclusive gate.
 - **Fresh file.** A layer file whose create saw the current epoch: its row is not
@@ -75,7 +77,7 @@ non-durable until the next change, `sync`, `close` or provider drop.
 
 ### The rewrite-in-place exception
 
-Under `Deferred`, the `close`, `flush` or `set_attr` size change of a file that
+Under `Deferred`, the `close`, `flush` or `set_attr` size change of a handle that
 **wrote** to a file whose row is already durable runs a durable point at once.
 Rewriting such a file in place changes store data a durable row describes; left
 non-durable, a store auto-flush mid-rewrite could publish a store state the
