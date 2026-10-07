@@ -40,7 +40,7 @@ pub const MAX_LAZY: u64 = 64 * 1024 * 1024 * 1024;
 
 const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
-const STATUS_ACCESS_VIOLATION: i32 = 0xC0000005u32 as i32;
+use crate::ntdef::STATUS_ACCESS_VIOLATION;
 
 /// A shim-owned VA range backing one synthetic section.
 struct OwnedRegion {

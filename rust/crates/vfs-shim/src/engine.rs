@@ -1152,7 +1152,7 @@ mod tests {
         use crate::overlay_layer_dir;
         use vfs_redirect::{FILE_OPEN_IF, FILE_OVERWRITE_IF};
         // GENERIC_WRITE — `classify_open` reads this as a write intent.
-        const WRITE: u32 = 0x4000_0000;
+        const WRITE: u32 = vfs_redirect::GENERIC_WRITE;
 
         let base = std::env::temp_dir().join(format!("vfs-engine-2root-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -1334,7 +1334,7 @@ mod tests {
     fn copy_on_write_never_seeds_from_a_real_file_under_the_root() {
         use crate::overlay_layer_dir;
         use vfs_redirect::FILE_OPEN_IF;
-        const WRITE: u32 = 0x4000_0000;
+        const WRITE: u32 = vfs_redirect::GENERIC_WRITE;
 
         let base =
             std::env::temp_dir().join(format!("vfs-engine-2root-cow-{}", std::process::id()));

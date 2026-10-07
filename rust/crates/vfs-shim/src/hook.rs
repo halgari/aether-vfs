@@ -3043,8 +3043,7 @@ unsafe fn parse_rename_target(info: *mut c_void, length: u32) -> Option<String> 
 /// failure, which is the same reason getting this predicate right matters
 /// more, not less.)
 fn is_write_open(access: u32, disposition: u32) -> bool {
-    const WRITE_ACCESS: u32 = 0x4000_0000 | 0x0002 | 0x0004; // GENERIC_WRITE|FILE_WRITE_DATA|FILE_APPEND_DATA
-    (access & WRITE_ACCESS) != 0 || matches!(disposition, 0 | 2 | 3 | 4 | 5)
+    (access & vfs_redirect::WRITE_ACCESS) != 0 || matches!(disposition, 0 | 2 | 3 | 4 | 5)
 }
 
 /// True for NT's append-only access grant: `FILE_APPEND_DATA` without
@@ -3069,9 +3068,7 @@ fn is_write_open(access: u32, disposition: u32) -> bool {
 /// `FILE_WRITE_DATA` without necessarily carrying its specific bit set in the
 /// raw mask this hook observes.
 fn is_append_only(access: u32) -> bool {
-    const GENERIC_WRITE: u32 = 0x4000_0000;
-    const FILE_WRITE_DATA: u32 = 0x0002;
-    const FILE_APPEND_DATA: u32 = 0x0004;
+    use vfs_redirect::{FILE_APPEND_DATA, FILE_WRITE_DATA, GENERIC_WRITE};
     access & FILE_APPEND_DATA != 0 && access & (FILE_WRITE_DATA | GENERIC_WRITE) == 0
 }
 
@@ -3229,13 +3226,8 @@ unsafe fn try_fuse_create(
 ) -> Option<NTSTATUS> {
     let client = crate::fuse_client::global()?;
     let path = path?.to_string();
-    let (root, vpath) = client.vpath_under_root(&path)?;
-    // Directory open of root: empty vpath → "."
-    let vp = if vpath.is_empty() {
-        "."
-    } else {
-        vpath.as_str()
-    };
+    let (root, vp) = client.route(&path)?;
+    let vp = vp.as_str();
 
     // **Gate 5, Task 4 — the DRM/identity exceptions, closed.** Four basenames
     // (`steam_appid.txt`, `SkyrimSELauncher.exe`, `steam_api{,64}.dll`,
@@ -3535,27 +3527,38 @@ fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool) {
         return;
     }
     let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
+    append_trace_line(
+        path,
+        &format!(
+            "skyrimse-exe\toa={}\taccess={}",
+            if rel { "fuse-relative" } else { "absolute" },
+            if write { "write" } else { "read" },
+        ),
+        &p,
+    );
+}
+
+/// Append `<epoch seconds>\t<head>\t<path>` to the diagnostic log at `log`. The shim's own file
+/// I/O is wrapped in `ShimIoGuard`, so the append is not itself traced.
+fn append_trace_line(log: &std::path::Path, head: &str, path: &str) {
     let line = format!(
-        "{}\tskyrimse-exe\toa={}\taccess={}\t{}\n",
+        "{}\t{head}\t{path}\n",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
-        if rel { "fuse-relative" } else { "absolute" },
-        if write { "write" } else { "read" },
-        p
     );
     let Some(_io) = ShimIoGuard::enter() else {
         return;
     };
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = log.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
+        .open(log)
     {
         let _ = f.write_all(line.as_bytes());
     }
@@ -3564,7 +3567,12 @@ fn drm_exe_trace(nt_or_win_path: &str, rel: bool, write: bool) {
 /// Optional proof that opens went through the director (not host disk).
 /// Set `VFS_DIRECTOR_OPEN_LOG` to a file path.
 fn director_open_trace(nt_or_win_path: &str, size: u64) {
-    let Some(path) = vfs_env::path(vfs_env::DIRECTOR_OPEN_LOG) else {
+    // Read once, like `drm_exe_trace`'s switch: this runs on every director open.
+    static LOG: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    let Some(path) = LOG
+        .get_or_init(|| vfs_env::path(vfs_env::DIRECTOR_OPEN_LOG))
+        .as_ref()
+    else {
         return;
     };
     let p = crate::fuse_client::strip_nt_device(nt_or_win_path.trim()).replace('/', "\\");
@@ -3580,29 +3588,7 @@ fn director_open_trace(nt_or_win_path: &str, size: u64) {
     {
         return;
     }
-    let line = format!(
-        "{}\tdirector-open\tsize={}\t{}\n",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        size,
-        p
-    );
-    let Some(_io) = ShimIoGuard::enter() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = f.write_all(line.as_bytes());
-    }
+    append_trace_line(path, &format!("director-open\tsize={size}"), &p);
 }
 
 /// Create a virtual directory under the managed root via the ring (`OP_MKDIR`),
@@ -3632,12 +3618,8 @@ unsafe fn try_fuse_mkdir(
     let path = path?;
     // A directory is named as it is created: the caller's spelling, not the
     // folded path. See `FuseClient::vpath_as_spelled`.
-    let (root, vpath) = client.vpath_as_spelled(path)?;
-    let vp = if vpath.is_empty() {
-        "."
-    } else {
-        vpath.as_str()
-    };
+    let (root, vp) = client.route_as_spelled(path)?;
+    let vp = vp.as_str();
     client.names_changed(root, &vfs_core::fold(vp));
     match client.mkdir(root, vp, 0o755) {
         Ok(()) => {
@@ -3877,14 +3859,10 @@ unsafe fn fuse_root_directory(oa: *const ObjectAttributes) -> bool {
     !root.is_null() && crate::fuse_synth::is_fuse_synth(root as isize)
 }
 
-/// Absolute `\??\` NT path for a Win32 or NT path string.
+/// Absolute `\??\` NT path for a Win32 or NT path string: `vfs_redirect::to_nt` after trimming
+/// and normalising a `\\?\` long prefix to `\??\`.
 fn to_nt_path(path: &str) -> String {
-    let p = crate::fuse_client::strip_nt_device(path.trim());
-    if p.starts_with(r"\??\") {
-        p.to_string()
-    } else {
-        format!(r"\??\{p}")
-    }
+    vfs_redirect::to_nt(crate::fuse_client::strip_nt_device(path.trim()))
 }
 
 /// Open via trampoline with an absolute NT path and **null** RootDirectory.
@@ -4061,13 +4039,8 @@ unsafe fn open_hook_body(
 /// to the Steam tree on NOT_FOUND (seal under-root).
 unsafe fn fuse_path_attr(path: &str) -> Option<Result<(bool, u64, i64), i32>> {
     let client = crate::fuse_client::global()?;
-    let (root, vpath) = client.vpath_under_root(path)?;
-    let vp = if vpath.is_empty() {
-        "."
-    } else {
-        vpath.as_str()
-    };
-    Some(match client.getattr(root, vp) {
+    let (root, vp) = client.route(path)?;
+    Some(match client.getattr(root, &vp) {
         Ok(a) if a.found => Ok((a.is_dir, a.size, a.mtime)),
         Ok(_) => Err(vfs_protocol::ST_NOT_FOUND),
         Err(st) => Err(st),
@@ -4537,12 +4510,8 @@ unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
     };
 
     if let Some(client) = crate::fuse_client::global() {
-        if let Some((root, vpath)) = client.vpath_under_root(path) {
-            let vp = if vpath.is_empty() {
-                "."
-            } else {
-                vpath.as_str()
-            };
+        if let Some((root, vp)) = client.route(path) {
+            let vp = vp.as_str();
             client.names_changed(root, vp);
             crate::read_cache::invalidate_path(root.0, vp);
             return match client.delete(root, vp) {
@@ -4764,12 +4733,7 @@ unsafe fn setinfo_hook_body(
                 Err(_) => None,
             };
             if let (Some(nt), Some(c)) = (nt, crate::fuse_client::global()) {
-                if let Some((root, vpath)) = c.vpath_under_root(&nt) {
-                    let src = if vpath.is_empty() {
-                        ".".to_string()
-                    } else {
-                        vpath
-                    };
+                if let Some((root, src)) = c.route(&nt) {
                     c.names_changed(root, &src);
                     crate::read_cache::invalidate_path(root.0, &src);
                     let ok = if is_delete {
@@ -4780,7 +4744,7 @@ unsafe fn setinfo_hook_body(
                         // rename that changes only the letter case says what
                         // the new case is. See `FuseClient::vpath_as_spelled`.
                         let target = parse_rename_target(info, length);
-                        match target.as_deref().and_then(|t| c.vpath_as_spelled(t)) {
+                        match target.as_deref().and_then(|t| c.route_as_spelled(t)) {
                             // A rename whose target lands under a *different*
                             // root is refused rather than guessed at: the
                             // wire carries one root for both sides, and the
@@ -4796,12 +4760,7 @@ unsafe fn setinfo_hook_body(
                             // lines down, the same as any other refused
                             // delete/rename on a virtual handle. The engine
                             // branch now fails closed the same way.
-                            Some((dst_root, dstv)) if dst_root == root => {
-                                let dst = if dstv.is_empty() {
-                                    ".".to_string()
-                                } else {
-                                    dstv
-                                };
+                            Some((dst_root, dst)) if dst_root == root => {
                                 c.names_changed(root, &vfs_core::fold(&dst));
                                 crate::read_cache::invalidate_path(root.0, &vfs_core::fold(&dst));
                                 let renamed = c.rename(root, &src, &dst).is_ok();
@@ -5953,16 +5912,7 @@ unsafe fn write_hook_body(
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
         crate::hookstats::note_read_completion(!apc.is_null(), !event.is_null());
-        let explicit = if byte_offset.is_null() {
-            None
-        } else {
-            let v = core::ptr::read_unaligned(byte_offset);
-            if v < 0 {
-                None
-            } else {
-                Some(v as u64)
-            }
-        };
+        let explicit = crate::ntbuf::explicit_offset(byte_offset);
         if let Some((fh, size, _is_dir, pos, append_only)) =
             crate::fuse_synth::lookup(handle as isize)
         {
@@ -6060,16 +6010,7 @@ unsafe fn read_hook_body(
         None => return STATUS_UNSUCCESSFUL,
     };
     if crate::fuse_synth::is_fuse_synth(handle as isize) {
-        let explicit = if byte_offset.is_null() {
-            None
-        } else {
-            let v = core::ptr::read_unaligned(byte_offset);
-            if v < 0 {
-                None
-            } else {
-                Some(v as u64)
-            }
-        };
+        let explicit = crate::ntbuf::explicit_offset(byte_offset);
         if let Some(view) = crate::fuse_synth::lookup_read(handle as isize) {
             let (fh, size, pos) = (view.fh, view.size, view.position);
             let off = explicit.unwrap_or(pos);
@@ -6832,15 +6773,11 @@ unsafe fn serve_dir_query(
         let Ok(wildcard) = wildcard_of(file_name) else {
             return passthrough();
         };
-        let routed = crate::fuse_client::global()
-            .and_then(|c| c.vpath_under_root(&dir_path).map(|hit| (c, hit)));
+        let routed =
+            crate::fuse_client::global().and_then(|c| c.route(&dir_path).map(|hit| (c, hit)));
         match routed {
-            Some((client, (root, vpath))) => {
-                let vp = if vpath.is_empty() {
-                    "."
-                } else {
-                    vpath.as_str()
-                };
+            Some((client, (root, vp))) => {
+                let vp = vp.as_str();
                 let items = match client.readdir(root, vp) {
                     Ok(entries) => {
                         let items: Vec<DirItem> = entries
@@ -6984,6 +6921,83 @@ unsafe fn serve_dir_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn us_raw(length: u16, buffer: *mut u16) -> UnicodeString {
+        UnicodeString {
+            length,
+            maximum_length: length,
+            buffer,
+        }
+    }
+
+    fn oa_named(us: &UnicodeString) -> ObjectAttributes {
+        ObjectAttributes {
+            length: core::mem::size_of::<ObjectAttributes>() as u32,
+            root_directory: core::ptr::null_mut(),
+            object_name: us,
+            attributes: 0,
+            security_descriptor: core::ptr::null(),
+            security_qos: core::ptr::null(),
+        }
+    }
+
+    /// An `ObjectName` the file hooks cannot decode is left to the real syscall: an odd `Length`
+    /// used to be read with its last byte dropped (so `"ab"` for 5 bytes of `"abc"`), and is
+    /// now undecodable. A zero-length name with a NULL buffer is the empty string like any other
+    /// zero-length name; it used to be undecodable.
+    #[test]
+    fn object_name_str_follows_the_shared_unicode_string_rule() {
+        let mut w: Vec<u16> = "abc".encode_utf16().collect();
+        let even = us_raw(6, w.as_mut_ptr());
+        let odd = us_raw(5, w.as_mut_ptr());
+        let null_empty = us_raw(0, core::ptr::null_mut());
+        let null_len = us_raw(2, core::ptr::null_mut());
+        unsafe {
+            assert_eq!(object_name_str(&oa_named(&even)).as_deref(), Some("abc"));
+            assert_eq!(object_name_str(&oa_named(&odd)), None);
+            assert_eq!(object_name_str(&oa_named(&null_empty)).as_deref(), Some(""));
+            assert_eq!(object_name_str(&oa_named(&null_len)), None);
+            assert_eq!(object_name_str(core::ptr::null()), None);
+        }
+    }
+
+    /// `wildcard_of`: `*` and `*.*` and the empty string mean everything; a string NT's capture
+    /// would reject (odd length, NULL buffer with a length) is an `Err`, where the odd one used
+    /// to be a truncated pattern and the NULL one used to mean everything.
+    #[test]
+    fn wildcard_of_follows_the_shared_unicode_string_rule() {
+        let enc = |s: &str| -> Vec<u16> { s.encode_utf16().collect() };
+        let mut star = enc("*");
+        let mut stardot = enc("*.*");
+        let mut pat = enc("a*.esp");
+        unsafe {
+            assert_eq!(wildcard_of(core::ptr::null()), Ok(None));
+            assert_eq!(wildcard_of(&us_raw(2, star.as_mut_ptr())), Ok(None));
+            assert_eq!(wildcard_of(&us_raw(6, stardot.as_mut_ptr())), Ok(None));
+            assert_eq!(wildcard_of(&us_raw(0, core::ptr::null_mut())), Ok(None));
+            assert_eq!(
+                wildcard_of(&us_raw(12, pat.as_mut_ptr())),
+                Ok(Some("a*.esp".to_string()))
+            );
+            assert_eq!(
+                wildcard_of(&us_raw(11, pat.as_mut_ptr())),
+                Err(STATUS_OBJECT_NAME_INVALID)
+            );
+            assert_eq!(
+                wildcard_of(&us_raw(4, core::ptr::null_mut())),
+                Err(crate::ntdef::STATUS_ACCESS_VIOLATION)
+            );
+        }
+    }
+
+    /// `to_nt_path` is `vfs_redirect::to_nt` plus a trim and a long-prefix strip; every spelling
+    /// of one path lands on the same `\??\` name.
+    #[test]
+    fn to_nt_path_gives_one_spelling() {
+        for p in [r"C:\a\b", r"\??\C:\a\b", r"\\?\C:\a\b", "  C:\\a\\b "] {
+            assert_eq!(to_nt_path(p), r"\??\C:\a\b", "{p:?}");
+        }
+    }
 
     /// `spoofed_object_name` adopts the host's prefix rather than assuming one.
     /// Both forms are measured facts (2026-09-01): Windows answers
@@ -7296,8 +7310,7 @@ mod tests {
     /// have pinned every write to EOF regardless of the caller's offset.
     #[test]
     fn generic_write_with_append_data_is_not_append_only() {
-        const GENERIC_WRITE: u32 = 0x4000_0000;
-        const FILE_APPEND_DATA: u32 = 0x0004;
+        use vfs_redirect::{FILE_APPEND_DATA, GENERIC_WRITE};
         assert!(!is_append_only(GENERIC_WRITE | FILE_APPEND_DATA));
     }
 
@@ -7307,7 +7320,7 @@ mod tests {
     /// `.write(true)`) requests exactly this.
     #[test]
     fn append_data_alone_is_append_only() {
-        const FILE_APPEND_DATA: u32 = 0x0004;
+        use vfs_redirect::FILE_APPEND_DATA;
         assert!(is_append_only(FILE_APPEND_DATA));
     }
 
@@ -7316,8 +7329,7 @@ mod tests {
     /// future edit cannot silently invert it.
     #[test]
     fn explicit_write_data_with_append_data_is_not_append_only() {
-        const FILE_WRITE_DATA: u32 = 0x0002;
-        const FILE_APPEND_DATA: u32 = 0x0004;
+        use vfs_redirect::{FILE_APPEND_DATA, FILE_WRITE_DATA};
         assert!(!is_append_only(FILE_WRITE_DATA | FILE_APPEND_DATA));
     }
 

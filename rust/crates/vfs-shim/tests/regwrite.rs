@@ -37,7 +37,9 @@ const STATUS_SUCCESS: i32 = 0;
 const STATUS_UNSUCCESSFUL: i32 = 0xC000_0001u32 as i32;
 const STATUS_INVALID_INFO_CLASS: i32 = 0xC000_0003u32 as i32;
 const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004u32 as i32;
+const STATUS_ACCESS_VIOLATION: i32 = 0xC000_0005u32 as i32;
 const STATUS_INVALID_PARAMETER: i32 = 0xC000_000Du32 as i32;
+const STATUS_OBJECT_NAME_INVALID: i32 = 0xC000_0033u32 as i32;
 const STATUS_ACCESS_DENIED: i32 = 0xC000_0022u32 as i32;
 const STATUS_OBJECT_NAME_NOT_FOUND: i32 = 0xC000_0034u32 as i32;
 const STATUS_CANNOT_DELETE: i32 = 0xC000_0121u32 as i32;
@@ -417,6 +419,7 @@ fn fixture() -> (MutexGuard<'static, ()>, &'static Fixture) {
         real_key("Info", &[("v", 1)]);
         real_key("Dead", &[("v", 1)]);
         real_key("Pre", &[]);
+        real_key("Names", &[("orig", 1)]);
         let sid = user_sid();
         let (st, pre) = open_abs(
             &format!(r"\REGISTRY\USER\{sid}\{BASE}\Pre"),
@@ -933,4 +936,85 @@ fn a_dead_director_fails_writes_and_leaves_the_real_key() {
     assert_eq!(f.real_info("Dead"), before);
     assert!(f.really_exists(r"Del\Dead"));
     assert!(!f.really_exists("DeadNew"));
+}
+
+/// Value names follow NT's `UNICODE_STRING` rule, shared by every registry hook (`ntbuf`): an
+/// odd `Length` is `STATUS_OBJECT_NAME_INVALID` (it used to be read with its last byte dropped),
+/// and a NULL buffer with a length is `STATUS_ACCESS_VIOLATION`.
+#[test]
+fn an_odd_or_null_value_name_is_refused_by_nt_s_rule() {
+    let (_g, f) = fixture();
+    let (st, h) = f.open("Names", NT_KEY_READ | NT_KEY_SET_VALUE);
+    assert_eq!(st, STATUS_SUCCESS);
+    let before = query_dword(h, "orig");
+    let chars: Vec<u16> = "orig".encode_utf16().collect();
+    let raw = |length: u16, buffer: *const u16| UnicodeString {
+        length,
+        maximum_length: length,
+        buffer,
+    };
+    let odd = raw(7, chars.as_ptr());
+    let null_with_length = raw(2, std::ptr::null());
+    unsafe {
+        assert_eq!(
+            NtSetValueKey(h, &odd, 0, REG_DWORD, 1u32.to_le_bytes().as_ptr(), 4),
+            STATUS_OBJECT_NAME_INVALID
+        );
+        assert_eq!(
+            NtSetValueKey(
+                h,
+                &null_with_length,
+                0,
+                REG_DWORD,
+                1u32.to_le_bytes().as_ptr(),
+                4
+            ),
+            STATUS_ACCESS_VIOLATION
+        );
+        let mut buf = vec![0u64; 64];
+        let mut ret = 0u32;
+        assert_eq!(
+            NtQueryValueKey(
+                h,
+                &odd,
+                KEY_VALUE_PARTIAL_INFORMATION,
+                buf.as_mut_ptr().cast(),
+                512,
+                &mut ret
+            ),
+            STATUS_OBJECT_NAME_INVALID
+        );
+    }
+    // The value the odd name would have truncated to was not written.
+    assert_eq!(query_dword(h, "orig"), before);
+    close(h);
+}
+
+/// A key name relative to a synthetic root, with an odd `Length`: the shim answers
+/// `STATUS_OBJECT_NAME_INVALID` itself, since a synthetic handle cannot be handed to the kernel.
+#[test]
+fn an_odd_length_key_name_under_a_synthetic_root_is_name_invalid() {
+    let (_g, f) = fixture();
+    regclient::set_value(&f.canon("Names"), "o", REG_DWORD, &1u32.to_le_bytes()).unwrap();
+    let (st, root) = f.open("Names", NT_KEY_READ);
+    assert_eq!(st, STATUS_SUCCESS);
+    assert!(is_synthetic_key_handle(root));
+    let chars: Vec<u16> = "Sub".encode_utf16().collect();
+    let us = UnicodeString {
+        length: 5,
+        maximum_length: 6,
+        buffer: chars.as_ptr(),
+    };
+    let oa = ObjectAttributes {
+        length: std::mem::size_of::<ObjectAttributes>() as u32,
+        root_directory: root,
+        object_name: &us,
+        attributes: OBJ_CASE_INSENSITIVE,
+        security_descriptor: std::ptr::null(),
+        security_qos: std::ptr::null(),
+    };
+    let mut h = 0isize;
+    let st = unsafe { NtOpenKeyEx(&mut h, NT_KEY_READ, &oa, 0) };
+    assert_eq!(st, STATUS_OBJECT_NAME_INVALID);
+    close(root);
 }

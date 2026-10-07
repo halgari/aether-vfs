@@ -842,6 +842,19 @@ impl FuseClient {
         }
     }
 
+    /// [`vpath_under_root`](Self::vpath_under_root) as the wire spells it: the root itself is
+    /// `"."`, not the empty string.
+    pub fn route(&self, path: &str) -> Option<(RootId, String)> {
+        self.vpath_under_root(path)
+            .map(|(root, vpath)| (root, wire_vpath(vpath)))
+    }
+
+    /// [`vpath_as_spelled`](Self::vpath_as_spelled) with the root as `"."`, like [`route`](Self::route).
+    pub fn route_as_spelled(&self, path: &str) -> Option<(RootId, String)> {
+        self.vpath_as_spelled(path)
+            .map(|(root, vpath)| (root, wire_vpath(vpath)))
+    }
+
     /// Map an absolute path into the virtual namespace: **which root** it
     /// belongs to, and its path relative to that root.
     ///
@@ -886,6 +899,15 @@ impl FuseClient {
             vpath.push_str(&vfs_core::fold(stream));
         }
         Some((root, vpath))
+    }
+}
+
+/// A directory open of the root itself has an empty remainder; on the wire that is `"."`.
+fn wire_vpath(vpath: String) -> String {
+    if vpath.is_empty() {
+        ".".to_string()
+    } else {
+        vpath
     }
 }
 
@@ -1111,6 +1133,26 @@ mod tests {
             resolve(&m, r"\??\C:\Docs\Skyrim"),
             Some((RootId(1), String::new()))
         );
+    }
+
+    /// The wire spells the root itself `"."`, and `route` is the one place that happens: it is
+    /// `vpath_under_root` through `wire_vpath`. (A `FuseClient` needs a live ring, so the
+    /// resolve-then-spell pair is checked on the `RootMap` the client wraps.)
+    #[test]
+    fn the_root_itself_is_spelled_as_a_dot_on_the_wire() {
+        let m = FuseClient::roots_only(&[(RootId(0), r"C:\Games\Skyrim")]);
+        let routed = |p: &str| resolve(&m, p).map(|(r, v)| (r, wire_vpath(v)));
+        assert_eq!(
+            routed(r"\??\C:\Games\Skyrim"),
+            Some((RootId(0), ".".to_string()))
+        );
+        assert_eq!(
+            routed(r"\??\C:\Games\Skyrim\Data\a.esm"),
+            Some((RootId(0), "data/a.esm".to_string()))
+        );
+        assert_eq!(routed(r"\??\C:\Windows\x.dll"), None);
+        assert_eq!(wire_vpath(String::new()), ".");
+        assert_eq!(wire_vpath("data".to_string()), "data");
     }
 
     /// **This is the unification, stated as a test.** The five alternate

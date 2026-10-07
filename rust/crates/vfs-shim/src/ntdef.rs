@@ -4,13 +4,18 @@
 use core::ffi::c_void;
 use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
+// The five statuses the registry layout also names are defined once, in `vfs_registry::layout`:
+// `STATUS_SUCCESS`, `STATUS_BUFFER_OVERFLOW` (the caller buffer cannot hold even one entry),
+// `STATUS_INVALID_PARAMETER`, `STATUS_BUFFER_TOO_SMALL`, and `STATUS_OBJECT_NAME_NOT_FOUND`
+// (returned for a tombstoned, mod-deleted path so the real on-disk file appears absent).
+pub use vfs_registry::layout::{
+    STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INVALID_PARAMETER,
+    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_SUCCESS,
+};
+
 /// `STATUS_UNSUCCESSFUL` — returned only if the trampoline is somehow unset
 /// (an invariant violation the hook must not panic on).
 pub const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as i32;
-
-/// `STATUS_OBJECT_NAME_NOT_FOUND` — returned for a tombstoned (mod-deleted) path
-/// so the real on-disk file appears absent.
-pub const STATUS_OBJECT_NAME_NOT_FOUND: NTSTATUS = 0xC000_0034u32 as i32;
 
 /// `STATUS_OBJECT_PATH_NOT_FOUND` — maps to Win32 `ERROR_PATH_NOT_FOUND` (3),
 /// as distinct from `STATUS_OBJECT_NAME_NOT_FOUND`'s `ERROR_FILE_NOT_FOUND`
@@ -62,8 +67,6 @@ pub type NtCreateFileFn = unsafe extern "system" fn(
     u32,           // EaLength
 ) -> NTSTATUS;
 
-/// `STATUS_SUCCESS`.
-pub const STATUS_SUCCESS: NTSTATUS = 0;
 /// `FILE_ATTRIBUTE_DIRECTORY` / `FILE_ATTRIBUTE_NORMAL`.
 pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
@@ -248,8 +251,6 @@ pub const SL_RETURN_SINGLE_ENTRY: u32 = 0x02;
 
 /// `STATUS_NO_MORE_FILES` — enumeration cursor exhausted.
 pub const STATUS_NO_MORE_FILES: NTSTATUS = 0x8000_0006u32 as i32;
-/// `STATUS_BUFFER_OVERFLOW` — the caller buffer cannot hold even one entry.
-pub const STATUS_BUFFER_OVERFLOW: NTSTATUS = 0x8000_0005u32 as i32;
 /// `STATUS_INFO_LENGTH_MISMATCH` — the caller buffer cannot hold even the fixed
 /// header of the requested structure. Distinct from `STATUS_BUFFER_OVERFLOW`,
 /// and `NtQueryObject` returns each in its own range — see `qobj_hook_body`.
@@ -535,12 +536,8 @@ pub const OBJ_CASE_INSENSITIVE: u32 = 0x40;
 
 /// `STATUS_NOT_SUPPORTED`.
 pub const STATUS_NOT_SUPPORTED: NTSTATUS = 0xC000_00BBu32 as i32;
-/// `STATUS_INVALID_PARAMETER`.
-pub const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000_000Du32 as i32;
 /// `STATUS_OBJECT_NAME_INVALID`.
 pub const STATUS_OBJECT_NAME_INVALID: NTSTATUS = 0xC000_0033u32 as i32;
-/// `STATUS_BUFFER_TOO_SMALL`.
-pub const STATUS_BUFFER_TOO_SMALL: NTSTATUS = 0xC000_0023u32 as i32;
 
 /// `ntdll!NtEnumerateKey`.
 pub type NtEnumerateKeyFn = unsafe extern "system" fn(

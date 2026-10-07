@@ -81,6 +81,19 @@ pub struct OwnedOa {
     oa: ObjectAttributes,
 }
 
+/// The longest even length a `UNICODE_STRING` can hold, in bytes.
+const MAX_UNICODE_STRING_BYTES: usize = 0xFFFE;
+
+/// `(Length, MaximumLength)` for `units` UTF-16 units plus a NUL, `MaximumLength` capped at the
+/// longest even length.
+fn lengths_for(units: usize) -> (u16, u16) {
+    let bytes = units * 2;
+    (
+        bytes as u16,
+        (bytes + 2).min(MAX_UNICODE_STRING_BYTES) as u16,
+    )
+}
+
 impl OwnedOa {
     /// `nt` (an absolute NT name) with a NULL `RootDirectory`. With a `template`, its length,
     /// attributes, security descriptor and QoS are carried over; without one the attributes are
@@ -94,16 +107,14 @@ impl OwnedOa {
         case_insensitive: bool,
     ) -> Box<OwnedOa> {
         let mut buf: Vec<u16> = nt.encode_utf16().collect();
-        // The longest even length a `UNICODE_STRING` can hold.
-        let max_bytes = 0xFFFE_usize;
-        buf.truncate(max_bytes / 2);
-        let bytes = (buf.len() * 2) as u16;
+        buf.truncate(MAX_UNICODE_STRING_BYTES / 2);
+        let (length, maximum_length) = lengths_for(buf.len());
         buf.push(0);
         let mut b = Box::new(OwnedOa {
             buf,
             us: UnicodeString {
-                length: bytes,
-                maximum_length: (bytes as usize + 2).min(max_bytes) as u16,
+                length,
+                maximum_length,
                 buffer: core::ptr::null_mut(),
             },
             oa: ObjectAttributes {
@@ -153,6 +164,20 @@ pub unsafe fn iosb_set(iosb: *mut c_void, status: NTSTATUS, info: usize) {
     let p = iosb as *mut u8;
     core::ptr::write_unaligned(p as *mut u32, status as u32);
     core::ptr::write_unaligned(p.add(8) as *mut usize, info);
+}
+
+/// The `ByteOffset` argument of `NtReadFile`/`NtWriteFile`: `Some` for an explicit offset,
+/// `None` for a NULL pointer or a negative value (`FILE_USE_FILE_POINTER_POSITION` and
+/// `FILE_WRITE_TO_END_OF_FILE` are negative sentinels), meaning "use the handle's position".
+///
+/// # Safety
+/// `byte_offset` is NULL or points to 8 readable bytes.
+pub unsafe fn explicit_offset(byte_offset: *const i64) -> Option<u64> {
+    if byte_offset.is_null() {
+        return None;
+    }
+    let v = core::ptr::read_unaligned(byte_offset);
+    (v >= 0).then_some(v as u64)
 }
 
 #[cfg(test)]
@@ -271,12 +296,23 @@ mod tests {
     }
 
     #[test]
-    fn owned_oa_cuts_an_overlong_name_at_an_even_length() {
-        let name = "a".repeat(40_000);
-        let o = OwnedOa::absolute(None, &name, true);
-        let us = unsafe { &*(*o.as_ptr()).object_name };
-        assert_eq!(us.length, 0xFFFE);
-        assert_eq!(us.maximum_length, 0xFFFE);
+    fn lengths_cap_at_the_longest_even_unicode_string() {
+        assert_eq!(lengths_for(0), (0, 2));
+        assert_eq!(lengths_for(9), (18, 20));
+        // 32767 units is 0xFFFE bytes: the NUL no longer fits in MaximumLength.
+        assert_eq!(lengths_for(0x7FFF), (0xFFFE, 0xFFFE));
+    }
+
+    #[test]
+    fn explicit_offset_is_none_for_null_and_negative_sentinels() {
+        unsafe {
+            assert_eq!(explicit_offset(core::ptr::null()), None);
+            assert_eq!(explicit_offset(&0i64), Some(0));
+            assert_eq!(explicit_offset(&4096i64), Some(4096));
+            assert_eq!(explicit_offset(&-1i64), None);
+            assert_eq!(explicit_offset(&-2i64), None);
+            assert_eq!(explicit_offset(&i64::MIN), None);
+        }
     }
 
     #[test]

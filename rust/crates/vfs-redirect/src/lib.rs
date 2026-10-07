@@ -946,12 +946,23 @@ pub struct WriteIntent {
     pub preserves: bool,
 }
 
+/// `FILE_WRITE_DATA`: the specific right to write file content.
+pub const FILE_WRITE_DATA: u32 = 0x0002;
+/// `FILE_APPEND_DATA`: the specific right to append.
+pub const FILE_APPEND_DATA: u32 = 0x0004;
+/// `GENERIC_WRITE`, as the raw mask a hook observes (the kernel maps it later).
+pub const GENERIC_WRITE: u32 = 0x4000_0000;
+/// `GENERIC_ALL`, as the raw mask a hook observes.
+pub const GENERIC_ALL: u32 = 0x1000_0000;
+/// The access bits the shim's `is_write_open` treats as write access. `GENERIC_ALL` is not in
+/// it, though it implies write: `classify_open` counts it and the shim's predicate has never
+/// done so, and the two are kept as they were.
+pub const WRITE_ACCESS: u32 = FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE;
+
 /// Classify an open from its desired-access mask and create disposition.
 pub fn classify_open(access: u32, disposition: u32) -> WriteIntent {
-    // FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL.
-    const WRITE_MASK: u32 = 0x2 | 0x4 | 0x4000_0000 | 0x1000_0000;
     WriteIntent {
-        write: access & WRITE_MASK != 0,
+        write: access & (WRITE_ACCESS | GENERIC_ALL) != 0,
         preserves: matches!(disposition, FILE_OPEN | FILE_OPEN_IF),
     }
 }
@@ -1223,6 +1234,23 @@ mod tests {
         assert_eq!(utf16_to_string(&string_to_utf16(s)), s);
         // No trailing NUL is appended.
         assert_eq!(*string_to_utf16("ab").last().unwrap(), b'b' as u16);
+    }
+
+    /// The shared write-access constants: `classify_open` counts `GENERIC_ALL`, the bare
+    /// `WRITE_ACCESS` mask the shim's `is_write_open` uses does not (kept as it was).
+    #[test]
+    fn write_access_masks_agree_with_classify_open() {
+        assert_eq!(WRITE_ACCESS, 0x4000_0006);
+        for bit in [
+            FILE_WRITE_DATA,
+            FILE_APPEND_DATA,
+            GENERIC_WRITE,
+            GENERIC_ALL,
+        ] {
+            assert!(classify_open(bit, FILE_OPEN).write, "{bit:#x}");
+        }
+        assert!(!classify_open(0x8000_0000, FILE_OPEN).write); // GENERIC_READ
+        assert_eq!(WRITE_ACCESS & GENERIC_ALL, 0);
     }
 
     #[test]
