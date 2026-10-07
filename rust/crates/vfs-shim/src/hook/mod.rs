@@ -17,13 +17,17 @@ mod registry;
 mod section;
 #[cfg(test)]
 mod test_support;
-// @mods
 
+pub(crate) use self::entry::ShimIoGuard;
+pub use self::entry::{as_shim_io_for_tests, contain_panic};
+pub use self::install::{
+    HookGuard, InstallError, install, install_late, registry_detours_installed, skipped_detours,
+};
+pub(crate) use self::registry::reg_real;
+
+// Every module reaches the others' `pub(super)` items through here.
 use self::close::*;
 use self::dirquery::*;
-pub(crate) use self::entry::ShimIoGuard;
-pub use self::entry::as_shim_io_for_tests;
-pub use self::entry::contain_panic;
 use self::entry::*;
 use self::file_attr::*;
 use self::file_info::*;
@@ -31,20 +35,13 @@ use self::file_io::*;
 use self::file_mutate::*;
 use self::file_open::*;
 use self::handles::*;
-pub use self::install::HookGuard;
-pub use self::install::InstallError;
-pub use self::install::install;
-pub use self::install::install_late;
-pub use self::install::registry_detours_installed;
-pub use self::install::skipped_detours;
 use self::install::*;
 use self::path::*;
 use self::process::*;
-pub(crate) use self::registry::reg_real;
 use self::registry::*;
 use self::section::*;
-// @uses
 
+use crate::engine::Engine;
 use std::sync::OnceLock;
 
 /// Opt-in only: when `VFS_ALLOW_DISK_FALLTHROUGH=1`, under-root FUSE NOT_FOUND
@@ -68,7 +65,5 @@ fn child_cwd_root() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| vfs_env::opt_out(vfs_env::CHILD_CWD_ROOT))
 }
-
-use crate::engine::Engine;
 
 static ENGINE: OnceLock<Engine> = OnceLock::new();

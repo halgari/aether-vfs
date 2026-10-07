@@ -691,8 +691,8 @@ mod tests {
         let mut hook_files: Vec<std::path::PathBuf> = Vec::new();
         walk(&hook_dir, &mut hook_files);
         assert!(
-            !hook_files.is_empty(),
-            "no sources found under {}",
+            hook_files.len() >= 15,
+            "expected the hook module's sources under {}, found {hook_files:?}",
             hook_dir.display()
         );
         for path in &hook_files {
