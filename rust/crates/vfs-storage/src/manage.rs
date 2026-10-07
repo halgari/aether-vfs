@@ -196,7 +196,7 @@ impl Storage {
         // Every durable catalog row must reference durable store data, and the
         // commit makes other layers' pending rows durable too. If it fails, the
         // rows may be gone while the files stay: only reconcile finds those.
-        if let Err(e) = self.flush_durably() {
+        if let Err(e) = self.durable_point() {
             self.needs_reconcile("delete_layer: durable point failed after the rows were dropped");
             return Err(e);
         }

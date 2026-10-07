@@ -12,7 +12,7 @@ use vfs_provider::Provider;
 use crate::cached::{lock, CacheState};
 use crate::catalog::Catalog;
 use crate::config::{Durability, StorageConfig};
-use crate::durable::DurableClock;
+use crate::durable::{fold_scratch_dirs, DurableClock};
 use crate::ids::Guid;
 use crate::layer::LayerProvider;
 use crate::ram::RamTier;
@@ -185,6 +185,8 @@ pub struct Storage {
     pub(crate) dirty: AtomicBool,
     /// When durable points happen, under [`Durability::Deferred`].
     pub(crate) clock: DurableClock,
+    /// `StorageConfig::scratch_dirs`, folded once at open: `(layer, dir)`.
+    pub(crate) scratch: Vec<(String, String)>,
     /// GUIDs of layer files (any layer's) whose rows are gone, durably or
     /// not, and that no handle has open: deleted from the store by the next
     /// durable point, after its catalog commit. A leaf lock, pushed to under
@@ -292,6 +294,7 @@ impl Storage {
             .map(|(_, r)| r.logical_bytes)
             .sum();
         let clock = DurableClock::new(cfg.max_deferred_commits);
+        let scratch = fold_scratch_dirs(&cfg.scratch_dirs);
         // Corruption found, or a repair that failed: the next open reports
         // and retries it, as before.
         let dirty = !reconciled.corrupt_files.is_empty() || !reconciled.failed_repairs.is_empty();
@@ -310,6 +313,7 @@ impl Storage {
             crashed: AtomicBool::new(false),
             dirty: AtomicBool::new(dirty),
             clock,
+            scratch,
             doomed: Mutex::new(Vec::new()),
             #[cfg(test)]
             fail_import_at: Mutex::new(None),
@@ -466,7 +470,7 @@ impl Storage {
     /// catalog). May be called with the `layers` registry lock held.
     pub(crate) fn create_layer_durably(&self, name: &str) -> Result<u64, StorageError> {
         let id = self.catalog.create_layer(name)?;
-        self.flush_durably()?;
+        self.durable_point()?;
         Ok(id)
     }
 

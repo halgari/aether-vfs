@@ -1,10 +1,17 @@
 //! Durability: ...(doc written later)
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
+use vfs_core::fold;
+use vfs_provider::map_io_err;
+
 use crate::cached::lock;
+use crate::config::{Durability, ScratchDir};
+use crate::ids::Guid;
+use crate::layer_io::FileCell;
 use crate::storage::{Storage, StorageError};
 
 /// The default for [`DurableClock::max_commits`]
@@ -224,12 +231,6 @@ impl Storage {
         self.gate.write().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// A durable point: [`Storage::durable_point`]. Safe with the `layers`
-    /// registry held.
-    pub(crate) fn flush_durably(&self) -> Result<(), StorageError> {
-        self.durable_point()
-    }
-
     /// Store flush, then the durable catalog commit, then the store deletes
     /// that commit made safe (every layer's removed or replaced files that no
     /// handle has open, see [`Storage::doomed`]).
@@ -317,5 +318,99 @@ fn clean_close_token() -> u64 {
         if t > 1 {
             return t;
         }
+    }
+}
+
+/// A layer's files created since the last durable point (the "fresh file"
+/// rule): the durability epoch ([`DurableClock::epoch`]) their creates saw,
+/// and their GUIDs. A set whose epoch is not the current one is stale (a
+/// durable point has published those rows since) and counts as empty.
+pub(crate) struct FreshFiles(Mutex<(u64, HashSet<Guid>)>);
+
+impl FreshFiles {
+    pub(crate) fn new() -> Self {
+        FreshFiles(Mutex::new((0, HashSet::new())))
+    }
+
+    /// Records that the file `guid` was created in the current durability
+    /// epoch. Under the shared gate (a create's), so no durable point runs
+    /// between the row's put and this.
+    pub(crate) fn created(&self, clock: &DurableClock, guid: Guid) -> Result<(), i32> {
+        let epoch = clock.epoch();
+        let mut fresh = self.0.lock().map_err(|_| map_io_err())?;
+        if fresh.0 != epoch {
+            *fresh = (epoch, HashSet::new());
+        }
+        fresh.1.insert(guid);
+        Ok(())
+    }
+
+    /// Whether no durable point has published the row of `guid` since its
+    /// create (so its whole content is still non-durable). A race with a
+    /// durable point answers false, which only costs an extra one.
+    fn contains(&self, clock: &DurableClock, guid: &Guid) -> bool {
+        let epoch = clock.epoch();
+        self.0
+            .lock()
+            .is_ok_and(|f| f.0 == epoch && f.1.contains(guid))
+    }
+}
+
+/// [`StorageConfig::scratch_dirs`](crate::StorageConfig::scratch_dirs) with
+/// each directory folded once, at open: `(layer, folded dir)`.
+pub(crate) fn fold_scratch_dirs(dirs: &[ScratchDir]) -> Vec<(String, String)> {
+    dirs.iter()
+        .map(|d| (d.layer.clone(), fold(&d.dir)))
+        .collect()
+}
+
+impl Storage {
+    /// Whether `cell`'s file is in one of `layer`'s scratch directories
+    /// ([`crate::StorageConfig::scratch_dirs`]): a temporary its host
+    /// deletes after a crash, so a rewrite of it never needs a durable point.
+    fn is_scratch(&self, layer: &str, cell: &FileCell) -> bool {
+        let mut dirs = self.scratch.iter().filter(|(l, _)| l == layer).peekable();
+        if dirs.peek().is_none() {
+            return false;
+        }
+        let path = cell.path.lock().unwrap_or_else(|e| e.into_inner());
+        path.as_deref()
+            .and_then(|p| p.split_once('/'))
+            .is_some_and(|(top, _)| dirs.any(|(_, dir)| dir == top))
+    }
+
+    /// The policy: called by a layer provider after a change that
+    /// [`Durability::OnEveryClose`] makes durable before it returns. Under
+    /// that policy, a [`Storage::durable_point`]. Under
+    /// [`Durability::Deferred`] the change stays non-durable (and a removed
+    /// file's store data stays, doomed) unless
+    ///
+    /// - `rewrote` names a file that was not created since the last durable
+    ///   point (not in `fresh`) and is not in a scratch directory: a rewrite
+    ///   in place of a file whose row is already durable runs one at once; or
+    /// - a durable point is due ([`Storage::deferred_point_due`]), which is
+    ///   claimed first so concurrent writers do not all run one; if it
+    ///   fails, the claim is undone ([`DurableClock::retry`]).
+    ///
+    /// Called with no lock held.
+    pub(crate) fn after_change(
+        &self,
+        layer: &str,
+        fresh: &FreshFiles,
+        rewrote: Option<&FileCell>,
+    ) -> Result<(), StorageError> {
+        let max_interval = match self.durability() {
+            Durability::OnEveryClose => return self.durable_point(),
+            Durability::Deferred { max_interval } => max_interval,
+        };
+        if rewrote
+            .is_some_and(|c| !fresh.contains(&self.clock, &c.guid) && !self.is_scratch(layer, c))
+        {
+            return self.durable_point();
+        }
+        if !self.deferred_point_due(max_interval) {
+            return Ok(());
+        }
+        self.durable_point().inspect_err(|_| self.clock.retry())
     }
 }

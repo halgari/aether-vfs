@@ -64,7 +64,7 @@ use vfs_provider::{
 };
 
 use crate::catalog::EntryRec;
-use crate::config::Durability;
+use crate::durable::FreshFiles;
 use crate::ids::{layer_file_id, new_guid, Guid};
 use crate::layer_io::{FileCell, FileState};
 use crate::storage::{Storage, StorageError};
@@ -156,11 +156,9 @@ pub(crate) struct LayerProvider {
     cells: Mutex<HashMap<Guid, Weak<FileCell>>>,
     handles: Mutex<HashMap<Handle, Arc<OpenFile>>>,
     next: AtomicU64,
-    /// Files created since the last durable point: the durability epoch
-    /// ([`crate::storage::DurableClock::epoch`]) their creates saw, and their
-    /// GUIDs. A set whose epoch is not the current one is stale (a durable
-    /// point has published those rows since) and counts as empty.
-    fresh: Mutex<(u64, HashSet<Guid>)>,
+    /// Files created since the last durable point (the policy is in
+    /// [`crate::durable`]).
+    fresh: FreshFiles,
     /// Test hook: the next file create fails at the store.
     #[cfg(test)]
     pub(crate) fail_store_create: AtomicBool,
@@ -180,7 +178,7 @@ impl LayerProvider {
             cells: Mutex::new(HashMap::new()),
             handles: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
-            fresh: Mutex::new((0, HashSet::new())),
+            fresh: FreshFiles::new(),
             #[cfg(test)]
             fail_store_create: AtomicBool::new(false),
             #[cfg(test)]
@@ -376,7 +374,7 @@ impl LayerProvider {
                 .set_len(&id, 0)
                 .map_err(|e| self.st_err("store create", e.into()))?;
             stored = true;
-            self.created_fresh(guid)?;
+            self.fresh.created(&self.storage.clock, guid)?;
             self.acquire(&rec, &p.folded)
         })();
         if made.is_err() {
@@ -452,68 +450,13 @@ impl LayerProvider {
             .map_err(|e| self.st_err("durable point", e))
     }
 
-    /// Records that the file `guid` was created in the current durability
-    /// epoch. Under the shared gate (a create's), so no durable point runs
-    /// between the row's put and this.
-    fn created_fresh(&self, guid: Guid) -> Result<(), i32> {
-        let epoch = self.storage.clock.epoch();
-        let mut fresh = lock(&self.fresh)?;
-        if fresh.0 != epoch {
-            *fresh = (epoch, HashSet::new());
-        }
-        fresh.1.insert(guid);
-        Ok(())
-    }
-
-    /// Whether no durable point has published the row of `guid` since its
-    /// create (so its whole content is still non-durable). A race with a
-    /// durable point answers false, which only costs an extra one.
-    fn is_fresh(&self, guid: &Guid) -> bool {
-        let epoch = self.storage.clock.epoch();
-        self.fresh
-            .lock()
-            .is_ok_and(|f| f.0 == epoch && f.1.contains(guid))
-    }
-
-    /// Whether `cell`'s file is in one of this layer's scratch directories
-    /// ([`crate::StorageConfig::scratch_dirs`]): a temporary its host
-    /// deletes after a crash, so a rewrite of it never needs a durable point.
-    fn is_scratch(&self, cell: &FileCell) -> bool {
-        let mut dirs = self
-            .storage
-            .cfg
-            .scratch_dirs
-            .iter()
-            .filter(|d| d.layer == self.name)
-            .peekable();
-        if dirs.peek().is_none() {
-            return false;
-        }
-        let path = cell.path.lock().unwrap_or_else(|e| e.into_inner());
-        path.as_deref()
-            .and_then(|p| p.split_once('/'))
-            .is_some_and(|(top, _)| dirs.any(|d| fold(&d.dir) == top))
-    }
-
     /// Called after a change that [`Durability::OnEveryClose`] makes durable
-    /// before it returns: under that policy, a [`Self::durable_point`].
-    /// Under [`Durability::Deferred`] the change stays non-durable (and a
-    /// removed file's store data stays, doomed) unless a durable point is
-    /// due, or `rewrote` names a file whose row is already durable (see the
-    /// module docs): then this runs one. Called with no lock held.
+    /// before it returns; the policy is [`Storage::after_change`]. Called
+    /// with no lock held.
     fn changed(&self, rewrote: Option<&FileCell>) -> Result<(), i32> {
-        let max_interval = match self.storage.durability() {
-            Durability::OnEveryClose => return self.durable_point(),
-            Durability::Deferred { max_interval } => max_interval,
-        };
-        if rewrote.is_some_and(|c| !self.is_fresh(&c.guid) && !self.is_scratch(c)) {
-            return self.durable_point();
-        }
-        if !self.storage.deferred_point_due(max_interval) {
-            return Ok(());
-        }
-        self.durable_point()
-            .inspect_err(|_| self.storage.clock.retry())
+        self.storage
+            .after_change(&self.name, &self.fresh, rewrote)
+            .map_err(|e| self.st_err("durable point", e))
     }
 
     fn handle(&self, h: Handle) -> Result<Arc<OpenFile>, i32> {
@@ -853,7 +796,7 @@ impl LayerProvider {
                     self.doom(g)?;
                 }
                 for g in &guids {
-                    self.created_fresh(*g)?;
+                    self.fresh.created(&self.storage.clock, *g)?;
                 }
                 Ok(())
             })();
