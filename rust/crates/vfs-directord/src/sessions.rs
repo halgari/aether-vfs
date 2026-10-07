@@ -1020,7 +1020,7 @@ fn daemon_names_only_the_embed_api() {
         .collect();
     files.sort();
     assert!(
-        files.iter().any(|p| p.ends_with("registry.rs")) && files.len() >= 5,
+        files.iter().any(|p| p.ends_with("sessions.rs")) && files.len() >= 5,
         "the enumeration must have found the daemon's sources — got {files:?}"
     );
 

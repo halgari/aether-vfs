@@ -2,8 +2,14 @@
 //! helpers shared by the `vfs` CLI and integration tests.
 
 pub mod discovery;
-pub mod registry;
 pub mod service;
+pub mod sessions;
+
+// compat: removed by cleanup stream I
+#[doc(hidden)]
+pub mod registry {
+    pub use super::sessions::*;
+}
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -18,7 +24,7 @@ use vfs_control::pb::director_client::DirectorClient;
 use vfs_embed::{CloseOutcome, Storage, StorageConfig};
 
 pub use discovery::{default_discovery_path, read_discovery, write_discovery, Discovery};
-pub use registry::SessionRegistry;
+pub use sessions::SessionRegistry;
 pub use service::DirectorService;
 
 /// Bind address used when the caller does not pin one (ephemeral port).
@@ -533,7 +539,7 @@ pub fn parse_source_flag(s: &str) -> Result<vfs_control::SourceEntry, String> {
     // has no idea that suffix is gone, so a leftover `#20` from a command
     // line nobody updated silently becomes part of `mount` instead of being
     // stripped — the source then mounts at a mangled, unreachable prefix
-    // (`registry.rs`'s `is_root` check sees `"/#20"`, not `"/"`) and the
+    // (`sessions.rs`'s `is_root` check sees `"/#20"`, not `"/"`) and the
     // session starts cleanly while serving nothing where the caller expected
     // root content. Reject it loudly instead.
     if let Some((_, suffix)) = mount.split_once('#') {
@@ -1022,7 +1028,7 @@ mod tests {
     /// The pre-2b syntax was `TYPE:PATH@MOUNT#LAYER`. Task 2 dropped `layer`
     /// from config but `parse_source_flag`'s `rsplit_once('@')` has no idea
     /// the `#LAYER` suffix is gone, so a stale command line's `#20` used to
-    /// become part of `mount` silently — `registry::add_source`'s `is_root`
+    /// become part of `mount` silently — `sessions::add_source`'s `is_root`
     /// check then sees `"/#20"`, not `"/"`, and the source mounts at an
     /// unreachable prefix instead of the root the caller intended, with the
     /// session starting cleanly and serving nothing where expected. This

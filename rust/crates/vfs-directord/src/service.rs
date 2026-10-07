@@ -18,7 +18,7 @@ use vfs_control::SourceSpec;
 use vfs_embed::{open_totals, rejected_writes, LaunchOpts, SourceKey, Storage, StorageError};
 use vfs_source::build_provider;
 
-use crate::registry::{LayerOpError, SessionRegistry, NO_STORAGE};
+use crate::sessions::{LayerOpError, SessionRegistry, NO_STORAGE};
 
 pub struct DirectorService {
     registry: SessionRegistry,
@@ -433,7 +433,7 @@ fn registry_status(err: String) -> Status {
 /// already live is `AlreadyExists`; a name that cannot name a Wine prefix is
 /// the caller's to fix (`InvalidArgument`); anything else is the daemon's.
 fn create_status(err: String) -> Status {
-    if err.starts_with(crate::registry::DUPLICATE_NAME) {
+    if err.starts_with(crate::sessions::DUPLICATE_NAME) {
         Status::already_exists(err)
     } else if err.contains("cannot name a Wine prefix") {
         Status::invalid_argument(err)
