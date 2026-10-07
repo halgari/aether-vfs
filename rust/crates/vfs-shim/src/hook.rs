@@ -2457,6 +2457,7 @@ fn refusal(serves: crate::regkeys::Serves) -> Option<NTSTATUS> {
     match serves {
         crate::regkeys::Serves::Yes => Some(STATUS_NOT_SUPPORTED),
         crate::regkeys::Serves::No => None,
+        crate::regkeys::Serves::Invalid(st) => Some(st),
         crate::regkeys::Serves::Unresolvable => {
             crate::hookstats::note_reg_write_refused();
             Some(STATUS_UNSUCCESSFUL)
@@ -2727,12 +2728,24 @@ struct DecodedPath {
 /// consult. [`path_of`] is the provenance-blind convenience wrapper for the
 /// many callers (filename matching, tracing, hookstats) that only ever read
 /// the string and never feed it back into a cached `RootMap` decision.
-unsafe fn path_of_tracked(oa: *const ObjectAttributes) -> Option<DecodedPath> {
+///
+/// `Err` is a name NT itself refuses (`ntbuf::us_units`: odd length, NULL buffer with a length).
+/// The hook must return that status and not call the real syscall: the host would rebuild the
+/// name (Wine rounds an odd length down) and act on a real file the shim would have virtualised.
+/// `Ok(None)` is a name that is simply not decodable to a path.
+unsafe fn path_of_tracked(oa: *const ObjectAttributes) -> Result<Option<DecodedPath>, NTSTATUS> {
     if oa.is_null() {
-        return None;
+        return Ok(None);
     }
     let oa_ref = &*oa;
-    let name = object_name_str(oa)?;
+    let Some(name) = crate::ntbuf::oa_name_string(oa)? else {
+        return Ok(None);
+    };
+    Ok(decode_relative(oa_ref, name))
+}
+
+/// The path for an already-decoded `name` and the OA's `RootDirectory`.
+unsafe fn decode_relative(oa_ref: &ObjectAttributes, name: String) -> Option<DecodedPath> {
     if oa_ref.root_directory.is_null() {
         return if name.is_empty() {
             None
@@ -2762,8 +2775,8 @@ unsafe fn path_of_tracked(oa: *const ObjectAttributes) -> Option<DecodedPath> {
 /// caller can tramp. Without this, steam_api / CRT opens like
 /// `RootDirectory=<game dir FUSE handle>, Name=steam_appid.txt` hit the kernel
 /// with a fake handle → fail → **Steam Error**.
-unsafe fn path_of(oa: *const ObjectAttributes) -> Option<String> {
-    path_of_tracked(oa).map(|d| d.path)
+unsafe fn path_of(oa: *const ObjectAttributes) -> Result<Option<String>, NTSTATUS> {
+    Ok(path_of_tracked(oa)?.map(|d| d.path))
 }
 
 /// Decide what to do with an already-decoded `path`, given its access mask
@@ -3709,7 +3722,10 @@ unsafe fn create_hook_body(
     // Decode once for the whole call and thread the result through every
     // function below that used to call `path_of(oa)` independently — see
     // `tag_under_root`'s doc comment for the cost argument.
-    let decoded = path_of_tracked(oa);
+    let decoded = match path_of_tracked(oa) {
+        Ok(d) => d,
+        Err(st) => return st,
+    };
     let path: Option<&str> = decoded.as_ref().map(|d| d.path.as_str());
     let os_consulted = decoded.as_ref().is_some_and(|d| d.os_consulted);
     // Held for the rest of this call whenever `path` is itself a snapshot of
@@ -3773,7 +3789,10 @@ unsafe fn create_hook_body(
                 outcome_recorded,
                 crate::hookstats::OpenOutcome::FellThroughRedirect,
             );
-            let new_oa = OwnedOa::absolute(Some(&*oa), &target_nt, false);
+            let new_oa = match redirected_oa(oa, &target_nt) {
+                Ok(o) => o,
+                Err(st) => return st,
+            };
             let status = tramp(
                 file_handle,
                 access,
@@ -3859,6 +3878,11 @@ unsafe fn fuse_root_directory(oa: *const ObjectAttributes) -> bool {
     !root.is_null() && crate::fuse_synth::is_fuse_synth(root as isize)
 }
 
+/// An owned absolute copy of `oa` naming `nt`, with the caller's own `Length` echoed.
+unsafe fn redirected_oa(oa: *const ObjectAttributes, nt: &str) -> Result<Box<OwnedOa>, NTSTATUS> {
+    Ok(OwnedOa::absolute(Some(&*oa), nt, false)?.with_length((*oa).length))
+}
+
 /// Absolute `\??\` NT path for a Win32 or NT path string: `vfs_redirect::to_nt` after trimming
 /// and normalising a `\\?\` long prefix to `\??\`.
 fn to_nt_path(path: &str) -> String {
@@ -3895,7 +3919,10 @@ unsafe fn tramp_create_abs(
     abs_path: &str,
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
-    let new_oa = OwnedOa::absolute(Some(&*oa), &nt, false);
+    let new_oa = match redirected_oa(oa, &nt) {
+        Ok(o) => o,
+        Err(st) => return st,
+    };
     tramp(
         file_handle,
         access,
@@ -3924,7 +3951,10 @@ unsafe fn tramp_open_abs(
     abs_path: &str,
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
-    let new_oa = OwnedOa::absolute(Some(&*oa), &nt, false);
+    let new_oa = match redirected_oa(oa, &nt) {
+        Ok(o) => o,
+        Err(st) => return st,
+    };
     tramp(file_handle, access, new_oa.as_ptr(), iosb, share, opts)
 }
 
@@ -3949,7 +3979,10 @@ unsafe fn open_hook_body(
     }
     // Decode once for the whole call — see `create_hook` and `tag_under_root`'s
     // doc comment for why, and for what the `UncachedScope` guard is for.
-    let decoded = path_of_tracked(oa);
+    let decoded = match path_of_tracked(oa) {
+        Ok(d) => d,
+        Err(st) => return st,
+    };
     let path: Option<&str> = decoded.as_ref().map(|d| d.path.as_str());
     let os_consulted = decoded.as_ref().is_some_and(|d| d.os_consulted);
     let _uncached_guard = os_consulted.then(vfs_redirect::UncachedScope::enter);
@@ -3998,7 +4031,10 @@ unsafe fn open_hook_body(
                 outcome_recorded,
                 crate::hookstats::OpenOutcome::FellThroughRedirect,
             );
-            let new_oa = OwnedOa::absolute(Some(&*oa), &target_nt, false);
+            let new_oa = match redirected_oa(oa, &target_nt) {
+                Ok(o) => o,
+                Err(st) => return st,
+            };
             let status = tramp(file_handle, access, new_oa.as_ptr(), iosb, share, opts);
             record_identity(file_handle, path, status);
             record_path(file_handle, path, status);
@@ -4130,7 +4166,10 @@ unsafe fn qibn_hook_body(
     if in_hook_reenter() {
         return tramp(oa, iosb, info, length, class_raw);
     }
-    if let Some(path) = path_of(oa) {
+    if let Some(path) = match path_of(oa) {
+        Ok(p) => p,
+        Err(st) => return st,
+    } {
         let fuse = fuse_path_attr(&path);
         if fuse.is_none() {
             // Logged too: a stat that lands outside the root is exactly how a
@@ -4199,7 +4238,10 @@ unsafe fn qattr_hook_body(
     if in_hook_reenter() {
         return tramp(oa, info);
     }
-    if let Some(path) = path_of(oa) {
+    if let Some(path) = match path_of(oa) {
+        Ok(p) => p,
+        Err(st) => return st,
+    } {
         // Under-root: director only (zip/overrides). Never host Steam metadata.
         let fuse = fuse_path_attr(&path);
         if fuse.is_none() {
@@ -4277,7 +4319,10 @@ unsafe fn qfull_hook_body(
     if in_hook_reenter() {
         return tramp(oa, info);
     }
-    if let Some(path) = path_of(oa) {
+    if let Some(path) = match path_of(oa) {
+        Ok(p) => p,
+        Err(st) => return st,
+    } {
         let fuse = fuse_path_attr(&path);
         if fuse.is_none() {
             crate::hookstats::note_stat(&path, "outside-root");
@@ -4496,7 +4541,10 @@ unsafe fn delete_hook_body(oa: *const ObjectAttributes) -> NTSTATUS {
     // `path_is_ours` are all `RootMap`-backed and cached the same way
     // `decision_for` is. See `parent_dir_of_handle`'s case 4 and
     // `DecodedPath`'s doc comment.
-    let decoded = path_of_tracked(oa);
+    let decoded = match path_of_tracked(oa) {
+        Ok(d) => d,
+        Err(st) => return st,
+    };
     let _uncached_guard = decoded
         .as_ref()
         .is_some_and(|d| d.os_consulted)
@@ -4577,7 +4625,10 @@ unsafe fn tramp_delete_abs(
     abs_path: &str,
 ) -> NTSTATUS {
     let nt = to_nt_path(abs_path);
-    let new_oa = OwnedOa::absolute(Some(&*oa), &nt, false);
+    let new_oa = match redirected_oa(oa, &nt) {
+        Ok(o) => o,
+        Err(st) => return st,
+    };
     tramp(new_oa.as_ptr())
 }
 
@@ -6769,9 +6820,10 @@ unsafe fn serve_dir_query(
     // The ring round trip and the overlay's own `read_dir` both call out, so
     // the lock must NOT be held here (NtClose also takes it).
     let rebuilt = if need_build {
-        // A wildcard the kernel's own capture would refuse is the real call's to judge.
-        let Ok(wildcard) = wildcard_of(file_name) else {
-            return passthrough();
+        // A wildcard NT's own capture refuses gets NT's answer.
+        let wildcard = match wildcard_of(file_name) {
+            Ok(w) => w,
+            Err(st) => return st,
         };
         let routed =
             crate::fuse_client::global().and_then(|c| c.route(&dir_path).map(|hit| (c, hit)));
@@ -6958,6 +7010,31 @@ mod tests {
             assert_eq!(object_name_str(&oa_named(&null_empty)).as_deref(), Some(""));
             assert_eq!(object_name_str(&oa_named(&null_len)), None);
             assert_eq!(object_name_str(core::ptr::null()), None);
+        }
+    }
+
+    /// The decoders behind every file hook return NT's status for a name it refuses, and the
+    /// hooks answer with it (`tests/odd_length_name_sealed.rs` checks that end to end).
+    #[test]
+    fn path_of_tracked_reports_a_name_nt_refuses() {
+        let mut w: Vec<u16> = "C:\\a".encode_utf16().collect();
+        let even = us_raw(8, w.as_mut_ptr());
+        let odd = us_raw(7, w.as_mut_ptr());
+        let null_len = us_raw(2, core::ptr::null_mut());
+        unsafe {
+            assert_eq!(
+                path_of_tracked(&oa_named(&even)).map(|d| d.map(|d| d.path)),
+                Ok(Some("C:\\a".to_string()))
+            );
+            assert_eq!(
+                path_of_tracked(&oa_named(&odd)).map(|d| d.map(|d| d.path)),
+                Err(STATUS_OBJECT_NAME_INVALID)
+            );
+            assert_eq!(
+                path_of_tracked(&oa_named(&null_len)).map(|d| d.map(|d| d.path)),
+                Err(crate::ntdef::STATUS_ACCESS_VIOLATION)
+            );
+            assert!(path_of_tracked(core::ptr::null()).unwrap().is_none());
         }
     }
 

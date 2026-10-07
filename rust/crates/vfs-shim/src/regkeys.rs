@@ -671,7 +671,7 @@ pub(crate) unsafe fn open_private(
     let Some(open) = real.open_ex else {
         return Err(STATUS_UNSUCCESSFUL);
     };
-    let name = OwnedOa::absolute(None, &path::to_nt(canonical, user_sid()), true);
+    let name = OwnedOa::absolute(None, &path::to_nt(canonical, user_sid()), true)?;
     let wow64 = access & WOW64_MASK;
     let try_open = |rights: u32| {
         let mut h: HANDLE = core::ptr::null_mut();
@@ -809,12 +809,12 @@ pub unsafe fn open_or_create(
     let oa_ref = &*oa;
     let root = oa_ref.root_directory as isize;
     let root_synth = is_synthetic(root);
-    // A name NT would refuse (odd length, NULL buffer with a length) is the real call's to
-    // refuse; a synthetic root has no real call to hand it to, so it gets the status.
+    // A name NT itself refuses (odd length, NULL buffer with a length) gets NT's status. It is
+    // never handed to the real call: the host would round an odd length down and open the key
+    // the overlay serves.
     let name = match crate::ntbuf::us_string(oa_ref.object_name) {
         Ok(n) => n.unwrap_or_default(),
-        Err(st) if root_synth => return Outcome::fail(st),
-        Err(_) => return passthrough(pass),
+        Err(st) => return Outcome::fail(st),
     };
     let base = if root == 0 {
         None
@@ -880,12 +880,14 @@ impl Key<'_> {
         pass: &mut dyn FnMut(*const ObjectAttributes) -> NTSTATUS,
     ) -> NTSTATUS {
         let st = if self.root_synth {
-            let abs = OwnedOa::absolute(
+            match OwnedOa::absolute(
                 Some(&*self.oa),
                 &path::to_nt(&self.canonical, user_sid()),
                 true,
-            );
-            pass(abs.as_ptr())
+            ) {
+                Ok(abs) => pass(abs.as_ptr()),
+                Err(st) => st,
+            }
         } else {
             pass(self.oa)
         };
@@ -1392,7 +1394,7 @@ unsafe fn open_real_rights(
     let Some(open) = real.open_ex else {
         return Err(STATUS_UNSUCCESSFUL);
     };
-    let name = OwnedOa::absolute(None, &path::to_nt(canonical, user_sid()), true);
+    let name = OwnedOa::absolute(None, &path::to_nt(canonical, user_sid()), true)?;
     let mut h: HANDLE = core::ptr::null_mut();
     let st = open(&mut h, rights | (wow64 & WOW64_MASK), name.as_ptr(), 0);
     if st < 0 {
@@ -1529,6 +1531,9 @@ pub enum Serves {
     /// It could not be told (the handle, or the name's root handle, is unresolvable): a call
     /// that would change the real key is refused with `STATUS_UNSUCCESSFUL` (spec section 6).
     Unresolvable,
+    /// The name is one NT itself refuses (`ntbuf::us_units`); the call gets this status and
+    /// never reaches the real registry.
+    Invalid(NTSTATUS),
 }
 
 /// Whether a key handle is one the overlay serves: synthetic, or a real key on a virtualised
@@ -1563,11 +1568,12 @@ pub unsafe fn serves_target(real: &Real, oa: *const ObjectAttributes) -> Serves 
     if is_synthetic(root) {
         return Serves::Yes;
     }
-    // A name NT would refuse is served by nobody: the real call refuses it.
-    let Ok(name) = crate::ntbuf::us_string(oa_ref.object_name) else {
-        return Serves::No;
+    // A name NT itself refuses gets NT's status; the real call never sees it (the host would
+    // round an odd length down and act on the key the overlay serves).
+    let name = match crate::ntbuf::us_string(oa_ref.object_name) {
+        Ok(n) => n.unwrap_or_default(),
+        Err(st) => return Serves::Invalid(st),
     };
-    let name = name.unwrap_or_default();
     let base = if root == 0 {
         None
     } else {

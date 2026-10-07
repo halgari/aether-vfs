@@ -157,9 +157,10 @@ fn done(r: Result<(), NTSTATUS>) -> Write {
     })
 }
 
-/// The caller's `UNICODE_STRING` as UTF-16 units: `Ok(None)` for a NULL pointer.
+/// The caller's `UNICODE_STRING` as UTF-16 units: `Ok(None)` for a NULL pointer. An odd length drops
+/// its last byte, as the server reads it (`ntbuf::value_name_units`).
 unsafe fn units<'a>(us: *const UnicodeString) -> Result<Option<&'a [u16]>, NTSTATUS> {
-    crate::ntbuf::us_units(us)
+    crate::ntbuf::value_name_units(us)
 }
 
 fn gone(st: NTSTATUS) -> bool {

@@ -481,9 +481,11 @@ fn node_of(p: &str) -> Result<Option<Node>, NTSTATUS> {
 }
 
 /// The caller's `UNICODE_STRING` as a value name: a NULL pointer is `STATUS_ACCESS_VIOLATION`,
-/// as are the other shapes `ntbuf::us_units` rejects (an odd length is `STATUS_OBJECT_NAME_INVALID`).
+/// as is a NULL buffer with a length. An odd length drops its last byte (`ntbuf::value_name_units`).
 unsafe fn read_us(us: *const UnicodeString) -> Result<String, NTSTATUS> {
-    crate::ntbuf::us_string(us)?.ok_or(STATUS_ACCESS_VIOLATION)
+    crate::ntbuf::value_name_units(us)?
+        .map(String::from_utf16_lossy)
+        .ok_or(STATUS_ACCESS_VIOLATION)
 }
 
 // ---- NtQueryKey ----

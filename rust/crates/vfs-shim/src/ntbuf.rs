@@ -57,6 +57,26 @@ pub unsafe fn us_string(us: *const UnicodeString) -> Result<Option<String>, NTST
     Ok(us_units(us)?.map(utf16_to_string))
 }
 
+/// A registry *value* name as UTF-16 units. Unlike an object name, an odd `Length` is read with
+/// its last byte dropped (Wine's server rounds it down, `namelen / 2 * 2`); NT is not shown to
+/// reject it. The other rules of [`us_units`] apply.
+///
+/// # Safety
+/// As [`us_units`].
+pub unsafe fn value_name_units<'a>(
+    us: *const UnicodeString,
+) -> Result<Option<&'a [u16]>, NTSTATUS> {
+    if us.is_null() {
+        return Ok(None);
+    }
+    let even = UnicodeString {
+        length: (*us).length & !1,
+        maximum_length: (*us).maximum_length,
+        buffer: (*us).buffer,
+    };
+    us_units(&even)
+}
+
 /// The `ObjectName` of an `OBJECT_ATTRIBUTES`, ignoring `RootDirectory`: `Ok(None)` for a NULL
 /// `oa` or a NULL `ObjectName`.
 ///
@@ -84,6 +104,11 @@ pub struct OwnedOa {
 /// The longest even length a `UNICODE_STRING` can hold, in bytes.
 const MAX_UNICODE_STRING_BYTES: usize = 0xFFFE;
 
+/// Whether `units` UTF-16 units fit a `UNICODE_STRING`.
+fn fits(units: usize) -> bool {
+    units * 2 <= MAX_UNICODE_STRING_BYTES
+}
+
 /// `(Length, MaximumLength)` for `units` UTF-16 units plus a NUL, `MaximumLength` capped at the
 /// longest even length.
 fn lengths_for(units: usize) -> (u16, u16) {
@@ -95,19 +120,22 @@ fn lengths_for(units: usize) -> (u16, u16) {
 }
 
 impl OwnedOa {
-    /// `nt` (an absolute NT name) with a NULL `RootDirectory`. With a `template`, its length,
-    /// attributes, security descriptor and QoS are carried over; without one the attributes are
-    /// `OBJ_CASE_INSENSITIVE` alone. `OBJ_CASE_INSENSITIVE` is added either way when
-    /// `case_insensitive` is set.
+    /// `nt` (an absolute NT name) with a NULL `RootDirectory` and `Length` of
+    /// `sizeof(OBJECT_ATTRIBUTES)`. With a `template`, its attributes, security descriptor and QoS
+    /// are carried over; without one the attributes are `OBJ_CASE_INSENSITIVE` alone.
+    /// `OBJ_CASE_INSENSITIVE` is added either way when `case_insensitive` is set.
     ///
-    /// A name too long for a `UNICODE_STRING` is cut at the longest even length that fits.
+    /// A name too long for a `UNICODE_STRING` (over 0xFFFE bytes) is refused with
+    /// `STATUS_OBJECT_NAME_INVALID`, never cut.
     pub fn absolute(
         template: Option<&ObjectAttributes>,
         nt: &str,
         case_insensitive: bool,
-    ) -> Box<OwnedOa> {
+    ) -> Result<Box<OwnedOa>, NTSTATUS> {
         let mut buf: Vec<u16> = nt.encode_utf16().collect();
-        buf.truncate(MAX_UNICODE_STRING_BYTES / 2);
+        if !fits(buf.len()) {
+            return Err(STATUS_OBJECT_NAME_INVALID);
+        }
         let (length, maximum_length) = lengths_for(buf.len());
         buf.push(0);
         let mut b = Box::new(OwnedOa {
@@ -133,7 +161,6 @@ impl OwnedOa {
         b.us.buffer = b.buf.as_mut_ptr();
         b.oa.object_name = &b.us;
         if let Some(t) = template {
-            b.oa.length = t.length;
             b.oa.attributes = t.attributes;
             b.oa.security_descriptor = t.security_descriptor;
             b.oa.security_qos = t.security_qos;
@@ -141,7 +168,13 @@ impl OwnedOa {
         if case_insensitive {
             b.oa.attributes |= OBJ_CASE_INSENSITIVE;
         }
-        b
+        Ok(b)
+    }
+
+    /// Set the `Length` field, for a caller that must echo the original attributes' own value.
+    pub fn with_length(mut self: Box<Self>, length: u32) -> Box<Self> {
+        self.oa.length = length;
+        self
     }
 
     /// The attributes, valid while `self` is alive.
@@ -199,6 +232,30 @@ mod tests {
             assert_eq!(us_string(core::ptr::null()), Ok(None));
             assert_eq!(oa_name_string(core::ptr::null()), Ok(None));
         }
+    }
+
+    #[test]
+    fn a_value_name_drops_an_odd_last_byte_but_keeps_the_other_rules() {
+        let mut w: Vec<u16> = "abc".encode_utf16().collect();
+        let odd = us_of(&mut w, 5);
+        assert_eq!(unsafe { value_name_units(&odd) }, Ok(Some(&w[..2])));
+        let null_len = UnicodeString {
+            length: 2,
+            maximum_length: 2,
+            buffer: core::ptr::null_mut(),
+        };
+        assert_eq!(
+            unsafe { value_name_units(&null_len) },
+            Err(STATUS_ACCESS_VIOLATION)
+        );
+        // One stray byte and nothing else is the empty name, even without a buffer.
+        let one = UnicodeString {
+            length: 1,
+            maximum_length: 1,
+            buffer: core::ptr::null_mut(),
+        };
+        assert_eq!(unsafe { value_name_units(&one) }, Ok(Some(&[][..])));
+        assert_eq!(unsafe { value_name_units(core::ptr::null()) }, Ok(None));
     }
 
     #[test]
@@ -273,9 +330,10 @@ mod tests {
             security_qos: 0x20 as _,
         };
         let name = r"\??\C:\a\b";
-        let o = OwnedOa::absolute(Some(&tmpl), name, false);
+        let o = OwnedOa::absolute(Some(&tmpl), name, false).unwrap();
         let oa = unsafe { &*o.as_ptr() };
         assert!(oa.root_directory.is_null());
+        assert_eq!(oa.length as usize, core::mem::size_of::<ObjectAttributes>());
         assert_eq!(oa.attributes, 0x2);
         assert_eq!(oa.security_descriptor, tmpl.security_descriptor);
         assert_eq!(oa.security_qos, tmpl.security_qos);
@@ -286,13 +344,20 @@ mod tests {
         assert_eq!(units[name.len()], 0);
         assert_eq!(unsafe { oa_name_string(oa) }, Ok(Some(name.to_string())));
         // No template: case-insensitive by default; with a template the flag is added on request.
-        let o = OwnedOa::absolute(None, name, false);
+        let o = OwnedOa::absolute(None, name, false).unwrap();
         assert_eq!(unsafe { (*o.as_ptr()).attributes }, OBJ_CASE_INSENSITIVE);
-        let o = OwnedOa::absolute(Some(&tmpl), name, true);
+        let o = OwnedOa::absolute(Some(&tmpl), name, true).unwrap();
         assert_eq!(
             unsafe { (*o.as_ptr()).attributes },
             0x2 | OBJ_CASE_INSENSITIVE
         );
+    }
+
+    #[test]
+    fn a_name_over_the_longest_even_length_is_refused_not_cut() {
+        assert!(fits(0x7FFF));
+        assert!(!fits(0x8000));
+        assert_eq!(lengths_for(0x7FFF), (0xFFFE, 0xFFFE));
     }
 
     #[test]

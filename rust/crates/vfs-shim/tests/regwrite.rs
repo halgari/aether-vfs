@@ -89,6 +89,7 @@ extern "system" {
         options: u32,
         disposition: *mut u32,
     ) -> i32;
+    fn NtLoadKey(target: *const ObjectAttributes, source: *const ObjectAttributes) -> i32;
     fn NtClose(h: isize) -> i32;
     fn NtQueryObject(h: isize, class: u32, info: *mut u8, len: u32, ret: *mut u32) -> i32;
     fn NtQueryKey(h: isize, class: u32, info: *mut u8, len: u32, ret: *mut u32) -> i32;
@@ -938,83 +939,118 @@ fn a_dead_director_fails_writes_and_leaves_the_real_key() {
     assert!(!f.really_exists("DeadNew"));
 }
 
-/// Value names follow NT's `UNICODE_STRING` rule, shared by every registry hook (`ntbuf`): an
-/// odd `Length` is `STATUS_OBJECT_NAME_INVALID` (it used to be read with its last byte dropped),
-/// and a NULL buffer with a length is `STATUS_ACCESS_VIOLATION`.
+/// Value names are not object names: an odd `Length` is read with its last byte dropped (what
+/// Wine's server does), and only a NULL buffer with a length is refused
+/// (`STATUS_ACCESS_VIOLATION`).
 #[test]
-fn an_odd_or_null_value_name_is_refused_by_nt_s_rule() {
+fn an_odd_value_name_is_truncated_and_a_null_buffer_with_a_length_is_refused() {
     let (_g, f) = fixture();
     let (st, h) = f.open("Names", NT_KEY_READ | NT_KEY_SET_VALUE);
     assert_eq!(st, STATUS_SUCCESS);
-    let before = query_dword(h, "orig");
-    let chars: Vec<u16> = "orig".encode_utf16().collect();
     let raw = |length: u16, buffer: *const u16| UnicodeString {
         length,
         maximum_length: length,
         buffer,
     };
-    let odd = raw(7, chars.as_ptr());
+    // "origx" read as 9 bytes is "orig": the existing value.
+    let chars: Vec<u16> = "origx".encode_utf16().collect();
+    let odd = raw(9, chars.as_ptr());
+    let mut buf = vec![0u64; 64];
+    let mut ret = 0u32;
+    let st = unsafe {
+        NtQueryValueKey(
+            h,
+            &odd,
+            KEY_VALUE_PARTIAL_INFORMATION,
+            buf.as_mut_ptr().cast(),
+            512,
+            &mut ret,
+        )
+    };
+    assert_eq!(st, STATUS_SUCCESS, "an odd Length reads as the even prefix");
+    // A set through an odd name writes the even prefix's name.
+    let newv: Vec<u16> = "newoddx".encode_utf16().collect();
+    let odd_new = raw(13, newv.as_ptr());
+    let st = unsafe { NtSetValueKey(h, &odd_new, 0, REG_DWORD, 5u32.to_le_bytes().as_ptr(), 4) };
+    assert_eq!(st, STATUS_SUCCESS);
+    assert_eq!(query_dword(h, "newodd"), Ok(5));
+    // A NULL buffer with a length is a bad pointer.
     let null_with_length = raw(2, std::ptr::null());
-    unsafe {
-        assert_eq!(
-            NtSetValueKey(h, &odd, 0, REG_DWORD, 1u32.to_le_bytes().as_ptr(), 4),
-            STATUS_OBJECT_NAME_INVALID
-        );
-        assert_eq!(
-            NtSetValueKey(
-                h,
-                &null_with_length,
-                0,
-                REG_DWORD,
-                1u32.to_le_bytes().as_ptr(),
-                4
-            ),
-            STATUS_ACCESS_VIOLATION
-        );
-        let mut buf = vec![0u64; 64];
-        let mut ret = 0u32;
-        assert_eq!(
-            NtQueryValueKey(
-                h,
-                &odd,
-                KEY_VALUE_PARTIAL_INFORMATION,
-                buf.as_mut_ptr().cast(),
-                512,
-                &mut ret
-            ),
-            STATUS_OBJECT_NAME_INVALID
-        );
-    }
-    // The value the odd name would have truncated to was not written.
-    assert_eq!(query_dword(h, "orig"), before);
+    let st = unsafe {
+        NtSetValueKey(
+            h,
+            &null_with_length,
+            0,
+            REG_DWORD,
+            1u32.to_le_bytes().as_ptr(),
+            4,
+        )
+    };
+    assert_eq!(st, STATUS_ACCESS_VIOLATION);
     close(h);
 }
 
-/// A key name relative to a synthetic root, with an odd `Length`: the shim answers
-/// `STATUS_OBJECT_NAME_INVALID` itself, since a synthetic handle cannot be handed to the kernel.
+/// Key names are object names: NT's rule applies, and the shim answers itself. Under a synthetic
+/// root an odd `Length` is `STATUS_OBJECT_NAME_INVALID` and a NULL buffer with a length is
+/// `STATUS_ACCESS_VIOLATION`; so is an absolute name. The real call never sees either.
 #[test]
-fn an_odd_length_key_name_under_a_synthetic_root_is_name_invalid() {
+fn a_key_name_nt_refuses_is_answered_by_the_shim() {
     let (_g, f) = fixture();
     regclient::set_value(&f.canon("Names"), "o", REG_DWORD, &1u32.to_le_bytes()).unwrap();
     let (st, root) = f.open("Names", NT_KEY_READ);
     assert_eq!(st, STATUS_SUCCESS);
     assert!(is_synthetic_key_handle(root));
     let chars: Vec<u16> = "Sub".encode_utf16().collect();
-    let us = UnicodeString {
-        length: 5,
-        maximum_length: 6,
-        buffer: chars.as_ptr(),
+    let open = |root_directory: isize, length: u16, buffer: *const u16| {
+        let us = UnicodeString {
+            length,
+            maximum_length: length,
+            buffer,
+        };
+        let oa = ObjectAttributes {
+            length: std::mem::size_of::<ObjectAttributes>() as u32,
+            root_directory,
+            object_name: &us,
+            attributes: OBJ_CASE_INSENSITIVE,
+            security_descriptor: std::ptr::null(),
+            security_qos: std::ptr::null(),
+        };
+        let mut h = 0isize;
+        let st = unsafe { NtOpenKeyEx(&mut h, NT_KEY_READ, &oa, 0) };
+        (st, h)
     };
-    let oa = ObjectAttributes {
+    assert_eq!(open(root, 5, chars.as_ptr()).0, STATUS_OBJECT_NAME_INVALID);
+    assert_eq!(open(root, 4, std::ptr::null()).0, STATUS_ACCESS_VIOLATION);
+    // An absolute name under the virtualised base: no root handle, still not forwarded.
+    let abs: Vec<u16> = format!(r"\REGISTRY\USER\{}\{BASE}\Names", f.sid)
+        .encode_utf16()
+        .collect();
+    let (st, h) = open(0, (abs.len() * 2 - 1) as u16, abs.as_ptr());
+    assert_eq!(st, STATUS_OBJECT_NAME_INVALID);
+    assert_eq!(h, 0);
+    assert_eq!(open(0, 4, std::ptr::null()).0, STATUS_ACCESS_VIOLATION);
+
+    // A hive load over a name the overlay serves, with an odd name (`serves_target`): NT's
+    // status, not a call to the real NtLoadKey.
+    let target_chars: Vec<u16> = format!(r"\REGISTRY\USER\{}\{BASE}\Names", f.sid)
+        .encode_utf16()
+        .collect();
+    let target_us = UnicodeString {
+        length: (target_chars.len() * 2 - 1) as u16,
+        maximum_length: (target_chars.len() * 2) as u16,
+        buffer: target_chars.as_ptr(),
+    };
+    let target = ObjectAttributes {
         length: std::mem::size_of::<ObjectAttributes>() as u32,
-        root_directory: root,
-        object_name: &us,
+        root_directory: 0,
+        object_name: &target_us,
         attributes: OBJ_CASE_INSENSITIVE,
         security_descriptor: std::ptr::null(),
         security_qos: std::ptr::null(),
     };
-    let mut h = 0isize;
-    let st = unsafe { NtOpenKeyEx(&mut h, NT_KEY_READ, &oa, 0) };
-    assert_eq!(st, STATUS_OBJECT_NAME_INVALID);
+    assert_eq!(
+        unsafe { NtLoadKey(&target, &target) },
+        STATUS_OBJECT_NAME_INVALID
+    );
     close(root);
 }
