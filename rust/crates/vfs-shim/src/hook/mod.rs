@@ -168,7 +168,7 @@ pub fn contain_panic<R>(
 /// differently for different hooks — and so a hook added later cannot quietly
 /// skip it. `no_extern_hook_bypasses_the_panic_containment_macro` in this
 /// module's tests enforces that by scanning the source: this macro must be the
-/// only place in `hook.rs` that defines an `extern "system"` function. The real detours reach
+/// only place in `hook/` that defines an `extern "system"` function. The real detours reach
 /// it through [`entry_points_from_table`], so their export names come from `detour_table!`.
 macro_rules! hook_entry_points {
     ($(
@@ -6891,7 +6891,7 @@ mod tests {
         files.sort();
         // A broken enumeration must fail loudly rather than pass vacuously.
         assert!(
-            files.iter().any(|p| p.ends_with("hook.rs"))
+            files.iter().any(|p| p.ends_with("hook/mod.rs"))
                 && files.iter().any(|p| p.ends_with("lazy_section.rs"))
                 && files.len() >= 14,
             "the enumeration must have found both crates' sources — got {files:?}"
@@ -6969,9 +6969,23 @@ mod tests {
         // And nothing may register a raw body as a detour: the bodies are not
         // `extern "system"`, so installing one is both an ABI error and a way
         // around the containment.
+        // Every file of the hook module is scanned, not only this one.
+        let hook_dir = this_crate.join("src").join("hook");
+        let mut hook_files: Vec<std::path::PathBuf> = Vec::new();
+        walk(&hook_dir, &mut hook_files);
         assert!(
-            !include_str!("hook.rs").contains(concat!("_hook_body", " as *const ()")),
-            "a hook body was installed as a detour, bypassing its wrapper"
+            !hook_files.is_empty(),
+            "no sources found under {}",
+            hook_dir.display()
         );
+        for path in &hook_files {
+            let src = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            assert!(
+                !src.contains(concat!("_hook_body", " as *const ()")),
+                "{}: a hook body was installed as a detour, bypassing its wrapper",
+                path.display()
+            );
+        }
     }
 }
