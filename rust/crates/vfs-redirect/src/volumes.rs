@@ -71,6 +71,7 @@ pub fn resolve_volume_map(root: &str) -> VolumeMap {
 /// first-root-only asymmetry stage 2b exists to remove.
 pub fn resolve_volume_map_for(roots: &[&str]) -> VolumeMap {
     let mut map = VolumeMap::empty();
+    #[cfg(windows)]
     for m in vfs_win::drive_mappings() {
         map.insert(&m.device_name, m.drive);
         if let Some(win32_guid) = &m.volume_guid_win32 {
@@ -124,6 +125,7 @@ pub fn resolve_volume_map_for(roots: &[&str]) -> VolumeMap {
 /// registered here, so both still classify as outside every root. The second
 /// was not previously named anywhere; it is recorded here so the gap is one
 /// someone chose rather than one nobody noticed.
+#[cfg(windows)]
 fn admin_share_nt_key(drive: char) -> String {
     format!(r"\??\UNC\localhost\{drive}$")
 }
@@ -132,6 +134,7 @@ fn admin_share_nt_key(drive: char) -> String {
 /// path (drive intact) — the form `std::fs` and `vfs_win::final_path_for_open`
 /// need, since `\??\...` is kernel-namespace notation `CreateFileW` itself
 /// cannot parse.
+#[cfg(windows)]
 fn strip_nt_prefix(p: &str) -> &str {
     p.strip_prefix(r"\??\")
         .or_else(|| p.strip_prefix(r"\\?\"))
@@ -143,6 +146,7 @@ fn strip_nt_prefix(p: &str) -> &str {
 /// path is always rewritten to its `\??\`-prefixed NT form ahead of the NT
 /// layer, the same rule [`admin_share_nt_key`] and every other prefix in
 /// this map already rely on.
+#[cfg(windows)]
 fn nt_key_for_win32_path(win32_path: &str) -> String {
     format!(r"\??\{win32_path}")
 }
@@ -238,6 +242,7 @@ fn nt_key_for_win32_path(win32_path: &str) -> String {
 /// pay the extra cost or the extra exposure to unrelated system junctions
 /// when the fixed, two-level convention this project's own sessions always
 /// use is already enough.
+#[cfg(windows)]
 fn junction_aliases(root: &str) -> Vec<(String, String)> {
     const MAX_ANCESTOR_LEVELS: usize = 2;
     let root_win32 = strip_nt_prefix(root);
@@ -294,6 +299,13 @@ fn junction_aliases(root: &str) -> Vec<(String, String)> {
     out
 }
 
+/// Non-Windows hosts have no reparse points to alias, so there are none. This
+/// keeps the pure parts of the crate buildable and testable on Linux.
+#[cfg(not(windows))]
+fn junction_aliases(_root: &str) -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// If `path` is a directory reparse point, the `/`-joined, prefix-free
 /// canonical form of where it currently points; `None` if it is not a
 /// reparse point (or is one of a kind this project does not act on — a
@@ -316,6 +328,7 @@ fn junction_aliases(root: &str) -> Vec<(String, String)> {
 /// such junction encountered while walking a real `Users\<name>` tree).
 /// Reading the reparse point's own on-disk metadata never touches whatever
 /// it points at.
+#[cfg(windows)]
 fn reparse_target_norm(path: &std::path::Path) -> Option<String> {
     let real = vfs_win::reparse_point_target(&path.to_string_lossy())?;
     vfs_core::normalize_vpath(&real).ok()
@@ -326,6 +339,7 @@ fn reparse_target_norm(path: &std::path::Path) -> Option<String> {
 /// component-wise, the same comparison [`crate::RootMap::match_canonical`]
 /// uses for the same reason: a byte-for-byte or substring compare would
 /// wrongly match `C:/Games2` against a root of `C:/Games`.
+#[cfg(windows)]
 fn is_component_prefix(root: &str, candidate: &str) -> bool {
     let root_comps: Vec<&str> = if root.is_empty() {
         Vec::new()
@@ -366,6 +380,7 @@ fn is_component_prefix(root: &str, candidate: &str) -> bool {
 /// fails closed to "unmapped", same as any other unrecognised device), but
 /// worse than useless, because an escape matrix built against the test's
 /// convenience keying would report the vector as handled when it is not.
+#[cfg(windows)]
 fn win32_guid_to_nt(win32_guid: &str) -> Option<String> {
     let rest = win32_guid.strip_prefix(r"\\?\")?;
     let rest = rest.trim_end_matches(['\\', '/']);
@@ -393,11 +408,19 @@ fn win32_guid_to_nt(win32_guid: &str) -> Option<String> {
 /// to the other ahead of the NT layer). Treat this return value as needing
 /// the same `\\?\` -> `\??\` normalisation before comparing it against, or
 /// feeding it back into, anything that expects the NT spelling.
+#[cfg(windows)]
 pub fn expand_short_name(path: &str) -> Option<String> {
     vfs_win::final_path_for_open(path).or_else(|| vfs_win::expand_long_path(path))
 }
 
-#[cfg(test)]
+/// Non-Windows hosts have no 8.3 names or Win32 path expansion.
+#[cfg(not(windows))]
+pub fn expand_short_name(_path: &str) -> Option<String> {
+    None
+}
+
+// Every test here exercises the Win32 volume layer.
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
