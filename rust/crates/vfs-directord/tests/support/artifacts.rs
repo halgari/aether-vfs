@@ -228,7 +228,7 @@ fn move_locked_artifacts_aside(names: &[&str]) {
 }
 
 pub fn ensure_inject_artifacts() {
-    // Session::launch locates shim/payload near the current exe (the test
+    // Session::launch locates the shim near the current exe (the test
     // binary). Co-locate them into the profile dir if cargo left them only in
     // deps/ or they were never built for this package.
     let profile = profile_dir();
@@ -237,7 +237,6 @@ pub fn ensure_inject_artifacts() {
         .join("..");
     let needed = [
         "vfs_shim_dll.dll",
-        "vfs_payload.dll",
         "vfs-fixture-read.exe",
         "vfs-fixture-writepath.exe",
         "vfs-fixture-escape.exe",
@@ -245,8 +244,7 @@ pub fn ensure_inject_artifacts() {
     ];
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
 
-    // vfs_payload.dll is its own separate workspace (see below); the rest
-    // build together as part of this one. Each is checked for staleness
+    // They build together as part of this workspace. Each is checked for staleness
     // against its own crate's transitive source, not merely for presence.
     let main_artifact_crates: [(&str, &str); 5] = [
         ("vfs_shim_dll.dll", "vfs-shim-dll"),
@@ -289,28 +287,6 @@ pub fn ensure_inject_artifacts() {
             "fixture/artifact build failed: {status}{}",
             lock_holders_hint()
         );
-    }
-
-    // vfs-payload lives in its own workspace (panic = "abort"). Build it
-    // into the same target dir so the co-location below finds it unchanged.
-    let target_dir = workspace.join("target");
-    let payload_stale = artifact_is_stale(
-        &profile.join("vfs_payload.dll"),
-        &workspace.join("crates").join("vfs-payload"),
-    );
-    if payload_stale {
-        let status = std::process::Command::new(&cargo)
-            .current_dir(&workspace)
-            .env("CARGO_TARGET_DIR", &target_dir)
-            .args([
-                "build",
-                "--manifest-path",
-                "crates/vfs-payload/Cargo.toml",
-                "--quiet",
-            ])
-            .status()
-            .expect("spawn cargo to build vfs-payload");
-        assert!(status.success(), "vfs-payload cargo build failed: {status}");
     }
 
     // Copy into profile root so Session::launch's find_near works from the

@@ -2,7 +2,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use super::{child_cwd_root, TRAMP_CPIW};
-use crate::child::{child_ready_timeout_ms, inject_child, re_suspend, ChildInjectError};
+use crate::child::{child_ready_timeout_ms, inject_child, ChildInjectError};
 use core::ffi::c_void;
 use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{CloseHandle, SetLastError, ERROR_PROCESS_ABORTED, HANDLE};
@@ -32,13 +32,12 @@ pub(super) type CreateProcessInternalWFn = unsafe extern "system" fn(
 /// process-creation hook can inject the same DLL into children.
 pub(super) static SELF_DLL: OnceLock<String> = OnceLock::new();
 
-/// `CreateProcessInternalW` hook: force the child to start suspended, dual-layer
-/// inject (early payload + full shim), wait for hooks, then resume (unless the
-/// caller asked for a suspended child).
+/// `CreateProcessInternalW` hook: force the child to start suspended, inject
+/// the shim (which bootstraps inside its `LoadLibrary`), then resume, unless the
+/// caller asked for a suspended child, which it gets still suspended.
 ///
 /// **Fails closed.** Every child this hook creates is injected, and if that
-/// fails for any reason (no shim DLL path, no payload, an arm or LoadLibrary
-/// failure, the child's shim reporting failure, the child dying, or no ready
+/// fails for any reason (no shim DLL path, a LoadLibrary failure, the child's shim reporting failure, the child dying, or no ready
 /// signal within the launch's ready timeout) the child is killed, its handles
 /// are closed, and this call returns `FALSE` with `ERROR_PROCESS_ABORTED`. The
 /// child is never released un-virtualised. There is no list of children the
@@ -128,9 +127,8 @@ pub(super) unsafe fn cpiw_hook_body(
             child_ready_timeout_ms(),
         ) {
             Ok(()) => {
-                if caller_suspended {
-                    re_suspend(hthread);
-                } else {
+                // Injection never resumed the primary thread.
+                if !caller_suspended {
                     // SAFETY: FFI call with valid arguments.
                     unsafe { ResumeThread(hthread) };
                 }

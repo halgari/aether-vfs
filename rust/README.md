@@ -61,7 +61,6 @@ cargo run -p vfs-directord -- up --config scenario.toml
 
 ```sh
 cargo build -p vfs-directord -p vfs-shim-dll -p vfs-fixture-read    # Windows
-cargo build --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
 ```
 
 On Linux the Windows half is cross-built with `../bin/build-windows`; the shim's own tests run
@@ -73,9 +72,7 @@ test policy and the clang-cl workaround
 
 ## Workspace
 
-Rust 2021 Cargo workspace, `panic = "unwind"` throughout. The `no_std` early payload
-(`vfs-payload`) needs `panic = "abort"`, so it is excluded from the workspace and carries its own
-profile; `vfs-protocol/tests/unwind.rs` pins both.
+Rust 2021 Cargo workspace, `panic = "unwind"` throughout; `vfs-protocol/tests/unwind.rs` pins it.
 
 The workspace members are listed in [`Cargo.toml`](Cargo.toml) and described one by one in the
 crate map of [docs/architecture.md](docs/architecture.md#8-crate-map). The ones a reader meets
@@ -89,7 +86,7 @@ first:
 | `vfs-compose`, `vfs-zip`, `vfs-source` | Providers and composition (overlay copy-up, layered, router, zip, remote) |
 | `vfs-storage`, `vfs-block-store` | Pull-through cache and named write layers on a deduplicating block store |
 | `vfs-proton` | GE-Proton install, prefix and Wine launch (Linux host) |
-| `vfs-shim`, `vfs-inject`, `vfs-payload` | The Windows half: NT detours, injection, early payload |
+| `vfs-shim`, `vfs-inject` | The Windows half: NT detours, launch and injection |
 
 ## License
 

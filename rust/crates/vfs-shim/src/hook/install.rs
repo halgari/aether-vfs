@@ -91,8 +91,8 @@ enum Group {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Flag {
-    /// Owned by the early payload in a dual-layer install: not detoured by `install_late`.
-    Early,
+    /// The path/attr stubs: built, then enabled together, before any other file detour.
+    First,
     /// The slot holds ntdll's own export whenever the detour is not installed.
     RawFallback,
     /// The registry overlay cannot run without it: a miss is added to its `missing` set.
@@ -256,7 +256,7 @@ unsafe fn make_detour(
     unsafe { RawDetour::new(proc as *const (), hookfn) }.map_err(|_| InstallError::Detour)
 }
 
-/// Set by the first `install`/`install_late`; a second one is `AlreadyInstalled`.
+/// Set by the first `install`; a second one is `AlreadyInstalled`.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// Claim the one install this process gets.
@@ -267,8 +267,7 @@ fn claim_install() -> Result<(), InstallError> {
     Ok(())
 }
 
-/// Install all detours (in-process / no early payload). Once per process. Patches the four
-/// path/attr stubs itself.
+/// Install all detours. Once per process.
 ///
 /// What is under a managed root is decided by the director's client
 /// (`crate::director::global`), which the caller attaches first: bootstrap refuses to get here
@@ -281,99 +280,17 @@ pub fn install() -> Result<HookGuard, InstallError> {
     crate::hookstats::start_reporter();
     claim_install()?;
     // SAFETY: ntdll lookup + detour install; each hook matches its ABI.
-    unsafe { install_all_detours(true) }
+    unsafe { install_all_detours() }
 }
 
-/// True when the `Early` rows of the detour table are exactly the four slots `install_late`
-/// fills from the early payload: create, open, qattr and qfull.
-fn early_rows_are_the_payload_slots() -> bool {
-    let payload: [*const RawTramp; 4] = [
-        TRAMP_CREATE.raw(),
-        TRAMP_OPEN.raw(),
-        TRAMP_QATTR.raw(),
-        TRAMP_QFULL.raw(),
-    ];
-    let rows = detour_rows();
-    let early: Vec<*const RawTramp> = rows
-        .iter()
-        .filter(|d| d.has(Flag::Early))
-        .map(|d| d.tramp as *const RawTramp)
-        .collect();
-    early.len() == payload.len() && payload.iter().all(|p| early.contains(p))
-}
-
-/// Dual-layer install: early payload already owns open/create/qattr/qfull.
-/// Wire trampolines to the early Config's tramp buffers, publish secondary
-/// dispatch pointers into that Config, and detour only the remaining stubs.
-///
-/// `payload_cfg` is the reflectively-mapped early Config in this process.
-///
-/// # Safety
-/// `payload_cfg` must point at a live [`PayloadConfig`](vfs_inject::PayloadConfig)
-/// written by the injector into this process, and stay valid for the call.
-pub unsafe fn install_late(
-    payload_cfg: *mut vfs_inject::PayloadConfig,
-) -> Result<HookGuard, InstallError> {
-    if payload_cfg.is_null() {
-        return Err(InstallError::Detour);
-    }
-    install_panic_hook();
-    // Before the detours go live: creating the breadcrumb file is real I/O, and
-    // once hooks are installed that I/O re-enters them.
-    crate::breadcrumb::init();
-    crate::hookstats::start_reporter();
-    claim_install()?;
-
-    // `install_all_detours(false)` below skips the `Early` rows, and the block below fills the
-    // slots of exactly the four rows that are `Early`. A fifth `Early` row would be left with an
-    // empty slot, and a hook that is not `Early` would lose its trampoline.
-    debug_assert!(
-        early_rows_are_the_payload_slots(),
-        "the `Early` rows of detour_table! are not the four payload slots install_late sets"
-    );
-
-    // SAFETY: cfg is the live early Config in this process; tramp addresses
-    // are RWX pages the injector allocated; secondary pointers are our hooks.
-    unsafe {
-        let cfg = &mut *payload_cfg;
-        // Call originals via the early payload's trampolines (real ntdll tails).
-        TRAMP_CREATE.set(Some(core::mem::transmute::<usize, NtCreateFileFn>(
-            cfg.create_tramp,
-        )));
-        TRAMP_OPEN.set(Some(core::mem::transmute::<usize, NtOpenFileFn>(
-            cfg.open_tramp,
-        )));
-        TRAMP_QATTR.set(Some(
-            core::mem::transmute::<usize, NtQueryAttributesFileFn>(cfg.qattr_tramp),
-        ));
-        TRAMP_QFULL.set(Some(core::mem::transmute::<
-            usize,
-            NtQueryFullAttributesFileFn,
-        >(cfg.qfull_tramp)));
-
-        // Publish secondary last-ish: from here the early payload hands every path it does not
-        // redirect itself to these hooks.
-        core::ptr::write_volatile(&mut cfg.secondary_create, create_hook as *const () as usize);
-        core::ptr::write_volatile(&mut cfg.secondary_open, open_hook as *const () as usize);
-        core::ptr::write_volatile(&mut cfg.secondary_qattr, qattr_hook as *const () as usize);
-        core::ptr::write_volatile(&mut cfg.secondary_qfull, qfull_hook as *const () as usize);
-
-        // Do NOT patch the four early-owned stubs.
-        install_all_detours(false)
-    }
-}
-
-/// `patch_early_owned`: when true, also detour the four path/attr stubs
-/// (the full install). When false, only remainder detours (dual-layer).
-///
 /// The file detours are walked in `detour_table!` order, which is the install order:
 ///
-///  1. the `Early` rows, if asked: every one is built and has its trampoline stored, then all
-///     are enabled;
+///  1. the `First` rows: every one is built and has its trampoline stored, then all are
+///     enabled;
 ///  2. the other file rows in order. A `Required` one is built and stored but **not yet
 ///     enabled**; an `Optional` one is enabled at once (it may turn out absent);
 ///  3. `host_name_convention` is decided, then the `Required` rows from step 2 are enabled.
-unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, InstallError> {
+unsafe fn install_all_detours() -> Result<HookGuard, InstallError> {
     // SAFETY: FFI call with valid arguments.
     let ntdll = unsafe { GetModuleHandleA(c"ntdll.dll".as_ptr().cast()) };
     if ntdll.is_null() {
@@ -383,28 +300,26 @@ unsafe fn install_all_detours(patch_early_owned: bool) -> Result<HookGuard, Inst
     let rows = detour_rows();
     let mut detours: Vec<RawDetour> = Vec::new();
 
-    if patch_early_owned {
-        let mut early = Vec::new();
-        for d in rows
-            .iter()
-            .filter(|d| d.group == Group::File && d.has(Flag::Early))
-        {
-            // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
-            early.push(unsafe { d.prepare(ntdll) }?);
-        }
-        for d in &early {
-            // SAFETY: FFI call with valid arguments.
-            unsafe { d.enable() }.map_err(|_| InstallError::Detour)?;
-        }
-        detours.extend(early);
+    let mut first = Vec::new();
+    for d in rows
+        .iter()
+        .filter(|d| d.group == Group::File && d.has(Flag::First))
+    {
+        // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
+        first.push(unsafe { d.prepare(ntdll) }?);
     }
+    for d in &first {
+        // SAFETY: FFI call with valid arguments.
+        unsafe { d.enable() }.map_err(|_| InstallError::Detour)?;
+    }
+    detours.extend(first);
 
     // File detours the registry overlay depends on that are not in (`NeededByRegistry`).
     let mut registry_missing: Vec<&'static str> = Vec::new();
     let mut deferred = Vec::new();
     for d in rows
         .iter()
-        .filter(|d| d.group == Group::File && !d.has(Flag::Early))
+        .filter(|d| d.group == Group::File && !d.has(Flag::First))
     {
         if d.install == Install::Required {
             // SAFETY: same NT-pointer contract as this fn (hook/mod.rs).
@@ -504,14 +419,4 @@ unsafe fn install_registry_detours(
         }
     }
     crate::regclient::detours_installed(&missing);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_early_rows_are_the_four_payload_slots() {
-        assert!(early_rows_are_the_payload_slots());
-    }
 }

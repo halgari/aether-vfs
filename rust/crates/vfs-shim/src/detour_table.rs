@@ -18,7 +18,7 @@
 //! | `tramp: NAME: Ty` | the trampoline slot (a `Tramp<Ty>` static) |
 //! | `install` | `Required` (a failure to detour aborts the install), `Optional` (skipped and noted in `skipped_detours()`), `IfPresent` (an absent export is silently fine, a present one that fails is noted) or `BestEffort` (any failure is silent) |
 //! | `group` | `File`, `Registry` (only with `VFS_REGISTRY`) or `Process` |
-//! | `flags` | `Early`, `RawFallback`, `NeededByRegistry` (see the comments on the rows that use them) |
+//! | `flags` | `First`, `RawFallback`, `NeededByRegistry` (see the comments on the rows that use them) |
 //! | `hook = body(args) -> ret` | the wrapper `extern "system" fn` and the body it calls |
 //! | `on_panic` | what the wrapper returns when the body panics |
 //!
@@ -31,13 +31,12 @@ macro_rules! detour_table {
     ($cb:ident) => {
         $cb! {
             // --- file hooks ---
-            // The four path/attr stubs the early payload owns. `install` (the full install) detours
-            // these first; `install_late` wires their trampolines to the payload's and skips them.
+            // The four path/attr stubs, detoured first and enabled together.
             {
                 export: "NtCreateFile",
                 stat: [Create = 0],
                 tramp: TRAMP_CREATE: NtCreateFileFn,
-                install: Required, group: File, flags: [Early],
+                install: Required, group: File, flags: [First],
                 hook: create_hook = create_hook_body(
                     file_handle: *mut HANDLE,
                     access: u32,
@@ -57,7 +56,7 @@ macro_rules! detour_table {
                 export: "NtQueryAttributesFile",
                 stat: [QAttr = 2],
                 tramp: TRAMP_QATTR: NtQueryAttributesFileFn,
-                install: Required, group: File, flags: [Early],
+                install: Required, group: File, flags: [First],
                 hook: qattr_hook = qattr_hook_body(
                     oa: *const ObjectAttributes,
                     info: *mut FileBasicInformation,
@@ -68,7 +67,7 @@ macro_rules! detour_table {
                 export: "NtQueryFullAttributesFile",
                 stat: [QFull = 3],
                 tramp: TRAMP_QFULL: NtQueryFullAttributesFileFn,
-                install: Required, group: File, flags: [Early],
+                install: Required, group: File, flags: [First],
                 hook: qfull_hook = qfull_hook_body(
                     oa: *const ObjectAttributes,
                     info: *mut FileNetworkOpenInformation,
@@ -79,7 +78,7 @@ macro_rules! detour_table {
                 export: "NtOpenFile",
                 stat: [Open = 1],
                 tramp: TRAMP_OPEN: NtOpenFileFn,
-                install: Required, group: File, flags: [Early],
+                install: Required, group: File, flags: [First],
                 hook: open_hook = open_hook_body(
                     file_handle: *mut HANDLE,
                     access: u32,

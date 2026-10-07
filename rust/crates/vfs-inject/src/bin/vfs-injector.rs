@@ -1,10 +1,11 @@
 //! Generic injector: a command-line wrapper over `run_target_with_shim`. The
 //! host (the director, or a test) sets the ring env (VFS_RING_SECTION etc.) and
-//! spawns this bin; this bin injects the shim (dual-layer) into the target,
+//! spawns this bin; this bin starts the target with the shim (import-activated
+//! or injected),
 //! which inherits the env and connects its FuseClient back to the host's ring.
 //!
 //! Usage:
-//!   vfs-injector <target_exe> <shim_dll> <payload_dll> <config_file> <ready_file> [-- target_args...]
+//!   vfs-injector <target_exe> <shim_dll> <config_file> <ready_file> [-- target_args...]
 //!
 //! Environment: `VFS_READY_TIMEOUT_SECS` (default 180) bounds the wait for the
 //! shim's ready report; `VFS_INJECT_CWD` is the target's working directory
@@ -43,7 +44,6 @@ fn main() {
     let vfs_inject::InjectorArgs {
         target,
         shim_dll: dll,
-        payload_dll: payload,
         config,
         ready,
         target_args: args,
@@ -64,7 +64,7 @@ fn main() {
         }
     }
 
-    eprintln!("[vfs-injector] target={target} shim={dll} payload={payload} cwd={current_dir:?}");
+    eprintln!("[vfs-injector] target={target} shim={dll} cwd={current_dir:?}");
     let exit = run_target_with_shim(RunConfig {
         target_exe: target,
         args,
@@ -73,8 +73,6 @@ fn main() {
         config_path: config,
         ready_path: ready,
         ready_timeout,
-        payload_path: payload,
-        preinit_redirects: vec![],
         detach: false,
     })
     .unwrap_or_else(|e| {

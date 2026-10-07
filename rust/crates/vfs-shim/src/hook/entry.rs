@@ -488,9 +488,7 @@ mod tests {
     /// So the enumeration is derived, not written:
     ///
     ///  * the **directories** are the two crates that compose the injected DLL —
-    ///    this one and `vfs-shim-dll`. `vfs-payload` is deliberately absent: it is
-    ///    `#![no_std]` with `panic = "abort"` and its own workspace, so it has no
-    ///    unwind to contain and could not call this function if it wanted to;
+    ///    this one and `vfs-shim-dll`;
     ///  * the **files** are read off those directories recursively at test time,
     ///    so a new module cannot be added outside the check;
     ///  * the **rule** is per-definition rather than a name list, so a new entry

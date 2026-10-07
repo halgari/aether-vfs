@@ -84,7 +84,6 @@ impl Rig {
                 args: vec![mode.to_string(), RUN_ID.to_string()],
                 wait: true,
                 shim_dll: Some(self.art.shim_dll()),
-                payload_dll: Some(self.art.payload_dll()),
                 log_file: Some(log.clone()),
                 // A Wine debug channel list for the fixture's launches, when one is wanted.
                 env: std::env::var("VFS_TEST_WINEDEBUG")

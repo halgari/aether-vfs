@@ -289,7 +289,7 @@ mod tests {
             return;
         };
         let before = import_dll_names_of_pe(&raw).unwrap();
-        let patched = add_first_import(&raw, "aether_shim.dll", "vfs_shim_sync_bootstrap").unwrap();
+        let patched = add_first_import(&raw, "aether_shim.dll", "vfs_shim_activated").unwrap();
         let after = import_dll_names_of_pe(&patched).unwrap();
         assert_eq!(after[0], "aether_shim.dll");
         assert_eq!(&after[1..], &before[..]);

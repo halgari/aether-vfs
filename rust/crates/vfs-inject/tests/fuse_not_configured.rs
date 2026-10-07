@@ -2,7 +2,7 @@
 //! (`VFS_RING_SECTION` unset — `FuseInitError::NotConfigured`) must abort just
 //! like one whose named ring failed to attach — not run the game completely
 //! un-virtualised while looking like a normal launch. That standalone mode is
-//! retired: see `bootstrap.rs`'s doc comment on `bootstrap_from_config_path_with_payload`.
+//! retired: see `bootstrap.rs`'s comment in `bootstrap_from_config_path`.
 //!
 //! Single-test binary, like `fuse_init_failure.rs`: `run_target_with_shim`
 //! mutates process-global env vars (`SHIM_CONFIG`/`SHIM_READY`/…) itself, so a
@@ -14,7 +14,7 @@ use std::time::Duration;
 use vfs_inject::{run_target_with_shim, InjectError, RunConfig};
 
 /// No director, no ring — `VFS_RING_SECTION` is simply never set here. Before
-/// this task, `bootstrap_from_config_path_with_payload` matched
+/// this task, the shim's bootstrap matched
 /// `FuseInitError::NotConfigured` alongside `Ok(())` and swallowed it: hooks
 /// installed anyway over the local snapshot, the ready file was written
 /// "ready" regardless, and the launch returned `Ok` with the process fully
@@ -41,7 +41,7 @@ fn no_ring_configured_aborts_the_launch() {
     let _ = std::fs::remove_file(&output_path);
 
     let probe = env!("CARGO_BIN_EXE_vfs-probe").to_string();
-    let (dll, payload) = common::locate_shim_and_payload();
+    let dll = common::locate_shim();
 
     // Make sure the harness itself did not inherit a ring from some other
     // process — this test's whole point is that none is configured.
@@ -65,8 +65,6 @@ fn no_ring_configured_aborts_the_launch() {
         config_path: config_path.to_str().unwrap().to_string(),
         ready_path: ready_path.to_str().unwrap().to_string(),
         ready_timeout: Duration::from_secs(10),
-        payload_path: payload,
-        preinit_redirects: vec![],
         detach: false,
     });
 

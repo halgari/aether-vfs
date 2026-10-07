@@ -7,9 +7,9 @@
 //! can check without spawning anything:
 //!
 //! 1. **The injector's argv is positional.** `vfs-injector <target> <shim>
-//!    <payload> <config> <ready> [-- args…]` — swap two of those and every
-//!    process still starts; the shim just never attaches, or attaches with the
-//!    payload as its config. There is no error to observe.
+//!    <config> <ready> [-- args…]` — swap two of those and every process
+//!    still starts; the shim just never attaches. There is no error to
+//!    observe.
 //! 2. **The environment is the whole handshake.** The shim decides whether it
 //!    is configured at all from [`vfs_env`] names it reads inside the Wine
 //!    process (see `vfs-shim/src/director.rs::try_init_from_env`), and two
@@ -60,8 +60,6 @@ pub struct LaunchFiles {
     pub injector: PathBuf,
     /// Host path to `vfs_shim_dll.dll`.
     pub shim_dll: PathBuf,
-    /// Host path to `vfs_payload.dll`.
-    pub payload_dll: PathBuf,
     /// Host path to the shim config file the injector hands the shim.
     pub config_file: PathBuf,
     /// Host path to the ready file the injector waits on.
@@ -112,8 +110,6 @@ pub struct WineLaunch {
     pub injector: PathBuf,
     /// Host path to `vfs_shim_dll.dll`.
     pub shim_dll: PathBuf,
-    /// Host path to `vfs_payload.dll`.
-    pub payload_dll: PathBuf,
     /// The target executable, as Wine sees it (`C:\…`).
     pub target: String,
     /// Host path to the shim config file the injector hands the shim.
@@ -209,7 +205,6 @@ impl WineLaunch {
             prefix,
             injector: files.injector,
             shim_dll: files.shim_dll,
-            payload_dll: files.payload_dll,
             target,
             config_file: files.config_file,
             ready_file: files.ready_file,
@@ -309,7 +304,7 @@ pub fn wine_binary(runtime: &Path) -> PathBuf {
 }
 
 /// The program and argv for a launch: `wine <injector> <target> <shim>
-/// <payload> <config> <ready> [-- args…]`.
+/// <config> <ready> [-- args…]`.
 ///
 /// The order is the injector's positional contract (`parse_injector_args`) and
 /// must not be rearranged to suit a caller: every permutation starts
@@ -320,14 +315,13 @@ pub fn command_line(l: &WineLaunch) -> (String, Vec<String>) {
         l.injector.to_string_lossy().into_owned(),
         l.target.clone(),
         l.shim_dll.to_string_lossy().into_owned(),
-        l.payload_dll.to_string_lossy().into_owned(),
         l.config_file.to_string_lossy().into_owned(),
         l.ready_file.to_string_lossy().into_owned(),
     ];
     if !l.args.is_empty() {
         // The separator is optional for the parser but not for the target: an
         // argument that looks like a path would otherwise be indistinguishable
-        // from a sixth positional if the contract ever grows one.
+        // from a fifth positional if the contract ever grows one.
         argv.push("--".to_string());
         argv.extend(l.args.iter().cloned());
     }
@@ -553,7 +547,6 @@ mod tests {
             LaunchFiles {
                 injector: abs("bin/vfs-injector.exe"),
                 shim_dll: abs("bin/vfs_shim_dll.dll"),
-                payload_dll: abs("bin/vfs_payload.dll"),
                 config_file: abs("state/shim.cfg"),
                 ready_file: abs("state/ready.txt"),
             },
@@ -572,7 +565,7 @@ mod tests {
 
     #[test]
     fn argv_is_the_injector_contract_in_order() {
-        // vfs-injector <target_exe> <shim_dll> <payload_dll> <config> <ready>
+        // vfs-injector <target_exe> <shim_dll> <config> <ready>
         // [-- args]. Order is positional, so a swap is silent and this is the
         // only thing that catches it.
         let (prog, argv) = command_line(&sample());
@@ -580,15 +573,14 @@ mod tests {
         assert_eq!(argv[0], sample().injector.to_string_lossy());
         assert_eq!(argv[1], sample().target);
         assert_eq!(argv[2], sample().shim_dll.to_string_lossy());
-        assert_eq!(argv[3], sample().payload_dll.to_string_lossy());
-        assert_eq!(argv[4], sample().config_file.to_string_lossy());
-        assert_eq!(argv[5], sample().ready_file.to_string_lossy());
+        assert_eq!(argv[3], sample().config_file.to_string_lossy());
+        assert_eq!(argv[4], sample().ready_file.to_string_lossy());
     }
 
     #[test]
     fn target_args_follow_a_separator_and_keep_their_order() {
         let (_, argv) = command_line(&sample());
-        assert_eq!(&argv[6..], &["--", "-arg1", "arg2"]);
+        assert_eq!(&argv[5..], &["--", "-arg1", "arg2"]);
     }
 
     #[test]
@@ -596,7 +588,7 @@ mod tests {
         let mut l = sample();
         l.args.clear();
         let (_, argv) = command_line(&l);
-        assert_eq!(argv.len(), 6, "{argv:?}");
+        assert_eq!(argv.len(), 5, "{argv:?}");
     }
 
     #[test]

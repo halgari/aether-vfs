@@ -54,7 +54,6 @@ members = [
   "crates/vfs-fixture-escape",
   "crates/vfs-fixture-prefs",
   "crates/vfs-fixture-vproxy",
-  "crates/vfs-fixture-staticimp",
   # Steam API probe for the Proton launch path: loads a game's own
   # steam_api64.dll and reports what it sees of the Steam client.
   "crates/vfs-fixture-steam",
@@ -65,7 +64,6 @@ members = [
   "crates/vfs-fixture-registry",
   "crates/vfs-bench",
 ]
-exclude = ["crates/vfs-payload"]
 
 [workspace.package]
 version = "0.1.0"
@@ -134,9 +132,8 @@ protoc-bin-vendored = "3"
 redb = "4.3"
 windows-sys = "0.61"
 
-# `vfs-payload` is excluded from this workspace (it is #![no_std] with a custom
-# panic_handler and must abort). Everything here unwinds so the library can
-# catch panics at FFI boundaries instead of killing its host process.
+# Everything here unwinds so the library can catch panics at FFI boundaries
+# instead of killing its host process.
 [profile.dev]
 panic = "unwind"
 

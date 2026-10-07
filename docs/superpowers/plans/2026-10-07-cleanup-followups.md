@@ -14,7 +14,7 @@ This backlog collects everything the 2026-10-07 cleanup pass deferred or flagged
    - Haskill's `playing()` loop can miss a refusal note when the loader exits within one refresh (`haskill/crates/haskill/src/commands/run.rs`).
    - The Windows embed launch adds refusals to the message only on `Err` (`vfs-embed/src/session/windows.rs`).
    - Check whether skse64_loader shows a modal dialog when its child is refused.
-6. **`CREATE_SUSPENDED` children.** The child is released from the spin gate and only then re-suspended, so it runs briefly before the caller resumes it. This predates the cleanup.
+6. ~~**`CREATE_SUSPENDED` children.** The child is released from the spin gate and only then re-suspended, so it runs briefly before the caller resumes it.~~ Fixed 2026-10-07: the early payload and its spin gate are gone, and injection never resumes the child's primary thread.
 7. **Roots env encoding.** `encode_roots` and the shim's parser have no shared `parse_roots`, and a `;` in a path breaks the encoding (M1).
 8. **Registry encode/decode recursion.** In debug builds it overflows a 2 MiB stack at about 600 levels. Give the director threads a larger stack, or make the code iterative (A1).
 9. **Production code still uses the system temp dir.** This covers the directord session base, `vfs_embed::Session::new` defaults and the discovery fallback (W4).
@@ -24,11 +24,11 @@ Not yet exercised in game: in-game file deletes, which test the delete-on-close 
 ## 2. Tests and CI
 
 1. **Known Wine failures and flakes:**
-   - `static_import*` fail with 0xC0000135; this predates the cleanup.
+   - ~~`static_import*` fail with 0xC0000135.~~ Removed 2026-10-07 with the early payload they tested.
    - `hook_coverage` fails because Wine lacks `NtQueryDirectoryFileEx` and `NtQueryInformationByName`.
    - The `lazy_section` test is flaky.
    - The registry test binary hit a spawn flake (OS error 731) under load.
-2. **The payload `Config` ABI offset test never runs.** It is a `#[test]` in the workspace-excluded vfs-payload. Make it a `const` assert. A shared ABI crate is the longer-term fix (S8).
+2. ~~**The payload `Config` ABI offset test never runs.**~~ Moot 2026-10-07: vfs-payload was removed.
 3. **Deferred lints:**
    - `unsafe_op_in_unsafe_fn` (about 100 sites);
    - `undocumented_unsafe_blocks` (about 400 sites);

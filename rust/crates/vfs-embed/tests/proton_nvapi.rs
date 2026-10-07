@@ -85,7 +85,6 @@ fn a_launched_program_initialises_nvapi_and_not_when_turned_off() {
         image: "probe.exe".into(),
         wait: true,
         shim_dll: Some(rig.art.shim_dll()),
-        payload_dll: Some(rig.art.payload_dll()),
         env: BTreeMap::from([(
             "WINEDLLOVERRIDES".to_string(),
             PROTON_GRAPHICS_OVERRIDES.to_string(),

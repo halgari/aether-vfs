@@ -28,30 +28,3 @@ fn main_workspace_profiles_unwind() {
         );
     }
 }
-
-#[test]
-fn vfs_payload_is_excluded_and_still_aborts() {
-    let root = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
-        .expect("read the workspace manifest");
-    assert!(
-        root.contains(r#"exclude = ["crates/vfs-payload"]"#),
-        "vfs-payload must stay excluded — it is #![no_std] and cannot unwind"
-    );
-
-    let payload = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../vfs-payload/Cargo.toml"
-    ))
-    .expect("read the vfs-payload manifest");
-    assert!(
-        payload
-            .lines()
-            .map(str::trim)
-            .any(|l| l == r#"panic = "abort""#),
-        "vfs-payload must keep panic = \"abort\""
-    );
-    assert!(
-        payload.contains("[workspace]"),
-        "vfs-payload must be its own workspace root"
-    );
-}

@@ -38,8 +38,8 @@ vfs-shim.workspace = true
 # `deps/vfs_shim_dll.dll`, which is the cargo#6313 collision that made
 # `--all-targets` unusable.
 vfs-zip.workspace = true
-# PE fixtures (payload, vproxy, staticimp) are built by build.rs via a nested
-# `cargo build -p …` (cannot be normal deps: vfs-payload is no_std/panic=abort).
+# PE fixtures (the shim, vproxy) are built by the tests via a nested
+# `cargo build -p …` (see tests/common).
 
 [[bin]]
 name = "vfs-probe"

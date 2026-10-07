@@ -147,7 +147,6 @@ mod registry_layer_tests {
             LaunchFiles {
                 injector: p("inj"),
                 shim_dll: p("shim"),
-                payload_dll: p("payload"),
                 config_file: p("cfg"),
                 ready_file: p("ready"),
             },

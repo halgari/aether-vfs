@@ -328,16 +328,19 @@ why. The open reply's `immutable` flag and generation sit in what
 was padding, so the wire version did not change: an older director's reply
 reads as mutable and is never cached.
 
-### 3.6 Process creation — `vfs-payload`, `vfs-inject`, `vfs-director::stage`
+### 3.6 Process creation — `vfs-pe`, `vfs-inject`, `vfs-director::stage`
 
 Getting the shim into the process before the process needs the VFS. This is the
 subtlest part of the system and gets its own section below.
 
-**Injection fails closed.** The injector holds the target suspended until the
-shim reports ready through a ready file, and a target that is not released with
-its shim is terminated: if injection fails, the shim's bootstrap reports a
-failure (config mismatch, director unreachable), the target dies early, or the
-ready timeout passes, the launch returns an error and the process is killed. The
+**Activation fails closed.** An import-activated exe cannot start without its
+shim: the loader refuses a missing one (`0xC0000135`) or one whose `DllMain`
+fails (`0xC0000142`). An injected target is held suspended until the shim has
+bootstrapped inside its `LoadLibrary` and said so in the ready file, and a target
+whose shim failed is terminated: if injection fails, the shim's bootstrap
+reports a failure (config mismatch, director unreachable), the target dies
+early, or the ready timeout passes, the launch returns an error and the process
+is killed. The
 same rule holds for every child the game creates (§4.3). The failure mode is a
 launch that errors, never an unvirtualised game that writes to the real disk.
 
@@ -468,22 +471,34 @@ Windows loader has already resolved the executable's static imports. A game EXE
 sitting alone in an otherwise-virtual directory dies at `STATUS_DLL_NOT_FOUND`
 before a single line of our code runs.
 
-Three mechanisms, in order:
+Two mechanisms:
 
 1. **Staging the PE closure.** Before launch, the director writes the target EXE
    and its non-system static imports — transitively, and nothing else — into a
    scratch directory. For Skyrim that is a 37 MB EXE and three DLLs against
    ~15 GB that stays virtual. The directory is deleted when the process exits.
-2. **Dual-layer injection.** A `no_std`, zero-import payload is reflectively
-   mapped and runs *before* `LdrpInitializeProcess`, where only ntdll exists. It
-   hooks the four path/attribute stubs needed to survive early init. Once the
-   loader has finished, the full shim installs and takes over with the complete
-   hook set and a live ring client.
-3. **Spin-gate handoff** between the two so neither races the other.
+   The loader resolves every static import from real files, so nothing needs to
+   be hooked before it runs.
+2. **The shim bootstraps in its own `DllMain`,** synchronously, however it was
+   loaded, and fails the load if it cannot. It arrives one of two ways:
+   - **Import activation** (`VFS_ACTIVATION=import`). The exe is rewritten
+     (`vfs_pe::add_first_import`, the Detours `setdll` technique) to import the
+     shim before anything else, and its header's stack reserve is raised to
+     16 MiB (`raise_stack_reserve`). The launcher starts it normally. The shim's
+     `DllMain` runs after the imports are mapped and before any other import's
+     `DllMain`, its TLS callbacks or its entry point, whoever started the
+     process.
+   - **Injection**, the way SKSE injects its DLL: create the target suspended,
+     grow its primary stack to 16 MiB, `LoadLibrary` the shim on a remote
+     thread (which first runs process initialisation, then the shim's
+     bootstrap), wait for that thread, and resume once the ready file says
+     "ready". The primary thread never runs before the hooks are live.
 
-The payload imports nothing because it cannot: at that point in process life
-kernel32 and the CRT are not mapped. Every address it needs is passed in a
-config struct by the injector.
+Until 2026-10 a third mechanism ran first: a `no_std` early payload, reflectively
+mapped and entered by redirecting the primary thread's start address, hooked the
+path stubs before the loader ran and held the thread at a spin gate while the
+full shim loaded. It existed to serve static imports from the virtual root;
+staging made it redundant, and it was removed.
 
 ### 4.2 `CreateProcess` needs a real file on disk
 
@@ -552,9 +567,12 @@ walk cannot discover it. For an SKSE launch the staged set is six files.
 
 **Follow the shim across `CreateProcess`.** The shim detours
 `kernelbase!CreateProcessInternalW` — the single funnel beneath every
-`CreateProcess*` variant — forces the child to start suspended, dual-layer
-injects it, waits for its hooks to report ready, then resumes. **It fails
-closed**: a child whose injection fails, whose shim reports a bootstrap failure,
+`CreateProcess*` variant — forces the child to start suspended, injects it as
+above (the child's primary thread is never resumed before the shim is up, so a
+caller that asked for a suspended child, like `skse64_loader`, gets it still
+suspended), then resumes it unless the caller asked otherwise. Under import
+activation the hook leaves creation alone, and each patched child activates
+itself through its own import. **It fails closed**: a child whose injection fails, whose shim reports a bootstrap failure,
 that dies early, or that is not ready within the launch's ready timeout is
 terminated and its `CreateProcess` call returns `FALSE` (`ERROR_PROCESS_ABORTED`).
 A child is never released without the shim, so the failure mode is a launch that
@@ -826,7 +844,6 @@ observer before concluding the process is idle.
 | `vfs-redirect` | pure path core: root map and canonicalisation |
 | `vfs-ntlayout` | pure NT byte layouts and decisions for the shim's hooks |
 | `vfs-shim` / `vfs-shim-dll` | NT detours, the director client, synthetic handles, sections, registry hooks |
-| `vfs-payload` | `no_std` pre-init hook payload (its own workspace) |
 | `vfs-inject` | injection and process creation (`vfs-injector`) |
 | `vfs-pe` | pure PE byte parsing, so any host can stage Windows executables |
 | `vfs-fixture-*` | Windows probe programs the tests run under the shim |

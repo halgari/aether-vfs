@@ -15,11 +15,10 @@ use vfs_inject::{run_target_with_shim, InjectError, RunConfig};
 /// Forcing `try_init_from_env` to fail (via the test-only
 /// `VFS_TEST_FUSE_INIT_FAIL` switch — see its doc comment in `vfs-env`) must
 /// make the launch return `Err(InjectError::FuseInit(_))`, and the target
-/// process must never have run: it is killed while still parked behind the
-/// pre-init spin gate, before `RtlUserThreadStart`, before a single byte of
-/// game code executes.
+/// process must never have run: it is killed while its primary thread is
+/// still suspended, before a single byte of game code executes.
 ///
-/// Before this task, `bootstrap_from_config_path_with_payload` discarded this
+/// Before this task, the shim's bootstrap discarded this
 /// exact error (`let _ = director::try_init_from_env();`), hooks installed
 /// anyway over an empty local snapshot, the ready file was written "ready"
 /// regardless, and the launch returned `Ok` with the process running fully
@@ -44,7 +43,7 @@ fn fuse_init_failure_aborts_the_launch() {
     let _ = std::fs::remove_file(&output_path);
 
     let probe = env!("CARGO_BIN_EXE_vfs-probe").to_string();
-    let (dll, payload) = common::locate_shim_and_payload();
+    let dll = common::locate_shim();
 
     // This is a single-test binary (one process), so mutating process env
     // around this one call cannot race another test the way it would in a
@@ -64,8 +63,6 @@ fn fuse_init_failure_aborts_the_launch() {
         config_path: config_path.to_str().unwrap().to_string(),
         ready_path: ready_path.to_str().unwrap().to_string(),
         ready_timeout: Duration::from_secs(10),
-        payload_path: payload,
-        preinit_redirects: vec![],
         detach: false,
     });
     std::env::remove_var(vfs_env::TEST_FUSE_INIT_FAIL);

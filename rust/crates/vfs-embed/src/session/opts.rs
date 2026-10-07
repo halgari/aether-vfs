@@ -48,8 +48,8 @@ pub struct LaunchOpts {
     /// without a fallback the loader fails them during process init — before
     /// any hook of ours exists to help.
     pub stage_fallback_dirs: Vec<PathBuf>,
-    /// Absolute paths to `vfs_shim_dll.dll`, `vfs_payload.dll` and (Proton
-    /// path) `vfs-injector.exe`.
+    /// Absolute paths to `vfs_shim_dll.dll` and (Proton path)
+    /// `vfs-injector.exe`.
     ///
     /// Left `None`, they are searched for **next to `std::env::current_exe()`**
     /// — and that is only the right answer when the host process *is* one of
@@ -64,17 +64,16 @@ pub struct LaunchOpts {
     /// "`vfs_shim_dll.dll` not found" from a host that shipped the DLL, with
     /// nothing pointing at why the search looked where it did.
     ///
-    /// **On the Proton path a launch needs three files.** `injector` is
+    /// **On the Proton path a launch needs two files.** `injector` is
     /// `vfs-injector.exe`; left `None` it is looked for **beside `shim_dll`**
     /// when that is set, else in `VFS_WINDOWS_ARTIFACTS`, else beside
-    /// `current_exe()` — the one directory `cargo build` puts all three in.
+    /// `current_exe()` — the one directory `cargo build` puts both in.
     /// On Linux they are a separate Windows cross-build
     /// (`bin/build-windows`; the names are
     /// `vfs_proton::artifacts::WINDOWS_ARTIFACTS`), so a missing one is
     /// reported by name rather than surfacing as a path error out of `wine`.
     /// The injector is not used on Windows, where it is in-process.
     pub shim_dll: Option<PathBuf>,
-    pub payload_dll: Option<PathBuf>,
     /// **Proton path only**: `vfs-injector.exe` — see [`shim_dll`](Self::shim_dll).
     pub injector: Option<PathBuf>,
     /// Extra environment variables for the child.
@@ -145,7 +144,6 @@ impl Default for LaunchOpts {
             stage_also: Vec::new(),
             stage_fallback_dirs: Vec::new(),
             shim_dll: None,
-            payload_dll: None,
             injector: None,
             env: BTreeMap::new(),
             cwd: None,

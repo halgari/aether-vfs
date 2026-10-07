@@ -791,7 +791,7 @@ impl Session {
         let config_path = self.write_shim_config(&root0)?;
         let ready_path = self.fresh_ready_flag();
 
-        let (injector, shim_dll, payload_dll) = locate_wine_artifacts(opts)?;
+        let (injector, shim_dll) = locate_wine_artifacts(opts)?;
         let (steam, mut notes) = self.steam_launch(&opts.env);
         let nvapi = nvapi_for_launch(opts, runtime, prefix, &mut notes);
 
@@ -803,7 +803,6 @@ impl Session {
             LaunchFiles {
                 injector,
                 shim_dll,
-                payload_dll,
                 config_file: config_path,
                 ready_file: ready_path,
             },
@@ -1057,24 +1056,23 @@ fn join_wine(base: &str, rel: &Path) -> Result<String, String> {
     Ok(out)
 }
 
-/// The three Windows binaries a Proton launch needs, resolved and checked, or
+/// The two Windows binaries a Proton launch needs, resolved and checked, or
 /// a message naming exactly which are missing.
 ///
-/// `vfs-injector.exe`, `vfs_shim_dll.dll` and `vfs_payload.dll` are Windows
+/// `vfs-injector.exe` and `vfs_shim_dll.dll` are Windows
 /// targets, cross-built separately from the Linux host (`bin/build-windows`,
 /// which copies them beside the Linux binaries) — so this resolves what is
 /// already there rather than producing anything, and says so in the failure.
-/// [`LaunchOpts::shim_dll`], [`LaunchOpts::payload_dll`] and
-/// [`LaunchOpts::injector`] win when set; the default location of the others is
-/// the directory holding `shim_dll` if that is set, else
-/// `VFS_WINDOWS_ARTIFACTS`, else the directory holding `current_exe()` — the
-/// one `cargo build` puts all three in.
+/// [`LaunchOpts::shim_dll`] and [`LaunchOpts::injector`] win when set; the
+/// default location of the other is the directory holding `shim_dll` if that
+/// is set, else `VFS_WINDOWS_ARTIFACTS`, else the directory holding
+/// `current_exe()` — the one `cargo build` puts both in.
 ///
-/// All three are checked before any of them is used, and every missing one is
+/// Both are checked before either is used, and every missing one is
 /// listed: a launch that reported them one at a time would cost a Wine
 /// round-trip per file.
 #[cfg(unix)]
-fn locate_wine_artifacts(opts: &LaunchOpts) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+fn locate_wine_artifacts(opts: &LaunchOpts) -> Result<(PathBuf, PathBuf), String> {
     let dir = vfs_env::path(vfs_env::WINDOWS_ARTIFACTS).filter(|p| !p.as_os_str().is_empty());
     locate_wine_artifacts_in(opts, dir.as_deref())
 }
@@ -1085,7 +1083,7 @@ fn locate_wine_artifacts(opts: &LaunchOpts) -> Result<(PathBuf, PathBuf, PathBuf
 fn locate_wine_artifacts_in(
     opts: &LaunchOpts,
     env_dir: Option<&Path>,
-) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+) -> Result<(PathBuf, PathBuf), String> {
     let base = match (&opts.shim_dll, env_dir) {
         (Some(s), _) => s
             .parent()
@@ -1101,10 +1099,9 @@ fn locate_wine_artifacts_in(
     let or_beside =
         |set: &Option<PathBuf>, name: &str| set.clone().unwrap_or_else(|| base.join(name));
     let shim = or_beside(&opts.shim_dll, artifacts::SHIM_DLL);
-    let payload = or_beside(&opts.payload_dll, artifacts::PAYLOAD_DLL);
     let injector = or_beside(&opts.injector, artifacts::INJECTOR);
 
-    let missing: Vec<String> = [&injector, &shim, &payload]
+    let missing: Vec<String> = [&injector, &shim]
         .iter()
         .filter(|p| !p.is_file())
         .map(|p| p.display().to_string())
@@ -1112,15 +1109,15 @@ fn locate_wine_artifacts_in(
     if !missing.is_empty() {
         return Err(format!(
             "launch: these Windows artifacts are missing: {}. Cross-build them with \
-             `bin/build-windows` (which copies them beside the Linux binaries), put all three \
+             `bin/build-windows` (which copies them beside the Linux binaries), put both \
              in {}, set VFS_WINDOWS_ARTIFACTS to the directory holding them, or set \
-             LaunchOpts.shim_dll, payload_dll and injector to where they are \
-             (any of the three left unset is looked for beside shim_dll).",
+             LaunchOpts.shim_dll and injector to where they are \
+             (one left unset is looked for beside shim_dll).",
             missing.join(", "),
             base.display()
         ));
     }
-    Ok((injector, shim, payload))
+    Ok((injector, shim))
 }
 
 #[cfg(test)]
@@ -1346,11 +1343,9 @@ mod tests {
         for n in artifacts::LAUNCH {
             std::fs::write(dir.join(n), b"x").unwrap();
         }
-        let (inj, shim, payload) =
-            locate_wine_artifacts_in(&LaunchOpts::default(), Some(&dir)).unwrap();
+        let (inj, shim) = locate_wine_artifacts_in(&LaunchOpts::default(), Some(&dir)).unwrap();
         assert_eq!(inj, dir.join(artifacts::INJECTOR));
         assert_eq!(shim, dir.join(artifacts::SHIM_DLL));
-        assert_eq!(payload, dir.join(artifacts::PAYLOAD_DLL));
 
         // An explicit shim_dll wins over the directory.
         let other = scratch("artifacts-other");
@@ -1367,7 +1362,7 @@ mod tests {
         // An explicit injector wins too, and only it moves.
         let inj_elsewhere = other.join(artifacts::INJECTOR);
         std::fs::write(&inj_elsewhere, b"x").unwrap();
-        let (inj, shim, payload) = locate_wine_artifacts_in(
+        let (inj, shim) = locate_wine_artifacts_in(
             &LaunchOpts {
                 injector: Some(inj_elsewhere.clone()),
                 ..Default::default()
@@ -1377,13 +1372,12 @@ mod tests {
         .unwrap();
         assert_eq!(inj, inj_elsewhere);
         assert_eq!(shim, dir.join(artifacts::SHIM_DLL));
-        assert_eq!(payload, dir.join(artifacts::PAYLOAD_DLL));
 
         // A directory missing some of them names each one.
-        std::fs::remove_file(dir.join(artifacts::PAYLOAD_DLL)).unwrap();
+        std::fs::remove_file(dir.join(artifacts::SHIM_DLL)).unwrap();
         let e = locate_wine_artifacts_in(&LaunchOpts::default(), Some(&dir)).unwrap_err();
         assert!(
-            e.contains("vfs_payload.dll") && !e.contains("vfs-injector.exe,"),
+            e.contains("vfs_shim_dll.dll") && !e.contains("vfs-injector.exe"),
             "{e}"
         );
     }

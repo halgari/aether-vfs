@@ -96,7 +96,7 @@ fn tmp(name: &str) -> PathBuf {
 /// `target/tmp`, never the user's.
 #[test]
 #[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts \
-            (vfs-injector.exe, vfs_shim_dll.dll, vfs_payload.dll, vfs-fixture-read.exe) for \
+            (vfs-injector.exe, vfs_shim_dll.dll, vfs-fixture-read.exe) for \
             this profile — see bin/build-windows"]
 fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider() {
     launch_fixture(
@@ -118,7 +118,7 @@ fn session_launches_a_windows_fixture_under_proton_that_reads_from_the_provider(
 /// fails) is `vfs-shim`'s `child_inject_fails_closed`.
 #[test]
 #[ignore = "needs a GE-Proton runtime, a bootable Wine prefix, and Windows-built artifacts \
-            (vfs-injector.exe, vfs_shim_dll.dll, vfs_payload.dll, vfs-fixture-read.exe) for \
+            (vfs-injector.exe, vfs_shim_dll.dll, vfs-fixture-read.exe) for \
             this profile — see bin/build-windows"]
 fn a_child_the_fixture_spawns_is_virtualised_too_under_proton() {
     let mut env = BTreeMap::new();
@@ -140,20 +140,7 @@ fn spike_import_activated_fixture_reads_from_the_provider() {
 }
 
 /// Spike: an import-activated fixture spawns a child, which the shim's
-/// existing child hook injects the classic way.
-#[test]
-#[ignore = "spike: import-table activation under Proton"]
-fn spike_import_activated_missing_shim_refuses_to_start() {
-    let mut env = BTreeMap::new();
-    env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
-    if std::env::var_os("SPIKE_FUSE_FAIL").is_some() {
-        env.insert("VFS_TEST_FUSE_INIT_FAIL".to_string(), "1".to_string());
-    } else {
-        env.insert("SPIKE_NO_SHIM".to_string(), "1".to_string());
-    }
-    launch_fixture("proton_launch::spike_import_missing_shim", env);
-}
-
+/// existing child hook leaves to activate itself through its own import.
 #[test]
 #[ignore = "spike"]
 fn spike_import_activated_fixture_child_is_virtualised() {
@@ -161,6 +148,30 @@ fn spike_import_activated_fixture_child_is_virtualised() {
     env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
     env.insert("VFS_FIXTURE_SPAWN_CHILD".to_string(), "1".to_string());
     launch_fixture("proton_launch::spike_import_activated_child", env);
+}
+
+/// Spike: a patched exe whose shim is missing never starts (the loader refuses
+/// it, 0xC0000135), so nothing of it runs un-virtualised.
+#[test]
+#[ignore = "spike: import-table activation under Proton"]
+#[should_panic(expected = "0xc0000135")]
+fn spike_import_activated_missing_shim_refuses_to_start() {
+    let mut env = BTreeMap::new();
+    env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
+    env.insert("SPIKE_NO_SHIM".to_string(), "1".to_string());
+    launch_fixture("proton_launch::spike_import_missing_shim", env);
+}
+
+/// Spike: a patched exe whose shim cannot bootstrap never starts either: the
+/// shim's `DllMain` fails, and with it process start (0xC0000142).
+#[test]
+#[ignore = "spike: import-table activation under Proton"]
+#[should_panic(expected = "0xc0000142")]
+fn spike_import_activated_failed_bootstrap_refuses_to_start() {
+    let mut env = BTreeMap::new();
+    env.insert("VFS_ACTIVATION".to_string(), "import".to_string());
+    env.insert("VFS_TEST_FUSE_INIT_FAIL".to_string(), "1".to_string());
+    launch_fixture("proton_launch::spike_import_failed_bootstrap", env);
 }
 
 /// The body of both launches above: serve [`VPATH`] from a provider, launch the
@@ -196,11 +207,11 @@ fn launch_fixture(test_name: &str, extra_env: BTreeMap<String, String>) {
     if extra_env.get("VFS_ACTIVATION").map(String::as_str) == Some("import") {
         let raw = std::fs::read(&image).unwrap();
         let mut patched =
-            vfs_pe::add_first_import(&raw, "vfs_shim_dll.dll", "vfs_shim_sync_bootstrap")
+            vfs_pe::add_first_import(&raw, "vfs_shim_dll.dll", "vfs_shim_activated")
                 .expect("patch the fixture's imports");
         vfs_pe::raise_stack_reserve(&mut patched, 16 * 1024 * 1024).unwrap();
         std::fs::write(&image, patched).unwrap();
-        if extra_env.get("SPIKE_NO_SHIM").is_none() {
+        if !extra_env.contains_key("SPIKE_NO_SHIM") {
             std::fs::copy(art.shim_dll(), root.join("vfs_shim_dll.dll")).unwrap();
         }
     }
@@ -255,7 +266,6 @@ fn launch_fixture(test_name: &str, extra_env: BTreeMap<String, String>) {
             // `vfs-injector.exe` is taken from the directory holding `shim_dll`,
             // which is why setting this one path is enough for all three.
             shim_dll: Some(art.shim_dll()),
-            payload_dll: Some(art.payload_dll()),
             env,
             ..Default::default()
         })
@@ -493,7 +503,6 @@ fn stalled_reads_on_two_threads_do_not_hold_up_file_operations_on_others_under_p
             image: "fixture.exe".into(),
             wait: true,
             shim_dll: Some(art.shim_dll()),
-            payload_dll: Some(art.payload_dll()),
             env,
             ..Default::default()
         })
@@ -742,7 +751,6 @@ fn a_virtual_directory_has_a_final_path_that_prefixes_its_files_under_proton() {
             image: "fixture.exe".into(),
             wait: true,
             shim_dll: Some(art.shim_dll()),
-            payload_dll: Some(art.payload_dll()),
             env,
             ..Default::default()
         })
@@ -926,7 +934,6 @@ fn small_reads_of_an_immutable_file_are_served_by_the_shim_read_cache_under_prot
             image: "fixture.exe".into(),
             wait: true,
             shim_dll: Some(art.shim_dll()),
-            payload_dll: Some(art.payload_dll()),
             env,
             ..Default::default()
         })

@@ -116,7 +116,7 @@ pub const LAUNCH_IMAGE: &str = "VFS_LAUNCH_IMAGE";
 /// Where the daemon publishes its endpoint for clients to discover.
 pub const DISCOVERY_PATH: &str = "VFS_DISCOVERY_PATH";
 /// Directory holding the Windows artefacts a Proton launch needs
-/// (`vfs-injector.exe`, `vfs_shim_dll.dll`, `vfs_payload.dll`), used instead of
+/// (`vfs-injector.exe`, `vfs_shim_dll.dll`), used instead of
 /// the directory beside the running executable. An explicit
 /// `LaunchOpts::shim_dll` still wins. The Proton tests read it too.
 pub const WINDOWS_ARTIFACTS: &str = "VFS_WINDOWS_ARTIFACTS";
@@ -164,8 +164,6 @@ pub const INJECT_STEAM_HELPER_OFF: &str = "off";
 pub const SHIM_CONFIG: &str = "VFS_SHIM_CONFIG";
 /// Path to the flag the shim touches once its hooks are live.
 pub const SHIM_READY: &str = "VFS_SHIM_READY";
-/// Path to `vfs_payload.dll`, for children that resolve it by environment.
-pub const PAYLOAD_PATH: &str = "VFS_PAYLOAD_PATH";
 /// Where the shim appends a line (`<image> <reason>`) for every child process
 /// it killed because it could not inject it (see the shim's
 /// `CreateProcessInternalW` hook). `run_target_with_shim` sets it to the ready
@@ -174,12 +172,10 @@ pub const PAYLOAD_PATH: &str = "VFS_PAYLOAD_PATH";
 pub const CHILD_REFUSED_LOG: &str = "VFS_CHILD_REFUSED_LOG";
 /// Appended to the ready file's path to name [`CHILD_REFUSED_LOG`]'s file.
 pub const CHILD_REFUSED_SUFFIX: &str = ".child-refused";
-/// File carrying the remote address of the payload config, for `install_late`.
-pub const PAYLOAD_CFG_FILE: &str = "VFS_PAYLOAD_CFG_FILE";
-/// Set when the launch uses the dual-layer (pre-init payload + full shim) path.
-pub const DUAL_LAYER: &str = "VFS_DUAL_LAYER";
-/// Spike: `import` means the target exe was rewritten to import the shim first,
-/// so the launcher starts it normally and the shim bootstraps from `DllMain`.
+/// `import` means the target exe was rewritten to import the shim first, so the
+/// launcher starts it normally, the shim bootstraps from `DllMain`, and the
+/// shim's process hook leaves children to activate themselves the same way.
+/// Unset: the launcher injects the shim, and so does the process hook.
 pub const ACTIVATION: &str = "VFS_ACTIVATION";
 /// The [`ACTIVATION`] value for import-table activation.
 pub const ACTIVATION_IMPORT: &str = "import";
@@ -616,19 +612,9 @@ pub const ALL: &[Var] = &[
         default: "no ready signal",
     },
     Var {
-        name: PAYLOAD_PATH,
+        name: ACTIVATION,
         kind: Kind::Handshake,
-        default: "resolved beside the shim",
-    },
-    Var {
-        name: PAYLOAD_CFG_FILE,
-        kind: Kind::Handshake,
-        default: "none",
-    },
-    Var {
-        name: DUAL_LAYER,
-        kind: Kind::Handshake,
-        default: "unset",
+        default: "unset: the shim is injected",
     },
     Var {
         name: CHILD_REFUSED_LOG,
@@ -1062,7 +1048,7 @@ pub mod handshake {
     pub const INJECT: &[&str] = &[INJECT_CWD, INJECT_STEAM_HELPER];
 
     /// The remaining handshake names: configuration the host hands the shim,
-    /// the payload or the staging step. A launch does not set them, but
+    /// or the staging step. A launch does not set them, but
     /// `LaunchOpts::env` may not either.
     pub const CONFIG: &[&str] = &[
         STATE_DIR,
@@ -1071,9 +1057,6 @@ pub mod handshake {
         DISCOVERY_PATH,
         SHIM_CONFIG,
         SHIM_READY,
-        PAYLOAD_PATH,
-        PAYLOAD_CFG_FILE,
-        DUAL_LAYER,
         CHILD_REFUSED_LOG,
     ];
 

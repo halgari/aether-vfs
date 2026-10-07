@@ -31,7 +31,6 @@ daemon — see [Embedding](#embedding) below.
 ```powershell
 cd rust
 cargo build -p vfs-directord -p vfs-shim-dll -p vfs-fixture-read
-cargo build --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
 ```
 
 ### Linux (Proton)
@@ -104,8 +103,7 @@ cargo test -p vfs-ipc -p vfs-protocol -p vfs-provider -p vfs-compose -p vfs-pe \
   -p vfs-registry -p vfs-redirect -p vfs-ntlayout
 ```
 
-On Windows, `cargo test --workspace` builds everything (the `vfs-payload` workspace
-separately: `cargo test --manifest-path crates/vfs-payload/Cargo.toml --target-dir target`).
+On Windows, `cargo test --workspace` builds everything.
 
 **Proton end-to-end tests** (`vfs-embed`'s `proton_*` tests, `#[ignore]`d) follow the
 policy in [Linux (Proton)](#linux-proton) above: a missing prerequisite prints
@@ -428,7 +426,7 @@ Any language can implement `vfs-source/proto/source.proto` (`Source` service).
 | Director kernel + ring server + staging | `vfs-director` |
 | GE-Proton install, prefix and Wine launch (Linux host) | `vfs-proton` |
 | Registry overlay model | `vfs-registry` |
-| Inject / shim / payload | `vfs-inject`, `vfs-shim`, `vfs-payload` |
+| Inject / shim | `vfs-inject`, `vfs-shim` |
 
 Docs: [rust/docs/](rust/docs/) (start at the
 [architecture overview](rust/docs/architecture.md), which has the full crate map);
@@ -441,9 +439,8 @@ Release build of the daemon and natives:
 ```powershell
 cd rust
 cargo build --release -p vfs-directord -p vfs-shim-dll -p vfs-source
-cargo build --release --manifest-path crates/vfs-payload/Cargo.toml --target-dir target   # separate workspace
 # Artifacts under target/release/:
-#   vfs.exe, vfs_shim_dll.dll, vfs_payload.dll, vfs-source-plugin.exe
+#   vfs.exe, vfs_shim_dll.dll, vfs-source-plugin.exe
 ```
 
 Ship those four next to each other (the daemon locates the DLLs beside the

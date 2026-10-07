@@ -1,7 +1,7 @@
 //! Shared helpers for vfs-inject integration tests.
 //!
 //! Builds PE fixtures once per test process (nested `cargo` at **runtime** is
-//! safe — the outer compile has finished). Co-locates payload beside the shim.
+//! safe — the outer compile has finished).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,7 +9,7 @@ use std::sync::Once;
 
 static FIXTURES: Once = Once::new();
 
-/// Ensure dual-layer / static-import PE fixtures are built (once per process).
+/// Ensure the PE fixtures are built (once per process).
 pub fn ensure_fixtures() {
     FIXTURES.call_once(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
@@ -19,7 +19,6 @@ pub fn ensure_fixtures() {
             .join("..")
             .canonicalize()
             .expect("workspace root");
-        let target_dir = workspace.join("target");
 
         // Main-workspace fixtures.
         let mut cmd = Command::new(&cargo);
@@ -29,8 +28,6 @@ pub fn ensure_fixtures() {
             "vfs-shim-dll",
             "-p",
             "vfs-fixture-vproxy",
-            "-p",
-            "vfs-fixture-staticimp",
             "--quiet",
         ]);
         if !cfg!(debug_assertions) {
@@ -39,22 +36,6 @@ pub fn ensure_fixtures() {
         let status = cmd.status().expect("spawn cargo to build fixtures");
         assert!(status.success(), "fixture cargo build failed: {status}");
 
-        // vfs-payload lives in its own workspace (panic = "abort"). Build it
-        // into the same target dir so `locate_artifact` finds it unchanged.
-        let mut pay = Command::new(&cargo);
-        pay.current_dir(&workspace)
-            .env("CARGO_TARGET_DIR", &target_dir)
-            .args([
-                "build",
-                "--manifest-path",
-                "crates/vfs-payload/Cargo.toml",
-                "--quiet",
-            ]);
-        if !cfg!(debug_assertions) {
-            pay.arg("--release");
-        }
-        let status = pay.status().expect("spawn cargo to build vfs-payload");
-        assert!(status.success(), "vfs-payload cargo build failed: {status}");
         // Co-locate under profile dir for child inject + locate.
         colocate_profile_artifacts();
     });
@@ -74,12 +55,7 @@ fn colocate_profile_artifacts() {
     let Some(profile_dir) = profile_dir_from_test_exe() else {
         return;
     };
-    for name in [
-        "vfs_payload.dll",
-        "vfs_shim_dll.dll",
-        "vproxy.dll",
-        "vfs-staticimp.exe",
-    ] {
+    for name in ["vfs_shim_dll.dll", "vproxy.dll"] {
         let dest = profile_dir.join(name);
         if dest.is_file() {
             continue;
@@ -134,14 +110,10 @@ fn find_near(reference: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Shim + payload paths, with payload co-located beside the shim when possible.
+/// The shim DLL's path.
 #[allow(dead_code)] // used by some test binaries, not all
-pub fn locate_shim_and_payload() -> (String, String) {
-    ensure_fixtures();
-    let dll = locate_artifact("vfs_shim_dll.dll");
-    let payload = locate_artifact("vfs_payload.dll");
-    let resolved = vfs_inject::ensure_payload_beside_shim(&dll, Some(&payload)).unwrap_or(payload);
-    (dll, resolved)
+pub fn locate_shim() -> String {
+    locate_artifact("vfs_shim_dll.dll")
 }
 
 /// Wait up to ~2 s for this process to have no child processes left, and

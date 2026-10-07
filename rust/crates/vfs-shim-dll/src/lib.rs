@@ -1,10 +1,12 @@
-//! Injectable shim DLL.
+//! The shim DLL.
 //!
-//! - Classic path: `DllMain` spawns a thread that bootstraps from
-//!   `VFS_SHIM_CONFIG` and signals `VFS_SHIM_READY`.
-//! - Dual-layer path (`VFS_DUAL_LAYER` set): `DllMain` does not spawn; the
-//!   OEP late-entry stub calls [`vfs_shim_sync_bootstrap`] synchronously after
-//!   LoadLibrary so hooks are live before EXE main.
+//! `DllMain` bootstraps synchronously on `DLL_PROCESS_ATTACH`, however the DLL
+//! arrived: as the first static import of a patched exe (import activation),
+//! or through a remote `LoadLibrary` into a suspended process (injection). In
+//! both cases nothing of the program has run yet, and a failed bootstrap
+//! returns `FALSE`, which fails the load: process start (0xC0000142) for an
+//! import, the `LoadLibrary` for an injection, whose launcher then kills the
+//! process. Either way the program never runs un-virtualised.
 #![allow(unsafe_code)]
 
 use core::ffi::c_void;
@@ -12,8 +14,7 @@ use windows_sys::Win32::Foundation::{HINSTANCE, TRUE};
 
 const DLL_PROCESS_ATTACH: u32 = 1;
 
-/// Standard DLL entry point. Always spawns bootstrap off the loader lock.
-/// Dual-layer uses `VFS_PAYLOAD_CFG_FILE` so bootstrap can `install_late`.
+/// Standard DLL entry point.
 /// (windows-sys 0.61 dropped the `BOOL` alias; the ABI return is a plain `i32`.)
 ///
 /// Deliberately does **nothing** on `DLL_PROCESS_DETACH`. Flushing a final
@@ -23,98 +24,54 @@ const DLL_PROCESS_ATTACH: u32 = 1;
 /// on forever inside the loader lock. See `vfs_shim::hookstats::banner` for
 /// the measurement and for what the reports say instead.
 ///
+/// Bootstrap runs under the loader lock. It must not wait on another thread or
+/// load a library whose `DllMain` would: it reads its config, maps the
+/// director's ring and patches ntdll, and the threads it starts are not waited
+/// for.
+///
 /// ## Panic containment
 ///
 /// This is an `extern "system"` entry point, so an unwind out of it is an
-/// immediate `abort()` of the game — inside the loader lock, which is the worst
-/// place in the process to die. `vfs_shim::contain_panic` is the same wrapper all
-/// twenty ntdll detours use.
-///
-/// **On a panic it returns `TRUE` and leaves a breadcrumb**, rather than `FALSE`.
-/// `FALSE` fails the `LoadLibrary` and looks like "the shim did not load", which
-/// is indistinguishable from a dozen ordinary causes. The only thing this
-/// function does is spawn `bootstrap`, so a panic here means bootstrap never
-/// started and the ready file is never written — which
-/// `vfs_inject::run_target_with_shim` already handles as `InjectError::Timeout`,
-/// after which it terminates the child. So the
-/// existing handshake reports it; returning `TRUE` just avoids replacing a
-/// diagnosable timeout with a loader failure.
+/// immediate `abort()` — inside the loader lock, the worst place in the process
+/// to die. `vfs_shim::contain_panic` is the same wrapper the ntdll detours use.
+/// A panic fails the load like any other bootstrap failure, and leaves a
+/// breadcrumb.
 #[no_mangle]
 pub extern "system" fn DllMain(_dll: HINSTANCE, reason: u32, _reserved: *mut c_void) -> i32 {
     vfs_shim::contain_panic(
         "DllMain",
         || {
-            if reason == DLL_PROCESS_ATTACH {
-                if import_activated() {
-                    // Loaded as the exe's first import: bootstrap here, under the
-                    // loader lock, before any other import's DllMain or the exe's
-                    // own code. FALSE fails process start (STATUS_DLL_INIT_FAILED),
-                    // which is the fail-closed outcome.
-                    let ok = bootstrap_inner();
-                    vfs_shim::finish_ready_handshake();
-                    return if ok { TRUE } else { 0 };
-                }
-                std::thread::spawn(bootstrap);
+            if reason != DLL_PROCESS_ATTACH {
+                return TRUE;
             }
-            TRUE
+            let ok = bootstrap();
+            vfs_shim::finish_ready_handshake();
+            if ok {
+                TRUE
+            } else {
+                // A spawning parent waits on this rather than on its timeout.
+                vfs_shim::signal_bootstrap_failed();
+                0
+            }
         },
         || {
-            log_boot(
-                "DllMain panicked — bootstrap was not spawned, so this process is NOT virtualized",
-            );
-            TRUE
+            log_boot("DllMain panicked — this process is NOT virtualized");
+            vfs_shim::signal_bootstrap_failed();
+            0
         },
     )
 }
 
-/// Synchronous bootstrap for dual-layer OEP late-entry.
-/// `payload_cfg` is the early payload Config address (or null for full install).
-///
-/// Returns 0 on success and non-zero on failure — `1` no config, `2` bootstrap
-/// failed, `3` FUSE init failed, and [`SYNC_BOOTSTRAP_PANICKED`] for a contained
-/// panic. The OEP stub reads this, so the panic has a value to report and does
-/// not need to invent an encoding.
+/// The export a patched exe imports, so the loader has a symbol to bind. It
+/// does nothing: the work happened in `DllMain`, before anything could call it.
 #[no_mangle]
-pub extern "system" fn vfs_shim_sync_bootstrap(payload_cfg: *mut c_void) -> u32 {
-    vfs_shim::contain_panic(
-        "vfs_shim_sync_bootstrap",
-        || vfs_shim::sync_bootstrap(payload_cfg),
-        || {
-            log_boot("vfs_shim_sync_bootstrap panicked — hooks are NOT installed");
-            SYNC_BOOTSTRAP_PANICKED
-        },
-    )
+pub extern "system" fn vfs_shim_activated() -> u32 {
+    vfs_shim::contain_panic("vfs_shim_activated", || 1, || 0)
 }
 
-/// What [`vfs_shim_sync_bootstrap`] returns when its body panicked.
-///
-/// A distinct code rather than reusing `2` ("bootstrap failed"): the two want
-/// different responses. `2` is a configured failure the shim understood; this is
-/// a bug, and the hook-panic counters plus the boot log are where it is recorded.
-/// Non-zero is what matters to the caller either way — it must never be 0, which
-/// would tell the stub that hooks are live when nothing is installed.
-pub const SYNC_BOOTSTRAP_PANICKED: u32 = 4;
-
-/// Whether this process was started with the shim as a static import. Children
-/// inherit it: in import mode the process hook does not inject children, each
-/// patched child activates itself the same way.
-fn import_activated() -> bool {
-    vfs_env::text(vfs_env::ACTIVATION).as_deref() == Some(vfs_env::ACTIVATION_IMPORT)
-}
-
-/// Classic async bootstrap (loader-lock safe: runs off DllMain). A failure also
-/// tells a parent that is waiting on this process (a shim-injected child's
-/// spawner) so it can kill us now instead of waiting out its timeout.
-fn bootstrap() {
-    let ok = bootstrap_inner();
-    vfs_shim::finish_ready_handshake();
-    if !ok {
-        vfs_shim::signal_bootstrap_failed();
-    }
-}
-
-/// Whether the shim came up.
-fn bootstrap_inner() -> bool {
+/// Whether the shim came up. A failure is also written to the ready file, so a
+/// launcher polling it reports why.
+fn bootstrap() -> bool {
     let config = match vfs_env::text(vfs_env::SHIM_CONFIG).ok_or(()) {
         Ok(c) => c,
         Err(_) => {
@@ -130,10 +87,7 @@ fn bootstrap_inner() -> bool {
             }
             true
         }
-        // A director was configured and FUSE failed to attach — same
-        // failure-spelling protocol as the dual-layer `sync_bootstrap` path,
-        // so any launcher polling the ready file sees the same signal
-        // regardless of which bootstrap path ran.
+        // A director was configured and FUSE failed to attach.
         Err(vfs_shim::BootstrapError::Fuse(msg)) => {
             log_boot(&format!("FUSE init failed: {msg}"));
             if let Some(ready) = vfs_env::text(vfs_env::SHIM_READY) {
@@ -145,8 +99,7 @@ fn bootstrap_inner() -> bool {
             false
         }
         // Any other bootstrap failure (a config from another build, an unreadable
-        // config, a hook that would not install): say so in the ready file as well as the
-        // boot log, so the launcher kills the parked process and reports why.
+        // config, a hook that would not install).
         Err(e) => {
             log_boot(&format!(
                 "bootstrap_from_config_path({config}) failed: {e:?}"

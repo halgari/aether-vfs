@@ -87,8 +87,8 @@ if [ -n "$VFS_INJECT_STEAM_HELPER" ]; then
   case "$FAKE_STEAM_REPORT" in
     none) ;;
     "") if [ "$VFS_INJECT_STEAM_HELPER" = off ]; then r=cleared; else r=started:236:300; fi
-        printf '%s' "$r" > "$6.steam-helper" ;;
-    *) printf '%s' "$FAKE_STEAM_REPORT" > "$6.steam-helper" ;;
+        printf '%s' "$r" > "$5.steam-helper" ;;
+    *) printf '%s' "$FAKE_STEAM_REPORT" > "$5.steam-helper" ;;
   esac
 fi
 echo "fake wine stdout"
@@ -97,7 +97,7 @@ echo "$@" > "$WINEPREFIX/fake-wine.args"
 echo $$ > "$WINEPREFIX/fake-wine.pid"
 case "$FAKE_WINE_MODE" in
   sleep) exec sleep 30 ;;
-  fail) echo "target-exited:0xc0000135" > "$6.injector-error"; exit 3 ;;
+  fail) echo "target-exited:0xc0000135" > "$5.injector-error"; exit 3 ;;
   game)
     touch "$WINEPREFIX/fake-game.run"
     ( while [ -f "$WINEPREFIX/fake-game.run" ]; do sleep 0.05; done ) </dev/null >/dev/null 2>&1 &
@@ -177,13 +177,6 @@ fn opts(shim: &str, mode: &str, wait: bool) -> LaunchOpts {
         image: "game.exe".into(),
         wait,
         shim_dll: Some(shim.into()),
-        payload_dll: Some(
-            shim.replace(
-                vfs_proton::artifacts::SHIM_DLL,
-                vfs_proton::artifacts::PAYLOAD_DLL,
-            )
-            .into(),
-        ),
         env: BTreeMap::from([("FAKE_WINE_MODE".to_string(), mode.to_string())]),
         ..Default::default()
     }
@@ -442,7 +435,7 @@ fn with_a_running_steam_client_the_launch_asks_for_the_helper_and_sets_steams_en
     // is the injector's to start, not a wrapper around it.
     let args = std::fs::read_to_string(pfx.join("fake-wine.args")).unwrap();
     let args: Vec<&str> = args.split_whitespace().collect();
-    assert_eq!(args.len(), 6, "{args:?}");
+    assert_eq!(args.len(), 5, "{args:?}");
     assert!(
         args[0].ends_with(vfs_proton::artifacts::INJECTOR),
         "{args:?}"
@@ -452,12 +445,8 @@ fn with_a_running_steam_client_the_launch_asks_for_the_helper_and_sets_steams_en
         args[2].ends_with(vfs_proton::artifacts::SHIM_DLL),
         "{args:?}"
     );
-    assert!(
-        args[3].ends_with(vfs_proton::artifacts::PAYLOAD_DLL),
-        "{args:?}"
-    );
-    assert!(args[4].ends_with("shim.cfg"), "{args:?}");
-    assert!(args[5].ends_with("ready.flag"), "{args:?}");
+    assert!(args[3].ends_with("shim.cfg"), "{args:?}");
+    assert!(args[4].ends_with("ready.flag"), "{args:?}");
 
     assert_eq!(
         std::fs::read_to_string(&log).unwrap(),

@@ -85,12 +85,12 @@
 //!
 //! Written down because the alternative is each new host rediscovering it.
 //!
-//! * **Locate its own `vfs_shim_dll.dll` / `vfs_payload.dll`.** Left unset,
+//! * **Locate its own `vfs_shim_dll.dll`.** Left unset,
 //!   [`LaunchOpts::shim_dll`] searches next to `std::env::current_exe()`,
 //!   which for any host that is not one of this workspace's binaries (a
 //!   language runtime loading the host as a module, say) is nowhere near the
-//!   shipped DLLs. Such a host must resolve both from its own module path and
-//!   set them; they are effectively mandatory outside this workspace's own
+//!   shipped DLL. Such a host must resolve it from its own module path and
+//!   set it; it is effectively mandatory outside this workspace's own
 //!   binaries.
 //! * **Keep its threads away from `std::env` — Windows only.** There,
 //!   `CreateProcessW` inherits by null environment, so [`Session::serve`] and

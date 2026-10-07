@@ -4,9 +4,8 @@
 //! The hooks are installed in this test's own process, so the process-creation
 //! hook is live for the `cmd` the test spawns. The "shim DLL" it would inject
 //! is this test executable (the hook injects the image it lives in), which is
-//! not a loadable shim: whichever step gives out first (no payload found
-//! beside it, or the child never reporting ready within the 2 s timeout set
-//! here), the rule is the same, and the three assertions are the rule:
+//! not a loadable shim: it never signals ready, and the rule for that is the
+//! same as for every other injection failure. The assertions are the rule:
 //!
 //! 1. the spawn fails (with `ERROR_PROCESS_ABORTED`),
 //! 2. no child process of this one is left, and
@@ -67,10 +66,8 @@ fn a_child_that_cannot_be_injected_is_killed_and_its_spawn_fails() {
     let marker = base.join("child-ran.txt");
 
     fakedirector::install(&root, Fake::new().with_dir("."), 0);
-    // A short allowance so a child that never reports ready fails the test fast;
-    // the payload named here does not exist.
+    // A short allowance so a child that never reports ready fails the test fast.
     std::env::set_var(vfs_env::READY_TIMEOUT_SECS, "2");
-    std::env::set_var(vfs_env::PAYLOAD_PATH, base.join("no-such-payload.dll"));
     let refused_log = base.join("ready.flag.child-refused");
     std::env::set_var(vfs_env::CHILD_REFUSED_LOG, &refused_log);
     let _guard = install().expect("install");

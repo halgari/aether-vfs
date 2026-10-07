@@ -98,7 +98,7 @@ fn ensure_fixtures() {
         assert!(status.success(), "vfs-payload build failed: {status}");
 
         let profile = profile_dir();
-        for name in ["vfs_shim_dll.dll", "vfs_payload.dll", "vfs-probe.exe"] {
+        for name in ["vfs_shim_dll.dll", "vfs-probe.exe"] {
             let dest = profile.join(name);
             if dest.is_file() {
                 continue;
@@ -159,7 +159,6 @@ fn launch_returns_err_when_fuse_client_fails_to_attach() {
         ],
         wait: true,
         shim_dll: None,
-        payload_dll: None,
         env,
         ..Default::default()
     };

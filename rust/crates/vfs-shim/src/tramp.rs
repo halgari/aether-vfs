@@ -18,8 +18,7 @@
 //! `set` is `Release` and `get` is `Acquire`. The trampoline is a code stub the `retour` crate
 //! built just before the store; a thread that sees the pointer must also see that stub. Enabling
 //! the detour is what lets another thread reach a hook at all, and that patch has its own
-//! ordering, so in practice the pair only has to be correct for the early-payload path
-//! (`install_late`), where the pointers come from another module's memory. Nothing here needs
+//! ordering, so in practice the pair is belt and braces. Nothing here needs
 //! `SeqCst`: a slot has one writer at a time (install) and independent readers.
 #![allow(unsafe_code)]
 
@@ -115,7 +114,9 @@ impl<F: TrampFn> Tramp<F> {
         Some(unsafe { core::mem::transmute_copy::<*mut (), F>(&p) })
     }
 
-    /// Store `f` (`None` clears the slot).
+    /// Store `f` (`None` clears the slot). Install stores through [`RawTramp::store`]; this
+    /// typed form is for the tests.
+    #[cfg(test)]
     pub(crate) fn set(&self, f: Option<F>) {
         const { assert!(size_of::<F>() == size_of::<*const ()>()) };
         let p = match f {

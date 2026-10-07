@@ -317,25 +317,9 @@ fn ensure_fixtures() {
             "shim/vfs-probe/vfs-fixture-read build failed: {status}"
         );
 
-        let target_dir = workspace.join("target");
-        let status = std::process::Command::new(&cargo)
-            .current_dir(&workspace)
-            .env("CARGO_TARGET_DIR", &target_dir)
-            .args([
-                "build",
-                "--manifest-path",
-                "crates/vfs-payload/Cargo.toml",
-                "--quiet",
-            ])
-            .args(release)
-            .status()
-            .expect("spawn cargo to build vfs-payload");
-        assert!(status.success(), "vfs-payload build failed: {status}");
-
         let profile = profile_dir();
         for name in [
             "vfs_shim_dll.dll",
-            "vfs_payload.dll",
             "vfs-probe.exe",
             "vfs-fixture-read.exe",
         ] {

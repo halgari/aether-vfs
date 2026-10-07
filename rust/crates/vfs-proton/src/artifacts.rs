@@ -13,11 +13,8 @@
 pub const INJECTOR: &str = "vfs-injector.exe";
 /// The shim DLL, which remaps the program's I/O to the director.
 pub const SHIM_DLL: &str = "vfs_shim_dll.dll";
-/// The payload DLL the injector places in the program.
-pub const PAYLOAD_DLL: &str = "vfs_payload.dll";
-
-/// What a Proton launch itself needs: the injector, the shim and the payload.
-pub const LAUNCH: [&str; 3] = [INJECTOR, SHIM_DLL, PAYLOAD_DLL];
+/// What a Proton launch itself needs: the injector and the shim.
+pub const LAUNCH: [&str; 2] = [INJECTOR, SHIM_DLL];
 
 /// The Windows test programs the Proton end-to-end tests run.
 pub const FIXTURE_READ: &str = "vfs-fixture-read.exe";
@@ -26,11 +23,10 @@ pub const FIXTURE_NVAPI: &str = "vfs-fixture-nvapi.exe";
 pub const FIXTURE_REGISTRY: &str = "vfs-fixture-registry.exe";
 
 /// Every artefact `bin/build-windows` produces, in the script's order: the
-/// launch's three, then the fixtures.
-pub const WINDOWS_ARTIFACTS: [&str; 7] = [
+/// launch's two, then the fixtures.
+pub const WINDOWS_ARTIFACTS: [&str; 6] = [
     INJECTOR,
     SHIM_DLL,
-    PAYLOAD_DLL,
     FIXTURE_READ,
     FIXTURE_STEAM,
     FIXTURE_NVAPI,

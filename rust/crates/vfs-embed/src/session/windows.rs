@@ -202,7 +202,7 @@ impl Session {
         ipc.write_thin_config(&thin, &root_s)?;
         let ready_path = self.fresh_ready_flag();
 
-        let (dll, payload) = locate_shim_payload(opts)?;
+        let dll = locate_shim(opts)?;
         // Remote LoadLibrary resolves relative to the *child* cwd (managed root,
         // which is intentionally empty). Always use absolute DLL paths.
         // Strip the `\\?\` verbatim prefix — some LoadLibrary paths reject it.
@@ -212,11 +212,6 @@ impl Session {
             std::fs::canonicalize(&dll)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or(dll),
-        );
-        let payload = strip_verbatim(
-            std::fs::canonicalize(&payload)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or(payload),
         );
         let config_path_s = strip_verbatim(
             std::fs::canonicalize(&config_path)
@@ -269,8 +264,6 @@ impl Session {
             config_path: config_path_s,
             ready_path: ready_path_s.clone(),
             ready_timeout,
-            payload_path: payload,
-            preinit_redirects: vec![],
             detach: !opts.wait,
         });
 
@@ -300,29 +293,15 @@ impl Session {
     }
 }
 
-// Only `launch`'s Windows body calls this (it resolves `vfs_inject`'s DLL/
-// payload pair), so it is gated alongside it.
+// Only `launch`'s Windows body calls this, so it is gated alongside it.
 #[cfg(windows)]
-fn locate_shim_payload(opts: &LaunchOpts) -> Result<(String, String), String> {
+fn locate_shim(opts: &LaunchOpts) -> Result<String, String> {
     let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
-    if let (Some(d), Some(p)) = (&opts.shim_dll, &opts.payload_dll) {
-        return Ok((text(d), text(p)));
+    if let Some(d) = &opts.shim_dll {
+        return Ok(text(d));
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dll = opts
-        .shim_dll
-        .as_deref()
-        .map(text)
-        .or_else(|| {
-            vfs_inject::find_near(&exe, "vfs_shim_dll.dll")
-                .map(|p| p.to_string_lossy().into_owned())
-        })
-        .ok_or_else(|| "vfs_shim_dll.dll not found (set LaunchOpts.shim_dll)".to_string())?;
-    let payload = opts
-        .payload_dll
-        .as_deref()
-        .map(text)
-        .or_else(|| vfs_inject::ensure_payload_beside_shim(&dll, None))
-        .ok_or_else(|| "vfs_payload.dll not found".to_string())?;
-    Ok((dll, payload))
+    vfs_inject::find_near(&exe, "vfs_shim_dll.dll")
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| "vfs_shim_dll.dll not found (set LaunchOpts.shim_dll)".to_string())
 }

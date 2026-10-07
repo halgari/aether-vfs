@@ -124,7 +124,6 @@ fn probe_session(test: &str, tag: &str, prefix: &str) -> Option<Probe> {
         image: "probe.exe".into(),
         wait: true,
         shim_dll: Some(rig.art.shim_dll()),
-        payload_dll: Some(rig.art.payload_dll()),
         env: BTreeMap::from([
             (
                 "VFS_FIXTURE_STEAM_API_DLL".to_string(),

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cross-build the Windows half of the Proton path from Linux: the injector, the
-# shim DLL, the payload DLL, the read fixture, the Steam probe, the NVAPI
+# shim DLL, the read fixture, the Steam probe, the NVAPI
 # probe and the registry probe. They run inside Wine; the Director that serves
 # them is native Linux and is built by plain `cargo`.
 #
@@ -76,7 +76,6 @@ target=x86_64-pc-windows-msvc
 ARTIFACTS=(
   vfs-injector.exe
   vfs_shim_dll.dll
-  vfs_payload.dll
   vfs-fixture-read.exe
   vfs-fixture-steam.exe
   vfs-fixture-nvapi.exe
@@ -102,9 +101,6 @@ cross=(env "CFLAGS_x86_64-pc-windows-msvc=-Wno-error=implicit-function-declarati
 "${cross[@]}" cargo xwin build "${flags[@]}" --target "$target" \
   -p vfs-inject -p vfs-shim-dll -p vfs-fixture-read -p vfs-fixture-steam \
   -p vfs-fixture-nvapi -p vfs-fixture-registry
-# vfs-payload is its own workspace (panic=abort, no CRT), so it builds apart.
-"${cross[@]}" cargo xwin build "${flags[@]}" --target "$target" \
-  --manifest-path crates/vfs-payload/Cargo.toml --target-dir target
 
 src="target/$target/$profile"
 dst="target/$profile"

@@ -2,9 +2,8 @@
 //! process carrying the message, not as a timeout and not as a running game.
 //!
 //! The hop under test: `decode_config` refuses the version, the shim DLL's
-//! bootstrap thread (started by `DllMain`; `sync_bootstrap` is the OEP-stub
-//! entry, not used by this launch) writes `bootstrap-failed:<message>` to the ready file, the injector reads
-//! it while the primary thread is still parked behind the spin gate and
+//! `DllMain` writes `bootstrap-failed:<message>` to the ready file, and the
+//! injector reads it while the primary thread is still suspended and
 //! terminates the process. Mirrors `fuse_not_configured.rs`, whose config is
 //! valid and whose failure is the missing ring.
 //!
@@ -32,7 +31,7 @@ fn a_config_version_mismatch_kills_the_process_with_the_message() {
     let ready_path = base.join("ready.flag");
     let output_path = base.join("probe-out.bin");
     let probe = env!("CARGO_BIN_EXE_vfs-probe").to_string();
-    let (dll, payload) = common::locate_shim_and_payload();
+    let dll = common::locate_shim();
 
     let result = run_target_with_shim(RunConfig {
         target_exe: probe,
@@ -48,8 +47,6 @@ fn a_config_version_mismatch_kills_the_process_with_the_message() {
         config_path: config_path.to_str().unwrap().to_string(),
         ready_path: ready_path.to_str().unwrap().to_string(),
         ready_timeout: Duration::from_secs(30),
-        payload_path: payload,
-        preinit_redirects: vec![],
         detach: false,
     });
 

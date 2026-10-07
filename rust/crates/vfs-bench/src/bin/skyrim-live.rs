@@ -502,7 +502,6 @@ component match sees exactly what the game's own raw NT open spells)",
         args: vec![],
         wait,
         shim_dll: None,
-        payload_dll: None,
         env: Default::default(),
         ..Default::default()
     })?;

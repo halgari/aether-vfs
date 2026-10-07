@@ -50,7 +50,6 @@ fn launch(dir: &Path, log_file: Option<PathBuf>) -> WineLaunch {
         LaunchFiles {
             injector: dir.join("vfs-injector.exe"),
             shim_dll: dir.join("vfs_shim_dll.dll"),
-            payload_dll: dir.join("vfs_payload.dll"),
             config_file: dir.join("shim.cfg"),
             ready_file: dir.join("ready.flag"),
         },

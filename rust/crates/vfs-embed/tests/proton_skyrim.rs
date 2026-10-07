@@ -216,7 +216,7 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
                 continue;
             };
             let mut patched =
-                vfs_pe::add_first_import(&raw, "vfs_shim_dll.dll", "vfs_shim_sync_bootstrap")
+                vfs_pe::add_first_import(&raw, "vfs_shim_dll.dll", "vfs_shim_activated")
                     .unwrap_or_else(|e| panic!("patch {exe}: {e}"));
             vfs_pe::raise_stack_reserve(&mut patched, 16 * 1024 * 1024).unwrap();
             std::fs::write(layer.join(exe), patched).unwrap();
@@ -252,7 +252,6 @@ fn vanilla_skyrim_runs_from_a_fully_virtual_root_under_proton() {
             image,
             stage_also: vec!["SkyrimSE.exe".into()],
             shim_dll: Some(art.shim_dll()),
-            payload_dll: Some(art.payload_dll()),
             env,
             ready_timeout: Some(Duration::from_secs(300)),
             ..Default::default()
