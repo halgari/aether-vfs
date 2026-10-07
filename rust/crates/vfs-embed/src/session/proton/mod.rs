@@ -323,7 +323,7 @@ impl Session {
             IpcServe::start_file_backed_with_workers(
                 Arc::clone(&self.kernel),
                 ring,
-                PROTON_PAYLOAD_CAP,
+                vfs_ipc::DEFAULT_PAYLOAD_CAP,
                 self.io_workers(),
             )
         };
@@ -986,17 +986,6 @@ const WINE_LINK_DIR: &str = "vfs-session";
 /// see no change.
 #[cfg(unix)]
 const DEFAULT_ROOT0_LOCATION: &str = r"C:\vfs-session\root";
-
-/// Inline ring payload capacity for the file-backed ring.
-///
-/// The value the named-section path uses (`vfs_ipc::DEFAULT_PAYLOAD_CAP`),
-/// restated because `vfs-embed` does not depend on `vfs-ipc`. Restating it
-/// cannot desynchronize the two ends of *this* ring: the child is told this
-/// server's capacity from `IpcServe::payload_cap`, never a default at either
-/// end. It would only mean a Wine session pipelines differently from a Windows
-/// one if the constant there changed.
-#[cfg(unix)]
-const PROTON_PAYLOAD_CAP: u32 = 1_048_576;
 
 /// Appends `rel`'s components to a `C:\…` prefix with Wine's separator.
 ///

@@ -60,6 +60,8 @@ vfs-shim = { path = "../vfs-shim" }
 # the same reason `vfs-shim` is kept out of the Linux graph above. A host
 # embedding this API launches a runtime; it does not download one.
 vfs-proton = { path = "../vfs-proton", default-features = false }
+# `DEFAULT_PAYLOAD_CAP`, the one ring payload capacity both transports use.
+vfs-ipc = { path = "../vfs-ipc" }
 
 [dev-dependencies]
 # `vfs-zip` is optional above (the `zip` feature); tests use `ZipProvider`
