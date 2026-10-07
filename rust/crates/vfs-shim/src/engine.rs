@@ -276,7 +276,7 @@ impl Engine {
     /// `RootMap::query_attributes` and `AttrDecision` — the local
     /// snapshot-backed attribute answering this crate used to fall back to —
     /// the shim-local write overlay is the only thing left that can still
-    /// answer an attribute query without asking the director. `hook.rs`'s
+    /// answer an attribute query without asking the director. `hook/`'s
     /// `qattr_hook`/`qfull_hook`/`qibn_hook` call this directly for exactly
     /// that: a file just created/modified through the overlay write
     /// fallback (gate 4's mechanism, untouched by Task 4) must still report
@@ -574,7 +574,7 @@ impl Engine {
         false
     }
 
-    /// Whether `nt_path` lies under **any** declared root. `hook.rs`'s
+    /// Whether `nt_path` lies under **any** declared root. `hook/`'s
     /// `path_is_ours` is the only caller; see its doc comment for the one
     /// spelling this still answers `false` for that the FUSE client answers
     /// `true` for (the staged-launch alias).
@@ -619,7 +619,7 @@ impl Engine {
     /// [`RenameOutcome::CrossRoot`] does **not**: see below.
     ///
     /// A rename whose two sides land under *different* roots is refused rather
-    /// than guessed at, matching what `hook.rs` already does one layer up when
+    /// than guessed at, matching what `hook/file_mutate.rs` already does one layer up when
     /// the FUSE client answers the same question (`Some((dst_root, dstv)) if
     /// dst_root == root`): `Overlay::rename` moves within one root's subtree,
     /// and there is no cross-root move in the provider contract either.
@@ -689,7 +689,7 @@ impl Engine {
     /// Task 4 deleted `RootMap::merge_directory`, which used to blend the
     /// published snapshot's virtual children in here — a directory listing
     /// under a managed root comes solely from the director's own `readdir`
-    /// (see `hook.rs::serve_dir_query`), never from a local snapshot merge.
+    /// (see `hook/dirquery.rs::serve_dir_query`), never from a local snapshot merge.
     /// This method keeps only the overlay half: the write path still needs a
     /// just-created/modified/deleted overlay entry to show up in a listing
     /// the director cannot itself account for.
@@ -1024,8 +1024,8 @@ mod tests {
     // local-answering path Task 4 deletes — `RootMap::merge_directory` and
     // `RootMap::query_attributes` no longer exist for `Engine` to call.
     // A directory listing under a managed root is now the director's
-    // `readdir` alone (`hook.rs::serve_dir_query`); an attribute query is the
-    // director's `getattr` alone (`hook.rs::fuse_path_attr`). Neither is
+    // `readdir` alone (`hook/dirquery.rs::serve_dir_query`); an attribute query is the
+    // director's `getattr` alone (`hook/file_attr.rs::fuse_path_attr`). Neither is
     // reachable from this crate's fast, no-director unit tests without a
     // live ring, so there is no in-crate equivalent to port these two to —
     // see the task report for this named gap. `overlay_listing_adds_overlay_children`
@@ -1116,7 +1116,7 @@ mod tests {
         );
         // `AttrDecision`/`Engine::query_attributes` are gone (Task 4); the
         // overlay's own whiteout state is what a caller now consults for an
-        // attribute-query fallback (see `hook.rs`'s qattr/qfull/qibn hooks).
+        // attribute-query fallback (see `hook/file_attr.rs`'s qattr/qfull/qibn hooks).
         assert!(matches!(
             engine.overlay_state(r"\??\C:\Games\Skyrim\Data\foo.esp"),
             Some(OverlayState::Whiteout)

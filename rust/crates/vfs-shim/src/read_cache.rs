@@ -6,7 +6,7 @@
 //! holds the one instance and says when it is off: `VFS_SHIM_READ_CACHE=0`
 //! ([`vfs_env::SHIM_READ_CACHE`]), read once.
 //!
-//! Where the shim feeds it, all in `hook.rs`:
+//! Where the shim feeds it, all in `hook/`:
 //!
 //! - **open** (`try_fuse_create`): every file handle the director opens is
 //!   registered with the open reply's `immutable` and `mount_gen`, and whether

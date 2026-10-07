@@ -122,7 +122,7 @@ pub fn bootstrap_from_config_path_with_payload(
     //
     // **The original reason is gone.** The staged directory physically holds
     // the game EXE and its import closure, and the four DRM exceptions in
-    // `hook.rs::try_fuse_create` worked by returning `None` so the open
+    // `hook/file_open.rs::try_fuse_create` worked by returning `None` so the open
     // trampolined to that real file — which required this engine to answer
     // `PassThrough`, i.e. to consider the staged directory outside its roots.
     // Gate 5's Task 4 deleted those exceptions, so nothing depends on that
@@ -133,7 +133,7 @@ pub fn bootstrap_from_config_path_with_payload(
     // it makes the client's declared root set a strict **superset** of the
     // engine's. That is what rules out "under an engine root but outside every
     // client root", the one shape in which `try_fuse_create` would decline a
-    // path the engine then treats as managed — see `hook.rs::path_is_ours` and
+    // path the engine then treats as managed — see `hook/path.rs::path_is_ours` and
     // `serve_dir_query`'s `ContainedNoDirector` arm, both of which are dead
     // only because that shape cannot arise.
     let roots = crate::director::roots_from_env(&root);

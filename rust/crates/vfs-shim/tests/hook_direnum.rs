@@ -25,7 +25,7 @@
 //! is a stronger, and arguably more honest, statement of the same underlying
 //! fact this file always existed to prove — a directory listing is only ever
 //! authoritative when a real director backs it (`serve_dir_query` in
-//! `hook.rs`, unchanged by this task) — no director now means no access at
+//! `hook/`, unchanged by this task) — no director now means no access at
 //! all, not merely "no snapshot contribution".
 use vfs_shim::{install, Engine};
 

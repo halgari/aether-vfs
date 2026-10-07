@@ -382,7 +382,7 @@ mod tests {
     /// said the opposite: that the director's listing of the shared directory
     /// "therefore arrives at `apply_to_listing`". It does not, twice over.
     /// `Engine::overlay_listing` is `apply_to_listing`'s only caller,
-    /// `hook.rs`'s `ContainedNoDirector` arm is its only caller, and that arm
+    /// `hook/dirquery.rs`'s `ContainedNoDirector` arm is its only caller, and that arm
     /// passes an empty base — so `merged` is always `[]` in production, even
     /// before accounting for that arm being dead by measurement. The live
     /// enumeration path is the director branch, which never reaches here.

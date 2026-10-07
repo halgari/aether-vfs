@@ -6,7 +6,7 @@
 //! (`RootMap::query_attributes`/`AttrDecision`), so a virtual file/dir was
 //! visible and a tombstoned real file was hidden even with nothing to
 //! consult. That local-answering path is deleted — attribute queries now
-//! route to the director only (`hook.rs::fuse_path_attr`) — so with no
+//! route to the director only (`hook/file_attr.rs::fuse_path_attr`) — so with no
 //! director, none of that happens any more: a virtual path is (correctly)
 //! invisible, and a tombstoned real file is (correctly, for this harness)
 //! visible, since nothing here has been told to hide it. The assertions below

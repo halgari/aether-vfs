@@ -24,7 +24,7 @@
 //! attribute APIs (`NtQueryAttributesFile`, `NtQueryFullAttributesFile`,
 //! `NtQueryInformationByName`) even with no director in the loop. Task 4
 //! deleted that local-answering path — those three now route to the director
-//! only (`hook.rs::fuse_path_attr`) — so with none attached, a virtual-only
+//! only (`hook/file_attr.rs::fuse_path_attr`) — so with none attached, a virtual-only
 //! file is (correctly) invisible to all three, and a tombstoned real file is
 //! (correctly, for this no-director harness) visible to all three, since
 //! nothing here has been told to hide it from them. Those assertions were

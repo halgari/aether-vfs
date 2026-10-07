@@ -551,7 +551,7 @@ mod tests {
     /// that a reserve in the test process is free.
     const SIZE: u64 = 8 * 1024 * 1024;
 
-    /// Mirrors `map_view_hook` / `unmap_view_hook`. Keep in step with hook.rs.
+    /// Mirrors `map_view_hook` / `unmap_view_hook`. Keep in step with `hook/section.rs`.
     fn hook_map(h: isize, off: u64, want: u64) -> usize {
         let (base, _) = crate::synth_section::map_view(h, off, want).expect("map_view");
         base

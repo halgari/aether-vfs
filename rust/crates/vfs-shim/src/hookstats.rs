@@ -1412,7 +1412,7 @@ pub fn outcome_count(outcome: OpenOutcome) -> u64 {
 /// open being a `Routed` decision, which breaks the equality without any
 /// bypass existing:
 ///
-///  - **The directory downgrade** (`hook.rs`): a write-flavoured open of a
+///  - **The directory downgrade** (`hook/file_open.rs`): a write-flavoured open of a
 ///    directory is re-issued as a read open, so one `Routed` produces two
 ///    `OP_OPEN`s.
 ///  - **Copy-up** (`Engine::cow_seed` → `seed_from_director`): the shim opens
@@ -1458,7 +1458,7 @@ pub fn unrouted_director_opens() -> u64 {
 /// Record which path an under-root open actually took. Cheap no-op when
 /// disabled, exactly like `note_passthrough`.
 ///
-/// Wired from every under-root decision site in `hook.rs`'s `create_hook` /
+/// Wired from every under-root decision site in `hook/file_open.rs`'s `create_hook` /
 /// `open_hook` / `try_fuse_create` — see those for the full site-by-site
 /// argument that each open records exactly once.
 pub fn note_open_outcome(outcome: OpenOutcome, path: &str) {

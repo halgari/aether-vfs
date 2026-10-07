@@ -270,7 +270,7 @@ pub fn nt_set_disposition_delete(h: *mut c_void) -> i32 {
 /// `NtSetInformationFile` with a `FILE_RENAME_INFORMATION`(`_EX`) naming an
 /// absolute target (`RootDirectory` NULL), which is what `MoveFileExW` builds.
 ///
-/// Layout, and it must match `hook.rs::parse_rename_target` exactly:
+/// Layout, and it must match `hook/path.rs::parse_rename_target` exactly:
 /// `ReplaceIfExists`/`Flags` at 0, `RootDirectory` at 8, `FileNameLength` at
 /// 16, `FileName` at 20.
 pub fn nt_rename(h: *mut c_void, target: &str, class: u32) -> i32 {

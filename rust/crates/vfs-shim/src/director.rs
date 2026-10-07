@@ -42,7 +42,7 @@ pub fn global() -> Option<&'static FuseClient> {
 // machinery nobody uses.
 //
 // The stack problem is real and is solved elsewhere: `vfs-inject` expands the
-// primary stack to 16 MiB before the game runs (see the note in `hook.rs` on
+// primary stack to 16 MiB before the game runs (see the note in `hook/file_open.rs` on
 // try_fuse_create), so ring ops run on the calling thread by design. The
 // helper is also not free to reintroduce casually: it would serialise every
 // op behind a thread spawn+join, and the worker would not inherit the
@@ -678,7 +678,7 @@ impl FuseClient {
     ///
     /// One root for both sides: the director resolves `from` and `to` against
     /// the same root, and a caller whose two paths land under *different*
-    /// roots must not route the rename here at all — see `hook.rs`'s
+    /// roots must not route the rename here at all — see `hook/file_mutate.rs`'s
     /// rename/delete arm, which declines rather than guessing.
     pub fn rename(&self, root: RootId, from: &str, to: &str) -> Result<(), i32> {
         let c = self.client();
